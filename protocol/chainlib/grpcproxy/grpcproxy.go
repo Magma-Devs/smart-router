@@ -1,0 +1,167 @@
+package grpcproxy
+
+import (
+	"context"
+	"net/http"
+	"strings"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/improbable-eng/grpc-web/go/grpcweb"
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/utils"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+)
+
+const MaxCallRecvMsgSize = 1024 * 1024 * 512 // 512MB for large debug responses
+
+type ProxyCallBack = func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error)
+
+type HealthReporter interface {
+	IsHealthy() bool
+}
+
+func NewGRPCProxy(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter) (*grpc.Server, *http.Server, error) {
+	return NewGRPCProxyWithReflection(cb, healthCheckPath, cmdFlags, healthReporter, nil)
+}
+
+// NewGRPCProxyWithReflection creates a gRPC proxy with optional reflection support.
+// If reflectionCallback is provided, a separate gRPC server is created for reflection
+// that uses standard protobuf codec (not RawBytesCodec), allowing proper serialization.
+// This enables tools like grpcurl to work with the smart router.
+func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionCallback ReflectionProxyCallback) (*grpc.Server, *http.Server, error) {
+	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(MaxCallRecvMsgSize) // setting receive size to 32mb instead of 4mb default
+	s := grpc.NewServer(grpc.UnknownServiceHandler(makeProxyFunc(cb)), grpc.ForceServerCodec(RawBytesCodec{}), serverReceiveMaxMessageSize)
+	grpc_health_v1.RegisterHealthServer(s, health.NewServer())
+
+	wrappedServer := grpcweb.WrapServer(s)
+
+	// Create a separate gRPC server for reflection with standard protobuf codec
+	// This is needed because the main proxy server uses RawBytesCodec which breaks
+	// the reflection service's protobuf message serialization
+	var wrappedReflectionServer *grpcweb.WrappedGrpcServer
+	if reflectionCallback != nil {
+		reflectionGrpcServer := grpc.NewServer(serverReceiveMaxMessageSize)
+		RegisterReflectionProxy(reflectionGrpcServer, reflectionCallback)
+		wrappedReflectionServer = grpcweb.WrapServer(reflectionGrpcServer)
+	}
+
+	handler := func(resp http.ResponseWriter, req *http.Request) {
+		// Set CORS headers
+		resp.Header().Set("Access-Control-Allow-Origin", cmdFlags.OriginFlag)
+
+		if req.Method == http.MethodOptions {
+			resp.Header().Set("Access-Control-Allow-Methods", cmdFlags.MethodsFlag)
+			resp.Header().Set("Access-Control-Allow-Headers", cmdFlags.HeadersFlag)
+			resp.Header().Set("Access-Control-Allow-Credentials", cmdFlags.CredentialsFlag)
+			resp.Header().Set("Access-Control-Max-Age", cmdFlags.CDNCacheDuration)
+			resp.WriteHeader(fiber.StatusNoContent)
+			resp.Write(make([]byte, 0))
+			return
+		}
+
+		if healthReporter != nil && req.URL.Path == healthCheckPath && req.Method == http.MethodGet {
+			if healthReporter.IsHealthy() {
+				resp.WriteHeader(fiber.StatusOK)
+				resp.Write([]byte("Healthy"))
+			} else {
+				resp.WriteHeader(fiber.StatusServiceUnavailable)
+				resp.Write([]byte("Unhealthy"))
+			}
+
+			return
+		}
+
+		// Route reflection requests to the dedicated reflection server
+		if wrappedReflectionServer != nil && isReflectionRequest(req.URL.Path) {
+			wrappedReflectionServer.ServeHTTP(resp, req)
+			return
+		}
+
+		wrappedServer.ServeHTTP(resp, req)
+	}
+
+	httpServer := &http.Server{
+		Handler: h2c.NewHandler(http.HandlerFunc(handler), &http2.Server{}),
+	}
+
+	return s, httpServer, nil
+}
+
+func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
+	return func(srv interface{}, stream grpc.ServerStream) error {
+		// currently the callback function does not account for headers.
+		methodName, ok := grpc.MethodFromServerStream(stream)
+		if !ok {
+			return status.Error(codes.Unavailable, "unable to get method name")
+		}
+		var reqBytes []byte
+		err := stream.RecvMsg(&reqBytes)
+		if err != nil {
+			return err
+		}
+		respBytes, md, err := callBack(stream.Context(), methodName[1:], reqBytes) // strip first '/' of the method name
+		if err != nil {
+			return err
+		}
+
+		// Convert metadata keys to lowercase
+		lowercaseMD := metadata.New(map[string]string{})
+		for k, v := range md {
+			lowerKey := strings.ToLower(k)
+			lowercaseMD[lowerKey] = v
+		}
+		md = lowercaseMD
+
+		if err := stream.SetHeader(md); err != nil {
+			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headers", md))
+		}
+		return stream.SendMsg(respBytes)
+	}
+}
+
+type RawBytesCodec struct{}
+
+func (RawBytesCodec) Marshal(v interface{}) ([]byte, error) {
+	bytes, ok := v.([]byte)
+	if !ok {
+		return nil, utils.LavaFormatError("cannot encode type", nil, utils.Attribute{Key: "v", Value: v})
+	}
+	return bytes, nil
+}
+
+func (RawBytesCodec) Unmarshal(data []byte, v interface{}) error {
+	bufferPtr, ok := v.(*[]byte)
+	if !ok {
+		return utils.LavaFormatDebug("cannot decode into type", utils.LogAttr("v", v), utils.LogAttr("data", data))
+	}
+	*bufferPtr = data
+	return nil
+}
+
+func (RawBytesCodec) Name() string {
+	return "lava/grpc-proxy-codec"
+}
+
+func (RawBytesCodec) String() string {
+	return RawBytesCodec{}.Name()
+}
+
+// isReflectionRequest checks if the request path is for gRPC reflection service
+func isReflectionRequest(path string) bool {
+	// gRPC reflection v1alpha (most common)
+	if strings.HasPrefix(path, "/grpc.reflection.v1alpha.ServerReflection/") {
+		return true
+	}
+	// gRPC reflection v1 (newer version)
+	if strings.HasPrefix(path, "/grpc.reflection.v1.ServerReflection/") {
+		return true
+	}
+	return false
+}
