@@ -35,7 +35,7 @@ This document is an extension to [CONTRIBUTING](./CONTRIBUTING.md) and provides 
 
 When writing code that is complex or relies on another piece of the code, it is advised to create a diagram or a flowchart to explain the logic. This will help other developers to understand the code and will also help you to understand the logic better.
 
-Lava uses [Mermaid.js](https://mermaid.js.org/), you can find the documentation on how to use it [here](https://mermaid.js.org/intro/).
+Smart Router uses [Mermaid.js](https://mermaid.js.org/), you can find the documentation on how to use it [here](https://mermaid.js.org/intro/).
 
 ## Acceptance tests
 

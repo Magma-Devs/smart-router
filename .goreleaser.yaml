@@ -1,10 +1,9 @@
 version: 2
-project_name: lava
+project_name: smart-router
 
 before:
   hooks:
     - go mod tidy
-    - go generate ./...
 
 metadata:
   mod_timestamp: "{{ .CommitTimestamp }}"
@@ -13,12 +12,11 @@ env:
   - CGO_ENABLED=1
 
 builds:
-  - id: lavavisor
-    binary: lavavisor
-    dir: cmd/lavavisor
+  - id: smartrouter
+    binary: smartrouter
+    dir: cmd/smartrouter
     goos:
       - linux
-      - windows
       - darwin
     goarch:
       - amd64
@@ -28,12 +26,6 @@ builds:
         goarch: s390x
       - goos: darwin
         goarch: ppc64le
-      - goos: windows
-        goarch: s390x
-      - goos: windows
-        goarch: ppc64le
-      - goos: windows
-        goarch: arm64
     flags:
       - -mod=readonly
       - -trimpath
@@ -43,57 +35,8 @@ builds:
       - CXX_darwin_amd64=o64-clang++
       - CC_darwin_arm64=oa64-clang
       - CXX_darwin_arm64=oa64-clang++
-      - CC_linux_arm64=aarch64-linux-gnu-gcc	
+      - CC_linux_arm64=aarch64-linux-gnu-gcc
       - CXX_linux_arm64=aarch64-linux-gnu-g++
-      - CC_windows_amd64=x86_64-w64-mingw32-gcc
-      - CXX_windows_amd64=x86_64-w64-mingw32-g++
-      - 'CC={{ index .Env (print "CC_" .Os "_" .Arch) }}'
-      - 'CXX={{ index .Env (print "CXX_" .Os "_" .Arch) }}'
-  
-  - id: lavad
-    binary: lavad
-    dir: cmd/lavad
-    goos:
-      - linux
-      - windows
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    ignore:
-      - goos: darwin
-        goarch: s390x
-      - goos: darwin
-        goarch: ppc64le
-      - goos: windows
-        goarch: s390x
-      - goos: windows
-        goarch: ppc64le
-      - goos: windows
-        goarch: arm64
-    ldflags:
-      - -X github.com/cosmos/cosmos-sdk/version.Name=lava
-      - -X github.com/cosmos/cosmos-sdk/version.AppName=lavad
-      - -X github.com/cosmos/cosmos-sdk/version.Version={{ .Version }}
-      - -X github.com/cosmos/cosmos-sdk/version.Commit={{ .Commit }}
-      - -X github.com/cosmos/cosmos-sdk/version.BuildTags=netgo,ledger
-      - -w -s
-    flags:
-      - -mod=readonly
-      - -trimpath
-    tags:
-      - netgo
-      - ledger
-    mod_timestamp: "{{ .CommitTimestamp }}"
-    env:
-      - CC_darwin_amd64=o64-clang
-      - CXX_darwin_amd64=o64-clang++
-      - CC_darwin_arm64=oa64-clang
-      - CXX_darwin_arm64=oa64-clang++
-      - CC_linux_arm64=aarch64-linux-gnu-gcc	
-      - CXX_linux_arm64=aarch64-linux-gnu-g++
-      - CC_windows_amd64=x86_64-w64-mingw32-gcc
-      - CXX_windows_amd64=x86_64-w64-mingw32-g++
       - 'CC={{ index .Env (print "CC_" .Os "_" .Arch) }}'
       - 'CXX={{ index .Env (print "CXX_" .Os "_" .Arch) }}'
 
@@ -102,7 +45,6 @@ builds:
     dir: cmd/lavap
     goos:
       - linux
-      - windows
       - darwin
     goarch:
       - amd64
@@ -112,12 +54,6 @@ builds:
         goarch: s390x
       - goos: darwin
         goarch: ppc64le
-      - goos: windows
-        goarch: s390x
-      - goos: windows
-        goarch: ppc64le
-      - goos: windows
-        goarch: arm64
     flags:
       - -mod=readonly
       - -trimpath
@@ -127,38 +63,22 @@ builds:
       - CXX_darwin_amd64=o64-clang++
       - CC_darwin_arm64=oa64-clang
       - CXX_darwin_arm64=oa64-clang++
-      - CC_linux_arm64=aarch64-linux-gnu-gcc	
+      - CC_linux_arm64=aarch64-linux-gnu-gcc
       - CXX_linux_arm64=aarch64-linux-gnu-g++
-      - CC_windows_amd64=x86_64-w64-mingw32-gcc
-      - CXX_windows_amd64=x86_64-w64-mingw32-g++
       - 'CC={{ index .Env (print "CC_" .Os "_" .Arch) }}'
       - 'CXX={{ index .Env (print "CXX_" .Os "_" .Arch) }}'
 
 archives:
-  - id: lavavisor
+  - id: smartrouter
     builds:
-      - lavavisor
+      - smartrouter
     format: binary
     name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
-    format_overrides:
-      - goos: windows
-        format: zip
   - id: lavap
     builds:
       - lavap
     format: binary
     name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
-    format_overrides:
-      - goos: windows
-        format: zip
-  - id: lavad
-    builds:
-      - lavad
-    format: binary
-    name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
-    format_overrides:
-      - goos: windows
-        format: zip
 
 checksum:
   name_template: "sha256sum.txt"

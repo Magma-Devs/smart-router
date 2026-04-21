@@ -1,6 +1,6 @@
 # RPC Smart Router
 
-The RPC Smart Router is Lava's RPC gateway that routes requests to pre-configured provider endpoints with QoS-based selection, caching, and automatic failover.
+The RPC Smart Router is a centralised RPC gateway that routes requests to pre-configured provider endpoints with QoS-based selection, caching, and automatic failover.
 
 ## Key Features
 

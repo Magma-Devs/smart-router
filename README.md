@@ -1,6 +1,6 @@
-# Lava Smart Router
+# Smart Router
 
-RPC routing solution for the Lava protocol. Routes JSON-RPC, REST, gRPC, and Tendermint RPC requests to statically configured provider endpoints with QoS-based selection, caching, and automatic failover.
+Centralised RPC routing gateway. Routes JSON-RPC, REST, gRPC, and Tendermint RPC requests to statically configured provider endpoints with QoS-based selection, caching, and automatic failover.
 
 ## Quick Start
 
@@ -26,16 +26,16 @@ smartrouter config/smartrouter_examples/smartrouter_lava.yml --geolocation 1 --u
 
 ### Configuration
 
-Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_lava.yml` for an example with Lava mainnet via PublicNode.
+Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_lava.yml` for an example targeting the Lava blockchain via PublicNode.
 
 Setup scripts are available in `scripts/pre_setups/`:
 
 ```bash
-# Lava (REST + gRPC + Tendermint RPC)
-./scripts/pre_setups/init_lava_smartrouter_lava.sh
+# Lava blockchain (REST + gRPC + Tendermint RPC)
+./scripts/pre_setups/init_smartrouter_lava.sh
 
 # Ethereum (JSON-RPC)
-./scripts/pre_setups/init_lava_smartrouter_eth.sh
+./scripts/pre_setups/init_smartrouter_eth.sh
 ```
 
 ## Supported Chains
