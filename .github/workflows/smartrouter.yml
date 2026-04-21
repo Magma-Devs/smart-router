@@ -70,12 +70,11 @@ jobs:
           verbose: true
 
   build:
-    name: Build binaries (${{ matrix.binary }}-${{ matrix.targetos }}-${{ matrix.arch }})
+    name: Build smartrouter (${{ matrix.targetos }}-${{ matrix.arch }})
     needs: [test]
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        binary: [smartrouter, lavap]
         targetos: [linux, darwin]
         arch: [amd64, arm64]
     steps:
@@ -91,18 +90,18 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Build ${{ matrix.binary }}
+      - name: Build smartrouter
         env:
           GOOS: ${{ matrix.targetos }}
           GOARCH: ${{ matrix.arch }}
         run: |
-          GOWORK=off go build -mod=readonly -o out/${{ matrix.binary }} ./cmd/${{ matrix.binary }}
+          GOWORK=off go build -mod=readonly -o out/smartrouter ./cmd/smartrouter
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.binary }}-${{ matrix.targetos }}-${{ matrix.arch }}
-          path: out/${{ matrix.binary }}
+          name: smartrouter-${{ matrix.targetos }}-${{ matrix.arch }}
+          path: out/smartrouter
 
   build_docker:
     name: Build Docker image
