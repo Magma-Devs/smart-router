@@ -1,4 +1,4 @@
-# Code of Conduct - Lava
+# Code of Conduct - Smart Router
 
 ## Our Pledge
 

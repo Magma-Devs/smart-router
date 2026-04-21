@@ -30,9 +30,9 @@ body:
 
   - type: input
     attributes:
-      label: Lava Version
+      label: Smart Router Version
       description: If applicable, specify the binary and the version you're using
-      placeholder: lavad v0.46, lavap v0.47, main, etc.
+      placeholder: smartrouter v0.1, main, etc.
     validations:
       required: true
 

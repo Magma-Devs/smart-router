@@ -19,8 +19,8 @@ if [[ "$REGENERATE_CONFIG" == "1" ]]; then
     rm -f "$CONFIG_FILE" 2>/dev/null || true
 fi
 
-# Kill all lavap and lavad processes
-killall lavap lavad 2>/dev/null || true
+# Kill any running smartrouter / lavap processes
+killall smartrouter lavap 2>/dev/null || true
 sleep 1
 
 # Kill all screen sessions
@@ -461,7 +461,7 @@ if [[ "$WS_ENABLED" == "true" ]]; then
 fi
 echo ""
 echo "To Stop All Services:"
-echo "  killall lavap"
+echo "  killall smartrouter lavap"
 echo "  screen -wipe"
 echo ""
 echo "============================================"
