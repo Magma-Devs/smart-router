@@ -1,32 +1,70 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+build/
+release/
+ts-client/
 
-# Test binary, built with `go test -c`
-*.test
+# Intellij
+.idea/
 
-# Code coverage profiles and other test artifacts
-*.out
-coverage.*
-*.coverprofile
-profile.cov
+# macOS
+.DS_Store
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# vscode
+.vscode/
 
-# Go workspace file
-go.work
-go.work.sum
+# vim
+.*.sw?
 
-# env file
+# Vue
+vue/src/store/generated/
+vue/node_modules
+vue/dist
+
+# Logs and debug
+scripts/automation_scripts/automation_results*
+testutil/e2e/protocolLogs/
+debugging/
+testutil/e2e/logs/
+
+# Misc
+scripts/vars/
+rpcprovider.yml
+rpcconsumer.yml
+
+# Environment variables and generated configs (secrets should not be committed)
 .env
+.env.local
+config/smartrouter_examples/smartrouter_*.yml
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# Local TLS cert/key files (do not commit)
+protocol/rpcprovider/cert.pem
+protocol/rpcprovider/key.pem
+
+# Node modules
+**/node_modules
+
+# Pairing lsit
+**/pairingList.json
+
+# Reward server ignores
+.storage/
+badger_test
+
+# Local load-test / adversarial probing fixtures (target lists, bodies, results).
+# Must never be committed — the target lists in particular can look like
+# reconnaissance data to automated scanners.
+attack/
+
+config/health_examples/health_template_gen.yml
+# Yarn
+.yarn/
+
+**/dist/
+
+docs/
+agent_docs/
+/readme-docs/
+mock-node-server/
+.claude/
+Claude.md
+lavap
+debugging/logs/

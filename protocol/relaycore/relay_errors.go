@@ -1,0 +1,169 @@
+package relaycore
+
+import (
+	"fmt"
+	"regexp"
+	"strconv"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/utils"
+)
+
+type RelayErrors struct {
+	RelayErrors       []RelayError
+	OnFailureMergeAll bool
+}
+
+// checking the errors that appeared the most and returning the number of errors that were the same and the index of one of them
+func (r *RelayErrors) findMaxAppearances(input map[string][]int) (maxVal int, indexToReturn int) {
+	var maxValIndexArray []int // one of the indexes
+	for _, val := range input {
+		if len(val) > maxVal {
+			maxVal = len(val)
+			maxValIndexArray = val
+		}
+	}
+	if len(maxValIndexArray) > 0 {
+		indexToReturn = maxValIndexArray[0]
+	} else {
+		indexToReturn = -1
+	}
+	return maxVal, indexToReturn
+}
+
+func replacePattern(input, pattern, replacement string) string {
+	re := regexp.MustCompile(pattern)
+	return re.ReplaceAllString(input, replacement)
+}
+
+func (r *RelayErrors) sanitizeError(err error) string {
+	errMsg := err.Error()
+	// Replace SessionId:(any digit here) with SessionId:*
+	errMsg = replacePattern(errMsg, `SessionId:\d+`, "SessionId:*")
+
+	// Replace GUID:(any digit here) with GUID:*
+	errMsg = replacePattern(errMsg, `GUID:\d+`, "GUID:*")
+
+	return errMsg
+}
+
+// AddError adds a new error to the RelayErrors collection
+func (r *RelayErrors) AddError(err RelayError) {
+	r.RelayErrors = append(r.RelayErrors, err)
+}
+
+// GetBestErrorMessageForUser picks the single error to return to the user
+// out of all failed relays. Precedence, in order:
+//
+//  1. MAJORITY CONSENSUS: if a single error string appears on at least half the
+//     failed providers, return it regardless of category or score. Agreement
+//     across providers is the strongest signal we have.
+//  2. EXTERNAL PREFERENCE: among scored candidates (non-nil reputation+stake),
+//     external errors (node/chain) beat internal errors (protocol/transport)
+//     regardless of score — the user can act on an external error.
+//  3. SCORE TIEBREAK: within the same category, the provider with the highest
+//     reputation × stake wins.
+//  4. FALLBACK: if nothing scored, return the first error or merge all.
+//
+// NOTE: the external preference is second-class — a Category=Internal majority
+// will beat a solo Category=External error. That matches "trust consensus over
+// individual signals", and flipping it would require a behavioral change the
+// relay-race design isn't ready for.
+func (r *RelayErrors) GetBestErrorMessageForUser() RelayError {
+	bestIndex := -1
+	bestResult := 0.0
+	bestIsExternal := false
+	errorMap := make(map[string][]int)
+	for idx, relayError := range r.RelayErrors {
+		errorMessage := r.sanitizeError(relayError.Err)
+		errorMap[errorMessage] = append(errorMap[errorMessage], idx)
+		currentResult := relayError.ProviderInfo.ProviderReputationSummary * float64(relayError.ProviderInfo.ProviderStake)
+		isExternal := relayError.LavaError != nil && relayError.LavaError.Category == common.CategoryExternal
+
+		// Scored candidate: apply external-beats-internal preference, then
+		// score tiebreak. This result is only consulted if step 1 (majority
+		// consensus) finds no majority — see the precedence block above.
+		if isExternal && !bestIsExternal {
+			bestResult = currentResult
+			bestIndex = idx
+			bestIsExternal = true
+		} else if isExternal == bestIsExternal && currentResult >= bestResult {
+			bestResult = currentResult
+			bestIndex = idx
+			bestIsExternal = isExternal
+		}
+	}
+
+	// Step 1: majority consensus wins unconditionally.
+	errorCount, index := r.findMaxAppearances(errorMap)
+	if index >= 0 && errorCount >= (len(r.RelayErrors)/2) {
+		if r.RelayErrors[index].Response != nil {
+			r.RelayErrors[index].Response.RelayResult.CrossValidation = errorCount
+		}
+		return r.RelayErrors[index]
+	}
+
+	// Step 2+3: external preference with score tiebreak (populated above).
+	if bestIndex != -1 {
+		utils.LavaFormatDebug("Failed all relays", utils.LogAttr("error_map", errorMap))
+		return r.RelayErrors[bestIndex]
+	}
+	// if we didn't manage to find any index return all.
+	utils.LavaFormatError("Failed finding the best error index in GetErrorMessageForUser", nil, utils.LogAttr("relayErrors", r.RelayErrors))
+	if r.OnFailureMergeAll {
+		return RelayError{Err: r.mergeAllErrors()}
+	}
+	// otherwise return the first element of the RelayErrors
+	return r.RelayErrors[0]
+}
+
+func (r *RelayErrors) getAllUniqueErrors() []error {
+	allErrors := []error{}
+	repeatingErrors := make(map[string]struct{})
+	for _, relayError := range r.RelayErrors {
+		errString := r.sanitizeError(relayError.Err) // using strings to filter repeating errors
+		_, ok := repeatingErrors[errString]
+		if ok {
+			continue
+		}
+		repeatingErrors[errString] = struct{}{}
+		allErrors = append(allErrors, relayError.Err)
+	}
+	return allErrors
+}
+
+func (r *RelayErrors) mergeAllErrors() error {
+	mergedMessage := ""
+	allErrors := r.getAllUniqueErrors()
+	allErrorsLength := len(allErrors)
+	for idx, message := range allErrors {
+		mergedMessage += strconv.Itoa(idx) + ". " + message.Error()
+		if idx < allErrorsLength-1 {
+			mergedMessage += ", "
+		}
+	}
+	return fmt.Errorf("%s", mergedMessage)
+}
+
+// RelayResponse represents a response from a relay operation
+type RelayResponse struct {
+	RelayResult common.RelayResult
+	Err         error
+}
+
+// TODO: there's no need to save error twice and provider info twice, this can just be a RelayResponse
+type RelayError struct {
+	Err          error
+	ProviderInfo common.ProviderInfo
+	Response     *RelayResponse
+	LavaError    *common.LavaError // classified error code (nil if not yet classified)
+}
+
+func (re RelayError) String() string {
+	return fmt.Sprintf("err: %s, ProviderInfo: %v, response: %v", re.Err, re.ProviderInfo, re.Response)
+}
+
+// GetError returns the underlying error
+func (re RelayError) GetError() error {
+	return re.Err
+}

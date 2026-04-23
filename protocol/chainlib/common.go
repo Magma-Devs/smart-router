@@ -1,0 +1,541 @@
+package chainlib
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"errors"
+
+	"github.com/goccy/go-json"
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/compress"
+	"github.com/gofiber/fiber/v2/middleware/favicon"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	common "github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
+	"google.golang.org/grpc/metadata"
+)
+
+const (
+	ContextUserValueKeyDappID  = "dappID"
+	RetryListeningInterval     = 10 // seconds
+	debug                      = false
+	relayMsgLogMaxChars        = 200
+	RPCProviderNodeAddressHash = "Lava-Provider-Node-Address-Hash"
+	RPCProviderNodeExtension   = "Lava-Provider-Node-Extension"
+	RpcProviderLoadRateHeader  = "Lava-Provider-Load-Rate"
+	RpcProviderUniqueIdHeader  = "Lava-Provider-Unique-Id"
+	WebSocketExtension         = "websocket"
+)
+
+var (
+	TrailersToAddToHeaderResponse      = []string{RPCProviderNodeExtension, RpcProviderLoadRateHeader}
+	InvalidResponses                   = []string{"null", "", "nil", "undefined"}
+	FailedSendingSubscriptionToClients = errors.New("Failed Sending Subscription To Clients connection might have been closed by the user")
+	NoActiveSubscriptionFound          = errors.New("no active subscriptions for hashed params.")
+	MaxBatchRequestSize                = 0 // configured via --max-batch-request-size flag, 0 means unlimited
+	ErrBatchRequestSizeExceeded        = errors.New("batch request size exceeded the configured limit")
+)
+
+type RelayReplyWrapper struct {
+	StatusCode int
+	RelayReply *pairingtypes.RelayReply
+}
+
+type VerificationKey struct {
+	Extension string
+	Addon     string
+}
+
+type VerificationContainer struct {
+	InternalPath   string
+	ConnectionType string
+	Name           string
+	ParseDirective spectypes.ParseDirective
+	Value          string
+	LatestDistance uint64
+	Severity       spectypes.ParseValue_VerificationSeverity
+	VerificationKey
+}
+
+func (vc *VerificationContainer) IsActive() bool {
+	if vc.Value == "" && vc.LatestDistance == 0 {
+		return false
+	}
+	return true
+}
+
+type TaggedContainer struct {
+	Parsing       *spectypes.ParseDirective
+	ApiCollection *spectypes.ApiCollection
+}
+
+type ApiContainer struct {
+	api           *spectypes.Api
+	collectionKey CollectionKey
+}
+
+type ApiKey struct {
+	Name           string
+	ConnectionType string
+	InternalPath   string
+}
+
+type CollectionKey struct {
+	ConnectionType string
+	InternalPath   string
+	Addon          string
+}
+
+type BaseChainProxy struct {
+	ErrorHandler
+	averageBlockTime time.Duration
+	NodeUrl          common.NodeUrl
+	ChainID          string
+	HashedNodeUrl    string
+}
+
+// returns the node url and chain id for that proxy.
+func (bcp *BaseChainProxy) GetChainProxyInformation() (common.NodeUrl, string) {
+	return bcp.NodeUrl, bcp.ChainID
+}
+
+func (bcp *BaseChainProxy) CapTimeoutForSend(ctx context.Context, chainMessage ChainMessageForSend) (context.Context, context.CancelFunc) {
+	relayTimeout := GetRelayTimeout(chainMessage, bcp.averageBlockTime)
+	processingTimeout := common.GetTimeoutForProcessing(relayTimeout, GetTimeoutInfo(chainMessage))
+	connectCtx, cancel := bcp.NodeUrl.LowerContextTimeout(ctx, processingTimeout)
+	return connectCtx, cancel
+}
+
+func extractDappIDFromFiberContext(c *fiber.Ctx) (dappID string) {
+	// Read the dappID from the headers
+	dappID = c.Get("dapp-id")
+	if dappID == "" {
+		dappID = generateNewDappID()
+	}
+	return dappID
+}
+
+// extractDappIDFromGrpcHeader extracts dappID from GRPC header
+func extractDappIDFromGrpcHeader(metadataValues metadata.MD) string {
+	dappId := generateNewDappID()
+	if values, ok := metadataValues["dapp-id"]; ok && len(values) > 0 {
+		dappId = values[0]
+	}
+	return dappId
+}
+
+// generateNewDappID generates default dappID
+// In future we can also implement unique dappID generation
+func generateNewDappID() string {
+	return "DefaultDappID"
+}
+
+func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled fiber.Handler, isMetricEnabled bool) fiber.Handler {
+	webSocketCallback := callbackToBeCalled
+	handler := func(c *fiber.Ctx) error {
+		// Extract dappID from headers
+		dappID := extractDappIDFromFiberContext(c)
+
+		// Store dappID in the local context
+		c.Locals("dapp-id", dappID)
+
+		if isMetricEnabled {
+			c.Locals(metrics.RefererHeaderKey, c.Get(metrics.RefererHeaderKey, ""))
+			c.Locals(metrics.UserAgentHeaderKey, c.Get(metrics.UserAgentHeaderKey, ""))
+			c.Locals(metrics.OriginHeaderKey, c.Get(metrics.OriginHeaderKey, ""))
+		}
+		return webSocketCallback(c) // uses external dappID
+	}
+	return handler
+}
+
+func isUTXOFamily(chainID string) bool {
+	return chainID == "BTC" || chainID == "BTCT" || chainID == "LTC" || chainID == "LTCT" || chainID == "DOGE" || chainID == "DOGET" || chainID == "BCH" || chainID == "BCHT"
+}
+
+// checkUTXOResponseAndFixReply returns the reply body for UTXO-family chains after
+// reformatting it for JSON-RPC 1.0 semantics, and returns replyData unchanged for all
+// other chains. The non-UTXO path is zero-copy: hot chains (ETH, Cosmos, etc.) no
+// longer pay a full string(replyData) allocation per response.
+func checkUTXOResponseAndFixReply(chainID string, replyData []byte) []byte {
+	if !isUTXOFamily(chainID) {
+		return replyData
+	}
+
+	// Try single response first
+	var jsonMsg *rpcclient.JsonrpcMessage
+	if err := json.Unmarshal(replyData, &jsonMsg); err == nil {
+		if marshaledRes, err := json.Marshal(convertToUTXOResponse(jsonMsg)); err == nil {
+			return marshaledRes
+		}
+		return replyData
+	}
+
+	// Try batch response (JSON array)
+	var jsonMsgs []rpcclient.JsonrpcMessage
+	if err := json.Unmarshal(replyData, &jsonMsgs); err == nil && len(jsonMsgs) > 0 {
+		btcBatch := make([]*rpcclient.BTCResponse, len(jsonMsgs))
+		for i := range jsonMsgs {
+			btcBatch[i] = convertToUTXOResponse(&jsonMsgs[i])
+		}
+		if marshaledRes, err := json.Marshal(btcBatch); err == nil {
+			return marshaledRes
+		}
+	}
+
+	// Reached only if batch unmarshal failed OR batch marshal failed: return the
+	// original bytes unchanged so the caller still gets a well-formed reply.
+	return replyData
+}
+
+// convertToUTXOResponse converts a JsonrpcMessage to BTCResponse format.
+// UTXO-family chains use JSON-RPC 1.0 which omits the "jsonrpc" field and always
+// includes the "error" field (even when null). The relay pipeline may add "jsonrpc":"2.0"
+// and strip null errors during response reconstruction — this undoes those changes.
+func convertToUTXOResponse(msg *rpcclient.JsonrpcMessage) *rpcclient.BTCResponse {
+	return &rpcclient.BTCResponse{
+		// Omit Version: UTXO-family nodes use JSON-RPC 1.0 which doesn't include the "jsonrpc" field.
+		// The relay pipeline may inject "2.0" during reconstruction; leaving Version empty strips it
+		// (BTCResponse.Version has omitempty).
+		ID:     msg.ID,
+		Method: msg.Method,
+		Error:  msg.Error,
+		Result: msg.Result,
+	}
+}
+
+// addHeadersAndSendBytes writes response metadata headers and sends the raw body via
+// fiber.Ctx.Send to avoid the []byte → string → []byte round-trip that fiber.Ctx.SendString
+// imposes at every call site. Hot-path response bodies (already []byte from the relay
+// pipeline) no longer pay an extra string-conversion allocation per request.
+func addHeadersAndSendBytes(c *fiber.Ctx, metaData []pairingtypes.Metadata, data []byte) error {
+	for _, value := range metaData {
+		c.Set(value.Name, value.Value)
+	}
+
+	return c.Send(data)
+}
+
+// convertToJsonError returns a JSON-encoded `{"error": errorMsg}` body as raw bytes.
+// Returning []byte (rather than string) lets every error-path caller hand the
+// result straight to addHeadersAndSendBytes / fiber.Ctx.Send with no conversion.
+func convertToJsonError(errorMsg string) []byte {
+	jsonResponse, err := json.Marshal(fiber.Map{
+		"error": errorMsg,
+	})
+	if err != nil {
+		return []byte(`{"error": "Failed to marshal error response to json"}`)
+	}
+
+	return jsonResponse
+}
+
+func addAttributeToError(key, value, errorMessage string) string {
+	return errorMessage + fmt.Sprintf(`, "%v": "%v"`, key, value)
+}
+
+func validateEndpoints(endpoints []common.NodeUrl, apiInterface string) {
+	for _, endpoint := range endpoints {
+		common.ValidateEndpoint(endpoint.Url, apiInterface)
+	}
+}
+
+func ListenWithRetry(app *fiber.App, address string, chosenAddrCh *common.SafeChannelSender[string]) {
+	for {
+		ln, err := net.Listen("tcp", address)
+		if err != nil {
+			utils.LavaFormatError("net.Listen(tcp, address)", err, utils.LogAttr("address", address))
+		} else {
+			chosenAddrCh.Send(ln.Addr().String())
+
+			err = app.Listener(ln)
+			if err != nil {
+				utils.LavaFormatError("app.Listen(listenAddr)", err)
+			}
+		}
+		time.Sleep(RetryListeningInterval * time.Second)
+	}
+}
+
+func GetListenerWithRetryGrpc(protocol, addr string) net.Listener {
+	for {
+		lis, err := net.Listen(protocol, addr)
+		if err == nil {
+			return lis
+		}
+		utils.LavaFormatError("failure setting up listener, net.Listen(protocol, addr)", err, utils.Attribute{Key: "listenAddr", Value: addr})
+		time.Sleep(RetryListeningInterval * time.Second)
+		utils.LavaFormatWarning("Attempting connection retry", nil)
+	}
+}
+
+// GetHeaderFromCachedMap extracts a header value from a cached headers map.
+// Returns the first value if present, or the defaultValue if not found.
+// This avoids repeated calls to fiberCtx.Get() which has overhead.
+func GetHeaderFromCachedMap(headers map[string][]string, key string, defaultValue string) string {
+	if values, ok := headers[key]; ok && len(values) > 0 {
+		return values[0]
+	}
+	return defaultValue
+}
+
+// rest request headers are formatted like map[string]string
+func convertToMetadataMap(md map[string][]string) []pairingtypes.Metadata {
+	metadata := make([]pairingtypes.Metadata, len(md))
+	indexer := 0
+	for k, v := range md {
+		metadata[indexer] = pairingtypes.Metadata{Name: k, Value: strings.Join(v, ", ")}
+		indexer += 1
+	}
+	return metadata
+}
+
+// rest response headers / grpc headers are formatted like map[string][]string
+func convertToMetadataMapOfSlices(md map[string][]string) []pairingtypes.Metadata {
+	metadata := make([]pairingtypes.Metadata, len(md))
+	indexer := 0
+	for k, v := range md {
+		metadata[indexer] = pairingtypes.Metadata{Name: k, Value: v[0]}
+		indexer += 1
+	}
+	return metadata
+}
+
+func convertRelayMetaDataToMDMetaData(md []pairingtypes.Metadata) metadata.MD {
+	responseMetaData := make(metadata.MD)
+	for _, v := range md {
+		responseMetaData[v.Name] = append(responseMetaData[v.Name], v.Value)
+	}
+	return responseMetaData
+}
+
+// split two requested blocks to the most advanced and most behind
+// the hierarchy is as follows:
+// NOT_APPLICABLE
+// LATEST_BLOCK
+// PENDING_BLOCK
+// SAFE
+// FINALIZED
+// numeric value (descending)
+// EARLIEST
+func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRequestedBlock, parsedBlock int64) (latestCombinedBlock int64, earliestCombinedBlock int64) {
+	latestCallback := func(currentLatest int64, parsedBlock int64) int64 {
+		if currentLatest < 0 && parsedBlock < 0 {
+			return utils.Max(currentLatest, parsedBlock)
+		}
+
+		if currentLatest > 0 && parsedBlock < 0 && parsedBlock != spectypes.EARLIEST_BLOCK {
+			return parsedBlock
+		}
+
+		if currentLatest < 0 && parsedBlock > 0 && currentLatest != spectypes.EARLIEST_BLOCK {
+			return currentLatest
+		}
+
+		return utils.Max(currentLatest, parsedBlock)
+	}
+
+	earliestCallback := func(currentEarliest int64, parsedBlock int64) int64 {
+		if currentEarliest == spectypes.EARLIEST_BLOCK || parsedBlock == spectypes.EARLIEST_BLOCK {
+			return spectypes.EARLIEST_BLOCK
+		}
+
+		if currentEarliest == spectypes.NOT_APPLICABLE || parsedBlock == spectypes.NOT_APPLICABLE {
+			return spectypes.NOT_APPLICABLE
+		}
+
+		if currentEarliest < 0 && parsedBlock < 0 {
+			return utils.Min(currentEarliest, parsedBlock)
+		}
+
+		if currentEarliest > 0 && parsedBlock < 0 {
+			return currentEarliest
+		}
+
+		if currentEarliest < 0 && parsedBlock > 0 {
+			return parsedBlock
+		}
+
+		return utils.Min(currentEarliest, parsedBlock)
+	}
+
+	return latestCallback(currentLatestRequestedBlock, parsedBlock), earliestCallback(currentEarliestRequestedBlock, parsedBlock)
+}
+
+func GetRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Duration) time.Duration {
+	if chainMessage.TimeoutOverride() != 0 {
+		return chainMessage.TimeoutOverride()
+	}
+	// Calculate extra RelayTimeout
+	extraRelayTimeout := time.Duration(0)
+	if IsHangingApi(chainMessage) {
+		extraRelayTimeout = averageBlockTime * 2
+	}
+	relayTimeAddition := common.GetTimePerCu(GetComputeUnits(chainMessage))
+	if chainMessage.GetApi().TimeoutMs > 0 {
+		relayTimeAddition = time.Millisecond * time.Duration(chainMessage.GetApi().TimeoutMs)
+	}
+	// Set relay timout, increase it every time we fail a relay on timeout
+	return extraRelayTimeout + relayTimeAddition
+}
+
+// applyResponseCompression wires the fiber compress middleware according to
+// cmdFlags.ResponseCompression. Modes:
+//
+//	"off"    — no compression middleware registered. Cheapest on CPU; clients get
+//	           raw bytes. Use when the process sits behind a compressing ingress.
+//	"brotli" — current legacy behavior: fasthttp auto-negotiates br/gzip/deflate
+//	           based on Accept-Encoding. Brotli in Go costs ~3x the CPU of gzip
+//	           for similar wire savings, so this is the expensive choice.
+//	"gzip"   — default. Strips `br` from Accept-Encoding before fasthttp's
+//	           encoder picks, so the best encoding advertised falls back to gzip
+//	           (or deflate). ~3x cheaper than brotli on the same workload.
+//
+// Any unknown value is treated as "gzip" but logs a warning — a deploy-time
+// typo in the flag would otherwise silently downgrade compression config.
+func applyResponseCompression(app *fiber.App, mode string) {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	switch normalized {
+	case common.ResponseCompressionOff:
+		return
+	case common.ResponseCompressionBrotli:
+		app.Use(compress.New(compress.Config{Level: compress.LevelBestSpeed}))
+	default: // "gzip", "", or anything else
+		if normalized != common.ResponseCompressionGzip && normalized != "" {
+			utils.LavaFormatWarning("unknown response-compression mode, falling back to gzip",
+				nil, utils.LogAttr("mode", mode))
+		}
+		app.Use(stripBrotliAcceptEncoding)
+		app.Use(compress.New(compress.Config{Level: compress.LevelBestSpeed}))
+	}
+}
+
+// stripBrotliAcceptEncoding removes the `br` coding from Accept-Encoding before
+// downstream middleware inspects it. Preserves q-values on remaining codings and
+// is a no-op when the header is missing. Case-insensitive per RFC 7231 §5.3.4.
+func stripBrotliAcceptEncoding(c *fiber.Ctx) error {
+	ae := c.Get(fiber.HeaderAcceptEncoding)
+	if ae == "" {
+		return c.Next()
+	}
+	parts := strings.Split(ae, ",")
+	kept := parts[:0]
+	stripped := false
+	for _, part := range parts {
+		coding := part
+		if semi := strings.IndexByte(coding, ';'); semi >= 0 {
+			coding = coding[:semi]
+		}
+		if strings.EqualFold(strings.TrimSpace(coding), "br") {
+			stripped = true
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if stripped {
+		if len(kept) == 0 {
+			// Client advertised only `br`. An absent Accept-Encoding is
+			// semantically different from an empty-value one: many stacks
+			// (fasthttp included) treat absent as "no client preference, pick
+			// your default" while empty-value can short-circuit content
+			// negotiation entirely. Delete the header to fall back to default.
+			c.Request().Header.Del(fiber.HeaderAcceptEncoding)
+		} else {
+			c.Request().Header.Set(fiber.HeaderAcceptEncoding, strings.Join(kept, ","))
+		}
+	}
+	return c.Next()
+}
+
+// setup a common preflight and cors configuration allowing wild cards and preflight caching.
+func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter) *fiber.App {
+	app := fiber.New(fiber.Config{
+		JSONEncoder: json.Marshal,
+		JSONDecoder: json.Unmarshal,
+	})
+	app.Use(favicon.New())
+	applyResponseCompression(app, cmdFlags.ResponseCompression)
+	app.Use(func(c *fiber.Ctx) error {
+		// we set up wild card by default.
+		c.Set("Access-Control-Allow-Origin", cmdFlags.OriginFlag)
+		// Handle preflight requests directly
+		if c.Method() == "OPTIONS" {
+			// set up all allowed methods.
+			c.Set("Access-Control-Allow-Methods", cmdFlags.MethodsFlag)
+			// allow headers
+			c.Set("Access-Control-Allow-Headers", cmdFlags.HeadersFlag)
+			// allow credentials
+			c.Set("Access-Control-Allow-Credentials", cmdFlags.CredentialsFlag)
+			// Cache preflight request for 24 hours (in seconds)
+			c.Set("Access-Control-Max-Age", cmdFlags.CDNCacheDuration)
+			return c.SendStatus(fiber.StatusNoContent)
+		}
+		if c.Method() == "DELETE" {
+			return c.SendStatus(fiber.StatusNoContent)
+		}
+		return c.Next()
+	})
+
+	app.Get(healthCheckPath, func(fiberCtx *fiber.Ctx) error {
+		if healthReporter.IsHealthy() {
+			fiberCtx.Status(http.StatusOK)
+			return fiberCtx.SendString("Health status OK")
+		} else {
+			fiberCtx.Status(http.StatusServiceUnavailable)
+			return fiberCtx.SendString("Health status Failure")
+		}
+	})
+
+	return app
+}
+
+func truncateAndPadString(s string, maxLength int) string {
+	// Truncate to a maximum length
+	if len(s) > maxLength {
+		s = s[:maxLength]
+	}
+
+	// Pad with empty strings if the length is less than the specified maximum length
+	s = fmt.Sprintf("%-*s", maxLength, s)
+
+	return s
+}
+
+// return if response is valid or not - true
+func ValidateNilResponse(responseString string) error {
+	return nil // this feature was disabled in version 0.35.8 due to some nodes request this response.
+	// after the timeout features we can add support for this filtering as it would be parsed and
+	// returned to the user if multiple providers returned the same type of response
+
+	// Removed on 0.35.8
+	// if slices.Contains(InvalidResponses, responseString) {
+	// 	return fmt.Errorf("response returned an empty value: %s", responseString)
+	// }
+	// return nil
+}
+
+func GetTimeoutInfo(chainMessage ChainMessageForSend) common.TimeoutInfo {
+	return common.TimeoutInfo{
+		CU:       chainMessage.GetApi().ComputeUnits,
+		Hanging:  IsHangingApi(chainMessage),
+		Stateful: GetStateful(chainMessage),
+	}
+}
+
+func IsUrlWebSocket(urlToParse string) (bool, error) {
+	u, err := url.Parse(urlToParse)
+	if err != nil {
+		return false, err
+	}
+
+	return u.Scheme == "ws" || u.Scheme == "wss", nil
+}
