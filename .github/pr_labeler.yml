@@ -1,0 +1,36 @@
+"C:cmd/smartrouter":
+  - changed-files:
+      - any-glob-to-any-file: "cmd/smartrouter/**/*"
+"C:cmd/lavap":
+  - changed-files:
+      - any-glob-to-any-file: "cmd/lavap/**/*"
+"C:cmd/common":
+  - changed-files:
+      - any-glob-to-any-file: "cmd/common/**/*"
+"C:protocol":
+  - changed-files:
+      - any-glob-to-any-file: "protocol/**/*"
+"C:ecosystem":
+  - changed-files:
+      - any-glob-to-any-file: "ecosystem/**/*"
+"C:specs":
+  - changed-files:
+      - any-glob-to-any-file: "specs/**/*"
+"C:utils":
+  - changed-files:
+      - any-glob-to-any-file: "utils/**/*"
+"C:types":
+  - changed-files:
+      - any-glob-to-any-file: "types/**/*"
+"C:scripts":
+  - changed-files:
+      - any-glob-to-any-file: "scripts/**/*"
+"Type: Build":
+  - changed-files:
+      - any-glob-to-any-file: "Makefile"
+      - any-glob-to-any-file: "Dockerfile"
+      - any-glob-to-any-file: "go.mod"
+      - any-glob-to-any-file: "go.sum"
+"Type: CI":
+  - changed-files:
+      - any-glob-to-any-file: ".github/**"

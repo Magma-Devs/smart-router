@@ -1,0 +1,74 @@
+version: "2"
+
+run:
+  tests: true
+  timeout: 7m
+
+linters:
+  default: none
+  # For list of linters and what they do: https://golangci-lint.run/usage/linters/
+  enable:
+    - copyloopvar
+    - dogsled
+    - forcetypeassert
+    - gocritic
+    - govet
+    - importas
+    - ineffassign
+    - misspell
+    - nakedret
+    - nilnil
+    - nolintlint
+    - staticcheck
+    - stylecheck
+    - unconvert
+    - whitespace
+  settings:
+    dogsled:
+      max-blank-identifiers: 5
+    gocritic:
+      disabled-checks:
+        - elseif
+    nolintlint:
+      allow-unused: false
+      require-explanation: false
+      require-specific: false
+  exclusions:
+    paths:
+      - protocol/chainlib/chainproxy/rpcInterfaceMessages/grpcMessage.go
+      - protocol/chainlib/grpc.go
+      - protocol/chainlib/grpcproxy/dyncodec/remote_grpc_reflection.go
+      - protocol/chainlib/grpcproxy/dyncodec/remote_relayer.go
+      - protocol/chainlib/grpcproxy/dyncodec/remotes_test.go
+    rules:
+      - linters:
+          - gocritic
+        text: "singleCaseSwitch"
+      - linters:
+          - gocritic
+        text: "ifElseChain"
+      - linters:
+          - stylecheck
+        text: "ST1003:"
+      # FIXME: Disabled until golangci-lint updates stylecheck with this fix:
+      # https://github.com/dominikh/go-tools/issues/389
+      - linters:
+          - stylecheck
+        text: "ST1016:"
+      - linters:
+          - staticcheck
+        text: 'SA1019:.*"github.com/golang/protobuf/proto" is deprecated.*'
+      - path: migrations
+        linters:
+          - staticcheck
+        text: "SA1019:"
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - goimports
+
+issues:
+  max-issues-per-linter: 10000
+  max-same-issues: 10000

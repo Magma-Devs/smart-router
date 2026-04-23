@@ -1,0 +1,53 @@
+name: Lint
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # golangci-lint is currently advisory on this repo: the fork is on
+      # Go 1.26 and earlier golangci-lint releases refuse to lint a newer
+      # toolchain than they were built with. Once a stable v2.x is pinned
+      # and known to produce a clean run against this codebase, drop the
+      # continue-on-error flags on the retries.
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        continue-on-error: true
+        id: lint_first_try
+        with:
+          version: latest
+          args: --config .golangci.yml -v
+
+      - name: Lint Retry 1
+        if: steps.lint_first_try.outcome == 'failure'
+        uses: golangci/golangci-lint-action@v6
+        continue-on-error: true
+        id: lint_retry_1
+        with:
+          version: latest
+          args: --config .golangci.yml -v
+
+      - name: Lint Retry 2
+        if: steps.lint_retry_1.outcome == 'failure'
+        uses: golangci/golangci-lint-action@v6
+        continue-on-error: true
+        id: lint_retry_2
+        with:
+          version: latest
+          args: --config .golangci.yml -v
