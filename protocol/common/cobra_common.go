@@ -3,7 +3,7 @@ package common
 import (
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -52,7 +52,7 @@ const (
 	//   --use-static-spec file1.json,file2.json
 	//
 	// Example with multiple sources (order matters - later overrides earlier):
-	//   --use-static-spec https://github.com/magma-Devs/smart-router-specs/tree/main/specs \
+	//   --use-static-spec https://github.com/Magma-Devs/smart-router-specs/tree/main/specs \
 	//   --use-static-spec https://gitlab.com/myorg/specs/-/tree/main \
 	//   --use-static-spec ./local-overrides/
 	//

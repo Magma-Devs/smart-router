@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/Magma-Devs/smart-router/protocol/relaycore"
 	"github.com/stretchr/testify/require"
 )
 

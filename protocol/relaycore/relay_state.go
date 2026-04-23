@@ -6,12 +6,12 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
-	slices "github.com/magma-Devs/smart-router/utils/lavaslices"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	common "github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/utils"
+	slices "github.com/Magma-Devs/smart-router/utils/lavaslices"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 type RetryHashCacheInf interface {

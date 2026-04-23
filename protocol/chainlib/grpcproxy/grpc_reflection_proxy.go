@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	reflectionpb "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"

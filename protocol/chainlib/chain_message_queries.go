@@ -1,8 +1,8 @@
 package chainlib
 
 import (
-	"github.com/magma-Devs/smart-router/protocol/common"
-	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	types "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 func ShouldSendToAllProviders(chainMessage ChainMessage) bool {

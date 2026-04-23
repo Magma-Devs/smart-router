@@ -9,8 +9,8 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 // WebsocketConnection defines the interface for websocket connections

@@ -7,12 +7,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	lavasession "github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib"
+	common "github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/lavaprotocol"
+	lavasession "github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 // UnifiedRelayStateMachine is the single state machine implementation used by both

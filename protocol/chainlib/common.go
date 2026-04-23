@@ -15,12 +15,12 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/favicon"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	common "github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
 	"google.golang.org/grpc/metadata"
 )
 

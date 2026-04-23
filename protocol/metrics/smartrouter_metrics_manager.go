@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/magma-Devs/smart-router/utils"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )

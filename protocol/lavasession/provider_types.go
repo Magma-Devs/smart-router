@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 type NetworkAddressData struct {

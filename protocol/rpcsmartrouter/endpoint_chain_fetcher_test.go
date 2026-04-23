@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
 	"github.com/stretchr/testify/require"
 )
 

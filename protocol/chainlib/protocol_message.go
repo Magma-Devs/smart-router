@@ -5,11 +5,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/utils"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 type UserData struct {

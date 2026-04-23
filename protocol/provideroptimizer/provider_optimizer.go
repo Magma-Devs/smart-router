@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
-	"github.com/magma-Devs/smart-router/utils/score"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils/lavaslices"
+	"github.com/Magma-Devs/smart-router/utils/score"
 	"gonum.org/v1/gonum/mathext"
 )
 

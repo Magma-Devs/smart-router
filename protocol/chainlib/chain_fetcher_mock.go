@@ -12,8 +12,8 @@ import (
 	context "context"
 	reflect "reflect"
 
-	lavasession "github.com/magma-Devs/smart-router/protocol/lavasession"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	lavasession "github.com/Magma-Devs/smart-router/protocol/lavasession"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 	gomock "go.uber.org/mock/gomock"
 )
 

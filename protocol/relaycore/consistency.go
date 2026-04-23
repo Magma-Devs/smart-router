@@ -4,8 +4,8 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 const (

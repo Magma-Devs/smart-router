@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 

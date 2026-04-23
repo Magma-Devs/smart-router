@@ -1,7 +1,7 @@
 package format
 
 import (
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 // FormatterForRelayRequestAndResponse returns input/output formatter functions

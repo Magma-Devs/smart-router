@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	types "github.com/magma-Devs/smart-router/types/spec"
+	types "github.com/Magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 

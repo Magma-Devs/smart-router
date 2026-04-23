@@ -4,10 +4,10 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/Magma-Devs/smart-router/protocol/internal/chainqueries"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 

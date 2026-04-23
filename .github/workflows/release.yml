@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REGISTRY: ghcr.io
-      IMAGE_NAME: "magma-Devs/smart-router"
+      IMAGE_NAME: "Magma-Devs/smart-router"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

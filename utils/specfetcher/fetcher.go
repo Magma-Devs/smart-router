@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
-	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
+	types "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 // Default timeouts and concurrency settings

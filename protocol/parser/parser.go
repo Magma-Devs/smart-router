@@ -10,11 +10,11 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/itchyny/gojq"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils/lavaslices"
 )
 
 const (

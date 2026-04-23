@@ -3,9 +3,9 @@ package lavaprotocol
 import (
 	"context"
 
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/sigs"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils/sigs"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 func setSalt(requestData *pairingtypes.RelayPrivateData, value uint64) {

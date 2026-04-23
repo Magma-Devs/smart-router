@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	planstypes "github.com/magma-Devs/smart-router/types/plans"
+	"github.com/Magma-Devs/smart-router/utils"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	planstypes "github.com/Magma-Devs/smart-router/types/plans"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"

@@ -4,8 +4,8 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/magma-Devs/smart-router/utils"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/utils"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

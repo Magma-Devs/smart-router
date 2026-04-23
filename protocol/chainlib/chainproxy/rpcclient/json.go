@@ -29,7 +29,7 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 const (

@@ -4,7 +4,7 @@ import (
 	"cmp"
 	"maps"
 
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
+	"github.com/Magma-Devs/smart-router/utils/lavaslices"
 )
 
 func FindLargestIntValueInMap[K comparable](myMap map[K]int) (K, int) {

@@ -6,13 +6,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/parser"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/protocol/parser"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 // EndpointChainFetcher implements chaintracker.ChainFetcher for direct RPC endpoints.

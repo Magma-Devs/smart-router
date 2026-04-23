@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )

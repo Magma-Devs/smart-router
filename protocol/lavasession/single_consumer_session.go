@@ -3,9 +3,9 @@ package lavasession
 import (
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/qos"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/qos"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 type SingleConsumerSession struct {

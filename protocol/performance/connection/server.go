@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/utils"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 type RelayerConnectionServer struct {

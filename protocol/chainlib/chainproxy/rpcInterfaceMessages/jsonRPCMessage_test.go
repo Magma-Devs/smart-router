@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -3,8 +3,8 @@ package metrics
 import (
 	"sync"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

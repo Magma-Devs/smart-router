@@ -3,7 +3,7 @@ package common
 import (
 	"sync"
 
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 type SafeSyncMap[K, V any] struct {

@@ -6,12 +6,12 @@ import (
 
 	tenderminttypes "github.com/cometbft/cometbft/rpc/jsonrpc/types"
 	"github.com/goccy/go-json"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/parser"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/Magma-Devs/smart-router/protocol/parser"
+	"github.com/Magma-Devs/smart-router/utils"
 
-	"github.com/magma-Devs/smart-router/utils/sigs"
+	"github.com/Magma-Devs/smart-router/utils/sigs"
 )
 
 type TendermintrpcMessage struct {

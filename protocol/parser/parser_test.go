@@ -6,9 +6,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 

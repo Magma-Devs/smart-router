@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	common "github.com/magma-Devs/smart-router/protocol/common"
+	common "github.com/Magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 

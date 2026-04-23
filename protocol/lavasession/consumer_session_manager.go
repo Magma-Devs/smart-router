@@ -12,14 +12,14 @@ import (
 
 	"errors"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	metrics "github.com/magma-Devs/smart-router/protocol/metrics"
-	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
-	"github.com/magma-Devs/smart-router/protocol/qos"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/rand"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	metrics "github.com/Magma-Devs/smart-router/protocol/metrics"
+	"github.com/Magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/Magma-Devs/smart-router/protocol/qos"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils/rand"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )

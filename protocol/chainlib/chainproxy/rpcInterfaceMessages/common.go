@@ -5,10 +5,10 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/parser"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/Magma-Devs/smart-router/protocol/parser"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 var WontCalculateBatchHash = errors.New("wont calculate batch message hash") // on batches we just wont calculate hashes, meaning we wont retry.

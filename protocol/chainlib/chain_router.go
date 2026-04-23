@@ -5,11 +5,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/utils"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"

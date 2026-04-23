@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/grafana/pyroscope-go"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 const (

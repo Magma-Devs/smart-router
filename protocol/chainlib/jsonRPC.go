@@ -15,18 +15,18 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
+	"github.com/Magma-Devs/smart-router/protocol/parser"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 const (

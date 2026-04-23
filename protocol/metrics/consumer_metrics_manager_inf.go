@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 // NoOpConsumerMetrics is returned by SafeMetrics when the caller passes nil.

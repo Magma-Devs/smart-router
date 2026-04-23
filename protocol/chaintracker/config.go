@@ -3,7 +3,7 @@ package chaintracker
 import (
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
 )
 
 const (

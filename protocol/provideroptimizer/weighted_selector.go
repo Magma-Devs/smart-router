@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/magma-Devs/smart-router/utils/score"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
+	"github.com/Magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils/rand"
+	"github.com/Magma-Devs/smart-router/utils/score"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 // Randomizer interface allows switching between global probabilistic RNG and deterministic RNG for testing

@@ -6,8 +6,8 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"github.com/magma-Devs/smart-router/utils"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/utils"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 const (

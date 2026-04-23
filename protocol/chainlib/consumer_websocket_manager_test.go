@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
-	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/assert"
 )
 

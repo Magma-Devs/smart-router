@@ -79,4 +79,4 @@ specs/              — Chain specification JSON files
 
 ## Community
 
-- [Issues](https://github.com/magma-Devs/smart-router/issues)
+- [Issues](https://github.com/Magma-Devs/smart-router/issues)

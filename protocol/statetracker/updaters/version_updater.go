@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
-	protocoltypes "github.com/magma-Devs/smart-router/types/protocol"
+	"github.com/Magma-Devs/smart-router/utils"
+	protocoltypes "github.com/Magma-Devs/smart-router/types/protocol"
 )
 
 const (

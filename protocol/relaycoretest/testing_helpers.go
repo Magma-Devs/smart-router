@@ -6,12 +6,12 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/relaycore"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/lavaprotocol"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/protocol/relaycore"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 // RelayProcessorMetricsMock is a mock implementation of metrics interfaces for testing

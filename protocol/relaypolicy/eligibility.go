@@ -1,6 +1,6 @@
 package relaypolicy
 
-import "github.com/magma-Devs/smart-router/protocol/common"
+import "github.com/Magma-Devs/smart-router/protocol/common"
 
 // Re-export eligibility types from common for convenience.
 type (

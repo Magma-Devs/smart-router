@@ -1,7 +1,7 @@
 package lavasession
 
 import (
-	planstypes "github.com/magma-Devs/smart-router/types/plans"
+	planstypes "github.com/Magma-Devs/smart-router/types/plans"
 )
 
 const maxGeoLatency int64 = 10000

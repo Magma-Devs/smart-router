@@ -7,9 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
+	rpcclient "github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 // UpstreamWSConnection wraps an rpcclient.Client with health tracking and subscription count

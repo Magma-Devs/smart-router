@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
 	"github.com/stretchr/testify/require"
 )
 

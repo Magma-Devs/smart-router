@@ -17,8 +17,8 @@ func TestParseRepoURL_GitHub(t *testing.T) {
 	}{
 		{
 			name:        "Valid GitHub URL with path",
-			input:       "https://github.com/magma-Devs/smart-router-specs/tree/main/specs/mainnet-1/specs",
-			wantProject: "magma-Devs/smart-router-specs",
+			input:       "https://github.com/Magma-Devs/smart-router-specs/tree/main/specs/mainnet-1/specs",
+			wantProject: "Magma-Devs/smart-router-specs",
 			wantBranch:  "main",
 			wantPath:    "specs/mainnet-1/specs",
 			wantError:   false,
@@ -243,7 +243,7 @@ func TestNew(t *testing.T) {
 
 // Benchmark tests
 func BenchmarkParseRepoURL_GitHub(b *testing.B) {
-	url := "https://github.com/magma-Devs/smart-router-specs/tree/main/specs/mainnet-1/specs"
+	url := "https://github.com/Magma-Devs/smart-router-specs/tree/main/specs/mainnet-1/specs"
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

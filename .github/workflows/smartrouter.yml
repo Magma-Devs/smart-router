@@ -64,7 +64,7 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          slug: magma-Devs/smart-router
+          slug: Magma-Devs/smart-router
           files: ./coverage.out
           fail_ci_if_error: false
           verbose: true

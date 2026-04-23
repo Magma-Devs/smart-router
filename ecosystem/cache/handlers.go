@@ -15,11 +15,11 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
-	"github.com/magma-Devs/smart-router/protocol/parser"
-	relaytypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
+	"github.com/Magma-Devs/smart-router/protocol/parser"
+	relaytypes "github.com/Magma-Devs/smart-router/types/relay"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils/lavaslices"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 

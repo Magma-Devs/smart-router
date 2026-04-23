@@ -3,8 +3,8 @@ package chainlib
 import (
 	"context"
 
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 // WSSubscriptionManager defines the interface for WebSocket subscription management.

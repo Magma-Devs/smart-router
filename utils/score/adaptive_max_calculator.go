@@ -6,7 +6,7 @@ import (
 	"time"
 
 	tdigest "github.com/caio/go-tdigest/v5"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 // AdaptiveMaxCalculator uses T-Digest with exponential decay to calculate

@@ -11,22 +11,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/parser"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/protocol/parser"
+	"github.com/Magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 type RestChainParser struct {

@@ -1,7 +1,7 @@
 package relaypolicy
 
 import (
-	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/common"
 )
 
 // ClassifyNodeError classifies a node error using the structured error registry.

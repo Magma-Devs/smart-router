@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gogo/status"
-	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 )

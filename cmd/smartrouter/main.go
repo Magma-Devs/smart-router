@@ -5,10 +5,10 @@ import (
 	_ "net/http/pprof"
 	"os"
 
-	"github.com/magma-Devs/smart-router/ecosystem/cache"
-	"github.com/magma-Devs/smart-router/protocol/performance/connection"
-	"github.com/magma-Devs/smart-router/protocol/rpcsmartrouter"
-	protocoltypes "github.com/magma-Devs/smart-router/types/protocol"
+	"github.com/Magma-Devs/smart-router/ecosystem/cache"
+	"github.com/Magma-Devs/smart-router/protocol/performance/connection"
+	"github.com/Magma-Devs/smart-router/protocol/rpcsmartrouter"
+	protocoltypes "github.com/Magma-Devs/smart-router/types/protocol"
 	"github.com/spf13/cobra"
 )
 

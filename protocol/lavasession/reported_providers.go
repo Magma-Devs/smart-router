@@ -4,9 +4,9 @@ import (
 	"sync"
 	"time"
 
-	metrics "github.com/magma-Devs/smart-router/protocol/metrics"
-	"github.com/magma-Devs/smart-router/utils"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	metrics "github.com/Magma-Devs/smart-router/protocol/metrics"
+	"github.com/Magma-Devs/smart-router/utils"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 const (

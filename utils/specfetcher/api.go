@@ -3,14 +3,14 @@ package specfetcher
 import (
 	"context"
 
-	types "github.com/magma-Devs/smart-router/types/spec"
+	types "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 // FetchSpecFromGitHub fetches a spec from a GitHub repository.
 // This is a convenience function that creates a new Fetcher with the provided token.
 //
 // URL format: https://github.com/{owner}/{repo}/tree/{branch}/{path}
-// Example: https://github.com/magma-Devs/smart-router-specs/tree/main/specs
+// Example: https://github.com/Magma-Devs/smart-router-specs/tree/main/specs
 func FetchSpecFromGitHub(ctx context.Context, repoURL, chainID, token string) (types.Spec, error) {
 	config := DefaultConfig()
 	config.Token = token

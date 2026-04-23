@@ -1,7 +1,7 @@
 package common
 
 import (
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 	"github.com/spf13/cobra"
 )
 

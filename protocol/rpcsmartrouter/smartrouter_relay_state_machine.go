@@ -3,11 +3,11 @@ package rpcsmartrouter
 import (
 	"context"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	"github.com/magma-Devs/smart-router/protocol/relaycore"
-	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
+	"github.com/Magma-Devs/smart-router/protocol/relaycore"
+	"github.com/Magma-Devs/smart-router/protocol/relaypolicy"
 )
 
 // Using interfaces from relaycore

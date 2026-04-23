@@ -6,7 +6,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	types "github.com/magma-Devs/smart-router/types/relay"
+	types "github.com/Magma-Devs/smart-router/types/relay"
 	gomock "go.uber.org/mock/gomock"
 	grpc "google.golang.org/grpc"
 	metadata "google.golang.org/grpc/metadata"

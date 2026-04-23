@@ -1,8 +1,8 @@
 package rpcsmartrouter
 
 import (
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/utils"
 	"github.com/spf13/viper"
 )
 

@@ -3,8 +3,8 @@ package chainlib
 import (
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	types "github.com/Magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

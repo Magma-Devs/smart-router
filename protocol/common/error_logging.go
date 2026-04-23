@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"sync/atomic"
 
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 // ErrorMetricsCallback is a function that gets called on every classified error for metrics tracking.

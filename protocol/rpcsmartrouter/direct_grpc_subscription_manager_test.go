@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

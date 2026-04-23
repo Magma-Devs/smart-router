@@ -20,12 +20,12 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
-	"github.com/magma-Devs/smart-router/protocol/chaintracker"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
-	specutils "github.com/magma-Devs/smart-router/utils/keeper"
+	"github.com/Magma-Devs/smart-router/protocol/chaintracker"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
+	specutils "github.com/Magma-Devs/smart-router/utils/keeper"
 )
 
 // ---------------------------------------------------------------------------

@@ -5,11 +5,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/parser"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib"
+	common "github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/parser"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 // transportFromProtocolMessage derives the TransportType from the protocol message's API collection.

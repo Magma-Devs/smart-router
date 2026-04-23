@@ -3,7 +3,7 @@ package protocopy
 import (
 	"testing"
 
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
 )
 

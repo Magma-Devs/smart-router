@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 func TestNewConsumerKafkaClient(t *testing.T) {

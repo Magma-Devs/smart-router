@@ -3,9 +3,9 @@ package relaycore
 import (
 	"fmt"
 
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol/protocolerrors"
-	"github.com/magma-Devs/smart-router/utils"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/protocol/lavaprotocol/protocolerrors"
+	"github.com/Magma-Devs/smart-router/utils"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 // ShouldSkipConsistencyValidation returns true when consistency validation

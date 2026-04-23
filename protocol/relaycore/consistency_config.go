@@ -3,7 +3,7 @@ package relaycore
 import (
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 // ConsistencyValidationConfig holds configuration for consistency validation

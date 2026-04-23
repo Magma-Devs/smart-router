@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	utils "github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/specfetcher"
-	types "github.com/magma-Devs/smart-router/types/spec"
+	utils "github.com/Magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils/specfetcher"
+	types "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 func decodeProposal(path string) (types.SpecAddProposalJSON, error) {

@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	chaintracker "github.com/magma-Devs/smart-router/protocol/chaintracker"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
-	rand "github.com/magma-Devs/smart-router/utils/rand"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	chaintracker "github.com/Magma-Devs/smart-router/protocol/chaintracker"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/utils"
+	rand "github.com/Magma-Devs/smart-router/utils/rand"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 

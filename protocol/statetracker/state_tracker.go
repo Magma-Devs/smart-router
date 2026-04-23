@@ -4,13 +4,13 @@ import (
 	"context"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	updaters "github.com/magma-Devs/smart-router/protocol/statetracker/updaters"
-	"github.com/magma-Devs/smart-router/utils"
-	speckeeper "github.com/magma-Devs/smart-router/utils/keeper"
-	"github.com/magma-Devs/smart-router/utils/specfetcher"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	updaters "github.com/Magma-Devs/smart-router/protocol/statetracker/updaters"
+	"github.com/Magma-Devs/smart-router/utils"
+	speckeeper "github.com/Magma-Devs/smart-router/utils/keeper"
+	"github.com/Magma-Devs/smart-router/utils/specfetcher"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 

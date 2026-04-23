@@ -11,14 +11,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	epochstorage "github.com/magma-Devs/smart-router/types/epoch"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
-	"github.com/magma-Devs/smart-router/utils/maps"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	epochstorage "github.com/Magma-Devs/smart-router/types/epoch"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils/lavaslices"
+	"github.com/Magma-Devs/smart-router/utils/maps"
 )
 
 var (

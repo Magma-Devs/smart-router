@@ -1,6 +1,6 @@
 package qos
 
-import "github.com/magma-Devs/smart-router/utils"
+import "github.com/Magma-Devs/smart-router/utils"
 
 // Mutator for relay failure
 type QoSMutatorDegradeAvailability struct {

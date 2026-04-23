@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/testproto"
-	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/grpcproxy/testproto"
+	"github.com/Magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 )

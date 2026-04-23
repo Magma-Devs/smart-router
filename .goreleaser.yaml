@@ -122,7 +122,7 @@ changelog:
 
 release:
   github:
-    owner: magma-Devs
+    owner: Magma-Devs
     name: smart-router
   replace_existing_draft: true
   name_template: "Smart Router v{{.Version}}"

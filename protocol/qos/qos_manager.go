@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 type QoSManager struct {

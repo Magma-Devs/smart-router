@@ -10,13 +10,13 @@ import (
 	time "time"
 
 	gomock "github.com/golang/mock/gomock"
-	rpcInterfaceMessages "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	extensionslib "github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	common "github.com/magma-Devs/smart-router/protocol/common"
-	metrics "github.com/magma-Devs/smart-router/protocol/metrics"
-	types "github.com/magma-Devs/smart-router/types/relay"
-	types0 "github.com/magma-Devs/smart-router/types/spec"
+	rpcInterfaceMessages "github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	rpcclient "github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	extensionslib "github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	common "github.com/Magma-Devs/smart-router/protocol/common"
+	metrics "github.com/Magma-Devs/smart-router/protocol/metrics"
+	types "github.com/Magma-Devs/smart-router/types/relay"
+	types0 "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 // MockChainParser is a mock of ChainParser interface.

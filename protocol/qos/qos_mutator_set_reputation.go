@@ -1,7 +1,7 @@
 package qos
 
 import (
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 )
 
 // Mutator to set usage for a session

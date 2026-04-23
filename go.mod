@@ -1,4 +1,4 @@
-module github.com/magma-Devs/smart-router
+module github.com/Magma-Devs/smart-router
 
 go 1.26.2
 
@@ -30,6 +30,7 @@ require (
 	github.com/jhump/protoreflect v1.15.1
 	github.com/joho/godotenv v1.3.0
 	github.com/newrelic/go-agent/v3 v3.20.4
+	github.com/spf13/pflag v1.0.5
 	github.com/tidwall/gjson v1.16.0
 	github.com/tidwall/sjson v1.2.5
 	go.uber.org/goleak v1.3.0
@@ -59,7 +60,6 @@ require (
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
 	github.com/sourcegraph/conc v0.3.0 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect

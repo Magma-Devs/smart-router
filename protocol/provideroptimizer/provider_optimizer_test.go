@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
-	"github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/magma-Devs/smart-router/utils/score"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils/lavaslices"
+	"github.com/Magma-Devs/smart-router/utils/rand"
+	"github.com/Magma-Devs/smart-router/utils/score"
 	"github.com/stretchr/testify/require"
 )
 

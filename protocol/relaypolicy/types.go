@@ -1,6 +1,6 @@
 package relaypolicy
 
-import "github.com/magma-Devs/smart-router/protocol/relaycore"
+import "github.com/Magma-Devs/smart-router/protocol/relaycore"
 
 // Re-export relaycore types for convenience
 type (

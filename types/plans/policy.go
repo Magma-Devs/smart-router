@@ -1,7 +1,7 @@
 package plans
 
 import (
-	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
+	epochstoragetypes "github.com/Magma-Devs/smart-router/types/epoch"
 )
 
 // ChainRequirement describes the addon and extension requirements for a single chain.

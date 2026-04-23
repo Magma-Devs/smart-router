@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	protocoltypes "github.com/magma-Devs/smart-router/types/protocol"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	protocoltypes "github.com/Magma-Devs/smart-router/types/protocol"
 )
 
 const (

@@ -9,13 +9,13 @@ import (
 	"time"
 
 	gojson "github.com/goccy/go-json"
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib"
+	rpcclient "github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
+	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 // Note: Configuration constants are now in WebsocketConfig (websocket_config.go)

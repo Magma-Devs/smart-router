@@ -4,8 +4,8 @@
 package chainqueries
 
 import (
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
 )
 
 // IsArchiveRequest returns true if the chain message carries the archive extension.

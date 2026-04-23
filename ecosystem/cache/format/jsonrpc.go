@@ -3,7 +3,7 @@ package format
 import (
 	"encoding/json"
 
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

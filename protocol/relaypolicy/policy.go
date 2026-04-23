@@ -1,6 +1,6 @@
 package relaypolicy
 
-import "github.com/magma-Devs/smart-router/protocol/relaycore"
+import "github.com/Magma-Devs/smart-router/protocol/relaycore"
 
 // Verify Policy implements RelayPolicyInf at compile time.
 var _ relaycore.RelayPolicyInf = (*Policy)(nil)

@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	plantypes "github.com/magma-Devs/smart-router/types/plans"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	specutils "github.com/magma-Devs/smart-router/utils/keeper"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/Magma-Devs/smart-router/protocol/common"
+	plantypes "github.com/Magma-Devs/smart-router/types/plans"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	specutils "github.com/Magma-Devs/smart-router/utils/keeper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -3,8 +3,8 @@ package cache
 import (
 	"context"
 
-	"github.com/magma-Devs/smart-router/protocol/performance"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/performance"
+	"github.com/Magma-Devs/smart-router/utils"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 )

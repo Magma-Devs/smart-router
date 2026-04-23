@@ -27,7 +27,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 // API describes the set of methods offered over the RPC interface

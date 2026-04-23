@@ -3,7 +3,7 @@ package lavasession
 import (
 	"sync"
 
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 // stores all providers that are currently used to stream subscriptions.

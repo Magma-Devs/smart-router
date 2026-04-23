@@ -16,9 +16,9 @@ import (
 	"slices"
 
 	"github.com/gogo/status"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
-	planstypes "github.com/magma-Devs/smart-router/types/plans"
-	"github.com/magma-Devs/smart-router/utils"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	planstypes "github.com/Magma-Devs/smart-router/types/plans"
+	"github.com/Magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"

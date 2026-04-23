@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	types "github.com/magma-Devs/smart-router/types/spec"
+	types "github.com/Magma-Devs/smart-router/types/spec"
 )
 
 // expandSpec expands a spec by resolving all its dependencies (inherited specs).

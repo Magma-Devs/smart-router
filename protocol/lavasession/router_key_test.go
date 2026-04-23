@@ -3,7 +3,7 @@ package lavasession
 import (
 	"testing"
 
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	spectypes "github.com/Magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 

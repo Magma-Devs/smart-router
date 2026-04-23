@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils/score"
+	"github.com/Magma-Devs/smart-router/utils/score"
 	"github.com/stretchr/testify/require"
 )
 
