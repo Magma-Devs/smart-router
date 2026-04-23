@@ -16,6 +16,10 @@ endpoints:
     chain-id: "LAVA"
     api-interface: "tendermintrpc"
 
+  - network-address: "0.0.0.0:3363"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+
 direct-rpc:
   # 3 upstream REST endpoints (PublicNode TLS)
   - name: "lava-publicnode-rest-1"
@@ -122,3 +126,46 @@ direct-rpc:
       - url: "wss://lava-rpc.publicnode.com:443/websocket"
         skip-verifications:
           - pruning
+
+  # 3 upstream Ethereum JSON-RPC endpoints.
+  # Each provider must include a wss:// URL alongside the https:// URL so the
+  # router can serve eth_subscribe (websocket is a required addon for ETH1).
+  - name: "eth-rpc-1"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://eth.llamarpc.com"
+        skip-verifications:
+          - chain-id
+          - pruning
+      - url: "wss://ethereum-rpc.publicnode.com"
+        skip-verifications:
+          - chain-id
+          - pruning
+
+  - name: "eth-rpc-2"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://ethereum-rpc.publicnode.com"
+        skip-verifications:
+          - chain-id
+          - pruning
+      - url: "wss://ethereum-rpc.publicnode.com"
+        skip-verifications:
+          - chain-id
+          - pruning
+
+  - name: "eth-rpc-3"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://rpc.ankr.com/eth"
+        skip-verifications:
+          - chain-id
+          - pruning
+      - url: "wss://ethereum-rpc.publicnode.com"
+        skip-verifications:
+          - chain-id
+          - pruning
+
