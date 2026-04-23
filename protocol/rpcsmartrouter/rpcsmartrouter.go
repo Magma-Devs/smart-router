@@ -462,18 +462,26 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		return err
 	}
 
-	// Filter the relevant static providers
+	// Filter the relevant static providers.
+	// IMPORTANT: filter on both ChainID *and* ApiInterface. A single chain (e.g. LAVA)
+	// can expose several api-interfaces (rest, grpc, tendermintrpc); selecting only by
+	// ChainID would let, say, the grpc endpoint pick a rest provider as its chain
+	// tracker source. The chain tracker would then craft a grpc-shaped GET_BLOCKNUM
+	// message (from the grpc chainParser) but dispatch it through the rest proxy,
+	// which fails with "invalid message type in rest" and aborts startup.
 	relevantStaticProviderList := []*lavasession.RPCStaticProviderEndpoint{}
 	for _, staticProvider := range options.staticProvidersList {
-		if staticProvider.ChainID == rpcEndpoint.ChainID {
+		if staticProvider.ChainID == rpcEndpoint.ChainID &&
+			staticProvider.ApiInterface == rpcEndpoint.ApiInterface {
 			relevantStaticProviderList = append(relevantStaticProviderList, staticProvider)
 		}
 	}
 
-	// Filter backup providers for this chain (needed for policy derivation)
+	// Filter backup providers for this chain+interface (needed for policy derivation)
 	relevantBackupProviderList := []*lavasession.RPCStaticProviderEndpoint{}
 	for _, backupProvider := range options.backupProvidersList {
-		if backupProvider.ChainID == rpcEndpoint.ChainID {
+		if backupProvider.ChainID == rpcEndpoint.ChainID &&
+			backupProvider.ApiInterface == rpcEndpoint.ApiInterface {
 			relevantBackupProviderList = append(relevantBackupProviderList, backupProvider)
 		}
 	}
