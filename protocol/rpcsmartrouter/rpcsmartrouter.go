@@ -47,8 +47,16 @@ import (
 	"github.com/magma-Devs/smart-router/utils/rand"
 	scoreutils "github.com/magma-Devs/smart-router/utils/score"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
+
+// wordSepNormalizeFunc maps `_` → `-` in flag names so the binary accepts
+// both `--log_level` (cosmos-sdk style) and `--log-level` (cobra default).
+// Required by the existing Helm chart, which still passes underscored flags.
+func wordSepNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+	return pflag.NormalizedName(strings.ReplaceAll(name, "_", "-"))
+}
 
 const (
 	DefaultRPCSmartRouterFileName = "rpcsmartrouter.yml"
@@ -1505,6 +1513,25 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 
 			return err
 		},
+	}
+
+	// Accept both `--log_level` and `--log-level` (and any other underscored
+	// flag name) — the deployed Helm chart still passes cosmos-sdk-style
+	// underscored flags. Without this, pods crash on startup with
+	// "unknown flag: --log_level". See BUG_REPORT_log_flag.md.
+	cmdRPCSmartRouter.Flags().SetNormalizeFunc(wordSepNormalizeFunc)
+
+	// Hidden no-op flags retained for backward compatibility with the existing
+	// Helm chart (`oci://ghcr.io/magma-devs/smart-router-helm-chart`), which
+	// still passes flags removed during the smart-router rewrite. Without
+	// these, pods crash on startup with "unknown flag: ...". Each is a Bool
+	// so it works with `--flag` (no value) and `--flag=true`/`--flag=false`.
+	for _, deprecated := range []string{
+		"skip-policy-verification",
+		"skip-relay-signing",
+	} {
+		cmdRPCSmartRouter.Flags().Bool(deprecated, false, "DEPRECATED: no-op, retained for chart compatibility")
+		_ = cmdRPCSmartRouter.Flags().MarkHidden(deprecated)
 	}
 
 	// RPCSmartRouter command flags - no blockchain flags needed
