@@ -9,7 +9,7 @@
 // customers. It does not scale to per-customer licensing or revocation, and
 // it stops being meaningful if the public repo ever goes public.
 //
-// Sprint 6 (see docs/smart-router-repo-enterprise.md §7) replaces this with
+// Sprint 6 (see agent_docs/smart-router-repo-enterprise.md §6) replaces this with
 // runtime file-loading via licensing.LoadFromFile / LoadFromEnvOrFile. When
 // that sprint lands, this whole file plus embedded_license.txt is deleted.
 //
