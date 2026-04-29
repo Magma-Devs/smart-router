@@ -8,15 +8,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/golang/protobuf/proto"
-	"github.com/jhump/protoreflect/desc"
-	"github.com/jhump/protoreflect/dynamic"
 	"github.com/Magma-Devs/smart-router/protocol/chainlib"
 	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/Magma-Devs/smart-router/protocol/common"
 	"github.com/Magma-Devs/smart-router/protocol/metrics"
-	"github.com/Magma-Devs/smart-router/utils"
 	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/utils"
+	"github.com/golang/protobuf/proto"
+	"github.com/jhump/protoreflect/desc"
+	"github.com/jhump/protoreflect/dynamic"
 	"google.golang.org/grpc"
 )
 
@@ -105,6 +105,11 @@ type DirectGRPCSubscriptionManager struct {
 
 	lock sync.RWMutex
 }
+
+// Compile-time assertion: *DirectGRPCSubscriptionManager satisfies GRPCSubscriptionManager.
+// If new methods are added to the interface, this line will fail until the
+// concrete type implements them.
+var _ GRPCSubscriptionManager = (*DirectGRPCSubscriptionManager)(nil)
 
 // NewDirectGRPCSubscriptionManager creates a new gRPC subscription manager
 func NewDirectGRPCSubscriptionManager(

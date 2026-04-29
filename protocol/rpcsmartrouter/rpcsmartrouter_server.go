@@ -69,8 +69,11 @@ type RPCSmartRouterServer struct {
 	// Per-endpoint ChainTracker manager for continuous block polling
 	endpointChainTrackerManager *EndpointChainTrackerManager
 
-	// gRPC streaming subscription manager (nil if not configured)
-	grpcSubscriptionManager *DirectGRPCSubscriptionManager
+	// gRPC streaming subscription manager (nil if not configured).
+	// Typed as the GRPCSubscriptionManager interface so a community noop can
+	// stand in for *DirectGRPCSubscriptionManager. See config.go for the
+	// interface definition and the rule for expanding it.
+	grpcSubscriptionManager GRPCSubscriptionManager
 
 	// Endpoint-scoped metrics manager (new spec)
 	smartRouterEndpointMetrics *metrics.SmartRouterMetricsManager
