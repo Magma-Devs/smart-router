@@ -12,6 +12,7 @@ import (
 	"github.com/Magma-Devs/smart-router/protocol/common"
 	"github.com/Magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils"
 	"github.com/jhump/protoreflect/desc"
 	"google.golang.org/grpc"
 )
@@ -98,13 +99,16 @@ func (communityConfig) ValidateAPIInterface(apiInterface string) error {
 	}
 }
 
-// ValidateTransport rejects WebSocket and explicitly-gRPC URL schemes.
-// Bare-host gRPC URLs (where the upstream is gRPC but the URL has no scheme)
-// are detected at the §3.3.6 row 3a insertion point in convertProvidersToSessions
-// where the per-endpoint ApiInterface is in scope — this method only sees the
-// raw URL string and cannot reliably distinguish a bare-host gRPC from a
-// bare-host HTTP without that context.
+// ValidateTransport rejects empty URLs, WebSocket, and explicitly-gRPC URL
+// schemes. Bare-host gRPC URLs (where the upstream is gRPC but the URL has
+// no scheme) are detected at the §3.3.6 row 3a insertion point in
+// convertProvidersToSessions where the per-endpoint ApiInterface is in
+// scope — this method only sees the raw URL string and cannot reliably
+// distinguish a bare-host gRPC from a bare-host HTTP without that context.
 func (communityConfig) ValidateTransport(rawURL string) error {
+	if strings.TrimSpace(rawURL) == "" {
+		return fmt.Errorf("empty transport url")
+	}
 	scheme := schemeOf(rawURL)
 	switch scheme {
 	case "http", "https":
@@ -114,6 +118,8 @@ func (communityConfig) ValidateTransport(rawURL string) error {
 	case "grpc", "grpcs":
 		return fmt.Errorf("gRPC transport (url=%q) requires an enterprise license", rawURL)
 	case "":
+		// Bare host (no '://' separator) — allow at this layer; bare-host gRPC
+		// is caught at §3.3.6 row 3a where ApiInterface context exists.
 		return nil
 	default:
 		return fmt.Errorf("unsupported transport scheme %q (url=%q)", scheme, rawURL)
@@ -155,8 +161,8 @@ func schemeOf(rawURL string) string {
 
 // enterpriseConfigFactory builds a SmartRouterConfig from a validated license.
 // The function pointer is set by enterprise_features.go's init() (only present
-// in enterprise builds), which keeps the community build free of any reference
-// to enterpriseConfig.
+// in enterprise builds); the community build never touches it, leaving
+// activeConfig as communityConfig.
 type enterpriseConfigFactory func(*licensing.License) SmartRouterConfig
 
 var (
@@ -168,13 +174,15 @@ var (
 // RegisterEnterpriseConfig wires the enterprise factory at process startup.
 // Called from enterprise_features.go's init() in enterprise builds.
 //
-// Safe to call exactly once. Subsequent calls panic so we fail loudly if a
-// future contributor accidentally registers two factories.
+// First registration wins. Subsequent calls log an error and are ignored,
+// so an accidental double-init surfaces in operational logs without taking
+// the process down.
 func RegisterEnterpriseConfig(f enterpriseConfigFactory) {
 	configMu.Lock()
 	defer configMu.Unlock()
 	if enterpriseFactory != nil {
-		panic("rpcsmartrouter: enterprise config factory already registered")
+		utils.LavaFormatError("rpcsmartrouter: enterprise config factory already registered; ignoring duplicate registration", nil)
+		return
 	}
 	enterpriseFactory = f
 }

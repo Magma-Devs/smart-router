@@ -4,6 +4,7 @@ package rpcsmartrouter
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/Magma-Devs/smart-router/licensing"
 	"github.com/Magma-Devs/smart-router/protocol/chainlib"
@@ -41,8 +42,15 @@ func (enterpriseConfig) ValidateAPIInterface(apiInterface string) error {
 	}
 }
 
-// All transports are unlocked by any valid enterprise license.
-func (enterpriseConfig) ValidateTransport(rawURL string) error { return nil }
+// All non-empty transports are unlocked by any valid enterprise license.
+// Empty URLs are still rejected as YAML typos (same rationale as the
+// "unsupported api-interface" default arm in ValidateAPIInterface).
+func (enterpriseConfig) ValidateTransport(rawURL string) error {
+	if strings.TrimSpace(rawURL) == "" {
+		return fmt.Errorf("empty transport url")
+	}
+	return nil
+}
 
 // All specs are unlocked by any valid enterprise license.
 func (enterpriseConfig) ValidateSpec(specIndex string) error { return nil }

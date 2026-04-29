@@ -44,7 +44,8 @@ func TestEnterpriseConfig_ValidateAPIInterface(t *testing.T) {
 
 func TestEnterpriseConfig_ValidateTransport(t *testing.T) {
 	c := enterpriseConfig{}
-	urls := []string{
+
+	allowed := []string{
 		"http://node:8545",
 		"https://node:8545",
 		"ws://node:8546",
@@ -52,11 +53,21 @@ func TestEnterpriseConfig_ValidateTransport(t *testing.T) {
 		"grpc://node:9090",
 		"grpcs://node:9090",
 		"node:8545",
-		"",
 	}
-	for i, u := range urls {
-		t.Run(u, func(t *testing.T) {
+	for i, u := range allowed {
+		t.Run("allow_"+u, func(t *testing.T) {
 			require.NoError(t, c.ValidateTransport(u), "url %s, tc #%d, i #%d", u, i, i)
+		})
+	}
+
+	// Empty / whitespace-only URLs are rejected even at enterprise — same
+	// "catches typos" rationale as the unsupported-api-interface default arm.
+	rejected := []string{"", "   \t  "}
+	for i, u := range rejected {
+		t.Run("reject_empty_"+u, func(t *testing.T) {
+			err := c.ValidateTransport(u)
+			require.Error(t, err, "empty url must reject, tc #%d, i #%d", i, i)
+			require.Contains(t, err.Error(), "empty transport url")
 		})
 	}
 }

@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Magma-Devs/smart-router/licensing"
@@ -127,6 +128,8 @@ func TestCommunityConfig_ValidateTransport(t *testing.T) {
 			[]string{"unsupported transport scheme"},
 		},
 		{"bare host treated as schemeless (Sprint 3 catches gRPC by ApiInterface)", "node.example.com:8545", false, nil},
+		{"empty rejected", "", true, []string{"empty transport url"}},
+		{"whitespace-only rejected", "   \t  ", true, []string{"empty transport url"}},
 	}
 
 	for i, tc := range cases {
@@ -137,7 +140,12 @@ func TestCommunityConfig_ValidateTransport(t *testing.T) {
 				for _, sub := range tc.wantSubstrings {
 					assert.Contains(t, err.Error(), sub, "%s, tc #%d, i #%d", tc.name, i, i)
 				}
-				assert.Contains(t, err.Error(), tc.rawURL, "error must echo offending URL: %s, tc #%d", tc.name, i)
+				// The empty/whitespace-only error message intentionally omits
+				// the URL (there's nothing useful to echo); for every other
+				// failing case the offending URL must appear.
+				if strings.TrimSpace(tc.rawURL) != "" {
+					assert.Contains(t, err.Error(), tc.rawURL, "error must echo offending URL: %s, tc #%d", tc.name, i)
+				}
 			} else {
 				assert.NoError(t, err, "%s, tc #%d, i #%d", tc.name, i, i)
 			}
@@ -276,30 +284,44 @@ func TestActivateConfig_FactoryAndLicense_PromotesToEnterprise(t *testing.T) {
 	assert.Equal(t, lic, got.License())
 }
 
-func TestRegisterEnterpriseConfig_PanicsOnDoubleRegistration(t *testing.T) {
+func TestRegisterEnterpriseConfig_IgnoresDoubleRegistration(t *testing.T) {
 	snapshotConfigSingletons(t)
 
 	configMu.Lock()
 	enterpriseFactory = nil
 	configMu.Unlock()
 
-	RegisterEnterpriseConfig(func(*licensing.License) SmartRouterConfig {
-		return fakeEnterpriseConfig{}
-	})
+	firstFactory := func(l *licensing.License) SmartRouterConfig {
+		return fakeEnterpriseConfig{license: l, marker: "first"}
+	}
+	secondFactory := func(l *licensing.License) SmartRouterConfig {
+		return fakeEnterpriseConfig{license: l, marker: "second"}
+	}
 
-	assert.Panics(t, func() {
-		RegisterEnterpriseConfig(func(*licensing.License) SmartRouterConfig {
-			return fakeEnterpriseConfig{}
-		})
-	}, "second registration must panic to surface accidental double-init")
+	// First registration wins.
+	RegisterEnterpriseConfig(firstFactory)
+
+	// Second registration must NOT panic and must NOT replace the first factory.
+	assert.NotPanics(t, func() { RegisterEnterpriseConfig(secondFactory) },
+		"second registration must log + return, not panic")
+
+	// Verify the first factory is still the active one by activating with a
+	// license and checking the marker on the resulting config.
+	ActivateConfig(&licensing.License{LicenseID: "double-reg-test"})
+	got, ok := ActiveConfig().(fakeEnterpriseConfig)
+	require.True(t, ok, "ActiveConfig should be fakeEnterpriseConfig after activation, got %T", ActiveConfig())
+	assert.Equal(t, "first", got.marker,
+		"first registration must win; second registration must be silently ignored")
 }
 
 // fakeEnterpriseConfig is a minimal SmartRouterConfig used only in tests, so
 // the community test file can exercise ActivateConfig() without depending on
 // the enterprise build tag. The Create* methods return nil — these tests
-// never invoke them.
+// never invoke them. The marker field lets a test distinguish two factory
+// instances (used by TestRegisterEnterpriseConfig_IgnoresDoubleRegistration).
 type fakeEnterpriseConfig struct {
 	license *licensing.License
+	marker  string
 }
 
 func (fakeEnterpriseConfig) Edition() string                   { return "enterprise-fake" }
