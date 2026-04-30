@@ -1,8 +1,11 @@
 package rpcsmartrouter
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/Magma-Devs/smart-router/licensing"
 	"github.com/Magma-Devs/smart-router/protocol/common"
 	"github.com/Magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/Magma-Devs/smart-router/types/spec"
@@ -21,12 +24,11 @@ import (
 // If a future refactor breaks a unit test, the matching row here also
 // fails and the regression is impossible to merge without acknowledgement.
 //
-// Rows explicitly deferred to Sprint 6 (the "no license at runtime"
-// scenario) call t.Skip with a clear reason. The embedded-license model
-// shipped in Sprint 1 has no path for "enterprise binary without a
-// license" — every enterprise build always carries a license envelope
-// baked in via //go:embed. Sprint 6 swaps to runtime file-loading and
-// will activate those rows.
+// Sprint 6 update: the "Enterprise (no license)" row, originally a
+// placeholder for the §3.4 community-mode-fallback behavior, was activated
+// when Sprint 6 swapped from build-time //go:embed to runtime file-loading.
+// The fallback contract was replaced with fail-fast — see that subtest for
+// the rationale and the assertion shape.
 func TestSprint4ContractMatrix(t *testing.T) {
 	t.Run("Community must pass", func(t *testing.T) {
 		snapshotConfigSingletons(t)
@@ -211,19 +213,46 @@ func TestSprint4ContractMatrix(t *testing.T) {
 		})
 	})
 
-	t.Run("Enterprise (no license) deferred to Sprint 6", func(t *testing.T) {
-		// §3.4 specifies that an enterprise binary running without a license
-		// should "behave as community" and emit "Enterprise build running in
-		// community mode". This contract row is structurally untestable under
-		// the Sprint 1 embedded-license model: every enterprise build carries
-		// a license envelope baked in via //go:embed, so "no license" never
-		// occurs at runtime.
+	t.Run("Enterprise (no license) fails fast", func(t *testing.T) {
+		// Sprint 6 runtime file-loaded contract: an enterprise binary with no
+		// readable license file MUST refuse to start. The original §3.4
+		// row called for community-mode fallback with a "running in community
+		// mode" log; that was deliberately replaced — silent downgrade was
+		// deemed worse UX than a hard error that points the operator at the
+		// missing file.
 		//
-		// Sprint 6 swaps to a runtime file-loaded license model. At that
-		// point this row becomes testable — the enterprise binary will check
-		// for a license file and fall back gracefully if absent. Until then,
-		// the contract row is documented here as a placeholder.
-		t.Skip("deferred to Sprint 6 — embedded-license model has no 'no license' path; runtime file-loaded model in Sprint 6 will activate this row")
+		// The fail-fast wiring lives in cmd/smartrouter/startup_enterprise.go's
+		// installLicenseCheck (LavaFormatFatal on loader error). That wiring
+		// is unit-tested in startup_enterprise_test.go::TestLoadLicenseEnvelope_*
+		// without subprocess gymnastics. The contract assertion here covers
+		// the licensing package's *primitive* — the loader must surface
+		// missing-file as an error, which the caller is required to treat as
+		// fatal.
+		if !IsEnterpriseBuild() {
+			t.Skip("license loading lives in the enterprise startup path — see startup_enterprise_test.go")
+		}
+
+		// Empty path → error. Caller MUST NOT fall back to a default.
+		_, err := licensing.LoadFromFile("")
+		require.Error(t, err, "Sprint 6 fail-fast: empty license path must error")
+
+		// Missing file → error mentioning the path so the operator log line
+		// ("license file unreadable source=…") points at the actual missing path.
+		missingPath := filepath.Join(t.TempDir(), "no-such-license.key")
+		_, err = licensing.LoadFromFile(missingPath)
+		require.Error(t, err, "Sprint 6 fail-fast: missing license file must error")
+		require.Contains(t, err.Error(), missingPath,
+			"error must surface the path so the operator log can point at the misconfiguration")
+
+		// Env-var-set-to-missing-path must NOT fall back to default — silent
+		// fallback would mask the misconfiguration the env var was supposed
+		// to surface.
+		t.Setenv("CONTRACT_TEST_LICENSE_FILE", missingPath)
+		fallback := filepath.Join(t.TempDir(), "fallback-should-not-be-read.key")
+		require.NoError(t, os.WriteFile(fallback, []byte("decoy-contents"), 0o600))
+		_, _, fromEnv, err := licensing.LoadFromEnvOrFile("CONTRACT_TEST_LICENSE_FILE", fallback)
+		require.Error(t, err, "Sprint 6 fail-fast: env var set to missing file must error, not silently fall back")
+		require.True(t, fromEnv, "fromEnv must be true when env var was set, even on error")
 	})
 
 	t.Run("License validation states", func(t *testing.T) {
