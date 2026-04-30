@@ -33,8 +33,10 @@ test-short:
 # ----------------------------------------------------------------------------
 # Enterprise build variants.
 # The -tags enterprise flag compiles in license validation, full subscription
-# managers, all spec types, and the embedded license envelope. Without the
-# tag, the same source produces the community binary above.
+# managers, and all spec types. The license itself is read at runtime from
+# --license-file / $SMART_ROUTER_LICENSE_FILE / ./license.key (Sprint 6 swapped
+# from build-time //go:embed to runtime file-loading). Without the tag, the
+# same source produces the community binary above.
 #
 # Output is build/smartrouter-enterprise so both binaries can sit side-by-
 # side for symbol-isolation checks (go tool nm) and A/B testing.

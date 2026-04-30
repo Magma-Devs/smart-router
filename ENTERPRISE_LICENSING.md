@@ -4,13 +4,15 @@ This guide is for operators of the **enterprise edition** of the smart router. C
 
 ## Quick start
 
-You receive a `license.key` file from Magma. Place it next to the binary:
+You receive a `license.key` file from Magma. Place it in the router's **working directory** (default `./license.key` resolves against the process's current working directory, NOT the binary's directory). The simplest layout — binary directory and working directory are the same:
 
 ```
-/srv/smart-router/
-├── smartrouter-enterprise
+/srv/smart-router/                ← cd here before launching, or set systemd
+├── smartrouter-enterprise          WorkingDirectory=/srv/smart-router/
 └── license.key       ← this file
 ```
+
+For systemd, Docker, or any deployment where CWD is not the binary directory, use either `--license-file=PATH` or `$SMART_ROUTER_LICENSE_FILE` to point at the file's absolute path explicitly. Defaults work for one-off CLI invocations; explicit paths are recommended for production.
 
 Start the router. If the license is valid, you'll see:
 
@@ -54,7 +56,7 @@ Past the license's `expires_at`, the router enters a 14-day grace period. During
 After the grace window ends, the router **refuses to start** with:
 
 ```
-FTL license expired on 2026-04-30 (grace period ended 2026-05-14) — re-issue and rebuild
+FTL license expired on 2026-04-30 (grace period ended 2026-05-14) — re-issue license, replace the file, and restart
 ```
 
 Plan license rotation to land **before** the original `expires_at` to avoid the grace-period log noise.
@@ -75,7 +77,7 @@ Each failure produces a fatal error with `source=` showing which path was attemp
 |---|---|---|
 | `license file unreadable — enterprise binary cannot start without a valid license` | The file at `source=` doesn't exist, isn't readable, or is empty. | Check the path exists and is readable by the router process; replace with the file Magma sent you. |
 | `license validation failed` | Envelope is malformed — wrong format, truncated, or signature doesn't verify against any known public key. | The file may have been corrupted in transit. Re-download from Magma. |
-| `license expired on YYYY-MM-DD (grace period ended YYYY-MM-DD)` | License is past expiry **and** past the 14-day grace window. | Contact Magma for a new license. |
+| `license expired on YYYY-MM-DD (grace period ended YYYY-MM-DD) — re-issue license, replace the file, and restart` | License is past expiry **and** past the 14-day grace window. | Contact Magma for a new license; replace `license.key` with the new file (see "Rotating to a new license") and restart. |
 | `license invalid` | Defensive arm — license validated cleanly but with an unrecognized status code. Should not occur in normal operation. | File a bug report with the full log line. |
 
 For warnings (not failures) like `license approaching expiry days_until_expiry=14`, contact Magma to issue a renewal — the router stays operational until expiry.

@@ -131,7 +131,7 @@ func resolveLicense(licenseKey string) licenseDecision {
 		expiredOn := license.ExpiresAt.Format("2006-01-02")
 		gracePeriodEnded := license.ExpiresAt.Add(licensing.GracePeriod).Format("2006-01-02")
 		return licenseDecision{
-			fatalMsg: fmt.Sprintf("license expired on %s (grace period ended %s) — re-issue and rebuild", expiredOn, gracePeriodEnded),
+			fatalMsg: fmt.Sprintf("license expired on %s (grace period ended %s) — re-issue license, replace the file, and restart", expiredOn, gracePeriodEnded),
 			license:  license,
 			status:   status,
 		}

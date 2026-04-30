@@ -153,7 +153,7 @@ func TestResolveLicense_Expired_PastGrace_ProducesFatalDecision(t *testing.T) {
 	assert.Equal(t, licensing.LicenseStatusExpired, d.status)
 	assert.Contains(t, d.fatalMsg, "license expired on")
 	assert.Contains(t, d.fatalMsg, "grace period ended")
-	assert.Contains(t, d.fatalMsg, "re-issue and rebuild")
+	assert.Contains(t, d.fatalMsg, "re-issue license, replace the file, and restart")
 	require.NotNil(t, d.license, "expired license is still parsed; the *License is needed for fatal log attributes")
 	assert.Equal(t, "lic_expired_test", d.license.LicenseID)
 }
