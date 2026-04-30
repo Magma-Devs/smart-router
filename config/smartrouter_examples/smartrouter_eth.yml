@@ -9,7 +9,7 @@ endpoints:
     network-address: "0.0.0.0:3360"
 
 direct-rpc:
-  # HTTP Endpoint 1
+  # HTTP+WS Endpoint 1
   - name: "eth-rpc-1"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
@@ -18,8 +18,9 @@ direct-rpc:
         skip-verifications:
           - chain-id
           - pruning
+      - url: "wss://eth.llamarpc.com"
 
-  # HTTP Endpoint 2
+  # HTTP+WS Endpoint 2
   - name: "eth-rpc-2"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
@@ -28,8 +29,9 @@ direct-rpc:
         skip-verifications:
           - chain-id
           - pruning
+      - url: "wss://json-rpc.8zfcse2amst1lajmh299uq4jn.blockchainnodeengine.com/?key=AIzaSyDyUtm6b-e-xKDQgVWzlroHdVTytiXEDik"
 
-  # HTTP Endpoint 3
+  # HTTP+WS Endpoint 3
   - name: "eth-rpc-3"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
@@ -38,6 +40,7 @@ direct-rpc:
         skip-verifications:
           - chain-id
           - pruning
+      - url: "wss://ethereum-rpc.publicnode.com"
 
   # WebSocket Endpoint 1 (Phase 5 - Subscriptions)
   - name: "eth-ws-1"
@@ -60,8 +63,49 @@ direct-rpc:
     node-urls:
       - url: "wss://ethereum-rpc.publicnode.com"
 
+  # Additional JSON-RPC test nodes (kept duplicated intentionally)
+  - name: "Google1"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://json-rpc.8zfcse2amst1lajmh299uq4jn.blockchainnodeengine.com?key=AIzaSyDyUtm6b-e-xKDQgVWzlroHdVTytiXEDik"
+        skip-verifications:
+          - chain-id
+          - pruning
+      - url: "wss://json-rpc.8zfcse2amst1lajmh299uq4jn.blockchainnodeengine.com?key=AIzaSyDyUtm6b-e-xKDQgVWzlroHdVTytiXEDik"
+
+  - name: "Google2"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://json-rpc.8zfcse2amst1lajmh299uq4jn.blockchainnodeengine.com?key=AIzaSyDyUtm6b-e-xKDQgVWzlroHdVTytiXEDik"
+        skip-verifications:
+          - chain-id
+          - pruning
+      - url: "wss://json-rpc.8zfcse2amst1lajmh299uq4jn.blockchainnodeengine.com?key=AIzaSyDyUtm6b-e-xKDQgVWzlroHdVTytiXEDik"
+
+  - name: "QuickNode1"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://wispy-distinguished-glitter.quiknode.pro/c6f9247c83ef5fd069dbef2c228ee1229b55e406/"
+        skip-verifications:
+          - chain-id
+          - pruning
+      - url: "wss://wispy-distinguished-glitter.quiknode.pro/c6f9247c83ef5fd069dbef2c228ee1229b55e406/"
+
+  - name: "QuickNode2"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://wispy-distinguished-glitter.quiknode.pro/c6f9247c83ef5fd069dbef2c228ee1229b55e406/"
+        skip-verifications:
+          - chain-id
+          - pruning
+      - url: "wss://wispy-distinguished-glitter.quiknode.pro/c6f9247c83ef5fd069dbef2c228ee1229b55e406/"
+
 backup-direct-rpc:
-  # Backup HTTP Endpoint (used only when all primary direct-rpc peers are exhausted)
+  # Backup HTTP+WS Endpoint (used only when all primary direct-rpc peers are exhausted)
   - name: "eth-rpc-backup"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
@@ -70,3 +114,4 @@ backup-direct-rpc:
         skip-verifications:
           - chain-id
           - pruning
+      - url: "wss://rpc.ankr.com/eth/ws"
