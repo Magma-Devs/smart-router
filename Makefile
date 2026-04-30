@@ -62,14 +62,21 @@ tidy:
 lint:
 	go vet ./...
 
-# Sprint 3.8 — guard against new callers bypassing the §3.3.6 gating system.
-# See scripts/check_gated_symbols.sh for the symbol allowlist.
+# Sprint 3.8 — source-level guard. Catches forbidden constructor calls
+# at PR review via git grep. See scripts/check_gated_symbols.sh.
 check-gates:
 	@bash scripts/check_gated_symbols.sh
+
+# Sprint 4.2 — post-build guard. Builds both editions and inspects the
+# linked artifacts (symbols, strings, size delta, go mod graph) to catch
+# leakage that source grep can't see. Complementary to check-gates — both
+# are needed. See scripts/verify_binaries.sh.
+verify-binaries:
+	@bash scripts/verify_binaries.sh
 
 clean:
 	rm -rf build/
 
 .PHONY: install install-all install-smartrouter build build-all test test-short \
         build-enterprise install-enterprise test-enterprise build-both test-both \
-        tidy lint check-gates clean
+        tidy lint check-gates verify-binaries clean

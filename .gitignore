@@ -67,4 +67,8 @@ mock-node-server/
 .claude/
 Claude.md
 lavap
+# `go build ./cmd/smartrouter` from repo root drops a 43MB binary here.
+# Use `make build` (which writes to build/) — this rule prevents the
+# accidental binary from sneaking into a commit.
+/smartrouter
 debugging/logs/
