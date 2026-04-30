@@ -1,5 +1,32 @@
 name: Build and Test
 
+# Sprint 5 — dual-edition CI.
+#
+# This workflow used to run only the community build (no `-tags enterprise`).
+# Sprint 5 extends it via a matrix `edition: [community, enterprise]` that
+# fans the test and build jobs across both editions, then adds a single
+# `guards` job that runs the source-level (`make check-gates`) and post-
+# build (`make verify-binaries`) gating checks once.
+#
+# Why a matrix and not a separate workflow file:
+#   - Renaming this file or splitting into community.yml/enterprise.yml
+#     would break any branch-protection rule pointing at the existing
+#     status check name. Matrix expansion preserves the workflow name
+#     "Build and Test" while doubling coverage.
+#   - The setup-go / checkout / cache boilerplate is identical; matrix
+#     amortizes it across both editions.
+#
+# Why `verify-binaries` is a single job (not matrix): the script
+# `scripts/verify_binaries.sh` builds BOTH editions internally and
+# inspects them side-by-side. Running it under a matrix would just
+# duplicate the same work.
+#
+# Actions-minute cost note: the test matrix doubles unit-test runtime;
+# the build matrix scopes the enterprise dimension to linux/amd64 only
+# so it's +1 build (5 total: 4 community OS/arch combos + 1 enterprise).
+# Release-time cross-compilation is handled by `.goreleaser.yaml` —
+# Sprint 5 doesn't try to also do that here.
+
 on:
   push:
     branches:
@@ -20,8 +47,16 @@ concurrency:
 
 jobs:
   test:
-    name: Unit tests
+    name: Unit tests (${{ matrix.edition }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - edition: community
+            tags: ""
+          - edition: enterprise
+            tags: enterprise
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -35,9 +70,13 @@ jobs:
 
       - name: Run tests
         timeout-minutes: 20
+        env:
+          EDITION_TAGS: ${{ matrix.tags }}
         run: |
           set -o pipefail
-          go test -json -timeout 15m -coverprofile=coverage.out ./... \
+          # ${EDITION_TAGS:+-tags $EDITION_TAGS} expands to "" when empty,
+          # or "-tags enterprise" when set. Cleaner than an if-else.
+          go test -json ${EDITION_TAGS:+-tags $EDITION_TAGS} -timeout 15m -coverprofile=coverage.out ./... \
             | tee test.json \
             | grep -v '"Action":"output"' \
             | go-junit-report -parser gojson -set-exit-code -out test-report.xml
@@ -46,14 +85,16 @@ jobs:
       - name: Print failed test output
         if: failure()
         run: |
-          echo "=== Failed test output ==="
+          echo "=== Failed test output (${{ matrix.edition }}) ==="
           jq -r 'select(.Action=="output") | .Output' test.json 2>/dev/null | tail -200 || echo "No test output found"
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          # Matrix-disambiguated name — without this, the second matrix run
+          # silently overwrites the first's artifact on upload.
+          name: test-results-${{ matrix.edition }}
           path: |
             test-report.xml
             test.log
@@ -66,17 +107,31 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: Magma-Devs/smart-router
           files: ./coverage.out
+          # Codecov flag per edition. Without this, the second matrix run's
+          # coverage upload silently overwrites the first.
+          flags: ${{ matrix.edition }}
           fail_ci_if_error: false
           verbose: true
 
   build:
-    name: Build smartrouter (${{ matrix.targetos }}-${{ matrix.arch }})
+    name: Build smartrouter (${{ matrix.edition }}-${{ matrix.targetos }}-${{ matrix.arch }})
     needs: [test]
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
+      # Community: full os/arch matrix (4 combos). Enterprise: linux/amd64
+      # only at PR time — release-time cross-compilation is handled by
+      # .goreleaser.yaml. This keeps Actions-minute cost to +1 build.
       matrix:
         targetos: [linux, darwin]
         arch: [amd64, arm64]
+        edition: [community]
+        tags: [""]
+        include:
+          - edition: enterprise
+            tags: enterprise
+            targetos: linux
+            arch: amd64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -94,14 +149,36 @@ jobs:
         env:
           GOOS: ${{ matrix.targetos }}
           GOARCH: ${{ matrix.arch }}
+          EDITION_TAGS: ${{ matrix.tags }}
         run: |
-          GOWORK=off go build -mod=readonly -o out/smartrouter ./cmd/smartrouter
+          # GOWORK=off is defensive — keeps a future go.work file from
+          # changing the build behavior under us.
+          GOWORK=off go build -mod=readonly ${EDITION_TAGS:+-tags $EDITION_TAGS} -o out/smartrouter ./cmd/smartrouter
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: smartrouter-${{ matrix.targetos }}-${{ matrix.arch }}
+          name: smartrouter-${{ matrix.edition }}-${{ matrix.targetos }}-${{ matrix.arch }}
           path: out/smartrouter
+
+  guards:
+    name: Edition gates and binary verification
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Source-level gate guard (forbidden constructor calls)
+        run: make check-gates
+
+      - name: Post-build verification (symbols, strings, size, deps)
+        # `make verify-binaries` builds both editions internally and runs
+        # scripts/verify_binaries.sh. Single invocation; no matrix needed.
+        run: make verify-binaries
 
   build_docker:
     name: Build Docker image
@@ -147,4 +224,6 @@ jobs:
         uses: EnricoMi/publish-unit-test-result-action@v2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Glob picks up both test-results-community/*.xml and
+          # test-results-enterprise/*.xml — the publish action aggregates.
           files: "artifacts/**/*.xml"

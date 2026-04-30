@@ -40,9 +40,15 @@ builds:
       - 'CC={{ index .Env (print "CC_" .Os "_" .Arch) }}'
       - 'CXX={{ index .Env (print "CXX_" .Os "_" .Arch) }}'
 
-  - id: lavap
-    binary: lavap
-    dir: cmd/lavap
+  # Sprint 5 — enterprise edition. Same source tree as the smartrouter
+  # build above, compiled with `-tags enterprise` to pull in the licensing
+  # envelope, expiry watcher, and full subscription managers. Output binary
+  # is named `smartrouter-enterprise` so it ships side-by-side with the
+  # community binary in the release archive (matches the Makefile's
+  # `build/smartrouter-enterprise` naming).
+  - id: smartrouter-enterprise
+    binary: smartrouter-enterprise
+    dir: cmd/smartrouter
     goos:
       - linux
       - darwin
@@ -54,6 +60,8 @@ builds:
         goarch: s390x
       - goos: darwin
         goarch: ppc64le
+    tags:
+      - enterprise
     flags:
       - -mod=readonly
       - -trimpath
@@ -69,15 +77,23 @@ builds:
       - 'CXX={{ index .Env (print "CXX_" .Os "_" .Arch) }}'
 
 archives:
+  # GoReleaser v2 spelling: `ids` (was `builds`) and `formats` (was `format`).
+  # The deprecated singular form still works but emits a warning on every
+  # `goreleaser check` and is slated for removal in v3.
   - id: smartrouter
-    builds:
+    ids:
       - smartrouter
-    format: binary
+    formats:
+      - binary
     name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
-  - id: lavap
-    builds:
-      - lavap
-    format: binary
+  # Enterprise archive. {{ .Binary }} resolves to `smartrouter-enterprise`
+  # for this build id, so the archive filename naturally encodes the edition
+  # without any template branching.
+  - id: smartrouter-enterprise
+    ids:
+      - smartrouter-enterprise
+    formats:
+      - binary
     name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
 
 checksum:
