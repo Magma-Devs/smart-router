@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     -w -s -linkmode=external -extldflags '-Wl,-z,muldefs -static'" \
     -trimpath \
     -o /smart-router/build/smart-router \
-    /smart-router/cmd/smartrouter/main.go
+    ./cmd/smartrouter
 
 FROM ${RUNNER_IMAGE}
 

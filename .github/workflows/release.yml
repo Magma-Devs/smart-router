@@ -14,8 +14,47 @@ permissions:
   contents: read
 
 jobs:
+  # Sprint 5 review — pre-publish verification gate.
+  #
+  # Both `release` and `release_docker` depend on this job. It reproduces the
+  # same checks the PR-time `Build and Test` workflow runs, but on the tagged
+  # commit that goreleaser is about to ship. Catches: an enterprise-only
+  # symbol leaking into the community binary, a forbidden constructor call,
+  # a goreleaser config that drifted out of sync.
+  #
+  # No matrix — `make test-both`, `make verify-binaries`, and goreleaser
+  # check each handle both editions internally.
+  verify:
+    name: Pre-release verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Tests (community + enterprise)
+        run: make test-both
+
+      - name: Source-level edition gate guard
+        run: make check-gates
+
+      - name: Post-build symbol/string/size/dep verification
+        run: make verify-binaries
+
+      - name: GoReleaser config validation
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: check
+
   release:
     name: release
+    needs: [verify]
     runs-on: ubuntu-latest
 
     permissions:
@@ -49,7 +88,12 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   release_docker:
+    needs: [verify]
     permissions:
+      # GitHub Actions REPLACES (does not merge) workflow-level permissions
+      # with job-level permissions. Restating contents:read here is required —
+      # without it, actions/checkout below has no access to the repo.
+      contents: read
       packages: write
     runs-on: ubuntu-latest
     env:
