@@ -50,12 +50,12 @@ fi
 # Sprint 3.9 nm baseline that confirmed these are enterprise-only symbols.
 declare -a FORBIDDEN_SYMBOLS=(
     'enterpriseConfig'             # Sprint 2 type — enterprise-only
-    'EmbeddedLicense'              # licensing/embed.go (//go:build enterprise)
     'expiryWatcher'                # cmd/smartrouter/startup_enterprise.go
     'resolveLicense'               # cmd/smartrouter/startup_enterprise.go
     'validateAndActivateLicense'   # cmd/smartrouter/startup_enterprise.go
     'logExpiryWarning'             # cmd/smartrouter/startup_enterprise.go
     'watcherCadence'               # cmd/smartrouter/startup_enterprise.go
+    'loadLicenseEnvelope'          # cmd/smartrouter/startup_enterprise.go (Sprint 6)
 )
 
 echo "==> Checking community binary symbols"

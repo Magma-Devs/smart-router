@@ -14,22 +14,58 @@ import (
 	"github.com/Magma-Devs/smart-router/utils"
 )
 
+const (
+	// licenseFileEnvVar lets operators point at a license file outside the
+	// working directory without shell scripting around the binary invocation.
+	licenseFileEnvVar = "SMART_ROUTER_LICENSE_FILE"
+
+	// defaultLicenseFilePath is read when neither --license-file nor
+	// SMART_ROUTER_LICENSE_FILE is set. Co-located with the binary keeps
+	// the simplest single-tenant deployment one file away from working.
+	defaultLicenseFilePath = "./license.key"
+
+	// licenseFileFlagName is the name of the highest-precedence override flag.
+	licenseFileFlagName = "license-file"
+)
+
 // installLicenseCheck wires the enterprise license-validation PreRunE onto the
-// router command. Validation runs lazily (only when the user actually invokes
-// the router, not on `version` / `cache` / `test`). Dispatches on LicenseStatus
-// per §3.3.5 of the implementation plan:
+// router command and registers the --license-file flag. Validation runs lazily
+// (only when the user actually invokes the router, not on `version` / `cache` /
+// `test`). Dispatches on LicenseStatus per §3.3.5 of the implementation plan:
 //
 //   - Valid:        log INFO banner, ActivateConfig, start ExpiryWatcher.
 //   - GracePeriod:  log ERROR, ActivateConfig (still operational), start watcher.
 //   - Expired:      FATAL — past grace, refuse to start.
 //   - Invalid/err:  FATAL — bad signature, unknown key, malformed envelope.
+//   - File missing: FATAL — Sprint 6 chose fail-fast over silent community-mode
+//     fallback. An enterprise binary without a license must not start.
 //
 // Wraps any existing PreRunE so a future contributor adding one inside
 // rpcsmartrouter is preserved.
+//
+// Sprint 6 runtime file-loaded model — license envelope is read at startup
+// from one of three sources (highest precedence first):
+//  1. --license-file=PATH flag
+//  2. $SMART_ROUTER_LICENSE_FILE env var
+//  3. ./license.key default
+//
+// See docs/ENTERPRISE_LICENSING.md for the operator-facing guide.
 func installLicenseCheck(cmd *cobra.Command) {
+	cmd.Flags().String(licenseFileFlagName, "",
+		"Path to enterprise license file. Highest precedence; overrides $"+licenseFileEnvVar+" and the default "+defaultLicenseFilePath+".")
+
 	existing := cmd.PreRunE
 	cmd.PreRunE = func(c *cobra.Command, args []string) error {
-		if err := validateAndActivateLicense(c.Context(), licensing.EmbeddedLicense()); err != nil {
+		envelope, source, err := loadLicenseEnvelope(c)
+		if err != nil {
+			utils.LavaFormatFatal("license file unreadable — enterprise binary cannot start without a valid license", err,
+				utils.Attribute{Key: "source", Value: source})
+			return nil // unreachable — LavaFormatFatal calls os.Exit(1)
+		}
+		utils.LavaFormatInfo("Loading enterprise license",
+			utils.Attribute{Key: "source", Value: source})
+
+		if err := validateAndActivateLicense(c.Context(), envelope); err != nil {
 			return err
 		}
 		if existing != nil {
@@ -37,6 +73,22 @@ func installLicenseCheck(cmd *cobra.Command) {
 		}
 		return nil
 	}
+}
+
+// loadLicenseEnvelope resolves the license envelope from the three-tier
+// precedence chain (flag > env > default) and returns a human-readable source
+// description for operator logging. Pure relative to filesystem state; no
+// side effects beyond os.ReadFile.
+func loadLicenseEnvelope(cmd *cobra.Command) (envelope, source string, err error) {
+	if flagPath, _ := cmd.Flags().GetString(licenseFileFlagName); flagPath != "" {
+		envelope, err = licensing.LoadFromFile(flagPath)
+		return envelope, fmt.Sprintf("--%s=%s", licenseFileFlagName, flagPath), err
+	}
+	envelope, path, fromEnv, err := licensing.LoadFromEnvOrFile(licenseFileEnvVar, defaultLicenseFilePath)
+	if fromEnv {
+		return envelope, fmt.Sprintf("$%s=%s", licenseFileEnvVar, path), err
+	}
+	return envelope, fmt.Sprintf("default %s", path), err
 }
 
 // licenseDecision is the pure-logic output of resolveLicense — what the

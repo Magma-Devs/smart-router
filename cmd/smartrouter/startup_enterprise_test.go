@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -243,6 +245,22 @@ func TestExpiryWatcher_ExitsOnCtxCancel(t *testing.T) {
 	}
 }
 
+// writeTestLicenseFile mints a valid license, signs it, writes the envelope to
+// a temp file, and returns the path. The path is t.TempDir-scoped so it's
+// auto-cleaned. Caller must NOT t.Parallel — registerTestKey mutates the
+// shared PublicKeys map.
+func writeTestLicenseFile(t *testing.T, licenseID string, expiresAt time.Time) string {
+	t.Helper()
+	key := registerTestKey(t)
+	lic := newTestLicense(licenseID, expiresAt)
+	licenseKey := signLicense(t, key, lic)
+
+	path := filepath.Join(t.TempDir(), "license.key")
+	require.NoError(t, os.WriteFile(path, []byte(licenseKey), 0o600),
+		"write test license file")
+	return path
+}
+
 func TestInstallLicenseCheck_ChainsExistingPreRunE(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}
 	var existingFired bool
@@ -251,29 +269,65 @@ func TestInstallLicenseCheck_ChainsExistingPreRunE(t *testing.T) {
 		return nil
 	}
 
-	// Mint a valid license so the new PreRunE doesn't bail out.
-	key := registerTestKey(t)
-	lic := newTestLicense("lic_chain_test", time.Now().Add(30*24*time.Hour))
-	licenseKey := signLicense(t, key, lic)
-	t.Cleanup(func() {})
+	// Sprint 6 — license is read at startup from --license-file / env var /
+	// default. Point the env var at a temp file containing a fresh valid
+	// envelope; the PreRunE will load it, validate, and chain to existing.
+	licensePath := writeTestLicenseFile(t, "lic_chain_test", time.Now().Add(30*24*time.Hour))
+	t.Setenv(licenseFileEnvVar, licensePath)
 
 	installLicenseCheck(cmd)
 
-	// Manually invoke via a context with our test license. Since
-	// installLicenseCheck calls licensing.EmbeddedLicense() inside its closure,
-	// we exercise the *chaining* (existing PreRunE still fires) by directly
-	// invoking validateAndActivateLicense first to leave activeConfig in a
-	// known state, then calling cmd.PreRunE which will re-validate the embedded
-	// production license.
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	require.NoError(t, validateAndActivateLicense(ctx, licenseKey),
-		"sanity: pre-arming activeConfig for the chained-PreRunE test")
-
-	// The cmd.PreRunE we're testing reads licensing.EmbeddedLicense() (the
-	// production license) — that's expected to validate cleanly in this build.
+	defer cancel() // stops the expiryWatcher goroutine started inside validateAndActivateLicense
 	cmd.SetContext(ctx)
-	err := cmd.PreRunE(cmd, nil)
-	require.NoError(t, err, "chained PreRunE must not return an error against the production embedded license")
+
+	require.NoError(t, cmd.PreRunE(cmd, nil),
+		"chained PreRunE must not return an error against a freshly-minted valid license")
 	assert.True(t, existingFired, "chained PreRunE must invoke the previously-installed PreRunE")
+}
+
+func TestLoadLicenseEnvelope_FlagBeatsEnv(t *testing.T) {
+	flagPath := writeTestLicenseFile(t, "lic_flag_wins", time.Now().Add(30*24*time.Hour))
+	envPath := writeTestLicenseFile(t, "lic_env_loses", time.Now().Add(30*24*time.Hour))
+	t.Setenv(licenseFileEnvVar, envPath)
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().String(licenseFileFlagName, "", "")
+	require.NoError(t, cmd.Flags().Set(licenseFileFlagName, flagPath))
+
+	envelope, source, err := loadLicenseEnvelope(cmd)
+	require.NoError(t, err)
+	require.NotEmpty(t, envelope)
+	require.Contains(t, source, flagPath, "source must mention the flag path")
+	require.NotContains(t, source, envPath, "source must not mention the env path when flag is set")
+}
+
+func TestLoadLicenseEnvelope_EnvBeatsDefault(t *testing.T) {
+	envPath := writeTestLicenseFile(t, "lic_env_wins", time.Now().Add(30*24*time.Hour))
+	t.Setenv(licenseFileEnvVar, envPath)
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().String(licenseFileFlagName, "", "")
+
+	envelope, source, err := loadLicenseEnvelope(cmd)
+	require.NoError(t, err)
+	require.NotEmpty(t, envelope)
+	require.Contains(t, source, "$"+licenseFileEnvVar)
+	require.Contains(t, source, envPath)
+}
+
+func TestLoadLicenseEnvelope_MissingFile_ReturnsError(t *testing.T) {
+	t.Setenv(licenseFileEnvVar, "")
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().String(licenseFileFlagName, "", "")
+	// Default path ./license.key doesn't exist in t.TempDir cwd; loader must
+	// surface that as an error rather than silently using a community fallback.
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	_, source, err := loadLicenseEnvelope(cmd)
+	require.Error(t, err, "missing default license file must surface as an error — Sprint 6 fail-fast contract")
+	require.Contains(t, source, "default")
+	require.Contains(t, source, defaultLicenseFilePath)
 }
