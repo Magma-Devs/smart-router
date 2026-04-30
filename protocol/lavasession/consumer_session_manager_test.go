@@ -1938,19 +1938,26 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 	err = csm.UpdateAllProviders(secondEpochHeight, nil, backupListEpoch2)
 	require.NoError(t, err)
 
-	// Precondition: re-blocked after epoch transition (comes from the previousEpoch merge).
-	csm.lock.RLock()
-	_, reblocked := csm.blockedBackupProviders[backupAddr]
-	csm.lock.RUnlock()
-	require.True(t, reblocked, "backup should be re-blocked immediately after epoch transition")
+	// No precondition assertion on the re-blocked state: UpdateAllProviders fires the
+	// comprehensive probe in a goroutine, so the "re-blocked" window between the merge
+	// and the probe's success is transient (~6ms on fast runners). Asserting on it
+	// would race against production code's normal behavior. The claim this test makes —
+	// "a healthy backup that was blocked last epoch ends up unblocked" — is verified by
+	// the final assertion below regardless of which path (the async probe or the explicit
+	// call) does the unblocking.
 
-	// Run the unblock pass. Comprehensive probe against grpcListener should succeed → unblock.
+	// Run the unblock pass explicitly. If the async probe already completed, this is a
+	// no-op; otherwise it does the work itself.
 	csm.checkAndUnblockHealthyReBlockedProviders(context.Background(), secondEpochHeight)
 
-	csm.lock.RLock()
-	_, stillBlocked := csm.blockedBackupProviders[backupAddr]
-	csm.lock.RUnlock()
-	require.False(t, stillBlocked, "healthy backup should be unblocked after comprehensive probe succeeds")
+	// Use Eventually to absorb any remaining timing variance from async probe completion.
+	require.Eventually(t, func() bool {
+		csm.lock.RLock()
+		defer csm.lock.RUnlock()
+		_, stillBlocked := csm.blockedBackupProviders[backupAddr]
+		return !stillBlocked
+	}, 2*time.Second, 10*time.Millisecond,
+		"healthy backup should be unblocked after comprehensive probe succeeds")
 }
 
 // TestGenerateReconnectCallback_BackupProviderUnblocked covers the #2265-derived behavior:
