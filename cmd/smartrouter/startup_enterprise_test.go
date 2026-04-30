@@ -108,28 +108,107 @@ func TestValidateAndActivateLicense_GracePeriod_PromotesActiveConfig(t *testing.
 	assert.Equal(t, "lic_grace_001", got.License().LicenseID)
 }
 
-// FATAL paths (LicenseStatusInvalid, LicenseStatusExpired) call
-// utils.LavaFormatFatal which calls os.Exit(1). Testing process exit is
-// awkward in Go (requires a subprocess test); we deliberately don't cover
-// those paths here. The licensing package's Validate() returns the same
-// error/status combinations, which ARE covered by licensing/license_test.go.
-// What's not covered: that validateAndActivateLicense routes those returns
-// to a fatal log line. That's a one-line wrapper — visual review is
-// sufficient.
+// FATAL paths are tested via resolveLicense (pure function — no os.Exit).
+// validateAndActivateLicense's role for those paths is just "format the
+// LavaFormatFatal call from the decision and call it" — visual review of
+// that one-line dispatch is sufficient since resolveLicense's table covers
+// every status × error combination that produces a fatal decision.
+
+func TestResolveLicense_Valid(t *testing.T) {
+	key := registerTestKey(t)
+	lic := newTestLicense("lic_valid_test", time.Now().Add(180*24*time.Hour))
+	licenseKey := signLicense(t, key, lic)
+
+	d := resolveLicense(licenseKey)
+	assert.False(t, d.shouldFatal(), "valid license must not produce fatal decision")
+	require.NotNil(t, d.license)
+	assert.Equal(t, "lic_valid_test", d.license.LicenseID)
+	assert.Equal(t, licensing.LicenseStatusValid, d.status)
+	assert.NoError(t, d.err)
+}
+
+func TestResolveLicense_GracePeriod(t *testing.T) {
+	key := registerTestKey(t)
+	// Expired 5 days ago — within the 14-day GracePeriod.
+	lic := newTestLicense("lic_grace_test", time.Now().Add(-5*24*time.Hour))
+	licenseKey := signLicense(t, key, lic)
+
+	d := resolveLicense(licenseKey)
+	assert.False(t, d.shouldFatal(), "grace-period license must not produce fatal decision")
+	require.NotNil(t, d.license)
+	assert.Equal(t, "lic_grace_test", d.license.LicenseID)
+	assert.Equal(t, licensing.LicenseStatusGracePeriod, d.status)
+}
+
+func TestResolveLicense_Expired_PastGrace_ProducesFatalDecision(t *testing.T) {
+	key := registerTestKey(t)
+	// Expired 30 days ago — past the 14-day grace period.
+	lic := newTestLicense("lic_expired_test", time.Now().Add(-30*24*time.Hour))
+	licenseKey := signLicense(t, key, lic)
+
+	d := resolveLicense(licenseKey)
+	require.True(t, d.shouldFatal(), "past-grace license must produce fatal decision")
+	assert.Equal(t, licensing.LicenseStatusExpired, d.status)
+	assert.Contains(t, d.fatalMsg, "license expired on")
+	assert.Contains(t, d.fatalMsg, "grace period ended")
+	assert.Contains(t, d.fatalMsg, "re-issue and rebuild")
+	require.NotNil(t, d.license, "expired license is still parsed; the *License is needed for fatal log attributes")
+	assert.Equal(t, "lic_expired_test", d.license.LicenseID)
+}
+
+func TestResolveLicense_BadSignature_ProducesFatalDecision(t *testing.T) {
+	key := registerTestKey(t)
+	lic := newTestLicense("lic_badsig_test", time.Now().Add(30*24*time.Hour))
+	licenseKey := signLicense(t, key, lic)
+
+	// Tamper with the payload so the signature no longer verifies.
+	tampered := licenseKey[:len(licenseKey)-4] + "XXXX"
+
+	d := resolveLicense(tampered)
+	require.True(t, d.shouldFatal(), "bad-signature license must produce fatal decision")
+	assert.Contains(t, d.fatalMsg, "license validation failed")
+	require.Error(t, d.err)
+}
+
+func TestResolveLicense_MalformedEnvelope_ProducesFatalDecision(t *testing.T) {
+	d := resolveLicense("not-a-valid-license-string")
+	require.True(t, d.shouldFatal(), "malformed envelope must produce fatal decision")
+	assert.Contains(t, d.fatalMsg, "license validation failed")
+	require.Error(t, d.err)
+}
+
+func TestResolveLicense_UnknownKeyID_ProducesFatalDecision(t *testing.T) {
+	// Mint a license signed by a key that's NEVER registered in licensing.PublicKeys.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	_ = pub // public half is intentionally NOT registered
+	lic := newTestLicense("lic_unknown_key", time.Now().Add(30*24*time.Hour))
+	lic.KeyID = "key_never_registered_xyz"
+	payload, err := json.Marshal(lic)
+	require.NoError(t, err)
+	sig := ed25519.Sign(priv, payload)
+	licenseKey := base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(sig)
+
+	d := resolveLicense(licenseKey)
+	require.True(t, d.shouldFatal(), "unknown key_id must produce fatal decision")
+	assert.Contains(t, d.fatalMsg, "license validation failed")
+	require.Error(t, d.err)
+	assert.Contains(t, d.err.Error(), "unknown signing key")
+}
 
 func TestWatcherCadence(t *testing.T) {
 	cases := []struct {
 		days int
 		want time.Duration
 	}{
-		{-3, time.Hour},          // grace period — already past expiry
-		{-1, time.Hour},          // grace period
-		{0, time.Hour},           // last 7 days — boundary
-		{6, time.Hour},           // last 7 days
-		{7, 24 * time.Hour},      // last 30 days — boundary
-		{29, 24 * time.Hour},     // last 30 days
-		{30, 0},                  // outside warning window — boundary
-		{365, 0},                 // outside warning window
+		{-3, time.Hour},      // grace period — already past expiry
+		{-1, time.Hour},      // grace period
+		{0, time.Hour},       // last 7 days — boundary
+		{6, time.Hour},       // last 7 days
+		{7, 24 * time.Hour},  // last 30 days — boundary
+		{29, 24 * time.Hour}, // last 30 days
+		{30, 0},              // outside warning window — boundary
+		{365, 0},             // outside warning window
 	}
 	for i, tc := range cases {
 		t.Run(fmt.Sprintf("days=%d", tc.days), func(t *testing.T) {

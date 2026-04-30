@@ -1278,6 +1278,79 @@ func ParseEndpoints(viper_endpoints *viper.Viper, geolocation uint64) (endpoints
 	return endpoints, err
 }
 
+// validateSmartRouterConfigAgainstEdition is §3.3.6 row #8 — the centralized
+// fail-fast pass that runs every edition gate against the parsed YAML/CLI
+// config exactly once, before any side-effecting startup work (pprof,
+// pyroscope, cache backend, ChainTracker spawn, server bind).
+//
+// Inline gates at rows #1, #2, #3, #3a, #4, #6, #7 stay in the runtime path
+// as defense-in-depth — but the expectation is this function catches every
+// violation first, so an operator with a misconfigured YAML sees the
+// rejection message before "started pprof on :6060" or any background
+// goroutine has launched.
+//
+// Returns the first gate failure encountered. Caller escalates to fatal
+// (the existing utils.LavaFormatError + return err pattern in the cobra
+// RunE closure is sufficient — no need for utils.LavaFormatFatal here
+// since the cobra layer will already surface a non-zero exit code).
+func validateSmartRouterConfigAgainstEdition(
+	rpcEndpoints []*lavasession.RPCEndpoint,
+	directRPCEndpoints []*lavasession.RPCStaticProviderEndpoint,
+	backupDirectRPCEndpoints []*lavasession.RPCStaticProviderEndpoint,
+) error {
+	cfg := ActiveConfig()
+
+	// API interface + spec — once per listener endpoint. Spec is deduped so a
+	// chain configured for multiple interfaces only logs one rejection.
+	seenSpecs := map[string]struct{}{}
+	for _, ep := range rpcEndpoints {
+		if err := cfg.ValidateAPIInterface(ep.ApiInterface); err != nil {
+			return utils.LavaFormatError("api-interface rejected by edition", err,
+				utils.Attribute{Key: "chainID", Value: ep.ChainID},
+				utils.Attribute{Key: "apiInterface", Value: ep.ApiInterface})
+		}
+		if _, dup := seenSpecs[ep.ChainID]; !dup {
+			seenSpecs[ep.ChainID] = struct{}{}
+			if err := cfg.ValidateSpec(ep.ChainID); err != nil {
+				return utils.LavaFormatError("spec rejected by edition", err,
+					utils.Attribute{Key: "chainID", Value: ep.ChainID})
+			}
+		}
+	}
+
+	// Transport — every URL in every provider list. For bare-host URLs (no
+	// '://' separator) AND ApiInterface == grpc, synthesize "grpc://" so
+	// community rejects with the gRPC-transport error message. Same logic
+	// as the inline gate in convertProvidersToSessions; this duplication is
+	// intentional (defense-in-depth: if a future caller of NewDirectRPCConnection
+	// appears that doesn't go through convertProvidersToSessions, this
+	// centralized pass still catches the YAML).
+	validateProviders := func(providers []*lavasession.RPCStaticProviderEndpoint) error {
+		for _, provider := range providers {
+			for _, url := range provider.NodeUrls {
+				validateURL := url.Url
+				if !strings.Contains(validateURL, "://") && provider.ApiInterface == spectypes.APIInterfaceGrpc {
+					validateURL = "grpc://" + validateURL
+				}
+				if err := cfg.ValidateTransport(validateURL); err != nil {
+					return utils.LavaFormatError("provider transport rejected by edition", err,
+						utils.Attribute{Key: "url", Value: url.Url},
+						utils.Attribute{Key: "provider", Value: provider.Name},
+						utils.Attribute{Key: "apiInterface", Value: provider.ApiInterface})
+				}
+			}
+		}
+		return nil
+	}
+	if err := validateProviders(directRPCEndpoints); err != nil {
+		return err
+	}
+	if err := validateProviders(backupDirectRPCEndpoints); err != nil {
+		return err
+	}
+	return nil
+}
+
 func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 	cmdRPCSmartRouter := &cobra.Command{
 		Use:   "rpcsmartrouter [config-file] | { {listen-ip:listen-port spec-chain-id api-interface} ... }",
@@ -1384,47 +1457,6 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				utils.LavaFormatFatal("failed to read test_mode flag", err)
 			}
 			ctx = context.WithValue(ctx, common.Test_mode_ctx_key{}, test_mode)
-			// check if the command includes --pprof-address
-			pprofAddressFlagUsed := cmd.Flags().Lookup("pprof-address").Changed
-			if pprofAddressFlagUsed {
-				// get pprof server ip address (default value: "")
-				pprofServerAddress, err := cmd.Flags().GetString("pprof-address")
-				if err != nil {
-					utils.LavaFormatFatal("failed to read pprof address flag", err)
-				}
-
-				// start pprof HTTP server
-				err = performance.StartPprofServer(pprofServerAddress)
-				if err != nil {
-					return utils.LavaFormatError("failed to start pprof HTTP server", err)
-				}
-			}
-			// check if the command includes --pyroscope-address
-			pyroscopeAddressFlagUsed := cmd.Flags().Lookup(performance.PyroscopeAddressFlagName).Changed
-			if pyroscopeAddressFlagUsed {
-				pyroscopeServerAddress, err := cmd.Flags().GetString(performance.PyroscopeAddressFlagName)
-				if err != nil {
-					utils.LavaFormatFatal("failed to read pyroscope address flag", err)
-				}
-				pyroscopeAppName, err := cmd.Flags().GetString(performance.PyroscopeAppNameFlagName)
-				if err != nil || pyroscopeAppName == "" {
-					pyroscopeAppName = "lavap-smartrouter"
-				}
-				mutexProfileFraction, err := cmd.Flags().GetInt(performance.PyroscopeMutexProfileFractionFlagName)
-				if err != nil {
-					mutexProfileFraction = performance.DefaultMutexProfileFraction
-				}
-				blockProfileRate, err := cmd.Flags().GetInt(performance.PyroscopeBlockProfileRateFlagName)
-				if err != nil {
-					blockProfileRate = performance.DefaultBlockProfileRate
-				}
-				tagsStr, _ := cmd.Flags().GetString(performance.PyroscopeTagsFlagName)
-				tags := performance.ParseTags(tagsStr)
-				err = performance.StartPyroscope(pyroscopeAppName, pyroscopeServerAddress, mutexProfileFraction, blockProfileRate, tags)
-				if err != nil {
-					return utils.LavaFormatError("failed to start pyroscope profiler", err)
-				}
-			}
 
 			// Parse direct RPC endpoints (new key: "direct-rpc", backward compat: "static-providers")
 			var directRPCEndpoints []*lavasession.RPCStaticProviderEndpoint
@@ -1465,6 +1497,57 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 						utils.Attribute{Key: "Urls", Value: endpoint.NodeUrls},
 						utils.Attribute{Key: "Chain ID", Value: endpoint.ChainID},
 						utils.Attribute{Key: "API Interface", Value: endpoint.ApiInterface})
+				}
+			}
+
+			// §3.3.6 row #8 — fail-fast edition validation before any
+			// side-effecting startup work. A misconfigured YAML must reject
+			// here with the gate's pinned error rather than after pprof,
+			// pyroscope, cache backend, or any background goroutine has
+			// started.
+			if err := validateSmartRouterConfigAgainstEdition(rpcEndpoints, directRPCEndpoints, backupDirectRPCEndpoints); err != nil {
+				return err
+			}
+
+			// check if the command includes --pprof-address
+			pprofAddressFlagUsed := cmd.Flags().Lookup("pprof-address").Changed
+			if pprofAddressFlagUsed {
+				// get pprof server ip address (default value: "")
+				pprofServerAddress, err := cmd.Flags().GetString("pprof-address")
+				if err != nil {
+					utils.LavaFormatFatal("failed to read pprof address flag", err)
+				}
+
+				// start pprof HTTP server
+				err = performance.StartPprofServer(pprofServerAddress)
+				if err != nil {
+					return utils.LavaFormatError("failed to start pprof HTTP server", err)
+				}
+			}
+			// check if the command includes --pyroscope-address
+			pyroscopeAddressFlagUsed := cmd.Flags().Lookup(performance.PyroscopeAddressFlagName).Changed
+			if pyroscopeAddressFlagUsed {
+				pyroscopeServerAddress, err := cmd.Flags().GetString(performance.PyroscopeAddressFlagName)
+				if err != nil {
+					utils.LavaFormatFatal("failed to read pyroscope address flag", err)
+				}
+				pyroscopeAppName, err := cmd.Flags().GetString(performance.PyroscopeAppNameFlagName)
+				if err != nil || pyroscopeAppName == "" {
+					pyroscopeAppName = "lavap-smartrouter"
+				}
+				mutexProfileFraction, err := cmd.Flags().GetInt(performance.PyroscopeMutexProfileFractionFlagName)
+				if err != nil {
+					mutexProfileFraction = performance.DefaultMutexProfileFraction
+				}
+				blockProfileRate, err := cmd.Flags().GetInt(performance.PyroscopeBlockProfileRateFlagName)
+				if err != nil {
+					blockProfileRate = performance.DefaultBlockProfileRate
+				}
+				tagsStr, _ := cmd.Flags().GetString(performance.PyroscopeTagsFlagName)
+				tags := performance.ParseTags(tagsStr)
+				err = performance.StartPyroscope(pyroscopeAppName, pyroscopeServerAddress, mutexProfileFraction, blockProfileRate, tags)
+				if err != nil {
+					return utils.LavaFormatError("failed to start pyroscope profiler", err)
 				}
 			}
 
