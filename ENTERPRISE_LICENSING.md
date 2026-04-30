@@ -30,7 +30,7 @@ In precedence order (highest first):
 |---|---|---|
 | `--license-file=PATH` flag | `smartrouter --license-file=/etc/magma/license.key …` | One-off invocations, debugging |
 | `$SMART_ROUTER_LICENSE_FILE` env var | `export SMART_ROUTER_LICENSE_FILE=/etc/magma/license.key` | systemd units, containers, anywhere a flag is awkward |
-| `./license.key` (default) | Place file in the binary's working directory | Simplest single-tenant deployments |
+| `./license.key` (default) | Place file in the router process's working directory (NOT necessarily the binary's directory; align them via `cd` before launch or systemd `WorkingDirectory=`) | Simplest single-tenant deployments |
 
 The chosen source is logged at startup so you can confirm which one fired:
 
