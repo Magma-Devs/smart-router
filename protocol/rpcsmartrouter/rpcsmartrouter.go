@@ -438,6 +438,22 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	smartRouterMetricsManager *metrics.SmartRouterMetricsManager,
 	relaysMonitorAggregator *metrics.RelaysMonitorAggregator,
 ) error {
+	// §3.3.6 row #1 — gate the API interface against the active edition.
+	// Community rejects rest/grpc/tendermintrpc with the pinned error message;
+	// enterprise allows all known interfaces.
+	if err := ActiveConfig().ValidateAPIInterface(rpcEndpoint.ApiInterface); err != nil {
+		err = utils.LavaFormatError("api-interface rejected by edition", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		errCh <- err
+		return err
+	}
+	// §3.3.6 row #2 — gate the spec index. Community uses the EVM-only
+	// allowlist (community_specs.go); enterprise allows all specs.
+	if err := ActiveConfig().ValidateSpec(rpcEndpoint.ChainID); err != nil {
+		err = utils.LavaFormatError("spec rejected by edition", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		errCh <- err
+		return err
+	}
+
 	chainParser, err := chainlib.NewChainParser(rpcEndpoint.ApiInterface)
 	if err != nil {
 		err = utils.LavaFormatError("failed creating chain parser", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
@@ -608,8 +624,11 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		go sessionManager.PeriodicProbeProviders(ctx, lavasession.PeriodicProbeProvidersInterval)
 	}
 
-	// Helper function to convert provider endpoints to sessions
-	convertProvidersToSessions := func(providerList []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+	// Helper function to convert provider endpoints to sessions.
+	// Returns (sessions, error) — the error path is for §3.3.6 row #3a gate
+	// rejections (transport not allowed by the active edition). On success,
+	// the second value is nil.
+	convertProvidersToSessions := func(providerList []*lavasession.RPCStaticProviderEndpoint) (map[uint64]*lavasession.ConsumerSessionsWithProvider, error) {
 		sessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
 		for idx, provider := range providerList {
 			// Only process providers matching this endpoint's API interface
@@ -619,6 +638,24 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 			endpoints := []*lavasession.Endpoint{}
 			for _, url := range provider.NodeUrls {
+				// §3.3.6 row #3a — gate the transport against the active
+				// edition before opening the direct connection. For bare-host
+				// URLs (no '://'), synthesize "grpc://" when the provider's
+				// ApiInterface is gRPC so community rejects bare-host gRPC
+				// with the gRPC-transport error message. Bare-host *HTTP*
+				// continues to be allowed (community ETH1 deployments often
+				// use bare host:port with implicit HTTPS).
+				validateURL := url.Url
+				if !strings.Contains(validateURL, "://") && provider.ApiInterface == spectypes.APIInterfaceGrpc {
+					validateURL = "grpc://" + validateURL
+				}
+				if err := ActiveConfig().ValidateTransport(validateURL); err != nil {
+					return nil, utils.LavaFormatError("provider transport rejected by edition", err,
+						utils.Attribute{Key: "url", Value: url.Url},
+						utils.Attribute{Key: "provider", Value: provider.Name},
+						utils.Attribute{Key: "apiInterface", Value: provider.ApiInterface})
+				}
+
 				extensions := map[string]struct{}{}
 				for _, extension := range url.Addons {
 					extensions[extension] = struct{}{}
@@ -705,16 +742,24 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			providerEntry.StaticProvider = true
 			sessions[uint64(idx)] = providerEntry
 		}
-		return sessions
+		return sessions, nil
 	}
 
 	// Convert static providers to ConsumerSessionsWithProvider format
-	providerSessions := convertProvidersToSessions(relevantStaticProviderList)
+	providerSessions, err := convertProvidersToSessions(relevantStaticProviderList)
+	if err != nil {
+		errCh <- err
+		return err
+	}
 
 	// Convert backup providers to sessions (already filtered above during policy derivation)
 	var backupProviderSessions map[uint64]*lavasession.ConsumerSessionsWithProvider
 	if len(relevantBackupProviderList) > 0 {
-		backupProviderSessions = convertProvidersToSessions(relevantBackupProviderList)
+		backupProviderSessions, err = convertProvidersToSessions(relevantBackupProviderList)
+		if err != nil {
+			errCh <- err
+			return err
+		}
 		utils.LavaFormatInfo("Configured backup providers for endpoint",
 			utils.Attribute{Key: "chainID", Value: chainID},
 			utils.Attribute{Key: "apiInterface", Value: rpcEndpoint.ApiInterface},
@@ -771,6 +816,16 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		for i := range provider.NodeUrls {
 			url := strings.ToLower(provider.NodeUrls[i].Url)
 			if strings.HasPrefix(url, "ws://") || strings.HasPrefix(url, "wss://") {
+				// §3.3.6 row #3 — HasPrefix is the WS discriminator;
+				// ValidateTransport is the gate. Community rejects ws/wss with
+				// the pinned error; enterprise lets the URL through.
+				if err := ActiveConfig().ValidateTransport(url); err != nil {
+					err = utils.LavaFormatError("websocket endpoint rejected by edition", err,
+						utils.Attribute{Key: "url", Value: provider.NodeUrls[i].Url},
+						utils.Attribute{Key: "provider", Value: provider.Name})
+					errCh <- err
+					return err
+				}
 				wsEndpoints = append(wsEndpoints, &provider.NodeUrls[i])
 				utils.LavaFormatInfo("Found WebSocket endpoint for direct subscriptions",
 					utils.LogAttr("url", provider.NodeUrls[i].Url),
@@ -781,26 +836,38 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		}
 	}
 
-	// Create DirectWSSubscriptionManager if WebSocket endpoints are available
-	// Otherwise fall back to provider-based subscription manager
+	// Create WebSocket subscription manager via the active edition's factory if
+	// WebSocket endpoints are available. §3.3.6 row #4 — community returns the
+	// NoOp (with the same effect as the else-branch below); enterprise returns
+	// the real *DirectWSSubscriptionManager.
 	if len(wsEndpoints) > 0 {
-		directWSManager := NewDirectWSSubscriptionManager(
-			smartRouterMetricsManager,
-			spectypes.APIInterfaceJsonRPC, // WebSocket subscriptions use JSON-RPC
-			rpcEndpoint.ChainID,
-			rpcEndpoint.ApiInterface,
-			wsEndpoints,
-			optimizer, // Pass optimizer for endpoint selection
-			nil,       // Use default WebSocket config (configurable via CLI flags later)
-		)
-		// Start background cleanup goroutine
-		directWSManager.Start(ctx)
-		wsSubscriptionManager = directWSManager
-		utils.LavaFormatInfo("Using DirectWSSubscriptionManager for direct WebSocket subscriptions",
+		wsm, err := ActiveConfig().CreateWSSubscriptionManager(WSSubscriptionManagerOptions{
+			Metrics:        smartRouterMetricsManager,
+			ConnectionType: spectypes.APIInterfaceJsonRPC, // WebSocket subscriptions use JSON-RPC
+			ChainID:        rpcEndpoint.ChainID,
+			APIInterface:   rpcEndpoint.ApiInterface,
+			Endpoints:      wsEndpoints,
+			Optimizer:      optimizer,
+			Config:         nil, // default config; CLI override TBD
+		})
+		if err != nil {
+			err = utils.LavaFormatError("failed creating WS subscription manager", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+			errCh <- err
+			return err
+		}
+		// Pure constructors per Sprint 2's design — Start() is the caller's
+		// responsibility. Only the Direct implementation needs starting; the
+		// NoOp has no background work.
+		if starter, ok := wsm.(interface{ Start(context.Context) }); ok {
+			starter.Start(ctx)
+		}
+		wsSubscriptionManager = wsm
+		utils.LavaFormatInfo("Using WebSocket subscription manager for direct subscriptions",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("wsEndpointCount", len(wsEndpoints)),
 			utils.LogAttr("optimizerEnabled", optimizer != nil),
+			utils.LogAttr("edition", ActiveConfig().Edition()),
 		)
 	} else {
 		// No WebSocket endpoints configured - use NoOp manager that returns clear errors
@@ -814,9 +881,22 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	}
 
 	// Create gRPC streaming subscription manager for gRPC server-streaming methods
-	// This supports Cosmos Event Streaming, Solana Geyser, and other gRPC streaming protocols
+	// This supports Cosmos Event Streaming, Solana Geyser, and other gRPC streaming protocols.
+	//
+	// §3.3.6 row #6 — defensive precondition. The API-interface gate at row #1
+	// already rejects gRPC in community mode, so this branch is dead code in
+	// the community build. The duplicate ValidateAPIInterface call here is
+	// defense-in-depth: if a future refactor weakens row #1, this assertion
+	// still prevents a community process from constructing a gRPC subscription
+	// manager (and the resulting upstream connection attempts).
 	var grpcEndpoints []*common.NodeUrl
 	if rpcEndpoint.ApiInterface == spectypes.APIInterfaceGrpc {
+		if err := ActiveConfig().ValidateAPIInterface(spectypes.APIInterfaceGrpc); err != nil {
+			err = utils.LavaFormatError("gRPC api-interface unexpectedly reached at row #6 — row #1 should have caught this", err,
+				utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+			errCh <- err
+			return err
+		}
 		// Collect gRPC endpoints from static providers
 		for _, provider := range relevantStaticProviderList {
 			if provider.ApiInterface == spectypes.APIInterfaceGrpc {
@@ -832,24 +912,35 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		}
 	}
 
-	// Initialize DirectGRPCSubscriptionManager if gRPC endpoints are available
+	// Create gRPC subscription manager via the active edition's factory.
+	// §3.3.6 row #7 — community returns the noop; enterprise returns the real
+	// *DirectGRPCSubscriptionManager.
 	if len(grpcEndpoints) > 0 {
-		grpcSubManager := NewDirectGRPCSubscriptionManager(
-			smartRouterMetricsManager, // Metrics manager for tracking
-			rpcEndpoint.ChainID,
-			rpcEndpoint.ApiInterface,
-			grpcEndpoints,
-			optimizer, // Pass optimizer for endpoint selection (same as WS manager)
-			nil,       // Use default GRPCStreamingConfig
-		)
-		// Start background cleanup goroutine
-		grpcSubManager.Start(ctx)
+		grpcSubManager, err := ActiveConfig().CreateGRPCSubscriptionManager(GRPCSubscriptionManagerOptions{
+			Metrics:      smartRouterMetricsManager,
+			ChainID:      rpcEndpoint.ChainID,
+			APIInterface: rpcEndpoint.ApiInterface,
+			Endpoints:    grpcEndpoints,
+			Optimizer:    optimizer,
+			Config:       nil,
+		})
+		if err != nil {
+			err = utils.LavaFormatError("failed creating gRPC subscription manager", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+			errCh <- err
+			return err
+		}
+		// Same pattern as the WS factory above — Start() lives outside the
+		// constructor so the noop doesn't pay for a goroutine it doesn't need.
+		if starter, ok := grpcSubManager.(interface{ Start(context.Context) }); ok {
+			starter.Start(ctx)
+		}
 		rpcSmartRouterServer.grpcSubscriptionManager = grpcSubManager
-		utils.LavaFormatInfo("Using DirectGRPCSubscriptionManager for gRPC streaming subscriptions",
+		utils.LavaFormatInfo("Using gRPC subscription manager for streaming subscriptions",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("grpcEndpointCount", len(grpcEndpoints)),
 			utils.LogAttr("optimizerEnabled", optimizer != nil),
+			utils.LogAttr("edition", ActiveConfig().Edition()),
 		)
 	}
 

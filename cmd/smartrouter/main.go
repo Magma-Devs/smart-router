@@ -37,6 +37,12 @@ func main() {
 	testCmd.AddCommand(connection.CreateTestConnectionServerCobraCommand())
 	testCmd.AddCommand(connection.CreateTestConnectionProbeCobraCommand())
 
+	// Install the edition-specific PreRunE on the router command only — version,
+	// cache, and test subcommands run regardless of license state. Tag-resolved
+	// across startup_community.go (//go:build !enterprise) and
+	// startup_enterprise.go (//go:build enterprise).
+	installLicenseCheck(rootCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
