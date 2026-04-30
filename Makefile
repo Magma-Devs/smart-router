@@ -2,6 +2,13 @@
 
 BINDIR ?= $(GOPATH)/bin
 
+# ----------------------------------------------------------------------------
+# Community build (default — no -tags enterprise).
+# Produces the restrictive jsonrpc/HTTP/EVM-only binary. install / build /
+# test targets are unchanged from prior sprints; existing scripts and CI
+# workflows continue to work without modification.
+# ----------------------------------------------------------------------------
+
 # Install binary to $GOPATH/bin
 install-all: install
 
@@ -23,6 +30,31 @@ test:
 test-short:
 	go test ./protocol/rpcsmartrouter/... -count=1 -timeout 120s
 
+# ----------------------------------------------------------------------------
+# Enterprise build variants.
+# The -tags enterprise flag compiles in license validation, full subscription
+# managers, all spec types, and the embedded license envelope. Without the
+# tag, the same source produces the community binary above.
+#
+# Output is build/smartrouter-enterprise so both binaries can sit side-by-
+# side for symbol-isolation checks (go tool nm) and A/B testing.
+# ----------------------------------------------------------------------------
+
+build-enterprise:
+	go build -mod=readonly -tags enterprise -o build/smartrouter-enterprise ./cmd/smartrouter
+
+install-enterprise:
+	go install -mod=readonly -tags enterprise ./cmd/smartrouter
+
+test-enterprise:
+	go test -tags enterprise ./... -count=1 -timeout 300s
+
+# Convenience: build/test both editions in one invocation. Useful before
+# committing a change that touches the gating system or build-tagged files.
+build-both: build build-enterprise
+
+test-both: test test-enterprise
+
 # Maintenance
 tidy:
 	go mod tidy
@@ -38,4 +70,6 @@ check-gates:
 clean:
 	rm -rf build/
 
-.PHONY: install install-all install-smartrouter build build-all test test-short tidy lint check-gates clean
+.PHONY: install install-all install-smartrouter build build-all test test-short \
+        build-enterprise install-enterprise test-enterprise build-both test-both \
+        tidy lint check-gates clean
