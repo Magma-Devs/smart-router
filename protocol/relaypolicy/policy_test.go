@@ -142,31 +142,43 @@ func TestDecide_HashError(t *testing.T) {
 func TestOnSendRelayResult(t *testing.T) {
 	t.Run("success resets counters", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 3, EnableCircuitBreaker: true, CircuitBreakerThreshold: 2})
-		policy.OnSendRelayResult(fmt.Errorf("err"), false)
-		result := policy.OnSendRelayResult(nil, false)
+		policy.OnSendRelayResult(fmt.Errorf("err"), false, relaycore.Stateless)
+		result := policy.OnSendRelayResult(nil, false, relaycore.Stateless)
 		require.Equal(t, SendSuccess, result)
 		require.Equal(t, 0, policy.GetConsecutiveBatchErrors())
 	})
 
 	t.Run("batch errors stop after threshold", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 2})
-		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("err1"), false))
-		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("err2"), false))
-		require.Equal(t, SendStop, policy.OnSendRelayResult(fmt.Errorf("err3"), false))
+		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("err1"), false, relaycore.Stateless))
+		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("err2"), false, relaycore.Stateless))
+		require.Equal(t, SendStop, policy.OnSendRelayResult(fmt.Errorf("err3"), false, relaycore.Stateless))
 	})
 
 	t.Run("circuit breaker trips on pairing errors", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 10, EnableCircuitBreaker: true, CircuitBreakerThreshold: 2})
-		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("pairing"), true))
-		require.Equal(t, SendStop, policy.OnSendRelayResult(fmt.Errorf("pairing"), true))
+		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.Stateless))
+		require.Equal(t, SendStop, policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.Stateless))
 	})
 
 	t.Run("non-pairing error resets pairing counter", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 10, EnableCircuitBreaker: true, CircuitBreakerThreshold: 2})
-		policy.OnSendRelayResult(fmt.Errorf("pairing"), true)
-		policy.OnSendRelayResult(fmt.Errorf("other"), false) // resets pairing counter
-		result := policy.OnSendRelayResult(fmt.Errorf("pairing"), true)
+		policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.Stateless)
+		policy.OnSendRelayResult(fmt.Errorf("other"), false, relaycore.Stateless) // resets pairing counter
+		result := policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.Stateless)
 		require.Equal(t, SendRetry, result) // only 1 consecutive, threshold is 2
+	})
+
+	t.Run("CrossValidation stops immediately on any error", func(t *testing.T) {
+		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 10, EnableCircuitBreaker: true, CircuitBreakerThreshold: 5})
+		// Even on the first error, CV must stop — the SendRetry path forces
+		// NumOfProviders=1, which would silently violate the user's quorum
+		// requirement and mask the precise error with a generic
+		// "failed relay, insufficient results" later.
+		require.Equal(t, SendStop, policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.CrossValidation))
+		require.Equal(t, SendStop, policy.OnSendRelayResult(fmt.Errorf("other"), false, relaycore.CrossValidation))
+		// And success still resets and returns SendSuccess for CV.
+		require.Equal(t, SendSuccess, policy.OnSendRelayResult(nil, false, relaycore.CrossValidation))
 	})
 }
 
@@ -304,25 +316,25 @@ func TestConsumerStateMachineBatchErrorCounterResetsOnSuccess(t *testing.T) {
 	})
 
 	// Send 2 batch errors (below threshold of 3)
-	result := policy.OnSendRelayResult(fmt.Errorf("send failed"), false)
+	result := policy.OnSendRelayResult(fmt.Errorf("send failed"), false, relaycore.Stateless)
 	require.Equal(t, relaycore.SendRetry, result, "First error should retry")
 	require.Equal(t, 1, policy.GetConsecutiveBatchErrors())
 
-	result = policy.OnSendRelayResult(fmt.Errorf("send failed"), false)
+	result = policy.OnSendRelayResult(fmt.Errorf("send failed"), false, relaycore.Stateless)
 	require.Equal(t, relaycore.SendRetry, result, "Second error should retry")
 	require.Equal(t, 2, policy.GetConsecutiveBatchErrors())
 
 	// Success resets the counter
-	result = policy.OnSendRelayResult(nil, false)
+	result = policy.OnSendRelayResult(nil, false, relaycore.Stateless)
 	require.Equal(t, relaycore.SendSuccess, result)
 	require.Equal(t, 0, policy.GetConsecutiveBatchErrors(), "Counter should reset on success")
 
 	// Now 3 more errors should be needed to trigger stop (not 1)
-	policy.OnSendRelayResult(fmt.Errorf("err"), false)
-	policy.OnSendRelayResult(fmt.Errorf("err"), false)
-	result = policy.OnSendRelayResult(fmt.Errorf("err"), false)
+	policy.OnSendRelayResult(fmt.Errorf("err"), false, relaycore.Stateless)
+	policy.OnSendRelayResult(fmt.Errorf("err"), false, relaycore.Stateless)
+	result = policy.OnSendRelayResult(fmt.Errorf("err"), false, relaycore.Stateless)
 	require.Equal(t, relaycore.SendRetry, result, "Third error should still retry (counter was reset)")
 
-	result = policy.OnSendRelayResult(fmt.Errorf("err"), false)
+	result = policy.OnSendRelayResult(fmt.Errorf("err"), false, relaycore.Stateless)
 	require.Equal(t, relaycore.SendStop, result, "Fourth error (>3) should stop")
 }
