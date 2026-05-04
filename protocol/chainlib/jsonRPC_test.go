@@ -14,7 +14,6 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gorilla/websocket"
-	gws "github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -730,7 +729,7 @@ func TestJsonRPCChainListener_GracefulShutdown_SendsWSCloseFrame_1001(t *testing
 
 	// Open a real WebSocket client.
 	wsURL := "ws://" + addr + "/ws"
-	client, _, err := gws.DefaultDialer.Dial(wsURL, nil)
+	client, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	require.NoError(t, err, "WS dial should succeed")
 	defer client.Close()
 
@@ -745,9 +744,9 @@ func TestJsonRPCChainListener_GracefulShutdown_SendsWSCloseFrame_1001(t *testing
 	_, _, readErr := client.ReadMessage()
 	require.Error(t, readErr)
 
-	closeErr, ok := readErr.(*gws.CloseError)
+	closeErr, ok := readErr.(*websocket.CloseError)
 	require.True(t, ok, "expected *websocket.CloseError, got %T: %v", readErr, readErr)
-	require.Equal(t, gws.CloseGoingAway, closeErr.Code,
+	require.Equal(t, websocket.CloseGoingAway, closeErr.Code,
 		"expected close code 1001 (Going Away), got %d", closeErr.Code)
 }
 
