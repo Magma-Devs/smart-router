@@ -21,12 +21,12 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -171,13 +171,13 @@ type rpcSmartRouterStartOptions struct {
 	weightedSelectorConfig   provideroptimizer.WeightedSelectorConfig
 }
 
-// spawns a new RPCSmartRouter server with all its processes and internals ready for communications
+// Start sets up the RPCSmartRouter and all its processes, then returns once
+// every endpoint is ready for traffic. Internal goroutines (chain listeners,
+// the debug HTTP server, the WS subscription managers, etc.) are bound to the
+// passed-in ctx — they run until the caller cancels it. The caller is expected
+// to wait on <-ctx.Done() and then call Stop(gracePeriod) to drain in-flight
+// requests gracefully before the process exits.
 func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterStartOptions) (err error) {
-	// Create a cancellable child context so that internal goroutines (e.g. the
-	// debug HTTP server) can be stopped cleanly when Start returns.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	if common.IsTestMode(ctx) {
 		testModeWarn("RPCSmartRouter running tests")
 	}
@@ -296,7 +296,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 		debugMux := buildDebugMux(optimizers, &currentOffsetNano)
 		srv := &http.Server{Addr: options.cmdFlags.DebugAddress, Handler: debugMux}
 		// Watcher goroutine: shuts the server down gracefully when ctx is cancelled
-		// (i.e. when Start returns after receiving os.Interrupt).
+		// (i.e. when the caller cancels — typically on SIGINT/SIGTERM via NotifyContext).
 		go func() {
 			<-ctx.Done()
 			srv.Shutdown(context.Background()) //nolint:errcheck
@@ -311,10 +311,50 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 
 	utils.LavaFormatInfo("RPCSmartRouter done setting up all endpoints, ready for requests")
 
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt)
-	<-signalChan
 	return nil
+}
+
+func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
+	utils.LavaFormatInfo("RPCSmartRouter: shutdown signal received, draining",
+		utils.LogAttr("gracePeriod", shutdownGracePeriod),
+	)
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownGracePeriod)
+	defer cancelShutdown()
+
+	// Phase 1: drain client-facing layer in parallel.
+	// WS goroutines have already started reacting to the cancelled Serve ctx
+	// (sending 1001 close frames via ListenToMessages); Shutdown waits for them
+	// to drain (via wsWG) and then drains in-flight HTTP via app.ShutdownWithContext.
+	var drainWG sync.WaitGroup
+	for key, server := range rpsr.rpcServers {
+		drainWG.Add(1)
+		go func(k string, s *RPCSmartRouterServer) {
+			defer drainWG.Done()
+			if s.chainListener == nil {
+				return
+			}
+			if err := s.chainListener.Shutdown(shutdownCtx); err != nil {
+				utils.LavaFormatWarning("listener shutdown returned error", err, utils.LogAttr("endpoint", k))
+			}
+		}(key, server)
+	}
+	drainWG.Wait()
+
+	// Phase 2: close upstream connections (provider WS pools, gRPC streaming pools).
+	// This must run AFTER Phase 1 so in-flight relays don't lose their pools mid-call.
+	for _, server := range rpsr.rpcServers {
+		if server.wsSubscriptionManager != nil {
+			if dwsm, ok := server.wsSubscriptionManager.(*DirectWSSubscriptionManager); ok {
+				dwsm.Close()
+			}
+		}
+		if server.grpcSubscriptionManager != nil {
+			server.grpcSubscriptionManager.Stop()
+		}
+	}
+
+	utils.LavaFormatInfo("RPCSmartRouter: graceful shutdown complete")
 }
 
 // buildDebugMux constructs the /debug/time-warp, /debug/time, and
@@ -1224,6 +1264,10 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 		RunE: func(cmd *cobra.Command, args []string) error {
 			utils.LavaFormatInfo(common.ProcessStartLogText)
 			common.ValidateAndCapMinRelayTimeout()
+
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
 			var err error
 			// set viper
 			config_name := DefaultRPCSmartRouterFileName
@@ -1284,8 +1328,6 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			if err != nil || len(rpcEndpoints) == 0 {
 				return utils.LavaFormatError("invalid endpoints definition", err)
 			}
-			// handle flags, pass necessary fields
-			ctx := context.Background()
 
 			// Smart router doesn't need blockchain chain ID
 			utils.LavaFormatInfo("Running Smart Router")
@@ -1486,6 +1528,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				EnableSelectionStats:     viper.GetBool(common.EnableSelectionStatsHeaderFlag),
 				DebugAddress:             viper.GetString("debug-address"),
 				ResponseCompression:      viper.GetString(common.ResponseCompressionFlag),
+				ShutdownGracePeriod:      viper.GetDuration(common.ShutdownGracePeriodFlag),
 			}
 
 			rpcSmartRouterSharedState := viper.GetBool(common.SharedStateFlag)
@@ -1502,8 +1545,18 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				geoLocation:              geolocation,
 				weightedSelectorConfig:   weightedSelectorConfig,
 			})
+			if err != nil {
+				return err
+			}
 
-			return err
+			<-ctx.Done()
+			// Restore default signal handling so a second SIGINT/SIGTERM during
+			// the drain phase force-terminates the process instead of being
+			// swallowed by NotifyContext.
+			cancel()
+			rpcSmartRouter.Stop(consumerPropagatedFlags.ShutdownGracePeriod)
+
+			return nil
 		},
 	}
 
@@ -1575,6 +1628,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().String(common.GitHubTokenFlag, "", "GitHub personal access token for accessing private repositories and higher API rate limits (5,000 requests/hour vs 60 for unauthenticated)")
 	cmdRPCSmartRouter.Flags().String(common.GitLabTokenFlag, "", "GitLab personal access token for accessing private repositories (supports gitlab.com and self-hosted instances)")
 	cmdRPCSmartRouter.Flags().Duration(common.EpochDurationFlag, 0, "duration of each epoch for time-based epoch system (e.g., 30m, 1h). If not set, epochs are disabled")
+	cmdRPCSmartRouter.Flags().Duration(common.ShutdownGracePeriodFlag, common.DefaultShutdownGracePeriod, "graceful shutdown deadline for in-flight requests and WebSocket clients")
 	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, 2, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
 	cmdRPCSmartRouter.Flags().BoolVar(&rpcInterfaceMessages.BatchNodeErrorOnAny, common.BatchNodeErrorOnAnyFlag, false, "if true, batch requests are treated as node errors if ANY sub-request fails; if false (default), only if ALL fail")
 	// optimizer qos reports

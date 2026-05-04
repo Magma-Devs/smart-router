@@ -13,9 +13,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/tidwall/gjson"
 )
 
@@ -106,7 +106,7 @@ func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]b
 	return bytesRateLimitError, nil
 }
 
-func (cwm *ConsumerWebsocketManager) ListenToMessages() {
+func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	// adding metrics for how many active connections we have.
 	cwm.rpcConsumerLogs.SetWebSocketConnectionActive(cwm.chainId, cwm.apiInterface, true)
 	defer cwm.rpcConsumerLogs.SetWebSocketConnectionActive(cwm.chainId, cwm.apiInterface, false)
@@ -137,15 +137,41 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 		utils.LavaFormatDebug("consumer websocket manager stopped", utils.LogAttr("GUID", webSocketCtx))
 	}()
 
+	// sendWS enqueues a frame for the writer goroutine, but unblocks if either
+	// ctx (server shutdown) or webSocketCtx (per-conn cleanup) cancels first —
+	// the writer exits on those signals, so a plain send would deadlock the
+	// caller and leave the connection goroutine stuck (preventing wsWG.Done()
+	// from firing during graceful shutdown).
+	sendWS := func(msg webSocketMsgWithType) {
+		select {
+		case websocketConnWriteChan <- msg:
+		case <-ctx.Done():
+		case <-webSocketCtx.Done():
+		}
+	}
+
+	// Single writer goroutine: serves both regular messages and the server-shutdown
+	// close frame. Single-writer discipline guarantees we never call WriteMessage
+	// concurrently — the underlying gorilla/fasthttp websocket library is not safe
+	// for concurrent writes.
 	go func() {
-		for msg := range websocketConnWriteChan {
+		for {
 			select {
+			case <-ctx.Done():
+				// Server-wide shutdown — send a CloseGoingAway (1001) frame so the
+				// client can distinguish an intentional shutdown from a crash, then
+				// close the underlying TCP conn so the read loop unblocks.
+				_ = cwm.websocketConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
+				_ = cwm.websocketConn.Close()
+				return
 			case <-webSocketCtx.Done():
 				utils.LavaFormatTrace("websocket's context cancelled", utils.LogAttr("GUID", webSocketCtx))
 				return
-			default:
-				err := cwm.websocketConn.WriteMessage(msg.messageType, msg.msg)
-				if err != nil {
+			case msg, ok := <-websocketConnWriteChan:
+				if !ok {
+					return
+				}
+				if err := cwm.websocketConn.WriteMessage(msg.messageType, msg.msg); err != nil {
 					utils.LavaFormatTrace("error writing msg to the websocket")
 					return
 				}
@@ -205,7 +231,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 			utils.LavaFormatTrace("error reading msg from the websocket, probably websocket was closed by the user", utils.LogAttr("err", err))
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
-				websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: formatterMsg}
+				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 			}
 			break
 		}
@@ -216,7 +242,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 			(WebSocketRateLimit > 0 && currentRequestsPerSecond > uint64(WebSocketRateLimit)) {
 			rateLimitResponse, err := cwm.handleRateLimitReached(msg)
 			if err == nil {
-				websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: rateLimitResponse}
+				sendWS(webSocketMsgWithType{messageType: messageType, msg: rateLimitResponse})
 			}
 			continue
 		}
@@ -226,7 +252,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 			// Log and remove the analyze
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), nil, msgSeed, []byte("Unable to extract dappID"), cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
-				websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: formatterMsg}
+				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 			}
 		}
 
@@ -251,7 +277,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 			utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", msg), utils.LogAttr("err", err))
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
-				websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: formatterMsg}
+				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 			}
 			continue
 		}
@@ -267,17 +293,17 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 						if err != nil {
 							continue
 						}
-						websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: msgData}
+						sendWS(webSocketMsgWithType{messageType: messageType, msg: msgData})
 					} else {
 						// Send formatted error so client gets feedback (e.g. upstream timeout)
 						formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
 						if formatterMsg != nil {
-							websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: formatterMsg}
+							sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 						}
 					}
 				} else if responseData != nil {
 					// Forward the node's response directly to the end user - no transformation or wrapping.
-					websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: responseData}
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: responseData})
 				}
 				continue
 			} else if IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL) {
@@ -292,7 +318,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 				if err != nil {
 					formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not send parsed relay", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
 					if formatterMsg != nil {
-						websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: formatterMsg}
+						sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 					}
 					continue
 				}
@@ -300,7 +326,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 				relayResultReply := relayResult.GetReply()
 				if relayResultReply != nil {
 					// No need to verify signature since this is already happening inside the SendParsedRelay flow
-					websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: relayResult.GetReply().Data}
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: relayResult.GetReply().Data})
 				} else {
 					utils.LavaFormatError("Relay result is nil over websocket normal request flow, should not happen", err, utils.LogAttr("messageType", messageType))
 				}
@@ -310,7 +336,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 
 		// Subscription flow
 		inputFormatter, outputFormatter := cacheformat.FormatterForRelayRequestAndResponse(protocolMessage.GetApiCollection().CollectionData.ApiInterface) // we use this to preserve the original jsonrpc id
-		inputFormatter(protocolMessage.RelayPrivateData().Data)                                                                                          // set the extracted jsonrpc id
+		inputFormatter(protocolMessage.RelayPrivateData().Data)                                                                                            // set the extracted jsonrpc id
 
 		reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(webSocketCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
 		if err != nil {
@@ -323,7 +349,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not start subscription", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
-				websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: formatterMsg} // No need to use outputFormatter here since we are sending an error
+				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg}) // No need to use outputFormatter here since we are sending an error
 				continue
 			}
 
@@ -334,7 +360,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 					continue
 				}
 
-				websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: outputFormatter(msgData)}
+				sendWS(webSocketMsgWithType{messageType: messageType, msg: outputFormatter(msgData)})
 				continue
 			}
 			continue
@@ -351,7 +377,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 
 				for subscriptionMsgReply := range subscriptionMsgsChan {
 					idleFor.Store(time.Now().Unix())
-					websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: outputFormatter(subscriptionMsgReply.Data)}
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: outputFormatter(subscriptionMsgReply.Data)})
 				}
 
 				utils.LavaFormatTrace("subscriptionMsgsChan was closed",
@@ -368,7 +394,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages() {
 		if reply != nil {
 			reply.Data = outputFormatter(reply.Data) // use that id for the reply
 
-			websocketConnWriteChan <- webSocketMsgWithType{messageType: messageType, msg: reply.Data}
+			sendWS(webSocketMsgWithType{messageType: messageType, msg: reply.Data})
 
 			logger.LogRequestAndResponse("jsonrpc ws msg", false, "ws", websocketConn.LocalAddr().String(), string(msg), string(reply.Data), msgSeed, time.Since(startTime), nil)
 		}

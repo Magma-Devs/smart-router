@@ -3,9 +3,9 @@ package rpcsmartrouter
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
@@ -28,13 +28,8 @@ import (
 // Any goroutine that fails during setup sends its error to errCh, which causes
 // the command to cancel and return the error immediately.
 func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEndpoint, parallelConnections uint, staticSpecPaths []string) error {
-	ctx, cancel := context.WithCancel(ctx)
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt)
-	defer func() {
-		signal.Stop(signalChan)
-		cancel()
-	}()
+	ctx, stopSignal := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignal()
 
 	if len(staticSpecPaths) == 0 {
 		return utils.LavaFormatError("--use-static-spec is required in smart-router mode (no blockchain connection available)", nil)
@@ -129,12 +124,9 @@ func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEn
 	select {
 	case err := <-errCh:
 		// A goroutine failed during setup — cancel all others and propagate.
-		cancel()
 		return err
 	case <-ctx.Done():
 		utils.LavaFormatInfo("test rpcsmartrouter ctx.Done")
-	case <-signalChan:
-		utils.LavaFormatInfo("test rpcsmartrouter signalChan")
 	}
 	return nil
 }

@@ -12,9 +12,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
-	"github.com/magma-Devs/smart-router/utils"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 )
 
@@ -179,6 +179,7 @@ type RelaySender interface {
 type ChainListener interface {
 	Serve(ctx context.Context, cmdFlags common.ConsumerCmdFlags)
 	GetListeningAddress() string
+	Shutdown(ctx context.Context) error
 }
 
 type ChainRouter interface {
@@ -239,4 +240,8 @@ func (*EmptyChainListener) Serve(ctx context.Context, cmdFlags common.ConsumerCm
 
 func (*EmptyChainListener) GetListeningAddress() string {
 	return ""
+}
+
+func (*EmptyChainListener) Shutdown(_ context.Context) error {
+	return nil
 }

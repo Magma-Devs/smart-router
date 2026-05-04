@@ -69,6 +69,10 @@ type RPCSmartRouterServer struct {
 	// Per-endpoint ChainTracker manager for continuous block polling
 	endpointChainTrackerManager *EndpointChainTrackerManager
 
+	// Direct WS subscription manager (nil if not configured); retained so
+	// graceful shutdown can call Close() to drain upstream WS pools.
+	wsSubscriptionManager chainlib.WSSubscriptionManager
+
 	// gRPC streaming subscription manager (nil if not configured)
 	grpcSubscriptionManager *DirectGRPCSubscriptionManager
 
@@ -99,6 +103,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.chainParser = chainParser
 	rpcss.smartRouterConsistency = smartRouterConsistency
 	rpcss.sharedState = sharedState
+	rpcss.wsSubscriptionManager = wsSubscriptionManager
 	rpcss.debugRelays = cmdFlags.DebugRelays
 	rpcss.enableSelectionStats = cmdFlags.EnableSelectionStats
 	rpcss.relayRetriesManager = lavaprotocol.NewRelayRetriesManager()
