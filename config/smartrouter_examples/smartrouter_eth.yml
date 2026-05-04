@@ -1,6 +1,10 @@
-# Smart Router Direct RPC Configuration
-# Testing Phases 1-5: JSON-RPC over HTTP/HTTPS + WebSocket Subscriptions
-# Mode: Direct connections to Ethereum RPC endpoints (no Lava providers!)
+# Smart Router — Ethereum (Enterprise Edition)
+# JSON-RPC over HTTP/HTTPS + WebSocket subscriptions. Requires the binary
+# built with `make build-enterprise` and a valid license, because WebSocket
+# transport is enterprise-gated.
+#
+# Community-compatible variant (HTTP only, no WebSocket): smartrouter_eth_community.yml
+# Mode: Direct connections to Ethereum RPC endpoints (no Lava providers).
 
 endpoints:
   - listen-address: "0.0.0.0:3360"

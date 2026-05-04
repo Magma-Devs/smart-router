@@ -14,9 +14,7 @@ Centralised RPC routing gateway. Routes JSON-RPC, REST, gRPC, and Tendermint RPC
 make install-all
 ```
 
-This installs two binaries:
-- `smartrouter` — the main smart router binary
-- `lavap` — alias exposing the same router subcommands (`rpcsmartrouter`, `cache`, `test`) for compatibility with existing tooling
+Installs the `smartrouter` binary into `$GOPATH/bin`. The router exposes subcommands `rpcsmartrouter` (root), `cache`, `version`, and `test`.
 
 ### Run
 
@@ -64,8 +62,8 @@ make clean          # Remove build artifacts
 ### Project structure
 
 ```
-cmd/smartrouter/    — Standalone smart router binary
-cmd/lavap/          — Alias binary exposing the router subcommands
+cmd/smartrouter/    — Smart router binary
+cmd/common/         — Shared CLI helpers (log flags, command wrappers)
 protocol/           — Core protocol implementation
   chainlib/         — Chain-specific parsers and proxies
   rpcsmartrouter/   — Smart router server and relay logic
