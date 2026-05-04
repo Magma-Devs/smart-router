@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -332,6 +333,8 @@ type JsonRPCChainListener struct {
 	wsSubscriptionManager      WSSubscriptionManager
 	listeningAddress           string
 	websocketConnectionLimiter *WebsocketConnectionLimiter
+	app                        *fiber.App     // captured during Serve so Shutdown can drain HTTP
+	wsWG                       sync.WaitGroup // tracks active downstream WS goroutines for Shutdown drain
 }
 
 // NewJrpcChainListener creates a new instance of JsonRPCChainListener
@@ -364,6 +367,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	test_mode := common.IsTestMode(ctx)
 	// Setup HTTP Server
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter)
+	apil.app = app
 
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		apil.websocketConnectionLimiter.HandleFiberRateLimitFlags(c)
@@ -381,6 +385,8 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	apiInterface := apil.endpoint.ApiInterface
 
 	webSocketCallback := websocket.New(func(websocketConn *websocket.Conn) {
+		apil.wsWG.Add(1)
+		defer apil.wsWG.Done()
 		canOpenConnection, decreaseIpConnection := apil.websocketConnectionLimiter.CanOpenConnection(websocketConn)
 		defer decreaseIpConnection()
 		if !canOpenConnection {
@@ -411,7 +417,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			headerRateLimit:        uint64(rateLimit),
 		})
 
-		consumerWebsocketManager.ListenToMessages()
+		consumerWebsocketManager.ListenToMessages(ctx)
 	})
 	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, apil.logger.StoreMetricData)
 	app.Get("/ws", websocketCallbackWithDappID)
@@ -538,7 +544,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		apil.listeningAddress = addr
 	}()
 
-	ListenWithRetry(app, apil.endpoint.NetworkAddress, addrChannelSafe)
+	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
 }
 
 func (apil *JsonRPCChainListener) GetListeningAddress() string {
@@ -806,4 +812,35 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	replyMsg = nil
 
 	return reply, subscriptionID, sub, err
+}
+
+// Shutdown stops accepting new connections, drains in-flight HTTP requests,
+// and then waits for active WebSocket goroutines to finish.
+//
+// The HTTP shutdown runs first because it closes the underlying listener: that
+// must happen before wsWG.Wait, otherwise a new /ws upgrade can call wsWG.Add(1)
+// concurrently with wsWG.Wait returning at counter==0, which sync.WaitGroup
+// rejects with a panic. The existing WS goroutines are already draining
+// independently — they observed the cancelled Serve ctx and are sending 1001
+// close frames via ListenToMessages — so the wait below is just for them to
+// finish unwinding.
+func (apil *JsonRPCChainListener) Shutdown(ctx context.Context) error {
+	if apil == nil || apil.app == nil {
+		return nil
+	}
+	httpErr := apil.app.ShutdownWithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		apil.wsWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// Listener is already closed and HTTP is drained; remaining WS conns
+		// will tear down when the process exits.
+		utils.LavaFormatWarning("JSONRPC: WS goroutines did not finish within shutdown grace period", nil)
+	}
+	return httpErr
 }

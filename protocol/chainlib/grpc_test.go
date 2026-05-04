@@ -285,3 +285,19 @@ func TestSettingBlocksHeadersGrpc(t *testing.T) {
 		})
 	}
 }
+
+func TestGrpcChainListener_Shutdown_CallsHttpServerShutdown(t *testing.T) {
+	listener := &GrpcChainListener{
+		httpServer: &http.Server{},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, listener.Shutdown(ctx))
+}
+
+func TestGrpcChainListener_Shutdown_NilServer(t *testing.T) {
+	listener := &GrpcChainListener{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, listener.Shutdown(ctx))
+}

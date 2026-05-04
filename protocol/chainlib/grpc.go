@@ -234,6 +234,7 @@ type GrpcChainListener struct {
 	chainParser      *GrpcChainParser
 	healthReporter   HealthReporter
 	listeningAddress string
+	httpServer       *http.Server // captured during Serve so Shutdown can call httpServer.Shutdown
 }
 
 func NewGrpcChainListener(
@@ -321,6 +322,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	if err != nil {
 		utils.LavaFormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
 	}
+	apil.httpServer = httpServer
 
 	// setup chain parser
 	apil.chainParser.setupForConsumer(sendRelayCallback)
@@ -599,4 +601,15 @@ func marshalJSON(msg proto.Message) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	err := (&jsonpb.Marshaler{}).Marshal(buf, msg)
 	return buf.Bytes(), err
+}
+
+// Shutdown drains in-flight gRPC unary requests and closes the listener.
+// http.Server.Shutdown sends HTTP/2 GOAWAY frames automatically — that is
+// the gRPC "going away" equivalent for streaming clients (the smart router's
+// gRPC API is currently unary-only, so no client streams exist to drain).
+func (apil *GrpcChainListener) Shutdown(ctx context.Context) error {
+	if apil == nil || apil.httpServer == nil {
+		return nil
+	}
+	return apil.httpServer.Shutdown(ctx)
 }
