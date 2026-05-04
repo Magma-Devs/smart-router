@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	gws "github.com/gorilla/websocket"
+	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -430,7 +430,7 @@ func TestTendermintRpcChainListener_GracefulShutdown_SendsWSCloseFrame_1001(t *t
 	listener, addr := startTestTendermintListener(t, serveCtx)
 
 	wsURL := "ws://" + addr + "/websocket"
-	client, _, err := gws.DefaultDialer.Dial(wsURL, nil)
+	client, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	require.NoError(t, err, "WS dial should succeed")
 	defer client.Close()
 
@@ -442,9 +442,9 @@ func TestTendermintRpcChainListener_GracefulShutdown_SendsWSCloseFrame_1001(t *t
 	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
 	_, _, readErr := client.ReadMessage()
 	require.Error(t, readErr)
-	closeErr, ok := readErr.(*gws.CloseError)
+	closeErr, ok := readErr.(*websocket.CloseError)
 	require.True(t, ok, "expected *websocket.CloseError, got %T: %v", readErr, readErr)
-	require.Equal(t, gws.CloseGoingAway, closeErr.Code,
+	require.Equal(t, websocket.CloseGoingAway, closeErr.Code,
 		"expected close code 1001 (Going Away), got %d", closeErr.Code)
 }
 

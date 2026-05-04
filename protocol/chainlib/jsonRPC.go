@@ -369,23 +369,38 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter)
 	apil.app = app
 
-	app.Use("/ws", func(c *fiber.Ctx) error {
+	// wsWG.Add must run synchronously inside the request handler so that
+	// app.ShutdownWithContext (which waits for in-flight handlers but stops
+	// tracking hijacked WS connections) is guaranteed to observe the Add
+	// before wsWG.Wait runs. Doing the Add inside the websocket goroutine
+	// would race: the goroutine is scheduled after the connection is hijacked
+	// and may not have called Add by the time Wait sees counter == 0.
+	//
+	// Registered as per-route middleware (not app.Use) so /ws and /websocket
+	// are covered uniformly without depending on fiber's mount-prefix matching.
+	wsUpgradeMiddleware := func(c *fiber.Ctx) error {
 		apil.websocketConnectionLimiter.HandleFiberRateLimitFlags(c)
 
 		// IsWebSocketUpgrade returns true if the client
 		// requested upgrade to the WebSocket protocol.
-		if websocket.IsWebSocketUpgrade(c) {
-			c.Locals("allowed", true)
-			return c.Next()
+		if !websocket.IsWebSocketUpgrade(c) {
+			return fiber.ErrUpgradeRequired
 		}
-		return fiber.ErrUpgradeRequired
-	})
+		apil.wsWG.Add(1)
+		c.Locals("allowed", true)
+		err := c.Next()
+		// If the upgrade did not succeed (anything other than 101 Switching
+		// Protocols), the websocket goroutine will not run, so balance the Add.
+		if c.Response().StatusCode() != fiber.StatusSwitchingProtocols {
+			apil.wsWG.Done()
+		}
+		return err
+	}
 
 	chainID := apil.endpoint.ChainID
 	apiInterface := apil.endpoint.ApiInterface
 
 	webSocketCallback := websocket.New(func(websocketConn *websocket.Conn) {
-		apil.wsWG.Add(1)
 		defer apil.wsWG.Done()
 		canOpenConnection, decreaseIpConnection := apil.websocketConnectionLimiter.CanOpenConnection(websocketConn)
 		defer decreaseIpConnection()
@@ -420,8 +435,8 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		consumerWebsocketManager.ListenToMessages(ctx)
 	})
 	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, apil.logger.StoreMetricData)
-	app.Get("/ws", websocketCallbackWithDappID)
-	app.Get("/websocket", websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
+	app.Get("/ws", wsUpgradeMiddleware, websocketCallbackWithDappID)
+	app.Get("/websocket", wsUpgradeMiddleware, websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
 
 	handlerPost := func(fiberCtx *fiber.Ctx) error {
 		// Set response header content-type to application/json
@@ -815,32 +830,11 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 }
 
 // Shutdown stops accepting new connections, drains in-flight HTTP requests,
-// and then waits for active WebSocket goroutines to finish.
-//
-// The HTTP shutdown runs first because it closes the underlying listener: that
-// must happen before wsWG.Wait, otherwise a new /ws upgrade can call wsWG.Add(1)
-// concurrently with wsWG.Wait returning at counter==0, which sync.WaitGroup
-// rejects with a panic. The existing WS goroutines are already draining
-// independently — they observed the cancelled Serve ctx and are sending 1001
-// close frames via ListenToMessages — so the wait below is just for them to
-// finish unwinding.
+// and then waits for active WebSocket goroutines to finish. See
+// drainHTTPThenWS for the full rationale on the ordering of HTTP-then-WS.
 func (apil *JsonRPCChainListener) Shutdown(ctx context.Context) error {
-	if apil == nil || apil.app == nil {
+	if apil == nil {
 		return nil
 	}
-	httpErr := apil.app.ShutdownWithContext(ctx)
-
-	done := make(chan struct{})
-	go func() {
-		apil.wsWG.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		// Listener is already closed and HTTP is drained; remaining WS conns
-		// will tear down when the process exits.
-		utils.LavaFormatWarning("JSONRPC: WS goroutines did not finish within shutdown grace period", nil)
-	}
-	return httpErr
+	return drainHTTPThenWS(ctx, apil.app, &apil.wsWG, "JSONRPC")
 }

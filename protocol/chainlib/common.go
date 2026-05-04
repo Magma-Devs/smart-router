@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"errors"
@@ -156,6 +157,34 @@ func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled f
 		return webSocketCallback(c) // uses external dappID
 	}
 	return handler
+}
+
+// drainHTTPThenWS performs the graceful shutdown sequence shared by every
+// chain listener: drain in-flight HTTP via app.ShutdownWithContext, then wait
+// for the per-listener websocket WaitGroup to reach zero. The HTTP shutdown
+// runs first so that (a) the listener stops accepting new /ws upgrades and
+// (b) any in-flight upgrade handler — which performs wsWG.Add(1) synchronously
+// in the upgrade middleware — has been observed before wsWG.Wait runs. If the
+// caller's context expires before wsWG drains, we log a warning and return;
+// the listener is already closed and remaining WS conns will tear down when
+// the process exits. name is used to disambiguate the warning across listeners.
+func drainHTTPThenWS(ctx context.Context, app *fiber.App, wg *sync.WaitGroup, name string) error {
+	if app == nil {
+		return nil
+	}
+	httpErr := app.ShutdownWithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		utils.LavaFormatWarning(name+": WS goroutines did not finish within shutdown grace period", nil)
+	}
+	return httpErr
 }
 
 func isUTXOFamily(chainID string) bool {
