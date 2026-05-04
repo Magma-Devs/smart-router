@@ -230,6 +230,7 @@ type RestChainListener struct {
 	healthReporter   HealthReporter
 	logger           *metrics.RPCConsumerLogs
 	listeningAddress string
+	app              *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewRestChainListener creates a new instance of RestChainListener
@@ -257,6 +258,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 	// Setup HTTP Server
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter)
+	apil.app = app
 
 	chainID := apil.endpoint.ChainID
 	apiInterface := apil.endpoint.ApiInterface
@@ -422,7 +424,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		apil.listeningAddress = addr
 	}()
 
-	ListenWithRetry(app, apil.endpoint.NetworkAddress, addrChannelSafe)
+	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
 }
 
 func (apil *RestChainListener) GetListeningAddress() string {
@@ -554,4 +556,13 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{},
 	}
 
 	return reply, "", nil, nil
+}
+
+// Shutdown drains in-flight HTTP requests and closes the listener.
+// REST has no client-facing WebSockets, so no 1001 close frames are needed.
+func (apil *RestChainListener) Shutdown(ctx context.Context) error {
+	if apil == nil || apil.app == nil {
+		return nil
+	}
+	return apil.app.ShutdownWithContext(ctx)
 }

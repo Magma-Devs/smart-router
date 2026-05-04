@@ -249,7 +249,7 @@ func validateEndpoints(endpoints []common.NodeUrl, apiInterface string) {
 	}
 }
 
-func ListenWithRetry(app *fiber.App, address string, chosenAddrCh *common.SafeChannelSender[string]) {
+func ListenWithRetry(ctx context.Context, app *fiber.App, address string, chosenAddrCh *common.SafeChannelSender[string]) {
 	for {
 		ln, err := net.Listen("tcp", address)
 		if err != nil {
@@ -262,7 +262,15 @@ func ListenWithRetry(app *fiber.App, address string, chosenAddrCh *common.SafeCh
 				utils.LavaFormatError("app.Listen(listenAddr)", err)
 			}
 		}
-		time.Sleep(RetryListeningInterval * time.Second)
+
+		// Stop retrying when the caller cancels (graceful shutdown). Without this,
+		// after app.ShutdownWithContext returns from app.Listener, the loop would
+		// sleep and rebind the port, undoing the shutdown.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(RetryListeningInterval * time.Second):
+		}
 	}
 }
 

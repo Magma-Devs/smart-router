@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
@@ -317,4 +318,21 @@ func TestRegexParsing(t *testing.T) {
 			assert.ErrorIs(t, err, common.APINotSupportedError)
 		}
 	}
+}
+
+func TestRestChainListener_Shutdown_CallsAppShutdown(t *testing.T) {
+	listener := &RestChainListener{
+		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, listener.Shutdown(ctx))
+}
+
+func TestRestChainListener_Shutdown_NilApp(t *testing.T) {
+	listener := &RestChainListener{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// Should not panic when Shutdown is called before Serve has captured an app.
+	require.NoError(t, listener.Shutdown(ctx))
 }

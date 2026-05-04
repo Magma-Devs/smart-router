@@ -72,9 +72,15 @@ const (
 	// Example: --gitlab-token glpat-xxxxxxxxxxxx
 	GitLabTokenFlag = "gitlab-token"
 
-	EpochDurationFlag              = "epoch-duration"         // duration of each epoch for time-based epoch system (standalone mode)
-	DefaultEpochDuration           = 30 * time.Minute         // default epoch duration for regular mode (if using time-based epochs)
-	StandaloneEpochDuration        = 15 * time.Minute         // default epoch duration for standalone/static provider mode
+	EpochDurationFlag       = "epoch-duration" // duration of each epoch for time-based epoch system (standalone mode)
+	DefaultEpochDuration    = 30 * time.Minute // default epoch duration for regular mode (if using time-based epochs)
+	StandaloneEpochDuration = 15 * time.Minute // default epoch duration for standalone/static provider mode
+
+	// ShutdownGracePeriodFlag controls how long graceful shutdown waits for in-flight
+	// requests and WebSocket clients to finish before forcing exit. Default 25s leaves
+	// a 5s margin under Kubernetes' default terminationGracePeriodSeconds of 30s.
+	ShutdownGracePeriodFlag        = "shutdown-grace-period"
+	DefaultShutdownGracePeriod     = 25 * time.Second
 	EnableSelectionStatsHeaderFlag = "enable-selection-stats" // enable selection stats header for debugging provider selection // allows the user to manually load a spec providing a path, this is useful to test spec changes before they hit the blockchain
 
 	// weighted selection flags (new system replacing tiers)
@@ -153,6 +159,7 @@ type ConsumerCmdFlags struct {
 	EnableSelectionStats     bool          // enables selection stats header for debugging provider selection
 	DebugAddress             string        // address for the debug HTTP server, e.g. ":9999". Empty = disabled.
 	ResponseCompression      string        // "gzip" (default), "brotli", or "off" — controls client-facing response compression
+	ShutdownGracePeriod      time.Duration // graceful shutdown deadline; passed to chain listeners and upstream cleanup
 }
 
 // default rolling logs behavior (if enabled) will store 3 files each 100MB for up to 1 day every time.

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -355,6 +356,8 @@ type TendermintRpcChainListener struct {
 	wsSubscriptionManager      WSSubscriptionManager
 	listeningAddress           string
 	websocketConnectionLimiter *WebsocketConnectionLimiter
+	app                        *fiber.App     // captured during Serve so Shutdown can drain HTTP
+	wsWG                       sync.WaitGroup // tracks active downstream WS goroutines for Shutdown drain
 }
 
 // NewTendermintRpcChainListener creates a new instance of TendermintRpcChainListener
@@ -387,6 +390,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 
 	// Setup HTTP Server
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter)
+	apil.app = app
 	chainID := apil.endpoint.ChainID
 	apiInterface := apil.endpoint.ApiInterface
 
@@ -401,6 +405,8 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		return fiber.ErrUpgradeRequired
 	})
 	webSocketCallback := websocket.New(func(websocketConn *websocket.Conn) {
+		apil.wsWG.Add(1)
+		defer apil.wsWG.Done()
 		canOpenConnection, decreaseIpConnection := apil.websocketConnectionLimiter.CanOpenConnection(websocketConn)
 		defer decreaseIpConnection()
 		if !canOpenConnection {
@@ -432,7 +438,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			headerRateLimit:        uint64(rateLimit),
 		})
 
-		consumerWebsocketManager.ListenToMessages()
+		consumerWebsocketManager.ListenToMessages(ctx)
 	})
 	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, apil.logger.StoreMetricData)
 	app.Get("/ws", websocketCallbackWithDappID)
@@ -590,7 +596,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		apil.listeningAddress = addr
 	}()
 
-	ListenWithRetry(app, apil.endpoint.NetworkAddress, addrChannelSafe)
+	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
 }
 
 func (apil *TendermintRpcChainListener) GetListeningAddress() string {
@@ -868,4 +874,26 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 	}
 
 	return reply, subscriptionID, sub, err
+}
+
+// Shutdown stops accepting new connections, drains in-flight HTTP requests,
+// and then waits for active WebSocket goroutines to finish.
+// See JsonRPCChainListener.Shutdown for the full rationale — this is the same shape.
+func (apil *TendermintRpcChainListener) Shutdown(ctx context.Context) error {
+	if apil == nil || apil.app == nil {
+		return nil
+	}
+	httpErr := apil.app.ShutdownWithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		apil.wsWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		utils.LavaFormatWarning("TendermintRPC: WS goroutines did not finish within shutdown grace period", nil)
+	}
+	return httpErr
 }
