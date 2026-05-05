@@ -778,11 +778,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		return filterErr
 	}
 
-	// Post-filter CV guard: even with the counter fixed, fail fast (and with
-	// a precise error message) when the filter dropped the surviving session
-	// count below the agreement threshold. Returning PairingListEmptyError
-	// lets the state machine retry with a fresh batch; the consistency-failed
-	// providers are already in unwantedProviders.
+	// Post-filter CV guard: fail fast with a precise error message when the
+	// filter dropped the surviving session count below the agreement threshold.
+	// Returning PairingListEmptyError surfaces the precise cause; the CV
+	// short-circuit in Policy.OnSendRelayResult ensures the state machine
+	// stops immediately rather than retrying with NumOfProviders=1 (which
+	// would silently violate quorum and mask this error).
 	selection := relayProcessor.GetSelection()
 	crossValidationParams := relayProcessor.GetCrossValidationParams()
 	if selection == relaycore.CrossValidation && crossValidationParams != nil &&
