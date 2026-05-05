@@ -76,6 +76,19 @@ func (r *retryingDummyChainTracker) StartAndServe(context.Context) error {
 	return nil
 }
 
+// blockingDummyChainTracker holds StartAndServe until proceed is closed, letting
+// tests interleave RemoveTracker with the success-path setTrackerState write.
+type blockingDummyChainTracker struct {
+	*chaintracker.DummyChainTracker
+
+	proceed chan struct{}
+}
+
+func (b *blockingDummyChainTracker) StartAndServe(context.Context) error {
+	<-b.proceed
+	return nil
+}
+
 func TestEndpointChainTrackerManager_GetOrCreateTracker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -186,6 +199,105 @@ func TestEndpointChainTrackerManager_StartTrackerRetriesAfterStartupFailure(t *t
 	require.Equal(t, EndpointChainTrackerPolling, state)
 	require.Empty(t, lastError)
 	require.Equal(t, int32(3), tracker.attempts.Load(), "tracker should retry until startup succeeds")
+}
+
+func TestEndpointChainTrackerManager_RemoveTrackerClearsTrackerStates(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+		ChainID:          "ETH",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 12 * time.Second,
+		BlocksToSave:     10,
+	})
+	require.NotNil(t, manager)
+	defer manager.Stop()
+
+	endpointURL := "http://test:8545"
+
+	manager.mu.Lock()
+	manager.trackers[endpointURL] = &chaintracker.DummyChainTracker{}
+	manager.cancelFuncs[endpointURL] = func() {}
+	manager.trackerStates[endpointURL] = EndpointChainTrackerPolling
+	manager.trackerLastErrors[endpointURL] = "stale error"
+	manager.mu.Unlock()
+
+	manager.RemoveTracker(endpointURL)
+
+	manager.mu.RLock()
+	_, statePresent := manager.trackerStates[endpointURL]
+	_, errPresent := manager.trackerLastErrors[endpointURL]
+	manager.mu.RUnlock()
+
+	require.False(t, statePresent, "trackerStates should be cleared, not retain a Stopped sentinel")
+	require.False(t, errPresent, "trackerLastErrors should be cleared")
+
+	state, lastError, exists := manager.GetTrackerState(endpointURL)
+	require.False(t, exists)
+	require.Equal(t, EndpointChainTrackerMissing, state)
+	require.Empty(t, lastError)
+}
+
+func TestEndpointChainTrackerManager_LateStateWriteAfterRemoveIsDropped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+		ChainID:          "ETH",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 12 * time.Second,
+		BlocksToSave:     10,
+	})
+	require.NotNil(t, manager)
+	defer manager.Stop()
+
+	endpointURL := "http://test:8545"
+	tracker := &blockingDummyChainTracker{
+		DummyChainTracker: &chaintracker.DummyChainTracker{},
+		proceed:           make(chan struct{}),
+	}
+
+	trackerCtx, trackerCancel := context.WithCancel(ctx)
+	manager.mu.Lock()
+	manager.trackers[endpointURL] = tracker
+	manager.cancelFuncs[endpointURL] = trackerCancel
+	manager.trackerStates[endpointURL] = EndpointChainTrackerNoBlockYet
+	manager.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		manager.startTrackerWithRetry(tracker, trackerCtx, endpointURL)
+		close(done)
+	}()
+
+	// Wait for the goroutine to enter StartAndServe (where it blocks on proceed).
+	require.Eventually(t, func() bool {
+		state, _, _ := manager.GetTrackerState(endpointURL)
+		return state == EndpointChainTrackerStarting
+	}, time.Second, time.Millisecond, "goroutine should reach Starting")
+
+	// Remove the tracker before startup completes; this should clear all state.
+	manager.RemoveTracker(endpointURL)
+
+	// Unblock startup so the success path runs *after* removal.
+	close(tracker.proceed)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		require.FailNow(t, "startTrackerWithRetry did not exit after removal")
+	}
+
+	// The late Polling write must not resurrect any entry.
+	manager.mu.RLock()
+	_, statePresent := manager.trackerStates[endpointURL]
+	manager.mu.RUnlock()
+	require.False(t, statePresent, "late setTrackerState after RemoveTracker should be a no-op")
+
+	state, _, exists := manager.GetTrackerState(endpointURL)
+	require.False(t, exists)
+	require.Equal(t, EndpointChainTrackerMissing, state, "GetTrackerState should report Missing, not Polling, after removal")
 }
 
 func TestEndpointChainTrackerManager_ValidateEndpointSync(t *testing.T) {
