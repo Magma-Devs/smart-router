@@ -60,6 +60,48 @@ func NewGrpcChainParser() (chainParser *GrpcChainParser, err error) {
 	return &GrpcChainParser{}, nil
 }
 
+// cloneForValidation returns a *GrpcChainParser with isolated registry/codec
+// fields so callers (one-shot verification flows) can safely pass the result
+// into NewGrpcChainProxy → setupForProvider without mutating the live parser.
+//
+// Read-only-after-init data on BaseChainParser is aliased — including the
+// inner contents of `spec` (a protobuf with nested slices/maps), which is
+// copied by value but whose nested fields remain shared. This is sound only
+// because the live serving path treats spec as immutable post-init; the rare
+// SetSpec / SetPolicy / UpdateBlockTime mutators run at init or at known
+// quiescent moments.
+//
+// The new BaseChainParser is constructed via struct literal, so its rwLock
+// is a fresh zero-value — no mutex is copied. Note the trade-off: because the
+// clone has a *separate* mutex from the live parser, the two cannot
+// synchronize. If a live-path SetSpec / UpdateBlockTime were to race with a
+// validation reader on the clone, the clone could observe a torn write of
+// nested spec fields. We accept that risk since the alternative — sharing the
+// parser instance — corrupts the live registry/codec when validation's bounded
+// context is cancelled, panicking gRPC relays on a nil connector.
+//
+// registry/codec are aliased initially; setupForProvider on the clone will
+// replace the *clone's* fields, leaving the live parser untouched.
+func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
+	return &GrpcChainParser{
+		BaseChainParser: BaseChainParser{
+			internalPaths:     apip.internalPaths,
+			taggedApis:        apip.taggedApis,
+			spec:              apip.spec,
+			serverApis:        apip.serverApis,
+			apiCollections:    apip.apiCollections,
+			headers:           apip.headers,
+			verifications:     apip.verifications,
+			allowedAddons:     apip.allowedAddons,
+			allowedExtensions: apip.allowedExtensions,
+			extensionParser:   apip.extensionParser,
+			active:            apip.active,
+		},
+		registry: apip.registry,
+		codec:    apip.codec,
+	}
+}
+
 func (bcp *GrpcChainParser) GetUniqueName() string {
 	return "grpc_chain_parser"
 }

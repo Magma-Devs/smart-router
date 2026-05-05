@@ -131,7 +131,7 @@ func TestUpdateEpoch_FreshSessions(t *testing.T) {
 
 	// 4. Trigger Epoch Update
 	newEpoch := uint64(2)
-	rpsr.updateEpoch(newEpoch)
+	rpsr.updateEpoch(context.Background(), newEpoch)
 
 	// 5. Verify results
 	// Get the updated session map
@@ -209,7 +209,7 @@ func TestUpdateEpoch_ResetsDisabledEndpoints(t *testing.T) {
 	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: providerSession}
 	rpsr.backupProviderSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: backupSession}
 
-	rpsr.updateEpoch(uint64(2))
+	rpsr.updateEpoch(context.Background(), uint64(2))
 
 	// Direct field reads below are safe without mu: updateEpoch is synchronous and
 	// has fully returned, so no other goroutine holds or can acquire the endpoint lock.
@@ -307,7 +307,7 @@ func TestUpdateEpoch_ResetsHealthMetric(t *testing.T) {
 	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: primarySession}
 	rpsr.backupProviderSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: backupSession}
 
-	rpsr.updateEpoch(uint64(2))
+	rpsr.updateEpoch(context.Background(), uint64(2))
 
 	// Struct-level reset still holds (regression guard for #2256).
 	require.True(t, disabledPrimaryEndpoint.Enabled, "primary endpoint should be re-enabled")
@@ -370,7 +370,7 @@ func TestUpdateEpoch_NilListenEndpointDoesNotPanic(t *testing.T) {
 	session.StaticProvider = true
 	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: session}
 
-	require.NotPanics(t, func() { rpsr.updateEpoch(uint64(2)) },
+	require.NotPanics(t, func() { rpsr.updateEpoch(context.Background(), uint64(2)) },
 		"updateEpoch must tolerate a server with nil listenEndpoint rather than nil-deref during metric resolution")
 
 	// Even without the metric reset, the in-memory struct reset (from commit 1559d6b29) must still run.
@@ -406,7 +406,7 @@ func TestGracefulFailure_AllProvidersHealthy_NoRetryLaunched(t *testing.T) {
 	require.Len(t, rpsr.providerSessions[chainKey], 2)
 
 	// Verify: epoch update works and preserves both providers
-	rpsr.updateEpoch(2)
+	rpsr.updateEpoch(context.Background(), 2)
 	require.Len(t, rpsr.providerSessions[chainKey], 2)
 	require.Equal(t, "providerA", rpsr.providerSessions[chainKey][0].PublicLavaAddress)
 	require.Equal(t, "providerB", rpsr.providerSessions[chainKey][1].PublicLavaAddress)
@@ -433,7 +433,7 @@ func TestGracefulFailure_EpochDoesNotResurrectFailedProviders(t *testing.T) {
 	}
 
 	// Trigger epoch update
-	rpsr.updateEpoch(2)
+	rpsr.updateEpoch(context.Background(), 2)
 
 	// Verify: only A and C in sessions — B was NOT resurrected
 	sessions := rpsr.providerSessions[chainKey]
@@ -693,7 +693,7 @@ func TestGracefulFailure_ConcurrentEpochAndRetry(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
-			rpsr.updateEpoch(uint64(10 + i))
+			rpsr.updateEpoch(context.Background(), uint64(10 + i))
 			time.Sleep(time.Millisecond)
 		}
 	}()
@@ -764,9 +764,9 @@ func TestGracefulFailure_EpochBeforeRetry_OnlyHealthyProviders(t *testing.T) {
 	}
 
 	// Epoch fires multiple times before retry runs
-	rpsr.updateEpoch(2)
-	rpsr.updateEpoch(3)
-	rpsr.updateEpoch(4)
+	rpsr.updateEpoch(context.Background(), 2)
+	rpsr.updateEpoch(context.Background(), 3)
+	rpsr.updateEpoch(context.Background(), 4)
 
 	// Verify: still only A in sessions after 3 epochs — B never resurrected
 	sessions := rpsr.providerSessions[chainKey]

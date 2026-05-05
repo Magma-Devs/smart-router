@@ -163,6 +163,15 @@ type RPCSmartRouter struct {
 
 	// Server references for per-endpoint ChainTracker cleanup on epoch updates
 	rpcServers map[string]*RPCSmartRouterServer // key: chainID-apiInterface
+
+	// reverifyInputs holds the per-chain inputs applyReverification needs
+	// (chain parser, configured static/backup lists, the convertProvidersToSessions
+	// closure built in CreateSmartRouterEndpoint). Populated under rpsr.mu in
+	// CreateSmartRouterEndpoint (parallel goroutines per endpoint); after Start's
+	// wg.Wait the map is read-only, so updateEpoch reads it without locking. Absent
+	// for tests that build RPCSmartRouter directly — updateEpoch then runs the
+	// original freshen-from-old loops without a reverification post-pass.
+	reverifyInputs map[string]*chainReverifyInputs // key: chainID-apiInterface
 }
 
 type rpcSmartRouterStartOptions struct {
@@ -196,6 +205,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	rpsr.backupProviderSessions = make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider)
 	rpsr.failedStaticProviders = make(map[string][]*lavasession.RPCStaticProviderEndpoint)
 	rpsr.rpcServers = make(map[string]*RPCSmartRouterServer)
+	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
 
 	// RPCSmartRouter always runs in standalone mode with time-based epochs
 	epochDuration := options.cmdFlags.EpochDuration
@@ -285,8 +295,12 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 
 	// Start epoch timer after all endpoints are set up
 	// Register ONE global epoch callback that updates ALL session managers
-	// This prevents multiple UpdateAllProviders calls with the same epoch to the same session manager
-	rpsr.epochTimer.RegisterCallback(rpsr.updateEpoch)
+	// This prevents multiple UpdateAllProviders calls with the same epoch to the same session manager.
+	// Capture ctx in the closure rather than stashing it on rpsr (storing context.Context in a struct is
+	// idiomatically discouraged); the EpochTimer's callback signature is fixed at func(uint64).
+	rpsr.epochTimer.RegisterCallback(func(epoch uint64) {
+		rpsr.updateEpoch(ctx, epoch)
+	})
 
 	// Log that epoch timer is configured for all session managers
 	utils.LavaFormatInfo("RPCSmartRouter: Registered epoch timer callback for all session managers",
@@ -1207,6 +1221,21 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		}
 	}
 
+	// Register the inputs updateEpoch needs every epoch tick: chain parser, the
+	// convert closure built above (it carries ctx, rpcEndpoint,
+	// smartRouterMetricsManager), and the full configured lists. There is no
+	// separate goroutine — re-validation runs synchronously from the epoch
+	// callback, bounded by SpecReVerifyConcurrency.
+	rpsr.mu.Lock()
+	rpsr.reverifyInputs[sessionManagerKey] = &chainReverifyInputs{
+		chainParser:                chainParser,
+		rpcEndpoint:                rpcEndpoint,
+		convertProvidersToSessions: convertProvidersToSessions,
+		configuredStatic:           relevantStaticProviderList,
+		configuredBackup:           relevantBackupProviderList,
+	}
+	rpsr.mu.Unlock()
+
 	// ============================================================================
 	// Session Registration (after validation — only healthy providers)
 	// ============================================================================
@@ -1960,7 +1989,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	return cmdRPCSmartRouter
 }
 
-func (rpsr *RPCSmartRouter) updateEpoch(epoch uint64) {
+func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 	// Copy session manager keys under lock to avoid iterating the map
 	// concurrently with retryFailedStaticProviders which writes to rpsr maps under rpsr.mu.
 	rpsr.mu.Lock()
@@ -2065,10 +2094,44 @@ func (rpsr *RPCSmartRouter) updateEpoch(epoch uint64) {
 				utils.LogAttr("chainKey", chainKeyLog))
 		}
 
-		// Update stored sessions with fresh objects
+		// Re-verify configured providers and reconcile against the fresh maps:
+		// drop entries whose provider failed validation (demote), and append
+		// new sessions for configured providers that pass but weren't active
+		// (promote — recovering from failed-init). Skipped when inputs are
+		// absent (test path constructs RPCSmartRouter directly). Demoted
+		// sessions are collected and their direct connections closed *after*
+		// UpdateAllProviders below — closing earlier would race in-flight
+		// relays still holding pointers to the prior pairing.
+		var demotedSessions []*lavasession.ConsumerSessionsWithProvider
+		if inputs := rpsr.reverifyInputs[chainKey]; inputs != nil {
+			reverifyStart := time.Now()
+			var demotedStatic, demotedBackup []*lavasession.ConsumerSessionsWithProvider
+			freshProviderSessions, demotedStatic = applyReverification(ctx, inputs, freshProviderSessions, reverifyTierStatic, epoch, nil)
+			freshBackupSessions, demotedBackup = applyReverification(ctx, inputs, freshBackupSessions, reverifyTierBackup, epoch, nil)
+			demotedSessions = append(demotedStatic, demotedBackup...)
+			// Per-chain re-verify is internally bounded by SpecReVerifyConcurrency,
+			// but updateEpoch iterates chains serially. Surfacing per-chain duration
+			// gives operators a signal when total tick time approaches epoch length —
+			// the cross-chain bound is Σ ⌈N_chain/conc⌉ × SpecReVerifyAttemptTimeout.
+			if elapsed := time.Since(reverifyStart); elapsed > SpecReVerifyAttemptTimeout {
+				utils.LavaFormatWarning("re-verify: cycle exceeded single-attempt timeout — consider tuning SpecReVerifyConcurrency", nil,
+					utils.LogAttr("chainKey", chainKeyLog),
+					utils.LogAttr("elapsed", elapsed.String()),
+					utils.LogAttr("attemptTimeout", SpecReVerifyAttemptTimeout.String()),
+				)
+			}
+		}
+
+		// Update stored sessions with fresh objects.
+		// When re-verification demotes every backup the map can be empty (not nil).
+		// In that case clear the entry so rpsr.backupProviderSessions stays consistent
+		// with what we hand UpdateAllProviders below — otherwise the stored field would
+		// retain the prior cycle's map.
 		rpsr.providerSessions[chainKey] = freshProviderSessions
 		if len(freshBackupSessions) > 0 {
 			rpsr.backupProviderSessions[chainKey] = freshBackupSessions
+		} else {
+			delete(rpsr.backupProviderSessions, chainKey)
 		}
 		server := rpsr.rpcServers[chainKey]
 
@@ -2086,6 +2149,15 @@ func (rpsr *RPCSmartRouter) updateEpoch(epoch uint64) {
 				utils.LogAttr("epoch", epoch),
 				utils.LogAttr("chainKey", chainKeyLog),
 			)
+		}
+
+		// Now that the session manager is on the new pairing, drop the
+		// DirectRPCConnections that belonged to demoted providers. The session
+		// manager's own purge path closes endpoint.Connections but not
+		// endpoint.DirectConnections — those are smart-router-owned transports
+		// and would otherwise leak across a flap (active → demoted → active rebuilds).
+		if len(demotedSessions) > 0 {
+			go closeDemotedDirectConnections(demotedSessions)
 		}
 
 		// cleanupStaleTrackers is the genuinely heavy work (tracker teardown +

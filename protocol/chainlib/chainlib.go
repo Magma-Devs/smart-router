@@ -100,6 +100,26 @@ type ChainParser interface {
 	ParseDirectiveEnabled() bool
 }
 
+// CloneChainParserForValidation returns a parser instance safe to pass into
+// GetChainRouter / NewChainProxy for one-shot verification (e.g., the spec
+// re-verification loop) WITHOUT mutating the live serving parser.
+//
+// For gRPC: NewGrpcChainProxy calls (*GrpcChainParser).setupForProvider, which
+// replaces the parser's registry and codec fields with ones bound to the
+// verification connection's lifetime. If the live parser is passed and the
+// verification context is later cancelled (e.g. a per-attempt WithTimeout),
+// the connection backing those fields dies and live gRPC relays panic on a
+// nil connector. Cloning isolates the mutation.
+//
+// For non-gRPC parsers no equivalent mutation occurs during chain-proxy
+// construction, so the original parser is returned unchanged.
+func CloneChainParserForValidation(parser ChainParser) ChainParser {
+	if grpc, ok := parser.(*GrpcChainParser); ok {
+		return grpc.cloneForValidation()
+	}
+	return parser
+}
+
 type ChainMessage interface {
 	SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string
 	RequestedBlock() (latest int64, earliest int64)
