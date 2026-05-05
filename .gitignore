@@ -72,3 +72,4 @@ lavap
 # accidental binary from sneaking into a commit.
 /smartrouter
 debugging/logs/
+license.key

@@ -1,9 +1,21 @@
 #!/bin/bash
+# Smart Router — Lava (Enterprise Edition) test setup
+#
+# Builds the enterprise binary (`-tags enterprise`), resolves a license file,
+# starts a cache server and a smart router in screen sessions, and points the
+# router at PublicNode REST + gRPC + Tendermint RPC endpoints.
+#
+# The enterprise binary refuses to start without a valid license; the community
+# binary (built via `make install-all`) ignores the `--license-file` flag.
+#
+# Override the license path via env var before running:
+#   export LICENSE_FILE="/path/to/license.key"   # default: ./license.key
+
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 source "$__dir"/../useful_commands.sh
 
 # Use absolute paths for logs
-LOGS_DIR=${__dir}/../../testutil/debugging/logs
+LOGS_DIR=${__dir}/../../debugging/logs
 mkdir -p "$LOGS_DIR"
 LOGS_DIR=$(cd "$LOGS_DIR" && pwd)
 rm "$LOGS_DIR"/*.log 2>/dev/null || true
@@ -11,10 +23,27 @@ rm "$LOGS_DIR"/*.log 2>/dev/null || true
 # Save project root for later use
 PROJECT_ROOT=$(cd "${__dir}/../.." && pwd)
 
+# Resolve license file. Precedence: $LICENSE_FILE, then $PROJECT_ROOT/license.key.
+# Resolved to absolute path so the smart router (which reads relative paths
+# from CWD, not the binary's directory) finds it deterministically.
+LICENSE_FILE_PATH="${LICENSE_FILE:-$PROJECT_ROOT/license.key}"
+if [[ ! -f "$LICENSE_FILE_PATH" ]]; then
+    echo "ERROR: license file not found at $LICENSE_FILE_PATH"
+    echo ""
+    echo "The enterprise binary refuses to start without a valid license."
+    echo "Either:"
+    echo "  - Place a license at $PROJECT_ROOT/license.key"
+    echo "  - Set \$LICENSE_FILE to point at one (export LICENSE_FILE=/path/to/license.key)"
+    exit 1
+fi
+LICENSE_FILE_PATH=$(cd "$(dirname "$LICENSE_FILE_PATH")" && pwd)/$(basename "$LICENSE_FILE_PATH")
+
 echo "============================================"
-echo "Smart Router Direct RPC (Lava via PublicNode)"
+echo "Smart Router Enterprise — Lava via PublicNode"
 echo "============================================"
-echo "Mode: DIRECT RPC (no Lava providers)"
+echo "Edition:  ENTERPRISE (-tags enterprise, license required)"
+echo "License:  $LICENSE_FILE_PATH"
+echo "Mode:     DIRECT RPC (no Lava providers)"
 echo "Upstream: PublicNode REST + gRPC + Tendermint RPC"
 echo "============================================"
 echo ""
@@ -29,8 +58,8 @@ sleep 1
 screen -wipe
 sleep 1
 
-echo "[Test Setup] installing all binaries"
-make install-all
+echo "[Test Setup] installing enterprise binary"
+make install-enterprise   # builds ./cmd/smartrouter with -tags enterprise
 
 echo ""
 echo "[Test Setup] skipping local node — using PublicNode endpoints"
@@ -214,13 +243,17 @@ else
 fi
 
 echo ""
-echo "[Test Setup] starting Smart Router (DIRECT RPC mode, REST + gRPC + Tendermint RPC)"
+echo "[Test Setup] starting Smart Router (ENTERPRISE, DIRECT RPC mode, REST + gRPC + Tendermint RPC)"
+# --skip-websocket-verification kept defensively; the Tendermint RPC node-urls
+# include wss:// entries and partial WS availability shouldn't fail boot.
 screen -d -m -S smartrouter bash -c "cd \"$PROJECT_ROOT\" && source ~/.bashrc; smartrouter \
 config/smartrouter_examples/smartrouter_lava.yml \
 --geolocation 1 \
 --log-level trace \
 --cache-be \"127.0.0.1:20100\" \
 --use-static-spec \"$SPECS_DIR\" \
+--skip-websocket-verification \
+--license-file=\"$LICENSE_FILE_PATH\" \
 --metrics-listen-address ':7779' \
 --min-relay-timeout 5s 2>&1 | tee \"$LOGS_DIR/SMARTROUTER_LAVA.log\"" && sleep 0.25
 
@@ -241,8 +274,10 @@ screen -ls
 
 echo ""
 echo "============================================"
-echo "Smart Router (Lava via PublicNode) Setup Complete!"
+echo "Smart Router Enterprise (Lava via PublicNode) Setup Complete!"
 echo "============================================"
+echo "Edition:                ENTERPRISE"
+echo "License:                $LICENSE_FILE_PATH"
 echo "Upstream REST:          $LAVA_REST_LOCAL"
 echo "Upstream gRPC:          $LAVA_GRPC_LOCAL"
 echo "Upstream Tendermint:    $LAVA_TENDERMINTRPC_LOCAL"
