@@ -329,6 +329,14 @@ func (m *EndpointChainTrackerManager) setTrackerState(endpointURL string, state 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Drop the write if the tracker has been removed. Without this, late writes from
+	// the retry goroutine or chaintracker callbacks can re-introduce a state entry
+	// (causing GetTrackerState to report a live state for an absent tracker, and
+	// growing trackerStates monotonically as endpoints churn).
+	if _, ok := m.trackers[endpointURL]; !ok {
+		return
+	}
+
 	m.trackerStates[endpointURL] = state
 	if err != nil {
 		m.trackerLastErrors[endpointURL] = err.Error()
@@ -405,11 +413,14 @@ func (m *EndpointChainTrackerManager) RemoveTracker(endpointURL string) {
 		delete(m.cancelFuncs, endpointURL)
 	}
 
-	// Remove from maps
+	// Remove from maps. Deleting the trackerStates entry (rather than writing
+	// EndpointChainTrackerStopped) keeps the map bounded as endpoints churn —
+	// GetTrackerState already returns EndpointChainTrackerMissing for absent
+	// entries, so the Stopped sentinel was redundant.
 	delete(m.trackers, endpointURL)
 	delete(m.fetchers, endpointURL)
 	delete(m.trackerLastErrors, endpointURL)
-	m.trackerStates[endpointURL] = EndpointChainTrackerStopped
+	delete(m.trackerStates, endpointURL)
 
 	utils.LavaFormatInfo("stopped and removed ChainTracker for endpoint",
 		utils.LogAttr("endpoint", endpointURL),
