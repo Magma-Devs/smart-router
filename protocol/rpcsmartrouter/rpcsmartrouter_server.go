@@ -787,6 +787,18 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	crossValidationParams := relayProcessor.GetCrossValidationParams()
 	if selection == relaycore.CrossValidation && crossValidationParams != nil &&
 		len(validSessions) < crossValidationParams.AgreementThreshold {
+		// Release the surviving valid sessions before returning. No goroutines
+		// will be launched for them, so without this they stay in
+		// UsedProviders.providers (CurrentlyUsed > 0). The state machine's
+		// validateReturnCondition only delivers the err to returnCondition when
+		// CurrentlyUsed == 0, so the request would otherwise stall for the
+		// full processingTimeout (~30s) instead of failing fast.
+		for endpointAddress, sessionInfo := range validSessions {
+			if sessionInfo != nil && sessionInfo.Session != nil {
+				usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)
+				sessionInfo.Session.Free(nil)
+			}
+		}
 		return utils.LavaFormatError("insufficient sessions for cross-validation consensus after consistency filter",
 			lavasession.PairingListEmptyError,
 			utils.LogAttr("agreementThreshold", crossValidationParams.AgreementThreshold),
