@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,7 +15,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/qos"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -1977,4 +1981,160 @@ func TestConsistencyPreValidationError_NotRetryable(t *testing.T) {
 	// SessionOutOfSyncError IS a session sync loss (for comparison)
 	require.True(t, lavasession.IsSessionSyncLoss(lavasession.SessionOutOfSyncError),
 		"SessionOutOfSyncError should be treated as session sync loss")
+}
+
+// ============================================================================
+// Tests for the post-filter CrossValidation guard fast-fail behavior
+// (commits a78426a + 97266e4)
+// ============================================================================
+
+// cvGuardStateMachine implements relaycore.RelayStateMachine for the CV-guard
+// integration test. It only needs to expose the UsedProviders, the selection,
+// and the cross-validation params; the early-exit path under test does not
+// touch the other methods.
+type cvGuardStateMachine struct {
+	usedProviders *lavasession.UsedProviders
+	cvParams      *common.CrossValidationParams
+}
+
+func (m *cvGuardStateMachine) GetProtocolMessage() chainlib.ProtocolMessage { return nil }
+func (m *cvGuardStateMachine) GetDebugState() bool                          { return false }
+func (m *cvGuardStateMachine) GetRelayTaskChannel() (chan relaycore.RelayStateSendInstructions, error) {
+	return make(chan relaycore.RelayStateSendInstructions), nil
+}
+func (m *cvGuardStateMachine) UpdateBatch(err error)                                       {}
+func (m *cvGuardStateMachine) GetSelection() relaycore.Selection                           { return relaycore.CrossValidation }
+func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidationParams     { return m.cvParams }
+func (m *cvGuardStateMachine) GetUsedProviders() *lavasession.UsedProviders                { return m.usedProviders }
+func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf)            {}
+func (m *cvGuardStateMachine) SetRelayRetriesManager(rm *lavaprotocol.RelayRetriesManager) {}
+
+// cvGuardMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter
+// for the CV-guard test. The early-exit path does not hit metrics callbacks.
+type cvGuardMetrics struct{}
+
+func (cvGuardMetrics) SetRelayNodeErrorMetric(chainId, apiInterface, providerAddress, method string) {
+}
+func (cvGuardMetrics) GetChainIdAndApiInterface() (string, string) { return "LAVA", "rest" }
+
+// TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions is the
+// regression catch for commit 97266e4. When filterEndpointsByConsistency drops
+// the surviving session count below AgreementThreshold for a CrossValidation
+// request, the post-filter guard must release the SURVIVING valid sessions
+// before returning, not just the failed ones. Without this, the state machine's
+// validateReturnCondition waits for CurrentlyUsed() == 0 to deliver the err,
+// so the request stalls the full processingTimeout (~30s) instead of failing fast.
+//
+// Setup: 3 sessions (1 synced, 2 stale), AgreementThreshold=2.
+// Filter drops the 2 stale; the surviving 1 is < AT, so the CV guard fires.
+//
+// Asserts:
+//   - returns in well under processingTimeout (the regression was a 30s stall)
+//   - error wraps lavasession.PairingListEmptyError (CV state machine short-circuits on this)
+//   - usedProviders.CurrentlyUsed() == 0 (catches surviving-session leak — 97266e4 regression)
+//   - usedProviders.SessionsLatestBatch() == 0 (catches counter leak — a78426a regression)
+func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *testing.T) {
+	ctx := context.Background()
+
+	// Real chainParser so sendRelayToDirectEndpoints' early ChainBlockStats() call works.
+	noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	// seenBlock=200, EndpointLagThreshold=10 (default). Endpoints below 190 are dropped.
+	consistency := newMockConsistency()
+	userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
+	consistency.SetSeenBlock(200, userData)
+
+	syncedEp := &lavasession.Endpoint{NetworkAddress: "http://synced:8545"}
+	syncedEp.LatestBlock.Store(195)
+	staleEp1 := &lavasession.Endpoint{NetworkAddress: "http://stale1:8545"}
+	staleEp1.LatestBlock.Store(50)
+	staleEp2 := &lavasession.Endpoint{NetworkAddress: "http://stale2:8545"}
+	staleEp2.LatestBlock.Store(50)
+
+	mkSession := func(addr string, ep *lavasession.Endpoint) *lavasession.SingleConsumerSession {
+		return &lavasession.SingleConsumerSession{
+			// Parent.Endpoints[0] is read by the QoS metrics path inside
+			// OnSessionFailure (consumer_session_manager.go:1807); leaving the
+			// slice empty panics. The endpoint identity doesn't matter here —
+			// only the indexing has to succeed.
+			Parent:     &lavasession.ConsumerSessionsWithProvider{PublicLavaAddress: addr, Endpoints: []*lavasession.Endpoint{ep}},
+			Connection: &lavasession.DirectRPCSessionConnection{Endpoint: ep},
+			QoSManager: qos.NewQoSManager(),
+		}
+	}
+	sess1 := mkSession("lava@provider1", syncedEp)
+	sess2 := mkSession("lava@provider2", staleEp1)
+	sess3 := mkSession("lava@provider3", staleEp2)
+	for _, s := range []*lavasession.SingleConsumerSession{sess1, sess2, sess3} {
+		_, ok := s.TryUseSession()
+		require.True(t, ok, "test setup: failed to lock session")
+	}
+
+	// Mimic GetSessions: AddUsed registers all 3 in UsedProviders; SetUsageForSession
+	// wires each session back to UsedProviders so Free(nil) calls RemoveUsed correctly.
+	usedProviders := lavasession.NewUsedProviders(nil)
+	sessionsMap := lavasession.ConsumerSessionsMap{
+		"lava@provider1": &lavasession.SessionInfo{Session: sess1},
+		"lava@provider2": &lavasession.SessionInfo{Session: sess2},
+		"lava@provider3": &lavasession.SessionInfo{Session: sess3},
+	}
+	usedProviders.AddUsed(sessionsMap, nil)
+	routerKey := lavasession.NewRouterKey(nil)
+	require.NoError(t, sess1.SetUsageForSession(0, nil, usedProviders, routerKey))
+	require.NoError(t, sess2.SetUsageForSession(0, nil, usedProviders, routerKey))
+	require.NoError(t, sess3.SetUsageForSession(0, nil, usedProviders, routerKey))
+	require.Equal(t, 3, usedProviders.CurrentlyUsed(), "test setup: expected 3 in CurrentlyUsed")
+	require.Equal(t, 3, usedProviders.SessionsLatestBatch(), "test setup: expected 3 in SessionsLatestBatch")
+
+	// CrossValidation, AgreementThreshold=2. Filter drops 2 of 3 → guard fires (1 < 2).
+	cvParams := &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2}
+	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
+	metricsStub := cvGuardMetrics{}
+	relayProcessor := relaycore.NewRelayProcessor(
+		ctx, cvParams, consistency, metricsStub, metricsStub,
+		lavaprotocol.NewRelayRetriesManager(), sm)
+
+	// Real session manager — OnSessionFailure runs against it for the 2 dropped sessions.
+	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	sessionManager := lavasession.NewConsumerSessionManager(
+		rpcEndpoint, optimizer, nil, nil, "test-router",
+		lavasession.NewActiveSubscriptionProvidersStorage())
+
+	rpcss := &RPCSmartRouterServer{
+		chainParser:            chainParser,
+		consistencyConfig:      relaycore.DefaultConsistencyValidationConfig(),
+		smartRouterConsistency: consistency,
+		sessionManager:         sessionManager,
+	}
+	protocolMsg := &MockProtocolMessage{
+		api:            &spectypes.Api{Name: "/cosmos/base/tendermint/v1beta1/blocks/latest"},
+		requestedBlock: spectypes.LATEST_BLOCK,
+		userData:       userData,
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	sendErr := rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, protocolMsg, relayProcessor, nil)
+	elapsed := time.Since(start)
+
+	require.Less(t, elapsed, time.Second,
+		"fast-fail required (commit 97266e4 regression catch); took %v", elapsed)
+	require.Error(t, sendErr)
+	require.Truef(t, errors.Is(sendErr, lavasession.PairingListEmptyError),
+		"error must wrap PairingListEmptyError so the CV short-circuit in policy.OnSendRelayResult can see it; got: %v", sendErr)
+	require.Equal(t, 0, usedProviders.CurrentlyUsed(),
+		"surviving valid sessions leaked into CurrentlyUsed — commit 97266e4 regression: validateReturnCondition will block on this and the request will stall processingTimeout")
+	require.Equal(t, 0, usedProviders.SessionsLatestBatch(),
+		"SessionsLatestBatch leaked — commit a78426a regression: RelayProcessor.checkEndProcessing will wait for responses that never arrive")
 }
