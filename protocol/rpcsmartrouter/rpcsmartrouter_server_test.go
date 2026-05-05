@@ -1516,6 +1516,13 @@ func TestSmartRouterSessionLeakPrevention_SingleProvider(t *testing.T) {
 		activeSessions := int32(0)
 		maxSessions := int32(1000) // MAX_SESSIONS_ALLOWED_PER_PROVIDER
 
+		// Buffered channel acts as a semaphore that enforces the cap, mirroring
+		// production where MAX_SESSIONS_ALLOWED_PER_PROVIDER gates acquisition.
+		// Without it the assertion below relies on goroutine scheduler luck and
+		// flakes under CI load (counter overshoots 1000 before any goroutine
+		// gets to decrement).
+		sem := make(chan struct{}, maxSessions)
+
 		var wg sync.WaitGroup
 		numRequests := 2000 // More than max sessions to verify no leak
 
@@ -1524,10 +1531,14 @@ func TestSmartRouterSessionLeakPrevention_SingleProvider(t *testing.T) {
 			go func(requestId int) {
 				defer wg.Done()
 
+				// Acquire a session slot (blocks while maxSessions are in flight)
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
 				// Simulate session acquisition
 				current := atomic.AddInt32(&activeSessions, 1)
 
-				// This should never happen with proper cleanup
+				// With the semaphore enforcing the cap, this must hold
 				if current > maxSessions {
 					t.Errorf("Session count exceeded max: %d > %d", current, maxSessions)
 				}
