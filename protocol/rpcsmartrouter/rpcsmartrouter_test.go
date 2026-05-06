@@ -834,3 +834,392 @@ func TestRPCSmartRouterCobraCommand_HelpStillRenders(t *testing.T) {
 		require.Contains(t, out, want, "--help output missing %q", want)
 	}
 }
+
+// reverifyTestRig is the shared scaffolding for the TestUpdateEpoch_Reverify* tests.
+// They differ only in how reverifyInputs is populated and what they assert post-update;
+// hoisting the boilerplate keeps each test focused on the behavior it actually covers.
+type reverifyTestRig struct {
+	rpsr     *RPCSmartRouter
+	chainKey string
+	endpoint *lavasession.RPCEndpoint
+}
+
+func newReverifyTestRig(t *testing.T, chainID, networkAddress string) *reverifyTestRig {
+	t.Helper()
+	rand.InitRandomSeed()
+	rpcEndpoint := &lavasession.RPCEndpoint{
+		ChainID:        chainID,
+		ApiInterface:   "tendermintrpc",
+		NetworkAddress: networkAddress,
+	}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
+	chainKey := rpcEndpoint.Key()
+	rpsr := &RPCSmartRouter{
+		sessionManagers:        make(map[string]*lavasession.ConsumerSessionManager),
+		providerSessions:       make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider),
+		backupProviderSessions: make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider),
+		rpcServers:             make(map[string]*RPCSmartRouterServer),
+		reverifyInputs:         make(map[string]*chainReverifyInputs),
+	}
+	rpsr.sessionManagers[chainKey] = lavasession.NewConsumerSessionManager(
+		rpcEndpoint, optimizer, nil, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage(),
+	)
+	return &reverifyTestRig{rpsr: rpsr, chainKey: chainKey, endpoint: rpcEndpoint}
+}
+
+// makeReverifyProvider builds a configured static-provider entry whose Name and
+// ApiInterface match the rig's endpoint. applyReverification keys the active-set
+// lookup off provider.Name == session.PublicLavaAddress.
+func makeReverifyProvider(name, chainID string) *lavasession.RPCStaticProviderEndpoint {
+	return &lavasession.RPCStaticProviderEndpoint{
+		Name:         name,
+		ChainID:      chainID,
+		ApiInterface: "tendermintrpc",
+	}
+}
+
+// makeReverifySession builds a session matching one a freshen pass would produce:
+// PublicLavaAddress == provider name, StaticProvider true, single trivial endpoint
+// (UpdateAllProviders only requires non-empty endpoints).
+func makeReverifySession(name string, epoch uint64) *lavasession.ConsumerSessionsWithProvider {
+	s := lavasession.NewConsumerSessionWithProvider(
+		name,
+		[]*lavasession.Endpoint{{NetworkAddress: "http://" + name + ":8080", Enabled: true}},
+		100, epoch, int64(1),
+	)
+	s.StaticProvider = true
+	return s
+}
+
+// fakeConvertSessions is the convertProvidersToSessions stub used by promote-path
+// tests. The production closure (see CreateSmartRouterEndpoint) opens real
+// DirectRPCConnections; tests only need session shape, not transport.
+func fakeConvertSessions(epoch uint64) func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+	return func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+		out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
+		for i, p := range providers {
+			out[uint64(i)] = makeReverifySession(p.Name, epoch)
+		}
+		return out
+	}
+}
+
+// TestUpdateEpoch_ReverifyDemotesFailingStatic verifies the demote orchestration:
+// a session live in the prior cycle whose provider now fails validation must be
+// dropped from rpsr.providerSessions[chainKey] after updateEpoch returns. This
+// covers the post-condition that lives only in updateEpoch (assignment of the
+// applyReverification result back into the router's map at rpcsmartrouter.go:1771).
+func TestUpdateEpoch_ReverifyDemotesFailingStatic(t *testing.T) {
+	rig := newReverifyTestRig(t, "LAVA_REVERIFY_DEMOTE", "127.0.0.1:3340")
+	rpsr, chainKey := rig.rpsr, rig.chainKey
+
+	const providerName = "lava@A"
+	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+		0: makeReverifySession(providerName, uint64(1)),
+	}
+	rpsr.reverifyInputs[chainKey] = &chainReverifyInputs{
+		rpcEndpoint:                rig.endpoint,
+		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{makeReverifyProvider(providerName, rig.endpoint.ChainID)},
+		convertProvidersToSessions: fakeConvertSessions(uint64(2)),
+		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+			return errors.New("re-verify failure")
+		},
+	}
+
+	rpsr.updateEpoch(context.Background(), uint64(2))
+
+	require.Empty(t, rpsr.providerSessions[chainKey],
+		"failed-validation provider must be dropped from rpsr.providerSessions after updateEpoch — applyReverification returned the demote, updateEpoch is responsible for storing it")
+	// End-to-end check: the post-reverify map must reach the session manager too,
+	// not just rpsr's own cache. validAddresses is built from pairingAddresses in
+	// UpdateAllProviders, so a count of 0 here confirms updateEpoch handed the
+	// demoted-out map to UpdateAllProviders rather than e.g. the pre-demote one.
+	require.Equal(t, 0, rpsr.sessionManagers[chainKey].GetNumberOfValidProviders(),
+		"session manager must reflect the post-reverify (empty) pairing")
+}
+
+// TestUpdateEpoch_ReverifyPromotesRecoveredStatic verifies the promote orchestration:
+// a configured provider absent from the prior cycle (failed-init / quarantined)
+// whose validation now passes must appear in rpsr.providerSessions[chainKey] with
+// PairingEpoch == newEpoch. The PairingEpoch assertion is the integration analogue
+// of the per-session check in TestApplyReverification — here we verify the value
+// survives the updateEpoch storage round-trip.
+func TestUpdateEpoch_ReverifyPromotesRecoveredStatic(t *testing.T) {
+	rig := newReverifyTestRig(t, "LAVA_REVERIFY_PROMOTE", "127.0.0.1:3341")
+	rpsr, chainKey := rig.rpsr, rig.chainKey
+
+	const providerName = "lava@A"
+	const newEpoch = uint64(2)
+
+	// No prior session: simulates failed-init or a provider that was quarantined
+	// last cycle. Freshen loop produces an empty map; applyReverification must
+	// promote A through convertProvidersToSessions.
+	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	rpsr.reverifyInputs[chainKey] = &chainReverifyInputs{
+		rpcEndpoint:                rig.endpoint,
+		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{makeReverifyProvider(providerName, rig.endpoint.ChainID)},
+		convertProvidersToSessions: fakeConvertSessions(newEpoch),
+		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+			return nil
+		},
+	}
+
+	rpsr.updateEpoch(context.Background(), newEpoch)
+
+	require.Len(t, rpsr.providerSessions[chainKey], 1,
+		"recovered provider must be promoted into rpsr.providerSessions after updateEpoch")
+	var promoted *lavasession.ConsumerSessionsWithProvider
+	for _, s := range rpsr.providerSessions[chainKey] {
+		promoted = s
+	}
+	require.Equal(t, providerName, promoted.PublicLavaAddress, "promoted session address must match configured provider name")
+	require.Equal(t, newEpoch, promoted.PairingEpoch,
+		"promoted session must carry the new epoch — applyReverification stamps it, updateEpoch must preserve it through storage")
+	// End-to-end checks: data must flow through to the session manager. The count
+	// confirms validAddresses was rebuilt from the post-reverify pairing, and
+	// IsStaticProvider confirms the promoted address landed in csm.pairing rather
+	// than getting stranded in rpsr's cache.
+	require.Equal(t, 1, rpsr.sessionManagers[chainKey].GetNumberOfValidProviders(),
+		"session manager validAddresses must contain exactly the promoted provider")
+	require.True(t, rpsr.sessionManagers[chainKey].IsStaticProvider(providerName),
+		"promoted provider must be queryable via IsStaticProvider — confirms it reached csm.pairing")
+}
+
+// TestUpdateEpoch_ReverifyMixedDemoteAndPromote covers the mixed case: in a single
+// updateEpoch tick one provider is demoted and another (previously failed-init) is
+// promoted. Asserts on the resulting map composition by name — the survivor set
+// after one full orchestration cycle.
+func TestUpdateEpoch_ReverifyMixedDemoteAndPromote(t *testing.T) {
+	rig := newReverifyTestRig(t, "LAVA_REVERIFY_MIXED", "127.0.0.1:3342")
+	rpsr, chainKey := rig.rpsr, rig.chainKey
+
+	const (
+		failingName   = "lava@A"
+		recoveredName = "lava@B"
+		newEpoch      = uint64(2)
+	)
+	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+		0: makeReverifySession(failingName, uint64(1)),
+	}
+	rpsr.reverifyInputs[chainKey] = &chainReverifyInputs{
+		rpcEndpoint: rig.endpoint,
+		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{
+			makeReverifyProvider(failingName, rig.endpoint.ChainID),
+			makeReverifyProvider(recoveredName, rig.endpoint.ChainID),
+		},
+		convertProvidersToSessions: fakeConvertSessions(newEpoch),
+		validateFn: func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+			if p.Name == failingName {
+				return errors.New("re-verify failure")
+			}
+			return nil
+		},
+	}
+
+	rpsr.updateEpoch(context.Background(), newEpoch)
+
+	gotNames := map[string]*lavasession.ConsumerSessionsWithProvider{}
+	for _, s := range rpsr.providerSessions[chainKey] {
+		gotNames[s.PublicLavaAddress] = s
+	}
+	require.Len(t, gotNames, 1, "exactly one provider must survive: failing demoted, recovered promoted")
+	require.NotContains(t, gotNames, failingName, "demoted provider must be absent from rpsr.providerSessions")
+	require.Contains(t, gotNames, recoveredName, "recovered provider must be present in rpsr.providerSessions")
+	require.Equal(t, newEpoch, gotNames[recoveredName].PairingEpoch, "promoted session must carry new epoch")
+	// End-to-end: only the recovered provider must reach the session manager.
+	require.Equal(t, 1, rpsr.sessionManagers[chainKey].GetNumberOfValidProviders(),
+		"session manager validAddresses must contain only the surviving (recovered) provider")
+}
+
+// TestUpdateEpoch_ReverifyEmptyBackupTierDeletes guards the delete-empty-map
+// invariant at rpcsmartrouter.go:1772-1776: when re-verification demotes every
+// backup, updateEpoch must DELETE rpsr.backupProviderSessions[chainKey] rather
+// than leave behind an empty map. An empty map would make the chain look like it
+// "has backups" to consumers iterating the outer map, so the delete branch is
+// load-bearing.
+func TestUpdateEpoch_ReverifyEmptyBackupTierDeletes(t *testing.T) {
+	rig := newReverifyTestRig(t, "LAVA_REVERIFY_BACKUP_DELETE", "127.0.0.1:3343")
+	rpsr, chainKey := rig.rpsr, rig.chainKey
+
+	const providerName = "lava@backup-A"
+	rpsr.backupProviderSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+		0: makeReverifySession(providerName, uint64(1)),
+	}
+	rpsr.reverifyInputs[chainKey] = &chainReverifyInputs{
+		rpcEndpoint:                rig.endpoint,
+		configuredBackup:           []*lavasession.RPCStaticProviderEndpoint{makeReverifyProvider(providerName, rig.endpoint.ChainID)},
+		convertProvidersToSessions: fakeConvertSessions(uint64(2)),
+		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+			return errors.New("backup re-verify failure")
+		},
+	}
+
+	rpsr.updateEpoch(context.Background(), uint64(2))
+
+	_, present := rpsr.backupProviderSessions[chainKey]
+	require.False(t, present,
+		"when every backup demotes, rpsr.backupProviderSessions[chainKey] must be DELETED, not stored as an empty map — otherwise outer-map iteration sees a phantom backup entry for the chain")
+}
+
+// TestUpdateEpoch_ReverifyBackupPartialDemote covers the backup-tier counterpart
+// to the static-mixed test: when re-verification leaves at least one backup
+// healthy, updateEpoch must take the assign branch at rpcsmartrouter.go:1772-1773
+// (not the delete branch) and store only the survivors. This is the path the
+// "backup tier produces a non-empty result post-reverify" case touches — the
+// empty-result delete path is covered separately above.
+func TestUpdateEpoch_ReverifyBackupPartialDemote(t *testing.T) {
+	rig := newReverifyTestRig(t, "LAVA_REVERIFY_BACKUP_PARTIAL", "127.0.0.1:3344")
+	rpsr, chainKey := rig.rpsr, rig.chainKey
+
+	const (
+		failingName  = "lava@backup-A"
+		survivorName = "lava@backup-B"
+		newEpoch     = uint64(2)
+	)
+	rpsr.backupProviderSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+		0: makeReverifySession(failingName, uint64(1)),
+		1: makeReverifySession(survivorName, uint64(1)),
+	}
+	rpsr.reverifyInputs[chainKey] = &chainReverifyInputs{
+		rpcEndpoint: rig.endpoint,
+		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{
+			makeReverifyProvider(failingName, rig.endpoint.ChainID),
+			makeReverifyProvider(survivorName, rig.endpoint.ChainID),
+		},
+		convertProvidersToSessions: fakeConvertSessions(newEpoch),
+		validateFn: func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+			if p.Name == failingName {
+				return errors.New("backup re-verify failure")
+			}
+			return nil
+		},
+	}
+
+	rpsr.updateEpoch(context.Background(), newEpoch)
+
+	stored, present := rpsr.backupProviderSessions[chainKey]
+	require.True(t, present, "partial-demote must take the assign branch, not delete")
+	gotNames := map[string]struct{}{}
+	for _, s := range stored {
+		gotNames[s.PublicLavaAddress] = struct{}{}
+	}
+	require.NotContains(t, gotNames, failingName, "demoted backup must be absent")
+	require.Contains(t, gotNames, survivorName, "healthy backup must be retained")
+	require.Len(t, gotNames, 1, "only the healthy backup must survive")
+}
+
+// TestUpdateEpoch_ReverifyPromotesRecoveredBackup mirrors the static promote test
+// for the backup tier: a configured backup absent from the prior cycle whose
+// validation now passes must appear in rpsr.backupProviderSessions[chainKey] with
+// PairingEpoch == newEpoch. Backup-tier code is almost-but-not-quite a copy of
+// the static path (the delete-empty-map branch differs), so a dedicated test
+// guards against copy-paste drift in the promote half.
+func TestUpdateEpoch_ReverifyPromotesRecoveredBackup(t *testing.T) {
+	rig := newReverifyTestRig(t, "LAVA_REVERIFY_BACKUP_PROMOTE", "127.0.0.1:3345")
+	rpsr, chainKey := rig.rpsr, rig.chainKey
+
+	const providerName = "lava@backup-A"
+	const newEpoch = uint64(2)
+
+	rpsr.backupProviderSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	rpsr.reverifyInputs[chainKey] = &chainReverifyInputs{
+		rpcEndpoint:                rig.endpoint,
+		configuredBackup:           []*lavasession.RPCStaticProviderEndpoint{makeReverifyProvider(providerName, rig.endpoint.ChainID)},
+		convertProvidersToSessions: fakeConvertSessions(newEpoch),
+		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+			return nil
+		},
+	}
+
+	rpsr.updateEpoch(context.Background(), newEpoch)
+
+	stored, present := rpsr.backupProviderSessions[chainKey]
+	require.True(t, present, "recovered backup must take the assign branch, not delete")
+	require.Len(t, stored, 1, "exactly one backup must be promoted")
+	var promoted *lavasession.ConsumerSessionsWithProvider
+	for _, s := range stored {
+		promoted = s
+	}
+	require.Equal(t, providerName, promoted.PublicLavaAddress, "promoted backup address must match configured provider name")
+	require.Equal(t, newEpoch, promoted.PairingEpoch,
+		"promoted backup must carry the new epoch — applyReverification stamps it via toAdmit, updateEpoch must preserve it through storage to backupProviderSessions")
+	// End-to-end: the promoted backup must reach the session manager's
+	// backupProviders map. IsStaticProvider walks pairing → backupProviders →
+	// pairingPurge, so a true result here confirms the address is in one of
+	// those (and since pairing/pairingPurge stayed empty, it must be in backupProviders).
+	require.True(t, rpsr.sessionManagers[chainKey].IsStaticProvider(providerName),
+		"promoted backup must be queryable via IsStaticProvider — confirms it reached csm.backupProviders")
+}
+
+// TestUpdateEpoch_ReverifyCrossEpochDemoteThenPromote exercises the multi-epoch
+// scenario only this kind of integration test catches: a provider active in
+// epoch 1, demoted in epoch 2, then re-promoted in epoch 3. Catches regressions
+// where:
+//   - the previous-epoch blocking machinery (UpdateAllProviders'
+//     previousEpochBlockedProviders preservation) accidentally quarantines a
+//     provider that re-validates clean
+//   - applyReverification's toAdmit path fails to produce a fresh session for an
+//     address that previously existed in csm.pairing (and is now in pairingPurge)
+//   - rpsr.providerSessions[chainKey] state from a prior demote isn't cleared
+//     before the freshen loop runs, double-feeding the next epoch
+//
+// The test uses a mutable bool over closure so we can flip the validateFn
+// outcome between epochs without rebuilding inputs (mirrors the real flow:
+// the same chainReverifyInputs is used across every epoch tick).
+func TestUpdateEpoch_ReverifyCrossEpochDemoteThenPromote(t *testing.T) {
+	rig := newReverifyTestRig(t, "LAVA_REVERIFY_CROSS_EPOCH", "127.0.0.1:3346")
+	rpsr, chainKey := rig.rpsr, rig.chainKey
+	sm := rpsr.sessionManagers[chainKey]
+
+	const providerName = "lava@A"
+
+	shouldFail := false
+	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	rpsr.reverifyInputs[chainKey] = &chainReverifyInputs{
+		rpcEndpoint:                rig.endpoint,
+		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{makeReverifyProvider(providerName, rig.endpoint.ChainID)},
+		convertProvidersToSessions: fakeConvertSessions(uint64(0)), // epoch on the fake is overwritten by applyReverification's PairingEpoch stamp
+		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+			if shouldFail {
+				return errors.New("re-verify failure")
+			}
+			return nil
+		},
+	}
+
+	// Epoch 1: A is configured and validates clean → promote into pairing.
+	rpsr.updateEpoch(context.Background(), uint64(1))
+	require.Equal(t, 1, sm.GetNumberOfValidProviders(), "epoch 1: A must be in pairing after first promote")
+	require.True(t, sm.IsStaticProvider(providerName), "epoch 1: A must be in csm.pairing")
+	require.Len(t, rpsr.providerSessions[chainKey], 1, "epoch 1: rpsr cache must hold A")
+	var epoch1Session *lavasession.ConsumerSessionsWithProvider
+	for _, s := range rpsr.providerSessions[chainKey] {
+		epoch1Session = s
+	}
+	require.Equal(t, uint64(1), epoch1Session.PairingEpoch, "epoch 1: PairingEpoch must be 1")
+
+	// Epoch 2: validate flips to failing → A demoted out of pairing.
+	shouldFail = true
+	rpsr.updateEpoch(context.Background(), uint64(2))
+	require.Equal(t, 0, sm.GetNumberOfValidProviders(), "epoch 2: A demoted, validAddresses must be empty")
+	require.Empty(t, rpsr.providerSessions[chainKey], "epoch 2: rpsr cache must reflect the demote")
+
+	// Epoch 3: validate passes again → A re-promoted. The critical assertion:
+	// previousEpochBlockedProviders machinery must NOT permanently quarantine A
+	// (it was demoted via reverify, not via OnSessionFailure, so it should never
+	// have entered currentlyBlockedProviderAddresses), and the new fresh session
+	// must carry PairingEpoch == 3.
+	shouldFail = false
+	rpsr.updateEpoch(context.Background(), uint64(3))
+	require.Equal(t, 1, sm.GetNumberOfValidProviders(), "epoch 3: A re-promoted, validAddresses must hold one entry")
+	require.True(t, sm.IsStaticProvider(providerName), "epoch 3: re-promoted A must be in csm.pairing")
+	require.Len(t, rpsr.providerSessions[chainKey], 1, "epoch 3: rpsr cache must hold the re-promoted A")
+	var epoch3Session *lavasession.ConsumerSessionsWithProvider
+	for _, s := range rpsr.providerSessions[chainKey] {
+		epoch3Session = s
+	}
+	require.NotSame(t, epoch1Session, epoch3Session,
+		"epoch 3: re-promoted session must be a fresh object, not a resurrected pointer from epoch 1 — applyReverification's toAdmit path goes through convertProvidersToSessions for absent-from-fresh providers")
+	require.Equal(t, uint64(3), epoch3Session.PairingEpoch,
+		"epoch 3: re-promoted session must carry PairingEpoch=3")
+}
