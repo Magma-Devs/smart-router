@@ -139,9 +139,10 @@ func TestApplyReverification(t *testing.T) {
 				rpcEndpoint:                rpc,
 				convertProvidersToSessions: convert,
 				configuredStatic:           configured,
+				validateFn:                 validate,
 			}
 
-			got, demoted := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, uint64(42), validate)
+			got, demoted := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, uint64(42))
 			gotNames := collectNames(got)
 
 			require.Len(t, gotNames, len(tt.want), "result size, tc #%d", i)
@@ -201,9 +202,10 @@ func TestApplyReverification_BackupTierReadsBackupList(t *testing.T) {
 		convertProvidersToSessions: fakeConvert,
 		configuredStatic:           staticOnly,
 		configuredBackup:           backupOnly,
+		validateFn:                 validate,
 	}
 
-	_, _ = applyReverification(context.Background(), inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{}, reverifyTierBackup, 1, validate)
+	_, _ = applyReverification(context.Background(), inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{}, reverifyTierBackup, 1)
 	require.Equal(t, []string{"B"}, calls, "backup tier must validate the backup list")
 }
 
