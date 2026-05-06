@@ -2106,8 +2106,8 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		if inputs := rpsr.reverifyInputs[chainKey]; inputs != nil {
 			reverifyStart := time.Now()
 			var demotedStatic, demotedBackup []*lavasession.ConsumerSessionsWithProvider
-			freshProviderSessions, demotedStatic = applyReverification(ctx, inputs, freshProviderSessions, reverifyTierStatic, epoch, nil)
-			freshBackupSessions, demotedBackup = applyReverification(ctx, inputs, freshBackupSessions, reverifyTierBackup, epoch, nil)
+			freshProviderSessions, demotedStatic = applyReverification(ctx, inputs, freshProviderSessions, reverifyTierStatic, epoch)
+			freshBackupSessions, demotedBackup = applyReverification(ctx, inputs, freshBackupSessions, reverifyTierBackup, epoch)
 			demotedSessions = append(demotedStatic, demotedBackup...)
 			// Per-chain re-verify is internally bounded by SpecReVerifyConcurrency,
 			// but updateEpoch iterates chains serially. Surfacing per-chain duration

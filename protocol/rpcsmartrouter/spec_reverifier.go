@@ -49,6 +49,11 @@ type chainReverifyInputs struct {
 	convertProvidersToSessions func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider
 	configuredStatic           []*lavasession.RPCStaticProviderEndpoint
 	configuredBackup           []*lavasession.RPCStaticProviderEndpoint
+	// validateFn is the per-provider validation callback applyReverification
+	// dispatches to. Production leaves it nil and applyReverification falls back
+	// to validateProvider (real network probe). Tests inject a fake to exercise
+	// updateEpoch's orchestration without standing up upstreams.
+	validateFn func(context.Context, *lavasession.RPCStaticProviderEndpoint) error
 }
 
 // applyReverification revalidates configured providers for one tier and
@@ -64,9 +69,10 @@ type chainReverifyInputs struct {
 //     configured providers that pass but were absent from `fresh` (returning
 //     from failed-init / quarantine).
 //
-// Production callers pass nil for `validate`, which dispatches to
-// validateProvider (real network probe). Tests inject a fake to exercise the
-// reconciliation logic without standing up upstreams.
+// The per-provider check is inputs.validateFn; production leaves it nil and we
+// fall back to validateProvider (real network probe). Tests inject a fake via
+// inputs.validateFn to exercise the reconciliation logic — and updateEpoch's
+// orchestration around it — without standing up upstreams.
 //
 // Validations run in parallel, capped by SpecReVerifyConcurrency, so a worst-
 // case cycle is bounded by ⌈N/conc⌉ × SpecReVerifyAttemptTimeout instead of
@@ -82,7 +88,6 @@ func applyReverification(
 	fresh map[uint64]*lavasession.ConsumerSessionsWithProvider,
 	tier reverifyTier,
 	epoch uint64,
-	validate func(context.Context, *lavasession.RPCStaticProviderEndpoint) error,
 ) (map[uint64]*lavasession.ConsumerSessionsWithProvider, []*lavasession.ConsumerSessionsWithProvider) {
 	var configured []*lavasession.RPCStaticProviderEndpoint
 	switch tier {
@@ -94,6 +99,7 @@ func applyReverification(
 	if len(configured) == 0 {
 		return fresh, nil
 	}
+	validate := inputs.validateFn
 	if validate == nil {
 		validate = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
 			return validateProvider(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
