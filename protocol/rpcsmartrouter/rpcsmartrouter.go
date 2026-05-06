@@ -768,7 +768,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Validate static providers BEFORE converting to sessions or registering.
 	// Only validates providers matching this endpoint's api-interface.
 	// See: the provider's validation approach for reference.
-	var failedStaticNames map[string]struct{}
+	var failedStaticSet map[*lavasession.RPCStaticProviderEndpoint]struct{}
 	var failedStaticEndpoints []*lavasession.RPCStaticProviderEndpoint
 
 	if len(relevantStaticProviderList) > 0 {
@@ -779,7 +779,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		)
 
 		totalAttemptedCount := 0
-		failedStaticNames = make(map[string]struct{})
+		failedStaticSet = make(map[*lavasession.RPCStaticProviderEndpoint]struct{})
 
 		for _, staticProvider := range relevantStaticProviderList {
 			// Skip providers with different api-interface (validated by their own endpoint)
@@ -827,7 +827,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			verificationRouter, err := chainlib.GetChainRouter(verifyCtx, parallelConnections, verificationEndpoint, chainParser)
 			if err != nil {
 				verifyCancel()
-				failedStaticNames[staticProvider.Name] = struct{}{}
+				failedStaticSet[staticProvider] = struct{}{}
 				failedStaticEndpoints = append(failedStaticEndpoints, staticProvider)
 				utils.LavaFormatWarning("static provider: failed creating chain router — excluding from provider list", err,
 					utils.LogAttr("chain", rpcEndpoint.ChainID),
@@ -853,7 +853,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			err = verificationFetcher.Validate(verifyCtx)
 			verifyCancel() // cleanup temporary router resources regardless of outcome
 			if err != nil {
-				failedStaticNames[staticProvider.Name] = struct{}{}
+				failedStaticSet[staticProvider] = struct{}{}
 				failedStaticEndpoints = append(failedStaticEndpoints, staticProvider)
 				utils.LavaFormatWarning("static provider validation failed — excluding from provider list", err,
 					utils.LogAttr("chain", rpcEndpoint.ChainID),
@@ -868,25 +868,25 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			)
 		}
 
-		healthyCount := totalAttemptedCount - len(failedStaticNames)
+		healthyCount := totalAttemptedCount - len(failedStaticSet)
 
 		// If ALL static providers failed verification, this endpoint cannot serve traffic
 		if totalAttemptedCount > 0 && healthyCount == 0 {
 			err := utils.LavaFormatError("all static providers failed verification — cannot serve endpoint", nil,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
-				utils.LogAttr("failedCount", len(failedStaticNames)),
+				utils.LogAttr("failedCount", len(failedStaticSet)),
 			)
 			errCh <- err
 			return err
 		}
 
-		if len(failedStaticNames) > 0 {
+		if len(failedStaticSet) > 0 {
 			utils.LavaFormatWarning("ATTENTION: some static providers failed verification and were excluded — they will be retried in the background",
 				nil,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
-				utils.LogAttr("failed", len(failedStaticNames)),
+				utils.LogAttr("failed", len(failedStaticSet)),
 				utils.LogAttr("healthy", healthyCount),
 			)
 		} else {
@@ -907,7 +907,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// static providers must still serve. Operators are clearly notified at startup
 	// so they can fix backup endpoints before they are actually needed in an emergency.
 	// Providers that fail validation are excluded from the registered backup list.
-	var failedBackupNames map[string]struct{}
+	var failedBackupSet map[*lavasession.RPCStaticProviderEndpoint]struct{}
 
 	if len(relevantBackupProviderList) > 0 {
 		utils.LavaFormatInfo("Validating backup providers (non-fatal)",
@@ -916,7 +916,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			utils.LogAttr("backupCount", len(relevantBackupProviderList)),
 		)
 
-		failedBackupNames = make(map[string]struct{})
+		failedBackupSet = make(map[*lavasession.RPCStaticProviderEndpoint]struct{})
 		validatedBackups := 0
 		for _, backupProvider := range relevantBackupProviderList {
 			if backupProvider.ApiInterface != rpcEndpoint.ApiInterface {
@@ -954,7 +954,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			verificationRouter, err := chainlib.GetChainRouter(verifyCtx, parallelConnections, verificationEndpoint, chainParser)
 			if err != nil {
 				verifyCancel()
-				failedBackupNames[backupProvider.Name] = struct{}{}
+				failedBackupSet[backupProvider] = struct{}{}
 				utils.LavaFormatWarning("backup provider: failed creating chain router — excluding from backup list", err,
 					utils.LogAttr("chain", rpcEndpoint.ChainID),
 					utils.LogAttr("provider", backupProvider.Name),
@@ -978,7 +978,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			err = verificationFetcher.Validate(verifyCtx)
 			verifyCancel()
 			if err != nil {
-				failedBackupNames[backupProvider.Name] = struct{}{}
+				failedBackupSet[backupProvider] = struct{}{}
 				utils.LavaFormatWarning("backup provider validation failed — excluding from backup list", err,
 					utils.LogAttr("chain", rpcEndpoint.ChainID),
 					utils.LogAttr("provider", backupProvider.Name),
@@ -992,12 +992,12 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			)
 		}
 
-		if len(failedBackupNames) > 0 {
+		if len(failedBackupSet) > 0 {
 			utils.LavaFormatWarning("ATTENTION: some backup providers failed validation and were excluded — they will not be used during emergency failover",
 				nil,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
-				utils.LogAttr("failed", len(failedBackupNames)),
+				utils.LogAttr("failed", len(failedBackupSet)),
 				utils.LogAttr("validated", validatedBackups),
 			)
 		} else {
@@ -1016,20 +1016,20 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// This ensures the session manager and rpsr.providerSessions never contain
 	// failed providers, so updateEpoch won't recreate sessions for dead nodes.
 	healthyStaticProviders := relevantStaticProviderList
-	if len(failedStaticNames) > 0 {
-		healthyStaticProviders = make([]*lavasession.RPCStaticProviderEndpoint, 0, len(relevantStaticProviderList)-len(failedStaticNames))
+	if len(failedStaticSet) > 0 {
+		healthyStaticProviders = make([]*lavasession.RPCStaticProviderEndpoint, 0, len(relevantStaticProviderList)-len(failedStaticSet))
 		for _, p := range relevantStaticProviderList {
-			if _, failed := failedStaticNames[p.Name]; !failed {
+			if _, failed := failedStaticSet[p]; !failed {
 				healthyStaticProviders = append(healthyStaticProviders, p)
 			}
 		}
 	}
 
 	healthyBackupProviders := relevantBackupProviderList
-	if len(failedBackupNames) > 0 {
-		healthyBackupProviders = make([]*lavasession.RPCStaticProviderEndpoint, 0, len(relevantBackupProviderList)-len(failedBackupNames))
+	if len(failedBackupSet) > 0 {
+		healthyBackupProviders = make([]*lavasession.RPCStaticProviderEndpoint, 0, len(relevantBackupProviderList)-len(failedBackupSet))
 		for _, p := range relevantBackupProviderList {
-			if _, failed := failedBackupNames[p.Name]; !failed {
+			if _, failed := failedBackupSet[p]; !failed {
 				healthyBackupProviders = append(healthyBackupProviders, p)
 			}
 		}
