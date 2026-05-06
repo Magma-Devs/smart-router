@@ -572,7 +572,9 @@ func TestGracefulFailure_MixedStaticAndBackupFiltering(t *testing.T) {
 	require.Equal(t, "backupY", healthyBackups[0].Name)
 }
 
-// Scenario 20: Duplicate provider names — healthy one gets excluded as collateral.
+// Scenario 20: Duplicate provider names are tolerated — only the actually-failing
+// instance is excluded. Pointer-keyed failed-set means name collisions don't cause
+// collateral exclusion of the healthy duplicate.
 func TestGracefulFailure_DuplicateNameCollision(t *testing.T) {
 	providers := []*lavasession.RPCStaticProviderEndpoint{
 		{
@@ -585,18 +587,20 @@ func TestGracefulFailure_DuplicateNameCollision(t *testing.T) {
 		},
 	}
 
-	// The dead one fails, name "my-node" is added to failedStaticNames
-	failedStaticNames := map[string]struct{}{"my-node": {}}
+	// Only the dead one fails — keyed by pointer identity, not by Name
+	failedStaticSet := map[*lavasession.RPCStaticProviderEndpoint]struct{}{
+		providers[1]: {},
+	}
 
-	// Filter — both get excluded because they share the name
 	healthy := make([]*lavasession.RPCStaticProviderEndpoint, 0)
 	for _, p := range providers {
-		if _, failed := failedStaticNames[p.Name]; !failed {
+		if _, failed := failedStaticSet[p]; !failed {
 			healthy = append(healthy, p)
 		}
 	}
 
-	require.Empty(t, healthy, "Both providers excluded because they share the same name")
+	require.Len(t, healthy, 1, "Only the failing duplicate is excluded; the healthy one survives")
+	require.Equal(t, "http://healthy:8080", healthy[0].NodeUrls[0].Url)
 }
 
 // Scenario 13/14/15: Retry goroutine self-terminates when failedStaticProviders is empty.
