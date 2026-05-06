@@ -1854,11 +1854,16 @@ func (rpsr *RPCSmartRouter) updateEpoch(epoch uint64) {
 			rpsr.backupProviderSessions[chainKey] = freshBackupSessions
 		}
 		server := rpsr.rpcServers[chainKey]
+
+		// UpdateAllProviders stays under rpsr.mu so the (rpsr.providerSessions write
+		// → csm push) pair is atomic with retryFailedStaticProviders' matching pair.
+		// Otherwise the two callers can push snapshots to csm in the opposite order
+		// they wrote rpsr.providerSessions, silently dropping providers until the
+		// next epoch. The synchronous body of UpdateAllProviders is a bounded map
+		// rebuild; probing is dispatched to a goroutine.
+		err := sessionManager.UpdateAllProviders(epoch, freshProviderSessions, freshBackupSessions)
 		rpsr.mu.Unlock()
 
-		// Heavy calls stay outside the lock (UpdateAllProviders triggers async probing,
-		// cleanupStaleTrackers does tracker removal)
-		err := sessionManager.UpdateAllProviders(epoch, freshProviderSessions, freshBackupSessions)
 		if err != nil {
 			utils.LavaFormatError("Failed to update providers on epoch change", err,
 				utils.LogAttr("epoch", epoch),
@@ -1866,8 +1871,9 @@ func (rpsr *RPCSmartRouter) updateEpoch(epoch uint64) {
 			)
 		}
 
-		// Cleanup stale ChainTrackers for endpoints no longer in the provider sessions
-		// This must happen AFTER UpdateAllProviders so connections are closed first
+		// cleanupStaleTrackers is the genuinely heavy work (tracker teardown +
+		// connection close) and stays outside the lock. Must run AFTER
+		// UpdateAllProviders so connections are closed first.
 		if server != nil {
 			rpsr.cleanupStaleTrackers(chainKey, server, freshProviderSessions, freshBackupSessions)
 		}
@@ -2016,10 +2022,16 @@ func (rpsr *RPCSmartRouter) retryFailedStaticProviders(
 
 			sessionManager := rpsr.sessionManagers[sessionManagerKey]
 			backupSessions := rpsr.backupProviderSessions[sessionManagerKey]
+
+			// UpdateAllProviders stays under rpsr.mu so this (rpsr.providerSessions
+			// write → csm push) pair is atomic with updateEpoch's matching pair.
+			// Otherwise a concurrent epoch tick can push to csm in the opposite
+			// order it wrote rpsr.providerSessions, silently dropping recovered
+			// providers until the next epoch.
+			err := sessionManager.UpdateAllProviders(currentEpoch, mergedSessions, backupSessions)
 			rpsr.mu.Unlock()
 
-			// Re-register all providers with session manager
-			if err := sessionManager.UpdateAllProviders(currentEpoch, mergedSessions, backupSessions); err != nil {
+			if err != nil {
 				utils.LavaFormatWarning("retry: failed to re-register recovered providers", err,
 					utils.LogAttr("chain", rpcEndpoint.ChainID),
 				)
