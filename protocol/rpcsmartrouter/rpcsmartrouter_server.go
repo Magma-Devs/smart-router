@@ -2192,46 +2192,47 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				go rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
 			}
 
-			// When there are retries, show all attempted providers (similar to REST behavior).
-			// Keep "Cached" in the list so the entry count matches Lava-Retries — without it,
-			// retries=N and a single provider name disagree on how many actors participated
-			// (MAG-1653 Bug #2).
-			allProvidersMap := make(map[string]bool)
-
-			if providerAddress != "" {
-				allProvidersMap[providerAddress] = true
-			}
-
-			// Add providers from node errors
-			for _, result := range nodeErrorResults {
-				if result.ProviderInfo.ProviderAddress != "" {
-					allProvidersMap[result.ProviderInfo.ProviderAddress] = true
+			// When there are retries, show all attempted providers in
+			// chronological-ish order (failures before the resolver, the resolver
+			// last). "Cached" stays in the list so the entry count matches
+			// Lava-Retries — without it, retries=N and a single provider name
+			// disagree on how many actors participated (MAG-1653 Bug #2).
+			//
+			// Ordering rule: walk protocol errors → node errors → successes,
+			// then append the resolver (`providerAddress`, which is "Cached"
+			// when relayResult.GetProvider() was empty). A `seen` set
+			// deduplicates without losing first-seen position. Result: errors
+			// chronologically first, the response source last (e.g.
+			// "lava@p1,lava@p2" when p2 succeeded after p1 failed; or
+			// "lava@p1,Cached" when cache resolved a request that p1 failed).
+			// Walking via slices instead of map iteration also makes the
+			// header value deterministic across runs — downstream parsers can
+			// rely on `last entry == response source`.
+			seen := make(map[string]struct{})
+			allProvidersList := make([]string, 0)
+			addProvider := func(addr string) {
+				if addr == "" {
+					return
 				}
-			}
-
-			// Add providers from protocol errors
-			for _, result := range protocolErrorResults {
-				if result.ProviderInfo.ProviderAddress != "" {
-					allProvidersMap[result.ProviderInfo.ProviderAddress] = true
+				if _, ok := seen[addr]; ok {
+					return
 				}
+				seen[addr] = struct{}{}
+				allProvidersList = append(allProvidersList, addr)
 			}
-
-			// Add providers from successful results (in case of partial success)
-			for _, result := range successResults {
-				if result.ProviderInfo.ProviderAddress != "" {
-					allProvidersMap[result.ProviderInfo.ProviderAddress] = true
-				}
+			for _, r := range protocolErrorResults {
+				addProvider(r.ProviderInfo.ProviderAddress)
 			}
+			for _, r := range nodeErrorResults {
+				addProvider(r.ProviderInfo.ProviderAddress)
+			}
+			for _, r := range successResults {
+				addProvider(r.ProviderInfo.ProviderAddress)
+			}
+			addProvider(providerAddress) // resolver — "Cached" or the winning real provider, ends up last
 
-			// Convert to slice and update provider address header with all participating providers
-			if len(allProvidersMap) > 0 {
-				allProvidersList := make([]string, 0, len(allProvidersMap))
-				for provider := range allProvidersMap {
-					allProvidersList = append(allProvidersList, provider)
-				}
+			if len(allProvidersList) > 0 {
 				allProvidersString := strings.Join(allProvidersList, ",")
-
-				// Update the existing PROVIDER_ADDRESS_HEADER_NAME with all providers
 				for i, metadata := range metadataReply {
 					if metadata.Name == common.PROVIDER_ADDRESS_HEADER_NAME {
 						metadataReply[i].Value = allProvidersString
