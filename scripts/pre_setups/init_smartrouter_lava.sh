@@ -47,7 +47,7 @@ LAVA_REST_LOCAL="https://lava-rest.publicnode.com:443"
 # gRPC URLs MUST have a scheme prefix; the validator in
 # protocol/lavasession/direct_rpc_connection.go (validateURL) rejects anything
 # else. Use grpcs:// for TLS — it implicitly sets AuthConfig.UseTLS=true.
-LAVA_GRPC_LOCAL="grpcs://lava-grpc.publicnode.com:443"
+LAVA_GRPC_LOCAL="grpcs://ba054036cd701b601cdab0806f7ad1da-lava.g.w.lavanet.xyz:443"
 LAVA_TENDERMINTRPC_LOCAL="https://lava-rpc.publicnode.com:443"
 LAVA_TENDERMINTRPC_WS_LOCAL="wss://lava-rpc.publicnode.com:443/websocket"
 
@@ -124,10 +124,9 @@ direct-rpc:
         skip-verifications:
           - pruning
 
-  # 3 upstream gRPC endpoints (PublicNode TLS)
-  # Note: gRPC URLs MUST include a scheme prefix; grpcs:// implies TLS so the
-  # explicit use-tls below is redundant but kept for documentation clarity.
-  # PublicNode gRPC blocks GetNodeInfo, so chain-id verification must be skipped.
+  # 3 upstream gRPC endpoints (Lavanet gateway, TLS)
+  # Note: grpcs:// scheme is required and implies TLS; the explicit use-tls
+  # below is redundant but kept for documentation clarity. chain-id verification is enabled.
   - name: "lava-publicnode-grpc-1"
     chain-id: "LAVA"
     api-interface: "grpc"
@@ -136,31 +135,6 @@ direct-rpc:
         auth-config:
           use-tls: true
         skip-verifications:
-          - chain-id
-          - pruning
-          - tx-indexing
-
-  - name: "lava-publicnode-grpc-2"
-    chain-id: "LAVA"
-    api-interface: "grpc"
-    node-urls:
-      - url: "$LAVA_GRPC_LOCAL"
-        auth-config:
-          use-tls: true
-        skip-verifications:
-          - chain-id
-          - pruning
-          - tx-indexing
-
-  - name: "lava-publicnode-grpc-3"
-    chain-id: "LAVA"
-    api-interface: "grpc"
-    node-urls:
-      - url: "$LAVA_GRPC_LOCAL"
-        auth-config:
-          use-tls: true
-        skip-verifications:
-          - chain-id
           - pruning
           - tx-indexing
 
@@ -222,6 +196,7 @@ config/smartrouter_examples/smartrouter_lava.yml \
 --cache-be \"127.0.0.1:20100\" \
 --use-static-spec \"$SPECS_DIR\" \
 --metrics-listen-address ':7779' \
+--maximum-streams-per-connection 10 \
 --min-relay-timeout 5s 2>&1 | tee \"$LOGS_DIR/SMARTROUTER_LAVA.log\"" && sleep 0.25
 
 sleep 3
