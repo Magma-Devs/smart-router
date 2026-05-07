@@ -193,6 +193,7 @@ func addArchiveExtension(ctx context.Context, protocolMessage chainlib.ProtocolM
 		utils.LavaFormatError("Failed adding archive extension", err, utils.LogAttr("apiUrl", relayRequestData.ApiUrl))
 		return protocolMessage
 	}
+	preserveForceCacheRefresh(protocolMessage, newProtocolMessage)
 	archiveStatus.isUpgraded.Store(true)
 	archiveStatus.isArchive.Store(true)
 	return newProtocolMessage
@@ -224,8 +225,26 @@ func removeArchiveExtension(ctx context.Context, protocolMessage chainlib.Protoc
 		utils.LavaFormatError("Failed removing archive extension", err, utils.LogAttr("apiUrl", relayRequestData.ApiUrl))
 		return protocolMessage
 	}
+	preserveForceCacheRefresh(protocolMessage, newProtocolMessage)
 	archiveStatus.isArchive.Store(false)
 	return newProtocolMessage
+}
+
+// preserveForceCacheRefresh copies the lava-force-cache-refresh directive from
+// src onto dst. ParseRelay only sees the metadata we hand it (just the new
+// extension override) and so calls SetForceCacheRefresh(false) on dst — without
+// this copy, a client that sent lava-force-cache-refresh: true gets cache-served
+// data on the retry/failover path because the post-archive message no longer
+// carries the directive (MAG-1653). Provider-selection directives like
+// lava-select-provider and lava-stickiness are intentionally NOT copied here:
+// the failover path may need to fall through to a different provider.
+func preserveForceCacheRefresh(src, dst chainlib.ProtocolMessage) {
+	if src == nil || dst == nil {
+		return
+	}
+	if src.GetForceCacheRefresh() {
+		dst.SetForceCacheRefresh(true)
+	}
 }
 
 // cacheBlockHashes marks all requested block hashes as irrelevant for future queries.
