@@ -2192,11 +2192,13 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				go rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
 			}
 
-			// When there are retries, show all attempted providers (similar to REST behavior)
+			// When there are retries, show all attempted providers (similar to REST behavior).
+			// Keep "Cached" in the list so the entry count matches Lava-Retries — without it,
+			// retries=N and a single provider name disagree on how many actors participated
+			// (MAG-1653 Bug #2).
 			allProvidersMap := make(map[string]bool)
 
-			// Add the current provider (might be from successful result or last error)
-			if providerAddress != "Cached" && providerAddress != "" {
+			if providerAddress != "" {
 				allProvidersMap[providerAddress] = true
 			}
 
