@@ -524,6 +524,83 @@ func TestRetryCountHeader(t *testing.T) {
 	})
 }
 
+// TestCacheServedResponseHeaders is a regression for MAG-1653 Bug #2: when a
+// relay is resolved by a cache hit during the retry loop, "Cached" must remain
+// in Lava-Provider-Address so the entry count stays consistent with Lava-Retries.
+// (Previously the retry-path rebuild explicitly excluded "Cached", overwriting
+// the header with only the failed provider names.)
+func TestCacheServedResponseHeaders(t *testing.T) {
+	ctx := context.Background()
+
+	findHeader := func(metadata []pairingtypes.Metadata, name string) *pairingtypes.Metadata {
+		for i := range metadata {
+			if metadata[i].Name == name {
+				return &metadata[i]
+			}
+		}
+		return nil
+	}
+
+	t.Run("cache hit with no retries - single Cached address, no retry header", func(t *testing.T) {
+		relayProcessor := &MockRelayProcessorForHeaders{
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: ""}}, // cache result has no provider
+			},
+			nodeErrors: []common.RelayResult{},
+		}
+
+		relayResult := &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
+			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, &MockProtocolMessage{
+			api: &spectypes.Api{Name: "eth_blockNumber"},
+		}, "eth_blockNumber", nil, true)
+
+		providerHeader := findHeader(relayResult.Reply.Metadata, common.PROVIDER_ADDRESS_HEADER_NAME)
+		require.NotNil(t, providerHeader)
+		require.Equal(t, "Cached", providerHeader.Value)
+
+		retryHeader := findHeader(relayResult.Reply.Metadata, common.RETRY_COUNT_HEADER_NAME)
+		require.Nil(t, retryHeader, "no retries occurred — header should be absent")
+	})
+
+	t.Run("cache hit after two protocol errors - matches MAG-1653 reproduction", func(t *testing.T) {
+		// 2 P1 503s + 1 cache hit = 3 attempts, 2 retries.
+		relayProcessor := &MockRelayProcessorForHeaders{
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: ""}}, // cache result
+			},
+			nodeErrors: []common.RelayResult{},
+			protocolErrors: []relaycore.RelayError{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"}},
+			},
+		}
+
+		relayResult := &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
+			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 2, relayProcessor, &MockProtocolMessage{
+			api: &spectypes.Api{Name: "eth_blockNumber"},
+		}, "eth_blockNumber", nil, true)
+
+		retryHeader := findHeader(relayResult.Reply.Metadata, common.RETRY_COUNT_HEADER_NAME)
+		require.NotNil(t, retryHeader)
+		require.Equal(t, "2", retryHeader.Value)
+
+		providerHeader := findHeader(relayResult.Reply.Metadata, common.PROVIDER_ADDRESS_HEADER_NAME)
+		require.NotNil(t, providerHeader)
+		require.Contains(t, providerHeader.Value, "Cached", "cache marker must be preserved on retry path")
+		require.Contains(t, providerHeader.Value, "lava@simprovider1", "failed provider must still be listed")
+	})
+}
+
 // TestStatefulRelayTargetsHeader tests the stateful API header functionality
 func TestStatefulRelayTargetsHeader(t *testing.T) {
 	ctx := context.Background()
