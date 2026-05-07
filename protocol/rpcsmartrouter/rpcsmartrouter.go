@@ -684,7 +684,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				directConn, err := lavasession.NewDirectRPCConnection(
 					ctx,
 					url,
-					uint(lavasession.DefaultMaximumStreamsOverASingleConnection),
+					uint(lavasession.MaximumStreamsOverASingleConnection),
 					provider.ApiInterface, // Used for protocol detection when URL has no scheme
 				)
 				if err != nil {
@@ -823,7 +823,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			verifyCtx, verifyCancel := context.WithTimeout(ctx, 30*time.Second)
 
 			// Create chain router with all URLs for complete supportedMap (HTTP + WebSocket)
-			parallelConnections := uint(lavasession.DefaultMaximumStreamsOverASingleConnection)
+			parallelConnections := uint(lavasession.MaximumStreamsOverASingleConnection)
 			verificationRouter, err := chainlib.GetChainRouter(verifyCtx, parallelConnections, verificationEndpoint, chainParser)
 			if err != nil {
 				verifyCancel()
@@ -950,7 +950,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 			verifyCtx, verifyCancel := context.WithCancel(ctx)
 
-			parallelConnections := uint(lavasession.DefaultMaximumStreamsOverASingleConnection)
+			parallelConnections := uint(lavasession.MaximumStreamsOverASingleConnection)
 			verificationRouter, err := chainlib.GetChainRouter(verifyCtx, parallelConnections, verificationEndpoint, chainParser)
 			if err != nil {
 				verifyCancel()
@@ -1222,7 +1222,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			},
 		}
 
-		parallelConnections := uint(lavasession.DefaultMaximumStreamsOverASingleConnection)
+		parallelConnections := uint(lavasession.MaximumStreamsOverASingleConnection)
 		chainRouter, err := chainlib.GetChainRouter(ctx, parallelConnections, chainTrackerEndpoint, chainParser)
 		if err != nil {
 			utils.LavaFormatWarning("Failed to create chain router for chain tracker", err,
@@ -1950,7 +1950,7 @@ func (rpsr *RPCSmartRouter) retryFailedStaticProviders(
 			// remaining providers in this cycle.
 			attemptCtx, attemptCancel := context.WithTimeout(ctx, 30*time.Second)
 
-			parallelConnections := uint(lavasession.DefaultMaximumStreamsOverASingleConnection)
+			parallelConnections := uint(lavasession.MaximumStreamsOverASingleConnection)
 			verificationRouter, err := chainlib.GetChainRouter(attemptCtx, parallelConnections, verificationEndpoint, chainParser)
 			if err != nil {
 				attemptCancel()
