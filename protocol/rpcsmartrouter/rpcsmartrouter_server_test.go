@@ -596,8 +596,9 @@ func TestCacheServedResponseHeaders(t *testing.T) {
 
 		providerHeader := findHeader(relayResult.Reply.Metadata, common.PROVIDER_ADDRESS_HEADER_NAME)
 		require.NotNil(t, providerHeader)
-		require.Contains(t, providerHeader.Value, "Cached", "cache marker must be preserved on retry path")
-		require.Contains(t, providerHeader.Value, "lava@simprovider1", "failed provider must still be listed")
+		// Ordering contract: errors chronologically first, resolver last.
+		// "Cached" sits at the end as the response source.
+		require.Equal(t, "lava@simprovider1,Cached", providerHeader.Value)
 	})
 }
 
