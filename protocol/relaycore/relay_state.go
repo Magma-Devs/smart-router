@@ -193,7 +193,7 @@ func addArchiveExtension(ctx context.Context, protocolMessage chainlib.ProtocolM
 		utils.LavaFormatError("Failed adding archive extension", err, utils.LogAttr("apiUrl", relayRequestData.ApiUrl))
 		return protocolMessage
 	}
-	preserveForceCacheRefresh(protocolMessage, newProtocolMessage)
+	preserveRetrySafeDirectives(protocolMessage, newProtocolMessage)
 	archiveStatus.isUpgraded.Store(true)
 	archiveStatus.isArchive.Store(true)
 	return newProtocolMessage
@@ -225,25 +225,69 @@ func removeArchiveExtension(ctx context.Context, protocolMessage chainlib.Protoc
 		utils.LavaFormatError("Failed removing archive extension", err, utils.LogAttr("apiUrl", relayRequestData.ApiUrl))
 		return protocolMessage
 	}
-	preserveForceCacheRefresh(protocolMessage, newProtocolMessage)
+	preserveRetrySafeDirectives(protocolMessage, newProtocolMessage)
 	archiveStatus.isArchive.Store(false)
 	return newProtocolMessage
 }
 
-// preserveForceCacheRefresh copies the lava-force-cache-refresh directive from
-// src onto dst. ParseRelay only sees the metadata we hand it (just the new
-// extension override) and so calls SetForceCacheRefresh(false) on dst — without
-// this copy, a client that sent lava-force-cache-refresh: true gets cache-served
-// data on the retry/failover path because the post-archive message no longer
-// carries the directive (MAG-1653). Provider-selection directives like
-// lava-select-provider and lava-stickiness are intentionally NOT copied here:
-// the failover path may need to fall through to a different provider.
-func preserveForceCacheRefresh(src, dst chainlib.ProtocolMessage) {
+// preserveRetrySafeDirectives copies consumer-intent directives from src onto
+// dst after an archive add/remove rebuilds the protocolMessage. The rebuild
+// passes only the new extension override into ParseRelay, so every other
+// directive on dst defaults to its zero value — without re-copying, retries
+// silently drop client-set directives (MAG-1653).
+//
+// Both the chainMessage state (runtime source of truth for force-cache-refresh
+// and timeout-override) and the directiveHeaders map (parse-time input surface,
+// where lava-debug-relay lives) are updated so the two stay consistent —
+// otherwise a future caller reaching for the map would silently see the wrong
+// answer.
+//
+// Provider-selection directives (lava-select-provider, lava-stickiness) are
+// deliberately NOT copied: the failover path may need to fall through to a
+// different provider on retry. The block-list (lava-providers-block) is also
+// not handled here because it's already preserved via usedProviders, captured
+// once at the top of ProcessRelaySend from the original protocolMessage.
+func preserveRetrySafeDirectives(src, dst chainlib.ProtocolMessage) {
 	if src == nil || dst == nil {
 		return
 	}
-	if src.GetForceCacheRefresh() {
-		dst.SetForceCacheRefresh(true)
+	preserveForceCacheRefresh(src, dst)
+	preserveRelayTimeout(src, dst)
+	preserveDebugRelay(src, dst)
+}
+
+func preserveForceCacheRefresh(src, dst chainlib.ProtocolMessage) {
+	if !src.GetForceCacheRefresh() {
+		return
+	}
+	dst.SetForceCacheRefresh(true)
+	if hdrs := dst.GetDirectiveHeaders(); hdrs != nil {
+		hdrs[common.FORCE_CACHE_REFRESH_HEADER_NAME] = "true"
+	}
+}
+
+func preserveRelayTimeout(src, dst chainlib.ProtocolMessage) {
+	timeout := src.TimeoutOverride()
+	if timeout == 0 {
+		return
+	}
+	dst.TimeoutOverride(timeout)
+	if hdrs := dst.GetDirectiveHeaders(); hdrs != nil {
+		hdrs[common.RELAY_TIMEOUT_HEADER_NAME] = timeout.String()
+	}
+}
+
+func preserveDebugRelay(src, dst chainlib.ProtocolMessage) {
+	srcHdrs := src.GetDirectiveHeaders()
+	if srcHdrs == nil {
+		return
+	}
+	v, ok := srcHdrs[common.LAVA_DEBUG_RELAY]
+	if !ok {
+		return
+	}
+	if hdrs := dst.GetDirectiveHeaders(); hdrs != nil {
+		hdrs[common.LAVA_DEBUG_RELAY] = v
 	}
 }
 
