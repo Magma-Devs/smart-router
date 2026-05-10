@@ -2293,8 +2293,19 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// add the relay retried count: total attempts minus 1 (the initial attempt is not a retry)
 		successResults, nodeErrorResults, protocolErrorResults := relayProcessor.GetResultsData()
 		totalAttempts := uint64(len(successResults)) + uint64(len(nodeErrorResults)) + protocolErrors
-		if totalAttempts > 1 {
-			totalRetries := totalAttempts - 1
+
+		// Stateful selection fans out to all top providers in a single batch and
+		// never retries (relaypolicy.Decide returns Stop for Stateful). Failures
+		// inside that fan-out are expected — only one provider needs to win —
+		// so they must not inflate Lava-Retries. Without this absorption,
+		// healthy stateful traffic shows non-zero retry rates whenever any
+		// parallel attempt loses the race or returns an error.
+		totalRetries := uint64(0)
+		if selection != relaycore.Stateful && totalAttempts > 1 {
+			totalRetries = totalAttempts - 1
+		}
+
+		if totalRetries > 0 {
 			metadataReply = append(metadataReply, pairingtypes.Metadata{
 				Name:  common.RETRY_COUNT_HEADER_NAME,
 				Value: strconv.FormatUint(totalRetries, 10),

@@ -525,6 +525,124 @@ func TestRetryCountHeader(t *testing.T) {
 	})
 }
 
+// TestRetryCountHeaderStatefulFanoutAbsorption pins the rule that parallel-batch
+// failures during a Stateful fan-out must not be counted as retries. Stateful
+// dispatches to all top providers at once (relaypolicy.Decide returns Stop for
+// Stateful, so it never retries sequentially); a 503 from one provider while
+// another succeeds is expected race-loss, not a retry.
+//
+// Bug repro: send eth_sendRawTransaction with {P1 down, P2 success, P3 success}.
+// Pre-fix the response carried Lava-Retries: 1, which fed false positives into
+// operator dashboards monitoring stateful traffic.
+func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
+	ctx := context.Background()
+
+	findHeader := func(metadata []pairingtypes.Metadata, name string) *pairingtypes.Metadata {
+		for i := range metadata {
+			if metadata[i].Name == name {
+				return &metadata[i]
+			}
+		}
+		return nil
+	}
+
+	t.Run("stateful fan-out with one provider 503 - absorbs failure, retries=0", func(t *testing.T) {
+		// Mirrors the production repro: P1 503 + P2 success in the same fan-out.
+		relayProcessor := &MockRelayProcessorForHeaders{
+			selection: relaycore.Stateful,
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider2"}},
+			},
+			protocolErrors: []relaycore.RelayError{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"}},
+			},
+		}
+
+		relayResult := &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider2"},
+			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 1, relayProcessor, &MockProtocolMessage{
+			api: &spectypes.Api{
+				Name:     "eth_sendRawTransaction",
+				Category: spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS},
+			},
+		}, "eth_sendRawTransaction", nil, true)
+
+		retryHeader := findHeader(relayResult.Reply.Metadata, common.RETRY_COUNT_HEADER_NAME)
+		require.Nil(t, retryHeader, "stateful fan-out must absorb in-batch failures: no Lava-Retries header expected")
+
+		// Provider-Address rebuild is gated on retries>0 to keep MAG-1653 Bug #2's
+		// invariant (entry count == retries+1). For retries=0 the header must
+		// stay at the single winning provider; the loser is reported via
+		// lava-fast-tx-participants instead.
+		providerHeader := findHeader(relayResult.Reply.Metadata, common.PROVIDER_ADDRESS_HEADER_NAME)
+		require.NotNil(t, providerHeader)
+		require.Equal(t, "lava@simprovider2", providerHeader.Value)
+	})
+
+	t.Run("stateful fan-out all healthy - no Lava-Retries header", func(t *testing.T) {
+		// Acceptance criterion 2: no regression for the all-healthy fan-out case.
+		// Three successes in one batch must not produce any retry header.
+		relayProcessor := &MockRelayProcessorForHeaders{
+			selection: relaycore.Stateful,
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider2"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider3"}},
+			},
+		}
+
+		relayResult := &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"},
+			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, &MockProtocolMessage{
+			api: &spectypes.Api{
+				Name:     "eth_sendRawTransaction",
+				Category: spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS},
+			},
+		}, "eth_sendRawTransaction", nil, true)
+
+		retryHeader := findHeader(relayResult.Reply.Metadata, common.RETRY_COUNT_HEADER_NAME)
+		require.Nil(t, retryHeader, "all-healthy stateful fan-out must not emit Lava-Retries")
+	})
+
+	t.Run("stateless one error then success - retries still counted (regression guard)", func(t *testing.T) {
+		// The absorption rule is scoped to Stateful; sequential-retry semantics
+		// for Stateless must continue to increment Lava-Retries. Without this
+		// guard a future change collapsing the Stateless branch into Stateful's
+		// would silently zero out the counter for the most common path.
+		relayProcessor := &MockRelayProcessorForHeaders{
+			selection: relaycore.Stateless,
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
+			},
+			nodeErrors: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+			},
+		}
+
+		relayResult := &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"},
+			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, &MockProtocolMessage{
+			api: &spectypes.Api{Name: "eth_blockNumber"},
+		}, "eth_blockNumber", nil, true)
+
+		retryHeader := findHeader(relayResult.Reply.Metadata, common.RETRY_COUNT_HEADER_NAME)
+		require.NotNil(t, retryHeader)
+		require.Equal(t, "1", retryHeader.Value)
+	})
+}
+
 // TestHedgeTriggeredHeader covers MAG-1818: lava-hedge-triggered must appear
 // (Value="true") iff analytics.HedgeCount > 0, and must be omitted otherwise.
 // This signal is independent of Lava-Retries — the test framework needs to
