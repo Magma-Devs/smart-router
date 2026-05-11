@@ -432,9 +432,8 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// JSON-RPC code like -32601 continues to classify the same way.
 		// The prefix only changes the verdict for HTTP 4xx/5xx responses
 		// that carry a JSON-RPC body with a generic/vendor code where the
-		// HTTP status is the authoritative signal. See
-		// smart-router-automation/BUGS/JIRA_DRAFT_HTTP_404_CLASSIFIER_BUG.md
-		// and JIRA_DRAFT_HTTP_413_CLASSIFIER_BUG.md for the evidence.
+		// HTTP status is the authoritative signal. 
+
 		classifierMessage := errorMessage
 		if statusCode < 200 || statusCode >= 300 {
 			classifierMessage = fmt.Sprintf("HTTP %d: %s", statusCode, errorMessage)
