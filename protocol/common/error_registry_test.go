@@ -1024,6 +1024,48 @@ func TestClassifyError_GenericRESTMappings(t *testing.T) {
 	}
 }
 
+// TestClassifyError_GenericJsonRPCHTTPStatusMappings is the JSON-RPC analogue
+// of TestClassifyError_GenericRESTMappings. The classifier appends
+// httpStatusMessageMappings (HTTPStatusContains matchers) to the JSON-RPC
+// transport in init(), so a JSON-RPC-shaped error whose message contains
+// "HTTP <status>:" must classify the same way it would on REST.
+//
+// This test pins the contract that
+// rpcsmartrouter/direct_rpc_relay.go::sendJSONRPCRelay relies on after the
+// MAG-1666 fix: when an upstream returns HTTP 4xx/5xx with a JSON-RPC error
+// body whose code is generic (-1 here), the call site prepends
+// "HTTP <status>: " to the message so HTTPStatusContains(N) can fire on the
+// JSON-RPC transport. Removing the prefix at the call site would silently
+// regress the retry verdict for 404 / 405 / 413 — this test catches that.
+// See smart-router-automation/BUGS/JIRA_DRAFT_HTTP_404_CLASSIFIER_BUG.md
+// and the parametrized integration sweep in
+// tests/simulator/production_tests/test_phase1_2_http_status_codes.py.
+func TestClassifyError_GenericJsonRPCHTTPStatusMappings(t *testing.T) {
+	tests := []struct {
+		name     string
+		message  string
+		expected *LavaError
+	}{
+		{"404 not found", "HTTP 404: Not Found", LavaErrorNodeEndpointNotFound},
+		{"405 method not allowed", "HTTP 405: Method Not Allowed", LavaErrorNodeMethodNotAllowed},
+		{"413 too large", "HTTP 413: Request Entity Too Large", LavaErrorUserRequestTooLarge},
+		{"429 rate limit", "HTTP 429: Too Many Requests", LavaErrorNodeRateLimited},
+		{"500 internal", "HTTP 500: Internal Server Error", LavaErrorNodeInternalError},
+		{"502 bad gateway", "HTTP 502: Bad Gateway", LavaErrorNodeBadGateway},
+		{"503 unavailable", "HTTP 503: Service Unavailable", LavaErrorNodeServiceUnavailable},
+		{"504 timeout", "HTTP 504: Gateway Timeout", LavaErrorNodeGatewayTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// errorCode=-1 is the generic body code the call site forwards
+			// when the upstream's JSON-RPC body has no standard code; this
+			// is exactly the case the MAG-1666 fix targets.
+			result := ClassifyError(nil, ChainFamilyAptos, TransportJsonRPC, -1, tt.message)
+			assert.Equal(t, tt.expected, result, "expected %s but got %s", tt.expected.Name, result.Name)
+		})
+	}
+}
+
 func TestClassifyError_GenericGRPCMappings(t *testing.T) {
 	tests := []struct {
 		name     string
