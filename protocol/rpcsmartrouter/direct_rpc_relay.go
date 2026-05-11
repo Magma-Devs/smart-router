@@ -423,7 +423,23 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		if jsonrpcCode := common.ExtractJSONRPCErrorCode(responseData); jsonrpcCode != 0 {
 			errorCode = jsonrpcCode
 		}
-		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, errorCode, errorMessage)
+		// MAG-1666 — HTTP status digits must reach the classifier.
+		// When the upstream returned a non-2xx HTTP status, prepend the
+		// status to the classifier message so HTTPStatusContains(N) rules
+		// (error_classifier.go::httpStatusMessageMappings) can fire. The
+		// body's JSON-RPC code still wins via CodeEquals priority — those
+		// matchers run before any message-based matcher — so a meaningful
+		// JSON-RPC code like -32601 continues to classify the same way.
+		// The prefix only changes the verdict for HTTP 4xx/5xx responses
+		// that carry a JSON-RPC body with a generic/vendor code where the
+		// HTTP status is the authoritative signal. See
+		// smart-router-automation/BUGS/JIRA_DRAFT_HTTP_404_CLASSIFIER_BUG.md
+		// and JIRA_DRAFT_HTTP_413_CLASSIFIER_BUG.md for the evidence.
+		classifierMessage := errorMessage
+		if statusCode < 200 || statusCode >= 300 {
+			classifierMessage = fmt.Sprintf("HTTP %d: %s", statusCode, errorMessage)
+		}
+		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, errorCode, classifierMessage)
 	}
 
 	return result, nil
