@@ -134,6 +134,139 @@ func TestDirectRPCRelaySender_SendDirectRelay_ServerError(t *testing.T) {
 	assert.Contains(t, err.Error(), "503")
 }
 
+// TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666 is the
+// call-site regression test for the MAG-1666 fix. The classifier-level test
+// (TestClassifyError_GenericJsonRPCHTTPStatusMappings) only proves the matcher
+// fires on an already-prefixed string; it can't catch a regression where the
+// call site at direct_rpc_relay.go::sendJSONRPCRelay stops prepending
+// "HTTP <status>: " to the classifier message.
+//
+// The discriminator: when the upstream returns HTTP 404/413 with a JSON-RPC
+// body whose code is generic (-1, not in the registry), the only signal that
+// can route classification to a non-retryable LavaError is the HTTP status
+// digits in the message. A bare/inert message (no substring matcher hits)
+// classifies to LavaErrorUnknown (retryable), so IsNonRetryable flips between
+// true (prefix present) and false (prefix removed).
+func TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666(t *testing.T) {
+	// The bare error message returned by CheckResponseError. Must be inert —
+	// no substring like "endpoint not found" / "method not allowed" / "request
+	// too large" or any other classifier matcher token, or the regression
+	// would be masked by a different matcher firing.
+	const bareErrorMessage = "upstream returned error"
+
+	// Discriminator assertion: without the call site's prefix, this exact
+	// (transport, errorCode, message) combination must classify to
+	// LavaErrorUnknown. If a future matcher swallows it, the test must fail
+	// loudly here rather than producing a confusing failure below.
+	require.Equal(t,
+		common.LavaErrorUnknown,
+		common.ClassifyError(nil, common.ChainFamilyEVM, common.TransportJsonRPC, -1, bareErrorMessage),
+		"bare message must classify to UNKNOWN without the HTTP <status>: prefix — "+
+			"otherwise this test cannot prove the prefix is what flipped the verdict")
+
+	tests := []struct {
+		name       string
+		statusCode int
+	}{
+		{name: "HTTP 404 → NODE_ENDPOINT_NOT_FOUND (non-retryable)", statusCode: 404},
+		{name: "HTTP 413 → USER_REQUEST_TOO_LARGE (non-retryable)", statusCode: 413},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Mock upstream returns the chosen HTTP status with a JSON-RPC
+			// body whose error.code is generic (-1) so ExtractJSONRPCErrorCode
+			// resolves to -1 and the HTTP status digits become the only
+			// signal the classifier has.
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.statusCode)
+				w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"` + bareErrorMessage + `"}}`))
+			}))
+			defer mockServer.Close()
+
+			ctx := context.Background()
+			nodeUrl := common.NodeUrl{Url: mockServer.URL}
+
+			directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+			require.NoError(t, err)
+
+			sender := &DirectRPCRelaySender{
+				directConnection: directConn,
+				endpointName:     "test-http-status-prefix",
+				chainFamily:      common.ChainFamilyEVM,
+			}
+
+			chainMessage := &mockChainMessage{
+				requestData: []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`),
+				// Drive the call site into its hasError branch with the inert
+				// message; this is what the classifier sees before prefixing.
+				checkResponseError: func(_ []byte, _ int) (bool, string) {
+					return true, bareErrorMessage
+				},
+			}
+
+			result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, tt.statusCode, result.StatusCode)
+			assert.True(t, result.IsNodeError, "hasError branch must have fired")
+			assert.True(t, result.IsNonRetryable,
+				"HTTP %d with generic body code should classify as non-retryable; "+
+					"removing the HTTP <status>: prefix at direct_rpc_relay.go::sendJSONRPCRelay would regress this",
+				tt.statusCode)
+		})
+	}
+}
+
+// TestDirectRPCRelaySender_HTTPStatusPrefixSkippedOn2xx pins the guard at
+// direct_rpc_relay.go::sendJSONRPCRelay: only non-2xx responses get the
+// "HTTP <status>: " prefix. An always-prefix change would silently re-route
+// 2xx JSON-RPC node errors through HTTP matchers and break the registry
+// contract for body-code classification.
+func TestDirectRPCRelaySender_HTTPStatusPrefixSkippedOn2xx(t *testing.T) {
+	const bareErrorMessage = "upstream returned error"
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"` + bareErrorMessage + `"}}`))
+	}))
+	defer mockServer.Close()
+
+	ctx := context.Background()
+	nodeUrl := common.NodeUrl{Url: mockServer.URL}
+
+	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	require.NoError(t, err)
+
+	sender := &DirectRPCRelaySender{
+		directConnection: directConn,
+		endpointName:     "test-http-status-prefix-2xx",
+		chainFamily:      common.ChainFamilyEVM,
+	}
+
+	chainMessage := &mockChainMessage{
+		requestData: []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`),
+		checkResponseError: func(_ []byte, _ int) (bool, string) {
+			return true, bareErrorMessage
+		},
+	}
+
+	result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 200, result.StatusCode)
+	assert.True(t, result.IsNodeError)
+	// HTTP 200 + generic body code (-1) + inert message → no matcher fires →
+	// LavaErrorUnknown → IsNonRetryable=false. An "always-prefix" regression
+	// would inject "HTTP 200: ..." into the classifier message, which is
+	// harmless today but documents that 2xx responses must not be reclassified
+	// through HTTP-status matchers.
+	assert.False(t, result.IsNonRetryable,
+		"2xx responses must not be classified via HTTP-status matchers")
+}
+
 func TestDirectRPCRelaySender_SendDirectRelay_BatchRequest(t *testing.T) {
 	// Create mock JSON-RPC server that handles batch requests
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -281,6 +414,9 @@ func createMockBatchChainMessage(t *testing.T, requestData []byte) chainlib.Chai
 type mockChainMessage struct {
 	requestData []byte
 	api         *spectypes.Api
+	// checkResponseError, when non-nil, overrides the default (false, "") so
+	// tests can drive the call site's hasError branch with a custom message.
+	checkResponseError func(data []byte, httpStatusCode int) (bool, string)
 }
 
 func (m *mockChainMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
@@ -295,6 +431,9 @@ func (m *mockChainMessage) GetApi() *spectypes.Api {
 }
 
 func (m *mockChainMessage) CheckResponseError(data []byte, httpStatusCode int) (bool, string) {
+	if m.checkResponseError != nil {
+		return m.checkResponseError(data, httpStatusCode)
+	}
 	return false, ""
 }
 

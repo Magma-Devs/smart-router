@@ -82,7 +82,7 @@ echo "Using static specs: $SPECS_DIR"
 #   export ETH_WS_URL_3="wss://ethereum-rpc.publicnode.com"
 
 # Set defaults if not already exported (placeholders will fail to connect)
-export ETH_RPC_URL_1="${ETH_RPC_URL_1:-https://eth.llamarpc.com}"
+export ETH_RPC_URL_1="${ETH_RPC_URL_1:-https://lb.drpc.live/ethereum/AgR9ugK3ak9roEnJY1YOg8O1VFMFBNUR8bRUehXRfUMv}"
 export ETH_RPC_URL_2="${ETH_RPC_URL_2:-https://json-rpc.8zfcse2amst1lajmh299uq4jn.blockchainnodeengine.com/?key=AIzaSyDyUtm6b-e-xKDQgVWzlroHdVTytiXEDik}"
 export ETH_RPC_URL_3="${ETH_RPC_URL_3:-https://ethereum-rpc.publicnode.com}"
 # Optional backup endpoint — emitted under `backup-direct-rpc:` only when set.
@@ -145,7 +145,10 @@ echo "    - 3 endpoints enable cross-validation testing (2-of-3 / 3-of-3)"
 echo "    - Testing Phases 1-5 implementation"
 echo ""
 
-# Build the config file — each provider is a separate direct-rpc entry
+# Build the config file — each provider pairs HTTPS + WSS under api-interface "jsonrpc".
+# WS legs MUST live in the same node-urls list as the HTTPS leg: the router filters
+# providers by (ChainID, ApiInterface) tuple before scanning for ws://wss:// URLs
+# (see protocol/rpcsmartrouter/rpcsmartrouter.go:512-518 and :818-830).
 cat > $CONFIG_FILE <<EOF
 # Smart Router Direct RPC Configuration
 # Testing Phases 1-5: JSON-RPC over HTTP/HTTPS + WebSocket Subscriptions
@@ -158,7 +161,7 @@ endpoints:
     network-address: "0.0.0.0:3360"
 
 direct-rpc:
-  # HTTP Endpoint 1
+  # HTTP+WS Endpoint 1
   - name: "eth-rpc-1"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
@@ -167,8 +170,9 @@ direct-rpc:
         skip-verifications:
           - chain-id
           - pruning
+      - url: "$ETH_WS_URL_1"
 
-  # HTTP Endpoint 2
+  # HTTP+WS Endpoint 2
   - name: "eth-rpc-2"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
@@ -177,8 +181,9 @@ direct-rpc:
         skip-verifications:
           - chain-id
           - pruning
+      - url: "$ETH_WS_URL_2"
 
-  # HTTP Endpoint 3
+  # HTTP+WS Endpoint 3
   - name: "eth-rpc-3"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
@@ -187,26 +192,6 @@ direct-rpc:
         skip-verifications:
           - chain-id
           - pruning
-
-  # WebSocket Endpoint 1 (Phase 5 - Subscriptions)
-  - name: "eth-ws-1"
-    chain-id: "ETH1"
-    api-interface: "websocket"
-    node-urls:
-      - url: "$ETH_WS_URL_1"
-
-  # WebSocket Endpoint 2 (Phase 5 - Subscriptions)
-  - name: "eth-ws-2"
-    chain-id: "ETH1"
-    api-interface: "websocket"
-    node-urls:
-      - url: "$ETH_WS_URL_2"
-
-  # WebSocket Endpoint 3 (Phase 5 - Subscriptions)
-  - name: "eth-ws-3"
-    chain-id: "ETH1"
-    api-interface: "websocket"
-    node-urls:
       - url: "$ETH_WS_URL_3"
 EOF
 
