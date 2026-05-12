@@ -250,12 +250,14 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupStaleSubscriptions() {
 // This enables tools like grpcurl to discover services through the smart router.
 // The cleanup function should be called when the connection is no longer needed.
 func (dgm *DirectGRPCSubscriptionManager) GetReflectionConnection(ctx context.Context) (*grpc.ClientConn, func(), error) {
-	if len(dgm.grpcEndpoints) == 0 {
-		return nil, nil, fmt.Errorf("no gRPC endpoints available for reflection")
+	// Select an endpoint via the primary→backup cascade. Reflection is read-only
+	// metadata so it isn't client-pinned; clientKey is empty.
+	endpoint, err := dgm.selectEndpoint(ctx, "", nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("no gRPC endpoints available for reflection: %w", err)
 	}
 
-	// Get a pool/connection for reflection
-	pool, err := dgm.getOrCreatePool(ctx, dgm.grpcEndpoints[0])
+	pool, err := dgm.getOrCreatePool(ctx, endpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get pool for reflection: %w", err)
 	}
@@ -265,11 +267,7 @@ func (dgm *DirectGRPCSubscriptionManager) GetReflectionConnection(ctx context.Co
 		return nil, nil, fmt.Errorf("failed to get connection for reflection: %w", err)
 	}
 
-	// Return the underlying gRPC connection
-	// The cleanup function doesn't need to do anything special since we're using the pool
-	cleanup := func() {
-		// Connection is managed by the pool - no cleanup needed
-	}
+	cleanup := func() {}
 
 	return conn.GetConn(), cleanup, nil
 }
@@ -279,8 +277,14 @@ func (dgm *DirectGRPCSubscriptionManager) IsStreamingMethod(ctx context.Context,
 	// Parse service and method name
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(methodPath)
 
-	// Get a pool/connection to check the method descriptor
-	pool, err := dgm.getOrCreatePool(ctx, dgm.grpcEndpoints[0])
+	// Select an endpoint via the primary→backup cascade.
+	// clientKey is empty because method-descriptor lookups aren't client-scoped.
+	endpoint, err := dgm.selectEndpoint(ctx, "", nil)
+	if err != nil {
+		return false, nil, err
+	}
+
+	pool, err := dgm.getOrCreatePool(ctx, endpoint)
 	if err != nil {
 		return false, nil, err
 	}
