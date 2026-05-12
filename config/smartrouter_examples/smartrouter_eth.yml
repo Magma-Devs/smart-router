@@ -14,11 +14,11 @@ direct-rpc:
     chain-id: "ETH1"
     api-interface: "jsonrpc"
     node-urls:
-      - url: "https://eth.llamarpc.com"
+      - url: "https://lb.drpc.live/ethereum/YOUR_DRPC_TOKEN"
         skip-verifications:
           - chain-id
           - pruning
-      - url: "wss://eth.llamarpc.com"
+      - url: "wss://lb.drpc.live/ethereum/YOUR_DRPC_TOKEN"
 
   # HTTP+WS Endpoint 2
   - name: "eth-rpc-2"
@@ -29,7 +29,7 @@ direct-rpc:
         skip-verifications:
           - chain-id
           - pruning
-      - url: "YOUR_ETH_WS_PROVIDER_URL"
+      - url: "wss://g.w.lavanet.xyz:443/gateway/eth/rpc/YOUR_LAVA_GATEWAY_KEY"
 
   # HTTP+WS Endpoint 3
   - name: "eth-rpc-3"
@@ -41,77 +41,3 @@ direct-rpc:
           - chain-id
           - pruning
       - url: "wss://ethereum-rpc.publicnode.com"
-
-  # WebSocket Endpoint 1 (Phase 5 - Subscriptions)
-  - name: "eth-ws-1"
-    chain-id: "ETH1"
-    api-interface: "websocket"
-    node-urls:
-      - url: "wss://g.w.lavanet.xyz:443/gateway/eth/rpc/YOUR_LAVA_GATEWAY_KEY"
-
-  # WebSocket Endpoint 2 (Phase 5 - Subscriptions)
-  - name: "eth-ws-2"
-    chain-id: "ETH1"
-    api-interface: "websocket"
-    node-urls:
-      - url: "wss://g.w.lavanet.xyz:443/gateway/eth/rpc/YOUR_LAVA_GATEWAY_KEY"
-
-  # WebSocket Endpoint 3 (Phase 5 - Subscriptions)
-  - name: "eth-ws-3"
-    chain-id: "ETH1"
-    api-interface: "websocket"
-    node-urls:
-      - url: "wss://ethereum-rpc.publicnode.com"
-
-  # Additional JSON-RPC test nodes (kept duplicated intentionally)
-  - name: "Google1"
-    chain-id: "ETH1"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "YOUR_ETH_RPC_PROVIDER_URL"
-        skip-verifications:
-          - chain-id
-          - pruning
-      - url: "YOUR_ETH_WS_PROVIDER_URL"
-
-  - name: "Google2"
-    chain-id: "ETH1"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "YOUR_ETH_RPC_PROVIDER_URL"
-        skip-verifications:
-          - chain-id
-          - pruning
-      - url: "YOUR_ETH_WS_PROVIDER_URL"
-
-  - name: "QuickNode1"
-    chain-id: "ETH1"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://YOUR_QUICKNODE_ENDPOINT.quiknode.pro/YOUR_QUICKNODE_TOKEN/"
-        skip-verifications:
-          - chain-id
-          - pruning
-      - url: "wss://YOUR_QUICKNODE_ENDPOINT.quiknode.pro/YOUR_QUICKNODE_TOKEN/"
-
-  - name: "QuickNode2"
-    chain-id: "ETH1"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://YOUR_QUICKNODE_ENDPOINT.quiknode.pro/YOUR_QUICKNODE_TOKEN/"
-        skip-verifications:
-          - chain-id
-          - pruning
-      - url: "wss://YOUR_QUICKNODE_ENDPOINT.quiknode.pro/YOUR_QUICKNODE_TOKEN/"
-
-backup-direct-rpc:
-  # Backup HTTP+WS Endpoint (used only when all primary direct-rpc peers are exhausted)
-  - name: "eth-rpc-backup"
-    chain-id: "ETH1"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://rpc.ankr.com/eth"
-        skip-verifications:
-          - chain-id
-          - pruning
-      - url: "wss://rpc.ankr.com/eth/ws"
