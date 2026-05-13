@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+#
+# CI-only image: consumes prebuilt binaries from the `build` workflow job.
+# For local "build from source" use the root Dockerfile instead.
+
+ARG RUNNER_IMAGE="gcr.io/distroless/static-debian12:debug"
+
+FROM ${RUNNER_IMAGE}
+
+ARG TARGETARCH
+COPY artifacts/linux/${TARGETARCH}/smartrouter /bin/smart-router
+
+ENV HOME=/smart-router
+WORKDIR $HOME
+
+# smart router listener
+EXPOSE 3360
+# metrics
+EXPOSE 7779
+
+ENTRYPOINT ["smart-router"]
