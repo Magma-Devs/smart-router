@@ -2169,3 +2169,52 @@ func TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint(t *testing.T) {
 	require.Error(t, probeErr,
 		"a disabled endpoint must cause the direct RPC probe to fail, even though HTTPDirectRPCConnection.IsHealthy starts optimistically true")
 }
+
+// TestResetTransientFailureState verifies the /debug/reset-all helper clears
+// every cross-epoch failure-tracking store on the CSM while leaving the live
+// pairing untouched (pairing, validAddresses, currentlyBlockedProviderAddresses,
+// backupProviders).
+func TestResetTransientFailureState(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+
+	// Pre-populate every transient store, plus a couple of "live pairing"
+	// entries we expect to survive the reset.
+	csm.lock.Lock()
+	csm.previousEpochBlockedProviders = map[string]struct{}{"prev-bad": {}}
+	csm.secondChanceGivenToAddresses = map[string]struct{}{"second-chance": {}}
+	csm.blockedBackupProviders = map[string]struct{}{"bad-backup": {}}
+	// Live pairing — must NOT be cleared.
+	csm.validAddresses = []string{"good-provider"}
+	// currentlyBlockedProviderAddresses is part of the live pairing (a
+	// destructive move out of validAddresses). Restoring it is an
+	// epoch-boundary operation, so this endpoint leaves it alone.
+	csm.currentlyBlockedProviderAddresses = []string{"now-blocked"}
+	csm.pairing = map[string]*ConsumerSessionsWithProvider{
+		"good-provider": {PublicLavaAddress: "good-provider"},
+	}
+	csm.backupProviders = map[string]*ConsumerSessionsWithProvider{
+		"backup-1": {PublicLavaAddress: "backup-1"},
+	}
+	csm.lock.Unlock()
+	csm.stickySessions.Set("session-id", &StickySession{Provider: "good-provider", Epoch: 1})
+	csm.reportedProviders.ReportProvider("reported-bad", 1, 0, nil, nil)
+	require.True(t, csm.reportedProviders.IsReported("reported-bad"))
+
+	csm.ResetTransientFailureState()
+
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	require.Empty(t, csm.previousEpochBlockedProviders, "previousEpochBlockedProviders must be cleared")
+	require.Empty(t, csm.secondChanceGivenToAddresses, "secondChanceGivenToAddresses must be cleared")
+	require.Empty(t, csm.blockedBackupProviders, "blockedBackupProviders must be cleared")
+	// Live pairing untouched.
+	require.Equal(t, []string{"good-provider"}, csm.validAddresses, "validAddresses must be left intact")
+	require.Equal(t, []string{"now-blocked"}, csm.currentlyBlockedProviderAddresses,
+		"currentlyBlockedProviderAddresses must be left intact — clearing without restoring to validAddresses would put providers in routing limbo")
+	require.Contains(t, csm.pairing, "good-provider", "pairing must be left intact")
+	require.Contains(t, csm.backupProviders, "backup-1", "backupProviders must be left intact")
+	// Sticky sessions + reported providers cleared via their own locks.
+	_, stickyExists := csm.stickySessions.Get("session-id")
+	require.False(t, stickyExists, "stickySessions must be cleared")
+	require.False(t, csm.reportedProviders.IsReported("reported-bad"), "reportedProviders must be cleared")
+}

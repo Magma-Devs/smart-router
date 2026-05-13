@@ -57,7 +57,7 @@ func TestDebugTimeWarp_SmartRouter_OffsetBoundaryValidation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var offsetNano atomic.Int64
-			mux := buildDebugMux(newEmptyOptimizersRouter(), &offsetNano)
+			mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
 
 			rr := postTimeWarpRouter(mux, tc.rawBody)
 
@@ -73,7 +73,7 @@ func TestDebugTimeWarp_SmartRouter_OffsetBoundaryValidation(t *testing.T) {
 // TestDebugTimeWarp_SmartRouter_ErrorMessageContainsNewCeiling mirrors the ceiling-message test.
 func TestDebugTimeWarp_SmartRouter_ErrorMessageContainsNewCeiling(t *testing.T) {
 	var offsetNano atomic.Int64
-	mux := buildDebugMux(newEmptyOptimizersRouter(), &offsetNano)
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
 
 	rr := postTimeWarpRouter(mux, `{"offset_seconds":86401}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
@@ -84,7 +84,7 @@ func TestDebugTimeWarp_SmartRouter_ErrorMessageContainsNewCeiling(t *testing.T) 
 
 func TestDebugResetScores_SmartRouter_ReturnsJSON(t *testing.T) {
 	var offsetNano atomic.Int64
-	mux := buildDebugMux(newEmptyOptimizersRouter(), &offsetNano)
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
 
 	rr := postResetScoresRouter(mux)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -94,7 +94,7 @@ func TestDebugResetScores_SmartRouter_ReturnsJSON(t *testing.T) {
 
 func TestDebugResetScores_SmartRouter_MethodNotAllowed(t *testing.T) {
 	var offsetNano atomic.Int64
-	mux := buildDebugMux(newEmptyOptimizersRouter(), &offsetNano)
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
 
 	req := httptest.NewRequest(http.MethodGet, "/debug/reset-scores", nil)
 	rr := httptest.NewRecorder()
@@ -105,7 +105,7 @@ func TestDebugResetScores_SmartRouter_MethodNotAllowed(t *testing.T) {
 
 func TestDebugResetScores_SmartRouter_DoesNotChangeOffset(t *testing.T) {
 	var offsetNano atomic.Int64
-	mux := buildDebugMux(newEmptyOptimizersRouter(), &offsetNano)
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
 
 	warpRR := postTimeWarpRouter(mux, `{"offset_seconds":3600}`)
 	require.Equal(t, http.StatusOK, warpRR.Code)
@@ -119,4 +119,79 @@ func TestDebugResetScores_SmartRouter_DoesNotChangeOffset(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, getRR.Code)
 	require.Contains(t, getRR.Body.String(), `"offset_seconds":3600`)
+}
+
+func postResetAllRouter(mux http.Handler) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/debug/reset-all", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// TestDebugResetAll_SmartRouter_ReturnsCapabilityAdvertisement verifies the
+// response shape contract. The "cleared" array is what the test framework
+// (tests/simulator/helpers.py) probes to decide whether to use this endpoint
+// or fall back to the legacy 4-call dance, so the keys are part of the API.
+func TestDebugResetAll_SmartRouter_ReturnsCapabilityAdvertisement(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	rr := postResetAllRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
+	body := rr.Body.String()
+	require.Contains(t, body, `"reset":true`)
+	require.Contains(t, body, `"optimizer"`)
+	require.Contains(t, body, `"ristretto"`)
+	require.Contains(t, body, `"retries-manager"`)
+	require.Contains(t, body, `"session-manager"`)
+	require.Contains(t, body, `"reported-providers"`)
+	require.Contains(t, body, `"sticky-sessions"`)
+}
+
+func TestDebugResetAll_SmartRouter_MethodNotAllowed(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/reset-all", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
+// TestDebugResetAll_SmartRouter_ResetsTimeOffset is the key behavioral
+// difference vs. /debug/reset-scores: reset-all must also zero the time
+// offset so a forward warp left over from a previous test doesn't leak in.
+// This is what eliminates the legacy warp(+3600)→warp(0)→reset-scores dance.
+func TestDebugResetAll_SmartRouter_ResetsTimeOffset(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	warpRR := postTimeWarpRouter(mux, `{"offset_seconds":3600}`)
+	require.Equal(t, http.StatusOK, warpRR.Code)
+
+	resetRR := postResetAllRouter(mux)
+	require.Equal(t, http.StatusOK, resetRR.Code)
+
+	getReq := httptest.NewRequest(http.MethodGet, "/debug/time", nil)
+	getRR := httptest.NewRecorder()
+	mux.ServeHTTP(getRR, getReq)
+
+	require.Equal(t, http.StatusOK, getRR.Code)
+	require.Contains(t, getRR.Body.String(), `"offset_seconds":0`)
+}
+
+// TestDebugResetAll_SmartRouter_NilRouterIsSafe makes sure the endpoint is
+// usable from a test fixture that didn't wire a full RPCSmartRouter — partial
+// reset is fine, panic is not.
+func TestDebugResetAll_SmartRouter_NilRouterIsSafe(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{
+		optimizers: newEmptyOptimizersRouter(),
+		offsetNano: &offsetNano,
+		router:     nil,
+	})
+
+	rr := postResetAllRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
 }
