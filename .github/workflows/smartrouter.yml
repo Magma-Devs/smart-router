@@ -3,7 +3,7 @@ name: Build and Test
 on:
   push:
     branches:
-      - main
+      - '**'
   pull_request:
     branches:
       - main
@@ -19,6 +19,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse ConsumerTarget version
+        id: ver
+        run: |
+          set -euo pipefail
+          file=types/protocol/params.go
+          v=$(grep -oP 'ConsumerTarget:\s*"\K[^"]+' "$file" || true)
+          if [ -z "$v" ]; then
+            echo "::error file=$file::ConsumerTarget is empty or could not be parsed"
+            exit 1
+          fi
+          if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error file=$file::ConsumerTarget '$v' is not valid semver (expected MAJOR.MINOR.PATCH[-pre])"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
   test:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -71,31 +94,35 @@ jobs:
 
   build:
     name: Build smartrouter (${{ matrix.targetos }}-${{ matrix.arch }})
-    needs: [test]
+    needs: [test, version]
     runs-on: ubuntu-latest
     strategy:
       matrix:
         targetos: [linux, darwin]
         arch: [amd64, arm64]
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.targetos }}
+      GOARCH: ${{ matrix.arch }}
+      GOAMD64: v3
+      GOARM64: v8.2
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-        env:
-          GOOS: ${{ matrix.targetos }}
-          GOARCH: ${{ matrix.arch }}
 
       - name: Download dependencies
         run: go mod download
 
       - name: Build smartrouter
-        env:
-          GOOS: ${{ matrix.targetos }}
-          GOARCH: ${{ matrix.arch }}
         run: |
-          GOWORK=off go build -mod=readonly -o out/smartrouter ./cmd/smartrouter
+          GOWORK=off go build \
+            -mod=readonly \
+            -trimpath \
+            -ldflags "-X main.version=${{ needs.version.outputs.version }} -X main.commit=${{ github.sha }} -w -s" \
+            -o out/smartrouter ./cmd/smartrouter
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -105,32 +132,134 @@ jobs:
 
   build_docker:
     name: Build Docker image
+    if: github.event_name != 'pull_request'
+    needs: [version, build]
     permissions:
       contents: read
-      packages: read
+      packages: write
     runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: magma-devs/smart-router
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Download linux/amd64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: smartrouter-linux-amd64
+          path: artifacts/linux/amd64
+
+      - name: Download linux/arm64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: smartrouter-linux-arm64
+          path: artifacts/linux/arm64
+
+      - name: Make binaries executable
+        run: chmod +x artifacts/linux/amd64/smartrouter artifacts/linux/arm64/smartrouter
+
+      - name: Plan tags
+        id: plan
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          push=false
+          is_main=false
+          tag=""
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ref="${GITHUB_REF#refs/heads/}"
+            if [ "$ref" = "main" ]; then
+              push=true; is_main=true; tag="$VERSION"
+            else
+              # OCI tags must be lowercase and free of '/'; sanitize the branch name
+              slug=$(echo "$ref" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9._-]|-|g')
+              push=true; tag="${slug}-${VERSION}"
+            fi
+          fi
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "is_main=$is_main" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "$push" = "true" ]; then
+            base="${REGISTRY}/${IMAGE_NAME}"
+            tags=("${base}:${tag}" "${base}:${tag}-${GITHUB_SHA}")
+            if [ "$is_main" = "true" ]; then
+              tags+=("${base}:latest")
+            fi
+            {
+              echo "tags<<EOF"
+              printf '%s\n' "${tags[@]}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice title=Image tags::$(IFS=' '; echo "${tags[*]}")"
+            echo "Planned image tags:"
+            printf '  - %s\n' "${tags[@]}"
+            {
+              echo "### Planned image tags"
+              printf -- '- `%s`\n' "${tags[@]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Skipping push: event=${{ github.event_name }} ref=${GITHUB_REF}"
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build (no push)
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: steps.plan.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure ConsumerTarget was bumped (main only)
+        if: steps.plan.outputs.is_main == 'true'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.plan.outputs.tag }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "::error file=types/protocol/params.go::$IMAGE already exists. Bump ConsumerTarget before merging to main."
+            exit 1
+          fi
+
+      - name: Extract OCI labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile
-          platforms: linux/amd64
-          build-args: |
-            GIT_VERSION=pr-${{ github.event.pull_request.number || github.sha }}
-            GIT_COMMIT=${{ github.sha }}
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          file: Dockerfile.ci
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.plan.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: ${{ steps.plan.outputs.push == 'true' }}
+
+      - name: Report pushed image
+        if: steps.plan.outputs.push == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.plan.outputs.tags }}
+        run: |
+          echo "::notice title=Image published::digest=${DIGEST}"
+          echo "Pushed image digest: ${DIGEST}"
+          echo "Tags:"
+          printf '  - %s\n' ${TAGS}
+          {
+            echo "### Pushed image"
+            echo ""
+            echo "**Digest:** \`${DIGEST}\`"
+            echo ""
+            echo "**Tags:**"
+            for t in ${TAGS}; do echo "- \`${t}\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
 
   report-test-results:
     name: Publish test results
