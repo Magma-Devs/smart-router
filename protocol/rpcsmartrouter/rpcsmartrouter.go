@@ -300,7 +300,11 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// Only starts when --debug-address flag is provided. Off by default.
 	if options.cmdFlags.DebugAddress != "" {
 		var currentOffsetNano atomic.Int64
-		debugMux := buildDebugMux(optimizers, &currentOffsetNano)
+		debugMux := buildDebugMux(debugMuxDeps{
+			optimizers: optimizers,
+			offsetNano: &currentOffsetNano,
+			router:     rpsr,
+		})
 		srv := &http.Server{Addr: options.cmdFlags.DebugAddress, Handler: debugMux}
 		// Watcher goroutine: shuts the server down gracefully when ctx is cancelled
 		// (i.e. when the caller cancels — typically on SIGINT/SIGTERM via NotifyContext).
@@ -364,15 +368,28 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 	utils.LavaFormatInfo("RPCSmartRouter: graceful shutdown complete")
 }
 
-// buildDebugMux constructs the /debug/time-warp, /debug/time, and
-// /debug/reset-scores HTTP handlers.
+// debugMuxDeps bundles the state the debug HTTP handlers reach into. Bundling
+// rather than positional args lets us add stores (router-wide retry caches,
+// session managers, etc.) without breaking the existing test fixtures, which
+// can leave router=nil and exercise just the optimizer+offset surface.
+type debugMuxDeps struct {
+	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]
+	offsetNano *atomic.Int64
+	// router is optional. When provided, /debug/reset-all also flushes
+	// per-server RelayRetriesManagers and per-CSM transient failure state.
+	router *RPCSmartRouter
+}
+
+// buildDebugMux constructs the /debug/time-warp, /debug/time, /debug/reset-scores,
+// and /debug/reset-all HTTP handlers.
 //
-// See rpcconsumer.buildDebugMux for full documentation — this is an identical copy
-// scoped to the rpcsmartrouter package.
-func buildDebugMux(
-	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer],
-	currentOffsetNano *atomic.Int64,
-) *http.ServeMux {
+// See rpcconsumer.buildDebugMux for full documentation of time-warp / time / reset-scores
+// — this is the rpcsmartrouter copy, extended with /debug/reset-all (a single endpoint
+// that flushes every router-internal state store so black-box tests can return to a
+// known-clean state without restarting the pod).
+func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
+	optimizers := deps.optimizers
+	currentOffsetNano := deps.offsetNano
 	// maxDebugOffsetSeconds caps the allowed forward warp to exactly 24 h (86 400 s).
 	// Upper: +24 h crosses a calendar-day boundary; ResetState() — called automatically
 	//        whenever the offset decreases — purges future-dated ScoreStore entries so
@@ -465,6 +482,57 @@ func buildDebugMux(
 		})
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d}`, count)
+	})
+
+	// POST /debug/reset-all — flush every in-process state store the test
+	// framework cares about in a single call. Equivalent to the legacy
+	// time-warp(+3600) → time-warp(0) → reset-scores dance plus clearing
+	// state that survives it (relay retry bans, sticky sessions, reported
+	// providers, cross-epoch blocked-provider memory).
+	//
+	// "Live pairing" (pairing tables, valid/backup addresses) is intentionally
+	// left intact: we want the next relay to route normally without waiting
+	// for an epoch transition.
+	mux.HandleFunc("/debug/reset-all", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		// 1. Optimizers: drop score caches, T-Digests, latest-sync data, and
+		//    the local Ristretto response cache. Also clear any active NowFunc
+		//    and zero the offset so a stale forward-warp doesn't reappear after
+		//    new samples come in.
+		currentOffsetNano.Store(0)
+		optimizers.Range(func(chainID string, opt *provideroptimizer.ProviderOptimizer) bool {
+			opt.NowFunc = nil
+			opt.ResetState()
+			return true
+		})
+
+		// 2. Per-server RelayRetriesManagers (6h hash ban cache) and 3. per-CSM
+		//    transient failure state. Both require the router to be present;
+		//    test fixtures without a router still get a useful partial reset
+		//    above and we report which stores actually moved.
+		if deps.router != nil {
+			deps.router.mu.Lock()
+			for _, server := range deps.router.rpcServers {
+				if server != nil && server.relayRetriesManager != nil {
+					server.relayRetriesManager.Reset()
+				}
+			}
+			for _, csm := range deps.router.sessionManagers {
+				if csm != nil {
+					csm.ResetTransientFailureState()
+				}
+			}
+			deps.router.mu.Unlock()
+		}
+
+		// Capability advertisement — hardcoded, not a per-call tally. The test
+		// framework probes the response to decide between this endpoint and
+		// the legacy 4-call dance.
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions"]}`)
 	})
 
 	return mux
