@@ -2047,3 +2047,42 @@ func NewConsumerSessionManager(
 func (csm *ConsumerSessionManager) SetLavaBlockHeightCallback(getLavaBlockHeight func() int64) {
 	csm.getLavaBlockHeight = getLavaBlockHeight
 }
+
+// ResetTransientFailureState clears every cross-epoch failure-tracking store
+// without forcing an epoch transition. The "live pairing" (pairing, rawPairing,
+// pairingAddresses, validAddresses, currentlyBlockedProviderAddresses,
+// backupProviders) is left intact so the very next relay can route normally.
+//
+// Used by the /debug/reset-all debug endpoint to return the router to a clean
+// state between black-box test runs.
+//
+// Cleared:
+//   - previousEpochBlockedProviders (cross-epoch known-bad memory)
+//   - secondChanceGivenToAddresses (per-epoch second-chance memory)
+//   - blockedBackupProviders (backup-provider failure memory for this epoch)
+//   - stickySessions (session affinities)
+//   - reportedProviders (accumulated unresponsiveness reports)
+//
+// We deliberately do NOT touch currentlyBlockedProviderAddresses: blocking is
+// a destructive move (removeAddressFromValidAddresses pops out of
+// validAddresses and pushes onto currentlyBlockedProviderAddresses), so
+// clearing the latter without restoring those addresses to validAddresses
+// would put the provider in routing limbo until the next epoch transition.
+// Unblocking is an epoch-boundary operation by design.
+func (csm *ConsumerSessionManager) ResetTransientFailureState() {
+	csm.lock.Lock()
+	csm.previousEpochBlockedProviders = make(map[string]struct{})
+	csm.secondChanceGivenToAddresses = make(map[string]struct{})
+	csm.blockedBackupProviders = make(map[string]struct{})
+	csm.lock.Unlock()
+
+	// stickySessions and reportedProviders carry their own locks; do not hold
+	// csm.lock across them to avoid lock-ordering hazards with the rest of the
+	// session-manager code.
+	if csm.stickySessions != nil {
+		csm.stickySessions.Clear()
+	}
+	if csm.reportedProviders != nil {
+		csm.reportedProviders.Reset()
+	}
+}
