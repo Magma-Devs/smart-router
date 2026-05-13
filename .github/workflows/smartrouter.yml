@@ -79,6 +79,7 @@ jobs:
         with:
           name: smartrouter-${{ matrix.targetos }}-${{ matrix.arch }}
           path: out/smartrouter
+          retention-days: 1
 
   build_docker:
     name: Build Docker image
