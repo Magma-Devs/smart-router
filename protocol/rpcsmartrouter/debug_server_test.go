@@ -316,17 +316,39 @@ func TestDebugMoveClock_ClearsCorruptedSeenBlock(t *testing.T) {
 }
 
 // TestDebugConsistencyReset_NilMapIsSafe makes sure every reset endpoint is
-// usable from a test fixture that didn't wire a consistencies map.
+// usable from a test fixture that didn't wire a consistencies map — including
+// when the time-warp handler actually takes the needsReset branch (which is
+// where resetAllConsistencies(nil) gets exercised).
+//
+// Important: the time-warp subtest pre-seeds offsetNano to +1h so the posted
+// offset_seconds:0 represents a *decrease* (newNano < prevNano). Without that
+// seed, both nano values are 0, needsReset stays false, and the reset branch
+// is skipped — so the test would cover the handler reaching its 200 OK reply
+// but NOT the resetAllConsistencies(nil) call path. The whole point of this
+// test is the latter.
 func TestDebugConsistencyReset_NilMapIsSafe(t *testing.T) {
 	endpoints := []struct {
 		name string
+		// seed runs before the request so we can put offsetNano in a state
+		// that forces the handler down the needsReset branch.
+		seed func(t *testing.T, offsetNano *atomic.Int64, mux http.Handler)
 		post func(http.Handler) *httptest.ResponseRecorder
 	}{
-		{"time-warp", func(m http.Handler) *httptest.ResponseRecorder {
-			return postTimeWarpRouter(m, `{"offset_seconds":0}`)
-		}},
-		{"reset-scores", postResetScoresRouter},
-		{"reset-all", postResetAllRouter},
+		{
+			name: "time-warp",
+			seed: func(t *testing.T, _ *atomic.Int64, mux http.Handler) {
+				// Going through the mux (rather than poking offsetNano
+				// directly) keeps the seed honest: it uses the same Swap
+				// the handler under test will compare against.
+				rr := postTimeWarpRouter(mux, `{"offset_seconds":3600}`)
+				require.Equal(t, http.StatusOK, rr.Code)
+			},
+			post: func(m http.Handler) *httptest.ResponseRecorder {
+				return postTimeWarpRouter(m, `{"offset_seconds":0}`)
+			},
+		},
+		{name: "reset-scores", post: postResetScoresRouter},
+		{name: "reset-all", post: postResetAllRouter},
 	}
 
 	for _, ep := range endpoints {
@@ -337,6 +359,9 @@ func TestDebugConsistencyReset_NilMapIsSafe(t *testing.T) {
 				offsetNano:    &offsetNano,
 				consistencies: nil,
 			})
+			if ep.seed != nil {
+				ep.seed(t, &offsetNano, mux)
+			}
 			rr := ep.post(mux)
 			require.Equal(t, http.StatusOK, rr.Code)
 		})
