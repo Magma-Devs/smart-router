@@ -83,6 +83,27 @@ func (cc *ConsistencyImpl) GetSeenBlock(userData common.UserData) (int64, bool) 
 	return cc.GetLatestBlock(cc.Key(userData))
 }
 
+// ResetState flushes every seen-block entry from the cache.
+//
+// Why this is necessary:
+// SetSeenBlockFromKey only writes when the new block is strictly greater than
+// the stored one (see line 62). A test that accidentally sends a millisecond
+// timestamp as a block parameter (~1.7T) poisons the entry, and the monotonic
+// guard then rejects every legitimate ~20M block update until the 5-minute TTL
+// expires — and ongoing traffic keeps refreshing the entry, so the TTL never
+// actually fires. Flushing the whole cache is the only recovery short of a
+// process restart.
+//
+// Intended for the debug /debug/reset-* paths only; ristretto's Clear pauses
+// and restarts the cache's processItems goroutine, so this is not suitable
+// for the hot path.
+func (cc *ConsistencyImpl) ResetState() {
+	if cc == nil || cc.cache == nil {
+		return
+	}
+	cc.cache.Clear()
+}
+
 func NewConsistency(specId string) Consistency {
 	cache, err := ristretto.NewCache(&ristretto.Config[string, any]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
 	if err != nil {

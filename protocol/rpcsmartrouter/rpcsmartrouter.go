@@ -301,9 +301,10 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	if options.cmdFlags.DebugAddress != "" {
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
-			optimizers: optimizers,
-			offsetNano: &currentOffsetNano,
-			router:     rpsr,
+			optimizers:    optimizers,
+			offsetNano:    &currentOffsetNano,
+			consistencies: smartRouterConsistencies,
+			router:        rpsr,
 		})
 		srv := &http.Server{Addr: options.cmdFlags.DebugAddress, Handler: debugMux}
 		// Watcher goroutine: shuts the server down gracefully when ctx is cancelled
@@ -375,9 +376,42 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 type debugMuxDeps struct {
 	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]
 	offsetNano *atomic.Int64
+	// consistencies is the per-chain seen-block cache map. Optional: nil-safe.
+	// Flushed only from the /debug/* recovery endpoints, never from the relay
+	// hot path — see consistencyResetter below for why this is reached via a
+	// type assertion rather than a public interface method.
+	consistencies *common.SafeSyncMap[string, relaycore.Consistency]
 	// router is optional. When provided, /debug/reset-all also flushes
 	// per-server RelayRetriesManagers and per-CSM transient failure state.
 	router *RPCSmartRouter
+}
+
+// consistencyResetter is the debug-only contract for flushing a Consistency
+// cache. It is *intentionally* not exposed on the public relaycore.Consistency
+// interface so production relay code paths cannot call ResetState by accident.
+// The /debug/* handlers type-assert to reach it; implementations that don't
+// satisfy the assertion (test fakes, future variants) are silently skipped.
+type consistencyResetter interface {
+	ResetState()
+}
+
+// resetAllConsistencies flushes every per-chain seen-block cache that
+// implements consistencyResetter. Why this is necessary: SetSeenBlockFromKey
+// only writes monotonically (consistency.go: `block >= blockSeen → return`),
+// so a poisoned value (e.g. a ms-timestamp accidentally passed as a block
+// number) blocks every legitimate smaller update, and ongoing traffic keeps
+// refreshing the TTL — without an explicit flush, the only recovery is a
+// process restart.
+func resetAllConsistencies(m *common.SafeSyncMap[string, relaycore.Consistency]) {
+	if m == nil {
+		return
+	}
+	m.Range(func(chainID string, c relaycore.Consistency) bool {
+		if r, ok := c.(consistencyResetter); ok {
+			r.ResetState()
+		}
+		return true
+	})
 }
 
 // buildDebugMux constructs the /debug/time-warp, /debug/time, /debug/reset-scores,
@@ -451,6 +485,13 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 			return true
 		})
+		// Gated on needsReset (same as opt.ResetState above) because the
+		// documented move-clock recovery sets offset_seconds back to 0 — that's
+		// the moment we also want to flush the per-chain seen-block cache. See
+		// resetAllConsistencies for the sticky-corruption reasoning.
+		if needsReset {
+			resetAllConsistencies(deps.consistencies)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"offset_seconds":%v,"applied_to_chains":true}`, body.OffsetSeconds)
 	})
@@ -468,7 +509,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	})
 
 	// POST /debug/reset-scores — clears optimizer score state without changing
-	// current time offset or NowFunc.
+	// current time offset or NowFunc. Also flushes per-chain seen-block caches
+	// so a corrupted seenBlock (e.g. a ms-timestamp accidentally passed as a
+	// block number) can be scrubbed without restarting the process.
 	mux.HandleFunc("/debug/reset-scores", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -480,6 +523,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			count++
 			return true
 		})
+		resetAllConsistencies(deps.consistencies)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d}`, count)
 	})
@@ -509,7 +553,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			return true
 		})
 
-		// 2. Per-server RelayRetriesManagers (6h hash ban cache) and 3. per-CSM
+		// 2. Per-chain seen-block consistency caches. Must be flushed here too,
+		//    not just in /debug/reset-scores: a poisoned huge seenBlock value
+		//    survives the legacy 4-call dance because the monotonic guard in
+		//    SetSeenBlockFromKey refuses smaller writes and ongoing traffic
+		//    keeps refreshing the TTL.
+		resetAllConsistencies(deps.consistencies)
+
+		// 3. Per-server RelayRetriesManagers (6h hash ban cache) and 4. per-CSM
 		//    transient failure state. Both require the router to be present;
 		//    test fixtures without a router still get a useful partial reset
 		//    above and we report which stores actually moved.
@@ -530,9 +581,11 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 		// Capability advertisement — hardcoded, not a per-call tally. The test
 		// framework probes the response to decide between this endpoint and
-		// the legacy 4-call dance.
+		// the legacy 4-call dance. "seen-block" is the per-chain consistency
+		// cache flush; without it the move-clock dance can't recover a
+		// poisoned seenBlock value.
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions"]}`)
+		fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block"]}`)
 	})
 
 	return mux
