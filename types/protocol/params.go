@@ -7,5 +7,5 @@ type Version struct {
 
 // DefaultVersion is the version embedded in binary releases.
 var DefaultVersion = Version{
-	ConsumerTarget: "6.2.0",
+	ConsumerTarget: "6.2.1",
 }
