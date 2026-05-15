@@ -2337,3 +2337,80 @@ func TestResetTransientFailureState(t *testing.T) {
 	require.False(t, stickyExists, "stickySessions must be cleared")
 	require.False(t, csm.reportedProviders.IsReported("reported-bad"), "reportedProviders must be cleared")
 }
+
+// TestResetBlockedProviders is the MAG-1810 regression test. In direct-rpc
+// mode there are no epoch transitions, so currentlyBlockedProviderAddresses
+// accumulates monotonically as tests trigger blockProvider — eventually
+// shrinking validAddresses to nothing and producing the cascading bundle
+// failure (115 → 59 → 3 across consecutive runs).
+//
+// ResetBlockedProviders is the explicit direct-rpc escape hatch for the
+// /debug/reset-all path: it atomically restores every blocked address back
+// to validAddresses (using setValidAddressesToDefaultValue), purges the
+// addon cache (RemoveAddonAddresses("", nil) inside the helper), and resets
+// the per-provider redemption flag.
+func TestResetBlockedProviders(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+
+	// Seed a pairing of three providers; block two of them so validAddresses
+	// has one entry and currentlyBlockedProviderAddresses has two.
+	csm.lock.Lock()
+	csm.pairing = map[string]*ConsumerSessionsWithProvider{
+		"provider-a": {PublicLavaAddress: "provider-a", Endpoints: []*Endpoint{{NetworkAddress: "addr-a"}}},
+		"provider-b": {PublicLavaAddress: "provider-b", Endpoints: []*Endpoint{{NetworkAddress: "addr-b"}}},
+		"provider-c": {PublicLavaAddress: "provider-c", Endpoints: []*Endpoint{{NetworkAddress: "addr-c"}}},
+	}
+	csm.pairingAddresses = map[uint64]string{
+		0: "provider-a",
+		1: "provider-b",
+		2: "provider-c",
+	}
+	csm.pairingAddressesLength = 3
+	csm.validAddresses = []string{"provider-a"}
+	csm.currentlyBlockedProviderAddresses = []string{"provider-b", "provider-c"}
+	// Seed a stale addon cache containing only one of the blocked providers —
+	// the post-condition is that this cache is purged so the next request
+	// sees the full restored pool.
+	csm.addonAddresses = map[string][]string{"": {"provider-a"}}
+	// Simulate the second-chance redemption flag being set on a blocked
+	// provider; ResetBlockedProviders must clear it back to Unused.
+	csm.pairing["provider-b"].atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus)
+	csm.lock.Unlock()
+
+	csm.ResetBlockedProviders()
+
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	require.Empty(t, csm.currentlyBlockedProviderAddresses,
+		"currentlyBlockedProviderAddresses must be drained in direct-rpc mode reset")
+	require.ElementsMatch(t, []string{"provider-a", "provider-b", "provider-c"}, csm.validAddresses,
+		"validAddresses must be restored to the full pairingAddresses set")
+	require.Empty(t, csm.addonAddresses,
+		"addonAddresses must be purged so the next request rebuilds against the restored validAddresses")
+	require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing["provider-b"].atomicReadBlockedStatus(),
+		"per-provider redemption flag must be reset to Unused")
+}
+
+// TestResetBlockedProviders_NoBlockedIsNoOp verifies the cheap-exit path:
+// when no providers are blocked, the helper returns without taking the heavy
+// setValidAddressesToDefaultValue path and without spawning metric
+// goroutines. validAddresses must be left exactly as it was.
+func TestResetBlockedProviders_NoBlockedIsNoOp(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+
+	csm.lock.Lock()
+	csm.pairing = map[string]*ConsumerSessionsWithProvider{
+		"provider-a": {PublicLavaAddress: "provider-a", Endpoints: []*Endpoint{{NetworkAddress: "addr-a"}}},
+	}
+	csm.pairingAddresses = map[uint64]string{0: "provider-a"}
+	csm.validAddresses = []string{"provider-a"}
+	csm.currentlyBlockedProviderAddresses = nil
+	csm.lock.Unlock()
+
+	csm.ResetBlockedProviders()
+
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	require.Equal(t, []string{"provider-a"}, csm.validAddresses, "validAddresses must be untouched on a no-op reset")
+	require.Empty(t, csm.currentlyBlockedProviderAddresses)
+}
