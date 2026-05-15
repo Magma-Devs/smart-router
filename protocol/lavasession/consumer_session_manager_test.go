@@ -9,10 +9,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -2168,6 +2170,123 @@ func TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint(t *testing.T) {
 	_, _, probeErr := csm.probeDirectRPCEndpoints(ctx, cswp, cswp.PublicLavaAddress)
 	require.Error(t, probeErr,
 		"a disabled endpoint must cause the direct RPC probe to fail, even though HTTPDirectRPCConnection.IsHealthy starts optimistically true")
+}
+
+// stateSizeRecorder is a minimal ConsumerMetricsManagerInf used to observe
+// publishStateSizes() emissions under test. Embedding NoOpConsumerMetrics
+// satisfies every method the interface requires without forcing us to stub
+// the ones the test doesn't care about.
+type stateSizeRecorder struct {
+	metrics.NoOpConsumerMetrics
+	mu                  sync.Mutex
+	blockedProviders    int
+	blockedBackup       int
+	stickySessionsCount int
+	reportedProviders   int
+}
+
+func (r *stateSizeRecorder) SetCSMBlockedProvidersCount(_, _ string, c int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.blockedProviders = c
+}
+
+func (r *stateSizeRecorder) SetCSMBlockedBackupProvidersCount(_, _ string, c int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.blockedBackup = c
+}
+
+func (r *stateSizeRecorder) SetCSMStickySessionsCount(_, _ string, c int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stickySessionsCount = c
+}
+
+func (r *stateSizeRecorder) SetCSMReportedProvidersCount(_, _ string, c int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reportedProviders = c
+}
+
+func (r *stateSizeRecorder) snapshot() (int, int, int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.blockedProviders, r.blockedBackup, r.stickySessionsCount, r.reportedProviders
+}
+
+// createConsumerSessionManagerWithMetrics builds a CSM wired to the given
+// metrics implementation so state-size emissions can be observed in tests.
+func createConsumerSessionManagerWithMetrics(m metrics.ConsumerMetricsManagerInf) *ConsumerSessionManager {
+	rand.InitRandomSeed()
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
+	optimizer.SetDeterministicSeed(1234567)
+	return NewConsumerSessionManager(&RPCEndpoint{"stub", "stub", "stub", false, "/", 0}, optimizer, m, nil, "lava@test", NewActiveSubscriptionProvidersStorage())
+}
+
+// TestPublishStateSizes_PopulateThenReset verifies that publishStateSizes
+// reflects the current size of every observed store, and that
+// ResetTransientFailureState drives all four counts back to zero — the
+// post-condition integration tests assert against /metrics (MAG-1762).
+func TestPublishStateSizes_PopulateThenReset(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+
+	csm.lock.Lock()
+	csm.previousEpochBlockedProviders = map[string]struct{}{"a": {}, "b": {}}
+	csm.blockedBackupProviders = map[string]struct{}{"backup-bad": {}}
+	csm.lock.Unlock()
+	csm.stickySessions.Set("client-1", &StickySession{Provider: "p1", Epoch: 1})
+	csm.stickySessions.Set("client-2", &StickySession{Provider: "p2", Epoch: 1})
+	csm.stickySessions.Set("client-3", &StickySession{Provider: "p3", Epoch: 1})
+	csm.reportedProviders.ReportProvider("reported-1", 1, 0, nil, nil)
+
+	csm.publishStateSizes()
+	blocked, blockedBackup, sticky, reported := rec.snapshot()
+	require.Equal(t, 2, blocked, "previousEpochBlockedProviders count must equal map size")
+	require.Equal(t, 1, blockedBackup, "blockedBackupProviders count must equal map size")
+	require.Equal(t, 3, sticky, "stickySessions count must equal store size")
+	require.Equal(t, 1, reported, "reportedProviders count must equal register size")
+
+	csm.ResetTransientFailureState()
+
+	blocked, blockedBackup, sticky, reported = rec.snapshot()
+	require.Equal(t, 0, blocked, "ResetTransientFailureState must zero previousEpochBlockedProviders gauge")
+	require.Equal(t, 0, blockedBackup, "ResetTransientFailureState must zero blockedBackupProviders gauge")
+	require.Equal(t, 0, sticky, "ResetTransientFailureState must zero stickySessions gauge")
+	require.Equal(t, 0, reported, "ResetTransientFailureState must zero reportedProviders gauge")
+}
+
+// TestPublishStateSizes_NilSafety ensures the publisher tolerates the
+// SafeMetrics(nil)→NoOp fall-through used by tests that pass a nil metrics
+// manager — it must not panic and must do nothing observable.
+func TestPublishStateSizes_NilSafety(t *testing.T) {
+	csm := CreateConsumerSessionManager() // nil metrics → NoOp
+	require.NotPanics(t, func() {
+		csm.publishStateSizes()
+		csm.ResetTransientFailureState()
+	})
+}
+
+// TestStateSizeStores_LenAccessors verifies the Len() accessors added to the
+// external stores so the publisher can read them without touching internals.
+func TestStateSizeStores_LenAccessors(t *testing.T) {
+	store := NewStickySessionStore()
+	require.Equal(t, 0, store.Len())
+	store.Set("a", &StickySession{Provider: "p", Epoch: 1})
+	store.Set("b", &StickySession{Provider: "p", Epoch: 1})
+	require.Equal(t, 2, store.Len())
+	store.Delete("a")
+	require.Equal(t, 1, store.Len())
+	store.Clear()
+	require.Equal(t, 0, store.Len())
+
+	rp := NewReportedProviders(nil, "stub")
+	require.Equal(t, 0, rp.Len())
+	rp.ReportProvider("provider-x", 1, 0, nil, nil)
+	require.Equal(t, 1, rp.Len())
+	rp.RemoveReport("provider-x")
+	require.Equal(t, 0, rp.Len())
 }
 
 // TestResetTransientFailureState verifies the /debug/reset-all helper clears
