@@ -2039,6 +2039,7 @@ func NewConsumerSessionManager(
 	csm.providerOptimizer = providerOptimizer
 	csm.activeSubscriptionProvidersStorage = activeSubscriptionProvidersStorage
 	csm.stickySessions = NewStickySessionStore()
+	csm.startStateSizesPublisher()
 	return csm
 }
 
@@ -2085,4 +2086,71 @@ func (csm *ConsumerSessionManager) ResetTransientFailureState() {
 	if csm.reportedProviders != nil {
 		csm.reportedProviders.Reset()
 	}
+
+	// Emit the state-size gauges immediately so /debug/reset-all callers see
+	// the post-condition (everything at 0) on the very next /metrics scrape,
+	// without waiting for the periodic publisher tick.
+	csm.publishStateSizes()
+}
+
+// stateSizesPublishInterval drives the periodic CSM state-size gauge tick.
+// Variable (not const) so unit tests can shorten it to deterministic timing
+// without exposing the goroutine internals.
+var stateSizesPublishInterval = time.Second
+
+// publishStateSizes reads the current size of every black-box state store
+// that /debug/reset-all promises to clear and emits them as Prometheus gauges
+// (MAG-1762). Safe to call from any goroutine: takes its locks lazily.
+//
+// Callers MUST NOT hold csm.lock — this function takes csm.lock.RLock
+// internally for the two map reads and then defers to the external stores
+// (which carry their own locks).
+func (csm *ConsumerSessionManager) publishStateSizes() {
+	if csm == nil || csm.consumerMetricsManager == nil || csm.rpcEndpoint == nil {
+		return
+	}
+
+	csm.lock.RLock()
+	blockedCount := len(csm.previousEpochBlockedProviders)
+	blockedBackupCount := len(csm.blockedBackupProviders)
+	csm.lock.RUnlock()
+
+	var stickyCount, reportedCount int
+	if csm.stickySessions != nil {
+		stickyCount = csm.stickySessions.Len()
+	}
+	if csm.reportedProviders != nil {
+		reportedCount = csm.reportedProviders.Len()
+	}
+
+	chainID := csm.rpcEndpoint.ChainID
+	apiInterface := csm.rpcEndpoint.ApiInterface
+	csm.consumerMetricsManager.SetCSMBlockedProvidersCount(chainID, apiInterface, blockedCount)
+	csm.consumerMetricsManager.SetCSMBlockedBackupProvidersCount(chainID, apiInterface, blockedBackupCount)
+	csm.consumerMetricsManager.SetCSMStickySessionsCount(chainID, apiInterface, stickyCount)
+	csm.consumerMetricsManager.SetCSMReportedProvidersCount(chainID, apiInterface, reportedCount)
+}
+
+// startStateSizesPublisher kicks off the periodic gauge tick. Per-CSM
+// goroutine, follows the same shape as the ReconnectProviders ticker in
+// reported_providers.go (no stop channel — bound to process lifetime).
+//
+// Skipped when the metrics manager is the NoOp variant — SafeMetrics(nil)
+// wraps a typed NoOp into the interface, so a plain nil check is never true;
+// we detect the NoOp explicitly to avoid spinning a useless goroutine in
+// every test that passes nil metrics.
+func (csm *ConsumerSessionManager) startStateSizesPublisher() {
+	if csm == nil || csm.consumerMetricsManager == nil {
+		return
+	}
+	if _, isNoOp := csm.consumerMetricsManager.(metrics.NoOpConsumerMetrics); isNoOp {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(stateSizesPublishInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			csm.publishStateSizes()
+		}
+	}()
 }

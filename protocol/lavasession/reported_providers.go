@@ -98,6 +98,14 @@ func (rp *ReportedProviders) IsReported(address string) bool {
 	return ok
 }
 
+// Len returns the current number of providers in the unresponsiveness register.
+// Used by the CSM state-size gauge publisher (MAG-1762).
+func (rp *ReportedProviders) Len() int {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return len(rp.addedToPurgeAndReport)
+}
+
 type reconnectCandidate struct {
 	address     string
 	reconnectCB func() error

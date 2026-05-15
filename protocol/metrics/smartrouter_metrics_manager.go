@@ -103,6 +103,14 @@ type SmartRouterMetricsManager struct {
 	cacheFailedTotalMetric   *prometheus.CounterVec   // lava_rpcsmartrouter_cache_failed_total
 	cacheLatencyHistogram    *prometheus.HistogramVec // lava_rpcsmartrouter_cache_latency_milliseconds
 
+	// CSM state-store size gauges (labels: spec, apiInterface). Expose otherwise
+	// black-box internal state so integration tests can verify /debug/reset-all
+	// emptied each store. See MAG-1762.
+	csmBlockedProvidersCount       *prometheus.GaugeVec // lava_rpcsmartrouter_csm_blocked_providers
+	csmBlockedBackupProvidersCount *prometheus.GaugeVec // lava_rpcsmartrouter_csm_blocked_backup_providers
+	csmStickySessionsCount         *prometheus.GaugeVec // lava_rpcsmartrouter_csm_sticky_sessions
+	csmReportedProvidersCount      *prometheus.GaugeVec // lava_rpcsmartrouter_csm_reported_providers
+
 	// Router-scoped request group metrics (labels: spec, apiInterface, provider_address, method)
 	routerRequestsTotal      *prometheus.CounterVec
 	routerRequestsSuccess    *prometheus.CounterVec
@@ -389,6 +397,30 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, incidentMethodLabels)
 
 	// =========================================================================
+	// CSM state-store size gauges (MAG-1762)
+	// One gauge per black-box state store that /debug/reset-all promises to
+	// clear. Tests scrape these via /metrics to verify the post-condition
+	// without firing a probe relay (which could repopulate the same stores).
+	// =========================================================================
+	csmStateLabels := []string{"spec", "apiInterface"}
+	csmBlockedProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lava_rpcsmartrouter_csm_blocked_providers",
+		Help: "Size of ConsumerSessionManager.previousEpochBlockedProviders (cross-epoch known-bad provider memory). Goes to 0 after /debug/reset-all.",
+	}, csmStateLabels)
+	csmBlockedBackupProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lava_rpcsmartrouter_csm_blocked_backup_providers",
+		Help: "Size of ConsumerSessionManager.blockedBackupProviders (per-epoch backup-provider failure memory). Goes to 0 after /debug/reset-all.",
+	}, csmStateLabels)
+	csmStickySessionsCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lava_rpcsmartrouter_csm_sticky_sessions",
+		Help: "Number of live sticky-session affinities tracked by the smart router. Goes to 0 after /debug/reset-all.",
+	}, csmStateLabels)
+	csmReportedProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lava_rpcsmartrouter_csm_reported_providers",
+		Help: "Number of providers currently in the ReportedProviders unresponsiveness register. Goes to 0 after /debug/reset-all.",
+	}, csmStateLabels)
+
+	// =========================================================================
 	// Request group metrics
 	// =========================================================================
 	routerRequestLabels := []string{"spec", "apiInterface", "provider_address", "method"}
@@ -487,6 +519,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	cacheSuccessTotalMetric = registerOrReuse(cacheSuccessTotalMetric)
 	cacheFailedTotalMetric = registerOrReuse(cacheFailedTotalMetric)
 	cacheLatencyHistogram = registerOrReuse(cacheLatencyHistogram)
+	csmBlockedProvidersCount = registerOrReuse(csmBlockedProvidersCount)
+	csmBlockedBackupProvidersCount = registerOrReuse(csmBlockedBackupProvidersCount)
+	csmStickySessionsCount = registerOrReuse(csmStickySessionsCount)
+	csmReportedProvidersCount = registerOrReuse(csmReportedProvidersCount)
 
 	manager := &SmartRouterMetricsManager{
 		// Endpoint-scoped (with function)
@@ -559,6 +595,12 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		cacheSuccessTotalMetric:  cacheSuccessTotalMetric,
 		cacheFailedTotalMetric:   cacheFailedTotalMetric,
 		cacheLatencyHistogram:    cacheLatencyHistogram,
+
+		// CSM state-store gauges
+		csmBlockedProvidersCount:       csmBlockedProvidersCount,
+		csmBlockedBackupProvidersCount: csmBlockedBackupProvidersCount,
+		csmStickySessionsCount:         csmStickySessionsCount,
+		csmReportedProvidersCount:      csmReportedProvidersCount,
 
 		// Internal state
 		endpointsHealthChecksOk: 1,
@@ -1111,6 +1153,39 @@ func (m *SmartRouterMetricsManager) SetQOSMetrics(chainId string, apiInterface s
 func (m *SmartRouterMetricsManager) ResetSessionRelatedMetrics() {}
 
 func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(string, string, map[string]string) {
+}
+
+// SetCSMBlockedProvidersCount publishes the size of csm.previousEpochBlockedProviders.
+// Used by integration tests to verify /debug/reset-all emptied the store (MAG-1762).
+func (m *SmartRouterMetricsManager) SetCSMBlockedProvidersCount(chainId, apiInterface string, count int) {
+	if m == nil {
+		return
+	}
+	m.csmBlockedProvidersCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
+}
+
+// SetCSMBlockedBackupProvidersCount publishes the size of csm.blockedBackupProviders.
+func (m *SmartRouterMetricsManager) SetCSMBlockedBackupProvidersCount(chainId, apiInterface string, count int) {
+	if m == nil {
+		return
+	}
+	m.csmBlockedBackupProvidersCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
+}
+
+// SetCSMStickySessionsCount publishes the number of live sticky-session affinities.
+func (m *SmartRouterMetricsManager) SetCSMStickySessionsCount(chainId, apiInterface string, count int) {
+	if m == nil {
+		return
+	}
+	m.csmStickySessionsCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
+}
+
+// SetCSMReportedProvidersCount publishes the size of the ReportedProviders register.
+func (m *SmartRouterMetricsManager) SetCSMReportedProvidersCount(chainId, apiInterface string, count int) {
+	if m == nil {
+		return
+	}
+	m.csmReportedProvidersCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
 }
 
 // SetRelayMetrics is a no-op for SmartRouter.
