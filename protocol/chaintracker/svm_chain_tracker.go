@@ -45,8 +45,7 @@ type SVMLatestBlockResponse struct {
 			Slot int64 `json:"slot"`
 		} `json:"context"`
 		Value struct {
-			LastValidBlockHeight int64  `json:"lastValidBlockHeight"`
-			BlockHash            string `json:"blockhash"`
+			BlockHash string `json:"blockhash"`
 		} `json:"value"`
 	} `json:"result"`
 }
