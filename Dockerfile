@@ -1,50 +1,23 @@
 # syntax=docker/dockerfile:1
+#
+# Thin runner image: copies a prebuilt smart-router binary into a minimal
+# distroless base. Used by:
+#   - CI (.github/workflows/smartrouter.yml + release.yml): per-arch binaries
+#     are cross-compiled on the runner and downloaded to
+#     artifacts/linux/<arch>/smartrouter; buildx assembles a multi-arch image.
+#   - Local compose stack: `make build` (or scripts/compose_up.sh) produces
+#     build/smartrouter; compose passes BINARY_PATH=build/smartrouter.
 
-ARG GO_VERSION="1.26"
-ARG ALPINE_VERSION="3.22"
-ARG RUNNER_IMAGE="gcr.io/distroless/static-debian12:debug"
-
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
-
-RUN apk add --no-cache \
-    ca-certificates \
-    build-base \
-    linux-headers \
-    binutils-gold
-
-WORKDIR /smart-router
-
-ENV GOCACHE=/root/.cache/go-build
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/root/go/pkg/mod \
-    --mount=type=bind,source=./go.sum,target=/smart-router/go.sum \
-    --mount=type=bind,source=./go.mod,target=/smart-router/go.mod \
-    go mod download -x
-
-COPY . .
-
-ARG GIT_VERSION="dev"
-ARG GIT_COMMIT="unknown"
-
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/root/go/pkg/mod \
-    GOWORK=off go build \
-    -mod=readonly \
-    -tags "netgo,muslc" \
-    -ldflags \
-    "-X main.version=${GIT_VERSION} \
-    -X main.commit=${GIT_COMMIT} \
-    -w -s -linkmode=external -extldflags '-Wl,-z,muldefs -static'" \
-    -trimpath \
-    -o /smart-router/build/smart-router \
-    /smart-router/cmd/smartrouter/main.go
+ARG RUNNER_IMAGE=gcr.io/distroless/static-debian12:debug
 
 FROM ${RUNNER_IMAGE}
 
-COPY --from=builder /smart-router/build/smart-router /bin/smart-router
+ARG TARGETARCH
+ARG BINARY_PATH=artifacts/linux/${TARGETARCH}/smartrouter
+COPY ${BINARY_PATH} /bin/smart-router
 
 ENV HOME=/smart-router
-WORKDIR $HOME
+WORKDIR ${HOME}
 
 # smart router listener
 EXPOSE 3360

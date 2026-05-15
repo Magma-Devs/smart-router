@@ -3,7 +3,7 @@ name: Build and Test
 on:
   push:
     branches:
-      - '**'
+      - main
   pull_request:
     branches:
       - main
@@ -93,16 +93,15 @@ jobs:
           verbose: true
 
   build:
-    name: Build smartrouter (${{ matrix.targetos }}-${{ matrix.arch }})
+    name: Build smartrouter (linux-${{ matrix.arch }})
     needs: [test, version]
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        targetos: [linux, darwin]
         arch: [amd64, arm64]
     env:
       CGO_ENABLED: "0"
-      GOOS: ${{ matrix.targetos }}
+      GOOS: linux
       GOARCH: ${{ matrix.arch }}
       GOAMD64: v3
       GOARM64: v8.2
@@ -127,7 +126,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: smartrouter-${{ matrix.targetos }}-${{ matrix.arch }}
+          name: smartrouter-linux-${{ matrix.arch }}
           path: out/smartrouter
 
   build_docker:
@@ -236,7 +235,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile.ci
+          file: Dockerfile
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.plan.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

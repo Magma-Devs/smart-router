@@ -1,0 +1,119 @@
+# Source of truth for the local docker compose stack.
+# Consumed by scripts/render_compose.py to emit compose/docker-compose.yml +
+# compose/configs/router-{id}.yml + compose/traefik/dynamic.yml.
+#
+# Shape mirrors smart-router-standalone/values/core/values.yml — only the keys
+# the compose renderer actually reads are kept (gateway, dashboard, authGateway,
+# staticSpecs.token, autoscaling, resource requests/limits are all dropped).
+
+base_domain: "lava.magmadevs.com"
+
+routers:
+  # Chains covered by the bundled specs/ directory: ETH1 (+ SEP1, HOL1), LAVA,
+  # COSMOSSDK, COSMOSSDK50, COSMOSWASM, COSMOSHUB, IBC, TENDERMINT, GRPCTEST.
+  # To add more, drop the spec JSON (and any spec it imports) into ../specs/.
+
+  - id: "eth"
+    network: "eth1"
+    nodes:
+      - name: "Lava1"
+        endpoints:
+          - url: "https://eth1.lava.build:443/"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+
+  # LAVA via REST. Tests the rest interface — LAVA is in the local specs/.
+  - id: "lava-rest"
+    network: "lava"
+    nodes:
+      - name: "LavaGateway"
+        endpoints:
+          - url: "https://g.w.lavanet.xyz:443/gateway/lava/rest/ba054036cd701b601cdab0806f7ad1da"
+            interface: "rest"
+
+  # LAVA via Tendermint RPC. Tests the tendermintrpc interface.
+  - id: "lava-tm"
+    network: "lava"
+    nodes:
+      - name: "LavaGateway"
+        endpoints:
+          - url: "https://g.w.lavanet.xyz:443/gateway/lava/rpc-http/ba054036cd701b601cdab0806f7ad1da"
+            interface: "tendermintrpc"
+
+  # Cosmos Hub via gRPC. The bundled specs/{cosmoshub,cosmossdkv50,cosmoswasm}.json
+  # resolve the chain spec graph locally — no remote spec fetch needed at boot.
+  #
+  # ⚠ Connection-burst caveat (binary-level): smart-router opens up to 100
+  # simultaneous TLS handshakes at startup (10 parallel connections × 10 retry
+  # attempts; hardcoded at protocol/lavasession/direct_rpc_connection.go:648
+  # and protocol/chainlib/chainproxy/connector.go:194). The public Lava
+  # gateways (*.g.w.lavanet.xyz:443) close that burst with TLS handshake errors
+  # → the binary exits fatal → container crash-loops → `grpcurl localhost:3003`
+  # returns "connection refused". Direct `grpcurl <gateway>:443` works fine
+  # (verified end-to-end) — it's only the parallel-connection startup burst
+  # that gets throttled.
+  #
+  # The router config + compose wiring + specs are all correct (verified by
+  # unit tests + manual specs/ check). To run this router end-to-end, either
+  # patch the connection-pool defaults in the binary or point at a gRPC
+  # endpoint that won't rate-limit the burst (your own gateway, self-hosted
+  # node, etc.).
+  - id: "lava-grpc"
+    network: "cosmoshub"   # must match the upstream's chain-id; the gateway URL is cosmoshub-tagged
+    nodes:
+      - name: "LavaGateway"
+        endpoints:
+          - url: "grpcs://13bf2575e519a5c11a3b712f569f8d07-cosmoshub.g.w.lavanet.xyz:443"
+            #- url: "grpcs://ba054036cd701b601cdab0806f7ad1da-lava.g.w.lavanet.xyz:443"
+            interface: "grpc"
+            auth_config:
+              use_tls: true
+
+miscellaneous:
+  log:
+    level: "debug"
+    format: "json"
+  geolocation: "1"
+  images:
+    smart-router:
+      url: "ghcr.io/magma-devs/smart-router"
+      # Default tag used when DEV_MODE is `<bare-tag>` and DEV_MODE is unset
+      # (the latter case falls back to a local Dockerfile build tagged smart-router:local).
+      version: "latest"
+  routers:
+    cache:
+      enabled: true
+    # Smart-router CLI flag defaults. Override via additionalFlags below.
+    maxSessionsPerProvider: 10000
+    maximumStreamsPerConnection: 1000
+    setRelayRetryLimit: 2
+    defaultProcessingTimeout: "30s"
+    minRelayTimeout: "10s"
+    maxBatchRequestSize: 0
+    providerOptimizerAvailabilityWeight: 0.3
+    providerOptimizerLatencyWeight: 0.3
+    providerOptimizerSyncWeight: 0.2
+    providerOptimizerStakeWeight: 0.2
+    providerOptimizerMinSelectionChance: 0.01
+    probeUpdateWeight: 0.25
+    enableSelectionStats: false
+    enableGrpcCompression: false
+    additionalFlags: []
+  # Static specs — the renderer passes --use-static-spec for each entry below.
+  # Local specs/ (mounted at /smart-router/specs) ships with this repo and
+  # covers: ETH1 (+ SEP1, HOL1), LAVA, COSMOSSDK, IBC, TENDERMINT, GRPCTEST.
+  #
+  # `remoteUrl` is commented out by default — when enabled, every router fetches
+  # from GitHub on startup and the anonymous rate limit (60 req/hour) trips
+  # quickly across N routers × M retries, making ALL routers fail to load specs.
+  # To use it, also set `token` to a GitHub PAT so requests are authenticated
+  # (5000 req/hour) — or drop the desired spec JSON into ../specs/ instead.
+  staticSpecs:
+    localPath: "/smart-router/specs"
+    # remoteUrl: "https://github.com/magma-devs/lava-specs/tree/main/"
+    # token: "ghp_..."
+  cache:
+    expiration_multiplier: 1.5
+    expiration_non_finalized_multiplier: 1.25
+    max_items: 2147483647
+    log_level: error
