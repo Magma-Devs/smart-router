@@ -385,6 +385,36 @@ func (s *RelayerCacheServer) Health(ctx context.Context, req *emptypb.Empty) (*r
 	return &relaytypes.CacheUsage{}, nil
 }
 
+// FlushCache empties every Ristretto store on this cache server. Reached only
+// from the smart router's /debug/reset-all handler so black-box tests can drop
+// stale entries without restarting the pod. Ristretto's Clear() is not atomic
+// and assumes no concurrent Set/Get; Wait() drains the asynchronous Set buffer
+// so a Set in flight at Clear time can't survive the flush and serve a hit on
+// the next Get. Caveat: this guarantee only holds when the test framework
+// stops issuing relay traffic before calling /debug/reset-all — a concurrent
+// Set buffered during the Clear/Wait window can still resurface as a hit
+// after Wait returns. Production callers (the simulator harness) honour
+// that invariant by design.
+func (s *RelayerCacheServer) FlushCache(ctx context.Context, req *emptypb.Empty) (*emptypb.Empty, error) {
+	if s.CacheServer == nil {
+		return &emptypb.Empty{}, nil
+	}
+	if c := s.CacheServer.tempCache; c != nil {
+		c.Clear()
+		c.Wait()
+	}
+	if c := s.CacheServer.finalizedCache; c != nil {
+		c.Clear()
+		c.Wait()
+	}
+	if c := s.CacheServer.blocksHashesToHeightsCache; c != nil {
+		c.Clear()
+		c.Wait()
+	}
+	utils.LavaFormatInfo("cache server flushed by FlushCache RPC")
+	return &emptypb.Empty{}, nil
+}
+
 func (s *RelayerCacheServer) cacheHit(ctx context.Context) {
 	atomic.AddUint64(&s.cacheHits, 1)
 	s.PrintCacheStats(ctx, "[+] cache hit")
