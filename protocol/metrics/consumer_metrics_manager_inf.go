@@ -34,6 +34,10 @@ func (NoOpConsumerMetrics) SetQOSMetrics(string, string, string, string, *pairin
 }
 func (NoOpConsumerMetrics) ResetSessionRelatedMetrics()                                    {}
 func (NoOpConsumerMetrics) ResetBlockedProvidersMetrics(string, string, map[string]string) {}
+func (NoOpConsumerMetrics) SetCSMBlockedProvidersCount(string, string, int)                {}
+func (NoOpConsumerMetrics) SetCSMBlockedBackupProvidersCount(string, string, int)          {}
+func (NoOpConsumerMetrics) SetCSMStickySessionsCount(string, string, int)                  {}
+func (NoOpConsumerMetrics) SetCSMReportedProvidersCount(string, string, int)               {}
 func (NoOpConsumerMetrics) SetWsSubscriptionRequestMetric(string, string)                  {}
 func (NoOpConsumerMetrics) SetFailedWsSubscriptionRequestMetric(string, string)            {}
 func (NoOpConsumerMetrics) SetWebSocketConnectionActive(string, string, bool)              {}
@@ -89,6 +93,15 @@ type ConsumerMetricsManagerInf interface {
 	// --- Session (ConsumerSessionManager) ---
 	ResetSessionRelatedMetrics()
 	ResetBlockedProvidersMetrics(chainId, apiInterface string, providers map[string]string)
+
+	// --- CSM state-store sizes (ConsumerSessionManager) ---
+	// Gauges that expose the current size of black-box state stores so
+	// integration tests can verify /debug/reset-all actually emptied them.
+	// All four go to zero after ResetTransientFailureState (MAG-1762).
+	SetCSMBlockedProvidersCount(chainId, apiInterface string, count int)
+	SetCSMBlockedBackupProvidersCount(chainId, apiInterface string, count int)
+	SetCSMStickySessionsCount(chainId, apiInterface string, count int)
+	SetCSMReportedProvidersCount(chainId, apiInterface string, count int)
 
 	// --- WebSocket (DirectWSSubscriptionManager) ---
 	SetWsSubscriptionRequestMetric(chainId string, apiInterface string)

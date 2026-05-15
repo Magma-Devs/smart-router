@@ -59,3 +59,12 @@ func (s *StickySessionStore) Clear() {
 	defer s.lock.Unlock()
 	s.sessions = make(map[string]*StickySession)
 }
+
+// Len returns the current number of sticky-session affinities. Used by the
+// CSM state-size gauge publisher (MAG-1762) so integration tests can verify
+// /debug/reset-all emptied the store.
+func (s *StickySessionStore) Len() int {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	return len(s.sessions)
+}
