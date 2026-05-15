@@ -584,10 +584,21 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    keeps refreshing the TTL.
 		resetAllConsistencies(deps.consistencies)
 
-		// 3. Per-server RelayRetriesManagers (6h hash ban cache) and 4. per-CSM
-		//    transient failure state. Both require the router to be present;
-		//    test fixtures without a router still get a useful partial reset
-		//    above and we report which stores actually moved.
+		// 3. Per-server RelayRetriesManagers (6h hash ban cache), 4. per-CSM
+		//    transient failure state, and 4b. per-CSM blocked-providers list.
+		//    All require the router to be present; test fixtures without a
+		//    router still get a useful partial reset above and we report which
+		//    stores actually moved.
+		//
+		//    Why ResetBlockedProviders runs separately from
+		//    ResetTransientFailureState:
+		//    ResetTransientFailureState deliberately preserves
+		//    currentlyBlockedProviderAddresses because in lava-pairing-network
+		//    mode unblocking is an epoch-boundary operation. In direct-rpc mode
+		//    (this fork's default) there are no epoch transitions, so blocked
+		//    providers can only accumulate across test runs unless we mass-
+		//    restore here. ResetBlockedProviders is the explicit escape hatch
+		//    for /debug/* paths; production relay paths never reach it.
 		if deps.router != nil {
 			deps.router.mu.Lock()
 			for _, server := range deps.router.rpcServers {
@@ -598,6 +609,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			for _, csm := range deps.router.sessionManagers {
 				if csm != nil {
 					csm.ResetTransientFailureState()
+					csm.ResetBlockedProviders()
 				}
 			}
 			deps.router.mu.Unlock()
@@ -640,12 +652,15 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// flushed. The test framework probes this body to decide between this
 		// endpoint and the legacy 4-call dance; "seen-block" was added to
 		// signal the per-chain consistency-cache flush, "cache-be" signals
-		// MAG-1764 end-to-end coverage.
+		// MAG-1764 end-to-end coverage, "blocked-providers" signals MAG-1810
+		// (currentlyBlockedProviderAddresses is now restored to
+		// pairingAddresses, the per-provider redemption flag is reset, and the
+		// addon cache is purged).
 		w.Header().Set("Content-Type", "application/json")
 		if cacheBeFlushed {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","cache-be"]}`)
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","cache-be"]}`)
 		} else {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block"]}`)
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers"]}`)
 		}
 	})
 

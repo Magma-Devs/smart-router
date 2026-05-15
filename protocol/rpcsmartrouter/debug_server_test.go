@@ -175,6 +175,11 @@ func TestDebugResetAll_SmartRouter_ReturnsCapabilityAdvertisement(t *testing.T) 
 	// lives). The simulator framework can probe this key to verify it doesn't
 	// need to fall back to a process restart.
 	require.Contains(t, body, `"seen-block"`)
+	// blocked-providers (MAG-1810): in direct-rpc mode there are no epoch
+	// transitions, so currentlyBlockedProviderAddresses can only grow as
+	// tests trigger blockProvider. reset-all must restore the list to
+	// pairingAddresses for the test bundle to recover.
+	require.Contains(t, body, `"blocked-providers"`)
 }
 
 func TestDebugResetAll_SmartRouter_MethodNotAllowed(t *testing.T) {
