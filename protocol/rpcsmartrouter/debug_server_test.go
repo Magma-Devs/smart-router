@@ -1,6 +1,8 @@
 package rpcsmartrouter
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,7 +14,27 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+// fakeCacheFlusher records Flush calls so /debug/reset-all tests can verify
+// the external cache-be branch fires. active controls CacheActive(); err
+// controls Flush()'s return value.
+type fakeCacheFlusher struct {
+	active     bool
+	err        error
+	flushCalls int
+}
+
+func (f *fakeCacheFlusher) CacheActive() bool {
+	return f.active
+}
+
+func (f *fakeCacheFlusher) Flush(_ context.Context) error {
+	f.flushCalls++
+	return f.err
+}
 
 func newEmptyOptimizersRouter() *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer] {
 	return &common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]{}
@@ -366,4 +388,100 @@ func TestDebugConsistencyReset_NilMapIsSafe(t *testing.T) {
 			require.Equal(t, http.StatusOK, rr.Code)
 		})
 	}
+}
+
+// TestDebugResetAll_SmartRouter_NoCacheBe verifies the default (no --cache-be)
+// deployment: cleared advertisement omits "cache-be" and no flush is attempted.
+func TestDebugResetAll_SmartRouter_NoCacheBe(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{
+		optimizers: newEmptyOptimizersRouter(),
+		offsetNano: &offsetNano,
+		cache:      nil,
+	})
+
+	rr := postResetAllRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NotContains(t, rr.Body.String(), `"cache-be"`)
+}
+
+// TestDebugResetAll_SmartRouter_CacheBeInactive verifies that a configured
+// cache whose gRPC client is currently disconnected (CacheActive=false)
+// does NOT advertise "cache-be" — honesty about what was actually cleared.
+func TestDebugResetAll_SmartRouter_CacheBeInactive(t *testing.T) {
+	var offsetNano atomic.Int64
+	flusher := &fakeCacheFlusher{active: false}
+	mux := buildDebugMux(debugMuxDeps{
+		optimizers: newEmptyOptimizersRouter(),
+		offsetNano: &offsetNano,
+		cache:      flusher,
+	})
+
+	rr := postResetAllRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, 0, flusher.flushCalls, "Flush must not be called when CacheActive() is false")
+	require.NotContains(t, rr.Body.String(), `"cache-be"`)
+}
+
+// TestDebugResetAll_SmartRouter_CacheBeActive_AdvertisesAndFlushes is the
+// MAG-1764 acceptance check at the Go level: when --cache-be is configured
+// and reachable, /debug/reset-all calls Flush and advertises "cache-be" in
+// the cleared list. The end-to-end "next request hits a provider" assertion
+// lives in the Python harness.
+func TestDebugResetAll_SmartRouter_CacheBeActive_AdvertisesAndFlushes(t *testing.T) {
+	var offsetNano atomic.Int64
+	flusher := &fakeCacheFlusher{active: true}
+	mux := buildDebugMux(debugMuxDeps{
+		optimizers: newEmptyOptimizersRouter(),
+		offsetNano: &offsetNano,
+		cache:      flusher,
+	})
+
+	rr := postResetAllRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, 1, flusher.flushCalls, "Flush must be called exactly once")
+	require.Contains(t, rr.Body.String(), `"cache-be"`)
+}
+
+// TestDebugResetAll_SmartRouter_CacheBeFlushError_Returns500 verifies the
+// fail-loud semantics: when cache-be is configured and Flush returns an
+// error, the endpoint must NOT swallow it and pretend the cache cleared.
+// The test framework reads the status code to surface the failure.
+func TestDebugResetAll_SmartRouter_CacheBeFlushError_Returns500(t *testing.T) {
+	var offsetNano atomic.Int64
+	flusher := &fakeCacheFlusher{active: true, err: errors.New("cache-be unreachable")}
+	mux := buildDebugMux(debugMuxDeps{
+		optimizers: newEmptyOptimizersRouter(),
+		offsetNano: &offsetNano,
+		cache:      flusher,
+	})
+
+	rr := postResetAllRouter(mux)
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Equal(t, 1, flusher.flushCalls)
+	require.Contains(t, rr.Body.String(), "cache-be flush failed")
+}
+
+// TestDebugResetAll_SmartRouter_CacheBeUnimplemented_DegradesGracefully
+// covers the rolling-deploy seam: a new router talking to an old cache pod
+// that doesn't yet expose FlushCache returns codes.Unimplemented. The
+// handler must still return 200 (in-process Ristretto cleared, debug
+// endpoint usable) but omit "cache-be" from the cleared list to keep the
+// advertisement honest.
+func TestDebugResetAll_SmartRouter_CacheBeUnimplemented_DegradesGracefully(t *testing.T) {
+	var offsetNano atomic.Int64
+	flusher := &fakeCacheFlusher{
+		active: true,
+		err:    status.Error(codes.Unimplemented, "FlushCache not implemented"),
+	}
+	mux := buildDebugMux(debugMuxDeps{
+		optimizers: newEmptyOptimizersRouter(),
+		offsetNano: &offsetNano,
+		cache:      flusher,
+	})
+
+	rr := postResetAllRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, 1, flusher.flushCalls)
+	require.NotContains(t, rr.Body.String(), `"cache-be"`)
 }
