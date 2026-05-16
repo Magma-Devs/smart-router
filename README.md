@@ -77,6 +77,21 @@ types/              — Shared type definitions
 specs/              — Chain specification JSON files
 ```
 
+## Releases
+
+Releases are cut by pushing a semver tag matching `vX.Y.Z` (optionally with a pre-release suffix, e.g. `v1.2.0-rc1`). Pushing the tag triggers the release workflow, which builds the binaries, publishes a multi-arch Docker image to `ghcr.io/magma-devs/smart-router`, and creates the corresponding entry on the [Releases page](https://github.com/Magma-Devs/smart-router/releases).
+
+To cut a new version:
+
+```bash
+git checkout main
+git pull
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+Alternatively, an existing tag can be released manually from GitHub → Actions → **Publish Smart Router Release** → *Run workflow*, passing the tag name as `release_tag`.
+
 ## Community
 
 - [Issues](https://github.com/magma-Devs/smart-router/issues)
