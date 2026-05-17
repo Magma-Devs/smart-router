@@ -1,9 +1,6 @@
 "C:cmd/smartrouter":
   - changed-files:
       - any-glob-to-any-file: "cmd/smartrouter/**/*"
-"C:cmd/lavap":
-  - changed-files:
-      - any-glob-to-any-file: "cmd/lavap/**/*"
 "C:cmd/common":
   - changed-files:
       - any-glob-to-any-file: "cmd/common/**/*"
