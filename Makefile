@@ -37,8 +37,8 @@ build:
 
 # Produce every release artifact locally (4 binaries, multi-arch Docker
 # image, checksums) under dist/ without publishing. Requires GoReleaser
-# (v1.22+) and Docker. Drives the same .goreleaser.yaml config CI uses,
-# so dist/ matches what a real release would produce for this commit.
+# (v2+) and Docker. Drives the same .goreleaser.yaml config CI uses, so
+# dist/ matches what a real release would produce for this commit.
 snapshot:
 	goreleaser release --snapshot --clean --skip=publish
 
