@@ -204,3 +204,14 @@ jobs:
             echo "**Tags:**"
             for t in ${TAGS}; do echo "- \`${t}\`"; done
           } >> "$GITHUB_STEP_SUMMARY"
+
+  goreleaser_check:
+    name: GoReleaser config check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: check
