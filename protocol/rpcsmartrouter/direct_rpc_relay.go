@@ -378,6 +378,25 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		utils.LogAttr("response_size", len(responseData)),
 	)
 
+	// Transport-level malformed detection. A JSON-RPC upstream that responds
+	// with 2xx + a body that fails json.Valid (truncated bytes, corrupted
+	// content) is classified as a transport failure here so it flows through
+	// the same retry/MarkUnhealthy plumbing as a connection RST or EOF — and
+	// gets attributed as a ProtocolError in dashboards rather than a node
+	// error. Schema-level malformation (well-formed JSON missing required
+	// fields) is detected later by CheckResponseError on the node-error path.
+	if statusCode >= 200 && statusCode < 300 && len(responseData) > 0 && !json.Valid(responseData) {
+		utils.LavaFormatDebug("direct RPC response is not valid JSON",
+			utils.LogAttr("endpoint", endpointIdentifier),
+			utils.LogAttr("status_code", statusCode),
+			utils.LogAttr("response_size", len(responseData)),
+		)
+		return nil, classifyAndWrap(
+			fmt.Errorf("malformed JSON-RPC response: body is not valid JSON"),
+			d.chainFamily, common.TransportJsonRPC,
+		)
+	}
+
 	// STEP 4: Check response for errors using chainMessage (with actual HTTP status)
 	hasError, errorMessage := chainMessage.CheckResponseError(responseData, statusCode)
 	if hasError {
@@ -513,6 +532,24 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	if err != nil {
 		tracing.RecordError(span, err)
 		return nil, classifyAndWrap(err, d.chainFamily, common.TransportREST)
+	}
+
+	// Transport-level malformed detection for REST 2xx responses. Unlike
+	// JSON-RPC, REST endpoints can legitimately return non-JSON content
+	// (plain text, binary), so we gate on "body opens with `{` or `[`"
+	// before invoking json.Valid — a body that looks like JSON but isn't
+	// parseable is treated as a transport failure (truncated bytes or
+	// corrupted upstream encoder).
+	if response.StatusCode >= 200 && response.StatusCode < 300 && looksLikeJSONOpening(response.Body) && !json.Valid(response.Body) {
+		utils.LavaFormatDebug("direct REST response opens as JSON but is not valid",
+			utils.LogAttr("endpoint", d.endpointName),
+			utils.LogAttr("status_code", response.StatusCode),
+			utils.LogAttr("response_size", len(response.Body)),
+		)
+		return nil, classifyAndWrap(
+			fmt.Errorf("malformed REST response: body is not valid JSON"),
+			d.chainFamily, common.TransportREST,
+		)
 	}
 
 	// Proper error classification (don't treat all 4xx as node errors)
@@ -761,6 +798,24 @@ func joinURLPath(base, path string) (string, error) {
 
 	// Relative path: use ResolveReference (handles ., .., query params)
 	return baseURL.ResolveReference(pathURL).String(), nil
+}
+
+// looksLikeJSONOpening returns true when the first non-whitespace byte of
+// data is a JSON structural opener ('{' or '['). Used to skip JSON validity
+// checks on REST endpoints that legitimately return non-JSON content (plain
+// text, binary) so they don't get false-flagged as malformed.
+func looksLikeJSONOpening(data []byte) bool {
+	for _, b := range data {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // convertHTTPHeadersToMetadata converts http.Header to pairingtypes.Metadata
