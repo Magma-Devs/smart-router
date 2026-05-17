@@ -23,9 +23,11 @@ type jsonrpcScanResult struct {
 //
 // Returns a non-nil error when the input is not a syntactically well-formed
 // JSON object (truncated bytes, top-level array/scalar, structural break).
-// Keys are matched by literal byte comparison; spec-legal but exotic
-// spellings like "result" for "result"
-// are not decoded and will not be recognized.
+// Keys are matched by literal byte comparison against the raw bytes inside
+// the quotes — JSON-escape-encoded spellings of the same key (e.g. the
+// "result" key written with each character as a six-byte hex escape) are
+// spec-legal but will not be recognized. No production upstream is known
+// to emit them.
 func scanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
 	var res jsonrpcScanResult
 	pos := skipWhitespace(data, 0)

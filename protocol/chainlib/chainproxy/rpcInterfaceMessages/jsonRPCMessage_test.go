@@ -479,6 +479,8 @@ func TestCheckResponseErrorForJsonRpcBatch_MalformedElements(t *testing.T) {
 	})
 
 	t.Run("partial_success_with_malformed_sibling_default_mode", func(t *testing.T) {
+		originalValue := BatchNodeErrorOnAny
+		defer func() { BatchNodeErrorOnAny = originalValue }()
 		BatchNodeErrorOnAny = false
 		data := []byte(`[{"jsonrpc":"2.0","id":1,"result":1},{"jsonrpc":"2.0","id":2}]`)
 		hasError, _ := CheckResponseErrorForJsonRpcBatch(data, 200)
