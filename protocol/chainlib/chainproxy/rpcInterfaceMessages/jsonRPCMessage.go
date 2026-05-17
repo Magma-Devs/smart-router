@@ -2,6 +2,7 @@ package rpcInterfaceMessages
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/goccy/go-json"
 
@@ -54,26 +55,67 @@ func (jm *JsonrpcMessage) GetRawRequestHash() ([]byte, error) {
 	return sigs.HashMsg(append(append(methodByteArray, paramsByteArray...), headersByteArray...)), nil
 }
 
-// returns if error exists and
-func (jm JsonrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	// Use a temporary struct that omits the Result field to avoid allocating memory for large results
-	// when we only need to check for errors
-	var result struct {
-		Error *rpcclient.JsonError `json:"error,omitempty"`
-	}
-	err := json.Unmarshal(data, &result)
-	if err != nil {
-		utils.LavaFormatWarning("Failed unmarshalling CheckError", err, utils.LogAttr("data", string(data)))
-		return false, ""
-	}
-	if result.Error == nil { // no error
-		return false, ""
-	}
-	if result.Error.Message == "" {
-		return false, ""
-	}
+// isJSONNull reports whether data is the JSON literal `null`. Scanner output
+// for value bytes already has surrounding whitespace stripped, so a direct
+// length+content check is correct without TrimSpace overhead.
+func isJSONNull(data []byte) bool {
+	return len(data) == 4 && string(data) == "null"
+}
 
-	return true, result.Error.Message
+// checkJsonrpcEnvelope runs the JSON-RPC envelope shape check shared by both
+// JsonrpcMessage and TendermintrpcMessage. It distinguishes three outcomes:
+//
+//   - hasError=true with a non-empty message → caller propagates as a
+//     node-error verdict (scanner parse failure, schema violation, or a
+//     real error object on the wire)
+//   - hasError=false, resultBytes != nil    → envelope success. Caller may
+//     inspect resultBytes for protocol-specific inner errors (e.g.
+//     Tendermint's response.code/log)
+//   - hasError=false, resultBytes == nil    → envelope success with no
+//     result content to inspect (rare; happens when "error" was present
+//     with an empty message)
+//
+// kind is woven into synthetic error messages — "JSON-RPC" or "Tendermint RPC".
+//
+// Edge case: "error": null is treated as if the error key were absent, since
+// JSON-RPC clients can't act on a null error. A response that has neither a
+// result nor a real error is still flagged as a schema violation.
+func checkJsonrpcEnvelope(data []byte, kind string) (hasError bool, errorMessage string, resultBytes []byte) {
+	scan, err := scanJsonrpcEnvelope(data)
+	if err != nil {
+		utils.LavaFormatWarning("malformed "+kind+" response", err, utils.LogAttr("data", string(data)))
+		return true, fmt.Sprintf("malformed %s response: %v", kind, err), nil
+	}
+	hasErr := scan.hasError && !isJSONNull(scan.errorBytes)
+	if !scan.hasResult && !hasErr {
+		return true, fmt.Sprintf("malformed %s response: missing both 'result' and 'error' fields", kind), nil
+	}
+	if !hasErr {
+		return false, "", scan.resultBytes
+	}
+	var je struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(scan.errorBytes, &je); err != nil {
+		return true, fmt.Sprintf("malformed %s response: error field is not a valid object", kind), nil
+	}
+	if je.Message == "" {
+		return false, "", scan.resultBytes
+	}
+	return true, je.Message, nil
+}
+
+// CheckResponseError classifies a JSON-RPC response body for the smart-router
+// retry pipeline. See checkJsonrpcEnvelope for the verdict rules; this method
+// is a thin wrapper since JsonrpcMessage has no protocol-specific inner-error
+// inspection (Tendermint does).
+//
+// Direct callers in direct_rpc_relay.go short-circuit truncated wire-level
+// failures via json.Valid before reaching here; this method's parse-failure
+// branch remains as a backstop for callers that bypass that check.
+func (jm JsonrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
+	hasErr, msg, _ := checkJsonrpcEnvelope(data, "JSON-RPC")
+	return hasErr, msg
 }
 
 func ConvertJsonRPCMsg(rpcMsg *rpcclient.JsonrpcMessage) (*JsonrpcMessage, error) {
@@ -273,49 +315,53 @@ func NewBatchMessage(msgs []JsonrpcMessage) (JsonrpcBatchMessage, error) {
 	return JsonrpcBatchMessage{batch: batch}, nil
 }
 
-// returns if error exists and
-// Behavior controlled by BatchNodeErrorOnAny flag:
-// - false (default): batch is an error only if ALL sub-requests failed
-// - true: batch is an error if ANY sub-request failed (strict mode)
+// CheckResponseErrorForJsonRpcBatch classifies a JSON-RPC batch response body.
+// Aggregation is controlled by BatchNodeErrorOnAny:
+//   - false (default): the batch is an error only when no sub-request succeeded
+//     AND at least one was faulty (had an error or was malformed)
+//   - true (strict):  the batch is an error whenever any sub-request was faulty
+//
+// A malformed sub-element (unparseable, or missing both 'result' and 'error')
+// is treated as a faulty element. A malformed top-level array (truncated, not
+// an array) is itself classified as a wrong-data verdict so the relay pipeline
+// can retry against another provider. Sub-element classification reuses
+// checkJsonrpcEnvelope so the rules stay in lockstep with the single path,
+// including the error:null edge case.
 func CheckResponseErrorForJsonRpcBatch(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	// Use a temporary struct that checks for both error and result presence
-	var result []struct {
-		Error  *rpcclient.JsonError `json:"error,omitempty"`
-		Result json.RawMessage      `json:"result,omitempty"`
+	var (
+		hasAnySuccess bool
+		aggregated    strings.Builder
+	)
+	appendFault := func(msg string) {
+		if aggregated.Len() > 0 {
+			aggregated.WriteString(",-,") // unique separator between sub-messages
+		}
+		aggregated.WriteString(msg)
 	}
-	err := json.Unmarshal(data, &result)
-	if err != nil {
-		utils.LavaFormatWarning("Failed unmarshalling CheckError", err, utils.LogAttr("data", string(data)))
+
+	walkErr := scanJsonrpcBatchElements(data, func(element []byte) bool {
+		elemHasErr, elemMsg, _ := checkJsonrpcEnvelope(element, "JSON-RPC batch element")
+		if elemHasErr {
+			appendFault(elemMsg)
+			return true
+		}
+		// Envelope success — element has a result (possibly null).
+		hasAnySuccess = true
+		return true
+	})
+
+	if walkErr != nil {
+		utils.LavaFormatWarning("malformed JSON-RPC batch response", walkErr, utils.LogAttr("data", string(data)))
+		return true, fmt.Sprintf("malformed JSON-RPC batch response: %v", walkErr)
+	}
+
+	// Default mode: a single success masks any sibling faults.
+	if !BatchNodeErrorOnAny && hasAnySuccess {
 		return false, ""
 	}
-
-	hasAnySuccess := false
-	hasAnyError := false
-	aggregatedErrors := ""
-
-	for _, batchResult := range result {
-		if batchResult.Error == nil && len(batchResult.Result) > 0 {
-			hasAnySuccess = true
-		}
-		if batchResult.Error != nil && batchResult.Error.Message != "" {
-			hasAnyError = true
-			if aggregatedErrors != "" {
-				aggregatedErrors += ",-," // add a unique comma separator between results
-			}
-			aggregatedErrors += batchResult.Error.Message
-		}
-	}
-
-	// BatchNodeErrorOnAny=true (strict): error if ANY sub-request failed
-	// BatchNodeErrorOnAny=false (default): error only if ALL sub-requests failed
-	if BatchNodeErrorOnAny {
-		// Strict mode: any error means batch failed
-		return hasAnyError, aggregatedErrors
-	}
-
-	// Default mode: only error if no successes at all
-	if hasAnySuccess {
+	if aggregated.Len() == 0 {
+		// No successes and no faults — typically the empty-batch case.
 		return false, ""
 	}
-	return aggregatedErrors != "", aggregatedErrors
+	return true, aggregated.String()
 }

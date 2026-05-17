@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -65,6 +66,140 @@ func TestDirectRPCRelaySender_SendDirectRelay(t *testing.T) {
 
 	// Verify response data
 	assert.Contains(t, string(result.Reply.Data), "0x1234")
+}
+
+// TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError pins
+// the wrong-data fix for MAG-1718: when an upstream returns 2xx with a body
+// that fails json.Valid (truncated bytes, corrupted upstream encoder), the
+// router must classify it as a transport-level failure — same bucket as a
+// connection RST — and return an error from SendDirectRelay rather than a
+// healthy-looking RelayResult. This means the relay pipeline retries against
+// another provider and the failure is attributed as a ProtocolError, not a
+// NodeError, so per-provider health dashboards correctly identify flaky
+// upstreams. A regression here would re-introduce the silent-forwarding bug.
+//
+// The test also asserts that the returned error wraps a *common.LavaError so a
+// future refactor that bypasses classifyAndWrap (and loses the protocol-error
+// classification) would be caught.
+func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *testing.T) {
+	assertTransportError := func(t *testing.T, err error, bodyKind string) {
+		t.Helper()
+		require.Error(t, err, "%s body must surface as transport-level error, not a RelayResult", bodyKind)
+		require.Contains(t, err.Error(), "malformed")
+		var wrapped *common.LavaWrappedError
+		require.True(t, errors.As(err, &wrapped),
+			"transport error must be wrapped via classifyAndWrap so the protocol-error classifier sees it")
+		require.NotNil(t, wrapped.LavaErr, "wrapped error must carry a classified LavaError")
+	}
+
+	t.Run("jsonrpc_truncated_body", func(t *testing.T) {
+		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			// Truncated mid-write — the shape from the ticket.
+			w.Write([]byte(`{"jsonrpc":"2.0","id":1,"resu`))
+		}))
+		defer mockServer.Close()
+
+		ctx := context.Background()
+		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		require.NoError(t, err)
+
+		sender := &DirectRPCRelaySender{
+			directConnection: directConn,
+			endpointName:     "truncated-upstream",
+			chainFamily:      common.ChainFamilyEVM,
+		}
+		chainMessage := createMockChainMessage(t, `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`)
+
+		result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+		require.Nil(t, result, "no RelayResult is built on the transport-error path")
+		assertTransportError(t, err, "truncated JSON-RPC")
+	})
+
+	t.Run("jsonrpc_garbage_body", func(t *testing.T) {
+		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`<html>upstream proxy error</html>`))
+		}))
+		defer mockServer.Close()
+
+		ctx := context.Background()
+		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		require.NoError(t, err)
+
+		sender := &DirectRPCRelaySender{
+			directConnection: directConn,
+			endpointName:     "garbage-upstream",
+			chainFamily:      common.ChainFamilyEVM,
+		}
+		chainMessage := createMockChainMessage(t, `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`)
+
+		result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+		require.Nil(t, result)
+		assertTransportError(t, err, "non-JSON JSON-RPC")
+	})
+
+	t.Run("rest_truncated_body", func(t *testing.T) {
+		// REST's malformed-JSON detection is gated on looksLikeJSONOpening,
+		// so a body that opens with '{' but is truncated must be flagged.
+		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"height":"12345","tx_respo`))
+		}))
+		defer mockServer.Close()
+
+		ctx := context.Background()
+		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		require.NoError(t, err)
+
+		sender := &DirectRPCRelaySender{
+			directConnection: directConn,
+			endpointName:     "truncated-rest-upstream",
+			chainFamily:      common.ChainFamilyEVM,
+		}
+		chainMessage := createMockRESTChainMessage(t, "/cosmos/bank/v1beta1/balances/lava1foo")
+
+		result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+		require.Nil(t, result)
+		assertTransportError(t, err, "truncated REST")
+		require.Contains(t, err.Error(), "REST", "synthetic error message must identify the transport")
+	})
+
+	t.Run("rest_non_json_body_passes_through", func(t *testing.T) {
+		// REST endpoints can legitimately serve plain text or binary content.
+		// The looksLikeJSONOpening gate must skip the json.Valid check in
+		// that case so we don't false-flag healthy non-JSON responses.
+		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`raw text response from a non-JSON endpoint`))
+		}))
+		defer mockServer.Close()
+
+		ctx := context.Background()
+		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		require.NoError(t, err)
+
+		sender := &DirectRPCRelaySender{
+			directConnection: directConn,
+			endpointName:     "plain-text-rest-upstream",
+			chainFamily:      common.ChainFamilyEVM,
+		}
+		chainMessage := createMockRESTChainMessage(t, "/some/non-json/endpoint")
+
+		result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+		require.NoError(t, err, "non-JSON REST bodies must pass through, not be flagged as malformed")
+		require.NotNil(t, result)
+	})
+
+	// Note: the schema-incomplete case (well-formed JSON missing both fields)
+	// is detected at the application layer by JsonrpcMessage.CheckResponseError
+	// and stays on the node-error path. That distinction is covered in the
+	// jsonRPCMessage_test.go unit tests since exercising the real chain message
+	// here would require full chain-parser construction.
 }
 
 func TestDirectRPCRelaySender_SendDirectRelay_Timeout(t *testing.T) {
@@ -398,6 +533,18 @@ func createMockChainMessage(t *testing.T, requestData string) chainlib.ChainMess
 	}
 }
 
+// createMockRESTChainMessage creates a mock ChainMessage configured for the
+// REST API interface with a GET request to the given path. Used by tests that
+// exercise sendRESTRelay (e.g. transport-level malformed detection).
+func createMockRESTChainMessage(t *testing.T, path string) chainlib.ChainMessage {
+	t.Helper()
+	return &mockChainMessage{
+		apiInterface: "rest",
+		httpMethod:   "GET",
+		rpcMessage:   &rpcInterfaceMessages.RestMessage{Path: path},
+	}
+}
+
 // createMockBatchChainMessage creates a mock ChainMessage for batch requests
 func createMockBatchChainMessage(t *testing.T, requestData []byte) chainlib.ChainMessage {
 	t.Helper()
@@ -414,12 +561,24 @@ func createMockBatchChainMessage(t *testing.T, requestData []byte) chainlib.Chai
 type mockChainMessage struct {
 	requestData []byte
 	api         *spectypes.Api
+	// apiInterface defaults to "jsonrpc" — set to "rest" / "grpc" to route
+	// through the corresponding sendXXXRelay branch in direct_rpc_relay.go.
+	apiInterface string
+	// httpMethod is surfaced as ApiCollection.CollectionData.Type, which the
+	// REST path consults; only meaningful when apiInterface == "rest".
+	httpMethod string
+	// rpcMessage, when non-nil, replaces the default mockGenericMessage —
+	// REST tests need a real *RestMessage so the path/body extraction works.
+	rpcMessage rpcInterfaceMessages.GenericMessage
 	// checkResponseError, when non-nil, overrides the default (false, "") so
 	// tests can drive the call site's hasError branch with a custom message.
 	checkResponseError func(data []byte, httpStatusCode int) (bool, string)
 }
 
 func (m *mockChainMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
+	if m.rpcMessage != nil {
+		return m.rpcMessage
+	}
 	return &mockGenericMessage{data: m.requestData}
 }
 
@@ -438,9 +597,14 @@ func (m *mockChainMessage) CheckResponseError(data []byte, httpStatusCode int) (
 }
 
 func (m *mockChainMessage) GetApiCollection() *spectypes.ApiCollection {
+	iface := m.apiInterface
+	if iface == "" {
+		iface = "jsonrpc"
+	}
 	return &spectypes.ApiCollection{
 		CollectionData: spectypes.CollectionData{
-			ApiInterface: "jsonrpc",
+			ApiInterface: iface,
+			Type:         m.httpMethod,
 		},
 	}
 }

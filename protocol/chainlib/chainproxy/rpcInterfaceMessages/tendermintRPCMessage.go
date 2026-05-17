@@ -59,26 +59,24 @@ type TendermintMessageResponse struct {
 	Response TendermintMessageResponseBody `json:"response,omitempty"`
 }
 
-// returns if error exists and
+// CheckResponseError classifies a Tendermint JSON-RPC response. The envelope
+// shape check (malformed bytes, missing-both-fields, error:null normalisation,
+// top-level error extraction) is delegated to checkJsonrpcEnvelope; this
+// method adds the Tendermint-specific success-path inspection of the embedded
+// `{"response": {"code": N, "log": M}}` payload that Tendermint nodes use to
+// signal application-level errors over an otherwise-200 envelope.
 func (jm TendermintrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	result := &JsonrpcMessage{}
-	err := json.Unmarshal(data, result)
-	if err != nil {
-		utils.LavaFormatWarning("Failed unmarshalling CheckError", err, utils.LogAttr("data", string(data)))
-		return false, ""
+	hasErr, msg, resultBytes := checkJsonrpcEnvelope(data, "Tendermint RPC")
+	if hasErr || resultBytes == nil {
+		return hasErr, msg
 	}
-
-	if result.Error == nil { // no error
-		if result.Result != nil { // check if we got a tendermint error
-			tendermintResponse := &TendermintMessageResponse{}
-			err := json.Unmarshal(result.Result, tendermintResponse)
-			if err == nil {
-				return (tendermintResponse.Response.Code != 0 && tendermintResponse.Response.Log != ""), tendermintResponse.Response.Log
-			}
+	var inner TendermintMessageResponse
+	if err := json.Unmarshal(resultBytes, &inner); err == nil {
+		if inner.Response.Code != 0 && inner.Response.Log != "" {
+			return true, inner.Response.Log
 		}
-		return false, ""
 	}
-	return result.Error.Message != "", result.Error.Message
+	return false, ""
 }
 
 func (tm TendermintrpcMessage) GetResult() json.RawMessage {
