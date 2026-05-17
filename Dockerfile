@@ -32,8 +32,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     -mod=readonly \
     -tags "netgo,muslc" \
     -ldflags \
-    "-X main.version=${GIT_VERSION} \
-    -X main.commit=${GIT_COMMIT} \
+    "-X github.com/magma-Devs/smart-router/version.Version=${GIT_VERSION} \
+    -X github.com/magma-Devs/smart-router/version.Commit=${GIT_COMMIT} \
     -w -s -linkmode=external -extldflags '-Wl,-z,muldefs -static'" \
     -trimpath \
     -o /smart-router/build/smart-router \
