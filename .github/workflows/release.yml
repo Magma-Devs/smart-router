@@ -84,6 +84,6 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
           build-args: |
-            GIT_VERSION="${{ steps.meta.outputs.version }}"
+            GIT_VERSION="${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}"
             GIT_COMMIT="${{ github.sha }}"
           push: true
