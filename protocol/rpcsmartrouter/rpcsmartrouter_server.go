@@ -2295,15 +2295,17 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			// disagree on how many actors participated (MAG-1653 Bug #2).
 			//
 			// Ordering rule: walk protocol errors → node errors → successes,
-			// then append the resolver (`providerAddress`, which is "Cached"
-			// when relayResult.GetProvider() was empty). A `seen` set
-			// deduplicates without losing first-seen position. Result: errors
-			// chronologically first, the response source last (e.g.
-			// "lava@p1,lava@p2" when p2 succeeded after p1 failed; or
-			// "lava@p1,Cached" when cache resolved a request that p1 failed).
-			// Walking via slices instead of map iteration also makes the
-			// header value deterministic across runs — downstream parsers can
-			// rely on `last entry == response source`.
+			// skipping any entry whose address matches the resolver, then
+			// append the resolver (`providerAddress`, which is "Cached" when
+			// relayResult.GetProvider() was empty). The skip-then-append is
+			// load-bearing: dedup alone preserves first-seen position, so if
+			// the resolver happened to be in successResults[0] (e.g. it
+			// completed before the loser was even recorded), the final
+			// addProvider(providerAddress) would be a no-op and the chain
+			// tail would be a *loser*, violating "last entry == response
+			// source" (MAG-1871). Walking slices makes the value
+			// deterministic across runs; the explicit final append makes
+			// the contract structurally true.
 			seen := make(map[string]struct{})
 			allProvidersList := make([]string, 0)
 			addProvider := func(addr string) {
@@ -2317,15 +2319,24 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				allProvidersList = append(allProvidersList, addr)
 			}
 			for _, r := range protocolErrorResults {
+				if r.ProviderInfo.ProviderAddress == providerAddress {
+					continue
+				}
 				addProvider(r.ProviderInfo.ProviderAddress)
 			}
 			for _, r := range nodeErrorResults {
+				if r.ProviderInfo.ProviderAddress == providerAddress {
+					continue
+				}
 				addProvider(r.ProviderInfo.ProviderAddress)
 			}
 			for _, r := range successResults {
+				if r.ProviderInfo.ProviderAddress == providerAddress {
+					continue
+				}
 				addProvider(r.ProviderInfo.ProviderAddress)
 			}
-			addProvider(providerAddress) // resolver — "Cached" or the winning real provider, ends up last
+			addProvider(providerAddress) // resolver — "Cached" or the winning real provider, always last
 
 			if len(allProvidersList) > 0 {
 				allProvidersString := strings.Join(allProvidersList, ",")
