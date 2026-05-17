@@ -52,11 +52,14 @@ dockers:
     goarch: amd64
     image_templates:
       - "ghcr.io/magma-devs/smart-router:{{ .Tag }}-amd64"
-      - "ghcr.io/magma-devs/smart-router:latest-amd64"
+      - "{{ if not .Prerelease }}ghcr.io/magma-devs/smart-router:latest-amd64{{ end }}"
     dockerfile: Dockerfile.release
     use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
+    # build_flag_templates is shared with arm64 below via a YAML anchor;
+    # --platform uses goreleaser's .Arch template so the same flag set
+    # works for both architectures.
+    build_flag_templates: &docker_build_flags
+      - "--platform=linux/{{ .Arch }}"
       - "--label=org.opencontainers.image.created={{ .Date }}"
       - "--label=org.opencontainers.image.title={{ .ProjectName }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
@@ -68,23 +71,21 @@ dockers:
     goarch: arm64
     image_templates:
       - "ghcr.io/magma-devs/smart-router:{{ .Tag }}-arm64"
-      - "ghcr.io/magma-devs/smart-router:latest-arm64"
+      - "{{ if not .Prerelease }}ghcr.io/magma-devs/smart-router:latest-arm64{{ end }}"
     dockerfile: Dockerfile.release
     use: buildx
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.created={{ .Date }}"
-      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.version={{ .Tag }}"
-      - "--label=org.opencontainers.image.source={{ .GitURL }}"
+    build_flag_templates: *docker_build_flags
 
 docker_manifests:
   - name_template: "ghcr.io/magma-devs/smart-router:{{ .Tag }}"
     image_templates:
       - "ghcr.io/magma-devs/smart-router:{{ .Tag }}-amd64"
       - "ghcr.io/magma-devs/smart-router:{{ .Tag }}-arm64"
-  - name_template: "ghcr.io/magma-devs/smart-router:latest"
+  # :latest manifest is only published for non-prerelease tags so RC /
+  # alpha / beta releases don't overwrite the stable :latest pointer.
+  # Requires `release: prerelease: auto` (or explicit .Prerelease=false)
+  # — see comment in the release: block.
+  - name_template: "{{ if not .Prerelease }}ghcr.io/magma-devs/smart-router:latest{{ end }}"
     image_templates:
       - "ghcr.io/magma-devs/smart-router:latest-amd64"
       - "ghcr.io/magma-devs/smart-router:latest-arm64"
@@ -137,4 +138,8 @@ release:
   name_template: "Smart Router v{{.Version}}"
   mode: replace
   draft: true
-  prerelease: "true"
+  # `auto` derives prerelease from the tag: vX.Y.Z is a final, vX.Y.Z-*
+  # (e.g. v1.0.0-rc1, v1.0.0-beta.2) is a prerelease. The :latest Docker
+  # tag in dockers / docker_manifests is guarded on `not .Prerelease`, so
+  # RC and beta tags don't overwrite the stable :latest pointer.
+  prerelease: auto
