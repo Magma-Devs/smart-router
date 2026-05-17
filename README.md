@@ -102,10 +102,10 @@ The version string is injected at build time from the git tag — `smartrouter v
 
 ### Reproducing a release locally
 
-Install [GoReleaser](https://goreleaser.com/install/) (v1.22+) and Docker, then run:
+Install [GoReleaser](https://goreleaser.com/install/) and Docker, then run:
 
 ```bash
-goreleaser release --snapshot --clean --skip=publish
+make snapshot   # shortcut for: goreleaser release --snapshot --clean --skip=publish
 ```
 
 This produces every release artifact — the four binaries, the multi-arch Docker image, and the checksum file — under `dist/`, without pushing anything to GitHub or GHCR. Because the release pipeline runs a single `go build` per arch (via `.goreleaser.yaml`'s `builds:` block) and feeds that binary into both the standalone archive and the Docker image, a local snapshot build produces the same bytes CI would for the same commit.
