@@ -17,6 +17,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -521,6 +522,78 @@ func TestRetryCountHeader(t *testing.T) {
 		retryHeader := findHeader(relayResult.Reply.Metadata, common.RETRY_COUNT_HEADER_NAME)
 		require.NotNil(t, retryHeader)
 		require.Equal(t, "1", retryHeader.Value)
+	})
+}
+
+// TestHedgeTriggeredHeader covers MAG-1818: lava-hedge-triggered must appear
+// (Value="true") iff analytics.HedgeCount > 0, and must be omitted otherwise.
+// This signal is independent of Lava-Retries — the test framework needs to
+// distinguish "hedge fired" from "classical retry" without inferring from
+// Lava-Retries + Lava-Provider-Address.
+func TestHedgeTriggeredHeader(t *testing.T) {
+	ctx := context.Background()
+
+	findHeader := func(metadata []pairingtypes.Metadata, name string) *pairingtypes.Metadata {
+		for i := range metadata {
+			if metadata[i].Name == name {
+				return &metadata[i]
+			}
+		}
+		return nil
+	}
+
+	newRelayResult := func() *common.RelayResult {
+		return &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+	}
+
+	newProcessor := func() *MockRelayProcessorForHeaders {
+		return &MockRelayProcessorForHeaders{
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+			},
+		}
+	}
+
+	t.Run("hedge fired - header present with value true", func(t *testing.T) {
+		relayResult := newRelayResult()
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+		analytics := &metrics.RelayMetrics{HedgeCount: 1}
+
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(), &MockProtocolMessage{
+			api: &spectypes.Api{Name: "eth_blockNumber"},
+		}, "eth_blockNumber", analytics, true)
+
+		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.LAVA_HEDGE_TRIGGERED_HEADER)
+		require.NotNil(t, hedgeHeader, "hedge header must be set when HedgeCount > 0")
+		require.Equal(t, "true", hedgeHeader.Value)
+	})
+
+	t.Run("hedge count zero - header absent", func(t *testing.T) {
+		relayResult := newRelayResult()
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+		analytics := &metrics.RelayMetrics{HedgeCount: 0}
+
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(), &MockProtocolMessage{
+			api: &spectypes.Api{Name: "eth_blockNumber"},
+		}, "eth_blockNumber", analytics, true)
+
+		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.LAVA_HEDGE_TRIGGERED_HEADER)
+		require.Nil(t, hedgeHeader, "hedge header must be omitted when HedgeCount == 0 (no \"false\" value ever emitted)")
+	})
+
+	t.Run("nil analytics - header absent", func(t *testing.T) {
+		relayResult := newRelayResult()
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(), &MockProtocolMessage{
+			api: &spectypes.Api{Name: "eth_blockNumber"},
+		}, "eth_blockNumber", nil, true)
+
+		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.LAVA_HEDGE_TRIGGERED_HEADER)
+		require.Nil(t, hedgeHeader, "hedge header must be omitted when analytics is nil")
 	})
 }
 
