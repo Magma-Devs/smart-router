@@ -62,6 +62,18 @@ func isJSONNull(data []byte) bool {
 	return len(data) == 4 && string(data) == "null"
 }
 
+// maxLoggedBodyBytes caps the size of the malformed-response body included in
+// warning logs. A persistently flaky upstream returning megabyte-scale garbage
+// would otherwise saturate the log pipeline.
+const maxLoggedBodyBytes = 2048
+
+func truncateForLog(data []byte) string {
+	if len(data) <= maxLoggedBodyBytes {
+		return string(data)
+	}
+	return string(data[:maxLoggedBodyBytes]) + "...[truncated]"
+}
+
 // checkJsonrpcEnvelope runs the JSON-RPC envelope shape check shared by both
 // JsonrpcMessage and TendermintrpcMessage. It distinguishes three outcomes:
 //
@@ -83,7 +95,7 @@ func isJSONNull(data []byte) bool {
 func checkJsonrpcEnvelope(data []byte, kind string) (hasError bool, errorMessage string, resultBytes []byte) {
 	scan, err := scanJsonrpcEnvelope(data)
 	if err != nil {
-		utils.LavaFormatWarning("malformed "+kind+" response", err, utils.LogAttr("data", string(data)))
+		utils.LavaFormatWarning("malformed "+kind+" response", err, utils.LogAttr("data", truncateForLog(data)))
 		return true, fmt.Sprintf("malformed %s response: %v", kind, err), nil
 	}
 	hasErr := scan.hasError && !isJSONNull(scan.errorBytes)
@@ -351,7 +363,7 @@ func CheckResponseErrorForJsonRpcBatch(data []byte, httpStatusCode int) (hasErro
 	})
 
 	if walkErr != nil {
-		utils.LavaFormatWarning("malformed JSON-RPC batch response", walkErr, utils.LogAttr("data", string(data)))
+		utils.LavaFormatWarning("malformed JSON-RPC batch response", walkErr, utils.LogAttr("data", truncateForLog(data)))
 		return true, fmt.Sprintf("malformed JSON-RPC batch response: %v", walkErr)
 	}
 
