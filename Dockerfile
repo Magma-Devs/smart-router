@@ -26,6 +26,13 @@ COPY . .
 ARG GIT_VERSION="dev"
 ARG GIT_COMMIT="unknown"
 
+# Match the microarchitecture baseline used by smartrouter.yml and
+# .goreleaser.yaml. Without this, go defaults to GOAMD64=v1 and
+# GOARM64=v8.0, so the binary inside the release image would run on
+# older CPUs than what customers actually deploy on — and would be
+# slower than the standalone binary attached to the same release.
+ENV GOAMD64=v3 GOARM64=v8.2
+
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/root/go/pkg/mod \
     GOWORK=off go build \
