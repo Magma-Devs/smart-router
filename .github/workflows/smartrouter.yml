@@ -129,8 +129,11 @@ jobs:
           if [ "$push" = "true" ]; then
             base="${REGISTRY}/${IMAGE_NAME}"
             tags=("${base}:${tag}" "${base}:${tag}-${GITHUB_SHA}")
+            # Dev pushes from main get a :main floating tag — `:latest` is
+            # reserved for the release pipeline (final tagged versions only,
+            # see .goreleaser.yaml dockers / docker_manifests blocks).
             if [ "$is_main" = "true" ]; then
-              tags+=("${base}:latest")
+              tags+=("${base}:main")
             fi
             {
               echo "tags<<EOF"
