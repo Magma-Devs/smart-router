@@ -29,6 +29,11 @@ builds:
     flags:
       - -mod=readonly
       - -trimpath
+    ldflags:
+      - -w
+      - -s
+      - -X github.com/magma-Devs/smart-router/version.Version={{ .Tag }}
+      - -X github.com/magma-Devs/smart-router/version.Commit={{ .FullCommit }}
     mod_timestamp: "{{ .CommitTimestamp }}"
     env:
       - CC_darwin_amd64=o64-clang
