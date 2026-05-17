@@ -100,6 +100,17 @@ A release publishes:
 
 The standalone Linux binaries and the binaries inside the Docker image are produced by the same `go build` invocation — same toolchain, same flags, byte-identical. GoReleaser owns the entire release-time build via the `dockers:` and `docker_manifests:` blocks in `.goreleaser.yaml`.
 
+#### Docker image tags
+
+| Tag | Source | Stability |
+|---|---|---|
+| `:vX.Y.Z` | release tag | immutable, byte-identical to the standalone binary at that version |
+| `:latest` | release tag | floating — points at the most recent **final** release (not RC/beta) |
+| `:main` | push to `main` branch | floating — most recent dev build from `main`, **not** a release artifact |
+| `:<branch>-<version>` | push to other branches | per-branch build for testing |
+
+Customers should pin to `:vX.Y.Z`. `:latest` is for non-production "just give me the newest stable" use; `:main` is for previewing unreleased work from `main`.
+
 The version string is injected at build time from the git tag — `smartrouter version` prints the tag verbatim, including the `v` prefix. Builds from non-tagged commits carry `git describe` output (e.g. `v1.2.0-3-gabc1234`), so a dev binary cannot masquerade as a release.
 
 ### Reproducing a release locally
