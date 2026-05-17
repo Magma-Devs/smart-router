@@ -42,7 +42,7 @@ jobs:
 
     - name: Run GoReleaser
       id: releaser
-      uses: docker://goreleaser/goreleaser-cross:v1.22
+      uses: docker://goreleaser/goreleaser:v1.22
       with:
         args: release --clean --timeout 90m
       env:
