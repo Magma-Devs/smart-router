@@ -28,7 +28,8 @@
 "Type: Build":
   - changed-files:
       - any-glob-to-any-file: "Makefile"
-      - any-glob-to-any-file: "Dockerfile"
+      - any-glob-to-any-file: "Dockerfile*"
+      - any-glob-to-any-file: ".goreleaser.yaml"
       - any-glob-to-any-file: "go.mod"
       - any-glob-to-any-file: "go.sum"
 "Type: CI":
