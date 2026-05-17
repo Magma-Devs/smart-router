@@ -42,11 +42,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
 	planstypes "github.com/magma-Devs/smart-router/types/plans"
-	protocoltypes "github.com/magma-Devs/smart-router/types/protocol"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	scoreutils "github.com/magma-Devs/smart-router/utils/score"
+	"github.com/magma-Devs/smart-router/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc/codes"
@@ -243,7 +243,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 		utils.LavaFormatFatal("failed creating RPCSmartRouter logs", err)
 	}
 
-	smartRouterMetricsManager.SetVersion(protocoltypes.DefaultVersion.ConsumerTarget)
+	smartRouterMetricsManager.SetVersion(version.Version)
 	smartRouterMetricsManager.StartSelectionStatsUpdater(ctx, metrics.OptimizerQosServerSamplingInterval)
 
 	// we want one provider optimizer per chain so we will store them for reuse across rpcEndpoints
@@ -1730,7 +1730,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			}
 
 			rpcSmartRouter := RPCSmartRouter{}
-			utils.LavaFormatInfo("lavap Binary Version: " + protocoltypes.DefaultVersion.ConsumerTarget)
+			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version)
 			rand.InitRandomSeed()
 
 			var cache *performance.Cache = nil

@@ -13,9 +13,9 @@ import (
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
-	protocoltypes "github.com/magma-Devs/smart-router/types/protocol"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
+	"github.com/magma-Devs/smart-router/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -195,7 +195,7 @@ func CreateTestRPCSmartRouterCobraCommand() *cobra.Command {
 				}
 			}
 			_ = networkChainId // chain-id flag kept for CLI compatibility but unused in static-spec mode
-			utils.LavaFormatInfo("lavad Binary Version: " + protocoltypes.DefaultVersion.ConsumerTarget)
+			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version)
 			rand.InitRandomSeed()
 			numberOfNodeParallelConnections, err := cmd.Flags().GetUint(chainproxy.ParallelConnectionsFlag)
 			if err != nil {

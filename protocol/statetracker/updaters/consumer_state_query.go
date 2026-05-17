@@ -5,19 +5,11 @@ import (
 	"fmt"
 
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	protocoltypes "github.com/magma-Devs/smart-router/types/protocol"
 )
 
 const (
 	BlockResultRetry = 20
 )
-
-// ProtocolVersionResponse holds the on-chain protocol version together with
-// the block number at which it was queried.
-type ProtocolVersionResponse struct {
-	Version     *protocoltypes.Version
-	BlockNumber string
-}
 
 // ConsumerStateQuery is a minimal stub that always returns an error for spec
 // queries. The smart router uses static spec loading exclusively; this stub

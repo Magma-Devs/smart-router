@@ -18,7 +18,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	dyncodec "github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
 	"github.com/magma-Devs/smart-router/protocol/parser"
-	protocoltypes "github.com/magma-Devs/smart-router/types/protocol"
+	"github.com/magma-Devs/smart-router/version"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -344,13 +344,13 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}
 
 	fmt.Printf(`
- ┌───────────────────────────────────────────────────┐ 
- │               Lava's Grpc Server                  │ 
- │               %s│ 
- │               Lavap Version: %s│ 
+ ┌───────────────────────────────────────────────────┐
+ │               Lava's Grpc Server                  │
+ │               %s│
+ │               Version: %s│
  └───────────────────────────────────────────────────┘
 
-`, truncateAndPadString(apil.endpoint.NetworkAddress, 36), truncateAndPadString(protocoltypes.DefaultVersion.ConsumerTarget, 21))
+`, truncateAndPadString(apil.endpoint.NetworkAddress, 36), truncateAndPadString(version.Version, 27))
 	if err := serveExecutor(); !errors.Is(err, http.ErrServerClosed) {
 		utils.LavaFormatFatal("Portal failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr()}, utils.Attribute{Key: "ChainID", Value: apil.endpoint.ChainID})
 	}
