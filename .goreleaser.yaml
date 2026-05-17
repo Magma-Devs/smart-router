@@ -42,7 +42,8 @@ archives:
   - id: smartrouter
     builds:
       - smartrouter
-    format: binary
+    formats:
+      - binary
     name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
 
 dockers:
