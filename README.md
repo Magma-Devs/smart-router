@@ -101,7 +101,10 @@ The version string is injected at build time from the git tag — `smartrouter v
 ### Tag conventions
 
 - Trigger pattern: `v[0-9]+.[0-9]+.[0-9]+*`. A tag like `1.2.0` (without the leading `v`) does *not* fire the workflow.
-- Follow [semver](https://semver.org/): `MAJOR.MINOR.PATCH`.
+- Follow [semver](https://semver.org/) `MAJOR.MINOR.PATCH`. For smart-router specifically:
+  - **MAJOR** — breaking change to the wire surface customers integrate with: HTTP metadata headers (e.g. `Smartrouter-Version`, `Lava-Provider-Address`), JSON-RPC envelope shape, removed/renamed CLI flags, removed/renamed config fields.
+  - **MINOR** — new capabilities: additional supported chains in `specs/`, new CLI flags, new metrics, new config fields with safe defaults, new HTTP metadata headers.
+  - **PATCH** — internal-only changes: bug fixes, performance improvements, refactors, dependency bumps, docs.
 
 ## Community
 
