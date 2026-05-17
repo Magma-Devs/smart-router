@@ -2429,6 +2429,19 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			})
 	}
 
+	// MAG-1818: signal that the hedge ticker dispatched at least one speculative
+	// batch on this request. Independent of Lava-Retries, which inclusively counts
+	// canceled hedge primaries — tests need this orthogonal flag to distinguish
+	// "hedge fired" from "classical retry." Omit-when-false convention (no "false"
+	// emitted), mirroring lava-identified-node-error above.
+	if analytics != nil && analytics.HedgeCount > 0 {
+		metadataReply = append(metadataReply,
+			pairingtypes.Metadata{
+				Name:  common.LAVA_HEDGE_TRIGGERED_HEADER,
+				Value: "true",
+			})
+	}
+
 	// fetch trailer information from the provider by using the provider trailer field.
 	rpcss.getMetadataFromRelayTrailer(chainlib.TrailersToAddToHeaderResponse, relayResult)
 
