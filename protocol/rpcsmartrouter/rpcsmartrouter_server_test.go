@@ -675,6 +675,133 @@ func TestCacheServedResponseHeaders(t *testing.T) {
 	})
 }
 
+// TestResolverAlwaysLastInProviderHeader hardens the Lava-Provider-Address
+// contract: the last entry in the comma-separated chain must always be the
+// address that resolved the response, even when that address also appears
+// earlier in successResults / nodeErrors (which can happen under hedging
+// or other concurrent dispatch patterns where the winner is recorded before
+// a slower peer's result lands in the same bucket).
+//
+// MAG-1871 context: a stickiness-failover test observed the *down pinned*
+// provider listed last instead of the failover peer. The exact data shape
+// that produced that output has not been traced to a unit-testable code
+// path (per provider_simulator/server.py, a `down` provider returns HTTP
+// 503 → protocol error → protocolErrors bucket — which iterates before
+// successResults and would *not* trigger the dedup bug). This test instead
+// covers the structural class of failure the fix prevents: any data shape
+// where the resolver appears earlier in iteration than another entry.
+// End-to-end verification against the failing simulator test
+// (`test_stickiness_breaks_on_failover_when_pinned_provider_is_unreachable`)
+// is still required to confirm MAG-1871 itself is closed.
+func TestResolverAlwaysLastInProviderHeader(t *testing.T) {
+	ctx := context.Background()
+
+	findHeader := func(metadata []pairingtypes.Metadata, name string) *pairingtypes.Metadata {
+		for i := range metadata {
+			if metadata[i].Name == name {
+				return &metadata[i]
+			}
+		}
+		return nil
+	}
+
+	t.Run("resolver appears earlier in successResults - resolver still last (regression for the fix)", func(t *testing.T) {
+		// Two successes recorded in order [simprovider2, simprovider3] with
+		// simprovider2 being the resolver returned by ProcessingResult.
+		// Before the fix, dedup kept simprovider2 at its first-seen position
+		// and the trailing addProvider(resolver) was a no-op, yielding
+		// "simprovider2,simprovider3" — winner not last, contract broken.
+		// After the fix, the resolver is skipped during iteration and
+		// appended explicitly at the end.
+		relayProcessor := &MockRelayProcessorForHeaders{
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider2"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider3"}},
+			},
+			nodeErrors: []common.RelayResult{},
+		}
+
+		relayResult := &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider2"},
+			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, &MockProtocolMessage{
+			api: &spectypes.Api{Name: "eth_blockNumber"},
+		}, "eth_blockNumber", nil, true)
+
+		providerHeader := findHeader(relayResult.Reply.Metadata, common.PROVIDER_ADDRESS_HEADER_NAME)
+		require.NotNil(t, providerHeader)
+		// Contract: last entry == response source (resolver).
+		require.Equal(t, "simprovider3,simprovider2", providerHeader.Value)
+	})
+
+	t.Run("resolver also recorded as nodeError on an earlier attempt - resolver still last", func(t *testing.T) {
+		// A provider returned a node error on a first attempt then served on
+		// a retry. The retry winner is the resolver; that same address must
+		// still appear last (not at its first-seen nodeErrors position).
+		// Without the fix the dedup keeps the resolver in the nodeErrors
+		// position; the final addProvider is a no-op.
+		relayProcessor := &MockRelayProcessorForHeaders{
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider1"}},
+			},
+			nodeErrors: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider2"}},
+			},
+		}
+
+		relayResult := &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider1"},
+			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, &MockProtocolMessage{
+			api: &spectypes.Api{Name: "eth_blockNumber"},
+		}, "eth_blockNumber", nil, true)
+
+		providerHeader := findHeader(relayResult.Reply.Metadata, common.PROVIDER_ADDRESS_HEADER_NAME)
+		require.NotNil(t, providerHeader)
+		// Before fix: "simprovider1,simprovider2" (simprovider2 last — wrong).
+		// After fix: simprovider1 (resolver) moved to the end.
+		require.Equal(t, "simprovider2,simprovider1", providerHeader.Value)
+	})
+
+	t.Run("classic failover (winner only in successResults) - already correct, still correct after fix", func(t *testing.T) {
+		// Sanity check: when the winner does not appear in any earlier
+		// bucket, the chain ends with the winner under both old and new
+		// code. This is the data shape that matches a textbook
+		// "stickiness fails over to peer" scenario per the simulator's
+		// down-mode semantics (down → HTTP 503 → protocolErrors).
+		relayProcessor := &MockRelayProcessorForHeaders{
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider2"}},
+			},
+			nodeErrors: []common.RelayResult{},
+			protocolErrors: []relaycore.RelayError{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider3"}},
+			},
+		}
+
+		relayResult := &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider2"},
+			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 1, relayProcessor, &MockProtocolMessage{
+			api: &spectypes.Api{Name: "eth_blockNumber"},
+		}, "eth_blockNumber", nil, true)
+
+		providerHeader := findHeader(relayResult.Reply.Metadata, common.PROVIDER_ADDRESS_HEADER_NAME)
+		require.NotNil(t, providerHeader)
+		require.Equal(t, "simprovider3,simprovider2", providerHeader.Value)
+	})
+}
+
 // TestStatefulRelayTargetsHeader tests the stateful API header functionality
 func TestStatefulRelayTargetsHeader(t *testing.T) {
 	ctx := context.Background()
