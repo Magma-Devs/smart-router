@@ -10,6 +10,8 @@ metadata:
 
 env:
   - CGO_ENABLED=0
+  - GOAMD64=v3
+  - GOARM64=v8.2
 
 builds:
   - id: smartrouter
