@@ -2501,7 +2501,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		}
 
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{
-			Name:  common.SMARTROUTER_VERSION_HEADER_NAME,
+			Name:  common.SMART_ROUTER_VERSION_HEADER_NAME,
 			Value: version.Version,
 		})
 	}
