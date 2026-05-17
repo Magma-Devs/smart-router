@@ -24,9 +24,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
-	protocoltypes "github.com/magma-Devs/smart-router/types/protocol"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/protocopy"
+	"github.com/magma-Devs/smart-router/version"
 
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -2500,11 +2500,10 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			}
 		}
 
-		version := pairingtypes.Metadata{
-			Name:  common.LAVAP_VERSION_HEADER_NAME,
-			Value: protocoltypes.DefaultVersion.ConsumerTarget,
-		}
-		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, version)
+		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{
+			Name:  common.SMARTROUTER_VERSION_HEADER_NAME,
+			Value: version.Version,
+		})
 	}
 
 	relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, metadataReply...)

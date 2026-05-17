@@ -26,21 +26,15 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - name: Parse ConsumerTarget version
+        with:
+          fetch-depth: 0
+      - name: Resolve version from git
         id: ver
         run: |
           set -euo pipefail
-          file=types/protocol/params.go
-          v=$(grep -oP 'ConsumerTarget:\s*"\K[^"]+' "$file" || true)
-          if [ -z "$v" ]; then
-            echo "::error file=$file::ConsumerTarget is empty or could not be parsed"
-            exit 1
-          fi
-          if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-            echo "::error file=$file::ConsumerTarget '$v' is not valid semver (expected MAJOR.MINOR.PATCH[-pre])"
-            exit 1
-          fi
+          v=$(git describe --tags --always --dirty)
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $v"
 
   build:
     name: Build smartrouter (${{ matrix.targetos }}-${{ matrix.arch }})
@@ -71,7 +65,7 @@ jobs:
           GOWORK=off go build \
             -mod=readonly \
             -trimpath \
-            -ldflags "-X main.version=${{ needs.version.outputs.version }} -X main.commit=${{ github.sha }} -w -s" \
+            -ldflags "-X github.com/magma-Devs/smart-router/version.Version=${{ needs.version.outputs.version }} -X github.com/magma-Devs/smart-router/version.Commit=${{ github.sha }} -w -s" \
             -o out/smartrouter ./cmd/smartrouter
 
       - name: Upload artifact
@@ -165,13 +159,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Ensure ConsumerTarget was bumped (main only)
+      - name: Ensure version is not already published (main only)
         if: steps.plan.outputs.is_main == 'true'
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.plan.outputs.tag }}
         run: |
           if docker buildx imagetools inspect "$IMAGE" >/dev/null 2>&1; then
-            echo "::error file=types/protocol/params.go::$IMAGE already exists. Bump ConsumerTarget before merging to main."
+            echo "::error::$IMAGE already exists. Tag a new release (git tag vX.Y.Z) before re-merging to main."
             exit 1
           fi
 
