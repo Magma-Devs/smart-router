@@ -8,7 +8,7 @@ import (
 	"github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/protocol/performance/connection"
 	"github.com/magma-Devs/smart-router/protocol/rpcsmartrouter"
-	protocoltypes "github.com/magma-Devs/smart-router/types/protocol"
+	"github.com/magma-Devs/smart-router/version"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +21,7 @@ func main() {
 		Use:   "version",
 		Short: "Print the version number",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println(protocoltypes.DefaultVersion.ConsumerTarget)
+			fmt.Println(version.Version)
 		},
 	}
 

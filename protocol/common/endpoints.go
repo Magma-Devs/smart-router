@@ -31,7 +31,7 @@ const (
 	REQUESTED_BLOCK_HEADER_NAME                     = "lava-parsed-requested-block"
 	LAVA_IDENTIFIED_NODE_ERROR_HEADER               = "lava-identified-node-error"
 	LAVA_HEDGE_TRIGGERED_HEADER                     = "lava-hedge-triggered"
-	LAVAP_VERSION_HEADER_NAME                       = "Lavap-Version"
+	SMARTROUTER_VERSION_HEADER_NAME                 = "Smartrouter-Version"
 	LAVA_CONSUMER_PROCESS_GUID                      = "lava-consumer-process-guid"
 	// these headers need to be lowercase
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME       = "lava-providers-block"
