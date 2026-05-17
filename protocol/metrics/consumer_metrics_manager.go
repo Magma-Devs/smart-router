@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -688,6 +688,15 @@ func (pme *ConsumerMetricsManager) ResetBlockedProvidersMetrics(chainId, apiInte
 		pme.blockedProviderMetric.WithLabelValues(labels).Set(0)
 	}
 }
+
+// SetCSMBlockedProvidersCount is a no-op on the legacy ConsumerMetricsManager.
+// The CSM state-store gauges are exposed by SmartRouterMetricsManager only
+// (MAG-1762); this stub exists solely so the type still satisfies
+// ConsumerMetricsManagerInf for the WebSocket subscription manager tests.
+func (pme *ConsumerMetricsManager) SetCSMBlockedProvidersCount(string, string, int)       {}
+func (pme *ConsumerMetricsManager) SetCSMBlockedBackupProvidersCount(string, string, int) {}
+func (pme *ConsumerMetricsManager) SetCSMStickySessionsCount(string, string, int)         {}
+func (pme *ConsumerMetricsManager) SetCSMReportedProvidersCount(string, string, int)      {}
 
 func (pme *ConsumerMetricsManager) SetVersion(version string) {
 	if pme == nil {

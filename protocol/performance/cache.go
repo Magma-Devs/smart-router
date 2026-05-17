@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 type relayerCacheClientStore struct {
@@ -186,6 +187,28 @@ func (cache *Cache) SetEntry(ctx context.Context, cacheSet *pairingtypes.RelayCa
 	}
 
 	_, err := client.SetRelay(ctx, cacheSet)
+	if err != nil {
+		cache.clientStore.resetOnConnectionError(err)
+	}
+	return err
+}
+
+// Flush asks the cache-be server to drop every entry it holds. Reached only
+// from the router's /debug/reset-all handler — never from the relay hot path.
+// Returns NotInitializedError when --cache-be is not configured and
+// NotConnectedError while the gRPC client is reconnecting; callers can treat
+// both as "no external cache to flush" and proceed.
+func (cache *Cache) Flush(ctx context.Context) error {
+	if cache == nil {
+		return NotInitializedError
+	}
+
+	client := cache.clientStore.getClient()
+	if client == nil {
+		return NotConnectedError
+	}
+
+	_, err := client.FlushCache(ctx, &emptypb.Empty{})
 	if err != nil {
 		cache.clientStore.resetOnConnectionError(err)
 	}

@@ -2039,6 +2039,7 @@ func NewConsumerSessionManager(
 	csm.providerOptimizer = providerOptimizer
 	csm.activeSubscriptionProvidersStorage = activeSubscriptionProvidersStorage
 	csm.stickySessions = NewStickySessionStore()
+	csm.startStateSizesPublisher()
 	return csm
 }
 
@@ -2085,4 +2086,131 @@ func (csm *ConsumerSessionManager) ResetTransientFailureState() {
 	if csm.reportedProviders != nil {
 		csm.reportedProviders.Reset()
 	}
+
+	// Emit the state-size gauges immediately so /debug/reset-all callers see
+	// the post-condition (everything at 0) on the very next /metrics scrape,
+	// without waiting for the periodic publisher tick.
+	csm.publishStateSizes()
+}
+
+// ResetBlockedProviders is the direct-rpc-mode escape hatch for
+// /debug/reset-all. It bypasses the epoch-boundary invariant documented on
+// ResetTransientFailureState by atomically restoring every
+// currentlyBlockedProviderAddresses entry back to validAddresses, then
+// resetting the per-provider redemption flag.
+//
+// Why ResetTransientFailureState alone is not enough:
+// The lava-pairing-network mode relies on UpdateAllProviders firing on every
+// epoch transition to repopulate validAddresses from pairingAddresses — that
+// is the only path that drains currentlyBlockedProviderAddresses without
+// stranding addresses in routing limbo. In direct-rpc mode the pairing list
+// is loaded once from YAML and never refreshed, so currentlyBlockedProvider
+// Addresses grows monotonically as tests trigger blockProvider, and the
+// pool of routable providers shrinks until tests cascade.
+//
+// We pair the three state changes (clear blocked list, refill valid list,
+// purge addon cache) inside a single lock-held block so observers never see
+// the "blocked-but-not-valid" state that the original doc warned against.
+// The addon-cache purge mirrors what removeAddressFromValidAddresses and
+// validateAndReturnBlockedProviderToValidAddressesListLocked already do on
+// every single-provider mutation.
+func (csm *ConsumerSessionManager) ResetBlockedProviders() {
+	csm.lock.Lock()
+	hadBlocked := len(csm.currentlyBlockedProviderAddresses) > 0
+	if hadBlocked {
+		// setValidAddressesToDefaultValue("", nil, ctx) refills validAddresses
+		// from pairingAddresses but does NOT touch addonAddresses in the
+		// no-addon branch. RemoveAddonAddresses("", nil) wipes the whole map
+		// so the next request rebuilds against the restored pool.
+		csm.setValidAddressesToDefaultValue("", nil, context.Background())
+		csm.RemoveAddonAddresses("", nil)
+	}
+	pairing := csm.pairing
+	endpoint := csm.RPCEndpoint()
+	csm.lock.Unlock()
+
+	if !hadBlocked {
+		return
+	}
+
+	// Clear the per-provider redemption flag for every entry returned to
+	// validAddresses. blockProvider sets this to Used in the second-chance
+	// path; without resetting, future failures see a "Used" status and skip
+	// retry logic. Done outside csm.lock — atomicWriteBlockedStatus does not
+	// take csm.lock, and the metric goroutine must not hold it either.
+	for addr, provider := range pairing {
+		if provider == nil {
+			continue
+		}
+		provider.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
+		if csm.consumerMetricsManager != nil && len(provider.Endpoints) > 0 {
+			go func(networkAddress, chainID, apiInterface, providerAddress string) {
+				csm.consumerMetricsManager.SetBlockedProvider(chainID, apiInterface, providerAddress, networkAddress, false)
+			}(provider.Endpoints[0].NetworkAddress, endpoint.ChainID, endpoint.ApiInterface, addr)
+		}
+	}
+
+	csm.publishStateSizes()
+}
+
+// stateSizesPublishInterval drives the periodic CSM state-size gauge tick.
+// Variable (not const) so unit tests can shorten it to deterministic timing
+// without exposing the goroutine internals.
+var stateSizesPublishInterval = time.Second
+
+// publishStateSizes reads the current size of every black-box state store
+// that /debug/reset-all promises to clear and emits them as Prometheus gauges
+// (MAG-1762). Safe to call from any goroutine: takes its locks lazily.
+//
+// Callers MUST NOT hold csm.lock — this function takes csm.lock.RLock
+// internally for the two map reads and then defers to the external stores
+// (which carry their own locks).
+func (csm *ConsumerSessionManager) publishStateSizes() {
+	if csm == nil || csm.consumerMetricsManager == nil || csm.rpcEndpoint == nil {
+		return
+	}
+
+	csm.lock.RLock()
+	blockedCount := len(csm.previousEpochBlockedProviders)
+	blockedBackupCount := len(csm.blockedBackupProviders)
+	csm.lock.RUnlock()
+
+	var stickyCount, reportedCount int
+	if csm.stickySessions != nil {
+		stickyCount = csm.stickySessions.Len()
+	}
+	if csm.reportedProviders != nil {
+		reportedCount = csm.reportedProviders.Len()
+	}
+
+	chainID := csm.rpcEndpoint.ChainID
+	apiInterface := csm.rpcEndpoint.ApiInterface
+	csm.consumerMetricsManager.SetCSMBlockedProvidersCount(chainID, apiInterface, blockedCount)
+	csm.consumerMetricsManager.SetCSMBlockedBackupProvidersCount(chainID, apiInterface, blockedBackupCount)
+	csm.consumerMetricsManager.SetCSMStickySessionsCount(chainID, apiInterface, stickyCount)
+	csm.consumerMetricsManager.SetCSMReportedProvidersCount(chainID, apiInterface, reportedCount)
+}
+
+// startStateSizesPublisher kicks off the periodic gauge tick. Per-CSM
+// goroutine, follows the same shape as the ReconnectProviders ticker in
+// reported_providers.go (no stop channel — bound to process lifetime).
+//
+// Skipped when the metrics manager is the NoOp variant — SafeMetrics(nil)
+// wraps a typed NoOp into the interface, so a plain nil check is never true;
+// we detect the NoOp explicitly to avoid spinning a useless goroutine in
+// every test that passes nil metrics.
+func (csm *ConsumerSessionManager) startStateSizesPublisher() {
+	if csm == nil || csm.consumerMetricsManager == nil {
+		return
+	}
+	if _, isNoOp := csm.consumerMetricsManager.(metrics.NoOpConsumerMetrics); isNoOp {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(stateSizesPublishInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			csm.publishStateSizes()
+		}
+	}()
 }

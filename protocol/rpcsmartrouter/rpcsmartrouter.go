@@ -49,6 +49,8 @@ import (
 	scoreutils "github.com/magma-Devs/smart-router/utils/score"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -301,9 +303,11 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	if options.cmdFlags.DebugAddress != "" {
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
-			optimizers: optimizers,
-			offsetNano: &currentOffsetNano,
-			router:     rpsr,
+			optimizers:    optimizers,
+			offsetNano:    &currentOffsetNano,
+			consistencies: smartRouterConsistencies,
+			router:        rpsr,
+			cache:         options.cache,
 		})
 		srv := &http.Server{Addr: options.cmdFlags.DebugAddress, Handler: debugMux}
 		// Watcher goroutine: shuts the server down gracefully when ctx is cancelled
@@ -375,9 +379,57 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 type debugMuxDeps struct {
 	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]
 	offsetNano *atomic.Int64
+	// consistencies is the per-chain seen-block cache map. Optional: nil-safe.
+	// Flushed only from the /debug/* recovery endpoints, never from the relay
+	// hot path — see consistencyResetter below for why this is reached via a
+	// type assertion rather than a public interface method.
+	consistencies *common.SafeSyncMap[string, relaycore.Consistency]
 	// router is optional. When provided, /debug/reset-all also flushes
 	// per-server RelayRetriesManagers and per-CSM transient failure state.
 	router *RPCSmartRouter
+	// cache is the optional external cache-be client. When non-nil and
+	// CacheActive(), /debug/reset-all also flushes the cache-be pod via
+	// RelayerCache.FlushCache — without it the in-process Ristretto reset is a
+	// lie on any deployment running with --cache-be (MAG-1764). Reached
+	// through cacheFlusher rather than the concrete *performance.Cache so
+	// tests can inject a fake without standing up a gRPC client.
+	cache cacheFlusher
+}
+
+// cacheFlusher is the minimal surface /debug/reset-all needs from the cache-be
+// client. *performance.Cache satisfies it; tests substitute a fake that
+// records the Flush call.
+type cacheFlusher interface {
+	CacheActive() bool
+	Flush(ctx context.Context) error
+}
+
+// consistencyResetter is the debug-only contract for flushing a Consistency
+// cache. It is *intentionally* not exposed on the public relaycore.Consistency
+// interface so production relay code paths cannot call ResetState by accident.
+// The /debug/* handlers type-assert to reach it; implementations that don't
+// satisfy the assertion (test fakes, future variants) are silently skipped.
+type consistencyResetter interface {
+	ResetState()
+}
+
+// resetAllConsistencies flushes every per-chain seen-block cache that
+// implements consistencyResetter. Why this is necessary: SetSeenBlockFromKey
+// only writes monotonically (consistency.go: `block >= blockSeen → return`),
+// so a poisoned value (e.g. a ms-timestamp accidentally passed as a block
+// number) blocks every legitimate smaller update, and ongoing traffic keeps
+// refreshing the TTL — without an explicit flush, the only recovery is a
+// process restart.
+func resetAllConsistencies(m *common.SafeSyncMap[string, relaycore.Consistency]) {
+	if m == nil {
+		return
+	}
+	m.Range(func(chainID string, c relaycore.Consistency) bool {
+		if r, ok := c.(consistencyResetter); ok {
+			r.ResetState()
+		}
+		return true
+	})
 }
 
 // buildDebugMux constructs the /debug/time-warp, /debug/time, /debug/reset-scores,
@@ -451,6 +503,13 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 			return true
 		})
+		// Gated on needsReset (same as opt.ResetState above) because the
+		// documented move-clock recovery sets offset_seconds back to 0 — that's
+		// the moment we also want to flush the per-chain seen-block cache. See
+		// resetAllConsistencies for the sticky-corruption reasoning.
+		if needsReset {
+			resetAllConsistencies(deps.consistencies)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"offset_seconds":%v,"applied_to_chains":true}`, body.OffsetSeconds)
 	})
@@ -468,7 +527,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	})
 
 	// POST /debug/reset-scores — clears optimizer score state without changing
-	// current time offset or NowFunc.
+	// current time offset or NowFunc. Also flushes per-chain seen-block caches
+	// so a corrupted seenBlock (e.g. a ms-timestamp accidentally passed as a
+	// block number) can be scrubbed without restarting the process.
 	mux.HandleFunc("/debug/reset-scores", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -480,19 +541,26 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			count++
 			return true
 		})
+		resetAllConsistencies(deps.consistencies)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d}`, count)
 	})
 
-	// POST /debug/reset-all — flush every in-process state store the test
-	// framework cares about in a single call. Equivalent to the legacy
-	// time-warp(+3600) → time-warp(0) → reset-scores dance plus clearing
-	// state that survives it (relay retry bans, sticky sessions, reported
-	// providers, cross-epoch blocked-provider memory).
+	// POST /debug/reset-all — flush every state store the test framework
+	// cares about in a single call: in-process Ristretto, optimizer scores,
+	// per-chain seen-block consistency caches, relay retry bans, sticky
+	// sessions, reported providers, cross-epoch blocked-provider memory,
+	// and — when --cache-be is configured — the external cache-be pod
+	// (MAG-1764). Equivalent to the legacy time-warp(+3600) → time-warp(0)
+	// → reset-scores dance plus the surviving state above.
 	//
 	// "Live pairing" (pairing tables, valid/backup addresses) is intentionally
 	// left intact: we want the next relay to route normally without waiting
 	// for an epoch transition.
+	//
+	// Returns 500 if cache-be is configured and its flush RPC fails — a
+	// silent failure here would advertise a capability the deployment did
+	// not actually fulfill.
 	mux.HandleFunc("/debug/reset-all", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -509,10 +577,28 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			return true
 		})
 
-		// 2. Per-server RelayRetriesManagers (6h hash ban cache) and 3. per-CSM
-		//    transient failure state. Both require the router to be present;
-		//    test fixtures without a router still get a useful partial reset
-		//    above and we report which stores actually moved.
+		// 2. Per-chain seen-block consistency caches. Must be flushed here too,
+		//    not just in /debug/reset-scores: a poisoned huge seenBlock value
+		//    survives the legacy 4-call dance because the monotonic guard in
+		//    SetSeenBlockFromKey refuses smaller writes and ongoing traffic
+		//    keeps refreshing the TTL.
+		resetAllConsistencies(deps.consistencies)
+
+		// 3. Per-server RelayRetriesManagers (6h hash ban cache), 4. per-CSM
+		//    transient failure state, and 4b. per-CSM blocked-providers list.
+		//    All require the router to be present; test fixtures without a
+		//    router still get a useful partial reset above and we report which
+		//    stores actually moved.
+		//
+		//    Why ResetBlockedProviders runs separately from
+		//    ResetTransientFailureState:
+		//    ResetTransientFailureState deliberately preserves
+		//    currentlyBlockedProviderAddresses because in lava-pairing-network
+		//    mode unblocking is an epoch-boundary operation. In direct-rpc mode
+		//    (this fork's default) there are no epoch transitions, so blocked
+		//    providers can only accumulate across test runs unless we mass-
+		//    restore here. ResetBlockedProviders is the explicit escape hatch
+		//    for /debug/* paths; production relay paths never reach it.
 		if deps.router != nil {
 			deps.router.mu.Lock()
 			for _, server := range deps.router.rpcServers {
@@ -523,16 +609,59 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			for _, csm := range deps.router.sessionManagers {
 				if csm != nil {
 					csm.ResetTransientFailureState()
+					csm.ResetBlockedProviders()
 				}
 			}
 			deps.router.mu.Unlock()
 		}
 
-		// Capability advertisement — hardcoded, not a per-call tally. The test
-		// framework probes the response to decide between this endpoint and
-		// the legacy 4-call dance.
+		// 5. External cache-be pod (MAG-1764). When --cache-be is configured,
+		//    the in-process Ristretto reset above is not the cache callers
+		//    actually hit — the real cache lives in a separate pod. Flush it
+		//    via RPC; on real failure return 500 so the test framework fails
+		//    loud instead of trusting a misleading capability advertisement.
+		//
+		//    The codes.Unimplemented branch is the rolling-deploy escape:
+		//    a new router talking to an old cache pod (no FlushCache RPC
+		//    yet) must not break /debug/reset-all. We degrade quietly —
+		//    in-process Ristretto cleared, "cache-be" omitted from cleared
+		//    so the advertisement stays honest.
+		//
+		//    Bounded by a short context: a slow cache pod must not stall the
+		//    debug handler. CacheActive() gates both the call and the
+		//    capability advertisement so deployments without --cache-be don't
+		//    advertise a key they didn't fulfill.
+		cacheBeFlushed := false
+		if deps.cache != nil && deps.cache.CacheActive() {
+			flushCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			err := deps.cache.Flush(flushCtx)
+			cancel()
+			switch {
+			case err == nil:
+				cacheBeFlushed = true
+			case status.Code(err) == codes.Unimplemented:
+				utils.LavaFormatWarning("cache-be does not implement FlushCache; treating as legacy pod", err)
+			default:
+				http.Error(w, fmt.Sprintf("cache-be flush failed: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// Capability advertisement — hardcoded for in-process stores, plus a
+		// conditional "cache-be" key when the external pod was actually
+		// flushed. The test framework probes this body to decide between this
+		// endpoint and the legacy 4-call dance; "seen-block" was added to
+		// signal the per-chain consistency-cache flush, "cache-be" signals
+		// MAG-1764 end-to-end coverage, "blocked-providers" signals MAG-1810
+		// (currentlyBlockedProviderAddresses is now restored to
+		// pairingAddresses, the per-provider redemption flag is reset, and the
+		// addon cache is purged).
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions"]}`)
+		if cacheBeFlushed {
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","cache-be"]}`)
+		} else {
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers"]}`)
+		}
 	})
 
 	return mux
