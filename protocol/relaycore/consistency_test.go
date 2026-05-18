@@ -65,67 +65,70 @@ func TestBasic(t *testing.T) {
 // up to the moment /debug/reset fires, then stops; the test then asserts the
 // corruption did not survive the reset.
 //
-// Without the RWMutex serialization in ResetState/SetSeenBlockFromKey, the
-// injector's last write — which is still in ristretto's setBuf when Clear
-// runs — can commit *after* Clear's store-clear step but *before* Clear
-// returns, leaving the cache holding the corruption value despite the reset
-// completing successfully. ristretto's own Clear doc warns it "is not an
-// atomic operation (but that shouldn't be a problem as it's assumed that
-// Set/Get calls won't be occurring until after this)" — the lock makes that
-// precondition hold.
+// Two race shapes are covered by the fix and exercised here:
 //
-// Iteration amplifies the probability of catching the race across goroutine-
-// scheduling variance. With the fix the test is deterministic (0 leaks);
-// without it, some iterations leak corruption.
+//   - Queued-writer: a Set call suspended between function entry and RLock
+//     acquires RLock after ResetState's Lock has Cleared, sees found=false,
+//     bypasses the monotonic guard, and re-poisons the just-cleared cache.
+//     Closed by the gen-counter check inside SetSeenBlockFromKey.
+//
+//   - Fresh-post-reset: a Set call that enters the function only after
+//     ResetState's gen.Add — its startGen snapshot matches the post-reset gen
+//     and the gen check passes, but the call's blockSeen was determined
+//     pre-reset by an upstream relay-processor. Closed by the lastResetAtNano
+//     tombstone (writes within ResetTombstoneWindow of a reset are dropped).
+//
+// Each iteration uses a fresh ConsistencyImpl so the tombstone from one
+// iteration's reset doesn't suppress the next iteration's pre-reset writes.
+// The race surfaces more reliably under constrained scheduling — validate
+// with `GOMAXPROCS=2 go test ... -count=200`.
 func TestResetState_FlushesCorruptionUnderConcurrentWrites(t *testing.T) {
 	const (
-		corruption   = int64(1_780_000_000_000)
-		key          = "victim"
-		warmup       = 2 * time.Millisecond
-		iterations   = 50
+		corruption = int64(1_780_000_000_000)
+		key        = "victim"
+		warmup     = 5 * time.Millisecond
+		iterations = 50
 	)
-
-	consistency, ok := setupConsistency().(*ConsistencyImpl)
-	require.True(t, ok, "setupConsistency should return *ConsistencyImpl")
 
 	leaks := 0
 	for iter := 0; iter < iterations; iter++ {
-		// Start each iteration from a quiescent, empty cache so a previous
-		// iteration's leak can't masquerade as a fresh one.
-		consistency.ResetState()
-		consistency.cache.Wait()
+		func() {
+			consistency, ok := setupConsistency().(*ConsistencyImpl)
+			require.True(t, ok, "setupConsistency should return *ConsistencyImpl")
+			defer consistency.cache.Close()
 
-		var wg sync.WaitGroup
-		injectorStop := make(chan struct{})
+			var wg sync.WaitGroup
+			injectorStop := make(chan struct{})
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-injectorStop:
-					return
-				default:
-					consistency.SetSeenBlockFromKey(corruption, key)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-injectorStop:
+						return
+					default:
+						consistency.SetSeenBlockFromKey(corruption, key)
+					}
 				}
+			}()
+
+			// Let the injector saturate setBuf with corrupted writes.
+			time.Sleep(warmup)
+
+			// Stop the injector and fire reset back-to-back so the injector's
+			// last writes are still in flight (in setBuf) when Clear runs.
+			close(injectorStop)
+			consistency.ResetState()
+
+			wg.Wait()
+			// Drain anything still in setBuf so a late commit surfaces as a leak.
+			consistency.cache.Wait()
+
+			if block, found := consistency.GetLatestBlock(key); found && block == corruption {
+				leaks++
 			}
 		}()
-
-		// Let the injector saturate setBuf with corrupted writes.
-		time.Sleep(warmup)
-
-		// Stop the injector and fire reset back-to-back so the injector's
-		// last writes are still in flight (in setBuf) when Clear runs.
-		close(injectorStop)
-		consistency.ResetState()
-
-		wg.Wait()
-		// Drain anything still in setBuf so a late commit surfaces as a leak.
-		consistency.cache.Wait()
-
-		if block, found := consistency.GetLatestBlock(key); found && block == corruption {
-			leaks++
-		}
 	}
 	require.Equalf(t, 0, leaks,
 		"%d/%d iterations leaked corruption past ResetState — write/Clear serialization is broken",

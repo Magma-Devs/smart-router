@@ -2,6 +2,7 @@ package relaycore
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
@@ -13,6 +14,15 @@ const (
 	CacheMaxCost     = 20000 // each item cost would be 1
 	CacheNumCounters = 20000 // expect 2000 items
 	EntryTTL         = 5 * time.Minute
+	// ResetTombstoneWindow drops SetSeenBlockFromKey writes that land within
+	// this window after a ResetState. A relay response can travel through the
+	// relay-processor pipeline for several milliseconds between when its
+	// blockSeen was determined and when it reaches the consistency cache; if
+	// /debug/reset-* fires in that window, the late-arriving write would
+	// re-poison the just-cleared store. 100 ms is long enough to absorb a
+	// pipeline's worth of in-flight responses and short enough that operators
+	// triggering reset won't notice the brief write-blocked period.
+	ResetTombstoneWindow = 100 * time.Millisecond
 )
 
 // Consistency interface for managing block consistency
@@ -25,17 +35,36 @@ type Consistency interface {
 
 // ConsistencyImpl is the default implementation of Consistency.
 //
-// mu serializes write paths against ResetState. ristretto's Clear() docs warn
-// it "is not an atomic operation (but that shouldn't be a problem as it's
-// assumed that Set/Get calls won't be occurring until after this)" — so under
-// concurrent writes, a Set enqueued into setBuf during Clear can commit after
-// Clear returns and survive what was supposed to be a reset. Writes take a
-// read-lock; ResetState takes the exclusive write-lock, which makes ristretto's
-// precondition hold rather than racing against it.
+// mu, gen, and lastResetAtNano together serialize write paths against
+// ResetState:
+//
+//   - mu (RWMutex): ristretto's Clear() docs warn it "is not an atomic operation
+//     (but that shouldn't be a problem as it's assumed that Set/Get calls won't
+//     be occurring until after this)." Writes take the read-lock around the
+//     internal SetWithTTL so Clear runs under the exclusive write-lock with no
+//     concurrent Set/Get in flight — making ristretto's precondition hold.
+//
+//   - gen (atomic counter): closes the queued-writer hole. A writer suspended
+//     between function entry and RLock can acquire RLock after ResetState has
+//     Cleared, see an empty cache (found=false), bypass the monotonic guard,
+//     and re-poison the store with whatever stale blockSeen it captured before
+//     the reset. Writes snapshot gen before RLock and drop the write if
+//     ResetState advanced gen while they were waiting.
+//
+//   - lastResetAtNano (tombstone window): closes the fresh-post-reset hole.
+//     A relay response can be in flight in the relay processor for several
+//     milliseconds between when blockSeen was determined and when it reaches
+//     this cache; if /debug/reset-* fires in that gap, the late-arriving
+//     SetSeenBlockFromKey call enters this function only AFTER ResetState's
+//     gen.Add — so its startGen snapshot already matches the post-reset gen
+//     and the gen check passes. The tombstone drops any write whose RLock
+//     acquires within ResetTombstoneWindow of the most recent ResetState.
 type ConsistencyImpl struct {
-	cache  *ristretto.Cache[string, any]
-	specId string
-	mu     sync.RWMutex
+	cache           *ristretto.Cache[string, any]
+	specId          string
+	mu              sync.RWMutex
+	gen             atomic.Int64
+	lastResetAtNano atomic.Int64
 }
 
 func (cc *ConsistencyImpl) SetLatestBlock(key string, block int64) {
@@ -66,15 +95,27 @@ func (cc *ConsistencyImpl) Key(userData common.UserData) string {
 // used on subscription, where we already have the dapp key stored, but we don't keep the dappId and ip separately
 //
 // The Get-then-Set sequence is held under the read-lock so that ResetState's
-// exclusive lock blocks every in-flight write — including the SetLatestBlock
-// call below — until Clear has run, which is what makes ristretto's
-// "no concurrent Set/Get during Clear" precondition hold.
+// exclusive lock blocks every in-flight write until Clear has run. The
+// generation snapshot before RLock catches writes queued behind ResetState's
+// Lock; the tombstone check catches writes that entered the function during
+// or just after Clear (relay-pipeline-delayed responses). Either condition
+// drops the write to keep the cleared cache cleared.
 func (cc *ConsistencyImpl) SetSeenBlockFromKey(blockSeen int64, key string) {
 	if cc == nil {
 		return
 	}
+	startGen := cc.gen.Load()
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
+	if cc.gen.Load() != startGen {
+		// ResetState ran while we were waiting on RLock; drop this stale write.
+		return
+	}
+	if reset := cc.lastResetAtNano.Load(); reset != 0 && time.Now().UnixNano()-reset < int64(ResetTombstoneWindow) {
+		// Within the post-reset window — this write's blockSeen was likely
+		// computed before the reset and arrived late through the relay pipeline.
+		return
+	}
 	// seen block is only increasing
 	if block, found := cc.GetLatestBlock(key); found && block >= blockSeen {
 		return
@@ -117,14 +158,18 @@ func (cc *ConsistencyImpl) GetSeenBlock(userData common.UserData) (int64, bool) 
 //
 // The exclusive lock blocks every concurrent SetSeenBlockFromKey for the
 // duration of Clear, which is what ristretto's Clear doc requires to make
-// the operation behave atomically — without it, a Set enqueued into setBuf
-// during Clear can commit after Clear returns and survive the reset.
+// the operation behave atomically. gen is advanced and lastResetAtNano is
+// stamped before Clear so any SetSeenBlockFromKey that was waiting on RLock
+// (gen check) or that arrives within ResetTombstoneWindow afterward (tombstone
+// check) drops its write rather than re-poisoning the cleared store.
 func (cc *ConsistencyImpl) ResetState() {
 	if cc == nil || cc.cache == nil {
 		return
 	}
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
+	cc.gen.Add(1)
+	cc.lastResetAtNano.Store(time.Now().UnixNano())
 	cc.cache.Clear()
 }
 
