@@ -108,17 +108,18 @@ func (r *relayerCacheClientStore) reconnectClient() {
 	utils.LavaFormatInfo("cache service reconnection loop started", utils.LogAttr("address", r.address))
 
 	for {
+		// Dial first, sleep only between failed attempts. Otherwise a caller
+		// that just discovered client == nil waits a full reconnectInterval
+		// before any retry happens, leaving the cache silently skipped.
+		if r.connectClient() == nil {
+			utils.LavaFormatInfo("cache service reconnection succeeded, exiting reconnect loop", utils.LogAttr("address", r.address))
+			return
+		}
 		select {
 		case <-r.ctx.Done():
 			utils.LavaFormatInfo("cache service reconnection loop exiting (context cancelled)", utils.LogAttr("address", r.address))
 			return
 		case <-time.After(reconnectInterval):
-			// connectClient() returns nil on success, non-nil error on failure.
-			// Exit the loop on success, keep retrying on failure.
-			if r.connectClient() == nil {
-				utils.LavaFormatInfo("cache service reconnection succeeded, exiting reconnect loop", utils.LogAttr("address", r.address))
-				return
-			}
 		}
 	}
 }
@@ -148,11 +149,18 @@ type Cache struct {
 
 func InitCache(ctx context.Context, addr string) (*Cache, error) {
 	clientStore, err := newRelayerCacheClientStore(ctx, addr)
-	return &Cache{
+	cache := &Cache{
 		clientStore: clientStore,
 		address:     addr,
 		serviceCtx:  ctx,
-	}, err
+	}
+	if err != nil {
+		// Initial dial failed. Start the reconnect loop eagerly so the
+		// cache becomes live as soon as the backend is reachable, instead
+		// of staying cold until the first relay triggers getClient().
+		go clientStore.reconnectClient()
+	}
+	return cache, err
 }
 
 func (cache *Cache) GetEntry(ctx context.Context, relayCacheGet *pairingtypes.RelayCacheGet) (reply *pairingtypes.CacheRelayReply, err error) {
