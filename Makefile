@@ -1,7 +1,5 @@
 #!/usr/bin/make -f
 
-BINDIR ?= $(GOPATH)/bin
-
 # Resolve version from git the same way CI does (smartrouter.yml's
 # `Resolve version from git` step). Falls back to "dev" outside a git
 # checkout.
@@ -21,17 +19,11 @@ export CGO_ENABLED ?= 0
 export GOAMD64     ?= v3
 export GOARM64     ?= v8.2
 
-# Install the router binary to $GOPATH/bin
-install-all: install
-
+# Install the router binary to $GOPATH/bin (or $GOBIN)
 install:
 	go install $(GOFLAGS) ./cmd/smartrouter
 
-install-smartrouter: install
-
 # Build the router binary into build/
-build-all: build
-
 build:
 	go build $(GOFLAGS) -o build/smartrouter ./cmd/smartrouter
 
@@ -91,4 +83,4 @@ lint:
 clean:
 	rm -rf build/ dist/
 
-.PHONY: install install-all install-smartrouter build build-all setup snapshot test test-short tidy lint clean
+.PHONY: install build setup snapshot test test-short tidy lint clean
