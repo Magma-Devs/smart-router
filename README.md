@@ -115,7 +115,7 @@ The version string is injected at build time from the git tag — `smartrouter v
 
 ### Reproducing a release locally
 
-Install [GoReleaser](https://goreleaser.com/install/) and Docker, set up Docker buildx (one-time, see below), then run:
+Install [GoReleaser](https://goreleaser.com/install/) and Docker, then run:
 
 ```bash
 make snapshot   # shortcut for: goreleaser release --snapshot --clean --skip=publish
@@ -123,20 +123,7 @@ make snapshot   # shortcut for: goreleaser release --snapshot --clean --skip=pub
 
 This produces every release artifact — the four binaries, the multi-arch Docker image, and the checksum file — under `dist/`, without pushing anything to GitHub or GHCR. Because the release pipeline runs a single `go build` per arch (via `.goreleaser.yaml`'s `builds:` block) and feeds that binary into both the standalone archive and the Docker image, a local snapshot build produces the same bytes CI would for the same commit.
 
-#### One-time Docker buildx setup
-
-`make snapshot` builds a multi-arch Docker image (`linux/amd64` + `linux/arm64`) and needs `docker buildx` configured with the `docker-container` driver. Without it, the build fails with `unknown flag: --platform` because the default `docker` driver doesn't support cross-platform builds. Set it up once per machine:
-
-```bash
-docker buildx version   # confirm buildx is installed; if it errors:
-                        #   sudo apt install docker-buildx-plugin   (debian / ubuntu)
-                        #   or install Docker Desktop with WSL2 integration
-
-docker buildx create --use --name smartrouter-builder --driver docker-container
-docker buildx inspect --bootstrap   # pulls moby/buildkit, ~30s first time
-```
-
-The builder persists across reboots; this is one-time-per-machine setup, not per-build.
+On first run, `make snapshot` creates a `smartrouter-builder` Docker buildx instance with the `docker-container` driver (needed for the multi-arch `--platform` build; the default `docker` driver doesn't support it). The setup is idempotent, takes ~30s only the first time (pulls `moby/buildkit`, ~150MB), and is scoped via `BUILDX_BUILDER` so it doesn't change your global default builder. If `docker buildx` itself is missing, `make snapshot` errors with a pointer to install it — on Debian/Ubuntu: `sudo apt install docker-buildx-plugin`; on WSL2: enable Docker Desktop's WSL2 integration.
 
 ### Tag conventions
 
