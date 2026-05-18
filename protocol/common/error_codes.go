@@ -250,6 +250,14 @@ var (
 		Code: 2015, Name: "NODE_BAD_GATEWAY", Category: CategoryExternal,
 		Description: "Bad gateway (HTTP 502 from provider)", Retryable: true,
 	})
+	// NODE_UNAUTHORIZED: upstream rejected the smart-router's credentials
+	// (HTTP 401). Non-retryable because the same credentials are reused on
+	// every attempt — retrying just multiplies the same auth failure across
+	// providers. Operator must fix the auth-config for the affected endpoint.
+	LavaErrorNodeUnauthorized = registerError(&LavaError{
+		Code: 2016, Name: "NODE_UNAUTHORIZED", Category: CategoryExternal,
+		Description: "Upstream rejected router credentials (HTTP 401)", Retryable: false,
+	})
 
 	// Bitcoin/UTXO node errors (2100-2149)
 	// Source: Bitcoin Core src/rpc/protocol.h

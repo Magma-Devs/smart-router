@@ -451,13 +451,36 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// JSON-RPC code like -32601 continues to classify the same way.
 		// The prefix only changes the verdict for HTTP 4xx/5xx responses
 		// that carry a JSON-RPC body with a generic/vendor code where the
-		// HTTP status is the authoritative signal. 
-
+		// HTTP status is the authoritative signal.
 		classifierMessage := errorMessage
 		if statusCode < 200 || statusCode >= 300 {
 			classifierMessage = fmt.Sprintf("HTTP %d: %s", statusCode, errorMessage)
 		}
 		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, errorCode, classifierMessage)
+
+		// MAG-1870 — HTTP status must be authoritative for 4xx-class transport
+		// errors. The single-pass classification above iterates matchers in
+		// declaration order: code-based matchers first, message-based after.
+		// When the body carries a registered RETRYABLE code (e.g. -32603
+		// NODE_INTERNAL_ERROR, -32000 NODE_SERVER_ERROR) AND the upstream
+		// returned a non-retryable HTTP status (404/405/413), the body-code
+		// matcher fires first and HTTPStatusContains never runs — so the
+		// retryable body code masks the non-retryable HTTP verdict and the
+		// router retries pointlessly.
+		//
+		// A second classification pass with the raw HTTP statusCode as the
+		// errorCode resolves the conflict: when the HTTP layer says the
+		// upstream rejected the request shape itself (not a node-internal
+		// hiccup), trust that verdict. We only escalate to non-retryable —
+		// never demote — so 2xx body errors keep their existing semantics
+		// and 5xx (which already map to retryable LavaErrors) are unaffected.
+		//
+		// The statusCode != errorCode guard skips the redundant pass in the
+		// bare-body fallback case where ExtractJSONRPCErrorCode returned 0
+		// and the first pass already ran with errorCode = statusCode.
+		if !result.IsNonRetryable && (statusCode < 200 || statusCode >= 300) && statusCode != errorCode {
+			result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
+		}
 	}
 
 	return result, nil

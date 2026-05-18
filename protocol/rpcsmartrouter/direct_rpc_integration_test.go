@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -400,6 +401,105 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixSkippedOn2xx(t *testing.T) {
 	// through HTTP-status matchers.
 	assert.False(t, result.IsNonRetryable,
 		"2xx responses must not be classified via HTTP-status matchers")
+}
+
+// TestDirectRPCRelaySender_HTTPStatusOverridesRetryableBodyCode_MAG1870 covers
+// the gap MAG-1666 left behind: an upstream that returns HTTP 4xx alongside a
+// proper JSON-RPC envelope whose error.code is a REGISTERED RETRYABLE code
+// (e.g. -32603 → LavaErrorNodeInternalError, -32000 → LavaErrorNodeServerError).
+//
+// The previous fix prepended "HTTP <status>: " to the classifier message so a
+// substring matcher (HTTPStatusContains) could fire. But matcher iteration is
+// "code-based first, message-based second" — so when the body's error.code is
+// a registered code, CodeEquals matches first and HTTPStatusContains never
+// runs. The router sees IsNonRetryable=false and retries, even though the
+// HTTP layer said 404/405/413 (non-retryable).
+//
+// The MAG-1666 test (TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666)
+// uses error.code=-1 specifically to dodge code matchers, which is why it
+// passes but doesn't catch the production case.
+func TestDirectRPCRelaySender_HTTPStatusOverridesRetryableBodyCode_MAG1870(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		bodyCode   int // a REGISTERED retryable code in genericErrorMappings[JsonRPC]
+	}{
+		// HTTP 401 was named in the duplicate MAG-1858 but had no registry
+		// entry at all prior to this patch; covered here because the same
+		// simulator test cluster fails on it.
+		{name: "HTTP 401 + body -32603 (new NODE_UNAUTHORIZED mapping)", statusCode: 401, bodyCode: -32603},
+		{name: "HTTP 404 + body -32603 (NODE_INTERNAL_ERROR)", statusCode: 404, bodyCode: -32603},
+		{name: "HTTP 405 + body -32603", statusCode: 405, bodyCode: -32603},
+		{name: "HTTP 413 + body -32603", statusCode: 413, bodyCode: -32603},
+		{name: "HTTP 404 + body -32000 (NODE_SERVER_ERROR, server-defined)", statusCode: 404, bodyCode: -32000},
+		// Pin the already-non-retryable body-code path: the first pass
+		// classifies via CodeEquals(-32601) → NODE_METHOD_NOT_FOUND
+		// (Retryable: false) and the second pass is skipped on the
+		// !IsNonRetryable guard. Surface a future regression that would
+		// flip this verdict before adding any second-pass logic.
+		{name: "HTTP 404 + body -32601 (already non-retryable, no second pass needed)", statusCode: 404, bodyCode: -32601},
+	}
+
+	// Sanity-pin the discriminator: each body code must classify as RETRYABLE
+	// on its own (no HTTP prefix). If a future change makes -32603 / -32000
+	// non-retryable in the registry, this test's premise dissolves and the
+	// assertion below would pass for the wrong reason.
+	for _, bodyCode := range []int{-32603, -32000} {
+		require.False(t,
+			common.IsNonRetryableNodeErrorWithContext(
+				common.ChainFamilyEVM, common.TransportJsonRPC,
+				bodyCode, "primary repeatedly errors"),
+			"body code %d must be retryable on its own — otherwise this test cannot prove the HTTP status flipped the verdict",
+			bodyCode)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errMsg := "primary repeatedly errors"
+			body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"error":{"code":%d,"message":"%s"}}`, tt.bodyCode, errMsg)
+
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.statusCode)
+				w.Write([]byte(body))
+			}))
+			defer mockServer.Close()
+
+			ctx := context.Background()
+			nodeUrl := common.NodeUrl{Url: mockServer.URL}
+
+			directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+			require.NoError(t, err)
+
+			sender := &DirectRPCRelaySender{
+				directConnection: directConn,
+				endpointName:     "test-http-status-overrides-body-code",
+				chainFamily:      common.ChainFamilyEVM,
+			}
+
+			chainMessage := &mockChainMessage{
+				requestData: []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`),
+				// Mirror what the real CheckResponseError extracts from a
+				// proper JSON-RPC error envelope: hasError=true, message =
+				// error.message. Crucially the bareErrorMessage MUST NOT
+				// contain "404"/"405"/"413" — otherwise the substring
+				// matcher could fire on the raw message and mask the bug.
+				checkResponseError: func(_ []byte, _ int) (bool, string) {
+					return true, errMsg
+				},
+			}
+
+			result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, tt.statusCode, result.StatusCode)
+			assert.True(t, result.IsNodeError, "hasError branch must have fired")
+			assert.True(t, result.IsNonRetryable,
+				"HTTP %d is non-retryable per the registry; a retryable body code (%d) "+
+					"must not mask the HTTP-status verdict",
+				tt.statusCode, tt.bodyCode)
+		})
+	}
 }
 
 func TestDirectRPCRelaySender_SendDirectRelay_BatchRequest(t *testing.T) {
