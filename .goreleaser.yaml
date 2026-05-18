@@ -10,8 +10,6 @@ metadata:
 
 env:
   - CGO_ENABLED=0
-  - GOAMD64=v3
-  - GOARM64=v8.2
 
 builds:
   - id: smartrouter
@@ -23,6 +21,15 @@ builds:
     goarch:
       - amd64
       - arm64
+    # GOAMD64=v3 (Haswell+: AVX2/BMI2/FMA) and GOARM64=v8.2 (FP16/dotprod)
+    # match smartrouter.yml's dev-image build env. The top-level `env:`
+    # block alone is NOT enough — goreleaser uses these per-build fields
+    # to drive target selection. Without them, snapshot/release produces
+    # baseline v1/v8.0 binaries regardless of `env: GOAMD64=...`.
+    goamd64:
+      - v3
+    goarm64:
+      - v8.2
     ignore:
       - goos: darwin
         goarch: s390x
@@ -44,7 +51,10 @@ archives:
       - smartrouter
     formats:
       - binary
-    name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    # With a single GOAMD64 level (v3) the .Amd64 suffix would land on
+    # every amd64 archive name (smartrouter-v1.0.0-linux-amd64v3). Drop
+    # the suffix clause since v3 is now the standard, not a variant.
+    name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}'
 
 # dockers_v2 (v2.15+) replaces the per-arch dockers: + docker_manifests:
 # combo with a single block. GoReleaser stages each platform's binary at
