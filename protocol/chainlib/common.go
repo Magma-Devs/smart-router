@@ -257,6 +257,11 @@ func addHeadersAndSendBytes(c *fiber.Ctx, metaData []pairingtypes.Metadata, data
 // convertToJsonError returns a JSON-encoded `{"error": errorMsg}` body as raw bytes.
 // Returning []byte (rather than string) lets every error-path caller hand the
 // result straight to addHeadersAndSendBytes / fiber.Ctx.Send with no conversion.
+//
+// NOTE: This helper produces a non-spec error envelope (`error` is a string).
+// It is retained for non-JSON-RPC chain interfaces (REST, Tendermint GET) whose
+// clients do not expect JSON-RPC 2.0 §5.1 shape. For JSON-RPC interfaces use
+// convertToJsonRpcError below.
 func convertToJsonError(errorMsg string) []byte {
 	jsonResponse, err := json.Marshal(fiber.Map{
 		"error": errorMsg,
@@ -265,6 +270,93 @@ func convertToJsonError(errorMsg string) []byte {
 		return []byte(`{"error": "Failed to marshal error response to json"}`)
 	}
 
+	return jsonResponse
+}
+
+// convertToJsonRpcError returns a JSON-RPC 2.0 §5.1 compliant error envelope:
+//
+//	{"jsonrpc":"2.0", "id": <reqID>, "error": {"code": -32000, "message": "...", "data": {...}}}
+//
+// Spec-compliant clients (Web3.py, ethers.js, viem) require `error` to be an
+// Object with `code` (int) and `message` (string). Previously the JSON-RPC
+// error path used convertToJsonError, which set `error` to a stringified
+// envelope — clients crashed reading response.error.code on a string.
+//
+// rawErrorMsg: the JSON string previously produced by GetUniqueGuidResponseForError
+// (shape: {"Error_GUID":"<guid>","Error":"<inner message>"}). We parse it to
+// extract the GUID and the inner error message; the inner message becomes the
+// JSON-RPC `message`, and full context lands under `data` for debugging.
+//
+// requestBody: the raw incoming JSON-RPC request body. We extract `id` from it
+// so the response preserves request correlation. If parsing fails, id is null
+// (still spec-valid).
+//
+// Code -32000 is from JSON-RPC 2.0 §5.1 implementation-defined server-error
+// range (-32000 to -32099). It is the appropriate code for router-synthesized
+// errors that are not parse/method/invalid-params/internal — e.g. "Selected
+// provider not available", retry exhaustion, consistency pre-validation, etc.
+func convertToJsonRpcError(rawErrorMsg string, requestBody []byte) []byte {
+	// Extract id from the original request so the client can correlate.
+	// Fall back to JSON null if the body is malformed or id is absent —
+	// spec-compliant for notifications and unparseable requests.
+	var reqID json.RawMessage
+	if len(requestBody) > 0 {
+		var probe struct {
+			ID json.RawMessage `json:"id"`
+		}
+		if err := json.Unmarshal(requestBody, &probe); err == nil && len(probe.ID) > 0 {
+			reqID = probe.ID
+		}
+	}
+	if len(reqID) == 0 {
+		reqID = json.RawMessage("null")
+	}
+
+	// Parse the stringified envelope produced by GetUniqueGuidResponseForError.
+	// Shape: {"Error_GUID":"<guid>","Error":"<inner-error-message>"}.
+	// Fall back to the raw string if parsing fails — we still produce a valid
+	// JSON-RPC error envelope.
+	var parsed struct {
+		ErrorGUID string `json:"Error_GUID"`
+		Error     string `json:"Error"`
+	}
+	guid := ""
+	message := rawErrorMsg
+	if err := json.Unmarshal([]byte(rawErrorMsg), &parsed); err == nil {
+		guid = parsed.ErrorGUID
+		if parsed.Error != "" {
+			message = parsed.Error
+		}
+	}
+	if message == "" {
+		message = "Internal server error"
+	}
+
+	data := map[string]any{}
+	if guid != "" {
+		data["guid"] = guid
+	}
+	// The inner error message from LavaFormatError already embeds provider
+	// context (selectedProvider, validProviders, addon, extensions, GUID) in
+	// its appended attribute block. Surface it under data.error so the full
+	// context is preserved for debugging without brittle substring parsing.
+	data["error"] = message
+
+	envelope := fiber.Map{
+		"jsonrpc": "2.0",
+		"id":      reqID,
+		"error": fiber.Map{
+			"code":    -32000,
+			"message": message,
+			"data":    data,
+		},
+	}
+
+	jsonResponse, err := json.Marshal(envelope)
+	if err != nil {
+		// Last-resort fallback — still spec-compliant.
+		return []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Failed to marshal error response"}}`)
+	}
 	return jsonResponse
 }
 

@@ -516,8 +516,10 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 				fiberCtx.Status(fiber.StatusInternalServerError)
 			}
 
-			// Construct json response
-			response := convertToJsonError(errMasking)
+			// Construct spec-compliant JSON-RPC 2.0 error envelope (see
+			// convertToJsonRpcError for the rationale — `error` must be an
+			// Object with code/message per §5.1, not a stringified envelope).
+			response := convertToJsonRpcError(errMasking, fiberCtx.Body())
 			// Return error json response
 			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
 		}
