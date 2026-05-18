@@ -1491,6 +1491,68 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	require.Error(t, err, "expected error when all backup providers are exhausted")
 }
 
+// TestBackupProviderOptimizerSelection_EndpointCountBoundaries backfills
+// MAG-1872 item 12: the existing TestBackupProviderOptimizerSelection
+// hardcodes 2 backup endpoints, exercising the round-robin loop at only one
+// pool size. This parametrizes the count at 1 (minimum) and 5 (a larger
+// pool) to cover both the trivial single-iteration case and the multi-call
+// round-robin path that exhausts after exactly N iterations.
+func TestBackupProviderOptimizerSelection_EndpointCountBoundaries(t *testing.T) {
+	cases := []struct {
+		name        string
+		backupCount int
+	}{
+		{name: "single_backup", backupCount: 1},
+		{name: "five_backups", backupCount: 5},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			csm := CreateConsumerSessionManager()
+
+			backupList := make(map[uint64]*ConsumerSessionsWithProvider, tc.backupCount)
+			for i := 0; i < tc.backupCount; i++ {
+				addr := fmt.Sprintf("backup-%d", i)
+				backup := NewConsumerSessionWithProvider(addr, []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}}, 999999, firstEpochHeight, int64(0))
+				backup.StaticProvider = true
+				backupList[uint64(i)] = backup
+			}
+
+			require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, nil, backupList))
+
+			ignoredProv := &ignoredProviders{
+				providers:    make(map[string]struct{}),
+				currentEpoch: firstEpochHeight,
+			}
+
+			// Drain the pool: exactly backupCount calls should each return
+			// one distinct backup.
+			seen := make(map[string]struct{})
+			for call := 0; call < tc.backupCount; call++ {
+				result, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
+					ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
+					[]string{}, 0, 0, NewUsedProviders(nil))
+				require.NoError(t, err, "call #%d of %d must succeed", call+1, tc.backupCount)
+				require.Len(t, result, 1, "exactly one backup per call (got %d)", len(result))
+				for addr := range result {
+					_, dup := seen[addr]
+					require.False(t, dup, "call #%d returned duplicate backup %q", call+1, addr)
+					seen[addr] = struct{}{}
+				}
+			}
+			require.Len(t, seen, tc.backupCount,
+				"every backup must be returned exactly once across %d calls", tc.backupCount)
+
+			// One more call exhausts the pool.
+			_, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
+				ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
+				[]string{}, 0, 0, NewUsedProviders(nil))
+			require.Error(t, err, "expected exhaustion error after %d backups served", tc.backupCount)
+		})
+	}
+}
+
 // TestGetReportedProviders_EpochTransitionRace reproduces the race between
 // GetReportedProviders and UpdateAllProviders that causes the error
 // "Failed to find a reported provider in pairing list".
