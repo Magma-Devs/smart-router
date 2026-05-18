@@ -40,6 +40,12 @@ type IChainTracker interface {
 	// GetAtomicLatestBlockNum returns the current latest block number atomically
 	GetAtomicLatestBlockNum() int64
 
+	// ResetLatestBlock zeroes the cached latest block so the next consistency
+	// pre-validation skips the lag check (validation_consistency.go treats
+	// endpointLatestBlock <= 0 as "unknown, do not gate"). The poll loop
+	// repopulates the value on its next successful fetch.
+	ResetLatestBlock()
+
 	// StartAndServe starts the chain tracker and serves gRPC if configured
 	StartAndServe(ctx context.Context) error
 
@@ -206,6 +212,36 @@ func (cs *ChainTracker) GetServerBlockMemory() uint64 {
 
 func (cs *ChainTracker) setLatestBlockNum(value int64) {
 	atomic.StoreInt64(&cs.latestBlockNum, value)
+}
+
+// ResetLatestBlock zeroes the cached latest block under blockQueueMu. After
+// reset, consistency pre-validation skips the lag check until the next poll
+// repopulates the value (validation_consistency.go treats endpointLatestBlock
+// <= 0 as "unknown, do not gate"). May be invoked concurrently with the poll
+// goroutine, so accesses outside this method's own locked region must go
+// through the locked helpers below.
+func (cs *ChainTracker) ResetLatestBlock() {
+	cs.blockQueueMu.Lock()
+	defer cs.blockQueueMu.Unlock()
+	atomic.StoreInt64(&cs.latestBlockNum, 0)
+	cs.latestChangeTime = time.Time{}
+}
+
+// getLatestChangeTime/setLatestChangeTime serialize access to latestChangeTime.
+// The field used to be touched only by the poll goroutine, but ResetLatestBlock
+// and the locked readers in GetLatestBlockData/GetLatestBlockNum make it a
+// concurrent field. All paths outside an already-held blockQueueMu must go
+// through these helpers.
+func (cs *ChainTracker) getLatestChangeTime() time.Time {
+	cs.blockQueueMu.RLock()
+	defer cs.blockQueueMu.RUnlock()
+	return cs.latestChangeTime
+}
+
+func (cs *ChainTracker) setLatestChangeTime(t time.Time) {
+	cs.blockQueueMu.Lock()
+	defer cs.blockQueueMu.Unlock()
+	cs.latestChangeTime = t
 }
 
 // this function fetches all previous blocks from the node starting at the latest provided going backwards blocksToSave blocks
@@ -377,10 +413,11 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 			}
 			blocksUpdated := uint64(newLatestBlock - prev_latest)
 			// update our timer resolution
-			if !cs.latestChangeTime.IsZero() {
-				cs.AddBlockGap(time.Since(cs.latestChangeTime), blocksUpdated)
+			prevChangeTime := cs.getLatestChangeTime()
+			if !prevChangeTime.IsZero() {
+				cs.AddBlockGap(time.Since(prevChangeTime), blocksUpdated)
 			}
-			cs.latestChangeTime = time.Now()
+			cs.setLatestChangeTime(time.Now())
 		}
 		if forked {
 			if cs.forkCallback != nil {
@@ -400,8 +437,8 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 }
 
 func (cs *ChainTracker) notUpdated() {
-	latestBlockTime := cs.latestChangeTime
-	if cs.latestChangeTime.IsZero() {
+	latestBlockTime := cs.getLatestChangeTime()
+	if latestBlockTime.IsZero() {
 		latestBlockTime = cs.startupTime
 	}
 	cs.oldBlockCallback(latestBlockTime)
@@ -464,7 +501,7 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 
 func (cs *ChainTracker) updateTimer(tickerBaseTime time.Duration, fetchFails uint64) {
 	blockGap := cs.smallestBlockGap()
-	timeSinceLastUpdate := time.Since(cs.latestChangeTime)
+	timeSinceLastUpdate := time.Since(cs.getLatestChangeTime())
 	var newPollingTime time.Duration
 	if timeSinceLastUpdate <= tickerBaseTime/2 && blockGap > tickerBaseTime/4 {
 		newPollingTime = tickerBaseTime / (cs.pollingTimeMultiplier / 4)

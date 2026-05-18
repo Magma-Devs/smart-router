@@ -396,6 +396,47 @@ func TestHTTPDirectRPCConnection_IsHealthy_Stays4xxHealthy(t *testing.T) {
 		"a 4xx/5xx response is an application error; transport reached the upstream and health must remain true")
 }
 
+// TestDirectRPCConnection_MarkHealthy_FlipsHTTPHealthyToTrue verifies the
+// recovery-only escape: after a transient failure leaves healthy=false (a
+// state the natural SendRequest-success path cannot reach because
+// IsHealthy() gates the request itself), MarkHealthy must unstick it without
+// requiring a successful exchange. Same idea for the gRPC variant — both
+// have an internal atomic.Bool we expect to flip. WebSocket has no internal
+// flag so MarkHealthy is a no-op there (covered in
+// TestDirectRPCConnection_MarkHealthy_WebSocketIsNoOp).
+func TestDirectRPCConnection_MarkHealthy_FlipsHTTPHealthyToTrue(t *testing.T) {
+	httpConn := &HTTPDirectRPCConnection{}
+	httpConn.healthy.Store(false)
+	require.False(t, httpConn.IsHealthy(), "precondition: healthy starts false")
+
+	httpConn.MarkHealthy()
+
+	require.True(t, httpConn.IsHealthy(), "MarkHealthy must flip the atomic back to true")
+}
+
+func TestDirectRPCConnection_MarkHealthy_FlipsGRPCHealthyToTrue(t *testing.T) {
+	grpcConn := &GRPCDirectRPCConnection{}
+	grpcConn.healthy.Store(false)
+	require.False(t, grpcConn.IsHealthy(), "precondition: healthy starts false")
+
+	grpcConn.MarkHealthy()
+
+	require.True(t, grpcConn.IsHealthy(), "MarkHealthy must flip the atomic back to true")
+}
+
+// TestDirectRPCConnection_MarkHealthy_WebSocketIsNoOp documents that
+// WebSocketDirectRPCConnection has no internal healthy flag (IsHealthy is a
+// constant true). MarkHealthy must still satisfy the interface without
+// panicking; the call is intentionally a no-op.
+func TestDirectRPCConnection_MarkHealthy_WebSocketIsNoOp(t *testing.T) {
+	wsConn := &WebSocketDirectRPCConnection{}
+	require.True(t, wsConn.IsHealthy(), "precondition: WebSocket IsHealthy is constant true")
+
+	wsConn.MarkHealthy() // must not panic
+
+	require.True(t, wsConn.IsHealthy())
+}
+
 // TestHTTPDirectRPCConnection_IsHealthy_RecoversAfterFailure verifies the full
 // unhealthy → healthy transition: once a connection has observed a transport
 // failure, a subsequent successful exchange must flip IsHealthy back to true.

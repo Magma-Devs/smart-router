@@ -401,6 +401,49 @@ func (m *EndpointChainTrackerManager) GetLatestBlockData(endpointURL string) (la
 	return latestBlock, changeTime, true
 }
 
+// ResetAllLatestBlocks calls ResetLatestBlock on every registered tracker so the
+// next consistency pre-validation skips the lag check until the poll loop
+// repopulates the cached value. Used by /debug/reset-scores to clear per-
+// endpoint chain-tracker pollution without restarting the tracker goroutines.
+// Returns the number of trackers that were reset.
+func (m *EndpointChainTrackerManager) ResetAllLatestBlocks() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, t := range m.trackers {
+		t.ResetLatestBlock()
+		count++
+	}
+	return count
+}
+
+// ResetAllConnectionHealth calls MarkHealthy on every per-endpoint
+// DirectRPCConnection. The same connection pointer is held in
+// endpoint.DirectConnections, which is what the cross-validation IsHealthy()
+// gate reads — so flipping the atomic here unblocks CV fan-out for endpoints
+// whose flag got stuck false from a long-ago transient failure. Returns the
+// number of connections visited (WebSocket connections are counted even
+// though their MarkHealthy is a no-op; the count is "invocations", not
+// "state transitions", so the caller can predict the number from the
+// endpoint count).
+func (m *EndpointChainTrackerManager) ResetAllConnectionHealth() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, fetcher := range m.fetchers {
+		if fetcher == nil {
+			continue
+		}
+		conn := fetcher.GetDirectConnection()
+		if conn == nil {
+			continue
+		}
+		conn.MarkHealthy()
+		count++
+	}
+	return count
+}
+
 // RemoveTracker removes and stops a ChainTracker for an endpoint.
 // It cancels the tracker's context first, which signals the goroutine to exit cleanly.
 func (m *EndpointChainTrackerManager) RemoveTracker(endpointURL string) {

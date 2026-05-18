@@ -28,6 +28,9 @@ func (dct *DummyChainTracker) GetAtomicLatestBlockNum() int64 {
 	return DummyChainTrackerLatestBlock
 }
 
+// ResetLatestBlock is a no-op for the dummy tracker; it has no cached state to clear.
+func (dct *DummyChainTracker) ResetLatestBlock() {}
+
 // StartAndServe starts the chain tracker and serves gRPC if configured
 func (dct *DummyChainTracker) StartAndServe(ctx context.Context) error {
 	return nil
