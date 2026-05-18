@@ -47,6 +47,15 @@ func NewEndpointChainFetcher(
 	}
 }
 
+// GetDirectConnection returns the underlying DirectRPCConnection. The same
+// pointer is stored in endpoint.DirectConnections[0] at construction time
+// (see ConsumerSessionManager.GetAllDirectRPCEndpoints), so a MarkHealthy()
+// call through this getter affects the exact atomic the cross-validation
+// path's IsHealthy() reads.
+func (ecf *EndpointChainFetcher) GetDirectConnection() lavasession.DirectRPCConnection {
+	return ecf.directConnection
+}
+
 // FetchLatestBlockNum fetches the latest block number from the endpoint.
 // Uses spec-driven parsing to support any chain type (EVM, Tendermint, REST, etc.).
 func (ecf *EndpointChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {

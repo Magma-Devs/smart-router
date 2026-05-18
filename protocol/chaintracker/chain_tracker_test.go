@@ -750,3 +750,53 @@ func TestChainTrackerMultipleInstancesNoLeaks(t *testing.T) {
 	// All instances should have cleaned up their resources (tickers, timers, goroutines)
 	// If there were leaks, this test would accumulate resources with each iteration
 }
+
+// TestChainTrackerResetLatestBlock verifies ResetLatestBlock zeroes both the
+// atomic latestBlockNum and the latestChangeTime so consistency pre-validation
+// treats the tracker as "unknown, do not gate" (validation_consistency.go:80).
+//
+// The poll loop is cancelled before Reset: after Reset prev_latest=0 and the
+// next tick would take the gotNewBlock branch in
+// fetchAllPreviousBlocksIfNecessary, rewriting latestBlockNum from the mock.
+// With TimeForPollingMock=2ms that's a tight flake window if we don't cancel.
+func TestChainTrackerResetLatestBlock(t *testing.T) {
+	mockBlocks := int64(20)
+	fetcherBlocks := int64(5)
+
+	mockChainFetcher := NewMockChainFetcher(1000, mockBlocks, nil)
+	mockChainFetcher.AdvanceBlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	chainTrackerConfig := chaintracker.ChainTrackerConfig{
+		BlocksToSave:          uint64(fetcherBlocks),
+		AverageBlockTime:      TimeForPollingMock,
+		ServerBlockMemory:     uint64(mockBlocks),
+		ParseDirectiveEnabled: true,
+	}
+
+	chainTracker, err := chaintracker.NewChainTracker(ctx, mockChainFetcher, chainTrackerConfig)
+	require.NoError(t, err)
+	require.NoError(t, chainTracker.StartAndServe(ctx))
+
+	for i := 0; i < 3; i++ {
+		mockChainFetcher.AdvanceBlock()
+	}
+	require.Eventually(t, func() bool {
+		return chainTracker.GetAtomicLatestBlockNum() > 1000
+	}, time.Second, TimeForPollingMock, "tracker should have polled a non-zero latest block")
+
+	// Stop the poll loop and give the goroutine time to exit before Reset so
+	// no subsequent tick can rewrite latestBlockNum.
+	cancel()
+	time.Sleep(TimeForPollingMock * 5)
+
+	chainTracker.ResetLatestBlock()
+
+	require.Equal(t, int64(0), chainTracker.GetAtomicLatestBlockNum())
+
+	latestBlock, changeTime := chainTracker.GetLatestBlockNum()
+	require.Equal(t, int64(0), latestBlock)
+	require.True(t, changeTime.IsZero(), "latestChangeTime should be zero after reset, got %v", changeTime)
+}
