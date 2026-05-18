@@ -35,11 +35,31 @@ build-all: build
 build:
 	go build $(GOFLAGS) -o build/smartrouter ./cmd/smartrouter
 
+BUILDX_BUILDER ?= smartrouter-builder
+export BUILDX_BUILDER
+
+# Idempotently ensure a docker-container-driver buildx builder exists.
+# The default `docker` driver doesn't support --platform / multi-arch,
+# so without this snapshot fails with `unknown flag: --platform`.
+# First run pulls moby/buildkit (~150MB) — about 30s; later runs no-op.
+# Scoped to this invocation via BUILDX_BUILDER env so the user's global
+# default builder is unchanged.
+buildx-setup:
+	@if ! docker buildx version >/dev/null 2>&1; then \
+	  echo "ERROR: docker buildx not installed. See README → 'One-time Docker buildx setup'."; \
+	  exit 1; \
+	fi
+	@if ! docker buildx inspect $(BUILDX_BUILDER) >/dev/null 2>&1; then \
+	  echo "Creating buildx builder '$(BUILDX_BUILDER)' (docker-container driver, pulls ~150MB moby/buildkit on first use)..."; \
+	  docker buildx create --name $(BUILDX_BUILDER) --driver docker-container >/dev/null; \
+	  docker buildx inspect --bootstrap $(BUILDX_BUILDER) >/dev/null; \
+	fi
+
 # Produce every release artifact locally (4 binaries, multi-arch Docker
 # image, checksums) under dist/ without publishing. Requires GoReleaser
 # (v2+) and Docker. Drives the same .goreleaser.yaml config CI uses, so
 # dist/ matches what a real release would produce for this commit.
-snapshot:
+snapshot: buildx-setup
 	goreleaser release --snapshot --clean --skip=publish
 
 # Tests
@@ -59,4 +79,4 @@ lint:
 clean:
 	rm -rf build/ dist/
 
-.PHONY: install install-all install-smartrouter build build-all snapshot test test-short tidy lint clean
+.PHONY: install install-all install-smartrouter build build-all buildx-setup snapshot test test-short tidy lint clean
