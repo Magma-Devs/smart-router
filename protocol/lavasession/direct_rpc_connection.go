@@ -76,6 +76,19 @@ type DirectRPCConnection interface {
 	// IsHealthy returns true if the connection is healthy
 	IsHealthy() bool
 
+	// MarkHealthy forcibly sets the connection's healthy flag back to true.
+	// Intended only for the /debug/reset-scores recovery path so a stuck-false
+	// flag from a transient earlier failure (network blip, brief read error)
+	// does not permanently exclude an endpoint from CV fan-out or pairing
+	// selection. Production code paths must rely on the natural
+	// healthy→false (SendRequest error) and healthy→true (SendRequest
+	// success) transitions; this only shortcuts the recovery when the next
+	// IsHealthy() gate would otherwise block the very request that would
+	// re-establish health. Side effect: the probe path that consults
+	// IsHealthy() at epoch transitions will also see true after a reset
+	// until the next SendRequest outcome resettles it.
+	MarkHealthy()
+
 	// GetURL returns the endpoint URL
 	GetURL() string
 
@@ -393,6 +406,14 @@ func (h *HTTPDirectRPCConnection) IsHealthy() bool {
 	return h.healthy.Load()
 }
 
+// MarkHealthy forcibly resets healthy to true. See the interface docstring;
+// this is the recovery-only escape for stuck-false caused by a one-off
+// transient that the natural SendRequest-success transition can never reach
+// because IsHealthy gates the request itself.
+func (h *HTTPDirectRPCConnection) MarkHealthy() {
+	h.healthy.Store(true)
+}
+
 func (h *HTTPDirectRPCConnection) GetURL() string {
 	return h.nodeUrl.Url
 }
@@ -492,6 +513,11 @@ func (w *WebSocketDirectRPCConnection) Close() error {
 func (w *WebSocketDirectRPCConnection) IsHealthy() bool {
 	return true // health tracking is done at the endpoint/QoS layer
 }
+
+// MarkHealthy is a no-op for WebSocket: this type has no internal healthy
+// flag (IsHealthy already always returns true). The interface method exists
+// so /debug/reset-scores can call it uniformly across transport types.
+func (w *WebSocketDirectRPCConnection) MarkHealthy() {}
 
 func (w *WebSocketDirectRPCConnection) GetURL() string {
 	return w.nodeUrl.Url
@@ -913,6 +939,14 @@ func (g *GRPCDirectRPCConnection) Close() error {
 
 func (g *GRPCDirectRPCConnection) IsHealthy() bool {
 	return g.healthy.Load()
+}
+
+// MarkHealthy forcibly resets healthy to true. See the interface docstring;
+// this is the recovery-only escape for stuck-false caused by a one-off
+// transient that the natural SendRequest-success transition can never reach
+// because IsHealthy gates the request itself.
+func (g *GRPCDirectRPCConnection) MarkHealthy() {
+	g.healthy.Store(true)
 }
 
 func (g *GRPCDirectRPCConnection) GetURL() string {

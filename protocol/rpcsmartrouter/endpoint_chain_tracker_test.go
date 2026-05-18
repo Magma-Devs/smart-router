@@ -48,6 +48,10 @@ func (m *mockDirectRPCConnection) IsHealthy() bool {
 	return m.healthy
 }
 
+func (m *mockDirectRPCConnection) MarkHealthy() {
+	m.healthy = true
+}
+
 func (m *mockDirectRPCConnection) GetURL() string {
 	return m.url
 }
