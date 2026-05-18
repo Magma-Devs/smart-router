@@ -11,10 +11,10 @@ Centralised RPC routing gateway. Routes JSON-RPC, REST, gRPC, and Tendermint RPC
 ### Build
 
 ```bash
-make install-all
+make install
 ```
 
-This installs the `smartrouter` binary.
+This installs the `smartrouter` binary to `$GOPATH/bin` (or `$GOBIN`).
 
 ### Run
 
@@ -51,10 +51,9 @@ Specs are in the `specs/` directory:
 
 ```bash
 make build          # Build smartrouter binary to build/
-make build-all      # Build all binaries to build/
 make install        # Install smartrouter to $GOPATH/bin
-make snapshot       # Reproduce a release locally in dist/ (see Releases below)
-make setup          # One-time-per-machine: ensure docker buildx is configured (auto-run by `make snapshot`)
+make snapshot       # Reproduce a release locally in dist/ (binaries + multi-arch Docker image)
+make setup          # One-time: ensure docker buildx is configured (auto-run by `make snapshot`)
 make test           # Run all tests
 make test-short     # Run smart router tests only
 make lint           # Run go vet
@@ -62,7 +61,7 @@ make tidy           # Run go mod tidy
 make clean          # Remove build artifacts
 ```
 
-All build targets inject version metadata via ldflags using the same `VERSION` (from `git describe --tags --always --dirty`) and `COMMIT` (from `git rev-parse HEAD`) that CI uses, so a local `make build` on a given commit produces a binary byte-identical to what CI publishes for the same commit (under the same Go toolchain).
+`make build` and `make install` inject the same version metadata via ldflags that CI uses (`git describe` for `Version`, `git rev-parse HEAD` for `Commit`), so a local build on a given commit is byte-identical to CI's for that commit (under the same Go toolchain).
 
 ### Project structure
 
@@ -130,63 +129,6 @@ docker pull ghcr.io/magma-devs/smart-router:vX.Y.Z
 ```
 
 If you'd rather customers pull without authenticating, change the **package** visibility (not the repo) to public at `https://github.com/orgs/Magma-Devs/packages` → smart-router → Package settings → Change visibility. The Go source stays private; only the published images become public.
-
-#### Build provenance and untagged versions
-
-Each release pushes a multi-arch manifest list **plus** two SLSA build-provenance attestation manifests (one per platform image). The attestation manifests show up as "untagged" versions in the package's version list — they're real artifacts referenced from the main manifest list, not leftovers. Combined with per-arch `:latest-amd64` / `:latest-arm64` pointers and CI dev-image pushes, the version list grows quickly; consider setting a retention policy at `https://github.com/orgs/Magma-Devs/packages` → smart-router → Package settings → "Manage Actions access" / retention rules ("retain only N tagged versions" + "delete untagged after N days").
-
-### Reproducing a release locally
-
-Install [GoReleaser](https://goreleaser.com/install/) and Docker, then run:
-
-```bash
-make snapshot   # shortcut for: goreleaser release --snapshot --clean --skip=publish
-```
-
-This produces every release artifact — the four binaries, the multi-arch Docker image, and the checksum file — under `dist/`, without pushing anything to GitHub or GHCR. Because the release pipeline runs a single `go build` per arch (via `.goreleaser.yaml`'s `builds:` block) and feeds that binary into both the standalone archive and the Docker image, a local snapshot build produces the same bytes CI would for the same commit.
-
-On first run, `make snapshot` calls `make setup`, which idempotently creates a `smartrouter-builder` Docker buildx instance with the `docker-container` driver (needed for the multi-arch `--platform` build; the default `docker` driver doesn't support it). The setup takes ~30s only the first time (pulls `moby/buildkit`, ~150MB) and is scoped via `BUILDX_BUILDER` so it doesn't change your global default builder. `make setup` is also callable on its own if you want to do the one-time prep ahead of time.
-
-If `docker buildx` itself is missing, the error message lists the install paths — the relevant gotcha is that **`docker-buildx-plugin` only exists in Docker's `docker-ce` apt repo, not in Ubuntu's stock `docker.io` package**. If you're on `docker.io`, install buildx as a CLI plugin manually:
-
-```bash
-mkdir -p ~/.docker/cli-plugins
-BUILDX_VERSION=$(curl -s https://api.github.com/repos/docker/buildx/releases/latest | grep tag_name | cut -d '"' -f 4)
-curl -L "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" \
-  -o ~/.docker/cli-plugins/docker-buildx
-chmod +x ~/.docker/cli-plugins/docker-buildx
-```
-
-On WSL2 the easier path is enabling Docker Desktop's WSL2 integration. On macOS, install Docker Desktop.
-
-### Verifying a release
-
-The release pipeline's architectural promise is that **the standalone binary, the binary inside the multi-arch Docker image, and a local `make build` at the same commit are byte-identical**. To verify:
-
-```bash
-# Local build at the release commit (e.g. v1.2.0)
-git checkout v1.2.0
-make clean && make build
-LOCAL_SHA=$(sha256sum build/smartrouter | cut -d' ' -f1)
-
-# Standalone binary from the GitHub Release
-gh release download v1.2.0 -R Magma-Devs/smart-router -p 'smartrouter-v1.2.0-linux-amd64'
-RELEASE_SHA=$(sha256sum smartrouter-v1.2.0-linux-amd64 | cut -d' ' -f1)
-
-# Binary inside the Docker image
-docker pull --platform linux/amd64 ghcr.io/magma-devs/smart-router:v1.2.0
-docker create --platform linux/amd64 --name sr-verify ghcr.io/magma-devs/smart-router:v1.2.0
-docker cp sr-verify:/bin/smart-router /tmp/smart-router-in-image
-docker rm sr-verify
-IMAGE_SHA=$(sha256sum /tmp/smart-router-in-image | cut -d' ' -f1)
-
-# All three should match
-echo "local:   $LOCAL_SHA"
-echo "release: $RELEASE_SHA"
-echo "image:   $IMAGE_SHA"
-```
-
-The three SHAs match because GoReleaser runs a single `go build` per arch per release and feeds that exact binary into both the GitHub Release archive and the Docker image (see `dockers_v2:` in `.goreleaser.yaml`).
 
 ### Tag conventions
 
