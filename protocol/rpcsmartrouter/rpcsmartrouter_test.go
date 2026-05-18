@@ -1,7 +1,9 @@
 package rpcsmartrouter
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -774,4 +777,60 @@ func TestGracefulFailure_EpochBeforeRetry_OnlyHealthyProviders(t *testing.T) {
 	// Verify: failed list unchanged
 	require.Len(t, rpsr.failedStaticProviders[chainKey], 1)
 	require.Equal(t, "providerB", rpsr.failedStaticProviders[chainKey][0].Name)
+}
+
+// When the smart-router exits with a startup error, cobra's default behaviour
+// is to dump the full --help text (Usage:, Flags:, Available Commands:,
+// Examples:) after the error line. In CrashLoopBackOff the help text swamps
+// `kubectl logs` and the real error scrolls off the top.
+//
+// The contract: cobra's error path on the smart-router root command must not
+// emit usage text. SilenceUsage is set on the command construction site.
+func TestRPCSmartRouterCobraCommand_StartupErrorDoesNotDumpUsage(t *testing.T) {
+	cmd := CreateRPCSmartRouterCobraCommand()
+
+	// Replace RunE so we exercise the error-output path without starting the
+	// server. The synthetic error stands in for any real fatal startup failure
+	// (static-provider verification, config parse, missing dependency, etc.).
+	cmd.RunE = func(_ *cobra.Command, _ []string) error {
+		return errors.New("synthetic startup failure")
+	}
+
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	// Pass the required --geolocation so cobra reaches RunE rather than failing
+	// on required-flag enforcement (which has its own usage-dump path).
+	cmd.SetArgs([]string{"--geolocation", "1"})
+
+	require.Error(t, cmd.Execute(), "expected Execute() to return synthetic error")
+
+	out := buf.String()
+	for _, forbidden := range []string{
+		"Usage:",
+		"Available Commands:",
+		"Examples:",
+		"Flags:",
+	} {
+		require.NotContains(t, out, forbidden,
+			"startup-error output leaked %q — SilenceUsage must be set on the root command", forbidden)
+	}
+}
+
+// Legitimate --help invocations must still render the full usage text;
+// SilenceUsage only suppresses the dump on error, not on explicit help.
+func TestRPCSmartRouterCobraCommand_HelpStillRenders(t *testing.T) {
+	cmd := CreateRPCSmartRouterCobraCommand()
+
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--help"})
+
+	require.NoError(t, cmd.Execute(), "--help should not return an error")
+
+	out := buf.String()
+	for _, want := range []string{"Usage:", "Flags:"} {
+		require.Contains(t, out, want, "--help output missing %q", want)
+	}
 }
