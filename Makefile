@@ -48,9 +48,17 @@ export BUILDX_BUILDER
 setup:
 	@if ! docker buildx version >/dev/null 2>&1; then \
 	  echo "ERROR: docker buildx is not installed."; \
-	  echo "  Debian / Ubuntu:  sudo apt install docker-buildx-plugin"; \
-	  echo "  WSL2:             enable Docker Desktop's WSL2 integration"; \
-	  echo "  macOS:            install Docker Desktop"; \
+	  echo "  Official install guide: https://docs.docker.com/build/buildx/install/"; \
+	  echo ""; \
+	  echo "  Common paths:"; \
+	  echo "    - Docker Desktop (macOS / Windows / WSL2): buildx is included."; \
+	  echo "    - docker-ce on Linux (Docker's official apt repo):"; \
+	  echo "        sudo apt install docker-buildx-plugin"; \
+	  echo "    - docker.io from Ubuntu repos: does NOT include buildx — install as a"; \
+	  echo "      CLI plugin manually:"; \
+	  echo "        mkdir -p ~/.docker/cli-plugins"; \
+	  echo "        curl -L https://github.com/docker/buildx/releases/latest/download/buildx-\$$(curl -s https://api.github.com/repos/docker/buildx/releases/latest | grep tag_name | cut -d '\"' -f 4).linux-amd64 -o ~/.docker/cli-plugins/docker-buildx"; \
+	  echo "        chmod +x ~/.docker/cli-plugins/docker-buildx"; \
 	  exit 1; \
 	fi
 	@if ! docker buildx inspect $(BUILDX_BUILDER) >/dev/null 2>&1; then \
