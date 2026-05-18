@@ -290,6 +290,7 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 // These are used for REST transport where the error code is the HTTP status code itself.
 func httpStatusCodeMappings() []errorMapping {
 	return []errorMapping{
+		{CodeEquals(401), LavaErrorNodeUnauthorized},
 		{CodeEquals(404), LavaErrorNodeEndpointNotFound},
 		{CodeEquals(405), LavaErrorNodeMethodNotAllowed},
 		{CodeEquals(413), LavaErrorUserRequestTooLarge},
@@ -315,6 +316,7 @@ func httpStatusCodeMappings() []errorMapping {
 // These match status codes appearing as substrings in error messages (e.g., "HTTP status 429").
 func httpStatusMessageMappings() []errorMapping {
 	return []errorMapping{
+		{HTTPStatusContains(401), LavaErrorNodeUnauthorized},
 		{HTTPStatusContains(404), LavaErrorNodeEndpointNotFound},
 		{HTTPStatusContains(405), LavaErrorNodeMethodNotAllowed},
 		{HTTPStatusContains(413), LavaErrorUserRequestTooLarge},
