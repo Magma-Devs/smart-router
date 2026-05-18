@@ -38,13 +38,14 @@ build:
 BUILDX_BUILDER ?= smartrouter-builder
 export BUILDX_BUILDER
 
-# Idempotently ensure a docker-container-driver buildx builder exists.
+# One-time-per-machine setup. Currently ensures a docker-container-
+# driver buildx builder exists (needed for the multi-arch image build).
 # The default `docker` driver doesn't support --platform / multi-arch,
 # so without this snapshot fails with `unknown flag: --platform`.
 # First run pulls moby/buildkit (~150MB) — about 30s; later runs no-op.
 # Scoped to this invocation via BUILDX_BUILDER env so the user's global
 # default builder is unchanged.
-buildx-setup:
+setup:
 	@if ! docker buildx version >/dev/null 2>&1; then \
 	  echo "ERROR: docker buildx is not installed."; \
 	  echo "  Debian / Ubuntu:  sudo apt install docker-buildx-plugin"; \
@@ -62,7 +63,7 @@ buildx-setup:
 # image, checksums) under dist/ without publishing. Requires GoReleaser
 # (v2+) and Docker. Drives the same .goreleaser.yaml config CI uses, so
 # dist/ matches what a real release would produce for this commit.
-snapshot: buildx-setup
+snapshot: setup
 	goreleaser release --snapshot --clean --skip=publish
 
 # Tests
@@ -82,4 +83,4 @@ lint:
 clean:
 	rm -rf build/ dist/
 
-.PHONY: install install-all install-smartrouter build build-all buildx-setup snapshot test test-short tidy lint clean
+.PHONY: install install-all install-smartrouter build build-all setup snapshot test test-short tidy lint clean
