@@ -2427,3 +2427,86 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	require.Equal(t, 0, usedProviders.SessionsLatestBatch(),
 		"SessionsLatestBatch leaked — commit a78426a regression: RelayProcessor.checkEndProcessing will wait for responses that never arrive")
 }
+
+// TestIsFinalizedForCacheWrite pins the finalization decision used by
+// tryCacheWrite when choosing between the short non-finalized TTL (~625 ms)
+// and the long finalized TTL (~1.5 h).
+//
+// The regression case it guards: eth_getBlockByNumber(N) responses set
+// Reply.LatestBlock = N (extractBlockHeightFromEVMResponse reads result.number,
+// which for this method is the requested block itself). The naive
+// IsFinalizedBlock(requested, latestFromReply, distance) check can never be
+// satisfied because (N <= N - distance) is false for any positive distance,
+// so every historical-block response gets the short TTL. A 10 s rolling
+// restart then drops every cached entry — the failure mode reported in
+// test_phase2_5_caching.py::test_cache_survives_router_pod_restart.
+//
+// The fix consults the router's tracked chain tip (chainTracker /
+// latestBlockEstimator / atomic latestBlockHeight, surfaced via
+// rpcss.getLatestBlock()) and prefers it when it is ahead of the reply's
+// per-response value.
+func TestIsFinalizedForCacheWrite(t *testing.T) {
+	tests := []struct {
+		name        string
+		requested   int64
+		replyLatest int64
+		tracked     int64
+		distance    int64
+		want        bool
+	}{
+		{
+			name:        "eth_getBlockByNumber historical: reply echoes request, tracker shows real tip",
+			requested:   17500000,
+			replyLatest: 17500000, // simulator (and real providers) echo result.number == requested
+			tracked:     20000000,
+			distance:    64,
+			want:        true,
+		},
+		{
+			name:        "tracker only slightly ahead of requested: not finalized",
+			requested:   20000000,
+			replyLatest: 20000000,
+			tracked:     20000050,
+			distance:    64,
+			want:        false,
+		},
+		{
+			name:        "tracker unavailable, reply carries real tip: falls back to reply",
+			requested:   17500000,
+			replyLatest: 20000000,
+			tracked:     0,
+			distance:    64,
+			want:        true,
+		},
+		{
+			name:        "tracker behind reply: max() keeps the higher reply value",
+			requested:   17500000,
+			replyLatest: 20000000,
+			tracked:     17500000,
+			distance:    64,
+			want:        true,
+		},
+		{
+			name:        "LATEST_BLOCK sentinel (-2): never finalized regardless of tip",
+			requested:   spectypes.LATEST_BLOCK,
+			replyLatest: 20000000,
+			tracked:     20000000,
+			distance:    64,
+			want:        false,
+		},
+		{
+			name:        "exactly on the finalization boundary: finalized",
+			requested:   17500000,
+			replyLatest: 17500000,
+			tracked:     17500064,
+			distance:    64,
+			want:        true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isFinalizedForCacheWrite(tc.requested, tc.replyLatest, tc.tracked, tc.distance)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}

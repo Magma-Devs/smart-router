@@ -1360,6 +1360,20 @@ func (rpcss *RPCSmartRouterServer) initializeChainTrackers(ctx context.Context) 
 	)
 }
 
+// isFinalizedForCacheWrite picks the chain tip used to decide whether a
+// cache-write goes to the long-TTL finalized store or the short-TTL temp
+// store. Reply.LatestBlock is unreliable for methods that echo the requested
+// block (eth_getBlockByNumber returns result.number = requested), so the
+// router's tracked tip (chainTracker / latestBlockEstimator / atomic
+// latestBlockHeight, surfaced via getLatestBlock()) wins when it is higher.
+func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlock, finalizationDistance int64) bool {
+	latest := replyLatestBlock
+	if trackedLatestBlock > latest {
+		latest = trackedLatestBlock
+	}
+	return spectypes.IsFinalizedBlock(requestedBlock, latest, finalizationDistance)
+}
+
 // tryCacheWrite attempts to write a successful relay response to the cache.
 // It runs in a separate goroutine to avoid blocking the relay response.
 // Cache writes are skipped when:
@@ -1449,9 +1463,13 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	// Get chain stats for finalization check
 	_, averageBlockTime, blockDistanceForFinalizedData, _ := rpcss.chainParser.ChainBlockStats()
 
-	// Determine if response is finalized
+	// Determine if response is finalized. Prefer the router's tracked chain
+	// tip over Reply.LatestBlock: for eth_getBlockByNumber the per-response
+	// value is the requested block itself (extractBlockHeightFromEVMResponse
+	// reads result.number), so the naive check never marks any historical
+	// block finalized and every entry takes the ~625 ms non-finalized TTL.
 	latestBlock := relayResult.Reply.LatestBlock
-	finalized := spectypes.IsFinalizedBlock(requestedBlock, latestBlock, int64(blockDistanceForFinalizedData))
+	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
 
 	// Convert LATEST_BLOCK to actual block number for cache key
 	// This must match the logic in cache lookup (sendRelayToEndpoint) to ensure cache hits
