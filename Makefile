@@ -46,7 +46,10 @@ export BUILDX_BUILDER
 # default builder is unchanged.
 buildx-setup:
 	@if ! docker buildx version >/dev/null 2>&1; then \
-	  echo "ERROR: docker buildx not installed. See README → 'One-time Docker buildx setup'."; \
+	  echo "ERROR: docker buildx is not installed."; \
+	  echo "  Debian / Ubuntu:  sudo apt install docker-buildx-plugin"; \
+	  echo "  WSL2:             enable Docker Desktop's WSL2 integration"; \
+	  echo "  macOS:            install Docker Desktop"; \
 	  exit 1; \
 	fi
 	@if ! docker buildx inspect $(BUILDX_BUILDER) >/dev/null 2>&1; then \
