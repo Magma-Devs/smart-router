@@ -63,23 +63,37 @@ Highlights` placeholder and the workflow still publishes — but the
 draft release will have a visible TODO that you'll need to edit before
 publishing.
 
-### Branch protection on `main`
+### `RELEASE_BOT_PAT` (fine-grained PAT)
 
-The workflow pushes the `CHANGELOG.md` commit to `main` using the
-default `GITHUB_TOKEN`. If `main` is branch-protected with "require PR
-review" or "require status checks", that push will be rejected.
+The workflow pushes the auto-generated `CHANGELOG.md` commit to `main`.
+The default `GITHUB_TOKEN` is rejected by `main`'s "require PR review"
+branch protection, so we use a fine-grained PAT instead.
 
-Two ways to fix:
+**Create the PAT** at <https://github.com/settings/personal-access-tokens>:
 
-- **Allow bypass for `github-actions[bot]`** in the `main` branch
-  protection rules (cleanest, no extra credentials).
-- **Use a fine-grained PAT** with `contents: write` on this repo, store
-  it as `secrets.RELEASE_TOKEN`, and swap `GITHUB_TOKEN` for it in the
-  commit step.
+- **Name:** `smart-router-release-bot`
+- **Resource owner:** `Magma-Devs`
+- **Repository access:** Only select repositories → `smart-router`
+- **Repository permissions:** Contents: Read and write (Metadata: Read
+  is added automatically; everything else: No access)
+- **Expiration:** pick something you'll remember to rotate (e.g. 1 year).
 
-If neither is set up, the release still publishes — but `CHANGELOG.md`
-in `main` won't be updated, and you'll need to commit it manually
-afterwards.
+Then add as a repo secret:
+
+```
+gh secret set RELEASE_BOT_PAT --repo Magma-Devs/smart-router
+# paste the token when prompted
+```
+
+**Add the PAT owner to `main`'s bypass list:** Settings → Branches → edit
+the `main` rule → "Allow specified actors to bypass required pull
+requests" → add the user account that owns the PAT → Save. (If the PAT
+owner is already an admin and the rule allows admins, this is a no-op.)
+
+If `RELEASE_BOT_PAT` is missing or expired, the commit-CHANGELOG-to-main
+step will fail and stop the workflow before goreleaser runs — the
+release won't be published. Rotate the PAT and re-run the workflow via
+`gh workflow run release.yml -f release_tag=vX.Y.Z`.
 
 ## Manually previewing a changelog locally
 

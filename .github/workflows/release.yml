@@ -41,6 +41,17 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}
+          # Use a fine-grained PAT (RELEASE_BOT_PAT secret) for the
+          # CHANGELOG-back-to-main push later in this job. The default
+          # GITHUB_TOKEN gets rejected by `main`'s PR-required branch
+          # protection. The PAT owner must be in `main`'s bypass list
+          # (Settings → Branches → main → "Allow specified actors to
+          # bypass required pull requests"). See RELEASING.md.
+          #
+          # Setting `token:` here configures git credentials for every
+          # subsequent step in this job, so `git push origin HEAD:main`
+          # uses the PAT automatically.
+          token: ${{ secrets.RELEASE_BOT_PAT }}
 
       - name: Fetch all tags
         run: git fetch --force --tags
