@@ -93,6 +93,10 @@ jobs:
         id: generate
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # GH_TOKEN lets the bumper look up the PR associated with each
+          # commit via `GET /commits/{sha}/pulls`. Default GITHUB_TOKEN
+          # has the required read access and isn't rate-limited (5000/hr).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           v_re=$(printf '%s' "$RELEASE_VERSION" | sed -e 's/[][().*+?^$\|/]/\\&/g')
           if grep -qE "^## ${v_re}( |\$)" CHANGELOG.md 2>/dev/null; then
