@@ -29,6 +29,10 @@ set -euo pipefail
 FORK_BASE="10a450617b7ee6d1aff724030f3a55b60a694533"
 
 REPO_URL="${REPO_URL:-https://github.com/magma-Devs/smart-router}"
+# Owner/repo path derived from REPO_URL — used for GitHub API calls
+# that look up the PR associated with each commit (see PR-link logic
+# in the per-commit loop below).
+REPO_PATH="${REPO_URL#https://github.com/}"
 EDITOR="${EDITOR:-vim}"
 
 : "${VERSION:?VERSION is required, e.g. VERSION=v1.0.0}"
@@ -95,18 +99,54 @@ for i in "${!GROUP_TITLES[@]}"; do : > "$tmp_dir/g$i"; done
 # `git log --reverse` yields oldest-first inside the range; the inline
 # bullet list ends up in chronological order, matching the old goreleaser
 # `sort: asc` behavior.
+#
+# For each commit we resolve a PR number two ways: first by looking for
+# the `(#N)` suffix that GitHub appends to squash-merged commit subjects,
+# and if that's missing, by calling `GET /commits/{sha}/pulls` against
+# the GitHub API (auth via GH_TOKEN). Unauthenticated API calls are rate-
+# limited to 60/hour, so the workflow passes GITHUB_TOKEN as GH_TOKEN.
+# Without a token, we still surface any (#N) baked into the subject.
 while IFS=$'\t' read -r short long subject; do
   if [[ "$subject" =~ $EXCLUDE_REGEX ]]; then
     continue
   fi
+
+  pr_num=""
+  subject_rendered="$subject"
+  if [[ "$subject" =~ \(#([0-9]+)\)[[:space:]]*$ ]]; then
+    pr_num="${BASH_REMATCH[1]}"
+    # Replace the trailing `(#N)` with `([#N])` so it renders as a
+    # markdown reference-style link (definition added to $tmp_dir/refs
+    # below; deduped via sort -u at end of section build).
+    subject_rendered="${subject%\(#${pr_num}\)*}([#${pr_num}])"
+  elif [ -n "${GH_TOKEN:-}" ]; then
+    pr_num="$(curl -sS --max-time 5 \
+      -H "Authorization: token ${GH_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      "https://api.github.com/repos/${REPO_PATH}/commits/${long}/pulls" 2>/dev/null \
+      | jq -r '.[0].number // empty' 2>/dev/null || true)"
+    if [ -n "$pr_num" ]; then
+      subject_rendered="${subject} ([#${pr_num}])"
+    fi
+  fi
+
   for i in "${!GROUP_REGEX[@]}"; do
     if [[ "$subject" =~ ${GROUP_REGEX[$i]} ]]; then
-      printf -- '- %s [`%s`]\n' "$subject" "$short" >> "$tmp_dir/g$i"
+      printf -- '- %s [`%s`]\n' "$subject_rendered" "$short" >> "$tmp_dir/g$i"
       printf '[`%s`]: %s/commit/%s\n' "$short" "$REPO_URL" "$long" >> "$tmp_dir/refs"
+      if [ -n "$pr_num" ]; then
+        printf '[#%s]: %s/pull/%s\n' "$pr_num" "$REPO_URL" "$pr_num" >> "$tmp_dir/refs"
+      fi
       break
     fi
   done
-done < <(git log --reverse --no-merges --pretty=format:'%h%x09%H%x09%s' "${prev_ref}..HEAD")
+done < <(git log --reverse --no-merges --pretty=tformat:'%h%x09%H%x09%s' "${prev_ref}..HEAD")
+# tformat: (terminator) appends a newline after every commit; plain
+# format: only puts newlines BETWEEN commits, so bash `read` drops the
+# last line in the loop above. With tformat: every commit is processed.
+
+# Dedup ref lines: a single PR can be linked from multiple commits.
+sort -u -o "$tmp_dir/refs" "$tmp_dir/refs"
 
 changes_md=""
 for i in "${!GROUP_TITLES[@]}"; do
