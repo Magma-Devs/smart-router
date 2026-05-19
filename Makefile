@@ -64,7 +64,36 @@ setup:
 # (v2+) and Docker. Drives the same .goreleaser.yaml config CI uses, so
 # dist/ matches what a real release would produce for this commit.
 snapshot: setup
-	goreleaser release --snapshot --clean --skip=publish
+	# --skip=sign: cosign keyless signing requires GitHub Actions OIDC,
+	# which isn't available locally. CI (.github/workflows/release.yml)
+	# does sign — see signs: in .goreleaser.yaml.
+	IS_SNAPSHOT=1 goreleaser release --snapshot --clean --skip=publish --skip=sign
+
+# Prepend a new release section to CHANGELOG.md for VERSION. Groups
+# commits since the last v*.*.* tag by conventional-commit prefix and
+# drafts the Highlights paragraph via Gemini Flash, then opens $EDITOR
+# so you can review/edit before committing.
+#
+# This is only needed for local previews or hand-written special-case
+# entries — CI does the same thing automatically on tag push. See
+# RELEASING.md for the full release workflow.
+#
+# GEMINI_API_KEY is required to get a Highlights draft (the repo
+# secret is only visible inside GitHub Actions — locally you need your
+# own key from https://aistudio.google.com/apikey). Without it, the
+# Highlights area is a TODO placeholder you'll need to fill in.
+#
+# Examples:
+#   GEMINI_API_KEY=... make changelog VERSION=v1.0.0   # full draft
+#   make changelog VERSION=v1.0.1 AI=0                 # explicitly skip LLM, TODO placeholder
+#   make changelog VERSION=v1.0.1 EDIT=0               # don't open $EDITOR
+changelog:
+	@if ! echo "$(VERSION)" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$$'; then \
+	  echo "VERSION must be a semver tag like v1.0.0 or v1.0.0-rc1 (got: '$(VERSION)')" >&2; \
+	  echo "Usage: make changelog VERSION=v1.0.0 [AI=0] [EDIT=0]" >&2; \
+	  exit 1; \
+	fi
+	VERSION=$(VERSION) AI=$(AI) EDIT=$(EDIT) GEMINI_API_KEY=$(GEMINI_API_KEY) scripts/changelog-bump.sh
 
 # Tests
 test:
@@ -83,4 +112,4 @@ lint:
 clean:
 	rm -rf build/ dist/
 
-.PHONY: install build setup snapshot test test-short tidy lint clean
+.PHONY: install build setup snapshot changelog test test-short tidy lint clean

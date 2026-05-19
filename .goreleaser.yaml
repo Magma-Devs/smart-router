@@ -99,41 +99,32 @@ checksum:
   name_template: "sha256sum.txt"
   algorithm: sha256
 
+# Auto-changelog is disabled — CHANGELOG.md is the source of truth and the
+# release body comes from `release.header_file` below. The conventional-
+# commit grouping logic that used to live here now lives in
+# scripts/changelog-bump.sh and runs at `make changelog` time, not at
+# release time. See RELEASING.md.
 changelog:
-  use:
-    github
-  sort: asc
-  groups:
-    - title: Dependency updates
-      regexp: '^.*?(feat|fix|chore)\(deps\)!?:.+$'
-      order: 300
-    - title: "New Features"
-      regexp: '^.*?feat(\(.+\))??!?:.+$'
-      order: 100
-    - title: "Security updates"
-      regexp: '^.*?sec(\(.+\))??!?:.+$'
-      order: 150
-    - title: "Bug fixes"
-      regexp: '^.*?(fix|refactor)(\(.+\))??!?:.+$'
-      order: 200
-    - title: "Documentation updates"
-      regexp: ^.*?docs?(\(.+\))??!?:.+$
-      order: 400
-    - title: "Build process updates"
-      regexp: ^.*?(build|ci)(\(.+\))??!?:.+$
-      order: 400
-    - title: Other work
-      order: 9999
-  filters:
-    exclude:
-      - "^test:"
-      - "^test\\("
-      - "^chore"
-      - "merge conflict"
-      - Merge pull request
-      - Merge remote-tracking branch
-      - Merge branch
-      - go mod tidy
+  disable: true
+
+# Cosign keyless signing of the checksum file. Requires `id-token: write`
+# in the release workflow and cosign installed on the runner (added by
+# sigstore/cosign-installer in .github/workflows/release.yml). The OIDC
+# token from GitHub Actions is exchanged with Sigstore Fulcio for a
+# short-lived signing certificate — no private key to manage or rotate.
+# Verification recipe is in RELEASING.md.
+signs:
+  - id: cosign-checksums
+    cmd: cosign
+    artifacts: checksum
+    output: true
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - '--output-certificate=${certificate}'
+      - '--output-signature=${signature}'
+      - '${artifact}'
+      - '--yes'
 
 release:
   github:
@@ -148,3 +139,8 @@ release:
   # tag in the dockers_v2 block is guarded on `not .Prerelease`, so RC
   # and beta tags don't overwrite the stable :latest pointer.
   prerelease: auto
+  # The release body is the matching `## <tag>` section of CHANGELOG.md.
+  # The release workflow extracts it with scripts/extract-changelog.sh
+  # and passes the result to goreleaser via `--release-notes`. Combined
+  # with `changelog.disable: true` above, that file becomes the entire
+  # release body — no goreleaser-generated content appended.
