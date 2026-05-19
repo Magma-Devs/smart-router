@@ -1057,6 +1057,37 @@ func TestNoPairingsError(t *testing.T) {
 	require.True(t, errors.Is(err, PairingListEmptyError))
 }
 
+// TestSelectedProviderAlreadyFailedReturnsError verifies the header-pinned path bounds retries.
+// Why: without this guard, GetSessions' outer loop spins forever when the pinned provider's
+// DirectRPC connection is unhealthy — the pinned name keeps being re-selected even after it
+// has been added to the in-request ignored list, producing the unbounded "Provider selected
+// via header" / "direct RPC connection is unhealthy" log pair seen in lava-sim-rest hangs.
+func TestSelectedProviderAlreadyFailedReturnsError(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairingList := createPairingList("", true)
+	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	validAddresses := csm.getValidAddresses("", nil, context.Background())
+	require.NotEmpty(t, validAddresses)
+	pinned := validAddresses[0]
+
+	// Sanity: when not ignored, the pinned address is returned successfully.
+	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", pinned)
+	require.NoError(t, err)
+	require.Equal(t, []string{pinned}, got)
+
+	// When the pinned address has already been added to ignoredProvidersList
+	// (simulating a prior failed connect attempt in the same GetSessions call),
+	// the helper must return an error instead of re-selecting the same address.
+	ignored := map[string]struct{}{pinned: {}}
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, 10, 100, "", nil, common.NO_STATE, "", pinned)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
+		"expected SelectedProviderUnavailableError, got: %v", err)
+}
+
 func TestPairingWithStateful(t *testing.T) {
 	ctx := context.Background()
 	t.Run("stateful", func(t *testing.T) {

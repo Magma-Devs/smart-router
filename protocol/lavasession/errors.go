@@ -21,6 +21,7 @@ var ( // Consumer Side Errors
 	ContextDoneNoNeedToLockSelectionError   = errors.New("Context deadline exceeded while trying to lock selection")
 	BlockEndpointError                      = errors.New("Block the endpoint")
 	ConsistencyPreValidationError           = errors.New("endpoint failed pre-request consistency validation")
+	SelectedProviderUnavailableError        = errors.New("Header-selected provider has already failed for this request")
 )
 
 
