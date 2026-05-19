@@ -28,6 +28,13 @@ jobs:
       # and exchange it with Sigstore Fulcio for a short-lived signing
       # certificate (keyless signing). See `signs:` in .goreleaser.yaml.
       id-token: write
+      # `pull-requests: read` lets the GITHUB_TOKEN call
+      # `GET /repos/{owner}/{repo}/commits/{sha}/pulls`, which the
+      # bumper uses (via GH_TOKEN) to attach a [#N] PR link to each
+      # bullet whose subject doesn't already carry a `(#N)` suffix.
+      # Without this scope, the API silently returns empty results
+      # and only the subject-extracted PR refs appear in the changelog.
+      pull-requests: read
 
     env:
       # The pushed tag (e.g. v1.0.0) for tag-push triggers, or the
@@ -109,18 +116,38 @@ jobs:
           echo "--- CHANGELOG.md head ---"
           head -40 CHANGELOG.md
 
+      # Extract the matching `## <tag>` section from CHANGELOG.md into
+      # a standalone file BEFORE the commit-to-main step. That step
+      # ends with `git checkout ${tag_commit}` to return HEAD to the
+      # tag — which resets the working tree's CHANGELOG.md back to its
+      # pre-bumper state. Extracting first means we capture the new
+      # section while it's still in the working tree.
+      #
+      # `.release-notes/` is gitignored, so the file survives the later
+      # `git checkout` without affecting goreleaser's clean-tree check.
+      # Lives outside `dist/` because goreleaser refuses to start when
+      # `dist/` is non-empty after `--clean`.
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          mkdir -p .release-notes
+          scripts/extract-changelog.sh "$RELEASE_VERSION" > .release-notes/body.md
+          echo "--- extracted release body ---"
+          head -20 .release-notes/body.md
+
       # Push the auto-generated CHANGELOG.md back to `main` as a new
       # commit, then return HEAD to the tag so goreleaser builds at the
       # exact tagged commit (not at main+1).
+      #
+      # Runs after extract on purpose — see the comment on the extract
+      # step. The `git checkout ${tag_commit}` at the end resets the
+      # working tree's CHANGELOG.md, which is why extract must come
+      # first.
       #
       # The push is fast-forward-only. If `main` has moved past the tag
       # between tag-push and workflow-run, this step fails — that's
       # intentional, manual intervention required.
       #
-      # Branch protection caveat: if `main` requires PR review or status
-      # checks, the GITHUB_TOKEN push will be rejected. Allow the
-      # `github-actions[bot]` to bypass review on `main`, or swap in a
-      # fine-grained PAT here. See RELEASING.md.
+      # Branch protection caveat: see RELEASING.md (`RELEASE_BOT_PAT`).
       - name: Commit CHANGELOG.md update to main
         if: steps.generate.outputs.did_generate == 'true'
         run: |
@@ -144,16 +171,6 @@ jobs:
           # Return HEAD to the tagged commit so goreleaser builds at
           # the tag, not at main+1.
           git checkout "${tag_commit}"
-
-      # Extract the matching `## <tag>` section from CHANGELOG.md into
-      # a standalone file. Lives outside `dist/` because goreleaser
-      # refuses to start if `dist/` is non-empty after `--clean`.
-      - name: Extract release notes from CHANGELOG.md
-        run: |
-          mkdir -p .release-notes
-          scripts/extract-changelog.sh "$RELEASE_VERSION" > .release-notes/body.md
-          echo "--- extracted release body ---"
-          head -20 .release-notes/body.md
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
