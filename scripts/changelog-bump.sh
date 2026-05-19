@@ -188,10 +188,19 @@ Smart Router is a multi-protocol RPC gateway (JSON-RPC, REST, gRPC, Tendermint)
 with QoS-scored upstream routing, finalization-aware caching, and provider
 failover. Audience: integrators and SREs running the router in production.
 
-Style: factual, terse, engineering tone. No marketing words like "powerful",
-"enhanced", "seamless", "robust", "leverage", "ecosystem". Lead with what is
-customer-visible. Skip CI/build/release-plumbing changes unless they directly
-affect users (e.g. signed checksums, new platform support).
+Write a single coherent paragraph (4-6 sentences) that describes what
+this release brings — flowing prose, NOT a list of features one after
+another. Weave the most important customer-visible changes together so
+the reader gets the gist of the release as a whole, not a roll call of
+commits. Name concrete artifacts (commands, endpoints, flags, headers,
+env vars, file names) inline when they fit the sentence naturally;
+don't shoehorn every feature in.
+
+Style: factual, engineering tone, specific. Banned marketing words:
+"powerful", "enhanced", "seamless", "robust", "leverage", "ecosystem",
+"comprehensive", "unlock", "delight". Skip pure CI / build-plumbing
+changes unless they directly affect users (signed checksums, new
+platform support).
 
 Prior release Highlights (match this voice; do not copy):
 ${prior_highlights:-<this is the first release with a Highlights section - no prior reference>}
@@ -199,9 +208,9 @@ ${prior_highlights:-<this is the first release with a Highlights section - no pr
 Commits in this release, grouped by type:
 ${grouped_for_prompt}
 
-Output: 2 to 4 sentences of plain prose. No header, no preamble, no bullet list.
-Plain text only - the result will be inserted verbatim under a "### Highlights"
-markdown heading.
+Output: plain prose only — no headers, no bullets, no preamble, no
+sentence-per-bullet structure. The result is inserted verbatim under a
+"### Highlights" markdown heading.
 EOF
 )"
 
