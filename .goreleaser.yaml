@@ -137,7 +137,8 @@ release:
     owner: magma-Devs
     name: smart-router
   replace_existing_draft: true
-  name_template: "Smart Router v{{.Version}}"
+  # Just the tag (e.g. `v1.0.0`) — no project-name prefix.
+  name_template: "{{.Tag}}"
   mode: replace
   draft: true
   # `auto` derives prerelease from the tag: vX.Y.Z is a final, vX.Y.Z-*
