@@ -99,13 +99,19 @@ checksum:
   name_template: "sha256sum.txt"
   algorithm: sha256
 
-# Auto-changelog is disabled — CHANGELOG.md is the source of truth and the
-# release body comes from `release.header_file` below. The conventional-
-# commit grouping logic that used to live here now lives in
-# scripts/changelog-bump.sh and runs at `make changelog` time, not at
-# release time. See RELEASING.md.
-changelog:
-  disable: true
+# No `changelog:` block. The release workflow passes
+# `--release-notes .release-notes/body.md` to goreleaser, which:
+#   1. Uses that file as the entire release body, AND
+#   2. Skips goreleaser's own changelog generation (per the flag's docs).
+#
+# We previously had `changelog: { disable: true }` here, but combining
+# it with `--release-notes` caused goreleaser to silently ship a release
+# with an empty body — the file content was never loaded. Dropping
+# `disable: true` and trusting the flag's own skip-changelog behavior
+# fixes that.
+#
+# The conventional-commit grouping logic that used to live here is now
+# in scripts/changelog-bump.sh — see RELEASING.md.
 
 # Cosign keyless signing of the checksum file. Requires `id-token: write`
 # in the release workflow and cosign installed on the runner (added by
