@@ -51,7 +51,12 @@ if [ -f CHANGELOG.md ] && grep -qE "^## ${v_re_escaped}( |\$)" CHANGELOG.md; the
   exit 1
 fi
 
-prev_ref="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' HEAD 2>/dev/null || true)"
+# --exclude "$VERSION" is critical when the release workflow runs on a
+# freshly-pushed tag: HEAD is at the new tag, so without exclusion
+# `git describe` returns the new tag itself as "prior" and `git log
+# <new>..HEAD` is empty. With exclusion, we get the actual previous
+# v*.*.* tag (or fall through to FORK_BASE for the first release).
+prev_ref="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude "$VERSION" HEAD 2>/dev/null || true)"
 if [ -z "$prev_ref" ]; then
   prev_ref="$FORK_BASE"
   echo "changelog-bump: no prior v*.*.* tag - using fork base ${FORK_BASE:0:8}" >&2
