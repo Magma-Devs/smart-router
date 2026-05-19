@@ -326,6 +326,13 @@ func convertToJsonRpcError(rawErrorMsg string, requestBody []byte) []byte {
 		guid = parsed.ErrorGUID
 		if parsed.Error != "" {
 			message = parsed.Error
+		} else if guid != "" {
+			// GetUniqueGuidResponseForError elides the Error field via ,omitempty
+			// when ReturnMaskedErrors == "true". In that mode rawErrorMsg is just
+			// `{"Error_GUID":"<guid>"}` — surfacing it as the JSON-RPC message
+			// would leak a raw JSON envelope into error.message, which is the
+			// exact failure shape this helper was added to avoid.
+			message = "Internal server error"
 		}
 	}
 	if message == "" {

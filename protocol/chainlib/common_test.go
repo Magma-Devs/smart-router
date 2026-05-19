@@ -211,6 +211,46 @@ func TestConvertToJsonRpcError_FallbackOnUnparseable(t *testing.T) {
 	}
 }
 
+// TestConvertToJsonRpcError_MaskedModeOmitsErrorField covers the
+// ReturnMaskedErrors=true path where GetUniqueGuidResponseForError elides
+// the Error field via ,omitempty. Without the masked-mode branch in the
+// helper, error.message would surface the raw `{"Error_GUID":"..."}`
+// envelope — defeating the spec-compliance goal one layer in.
+func TestConvertToJsonRpcError_MaskedModeOmitsErrorField(t *testing.T) {
+	t.Parallel()
+
+	// Masked-mode envelope: Error_GUID only, Error elided by ,omitempty.
+	rawErrMsg := `{"Error_GUID":"3789588031954078542"}`
+	reqBody := []byte(`{"jsonrpc":"2.0","id":42,"method":"engine_getPayloadV3","params":[]}`)
+
+	result := convertToJsonRpcError(rawErrMsg, reqBody)
+
+	var parsed map[string]any
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("result is not valid JSON: %v. Result: %s", err, result)
+	}
+
+	errObj, ok := parsed["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error must be an Object, got %T", parsed["error"])
+	}
+	msg, _ := errObj["message"].(string)
+	if msg == "" {
+		t.Errorf("error.message must be non-empty")
+	}
+	if strings.Contains(msg, "Error_GUID") || strings.Contains(msg, "{") {
+		t.Errorf("error.message must not leak the raw JSON envelope under masking; got %q", msg)
+	}
+	// data.guid is still useful debugging info even when message is generic.
+	data, ok := errObj["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("error.data must be an Object, got %T", errObj["data"])
+	}
+	if g, _ := data["guid"].(string); g != "3789588031954078542" {
+		t.Errorf("expected data.guid to be preserved under masking, got %v", data["guid"])
+	}
+}
+
 func TestAddAttributeToError(t *testing.T) {
 	t.Parallel()
 
