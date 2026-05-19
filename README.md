@@ -12,7 +12,7 @@
 # Smart Router
 
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
-[![Status](https://img.shields.io/badge/status-pre--v1-orange)](https://github.com/Magma-Devs/smart-router)
+[![Release](https://img.shields.io/badge/release-v1.0.0-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
 
