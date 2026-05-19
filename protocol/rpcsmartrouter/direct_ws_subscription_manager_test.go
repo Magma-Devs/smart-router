@@ -1477,6 +1477,46 @@ func TestCreateSubscriptionReply_Tendermint(t *testing.T) {
 	assert.Equal(t, "tm.event='NewBlock'", result.Query, "Tendermint response should preserve query object")
 }
 
+// TestCreateSubscriptionReply_Tendermint_PreservesUpstreamFields guards against
+// the Tendermint reply becoming lossy. The pre-PR code returned json.Marshal(originalMsg)
+// verbatim; the post-PR fix must still preserve every top-level field other than id,
+// otherwise a non-nil Error envelope (or any future field a Tendermint client depends on)
+// silently disappears.
+func TestCreateSubscriptionReply_Tendermint_PreservesUpstreamFields(t *testing.T) {
+	originalMsg := &rpcclient.JsonrpcMessage{
+		Version: "2.0",
+		ID:      json.RawMessage(`1`),
+		Result:  json.RawMessage(`{"query":"tm.event='NewBlock'"}`),
+		// Error is the realistic "extra field" most likely to appear on a
+		// subscription reply; if dropped, the client never sees that the
+		// upstream subscribe actually failed.
+		Error: &rpcclient.JsonError{
+			Code:    -32000,
+			Message: "upstream subscription rejected",
+		},
+	}
+
+	replyData, err := createSubscriptionReply("ignored", json.RawMessage(`"abc"`), originalMsg, "tendermintrpc")
+	require.NoError(t, err)
+
+	var resp map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(replyData, &resp))
+
+	// id must be the caller's, not the upstream's.
+	assert.JSONEq(t, `"abc"`, string(resp["id"]))
+	// All other fields the upstream sent must survive — this is the regression guard.
+	require.Contains(t, resp, "result", "result must be preserved")
+	require.Contains(t, resp, "error", "error envelope must be preserved when upstream returned one")
+	assert.JSONEq(t, `{"query":"tm.event='NewBlock'"}`, string(resp["result"]))
+	var errObj struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(resp["error"], &errObj))
+	assert.Equal(t, -32000, errObj.Code)
+	assert.Equal(t, "upstream subscription rejected", errObj.Message)
+}
+
 // TestCreateSubscriptionReply_EVM verifies that EVM subscription responses use router IDs
 func TestCreateSubscriptionReply_EVM(t *testing.T) {
 	// Simulated EVM eth_subscribe response from upstream

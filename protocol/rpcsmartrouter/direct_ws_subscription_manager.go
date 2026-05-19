@@ -1179,6 +1179,11 @@ type upstreamErrSource interface {
 // from dwsm.activeSubscriptions, leaving notifications flowing through the new listener (which
 // reads activeSub directly) while making the unsubscribe lookup fail with "subscription not
 // found". reconnectInFlight is true when ownership has been handed off to that goroutine.
+//
+// Cleanup ownership: once reconnectInFlight is set, handleUpstreamDisconnect is responsible
+// for calling cleanupSubscription on every failure path (reconnect timeout, GetConnection
+// failure post-reconnect, re-subscribe failure) so a failed restoration does not leak the
+// subscription. See handleUpstreamDisconnect for the corresponding cleanup-on-failure calls.
 func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 	ctx context.Context,
 	hashedParams string,
@@ -1575,15 +1580,22 @@ func createSubscriptionReply(routerID string, requestID json.RawMessage, origina
 		return nil, fmt.Errorf("original message is nil")
 	}
 
-	// For Tendermint: preserve the original result format ({"query":"..."}) but with the
-	// caller's request id, not the upstream's.
+	// For Tendermint: preserve the upstream message verbatim (custom extensions,
+	// error envelope, anything beyond `result` that a Tendermint client may rely
+	// on) and overwrite only the id field with the caller's request id. A naive
+	// hand-built {jsonrpc,id,result} envelope would drop everything else that
+	// the upstream returned.
 	if apiInterface == "tendermintrpc" {
-		response := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"id":      requestID,
-			"result":  originalMsg.Result,
+		raw, err := json.Marshal(originalMsg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal upstream message: %w", err)
 		}
-		return json.Marshal(response)
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return nil, fmt.Errorf("failed to round-trip upstream message: %w", err)
+		}
+		obj["id"] = requestID
+		return json.Marshal(obj)
 	}
 
 	// For EVM: response carries the router ID (not the upstream hex) and the caller's id.
