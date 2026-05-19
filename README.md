@@ -1,3 +1,14 @@
+<div align="center">
+
+<a href="https://github.com/Magma-Devs/smart-router" target="_blank" rel="noopener noreferrer">
+  <img
+    src="./docs/assets/banner.png"
+    alt="Smart Router — Centralised RPC routing gateway"
+    width="100%"
+    style="cursor: pointer;"
+  >
+</a>
+
 # Smart Router
 
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
@@ -5,7 +16,17 @@
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
 
+</div>
+
 Centralised RPC routing gateway. Routes JSON-RPC, REST, gRPC, and Tendermint RPC requests to statically configured provider endpoints with QoS-based selection, caching, and automatic failover.
+
+<div align="center">
+
+[Quick Start](#quick-start) · [How it works](#how-it-works) · [Supported Chains](#supported-chains) · [Releases](#releases) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
+
+</div>
+
+---
 
 ## What is smart router
 
