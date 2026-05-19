@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -150,6 +151,34 @@ func postResetAllRouter(mux http.Handler) *httptest.ResponseRecorder {
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	return rr
+}
+
+// postResetAllRouterWithSkip posts to /debug/reset-all?skip=<skip> so the
+// diagnostic-harness tests exercise the per-step gating without each having
+// to spell the URL out.
+func postResetAllRouterWithSkip(mux http.Handler, skip string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/debug/reset-all?skip="+skip, nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// resetAllResponse is the parsed shape of /debug/reset-all's JSON. Tests
+// assert on the decoded fields rather than substring-matching the raw body,
+// because "retries-manager" appearing in "skipped" would otherwise satisfy
+// a Contains check looking for it in "cleared".
+type resetAllResponse struct {
+	Reset   bool     `json:"reset"`
+	Cleared []string `json:"cleared"`
+	Skipped []string `json:"skipped"`
+}
+
+func decodeResetAllResponse(t *testing.T, rr *httptest.ResponseRecorder) resetAllResponse {
+	t.Helper()
+	var out resetAllResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out),
+		"reset-all response must be valid JSON, got %q", rr.Body.String())
+	return out
 }
 
 // TestDebugResetAll_SmartRouter_ReturnsCapabilityAdvertisement verifies the
@@ -489,4 +518,111 @@ func TestDebugResetAll_SmartRouter_CacheBeUnimplemented_DegradesGracefully(t *te
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Equal(t, 1, flusher.flushCalls)
 	require.NotContains(t, rr.Body.String(), `"cache-be"`)
+}
+
+// /debug/reset-all ?skip= diagnostic harness: each test below verifies that
+// a named step is suppressed (omitted from "cleared", echoed in "skipped")
+// while the rest still run. The PR is instrumentation for an upcoming BTC
+// degradation experiment — we don't have an interface seam over
+// RelayRetriesManager / ConsumerSessionManager, so we assert on response
+// shape rather than fake-injecting those types. Cache-be does have a fake,
+// so the cache-be skip test asserts the real Flush wasn't called.
+
+// TestDebugResetAll_SmartRouter_Skip_RetriesManager: passing
+// ?skip=retries-manager must remove "retries-manager" from cleared and
+// echo it in skipped, while the rest of the reset-all surface still
+// advertises as cleared.
+func TestDebugResetAll_SmartRouter_Skip_RetriesManager(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	rr := postResetAllRouterWithSkip(mux, "retries-manager")
+	require.Equal(t, http.StatusOK, rr.Code)
+	resp := decodeResetAllResponse(t, rr)
+	require.True(t, resp.Reset)
+	require.NotContains(t, resp.Cleared, "retries-manager")
+	require.Equal(t, []string{"retries-manager"}, resp.Skipped)
+	// The other steps' keys are still present because they ran.
+	require.Contains(t, resp.Cleared, "session-manager")
+	require.Contains(t, resp.Cleared, "blocked-providers")
+}
+
+// TestDebugResetAll_SmartRouter_Skip_SessionTransientAndBlocked: the two
+// session-* skip keys gate ResetTransientFailureState (which owns
+// session-manager / reported-providers / sticky-sessions) and
+// ResetBlockedProviders (which owns blocked-providers) respectively. Passing
+// both must drop all four advertised keys and echo both skip names sorted.
+func TestDebugResetAll_SmartRouter_Skip_SessionTransientAndBlocked(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	rr := postResetAllRouterWithSkip(mux, "session-transient,session-blocked")
+	require.Equal(t, http.StatusOK, rr.Code)
+	resp := decodeResetAllResponse(t, rr)
+	require.NotContains(t, resp.Cleared, "session-manager")
+	require.NotContains(t, resp.Cleared, "reported-providers")
+	require.NotContains(t, resp.Cleared, "sticky-sessions")
+	require.NotContains(t, resp.Cleared, "blocked-providers")
+	// sortedKeys gives stable alphabetical order so the diagnostic comparing
+	// responses across passes can rely on it.
+	require.Equal(t, []string{"session-blocked", "session-transient"}, resp.Skipped)
+	// retries-manager still ran.
+	require.Contains(t, resp.Cleared, "retries-manager")
+}
+
+// TestDebugResetAll_SmartRouter_Skip_CacheBe_DoesNotFlush is the one skip
+// test with a real-call assertion: the existing fakeCacheFlusher records
+// Flush invocations, so we can verify that the gate short-circuits *before*
+// the cache-be RPC. The flusher being active means a no-skip request would
+// have called Flush once; under skip it must remain zero.
+func TestDebugResetAll_SmartRouter_Skip_CacheBe_DoesNotFlush(t *testing.T) {
+	var offsetNano atomic.Int64
+	flusher := &fakeCacheFlusher{active: true}
+	mux := buildDebugMux(debugMuxDeps{
+		optimizers: newEmptyOptimizersRouter(),
+		offsetNano: &offsetNano,
+		cache:      flusher,
+	})
+
+	rr := postResetAllRouterWithSkip(mux, "cache-be")
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, 0, flusher.flushCalls,
+		"Flush must not be called when skip=cache-be even though CacheActive() is true")
+	resp := decodeResetAllResponse(t, rr)
+	require.NotContains(t, resp.Cleared, "cache-be")
+	require.Equal(t, []string{"cache-be"}, resp.Skipped)
+}
+
+// TestDebugResetAll_SmartRouter_Skip_AllFour_LeavesBaseline is the
+// sanity-probe path the spec calls out: skipping every gateable step must
+// leave only the unconditional baseline (optimizer, ristretto, seen-block)
+// in cleared, and echo all four skip keys sorted. This is what the BTC
+// diagnostic uses as a wiring check before trusting the 5-pass results.
+func TestDebugResetAll_SmartRouter_Skip_AllFour_LeavesBaseline(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	rr := postResetAllRouterWithSkip(mux, "retries-manager,session-transient,session-blocked,cache-be")
+	require.Equal(t, http.StatusOK, rr.Code)
+	resp := decodeResetAllResponse(t, rr)
+	require.Equal(t, []string{"optimizer", "ristretto", "seen-block"}, resp.Cleared)
+	require.Equal(t, []string{"cache-be", "retries-manager", "session-blocked", "session-transient"}, resp.Skipped)
+}
+
+// TestDebugResetAll_SmartRouter_Skip_UnknownNamesDropped covers the typo-
+// safety contract: an unrecognized name must NOT appear in "skipped"
+// (which would lie about what was suppressed) and must NOT suppress any
+// step. The retries-manager step must run as normal because the only
+// skip names are unrecognized.
+func TestDebugResetAll_SmartRouter_Skip_UnknownNamesDropped(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	rr := postResetAllRouterWithSkip(mux, "retries-managr,bogus")
+	require.Equal(t, http.StatusOK, rr.Code)
+	resp := decodeResetAllResponse(t, rr)
+	require.Empty(t, resp.Skipped, "unknown skip names must not be echoed in skipped")
+	require.Contains(t, resp.Cleared, "retries-manager")
+	require.Contains(t, resp.Cleared, "session-manager")
+	require.Contains(t, resp.Cleared, "blocked-providers")
 }

@@ -22,6 +22,7 @@ import (
 	"math"
 	"net/http"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -432,6 +433,59 @@ func resetAllConsistencies(m *common.SafeSyncMap[string, relaycore.Consistency])
 	})
 }
 
+// /debug/reset-all step keys. Used by the optional ?skip= diagnostic to gate
+// individual reset-all steps so we can isolate which one (if any) is causing
+// cumulative router degradation across BTC suite runs. Adding a new step here
+// is also where you wire the gate + the cleared/skipped advertisement.
+const (
+	resetAllSkipRetriesManager   = "retries-manager"
+	resetAllSkipSessionTransient = "session-transient"
+	resetAllSkipSessionBlocked   = "session-blocked"
+	resetAllSkipCacheBe          = "cache-be"
+)
+
+// resetAllSkipKnownSet is the closed set of accepted ?skip= names. A typo in
+// the query string (e.g. "retries-managr") is silently dropped from the skip
+// set rather than echoed in the response's "skipped" array — so a "skipped"
+// entry always reflects a step that was actually suppressed.
+var resetAllSkipKnownSet = map[string]struct{}{
+	resetAllSkipRetriesManager:   {},
+	resetAllSkipSessionTransient: {},
+	resetAllSkipSessionBlocked:   {},
+	resetAllSkipCacheBe:          {},
+}
+
+// parseResetAllSkipSet splits a comma-separated list and returns the
+// recognized-name subset. Empty / whitespace-only entries are tolerated so
+// callers can stitch the query string together without sanitizing.
+func parseResetAllSkipSet(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, key := range strings.Split(raw, ",") {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, ok := resetAllSkipKnownSet[key]; !ok {
+			continue
+		}
+		out[key] = true
+	}
+	return out
+}
+
+// sortedKeys returns the keys of a string-keyed bool map in deterministic
+// sorted order. Used so the /debug/reset-all "skipped" array has a stable
+// shape across runs — important for the diagnostic harness comparing
+// responses across BTC suite passes.
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // buildDebugMux constructs the /debug/time-warp, /debug/time, /debug/reset-scores,
 // and /debug/reset-all HTTP handlers.
 //
@@ -566,10 +620,21 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
+
+		// Optional diagnostic harness: ?skip=retries-manager,session-transient,
+		// session-blocked,cache-be lets the BTC degradation experiment isolate
+		// which extra reset-all step pollutes the router. Unknown names are
+		// silently ignored (not echoed in "skipped") so a typo cannot appear
+		// in the response as if it had taken effect — the response stays an
+		// accurate description of what the handler actually did. Production
+		// callers leave skip empty and get the full reset.
+		skip := parseResetAllSkipSet(r.URL.Query().Get("skip"))
+
 		// 1. Optimizers: drop score caches, T-Digests, latest-sync data, and
 		//    the local Ristretto response cache. Also clear any active NowFunc
 		//    and zero the offset so a stale forward-warp doesn't reappear after
-		//    new samples come in.
+		//    new samples come in. Unconditional baseline — shared with
+		//    /debug/reset-scores and proven safe for the BTC suite.
 		currentOffsetNano.Store(0)
 		optimizers.Range(func(chainID string, opt *provideroptimizer.ProviderOptimizer) bool {
 			opt.NowFunc = nil
@@ -577,62 +642,45 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			return true
 		})
 
-		// 2. Per-chain seen-block consistency caches. Must be flushed here too,
-		//    not just in /debug/reset-scores: a poisoned huge seenBlock value
-		//    survives the legacy 4-call dance because the monotonic guard in
-		//    SetSeenBlockFromKey refuses smaller writes and ongoing traffic
-		//    keeps refreshing the TTL.
+		// 2. Per-chain seen-block consistency caches. Unconditional for the
+		//    same reason it's unconditional in /debug/reset-scores: a poisoned
+		//    seenBlock value survives any other reset because the monotonic
+		//    guard in SetSeenBlockFromKey refuses smaller writes.
 		resetAllConsistencies(deps.consistencies)
 
-		// 3. Per-server RelayRetriesManagers (6h hash ban cache), 4. per-CSM
-		//    transient failure state, and 4b. per-CSM blocked-providers list.
-		//    All require the router to be present; test fixtures without a
-		//    router still get a useful partial reset above and we report which
-		//    stores actually moved.
-		//
-		//    Why ResetBlockedProviders runs separately from
-		//    ResetTransientFailureState:
-		//    ResetTransientFailureState deliberately preserves
-		//    currentlyBlockedProviderAddresses because in lava-pairing-network
-		//    mode unblocking is an epoch-boundary operation. In direct-rpc mode
-		//    (this fork's default) there are no epoch transitions, so blocked
-		//    providers can only accumulate across test runs unless we mass-
-		//    restore here. ResetBlockedProviders is the explicit escape hatch
-		//    for /debug/* paths; production relay paths never reach it.
+		// 3. Per-server RelayRetriesManagers, 4. per-CSM transient failure
+		//    state, 4b. per-CSM blocked-providers list. Each gated on its own
+		//    skip key for the diagnostic. The router-presence guard stays —
+		//    test fixtures without a router still get the baseline above.
 		if deps.router != nil {
 			deps.router.mu.Lock()
-			for _, server := range deps.router.rpcServers {
-				if server != nil && server.relayRetriesManager != nil {
-					server.relayRetriesManager.Reset()
+			if !skip[resetAllSkipRetriesManager] {
+				for _, server := range deps.router.rpcServers {
+					if server != nil && server.relayRetriesManager != nil {
+						server.relayRetriesManager.Reset()
+					}
 				}
 			}
 			for _, csm := range deps.router.sessionManagers {
-				if csm != nil {
+				if csm == nil {
+					continue
+				}
+				if !skip[resetAllSkipSessionTransient] {
 					csm.ResetTransientFailureState()
+				}
+				if !skip[resetAllSkipSessionBlocked] {
 					csm.ResetBlockedProviders()
 				}
 			}
 			deps.router.mu.Unlock()
 		}
 
-		// 5. External cache-be pod (MAG-1764). When --cache-be is configured,
-		//    the in-process Ristretto reset above is not the cache callers
-		//    actually hit — the real cache lives in a separate pod. Flush it
-		//    via RPC; on real failure return 500 so the test framework fails
-		//    loud instead of trusting a misleading capability advertisement.
-		//
-		//    The codes.Unimplemented branch is the rolling-deploy escape:
-		//    a new router talking to an old cache pod (no FlushCache RPC
-		//    yet) must not break /debug/reset-all. We degrade quietly —
-		//    in-process Ristretto cleared, "cache-be" omitted from cleared
-		//    so the advertisement stays honest.
-		//
-		//    Bounded by a short context: a slow cache pod must not stall the
-		//    debug handler. CacheActive() gates both the call and the
-		//    capability advertisement so deployments without --cache-be don't
-		//    advertise a key they didn't fulfill.
+		// 5. External cache-be pod (MAG-1764). Short-circuit on skip first so
+		//    a skipped pass never hits the cache-be RPC at all. Other branches
+		//    (codes.Unimplemented = rolling-deploy escape; real error → 500)
+		//    behave exactly as before.
 		cacheBeFlushed := false
-		if deps.cache != nil && deps.cache.CacheActive() {
+		if !skip[resetAllSkipCacheBe] && deps.cache != nil && deps.cache.CacheActive() {
 			flushCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			err := deps.cache.Flush(flushCtx)
 			cancel()
@@ -647,21 +695,30 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 		}
 
-		// Capability advertisement — hardcoded for in-process stores, plus a
-		// conditional "cache-be" key when the external pod was actually
-		// flushed. The test framework probes this body to decide between this
-		// endpoint and the legacy 4-call dance; "seen-block" was added to
-		// signal the per-chain consistency-cache flush, "cache-be" signals
-		// MAG-1764 end-to-end coverage, "blocked-providers" signals MAG-1810
-		// (currentlyBlockedProviderAddresses is now restored to
-		// pairingAddresses, the per-provider redemption flag is reset, and the
-		// addon cache is purged).
-		w.Header().Set("Content-Type", "application/json")
-		if cacheBeFlushed {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","cache-be"]}`)
-		} else {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers"]}`)
+		// Capability advertisement — built from steps that actually ran so the
+		// test framework reads what the handler did, not a hardcoded list.
+		// "skipped" only echoes recognized names (typos drop) so callers can
+		// trust that a key in "skipped" really did suppress its step.
+		cleared := []string{"optimizer", "ristretto", "seen-block"}
+		if !skip[resetAllSkipRetriesManager] {
+			cleared = append(cleared, "retries-manager")
 		}
+		if !skip[resetAllSkipSessionTransient] {
+			cleared = append(cleared, "session-manager", "reported-providers", "sticky-sessions")
+		}
+		if !skip[resetAllSkipSessionBlocked] {
+			cleared = append(cleared, "blocked-providers")
+		}
+		if cacheBeFlushed {
+			cleared = append(cleared, "cache-be")
+		}
+		payload := map[string]any{
+			"reset":   true,
+			"cleared": cleared,
+			"skipped": sortedKeys(skip),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(payload)
 	})
 
 	return mux
