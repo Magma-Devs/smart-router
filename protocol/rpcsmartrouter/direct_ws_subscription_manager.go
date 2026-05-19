@@ -640,8 +640,11 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		originalResult = firstMsg.Result
 	}
 
-	// Create first reply - preserves original format for Tendermint, uses router ID for EVM
-	firstReplyData, err := createSubscriptionReply(routerID, firstMsg, dwsm.apiInterface)
+	// Create first reply - preserves original format for Tendermint, uses router ID for EVM.
+	// requestID is the client's original JSON-RPC id (extracted at the top of this function);
+	// passing it explicitly ensures the response echoes the caller's id verbatim, including
+	// non-numeric ids like string UUIDs (JSON-RPC 2.0 §4.2).
+	firstReplyData, err := createSubscriptionReply(routerID, requestID, firstMsg, dwsm.apiInterface)
 	if err != nil {
 		upstreamSub.Unsubscribe()
 		dwsm.failPendingSubscription(hashedParams)
@@ -752,9 +755,12 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	for hp, sub := range dwsm.activeSubscriptions {
 		if ownedRouterID, exists := sub.clientRouterIDs[clientKey]; exists {
 			// For Tendermint: client unsubscribes using the query (which is also the upstream ID)
-			// For EVM: client unsubscribes using the router ID we gave them
+			// For EVM: client unsubscribes using the router ID we gave them, but accept the
+			// upstream hex id too — some clients echo back the raw `result` they observed,
+			// and (historically) responses leaked the upstream id, so being permissive here
+			// is necessary for correctness. Ownership is already enforced by the outer
+			// `clientRouterIDs[clientKey]` check, so accepting the upstream id is safe.
 			if dwsm.apiInterface == "tendermintrpc" {
-				// Tendermint: match by upstream ID (query string)
 				if sub.upstreamID == subIDFromRequest {
 					activeSub = sub
 					hashedParams = hp
@@ -763,8 +769,7 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 					break
 				}
 			} else {
-				// EVM: match by router ID
-				if ownedRouterID == subIDFromRequest {
+				if ownedRouterID == subIDFromRequest || sub.upstreamID == subIDFromRequest {
 					activeSub = sub
 					hashedParams = hp
 					routerSubID = ownedRouterID
@@ -1157,15 +1162,34 @@ func (dwsm *DirectWSSubscriptionManager) createUpstreamSubscription(
 	return sub, firstMsg, msgChan, nil
 }
 
-// listenForUpstreamMessages listens for messages from upstream and routes to clients
+// upstreamErrSource is the minimal slice of *rpcclient.ClientSubscription that
+// listenForUpstreamMessages actually needs. Taking an interface here lets tests drive the
+// error-handling branch with a local fake without exposing test-only constructors from the
+// rpcclient package. *rpcclient.ClientSubscription satisfies it via its Err() method.
+type upstreamErrSource interface {
+	Err() <-chan error
+}
+
+// listenForUpstreamMessages listens for messages from upstream and routes to clients.
+//
+// On an upstream error we hand off to handleUpstreamDisconnect, which either restores the
+// subscription (spawning a fresh listener) or cleans it up. We must NOT run cleanup from this
+// goroutine in that case — handleUpstreamDisconnect mutates activeSub in place to point at the
+// new upstream subscription, and a deferred cleanup here would wipe the just-restored entry
+// from dwsm.activeSubscriptions, leaving notifications flowing through the new listener (which
+// reads activeSub directly) while making the unsubscribe lookup fail with "subscription not
+// found". reconnectInFlight is true when ownership has been handed off to that goroutine.
 func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 	ctx context.Context,
 	hashedParams string,
 	activeSub *directActiveSubscription,
-	upstreamSub *rpcclient.ClientSubscription,
+	upstreamSub upstreamErrSource,
 ) {
+	reconnectInFlight := false
 	defer func() {
-		dwsm.cleanupSubscription(hashedParams)
+		if !reconnectInFlight {
+			dwsm.cleanupSubscription(hashedParams)
+		}
 	}()
 
 	for {
@@ -1188,7 +1212,7 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 					err,
 					utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 				)
-				// Attempt reconnection
+				reconnectInFlight = true
 				go dwsm.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
 			}
 			return
@@ -1541,23 +1565,31 @@ func getSubscriptionID(apiInterface string, responseMsg *rpcclient.JsonrpcMessag
 	return extractSubscriptionID(responseMsg)
 }
 
-// createSubscriptionReply creates the first reply with the router subscription ID
-func createSubscriptionReply(routerID string, originalMsg *rpcclient.JsonrpcMessage, apiInterface string) ([]byte, error) {
+// createSubscriptionReply creates the first reply for a brand-new subscription.
+// The response id is taken from the client's request — NOT from originalMsg.ID — because
+// originalMsg.ID is the upstream rpcclient's internal counter, which the client never sent
+// and must not see (JSON-RPC 2.0 §4.2 requires the response id to match the request id
+// exactly, including type: string ids stay strings).
+func createSubscriptionReply(routerID string, requestID json.RawMessage, originalMsg *rpcclient.JsonrpcMessage, apiInterface string) ([]byte, error) {
 	if originalMsg == nil {
 		return nil, fmt.Errorf("original message is nil")
 	}
 
-	// For Tendermint: preserve the original response format {"result":{"query":"..."}}
-	// Tendermint clients expect the query object back, not a router ID
+	// For Tendermint: preserve the original result format ({"query":"..."}) but with the
+	// caller's request id, not the upstream's.
 	if apiInterface == "tendermintrpc" {
-		// Return original message as-is - it already has the correct format
-		return json.Marshal(originalMsg)
+		response := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      requestID,
+			"result":  originalMsg.Result,
+		}
+		return json.Marshal(response)
 	}
 
-	// For EVM: create response with router ID instead of upstream ID
+	// For EVM: response carries the router ID (not the upstream hex) and the caller's id.
 	response := map[string]interface{}{
 		"jsonrpc": "2.0",
-		"id":      originalMsg.ID,
+		"id":      requestID,
 		"result":  routerID,
 	}
 

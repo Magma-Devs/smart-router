@@ -289,7 +289,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				if err != nil {
 					utils.LavaFormatWarning("error unsubscribing from subscription", err, utils.LogAttr("GUID", webSocketCtx))
 					if err == common.SubscriptionNotFoundError {
-						msgData, err := json.Marshal(common.JsonRpcSubscriptionNotFoundError)
+						// Echo the caller's id (JSON-RPC 2.0 §4.2) — the template's hardcoded
+						// id is just a fallback for malformed requests with no id field.
+						msgData, err := common.MarshalJsonRPCErrorWithRequestID(common.JsonRpcSubscriptionNotFoundError, msg)
 						if err != nil {
 							continue
 						}
