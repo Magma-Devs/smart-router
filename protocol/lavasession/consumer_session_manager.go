@@ -1089,6 +1089,22 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 
 	// Handle provider selection via header (smartrouter only)
 	if selectedProvider != "" {
+		// If the pinned provider has already been added to ignoredProvidersList during this
+		// GetSessions call (e.g. a prior fetchEndpointConnectionFromConsumerSessionWithProvider
+		// returned connected=false), the outer loop would otherwise re-call us with the same
+		// selectedProvider and we'd return the same address again — an unbounded spin. Bound
+		// it here by returning an error the caller propagates as a single attempt.
+		if _, ignored := ignoredProvidersList[selectedProvider]; ignored {
+			return nil, utils.LavaFormatWarning(
+				"Selected provider already failed in this request",
+				SelectedProviderUnavailableError,
+				utils.LogAttr("selectedProvider", selectedProvider),
+				utils.LogAttr("addon", addon),
+				utils.LogAttr("extensions", extensions),
+				utils.LogAttr("GUID", ctx),
+			)
+		}
+
 		// Validate that the selected provider is in the valid addresses list
 		providerValid := slices.Contains(validAddresses, selectedProvider)
 		if providerValid {
@@ -1099,18 +1115,18 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 				utils.LogAttr("extensions", extensions),
 				utils.LogAttr("GUID", ctx))
 			return addresses, nil
-		} else {
-			// Return error instead of falling back to random selection
-			return nil, utils.LavaFormatError(
-				"Selected provider not available",
-				nil,
-				utils.LogAttr("selectedProvider", selectedProvider),
-				utils.LogAttr("validProviders", validAddresses),
-				utils.LogAttr("addon", addon),
-				utils.LogAttr("extensions", extensions),
-				utils.LogAttr("GUID", ctx),
-			)
 		}
+
+		// Return error instead of falling back to random selection
+		return nil, utils.LavaFormatError(
+			"Selected provider not available",
+			SelectedProviderUnavailableError,
+			utils.LogAttr("selectedProvider", selectedProvider),
+			utils.LogAttr("validProviders", validAddresses),
+			utils.LogAttr("addon", addon),
+			utils.LogAttr("extensions", extensions),
+			utils.LogAttr("GUID", ctx),
+		)
 	}
 
 	if stickysession, ok := csm.stickySessions.Get(stickiness); ok {
