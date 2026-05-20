@@ -298,7 +298,22 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// This prevents multiple UpdateAllProviders calls with the same epoch to the same session manager.
 	// Capture ctx in the closure rather than stashing it on rpsr (storing context.Context in a struct is
 	// idiomatically discouraged); the EpochTimer's callback signature is fixed at func(uint64).
+	//
+	// Skip the very first synchronous callback. EpochTimer.Start fires
+	// notifyCallbacks(currentEpoch) inline before returning (see
+	// protocol/common/epoch_timer.go), so without this guard updateEpoch — and
+	// the applyReverification it drives — runs while chain listeners, direct
+	// RPC connection pools, and chain trackers are all still completing their
+	// initial dials against the same upstreams. The contention amplifies the
+	// race window in addClientsAsynchronouslyGrpc; defense-in-depth alongside
+	// the connector fix in chainproxy/connector.go. All subsequent ticks come
+	// from the timer goroutine after the system is steady-state and run
+	// normally.
+	var firstTick atomic.Bool
 	rpsr.epochTimer.RegisterCallback(func(epoch uint64) {
+		if firstTick.CompareAndSwap(false, true) {
+			return
+		}
 		rpsr.updateEpoch(ctx, epoch)
 	})
 
