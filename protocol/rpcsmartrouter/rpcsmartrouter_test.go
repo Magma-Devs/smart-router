@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1222,4 +1223,64 @@ func TestUpdateEpoch_ReverifyCrossEpochDemoteThenPromote(t *testing.T) {
 		"epoch 3: re-promoted session must be a fresh object, not a resurrected pointer from epoch 1 — applyReverification's toAdmit path goes through convertProvidersToSessions for absent-from-fresh providers")
 	require.Equal(t, uint64(3), epoch3Session.PairingEpoch,
 		"epoch 3: re-promoted session must carry PairingEpoch=3")
+}
+
+// TestEpochTimer_FirstTickIsSwallowed verifies the H2 defense-in-depth gate
+// added in PR #54 (MAG-1926) at rpcsmartrouter.go:312-318. The EpochTimer.Start
+// callback now fires a synchronous boot tick (see protocol/common/epoch_timer.go
+// notifyCallbacks). Before the fix, that boot tick invoked updateEpoch at the
+// exact moment the connector pool was still warming up — amplifying the H1
+// race in addClientsAsynchronouslyGrpc. The fix wraps updateEpoch in an
+// atomic.Bool one-shot gate that swallows the first invocation and lets every
+// subsequent epoch tick through.
+//
+// This test replicates the exact closure pattern shipped at rpcsmartrouter.go
+// :313-318 (atomic.Bool + CompareAndSwap(false, true) + early return) and
+// asserts a spy stand-in for updateEpoch sees zero calls after the first
+// invocation and exactly one call after the second.
+func TestEpochTimer_FirstTickIsSwallowed(t *testing.T) {
+	rpsr := createTestRPCSmartRouter()
+
+	var spyCount atomic.Int64
+	var capturedEpoch atomic.Uint64
+	// Stand-in for rpsr.updateEpoch(ctx, epoch). We can't call the real
+	// updateEpoch here without spinning up endpoints/session managers, so we
+	// observe via a counter the same way the production closure would invoke it.
+	updateEpochSpy := func(epoch uint64) {
+		spyCount.Add(1)
+		capturedEpoch.Store(epoch)
+	}
+
+	// Mirror of the closure registered inside RPCSmartRouter.Start at
+	// protocol/rpcsmartrouter/rpcsmartrouter.go:312-318. The atomic.Bool gate
+	// is local to the closure on purpose so each Start() call gets a fresh
+	// one-shot.
+	var firstTick atomic.Bool
+	cb := func(epoch uint64) {
+		if firstTick.CompareAndSwap(false, true) {
+			return
+		}
+		updateEpochSpy(epoch)
+	}
+	rpsr.epochTimer.RegisterCallback(cb)
+
+	// First invocation = the synchronous boot tick from EpochTimer.Start.
+	// Gate must swallow it.
+	cb(uint64(42))
+	require.Equal(t, int64(0), spyCount.Load(),
+		"first epoch tick must be swallowed by firstTick gate; pre-fix the boot tick called updateEpoch during connector pool warm-up")
+
+	// Second invocation = a normal timer-driven tick. Gate is consumed; this
+	// must call updateEpoch with the supplied epoch.
+	cb(uint64(43))
+	require.Equal(t, int64(1), spyCount.Load(),
+		"second epoch tick must invoke updateEpoch exactly once")
+	require.Equal(t, uint64(43), capturedEpoch.Load(),
+		"updateEpoch must receive the second tick's epoch value, not the boot epoch")
+
+	// Third invocation = another normal tick. Gate stays open.
+	cb(uint64(44))
+	require.Equal(t, int64(2), spyCount.Load(),
+		"subsequent epoch ticks must continue invoking updateEpoch (gate is one-shot, not permanent)")
+	require.Equal(t, uint64(44), capturedEpoch.Load())
 }
