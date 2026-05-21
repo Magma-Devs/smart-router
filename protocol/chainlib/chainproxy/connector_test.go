@@ -268,6 +268,51 @@ func TestHashing(t *testing.T) {
 	require.Equal(t, conn.hashedNodeUrl, HashURL(listenerAddressTcp))
 }
 
+// TestConnectorPoolSurvivesProbeCancellation verifies the H1 fix in
+// connector.createConnection (PR #54, MAG-1926). When a probe-scoped ctx is
+// cancelled while createConnection is mid-loop, the pre-fix code called
+// connector.Close() — which tore down ALL existing free clients in the pool,
+// crashing every other caller that still held a reference to the connector.
+// The fix removes that Close() call; createConnection now just returns ctx.Err()
+// and leaves the pool intact for other callers.
+//
+// Pre-fix (Close on cancellation): pool drops from numberOfClients to 0, and
+// subsequent GetRpc fails / blocks forever waiting for new clients.
+// Post-fix: pool count is unchanged and GetRpc still returns a usable client.
+func TestConnectorPoolSurvivesProbeCancellation(t *testing.T) {
+	server := createGRPCServer(t)
+	defer server.Stop()
+
+	ctx := context.Background()
+	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	require.NoError(t, err)
+	for { // wait for the async fill goroutine to finish populating the pool
+		if conn.numberOfFreeClients() == numberOfClients {
+			break
+		}
+	}
+	require.Equal(t, numberOfClients, conn.numberOfFreeClients(), "pool should be full before cancellation")
+
+	// Simulate a probe-scoped ctx that gets cancelled mid-loop. createConnection
+	// observes ctx.Err() != nil and (pre-fix) calls connector.Close(); (post-fix)
+	// just returns ctx.Err().
+	probeCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err = conn.createConnection(probeCtx, common.NodeUrl{Url: listenerAddressGrpc}, conn.numberOfFreeClients())
+	require.Error(t, err, "createConnection must return the cancellation error")
+	require.ErrorIs(t, err, context.Canceled)
+
+	// The pool that other callers depend on must still be intact.
+	require.Equal(t, numberOfClients, conn.numberOfFreeClients(),
+		"existing pool clients must survive a probe-ctx cancellation; pre-fix Close() wiped them")
+
+	// And the connector is still usable for downstream calls.
+	rpc, err := conn.GetRpc(ctx, false)
+	require.NoError(t, err, "GetRpc should still work after a cancelled probe")
+	require.NotNil(t, rpc)
+	conn.ReturnRpc(rpc)
+}
+
 func createRPCServer() net.Listener {
 	timeserver := new(TimeServer)
 	// Register the timeserver object upon which the GiveServerTime
