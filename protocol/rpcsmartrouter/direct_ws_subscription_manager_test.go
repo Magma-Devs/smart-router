@@ -17,6 +17,7 @@ import (
 	rpcclient "github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
 	"github.com/Magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 	spectypes "github.com/Magma-Devs/smart-router/types/spec"
@@ -285,6 +286,7 @@ func TestNewDirectWSSubscriptionManager(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil, // No optimizer for basic test
 		nil, // Use default WebSocket config
 	)
@@ -320,6 +322,7 @@ func TestGetOrCreatePool(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		nil, // Use default WebSocket config
 	)
@@ -356,6 +359,7 @@ func TestDirectWSSubscriptionManager_UnsubscribeAll_NoSubscriptions(t *testing.T
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		nil, // Use default WebSocket config
 	)
@@ -379,6 +383,7 @@ func TestDirectWSSubscriptionManager_Unsubscribe_NoSubscriptions(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		nil, // Use default WebSocket config
 	)
@@ -409,6 +414,7 @@ func TestDirectWSSubscriptionManager_StartSubscription_ConnectionFailure(t *test
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		nil, // Use default WebSocket config
 	)
@@ -533,6 +539,7 @@ func TestActiveSubscriptionTracksPerClientRouterIDs(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		nil,
 	)
@@ -612,6 +619,7 @@ func TestUnsubscribeRateLimiting(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		config,
 	)
@@ -669,6 +677,7 @@ func TestUnsubscribeAllNotRateLimited(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		config,
 	)
@@ -705,6 +714,7 @@ func TestMultiClientJoinExistingSubscription(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		nil,
 	)
@@ -814,6 +824,7 @@ func TestMultiClientIndependentUnsubscribe(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		nil,
 	)
@@ -948,6 +959,7 @@ func TestRouteMessageToClientsPerClientID(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		nil,
 	)
@@ -1041,6 +1053,7 @@ func TestReconnectionUpdatesConnectionBookkeeping(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		config,
 	)
@@ -1163,6 +1176,7 @@ func TestUnsubscribeRouterIDOwnershipValidation(t *testing.T) {
 		"ETH",
 		"jsonrpc",
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		config,
 	)
@@ -1394,6 +1408,7 @@ func TestDirectWSSubscriptionManager_TendermintAPIInterface(t *testing.T) {
 		"COSMOSHUB",
 		"tendermintrpc", // Tendermint API interface
 		wsEndpoints,
+		nil, // wsBackupEndpoints — none for primary-only test
 		nil,
 		nil,
 	)
@@ -1440,8 +1455,8 @@ func TestCreateSubscriptionReply_Tendermint(t *testing.T) {
 		Result:  json.RawMessage(`{"query":"tm.event='NewBlock'"}`),
 	}
 
-	// For Tendermint, should return original format (not router ID)
-	replyData, err := createSubscriptionReply("router-id-ignored", originalMsg, "tendermintrpc")
+	// For Tendermint, should return original result format (not router ID)
+	replyData, err := createSubscriptionReply("router-id-ignored", json.RawMessage(`1`), originalMsg, "tendermintrpc")
 	require.NoError(t, err)
 
 	// Parse the response
@@ -1462,6 +1477,46 @@ func TestCreateSubscriptionReply_Tendermint(t *testing.T) {
 	assert.Equal(t, "tm.event='NewBlock'", result.Query, "Tendermint response should preserve query object")
 }
 
+// TestCreateSubscriptionReply_Tendermint_PreservesUpstreamFields guards against
+// the Tendermint reply becoming lossy. The pre-PR code returned json.Marshal(originalMsg)
+// verbatim; the post-PR fix must still preserve every top-level field other than id,
+// otherwise a non-nil Error envelope (or any future field a Tendermint client depends on)
+// silently disappears.
+func TestCreateSubscriptionReply_Tendermint_PreservesUpstreamFields(t *testing.T) {
+	originalMsg := &rpcclient.JsonrpcMessage{
+		Version: "2.0",
+		ID:      json.RawMessage(`1`),
+		Result:  json.RawMessage(`{"query":"tm.event='NewBlock'"}`),
+		// Error is the realistic "extra field" most likely to appear on a
+		// subscription reply; if dropped, the client never sees that the
+		// upstream subscribe actually failed.
+		Error: &rpcclient.JsonError{
+			Code:    -32000,
+			Message: "upstream subscription rejected",
+		},
+	}
+
+	replyData, err := createSubscriptionReply("ignored", json.RawMessage(`"abc"`), originalMsg, "tendermintrpc")
+	require.NoError(t, err)
+
+	var resp map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(replyData, &resp))
+
+	// id must be the caller's, not the upstream's.
+	assert.JSONEq(t, `"abc"`, string(resp["id"]))
+	// All other fields the upstream sent must survive — this is the regression guard.
+	require.Contains(t, resp, "result", "result must be preserved")
+	require.Contains(t, resp, "error", "error envelope must be preserved when upstream returned one")
+	assert.JSONEq(t, `{"query":"tm.event='NewBlock'"}`, string(resp["result"]))
+	var errObj struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(resp["error"], &errObj))
+	assert.Equal(t, -32000, errObj.Code)
+	assert.Equal(t, "upstream subscription rejected", errObj.Message)
+}
+
 // TestCreateSubscriptionReply_EVM verifies that EVM subscription responses use router IDs
 func TestCreateSubscriptionReply_EVM(t *testing.T) {
 	// Simulated EVM eth_subscribe response from upstream
@@ -1474,7 +1529,7 @@ func TestCreateSubscriptionReply_EVM(t *testing.T) {
 	routerID := "0xrouter456"
 
 	// For EVM, should replace upstream ID with router ID
-	replyData, err := createSubscriptionReply(routerID, originalMsg, "jsonrpc")
+	replyData, err := createSubscriptionReply(routerID, json.RawMessage(`1`), originalMsg, "jsonrpc")
 	require.NoError(t, err)
 
 	// Parse the response
@@ -1560,7 +1615,7 @@ func TestTendermintSubscriptionEndToEnd(t *testing.T) {
 		}
 
 		// Create reply for Tendermint
-		reply, err := createSubscriptionReply("any-router-id", upstreamResponse, "tendermintrpc")
+		reply, err := createSubscriptionReply("any-router-id", json.RawMessage(`1`), upstreamResponse, "tendermintrpc")
 		require.NoError(t, err)
 
 		// Client should see the query format, not a router ID
@@ -1586,4 +1641,777 @@ func TestTendermintSubscriptionEndToEnd(t *testing.T) {
 		// Should NOT have the router ID injected
 		assert.NotContains(t, string(rewritten), "some-router-id")
 	})
+}
+
+// fakeSubscriptionOptimizer is a minimal WebSocketEndpointOptimizer for cascade tests.
+// Used by both DirectWSSubscriptionManager and DirectGRPCSubscriptionManager test suites
+// (the interface is shared across both subscription managers despite its name).
+// It returns a configurable address from ChooseProvider; relay-data callbacks are no-ops.
+type fakeSubscriptionOptimizer struct {
+	chooseFn func(allAddresses []string, ignored map[string]struct{}) []string
+}
+
+func (f *fakeSubscriptionOptimizer) ChooseProvider(_ context.Context, allAddresses []string, ignored map[string]struct{}, _ uint64, _ int64) []string {
+	if f.chooseFn != nil {
+		return f.chooseFn(allAddresses, ignored)
+	}
+	return nil
+}
+
+func (f *fakeSubscriptionOptimizer) AppendRelayData(_ string, _ time.Duration, _, _ uint64) {}
+func (f *fakeSubscriptionOptimizer) AppendRelayFailure(_ string)                            {}
+
+func TestSelectEndpoint_WS_PrimaryOnly_NilBackup(t *testing.T) {
+	primary := []*common.NodeUrl{
+		{Url: "wss://primary-1.example.com"},
+		{Url: "wss://primary-2.example.com"},
+	}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		primary,
+		nil, // wsBackupEndpoints — none
+		nil, // optimizer
+		nil, // config
+	)
+
+	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	require.NoError(t, err)
+	require.NotNil(t, ep)
+	// First-available branch with no optimizer and no ignored set returns first endpoint.
+	assert.Equal(t, "wss://primary-1.example.com", ep.Url)
+}
+
+func TestSelectEndpoint_WS_PrimaryOnly_EmptyBackup(t *testing.T) {
+	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		primary,
+		[]*common.NodeUrl{}, // empty backup, regression guard for nil-vs-empty equivalence
+		nil,
+		nil,
+	)
+
+	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "wss://primary-1.example.com", ep.Url)
+}
+
+func TestSelectEndpoint_WS_PrimaryExhausted_FallsBackToBackup(t *testing.T) {
+	primary := []*common.NodeUrl{
+		{Url: "wss://primary-1.example.com"},
+		{Url: "wss://primary-2.example.com"},
+	}
+	backup := []*common.NodeUrl{
+		{Url: "wss://backup-1.example.com"},
+	}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		primary,
+		backup,
+		nil, // optimizer nil — first-available branch
+		nil,
+	)
+
+	ignored := map[string]struct{}{
+		"wss://primary-1.example.com": {},
+		"wss://primary-2.example.com": {},
+	}
+	ep, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
+	require.NoError(t, err)
+	require.NotNil(t, ep)
+	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
+}
+
+func TestSelectEndpoint_WS_PrimaryEmpty_BackupOnly(t *testing.T) {
+	backup := []*common.NodeUrl{
+		{Url: "wss://backup-1.example.com"},
+		{Url: "wss://backup-2.example.com"},
+	}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		nil, // primary empty
+		backup,
+		nil,
+		nil,
+	)
+
+	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	require.NoError(t, err)
+	require.NotNil(t, ep)
+	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
+}
+
+func TestSelectEndpoint_WS_BothExhausted_ReturnsError(t *testing.T) {
+	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
+	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		primary,
+		backup,
+		nil,
+		nil,
+	)
+
+	ignored := map[string]struct{}{
+		"wss://primary-1.example.com": {},
+		"wss://backup-1.example.com":  {},
+	}
+	_, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "primary and backup both exhausted")
+}
+
+func TestSelectEndpoint_WS_BothEmpty_ReturnsError(t *testing.T) {
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	_, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	require.Error(t, err)
+}
+
+func TestSelectEndpoint_WS_StickyOnPrimary_Returns(t *testing.T) {
+	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
+	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		primary,
+		backup,
+		nil,
+		nil,
+	)
+
+	// Manually set a sticky entry pointing at the primary.
+	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://primary-1.example.com"})
+
+	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "wss://primary-1.example.com", ep.Url)
+}
+
+func TestSelectEndpoint_WS_StickyOnBackup_Returns(t *testing.T) {
+	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
+	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		primary,
+		backup,
+		nil,
+		nil,
+	)
+
+	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://backup-1.example.com"})
+
+	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	require.NoError(t, err)
+	// Sticky-on-backup must resolve directly via endpointsByURL (which spans both tiers).
+	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
+}
+
+func TestSelectEndpoint_WS_StickyIgnored_FallsThroughCascade(t *testing.T) {
+	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
+	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		primary,
+		backup,
+		nil,
+		nil,
+	)
+
+	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://primary-1.example.com"})
+
+	ignored := map[string]struct{}{
+		"wss://primary-1.example.com": {},
+	}
+	ep, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
+	require.NoError(t, err)
+	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
+}
+
+func TestSelectEndpoint_WS_OptimizerOverPrimary_NotConsultedForBackup(t *testing.T) {
+	primary := []*common.NodeUrl{
+		{Url: "wss://primary-1.example.com"},
+		{Url: "wss://primary-2.example.com"},
+	}
+	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
+
+	calls := 0
+	opt := &fakeSubscriptionOptimizer{
+		chooseFn: func(addresses []string, _ map[string]struct{}) []string {
+			calls++
+			// Always return the second primary URL — backup must never reach the optimizer.
+			return []string{"wss://primary-2.example.com"}
+		},
+	}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		primary,
+		backup,
+		opt,
+		nil,
+	)
+
+	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "wss://primary-2.example.com", ep.Url)
+	// Optimizer must run exactly once (against primary tier). If the cascade
+	// erroneously fell into the backup tier, the optimizer would be invoked twice.
+	assert.Equal(t, 1, calls)
+}
+
+func TestSelectEndpoint_WS_OptimizerOverBackup(t *testing.T) {
+	primary := []*common.NodeUrl{
+		{Url: "wss://primary-1.example.com"},
+		{Url: "wss://primary-2.example.com"},
+	}
+	backup := []*common.NodeUrl{
+		{Url: "wss://backup-1.example.com"},
+		{Url: "wss://backup-2.example.com"},
+	}
+
+	calls := 0
+	opt := &fakeSubscriptionOptimizer{
+		chooseFn: func(addresses []string, ignored map[string]struct{}) []string {
+			calls++
+			// When invoked over the backup tier, return backup-2.
+			// When invoked over the primary tier (with both primaries ignored),
+			// return nothing so the cascade falls through.
+			for _, addr := range addresses {
+				if addr == "wss://backup-2.example.com" {
+					return []string{"wss://backup-2.example.com"}
+				}
+			}
+			return nil
+		},
+	}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		primary,
+		backup,
+		opt,
+		nil,
+	)
+
+	ignored := map[string]struct{}{
+		"wss://primary-1.example.com": {},
+		"wss://primary-2.example.com": {},
+	}
+	ep, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
+	require.NoError(t, err)
+	assert.Equal(t, "wss://backup-2.example.com", ep.Url)
+	// Optimizer must be consulted for both tiers: once over primary (returns nil
+	// → cascade falls through), then once over backup (returns backup-2).
+	assert.Equal(t, 2, calls)
+}
+
+func TestSelectEndpoint_WS_EndpointsByURL_IncludesBothTiers(t *testing.T) {
+	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
+	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc",
+		"ETH",
+		"jsonrpc",
+		primary,
+		backup,
+		nil,
+		nil,
+	)
+
+	require.Len(t, manager.endpointsByURL, 2)
+	assert.NotNil(t, manager.endpointsByURL["wss://primary-1.example.com"])
+	assert.NotNil(t, manager.endpointsByURL["wss://backup-1.example.com"])
+}
+
+// ==================== MAG-1824 regression coverage ====================
+
+// mockWSProtocolMessageWithRawData is a ProtocolMessage variant that lets a test inject
+// raw RelayPrivateData bytes, so we can construct unsubscribe requests with non-numeric
+// ids (e.g. string UUIDs) — the scenario the bug targets.
+type mockWSProtocolMessageWithRawData struct {
+	mockWSProtocolMessage
+	rawData []byte
+}
+
+func (m *mockWSProtocolMessageWithRawData) RelayPrivateData() *pairingtypes.RelayPrivateData {
+	return &pairingtypes.RelayPrivateData{Data: m.rawData}
+}
+
+// TestCreateSubscriptionReply_EchoesStringRequestID is the direct regression for MAG-1824's
+// first symptom: the response id must be the caller's verbatim string, not the upstream's
+// internal counter.
+func TestCreateSubscriptionReply_EchoesStringRequestID(t *testing.T) {
+	t.Run("EVM with string UUID id", func(t *testing.T) {
+		// Upstream returned its own id (typically the rpcclient's nextID() = 1) — this
+		// must NOT leak to the response.
+		upstream := &rpcclient.JsonrpcMessage{
+			Version: "2.0",
+			ID:      json.RawMessage(`1`),
+			Result:  json.RawMessage(`"0xabc"`),
+		}
+
+		clientID := json.RawMessage(`"client-uuid-1"`)
+		replyData, err := createSubscriptionReply("rs_abc123_00001", clientID, upstream, "jsonrpc")
+		require.NoError(t, err)
+
+		var resp map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(replyData, &resp))
+
+		assert.JSONEq(t, `"client-uuid-1"`, string(resp["id"]),
+			"id must echo caller's string verbatim")
+		assert.JSONEq(t, `"rs_abc123_00001"`, string(resp["result"]),
+			"result must be router id, not upstream hex")
+	})
+
+	t.Run("EVM with numeric id", func(t *testing.T) {
+		upstream := &rpcclient.JsonrpcMessage{
+			Version: "2.0",
+			ID:      json.RawMessage(`99`), // upstream counter — should not appear
+			Result:  json.RawMessage(`"0xabc"`),
+		}
+
+		replyData, err := createSubscriptionReply("rs_xxx_00001", json.RawMessage(`42`), upstream, "jsonrpc")
+		require.NoError(t, err)
+
+		var resp map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(replyData, &resp))
+
+		assert.JSONEq(t, `42`, string(resp["id"]))
+	})
+
+	t.Run("Tendermint preserves caller id and query result", func(t *testing.T) {
+		upstream := &rpcclient.JsonrpcMessage{
+			Version: "2.0",
+			ID:      json.RawMessage(`7`),
+			Result:  json.RawMessage(`{"query":"tm.event='NewBlock'"}`),
+		}
+
+		replyData, err := createSubscriptionReply("ignored", json.RawMessage(`"abc"`), upstream, "tendermintrpc")
+		require.NoError(t, err)
+
+		var resp map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(replyData, &resp))
+
+		assert.JSONEq(t, `"abc"`, string(resp["id"]),
+			"Tendermint must also echo caller's id, not the upstream's")
+		assert.JSONEq(t, `{"query":"tm.event='NewBlock'"}`, string(resp["result"]),
+			"query format must be preserved")
+	})
+}
+
+// TestUnsubscribe_AcceptsUpstreamIDFallback is the regression for MAG-1824's second symptom:
+// the unsubscribe lookup must succeed even when the client sends back the upstream hex id
+// (rather than the router-issued rs_xxx id). Ownership is still gated on the caller having
+// an entry in clientRouterIDs for that subscription, so this remains safe.
+func TestUnsubscribe_AcceptsUpstreamIDFallback(t *testing.T) {
+	config := &WebsocketConfig{
+		MaxSubscriptionsPerClient:       25,
+		PerClientLimitEnforcement:       "warn",
+		MaxTotalSubscriptions:           5000,
+		TotalLimitEnforcement:           "warn",
+		SubscriptionSharingEnabled:      true,
+		SubscriptionsPerMinutePerClient: 60,
+		UnsubscribesPerMinutePerClient:  60,
+		MaxMessageSize:                  1048576,
+		CleanupInterval:                 time.Minute,
+	}
+
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "ETH", "jsonrpc",
+		[]*common.NodeUrl{{Url: "wss://test.example.com"}},
+		nil, nil, config,
+	)
+
+	clientKey := manager.CreateWebSocketConnectionUniqueKey("dapp1", "192.168.1.1", "ws-1")
+	routerID := manager.idMapper.GenerateRouterID(clientKey)
+	upstreamID := "0xupstream-hex-deadbeef"
+	manager.idMapper.RegisterMapping(routerID, upstreamID)
+
+	// Second co-tenant on the same shared subscription — keeps len(connectedClients) > 1
+	// so the unsubscribe stays on the "remove this client only" branch and doesn't try to
+	// tear down the (nil) upstreamSubscription.
+	keeperKey := manager.CreateWebSocketConnectionUniqueKey("dappKeeper", "10.0.0.1", "ws-keeper")
+	keeperRouterID := manager.idMapper.GenerateRouterID(keeperKey)
+	manager.idMapper.RegisterMapping(keeperRouterID, upstreamID)
+
+	subCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	hashedParams := "test-params-hash"
+	activeSub := &directActiveSubscription{
+		upstreamID:       upstreamID,
+		hashedParams:     hashedParams,
+		connectedClients: map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]{},
+		clientRouterIDs:  map[string]string{clientKey: routerID, keeperKey: keeperRouterID},
+		ctx:              subCtx,
+		cancel:           cancel,
+	}
+	replyChan := make(chan *pairingtypes.RelayReply, 1)
+	keeperReplyChan := make(chan *pairingtypes.RelayReply, 1)
+	activeSub.connectedClients[clientKey] = common.NewSafeChannelSender(subCtx, replyChan)
+	activeSub.connectedClients[keeperKey] = common.NewSafeChannelSender(subCtx, keeperReplyChan)
+
+	manager.lock.Lock()
+	manager.activeSubscriptions[hashedParams] = activeSub
+	manager.lock.Unlock()
+
+	// Client sends back the UPSTREAM id, not the router id — historically this would have
+	// produced "subscription not found".
+	body, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "eth_unsubscribe",
+		"params":  []interface{}{upstreamID},
+		"id":      "client-uuid-1",
+	})
+	require.NoError(t, err)
+
+	pm := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{
+			method: "eth_unsubscribe",
+			params: []interface{}{upstreamID},
+		},
+		rawData: body,
+	}
+
+	_, err = manager.Unsubscribe(context.Background(), pm, "dapp1", "192.168.1.1", "ws-1", nil)
+	assert.NoError(t, err, "unsubscribe should accept the upstream id as a fallback")
+
+	// And confirm the canonical (router-id) path still works for a freshly registered sub.
+	clientKey2 := manager.CreateWebSocketConnectionUniqueKey("dapp2", "192.168.2.2", "ws-2")
+	routerID2 := manager.idMapper.GenerateRouterID(clientKey2)
+	manager.idMapper.RegisterMapping(routerID2, "0xupstream-2")
+	keeperKey2 := manager.CreateWebSocketConnectionUniqueKey("dappKeeper2", "10.0.0.2", "ws-keeper2")
+	keeperRouterID2 := manager.idMapper.GenerateRouterID(keeperKey2)
+	manager.idMapper.RegisterMapping(keeperRouterID2, "0xupstream-2")
+
+	hashedParams2 := "params-2"
+	subCtx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	activeSub2 := &directActiveSubscription{
+		upstreamID:   "0xupstream-2",
+		hashedParams: hashedParams2,
+		connectedClients: map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]{
+			clientKey2: common.NewSafeChannelSender(subCtx2, make(chan *pairingtypes.RelayReply, 1)),
+			keeperKey2: common.NewSafeChannelSender(subCtx2, make(chan *pairingtypes.RelayReply, 1)),
+		},
+		clientRouterIDs: map[string]string{clientKey2: routerID2, keeperKey2: keeperRouterID2},
+		ctx:             subCtx2,
+		cancel:          cancel2,
+	}
+	manager.lock.Lock()
+	manager.activeSubscriptions[hashedParams2] = activeSub2
+	manager.lock.Unlock()
+
+	body2, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "eth_unsubscribe",
+		"params":  []interface{}{routerID2},
+		"id":      2,
+	})
+	require.NoError(t, err)
+	pm2 := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{method: "eth_unsubscribe", params: []interface{}{routerID2}},
+		rawData:               body2,
+	}
+	_, err = manager.Unsubscribe(context.Background(), pm2, "dapp2", "192.168.2.2", "ws-2", nil)
+	assert.NoError(t, err, "router-id unsubscribe path must still work")
+}
+
+// TestEndToEnd_SubscribeUnsubscribeRoundTrip is the closest in-process analogue of the
+// MAG-1824 smoke test (tests/release_smoke/test_ws_subscribe_smoke.py): drive the manager
+// against a real upstream WebSocket (mockSubscriptionServer) and verify the full lifecycle.
+//
+// Acceptance criteria covered:
+//  1. Subscribe response id echoes the caller's string verbatim (no `id:1` substitution).
+//  2. Unsubscribe of the just-issued subscription succeeds (no SubscriptionNotFoundError).
+//  3. Notifications arrive while the subscription is live (no regression).
+func TestEndToEnd_SubscribeUnsubscribeRoundTrip(t *testing.T) {
+	mockSrv := newMockSubscriptionServer()
+	mockSrv.messageInterval = 20 * time.Millisecond // get a notification quickly
+	defer mockSrv.Close()
+
+	nodeUrl := &common.NodeUrl{Url: mockSrv.URL()}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "ETH", "jsonrpc",
+		[]*common.NodeUrl{nodeUrl},
+		nil, nil, nil,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 1. Subscribe with a STRING id like the bug report's "client-uuid-1".
+	subscribeBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "eth_subscribe",
+		"params":  []interface{}{"newHeads"},
+		"id":      "client-uuid-1",
+	})
+	require.NoError(t, err)
+
+	subscribeMsg := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{
+			method: "eth_subscribe",
+			params: []interface{}{"newHeads"},
+		},
+		rawData: subscribeBody,
+	}
+
+	const dappID, ip, wsUID = "dapp-e2e", "192.168.99.99", "ws-e2e"
+	reply, repliesChan, err := manager.StartSubscription(ctx, subscribeMsg, dappID, ip, wsUID, nil)
+	require.NoError(t, err, "subscribe must succeed")
+	require.NotNil(t, reply, "subscribe must return a reply")
+	require.NotNil(t, repliesChan, "subscribe must return a notifications channel")
+
+	// Verify id is echoed verbatim — this is Bug #1's regression in the e2e shape.
+	var subResp map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(reply.Data, &subResp))
+	assert.JSONEq(t, `"client-uuid-1"`, string(subResp["id"]),
+		"subscribe response id must be the caller's string, not the upstream's counter")
+
+	// Capture the subscription id the router exposed to the client (router id, NOT upstream).
+	var routerSubID string
+	require.NoError(t, json.Unmarshal(subResp["result"], &routerSubID))
+	assert.NotEmpty(t, routerSubID)
+	assert.True(t, strings.HasPrefix(routerSubID, "rs_"),
+		"router id should be rs_-prefixed (got %q)", routerSubID)
+
+	// 2. At least one notification must arrive on the live subscription.
+	select {
+	case notif := <-repliesChan:
+		require.NotNil(t, notif, "first notification")
+		assert.Contains(t, string(notif.Data), `"eth_subscription"`,
+			"notification should be an eth_subscription event")
+		assert.Contains(t, string(notif.Data), routerSubID,
+			"notification subscription field should be the router id (rewritten from upstream)")
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected at least one notification within 2s")
+	}
+
+	// 3. Unsubscribe using the just-issued router id — the bug's primary symptom is that
+	// this returns SubscriptionNotFoundError. After the fix it must succeed and the node's
+	// response (with the caller's id and result:true) must be returned.
+	unsubBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "eth_unsubscribe",
+		"params":  []interface{}{routerSubID},
+		"id":      "client-uuid-2",
+	})
+	require.NoError(t, err)
+
+	unsubMsg := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{
+			method: "eth_unsubscribe",
+			params: []interface{}{routerSubID},
+		},
+		rawData: unsubBody,
+	}
+
+	nodeResp, err := manager.Unsubscribe(ctx, unsubMsg, dappID, ip, wsUID, nil)
+	require.NoError(t, err, "unsubscribe of just-issued subscription id must NOT return subscription-not-found")
+	require.NotNil(t, nodeResp, "expected node response bytes from upstream")
+
+	// The mock upstream returns {"jsonrpc":"2.0","id":<caller's id>,"result":true}.
+	// Per the ticket's acceptance criteria, the caller's id must round-trip end-to-end.
+	var unsubResp map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(nodeResp, &unsubResp))
+	assert.JSONEq(t, `"client-uuid-2"`, string(unsubResp["id"]),
+		"unsubscribe response id must echo caller's string id")
+	assert.JSONEq(t, `true`, string(unsubResp["result"]),
+		`unsubscribe response result must be "true"`)
+
+	// Belt-and-suspenders: confirm the router translated router-id → upstream-id when
+	// it called the upstream. If the router had forwarded `rs_xxx_NNNNN` to the upstream,
+	// the mock's closeSubscription would not have matched any entry and the map would
+	// still hold the upstream id. This guards against a regression where the router
+	// leaks router ids to upstream nodes.
+	mockSrv.lock.RLock()
+	leftoverSubs := len(mockSrv.subscriptions)
+	mockSrv.lock.RUnlock()
+	assert.Equal(t, 0, leftoverSubs,
+		"mock upstream should see its own subscription id on eth_unsubscribe, not the router id")
+}
+
+// TestListenForUpstreamMessages_ReconnectSkipsCleanup is the regression for the cleanup
+// race in listenForUpstreamMessages. With the bug, when upstreamSub.Err() fires and we
+// hand off to handleUpstreamDisconnect, the deferred dwsm.cleanupSubscription(hashedParams)
+// in the returning goroutine deletes the activeSubscription that the reconnect path is
+// (or will be) restoring. After the fix, the deferred cleanup is skipped when
+// reconnectInFlight is set.
+//
+// We drive the listener directly with a synthetic *ClientSubscription whose Err() is a
+// pre-loaded channel, so we don't need a real WS server. The assertion is on the post-
+// condition: activeSubscriptions[hp] survives the listener's return, AND the client is
+// still present in connectedClients (i.e. cleanupSubscription did NOT close their channel).
+func TestListenForUpstreamMessages_ReconnectSkipsCleanup(t *testing.T) {
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "ETH", "jsonrpc",
+		[]*common.NodeUrl{{Url: "wss://test.example.com"}},
+		nil, nil, nil,
+	)
+
+	clientKey := manager.CreateWebSocketConnectionUniqueKey("d", "1.1.1.1", "ws")
+	routerID := manager.idMapper.GenerateRouterID(clientKey)
+	upstreamID := "0xreconnect-survives"
+	manager.idMapper.RegisterMapping(routerID, upstreamID)
+
+	subCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const hp = "hp-reconnect"
+	activeSub := &directActiveSubscription{
+		upstreamID:   upstreamID,
+		hashedParams: hp,
+		connectedClients: map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]{
+			clientKey: common.NewSafeChannelSender(subCtx, make(chan *pairingtypes.RelayReply, 1)),
+		},
+		clientRouterIDs: map[string]string{clientKey: routerID},
+		ctx:             subCtx,
+		cancel:          cancel,
+		closeSubChan:    make(chan struct{}),
+		messagesChan:    make(chan *rpcclient.JsonrpcMessage, 1),
+	}
+	// Pre-set restoring=true so the spawned handleUpstreamDisconnect goroutine no-ops
+	// instead of dereferencing the nil upstreamPool. The thing under test is the OLD
+	// listener's deferred cleanup branch, not the reconnect logic itself.
+	activeSub.restoring.Store(true)
+
+	manager.lock.Lock()
+	manager.activeSubscriptions[hp] = activeSub
+	manager.lock.Unlock()
+
+	// Drive the listener via a local fake satisfying the upstreamErrSource interface.
+	// A pre-loaded, closed channel triggers the Err() branch immediately so the listener
+	// returns deterministically — no need for a real rpcclient.ClientSubscription.
+	errCh := make(chan error, 1)
+	errCh <- fmt.Errorf("simulated upstream error")
+	close(errCh)
+	upstreamSub := fakeUpstreamErrSource{ch: errCh}
+
+	// Run the listener synchronously to observe its return; the listener returns as soon
+	// as it drains the Err() channel and kicks off handleUpstreamDisconnect.
+	done := make(chan struct{})
+	go func() {
+		manager.listenForUpstreamMessages(subCtx, hp, activeSub, upstreamSub)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listenForUpstreamMessages did not return within 2s")
+	}
+
+	// The crucial invariant: the deferred cleanup in the returning listener must NOT have
+	// fired (reconnect handoff suppressed it). Without the fix, this assertion fails:
+	// cleanupSubscription would have deleted activeSubscriptions[hp] and closed every
+	// SafeChannelSender. We rely on the entry being present right after return; the
+	// background handleUpstreamDisconnect goroutine may eventually call cleanup itself,
+	// but only after async reconnect attempts complete.
+	manager.lock.RLock()
+	_, stillPresent := manager.activeSubscriptions[hp]
+	manager.lock.RUnlock()
+	assert.True(t, stillPresent,
+		"deferred cleanup must be skipped when reconnect is in flight (race regression)")
+}
+
+// fakeUpstreamErrSource satisfies the upstreamErrSource interface that
+// listenForUpstreamMessages takes. Defined in the test file so we don't have to expose any
+// test-only constructor from the rpcclient package.
+type fakeUpstreamErrSource struct{ ch chan error }
+
+func (f fakeUpstreamErrSource) Err() <-chan error { return f.ch }
+
+// TestUnsubscribe_StillRejectsForeignSubscription confirms the upstream-id fallback does NOT
+// open a hole that lets one client unsubscribe another client's shared subscription.
+func TestUnsubscribe_StillRejectsForeignSubscription(t *testing.T) {
+	config := &WebsocketConfig{
+		MaxSubscriptionsPerClient:       25,
+		PerClientLimitEnforcement:       "warn",
+		MaxTotalSubscriptions:           5000,
+		TotalLimitEnforcement:           "warn",
+		SubscriptionSharingEnabled:      true,
+		SubscriptionsPerMinutePerClient: 60,
+		UnsubscribesPerMinutePerClient:  60,
+		MaxMessageSize:                  1048576,
+		CleanupInterval:                 time.Minute,
+	}
+
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "ETH", "jsonrpc",
+		[]*common.NodeUrl{{Url: "wss://test.example.com"}},
+		nil, nil, config,
+	)
+
+	owner := manager.CreateWebSocketConnectionUniqueKey("dapp1", "192.168.1.1", "ws-owner")
+	ownerRouterID := manager.idMapper.GenerateRouterID(owner)
+	upstreamID := "0xshared-sub"
+	manager.idMapper.RegisterMapping(ownerRouterID, upstreamID)
+
+	subCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	activeSub := &directActiveSubscription{
+		upstreamID:       upstreamID,
+		hashedParams:     "hp",
+		connectedClients: map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]{owner: common.NewSafeChannelSender(subCtx, make(chan *pairingtypes.RelayReply, 1))},
+		clientRouterIDs:  map[string]string{owner: ownerRouterID},
+		ctx:              subCtx,
+		cancel:           cancel,
+	}
+	manager.lock.Lock()
+	manager.activeSubscriptions["hp"] = activeSub
+	manager.lock.Unlock()
+
+	// A second client (different dappID/ip/wsUID) tries to unsubscribe using the upstream id.
+	// The fallback must still require clientRouterIDs[attacker] to exist — which it does not.
+	body, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": []interface{}{upstreamID}, "id": 5,
+	})
+	pm := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{method: "eth_unsubscribe", params: []interface{}{upstreamID}},
+		rawData:               body,
+	}
+	_, err := manager.Unsubscribe(context.Background(), pm, "evil", "10.0.0.1", "ws-evil", nil)
+	assert.Equal(t, common.SubscriptionNotFoundError, err,
+		"unrelated client must not be able to unsubscribe via upstream-id fallback")
 }

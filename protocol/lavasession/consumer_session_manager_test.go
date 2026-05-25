@@ -9,10 +9,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
 	"github.com/Magma-Devs/smart-router/protocol/provideroptimizer"
 	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 	spectypes "github.com/Magma-Devs/smart-router/types/spec"
@@ -1055,6 +1057,37 @@ func TestNoPairingsError(t *testing.T) {
 	require.True(t, errors.Is(err, PairingListEmptyError))
 }
 
+// TestSelectedProviderAlreadyFailedReturnsError verifies the header-pinned path bounds retries.
+// Why: without this guard, GetSessions' outer loop spins forever when the pinned provider's
+// DirectRPC connection is unhealthy — the pinned name keeps being re-selected even after it
+// has been added to the in-request ignored list, producing the unbounded "Provider selected
+// via header" / "direct RPC connection is unhealthy" log pair seen in lava-sim-rest hangs.
+func TestSelectedProviderAlreadyFailedReturnsError(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairingList := createPairingList("", true)
+	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	validAddresses := csm.getValidAddresses("", nil, context.Background())
+	require.NotEmpty(t, validAddresses)
+	pinned := validAddresses[0]
+
+	// Sanity: when not ignored, the pinned address is returned successfully.
+	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", pinned)
+	require.NoError(t, err)
+	require.Equal(t, []string{pinned}, got)
+
+	// When the pinned address has already been added to ignoredProvidersList
+	// (simulating a prior failed connect attempt in the same GetSessions call),
+	// the helper must return an error instead of re-selecting the same address.
+	ignored := map[string]struct{}{pinned: {}}
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, 10, 100, "", nil, common.NO_STATE, "", pinned)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
+		"expected SelectedProviderUnavailableError, got: %v", err)
+}
+
 func TestPairingWithStateful(t *testing.T) {
 	ctx := context.Background()
 	t.Run("stateful", func(t *testing.T) {
@@ -1487,6 +1520,68 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	// Third call: both backups are now ignored — expect an error.
 	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, 0, NewUsedProviders(nil))
 	require.Error(t, err, "expected error when all backup providers are exhausted")
+}
+
+// TestBackupProviderOptimizerSelection_EndpointCountBoundaries backfills
+// MAG-1872 item 12: the existing TestBackupProviderOptimizerSelection
+// hardcodes 2 backup endpoints, exercising the round-robin loop at only one
+// pool size. This parametrizes the count at 1 (minimum) and 5 (a larger
+// pool) to cover both the trivial single-iteration case and the multi-call
+// round-robin path that exhausts after exactly N iterations.
+func TestBackupProviderOptimizerSelection_EndpointCountBoundaries(t *testing.T) {
+	cases := []struct {
+		name        string
+		backupCount int
+	}{
+		{name: "single_backup", backupCount: 1},
+		{name: "five_backups", backupCount: 5},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			csm := CreateConsumerSessionManager()
+
+			backupList := make(map[uint64]*ConsumerSessionsWithProvider, tc.backupCount)
+			for i := 0; i < tc.backupCount; i++ {
+				addr := fmt.Sprintf("backup-%d", i)
+				backup := NewConsumerSessionWithProvider(addr, []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}}, 999999, firstEpochHeight, int64(0))
+				backup.StaticProvider = true
+				backupList[uint64(i)] = backup
+			}
+
+			require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, nil, backupList))
+
+			ignoredProv := &ignoredProviders{
+				providers:    make(map[string]struct{}),
+				currentEpoch: firstEpochHeight,
+			}
+
+			// Drain the pool: exactly backupCount calls should each return
+			// one distinct backup.
+			seen := make(map[string]struct{})
+			for call := 0; call < tc.backupCount; call++ {
+				result, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
+					ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
+					[]string{}, 0, 0, NewUsedProviders(nil))
+				require.NoError(t, err, "call #%d of %d must succeed", call+1, tc.backupCount)
+				require.Len(t, result, 1, "exactly one backup per call (got %d)", len(result))
+				for addr := range result {
+					_, dup := seen[addr]
+					require.False(t, dup, "call #%d returned duplicate backup %q", call+1, addr)
+					seen[addr] = struct{}{}
+				}
+			}
+			require.Len(t, seen, tc.backupCount,
+				"every backup must be returned exactly once across %d calls", tc.backupCount)
+
+			// One more call exhausts the pool.
+			_, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
+				ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
+				[]string{}, 0, 0, NewUsedProviders(nil))
+			require.Error(t, err, "expected exhaustion error after %d backups served", tc.backupCount)
+		})
+	}
 }
 
 // TestGetReportedProviders_EpochTransitionRace reproduces the race between
@@ -1938,26 +2033,19 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 	err = csm.UpdateAllProviders(secondEpochHeight, nil, backupListEpoch2)
 	require.NoError(t, err)
 
-	// No precondition assertion on the re-blocked state: UpdateAllProviders fires the
-	// comprehensive probe in a goroutine, so the "re-blocked" window between the merge
-	// and the probe's success is transient (~6ms on fast runners). Asserting on it
-	// would race against production code's normal behavior. The claim this test makes —
-	// "a healthy backup that was blocked last epoch ends up unblocked" — is verified by
-	// the final assertion below regardless of which path (the async probe or the explicit
-	// call) does the unblocking.
+	// Precondition: re-blocked after epoch transition (comes from the previousEpoch merge).
+	csm.lock.RLock()
+	_, reblocked := csm.blockedBackupProviders[backupAddr]
+	csm.lock.RUnlock()
+	require.True(t, reblocked, "backup should be re-blocked immediately after epoch transition")
 
-	// Run the unblock pass explicitly. If the async probe already completed, this is a
-	// no-op; otherwise it does the work itself.
+	// Run the unblock pass. Comprehensive probe against grpcListener should succeed → unblock.
 	csm.checkAndUnblockHealthyReBlockedProviders(context.Background(), secondEpochHeight)
 
-	// Use Eventually to absorb any remaining timing variance from async probe completion.
-	require.Eventually(t, func() bool {
-		csm.lock.RLock()
-		defer csm.lock.RUnlock()
-		_, stillBlocked := csm.blockedBackupProviders[backupAddr]
-		return !stillBlocked
-	}, 2*time.Second, 10*time.Millisecond,
-		"healthy backup should be unblocked after comprehensive probe succeeds")
+	csm.lock.RLock()
+	_, stillBlocked := csm.blockedBackupProviders[backupAddr]
+	csm.lock.RUnlock()
+	require.False(t, stillBlocked, "healthy backup should be unblocked after comprehensive probe succeeds")
 }
 
 // TestGenerateReconnectCallback_BackupProviderUnblocked covers the #2265-derived behavior:
@@ -2175,4 +2263,247 @@ func TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint(t *testing.T) {
 	_, _, probeErr := csm.probeDirectRPCEndpoints(ctx, cswp, cswp.PublicLavaAddress)
 	require.Error(t, probeErr,
 		"a disabled endpoint must cause the direct RPC probe to fail, even though HTTPDirectRPCConnection.IsHealthy starts optimistically true")
+}
+
+// stateSizeRecorder is a minimal ConsumerMetricsManagerInf used to observe
+// publishStateSizes() emissions under test. Embedding NoOpConsumerMetrics
+// satisfies every method the interface requires without forcing us to stub
+// the ones the test doesn't care about.
+type stateSizeRecorder struct {
+	metrics.NoOpConsumerMetrics
+	mu                  sync.Mutex
+	blockedProviders    int
+	blockedBackup       int
+	stickySessionsCount int
+	reportedProviders   int
+}
+
+func (r *stateSizeRecorder) SetCSMBlockedProvidersCount(_, _ string, c int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.blockedProviders = c
+}
+
+func (r *stateSizeRecorder) SetCSMBlockedBackupProvidersCount(_, _ string, c int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.blockedBackup = c
+}
+
+func (r *stateSizeRecorder) SetCSMStickySessionsCount(_, _ string, c int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stickySessionsCount = c
+}
+
+func (r *stateSizeRecorder) SetCSMReportedProvidersCount(_, _ string, c int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reportedProviders = c
+}
+
+func (r *stateSizeRecorder) snapshot() (int, int, int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.blockedProviders, r.blockedBackup, r.stickySessionsCount, r.reportedProviders
+}
+
+// createConsumerSessionManagerWithMetrics builds a CSM wired to the given
+// metrics implementation so state-size emissions can be observed in tests.
+func createConsumerSessionManagerWithMetrics(m metrics.ConsumerMetricsManagerInf) *ConsumerSessionManager {
+	rand.InitRandomSeed()
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
+	optimizer.SetDeterministicSeed(1234567)
+	return NewConsumerSessionManager(&RPCEndpoint{"stub", "stub", "stub", false, "/", 0}, optimizer, m, nil, "lava@test", NewActiveSubscriptionProvidersStorage())
+}
+
+// TestPublishStateSizes_PopulateThenReset verifies that publishStateSizes
+// reflects the current size of every observed store, and that
+// ResetTransientFailureState drives all four counts back to zero — the
+// post-condition integration tests assert against /metrics (MAG-1762).
+func TestPublishStateSizes_PopulateThenReset(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+
+	csm.lock.Lock()
+	csm.previousEpochBlockedProviders = map[string]struct{}{"a": {}, "b": {}}
+	csm.blockedBackupProviders = map[string]struct{}{"backup-bad": {}}
+	csm.lock.Unlock()
+	csm.stickySessions.Set("client-1", &StickySession{Provider: "p1", Epoch: 1})
+	csm.stickySessions.Set("client-2", &StickySession{Provider: "p2", Epoch: 1})
+	csm.stickySessions.Set("client-3", &StickySession{Provider: "p3", Epoch: 1})
+	csm.reportedProviders.ReportProvider("reported-1", 1, 0, nil, nil)
+
+	csm.publishStateSizes()
+	blocked, blockedBackup, sticky, reported := rec.snapshot()
+	require.Equal(t, 2, blocked, "previousEpochBlockedProviders count must equal map size")
+	require.Equal(t, 1, blockedBackup, "blockedBackupProviders count must equal map size")
+	require.Equal(t, 3, sticky, "stickySessions count must equal store size")
+	require.Equal(t, 1, reported, "reportedProviders count must equal register size")
+
+	csm.ResetTransientFailureState()
+
+	blocked, blockedBackup, sticky, reported = rec.snapshot()
+	require.Equal(t, 0, blocked, "ResetTransientFailureState must zero previousEpochBlockedProviders gauge")
+	require.Equal(t, 0, blockedBackup, "ResetTransientFailureState must zero blockedBackupProviders gauge")
+	require.Equal(t, 0, sticky, "ResetTransientFailureState must zero stickySessions gauge")
+	require.Equal(t, 0, reported, "ResetTransientFailureState must zero reportedProviders gauge")
+}
+
+// TestPublishStateSizes_NilSafety ensures the publisher tolerates the
+// SafeMetrics(nil)→NoOp fall-through used by tests that pass a nil metrics
+// manager — it must not panic and must do nothing observable.
+func TestPublishStateSizes_NilSafety(t *testing.T) {
+	csm := CreateConsumerSessionManager() // nil metrics → NoOp
+	require.NotPanics(t, func() {
+		csm.publishStateSizes()
+		csm.ResetTransientFailureState()
+	})
+}
+
+// TestStateSizeStores_LenAccessors verifies the Len() accessors added to the
+// external stores so the publisher can read them without touching internals.
+func TestStateSizeStores_LenAccessors(t *testing.T) {
+	store := NewStickySessionStore()
+	require.Equal(t, 0, store.Len())
+	store.Set("a", &StickySession{Provider: "p", Epoch: 1})
+	store.Set("b", &StickySession{Provider: "p", Epoch: 1})
+	require.Equal(t, 2, store.Len())
+	store.Delete("a")
+	require.Equal(t, 1, store.Len())
+	store.Clear()
+	require.Equal(t, 0, store.Len())
+
+	rp := NewReportedProviders(nil, "stub")
+	require.Equal(t, 0, rp.Len())
+	rp.ReportProvider("provider-x", 1, 0, nil, nil)
+	require.Equal(t, 1, rp.Len())
+	rp.RemoveReport("provider-x")
+	require.Equal(t, 0, rp.Len())
+}
+
+// TestResetTransientFailureState verifies the /debug/reset-all helper clears
+// every cross-epoch failure-tracking store on the CSM while leaving the live
+// pairing untouched (pairing, validAddresses, currentlyBlockedProviderAddresses,
+// backupProviders).
+func TestResetTransientFailureState(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+
+	// Pre-populate every transient store, plus a couple of "live pairing"
+	// entries we expect to survive the reset.
+	csm.lock.Lock()
+	csm.previousEpochBlockedProviders = map[string]struct{}{"prev-bad": {}}
+	csm.secondChanceGivenToAddresses = map[string]struct{}{"second-chance": {}}
+	csm.blockedBackupProviders = map[string]struct{}{"bad-backup": {}}
+	// Live pairing — must NOT be cleared.
+	csm.validAddresses = []string{"good-provider"}
+	// currentlyBlockedProviderAddresses is part of the live pairing (a
+	// destructive move out of validAddresses). Restoring it is an
+	// epoch-boundary operation, so this endpoint leaves it alone.
+	csm.currentlyBlockedProviderAddresses = []string{"now-blocked"}
+	csm.pairing = map[string]*ConsumerSessionsWithProvider{
+		"good-provider": {PublicLavaAddress: "good-provider"},
+	}
+	csm.backupProviders = map[string]*ConsumerSessionsWithProvider{
+		"backup-1": {PublicLavaAddress: "backup-1"},
+	}
+	csm.lock.Unlock()
+	csm.stickySessions.Set("session-id", &StickySession{Provider: "good-provider", Epoch: 1})
+	csm.reportedProviders.ReportProvider("reported-bad", 1, 0, nil, nil)
+	require.True(t, csm.reportedProviders.IsReported("reported-bad"))
+
+	csm.ResetTransientFailureState()
+
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	require.Empty(t, csm.previousEpochBlockedProviders, "previousEpochBlockedProviders must be cleared")
+	require.Empty(t, csm.secondChanceGivenToAddresses, "secondChanceGivenToAddresses must be cleared")
+	require.Empty(t, csm.blockedBackupProviders, "blockedBackupProviders must be cleared")
+	// Live pairing untouched.
+	require.Equal(t, []string{"good-provider"}, csm.validAddresses, "validAddresses must be left intact")
+	require.Equal(t, []string{"now-blocked"}, csm.currentlyBlockedProviderAddresses,
+		"currentlyBlockedProviderAddresses must be left intact — clearing without restoring to validAddresses would put providers in routing limbo")
+	require.Contains(t, csm.pairing, "good-provider", "pairing must be left intact")
+	require.Contains(t, csm.backupProviders, "backup-1", "backupProviders must be left intact")
+	// Sticky sessions + reported providers cleared via their own locks.
+	_, stickyExists := csm.stickySessions.Get("session-id")
+	require.False(t, stickyExists, "stickySessions must be cleared")
+	require.False(t, csm.reportedProviders.IsReported("reported-bad"), "reportedProviders must be cleared")
+}
+
+// TestResetBlockedProviders is the MAG-1810 regression test. In direct-rpc
+// mode there are no epoch transitions, so currentlyBlockedProviderAddresses
+// accumulates monotonically as tests trigger blockProvider — eventually
+// shrinking validAddresses to nothing and producing the cascading bundle
+// failure (115 → 59 → 3 across consecutive runs).
+//
+// ResetBlockedProviders is the explicit direct-rpc escape hatch for the
+// /debug/reset-all path: it atomically restores every blocked address back
+// to validAddresses (using setValidAddressesToDefaultValue), purges the
+// addon cache (RemoveAddonAddresses("", nil) inside the helper), and resets
+// the per-provider redemption flag.
+func TestResetBlockedProviders(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+
+	// Seed a pairing of three providers; block two of them so validAddresses
+	// has one entry and currentlyBlockedProviderAddresses has two.
+	csm.lock.Lock()
+	csm.pairing = map[string]*ConsumerSessionsWithProvider{
+		"provider-a": {PublicLavaAddress: "provider-a", Endpoints: []*Endpoint{{NetworkAddress: "addr-a"}}},
+		"provider-b": {PublicLavaAddress: "provider-b", Endpoints: []*Endpoint{{NetworkAddress: "addr-b"}}},
+		"provider-c": {PublicLavaAddress: "provider-c", Endpoints: []*Endpoint{{NetworkAddress: "addr-c"}}},
+	}
+	csm.pairingAddresses = map[uint64]string{
+		0: "provider-a",
+		1: "provider-b",
+		2: "provider-c",
+	}
+	csm.pairingAddressesLength = 3
+	csm.validAddresses = []string{"provider-a"}
+	csm.currentlyBlockedProviderAddresses = []string{"provider-b", "provider-c"}
+	// Seed a stale addon cache containing only one of the blocked providers —
+	// the post-condition is that this cache is purged so the next request
+	// sees the full restored pool.
+	csm.addonAddresses = map[string][]string{"": {"provider-a"}}
+	// Simulate the second-chance redemption flag being set on a blocked
+	// provider; ResetBlockedProviders must clear it back to Unused.
+	csm.pairing["provider-b"].atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus)
+	csm.lock.Unlock()
+
+	csm.ResetBlockedProviders()
+
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	require.Empty(t, csm.currentlyBlockedProviderAddresses,
+		"currentlyBlockedProviderAddresses must be drained in direct-rpc mode reset")
+	require.ElementsMatch(t, []string{"provider-a", "provider-b", "provider-c"}, csm.validAddresses,
+		"validAddresses must be restored to the full pairingAddresses set")
+	require.Empty(t, csm.addonAddresses,
+		"addonAddresses must be purged so the next request rebuilds against the restored validAddresses")
+	require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing["provider-b"].atomicReadBlockedStatus(),
+		"per-provider redemption flag must be reset to Unused")
+}
+
+// TestResetBlockedProviders_NoBlockedIsNoOp verifies the cheap-exit path:
+// when no providers are blocked, the helper returns without taking the heavy
+// setValidAddressesToDefaultValue path and without spawning metric
+// goroutines. validAddresses must be left exactly as it was.
+func TestResetBlockedProviders_NoBlockedIsNoOp(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+
+	csm.lock.Lock()
+	csm.pairing = map[string]*ConsumerSessionsWithProvider{
+		"provider-a": {PublicLavaAddress: "provider-a", Endpoints: []*Endpoint{{NetworkAddress: "addr-a"}}},
+	}
+	csm.pairingAddresses = map[uint64]string{0: "provider-a"}
+	csm.validAddresses = []string{"provider-a"}
+	csm.currentlyBlockedProviderAddresses = nil
+	csm.lock.Unlock()
+
+	csm.ResetBlockedProviders()
+
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	require.Equal(t, []string{"provider-a"}, csm.validAddresses, "validAddresses must be untouched on a no-op reset")
+	require.Empty(t, csm.currentlyBlockedProviderAddresses)
 }

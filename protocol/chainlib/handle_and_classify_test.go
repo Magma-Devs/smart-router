@@ -92,6 +92,16 @@ func TestClassifyNodeError_HTTPError(t *testing.T) {
 // rpcclient.HTTPError MUST win over the wrapping HTTP status. Before the fix,
 // the HTTP status unconditionally overwrote the JSON-RPC code, which caused
 // classification to lose the structured error code.
+//
+// MAG-1666 update: when the wrapping HTTPError carries a non-2xx status, the
+// extracted message is now prefixed with "HTTP <status>: " so the
+// HTTPStatusContains(N) classifier rules can fire for upstreams that respond
+// with HTTP 4xx + JSON-RPC body and a generic body code. The body message is
+// preserved (the prefix is additive composition, not a replacement) and the
+// body's JSON-RPC code still wins the priority race because CodeEquals
+// matchers are evaluated before any message-based matcher — including
+// HTTPStatusContains. This test continues to assert both: the code is
+// untouched, and the body message remains the suffix of the composed string.
 func TestExtractNodeErrorDetails_JSONRPCBodyBeatsHTTPStatus(t *testing.T) {
 	// Use code 3 (generic JSON-RPC server error reserved range) with an
 	// opaque message so the classifier cannot fall back to a message matcher.
@@ -103,9 +113,12 @@ func TestExtractNodeErrorDetails_JSONRPCBodyBeatsHTTPStatus(t *testing.T) {
 	}
 	code, msg := ExtractNodeErrorDetails(httpErr)
 	assert.Equal(t, -32700, code, "JSON-RPC body code must beat HTTP status")
-	assert.Equal(t, "opaque", msg, "JSON-RPC body message must beat outer error string")
+	assert.Equal(t, "HTTP 400: opaque", msg,
+		"composed message must carry the HTTP status prefix AND the JSON-RPC body message")
 
 	// End-to-end: classification must honour the extracted JSON-RPC code.
+	// CodeEquals(-32700) runs before any HTTPStatusContains rule, so the
+	// JSON-RPC code wins despite the new HTTP prefix on the message.
 	result := ClassifyNodeError(httpErr, -1, common.TransportJsonRPC)
 	require.NotNil(t, result)
 	assert.Equal(t, common.LavaErrorUserParseError, result,

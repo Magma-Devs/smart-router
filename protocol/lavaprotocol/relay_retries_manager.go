@@ -53,3 +53,10 @@ func (rrm *RelayRetriesManager) AddHashToCache(hash string) {
 func (rrm *RelayRetriesManager) RemoveHashFromCache(hash string) {
 	rrm.cache.Del(hash)
 }
+
+// Reset empties the entire ban cache so previously-banned retry hashes can be
+// retried again immediately. Intended for the /debug/reset-all endpoint —
+// without it the 6-hour TTL leaks failure memory across black-box test runs.
+func (rrm *RelayRetriesManager) Reset() {
+	rrm.cache.Clear()
+}

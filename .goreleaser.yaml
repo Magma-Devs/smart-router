@@ -9,7 +9,9 @@ metadata:
   mod_timestamp: "{{ .CommitTimestamp }}"
 
 env:
-  - CGO_ENABLED=1
+  # Repo has no cgo imports (verified by grep '^import "C"'). Pure-Go
+  # build keeps the release runner free of clang cross-compile setup.
+  - CGO_ENABLED=0
 
 builds:
   - id: smartrouter
@@ -21,6 +23,15 @@ builds:
     goarch:
       - amd64
       - arm64
+    # GOAMD64=v3 (Haswell+: AVX2/BMI2/FMA) and GOARM64=v8.2 (FP16/dotprod)
+    # match smartrouter.yml's dev-image build env. The top-level `env:`
+    # block alone is NOT enough — goreleaser uses these per-build fields
+    # to drive target selection. Without them, snapshot/release produces
+    # baseline v1/v8.0 binaries regardless of `env: GOAMD64=...`.
+    goamd64:
+      - v3
+    goarm64:
+      - v8.2
     ignore:
       - goos: darwin
         goarch: s390x
@@ -29,23 +40,18 @@ builds:
     flags:
       - -mod=readonly
       - -trimpath
+    ldflags:
+      - -w
+      - -s
+      - -X github.com/Magma-Devs/smart-router/version.Version={{ .Tag }}
+      - -X github.com/Magma-Devs/smart-router/version.Commit={{ .FullCommit }}
     mod_timestamp: "{{ .CommitTimestamp }}"
-    env:
-      - CC_darwin_amd64=o64-clang
-      - CXX_darwin_amd64=o64-clang++
-      - CC_darwin_arm64=oa64-clang
-      - CXX_darwin_arm64=oa64-clang++
-      - CC_linux_arm64=aarch64-linux-gnu-gcc
-      - CXX_linux_arm64=aarch64-linux-gnu-g++
-      - 'CC={{ index .Env (print "CC_" .Os "_" .Arch) }}'
-      - 'CXX={{ index .Env (print "CXX_" .Os "_" .Arch) }}'
 
-  # Sprint 5 — enterprise edition. Same source tree as the smartrouter
-  # build above, compiled with `-tags enterprise` to pull in the licensing
-  # envelope, expiry watcher, and full subscription managers. Output binary
-  # is named `smartrouter-enterprise` so it ships side-by-side with the
-  # community binary in the release archive (matches the Makefile's
-  # `build/smartrouter-enterprise` naming).
+  # Enterprise edition. Same source tree compiled with `-tags enterprise`
+  # to pull in the licensing envelope, expiry watcher, and full subscription
+  # managers. Output binary is named `smartrouter-enterprise` so it ships
+  # side-by-side with the community binary in the release archive (matches
+  # the Makefile's `build/smartrouter-enterprise` naming).
   - id: smartrouter-enterprise
     binary: smartrouter-enterprise
     dir: cmd/smartrouter
@@ -55,6 +61,10 @@ builds:
     goarch:
       - amd64
       - arm64
+    goamd64:
+      - v3
+    goarm64:
+      - v8.2
     ignore:
       - goos: darwin
         goarch: s390x
@@ -65,83 +75,124 @@ builds:
     flags:
       - -mod=readonly
       - -trimpath
+    ldflags:
+      - -w
+      - -s
+      - -X github.com/Magma-Devs/smart-router/version.Version={{ .Tag }}
+      - -X github.com/Magma-Devs/smart-router/version.Commit={{ .FullCommit }}
     mod_timestamp: "{{ .CommitTimestamp }}"
-    env:
-      - CC_darwin_amd64=o64-clang
-      - CXX_darwin_amd64=o64-clang++
-      - CC_darwin_arm64=oa64-clang
-      - CXX_darwin_arm64=oa64-clang++
-      - CC_linux_arm64=aarch64-linux-gnu-gcc
-      - CXX_linux_arm64=aarch64-linux-gnu-g++
-      - 'CC={{ index .Env (print "CC_" .Os "_" .Arch) }}'
-      - 'CXX={{ index .Env (print "CXX_" .Os "_" .Arch) }}'
 
 archives:
   # GoReleaser v2 spelling: `ids` (was `builds`) and `formats` (was `format`).
-  # The deprecated singular form still works but emits a warning on every
-  # `goreleaser check` and is slated for removal in v3.
   - id: smartrouter
     ids:
       - smartrouter
     formats:
       - binary
-    name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    # With a single GOAMD64 level (v3) the .Amd64 suffix would land on every
+    # amd64 archive name (smartrouter-v1.0.0-linux-amd64v3). Drop the suffix
+    # clause since v3 is now the standard, not a variant.
+    name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}'
   # Enterprise archive. {{ .Binary }} resolves to `smartrouter-enterprise`
-  # for this build id, so the archive filename naturally encodes the edition
-  # without any template branching.
+  # for this build id, so the archive filename naturally encodes the edition.
   - id: smartrouter-enterprise
     ids:
       - smartrouter-enterprise
     formats:
       - binary
-    name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}'
+
+# dockers_v2 (v2.15+) replaces the per-arch dockers: + docker_manifests:
+# combo with a single block. GoReleaser stages each platform's binary at
+# `linux/<arch>/smartrouter` in the build context, and Dockerfile.release
+# resolves the right one via $TARGETPLATFORM. The multi-arch manifest is
+# created automatically from the platforms list.
+#
+# :latest is guarded on `not .Prerelease` so RC / alpha / beta tags
+# publish their per-version image but do not overwrite the stable
+# :latest pointer (requires release.prerelease: auto, set below).
+#
+# Only the community edition publishes a Docker image. The enterprise
+# binary ships in the release archive but not as a public OCI image —
+# add a second dockers_v2 entry here if that changes.
+dockers_v2:
+  - id: smartrouter
+    ids:
+      - smartrouter
+    images:
+      # OCI image names MUST be lowercase per the OCI spec. Independent of
+      # the GitHub org's `Magma-Devs` casing — the org URL and Go imports
+      # use the capital form; image refs must not.
+      - ghcr.io/magma-devs/smart-router
+    tags:
+      - "{{ .Tag }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    dockerfile: Dockerfile.release
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    # annotations land on the multi-arch manifest (modern OCI surface).
+    # labels are mirrored onto the per-arch image config so older tools
+    # that read `docker inspect --format '{{.Config.Labels}}'` (some
+    # image scanners, ops runbooks) still see the version metadata.
+    annotations:
+      "org.opencontainers.image.created": "{{ .Date }}"
+      "org.opencontainers.image.title": "{{ .ProjectName }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.version": "{{ .Tag }}"
+      "org.opencontainers.image.source": "{{ .GitURL }}"
+    labels:
+      "org.opencontainers.image.created": "{{ .Date }}"
+      "org.opencontainers.image.title": "{{ .ProjectName }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.version": "{{ .Tag }}"
+      "org.opencontainers.image.source": "{{ .GitURL }}"
 
 checksum:
   name_template: "sha256sum.txt"
   algorithm: sha256
 
-changelog:
-  use:
-    github
-  sort: asc
-  groups:
-    - title: Dependency updates
-      regexp: '^.*?(feat|fix|chore)\(deps\)!?:.+$'
-      order: 300
-    - title: "New Features"
-      regexp: '^.*?feat(\(.+\))??!?:.+$'
-      order: 100
-    - title: "Security updates"
-      regexp: '^.*?sec(\(.+\))??!?:.+$'
-      order: 150
-    - title: "Bug fixes"
-      regexp: '^.*?(fix|refactor)(\(.+\))??!?:.+$'
-      order: 200
-    - title: "Documentation updates"
-      regexp: ^.*?docs?(\(.+\))??!?:.+$
-      order: 400
-    - title: "Build process updates"
-      regexp: ^.*?(build|ci)(\(.+\))??!?:.+$
-      order: 400
-    - title: Other work
-      order: 9999
-  filters:
-    exclude:
-      - "^test:"
-      - "^test\\("
-      - "^chore"
-      - "merge conflict"
-      - Merge pull request
-      - Merge remote-tracking branch
-      - Merge branch
-      - go mod tidy
+# No `changelog:` block. The release workflow passes
+# `--release-notes .release-notes/body.md` to goreleaser, which:
+#   1. Uses that file as the entire release body, AND
+#   2. Skips goreleaser's own changelog generation (per the flag's docs).
+#
+# The conventional-commit grouping logic that used to live here is now
+# in scripts/changelog-bump.sh — see RELEASING.md.
+
+# Cosign keyless signing of the checksum file. Requires `id-token: write`
+# in the release workflow and cosign installed on the runner (added by
+# sigstore/cosign-installer in .github/workflows/release.yml). The OIDC
+# token from GitHub Actions is exchanged with Sigstore Fulcio for a
+# short-lived signing certificate — no private key to manage or rotate.
+# Verification recipe is in RELEASING.md.
+signs:
+  - id: cosign-checksums
+    cmd: cosign
+    artifacts: checksum
+    output: true
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - '--output-certificate=${certificate}'
+      - '--output-signature=${signature}'
+      - '${artifact}'
+      - '--yes'
 
 release:
   github:
     owner: Magma-Devs
     name: smart-router
   replace_existing_draft: true
-  name_template: "Smart Router v{{.Version}}"
+  # Just the tag (e.g. `v1.0.0`) — no project-name prefix.
+  name_template: "{{.Tag}}"
   mode: replace
   draft: true
-  prerelease: "true"
+  # `auto` derives prerelease from the tag: vX.Y.Z is a final, vX.Y.Z-*
+  # (e.g. v1.0.0-rc1, v1.0.0-beta.2) is a prerelease. The :latest Docker
+  # tag in the dockers_v2 block is guarded on `not .Prerelease`, so RC
+  # and beta tags don't overwrite the stable :latest pointer.
+  prerelease: auto
+  # The release body is the matching `## <tag>` section of CHANGELOG.md.
+  # The release workflow extracts it with scripts/extract-changelog.sh
+  # and passes the result to goreleaser via `--release-notes`.

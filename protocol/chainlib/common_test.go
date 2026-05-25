@@ -137,6 +137,120 @@ func TestConvertToJsonError(t *testing.T) {
 	}
 }
 
+// TestConvertToJsonRpcError verifies the spec-compliant JSON-RPC 2.0 error
+// envelope: `error` is an Object with code/message, not a stringified envelope.
+// Regression coverage for MAG-1866.
+func TestConvertToJsonRpcError(t *testing.T) {
+	t.Parallel()
+
+	rawErrMsg := `{"Error_GUID":"3789588031954078542","Error":"Selected provider not available {selectedProvider:quicknode1,validProviders:google1,GUID:3789588031954078542}"}`
+	reqBody := []byte(`{"jsonrpc":"2.0","id":42,"method":"engine_getPayloadV3","params":[]}`)
+
+	result := convertToJsonRpcError(rawErrMsg, reqBody)
+
+	var parsed map[string]any
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("result is not valid JSON: %v. Result: %s", err, result)
+	}
+
+	if v, _ := parsed["jsonrpc"].(string); v != "2.0" {
+		t.Errorf("expected jsonrpc=\"2.0\", got %v", parsed["jsonrpc"])
+	}
+	// id must round-trip the request id as a JSON number.
+	if v, _ := parsed["id"].(float64); v != 42 {
+		t.Errorf("expected id=42, got %v (%T)", parsed["id"], parsed["id"])
+	}
+
+	errObj, ok := parsed["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error must be an Object per JSON-RPC 2.0 §5.1, got %T: %v", parsed["error"], parsed["error"])
+	}
+	if code, _ := errObj["code"].(float64); int(code) != -32000 {
+		t.Errorf("expected error.code=-32000, got %v", errObj["code"])
+	}
+	msg, _ := errObj["message"].(string)
+	if msg == "" {
+		t.Errorf("error.message must be a non-empty string, got %v", errObj["message"])
+	}
+	if !strings.Contains(msg, "Selected provider not available") {
+		t.Errorf("error.message should preserve inner error context, got %q", msg)
+	}
+	data, ok := errObj["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("error.data must be an Object, got %T", errObj["data"])
+	}
+	if g, _ := data["guid"].(string); g != "3789588031954078542" {
+		t.Errorf("expected data.guid to be preserved, got %v", data["guid"])
+	}
+}
+
+// TestConvertToJsonRpcError_FallbackOnUnparseable verifies that when the raw
+// error message is not the expected GetUniqueGuidResponseForError shape, the
+// envelope still passes JSON-RPC 2.0 validation.
+func TestConvertToJsonRpcError_FallbackOnUnparseable(t *testing.T) {
+	t.Parallel()
+
+	result := convertToJsonRpcError("plain text error, not JSON", []byte(`{}`))
+	var parsed map[string]any
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+	errObj, ok := parsed["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error must be an Object, got %T", parsed["error"])
+	}
+	if int(errObj["code"].(float64)) != -32000 {
+		t.Errorf("expected error.code=-32000, got %v", errObj["code"])
+	}
+	if msg, _ := errObj["message"].(string); msg != "plain text error, not JSON" {
+		t.Errorf("expected raw message to pass through, got %q", msg)
+	}
+	// id absent in request body → null in response (still spec-valid).
+	if v, exists := parsed["id"]; !exists || v != nil {
+		t.Errorf("expected id=null when request has no id, got %v", v)
+	}
+}
+
+// TestConvertToJsonRpcError_MaskedModeOmitsErrorField covers the
+// ReturnMaskedErrors=true path where GetUniqueGuidResponseForError elides
+// the Error field via ,omitempty. Without the masked-mode branch in the
+// helper, error.message would surface the raw `{"Error_GUID":"..."}`
+// envelope — defeating the spec-compliance goal one layer in.
+func TestConvertToJsonRpcError_MaskedModeOmitsErrorField(t *testing.T) {
+	t.Parallel()
+
+	// Masked-mode envelope: Error_GUID only, Error elided by ,omitempty.
+	rawErrMsg := `{"Error_GUID":"3789588031954078542"}`
+	reqBody := []byte(`{"jsonrpc":"2.0","id":42,"method":"engine_getPayloadV3","params":[]}`)
+
+	result := convertToJsonRpcError(rawErrMsg, reqBody)
+
+	var parsed map[string]any
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("result is not valid JSON: %v. Result: %s", err, result)
+	}
+
+	errObj, ok := parsed["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error must be an Object, got %T", parsed["error"])
+	}
+	msg, _ := errObj["message"].(string)
+	if msg == "" {
+		t.Errorf("error.message must be non-empty")
+	}
+	if strings.Contains(msg, "Error_GUID") || strings.Contains(msg, "{") {
+		t.Errorf("error.message must not leak the raw JSON envelope under masking; got %q", msg)
+	}
+	// data.guid is still useful debugging info even when message is generic.
+	data, ok := errObj["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("error.data must be an Object, got %T", errObj["data"])
+	}
+	if g, _ := data["guid"].(string); g != "3789588031954078542" {
+		t.Errorf("expected data.guid to be preserved under masking, got %v", data["guid"])
+	}
+}
+
 func TestAddAttributeToError(t *testing.T) {
 	t.Parallel()
 

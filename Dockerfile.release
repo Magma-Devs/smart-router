@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+#
+# Release runtime image. GoReleaser builds the smartrouter binary via the
+# `builds:` block in .goreleaser.yaml and stages every target's binary
+# into this Dockerfile's build context under `<os>/<arch>/smartrouter`.
+# $TARGETPLATFORM (e.g. linux/amd64, linux/arm64) selects the right one
+# at docker buildx time.
+#
+# The standalone binary attached to the GitHub Release and the binary
+# inside this image are produced by the same `go build` invocation —
+# same toolchain, same flags, byte-identical.
+
+ARG RUNNER_IMAGE="gcr.io/distroless/static-debian12:debug"
+FROM ${RUNNER_IMAGE}
+
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/smartrouter /bin/smart-router
+
+ENV HOME=/smart-router
+WORKDIR $HOME
+
+# smart router listener
+EXPOSE 3360
+# metrics
+EXPOSE 7779
+
+ENTRYPOINT ["/bin/smart-router"]

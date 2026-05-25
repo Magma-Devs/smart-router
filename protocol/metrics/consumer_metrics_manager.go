@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/Magma-Devs/smart-router/utils"
 	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -689,6 +690,15 @@ func (pme *ConsumerMetricsManager) ResetBlockedProvidersMetrics(chainId, apiInte
 	}
 }
 
+// SetCSMBlockedProvidersCount is a no-op on the legacy ConsumerMetricsManager.
+// The CSM state-store gauges are exposed by SmartRouterMetricsManager only
+// (MAG-1762); this stub exists solely so the type still satisfies
+// ConsumerMetricsManagerInf for the WebSocket subscription manager tests.
+func (pme *ConsumerMetricsManager) SetCSMBlockedProvidersCount(string, string, int)       {}
+func (pme *ConsumerMetricsManager) SetCSMBlockedBackupProvidersCount(string, string, int) {}
+func (pme *ConsumerMetricsManager) SetCSMStickySessionsCount(string, string, int)         {}
+func (pme *ConsumerMetricsManager) SetCSMReportedProvidersCount(string, string, int)      {}
+
 func (pme *ConsumerMetricsManager) SetVersion(version string) {
 	if pme == nil {
 		return
@@ -697,8 +707,14 @@ func (pme *ConsumerMetricsManager) SetVersion(version string) {
 }
 
 func SetVersionInner(protocolVersionMetric *prometheus.GaugeVec, version string) {
+	// Normalize git-describe style: strip leading "v" and drop everything from the first "-" or "+".
+	// Examples: "v6.2.2" → "6.2.2", "v6.2.2-3-gabc1234-dirty" → "6.2.2".
+	cleaned := strings.TrimPrefix(version, "v")
+	if i := strings.IndexAny(cleaned, "-+"); i >= 0 {
+		cleaned = cleaned[:i]
+	}
 	var major, minor, patch int
-	_, err := fmt.Sscanf(version, "%d.%d.%d", &major, &minor, &patch)
+	_, err := fmt.Sscanf(cleaned, "%d.%d.%d", &major, &minor, &patch)
 	if err != nil {
 		utils.LavaFormatError("Failed parsing version at metrics manager", err, utils.LogAttr("version", version))
 		protocolVersionMetric.WithLabelValues("version").Set(0)

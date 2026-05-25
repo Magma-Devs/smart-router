@@ -337,3 +337,63 @@ func TestJSONRPCID(t *testing.T) {
 		t.Errorf("Expected %q, but got %q", expected, intID.String())
 	}
 }
+
+// TestTendermintrpcMessage_CheckResponseError mirrors the JSON-RPC envelope
+// checks for malformed/missing-fields detection while preserving the
+// Tendermint-specific inner-error inspection on
+// {"result":{"response":{"code":N,"log":M}}}.
+func TestTendermintrpcMessage_CheckResponseError(t *testing.T) {
+	tm := TendermintrpcMessage{}
+
+	t.Run("truncated_body", func(t *testing.T) {
+		hasError, msg := tm.CheckResponseError([]byte(`{"jsonrpc":"2.0","id":1,"resu`), 200)
+		require.True(t, hasError)
+		require.Contains(t, msg, "malformed Tendermint RPC response")
+	})
+
+	t.Run("missing_both_result_and_error", func(t *testing.T) {
+		hasError, msg := tm.CheckResponseError([]byte(`{"jsonrpc":"2.0","id":1}`), 200)
+		require.True(t, hasError)
+		require.Contains(t, msg, "missing both 'result' and 'error'")
+	})
+
+	t.Run("envelope_error_with_message", func(t *testing.T) {
+		hasError, msg := tm.CheckResponseError(
+			[]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`),
+			200,
+		)
+		require.True(t, hasError)
+		require.Equal(t, "method not found", msg)
+	})
+
+	t.Run("inner_tendermint_error_surfaces_log", func(t *testing.T) {
+		// The Tendermint-specific embedded-error shape — must be preserved.
+		data := []byte(`{"jsonrpc":"2.0","id":1,"result":{"response":{"code":5,"log":"insufficient fees"}}}`)
+		hasError, msg := tm.CheckResponseError(data, 200)
+		require.True(t, hasError, "non-zero inner code must surface")
+		require.Equal(t, "insufficient fees", msg)
+	})
+
+	t.Run("inner_tendermint_code_zero_is_success", func(t *testing.T) {
+		data := []byte(`{"jsonrpc":"2.0","id":1,"result":{"response":{"code":0,"log":""}}}`)
+		hasError, _ := tm.CheckResponseError(data, 200)
+		require.False(t, hasError)
+	})
+
+	t.Run("plain_result_no_inner_response_is_success", func(t *testing.T) {
+		data := []byte(`{"jsonrpc":"2.0","id":1,"result":{"block_height":"12345"}}`)
+		hasError, _ := tm.CheckResponseError(data, 200)
+		require.False(t, hasError)
+	})
+
+	t.Run("null_result_is_success", func(t *testing.T) {
+		hasError, _ := tm.CheckResponseError([]byte(`{"jsonrpc":"2.0","id":1,"result":null}`), 200)
+		require.False(t, hasError)
+	})
+
+	t.Run("error_null_and_no_result_is_malformed", func(t *testing.T) {
+		hasError, msg := tm.CheckResponseError([]byte(`{"jsonrpc":"2.0","id":1,"error":null}`), 200)
+		require.True(t, hasError)
+		require.Contains(t, msg, "missing both 'result' and 'error'")
+	})
+}

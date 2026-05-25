@@ -18,7 +18,7 @@ import (
 	"github.com/Magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	dyncodec "github.com/Magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
 	"github.com/Magma-Devs/smart-router/protocol/parser"
-	protocoltypes "github.com/Magma-Devs/smart-router/types/protocol"
+	"github.com/Magma-Devs/smart-router/version"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -58,6 +58,48 @@ type GrpcChainParser struct {
 // NewGrpcChainParser creates a new instance of GrpcChainParser
 func NewGrpcChainParser() (chainParser *GrpcChainParser, err error) {
 	return &GrpcChainParser{}, nil
+}
+
+// cloneForValidation returns a *GrpcChainParser with isolated registry/codec
+// fields so callers (one-shot verification flows) can safely pass the result
+// into NewGrpcChainProxy → setupForProvider without mutating the live parser.
+//
+// Read-only-after-init data on BaseChainParser is aliased — including the
+// inner contents of `spec` (a protobuf with nested slices/maps), which is
+// copied by value but whose nested fields remain shared. This is sound only
+// because the live serving path treats spec as immutable post-init; the rare
+// SetSpec / SetPolicy / UpdateBlockTime mutators run at init or at known
+// quiescent moments.
+//
+// The new BaseChainParser is constructed via struct literal, so its rwLock
+// is a fresh zero-value — no mutex is copied. Note the trade-off: because the
+// clone has a *separate* mutex from the live parser, the two cannot
+// synchronize. If a live-path SetSpec / UpdateBlockTime were to race with a
+// validation reader on the clone, the clone could observe a torn write of
+// nested spec fields. We accept that risk since the alternative — sharing the
+// parser instance — corrupts the live registry/codec when validation's bounded
+// context is cancelled, panicking gRPC relays on a nil connector.
+//
+// registry/codec are aliased initially; setupForProvider on the clone will
+// replace the *clone's* fields, leaving the live parser untouched.
+func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
+	return &GrpcChainParser{
+		BaseChainParser: BaseChainParser{
+			internalPaths:     apip.internalPaths,
+			taggedApis:        apip.taggedApis,
+			spec:              apip.spec,
+			serverApis:        apip.serverApis,
+			apiCollections:    apip.apiCollections,
+			headers:           apip.headers,
+			verifications:     apip.verifications,
+			allowedAddons:     apip.allowedAddons,
+			allowedExtensions: apip.allowedExtensions,
+			extensionParser:   apip.extensionParser,
+			active:            apip.active,
+		},
+		registry: apip.registry,
+		codec:    apip.codec,
+	}
 }
 
 func (bcp *GrpcChainParser) GetUniqueName() string {
@@ -234,6 +276,7 @@ type GrpcChainListener struct {
 	chainParser      *GrpcChainParser
 	healthReporter   HealthReporter
 	listeningAddress string
+	httpServer       *http.Server // captured during Serve so Shutdown can call httpServer.Shutdown
 }
 
 func NewGrpcChainListener(
@@ -321,6 +364,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	if err != nil {
 		utils.LavaFormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
 	}
+	apil.httpServer = httpServer
 
 	// setup chain parser
 	apil.chainParser.setupForConsumer(sendRelayCallback)
@@ -342,13 +386,13 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}
 
 	fmt.Printf(`
- ┌───────────────────────────────────────────────────┐ 
- │               Lava's Grpc Server                  │ 
- │               %s│ 
- │               Lavap Version: %s│ 
+ ┌───────────────────────────────────────────────────┐
+ │               Lava's Grpc Server                  │
+ │               %s│
+ │               Version: %s│
  └───────────────────────────────────────────────────┘
 
-`, truncateAndPadString(apil.endpoint.NetworkAddress, 36), truncateAndPadString(protocoltypes.DefaultVersion.ConsumerTarget, 21))
+`, truncateAndPadString(apil.endpoint.NetworkAddress, 36), truncateAndPadString(version.Version, 27))
 	if err := serveExecutor(); !errors.Is(err, http.ErrServerClosed) {
 		utils.LavaFormatFatal("Portal failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr()}, utils.Attribute{Key: "ChainID", Value: apil.endpoint.ChainID})
 	}
@@ -599,4 +643,15 @@ func marshalJSON(msg proto.Message) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	err := (&jsonpb.Marshaler{}).Marshal(buf, msg)
 	return buf.Bytes(), err
+}
+
+// Shutdown drains in-flight gRPC unary requests and closes the listener.
+// http.Server.Shutdown sends HTTP/2 GOAWAY frames automatically — that is
+// the gRPC "going away" equivalent for streaming clients (the smart router's
+// gRPC API is currently unary-only, so no client streams exist to drain).
+func (apil *GrpcChainListener) Shutdown(ctx context.Context) error {
+	if apil == nil || apil.httpServer == nil {
+		return nil
+	}
+	return apil.httpServer.Shutdown(ctx)
 }

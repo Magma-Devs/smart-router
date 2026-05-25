@@ -203,6 +203,7 @@ type RelayerCacheClient interface {
 	GetRelay(ctx context.Context, in *RelayCacheGet, opts ...grpc.CallOption) (*CacheRelayReply, error)
 	SetRelay(ctx context.Context, in *RelayCacheSet, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Health(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*CacheUsage, error)
+	FlushCache(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 // RelayerCacheServer is the server API for the RelayerCache service.
@@ -210,6 +211,9 @@ type RelayerCacheServer interface {
 	GetRelay(context.Context, *RelayCacheGet) (*CacheRelayReply, error)
 	SetRelay(context.Context, *RelayCacheSet) (*emptypb.Empty, error)
 	Health(context.Context, *emptypb.Empty) (*CacheUsage, error)
+	// FlushCache drops every entry across the cache server's stores. Intended
+	// for /debug/reset-all on the smart router; never called on the hot path.
+	FlushCache(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 }
 
 // UnimplementedRelayerCacheServer must be embedded to satisfy RelayerCacheServer
@@ -226,6 +230,10 @@ func (UnimplementedRelayerCacheServer) SetRelay(_ context.Context, _ *RelayCache
 
 func (UnimplementedRelayerCacheServer) Health(_ context.Context, _ *emptypb.Empty) (*CacheUsage, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Health not implemented")
+}
+
+func (UnimplementedRelayerCacheServer) FlushCache(_ context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FlushCache not implemented")
 }
 
 // relayerCacheClient wraps a grpc.ClientConnInterface for the RelayerCache service.
@@ -259,6 +267,15 @@ func (c *relayerCacheClient) SetRelay(ctx context.Context, in *RelayCacheSet, op
 func (c *relayerCacheClient) Health(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*CacheUsage, error) {
 	out := new(CacheUsage)
 	err := c.cc.Invoke(ctx, "/lavanet.lava.pairing.RelayerCache/Health", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayerCacheClient) FlushCache(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, "/lavanet.lava.pairing.RelayerCache/FlushCache", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -324,6 +341,24 @@ func _RelayerCache_Health_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RelayerCache_FlushCache_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayerCacheServer).FlushCache(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/lavanet.lava.pairing.RelayerCache/FlushCache",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayerCacheServer).FlushCache(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var _RelayerCache_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "lavanet.lava.pairing.RelayerCache",
 	HandlerType: (*RelayerCacheServer)(nil),
@@ -339,6 +374,10 @@ var _RelayerCache_serviceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Health",
 			Handler:    _RelayerCache_Health_Handler,
+		},
+		{
+			MethodName: "FlushCache",
+			Handler:    _RelayerCache_FlushCache_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

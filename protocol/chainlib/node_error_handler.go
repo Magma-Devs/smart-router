@@ -49,6 +49,28 @@ func NewSolanaNonRetryableError(err error) error {
 // downstream classification relies on the structured JSON-RPC code.
 //
 // Falls back to (0, err.Error()) when none of the above apply.
+//
+// MAG-1666 — HTTP status digits must reach the classifier
+// -------------------------------------------------------
+// Step 1 returns the JSON-RPC body's code and message, which is correct when
+// the body carries a standard JSON-RPC error code (e.g. -32601 method not
+// found in an HTTP 200 reply). But some upstreams (geth/erigon/nethermind
+// when their own HTTP layer rejects the request, and L7 proxies configured
+// to emit JSON error pages) return HTTP 4xx/5xx with a JSON-RPC error body
+// whose code is meaningless (-1, 0, or a vendor-specific number). For those,
+// the HTTPStatusContains(N) classifier rules in error_classifier.go are the
+// authoritative source of the retry/non-retry verdict — but they only fire
+// when the digits "N" appear in the synthesised errorMessage.
+//
+// We therefore prefix "HTTP <status>: " when the wrapped error is an
+// rpcclient.HTTPError with a non-2xx status. The body's JSON-RPC code is
+// still returned as errorCode, so Tier-1 CodeEquals matchers (e.g.
+// CodeEquals(-32601)) still win when they're applicable — they're evaluated
+// before HTTPStatusContains. The prefix only changes the outcome for
+// generic/unknown body codes where the HTTPStatusContains predicate is
+// supposed to drive classification but currently sees a message without
+// the digit. See BUGS/JIRA_DRAFT_HTTP_404_CLASSIFIER_BUG.md and
+// BUGS/JIRA_DRAFT_HTTP_413_CLASSIFIER_BUG.md in smart-router-automation.
 func ExtractNodeErrorDetails(nodeError error) (errorCode int, errorMessage string) {
 	errorMessage = nodeError.Error()
 
@@ -56,6 +78,16 @@ func ExtractNodeErrorDetails(nodeError error) (errorCode int, errorMessage strin
 	if jsonMsg := TryRecoverNodeErrorFromClientError(nodeError); jsonMsg != nil && jsonMsg.Error != nil {
 		if jsonMsg.Error.Message != "" {
 			errorMessage = jsonMsg.Error.Message
+		}
+		// When the wrapping HTTPError carries a non-2xx status, prepend it
+		// so HTTPStatusContains(N) can fire. CodeEquals matchers run before
+		// HTTPStatusContains, so a real JSON-RPC code like -32601 still
+		// wins; the prefix only affects generic body codes (-1, 0, vendor-
+		// specific) where the HTTP status is the authoritative signal.
+		if httpError, ok := nodeError.(rpcclient.HTTPError); ok {
+			if httpError.StatusCode < 200 || httpError.StatusCode >= 300 {
+				errorMessage = fmt.Sprintf("HTTP %d: %s", httpError.StatusCode, errorMessage)
+			}
 		}
 		return jsonMsg.Error.Code, errorMessage
 	}

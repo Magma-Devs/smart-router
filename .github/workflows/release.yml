@@ -16,11 +16,11 @@ permissions:
 jobs:
   # Sprint 5 review — pre-publish verification gate.
   #
-  # Both `release` and `release_docker` depend on this job. It reproduces the
-  # same checks the PR-time `Build and Test` workflow runs, but on the tagged
-  # commit that goreleaser is about to ship. Catches: an enterprise-only
-  # symbol leaking into the community binary, a forbidden constructor call,
-  # a goreleaser config that drifted out of sync.
+  # `release` depends on this job. It reproduces the same checks the PR-time
+  # `Build and Test` workflow runs, but on the tagged commit that goreleaser
+  # is about to ship. Catches: an enterprise-only symbol leaking into the
+  # community binary, a forbidden constructor call, a goreleaser config
+  # that drifted out of sync.
   #
   # No matrix — `make test-both`, `make verify-binaries`, and goreleaser
   # check each handle both editions internally.
@@ -49,7 +49,8 @@ jobs:
       - name: GoReleaser config validation
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          distribution: goreleaser
+          version: '~> v2'
           args: check
 
   release:
@@ -58,76 +59,197 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
+      # `contents: write` lets the workflow do two things: push the
+      # auto-generated CHANGELOG.md commit back to `main`, and publish
+      # the draft GitHub release via goreleaser.
       contents: write
-
-    steps:
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
-      with:
-        large-packages: false
-        docker-images: false
-        swap-storage: false
-        tool-cache: false
-
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        ref: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}
-
-    - name: Fetch all tags
-      run: |
-        git fetch --force --tags
-
-    - name: Run GoReleaser
-      id: releaser
-      uses: docker://goreleaser/goreleaser-cross:v1.22
-      with:
-        args: release --clean --timeout 90m
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  release_docker:
-    needs: [verify]
-    permissions:
-      # GitHub Actions REPLACES (does not merge) workflow-level permissions
-      # with job-level permissions. Restating contents:read here is required —
-      # without it, actions/checkout below has no access to the repo.
-      contents: read
+      # GHCR push for the dockers_v2 block in .goreleaser.yaml.
       packages: write
-    runs-on: ubuntu-latest
+      # Required so cosign can request an OIDC token from GitHub Actions
+      # and exchange it with Sigstore Fulcio for a short-lived signing
+      # certificate (keyless signing). See `signs:` in .goreleaser.yaml.
+      id-token: write
+      # `pull-requests: read` lets the GITHUB_TOKEN call
+      # `GET /repos/{owner}/{repo}/commits/{sha}/pulls`, which the
+      # bumper uses (via GH_TOKEN) to attach a [#N] PR link to each
+      # bullet whose subject doesn't already carry a `(#N)` suffix.
+      # Without this scope, the API silently returns empty results
+      # and only the subject-extracted PR refs appear in the changelog.
+      pull-requests: read
+
     env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: "Magma-Devs/smart-router"
+      # The pushed tag (e.g. v1.0.0) for tag-push triggers, or the
+      # release_tag input for workflow_dispatch. Used by every step that
+      # needs the version: bumper, extract, commit message.
+      RELEASE_VERSION: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}
+
     steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+          tool-cache: false
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}
+          # Use a fine-grained PAT (RELEASE_BOT_PAT secret) for the
+          # CHANGELOG-back-to-main push later in this job. The default
+          # GITHUB_TOKEN gets rejected by `main`'s PR-required branch
+          # protection. The PAT owner must be in `main`'s bypass list
+          # (Settings → Branches → main → "Allow specified actors to
+          # bypass required pull requests"). See RELEASING.md.
+          #
+          # Setting `token:` here configures git credentials for every
+          # subsequent step in this job, so `git push origin HEAD:main`
+          # uses the PAT automatically.
+          token: ${{ secrets.RELEASE_BOT_PAT }}
+
+      - name: Fetch all tags
+        run: git fetch --force --tags
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Log into registry ${{ env.REGISTRY }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Log into GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
+
+      # Auto-generate the CHANGELOG.md entry for this tag. Calls Gemini
+      # Flash via scripts/changelog-ai.sh for the Highlights paragraph,
+      # then groups the commits since the previous v*.*.* tag into the
+      # Changes section. If GEMINI_API_KEY isn't set, the script falls
+      # back to a TODO placeholder for Highlights and keeps going.
+      #
+      # If the section already exists (workflow re-run for the same
+      # tag), the bumper would refuse — so we detect that here and
+      # skip the generate + commit steps. The existing CHANGELOG.md
+      # section is still used for the release body in the extract step
+      # below.
+      - name: Generate CHANGELOG.md entry
+        id: generate
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # GH_TOKEN lets the bumper look up the PR associated with each
+          # commit via `GET /commits/{sha}/pulls`. Default GITHUB_TOKEN
+          # has the required read access and isn't rate-limited (5000/hr).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v_re=$(printf '%s' "$RELEASE_VERSION" | sed -e 's/[][().*+?^$\|/]/\\&/g')
+          if grep -qE "^## ${v_re}( |\$)" CHANGELOG.md 2>/dev/null; then
+            echo "CHANGELOG.md already has a section for ${RELEASE_VERSION} — skipping bumper"
+            echo "did_generate=false" >> "$GITHUB_OUTPUT"
+          else
+            VERSION="$RELEASE_VERSION" AI=1 EDIT=0 scripts/changelog-bump.sh
+            echo "did_generate=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "--- CHANGELOG.md head ---"
+          head -40 CHANGELOG.md
+
+      # Bump the static "release-vX.Y.Z" badge in README.md to the new
+      # version. Static (not the shields.io GitHub-release endpoint)
+      # because that endpoint reads /releases/latest unauthenticated,
+      # which fails on private repos. So we maintain the version in
+      # the URL ourselves and resync it from the release workflow.
+      #
+      # Only runs for FINAL releases (vX.Y.Z with no -rc/-beta/etc
+      # suffix). Prereleases shouldn't move the "release" badge in
+      # README — it's meant to indicate the latest production version.
+      - name: Update README release badge (final releases only)
+        id: badge
+        run: |
+          if [[ "${RELEASE_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            sed -i -E "s|release-v[0-9]+\.[0-9]+\.[0-9]+-brightgreen|release-${RELEASE_VERSION}-brightgreen|" README.md
+            if git diff --quiet README.md; then
+              echo "Badge already at ${RELEASE_VERSION} (or pattern not found)"
+              echo "did_update=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "Bumped release badge to ${RELEASE_VERSION}"
+              echo "did_update=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "Prerelease tag (${RELEASE_VERSION}) — skipping badge update"
+            echo "did_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Extract the matching `## <tag>` section from CHANGELOG.md into
+      # a standalone file BEFORE the commit-to-main step. That step
+      # ends with `git checkout ${tag_commit}` to return HEAD to the
+      # tag — which resets the working tree's CHANGELOG.md back to its
+      # pre-bumper state. Extracting first means we capture the new
+      # section while it's still in the working tree.
+      #
+      # `.release-notes/` is gitignored, so the file survives the later
+      # `git checkout` without affecting goreleaser's clean-tree check.
+      # Lives outside `dist/` because goreleaser refuses to start when
+      # `dist/` is non-empty after `--clean`.
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          mkdir -p .release-notes
+          scripts/extract-changelog.sh "$RELEASE_VERSION" > .release-notes/body.md
+          echo "--- extracted release body ---"
+          head -20 .release-notes/body.md
+
+      # Push the release-time bookkeeping changes (CHANGELOG section,
+      # README release badge) back to `main` as a single commit, then
+      # return HEAD to the tag so goreleaser builds at the exact tagged
+      # commit (not at main+1).
+      #
+      # Runs after extract on purpose — see the comment on the extract
+      # step. The `git checkout ${tag_commit}` at the end resets the
+      # working tree, which is why extract must come first.
+      #
+      # The push is fast-forward-only. If `main` has moved past the tag
+      # between tag-push and workflow-run, this step fails — that's
+      # intentional, manual intervention required.
+      #
+      # Branch protection caveat: see RELEASING.md (`RELEASE_BOT_PAT`).
+      - name: Commit release-time updates to main
+        if: ${{ steps.generate.outputs.did_generate == 'true' || steps.badge.outputs.did_update == 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          tag_commit=$(git rev-parse HEAD)
+          git checkout -b release-update
+          git add CHANGELOG.md README.md
+          git commit -m "chore(release): bump artifacts for ${RELEASE_VERSION}
+
+          Auto-generated by .github/workflows/release.yml on tag push."
+          # Fast-forward push only — fails if main has new commits.
+          git push origin HEAD:main
+          # Return HEAD to the tagged commit so goreleaser builds at
+          # the tag, not at main+1.
+          git checkout "${tag_commit}"
+
+      # GoReleaser does community + enterprise builds, archives, cosign
+      # signing, AND the multi-arch Docker push (via dockers_v2 in
+      # .goreleaser.yaml). No separate `release_docker` job is needed.
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            GIT_VERSION="${{ steps.meta.outputs.version }}"
-            GIT_COMMIT="${{ github.sha }}"
-          push: true
+          distribution: goreleaser
+          version: '~> v2'
+          # --release-notes makes the file contents the entire release
+          # body and disables goreleaser's own changelog generation.
+          args: release --clean --timeout 90m --release-notes .release-notes/body.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

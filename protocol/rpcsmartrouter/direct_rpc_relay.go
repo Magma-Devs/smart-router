@@ -18,6 +18,7 @@ import (
 	"github.com/Magma-Devs/smart-router/protocol/common"
 	"github.com/Magma-Devs/smart-router/protocol/lavasession"
 	"github.com/Magma-Devs/smart-router/protocol/parser"
+	"github.com/Magma-Devs/smart-router/protocol/tracing"
 	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 	"github.com/Magma-Devs/smart-router/utils"
 )
@@ -330,12 +331,19 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		ContentType: "application/json",
 	}
 
+	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendJSONRPCRelay)
+	defer span.End()
+	tracing.RecordHTTPRequest(span, httpParams.Method, httpParams.URL)
+	httpParams.Headers = tracing.InjectHTTP(requestCtx, httpParams.Headers)
+
 	// STEP 3: Send request using DoHTTPRequest (returns headers + body)
 	startTime := time.Now()
 	response, err := httpDoer.DoHTTPRequest(requestCtx, httpParams)
 	latency := time.Since(startTime)
+	tracing.RecordHTTPResponse(span, response)
 
 	if err != nil {
+		tracing.RecordError(span, err)
 		utils.LavaFormatDebug("direct RPC request failed",
 			utils.LogAttr("endpoint", endpointIdentifier),
 			utils.LogAttr("protocol", d.directConnection.GetProtocol()),
@@ -369,6 +377,25 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		utils.LogAttr("status_code", statusCode),
 		utils.LogAttr("response_size", len(responseData)),
 	)
+
+	// Transport-level malformed detection. A JSON-RPC upstream that responds
+	// with 2xx + a body that fails json.Valid (truncated bytes, corrupted
+	// content) is classified as a transport failure here so it flows through
+	// the same retry/MarkUnhealthy plumbing as a connection RST or EOF — and
+	// gets attributed as a ProtocolError in dashboards rather than a node
+	// error. Schema-level malformation (well-formed JSON missing required
+	// fields) is detected later by CheckResponseError on the node-error path.
+	if statusCode >= 200 && statusCode < 300 && len(responseData) > 0 && !json.Valid(responseData) {
+		utils.LavaFormatDebug("direct RPC response is not valid JSON",
+			utils.LogAttr("endpoint", endpointIdentifier),
+			utils.LogAttr("status_code", statusCode),
+			utils.LogAttr("response_size", len(responseData)),
+		)
+		return nil, classifyAndWrap(
+			fmt.Errorf("malformed JSON-RPC response: body is not valid JSON"),
+			d.chainFamily, common.TransportJsonRPC,
+		)
+	}
 
 	// STEP 4: Check response for errors using chainMessage (with actual HTTP status)
 	hasError, errorMessage := chainMessage.CheckResponseError(responseData, statusCode)
@@ -415,7 +442,45 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		if jsonrpcCode := common.ExtractJSONRPCErrorCode(responseData); jsonrpcCode != 0 {
 			errorCode = jsonrpcCode
 		}
-		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, errorCode, errorMessage)
+		// MAG-1666 — HTTP status digits must reach the classifier.
+		// When the upstream returned a non-2xx HTTP status, prepend the
+		// status to the classifier message so HTTPStatusContains(N) rules
+		// (error_classifier.go::httpStatusMessageMappings) can fire. The
+		// body's JSON-RPC code still wins via CodeEquals priority — those
+		// matchers run before any message-based matcher — so a meaningful
+		// JSON-RPC code like -32601 continues to classify the same way.
+		// The prefix only changes the verdict for HTTP 4xx/5xx responses
+		// that carry a JSON-RPC body with a generic/vendor code where the
+		// HTTP status is the authoritative signal.
+		classifierMessage := errorMessage
+		if statusCode < 200 || statusCode >= 300 {
+			classifierMessage = fmt.Sprintf("HTTP %d: %s", statusCode, errorMessage)
+		}
+		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, errorCode, classifierMessage)
+
+		// MAG-1870 — HTTP status must be authoritative for 4xx-class transport
+		// errors. The single-pass classification above iterates matchers in
+		// declaration order: code-based matchers first, message-based after.
+		// When the body carries a registered RETRYABLE code (e.g. -32603
+		// NODE_INTERNAL_ERROR, -32000 NODE_SERVER_ERROR) AND the upstream
+		// returned a non-retryable HTTP status (404/405/413), the body-code
+		// matcher fires first and HTTPStatusContains never runs — so the
+		// retryable body code masks the non-retryable HTTP verdict and the
+		// router retries pointlessly.
+		//
+		// A second classification pass with the raw HTTP statusCode as the
+		// errorCode resolves the conflict: when the HTTP layer says the
+		// upstream rejected the request shape itself (not a node-internal
+		// hiccup), trust that verdict. We only escalate to non-retryable —
+		// never demote — so 2xx body errors keep their existing semantics
+		// and 5xx (which already map to retryable LavaErrors) are unaffected.
+		//
+		// The statusCode != errorCode guard skips the redundant pass in the
+		// bare-body fallback case where ExtractJSONRPCErrorCode returned 0
+		// and the first pass already ran with errorCode = statusCode.
+		if !result.IsNonRetryable && (statusCode < 200 || statusCode >= 300) && statusCode != errorCode {
+			result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
+		}
 	}
 
 	return result, nil
@@ -470,6 +535,11 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	}
 
 	// Send request
+	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendRESTRelay)
+	defer span.End()
+	tracing.RecordHTTPRequest(span, httpMethod, fullURL)
+	headers = tracing.InjectHTTP(requestCtx, headers)
+
 	startTime := time.Now()
 	response, err := httpDoer.DoHTTPRequest(requestCtx, lavasession.HTTPRequestParams{
 		Method:      httpMethod,
@@ -479,10 +549,30 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		ContentType: "application/json",
 	})
 	latency := time.Since(startTime)
+	tracing.RecordHTTPResponse(span, response)
 
 	// Handle transport errors
 	if err != nil {
+		tracing.RecordError(span, err)
 		return nil, classifyAndWrap(err, d.chainFamily, common.TransportREST)
+	}
+
+	// Transport-level malformed detection for REST 2xx responses. Unlike
+	// JSON-RPC, REST endpoints can legitimately return non-JSON content
+	// (plain text, binary), so we gate on "body opens with `{` or `[`"
+	// before invoking json.Valid — a body that looks like JSON but isn't
+	// parseable is treated as a transport failure (truncated bytes or
+	// corrupted upstream encoder).
+	if response.StatusCode >= 200 && response.StatusCode < 300 && looksLikeJSONOpening(response.Body) && !json.Valid(response.Body) {
+		utils.LavaFormatDebug("direct REST response opens as JSON but is not valid",
+			utils.LogAttr("endpoint", d.endpointName),
+			utils.LogAttr("status_code", response.StatusCode),
+			utils.LogAttr("response_size", len(response.Body)),
+		)
+		return nil, classifyAndWrap(
+			fmt.Errorf("malformed REST response: body is not valid JSON"),
+			d.chainFamily, common.TransportREST,
+		)
 	}
 
 	// Proper error classification (don't treat all 4xx as node errors)
@@ -601,11 +691,18 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	)
 
 	// Send gRPC request via DirectRPCConnection
+	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendGRPCRelay)
+	defer span.End()
+	tracing.RecordGRPCRequest(span, methodPath, d.directConnection.GetURL())
+	tracing.InjectGRPC(requestCtx, headers)
+
 	startTime := time.Now()
 	response, err := d.directConnection.SendRequest(requestCtx, requestData, headers)
 	latency := time.Since(startTime)
+	tracing.RecordGRPCResponse(span, response)
 
 	if err != nil {
+		tracing.RecordError(span, err)
 		utils.LavaFormatDebug("direct gRPC request failed",
 			utils.LogAttr("endpoint", endpointIdentifier),
 			utils.LogAttr("method", methodPath),
@@ -724,6 +821,24 @@ func joinURLPath(base, path string) (string, error) {
 
 	// Relative path: use ResolveReference (handles ., .., query params)
 	return baseURL.ResolveReference(pathURL).String(), nil
+}
+
+// looksLikeJSONOpening returns true when the first non-whitespace byte of
+// data is a JSON structural opener ('{' or '['). Used to skip JSON validity
+// checks on REST endpoints that legitimately return non-JSON content (plain
+// text, binary) so they don't get false-flagged as malformed.
+func looksLikeJSONOpening(data []byte) bool {
+	for _, b := range data {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // convertHTTPHeadersToMetadata converts http.Header to pairingtypes.Metadata

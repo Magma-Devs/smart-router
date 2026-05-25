@@ -5,8 +5,8 @@ import (
 	"time"
 
 	metrics "github.com/Magma-Devs/smart-router/protocol/metrics"
-	"github.com/Magma-Devs/smart-router/utils"
 	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
+	"github.com/Magma-Devs/smart-router/utils"
 )
 
 const (
@@ -96,6 +96,14 @@ func (rp *ReportedProviders) IsReported(address string) bool {
 	defer rp.lock.RUnlock()
 	_, ok := rp.addedToPurgeAndReport[address]
 	return ok
+}
+
+// Len returns the current number of providers in the unresponsiveness register.
+// Used by the CSM state-size gauge publisher (MAG-1762).
+func (rp *ReportedProviders) Len() int {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return len(rp.addedToPurgeAndReport)
 }
 
 type reconnectCandidate struct {

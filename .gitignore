@@ -61,6 +61,10 @@ config/health_examples/health_template_gen.yml
 **/dist/
 
 docs/
+
+# Release notes extracted from CHANGELOG.md by the release workflow
+.release-notes/
+
 agent_docs/
 /readme-docs/
 mock-node-server/

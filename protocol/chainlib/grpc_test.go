@@ -11,6 +11,7 @@ import (
 	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/Magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
 	"github.com/Magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/Magma-Devs/smart-router/types/relay"
 	spectypes "github.com/Magma-Devs/smart-router/types/spec"
@@ -284,4 +285,73 @@ func TestSettingBlocksHeadersGrpc(t *testing.T) {
 			require.Equal(t, test.block, parsedInput.GetBlock())
 		})
 	}
+}
+
+func TestGrpcChainListener_Shutdown_CallsHttpServerShutdown(t *testing.T) {
+	listener := &GrpcChainListener{
+		httpServer: &http.Server{},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, listener.Shutdown(ctx))
+}
+
+func TestGrpcChainListener_Shutdown_NilServer(t *testing.T) {
+	listener := &GrpcChainListener{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, listener.Shutdown(ctx))
+}
+
+// TestCloneChainParserForValidation_GrpcIsolation locks in the invariant that
+// CloneChainParserForValidation returns a *GrpcChainParser whose registry and
+// codec fields are independent of the live parser's. This is the property
+// that prevents NewGrpcChainProxy -> setupForProvider from breaking the live
+// parser when called from the spec re-verification path.
+func TestCloneChainParserForValidation_GrpcIsolation(t *testing.T) {
+	live, err := NewGrpcChainParser()
+	require.NoError(t, err)
+
+	// Set sentinel registry/codec values on the live parser so we can detect
+	// whether mutating the clone leaks back.
+	liveRegistry := &dyncodec.Registry{}
+	liveCodec := &dyncodec.Codec{}
+	live.registry = liveRegistry
+	live.codec = liveCodec
+
+	cloned := CloneChainParserForValidation(live)
+	clonedGrpc, ok := cloned.(*GrpcChainParser)
+	require.True(t, ok, "clone of a *GrpcChainParser must remain a *GrpcChainParser")
+	require.NotSame(t, live, clonedGrpc, "clone must be a distinct *GrpcChainParser instance")
+
+	// Clone should start with the same registry/codec values as the original.
+	require.Same(t, liveRegistry, clonedGrpc.registry, "clone initially aliases the live registry")
+	require.Same(t, liveCodec, clonedGrpc.codec, "clone initially aliases the live codec")
+
+	// Simulate setupForProvider on the clone (the actual mutation NewGrpcChainProxy
+	// would perform after we hand it the cloned parser).
+	clonedGrpc.registry = &dyncodec.Registry{}
+	clonedGrpc.codec = &dyncodec.Codec{}
+
+	// The live parser's fields must be untouched.
+	require.Same(t, liveRegistry, live.registry, "mutating clone.registry must not affect live.registry")
+	require.Same(t, liveCodec, live.codec, "mutating clone.codec must not affect live.codec")
+}
+
+// TestCloneChainParserForValidation_NonGrpcReturnsOriginal documents that
+// non-gRPC parsers don't have setupForProvider-style mutation, so the helper
+// returns them unchanged. Adding a new parser type that mutates during
+// chain-proxy construction would require extending the type-switch.
+func TestCloneChainParserForValidation_NonGrpcReturnsOriginal(t *testing.T) {
+	jrpcParser, err := NewJrpcChainParser()
+	require.NoError(t, err)
+	require.Same(t, ChainParser(jrpcParser), CloneChainParserForValidation(jrpcParser), "non-gRPC parser must be returned as-is")
+
+	restParser, err := NewRestChainParser()
+	require.NoError(t, err)
+	require.Same(t, ChainParser(restParser), CloneChainParserForValidation(restParser), "non-gRPC parser must be returned as-is")
+
+	tmParser, err := NewTendermintRpcChainParser()
+	require.NoError(t, err)
+	require.Same(t, ChainParser(tmParser), CloneChainParserForValidation(tmParser), "non-gRPC parser must be returned as-is")
 }

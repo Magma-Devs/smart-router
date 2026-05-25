@@ -1,9 +1,6 @@
 "C:cmd/smartrouter":
   - changed-files:
       - any-glob-to-any-file: "cmd/smartrouter/**/*"
-"C:cmd/lavap":
-  - changed-files:
-      - any-glob-to-any-file: "cmd/lavap/**/*"
 "C:cmd/common":
   - changed-files:
       - any-glob-to-any-file: "cmd/common/**/*"
@@ -28,7 +25,8 @@
 "Type: Build":
   - changed-files:
       - any-glob-to-any-file: "Makefile"
-      - any-glob-to-any-file: "Dockerfile"
+      - any-glob-to-any-file: "Dockerfile*"
+      - any-glob-to-any-file: ".goreleaser.yaml"
       - any-glob-to-any-file: "go.mod"
       - any-glob-to-any-file: "go.sum"
 "Type: CI":

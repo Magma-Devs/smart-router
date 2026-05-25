@@ -300,11 +300,15 @@ func TestCheckResponseErrorForJsonRpcBatch(t *testing.T) {
 		require.Empty(t, errorMsg)
 	})
 
-	t.Run("invalid_json_no_error", func(t *testing.T) {
+	t.Run("invalid_json_is_malformed", func(t *testing.T) {
+		// Previously this asserted (false, "") under a "fail-open" rationale.
+		// That silently propagated truncated upstream bodies to clients; the
+		// router now classifies a malformed batch envelope as a wrong-data
+		// verdict so the relay pipeline retries against another provider.
 		data := []byte(`not valid json`)
 		hasError, errorMsg := CheckResponseErrorForJsonRpcBatch(data, 200)
-		require.False(t, hasError, "Invalid JSON should not return error (fail-open)")
-		require.Empty(t, errorMsg)
+		require.True(t, hasError, "malformed batch envelope must be flagged for retry")
+		require.Contains(t, errorMsg, "malformed JSON-RPC batch response")
 	})
 
 	t.Run("null_result_with_no_error_is_success", func(t *testing.T) {
@@ -373,5 +377,123 @@ func TestCheckResponseErrorForJsonRpcBatch_StrictMode(t *testing.T) {
 		]`)
 		hasError, _ := CheckResponseErrorForJsonRpcBatch(data, 200)
 		require.False(t, hasError, "Default mode: partial success should not be an error")
+	})
+}
+
+// TestJsonrpcMessage_CheckResponseError_MalformedShapes covers MAG-1718 Phase 1.6
+// wrong-data cases at the application layer: a body that omits both result and
+// error fields, and an unparseable body as a backstop. Truncated wire-level
+// failures are caught at the transport layer in direct_rpc_relay.go via
+// json.Valid; this is the in-function defense for malformed shapes.
+func TestJsonrpcMessage_CheckResponseError_MalformedShapes(t *testing.T) {
+	jm := JsonrpcMessage{}
+
+	t.Run("missing_both_result_and_error", func(t *testing.T) {
+		// Schema violation: spec requires exactly one of result or error.
+		hasError, msg := jm.CheckResponseError([]byte(`{"jsonrpc":"2.0","id":1}`), 200)
+		require.True(t, hasError, "missing both fields must be flagged")
+		require.Contains(t, msg, "missing both 'result' and 'error'")
+	})
+
+	t.Run("truncated_body_is_flagged_as_backstop", func(t *testing.T) {
+		// Direct callers should catch this earlier via json.Valid; flagged here as defense.
+		hasError, msg := jm.CheckResponseError([]byte(`{"jsonrpc":"2.0","id":1,"resu`), 200)
+		require.True(t, hasError)
+		require.Contains(t, msg, "malformed JSON-RPC response")
+	})
+
+	t.Run("null_result_is_success", func(t *testing.T) {
+		// result:null is a legal JSON-RPC response — eth_getTransactionByHash
+		// for an unknown hash returns null, for example.
+		hasError, msg := jm.CheckResponseError([]byte(`{"jsonrpc":"2.0","id":1,"result":null}`), 200)
+		require.False(t, hasError)
+		require.Empty(t, msg)
+	})
+
+	t.Run("normal_result_is_success", func(t *testing.T) {
+		hasError, _ := jm.CheckResponseError([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x12a7b5c"}`), 200)
+		require.False(t, hasError)
+	})
+
+	t.Run("error_with_message_returns_message", func(t *testing.T) {
+		hasError, msg := jm.CheckResponseError(
+			[]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`),
+			200,
+		)
+		require.True(t, hasError)
+		require.Equal(t, "method not found", msg)
+	})
+
+	t.Run("error_with_empty_message_is_not_flagged", func(t *testing.T) {
+		// Preserves the previous behavior: an error object with an empty
+		// message is not surfaced as an error.
+		hasError, _ := jm.CheckResponseError(
+			[]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":0,"message":""}}`),
+			200,
+		)
+		require.False(t, hasError)
+	})
+
+	t.Run("top_level_scalar_body", func(t *testing.T) {
+		hasError, msg := jm.CheckResponseError([]byte(`"just a string"`), 200)
+		require.True(t, hasError)
+		require.Contains(t, msg, "malformed JSON-RPC response")
+	})
+
+	t.Run("empty_body", func(t *testing.T) {
+		hasError, _ := jm.CheckResponseError(nil, 200)
+		require.True(t, hasError)
+	})
+
+	t.Run("error_null_and_no_result_is_malformed", func(t *testing.T) {
+		// "error": null is semantically equivalent to no error key. Combined
+		// with a missing result it's a schema violation — must be flagged so
+		// the relay pipeline doesn't forward a useless body to the client.
+		hasError, msg := jm.CheckResponseError([]byte(`{"jsonrpc":"2.0","id":1,"error":null}`), 200)
+		require.True(t, hasError, "error:null + no result must be flagged as malformed")
+		require.Contains(t, msg, "missing both 'result' and 'error'")
+	})
+
+	t.Run("error_null_with_result_is_success", func(t *testing.T) {
+		// "error": null alongside a real result is a (mildly off-spec but)
+		// healthy response. Some upstreams emit this shape.
+		hasError, _ := jm.CheckResponseError(
+			[]byte(`{"jsonrpc":"2.0","id":1,"result":"0x12a7b5c","error":null}`),
+			200,
+		)
+		require.False(t, hasError, "error:null alongside a result must not be flagged")
+	})
+}
+
+// TestCheckResponseErrorForJsonRpcBatch_MalformedElements covers the
+// analogous cases at the batch level: a batch where every element is
+// malformed must NOT slip through as "no errors" the way it did before.
+func TestCheckResponseErrorForJsonRpcBatch_MalformedElements(t *testing.T) {
+	t.Run("all_elements_missing_both_fields", func(t *testing.T) {
+		// Previously this returned (false, "") because the aggregator only
+		// collected sub-messages from elements with a non-nil error object.
+		data := []byte(`[{"jsonrpc":"2.0","id":1},{"jsonrpc":"2.0","id":2}]`)
+		hasError, errorMsg := CheckResponseErrorForJsonRpcBatch(data, 200)
+		require.True(t, hasError, "all-malformed batch must be flagged for retry")
+		require.Contains(t, errorMsg, "missing both 'result' and 'error'")
+	})
+
+	t.Run("partial_success_with_malformed_sibling_default_mode", func(t *testing.T) {
+		originalValue := BatchNodeErrorOnAny
+		defer func() { BatchNodeErrorOnAny = originalValue }()
+		BatchNodeErrorOnAny = false
+		data := []byte(`[{"jsonrpc":"2.0","id":1,"result":1},{"jsonrpc":"2.0","id":2}]`)
+		hasError, _ := CheckResponseErrorForJsonRpcBatch(data, 200)
+		require.False(t, hasError, "a success masks a malformed sibling in default mode")
+	})
+
+	t.Run("partial_success_with_malformed_sibling_strict_mode", func(t *testing.T) {
+		originalValue := BatchNodeErrorOnAny
+		defer func() { BatchNodeErrorOnAny = originalValue }()
+		BatchNodeErrorOnAny = true
+		data := []byte(`[{"jsonrpc":"2.0","id":1,"result":1},{"jsonrpc":"2.0","id":2}]`)
+		hasError, errorMsg := CheckResponseErrorForJsonRpcBatch(data, 200)
+		require.True(t, hasError, "strict mode flags any fault, including malformed elements")
+		require.Contains(t, errorMsg, "missing both 'result' and 'error'")
 	})
 }

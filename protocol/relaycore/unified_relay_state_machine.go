@@ -300,7 +300,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 			select {
 			case err := <-sm.batchUpdate:
 				isPairingListEmpty := err != nil && errors.Is(err, lavasession.PairingListEmptyError)
-				result := sm.policy.OnSendRelayResult(err, isPairingListEmpty)
+				result := sm.policy.OnSendRelayResult(err, isPairingListEmpty, sm.selection)
 
 				switch result {
 				case SendSuccess:

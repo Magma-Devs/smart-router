@@ -1,9 +1,11 @@
 package common
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/tidwall/gjson"
 )
 
 // #######
@@ -67,6 +69,38 @@ var JsonRpcSubscriptionNotFoundError = JsonRPCErrorMessage{
 		Message: "Internal error",
 		Data:    "subscription not found",
 	},
+}
+
+// MarshalJsonRPCErrorWithRequestID returns the marshaled error response with the JSON-RPC id
+// taken from requestBytes (so the response echoes the caller's id per JSON-RPC 2.0 §4.2).
+// When requestBytes does not contain a parseable id, the template's hardcoded Id is preserved.
+// Supports string ids (e.g. UUIDs), numeric ids, and null.
+func MarshalJsonRPCErrorWithRequestID(template JsonRPCErrorMessage, requestBytes []byte) ([]byte, error) {
+	baseline, err := json.Marshal(template)
+	if err != nil {
+		return nil, err
+	}
+	if len(requestBytes) == 0 {
+		return baseline, nil
+	}
+	idResult := gjson.GetBytes(requestBytes, "id")
+	if !idResult.Exists() {
+		return baseline, nil
+	}
+	// idResult.Raw is the verbatim JSON for the id (e.g. `"client-uuid-1"`, `42`, `null`).
+	// Substituting it as raw JSON preserves the caller's exact type.
+	return setJSONFieldRaw(baseline, "id", []byte(idResult.Raw))
+}
+
+// setJSONFieldRaw replaces a top-level field with raw JSON without going through Go's typed
+// marshaling — needed because string-typed ids must round-trip exactly.
+func setJSONFieldRaw(data []byte, field string, rawValue []byte) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return data, err
+	}
+	obj[field] = json.RawMessage(rawValue)
+	return json.Marshal(obj)
 }
 
 // #######

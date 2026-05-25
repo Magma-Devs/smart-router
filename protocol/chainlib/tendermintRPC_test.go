@@ -9,10 +9,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofiber/fiber/v2"
+	"github.com/gorilla/websocket"
 	"github.com/Magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/Magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/Magma-Devs/smart-router/protocol/common"
+	"github.com/Magma-Devs/smart-router/protocol/lavasession"
+	"github.com/Magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/Magma-Devs/smart-router/types/spec"
+	"github.com/Magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -343,4 +348,124 @@ func TestTendermintURIRPC(t *testing.T) {
 	if closeServer != nil {
 		closeServer()
 	}
+}
+
+func TestTendermintRpcChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
+	listener := &TendermintRpcChainListener{
+		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
+	}
+	listener.wsWG.Add(1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		listener.wsWG.Done()
+	}()
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, listener.Shutdown(ctx))
+	elapsed := time.Since(start)
+	require.GreaterOrEqual(t, elapsed, 100*time.Millisecond)
+	require.Less(t, elapsed, 1*time.Second)
+}
+
+func TestTendermintRpcChainListener_Shutdown_RespectsContextDeadline(t *testing.T) {
+	listener := &TendermintRpcChainListener{
+		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
+	}
+	listener.wsWG.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_ = listener.Shutdown(ctx)
+	elapsed := time.Since(start)
+	require.Less(t, elapsed, 1*time.Second)
+	listener.wsWG.Done()
+}
+
+func TestTendermintRpcChainListener_Shutdown_NilApp(t *testing.T) {
+	listener := &TendermintRpcChainListener{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, listener.Shutdown(ctx))
+}
+
+// startTestTendermintListener spins up a TendermintRpcChainListener bound to 127.0.0.1:0
+// and returns the listener plus its dynamic address once Serve is ready.
+func startTestTendermintListener(t *testing.T, ctx context.Context) (*TendermintRpcChainListener, string) {
+	t.Helper()
+	// ListenToMessages uses the custom rand package which requires initialization.
+	// The package-level TestMain (chain_router_test.go) does not call InitRandomSeed,
+	// so we do it here. InitRandomSeed is idempotent.
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	endpoint := &lavasession.RPCEndpoint{
+		NetworkAddress:  "127.0.0.1:0",
+		ChainID:         "COS5",
+		ApiInterface:    "tendermintrpc",
+		HealthCheckPath: "/lava/health",
+	}
+	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil, nil)
+	require.NoError(t, err)
+	listener := NewTendermintRpcChainListener(ctx, endpoint, nil, nil, logger, nil, nil)
+
+	cmdFlags := common.ConsumerCmdFlags{}
+	go listener.Serve(ctx, cmdFlags)
+
+	// Wait for the listener to bind and report its address.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if addr := listener.GetListeningAddress(); addr != "" {
+			return listener, addr
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("tendermint listener never reported a listening address")
+	return nil, ""
+}
+
+func TestTendermintRpcChainListener_GracefulShutdown_SendsWSCloseFrame_1001(t *testing.T) {
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	listener, addr := startTestTendermintListener(t, serveCtx)
+
+	wsURL := "ws://" + addr + "/websocket"
+	client, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err, "WS dial should succeed")
+	defer client.Close()
+
+	cancelServe()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	_ = listener.Shutdown(shutdownCtx)
+
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, readErr := client.ReadMessage()
+	require.Error(t, readErr)
+	closeErr, ok := readErr.(*websocket.CloseError)
+	require.True(t, ok, "expected *websocket.CloseError, got %T: %v", readErr, readErr)
+	require.Equal(t, websocket.CloseGoingAway, closeErr.Code,
+		"expected close code 1001 (Going Away), got %d", closeErr.Code)
+}
+
+func TestTendermintRpcChainListener_GracefulShutdown_RejectsNewConnectionsAfterShutdown(t *testing.T) {
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	listener, addr := startTestTendermintListener(t, serveCtx)
+
+	cancelServe()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	_ = listener.Shutdown(shutdownCtx)
+
+	// Give the OS a moment to release the listener socket.
+	time.Sleep(100 * time.Millisecond)
+
+	// New GET attempts should fail at the connection layer.
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	resp, err := httpClient.Get("http://" + addr + "/")
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+	require.Error(t, err, "GET after Shutdown should fail with connection error")
 }

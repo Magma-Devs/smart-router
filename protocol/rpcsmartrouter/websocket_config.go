@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -74,8 +75,13 @@ func DefaultWebsocketConfig() *WebsocketConfig {
 	}
 }
 
-// ClientRateLimiter manages per-client rate limiting for subscription operations
+// ClientRateLimiter manages per-client rate limiting for subscription operations.
+// AllowSubscribe / AllowUnsubscribe / CleanupClient may be called concurrently
+// from many WS connection goroutines; the embedded mutex serializes access to
+// the per-client limiter maps.
 type ClientRateLimiter struct {
+	mu sync.Mutex
+
 	// subscribeLimiters tracks subscription creation rate per client
 	subscribeLimiters map[string]*rate.Limiter
 	// unsubscribeLimiters tracks unsubscription rate per client
@@ -105,26 +111,32 @@ func NewClientRateLimiter(config *WebsocketConfig) *ClientRateLimiter {
 
 // AllowSubscribe checks if the client is allowed to create a subscription
 func (crl *ClientRateLimiter) AllowSubscribe(clientKey string) bool {
+	crl.mu.Lock()
 	limiter, exists := crl.subscribeLimiters[clientKey]
 	if !exists {
 		limiter = rate.NewLimiter(crl.subscribeRate, crl.subscribeBurst)
 		crl.subscribeLimiters[clientKey] = limiter
 	}
+	crl.mu.Unlock()
 	return limiter.Allow()
 }
 
 // AllowUnsubscribe checks if the client is allowed to unsubscribe
 func (crl *ClientRateLimiter) AllowUnsubscribe(clientKey string) bool {
+	crl.mu.Lock()
 	limiter, exists := crl.unsubscribeLimiters[clientKey]
 	if !exists {
 		limiter = rate.NewLimiter(crl.unsubscribeRate, crl.unsubscribeBurst)
 		crl.unsubscribeLimiters[clientKey] = limiter
 	}
+	crl.mu.Unlock()
 	return limiter.Allow()
 }
 
 // CleanupClient removes rate limiters for a disconnected client
 func (crl *ClientRateLimiter) CleanupClient(clientKey string) {
+	crl.mu.Lock()
+	defer crl.mu.Unlock()
 	delete(crl.subscribeLimiters, clientKey)
 	delete(crl.unsubscribeLimiters, clientKey)
 }

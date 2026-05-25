@@ -353,7 +353,18 @@ func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector,
 		connector.addClient(rpcClient)
 	}
 	if (connector.numberOfFreeClients() + connector.numberOfUsedClients()) == 0 {
-		utils.LavaFormatFatal("Could not create any connections to the node check address", nil, utils.Attribute{Key: "address", Value: nodeUrl.UrlStr()})
+		if ctx.Err() != nil {
+			// Probe-scoped ctx (validateProvider, etc.) was cancelled before
+			// the async fill produced any client. Caller will treat the
+			// returned error as a probe failure; the process must not exit.
+			utils.LavaFormatWarning("gRPC connector aborted before any connection was built", ctx.Err(),
+				utils.LogAttr("address", nodeUrl.UrlStr()),
+			)
+		} else {
+			utils.LavaFormatFatal("Could not create any connections to the node check address", nil,
+				utils.Attribute{Key: "address", Value: nodeUrl.UrlStr()},
+			)
+		}
 	}
 	utils.LavaFormatInfo("Finished adding clients asynchronously", utils.LogAttr("count", len(connector.freeClients)))
 	go connector.connectorLoop(ctx)
@@ -408,7 +419,10 @@ func (connector *GRPCConnector) createConnection(ctx context.Context, nodeUrl co
 			return nil, err
 		}
 		if ctx.Err() != nil {
-			connector.Close()
+			// Don't Close() the connector — that wipes the existing pool.
+			// One probe's cancellation must not destroy connections that
+			// other callers are still using. Just stop dialling more and
+			// return the error.
 			return nil, ctx.Err()
 		}
 		nctx, cancel := connector.nodeUrl.LowerContextTimeoutWithDuration(ctx, common.AverageWorldLatency*2)

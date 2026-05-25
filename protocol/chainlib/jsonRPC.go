@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -332,6 +333,8 @@ type JsonRPCChainListener struct {
 	wsSubscriptionManager      WSSubscriptionManager
 	listeningAddress           string
 	websocketConnectionLimiter *WebsocketConnectionLimiter
+	app                        *fiber.App     // captured during Serve so Shutdown can drain HTTP
+	wsWG                       sync.WaitGroup // tracks active downstream WS goroutines for Shutdown drain
 }
 
 // NewJrpcChainListener creates a new instance of JsonRPCChainListener
@@ -364,23 +367,41 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	test_mode := common.IsTestMode(ctx)
 	// Setup HTTP Server
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter)
+	apil.app = app
 
-	app.Use("/ws", func(c *fiber.Ctx) error {
+	// wsWG.Add must run synchronously inside the request handler so that
+	// app.ShutdownWithContext (which waits for in-flight handlers but stops
+	// tracking hijacked WS connections) is guaranteed to observe the Add
+	// before wsWG.Wait runs. Doing the Add inside the websocket goroutine
+	// would race: the goroutine is scheduled after the connection is hijacked
+	// and may not have called Add by the time Wait sees counter == 0.
+	//
+	// Registered as per-route middleware (not app.Use) so /ws and /websocket
+	// are covered uniformly without depending on fiber's mount-prefix matching.
+	wsUpgradeMiddleware := func(c *fiber.Ctx) error {
 		apil.websocketConnectionLimiter.HandleFiberRateLimitFlags(c)
 
 		// IsWebSocketUpgrade returns true if the client
 		// requested upgrade to the WebSocket protocol.
-		if websocket.IsWebSocketUpgrade(c) {
-			c.Locals("allowed", true)
-			return c.Next()
+		if !websocket.IsWebSocketUpgrade(c) {
+			return fiber.ErrUpgradeRequired
 		}
-		return fiber.ErrUpgradeRequired
-	})
+		apil.wsWG.Add(1)
+		c.Locals("allowed", true)
+		err := c.Next()
+		// If the upgrade did not succeed (anything other than 101 Switching
+		// Protocols), the websocket goroutine will not run, so balance the Add.
+		if c.Response().StatusCode() != fiber.StatusSwitchingProtocols {
+			apil.wsWG.Done()
+		}
+		return err
+	}
 
 	chainID := apil.endpoint.ChainID
 	apiInterface := apil.endpoint.ApiInterface
 
 	webSocketCallback := websocket.New(func(websocketConn *websocket.Conn) {
+		defer apil.wsWG.Done()
 		canOpenConnection, decreaseIpConnection := apil.websocketConnectionLimiter.CanOpenConnection(websocketConn)
 		defer decreaseIpConnection()
 		if !canOpenConnection {
@@ -411,11 +432,11 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			headerRateLimit:        uint64(rateLimit),
 		})
 
-		consumerWebsocketManager.ListenToMessages()
+		consumerWebsocketManager.ListenToMessages(ctx)
 	})
 	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, apil.logger.StoreMetricData)
-	app.Get("/ws", websocketCallbackWithDappID)
-	app.Get("/websocket", websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
+	app.Get("/ws", wsUpgradeMiddleware, websocketCallbackWithDappID)
+	app.Get("/websocket", wsUpgradeMiddleware, websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
 
 	handlerPost := func(fiberCtx *fiber.Ctx) error {
 		// Set response header content-type to application/json
@@ -495,8 +516,10 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 				fiberCtx.Status(fiber.StatusInternalServerError)
 			}
 
-			// Construct json response
-			response := convertToJsonError(errMasking)
+			// Construct spec-compliant JSON-RPC 2.0 error envelope (see
+			// convertToJsonRpcError for the rationale — `error` must be an
+			// Object with code/message per §5.1, not a stringified envelope).
+			response := convertToJsonRpcError(errMasking, fiberCtx.Body())
 			// Return error json response
 			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
 		}
@@ -538,7 +561,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		apil.listeningAddress = addr
 	}()
 
-	ListenWithRetry(app, apil.endpoint.NetworkAddress, addrChannelSafe)
+	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
 }
 
 func (apil *JsonRPCChainListener) GetListeningAddress() string {
@@ -806,4 +829,14 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	replyMsg = nil
 
 	return reply, subscriptionID, sub, err
+}
+
+// Shutdown stops accepting new connections, drains in-flight HTTP requests,
+// and then waits for active WebSocket goroutines to finish. See
+// drainHTTPThenWS for the full rationale on the ordering of HTTP-then-WS.
+func (apil *JsonRPCChainListener) Shutdown(ctx context.Context) error {
+	if apil == nil {
+		return nil
+	}
+	return drainHTTPThenWS(ctx, apil.app, &apil.wsWG, "JSONRPC")
 }

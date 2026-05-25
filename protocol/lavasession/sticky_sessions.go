@@ -51,3 +51,20 @@ func (s *StickySessionStore) DeleteOldSessions(epoch uint64) {
 		}
 	}
 }
+
+// Clear drops every sticky session affinity, regardless of epoch.
+// Used by the /debug/reset-all endpoint to return the router to a clean state.
+func (s *StickySessionStore) Clear() {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	s.sessions = make(map[string]*StickySession)
+}
+
+// Len returns the current number of sticky-session affinities. Used by the
+// CSM state-size gauge publisher (MAG-1762) so integration tests can verify
+// /debug/reset-all emptied the store.
+func (s *StickySessionStore) Len() int {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	return len(s.sessions)
+}

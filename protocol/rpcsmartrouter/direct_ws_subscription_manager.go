@@ -109,10 +109,13 @@ type DirectWSSubscriptionManager struct {
 	chainID        string
 	apiInterface   string
 
-	// Upstream endpoint configuration - multiple endpoints for optimizer selection
-	wsEndpoints    []*common.NodeUrl          // All available WebSocket endpoints
-	endpointsByURL map[string]*common.NodeUrl // Quick lookup by URL
-	optimizer      WebSocketEndpointOptimizer // Optimizer for endpoint selection (can be nil)
+	// Upstream endpoint configuration - two-tier separation matches HTTP backup model.
+	// Primary tier serves all selections; backup tier is only consulted when primary is
+	// exhausted (analogous to ConsumerSessionManager's pairing/backupProviders split).
+	wsEndpoints       []*common.NodeUrl          // Primary tier — selected first
+	wsBackupEndpoints []*common.NodeUrl          // Backup tier — used only when primary exhausted
+	endpointsByURL    map[string]*common.NodeUrl // Quick lookup by URL across both tiers (sticky-session uniformity)
+	optimizer         WebSocketEndpointOptimizer // Optimizer for endpoint selection (can be nil)
 
 	// Sticky sessions for subscription affinity - same client uses same endpoint
 	stickyStore *lavasession.StickySessionStore
@@ -142,18 +145,27 @@ type WebSocketEndpointOptimizer interface {
 
 // NewDirectWSSubscriptionManager creates a new direct WebSocket subscription manager.
 // If config is nil, DefaultWebsocketConfig() will be used.
+//
+// wsEndpoints is the primary tier — selectEndpoint serves these first.
+// wsBackupEndpoints is the backup tier — only consulted when primary is exhausted.
+// Either slice may be nil or empty; both must not be empty for selection to succeed.
 func NewDirectWSSubscriptionManager(
 	metricsManager metrics.ConsumerMetricsManagerInf,
 	connectionType string,
 	chainID string,
 	apiInterface string,
 	wsEndpoints []*common.NodeUrl,
+	wsBackupEndpoints []*common.NodeUrl,
 	optimizer WebSocketEndpointOptimizer,
 	config *WebsocketConfig,
 ) *DirectWSSubscriptionManager {
-	// Build URL lookup map
-	endpointsByURL := make(map[string]*common.NodeUrl, len(wsEndpoints))
+	// Build URL lookup map across both tiers so sticky-session lookups by URL
+	// work uniformly regardless of which tier the endpoint came from.
+	endpointsByURL := make(map[string]*common.NodeUrl, len(wsEndpoints)+len(wsBackupEndpoints))
 	for _, ep := range wsEndpoints {
+		endpointsByURL[ep.Url] = ep
+	}
+	for _, ep := range wsBackupEndpoints {
 		endpointsByURL[ep.Url] = ep
 	}
 
@@ -173,6 +185,7 @@ func NewDirectWSSubscriptionManager(
 		chainID:              chainID,
 		apiInterface:         apiInterface,
 		wsEndpoints:          wsEndpoints,
+		wsBackupEndpoints:    wsBackupEndpoints,
 		endpointsByURL:       endpointsByURL,
 		optimizer:            optimizer,
 		stickyStore:          lavasession.NewStickySessionStore(),
@@ -289,15 +302,14 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 
 // selectEndpoint selects the best WebSocket endpoint for a client.
 // Selection priority:
-//  1. Sticky session (if client already has affinity to an endpoint)
-//  2. Optimizer-based selection (QoS, latency, etc.)
-//  3. First available endpoint (fallback)
+//  1. Sticky session (any tier — endpointsByURL spans both)
+//  2. Primary tier (optimizer or first-available)
+//  3. Backup tier (optimizer or first-available) — only when primary is exhausted
+//
+// Backup-tier consultation mirrors ConsumerSessionManager.getSessionWithProviderOrError
+// (see protocol/lavasession/consumer_session_manager.go:820-852).
 func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
-	if len(dwsm.wsEndpoints) == 0 {
-		return nil, fmt.Errorf("no WebSocket endpoints configured")
-	}
-
-	// Priority 1: Check sticky session for this client
+	// Tier 0: sticky session for this client (resolves across both tiers).
 	if clientKey != "" {
 		if stickySession, exists := dwsm.stickyStore.Get(clientKey); exists {
 			stickyEndpoint, found := dwsm.endpointsByURL[stickySession.Provider]
@@ -317,7 +329,7 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 					)
 					return stickyEndpoint, nil
 				}
-				// Sticky endpoint is ignored, clear it and continue to optimizer
+				// Sticky endpoint is ignored — clear and continue to cascade.
 				utils.LavaFormatDebug("DirectWS: sticky endpoint ignored, clearing affinity",
 					utils.LogAttr("clientKey", clientKey),
 					utils.LogAttr("ignoredEndpoint", sanitizeEndpointURL(stickySession.Provider)),
@@ -327,9 +339,36 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 		}
 	}
 
-	// Priority 2: If only one endpoint or no optimizer, use first available
-	if len(dwsm.wsEndpoints) == 1 || dwsm.optimizer == nil {
-		for _, ep := range dwsm.wsEndpoints {
+	// Tier 1: primary endpoints.
+	ep, primaryErr := dwsm.selectFromTier(ctx, dwsm.wsEndpoints, ignoredEndpoints)
+	if primaryErr == nil {
+		return ep, nil
+	}
+
+	// Tier 2: backup endpoints (only when primary is exhausted).
+	utils.LavaFormatDebug("DirectWS: primary endpoints exhausted, falling back to backup",
+		utils.LogAttr("primaryReason", primaryErr.Error()),
+		utils.LogAttr("backupCount", len(dwsm.wsBackupEndpoints)),
+	)
+	ep, backupErr := dwsm.selectFromTier(ctx, dwsm.wsBackupEndpoints, ignoredEndpoints)
+	if backupErr == nil {
+		return ep, nil
+	}
+
+	return nil, fmt.Errorf("no WebSocket endpoints available (primary and backup both exhausted)")
+}
+
+// selectFromTier picks one endpoint from the given tier's endpoint slice using
+// the optimizer when available, falling back to first-non-ignored. The caller is
+// responsible for cascade ordering — this helper is tier-agnostic.
+func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tier []*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+	if len(tier) == 0 {
+		return nil, fmt.Errorf("tier is empty")
+	}
+
+	// Single endpoint or no optimizer: first-non-ignored.
+	if len(tier) == 1 || dwsm.optimizer == nil {
+		for _, ep := range tier {
 			if ignoredEndpoints == nil {
 				return ep, nil
 			}
@@ -337,21 +376,21 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 				return ep, nil
 			}
 		}
-		return nil, fmt.Errorf("all WebSocket endpoints are ignored/unavailable")
+		return nil, fmt.Errorf("all endpoints in tier are ignored/unavailable")
 	}
 
-	// Priority 3: Use optimizer to select best endpoint
-	allURLs := make([]string, 0, len(dwsm.wsEndpoints))
-	for _, ep := range dwsm.wsEndpoints {
+	// Optimizer over this tier.
+	allURLs := make([]string, 0, len(tier))
+	for _, ep := range tier {
 		allURLs = append(allURLs, ep.Url)
 	}
 
-	// cu=1 and requestedBlock=LATEST_BLOCK are sensible defaults for subscriptions
-	selectedURLs := dwsm.optimizer.ChooseProvider(ctx, allURLs, ignoredEndpoints, 1, -2) // -2 = LATEST_BLOCK
+	// cu=1 and requestedBlock=LATEST_BLOCK (-2) are sensible defaults for subscriptions.
+	selectedURLs := dwsm.optimizer.ChooseProvider(ctx, allURLs, ignoredEndpoints, 1, -2)
 
 	if len(selectedURLs) == 0 {
-		// Optimizer returned nothing, fall back to first non-ignored
-		for _, ep := range dwsm.wsEndpoints {
+		// Optimizer returned nothing — fall back to first-non-ignored within tier.
+		for _, ep := range tier {
 			if ignoredEndpoints == nil {
 				return ep, nil
 			}
@@ -359,7 +398,7 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 				return ep, nil
 			}
 		}
-		return nil, fmt.Errorf("optimizer returned no endpoints and all fallbacks are ignored")
+		return nil, fmt.Errorf("optimizer returned no endpoints and all fallbacks in tier are ignored")
 	}
 
 	selectedURL := selectedURLs[0]
@@ -370,7 +409,7 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 
 	utils.LavaFormatDebug("DirectWS: selected endpoint via optimizer",
 		utils.LogAttr("endpoint", sanitizeEndpointURL(selectedURL)),
-		utils.LogAttr("totalEndpoints", len(dwsm.wsEndpoints)),
+		utils.LogAttr("tierSize", len(tier)),
 	)
 
 	return selectedEndpoint, nil
@@ -601,8 +640,11 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		originalResult = firstMsg.Result
 	}
 
-	// Create first reply - preserves original format for Tendermint, uses router ID for EVM
-	firstReplyData, err := createSubscriptionReply(routerID, firstMsg, dwsm.apiInterface)
+	// Create first reply - preserves original format for Tendermint, uses router ID for EVM.
+	// requestID is the client's original JSON-RPC id (extracted at the top of this function);
+	// passing it explicitly ensures the response echoes the caller's id verbatim, including
+	// non-numeric ids like string UUIDs (JSON-RPC 2.0 §4.2).
+	firstReplyData, err := createSubscriptionReply(routerID, requestID, firstMsg, dwsm.apiInterface)
 	if err != nil {
 		upstreamSub.Unsubscribe()
 		dwsm.failPendingSubscription(hashedParams)
@@ -713,9 +755,12 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	for hp, sub := range dwsm.activeSubscriptions {
 		if ownedRouterID, exists := sub.clientRouterIDs[clientKey]; exists {
 			// For Tendermint: client unsubscribes using the query (which is also the upstream ID)
-			// For EVM: client unsubscribes using the router ID we gave them
+			// For EVM: client unsubscribes using the router ID we gave them, but accept the
+			// upstream hex id too — some clients echo back the raw `result` they observed,
+			// and (historically) responses leaked the upstream id, so being permissive here
+			// is necessary for correctness. Ownership is already enforced by the outer
+			// `clientRouterIDs[clientKey]` check, so accepting the upstream id is safe.
 			if dwsm.apiInterface == "tendermintrpc" {
-				// Tendermint: match by upstream ID (query string)
 				if sub.upstreamID == subIDFromRequest {
 					activeSub = sub
 					hashedParams = hp
@@ -724,8 +769,7 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 					break
 				}
 			} else {
-				// EVM: match by router ID
-				if ownedRouterID == subIDFromRequest {
+				if ownedRouterID == subIDFromRequest || sub.upstreamID == subIDFromRequest {
 					activeSub = sub
 					hashedParams = hp
 					routerSubID = ownedRouterID
@@ -1118,15 +1162,39 @@ func (dwsm *DirectWSSubscriptionManager) createUpstreamSubscription(
 	return sub, firstMsg, msgChan, nil
 }
 
-// listenForUpstreamMessages listens for messages from upstream and routes to clients
+// upstreamErrSource is the minimal slice of *rpcclient.ClientSubscription that
+// listenForUpstreamMessages actually needs. Taking an interface here lets tests drive the
+// error-handling branch with a local fake without exposing test-only constructors from the
+// rpcclient package. *rpcclient.ClientSubscription satisfies it via its Err() method.
+type upstreamErrSource interface {
+	Err() <-chan error
+}
+
+// listenForUpstreamMessages listens for messages from upstream and routes to clients.
+//
+// On an upstream error we hand off to handleUpstreamDisconnect, which either restores the
+// subscription (spawning a fresh listener) or cleans it up. We must NOT run cleanup from this
+// goroutine in that case — handleUpstreamDisconnect mutates activeSub in place to point at the
+// new upstream subscription, and a deferred cleanup here would wipe the just-restored entry
+// from dwsm.activeSubscriptions, leaving notifications flowing through the new listener (which
+// reads activeSub directly) while making the unsubscribe lookup fail with "subscription not
+// found". reconnectInFlight is true when ownership has been handed off to that goroutine.
+//
+// Cleanup ownership: once reconnectInFlight is set, handleUpstreamDisconnect is responsible
+// for calling cleanupSubscription on every failure path (reconnect timeout, GetConnection
+// failure post-reconnect, re-subscribe failure) so a failed restoration does not leak the
+// subscription. See handleUpstreamDisconnect for the corresponding cleanup-on-failure calls.
 func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 	ctx context.Context,
 	hashedParams string,
 	activeSub *directActiveSubscription,
-	upstreamSub *rpcclient.ClientSubscription,
+	upstreamSub upstreamErrSource,
 ) {
+	reconnectInFlight := false
 	defer func() {
-		dwsm.cleanupSubscription(hashedParams)
+		if !reconnectInFlight {
+			dwsm.cleanupSubscription(hashedParams)
+		}
 	}()
 
 	for {
@@ -1149,7 +1217,7 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 					err,
 					utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 				)
-				// Attempt reconnection
+				reconnectInFlight = true
 				go dwsm.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
 			}
 			return
@@ -1502,23 +1570,38 @@ func getSubscriptionID(apiInterface string, responseMsg *rpcclient.JsonrpcMessag
 	return extractSubscriptionID(responseMsg)
 }
 
-// createSubscriptionReply creates the first reply with the router subscription ID
-func createSubscriptionReply(routerID string, originalMsg *rpcclient.JsonrpcMessage, apiInterface string) ([]byte, error) {
+// createSubscriptionReply creates the first reply for a brand-new subscription.
+// The response id is taken from the client's request — NOT from originalMsg.ID — because
+// originalMsg.ID is the upstream rpcclient's internal counter, which the client never sent
+// and must not see (JSON-RPC 2.0 §4.2 requires the response id to match the request id
+// exactly, including type: string ids stay strings).
+func createSubscriptionReply(routerID string, requestID json.RawMessage, originalMsg *rpcclient.JsonrpcMessage, apiInterface string) ([]byte, error) {
 	if originalMsg == nil {
 		return nil, fmt.Errorf("original message is nil")
 	}
 
-	// For Tendermint: preserve the original response format {"result":{"query":"..."}}
-	// Tendermint clients expect the query object back, not a router ID
+	// For Tendermint: preserve the upstream message verbatim (custom extensions,
+	// error envelope, anything beyond `result` that a Tendermint client may rely
+	// on) and overwrite only the id field with the caller's request id. A naive
+	// hand-built {jsonrpc,id,result} envelope would drop everything else that
+	// the upstream returned.
 	if apiInterface == "tendermintrpc" {
-		// Return original message as-is - it already has the correct format
-		return json.Marshal(originalMsg)
+		raw, err := json.Marshal(originalMsg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal upstream message: %w", err)
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return nil, fmt.Errorf("failed to round-trip upstream message: %w", err)
+		}
+		obj["id"] = requestID
+		return json.Marshal(obj)
 	}
 
-	// For EVM: create response with router ID instead of upstream ID
+	// For EVM: response carries the router ID (not the upstream hex) and the caller's id.
 	response := map[string]interface{}{
 		"jsonrpc": "2.0",
-		"id":      originalMsg.ID,
+		"id":      requestID,
 		"result":  routerID,
 	}
 

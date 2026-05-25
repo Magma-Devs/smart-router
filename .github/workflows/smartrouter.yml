@@ -2,35 +2,22 @@ name: Build and Test
 
 # Sprint 5 — dual-edition CI.
 #
-# This workflow used to run only the community build (no `-tags enterprise`).
-# Sprint 5 extends it via a matrix `edition: [community, enterprise]` that
-# fans the test and build jobs across both editions, then adds a single
-# `guards` job that runs the source-level (`make check-gates`) and post-
-# build (`make verify-binaries`) gating checks once.
+# Test job: matrix `edition: [community, enterprise]` fans the unit-test
+# job across both editions.
+# Build job: dual-edition × os/arch matrix (4 community OS/arch combos
+# + 1 enterprise linux/amd64). Release-time cross-compilation for the
+# enterprise binary is handled by `.goreleaser.yaml`.
+# Guards job: source-level (`make check-gates`) and post-build
+# (`make verify-binaries`) gating checks once (not per matrix dimension).
 #
-# Why a matrix and not a separate workflow file:
-#   - Renaming this file or splitting into community.yml/enterprise.yml
-#     would break any branch-protection rule pointing at the existing
-#     status check name. Matrix expansion preserves the workflow name
-#     "Build and Test" while doubling coverage.
-#   - The setup-go / checkout / cache boilerplate is identical; matrix
-#     amortizes it across both editions.
-#
-# Why `verify-binaries` is a single job (not matrix): the script
-# `scripts/verify_binaries.sh` builds BOTH editions internally and
-# inspects them side-by-side. Running it under a matrix would just
-# duplicate the same work.
-#
-# Actions-minute cost note: the test matrix doubles unit-test runtime;
-# the build matrix scopes the enterprise dimension to linux/amd64 only
-# so it's +1 build (5 total: 4 community OS/arch combos + 1 enterprise).
-# Release-time cross-compilation is handled by `.goreleaser.yaml` —
-# Sprint 5 doesn't try to also do that here.
+# Why a matrix and not separate workflow files: renaming or splitting
+# would break any branch-protection rule pointing at the existing status
+# check name "Build and Test".
 
 on:
   push:
     branches:
-      - main
+      - '**'
   pull_request:
     branches:
       - main
@@ -46,6 +33,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve version from git
+        id: ver
+        run: |
+          set -euo pipefail
+          v=$(git describe --tags --always --dirty)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $v"
+
   test:
     name: Unit tests (${{ matrix.edition }})
     runs-on: ubuntu-latest
@@ -115,7 +119,7 @@ jobs:
 
   build:
     name: Build smartrouter (${{ matrix.edition }}-${{ matrix.targetos }}-${{ matrix.arch }})
-    needs: [test]
+    needs: [version, test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -123,41 +127,53 @@ jobs:
       # only at PR time — release-time cross-compilation is handled by
       # .goreleaser.yaml. This keeps Actions-minute cost to +1 build.
       matrix:
-        targetos: [linux, darwin]
-        arch: [amd64, arm64]
         edition: [community]
         tags: [""]
+        targetos: [linux, darwin]
+        arch: [amd64, arm64]
         include:
           - edition: enterprise
             tags: enterprise
             targetos: linux
             arch: amd64
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.targetos }}
+      GOARCH: ${{ matrix.arch }}
+      # Match .goreleaser.yaml: Haswell+ baseline for amd64, FP16/dotprod
+      # baseline for arm64.
+      GOAMD64: v3
+      GOARM64: v8.2
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-        env:
-          GOOS: ${{ matrix.targetos }}
-          GOARCH: ${{ matrix.arch }}
 
       - name: Download dependencies
         run: go mod download
 
       - name: Build smartrouter
         env:
-          GOOS: ${{ matrix.targetos }}
-          GOARCH: ${{ matrix.arch }}
           EDITION_TAGS: ${{ matrix.tags }}
         run: |
           # GOWORK=off is defensive — keeps a future go.work file from
           # changing the build behavior under us.
-          GOWORK=off go build -mod=readonly ${EDITION_TAGS:+-tags $EDITION_TAGS} -o out/smartrouter ./cmd/smartrouter
+          GOWORK=off go build \
+            -mod=readonly \
+            -trimpath \
+            ${EDITION_TAGS:+-tags $EDITION_TAGS} \
+            -ldflags "-X github.com/Magma-Devs/smart-router/version.Version=${{ needs.version.outputs.version }} -X github.com/Magma-Devs/smart-router/version.Commit=${{ github.sha }} -w -s" \
+            -o out/smartrouter ./cmd/smartrouter
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+          # Edition-prefixed name avoids collisions between community and
+          # enterprise binaries in the same artifact namespace. The
+          # build_docker job below downloads the `community-linux-*`
+          # artifacts to build the Docker image.
           name: smartrouter-${{ matrix.edition }}-${{ matrix.targetos }}-${{ matrix.arch }}
           path: out/smartrouter
 
@@ -182,32 +198,150 @@ jobs:
 
   build_docker:
     name: Build Docker image
+    if: github.event_name != 'pull_request'
+    needs: [version, build]
     permissions:
       contents: read
-      packages: read
+      packages: write
     runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      # OCI image names MUST be lowercase per the OCI spec, independent
+      # of the GitHub org's `Magma-Devs` casing.
+      IMAGE_NAME: magma-devs/smart-router
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Download linux/amd64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: smartrouter-community-linux-amd64
+          path: artifacts/linux/amd64
+
+      - name: Download linux/arm64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: smartrouter-community-linux-arm64
+          path: artifacts/linux/arm64
+
+      - name: Make binaries executable
+        run: chmod +x artifacts/linux/amd64/smartrouter artifacts/linux/arm64/smartrouter
+
+      - name: Plan tags
+        id: plan
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          push=false
+          is_main=false
+          tag=""
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ref="${GITHUB_REF#refs/heads/}"
+            if [ "$ref" = "main" ]; then
+              push=true; is_main=true; tag="$VERSION"
+            else
+              # OCI tags must be lowercase and free of '/'; sanitize the branch name
+              slug=$(echo "$ref" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9._-]|-|g')
+              push=true; tag="${slug}-${VERSION}"
+            fi
+          fi
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "is_main=$is_main" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "$push" = "true" ]; then
+            base="${REGISTRY}/${IMAGE_NAME}"
+            tags=("${base}:${tag}" "${base}:${tag}-${GITHUB_SHA}")
+            # Dev pushes from main get a :main floating tag — `:latest` is
+            # reserved for the release pipeline (final tagged versions only,
+            # see .goreleaser.yaml dockers / docker_manifests blocks).
+            if [ "$is_main" = "true" ]; then
+              tags+=("${base}:main")
+            fi
+            {
+              echo "tags<<EOF"
+              printf '%s\n' "${tags[@]}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice title=Image tags::$(IFS=' '; echo "${tags[*]}")"
+            echo "Planned image tags:"
+            printf '  - %s\n' "${tags[@]}"
+            {
+              echo "### Planned image tags"
+              printf -- '- `%s`\n' "${tags[@]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Skipping push: event=${{ github.event_name }} ref=${GITHUB_REF}"
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build (no push)
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: steps.plan.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure version is not already published (main only)
+        if: steps.plan.outputs.is_main == 'true'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.plan.outputs.tag }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "::error::$IMAGE already exists. Tag a new release (git tag vX.Y.Z) before re-merging to main."
+            exit 1
+          fi
+
+      - name: Extract OCI labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile
-          platforms: linux/amd64
-          build-args: |
-            GIT_VERSION=pr-${{ github.event.pull_request.number || github.sha }}
-            GIT_COMMIT=${{ github.sha }}
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          file: Dockerfile.ci
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.plan.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: ${{ steps.plan.outputs.push == 'true' }}
+
+      - name: Report pushed image
+        if: steps.plan.outputs.push == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.plan.outputs.tags }}
+        run: |
+          echo "::notice title=Image published::digest=${DIGEST}"
+          echo "Pushed image digest: ${DIGEST}"
+          echo "Tags:"
+          printf '  - %s\n' ${TAGS}
+          {
+            echo "### Pushed image"
+            echo ""
+            echo "**Digest:** \`${DIGEST}\`"
+            echo ""
+            echo "**Tags:**"
+            for t in ${TAGS}; do echo "- \`${t}\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  goreleaser_check:
+    name: GoReleaser config check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: check
 
   report-test-results:
     name: Publish test results

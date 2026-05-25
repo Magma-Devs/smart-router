@@ -129,6 +129,79 @@ func TestGetAllSpecsFromPath(t *testing.T) {
 	})
 }
 
+// TestGetAllSpecsFromPath_MisconfiguredFailsFast backfills MAG-1872 item 11:
+// --use-static-spec must fail fast on misconfigured paths so the smart router
+// refuses to start with a broken spec set. The existing TestGetAllSpecsFromPath
+// covers only "non-existent path"; this fills the gaps around malformed JSON
+// (in both file and directory inputs) and an unreadable directory.
+func TestGetAllSpecsFromPath_MisconfiguredFailsFast(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	malformedFile := filepath.Join(tmpDir, "malformed.json")
+	require.NoError(t, os.WriteFile(malformedFile, []byte("{not valid json"), 0o644))
+
+	malformedDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(malformedDir, "bad.json"), []byte("{also not valid"), 0o644))
+
+	cases := []struct {
+		name           string
+		path           string
+		wantErrSubstr  string // case-insensitive substring of the returned error; empty = just any error
+		skipIfRootUser bool
+		setup          func(t *testing.T) string
+	}{
+		{
+			name:          "missing_file_returns_error",
+			path:          filepath.Join(tmpDir, "this-file-does-not-exist.json"),
+			wantErrSubstr: "",
+		},
+		{
+			name:          "malformed_json_file_surfaces_parse_error",
+			path:          malformedFile,
+			wantErrSubstr: "json",
+		},
+		{
+			name:          "malformed_json_inside_directory_surfaces_parse_error",
+			path:          malformedDir,
+			wantErrSubstr: "json",
+		},
+		{
+			name:           "unreadable_directory_surfaces_permission_error",
+			skipIfRootUser: true,
+			setup: func(t *testing.T) string {
+				d := t.TempDir()
+				// Strip read permission so directory listing fails. Restore
+				// before t.TempDir cleanup runs or the test framework cannot
+				// remove the directory.
+				require.NoError(t, os.Chmod(d, 0o000))
+				t.Cleanup(func() {
+					_ = os.Chmod(d, 0o755)
+				})
+				return d
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.skipIfRootUser && os.Geteuid() == 0 {
+				t.Skip("permission-denied behavior cannot be exercised as root")
+			}
+			path := tc.path
+			if tc.setup != nil {
+				path = tc.setup(t)
+			}
+
+			_, err := GetAllSpecsFromPath(path)
+			require.Error(t, err, "misconfigured spec path %q must fail fast", path)
+			if tc.wantErrSubstr != "" {
+				require.Contains(t, strings.ToLower(err.Error()), tc.wantErrSubstr,
+					"error message should hint at root cause; got: %s", err.Error())
+			}
+		})
+	}
+}
+
 func TestExpandSpecWithDependencies(t *testing.T) {
 	// Create specs map with base and derived specs
 	specs := map[string]types.Spec{
