@@ -53,24 +53,26 @@ type GRPCSubscriptionManager interface {
 // constructor at direct_ws_subscription_manager.go so the enterprise factory
 // can unpack them without changing the constructor signature.
 type WSSubscriptionManagerOptions struct {
-	Metrics        metrics.ConsumerMetricsManagerInf
-	ConnectionType string
-	ChainID        string
-	APIInterface   string
-	Endpoints      []*common.NodeUrl
-	Optimizer      WebSocketEndpointOptimizer
-	Config         *WebsocketConfig
+	Metrics         metrics.ConsumerMetricsManagerInf
+	ConnectionType  string
+	ChainID         string
+	APIInterface    string
+	Endpoints       []*common.NodeUrl
+	BackupEndpoints []*common.NodeUrl
+	Optimizer       WebSocketEndpointOptimizer
+	Config          *WebsocketConfig
 }
 
 // GRPCSubscriptionManagerOptions bundles the inputs required to build a
 // *DirectGRPCSubscriptionManager. Same shape rule as WSSubscriptionManagerOptions.
 type GRPCSubscriptionManagerOptions struct {
-	Metrics      metrics.ConsumerMetricsManagerInf
-	ChainID      string
-	APIInterface string
-	Endpoints    []*common.NodeUrl
-	Optimizer    WebSocketEndpointOptimizer
-	Config       *GRPCStreamingConfig
+	Metrics         metrics.ConsumerMetricsManagerInf
+	ChainID         string
+	APIInterface    string
+	Endpoints       []*common.NodeUrl
+	BackupEndpoints []*common.NodeUrl
+	Optimizer       WebSocketEndpointOptimizer
+	Config          *GRPCStreamingConfig
 }
 
 // communityConfig is the default, restrictive capability set used when the

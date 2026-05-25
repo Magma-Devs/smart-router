@@ -62,6 +62,7 @@ func (enterpriseConfig) CreateWSSubscriptionManager(opts WSSubscriptionManagerOp
 		opts.ChainID,
 		opts.APIInterface,
 		opts.Endpoints,
+		opts.BackupEndpoints,
 		opts.Optimizer,
 		opts.Config,
 	), nil
@@ -73,6 +74,7 @@ func (enterpriseConfig) CreateGRPCSubscriptionManager(opts GRPCSubscriptionManag
 		opts.ChainID,
 		opts.APIInterface,
 		opts.Endpoints,
+		opts.BackupEndpoints,
 		opts.Optimizer,
 		opts.Config,
 	), nil
