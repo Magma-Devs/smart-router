@@ -19,7 +19,7 @@
 #   EDIT            optional  - 0 to skip $EDITOR (default 1)
 #   EDITOR          optional  - defaults to vim
 #   GEMINI_API_KEY  optional  - passed through to changelog-ai.sh
-#   REPO_URL        optional  - default: https://github.com/magma-Devs/smart-router
+#   REPO_URL        optional  - default: https://github.com/Magma-Devs/smart-router
 
 set -euo pipefail
 
@@ -28,7 +28,7 @@ set -euo pipefail
 # walk into the imported lavanet/lava upstream history.
 FORK_BASE="10a450617b7ee6d1aff724030f3a55b60a694533"
 
-REPO_URL="${REPO_URL:-https://github.com/magma-Devs/smart-router}"
+REPO_URL="${REPO_URL:-https://github.com/Magma-Devs/smart-router}"
 # Owner/repo path derived from REPO_URL — used for GitHub API calls
 # that look up the PR associated with each commit (see PR-link logic
 # in the per-commit loop below).

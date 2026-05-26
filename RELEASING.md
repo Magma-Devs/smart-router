@@ -52,7 +52,7 @@ the draft and clicking **Publish**.
 Set `GEMINI_API_KEY` as a repository (or organization) secret:
 
 ```
-gh secret set GEMINI_API_KEY --body '<your-key>' --repo magma-Devs/smart-router
+gh secret set GEMINI_API_KEY --body '<your-key>' --repo Magma-Devs/smart-router
 ```
 
 Get a key from <https://aistudio.google.com/apikey>. The free tier
@@ -160,13 +160,13 @@ Install [cosign](https://docs.sigstore.dev/cosign/installation/) and run:
 cosign verify-blob \
   --certificate sha256sum.txt.pem \
   --signature sha256sum.txt.sig \
-  --certificate-identity-regexp 'https://github.com/magma-Devs/smart-router/.github/workflows/release.yml@.*' \
+  --certificate-identity-regexp 'https://github.com/Magma-Devs/smart-router/.github/workflows/release.yml@.*' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   sha256sum.txt
 ```
 
 A successful verify means the checksum file was produced by the release
-workflow on the `magma-Devs/smart-router` repo. Then verify your binary:
+workflow on the `Magma-Devs/smart-router` repo. Then verify your binary:
 
 ```
 grep smartrouter-v1.0.0-linux-amd64 sha256sum.txt | sha256sum -c
