@@ -56,7 +56,7 @@ func (enterpriseConfig) ValidateTransport(rawURL string) error {
 func (enterpriseConfig) ValidateSpec(specIndex string) error { return nil }
 
 func (enterpriseConfig) CreateWSSubscriptionManager(opts WSSubscriptionManagerOptions) (chainlib.WSSubscriptionManager, error) {
-	return NewDirectWSSubscriptionManager(
+	mgr := NewDirectWSSubscriptionManager(
 		opts.Metrics,
 		opts.ConnectionType,
 		opts.ChainID,
@@ -65,11 +65,17 @@ func (enterpriseConfig) CreateWSSubscriptionManager(opts WSSubscriptionManagerOp
 		opts.BackupEndpoints,
 		opts.Optimizer,
 		opts.Config,
-	), nil
+	)
+	// Start the background cleanup goroutine here so the gated call site in
+	// rpcsmartrouter.go can stay constructor-free (§3.3.6 gate guard).
+	if opts.Ctx != nil {
+		mgr.Start(opts.Ctx)
+	}
+	return mgr, nil
 }
 
 func (enterpriseConfig) CreateGRPCSubscriptionManager(opts GRPCSubscriptionManagerOptions) (GRPCSubscriptionManager, error) {
-	return NewDirectGRPCSubscriptionManager(
+	mgr := NewDirectGRPCSubscriptionManager(
 		opts.Metrics,
 		opts.ChainID,
 		opts.APIInterface,
@@ -77,5 +83,9 @@ func (enterpriseConfig) CreateGRPCSubscriptionManager(opts GRPCSubscriptionManag
 		opts.BackupEndpoints,
 		opts.Optimizer,
 		opts.Config,
-	), nil
+	)
+	if opts.Ctx != nil {
+		mgr.Start(opts.Ctx)
+	}
+	return mgr, nil
 }

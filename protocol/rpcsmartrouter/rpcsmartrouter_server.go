@@ -74,8 +74,10 @@ type RPCSmartRouterServer struct {
 	// graceful shutdown can call Close() to drain upstream WS pools.
 	wsSubscriptionManager chainlib.WSSubscriptionManager
 
-	// gRPC streaming subscription manager (nil if not configured)
-	grpcSubscriptionManager *DirectGRPCSubscriptionManager
+	// gRPC streaming subscription manager (nil if not configured).
+	// Interface type so the edition dispatcher (§3.3.6) can swap in either
+	// the enterprise *DirectGRPCSubscriptionManager or community's noop.
+	grpcSubscriptionManager GRPCSubscriptionManager
 
 	// Endpoint-scoped metrics manager (new spec)
 	smartRouterEndpointMetrics *metrics.SmartRouterMetricsManager

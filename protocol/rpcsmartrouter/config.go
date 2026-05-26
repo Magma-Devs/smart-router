@@ -61,6 +61,12 @@ type WSSubscriptionManagerOptions struct {
 	BackupEndpoints []*common.NodeUrl
 	Optimizer       WebSocketEndpointOptimizer
 	Config          *WebsocketConfig
+	// Ctx is consumed by the enterprise factory to drive the manager's
+	// background cleanup goroutine (DirectWSSubscriptionManager.Start).
+	// The community noop ignores it. Storing context in an options struct
+	// is a smell for long-lived state but acceptable here: the struct
+	// lives only for the duration of one factory call.
+	Ctx context.Context
 }
 
 // GRPCSubscriptionManagerOptions bundles the inputs required to build a
@@ -73,6 +79,8 @@ type GRPCSubscriptionManagerOptions struct {
 	BackupEndpoints []*common.NodeUrl
 	Optimizer       WebSocketEndpointOptimizer
 	Config          *GRPCStreamingConfig
+	// Ctx — see WSSubscriptionManagerOptions.Ctx.
+	Ctx context.Context
 }
 
 // communityConfig is the default, restrictive capability set used when the

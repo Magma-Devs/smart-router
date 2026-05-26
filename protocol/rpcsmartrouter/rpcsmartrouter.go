@@ -394,7 +394,14 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 			}
 		}
 		if server.grpcSubscriptionManager != nil {
-			server.grpcSubscriptionManager.Stop()
+			// Mirror the WS shutdown pattern just above: the interface
+			// (GRPCSubscriptionManager) doesn't expose Stop; only the
+			// concrete enterprise manager has it. Community's noop has
+			// no goroutines to stop, so the assertion-miss branch is a
+			// correct no-op.
+			if dgm, ok := server.grpcSubscriptionManager.(*DirectGRPCSubscriptionManager); ok {
+				dgm.Stop()
+			}
 		}
 	}
 
@@ -1356,23 +1363,29 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	wsEndpoints := collectWSEndpoints(healthyStaticProviders, "primary")
 	wsBackupEndpoints := collectWSEndpoints(healthyBackupProviders, "backup")
 
-	// Create DirectWSSubscriptionManager if any WebSocket endpoints are available
-	// (primary or backup); otherwise install the NoOp manager.
+	// Route construction through the edition gate (§3.3.6). Community returns
+	// a NoOp manager regardless of endpoint count; enterprise returns the real
+	// DirectWSSubscriptionManager (Start is invoked inside the factory).
 	if len(wsEndpoints) > 0 || len(wsBackupEndpoints) > 0 {
-		directWSManager := NewDirectWSSubscriptionManager(
-			smartRouterMetricsManager,
-			spectypes.APIInterfaceJsonRPC, // WebSocket subscriptions use JSON-RPC
-			rpcEndpoint.ChainID,
-			rpcEndpoint.ApiInterface,
-			wsEndpoints,
-			wsBackupEndpoints,
-			optimizer, // Pass optimizer for endpoint selection
-			nil,       // Use default WebSocket config (configurable via CLI flags later)
-		)
-		// Start background cleanup goroutine
-		directWSManager.Start(ctx)
-		wsSubscriptionManager = directWSManager
-		utils.LavaFormatInfo("Using DirectWSSubscriptionManager for direct WebSocket subscriptions",
+		var err error
+		wsSubscriptionManager, err = ActiveConfig().CreateWSSubscriptionManager(WSSubscriptionManagerOptions{
+			Metrics:         smartRouterMetricsManager,
+			ConnectionType:  spectypes.APIInterfaceJsonRPC, // WebSocket subscriptions use JSON-RPC
+			ChainID:         rpcEndpoint.ChainID,
+			APIInterface:    rpcEndpoint.ApiInterface,
+			Endpoints:       wsEndpoints,
+			BackupEndpoints: wsBackupEndpoints,
+			Optimizer:       optimizer,
+			Config:          nil, // Use default WebSocket config (configurable via CLI flags later)
+			Ctx:             ctx,
+		})
+		if err != nil {
+			return utils.LavaFormatError("failed to create WS subscription manager", err,
+				utils.LogAttr("chainID", rpcEndpoint.ChainID),
+				utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
+			)
+		}
+		utils.LavaFormatInfo("Created WS subscription manager via edition dispatcher",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("wsEndpointCount", len(wsEndpoints)),
@@ -1397,22 +1410,28 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		grpcBackupEndpoints = collectGRPCEndpoints(healthyBackupProviders, "backup")
 	}
 
-	// Initialize DirectGRPCSubscriptionManager if any gRPC endpoints are available
-	// (primary or backup).
+	// Route construction through the edition gate (§3.3.6). Community returns
+	// a noop GRPC manager (no streaming support); enterprise returns the real
+	// DirectGRPCSubscriptionManager (Start is invoked inside the factory).
 	if len(grpcEndpoints) > 0 || len(grpcBackupEndpoints) > 0 {
-		grpcSubManager := NewDirectGRPCSubscriptionManager(
-			smartRouterMetricsManager, // Metrics manager for tracking
-			rpcEndpoint.ChainID,
-			rpcEndpoint.ApiInterface,
-			grpcEndpoints,
-			grpcBackupEndpoints,
-			optimizer, // Pass optimizer for endpoint selection (same as WS manager)
-			nil,       // Use default GRPCStreamingConfig
-		)
-		// Start background cleanup goroutine
-		grpcSubManager.Start(ctx)
+		grpcSubManager, err := ActiveConfig().CreateGRPCSubscriptionManager(GRPCSubscriptionManagerOptions{
+			Metrics:         smartRouterMetricsManager,
+			ChainID:         rpcEndpoint.ChainID,
+			APIInterface:    rpcEndpoint.ApiInterface,
+			Endpoints:       grpcEndpoints,
+			BackupEndpoints: grpcBackupEndpoints,
+			Optimizer:       optimizer,
+			Config:          nil, // Use default GRPCStreamingConfig
+			Ctx:             ctx,
+		})
+		if err != nil {
+			return utils.LavaFormatError("failed to create GRPC subscription manager", err,
+				utils.LogAttr("chainID", rpcEndpoint.ChainID),
+				utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
+			)
+		}
 		rpcSmartRouterServer.grpcSubscriptionManager = grpcSubManager
-		utils.LavaFormatInfo("Using DirectGRPCSubscriptionManager for gRPC streaming subscriptions",
+		utils.LavaFormatInfo("Created GRPC subscription manager via edition dispatcher",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("grpcEndpointCount", len(grpcEndpoints)),
