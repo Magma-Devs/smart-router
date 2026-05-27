@@ -38,6 +38,15 @@ Smart router is a reverse proxy specialised for blockchain RPC. Applications poi
 - **Response caching** — caches what's safe to cache, keyed by method, params, and block height.
 - **First-class observability** — Prometheus metrics fine-grained enough to see which provider is letting you down.
 
+## Editions
+
+Smart router ships in two editions from the same source tree:
+
+- **Community** (default build) — JSON-RPC over HTTP/HTTPS, EVM-family specs. No license required.
+- **Enterprise** (built with `-tags enterprise`) — adds REST, gRPC, Tendermint RPC, WebSocket subscriptions, and non-EVM specs. Requires a valid `license.key` from Magma at runtime; see [`ENTERPRISE_LICENSING.md`](ENTERPRISE_LICENSING.md) for the operator guide.
+
+Both editions share the same routing core, QoS engine, and observability stack — the difference is which transports and spec types the binary accepts.
+
 ## Quick Start
 
 The fastest way to start: install the binary, point it at a YAML config, run.

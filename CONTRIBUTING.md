@@ -134,7 +134,10 @@ Enhancement suggestions are tracked as [GitHub issues](https://github.com/Magma-
 <!-- You might want to create an issue template for enhancement suggestions that can be used as a guide and that defines the structure of the information to be included. If you do so, reference it here in the description. -->
 
 ## Join The Project Team
-<!-- TODO -->
+
+Smart Router is maintained by [Magma Devs](https://github.com/Magma-Devs). External contributors open issues and pull requests against this public repo; maintainers triage. There is no current process for promoting external contributors to maintainer.
+
+Magma maintainers also operate a private companion repo, `smart-router-enterprise-internal`, that holds license-signing tooling (`keygen`, `license-gen`) and the signing-key runbook. The split is documented in `agent_docs/smart-router-repo-enterprise.md` §3.3.8. The dependency is strictly one-way — the internal repo imports the `License` struct from this public repo via Go module `replace`; the public repo never imports from internal. Signing private keys live in 1Password only, not in either repo.
 
 <!-- omit in toc -->
 ## Attribution

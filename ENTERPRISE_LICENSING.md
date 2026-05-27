@@ -4,7 +4,9 @@ This guide is for operators of the **enterprise edition** of the smart router. C
 
 ## Quick start
 
-You receive a `license.key` file from Magma. Place it in the router's **working directory** (default `./license.key` resolves against the process's current working directory, NOT the binary's directory). The simplest layout — binary directory and working directory are the same:
+Enterprise licenses are provisioned by Magma. Contact your Magma account contact to request a new license, renew an expiring one, or rotate after a suspected key compromise.
+
+Once you have a `license.key` file, place it in the router's **working directory** (default `./license.key` resolves against the process's current working directory, NOT the binary's directory). The simplest layout — binary directory and working directory are the same:
 
 ```
 /srv/smart-router/                ← cd here before launching, or set systemd
