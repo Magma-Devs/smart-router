@@ -19,7 +19,7 @@ For systemd, Docker, or any deployment where CWD is not the binary directory, us
 Start the router. If the license is valid, you'll see:
 
 ```
-INF Smart Router ENTERPRISE Edition customer=acme expires=2027-04-30 days_until_expiry=365
+INF Smart Router ENTERPRISE Edition license_id=lic_a1b2c3d4e5f60718 customer=acme expires=2027-04-30 days_until_expiry=365
 ```
 
 If the license is missing or invalid, the binary refuses to start. **There is no community-mode fallback** — an enterprise binary without a license is a hard error.
