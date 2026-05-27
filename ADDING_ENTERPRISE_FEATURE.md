@@ -29,13 +29,13 @@ For URL rejections, echo with `%q`: `"<Transport> transport (url=%q) requires an
 `protocol/rpcsmartrouter/enterprise_config.go`.
 
 - `Validate*`: return `nil`, with a typo-guard `default` arm (see `ValidateAPIInterface`).
-- `Create*`: return the real `Direct*` impl as a **pure constructor** — never call `Start(ctx)` inside. Lifecycle is the caller's job.
+- `Create*`: return the real `Direct*` impl. If the impl is long-lived, call `Start(opts.Ctx)` inside before returning — the dispatcher hides the concrete type from callers, so the factory is the only place that owns lifecycle.
 
 ## Step 4 — Gate at the call site
 
 Two locations, both required:
 
-1. **Centralized validator** — `validateSmartRouterConfigAgainstEdition` in `rpcsmartrouter.go`. Fires once at startup before pprof/cache/server bind. The user-facing fail-fast point.
+1. **Centralized validator** — `validateSmartRouterConfigAgainstEdition` in `edition_validate.go`. Fires once at startup before pprof/cache/server bind. The user-facing fail-fast point.
 2. **Inline runtime gate** — at the capability's actual use site. Defense-in-depth for non-startup paths.
 
 ```go
@@ -45,7 +45,7 @@ if err := ActiveConfig().ValidateXxx(input); err != nil {
 }
 ```
 
-For factories: replace the `NewDirect*` call with `ActiveConfig().CreateXxx(opts)` and start the result if it implements `Start(context.Context)`.
+For factories: replace the `NewDirect*` call with `ActiveConfig().CreateXxx(opts)`. Don't `Start(...)` after — the factory already started long-lived impls internally; double-start either panics or leaks goroutines.
 
 ## Step 5 — Update CI guards if you added a new constructor
 
@@ -69,14 +69,14 @@ All four must be green. CI runs the same set on every PR.
 
 1. **Interface**: added to `config.go`. Factory pattern because result is a runtime object.
 2. **Community**: returns `NoOpWSSubscriptionManager` (pre-existing stub).
-3. **Enterprise**: returns `*DirectWSSubscriptionManager` as pure constructor; `Start(ctx)` at call site.
+3. **Enterprise**: constructs `*DirectWSSubscriptionManager` and calls `Start(opts.Ctx)` internally so the dispatcher hides lifecycle from the call site.
 4. **Call site**: `rpcsmartrouter.go` swaps `NewDirectWSSubscriptionManager(...)` for `ActiveConfig().CreateWSSubscriptionManager(opts)`.
 5. **Guards**: `enterprise_config.go` added to the existing `NewDirectWSSubscriptionManager` allowlist.
 
 ## Common mistakes
 
 - **Custom error string** — defeats contract-test substring asserts. Use the pinned template.
-- **`Start(ctx)` inside a factory** — couples lifecycle to construction; breaks tests. Pure constructors only.
+- **`Start(ctx)` at the call site after the factory returned** — the factory already started long-lived impls. Double-start panics or leaks goroutines.
 - **Skipping the centralized validator** — inline-only gates fire after side effects have started.
 - **Skipping `make verify-binaries`** — source guards miss build-tag misapplication, indirect dispatch, string concat.
 - **Unit test without a contract entry** — both protect different regression classes.
