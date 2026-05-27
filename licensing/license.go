@@ -27,7 +27,7 @@ type License struct {
 	CustomerID string    `json:"customer_id"`
 	KeyID      string    `json:"key_id"`
 	ExpiresAt  time.Time `json:"expires_at"`
-	MaxNodes   int       `json:"max_nodes"` // 0 = unlimited; honor-system in Phase 2
+	MaxNodes   int       `json:"max_nodes"` // 0 = unlimited. Honor-system only: signed into the payload, not enforced anywhere at runtime.
 	IssuedAt   time.Time `json:"issued_at"`
 }
 

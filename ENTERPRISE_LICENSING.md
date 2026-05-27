@@ -89,3 +89,4 @@ For warnings (not failures) like `license approaching expiry days_until_expiry=1
 - **Setting `$SMART_ROUTER_LICENSE_FILE` to an empty string is the same as unsetting it.** Both fall back to `./license.key`.
 - **The `--license-file` flag is on the router command, not subcommands.** `smartrouter cache`, `smartrouter version`, and `smartrouter test` ignore it (and don't validate licenses at all).
 - **The license file is plain text** (a base64-encoded envelope). It's safe to `cat` for debugging; it does not contain a signing private key.
+- **`max_nodes` in the license payload is honor-system.** The field is signed into the envelope and visible if you `base64 -d` the payload, but no runtime code counts or caps anything against it. A license with `max_nodes=5` does not refuse to serve a sixth node — the field exists as a contractual marker, not a hard limit.
