@@ -18,8 +18,3 @@ const (
 	// relay server, kafka). A manager/client given this value is a no-op.
 	DisabledFlagOption = "disabled"
 )
-
-// ShowProviderEndpointInMetrics is bound to the --show-provider-address-in-metrics
-// flag. The consumer metrics it once gated have been removed; the var is retained so
-// the flag binding stays valid until the flag itself is retired.
-var ShowProviderEndpointInMetrics = false

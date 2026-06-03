@@ -115,8 +115,6 @@ const (
 	// DisableBatchRequestRetryFlag prevents batch requests from being retried on consumer/smartrouter side
 	DisableBatchRequestRetryFlag = "disable-batch-request-retry"
 
-	ShowProviderEndpointInMetricsFlagName = "show-provider-address-in-metrics"
-
 	MemoryGCThresholdGBFlagName      = "memory-gc-threshold-gb"     // Memory GC threshold in GB (0 = disabled)
 	MaxSessionsPerProviderFlagName   = "max-sessions-per-provider"  // Max number of sessions allowed per provider
 	DefaultProcessingTimeoutFlagName = "default-processing-timeout" // default timeout for relay processing
