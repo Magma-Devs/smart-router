@@ -18,7 +18,6 @@ import (
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"golang.org/x/net/http2"
@@ -117,7 +116,6 @@ type ChainTracker struct {
 	startupTime             time.Time
 	blockEventsGap          []time.Duration
 	blockTimeUpdatables     map[blockTimeUpdatable]struct{}
-	pmetrics                *metrics.ProviderMetricsManager
 
 	// initial config
 	averageBlockTime time.Duration
@@ -387,21 +385,17 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 				cs.notUpdated()
 			}
 		}
-		cs.pmetrics.SetLatestBlockFetchError(cs.endpoint.ChainID, cs.endpoint.ApiInterface)
 		if cs.fetchErrorCallback != nil {
 			cs.fetchErrorCallback()
 		}
 		return err
 	}
-	cs.pmetrics.SetLatestBlockFetchSuccess(cs.endpoint.ChainID, cs.endpoint.ApiInterface)
 	gotNewBlock := cs.gotNewBlock(ctx, newLatestBlock)
 	forked, err := cs.forkChanged(ctx, newLatestBlock)
 	if err != nil {
-		cs.pmetrics.SetSpecificBlockFetchError(cs.endpoint.ChainID, cs.endpoint.ApiInterface)
 		return utils.LavaFormatDebug("could not fetchLatestBlock Hash in ChainTracker", utils.Attribute{Key: "error", Value: err}, utils.Attribute{Key: "block", Value: newLatestBlock}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
 	}
 	prev_latest := cs.GetAtomicLatestBlockNum()
-	cs.pmetrics.SetSpecificBlockFetchSuccess(cs.endpoint.ChainID, cs.endpoint.ApiInterface)
 	if gotNewBlock || forked {
 		latestHash, err := cs.fetchAllPreviousBlocks(ctx, newLatestBlock)
 		if err != nil {
@@ -699,7 +693,6 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		blockEventsGap:          []time.Duration{},
 		blockTimeUpdatables:     map[blockTimeUpdatable]struct{}{},
 		startupTime:             time.Now(),
-		pmetrics:                config.Pmetrics,
 		pollingTimeMultiplier:   time.Duration(pollingTime),
 		averageBlockTime:        config.AverageBlockTime,
 		serverAddress:           config.ServerAddress,

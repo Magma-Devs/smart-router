@@ -7,6 +7,16 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
+// ProviderSelectionScores contains all scores for a provider at time of selection.
+type ProviderSelectionScores struct {
+	ProviderAddress string
+	Availability    float64 // Availability score (0-1)
+	Latency         float64 // Latency score (0-1)
+	Sync            float64 // Sync score (0-1)
+	Stake           float64 // Stake score (0-1)
+	Composite       float64 // Combined QoS score (0-1)
+}
+
 // NoOpConsumerMetrics is returned by SafeMetrics when the caller passes nil.
 // Every method is a harmless no-op so downstream code never needs nil guards.
 var _ ConsumerMetricsManagerInf = NoOpConsumerMetrics{}

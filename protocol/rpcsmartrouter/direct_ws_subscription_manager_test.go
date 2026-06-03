@@ -261,17 +261,11 @@ func (m *mockWSGenericMessage) GetMethod() string                   { return m.m
 func (m *mockWSGenericMessage) GetResult() json.RawMessage          { return nil }
 func (m *mockWSGenericMessage) GetID() json.RawMessage              { return []byte("1") }
 
-// Package-level test metrics manager to avoid duplicate registration
-var (
-	testMetricsManager *metrics.ConsumerMetricsManager
-	testMetricsOnce    sync.Once
-)
-
-func getTestMetricsManager() *metrics.ConsumerMetricsManager {
-	testMetricsOnce.Do(func() {
-		testMetricsManager = metrics.NewConsumerMetricsManager(metrics.ConsumerMetricsManagerOptions{})
-	})
-	return testMetricsManager
+// getTestMetricsManager returns a no-op metrics sink for the subscription managers.
+// The smart router's real metrics owner is SmartRouterMetricsManager; these tests only
+// need something that satisfies ConsumerMetricsManagerInf.
+func getTestMetricsManager() metrics.ConsumerMetricsManagerInf {
+	return metrics.NoOpConsumerMetrics{}
 }
 
 // TestNewDirectWSSubscriptionManager tests the constructor

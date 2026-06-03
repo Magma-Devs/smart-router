@@ -144,7 +144,7 @@ type EndpointMetrics struct {
 // SmartRouterMetricsManagerOptions contains configuration for the metrics manager
 type SmartRouterMetricsManagerOptions struct {
 	NetworkAddress     string
-	StartHTTPServer    bool // If false, only register metrics (for use alongside ConsumerMetricsManager)
+	StartHTTPServer    bool // If false, only register metrics without starting the HTTP server
 	OptimizerQoSClient *ConsumerOptimizerQoSClient
 }
 
@@ -609,7 +609,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		optimizerQoSClient:      options.OptimizerQoSClient,
 	}
 
-	// Only start HTTP server if requested (to avoid conflicts with ConsumerMetricsManager)
+	// Only start the HTTP server if requested.
 	if options.StartHTTPServer && options.NetworkAddress != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.Handler())

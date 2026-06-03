@@ -240,8 +240,8 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	}
 	// SmartRouterMetricsManager is the single metrics owner for the smart router.
 	// It serves its own HTTP endpoint and implements ConsumerMetricsManagerInf so it
-	// can be passed to RPCConsumerLogs, ConsumerSessionManager, etc., eliminating the
-	// need for a ConsumerMetricsManager (and all its lava_consumer_* metrics).
+	// can be passed to RPCConsumerLogs, ConsumerSessionManager, etc. — the interface
+	// decouples those consumers from the concrete metrics sink.
 	smartRouterMetricsManager := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{
 		NetworkAddress:     options.analyticsServerAddresses.MetricsListenAddress,
 		StartHTTPServer:    true,
