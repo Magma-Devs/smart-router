@@ -1818,10 +1818,9 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			rand.InitRandomSeed()
 
 			var cache *performance.Cache = nil
-			cacheAddr, err := cmd.Flags().GetString(performance.CacheFlagName)
-			if err != nil {
-				utils.LavaFormatError("Failed To Get Cache Address flag", err, utils.Attribute{Key: "flags", Value: cmd.Flags()})
-			} else if cacheAddr != "" {
+			// viper (not cmd.Flags) so --cache-be can also come from the config file.
+			if cacheAddr := viper.GetString(performance.CacheFlagName); cacheAddr != "" {
+				var err error
 				cache, err = performance.InitCache(ctx, cacheAddr)
 				if err != nil {
 					utils.LavaFormatError("Failed To Connect to cache at address", err, utils.Attribute{Key: "address", Value: cacheAddr})
