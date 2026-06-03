@@ -1,0 +1,82 @@
+# Smart Router Direct RPC Configuration — multi-chain (Ethereum + Arbitrum + Base)
+# Mode: Direct connections to public RPC endpoints (no Lava providers!)
+#
+# Three JSON-RPC chains on three ports, each with 2 upstreams (HTTP + WS).
+# The ETH1 spec — which ARBITRUM and BASE both import — requires websocket
+# support, so every provider pairs an http url with a wss url; http-only
+# providers are excluded at startup.
+#   - Lava public gateway (<chain>.lava.build, ws at /websocket)
+#   - PublicNode
+# All endpoints verified live (correct eth_chainId, blockNumber + ws handshake).
+#
+# Specs required (resolve via --use-static-spec specs/):
+#   ETH1     -> specs/ethereum.json   (already in repo)
+#   ARBITRUM -> specs/arbitrum.json   (imports ETH1)  — from Magma-Devs/lava-specs
+#   BASE     -> specs/base.json       (imports ETH1)  — from Magma-Devs/lava-specs
+
+# Prometheus metrics (scrape at http://<host>:7779/metrics). Set to
+# "disabled" to turn off. Read via viper, so the --metrics-listen-address
+# flag overrides this if both are set.
+metrics-listen-address: "0.0.0.0:7779"
+
+endpoints:
+  - listen-address: "0.0.0.0:3360"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    network-address: "0.0.0.0:3360"
+
+  - listen-address: "0.0.0.0:3361"
+    chain-id: "ARBITRUM"
+    api-interface: "jsonrpc"
+    network-address: "0.0.0.0:3361"
+
+  - listen-address: "0.0.0.0:3362"
+    chain-id: "BASE"
+    api-interface: "jsonrpc"
+    network-address: "0.0.0.0:3362"
+
+direct-rpc:
+  # ---- Ethereum (ETH1, chainId 0x1) ----
+  - name: "eth-lava-build"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://eth1.lava.build"
+      - url: "wss://eth1.lava.build/websocket"
+
+  - name: "eth-publicnode"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://ethereum-rpc.publicnode.com"
+      - url: "wss://ethereum-rpc.publicnode.com"
+
+  # ---- Arbitrum One (ARBITRUM, chainId 0xa4b1) ----
+  - name: "arb-lava-build"
+    chain-id: "ARBITRUM"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://arbitrum.lava.build"
+      - url: "wss://arbitrum.lava.build/websocket"
+
+  - name: "arb-publicnode"
+    chain-id: "ARBITRUM"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://arbitrum-one-rpc.publicnode.com"
+      - url: "wss://arbitrum-one-rpc.publicnode.com"
+
+  # ---- Base (BASE, chainId 0x2105) ----
+  - name: "base-lava-build"
+    chain-id: "BASE"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://base.lava.build"
+      - url: "wss://base.lava.build/websocket"
+
+  - name: "base-publicnode"
+    chain-id: "BASE"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://base-rpc.publicnode.com"
+      - url: "wss://base-rpc.publicnode.com"

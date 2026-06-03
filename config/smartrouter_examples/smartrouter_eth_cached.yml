@@ -1,16 +1,29 @@
-# Smart Router Direct RPC Configuration
+# Smart Router Direct RPC Configuration — Ethereum WITH cache
 # Mode: Direct connections to Ethereum JSON-RPC endpoints (no Lava providers!)
+#
+# Same as smartrouter_eth.yml, but with the external cache-be address baked
+# into the config (cache-be: below). Demonstrates config-file-driven caching —
+# the address is read via viper, so it works from the YAML as well as the
+# --cache-be flag (the flag wins on conflict).
+#
+# Run it with the cache overlay (which starts the cache service):
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_eth_cached.yml \
+#     docker compose -f docker/docker-compose.yml \
+#                    -f docker/docker-compose.cache.yml up --build
 #
 # 3 upstreams, each HTTP + WebSocket (the ETH1 spec requires ws for
 # subscriptions; http-only providers are excluded at startup):
 #   1. Lava public gateway (eth1.lava.build, ws at /websocket)
 #   2. PublicNode
 #   3. Tenderly public gateway
-# All verified live (eth_chainId == 0x1, eth_blockNumber + ws handshake OK).
+
+# External cache-be server (the `smart-router cache` sidecar). "cache:20100"
+# is the compose service name + port. Remove this key (or run without the
+# cache service) to disable caching.
+cache-be: "cache:20100"
 
 # Prometheus metrics (scrape at http://<host>:7779/metrics). Set to
-# "disabled" to turn off. Read via viper, so the --metrics-listen-address
-# flag overrides this if both are set.
+# "disabled" to turn off.
 metrics-listen-address: "0.0.0.0:7779"
 
 endpoints:
