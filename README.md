@@ -60,6 +60,16 @@ After running, you get:
 - A health endpoint at `/lava/health`.
 - Provider rotation, RPC-aware retry, response caching, and metrics — all driven by the YAML config.
 
+### Run with Docker Compose
+
+No host Go toolchain needed — build and run the binary (plus an optional cache) in Docker:
+
+```bash
+docker compose -f docker/docker-compose.yml up --build
+```
+
+A single parameterized stack serves every example config (`SR_CONFIG=…`), with the cache added by layering an overlay compose file. See [`docs/LOCAL-COMPOSE.md`](docs/LOCAL-COMPOSE.md) for the full guide — config switching, the cache overlay, multi-chain examples, and logging/metrics.
+
 ### Configuration
 
 Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_lava.yml` for an example targeting the Lava blockchain via PublicNode.
