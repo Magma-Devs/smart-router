@@ -21,7 +21,7 @@ In scope:
 
 - The `smartrouter` binary and the published Docker image at `ghcr.io/magma-devs/smart-router`.
 - Wire protocols smart-router exposes: JSON-RPC, REST, gRPC, Tendermint RPC, plus the `Smart-Router-*` and `Lava-*` HTTP metadata headers.
-- The release pipeline configuration (`.goreleaser.yaml`, `Dockerfile.release`, `.github/workflows/release.yml`).
+- The release pipeline configuration (`.goreleaser.yaml`, `docker/Dockerfile.release`, `.github/workflows/release.yml`).
 
 Out of scope:
 

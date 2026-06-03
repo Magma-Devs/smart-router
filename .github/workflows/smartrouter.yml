@@ -183,7 +183,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile.ci
+          file: docker/Dockerfile.ci
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.plan.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

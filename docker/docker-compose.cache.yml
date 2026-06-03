@@ -1,0 +1,30 @@
+# Cache overlay — layer on top of docker-compose.yml to add the cache sidecar.
+#
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_eth_cached.yml \
+#     docker compose -f docker/docker-compose.yml \
+#                    -f docker/docker-compose.cache.yml up --build
+#
+# The router reaches the cache via `cache-be: cache:20100` in the *_cached.yml
+# config (NOT a flag — see the note in docker-compose.yml). This file only
+# starts the cache service; pair it with a config that declares cache-be:.
+#
+# Cache prometheus metrics: http://localhost:5555/metrics
+
+services:
+  cache:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: smart-router:dev
+    command: ["cache", "0.0.0.0:20100", "--metrics_address", "0.0.0.0:5555"]
+    expose:
+      - "20100"
+    ports:
+      - "5555:5555" # cache prometheus metrics
+    healthcheck:
+      # distroless:debug ships busybox at /busybox
+      test: ["CMD", "/busybox/wget", "-qO-", "http://localhost:5555/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
