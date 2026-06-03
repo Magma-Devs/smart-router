@@ -22,8 +22,10 @@ go.work
 go.work.sum
 *.md
 
-Dockerfile
-docker/docker-compose.*
+# All docker build/compose machinery lives here; none of it needs to be
+# inside the build context (Dockerfiles are passed via -f / dockerfile:,
+# context stays the repo root or goreleaser's staging dir).
+docker/
 cmd/**/Dockerfile
 
 .dockerignore
