@@ -9,7 +9,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -60,7 +59,6 @@ type EndpointChainTrackerManager struct {
 	chainParser  chainlib.ChainParser
 	chainID      string
 	apiInterface string
-	pmetrics     *metrics.ProviderMetricsManager
 
 	// Chain-specific timing
 	averageBlockTime time.Duration
@@ -86,7 +84,6 @@ type EndpointChainTrackerConfig struct {
 	ApiInterface     string
 	AverageBlockTime time.Duration
 	BlocksToSave     uint64
-	Pmetrics         *metrics.ProviderMetricsManager
 
 	// Optional callbacks
 	OnFork        func(endpointURL string, blockNum int64)
@@ -134,7 +131,6 @@ func NewEndpointChainTrackerManager(ctx context.Context, config EndpointChainTra
 		chainParser:       config.ChainParser,
 		chainID:           config.ChainID,
 		apiInterface:      config.ApiInterface,
-		pmetrics:          config.Pmetrics,
 		averageBlockTime:  avgBlockTime,
 		blocksToSave:      blocksToSave,
 		retryMinDelay:     defaultTrackerStartRetryMin,
@@ -190,7 +186,6 @@ func (m *EndpointChainTrackerManager) GetOrCreateTracker(
 		AverageBlockTime:         m.averageBlockTime,
 		ServerBlockMemory:        chaintracker.DefaultAssumedBlockMemory,
 		BlocksCheckpointDistance: chaintracker.DefaultBlockCheckpointDistance,
-		Pmetrics:                 m.pmetrics,
 		ChainId:                  m.chainID,
 		ParseDirectiveEnabled:    true, // Always enabled for direct RPC
 	}

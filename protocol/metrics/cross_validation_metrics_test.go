@@ -13,16 +13,6 @@ var (
 	cvProviderLabels = []string{"spec", "apiInterface", "method", "provider_address"}
 )
 
-func newConsumerForCVTest() *ConsumerMetricsManager {
-	return &ConsumerMetricsManager{
-		crossValidationRequestsTotalMetric:              prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_c_cv_req"}, cvLabels),
-		crossValidationSuccessTotalMetric:               prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_c_cv_success"}, cvLabels),
-		crossValidationFailedTotalMetric:                prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_c_cv_failed"}, cvLabels),
-		crossValidationProviderAgreementsTotalMetric:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_c_cv_agreements"}, cvProviderLabels),
-		crossValidationProviderDisagreementsTotalMetric: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_c_cv_disagreements"}, cvProviderLabels),
-	}
-}
-
 func newSmartRouterForCVTest() *SmartRouterMetricsManager {
 	return &SmartRouterMetricsManager{
 		crossValidationRequestsTotalMetric:              prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_req"}, cvLabels),
@@ -34,8 +24,8 @@ func newSmartRouterForCVTest() *SmartRouterMetricsManager {
 	}
 }
 
-// cvRunner is a thin adapter that lets the shared test case table drive both
-// ConsumerMetricsManager and SmartRouterMetricsManager cross-validation logic.
+// cvRunner is a thin adapter that lets the shared test case table drive the
+// SmartRouterMetricsManager cross-validation logic.
 type cvRunner struct {
 	invoke        func(chainId, apiInterface, method string, success bool, agreeing, disagreeing []string)
 	total         *prometheus.CounterVec
@@ -43,18 +33,6 @@ type cvRunner struct {
 	failedC       *prometheus.CounterVec
 	agreements    *prometheus.CounterVec
 	disagreements *prometheus.CounterVec
-}
-
-func newConsumerCVRunner() *cvRunner {
-	cmm := newConsumerForCVTest()
-	return &cvRunner{
-		invoke:        cmm.SetCrossValidationMetric,
-		total:         cmm.crossValidationRequestsTotalMetric,
-		successC:      cmm.crossValidationSuccessTotalMetric,
-		failedC:       cmm.crossValidationFailedTotalMetric,
-		agreements:    cmm.crossValidationProviderAgreementsTotalMetric,
-		disagreements: cmm.crossValidationProviderDisagreementsTotalMetric,
-	}
 }
 
 func newSmartRouterCVRunner() *cvRunner {
@@ -70,8 +48,7 @@ func newSmartRouterCVRunner() *cvRunner {
 }
 
 // TestSetCrossValidationMetric covers the cross-validation counter logic for
-// both ConsumerMetricsManager and SmartRouterMetricsManager using the same
-// table of cases.
+// SmartRouterMetricsManager using a table of cases.
 func TestSetCrossValidationMetric(t *testing.T) {
 	type cvCall struct {
 		success               bool
@@ -122,7 +99,6 @@ func TestSetCrossValidationMetric(t *testing.T) {
 		name string
 		new  func() *cvRunner
 	}{
-		{"consumer", newConsumerCVRunner},
 		{"smart_router", newSmartRouterCVRunner},
 	}
 
@@ -161,13 +137,6 @@ func TestSetCrossValidationMetric(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestConsumerSetCrossValidationMetric_NilManager(t *testing.T) {
-	var cmm *ConsumerMetricsManager
-	require.NotPanics(t, func() {
-		cmm.SetCrossValidationMetric("ETH1", "jsonrpc", "eth_blockNumber", true, []string{"prov-A"}, nil)
-	})
 }
 
 func TestSmartRouterSetCrossValidationMetric_NilManager(t *testing.T) {
