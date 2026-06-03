@@ -1012,6 +1012,7 @@ func TestClassifyError_GenericRESTMappings(t *testing.T) {
 		{"413 too large", "HTTP 413: Request Entity Too Large", LavaErrorUserRequestTooLarge},
 		{"429 rate limit", "HTTP 429: Too Many Requests", LavaErrorNodeRateLimited},
 		{"500 internal", "HTTP 500: Internal Server Error", LavaErrorNodeInternalError},
+		{"501 not implemented", "HTTP 501: Not Implemented", LavaErrorNodeUnimplemented},
 		{"502 bad gateway", "HTTP 502: Bad Gateway", LavaErrorNodeBadGateway},
 		{"503 unavailable", "HTTP 503: Service Unavailable", LavaErrorNodeServiceUnavailable},
 		{"504 timeout", "HTTP 504: Gateway Timeout", LavaErrorNodeGatewayTimeout},
@@ -1022,6 +1023,24 @@ func TestClassifyError_GenericRESTMappings(t *testing.T) {
 			assert.Equal(t, tt.expected, result, "expected %s but got %s", tt.expected.Name, result.Name)
 		})
 	}
+}
+
+// TestClassifyError_REST501NotImplemented pins the classifier half of the MAG-1576
+// "REST not implemented" fix. The REST relay path classifies on the HTTP status code
+// itself (errorCode = StatusCode), so a Cosmos node's 501 must map to
+// NODE_UNIMPLEMENTED and be non-retryable — otherwise the router would retry an
+// unsupported method as if it were a transient server error.
+func TestClassifyError_REST501NotImplemented(t *testing.T) {
+	// Code-based path: the REST relay forwards errorCode = HTTP status (501).
+	result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportREST, 501, "Not Implemented")
+	assert.Equal(t, LavaErrorNodeUnimplemented, result,
+		"REST 501 must classify as NODE_UNIMPLEMENTED, got %s", result.Name)
+	assert.False(t, result.Retryable, "NODE_UNIMPLEMENTED must be non-retryable")
+
+	// The umbrella retry verdict the relay path actually consults.
+	assert.True(t,
+		IsNonRetryableNodeErrorWithContext(ChainFamilyCosmosSDK, TransportREST, 501, "Not Implemented"),
+		"REST 501 must be non-retryable")
 }
 
 // TestClassifyError_GenericJsonRPCHTTPStatusMappings is the JSON-RPC analogue
@@ -1051,6 +1070,7 @@ func TestClassifyError_GenericJsonRPCHTTPStatusMappings(t *testing.T) {
 		{"413 too large", "HTTP 413: Request Entity Too Large", LavaErrorUserRequestTooLarge},
 		{"429 rate limit", "HTTP 429: Too Many Requests", LavaErrorNodeRateLimited},
 		{"500 internal", "HTTP 500: Internal Server Error", LavaErrorNodeInternalError},
+		{"501 not implemented", "HTTP 501: Not Implemented", LavaErrorNodeUnimplemented},
 		{"502 bad gateway", "HTTP 502: Bad Gateway", LavaErrorNodeBadGateway},
 		{"503 unavailable", "HTTP 503: Service Unavailable", LavaErrorNodeServiceUnavailable},
 		{"504 timeout", "HTTP 504: Gateway Timeout", LavaErrorNodeGatewayTimeout},

@@ -2052,9 +2052,18 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		return relayLatency, err, needsBackoff
 	}
 
-	// Check status code even when err == nil (for REST 5xx/429)
+	// Check status code even when err == nil (for REST 5xx/429).
+	//
+	// HTTP 501 (Not Implemented) is deliberately excluded: a Cosmos REST node
+	// returns it to mean "I don't implement this method" — a node-capability
+	// error, not a server/transport failure. Routing it through this branch
+	// would convert it into a synthetic transport error (triggering retry +
+	// backoff) and discard the node's response. Excluding it lets the result
+	// flow through as the NodeError the REST sender already produced
+	// (IsNodeError=true), where it classifies as NODE_UNIMPLEMENTED
+	// (non-retryable) and is returned to the client.
 	statusCode := result.StatusCode
-	if statusCode >= 500 || statusCode == 429 {
+	if (statusCode >= 500 && statusCode != http.StatusNotImplemented) || statusCode == 429 {
 		shouldMarkUnhealthy, needsBackoffHTTP := classifyHTTPStatus(statusCode)
 		needsBackoff = needsBackoffHTTP
 
