@@ -9,6 +9,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
@@ -351,4 +352,91 @@ func TestRESTRelay_ResponseHeaders(t *testing.T) {
 		}
 	}
 	assert.True(t, found, fmt.Sprintf("expected X-Custom-Header in metadata, got: %+v", result.Reply.Metadata))
+}
+
+// TestRESTRelay_501_NotImplemented_relayInnerDirect reproduces MAG-1576: a
+// Cosmos-based node returns HTTP 501 ("not implemented"), and relayInnerDirect()
+// mis-routes it to the PROTOCOL-error path instead of treating it as a NodeError.
+//
+// Why the bug lives in relayInnerDirect (not the REST sender): sendRESTRelay
+// already classifies 5xx as IsNodeError=true and returns a NIL Go error — see
+// TestRESTRelay_503_ServiceUnavailable. But relayInnerDirect's blanket
+//
+//	if statusCode >= 500 || statusCode == 429 { ... return fmt.Errorf("HTTP %d", statusCode) }
+//
+// converts that node-error result into a synthetic transport error, which the
+// caller files via setErrorResponse on the protocol-error path. For 501 this is
+// wrong: 501 should be NODE_UNIMPLEMENTED (Retryable:false), so as a protocol
+// error it gets RETRIED instead of failing fast and the node's body is lost.
+//
+// Regression guard: asserts that relayInnerDirect does NOT convert a REST 501
+// into a transport error. Before the fix this failed with fmt.Errorf("HTTP 501");
+// the fix excludes 501 from the `statusCode >= 500` transport-error branch so the
+// NodeError the sender produced is preserved and returned to the client.
+func TestRESTRelay_501_NotImplemented_relayInnerDirect(t *testing.T) {
+	ctx := context.Background()
+	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+		ctx,
+		"LAVA",
+		spectypes.APIInterfaceRest,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Cosmos gRPC-gateway "not implemented" surfaces as HTTP 501.
+			w.WriteHeader(http.StatusNotImplemented)
+			_, _ = w.Write([]byte(`{"code":12,"message":"Not Implemented"}`))
+		}),
+		nil,
+		"../../",
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, chainParser)
+	require.NotNil(t, endpoint)
+	defer closeServer()
+
+	chainMessage, err := chainParser.ParseMsg(
+		"/cosmos/base/tendermint/v1beta1/blocks/latest",
+		nil,
+		http.MethodGet,
+		nil,
+		extensionslib.ExtensionInfo{LatestBlock: 0},
+	)
+	require.NoError(t, err)
+
+	nodeUrl := endpoint.NodeUrls[0]
+	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	require.NoError(t, err)
+
+	// Minimal smart-router direct session. Endpoint is deliberately left nil so
+	// relayInnerDirect's MarkUnhealthy/metrics blocks (guarded by
+	// `targetEndpoint != nil`) are skipped — smartRouterEndpointMetrics is never
+	// dereferenced, keeping the harness self-contained.
+	cswp := &lavasession.ConsumerSessionsWithProvider{PublicLavaAddress: "test-cosmos-lcd"}
+	session := &lavasession.SingleConsumerSession{
+		Parent: cswp,
+		Connection: &lavasession.DirectRPCSessionConnection{
+			DirectConnection: directConn,
+			EndpointAddress:  nodeUrl.Url,
+		},
+	}
+
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+	}
+
+	relayResult := &common.RelayResult{}
+	_, relayErr, _ := rpcss.relayInnerDirect(ctx, session, relayResult, 5*time.Second, chainMessage, nil, nil)
+
+	// DESIRED (post-fix): a REST 501 "not implemented" is a NodeError, so
+	// relayInnerDirect must NOT convert it into a Go error (which routes it to
+	// setErrorResponse / the protocol-error path). This fails today with
+	// relayErr = "HTTP 501" — that failure IS the reproduction.
+	require.NoError(t, relayErr,
+		"BUG: relayInnerDirect converts a REST 501 (which sendRESTRelay tagged IsNodeError=true) into a transport error, routing it to the protocol-error path instead of treating it as a NodeError")
+	assert.Equal(t, http.StatusNotImplemented, relayResult.StatusCode)
+	assert.True(t, relayResult.IsNodeError, "REST 501 should be classified as a node error")
+	// End-to-end: with the classifier mapping 501→NODE_UNIMPLEMENTED, the node
+	// error must be non-retryable so the policy stops instead of retrying an
+	// unsupported method. This ties the routing fix (Part 1) to the classifier
+	// fix (Part 2).
+	assert.True(t, relayResult.IsNonRetryable, "REST 501 should be a non-retryable node error")
 }

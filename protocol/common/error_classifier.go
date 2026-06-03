@@ -296,6 +296,9 @@ func httpStatusCodeMappings() []errorMapping {
 		{CodeEquals(413), LavaErrorUserRequestTooLarge},
 		{CodeEquals(429), LavaErrorNodeRateLimited},
 		{CodeEquals(500), LavaErrorNodeInternalError},
+		// 501 Not Implemented: node lacks this method/endpoint (e.g. Cosmos REST
+		// gRPC-gateway). Non-retryable node error, not a transient server failure.
+		{CodeEquals(501), LavaErrorNodeUnimplemented},
 		{CodeEquals(502), LavaErrorNodeBadGateway},
 		{CodeEquals(503), LavaErrorNodeServiceUnavailable},
 		{CodeEquals(504), LavaErrorNodeGatewayTimeout},
@@ -322,6 +325,8 @@ func httpStatusMessageMappings() []errorMapping {
 		{HTTPStatusContains(413), LavaErrorUserRequestTooLarge},
 		{HTTPStatusContains(429), LavaErrorNodeRateLimited},
 		{HTTPStatusContains(500), LavaErrorNodeInternalError},
+		// 501 Not Implemented: node lacks this method/endpoint. Non-retryable.
+		{HTTPStatusContains(501), LavaErrorNodeUnimplemented},
 		{HTTPStatusContains(502), LavaErrorNodeBadGateway},
 		{HTTPStatusContains(503), LavaErrorNodeServiceUnavailable},
 		{HTTPStatusContains(504), LavaErrorNodeGatewayTimeout},
