@@ -1,0 +1,54 @@
+# Local dev stack: one parameterized smart-router (router only).
+#
+# Pick the example config with SR_CONFIG. To add the cache, layer the cache
+# overlay on top (see below) — there is no per-config compose file.
+#
+#   # Ethereum example (default):
+#   docker compose -f docker/docker-compose.yml up --build
+#
+#   # Any other example:
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_multichain.yml \
+#     docker compose -f docker/docker-compose.yml up --build
+#
+#   # With the cache: use a *_cached.yml config (which declares cache-be:)
+#   # and layer the cache overlay, which starts the cache sidecar:
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_eth_cached.yml \
+#     docker compose -f docker/docker-compose.yml \
+#                    -f docker/docker-compose.cache.yml up --build
+#
+#   curl -X POST http://localhost:3360 -H 'content-type: application/json' \
+#        -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+#
+# Build context is the repo root (..) so the in-image go build + bundled
+# specs/ + config/ resolve.
+#
+# Ports: the superset every bundled example uses is published. A given config
+# only binds the listeners it declares; the rest sit idle — harmless.
+#   3360  ETH1 jsonrpc (eth, multichain)
+#   3361  ARBITRUM jsonrpc (multichain)
+#   3362  BASE jsonrpc (multichain)
+#   7779  router prometheus metrics
+
+name: smart-router
+
+services:
+  router:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: smart-router:dev
+    command:
+      - "${SR_CONFIG:-config/smartrouter_examples/smartrouter_eth.yml}"
+      - "--geolocation"
+      - "1"
+      - "--use-static-spec"
+      - "specs/"
+      - "--log-level"
+      - "${SR_LOG_LEVEL:-info}"
+      - "--log-format"
+      - "${SR_LOG_FORMAT:-json}"
+    ports:
+      - "3360:3360" # ETH1 jsonrpc
+      - "3361:3361" # ARBITRUM jsonrpc
+      - "3362:3362" # BASE jsonrpc
+      - "7779:7779" # router prometheus metrics

@@ -58,7 +58,7 @@ archives:
 
 # dockers_v2 (v2.15+) replaces the per-arch dockers: + docker_manifests:
 # combo with a single block. GoReleaser stages each platform's binary at
-# `linux/<arch>/smartrouter` in the build context, and Dockerfile.release
+# `linux/<arch>/smartrouter` in the build context, and docker/Dockerfile.release
 # resolves the right one via $TARGETPLATFORM. The multi-arch manifest is
 # created automatically from the platforms list.
 #
@@ -74,7 +74,7 @@ dockers_v2:
     tags:
       - "{{ .Tag }}"
       - "{{ if not .Prerelease }}latest{{ end }}"
-    dockerfile: Dockerfile.release
+    dockerfile: docker/Dockerfile.release
     platforms:
       - linux/amd64
       - linux/arm64

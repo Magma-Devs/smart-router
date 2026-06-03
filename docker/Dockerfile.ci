@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # CI-only image: consumes prebuilt binaries from the `build` workflow job.
-# For local "build from source" use the root Dockerfile instead.
+# For local "build from source" use docker/Dockerfile instead.
 
 ARG RUNNER_IMAGE="gcr.io/distroless/static-debian12:debug"
 
