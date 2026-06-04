@@ -10,7 +10,7 @@ metrics manager.
 
 | Path | Format | Description |
 | --- | --- | --- |
-| `/metrics` | Prometheus | All registered metrics ([`promhttp.Handler()`](../protocol/metrics/smartrouter_metrics_manager.go#L615)) |
+| `/metrics` | Prometheus | All registered metrics ([`promhttp.Handler()`](../protocol/metrics/smartrouter_metrics_manager.go#L623)) |
 | `/metrics/overall-health` | text | `200 Health status OK` if ≥1 endpoint is healthy, else `503 Unhealthy` |
 | `/metrics/health-overall` | text | Alias of the above (backward-compat path) |
 
@@ -28,7 +28,7 @@ curl http://localhost:7779/metrics
 ```
 
 The flag is defined at
-[`rpcsmartrouter.go:1975`](../protocol/rpcsmartrouter/rpcsmartrouter.go#L1975); the flag
+[`rpcsmartrouter.go:1974`](../protocol/rpcsmartrouter/rpcsmartrouter.go#L1974); the flag
 name and the `disabled` sentinel live in
 [`flags.go`](../protocol/metrics/flags.go#L8).
 
