@@ -244,7 +244,6 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// decouples those consumers from the concrete metrics sink.
 	smartRouterMetricsManager := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{
 		NetworkAddress:     options.analyticsServerAddresses.MetricsListenAddress,
-		StartHTTPServer:    true,
 		OptimizerQoSClient: smartRouterOptimizerQoSClient,
 	})
 

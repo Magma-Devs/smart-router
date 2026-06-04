@@ -141,10 +141,16 @@ type EndpointMetrics struct {
 	lock         sync.Mutex
 }
 
-// SmartRouterMetricsManagerOptions contains configuration for the metrics manager
+// SmartRouterMetricsManagerOptions contains configuration for the metrics manager.
+//
+// NetworkAddress selects the behaviour:
+//   - "disabled"      → no manager is created (returns nil)
+//   - "" (empty)      → manager is created and collectors are registered, but no
+//                       HTTP server is started (register-only; used by tests and
+//                       embedded callers)
+//   - "host:port"     → manager is created and the metrics HTTP server listens there
 type SmartRouterMetricsManagerOptions struct {
 	NetworkAddress     string
-	StartHTTPServer    bool // If false, only register metrics without starting the HTTP server
 	OptimizerQoSClient *ConsumerOptimizerQoSClient
 }
 
@@ -609,8 +615,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		optimizerQoSClient:      options.OptimizerQoSClient,
 	}
 
-	// Only start the HTTP server if requested.
-	if options.StartHTTPServer && options.NetworkAddress != "" {
+	// Start the HTTP server only when a listen address is configured. An empty
+	// address leaves the manager in register-only mode (collectors registered, no
+	// socket) — see SmartRouterMetricsManagerOptions.
+	if options.NetworkAddress != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.Handler())
 

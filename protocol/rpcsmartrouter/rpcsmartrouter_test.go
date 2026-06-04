@@ -259,8 +259,7 @@ func TestUpdateEpoch_ResetsHealthMetric(t *testing.T) {
 	// Wire a real SmartRouterMetricsManager into a minimal RPCSmartRouterServer so
 	// updateEpoch can find it via rpsr.rpcServers[chainKey].
 	metricsManager := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{
-		NetworkAddress:  "disabled-but-nonempty", // non-DisabledFlagOption value so the manager is created
-		StartHTTPServer: false,
+		NetworkAddress: "", // register-only: manager is created, no HTTP server bound
 	})
 	require.NotNil(t, metricsManager)
 	rpsr.rpcServers[chainKey] = &RPCSmartRouterServer{
