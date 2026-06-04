@@ -804,7 +804,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Smart router queries spec once during initialization (no ongoing updates)
 	if len(options.cmdFlags.StaticSpecPaths) > 0 {
 		// Load spec from static file/directory/URL sources
-		err = statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, options.cmdFlags.StaticSpecPaths, *rpcEndpoint, nil, options.cmdFlags.GitHubToken, options.cmdFlags.GitLabToken)
+		err = statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, options.cmdFlags.StaticSpecPaths, *rpcEndpoint, options.cmdFlags.GitHubToken, options.cmdFlags.GitLabToken)
 		if err != nil {
 			err = utils.LavaFormatError("failed loading static spec", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 			errCh <- err
