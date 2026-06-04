@@ -10,7 +10,7 @@ import (
 
 // SetVersionInner encodes a semantic version string onto a protocol-version gauge as
 // major*1e6 + minor*1e3 + patch, so dashboards can compare deployed versions numerically.
-// Shared by every metrics manager that exposes a protocol_version gauge.
+// Used by SmartRouterMetricsManager to set its protocol_version gauge.
 func SetVersionInner(protocolVersionMetric *prometheus.GaugeVec, version string) {
 	// Normalize git-describe style: strip leading "v" and drop everything from the first "-" or "+".
 	// Examples: "v6.2.2" → "6.2.2", "v6.2.2-3-gabc1234-dirty" → "6.2.2".
