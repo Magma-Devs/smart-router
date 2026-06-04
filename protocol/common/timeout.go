@@ -2,13 +2,10 @@ package common
 
 import (
 	"context"
-	"errors"
 	"math"
 	"time"
 
-	"github.com/gogo/status"
 	"github.com/magma-Devs/smart-router/utils"
-	"google.golang.org/grpc/codes"
 )
 
 const (
@@ -92,10 +89,6 @@ func GetTimePerCu(cu uint64) time.Duration {
 	return base
 }
 
-func ContextOutOfTime(ctx context.Context) bool {
-	return errors.Is(ctx.Err(), context.DeadlineExceeded)
-}
-
 func GetRemainingTimeoutFromContext(ctx context.Context) (timeRemaining time.Duration) {
 	deadline, ok := ctx.Deadline()
 	if ok {
@@ -109,15 +102,6 @@ func CapContextTimeout(ctx context.Context, timeout time.Duration) (context.Cont
 		return context.WithTimeout(ctx, timeout)
 	}
 	return context.WithCancel(ctx)
-}
-
-func IsTimeout(errArg error) bool {
-	if statusCode, ok := status.FromError(errArg); ok {
-		if statusCode.Code() == codes.DeadlineExceeded {
-			return true
-		}
-	}
-	return false
 }
 
 type TimeoutInfo struct {
