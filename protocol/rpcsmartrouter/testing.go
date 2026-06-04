@@ -50,9 +50,8 @@ func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEn
 				return
 			}
 
-			// In smart-router mode NewConsumerStateQuery returns a stub whose
-			// GetSpec always errors.  Use static spec loading instead, mirroring
-			// what the main rpcsmartrouter command does via RegisterForSpecUpdates.
+			// smart-router has no live blockchain spec query; load specs
+			// statically, mirroring what the main rpcsmartrouter command does.
 			rpcEndpoint := lavasession.RPCEndpoint{
 				ChainID:      rpcProviderEndpoint.ChainID,
 				ApiInterface: rpcProviderEndpoint.ApiInterface,
