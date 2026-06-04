@@ -56,7 +56,7 @@ smartrouter config/smartrouter_examples/smartrouter_lava.yml --geolocation 1 --u
 After running, you get:
 
 - An RPC endpoint per chain interface (ports from the YAML config; conventional default `:3360`).
-- Prometheus metrics on `:7779`.
+- Prometheus metrics on `:7779` — see [docs/METRICS.md](docs/METRICS.md) for the full reference.
 - A health endpoint at `/lava/health`.
 - Provider rotation, RPC-aware retry, response caching, and metrics — all driven by the YAML config.
 
