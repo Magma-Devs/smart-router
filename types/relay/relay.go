@@ -560,55 +560,6 @@ func (r *RelayRequest) Unmarshal(dAtA []byte) error {
 	return jsonUnmarshal(dAtA, r)
 }
 
-// RelayExchange pairs a request and reply for signing/verification by sigs.Sign.
-type RelayExchange struct {
-	Request RelayRequest
-	Reply   RelayReply
-}
-
-// NewRelayExchange constructs a RelayExchange used for signing relay responses.
-func NewRelayExchange(request RelayRequest, reply RelayReply) RelayExchange {
-	return RelayExchange{Request: request, Reply: reply}
-}
-
-// GetSignature implements sigs.Signable; the signature lives in the reply.
-func (re RelayExchange) GetSignature() []byte {
-	return re.Reply.Sig
-}
-
-// DataToSign implements sigs.Signable; encodes the session and reply fields that
-// must be covered by the provider's signature.
-func (re RelayExchange) DataToSign() []byte {
-	var buf []byte
-
-	appendBytes := func(b []byte) {
-		lenBuf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(lenBuf, uint32(len(b)))
-		buf = append(buf, lenBuf...)
-		buf = append(buf, b...)
-	}
-	appendInt64 := func(v int64) {
-		b := make([]byte, 8)
-		binary.LittleEndian.PutUint64(b, uint64(v))
-		buf = append(buf, b...)
-	}
-
-	if re.Request.RelaySession != nil {
-		sessionData := re.Request.RelaySession.DataToSign()
-		appendBytes(sessionData)
-	}
-	appendBytes(re.Reply.Data)
-	appendInt64(re.Reply.LatestBlock)
-	appendBytes(re.Reply.FinalizedBlocksHashes)
-
-	return buf
-}
-
-// HashRounds implements sigs.Signable.
-func (re RelayExchange) HashRounds() int {
-	return 1
-}
-
 // ProbeRequest is sent by the consumer to probe a provider before committing to
 // a full relay.
 type ProbeRequest struct {
