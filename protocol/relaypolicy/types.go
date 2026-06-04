@@ -36,9 +36,3 @@ type PolicyConfig struct {
 	CircuitBreakerThreshold int  // consecutive pairing errors before tripping
 	SendRelayAttempts       int  // consecutive batch errors before giving up
 }
-
-// ErrorClassification is returned by ClassifyNodeError.
-type ErrorClassification struct {
-	IsNonRetryable      bool // umbrella flag: true if any non-retryable condition
-	IsUnsupportedMethod bool // subset of IsNonRetryable, gates zero-CU + caching
-}
