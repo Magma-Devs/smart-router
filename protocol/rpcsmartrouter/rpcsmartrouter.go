@@ -146,7 +146,6 @@ type AnalyticsServerAddresses struct {
 	RelayKafkaTLSInsecure bool
 	ReportsAddressFlag    string
 	OptimizerQoSAddress   string
-	OptimizerQoSListen    bool
 }
 type RPCSmartRouter struct {
 	// Smart router doesn't need blockchain state tracking
@@ -233,11 +232,12 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 
 	smartRouterUsageServeManager := metrics.NewConsumerRelayServerClient(options.analyticsServerAddresses.RelayServerAddress)                                                                                                                                                                                                                                                                                                                     // start up relay server reporting
 	smartRouterKafkaClient := metrics.NewConsumerKafkaClient(options.analyticsServerAddresses.RelayKafkaAddress, options.analyticsServerAddresses.RelayKafkaTopic, options.analyticsServerAddresses.RelayKafkaUsername, options.analyticsServerAddresses.RelayKafkaPassword, options.analyticsServerAddresses.RelayKafkaMechanism, options.analyticsServerAddresses.RelayKafkaTLSEnabled, options.analyticsServerAddresses.RelayKafkaTLSInsecure) // start up kafka client
-	var smartRouterOptimizerQoSClient *metrics.ConsumerOptimizerQoSClient
-	if options.analyticsServerAddresses.OptimizerQoSAddress != "" || options.analyticsServerAddresses.OptimizerQoSListen {
-		smartRouterOptimizerQoSClient = metrics.NewConsumerOptimizerQoSClient(smartRouterIdentifier, options.analyticsServerAddresses.OptimizerQoSAddress, options.geoLocation, metrics.OptimizerQosServerPushInterval) // start up optimizer qos client
-		smartRouterOptimizerQoSClient.StartOptimizersQoSReportsCollecting(ctx, metrics.OptimizerQosServerSamplingInterval)
-	}
+	// Always collect optimizer QoS reports so the lava_rpc_optimizer_selection_score
+	// metric is exposed on /metrics. When an OptimizerQoSAddress is configured the
+	// reports are also pushed there; with no address the client's QueueSender is nil
+	// (a no-op), so collection still runs but nothing is pushed.
+	smartRouterOptimizerQoSClient := metrics.NewConsumerOptimizerQoSClient(smartRouterIdentifier, options.analyticsServerAddresses.OptimizerQoSAddress, options.geoLocation, metrics.OptimizerQosServerPushInterval)
+	smartRouterOptimizerQoSClient.StartOptimizersQoSReportsCollecting(ctx, metrics.OptimizerQosServerSamplingInterval)
 	// SmartRouterMetricsManager is the single metrics owner for the smart router.
 	// It serves its own HTTP endpoint and implements ConsumerMetricsManagerInf so it
 	// can be passed to RPCConsumerLogs, ConsumerSessionManager, etc. — the interface
@@ -1844,7 +1844,6 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				RelayKafkaTLSInsecure: viper.GetBool(metrics.RelayKafkaTLSInsecureFlagName),
 				ReportsAddressFlag:    viper.GetString(reportsSendBEAddress),
 				OptimizerQoSAddress:   viper.GetString(common.OptimizerQosServerAddressFlag),
-				OptimizerQoSListen:    viper.GetBool(common.OptimizerQosListenFlag),
 			}
 
 			maxConcurrentProviders := viper.GetUint(common.MaximumConcurrentProvidersFlagName)
@@ -2005,7 +2004,6 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().BoolVar(&rpcInterfaceMessages.BatchNodeErrorOnAny, common.BatchNodeErrorOnAnyFlag, false, "if true, batch requests are treated as node errors if ANY sub-request fails; if false (default), only if ALL fail")
 	// optimizer qos reports
 	cmdRPCSmartRouter.Flags().String(common.OptimizerQosServerAddressFlag, "", "address to send optimizer qos reports to")
-	cmdRPCSmartRouter.Flags().Bool(common.OptimizerQosListenFlag, false, "enable listening for optimizer qos reports on metrics endpoint i.e GET -> localhost:7779/provider_optimizer_metrics")
 	cmdRPCSmartRouter.Flags().DurationVar(&metrics.OptimizerQosServerPushInterval, common.OptimizerQosServerPushIntervalFlag, time.Minute*5, "interval to push optimizer qos reports")
 	cmdRPCSmartRouter.Flags().DurationVar(&metrics.OptimizerQosServerSamplingInterval, common.OptimizerQosServerSamplingIntervalFlag, time.Second*1, "interval to sample optimizer qos reports")
 	// websocket flags
