@@ -27,11 +27,3 @@ func FindRequestedBlockHash(requestedHashes []*BlockStore, requestBlock, toBlock
 	}
 	return requestedBlockHash, finalizedBlockHashes
 }
-
-func BuildProofFromBlocks(requestedHashes []*BlockStore) map[int64]interface{} {
-	finalizedBlockHashes := map[int64]interface{}{}
-	for _, block := range requestedHashes {
-		finalizedBlockHashes[block.Block] = block.Hash
-	}
-	return finalizedBlockHashes
-}
