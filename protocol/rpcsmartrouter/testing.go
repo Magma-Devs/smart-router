@@ -59,9 +59,8 @@ func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEn
 			}
 			if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(
 				ctx, chainParser, staticSpecPaths, rpcEndpoint,
-				nil, // no live spec updater in static mode
-				"",  // github token — not needed for local files
-				"",  // gitlab token — not needed for local files
+				"", // github token — not needed for local files
+				"", // gitlab token — not needed for local files
 			); err != nil {
 				errCh <- utils.LavaFormatError("failed loading spec for endpoint", err,
 					utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID},
