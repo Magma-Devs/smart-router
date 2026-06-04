@@ -469,24 +469,6 @@ func ApiInterfaceToTransport(apiInterface string) TransportType {
 	}
 }
 
-// ClassifyMessage classifies an error from just a message string and an optional
-// numeric code, trying all transport types in order (JsonRPC → REST → gRPC) and
-// returning the first non-unknown classification.
-//
-// Use this only when the transport AND chain are genuinely unknown. Tier-2
-// (chain-specific) matchers are unconditionally skipped here, so a chain-native
-// message that happens to contain a broad Tier-1 substring can be misclassified.
-// If the chain is known, call ClassifyError directly (or use a helper like
-// IsUnsupportedMethodError that takes a chainID) to avoid false matches.
-func ClassifyMessage(code int, message string) *LavaError {
-	for _, transport := range []TransportType{TransportJsonRPC, TransportREST, TransportGRPC} {
-		if c := ClassifyError(nil, ChainFamilyUnknown, transport, code, message); c != LavaErrorUnknown {
-			return c
-		}
-	}
-	return LavaErrorUnknown
-}
-
 // ClassifyError classifies an error into a LavaError for internal use (logging, metrics, endpoint health).
 // The original error always passes through unchanged to the user (transparent hop).
 //

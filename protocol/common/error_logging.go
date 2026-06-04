@@ -81,20 +81,6 @@ func LogCodedError(description string, err error, lavaError *LavaError, chainID 
 	return utils.LavaFormatError(description, err, buildCodedAttrs(lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)...)
 }
 
-// LogCodedWarning logs an error at Warning level with a classified LavaError, auto-populating
-// structured fields and invoking the metrics callback if registered.
-//
-// Use this for expected/non-critical errors that should be tracked in metrics but should not
-// appear as errors in logs (e.g., session-out-of-sync, invalid consumer requests, relay
-// capacity limits that are normal in production).
-func LogCodedWarning(description string, err error, lavaError *LavaError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) error {
-	if lavaError == nil {
-		lavaError = LavaErrorUnknown
-	}
-	EmitErrorMetric(lavaError, chainID)
-	return utils.LavaFormatWarning(description, err, buildCodedAttrs(lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)...)
-}
-
 // ExtractJSONRPCErrorCode extracts the error code from a JSON-RPC error response body.
 // Returns 0 if the body is not a valid JSON-RPC error.
 func ExtractJSONRPCErrorCode(data []byte) int {
