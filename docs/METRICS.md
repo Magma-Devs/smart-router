@@ -204,18 +204,3 @@ Defined in [`error_metrics.go`](../protocol/metrics/error_metrics.go).
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `lava_errors_total` | Counter | `error_name`, `error_category`, `retryable`, `chain_id` | Errors classified by name, category, retryability, and chain. |
-
----
-
-## Removed families
-
-`SmartRouterMetricsManager` is the only metrics manager constructed at runtime
-([`rpcsmartrouter.go`](../protocol/rpcsmartrouter/rpcsmartrouter.go)). Three metric
-families that used to live in this package were never instantiated by the smart router
-and have been removed — listed here so they don't resurface in dashboards or alerts:
-
-| Family | Former home | Why removed |
-| --- | --- | --- |
-| `lava_consumer_*` | `consumer_metrics_manager.go` | `ConsumerMetricsManager` had no call site; the smart router implements `ConsumerMetricsManagerInf` directly. |
-| `lava_provider_*` | `provider_metrics_manager.go` | `ProviderMetricsManager` was only ever a nil field on the chaintracker — no metric was emitted. |
-| `lava_health_*` / `lava_*_entities` | `health_metrics.go` | `NewHealthMetrics` had no call site; it stood up its own orphaned HTTP server. The live health path (`RelaysMonitorAggregator`) is unaffected. |
