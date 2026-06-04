@@ -6,20 +6,11 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	updaters "github.com/magma-Devs/smart-router/protocol/statetracker/updaters"
 	"github.com/magma-Devs/smart-router/utils"
 	speckeeper "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/specfetcher"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
-
-
-// SpecUpdaterInf is implemented by state-tracker types that can register a
-// SpecUpdatable for live on-chain spec updates.  Callers that do not need live
-// updates (e.g. the smart router using static specs) may pass nil.
-type SpecUpdaterInf interface {
-	RegisterForSpecUpdates(ctx context.Context, specUpdatable updaters.SpecUpdatable, endpoint lavasession.RPCEndpoint) error
-}
 
 // expandCommaSeparatedPaths takes a slice of paths (from StringArray flag) and expands
 // any comma-separated values within each element. This allows users to specify multiple
@@ -70,25 +61,19 @@ func expandCommaSeparatedPaths(specPaths []string) []string {
 //	--use-static-spec file1.json,file2.json
 //
 // For remote repositories, the appropriate token (githubToken or gitlabToken) is used for authentication.
-// When specPaths is empty and specUpdaterInf is non-nil, it falls back to blockchain registration.
-func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint lavasession.RPCEndpoint, specUpdaterInf SpecUpdaterInf, githubToken string, gitlabToken string) error {
+// smart-router loads specs statically; empty specPaths is an error (there is no live blockchain fallback).
+func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint lavasession.RPCEndpoint, githubToken string, gitlabToken string) error {
 	if len(specPaths) == 0 {
-		if specUpdaterInf == nil {
-			return utils.LavaFormatError("no spec paths provided and no spec updater registered", nil,
-				utils.LogAttr("chain_id", rpcEndpoint.ChainID))
-		}
-		return specUpdaterInf.RegisterForSpecUpdates(ctx, chainParser, rpcEndpoint)
+		return utils.LavaFormatError("no spec paths provided", nil,
+			utils.LogAttr("chain_id", rpcEndpoint.ChainID))
 	}
 
 	// Expand comma-separated paths (for local files)
 	expandedPaths := expandCommaSeparatedPaths(specPaths)
 
 	if len(expandedPaths) == 0 {
-		if specUpdaterInf == nil {
-			return utils.LavaFormatError("no valid spec paths after expansion and no spec updater registered", nil,
-				utils.LogAttr("chain_id", rpcEndpoint.ChainID))
-		}
-		return specUpdaterInf.RegisterForSpecUpdates(ctx, chainParser, rpcEndpoint)
+		return utils.LavaFormatError("no valid spec paths after expansion", nil,
+			utils.LogAttr("chain_id", rpcEndpoint.ChainID))
 	}
 
 	// Aggregate all specs from all sources
