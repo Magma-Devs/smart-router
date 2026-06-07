@@ -2262,6 +2262,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 				oldSession.GetProviderStakeSize(),
 			)
 			freshSession.StaticProvider = oldSession.StaticProvider
+			freshSession.GroupLabel = oldSession.GroupLabel // cross-validation group must survive epoch refresh
 			freshProviderSessions[idx] = freshSession
 
 			utils.LavaFormatDebug("Created fresh provider session for epoch",
@@ -2290,6 +2291,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 				oldSession.GetProviderStakeSize(),
 			)
 			freshSession.StaticProvider = oldSession.StaticProvider
+			freshSession.GroupLabel = oldSession.GroupLabel // cross-validation group must survive epoch refresh
 			freshBackupSessions[idx] = freshSession
 
 			utils.LavaFormatDebug("Created fresh backup provider session for epoch",

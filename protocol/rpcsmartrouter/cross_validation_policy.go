@@ -208,7 +208,11 @@ func (r *CrossValidationPolicyResolver) Resolve(chainID, apiInterface, method st
 		MinGroups: resolveKnob(0, false, policy.MinGroups, defaultEnabledMinGroups),
 	}
 
-	// Keep the quorum shape satisfiable regardless of caller/cap interaction.
+	// Keep the quorum shape satisfiable. Validate() guarantees the no-caller shape already satisfies
+	// threshold/min-groups <= max-participants, so this only fires when a caller asked for more
+	// participants than an operator cap allows (the approved cap-loosening): we then lower the caller's
+	// threshold to the capped participant count. It never reduces below an operator floor, because the
+	// capped participant count is itself >= max-participants' floor >= the threshold/min-groups floors.
 	if eff.AgreementThreshold > eff.MaxParticipants {
 		eff.AgreementThreshold = eff.MaxParticipants
 	}
@@ -284,13 +288,21 @@ func (p CrossValidationPolicy) Validate() error {
 			return fmt.Errorf("%s floor %d cannot exceed cap %d", name, *b.Floor, *b.Cap)
 		}
 	}
-	// Cross-knob unsatisfiability: a required threshold/min-groups floor that exceeds the
-	// max-participants cap can never be met.
-	if p.AgreementThreshold.Floor != nil && p.MaxParticipants.Cap != nil && *p.AgreementThreshold.Floor > *p.MaxParticipants.Cap {
-		return fmt.Errorf("agreement-threshold floor %d exceeds max-participants cap %d (unsatisfiable)", *p.AgreementThreshold.Floor, *p.MaxParticipants.Cap)
-	}
-	if p.MinGroups.Floor != nil && p.MaxParticipants.Cap != nil && *p.MinGroups.Floor > *p.MaxParticipants.Cap {
-		return fmt.Errorf("min-groups floor %d exceeds max-participants cap %d (unsatisfiable)", *p.MinGroups.Floor, *p.MaxParticipants.Cap)
+	// An ENABLED policy forces cross-validation even with no caller headers, so its no-caller resolved
+	// shape must be satisfiable on its own. Compute that shape with the same resolveKnob logic Resolve
+	// uses and reject if agreement-threshold or min-groups would exceed max-participants — otherwise
+	// Resolve would silently clamp them down, violating "floor = operator minimum". (A disabled policy
+	// never resolves on its own, so this does not apply.)
+	if p.Enabled {
+		noCallerMax := resolveKnob(0, false, p.MaxParticipants, defaultEnabledMaxParticipants)
+		noCallerThreshold := resolveKnob(0, false, p.AgreementThreshold, defaultEnabledAgreementThreshold)
+		noCallerMinGroups := resolveKnob(0, false, p.MinGroups, defaultEnabledMinGroups)
+		if noCallerThreshold > noCallerMax {
+			return fmt.Errorf("agreement-threshold resolves to %d with no caller but max-participants resolves to %d; an enabled policy must be satisfiable without caller headers (raise max-participants or lower agreement-threshold)", noCallerThreshold, noCallerMax)
+		}
+		if noCallerMinGroups > noCallerMax {
+			return fmt.Errorf("min-groups resolves to %d with no caller but max-participants resolves to %d; an enabled policy must be satisfiable without caller headers (raise max-participants or lower min-groups)", noCallerMinGroups, noCallerMax)
+		}
 	}
 	return nil
 }

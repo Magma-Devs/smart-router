@@ -275,6 +275,32 @@ func createPairingList(providerPrefixAddress string, enabled bool) map[uint64]*C
 	return cswpList
 }
 
+// TestNumberOfValidProviderGroups covers the Fix 3 group-capacity helper: distinct cross-validation
+// group labels across valid providers, with empty GroupLabel folded into the implicit "default" group.
+func TestNumberOfValidProviderGroups(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	mk := func(addr, group string) *ConsumerSessionsWithProvider {
+		return &ConsumerSessionsWithProvider{
+			PublicLavaAddress: addr,
+			Endpoints:         []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
+			Sessions:          map[int64]*SingleConsumerSession{},
+			MaxComputeUnits:   200,
+			PairingEpoch:      firstEpochHeight,
+			GroupLabel:        group,
+		}
+	}
+	pairingList := map[uint64]*ConsumerSessionsWithProvider{
+		0: mk("lava@p0", "tier-1"),
+		1: mk("lava@p1", "tier-1"), // shares tier-1
+		2: mk("lava@p2", "external"),
+		3: mk("lava@p3", ""), // empty -> implicit "default"
+	}
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
+
+	require.Equal(t, 4, csm.GetNumberOfValidProviders())
+	require.Equal(t, 3, csm.NumberOfValidProviderGroups(), "tier-1, external, default are the 3 distinct groups")
+}
+
 func TestNoPairingAvailableFlow(t *testing.T) {
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()
