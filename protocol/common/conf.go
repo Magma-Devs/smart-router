@@ -14,6 +14,7 @@ const (
 	PlainTextConnection                = "allow-plaintext-connection"
 	EndpointsConfigName                = "endpoints"
 	DirectRPCConfigName                = "direct-rpc"
+	CrossValidationConfigName          = "cross-validation"
 	BackupDirectRPCConfigName          = "backup-direct-rpc"
 	StaticProvidersConfigName          = "static-providers" // Deprecated: use DirectRPCConfigName
 	BackupProvidersConfigName          = "backup-providers" // Deprecated: use BackupDirectRPCConfigName

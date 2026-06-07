@@ -4,10 +4,12 @@ import (
 	"context"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // Using interfaces from relaycore
@@ -48,8 +50,9 @@ func SmartRouterPolicyConfig() relaypolicy.PolicyConfig {
 	}
 }
 
-// NewSmartRouterRelayStateMachine creates a SmartRouter-mode unified state machine.
-// This is a convenience wrapper that passes the SmartRouter config and policy.
+// NewSmartRouterRelayStateMachine creates a SmartRouter-mode unified state machine with no per-method
+// policy resolver (selection is purely header-driven). Kept for tests and callers that do not wire a
+// policy resolver.
 func NewSmartRouterRelayStateMachine(
 	ctx context.Context,
 	usedProviders *lavasession.UsedProviders,
@@ -58,6 +61,48 @@ func NewSmartRouterRelayStateMachine(
 	analytics *metrics.RelayMetrics,
 	debugRelays bool,
 ) (RelayStateMachine, error) {
+	return NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders, relaySender, protocolMessage, analytics, debugRelays, nil, "", "")
+}
+
+// NewSmartRouterRelayStateMachineWithPolicy is the production constructor: it consults the per-method
+// cross-validation policy resolver (which lives in this package — relaycore cannot import it) and, when a
+// policy applies, injects the resolved params as an override so the unified state machine selects
+// CrossValidation regardless of the method's stateful category. resolver may be nil / empty, in which
+// case behavior is identical to the header-driven path.
+func NewSmartRouterRelayStateMachineWithPolicy(
+	ctx context.Context,
+	usedProviders *lavasession.UsedProviders,
+	relaySender SmartRouterRelaySender,
+	protocolMessage chainlib.ProtocolMessage,
+	analytics *metrics.RelayMetrics,
+	debugRelays bool,
+	resolver *CrossValidationPolicyResolver,
+	chainID string,
+	apiInterface string,
+) (RelayStateMachine, error) {
+	var cvOverride *common.CrossValidationParams
+	if resolver.HasPolicies() {
+		caller, callerPresent, err := protocolMessage.GetCrossValidationParameters()
+		if callerPresent && err != nil {
+			return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
+		}
+		method := protocolMessage.GetApi().GetName()
+		if eff, applies := resolver.Resolve(chainID, apiInterface, method, caller, callerPresent); applies {
+			cvOverride = &eff
+			if debugRelays {
+				utils.LavaFormatDebug("[CrossValidation] per-method policy resolved",
+					utils.LogAttr("chainID", chainID),
+					utils.LogAttr("apiInterface", apiInterface),
+					utils.LogAttr("method", method),
+					utils.LogAttr("maxParticipants", eff.MaxParticipants),
+					utils.LogAttr("agreementThreshold", eff.AgreementThreshold),
+					utils.LogAttr("minGroups", eff.MinGroups),
+					utils.LogAttr("callerHeadersPresent", callerPresent),
+					utils.LogAttr("GUID", ctx))
+			}
+		}
+	}
+
 	policy := relaypolicy.NewPolicy(SmartRouterPolicyConfig())
 	return relaycore.NewUnifiedRelayStateMachine(
 		ctx,
@@ -68,5 +113,6 @@ func NewSmartRouterRelayStateMachine(
 		debugRelays,
 		SmartRouterStateMachineConfig(),
 		policy,
+		cvOverride,
 	)
 }

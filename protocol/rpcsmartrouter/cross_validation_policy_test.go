@@ -1,9 +1,11 @@
 package rpcsmartrouter
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,8 +16,8 @@ func intPtr(i int) *int { return &i }
 func newResolver(t *testing.T, method string, policy CrossValidationPolicy) *CrossValidationPolicyResolver {
 	t.Helper()
 	r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{
-		Policies: map[string]map[string]map[string]CrossValidationPolicy{
-			"ETH1": {"jsonrpc": {method: policy}},
+		Policies: []CrossValidationPolicyEntry{
+			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: method, CrossValidationPolicy: policy},
 		},
 	})
 	require.NoError(t, err)
@@ -156,6 +158,66 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 	}
 }
 
+// TestParseCrossValidationConfig covers YAML parsing: absent key (backwards compatible), the object
+// form {floor, cap}, and the scalar shorthand (N == {floor: N}).
+func TestParseCrossValidationConfig(t *testing.T) {
+	t.Run("absent key yields empty config", func(t *testing.T) {
+		v := viper.New()
+		v.SetConfigType("yaml")
+		require.NoError(t, v.ReadConfig(strings.NewReader("direct-rpc:\n  - name: x\n")))
+		cfg, err := ParseCrossValidationConfig(v)
+		require.NoError(t, err)
+		r, err := NewCrossValidationPolicyResolver(cfg)
+		require.NoError(t, err)
+		assert.False(t, r.HasPolicies())
+	})
+
+	t.Run("object form and scalar shorthand both parse", func(t *testing.T) {
+		const yamlBody = "cross-validation:\n" +
+			"  policies:\n" +
+			"    - chain-id: ETH1\n" +
+			"      api-interface: jsonrpc\n" +
+			"      method: eth_getBalance\n" + // preserved casing (string value, not a map key)
+			"      enabled: true\n" +
+			"      agreement-threshold: 2\n" + // scalar shorthand -> {floor: 2}
+			"      max-participants:\n" + // object form
+			"        floor: 3\n" +
+			"        cap: 5\n" +
+			"      min-groups: 2\n" // scalar shorthand -> {floor: 2}
+
+		v := viper.New()
+		v.SetConfigType("yaml")
+		require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
+
+		cfg, err := ParseCrossValidationConfig(v)
+		require.NoError(t, err)
+
+		require.Len(t, cfg.Policies, 1)
+		entry := cfg.Policies[0]
+		assert.Equal(t, "ETH1", entry.ChainID)
+		assert.Equal(t, "jsonrpc", entry.ApiInterface)
+		assert.Equal(t, "eth_getBalance", entry.Method, "method casing must be preserved")
+		policy := entry.CrossValidationPolicy
+		require.True(t, policy.Enabled)
+		require.NotNil(t, policy.AgreementThreshold.Floor)
+		assert.Equal(t, 2, *policy.AgreementThreshold.Floor)
+		assert.Nil(t, policy.AgreementThreshold.Cap)
+		require.NotNil(t, policy.MaxParticipants.Floor)
+		require.NotNil(t, policy.MaxParticipants.Cap)
+		assert.Equal(t, 3, *policy.MaxParticipants.Floor)
+		assert.Equal(t, 5, *policy.MaxParticipants.Cap)
+		require.NotNil(t, policy.MinGroups.Floor)
+		assert.Equal(t, 2, *policy.MinGroups.Floor)
+
+		// And it resolves end-to-end.
+		r, err := NewCrossValidationPolicyResolver(cfg)
+		require.NoError(t, err)
+		got, applies := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", common.CrossValidationParams{}, false)
+		require.True(t, applies)
+		assert.Equal(t, common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2, MinGroups: 2}, got)
+	})
+}
+
 // TestCrossValidationPolicy_Validate covers config-load validation of a single policy.
 func TestCrossValidationPolicy_Validate(t *testing.T) {
 	cases := []struct {
@@ -188,12 +250,10 @@ func TestCrossValidationPolicy_Validate(t *testing.T) {
 // policy on a stateful (write) method.
 func TestCrossValidationPolicyResolver_StatefulGuard(t *testing.T) {
 	r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{
-		Policies: map[string]map[string]map[string]CrossValidationPolicy{
-			"ETH1": {"jsonrpc": {
-				"eth_getBalance":         {Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}},
-				"eth_sendRawTransaction": {Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}},
-				"eth_disabledWrite":      {Enabled: false}, // disabled write policy is allowed
-			}},
+		Policies: []CrossValidationPolicyEntry{
+			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}}},
+			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}}},
+			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_disabledWrite", CrossValidationPolicy: CrossValidationPolicy{Enabled: false}}, // disabled write policy is allowed
 		},
 	})
 	require.NoError(t, err)

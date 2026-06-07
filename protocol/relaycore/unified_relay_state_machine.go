@@ -45,13 +45,25 @@ func NewUnifiedRelayStateMachine(
 	debugRelays bool,
 	config StateMachineConfig,
 	policy RelayPolicyInf,
+	// cvOverride, when non-nil, forces CrossValidation with these already-resolved params. The
+	// rpcsmartrouter layer sets it from a per-method policy (it owns the policy resolver; relaycore
+	// must not import it). nil => the legacy header-driven decision below, unchanged.
+	cvOverride *common.CrossValidationParams,
 ) (RelayStateMachine, error) {
-	crossValidationParams, headersPresent, err := protocolMessage.GetCrossValidationParameters()
-
 	var selection Selection
 	var cvParams *common.CrossValidationParams
 
-	if headersPresent && err != nil {
+	if cvOverride != nil {
+		// Per-method policy forced cross-validation. Checked BEFORE the Stateful branch so a
+		// policy-enabled method is never silently routed to Stateful (Finding A).
+		selection = CrossValidation
+		cvParams = cvOverride
+		utils.LavaFormatDebug("[StateMachine] CrossValidation mode enabled (policy-resolved)",
+			utils.LogAttr("maxParticipants", cvOverride.MaxParticipants),
+			utils.LogAttr("agreementThreshold", cvOverride.AgreementThreshold),
+			utils.LogAttr("minGroups", cvOverride.MinGroups),
+			utils.LogAttr("GUID", ctx))
+	} else if crossValidationParams, headersPresent, err := protocolMessage.GetCrossValidationParameters(); headersPresent && err != nil {
 		return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
 	} else if headersPresent {
 		selection = CrossValidation
