@@ -1148,6 +1148,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				stakeAmount,
 			)
 			providerEntry.StaticProvider = true
+			providerEntry.GroupLabel = provider.GroupLabel // cross-validation group-diversity label (may be empty)
 			sessions[uint64(idx)] = providerEntry
 		}
 		return sessions

@@ -38,6 +38,11 @@ type RPCStaticProviderEndpoint struct {
 	// If omitted, it is treated as 0 so the weight calculator can apply the legacy
 	// "static provider boost" behavior (instead of using an explicit stake value).
 	Stake int64 `yaml:"stake,omitempty" json:"stake,omitempty" mapstructure:"stake,omitempty"`
+	// GroupLabel is an optional, deployment-defined provider-group identifier (e.g. "tier-1", "external")
+	// used by cross-validation group-diversity policies to require a quorum span N distinct groups.
+	// Empty means the provider belongs to the implicit "default" group; it has no effect unless a
+	// per-method policy sets a group-diversity requirement.
+	GroupLabel string `yaml:"group-label,omitempty" json:"group-label,omitempty" mapstructure:"group-label,omitempty"`
 }
 
 // ToBase returns the base RPCProviderEndpoint (for compatibility with existing code)

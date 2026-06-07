@@ -314,6 +314,10 @@ type ConsumerSessionsWithProvider struct {
 	// first offense again instead of an immediate hard block. 0 == not on probation.
 	onSecondChanceProbation uint32
 	StaticProvider          bool
+	// GroupLabel is the provider's configured cross-validation group (from RPCStaticProviderEndpoint.GroupLabel).
+	// It rides on the provider record so it can be read off a session's Parent without an address-keyed lookup.
+	// Empty string means the implicit "default" group.
+	GroupLabel string
 }
 
 func NewConsumerSessionWithProvider(publicLavaAddress string, pairingEndpoints []*Endpoint, maxCu uint64, epoch uint64, stakeSize int64) *ConsumerSessionsWithProvider {

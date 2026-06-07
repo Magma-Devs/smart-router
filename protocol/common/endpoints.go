@@ -366,6 +366,10 @@ type ProviderInfo struct {
 	ProviderAddress           string
 	ProviderReputationSummary float64 // the number represents the average qos for this provider session
 	ProviderStake             int64
+	// ProviderGroup is the provider's configured group label (from RPCStaticProviderEndpoint.GroupLabel),
+	// carried on each result so cross-validation group-diversity checks and mismatch metrics can read it
+	// locally. Empty string means the implicit "default" group.
+	ProviderGroup string
 }
 
 type RelayResult struct {

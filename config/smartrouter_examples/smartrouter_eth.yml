@@ -20,8 +20,13 @@ endpoints:
     network-address: "0.0.0.0:3360"
 
 direct-rpc:
+  # group-label is optional; it tags the provider's vendor/operator group so cross-validation
+  # group-diversity policies can require a quorum to span N distinct groups. Omit it and the
+  # provider falls into the implicit "default" group (no effect unless a policy requires diversity).
+
   # Endpoint 1 — Lava public gateway (HTTP + WS)
   - name: "eth-lava-build"
+    group-label: "lava"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
     node-urls:
@@ -30,6 +35,7 @@ direct-rpc:
 
   # Endpoint 2 — PublicNode (HTTP + WS)
   - name: "eth-publicnode"
+    group-label: "publicnode"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
     node-urls:
@@ -38,8 +44,42 @@ direct-rpc:
 
   # Endpoint 3 — Tenderly public gateway (HTTP + WS)
   - name: "eth-tenderly"
+    group-label: "tenderly"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
     node-urls:
       - url: "https://mainnet.gateway.tenderly.co"
       - url: "wss://mainnet.gateway.tenderly.co"
+
+# Optional per-method cross-validation policies (omit entirely => header-driven CV only, unchanged).
+# Each knob resolves as clamp(caller, floor, cap): floor = operator minimum the caller may exceed,
+# cap = operator maximum that overrides a stricter caller. A bare number N means {floor: N}.
+# chain-id/api-interface match case-insensitively; method exactly. Policies on stateful (write) methods
+# are rejected at startup. Uncomment to enable:
+#
+# cross-validation:
+#   policies:
+#     - chain-id: ETH1
+#       api-interface: jsonrpc
+#       method: eth_getBalance
+#       enabled: true
+#       agreement-threshold: 2          # at least 2 providers must return identical responses
+#       max-participants: 3             # fan out to 3 providers
+#       min-groups: 2                   # spanning at least 2 distinct group-labels (see above)
+#     - chain-id: ETH1
+#       api-interface: jsonrpc
+#       method: eth_getTransactionReceipt
+#       enabled: true
+#       agreement-threshold: { floor: 3, cap: 3 }   # exactly 3 — unanimous
+#       max-participants: { floor: 3, cap: 5 }
+#       min-groups: 2
+#     - chain-id: ETH1
+#       api-interface: jsonrpc
+#       method: eth_call
+#       enabled: true
+#       agreement-threshold: 2          # quorum size WITHIN each group
+#       min-groups: 2                   # number of groups that must each reach their own quorum
+#       max-participants: 4             # must be >= min-groups * agreement-threshold (2*2)
+#       per-group-quorum: true          # stronger: each of min-groups groups must independently
+#                                       # reach agreement-threshold AND the per-group winners must agree
+#                                       # (trusted-reference + corroborator). Requires min-groups > 1.

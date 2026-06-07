@@ -93,6 +93,52 @@ func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
 	}
 }
 
+// TestParseStaticProviderEndpoints_GroupLabel covers the cross-validation provider-group
+// spine (Phase 0.1): the optional `group-label` YAML key must deserialize into
+// RPCStaticProviderEndpoint.GroupLabel, an absent key must yield the empty string (the
+// implicit "default" group), and two providers may share a label. This is the entry point
+// of the group plumbing that later flows to common.ProviderInfo.ProviderGroup via the
+// provider session record.
+func TestParseStaticProviderEndpoints_GroupLabel(t *testing.T) {
+	const flagGeolocation uint64 = 1
+
+	const yamlBody = "direct-rpc:\n" +
+		"  - name: eth-rpc-1\n" +
+		"    group-label: tier-1\n" +
+		"    chain-id: ETH1\n" +
+		"    api-interface: jsonrpc\n" +
+		"    node-urls:\n" +
+		"      - url: https://a.example.com\n" +
+		"  - name: eth-rpc-2\n" +
+		"    group-label: tier-1\n" + // shares a group with eth-rpc-1
+		"    chain-id: ETH1\n" +
+		"    api-interface: jsonrpc\n" +
+		"    node-urls:\n" +
+		"      - url: https://b.example.com\n" +
+		"  - name: eth-rpc-3\n" + // no group-label → implicit "default"
+		"    chain-id: ETH1\n" +
+		"    api-interface: jsonrpc\n" +
+		"    node-urls:\n" +
+		"      - url: https://c.example.com\n"
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
+
+	endpoints, err := ParseStaticProviderEndpoints(v, common.DirectRPCConfigName, flagGeolocation)
+	require.NoError(t, err)
+	require.Len(t, endpoints, 3)
+
+	byName := map[string]string{}
+	for _, ep := range endpoints {
+		byName[ep.Name] = ep.GroupLabel
+	}
+
+	assert.Equal(t, "tier-1", byName["eth-rpc-1"], "group-label must deserialize into GroupLabel")
+	assert.Equal(t, "tier-1", byName["eth-rpc-2"], "providers may share a group label")
+	assert.Equal(t, "", byName["eth-rpc-3"], "absent group-label must yield empty string (implicit default group)")
+}
+
 // TestParseEndpoints_GeolocationFlagBinding backfills MAG-1872 item 10: the
 // --geolocation CLI flag must propagate to every parsed RPCEndpoint via
 // ParseEndpoints. TestGeoOrdering in protocol/lavasession/common_test.go
