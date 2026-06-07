@@ -2,9 +2,13 @@ package rpcsmartrouter
 
 import (
 	"fmt"
+	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/mitchellh/mapstructure"
+	"github.com/spf13/viper"
 )
 
 // Per-method cross-validation policy (Phase 1.1).
@@ -47,10 +51,20 @@ type CrossValidationPolicy struct {
 	MinGroups          Bound `yaml:"min-groups,omitempty" json:"min-groups,omitempty" mapstructure:"min-groups,omitempty"`
 }
 
-// CrossValidationConfig is the parsed `cross-validation:` config block: chain-id -> api-interface ->
-// method -> policy.
+// CrossValidationPolicyEntry is one entry in the `cross-validation.policies` list. method is a string
+// value (not a map key) so its casing is preserved — viper lower-cases map keys, which would corrupt
+// case-sensitive RPC method names. This list shape also matches the existing `direct-rpc:` / `endpoints:`
+// config style.
+type CrossValidationPolicyEntry struct {
+	ChainID               string `yaml:"chain-id,omitempty" json:"chain-id,omitempty" mapstructure:"chain-id"`
+	ApiInterface          string `yaml:"api-interface,omitempty" json:"api-interface,omitempty" mapstructure:"api-interface"`
+	Method                string `yaml:"method,omitempty" json:"method,omitempty" mapstructure:"method"`
+	CrossValidationPolicy `yaml:",inline" mapstructure:",squash"`
+}
+
+// CrossValidationConfig is the parsed `cross-validation:` config block.
 type CrossValidationConfig struct {
-	Policies map[string]map[string]map[string]CrossValidationPolicy `yaml:"policies,omitempty" json:"policies,omitempty" mapstructure:"policies,omitempty"`
+	Policies []CrossValidationPolicyEntry `yaml:"policies,omitempty" json:"policies,omitempty" mapstructure:"policies,omitempty"`
 }
 
 // CrossValidationPolicyResolver resolves the effective cross-validation params for a request. It is
@@ -69,15 +83,18 @@ func policyKey(chainID, apiInterface, method string) string {
 // nil config yields a resolver with no policies (every request resolves to pure caller-driven behavior).
 func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidationPolicyResolver, error) {
 	r := &CrossValidationPolicyResolver{policies: map[string]CrossValidationPolicy{}}
-	for chainID, byAPI := range cfg.Policies {
-		for apiInterface, byMethod := range byAPI {
-			for method, policy := range byMethod {
-				if err := policy.Validate(); err != nil {
-					return nil, fmt.Errorf("invalid cross-validation policy for %s/%s/%s: %w", chainID, apiInterface, method, err)
-				}
-				r.policies[policyKey(chainID, apiInterface, method)] = policy
-			}
+	for i, entry := range cfg.Policies {
+		if entry.ChainID == "" || entry.ApiInterface == "" || entry.Method == "" {
+			return nil, fmt.Errorf("cross-validation policy #%d must set chain-id, api-interface, and method", i)
 		}
+		if err := entry.CrossValidationPolicy.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid cross-validation policy for %s/%s/%s: %w", entry.ChainID, entry.ApiInterface, entry.Method, err)
+		}
+		key := policyKey(entry.ChainID, entry.ApiInterface, entry.Method)
+		if _, dup := r.policies[key]; dup {
+			return nil, fmt.Errorf("duplicate cross-validation policy for %s/%s/%s", entry.ChainID, entry.ApiInterface, entry.Method)
+		}
+		r.policies[key] = entry.CrossValidationPolicy
 	}
 	return r, nil
 }
@@ -85,6 +102,86 @@ func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidati
 // HasPolicies reports whether any policy is configured (used to keep the no-policy path identical to today).
 func (r *CrossValidationPolicyResolver) HasPolicies() bool {
 	return r != nil && len(r.policies) > 0
+}
+
+// NumPolicies returns how many per-method policies are configured (for startup logging).
+func (r *CrossValidationPolicyResolver) NumPolicies() int {
+	if r == nil {
+		return 0
+	}
+	return len(r.policies)
+}
+
+// ParseCrossValidationConfig reads the optional top-level `cross-validation:` block from viper config.
+// An absent key yields an empty config (fully backwards compatible). Each knob accepts either the object
+// form `{floor: N, cap: M}` or the scalar shorthand `N` (meaning `{floor: N}`).
+func ParseCrossValidationConfig(v *viper.Viper) (CrossValidationConfig, error) {
+	var cfg CrossValidationConfig
+	if v == nil || !v.IsSet(common.CrossValidationConfigName) {
+		return cfg, nil
+	}
+	hook := viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(boundScalarShorthandHook()))
+	if err := v.UnmarshalKey(common.CrossValidationConfigName, &cfg, hook); err != nil {
+		return cfg, fmt.Errorf("could not unmarshal %q config: %w", common.CrossValidationConfigName, err)
+	}
+	return cfg, nil
+}
+
+// boundScalarShorthandHook lets a Bound be written as a bare number: `agreement-threshold: 2` is
+// decoded as `{floor: 2}`. The object form (a map) is passed through untouched for normal decoding.
+func boundScalarShorthandHook() mapstructure.DecodeHookFuncType {
+	boundType := reflect.TypeOf(Bound{})
+	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if to != boundType {
+			return data, nil
+		}
+		switch from.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+			reflect.Float32, reflect.Float64, reflect.String:
+			n, err := scalarToInt(data)
+			if err != nil {
+				return nil, fmt.Errorf("invalid cross-validation knob value %v: %w", data, err)
+			}
+			return Bound{Floor: &n}, nil
+		default:
+			return data, nil // object form: let mapstructure decode the map into Bound
+		}
+	}
+}
+
+// scalarToInt converts a YAML scalar (int / float / numeric string) to an int for the Bound shorthand.
+func scalarToInt(data interface{}) (int, error) {
+	switch x := data.(type) {
+	case int:
+		return x, nil
+	case int8:
+		return int(x), nil
+	case int16:
+		return int(x), nil
+	case int32:
+		return int(x), nil
+	case int64:
+		return int(x), nil
+	case uint:
+		return int(x), nil
+	case uint8:
+		return int(x), nil
+	case uint16:
+		return int(x), nil
+	case uint32:
+		return int(x), nil
+	case uint64:
+		return int(x), nil
+	case float32:
+		return int(x), nil
+	case float64:
+		return int(x), nil
+	case string:
+		return strconv.Atoi(strings.TrimSpace(x))
+	default:
+		return 0, fmt.Errorf("unsupported numeric type %T", data)
+	}
 }
 
 // Resolve returns the effective cross-validation params for a request and whether cross-validation

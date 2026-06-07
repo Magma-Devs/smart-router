@@ -30,6 +30,7 @@ import (
 
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 	grpcmetadata "google.golang.org/grpc/metadata"
 )
@@ -79,6 +80,9 @@ type RPCSmartRouterServer struct {
 
 	// Endpoint-scoped metrics manager (new spec)
 	smartRouterEndpointMetrics *metrics.SmartRouterMetricsManager
+
+	// Per-method cross-validation policy resolver (nil/empty => header-driven CV only).
+	crossValidationResolver *CrossValidationPolicyResolver
 }
 
 func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
@@ -109,6 +113,26 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.enableSelectionStats = cmdFlags.EnableSelectionStats
 	rpcss.relayRetriesManager = lavaprotocol.NewRelayRetriesManager()
 	rpcss.latestBlockEstimator = relaycore.NewLatestBlockEstimator()
+
+	// Load optional per-method cross-validation policies (empty => header-driven CV only, fully
+	// backwards compatible). Fail fast on invalid config.
+	cvConfig, cvErr := ParseCrossValidationConfig(viper.GetViper())
+	if cvErr != nil {
+		return cvErr
+	}
+	cvResolver, cvErr := NewCrossValidationPolicyResolver(cvConfig)
+	if cvErr != nil {
+		return cvErr
+	}
+	rpcss.crossValidationResolver = cvResolver
+	// TODO(Phase 1.5): enforce cvResolver.ValidateNoStatefulPolicies(...) with a chainParser-backed
+	// method->stateful predicate, plus the group-capacity check, at startup.
+	if cvResolver.HasPolicies() {
+		utils.LavaFormatInfo("cross-validation per-method policies loaded",
+			utils.LogAttr("policies", cvResolver.NumPolicies()),
+			utils.LogAttr("chainID", listenEndpoint.ChainID),
+			utils.LogAttr("apiInterface", listenEndpoint.ApiInterface))
+	}
 
 	// Initialize consistency validation config from chain spec values
 	blockLagForQosSync, averageBlockTime, blockDistanceForFinalizedData, _ := chainParser.ChainBlockStats()
@@ -306,8 +330,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
 	usedProviders.SetEligibilityFunc(relaypolicy.DecideEligibility)
 
-	// Create state machine first - it determines Selection type based on cross-validation headers
-	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, rpcss, protocolMessage, nil, rpcss.debugRelays)
+	// Create state machine first - it determines Selection type based on per-method policy + headers
+	stateMachine, err := NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders, rpcss, protocolMessage, nil, rpcss.debugRelays, rpcss.crossValidationResolver, rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface)
 	if err != nil {
 		return false, err
 	}
@@ -629,8 +653,8 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		tracing.RecordRetryCount(span, usedProviders.BatchNumber()-1)
 	}()
 
-	// Create state machine first - it determines Selection type based on cross-validation headers
-	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, rpcss, protocolMessage, analytics, rpcss.debugRelays)
+	// Create state machine first - it determines Selection type based on per-method policy + headers
+	stateMachine, err := NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders, rpcss, protocolMessage, analytics, rpcss.debugRelays, rpcss.crossValidationResolver, rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface)
 	if err != nil {
 		tracing.RecordError(span, err)
 		return nil, err
