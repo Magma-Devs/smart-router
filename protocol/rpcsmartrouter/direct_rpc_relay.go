@@ -30,6 +30,7 @@ type DirectRPCRelaySender struct {
 	endpointName        string             // Sanitized endpoint name (no API keys)
 	originalRequestData []byte             // Original request bytes (for batch support)
 	chainFamily         common.ChainFamily // Chain family for Tier 2 classification (-1 if unknown)
+	groupLabel          string             // Cross-validation group label of this provider (may be empty)
 }
 
 // maxResponseSizeForBlockExtraction is the threshold above which we skip JSON parsing
@@ -431,6 +432,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		StatusCode: statusCode,
 		ProviderInfo: common.ProviderInfo{
 			ProviderAddress: providerAddress,
+			ProviderGroup:   d.groupLabel,
 		},
 		IsNodeError: hasError,
 	}
@@ -616,6 +618,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		StatusCode: response.StatusCode,
 		ProviderInfo: common.ProviderInfo{
 			ProviderAddress: providerAddress,
+			ProviderGroup:   d.groupLabel,
 		},
 		IsNodeError: isNodeError, // Correct transport-level classification
 	}
@@ -724,6 +727,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 				Finalized: true,
 				ProviderInfo: common.ProviderInfo{
 					ProviderAddress: endpointIdentifier,
+					ProviderGroup:   d.groupLabel,
 				},
 				IsNodeError: grpcErr.Code >= 13, // INTERNAL and above are node errors
 			}, nil
@@ -779,6 +783,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		StatusCode: response.StatusCode,
 		ProviderInfo: common.ProviderInfo{
 			ProviderAddress: providerAddress,
+			ProviderGroup:   d.groupLabel,
 		},
 		IsNodeError: hasError,
 	}

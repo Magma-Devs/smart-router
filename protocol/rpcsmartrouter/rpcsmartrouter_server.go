@@ -1964,6 +1964,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		endpointName:        endpointName,
 		originalRequestData: originalRequestData,
 		chainFamily:         senderChainFamily,
+		groupLabel:          singleConsumerSession.Parent.GroupLabel,
 	}
 
 	// Send relay directly to RPC endpoint
