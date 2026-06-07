@@ -422,6 +422,24 @@ func (apip *BaseChainParser) getSupportedApi(apiKey ApiKey) (*ApiContainer, erro
 	return &apiCont, nil
 }
 
+// ApiHasStatefulCategory reports whether any supported API named `name` is a write / stateful method
+// (Category.Stateful == CONSISTENCY_SELECT_ALL_PROVIDERS). Used by the cross-validation policy guard to
+// reject an enabled per-method CV policy on a write method, where cross-validating the response is a
+// no-op (the response is a deterministic acknowledgement, not an observation of chain state).
+func (apip *BaseChainParser) ApiHasStatefulCategory(name string) bool {
+	if apip == nil {
+		return false
+	}
+	apip.rwLock.RLock()
+	defer apip.rwLock.RUnlock()
+	for apiKey, apiCont := range apip.serverApis {
+		if apiKey.Name == name && apiCont.api != nil && apiCont.api.Category.Stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+			return true
+		}
+	}
+	return false
+}
+
 func (apip *BaseChainParser) isValidInternalPath(path string) bool {
 	if apip == nil || len(apip.internalPaths) == 0 {
 		return false

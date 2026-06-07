@@ -101,6 +101,23 @@ func (csm *ConsumerSessionManager) GetNumberOfValidProviders() int {
 	return len(csm.validAddresses)
 }
 
+// NumberOfValidProviderGroups returns the count of distinct cross-validation group labels across the
+// currently valid providers. An empty GroupLabel is counted as the implicit "default" group. Used by the
+// cross-validation capacity check to verify a min-groups policy can be satisfied.
+func (csm *ConsumerSessionManager) NumberOfValidProviderGroups() int {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	groups := make(map[string]struct{}, len(csm.validAddresses))
+	for _, addr := range csm.validAddresses {
+		label := "default"
+		if cswp, ok := csm.pairing[addr]; ok && cswp.GroupLabel != "" {
+			label = cswp.GroupLabel
+		}
+		groups[label] = struct{}{}
+	}
+	return len(groups)
+}
+
 // IsStaticProvider returns true when the given provider address belongs to a
 // static provider in the current pairing (including backup providers and
 // purged providers that may still be serving active subscriptions across an

@@ -156,6 +156,46 @@ func TestUpdateEpoch_FreshSessions(t *testing.T) {
 	// but the fact that updateEpoch completed means UpdateAllProviders was called.
 }
 
+// TestUpdateEpoch_PreservesGroupLabel is the Fix 1 regression test: updateEpoch rebuilds fresh
+// ConsumerSessionsWithProvider objects, and the cross-validation GroupLabel must survive that rebuild for
+// both primary and backup providers (not just StaticProvider).
+func TestUpdateEpoch_PreservesGroupLabel(t *testing.T) {
+	rand.InitRandomSeed()
+	rpsr := &RPCSmartRouter{
+		sessionManagers:        make(map[string]*lavasession.ConsumerSessionManager),
+		providerSessions:       make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider),
+		backupProviderSessions: make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider),
+	}
+	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "tendermintrpc", NetworkAddress: "127.0.0.1:3333"}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	chainKey := rpcEndpoint.Key()
+	rpsr.sessionManagers[chainKey] = lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+
+	primary := lavasession.NewConsumerSessionWithProvider("lava@primary",
+		[]*lavasession.Endpoint{{NetworkAddress: "http://primary:8080", Enabled: true}}, 100, 1, int64(1))
+	primary.StaticProvider = true
+	primary.GroupLabel = "tier-1"
+	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: primary}
+
+	backup := lavasession.NewConsumerSessionWithProvider("lava@backup",
+		[]*lavasession.Endpoint{{NetworkAddress: "http://backup:8080", Enabled: true}}, 100, 1, int64(1))
+	backup.StaticProvider = true
+	backup.GroupLabel = "external"
+	rpsr.backupProviderSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: backup}
+
+	rpsr.updateEpoch(context.Background(), uint64(2))
+
+	freshPrimary := rpsr.providerSessions[chainKey][0]
+	require.NotNil(t, freshPrimary)
+	require.False(t, primary == freshPrimary, "primary session must be a fresh instance after epoch refresh")
+	require.Equal(t, "tier-1", freshPrimary.GroupLabel, "primary GroupLabel must survive epoch refresh")
+
+	freshBackup := rpsr.backupProviderSessions[chainKey][0]
+	require.NotNil(t, freshBackup)
+	require.False(t, backup == freshBackup, "backup session must be a fresh instance after epoch refresh")
+	require.Equal(t, "external", freshBackup.GroupLabel, "backup GroupLabel must survive epoch refresh")
+}
+
 func TestUpdateEpoch_ResetsDisabledEndpoints(t *testing.T) {
 	rand.InitRandomSeed()
 
@@ -693,7 +733,7 @@ func TestGracefulFailure_ConcurrentEpochAndRetry(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
-			rpsr.updateEpoch(context.Background(), uint64(10 + i))
+			rpsr.updateEpoch(context.Background(), uint64(10+i))
 			time.Sleep(time.Millisecond)
 		}
 	}()

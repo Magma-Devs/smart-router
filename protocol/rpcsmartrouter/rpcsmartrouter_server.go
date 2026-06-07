@@ -125,9 +125,22 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		return cvErr
 	}
 	rpcss.crossValidationResolver = cvResolver
-	// TODO(Phase 1.5): enforce cvResolver.ValidateNoStatefulPolicies(...) with a chainParser-backed
-	// method->stateful predicate, plus the group-capacity check, at startup.
 	if cvResolver.HasPolicies() {
+		// Reject an enabled CV policy on a stateful (write) method of THIS endpoint's chain/api —
+		// cross-validating a write response is a no-op and would mis-route the request to
+		// CrossValidation before the Stateful branch. A policy for a different chain/api is validated by
+		// that endpoint's own ServeRPCRequests invocation.
+		if statefulChecker, ok := chainParser.(interface{ ApiHasStatefulCategory(string) bool }); ok {
+			isStateful := func(chainID, apiInterface, method string) bool {
+				if !strings.EqualFold(chainID, listenEndpoint.ChainID) || !strings.EqualFold(apiInterface, listenEndpoint.ApiInterface) {
+					return false
+				}
+				return statefulChecker.ApiHasStatefulCategory(method)
+			}
+			if guardErr := cvResolver.ValidateNoStatefulPolicies(isStateful); guardErr != nil {
+				return guardErr // fail fast on misconfiguration
+			}
+		}
 		utils.LavaFormatInfo("cross-validation per-method policies loaded",
 			utils.LogAttr("policies", cvResolver.NumPolicies()),
 			utils.LogAttr("chainID", listenEndpoint.ChainID),
@@ -310,14 +323,27 @@ func (rpcss *RPCSmartRouterServer) craftRelay(ctx context.Context) (ok bool, rel
 	return true, relay, chainMessage, nil
 }
 
-// validateCrossValidationCapacity returns an error when CrossValidation mode is active but
-// MaxParticipants exceeds the number of currently available endpoints.
+// validateCrossValidationCapacity returns an error when CrossValidation mode is active but the available
+// providers cannot satisfy the requested shape: either MaxParticipants exceeds the number of available
+// endpoints, or MinGroups exceeds the number of distinct provider groups (empty GroupLabel counts as the
+// "default" group). The MinGroups check is the Phase 1.1 capacity guard; full group-aware quorum
+// selection lands in Phase 1.2.
 func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.Context, selection relaycore.Selection, params *common.CrossValidationParams) error {
-	if selection == relaycore.CrossValidation && params != nil && params.MaxParticipants > rpcss.sessionManager.GetNumberOfValidProviders() {
+	if selection != relaycore.CrossValidation || params == nil {
+		return nil
+	}
+	if available := rpcss.sessionManager.GetNumberOfValidProviders(); params.MaxParticipants > available {
 		return utils.LavaFormatError("requested cross-validation maxParticipants exceeds available endpoints",
 			lavasession.PairingListEmptyError,
 			utils.LogAttr("maxParticipants", params.MaxParticipants),
-			utils.LogAttr("availableEndpoints", rpcss.sessionManager.GetNumberOfValidProviders()),
+			utils.LogAttr("availableEndpoints", available),
+			utils.LogAttr("GUID", ctx))
+	}
+	if availableGroups := rpcss.sessionManager.NumberOfValidProviderGroups(); params.MinGroups > availableGroups {
+		return utils.LavaFormatError("cross-validation minGroups exceeds available distinct provider groups",
+			lavasession.PairingListEmptyError,
+			utils.LogAttr("minGroups", params.MinGroups),
+			utils.LogAttr("availableProviderGroups", availableGroups),
 			utils.LogAttr("GUID", ctx))
 	}
 	return nil

@@ -1,10 +1,15 @@
 package rpcsmartrouter
 
 import (
+	"context"
+	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -233,6 +238,14 @@ func TestCrossValidationPolicy_Validate(t *testing.T) {
 		{"floor exceeds cap", CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(5), Cap: intPtr(3)}}, true},
 		{"threshold floor exceeds participants cap (unsatisfiable)", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(5)}, MaxParticipants: Bound{Cap: intPtr(3)}}, true},
 		{"min-groups floor exceeds participants cap (unsatisfiable)", CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: intPtr(4)}, MaxParticipants: Bound{Cap: intPtr(3)}}, true},
+		// Fix 4: an enabled policy must be satisfiable with NO caller — reject instead of silently
+		// clamping agreement-threshold / min-groups down to max-participants.
+		{"enabled: threshold floor 5 > participants floor 3", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(5)}, MaxParticipants: Bound{Floor: intPtr(3)}}, true},
+		{"enabled: threshold floor 5 > default participants (3)", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(5)}}, true},
+		{"enabled: min-groups floor 4 > participants floor 3", CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: intPtr(4)}, MaxParticipants: Bound{Floor: intPtr(3)}}, true},
+		{"enabled: threshold floor 5 with participants floor 5 is fine", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(5)}, MaxParticipants: Bound{Floor: intPtr(5)}}, false},
+		// A disabled policy never resolves on its own, so an unsatisfiable no-caller shape is allowed.
+		{"disabled: unsatisfiable floors allowed (dormant)", CrossValidationPolicy{Enabled: false, AgreementThreshold: Bound{Floor: intPtr(5)}, MaxParticipants: Bound{Floor: intPtr(3)}}, false},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -244,6 +257,78 @@ func TestCrossValidationPolicy_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCrossValidationPolicy_StatefulGuard_ProductionParser exercises the real production path of the
+// stateful guard (Fix 2): a real chain parser's ApiHasStatefulCategory lookup, fed through the exact
+// predicate ServeRPCRequests builds, must reject an enabled CV policy on a write method and allow one on
+// a read method.
+func TestCrossValidationPolicy_StatefulGuard_ProductionParser(t *testing.T) {
+	ctx := context.Background()
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	checker, ok := chainParser.(interface{ ApiHasStatefulCategory(string) bool })
+	require.True(t, ok, "real chain parser must expose ApiHasStatefulCategory")
+	require.True(t, checker.ApiHasStatefulCategory("eth_sendRawTransaction"), "eth_sendRawTransaction must be stateful in the ETH1 spec")
+	require.False(t, checker.ApiHasStatefulCategory("eth_getBalance"), "eth_getBalance must be a read")
+
+	// Mirror the predicate built in ServeRPCRequests.
+	isStateful := func(chainID, apiInterface, method string) bool {
+		if !strings.EqualFold(chainID, "ETH1") || !strings.EqualFold(apiInterface, "jsonrpc") {
+			return false
+		}
+		return checker.ApiHasStatefulCategory(method)
+	}
+
+	writePolicy := []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(2)}}}}
+	rWrite, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: writePolicy})
+	require.NoError(t, err)
+	require.Error(t, rWrite.ValidateNoStatefulPolicies(isStateful), "enabled CV policy on a write method must be rejected at startup")
+
+	readPolicy := []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(2)}}}}
+	rRead, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: readPolicy})
+	require.NoError(t, err)
+	require.NoError(t, rRead.ValidateNoStatefulPolicies(isStateful), "CV policy on a read method must be allowed")
+}
+
+// TestGroupLabel_ConfigToSession_InertWithoutPolicy strengthens Phase 0.2 (Fix 5): it follows the real
+// path group-label (config) -> RPCStaticProviderEndpoint.GroupLabel -> ConsumerSessionsWithProvider.
+// GroupLabel, and confirms that with no group-diversity policy configured the label is inert (no CV).
+func TestGroupLabel_ConfigToSession_InertWithoutPolicy(t *testing.T) {
+	const yamlBody = "direct-rpc:\n" +
+		"  - name: p1\n" +
+		"    group-label: tier-1\n" +
+		"    chain-id: ETH1\n" +
+		"    api-interface: jsonrpc\n" +
+		"    node-urls:\n" +
+		"      - url: https://a.example.com\n"
+	v := viper.New()
+	v.SetConfigType("yaml")
+	require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
+
+	// config -> RPCStaticProviderEndpoint.GroupLabel
+	endpoints, err := ParseStaticProviderEndpoints(v, common.DirectRPCConfigName, 1)
+	require.NoError(t, err)
+	require.Len(t, endpoints, 1)
+	require.Equal(t, "tier-1", endpoints[0].GroupLabel)
+
+	// -> ConsumerSessionsWithProvider.GroupLabel (mirrors the provider build in rpcsmartrouter.go)
+	session := lavasession.NewConsumerSessionWithProvider(endpoints[0].Name,
+		[]*lavasession.Endpoint{{NetworkAddress: "http://a", Enabled: true}}, 1, 1, 0)
+	session.GroupLabel = endpoints[0].GroupLabel
+	require.Equal(t, "tier-1", session.GroupLabel, "group label must flow config -> session record")
+
+	// Inert: with no policy configured, group labels never trigger cross-validation.
+	r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{})
+	require.NoError(t, err)
+	require.False(t, r.HasPolicies())
+	_, applies := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", common.CrossValidationParams{}, false)
+	require.False(t, applies, "no policy => no cross-validation regardless of group labels")
 }
 
 // TestCrossValidationPolicyResolver_StatefulGuard covers the config-load guard that rejects an enabled
