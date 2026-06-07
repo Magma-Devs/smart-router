@@ -318,6 +318,85 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 	})
 }
 
+// TestAppendHeadersToRelayResult_GroupLabelsInertWithoutPolicy is the Phase 0.2
+// backwards-compatibility lock for the cross-validation provider-group spine
+// (UC-7). The spine (Phase 0.1) carries a provider GroupLabel through to
+// common.ProviderInfo.ProviderGroup, but with no group-diversity policy
+// configured that label must have ZERO effect on observable behavior. This test
+// runs appendHeadersToRelayResult over an identical cross-validation scenario
+// twice — once with ProviderGroup populated on every result, once with it empty —
+// and asserts the emitted cross-validation headers (status, all-providers,
+// agreeing-providers) are byte-identical. It will start failing the moment any
+// future change (e.g. Phase 1.2 group-aware logic) lets a group label leak into
+// the default no-policy path.
+func TestAppendHeadersToRelayResult_GroupLabelsInertWithoutPolicy(t *testing.T) {
+	ctx := context.Background()
+	providerAddress1 := "lava@provider1"
+	providerAddress2 := "lava@provider2"
+	providerAddress3 := "lava@provider3"
+	winningHash := [32]byte{1, 2, 3, 4, 5, 6, 7, 8}
+
+	// collectCVHeaders runs the header builder for a cross-validation success
+	// scenario and returns the three CV headers as a name->value map. groupLabels,
+	// when non-empty, are stamped onto every participating result's ProviderGroup.
+	collectCVHeaders := func(t *testing.T, withGroups bool) map[string]string {
+		t.Helper()
+		grp := func(addr string) common.ProviderInfo {
+			pi := common.ProviderInfo{ProviderAddress: addr}
+			if withGroups {
+				pi.ProviderGroup = "group-" + addr // arbitrary non-empty label per provider
+			}
+			return pi
+		}
+
+		relayProcessor := &MockRelayProcessorForHeaders{
+			crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5},
+			selection:                       relaycore.CrossValidation,
+			crossValidationQueriedProviders: []string{providerAddress1, providerAddress2, providerAddress3},
+			successResults: []common.RelayResult{
+				{ProviderInfo: grp(providerAddress1), ResponseHash: winningHash},
+				{ProviderInfo: grp(providerAddress2), ResponseHash: winningHash},
+			},
+			nodeErrors: []common.RelayResult{
+				{ProviderInfo: grp(providerAddress3)},
+			},
+		}
+
+		relayResult := &common.RelayResult{
+			ProviderInfo:    grp(providerAddress1),
+			CrossValidation: 2, // meets threshold
+			ResponseHash:    winningHash,
+			Reply:           &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+		mockProtocolMessage := &MockProtocolMessage{api: &spectypes.Api{Name: "test-api"}}
+		rpcSmartRouterServer := &RPCSmartRouterServer{}
+
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, true)
+
+		headers := map[string]string{}
+		for _, meta := range relayResult.Reply.Metadata {
+			switch meta.Name {
+			case common.CROSS_VALIDATION_STATUS_HEADER_NAME,
+				common.CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME,
+				common.CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER:
+				headers[meta.Name] = meta.Value
+			}
+		}
+		return headers
+	}
+
+	withoutGroups := collectCVHeaders(t, false)
+	withGroups := collectCVHeaders(t, true)
+
+	// Sanity: the scenario actually produced cross-validation headers.
+	require.Equal(t, "success", withoutGroups[common.CROSS_VALIDATION_STATUS_HEADER_NAME],
+		"baseline scenario should reach cross-validation success")
+
+	// The lock: group labels must not perturb any observable cross-validation header.
+	require.Equal(t, withoutGroups, withGroups,
+		"populating ProviderGroup must not change CV headers when no group-diversity policy is configured (UC-7)")
+}
+
 // TestRetryCountHeader verifies that the Lava-Retries header correctly reflects
 // actual retry attempts (total attempts - 1), not raw error counts.
 func TestRetryCountHeader(t *testing.T) {
@@ -2409,9 +2488,11 @@ func (m *cvGuardStateMachine) GetDebugState() bool                          { re
 func (m *cvGuardStateMachine) GetRelayTaskChannel() (chan relaycore.RelayStateSendInstructions, error) {
 	return make(chan relaycore.RelayStateSendInstructions), nil
 }
-func (m *cvGuardStateMachine) UpdateBatch(err error)                                       {}
-func (m *cvGuardStateMachine) GetSelection() relaycore.Selection                           { return relaycore.CrossValidation }
-func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidationParams     { return m.cvParams }
+func (m *cvGuardStateMachine) UpdateBatch(err error)             {}
+func (m *cvGuardStateMachine) GetSelection() relaycore.Selection { return relaycore.CrossValidation }
+func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidationParams {
+	return m.cvParams
+}
 func (m *cvGuardStateMachine) GetUsedProviders() *lavasession.UsedProviders                { return m.usedProviders }
 func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf)            {}
 func (m *cvGuardStateMachine) SetRelayRetriesManager(rm *lavaprotocol.RelayRetriesManager) {}
