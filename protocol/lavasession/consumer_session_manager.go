@@ -1635,30 +1635,45 @@ func (csm *ConsumerSessionManager) orderForGroupDiversity(ranked []string, wante
 		return "default"
 	}
 
+	// Count how many providers each group has available in the ranked pool, so Phase 1 can prefer groups
+	// that can actually reach perGroupTarget. Without this, a higher-QoS but under-provisioned group (e.g.
+	// one with a single provider) could be opened ahead of a viable one, be unable to reach its internal
+	// quorum, and spuriously fail per-group quorum even though a satisfiable set existed.
+	groupAvail := make(map[string]int)
+	for _, addr := range ranked {
+		groupAvail[groupOf(addr)]++
+	}
+
 	picked := make([]string, 0, wanted)
 	pickedSet := make(map[string]struct{}, wanted)
 	groupPickCount := make(map[string]int, minGroups)
 
-	// Phase 1: front-load up to perGroupTarget highest-QoS providers from each of minGroups groups. Walk
-	// the QoS-ranked list; open a new group only while fewer than minGroups groups are covered, and take
-	// from a group only until it has perGroupTarget providers. This guarantees each covered group can reach
-	// its own internal quorum (per-group mode) without letting a QoS-dominant group starve the others.
-	for _, addr := range ranked {
-		if len(picked) >= wanted {
-			break
+	// Phase 1: front-load up to perGroupTarget highest-QoS providers from each of minGroups groups. Run two
+	// passes over the QoS-ranked list: the first opens only groups that can reach the full perGroupTarget;
+	// the second (a best-effort fallback) opens any remaining group when too few viable groups exist — the
+	// per-group gate then fails the request rather than under-validating. In both passes a group is filled
+	// only up to perGroupTarget, and no more than minGroups groups are opened.
+	phase1 := func(canOpen func(group string) bool) {
+		for _, addr := range ranked {
+			if len(picked) >= wanted {
+				return
+			}
+			g := groupOf(addr)
+			if _, opened := groupPickCount[g]; !opened {
+				if len(groupPickCount) >= minGroups || !canOpen(g) {
+					continue
+				}
+			}
+			if groupPickCount[g] >= perGroupTarget {
+				continue
+			}
+			picked = append(picked, addr)
+			pickedSet[addr] = struct{}{}
+			groupPickCount[g]++
 		}
-		g := groupOf(addr)
-		_, covered := groupPickCount[g]
-		if !covered && len(groupPickCount) >= minGroups {
-			continue // don't open more than minGroups groups in Phase 1
-		}
-		if groupPickCount[g] >= perGroupTarget {
-			continue // this group already has its per-group target
-		}
-		picked = append(picked, addr)
-		pickedSet[addr] = struct{}{}
-		groupPickCount[g]++
 	}
+	phase1(func(g string) bool { return groupAvail[g] >= perGroupTarget }) // prefer groups that can reach the target
+	phase1(func(string) bool { return true })                              // fallback: open any remaining group best-effort
 
 	// Phase 2: fill remaining slots by QoS order with providers not already picked.
 	for _, addr := range ranked {
