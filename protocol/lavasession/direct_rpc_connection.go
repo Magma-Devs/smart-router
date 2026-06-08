@@ -19,6 +19,7 @@ import (
 	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -147,10 +148,23 @@ type HTTPDirectRPCConnection struct {
 	healthy atomic.Bool
 }
 
-// WebSocketDirectRPCConnection implements DirectRPCConnection for WebSocket/WSS
+// WebSocketDirectRPCConnection implements DirectRPCConnection for WebSocket/WSS.
+//
+// Request/response is served over a persistent JSON-RPC-over-WebSocket client
+// (rpcclient.Client), dialed lazily on first SendRequest and cached. The client
+// multiplexes concurrent requests by JSON-RPC id and transparently reconnects a
+// dropped socket, so callers (chain-tracker polls, direct relays) get the same
+// raw-bytes contract as HTTP with no WebSocket-specific handling.
+//
+// Subscriptions/streaming are NOT served here — those use the dedicated
+// UpstreamWSPool layer.
 type WebSocketDirectRPCConnection struct {
-	nodeUrl  common.NodeUrl
-	protocol DirectRPCProtocol
+	nodeUrl   common.NodeUrl
+	protocol  DirectRPCProtocol
+	isJsonRPC bool // true → EVM JSON-RPC framing; false → Tendermint RPC framing
+
+	mu     sync.Mutex
+	client *rpcclient.Client // lazily dialed on first SendRequest, then cached
 }
 
 // GRPCDirectRPCConnection implements DirectRPCConnection for gRPC.
@@ -239,11 +253,13 @@ func NewDirectRPCConnection(
 		return conn, nil
 
 	case DirectRPCProtocolWS, DirectRPCProtocolWSS:
-		// WebSocket support is handled via a dedicated subscription/streaming layer.
-		// See WEBSOCKET_SUPPORT.md for the design (connection lifecycle differs from request/response).
+		// Request/response over WebSocket uses the shared go-ethereum-derived
+		// JSON-RPC client (rpcclient), dialed lazily on first SendRequest.
+		// Subscriptions/streaming continue to use the dedicated UpstreamWSPool layer.
 		return &WebSocketDirectRPCConnection{
-			nodeUrl:  nodeUrl,
-			protocol: protocol,
+			nodeUrl:   nodeUrl,
+			protocol:  protocol,
+			isJsonRPC: !strings.EqualFold(apiInterface, "tendermintrpc"),
 		}, nil
 
 	case DirectRPCProtocolGRPC:
@@ -493,13 +509,78 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	}, nil
 }
 
-// SendRequest implements DirectRPCConnection for WebSocket/WSS
+// SendRequest implements DirectRPCConnection for WebSocket/WSS.
+//
+// It ships the already-built request body as a single JSON-RPC frame over a
+// persistent WebSocket connection and waits for the id-correlated response
+// frame, presenting the same raw-bytes-in / raw-bytes-out contract as the HTTP
+// transport. This is request/response only — subscriptions/streaming use the
+// dedicated UpstreamWSPool layer.
 func (w *WebSocketDirectRPCConnection) SendRequest(
 	ctx context.Context,
 	data []byte,
 	headers map[string]string,
 ) (*DirectRPCResponse, error) {
-	return nil, fmt.Errorf("WebSocket SendRequest not implemented; use subscription/streaming flow")
+	client, err := w.ensureClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial WebSocket %s: %w", w.nodeUrl.Url, err)
+	}
+
+	// Decode the already-built request body to recover id/method/params for the
+	// typed client API. Params is interface{}, so a JSON array decodes to
+	// []interface{} and an object to map[string]interface{} — exactly the shapes
+	// CallContext accepts.
+	var reqMsg rpcInterfaceMessages.JsonrpcMessage
+	if err := json.Unmarshal(data, &reqMsg); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON-RPC request for WebSocket %s: %w", w.nodeUrl.Url, err)
+	}
+	id := reqMsg.ID
+	if len(id) == 0 {
+		id = json.RawMessage("1")
+	}
+
+	reply, err := client.CallContext(ctx, id, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
+	if err != nil {
+		return nil, err
+	}
+
+	respBytes, err := json.Marshal(reply)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal WebSocket response for %s: %w", w.nodeUrl.Url, err)
+	}
+	utils.LavaFormatTrace("WebSocket SendRequest succeeded",
+		utils.LogAttr("endpoint", w.nodeUrl.Url),
+		utils.LogAttr("method", reqMsg.Method),
+		utils.LogAttr("responseBytes", len(respBytes)),
+	)
+	return &DirectRPCResponse{Data: respBytes, StatusCode: http.StatusOK}, nil
+}
+
+// ensureClient lazily dials the WebSocket on first use and caches the resulting
+// rpcclient.Client. The client owns reconnection internally (Client.write ->
+// reconnect, using each call's context), so a single successful dial survives
+// transient socket drops; only a failed initial dial leaves client nil, and the
+// next call retries the dial. The dial context is used only to establish the
+// connection — it does not bound the connection's lifetime.
+func (w *WebSocketDirectRPCConnection) ensureClient(ctx context.Context) (*rpcclient.Client, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.client != nil {
+		return w.client, nil
+	}
+
+	headers := make(map[string]string)
+	for k, v := range w.nodeUrl.GetAuthHeaders() {
+		headers[k] = v
+	}
+	endpoint := w.nodeUrl.AuthConfig.AddAuthPath(w.nodeUrl.Url)
+
+	client, err := rpcclient.DialWebsocket(ctx, endpoint, headers)
+	if err != nil {
+		return nil, err
+	}
+	w.client = client
+	return client, nil
 }
 
 func (w *WebSocketDirectRPCConnection) GetProtocol() DirectRPCProtocol {
@@ -507,6 +588,12 @@ func (w *WebSocketDirectRPCConnection) GetProtocol() DirectRPCProtocol {
 }
 
 func (w *WebSocketDirectRPCConnection) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.client != nil {
+		w.client.Close()
+		w.client = nil
+	}
 	return nil
 }
 

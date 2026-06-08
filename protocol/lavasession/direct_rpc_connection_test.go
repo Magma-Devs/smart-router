@@ -2,12 +2,16 @@ package lavasession
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -214,17 +218,80 @@ func TestHTTPConnectionInterface(t *testing.T) {
 	assert.NoError(t, conn.Close())
 }
 
-func TestWebSocketSendRequestNotImplemented(t *testing.T) {
-	ctx := context.Background()
-	nodeUrl := common.NodeUrl{Url: "wss://test.example.com"}
+// newTestWSJSONRPCServer starts a minimal JSON-RPC-over-WebSocket server that
+// answers eth_blockNumber with a fixed block and echoes the request id. It
+// returns the ws:// URL and a cleanup func.
+func newTestWSJSONRPCServer(t *testing.T, result string) (string, func()) {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			_, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+			}
+			if err := json.Unmarshal(msg, &req); err != nil {
+				return
+			}
+			resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":%s}`, string(req.ID), result)
+			if err := c.WriteMessage(websocket.TextMessage, []byte(resp)); err != nil {
+				return
+			}
+		}
+	}))
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") // http://host -> ws://host
+	return wsURL, srv.Close
+}
 
-	conn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+// TestWebSocketSendRequest_RoundTrip verifies request/response works over a real
+// WebSocket connection: SendRequest ships the JSON-RPC frame, the id-correlated
+// reply comes back, and the cached client is reused on the second call.
+func TestWebSocketSendRequest_RoundTrip(t *testing.T) {
+	wsURL, cleanup := newTestWSJSONRPCServer(t, `"0x10"`)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: wsURL}, 5, "")
+	require.NoError(t, err)
+	defer conn.Close()
+	require.Equal(t, DirectRPCProtocolWS, conn.GetProtocol())
+
+	resp, err := conn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), nil)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(resp.Data), `"result":"0x10"`)
+
+	// Second call reuses the cached client (no re-dial).
+	resp2, err := conn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}`), nil)
+	require.NoError(t, err)
+	assert.Contains(t, string(resp2.Data), `"result":"0x10"`)
+}
+
+// TestWebSocketSendRequest_DialFailure verifies that an unreachable WebSocket
+// endpoint surfaces a dial error (which the chain-tracker retries) rather than
+// the old "not implemented" stub.
+func TestWebSocketSendRequest_DialFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: "ws://127.0.0.1:1"}, 5, "")
 	require.NoError(t, err)
 
-	// WebSocket SendRequest should return not implemented error
-	_, err = conn.SendRequest(ctx, []byte("test"), nil)
+	_, err = conn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "WebSocket SendRequest not implemented")
+	assert.Contains(t, err.Error(), "failed to dial WebSocket")
 }
 
 func TestGRPCConnectionURLValidation(t *testing.T) {
