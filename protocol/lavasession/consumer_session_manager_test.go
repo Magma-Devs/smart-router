@@ -299,6 +299,11 @@ func TestNumberOfValidProviderGroups(t *testing.T) {
 
 	require.Equal(t, 4, csm.GetNumberOfValidProviders())
 	require.Equal(t, 3, csm.NumberOfValidProviderGroups(), "tier-1, external, default are the 3 distinct groups")
+
+	// With no addon/extension filtering the request-scoped counts match the totals.
+	providers, groups := csm.ProviderAndGroupCountsForRequest("", nil, context.Background())
+	require.Equal(t, 4, providers)
+	require.Equal(t, 3, groups)
 }
 
 func TestNoPairingAvailableFlow(t *testing.T) {

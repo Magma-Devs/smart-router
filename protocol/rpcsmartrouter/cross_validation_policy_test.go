@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/golang/mock/gomock"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -220,6 +221,71 @@ func TestParseCrossValidationConfig(t *testing.T) {
 		got, applies := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", common.CrossValidationParams{}, false)
 		require.True(t, applies)
 		assert.Equal(t, common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2, MinGroups: 2}, got)
+	})
+}
+
+// TestParseCrossValidationConfig_RejectsFractional covers P2: a fractional knob value must be a config
+// error, not silently truncated.
+func TestParseCrossValidationConfig_RejectsFractional(t *testing.T) {
+	const yamlBody = "cross-validation:\n" +
+		"  policies:\n" +
+		"    - chain-id: ETH1\n" +
+		"      api-interface: jsonrpc\n" +
+		"      method: eth_getBalance\n" +
+		"      enabled: true\n" +
+		"      agreement-threshold: 2.9\n" // fractional -> must be rejected
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
+
+	_, err := ParseCrossValidationConfig(v)
+	require.Error(t, err, "fractional knob value must be rejected, not truncated to an int")
+}
+
+// TestValidateCrossValidationStartup covers the startup guards: the stateful-write guard (with a real
+// parser and the fail-closed path when the parser cannot classify) and the min-groups capacity bound.
+func TestValidateCrossValidationStartup(t *testing.T) {
+	ctx := context.Background()
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	realParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	mkResolver := func(t *testing.T, entries ...CrossValidationPolicyEntry) *CrossValidationPolicyResolver {
+		t.Helper()
+		r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: entries})
+		require.NoError(t, err)
+		return r
+	}
+	readPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(2)}}}
+	writePolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(2)}}}
+	groupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(3)}, MinGroups: Bound{Floor: intPtr(3)}}}
+
+	t.Run("no policies -> ok", func(t *testing.T) {
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t), realParser, "ETH1", "jsonrpc", 5))
+	})
+	t.Run("read policy, enough groups -> ok", func(t *testing.T) {
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, readPolicy), realParser, "ETH1", "jsonrpc", 2))
+	})
+	t.Run("write policy -> rejected by stateful guard", func(t *testing.T) {
+		require.Error(t, validateCrossValidationStartup(mkResolver(t, writePolicy), realParser, "ETH1", "jsonrpc", 5))
+	})
+	t.Run("min-groups 3 but only 2 configured groups -> rejected", func(t *testing.T) {
+		require.Error(t, validateCrossValidationStartup(mkResolver(t, groupPolicy), realParser, "ETH1", "jsonrpc", 2))
+	})
+	t.Run("min-groups 3 with 3 configured groups -> ok", func(t *testing.T) {
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, groupPolicy), realParser, "ETH1", "jsonrpc", 3))
+	})
+	t.Run("parser cannot classify stateful -> fail closed", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+		// MockChainParser implements chainlib.ChainParser but NOT ApiHasStatefulCategory.
+		mockParser := chainlib.NewMockChainParser(ctrl)
+		require.Error(t, validateCrossValidationStartup(mkResolver(t, readPolicy), mockParser, "ETH1", "jsonrpc", 5),
+			"policies + a parser that cannot classify stateful methods must fail closed")
 	})
 }
 

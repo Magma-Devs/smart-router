@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -112,6 +113,31 @@ func (r *CrossValidationPolicyResolver) NumPolicies() int {
 	return len(r.policies)
 }
 
+// MaxResolvedMinGroups returns the largest no-caller resolved min-groups among ENABLED policies for the
+// given chain/api (0 if none). Used by the startup capacity check: if it exceeds the number of distinct
+// provider groups configured for the endpoint, no request can ever satisfy that policy. min-groups has no
+// caller header, so the no-caller value is the maximum a request will ever require.
+func (r *CrossValidationPolicyResolver) MaxResolvedMinGroups(chainID, apiInterface string) int {
+	if r == nil {
+		return 0
+	}
+	wantChain, wantAPI := strings.ToLower(chainID), strings.ToLower(apiInterface)
+	maxMinGroups := 0
+	for key, policy := range r.policies {
+		if !policy.Enabled {
+			continue
+		}
+		kc, ka, _ := splitPolicyKey(key)
+		if kc != wantChain || ka != wantAPI {
+			continue
+		}
+		if mg := resolveKnob(0, false, policy.MinGroups, defaultEnabledMinGroups); mg > maxMinGroups {
+			maxMinGroups = mg
+		}
+	}
+	return maxMinGroups
+}
+
 // ParseCrossValidationConfig reads the optional top-level `cross-validation:` block from viper config.
 // An absent key yields an empty config (fully backwards compatible). Each knob accepts either the object
 // form `{floor: N, cap: M}` or the scalar shorthand `N` (meaning `{floor: N}`).
@@ -174,14 +200,23 @@ func scalarToInt(data interface{}) (int, error) {
 	case uint64:
 		return int(x), nil
 	case float32:
-		return int(x), nil
+		return floatToInt(float64(x))
 	case float64:
-		return int(x), nil
+		return floatToInt(x)
 	case string:
 		return strconv.Atoi(strings.TrimSpace(x))
 	default:
 		return 0, fmt.Errorf("unsupported numeric type %T", data)
 	}
+}
+
+// floatToInt converts a YAML float to an int, rejecting fractional values: cross-validation knobs are
+// positive integers, so `agreement-threshold: 2.9` is a config error rather than a silent truncation.
+func floatToInt(f float64) (int, error) {
+	if f != math.Trunc(f) {
+		return 0, fmt.Errorf("value %v must be a whole number", f)
+	}
+	return int(f), nil
 }
 
 // Resolve returns the effective cross-validation params for a request and whether cross-validation
