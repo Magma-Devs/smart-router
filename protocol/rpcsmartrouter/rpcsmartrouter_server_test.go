@@ -318,6 +318,44 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 	})
 }
 
+// TestAppendHeadersToRelayResult_FailureReasonHeader verifies that a cross-validation failure surfaces a
+// distinguishable lava-cross-validation-failure-reason header (so clients can tell diversity-unmet from
+// an ordinary no-agreement).
+func TestAppendHeadersToRelayResult_FailureReasonHeader(t *testing.T) {
+	ctx := context.Background()
+	relayProcessor := &MockRelayProcessorForHeaders{
+		crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5, MinGroups: 2},
+		selection:                       relaycore.CrossValidation,
+		crossValidationQueriedProviders: []string{"lava@provider1", "lava@provider2"},
+		successResults:                  []common.RelayResult{},
+		nodeErrors:                      []common.RelayResult{},
+	}
+	relayResult := &common.RelayResult{
+		ProviderInfo:                 common.ProviderInfo{ProviderAddress: "lava@provider1"},
+		CrossValidation:              0, // below threshold -> failed
+		CrossValidationFailureReason: common.CrossValidationReasonDiversityUnmet,
+		Reply:                        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+	}
+	mockProtocolMessage := &MockProtocolMessage{api: &spectypes.Api{Name: "test-api"}}
+	rpcSmartRouterServer := &RPCSmartRouterServer{}
+
+	rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, false)
+
+	var statusHeader, reasonHeader *pairingtypes.Metadata
+	for i := range relayResult.Reply.Metadata {
+		switch relayResult.Reply.Metadata[i].Name {
+		case common.CROSS_VALIDATION_STATUS_HEADER_NAME:
+			statusHeader = &relayResult.Reply.Metadata[i]
+		case common.CROSS_VALIDATION_FAILURE_REASON_HEADER:
+			reasonHeader = &relayResult.Reply.Metadata[i]
+		}
+	}
+	require.NotNil(t, statusHeader)
+	require.Equal(t, "failed", statusHeader.Value)
+	require.NotNil(t, reasonHeader, "failure-reason header must be present on cross-validation failure")
+	require.Equal(t, common.CrossValidationReasonDiversityUnmet, reasonHeader.Value)
+}
+
 // TestAppendHeadersToRelayResult_GroupLabelsInertWithoutPolicy is the Phase 0.2
 // backwards-compatibility lock for the cross-validation provider-group spine
 // (UC-7). The spine (Phase 0.1) carries a provider GroupLabel through to

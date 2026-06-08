@@ -960,6 +960,38 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		)
 	}
 
+	// Post-filter group-diversity guard (1.2d): the consistency filter may drop an entire group while
+	// leaving enough same-group sessions to pass the count check above. Fail fast when the survivors can
+	// no longer span MinGroups distinct groups, rather than launching relays the diversity gate will reject.
+	if selection == relaycore.CrossValidation && crossValidationParams != nil && crossValidationParams.MinGroups > 1 {
+		survivingGroups := make(map[string]struct{})
+		for _, sessionInfo := range validSessions {
+			if sessionInfo == nil || sessionInfo.Session == nil || sessionInfo.Session.Parent == nil {
+				continue
+			}
+			label := "default"
+			if g := sessionInfo.Session.Parent.GroupLabel; g != "" {
+				label = g
+			}
+			survivingGroups[label] = struct{}{}
+		}
+		if len(survivingGroups) < crossValidationParams.MinGroups {
+			for endpointAddress, sessionInfo := range validSessions {
+				if sessionInfo != nil && sessionInfo.Session != nil {
+					usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)
+					sessionInfo.Session.Free(nil)
+				}
+			}
+			return utils.LavaFormatError("insufficient provider groups for cross-validation after consistency filter ("+common.CrossValidationReasonDiversityUnmet+")",
+				lavasession.PairingListEmptyError,
+				utils.LogAttr("minGroups", crossValidationParams.MinGroups),
+				utils.LogAttr("groupsAfterFilter", len(survivingGroups)),
+				utils.LogAttr("sessionsAfterFilter", len(validSessions)),
+				utils.LogAttr("GUID", ctx),
+			)
+		}
+	}
+
 	sessions = validSessions
 
 	// Capture the batch number synchronously before launching goroutines so each
@@ -2384,6 +2416,15 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			Name:  common.CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER,
 			Value: strings.Join(agreeingProvidersList, ","),
 		})
+
+		// On failure, surface WHY (no-agreement / diversity-unmet / insufficient-responses) so clients
+		// and metrics can distinguish a diversity failure from an ordinary no-agreement.
+		if relayResult != nil && relayResult.CrossValidationFailureReason != "" {
+			metadataReply = append(metadataReply, pairingtypes.Metadata{
+				Name:  common.CROSS_VALIDATION_FAILURE_REASON_HEADER,
+				Value: relayResult.CrossValidationFailureReason,
+			})
+		}
 	} else if relayResult != nil {
 		// For non-cross-validation mode: keep existing single provider behavior
 		providerAddress := relayResult.GetProvider()
