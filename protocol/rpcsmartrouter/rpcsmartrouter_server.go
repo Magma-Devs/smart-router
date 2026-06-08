@@ -464,7 +464,75 @@ func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.C
 			utils.LogAttr("extensions", extensions),
 			utils.LogAttr("GUID", ctx))
 	}
+	// Per-group quorum (2.3) is stricter than MinGroups diversity: each of MinGroups groups must
+	// independently reach AgreementThreshold matching responses. Two extra request-time guards:
+	//   1. The shape must be self-consistent — MaxParticipants >= MinGroups * AgreementThreshold — so a
+	//      caller-loosened max (or any effective params) can physically fit a quorum per group. This catches
+	//      caller-induced impossibility that config-time Validate cannot (the caller raises the threshold).
+	//   2. At least MinGroups candidate groups must EACH have >= AgreementThreshold providers; distinct-group
+	//      count alone (checked above) is insufficient when a group has too few providers to ever corroborate.
+	if params.PerGroupQuorum {
+		if needed := params.MinGroups * params.AgreementThreshold; params.MaxParticipants < needed {
+			return common.CrossValidationReasonInsufficientCapacity, utils.LavaFormatError("per-group cross-validation requires maxParticipants >= minGroups * agreementThreshold",
+				lavasession.PairingListEmptyError,
+				utils.LogAttr("maxParticipants", params.MaxParticipants),
+				utils.LogAttr("minGroups", params.MinGroups),
+				utils.LogAttr("agreementThreshold", params.AgreementThreshold),
+				utils.LogAttr("needed", needed),
+				utils.LogAttr("GUID", ctx))
+		}
+		groupCounts := rpcss.sessionManager.GroupCountsForRequest(addon, extensions, ctx)
+		adequateGroups := countAdequateGroups(groupCounts, params.AgreementThreshold)
+		if adequateGroups < params.MinGroups {
+			return common.CrossValidationReasonInsufficientGroups, utils.LavaFormatError("per-group cross-validation: too few candidate groups have enough providers to each reach the agreement threshold",
+				lavasession.PairingListEmptyError,
+				utils.LogAttr("minGroups", params.MinGroups),
+				utils.LogAttr("agreementThreshold", params.AgreementThreshold),
+				utils.LogAttr("groupsWithEnoughProviders", adequateGroups),
+				utils.LogAttr("candidateGroupCounts", groupCounts),
+				utils.LogAttr("addon", addon),
+				utils.LogAttr("extensions", extensions),
+				utils.LogAttr("GUID", ctx))
+		}
+	}
 	return "", nil
+}
+
+// countAdequateGroups returns how many groups in the per-group breakdown have at least `threshold`
+// providers/sessions — i.e. how many groups can independently reach their internal quorum. Mirrors
+// relaycore's per-group qualifying-group count for the capacity/post-filter guards.
+func countAdequateGroups(groupCounts map[string]int, threshold int) int {
+	n := 0
+	for _, c := range groupCounts {
+		if c >= threshold {
+			n++
+		}
+	}
+	return n
+}
+
+// crossValidationGroupShortfall evaluates whether a set of per-group counts can still satisfy the group
+// requirement of a cross-validation policy, returning the qualifying-group count and a non-empty structured
+// fail reason when it cannot. For PerGroupQuorum a group qualifies only with >= AgreementThreshold members
+// (so MinGroups groups can each reach their internal quorum); otherwise any non-empty group qualifies
+// (MinGroups diversity). Used by the post-consistency-filter guard so per-group failures are caught before
+// relays launch. Returns ("", 0-ok) shape: failReason == "" means the requirement is still satisfiable.
+func crossValidationGroupShortfall(groupCounts map[string]int, params *common.CrossValidationParams) (qualifying int, failReason string) {
+	if params == nil || params.MinGroups <= 1 {
+		return len(groupCounts), ""
+	}
+	if params.PerGroupQuorum {
+		qualifying = countAdequateGroups(groupCounts, params.AgreementThreshold)
+		if qualifying < params.MinGroups {
+			return qualifying, common.CrossValidationReasonInsufficientGroups
+		}
+		return qualifying, ""
+	}
+	qualifying = len(groupCounts)
+	if qualifying < params.MinGroups {
+		return qualifying, common.CrossValidationReasonInsufficientGroups
+	}
+	return qualifying, ""
 }
 
 // crossValidationFailFastResult builds the minimal RelayResult returned on a request-time cross-validation
@@ -1089,11 +1157,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		)
 	}
 
-	// Post-filter group-diversity guard (1.2d): the consistency filter may drop an entire group while
-	// leaving enough same-group sessions to pass the count check above. Fail fast when the survivors can
-	// no longer span MinGroups distinct groups, rather than launching relays the diversity gate will reject.
+	// Post-filter group guard (1.2d + 2.3): the consistency filter may drop an entire group, or drop a
+	// group below its per-group quorum, while leaving enough total sessions to pass the count check above.
+	// Fail fast when the survivors can no longer span the required groups, rather than launching relays the
+	// group/per-group gate will reject. For MinGroups diversity: require MinGroups distinct surviving
+	// groups. For PerGroupQuorum: require MinGroups surviving groups that EACH still have >= threshold
+	// sessions (a distinct-group count alone passes even when a group dropped below its internal quorum).
 	if selection == relaycore.CrossValidation && crossValidationParams != nil && crossValidationParams.MinGroups > 1 {
-		survivingGroups := make(map[string]struct{})
+		survivingGroupCounts := make(map[string]int)
 		for _, sessionInfo := range validSessions {
 			if sessionInfo == nil || sessionInfo.Session == nil || sessionInfo.Session.Parent == nil {
 				continue
@@ -1102,20 +1173,23 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			if g := sessionInfo.Session.Parent.GroupLabel; g != "" {
 				label = g
 			}
-			survivingGroups[label] = struct{}{}
+			survivingGroupCounts[label]++
 		}
-		if len(survivingGroups) < crossValidationParams.MinGroups {
+		if qualifyingGroups, failReason := crossValidationGroupShortfall(survivingGroupCounts, crossValidationParams); failReason != "" {
 			for endpointAddress, sessionInfo := range validSessions {
 				if sessionInfo != nil && sessionInfo.Session != nil {
 					usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)
 					sessionInfo.Session.Free(nil)
 				}
 			}
-			relayProcessor.SetCrossValidationFailFastReason(common.CrossValidationReasonInsufficientGroups)
-			return utils.LavaFormatError("insufficient provider groups for cross-validation after consistency filter ("+common.CrossValidationReasonInsufficientGroups+")",
+			relayProcessor.SetCrossValidationFailFastReason(failReason)
+			return utils.LavaFormatError("insufficient provider groups for cross-validation after consistency filter ("+failReason+")",
 				lavasession.PairingListEmptyError,
 				utils.LogAttr("minGroups", crossValidationParams.MinGroups),
-				utils.LogAttr("groupsAfterFilter", len(survivingGroups)),
+				utils.LogAttr("perGroupQuorum", crossValidationParams.PerGroupQuorum),
+				utils.LogAttr("agreementThreshold", crossValidationParams.AgreementThreshold),
+				utils.LogAttr("qualifyingGroupsAfterFilter", qualifyingGroups),
+				utils.LogAttr("survivingGroupCounts", survivingGroupCounts),
 				utils.LogAttr("sessionsAfterFilter", len(validSessions)),
 				utils.LogAttr("GUID", ctx),
 			)

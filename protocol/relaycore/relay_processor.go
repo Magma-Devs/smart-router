@@ -181,7 +181,17 @@ func (rp *RelayProcessor) hashQuorumReached(count int, groupCounts map[string]in
 func (rp *RelayProcessor) crossValidationQuorumReached() bool {
 	threshold := rp.getAgreementThreshold()
 	minGroups := rp.getMinGroups()
-	for _, stat := range rp.quorumMap {
+	perGroup := rp.perGroupQuorum()
+	for hash, stat := range rp.quorumMap {
+		// Empty/nil replies keep the zero hash (handleResponse only hashes non-empty data). Per-group
+		// quorum never corroborates on a nil reply, and responsesCrossValidation excludes them from the
+		// per-group winner — so the early-exit must ignore the zero-hash bucket too, otherwise enough
+		// nil replies could trip an early exit that the final per-group check then fails (premature
+		// group-quorum-unmet). Default mode keeps counting the zero hash: it has a legitimate nil-reply
+		// fallback consensus.
+		if perGroup && hash == ([32]byte{}) {
+			continue
+		}
 		if rp.hashQuorumReached(stat.count, stat.groupCounts, threshold, minGroups) {
 			return true
 		}

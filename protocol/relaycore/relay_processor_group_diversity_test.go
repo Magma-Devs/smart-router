@@ -331,3 +331,93 @@ func TestCrossValidationQuorumReached_Diversity(t *testing.T) {
 	}
 	require.True(t, rpNoGroups.crossValidationQuorumReached(), "MinGroups<=1 must reach quorum on count alone")
 }
+
+// TestCrossValidationQuorumReached_PerGroupIgnoresNilReplies covers the per-group early-exit fix: empty/nil
+// successful replies accumulate under the zero hash, but per-group quorum never corroborates on a nil reply.
+// The early-exit must ignore the zero-hash bucket (matching responsesCrossValidation), so nil replies cannot
+// trip a premature exit that the final per-group check then fails. Default mode keeps the zero hash for its
+// legitimate nil-reply fallback.
+func TestCrossValidationQuorumReached_PerGroupIgnoresNilReplies(t *testing.T) {
+	zero := [32]byte{}     // nil/empty replies bucket here
+	real := [32]byte{0xAA} // a real response hash
+
+	// Per-group: a zero-hash bucket that WOULD satisfy per-group (2 groups, 2 each) must NOT early-exit.
+	rp := &RelayProcessor{
+		crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 6, MinGroups: 2, PerGroupQuorum: true},
+		selection:             CrossValidation,
+		quorumMap: map[[32]byte]*quorumStat{
+			zero: {count: 4, groupCounts: map[string]int{"g1": 2, "g2": 2}},
+		},
+	}
+	require.False(t, rp.crossValidationQuorumReached(), "nil/empty replies must not satisfy per-group early-exit")
+
+	// A later run of real replies forming a genuine per-group quorum DOES early-exit.
+	rp.quorumMap[real] = &quorumStat{count: 4, groupCounts: map[string]int{"g1": 2, "g2": 2}}
+	require.True(t, rp.crossValidationQuorumReached(), "real per-group quorum must early-exit even with nil replies present")
+
+	// Default (non-per-group) mode is unchanged: the zero-hash bucket is a legitimate nil-reply consensus.
+	rpDefault := &RelayProcessor{
+		crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 6, MinGroups: 2},
+		selection:             CrossValidation,
+		quorumMap: map[[32]byte]*quorumStat{
+			zero: {count: 4, groupCounts: map[string]int{"g1": 2, "g2": 2}},
+		},
+	}
+	require.True(t, rpDefault.crossValidationQuorumReached(), "default mode must still count nil replies for early-exit")
+}
+
+// TestRelayProcessor_PerGroupNilReplyRealPath drives a real RelayProcessor through handleResponse: empty
+// successful replies arrive first (accumulating under the zero hash), then real replies form a per-group
+// quorum. It proves the live path does not prematurely report group-quorum-unmet on the nil replies and
+// still reaches consensus on the real data.
+func TestRelayProcessor_PerGroupNilReplyRealPath(t *testing.T) {
+	ctx := context.Background()
+	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
+	usedProviders := lavasession.NewUsedProviders(nil)
+	sm := &mockRelayStateMachine{
+		protocolMessage:       protocolMessage,
+		usedProviders:         usedProviders,
+		selection:             CrossValidation,
+		crossValidationParams: &common.CrossValidationParams{MaxParticipants: 8, AgreementThreshold: 2, MinGroups: 2, PerGroupQuorum: true},
+	}
+	rp := NewRelayProcessor(ctx, sm.crossValidationParams, NewConsistency("LAVA"), RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
+
+	mkResp := func(provider, group, data string) *RelayResponse {
+		return &RelayResponse{
+			RelayResult: common.RelayResult{
+				Request:      &pairingtypes.RelayRequest{RelaySession: &pairingtypes.RelaySession{}, RelayData: &pairingtypes.RelayPrivateData{}},
+				Reply:        &pairingtypes.RelayReply{Data: []byte(data), LatestBlock: 1},
+				ProviderInfo: common.ProviderInfo{ProviderAddress: provider, ProviderGroup: group},
+				StatusCode:   200,
+			},
+		}
+	}
+
+	// Empty successful replies first (4, spanning two groups, 2 each) — would satisfy per-group IF counted.
+	rp.handleResponse(mkResp("e1", "g1", ""))
+	rp.handleResponse(mkResp("e2", "g1", ""))
+	rp.handleResponse(mkResp("e3", "g2", ""))
+	rp.handleResponse(mkResp("e4", "g2", ""))
+	rp.lock.RLock()
+	reachedOnNil := rp.crossValidationQuorumReached()
+	rp.lock.RUnlock()
+	require.False(t, reachedOnNil, "nil replies must not trip the per-group early-exit")
+
+	// Real replies forming a genuine per-group quorum on "A".
+	rp.handleResponse(mkResp("p1", "g1", "A"))
+	rp.handleResponse(mkResp("p2", "g1", "A"))
+	rp.handleResponse(mkResp("p3", "g2", "A"))
+	rp.handleResponse(mkResp("p4", "g2", "A"))
+
+	result, err := rp.ProcessingResult()
+	require.NoError(t, err, "real per-group quorum must succeed despite earlier nil replies")
+	require.Equal(t, "A", string(result.Reply.Data))
+}
