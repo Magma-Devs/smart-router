@@ -144,6 +144,52 @@ func TestRelayProcessor_CrossValidationOutlierRealPath(t *testing.T) {
 	require.Equal(t, map[string]struct{}{"g3": {}}, outlierGroups, "only the divergent g3 is an outlier; hashes do not collapse to agreement")
 }
 
+// TestRelayProcessor_CrossValidationFailureRealPath is the failure-path counterpart to the outlier real
+// path: it drives a real RelayProcessor to a quorum FAILURE (two successful responses with different data,
+// so no hash reaches the threshold) and proves ProcessingResult returns a NON-NIL minimal result carrying
+// the failure reason alongside the error. This is the link the client-facing headers depend on — if a
+// refactor returned nil here, appendHeadersToRelayResult would have nothing to write and the
+// failure-reason / disagreeing-providers headers would silently die on the exact path they exist for.
+func TestRelayProcessor_CrossValidationFailureRealPath(t *testing.T) {
+	ctx := context.Background()
+	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
+	usedProviders := lavasession.NewUsedProviders(nil)
+	sm := newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation) // threshold 2, minGroups 1
+	rp := NewRelayProcessor(ctx, sm.crossValidationParams, NewConsistency("LAVA"), RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
+
+	mkResp := func(provider, group, data string) *RelayResponse {
+		return &RelayResponse{
+			RelayResult: common.RelayResult{
+				Request:      &pairingtypes.RelayRequest{RelaySession: &pairingtypes.RelaySession{}, RelayData: &pairingtypes.RelayPrivateData{}},
+				Reply:        &pairingtypes.RelayReply{Data: []byte(data), LatestBlock: 1},
+				ProviderInfo: common.ProviderInfo{ProviderAddress: provider, ProviderGroup: group},
+				StatusCode:   200,
+			},
+		}
+	}
+	// Two successful responses that disagree -> no hash reaches the threshold of 2 -> no-agreement.
+	rp.handleResponse(mkResp("p1", "g1", "A"))
+	rp.handleResponse(mkResp("p2", "g2", "B"))
+
+	result, err := rp.ProcessingResult()
+	require.Error(t, err, "a quorum failure must surface an error")
+	require.NotNil(t, result, "failure must still return a minimal result so headers can be attached")
+	require.Equal(t, common.CrossValidationReasonNoAgreement, result.CrossValidationFailureReason)
+	require.Equal(t, http.StatusInternalServerError, result.StatusCode)
+
+	// Both successful-but-disagreeing providers are available to the header path as dissenters.
+	successResults, _, _ := rp.GetResultsData()
+	require.Len(t, successResults, 2)
+}
+
 // TestResponsesCrossValidation_FailureReasons covers the distinguishable failure reasons surfaced to the
 // client: no-agreement (count threshold never reached) vs diversity-unmet (count met but too few groups).
 func TestResponsesCrossValidation_FailureReasons(t *testing.T) {

@@ -336,6 +336,11 @@ func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
 	// (b) Group accounting only sees primaries — the backup's distinct "backup-group" must not count.
 	require.Equal(t, 2, csm.GetNumberOfValidProviders(), "only primaries are valid providers")
 	require.Equal(t, 2, csm.NumberOfValidProviderGroups(), "backup-group must not inflate the group count")
+	// ProviderAndGroupCountsForRequest is the exact input the CV capacity gate trusts to fail-fast; a
+	// backup leaking in here would let an unsatisfiable min-groups/max-participants policy pass.
+	reqProviders, reqGroups := csm.ProviderAndGroupCountsForRequest("", nil, context.Background())
+	require.Equal(t, 2, reqProviders, "capacity gate must not see the backup as a candidate endpoint")
+	require.Equal(t, 2, reqGroups, "capacity gate must not see backup-group as a candidate group")
 	assignments := csm.ProviderGroupAssignments()
 	require.NotContains(t, assignments, "backup-group", "backup group must not appear in assignments")
 	for group, addrs := range assignments {
