@@ -1898,8 +1898,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		utils.LavaFormatTrace("found provider selection header", utils.LogAttr("provider", selectedProvider), utils.LogAttr("GUID", ctx))
 	}
 
+	// Group-aware fan-out: when a cross-validation policy requires group diversity, select across at
+	// least MinGroups distinct provider groups (1.2a). Default 1 leaves selection group-blind.
+	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1}
+	if cvp := relayProcessor.GetCrossValidationParams(); cvp != nil && cvp.MinGroups > 1 {
+		sessionOpts.MinGroups = cvp.MinGroups
+	}
+
 	_, sessSpan := tracing.StartInternalSpan(ctx, tracing.SpanGetSessions)
-	sessions, err := rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, extensions, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider)
+	sessions, err := rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, extensions, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider, sessionOpts)
 	tracing.RecordSessionStats(sessSpan, numOfEndpoints, len(sessions))
 	if err != nil {
 		tracing.RecordError(sessSpan, err)
@@ -1911,7 +1918,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 			if addon != "" {
 				return utils.LavaFormatError("No Providers For Addon", err, utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("userIp", userData.ConsumerIp), utils.LogAttr("GUID", ctx))
 			} else if len(extensions) > 0 && relayProcessor.GetAllowSessionDegradation() { // if we have no providers for that extension, use a regular provider, otherwise return the extension results
-				sessions, err = rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, []*spectypes.Extension{}, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider)
+				sessions, err = rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, []*spectypes.Extension{}, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider, sessionOpts)
 				if err != nil {
 					return err
 				}
