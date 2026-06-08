@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"crypto/sha256"
 	"net/http"
 	"strings"
 	"testing"
@@ -323,6 +324,39 @@ func TestCrossValidationPolicy_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCrossValidationSuccessOutliers covers the mismatch-metric gating (1.3): only SUCCESSFUL content
+// outliers vs the consensus, only when quorum was reached, only for deterministic methods.
+func TestCrossValidationSuccessOutliers(t *testing.T) {
+	hashA := sha256.Sum256([]byte("A"))
+	hashB := sha256.Sum256([]byte("B"))
+	mk := func(addr, group string, hash [32]byte) common.RelayResult {
+		return common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: addr, ProviderGroup: group}, ResponseHash: hash}
+	}
+	// Two agree on A (consensus), one diverges (B).
+	results := []common.RelayResult{mk("p1", "g1", hashA), mk("p2", "g2", hashA), mk("p3", "g3", hashB)}
+
+	t.Run("quorum reached + deterministic -> the divergent outlier", func(t *testing.T) {
+		out := crossValidationSuccessOutliers(results, hashA, true, true)
+		require.Len(t, out, 1)
+		require.Equal(t, "p3", out[0].ProviderInfo.ProviderAddress)
+		require.Equal(t, "g3", out[0].ProviderInfo.ProviderGroup)
+	})
+	t.Run("all agree -> no outliers", func(t *testing.T) {
+		require.Empty(t, crossValidationSuccessOutliers([]common.RelayResult{mk("p1", "g1", hashA), mk("p2", "g2", hashA)}, hashA, true, true))
+	})
+	t.Run("quorum failed -> none (failures are not content outliers)", func(t *testing.T) {
+		require.Nil(t, crossValidationSuccessOutliers(results, hashA, false, true))
+	})
+	t.Run("non-deterministic -> none", func(t *testing.T) {
+		require.Nil(t, crossValidationSuccessOutliers(results, hashA, true, false))
+	})
+	t.Run("zero hashes would falsely agree -> none (why Finding 1's real hashes matter)", func(t *testing.T) {
+		var zero [32]byte
+		zr := []common.RelayResult{mk("p1", "g1", zero), mk("p2", "g2", zero), mk("p3", "g3", zero)}
+		require.Empty(t, crossValidationSuccessOutliers(zr, zero, true, true))
+	})
 }
 
 // TestCrossValidationFinality covers the tri-state finality classifier used to label mismatch metrics.
