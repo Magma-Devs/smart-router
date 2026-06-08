@@ -328,6 +328,61 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 	})
 }
 
+// TestAppendHeadersToRelayResult_DisagreeingOnQuorumFailure covers the failure semantics of the
+// disagreeing-providers header: when successful responses come back but fail to form a quorum, every
+// successful provider is in conflict (there is no consensus to agree with), so all of them must appear in
+// lava-cross-validation-disagreeing-providers — not just node/protocol-error providers.
+func TestAppendHeadersToRelayResult_DisagreeingOnQuorumFailure(t *testing.T) {
+	ctx := context.Background()
+	hashA := [32]byte{1}
+	hashB := [32]byte{2}
+	relayProcessor := &MockRelayProcessorForHeaders{
+		crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5},
+		selection:                       relaycore.CrossValidation,
+		crossValidationQueriedProviders: []string{"lava@provider1", "lava@provider2", "lava@provider3"},
+		// Two successful but disagreeing responses (different hashes) plus a node error: none agree up to
+		// the threshold, so the quorum fails.
+		successResults: []common.RelayResult{
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}, ResponseHash: hashA},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}, ResponseHash: hashB},
+		},
+		nodeErrors: []common.RelayResult{
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"}},
+		},
+	}
+	relayResult := &common.RelayResult{
+		ProviderInfo:    common.ProviderInfo{ProviderAddress: "lava@provider1"},
+		CrossValidation: 1, // below threshold -> failed
+		Reply:           &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+	}
+	mockProtocolMessage := &MockProtocolMessage{api: &spectypes.Api{Name: "test-api"}}
+	rpcSmartRouterServer := &RPCSmartRouterServer{}
+
+	rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, false)
+
+	var statusHeader, agreeingHeader, disagreeingHeader *pairingtypes.Metadata
+	for i := range relayResult.Reply.Metadata {
+		switch relayResult.Reply.Metadata[i].Name {
+		case common.CROSS_VALIDATION_STATUS_HEADER_NAME:
+			statusHeader = &relayResult.Reply.Metadata[i]
+		case common.CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER:
+			agreeingHeader = &relayResult.Reply.Metadata[i]
+		case common.CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER:
+			disagreeingHeader = &relayResult.Reply.Metadata[i]
+		}
+	}
+	require.NotNil(t, statusHeader)
+	require.Equal(t, "failed", statusHeader.Value)
+	// No consensus -> no provider agrees.
+	require.NotNil(t, agreeingHeader)
+	require.Equal(t, "", agreeingHeader.Value)
+	// Both successful-but-disagreeing providers AND the node-error provider are in the disagreeing set.
+	require.NotNil(t, disagreeingHeader)
+	require.Contains(t, disagreeingHeader.Value, "lava@provider1")
+	require.Contains(t, disagreeingHeader.Value, "lava@provider2")
+	require.Contains(t, disagreeingHeader.Value, "lava@provider3")
+}
+
 // TestAppendHeadersToRelayResult_FailureReasonHeader verifies that a cross-validation failure surfaces a
 // distinguishable lava-cross-validation-failure-reason header (so clients can tell diversity-unmet from
 // an ordinary no-agreement).

@@ -42,6 +42,12 @@ type RelayProcessor struct {
 	currentQuorumEqualResults       int      // max count across hashes — kept for logging only, not for decisions
 	statefulRelayTargets            []string // stores all providers that received a stateful relay
 	crossValidationQueriedProviders []string // stores all providers that were queried for cross-validation (even if response not received)
+	// crossValidationFailFastReason carries the structured reason for a request-time cross-validation
+	// fail-fast (capacity/diversity checks that abort before any relay completes, so no RelayResult is
+	// produced). It rides on the shared processor back to the caller, which synthesizes the
+	// lava-cross-validation-failure-reason header from it — the error returns are left byte-for-byte
+	// unchanged so the state machine's PairingListEmptyError stop logic is unaffected. Guarded by rp.lock.
+	crossValidationFailFastReason string
 }
 
 // quorumStat is the per-hash agreement tally for cross-validation: how many providers returned this exact
@@ -197,6 +203,23 @@ func (rp *RelayProcessor) GetCrossValidationQueriedProviders() []string {
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 	return rp.crossValidationQueriedProviders
+}
+
+// SetCrossValidationFailFastReason records why a cross-validation request was aborted before any relay
+// completed (a capacity/diversity check that fails fast). The caller reads it back off the shared
+// processor to synthesize the failure-reason header, since no RelayResult exists on this path.
+func (rp *RelayProcessor) SetCrossValidationFailFastReason(reason string) {
+	rp.lock.Lock()
+	defer rp.lock.Unlock()
+	rp.crossValidationFailFastReason = reason
+}
+
+// GetCrossValidationFailFastReason returns the request-time fail-fast reason, or "" if the request did
+// not abort on a capacity/diversity check.
+func (rp *RelayProcessor) GetCrossValidationFailFastReason() string {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return rp.crossValidationFailFastReason
 }
 
 func (rp *RelayProcessor) String() string {
