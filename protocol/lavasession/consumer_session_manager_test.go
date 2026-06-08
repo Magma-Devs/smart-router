@@ -306,6 +306,55 @@ func TestNumberOfValidProviderGroups(t *testing.T) {
 	require.Equal(t, 3, groups)
 }
 
+// TestBackupProvidersExcludedFromValidationSet is the Phase 1.5 validation-set scope guard: backup
+// providers are failover-only and must never enter the cross-validation candidate set. Concretely they
+// must not (a) be returned by GetSessions — the path CV fans out over — while healthy primaries exist,
+// nor (b) appear in the group accounting (NumberOfValidProviderGroups / ProviderGroupAssignments) that
+// the CV capacity check trusts, or a backup could inflate a quorum it was never meant to validate.
+func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
+	ctx := context.Background()
+	csm := CreateConsumerSessionManager()
+	mk := func(addr, group string) *ConsumerSessionsWithProvider {
+		return &ConsumerSessionsWithProvider{
+			PublicLavaAddress: addr,
+			Endpoints:         []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
+			Sessions:          map[int64]*SingleConsumerSession{},
+			MaxComputeUnits:   200,
+			PairingEpoch:      firstEpochHeight,
+			GroupLabel:        group,
+		}
+	}
+	primaries := map[uint64]*ConsumerSessionsWithProvider{
+		0: mk("lava@primary0", "g1"),
+		1: mk("lava@primary1", "g2"),
+	}
+	backups := map[uint64]*ConsumerSessionsWithProvider{
+		0: mk("lava@backup0", "backup-group"),
+	}
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, primaries, backups))
+
+	// (b) Group accounting only sees primaries — the backup's distinct "backup-group" must not count.
+	require.Equal(t, 2, csm.GetNumberOfValidProviders(), "only primaries are valid providers")
+	require.Equal(t, 2, csm.NumberOfValidProviderGroups(), "backup-group must not inflate the group count")
+	assignments := csm.ProviderGroupAssignments()
+	require.NotContains(t, assignments, "backup-group", "backup group must not appear in assignments")
+	for group, addrs := range assignments {
+		for _, addr := range addrs {
+			require.NotEqual(t, "lava@backup0", addr, "backup must not appear under group %q", group)
+		}
+	}
+
+	// (a) Asking for more providers than exist must still never surface the backup; repeat to defeat
+	// any selection nondeterminism.
+	for i := 0; i < 20; i++ {
+		css, err := csm.GetSessions(ctx, 5, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+		require.NoError(t, err, "i #%d", i)
+		for provider := range css {
+			require.NotEqual(t, "lava@backup0", provider, "backup leaked into GetSessions on call #%d", i)
+		}
+	}
+}
+
 // TestOrderForGroupDiversity covers Phase 1.2a group-aware selection ordering: the front of the returned
 // list spans up to minGroups distinct groups (highest-QoS per group), then the rest fills by QoS, with no
 // duplicates and best-effort when too few groups exist (the diversity gate then fails).
