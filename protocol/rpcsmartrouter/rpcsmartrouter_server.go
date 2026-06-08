@@ -1018,6 +1018,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 
 	// If ALL sessions failed consistency validation, return error to trigger retry with different providers
 	if filterErr != nil {
+		// This is a request-time candidate-set failure (the whole batch was filtered out before any relay
+		// ran), so carry the structured reason on the shared processor for the failure-reason header — same
+		// as the other fail-fast sites. The error itself is left unchanged. If a later retry batch succeeds,
+		// HasResults() becomes true and SendParsedRelay takes the normal path, ignoring this field.
+		if relayProcessor.GetSelection() == relaycore.CrossValidation {
+			relayProcessor.SetCrossValidationFailFastReason(common.CrossValidationReasonInsufficientCapacity)
+		}
 		return filterErr
 	}
 
