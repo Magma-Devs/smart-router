@@ -35,10 +35,20 @@ type RelayProcessor struct {
 	relayRetriesManager          *lavaprotocol.RelayRetriesManager
 	ResultsManager
 	RelayStateMachine
-	quorumMap                       map[[32]byte]int
-	currentQuorumEqualResults       int
+	// quorumMap tracks, per identical response hash, how many providers returned it and which distinct
+	// cross-validation groups they span. Both must be updated together (in handleResponse) so the
+	// diversity-aware early-exit cannot drift; see quorumStat.
+	quorumMap                       map[[32]byte]*quorumStat
+	currentQuorumEqualResults       int      // max count across hashes — kept for logging only, not for decisions
 	statefulRelayTargets            []string // stores all providers that received a stateful relay
 	crossValidationQueriedProviders []string // stores all providers that were queried for cross-validation (even if response not received)
+}
+
+// quorumStat is the per-hash agreement tally for cross-validation: how many providers returned this exact
+// response, and the set of distinct group labels among them (empty label folded into "default").
+type quorumStat struct {
+	count  int
+	groups map[string]struct{}
 }
 
 func NewRelayProcessor(
@@ -89,7 +99,7 @@ func NewRelayProcessor(
 		RelayStateMachine:            relayStateMachine,
 		selection:                    selection,
 		usedProviders:                relayStateMachine.GetUsedProviders(),
-		quorumMap:                    make(map[[32]byte]int),
+		quorumMap:                    make(map[[32]byte]*quorumStat),
 		currentQuorumEqualResults:    0,
 	}
 	relayProcessor.RelayStateMachine.SetResultsChecker(relayProcessor)
@@ -115,6 +125,39 @@ func (rp *RelayProcessor) getMaxParticipants() int {
 		return rp.crossValidationParams.MaxParticipants
 	}
 	return 1
+}
+
+// getMinGroups returns the required number of distinct provider groups (1 = no diversity requirement).
+func (rp *RelayProcessor) getMinGroups() int {
+	if rp.crossValidationParams != nil && rp.crossValidationParams.MinGroups > 1 {
+		return rp.crossValidationParams.MinGroups
+	}
+	return 1
+}
+
+// crossValidationQuorumReached reports whether some response hash has been returned by at least
+// AgreementThreshold providers spanning at least MinGroups distinct groups. This is the single
+// diversity-aware early-exit predicate used by both checkEndProcessing and HasRequiredNodeResults so the
+// two cannot disagree. With MinGroups <= 1 it reduces exactly to "some hash reached the threshold"
+// (the pre-1.2 behavior). Assumes rp.lock is held.
+func (rp *RelayProcessor) crossValidationQuorumReached() bool {
+	threshold := rp.getAgreementThreshold()
+	minGroups := rp.getMinGroups()
+	for _, stat := range rp.quorumMap {
+		if stat.count >= threshold && len(stat.groups) >= minGroups {
+			return true
+		}
+	}
+	return false
+}
+
+// quorumGroupOf returns the group label used for diversity counting for a result, folding an empty label
+// into the implicit "default" group.
+func quorumGroupOf(result common.RelayResult) string {
+	if result.ProviderInfo.ProviderGroup == "" {
+		return "default"
+	}
+	return result.ProviderInfo.ProviderGroup
 }
 
 // true if we never got an extension. (default value)
@@ -215,11 +258,14 @@ func (rp *RelayProcessor) checkEndProcessing(responsesCount int) bool {
 	// Mode-specific early exit conditions
 	switch rp.selection {
 	case CrossValidation:
-		// Early exit if we've reached the agreement threshold
-		if rp.currentQuorumEqualResults >= rp.getAgreementThreshold() {
-			utils.LavaFormatDebug("[RelayProcessor] checkEndProcessing - CrossValidation threshold met",
+		// Early exit only once the agreement threshold is met AND spans the required number of distinct
+		// groups — exiting on count alone could stop before a later same-hash response from a new group
+		// arrives, then fail the diversity gate (the seam bug 1.2 must avoid).
+		if rp.crossValidationQuorumReached() {
+			utils.LavaFormatDebug("[RelayProcessor] checkEndProcessing - CrossValidation quorum (count+diversity) met",
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("agreementThreshold", rp.getAgreementThreshold()),
+				utils.LogAttr("minGroups", rp.getMinGroups()),
 				utils.LogAttr("currentEqualResults", rp.currentQuorumEqualResults))
 			return true
 		}
@@ -310,17 +356,18 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 
 	hash, hashErr := rp.getInputMsgInfoHashString()
 
-	// CrossValidation mode: check if agreementThreshold is met
+	// CrossValidation mode: check if agreementThreshold is met across the required number of groups
 	if rp.selection == CrossValidation {
-		if rp.currentQuorumEqualResults >= rp.getAgreementThreshold() {
+		if rp.crossValidationQuorumReached() {
 			if hashErr == nil {
 				go rp.relayRetriesManager.RemoveHashFromCache(hash)
 			}
 			if rp.debugRelay {
-				utils.LavaFormatDebug("HasRequiredNodeResults CrossValidation threshold met",
+				utils.LavaFormatDebug("HasRequiredNodeResults CrossValidation quorum (count+diversity) met",
 					utils.LogAttr("GUID", rp.guid),
 					utils.LogAttr("tries", tries),
 					utils.LogAttr("agreementThreshold", rp.getAgreementThreshold()),
+					utils.LogAttr("minGroups", rp.getMinGroups()),
 					utils.LogAttr("currentQuorumEqualResults", rp.currentQuorumEqualResults),
 					utils.LogAttr("resultsCount", resultsCount),
 				)
@@ -443,9 +490,15 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 		// in JSON key order land in the same quorum bucket (MAG-2062).
 		hash := canonicalResponseHash(response.RelayResult.GetReply().GetData())
 		response.RelayResult.ResponseHash = hash // Cache the hash for later reuse
-		rp.quorumMap[hash]++
-		if rp.quorumMap[hash] > rp.currentQuorumEqualResults {
-			rp.currentQuorumEqualResults = rp.quorumMap[hash]
+		stat := rp.quorumMap[hash]
+		if stat == nil {
+			stat = &quorumStat{groups: make(map[string]struct{})}
+			rp.quorumMap[hash] = stat
+		}
+		stat.count++
+		stat.groups[quorumGroupOf(response.RelayResult)] = struct{}{} // count++ and group recorded together
+		if stat.count > rp.currentQuorumEqualResults {
+			rp.currentQuorumEqualResults = stat.count
 		}
 	}
 
@@ -521,11 +574,13 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 	type resultCount struct {
 		count  int
 		result common.RelayResult
+		groups map[string]struct{} // distinct cross-validation groups among the providers with this hash
 	}
 
 	countMap := make(map[[32]byte]*resultCount)
 	nilReplies := 0
 	nilReplyIdx := -1
+	nilReplyGroups := make(map[string]struct{}) // distinct groups among nil/empty repliers (for the diversity gate)
 
 	// Helper function to check if response data is valid
 	isValidResponse := func(data []byte) bool {
@@ -546,6 +601,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 
 			if count, exists := countMap[hash]; exists {
 				count.count++
+				count.groups[quorumGroupOf(result)] = struct{}{}
 				utils.LavaFormatDebug("🔍 [Quorum] Response hash matches existing group",
 					utils.LogAttr("GUID", rp.guid),
 					utils.LogAttr("providerIdx", idx),
@@ -557,6 +613,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 				countMap[hash] = &resultCount{
 					count:  1,
 					result: result,
+					groups: map[string]struct{}{quorumGroupOf(result): {}},
 				}
 				utils.LavaFormatDebug("🔍 [Quorum] New unique response hash detected",
 					utils.LogAttr("GUID", rp.guid),
@@ -569,6 +626,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 		} else {
 			nilReplies++
 			nilReplyIdx = idx
+			nilReplyGroups[quorumGroupOf(result)] = struct{}{}
 			utils.LavaFormatDebug("🔍 [Quorum] Nil or invalid response detected",
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("providerIdx", idx),
@@ -580,6 +638,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 	var maxCount int
 	var mostCommonResult common.RelayResult
 	var consensusHash [32]byte
+	var consensusGroups map[string]struct{} // distinct groups behind the winning response (for the diversity gate)
 
 	// Log all response groups
 	utils.LavaFormatInfo("🔍 [Quorum] Response groups summary",
@@ -600,12 +659,14 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 			maxCount = count.count
 			mostCommonResult = count.result
 			consensusHash = hash
+			consensusGroups = count.groups
 		}
 	}
 
 	if nilReplies >= crossValidationSize && maxCount < crossValidationSize {
 		maxCount = nilReplies
 		mostCommonResult = results[nilReplyIdx]
+		consensusGroups = nilReplyGroups
 		utils.LavaFormatInfo("🔍 [Quorum] Nil replies reached quorum",
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("nilRepliesCount", nilReplies),
@@ -631,6 +692,19 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 			utils.LogAttr("totalResults", len(results)),
 			utils.LogAttr("maxCount", maxCount),
 			utils.LogAttr("crossValidationSize", crossValidationSize))
+	}
+
+	// Group-diversity gate (1.2c): the count threshold is met, but the agreeing providers must also span
+	// at least MinGroups distinct groups. A quorum reached within too few groups is treated as a failure,
+	// not a success (a single-group outage/compromise must not satisfy quorum on its own). MinGroups <= 1
+	// disables this gate, keeping the pre-1.2 path byte-identical.
+	if minGroups := rp.getMinGroups(); minGroups > 1 && len(consensusGroups) < minGroups {
+		return nil, utils.LavaFormatInfo("cross-validation failed: group-diversity requirement not met",
+			utils.LogAttr("GUID", rp.guid),
+			utils.LogAttr("agreementCount", maxCount),
+			utils.LogAttr("agreeingGroups", len(consensusGroups)),
+			utils.LogAttr("minGroups", minGroups),
+			utils.LogAttr("agreementThreshold", crossValidationSize))
 	}
 
 	mostCommonResult.CrossValidation = maxCount
