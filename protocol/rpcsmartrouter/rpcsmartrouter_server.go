@@ -413,13 +413,16 @@ func crossValidationFinality(requestedBlock, latestBlock, finalizationDistance i
 // Counting against the addon/extension-filtered candidate set — not all valid providers — avoids passing a
 // request that is actually satisfiable only by a narrower, under-grouped set. The MinGroups check is the
 // Phase 1.1 capacity guard; full group-aware quorum selection lands in Phase 1.2.
-func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.Context, selection relaycore.Selection, params *common.CrossValidationParams, addon string, extensions []string) error {
+// The returned string is the structured cross-validation failure reason (one of the
+// CrossValidationReasonInsufficient* request-time values), so the caller can surface it to the client via
+// the failure-reason header; it is "" when there is no error.
+func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.Context, selection relaycore.Selection, params *common.CrossValidationParams, addon string, extensions []string) (string, error) {
 	if selection != relaycore.CrossValidation || params == nil {
-		return nil
+		return "", nil
 	}
 	candidateProviders, candidateGroups := rpcss.sessionManager.ProviderAndGroupCountsForRequest(addon, extensions, ctx)
 	if params.MaxParticipants > candidateProviders {
-		return utils.LavaFormatError("requested cross-validation maxParticipants exceeds available candidate endpoints",
+		return common.CrossValidationReasonInsufficientCapacity, utils.LavaFormatError("requested cross-validation maxParticipants exceeds available candidate endpoints",
 			lavasession.PairingListEmptyError,
 			utils.LogAttr("maxParticipants", params.MaxParticipants),
 			utils.LogAttr("candidateEndpoints", candidateProviders),
@@ -428,7 +431,7 @@ func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.C
 			utils.LogAttr("GUID", ctx))
 	}
 	if params.MinGroups > candidateGroups {
-		return utils.LavaFormatError("cross-validation minGroups exceeds available distinct candidate provider groups",
+		return common.CrossValidationReasonInsufficientGroups, utils.LavaFormatError("cross-validation minGroups exceeds available distinct candidate provider groups",
 			lavasession.PairingListEmptyError,
 			utils.LogAttr("minGroups", params.MinGroups),
 			utils.LogAttr("candidateProviderGroups", candidateGroups),
@@ -436,7 +439,25 @@ func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.C
 			utils.LogAttr("extensions", extensions),
 			utils.LogAttr("GUID", ctx))
 	}
-	return nil
+	return "", nil
+}
+
+// crossValidationFailFastResult builds the minimal RelayResult returned on a request-time cross-validation
+// fail-fast: no relay completed, so there is no upstream reply, but the cross-validation status and the
+// structured failure reason are carried as response-header metadata. The interface listeners write this
+// metadata onto the HTTP error response (alongside the JSON-RPC error body), so the client can distinguish
+// a capacity/diversity failure from a generic upstream error without a parallel signalling mechanism.
+func crossValidationFailFastResult(reason string) *common.RelayResult {
+	return &common.RelayResult{
+		StatusCode:                   http.StatusInternalServerError,
+		CrossValidationFailureReason: reason,
+		Reply: &pairingtypes.RelayReply{
+			Metadata: []pairingtypes.Metadata{
+				{Name: common.CROSS_VALIDATION_STATUS_HEADER_NAME, Value: "failed"},
+				{Name: common.CROSS_VALIDATION_FAILURE_REASON_HEADER, Value: reason},
+			},
+		},
+	}
 }
 
 func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, retries int, initialRelays bool, protocolMessage chainlib.ProtocolMessage) (bool, error) {
@@ -455,7 +476,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	// Get cross-validation parameters from the state machine (nil for Stateless/Stateful)
 	crossValidationParams := stateMachine.GetCrossValidationParams()
 
-	if err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
+	// Initial/health relays are not client-facing, so the structured reason is unused here.
+	if _, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
 		return false, err
 	}
 
@@ -695,6 +717,16 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// we can't send anymore, and we don't have any responses
 		utils.LavaFormatError("failed getting responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()), utils.LogAttr("userIp", userData.ConsumerIp), utils.LogAttr("relayProcessor", relayProcessor))
 
+		// A request-time cross-validation fail-fast (capacity/diversity check that aborts before any relay
+		// completes) produces no RelayResult, so the structured failure-reason header would otherwise be
+		// dropped here. Synthesize a minimal result carrying it so the client can still distinguish a
+		// capacity/diversity failure from a generic upstream error (the "reuse header channel" contract).
+		if relayProcessor != nil {
+			if reason := relayProcessor.GetCrossValidationFailFastReason(); reason != "" {
+				return crossValidationFailFastResult(reason), err
+			}
+		}
+
 		return nil, err
 	}
 
@@ -779,13 +811,10 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	// Get cross-validation parameters from the state machine (nil for Stateless/Stateful)
 	crossValidationParams := stateMachine.GetCrossValidationParams()
 
-	if err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
-		tracing.RecordError(span, err)
-		return nil, err
-	}
-
 	// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
 	// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
+	// Created before the capacity check so a request-time fail-fast can carry its structured reason back on
+	// the shared processor (the check aborts before any RelayResult exists).
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx,
 		crossValidationParams,
@@ -795,6 +824,16 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		rpcss.relayRetriesManager,
 		stateMachine,
 	)
+
+	if reason, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
+		if reason != "" {
+			relayProcessor.SetCrossValidationFailFastReason(reason)
+		}
+		tracing.RecordError(span, err)
+		// Return the processor (not nil) so SendParsedRelay can read the fail-fast reason and surface the
+		// failure-reason header to the client.
+		return relayProcessor, err
+	}
 
 	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 	if err != nil {
@@ -1004,6 +1043,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				sessionInfo.Session.Free(nil)
 			}
 		}
+		// Carry the structured reason on the shared processor so SendParsedRelay can surface the
+		// failure-reason header; the error itself is left unchanged so the state machine's
+		// PairingListEmptyError stop logic is unaffected.
+		relayProcessor.SetCrossValidationFailFastReason(common.CrossValidationReasonInsufficientCapacity)
 		return utils.LavaFormatError("insufficient sessions for cross-validation consensus after consistency filter",
 			lavasession.PairingListEmptyError,
 			utils.LogAttr("agreementThreshold", crossValidationParams.AgreementThreshold),
@@ -1036,7 +1079,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					sessionInfo.Session.Free(nil)
 				}
 			}
-			return utils.LavaFormatError("insufficient provider groups for cross-validation after consistency filter ("+common.CrossValidationReasonDiversityUnmet+")",
+			relayProcessor.SetCrossValidationFailFastReason(common.CrossValidationReasonInsufficientGroups)
+			return utils.LavaFormatError("insufficient provider groups for cross-validation after consistency filter ("+common.CrossValidationReasonInsufficientGroups+")",
 				lavasession.PairingListEmptyError,
 				utils.LogAttr("minGroups", crossValidationParams.MinGroups),
 				utils.LogAttr("groupsAfterFilter", len(survivingGroups)),
@@ -2041,6 +2085,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		// Verify we have enough sessions to meet the agreement threshold
 		// If not, fail early with a clear error rather than proceeding knowing consensus is impossible
 		if crossValidationParams != nil && len(sessions) < crossValidationParams.AgreementThreshold {
+			relayProcessor.SetCrossValidationFailFastReason(common.CrossValidationReasonInsufficientCapacity)
 			return utils.LavaFormatError("insufficient sessions for cross-validation consensus",
 				lavasession.PairingListEmptyError,
 				utils.LogAttr("agreementThreshold", crossValidationParams.AgreementThreshold),

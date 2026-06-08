@@ -56,11 +56,21 @@ const (
 )
 
 // Cross-validation failure reasons, surfaced via CROSS_VALIDATION_FAILURE_REASON_HEADER so clients and
-// metrics can distinguish why a quorum was not reached.
+// metrics can distinguish why cross-validation failed — both quorum-time (a quorum was not reached) and
+// request-time (the candidate set could not even be assembled).
 const (
+	// Quorum-time reasons: responses came back but did not form an acceptable quorum. A retry against a
+	// different provider set may succeed.
 	CrossValidationReasonInsufficientResponses = "insufficient-responses" // fewer successful responses than the agreement threshold
 	CrossValidationReasonNoAgreement           = "no-agreement"           // enough responses, but none agreed up to the threshold
 	CrossValidationReasonDiversityUnmet        = "diversity-unmet"        // a quorum agreed, but did not span the required number of groups
+
+	// Request-time (structural) reasons: the request was aborted before any relay completed because the
+	// candidate provider set cannot satisfy the policy. Unlike the quorum-time reasons, a retry against
+	// the same router will NOT help — the fleet structurally lacks the providers/groups — so the client
+	// should fall back rather than retry.
+	CrossValidationReasonInsufficientCapacity = "insufficient-capacity" // too few candidate providers/sessions for max-participants or the threshold
+	CrossValidationReasonInsufficientGroups   = "insufficient-groups"   // too few distinct candidate groups for min-groups
 )
 
 var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
