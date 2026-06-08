@@ -52,6 +52,154 @@ backup-providers:
       - url: https://eth-mainnet.g.alchemy.com/v2/BACKUP_KEY
 ```
 
+## Cross-Validation
+
+Cross-validation fans a single request out to **N providers in parallel**, hashes each
+successful response (`SHA256(reply.data)`), and only returns an answer once a **quorum** of
+providers agree on the same hash. It defends against a single compromised or buggy provider
+returning a wrong-but-well-formed answer. It is **read-only**: it never runs on stateful
+(write) methods — such policies are rejected at startup.
+
+Cross-validation can be turned on two ways, which compose via `clamp(caller, floor, cap)`:
+
+- **Per-request headers** (the caller opts in per call):
+  - `lava-cross-validation-max-participants: N` — fan out to N providers.
+  - `lava-cross-validation-agreement-threshold: M` — require M identical responses.
+- **Per-method operator policy** (config-driven, below). An operator policy can *mandate*
+  cross-validation even with no caller headers (`enabled: true`), set a **floor** the caller
+  may exceed, and a **cap** that overrides a stricter caller.
+
+### Provider group labels
+
+Tag each provider with an optional `group-label` (vendor/operator/region). Providers with no
+label fold into the implicit `"default"` group. Group labels are what the **diversity** and
+**per-group quorum** policies below reason about — a quorum drawn entirely from one vendor is
+not the independent confirmation cross-validation is meant to give.
+
+```yaml
+direct-rpc:
+  - name: drpc-eth
+    chain-id: ETH1
+    api-interface: jsonrpc
+    group-label: "drpc"          # <-- this provider's cross-validation group
+    node-urls:
+      - url: https://eth.drpc.org
+  - name: publicnode-eth
+    chain-id: ETH1
+    api-interface: jsonrpc
+    group-label: "publicnode"
+    node-urls:
+      - url: https://ethereum-rpc.publicnode.com
+```
+
+### Per-method policies
+
+An optional top-level `cross-validation:` block sets policy per `(chain-id, api-interface,
+method)`. Omitting it entirely keeps the header-driven behavior above, fully backwards
+compatible. `chain-id`/`api-interface` match case-insensitively; `method` matches exactly.
+Each numeric knob is either a bare number `N` (meaning `{floor: N}`) or an object
+`{floor: F, cap: C}`.
+
+```yaml
+cross-validation:
+  policies:
+    - chain-id: ETH1
+      api-interface: jsonrpc
+      method: eth_getBalance
+      enabled: true                 # mandate CV here even without caller headers
+      agreement-threshold: 2        # at least 2 identical responses
+      max-participants: 3           # fan out to 3 providers
+      min-groups: 2                 # the agreeing responses must span >= 2 distinct groups
+
+    - chain-id: ETH1
+      api-interface: jsonrpc
+      method: eth_call
+      enabled: true
+      agreement-threshold: 2        # quorum size WITHIN each group
+      min-groups: 2                 # number of groups that must each reach their own quorum
+      max-participants: 4           # must be >= min-groups * agreement-threshold
+      per-group-quorum: true        # see "Per-group quorum" below
+```
+
+| Knob | Meaning |
+| --- | --- |
+| `enabled` | `true` mandates CV for this method even with no caller headers. |
+| `max-participants` | How many providers to fan out to. |
+| `agreement-threshold` | How many identical responses form a quorum (in per-group mode, *within each group*). |
+| `min-groups` | Distinct provider groups the quorum must span (`1` = no diversity requirement). |
+| `per-group-quorum` | Upgrade `min-groups` to per-group quorum (operator-only; requires `min-groups > 1`). |
+
+**Group diversity (`min-groups`)** requires the single agreeing quorum to be returned by
+providers from at least `min-groups` distinct groups. **Per-group quorum** (`per-group-quorum:
+true`) is stronger: each of `min-groups` groups must *independently* reach `agreement-threshold`
+matching responses, and the per-group winners must agree. This is the trusted-reference +
+corroborator model — one group is the reference, others must independently corroborate it.
+It requires `max-participants >= min-groups * agreement-threshold` (rejected at config-load
+otherwise), and the router front-loads `agreement-threshold` providers per group during
+selection so a QoS-dominant group cannot starve the others.
+
+A policy that cannot be satisfied by the configured fleet (too few groups, or too few providers
+per group for per-group quorum) is **rejected at startup**, and the resolved
+provider→group layout is logged.
+
+### Response headers
+
+Every cross-validated response carries headers so a client can see what happened without debug
+mode:
+
+| Header | Value |
+| --- | --- |
+| `lava-cross-validation-status` | `success` or `failed`. |
+| `lava-cross-validation-all-providers` | All providers queried (comma-separated). |
+| `lava-cross-validation-agreeing-providers` | Providers whose response matched the consensus. |
+| `lava-cross-validation-disagreeing-providers` | Providers that dissented (node/protocol errors and hash-divergent responses; on a quorum failure, every successful provider, since there is no consensus to agree with). |
+| `lava-cross-validation-failure-reason` | On failure only — a stable enum (below). |
+
+The router does **not** automatically retry with a different provider set on a quorum failure;
+the structured signal lets the client decide its next action. Note: on the gRPC interface,
+response metadata is currently not surfaced on the error path, so these headers reach clients
+on the JSON-RPC, REST, and Tendermint interfaces.
+
+### Failure reasons
+
+`lava-cross-validation-failure-reason` is one of a small closed enum. **Quorum-time** reasons
+mean responses came back but didn't agree — a retry against a different set *may* help:
+
+- `no-agreement` — enough responses, but none agreed up to the threshold.
+- `insufficient-responses` — fewer successful responses than the threshold.
+- `diversity-unmet` — a quorum agreed but did not span `min-groups` groups.
+- `group-quorum-unmet` — (per-group mode) too few groups reached their own internal quorum, or the per-group winners disagreed.
+
+**Request-time (structural)** reasons mean the candidate set could not even be assembled — a
+retry against the same router will *not* help (the fleet structurally lacks the
+providers/groups), so the client should fall back:
+
+- `insufficient-capacity` — too few candidate providers/sessions for `max-participants` or the threshold.
+- `insufficient-groups` — too few candidate groups (or, for per-group, too few groups with enough providers) for `min-groups`.
+
+### Outlier behavior
+
+There is **no separate "outlier detection" step** for responses — an outlier is simply *a
+successful response whose `SHA256(reply.data)` differs from the reached consensus hash*. The
+quorum computation buckets every response by hash and the largest qualifying bucket wins; an
+outlier forms its own bucket-of-one and **loses the vote**. Net effect: the outlier never
+becomes the returned answer and cannot pull the majority below threshold, but it is **not
+removed by a detect-then-filter pass** — it is minority-loses, not a pre-filter.
+
+An outlier provider is **not penalized, blocked, or deprioritized** by cross-validation (QoS
+scoring is separate). It is recorded for observability only:
+
+- `lava_rpcsmartrouter_cross_validation_mismatch_total{spec, apiInterface, method, group, finality}`
+  is incremented for each successful content outlier — *only* after a quorum was reached, and
+  *only* on deterministic methods (non-deterministic methods legitimately differ, and quorum
+  failures emit a failure-reason instead, not a per-provider outlier). The `finality` label
+  (`finalized` / `not_finalized` / `unknown`) lets alerting prioritize post-finality divergence
+  over benign pre-finality propagation lag.
+- The dissenting provider also appears in the `lava-cross-validation-disagreeing-providers`
+  header.
+
+A single divergent provider therefore does **not** block a quorum — it is observed and outvoted.
+
 ## Usage
 
 ```bash
