@@ -352,6 +352,30 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 	return nil
 }
 
+// crossValidationFinalityLabel returns the tri-state finality label (finalized / not_finalized / unknown)
+// for the request, used by the mismatch metric so alerts can prioritise post-finality divergence over
+// natural pre-finality propagation lag. "unknown" covers sentinel requested blocks (latest/pending/
+// not-applicable) and the case where the latest block is not yet known.
+func (rpcss *RPCSmartRouterServer) crossValidationFinalityLabel(protocolMessage chainlib.ProtocolMessage) string {
+	requestedBlock, _ := protocolMessage.RequestedBlock()
+	latestBlock := int64(rpcss.latestBlockHeight.Load())
+	_, _, blockDistanceForFinalizedData, _ := rpcss.chainParser.ChainBlockStats()
+	return crossValidationFinality(requestedBlock, latestBlock, int64(blockDistanceForFinalizedData))
+}
+
+// crossValidationFinality is the pure tri-state finality classifier (finalized / not_finalized / unknown).
+// "unknown" covers a sentinel requested block (latest/pending/not-applicable, all < 0) and an unknown
+// latest block (<= 0).
+func crossValidationFinality(requestedBlock, latestBlock, finalizationDistance int64) string {
+	if requestedBlock < 0 || latestBlock <= 0 {
+		return "unknown"
+	}
+	if spectypes.IsFinalizedBlock(requestedBlock, latestBlock, finalizationDistance) {
+		return "finalized"
+	}
+	return "not_finalized"
+}
+
 // validateCrossValidationCapacity returns an error when CrossValidation mode is active but the request's
 // concrete candidate set (providers that support the request's addon + extensions) cannot satisfy the
 // requested shape: either MaxParticipants exceeds the number of candidate endpoints, or MinGroups exceeds
@@ -2351,17 +2375,26 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		cvSuccess := relayResult != nil && cvParams != nil && relayResult.CrossValidation >= cvParams.AgreementThreshold
 		cvStatus := "failed"
 		var agreeingProvidersList, disagreeingProvidersList []string
+		disagreeingGroups := map[string]struct{}{} // distinct groups behind dissenting/conflicting responses
+
+		addDisagree := func(pi common.ProviderInfo) {
+			if pi.ProviderAddress == "" {
+				return
+			}
+			disagreeingProvidersList = append(disagreeingProvidersList, pi.ProviderAddress)
+			group := pi.ProviderGroup
+			if group == "" {
+				group = "default"
+			}
+			disagreeingGroups[group] = struct{}{}
+		}
 
 		// Error providers always disagree regardless of consensus outcome
 		for _, result := range nodeErrorResults {
-			if result.ProviderInfo.ProviderAddress != "" {
-				disagreeingProvidersList = append(disagreeingProvidersList, result.ProviderInfo.ProviderAddress)
-			}
+			addDisagree(result.ProviderInfo)
 		}
 		for _, result := range protocolErrorResults {
-			if result.ProviderInfo.ProviderAddress != "" {
-				disagreeingProvidersList = append(disagreeingProvidersList, result.ProviderInfo.ProviderAddress)
-			}
+			addDisagree(result.ProviderInfo)
 		}
 
 		if cvSuccess {
@@ -2374,15 +2407,13 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				if result.ResponseHash == winningHash {
 					agreeingProvidersList = append(agreeingProvidersList, result.ProviderInfo.ProviderAddress)
 				} else {
-					disagreeingProvidersList = append(disagreeingProvidersList, result.ProviderInfo.ProviderAddress)
+					addDisagree(result.ProviderInfo)
 				}
 			}
 		} else {
 			// No consensus — every successful provider is also in conflict
 			for _, result := range successResults {
-				if result.ProviderInfo.ProviderAddress != "" {
-					disagreeingProvidersList = append(disagreeingProvidersList, result.ProviderInfo.ProviderAddress)
-				}
+				addDisagree(result.ProviderInfo)
 			}
 		}
 
@@ -2397,6 +2428,18 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				chainId, apiInterface, apiName, cvSuccess,
 				agreeingProvidersList, disagreeingProvidersList,
 			)
+		}
+
+		// Mismatch alerting surface (1.3): on a content mismatch (dissent, or failure to agree), record one
+		// bounded group+finality-labeled metric per dissenting group — ONLY for deterministic methods, since
+		// non-deterministic methods legitimately return different responses and would only add noise.
+		if rpcss.smartRouterEndpointMetrics != nil && rpcss.listenEndpoint != nil && len(disagreeingGroups) > 0 &&
+			protocolMessage.GetApi() != nil && protocolMessage.GetApi().Category.Deterministic {
+			chainId, apiInterface := rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+			finality := rpcss.crossValidationFinalityLabel(protocolMessage)
+			for group := range disagreeingGroups {
+				rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
+			}
 		}
 
 		// Add cross-validation headers (always, even on failure)

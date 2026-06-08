@@ -81,6 +81,7 @@ type SmartRouterMetricsManager struct {
 	crossValidationFailedTotalMetric                *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_failed_total          {spec, apiInterface, method}
 	crossValidationProviderAgreementsTotalMetric    *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_provider_agreements_total    {spec, apiInterface, method, provider_address}
 	crossValidationProviderDisagreementsTotalMetric *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_provider_disagreements_total {spec, apiInterface, method, provider_address}
+	crossValidationMismatchTotalMetric              *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_mismatch_total {spec, apiInterface, method, group, finality} — bounded alerting surface
 
 	// Incident group metrics
 	incidentNodeErrorsTotalMetric     *prometheus.CounterVec   // lava_rpcsmartrouter_node_errors_total         {spec, apiInterface, provider_address, method}
@@ -146,8 +147,8 @@ type EndpointMetrics struct {
 // NetworkAddress selects the behaviour:
 //   - "disabled"      → no manager is created (returns nil)
 //   - "" (empty)      → manager is created and collectors are registered, but no
-//                       HTTP server is started (register-only; used by tests and
-//                       embedded callers)
+//     HTTP server is started (register-only; used by tests and
+//     embedded callers)
 //   - "host:port"     → manager is created and the metrics HTTP server listens there
 type SmartRouterMetricsManagerOptions struct {
 	NetworkAddress     string
@@ -340,6 +341,13 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "lava_rpcsmartrouter_cross_validation_provider_disagreements_total",
 		Help: "Total number of times a provider's response disagreed with the cross-validation consensus.",
 	}, crossValidationProviderLabels)
+	// Bounded alerting surface: keyed by group (operator-defined, low cardinality) and finality
+	// (finalized/not_finalized/unknown) instead of provider address. Post-finality divergence is the
+	// high-signal alert. Only emitted for deterministic methods (see SetCrossValidationMismatchMetric).
+	crossValidationMismatchTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "lava_rpcsmartrouter_cross_validation_mismatch_total",
+		Help: "Total cross-validation mismatches (quorum failure or dissent) by provider group and finality.",
+	}, []string{"spec", "apiInterface", "method", "group", "finality"})
 
 	// =========================================================================
 	// Incident group metrics
@@ -500,6 +508,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	crossValidationFailedTotalMetric = registerOrReuse(crossValidationFailedTotalMetric)
 	crossValidationProviderAgreementsTotalMetric = registerOrReuse(crossValidationProviderAgreementsTotalMetric)
 	crossValidationProviderDisagreementsTotalMetric = registerOrReuse(crossValidationProviderDisagreementsTotalMetric)
+	crossValidationMismatchTotalMetric = registerOrReuse(crossValidationMismatchTotalMetric)
 	incidentNodeErrorsTotalMetric = registerOrReuse(incidentNodeErrorsTotalMetric)
 	incidentProtocolErrorsTotalMetric = registerOrReuse(incidentProtocolErrorsTotalMetric)
 	incidentRetriesTotalMetric = registerOrReuse(incidentRetriesTotalMetric)
@@ -570,6 +579,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		crossValidationFailedTotalMetric:                crossValidationFailedTotalMetric,
 		crossValidationProviderAgreementsTotalMetric:    crossValidationProviderAgreementsTotalMetric,
 		crossValidationProviderDisagreementsTotalMetric: crossValidationProviderDisagreementsTotalMetric,
+		crossValidationMismatchTotalMetric:              crossValidationMismatchTotalMetric,
 
 		// Incident group
 		incidentNodeErrorsTotalMetric:     incidentNodeErrorsTotalMetric,
@@ -1120,6 +1130,21 @@ func (m *SmartRouterMetricsManager) SetCrossValidationMetric(chainId, apiInterfa
 	for _, provider := range disagreeingProviders {
 		m.crossValidationProviderDisagreementsTotalMetric.WithLabelValues(chainId, apiInterface, method, provider).Inc()
 	}
+}
+
+// SetCrossValidationMismatchMetric records one cross-validation mismatch (a quorum failure, or a quorum
+// reached with dissent) for a dissenting provider group, labeled by finality
+// (finalized/not_finalized/unknown). This is the bounded alerting surface: group is operator-defined and
+// finality is tri-valued, so it stays low-cardinality. Callers must only invoke it for deterministic
+// methods — non-deterministic methods legitimately return different responses and would be noise.
+func (m *SmartRouterMetricsManager) SetCrossValidationMismatchMetric(chainId, apiInterface, method, group, finality string) {
+	if m == nil {
+		return
+	}
+	if group == "" {
+		group = "default"
+	}
+	m.crossValidationMismatchTotalMetric.WithLabelValues(chainId, apiInterface, method, group, finality).Inc()
 }
 
 func (m *SmartRouterMetricsManager) UpdateHealthCheckStatus(status bool) {

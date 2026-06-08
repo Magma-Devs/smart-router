@@ -20,8 +20,26 @@ func newSmartRouterForCVTest() *SmartRouterMetricsManager {
 		crossValidationFailedTotalMetric:                prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_failed"}, cvLabels),
 		crossValidationProviderAgreementsTotalMetric:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_agreements"}, cvProviderLabels),
 		crossValidationProviderDisagreementsTotalMetric: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_disagreements"}, cvProviderLabels),
+		crossValidationMismatchTotalMetric:              prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_mismatch"}, []string{"spec", "apiInterface", "method", "group", "finality"}),
 		urlToProviderNames:                              make(map[string][]string),
 	}
+}
+
+// TestSetCrossValidationMismatchMetric covers the bounded group+finality mismatch counter (1.3): the
+// right series increments, repeated calls accumulate, and an empty group folds into "default".
+func TestSetCrossValidationMismatchMetric(t *testing.T) {
+	m := newSmartRouterForCVTest()
+	m.SetCrossValidationMismatchMetric("ETH1", "jsonrpc", "eth_getBalance", "tier-1", "finalized")
+	m.SetCrossValidationMismatchMetric("ETH1", "jsonrpc", "eth_getBalance", "tier-1", "finalized")
+	m.SetCrossValidationMismatchMetric("ETH1", "jsonrpc", "eth_getBalance", "external", "not_finalized")
+	m.SetCrossValidationMismatchMetric("ETH1", "jsonrpc", "eth_getBalance", "", "unknown") // empty -> "default"
+
+	require.Equal(t, float64(2), testutil.ToFloat64(m.crossValidationMismatchTotalMetric.WithLabelValues("ETH1", "jsonrpc", "eth_getBalance", "tier-1", "finalized")))
+	require.Equal(t, float64(1), testutil.ToFloat64(m.crossValidationMismatchTotalMetric.WithLabelValues("ETH1", "jsonrpc", "eth_getBalance", "external", "not_finalized")))
+	require.Equal(t, float64(1), testutil.ToFloat64(m.crossValidationMismatchTotalMetric.WithLabelValues("ETH1", "jsonrpc", "eth_getBalance", "default", "unknown")))
+
+	var nilM *SmartRouterMetricsManager
+	require.NotPanics(t, func() { nilM.SetCrossValidationMismatchMetric("a", "b", "c", "d", "e") })
 }
 
 // cvRunner is a thin adapter that lets the shared test case table drive the
