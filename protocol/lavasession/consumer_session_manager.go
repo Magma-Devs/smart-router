@@ -115,6 +115,20 @@ func (csm *ConsumerSessionManager) countDistinctGroups(addresses []string) int {
 	return len(groups)
 }
 
+// countByGroup returns the per-group provider count for the given addresses (empty label folded into
+// "default"). Assumes csm.lock is held.
+func (csm *ConsumerSessionManager) countByGroup(addresses []string) map[string]int {
+	counts := make(map[string]int, len(addresses))
+	for _, addr := range addresses {
+		label := "default"
+		if cswp, ok := csm.pairing[addr]; ok && cswp.GroupLabel != "" {
+			label = cswp.GroupLabel
+		}
+		counts[label]++
+	}
+	return counts
+}
+
 // NumberOfValidProviderGroups returns the count of distinct cross-validation group labels across ALL
 // currently valid providers (ignoring addon/extension filtering). Used by the startup capacity check as
 // the upper bound on how many distinct groups a request could ever draw from.
@@ -154,6 +168,16 @@ func (csm *ConsumerSessionManager) ProviderAndGroupCountsForRequest(addon string
 	defer csm.lock.RUnlock()
 	addresses := csm.CalculateAddonValidAddresses(addon, extensions, ctx)
 	return len(addresses), csm.countDistinctGroups(addresses)
+}
+
+// GroupCountsForRequest returns the per-group provider count among the candidate set that supports the
+// request's addon + extensions (group label -> count, empty label folded into "default"). Used by the
+// per-group-quorum capacity check, which needs to know not just how many distinct groups exist but how many
+// of them have enough providers to each reach the agreement threshold.
+func (csm *ConsumerSessionManager) GroupCountsForRequest(addon string, extensions []string, ctx context.Context) map[string]int {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	return csm.countByGroup(csm.CalculateAddonValidAddresses(addon, extensions, ctx))
 }
 
 // IsStaticProvider returns true when the given provider address belongs to a

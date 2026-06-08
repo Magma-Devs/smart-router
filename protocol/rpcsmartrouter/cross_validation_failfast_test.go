@@ -81,6 +81,76 @@ func TestValidateCrossValidationCapacity_Reasons(t *testing.T) {
 	})
 }
 
+// TestValidateCrossValidationCapacity_PerGroup covers the 2.3 runtime per-group capacity guards in
+// validateCrossValidationCapacity: the self-consistency check (max >= minGroups*threshold, catching
+// caller-induced impossible effective params) and the adequately-staffed-group check (>= minGroups
+// candidate groups each with >= threshold providers after addon/extension filtering).
+func TestValidateCrossValidationCapacity_PerGroup(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("caller-induced impossible: minGroups 2 * threshold 3 > maxParticipants 4 -> insufficient-capacity", func(t *testing.T) {
+		// Fleet has 4 providers across 2 groups, so the provider/group checks pass and the self-consistency
+		// check is what fires. This is the case config-time Validate cannot catch (the caller raised the threshold).
+		srv := newCapacityTestServer(t, map[string]string{"lava@a0": "A", "lava@a1": "A", "lava@b0": "B", "lava@b1": "B"})
+		params := &common.CrossValidationParams{AgreementThreshold: 3, MaxParticipants: 4, MinGroups: 2, PerGroupQuorum: true}
+		reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
+		require.Error(t, err)
+		require.Equal(t, common.CrossValidationReasonInsufficientCapacity, reason)
+	})
+
+	t.Run("two groups but only one has >= threshold providers -> insufficient-groups", func(t *testing.T) {
+		// A=2, B=1, C=1: 4 candidates across 3 groups (passes provider/group/self-consistency checks for
+		// minGroups 2, threshold 2, max 4), but only group A can reach an internal quorum of 2.
+		srv := newCapacityTestServer(t, map[string]string{"lava@a0": "A", "lava@a1": "A", "lava@b0": "B", "lava@c0": "C"})
+		params := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 4, MinGroups: 2, PerGroupQuorum: true}
+		reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
+		require.Error(t, err)
+		require.Equal(t, common.CrossValidationReasonInsufficientGroups, reason)
+	})
+
+	t.Run("two adequately-staffed groups -> ok", func(t *testing.T) {
+		srv := newCapacityTestServer(t, map[string]string{"lava@a0": "A", "lava@a1": "A", "lava@b0": "B", "lava@b1": "B"})
+		params := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 4, MinGroups: 2, PerGroupQuorum: true}
+		reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
+		require.NoError(t, err)
+		require.Empty(t, reason)
+	})
+}
+
+// TestCrossValidationGroupShortfall covers the pure decision used by the post-consistency-filter guard:
+// given per-group survivor counts, can the request still satisfy its group requirement. Per-group mode
+// requires MinGroups groups that EACH still have >= threshold survivors; MinGroups mode requires only that
+// many distinct groups.
+func TestCrossValidationGroupShortfall(t *testing.T) {
+	t.Run("per-group: a surviving group dropped below threshold -> insufficient-groups", func(t *testing.T) {
+		params := &common.CrossValidationParams{AgreementThreshold: 2, MinGroups: 2, PerGroupQuorum: true}
+		qualifying, reason := crossValidationGroupShortfall(map[string]int{"A": 2, "B": 1}, params)
+		require.Equal(t, common.CrossValidationReasonInsufficientGroups, reason)
+		require.Equal(t, 1, qualifying)
+	})
+	t.Run("per-group: both groups still adequate -> ok", func(t *testing.T) {
+		params := &common.CrossValidationParams{AgreementThreshold: 2, MinGroups: 2, PerGroupQuorum: true}
+		qualifying, reason := crossValidationGroupShortfall(map[string]int{"A": 2, "B": 2}, params)
+		require.Empty(t, reason)
+		require.Equal(t, 2, qualifying)
+	})
+	t.Run("min-groups diversity: distinct groups suffice regardless of per-group count", func(t *testing.T) {
+		params := &common.CrossValidationParams{AgreementThreshold: 2, MinGroups: 2}
+		_, reason := crossValidationGroupShortfall(map[string]int{"A": 1, "B": 1}, params)
+		require.Empty(t, reason, "MinGroups mode only needs distinct groups, not threshold per group")
+	})
+	t.Run("min-groups diversity: too few distinct groups -> insufficient-groups", func(t *testing.T) {
+		params := &common.CrossValidationParams{AgreementThreshold: 2, MinGroups: 2}
+		_, reason := crossValidationGroupShortfall(map[string]int{"A": 5}, params)
+		require.Equal(t, common.CrossValidationReasonInsufficientGroups, reason)
+	})
+	t.Run("min-groups <= 1 is never a shortfall", func(t *testing.T) {
+		params := &common.CrossValidationParams{AgreementThreshold: 2, MinGroups: 1, PerGroupQuorum: true}
+		_, reason := crossValidationGroupShortfall(map[string]int{"A": 1}, params)
+		require.Empty(t, reason)
+	})
+}
+
 // TestCrossValidationFailFastResult verifies the minimal result returned on a request-time fail-fast
 // carries the cross-validation status and the structured reason as response-header metadata — this is the
 // payload the interface listeners write onto the HTTP error response so the client can distinguish a
