@@ -124,6 +124,27 @@ func (csm *ConsumerSessionManager) NumberOfValidProviderGroups() int {
 	return csm.countDistinctGroups(csm.validAddresses)
 }
 
+// ProviderGroupAssignments returns a snapshot of how the currently valid providers map onto
+// cross-validation group labels (label -> sorted provider addresses), folding an empty label into
+// "default". It is meant for one-shot startup/diagnostic logging so operators can see the diversity
+// their config actually yields; it is not on any hot path.
+func (csm *ConsumerSessionManager) ProviderGroupAssignments() map[string][]string {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	assignments := make(map[string][]string)
+	for _, addr := range csm.validAddresses {
+		label := "default"
+		if cswp, ok := csm.pairing[addr]; ok && cswp.GroupLabel != "" {
+			label = cswp.GroupLabel
+		}
+		assignments[label] = append(assignments[label], addr)
+	}
+	for label := range assignments {
+		sort.Strings(assignments[label])
+	}
+	return assignments
+}
+
 // ProviderAndGroupCountsForRequest returns the number of providers and the number of distinct group
 // labels among the providers that actually support the request's addon + extensions — i.e. the concrete
 // candidate set, not all valid providers. Used by the per-request cross-validation capacity check so a

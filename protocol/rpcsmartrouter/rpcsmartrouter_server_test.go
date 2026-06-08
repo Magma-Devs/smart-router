@@ -149,8 +149,8 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		// Call the function
 		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, true)
 
-		// Verify the result - should have status, all-providers, agreeing-providers, and user request type headers
-		require.Len(t, relayResult.Reply.Metadata, 4)
+		// Verify the result - should have status, all-providers, agreeing-providers, disagreeing-providers, and user request type headers
+		require.Len(t, relayResult.Reply.Metadata, 5)
 
 		// Find and verify headers
 		var statusHeader, allProvidersHeader, agreeingProvidersHeader *pairingtypes.Metadata
@@ -212,11 +212,11 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		// Call the function
 		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, true)
 
-		// Verify the result - should have 4 headers: status, all-providers, agreeing-providers, user-request-type
-		require.Len(t, relayResult.Reply.Metadata, 4)
+		// Verify the result - should have 5 headers: status, all-providers, agreeing-providers, disagreeing-providers, user-request-type
+		require.Len(t, relayResult.Reply.Metadata, 5)
 
 		// Find all CV headers
-		var statusHeader, allProvidersHeader, agreeingProvidersHeader *pairingtypes.Metadata
+		var statusHeader, allProvidersHeader, agreeingProvidersHeader, disagreeingProvidersHeader *pairingtypes.Metadata
 		for i := range relayResult.Reply.Metadata {
 			meta := &relayResult.Reply.Metadata[i]
 			switch meta.Name {
@@ -226,12 +226,20 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 				allProvidersHeader = meta
 			case common.CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER:
 				agreeingProvidersHeader = meta
+			case common.CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER:
+				disagreeingProvidersHeader = meta
 			}
 		}
 
 		// Verify status header
 		require.NotNil(t, statusHeader)
 		require.Equal(t, "success", statusHeader.Value)
+
+		// Verify disagreeing providers header: provider3 is a node error, so it dissents even on success
+		require.NotNil(t, disagreeingProvidersHeader)
+		require.Equal(t, "lava@provider3", disagreeingProvidersHeader.Value)
+		require.NotContains(t, disagreeingProvidersHeader.Value, "lava@provider1")
+		require.NotContains(t, disagreeingProvidersHeader.Value, "lava@provider2")
 
 		// Verify all providers header (includes all 3)
 		require.NotNil(t, allProvidersHeader)
@@ -275,8 +283,8 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		// Call the function
 		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, true)
 
-		// Verify the result - should have 4 headers (status, all-providers, agreeing-providers, user-request-type)
-		require.Len(t, relayResult.Reply.Metadata, 4)
+		// Verify the result - should have 5 headers (status, all-providers, agreeing-providers, disagreeing-providers, user-request-type)
+		require.Len(t, relayResult.Reply.Metadata, 5)
 
 		// Find and verify headers
 		var statusHeader, allProvidersHeader, agreeingProvidersHeader *pairingtypes.Metadata

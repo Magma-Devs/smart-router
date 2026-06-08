@@ -131,10 +131,20 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		if cvStartupErr := validateCrossValidationStartup(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, sessionManager.NumberOfValidProviderGroups()); cvStartupErr != nil {
 			return cvStartupErr
 		}
+		// Log the resolved provider->group layout once at startup so operators can confirm the diversity
+		// their config yields (a min-groups policy is only as good as the group spread of the fleet).
+		groupAssignments := sessionManager.ProviderGroupAssignments()
+		groupSizes := make(map[string]int, len(groupAssignments))
+		for label, addrs := range groupAssignments {
+			groupSizes[label] = len(addrs)
+		}
 		utils.LavaFormatInfo("cross-validation per-method policies loaded",
 			utils.LogAttr("policies", cvResolver.NumPolicies()),
 			utils.LogAttr("chainID", listenEndpoint.ChainID),
-			utils.LogAttr("apiInterface", listenEndpoint.ApiInterface))
+			utils.LogAttr("apiInterface", listenEndpoint.ApiInterface),
+			utils.LogAttr("distinctGroups", len(groupAssignments)),
+			utils.LogAttr("groupSizes", groupSizes),
+			utils.LogAttr("groupAssignments", groupAssignments))
 	}
 
 	// Initialize consistency validation config from chain spec values
@@ -2495,6 +2505,13 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		metadataReply = append(metadataReply, pairingtypes.Metadata{
 			Name:  common.CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER,
 			Value: strings.Join(agreeingProvidersList, ","),
+		})
+
+		// Add disagreeing providers header so clients see dissent (providers whose response conflicted
+		// with the consensus, plus node/protocol-error providers) without needing debug mode.
+		metadataReply = append(metadataReply, pairingtypes.Metadata{
+			Name:  common.CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER,
+			Value: strings.Join(disagreeingProvidersList, ","),
 		})
 
 		// On failure, surface WHY (no-agreement / diversity-unmet / insufficient-responses) so clients
