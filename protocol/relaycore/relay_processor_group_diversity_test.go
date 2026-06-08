@@ -1,10 +1,17 @@
 package relaycore
 
 import (
+	"context"
+	"crypto/sha256"
+	"net/http"
 	"testing"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,6 +89,59 @@ func TestResponsesCrossValidation_GroupDiversity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRelayProcessor_CrossValidationOutlierRealPath drives a real RelayProcessor (Finding 1): two
+// agreeing successful responses plus one successful divergent response. It proves the stored success
+// results and the returned consensus carry real (non-zero) SHA256 hashes, so the divergent response is
+// detected as an outlier instead of every hash collapsing to zero and looking like agreement.
+func TestRelayProcessor_CrossValidationOutlierRealPath(t *testing.T) {
+	ctx := context.Background()
+	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
+	usedProviders := lavasession.NewUsedProviders(nil)
+	sm := newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation) // threshold 2, minGroups 1
+	rp := NewRelayProcessor(ctx, sm.crossValidationParams, NewConsistency("LAVA"), RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
+
+	mkResp := func(provider, group, data string) *RelayResponse {
+		return &RelayResponse{
+			RelayResult: common.RelayResult{
+				Request:      &pairingtypes.RelayRequest{RelaySession: &pairingtypes.RelaySession{}, RelayData: &pairingtypes.RelayPrivateData{}},
+				Reply:        &pairingtypes.RelayReply{Data: []byte(data), LatestBlock: 1},
+				ProviderInfo: common.ProviderInfo{ProviderAddress: provider, ProviderGroup: group},
+				StatusCode:   200,
+			},
+		}
+	}
+	// Drive handleResponse directly: deterministic, avoids the CV early-exit race in WaitForResults.
+	rp.handleResponse(mkResp("p1", "g1", "A"))
+	rp.handleResponse(mkResp("p2", "g2", "A"))
+	rp.handleResponse(mkResp("p3", "g3", "B")) // divergent successful outlier
+
+	result, err := rp.ProcessingResult()
+	require.NoError(t, err)
+	require.Equal(t, "A", string(result.Reply.Data), "consensus is the agreed-on A")
+	require.Equal(t, 2, result.CrossValidation)
+	wantHash := sha256.Sum256([]byte("A"))
+	require.Equal(t, wantHash, result.ResponseHash, "consensus result must carry the consensus hash, not zero")
+
+	successResults, _, _ := rp.GetResultsData()
+	require.Len(t, successResults, 3)
+	outlierGroups := map[string]struct{}{}
+	for _, r := range successResults {
+		require.NotEqual(t, [32]byte{}, r.ResponseHash, "stored success result must carry a real hash, not zero")
+		if r.ResponseHash != wantHash {
+			outlierGroups[r.ProviderInfo.ProviderGroup] = struct{}{}
+		}
+	}
+	require.Equal(t, map[string]struct{}{"g3": {}}, outlierGroups, "only the divergent g3 is an outlier; hashes do not collapse to agreement")
 }
 
 // TestResponsesCrossValidation_FailureReasons covers the distinguishable failure reasons surfaced to the

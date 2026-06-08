@@ -469,6 +469,14 @@ func canonicalResponseHash(data []byte) [32]byte {
 }
 
 func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
+	// Cache the SHA256 of the reply data BEFORE storing it. ResultsManager keeps RelayResult BY VALUE, so
+	// if we hashed after SetResponse the stored copy in successResults would keep the zero hash and the
+	// header path would compare zero hashes and treat real dissent as agreement. Computed for any reply
+	// with data; only successful replies are counted toward quorum below (empty/nil replies stay zero).
+	if response != nil && response.RelayResult.GetReply() != nil && len(response.RelayResult.GetReply().GetData()) > 0 {
+		response.RelayResult.ResponseHash = sha256.Sum256(response.RelayResult.GetReply().GetData())
+	}
+
 	nodeError := rp.ResultsManager.SetResponse(response, rp.RelayStateMachine.GetProtocolMessage())
 
 	// send relay error metrics only on non stateful queries, as stateful queries always return X-1/X errors.
@@ -478,18 +486,9 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 		utils.LavaFormatInfo("Relay received a node error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("Error", nodeError), utils.LogAttr("provider", response.RelayResult.ProviderInfo), utils.LogAttr("Request", rp.RelayStateMachine.GetProtocolMessage().GetApi().Name))
 	}
 
-	// Only hash successful responses (not errors) for cross-validation tracking
-	// This prevents error responses from being counted toward cross-validation.
-	// The hash and quorumMap are only consumed in CrossValidation mode (see
-	// checkEndProcessing / HasRequiredNodeResults), so skip the canonicalization
-	// work entirely for Stateless/Stateful traffic — it would otherwise decode
-	// and re-marshal every response body (potentially large) for a map nothing reads.
-	if rp.selection == CrossValidation && response != nil && nodeError == nil && response.Err == nil {
-		// Hash the response data once and cache it in the RelayResult.
-		// Canonicalize first so semantically-identical responses that differ only
-		// in JSON key order land in the same quorum bucket (MAG-2062).
-		hash := canonicalResponseHash(response.RelayResult.GetReply().GetData())
-		response.RelayResult.ResponseHash = hash // Cache the hash for later reuse
+	// Only successful responses (not errors) count toward cross-validation quorum.
+	if response != nil && nodeError == nil && response.Err == nil {
+		hash := response.RelayResult.ResponseHash // already cached above (before SetResponse)
 		stat := rp.quorumMap[hash]
 		if stat == nil {
 			stat = &quorumStat{groups: make(map[string]struct{})}
@@ -726,7 +725,8 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 	}
 
 	mostCommonResult.CrossValidation = winnerCount
-	maxCount = winnerCount // keep the success-log fields below referring to the winning quorum
+	mostCommonResult.ResponseHash = consensusHash // ensure the returned consensus carries the winning hash
+	maxCount = winnerCount                        // keep the success-log fields below referring to the winning quorum
 
 	// Log successful quorum consensus
 	utils.LavaFormatInfo("✅ [Quorum] CONSENSUS REACHED",
