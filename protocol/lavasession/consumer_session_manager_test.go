@@ -306,6 +306,62 @@ func TestNumberOfValidProviderGroups(t *testing.T) {
 	require.Equal(t, 3, groups)
 }
 
+// TestOrderForGroupDiversity covers Phase 1.2a group-aware selection ordering: the front of the returned
+// list spans up to minGroups distinct groups (highest-QoS per group), then the rest fills by QoS, with no
+// duplicates and best-effort when too few groups exist (the diversity gate then fails).
+func TestOrderForGroupDiversity(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	csm.pairing = map[string]*ConsumerSessionsWithProvider{
+		"p0": {PublicLavaAddress: "p0", GroupLabel: "g1"},
+		"p1": {PublicLavaAddress: "p1", GroupLabel: "g1"},
+		"p2": {PublicLavaAddress: "p2", GroupLabel: "g2"},
+		"p3": {PublicLavaAddress: "p3", GroupLabel: ""}, // empty -> "default"
+	}
+	ranked := []string{"p0", "p1", "p2", "p3"} // QoS-ranked
+
+	distinctGroups := func(addrs []string) map[string]struct{} {
+		m := map[string]struct{}{}
+		for _, a := range addrs {
+			g := "default"
+			if csm.pairing[a].GroupLabel != "" {
+				g = csm.pairing[a].GroupLabel
+			}
+			m[g] = struct{}{}
+		}
+		return m
+	}
+
+	t.Run("front spans minGroups, highest-QoS still first", func(t *testing.T) {
+		got := csm.orderForGroupDiversity(ranked, 3, 2)
+		require.Len(t, got, 3)
+		require.Len(t, distinctGroups(got[:2]), 2, "first two must cover two distinct groups")
+		require.Equal(t, "p0", got[0], "highest-QoS provider stays first")
+	})
+	t.Run("wanted == minGroups returns exactly the diverse front", func(t *testing.T) {
+		got := csm.orderForGroupDiversity(ranked, 2, 2)
+		require.Len(t, got, 2)
+		require.Len(t, distinctGroups(got), 2)
+	})
+	t.Run("minGroups 3 covers three groups", func(t *testing.T) {
+		got := csm.orderForGroupDiversity(ranked, 4, 3)
+		require.Len(t, got, 4)
+		require.GreaterOrEqual(t, len(distinctGroups(got[:3])), 3)
+	})
+	t.Run("too few groups -> best effort (gate fails later)", func(t *testing.T) {
+		got := csm.orderForGroupDiversity([]string{"p0", "p1"}, 2, 2) // both g1
+		require.Len(t, got, 2)
+		require.Len(t, distinctGroups(got), 1, "only one group available")
+	})
+	t.Run("no duplicates", func(t *testing.T) {
+		got := csm.orderForGroupDiversity(ranked, 4, 2)
+		seen := map[string]bool{}
+		for _, a := range got {
+			require.False(t, seen[a], "duplicate %s", a)
+			seen[a] = true
+		}
+	})
+}
+
 func TestNoPairingAvailableFlow(t *testing.T) {
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()

@@ -854,8 +854,8 @@ func (csm *ConsumerSessionManager) validatePairingListNotEmpty(addon string, ext
 	return numberOfResets
 }
 
-func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Context, wantedProviderNumber int, usedProviders UsedProvidersInf, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string) (sessionWithProviderMap SessionWithProviderMap, err error) {
-	sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider)
+func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Context, wantedProviderNumber int, usedProviders UsedProvidersInf, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups int) (sessionWithProviderMap SessionWithProviderMap, err error) {
+	sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups)
 	if err != nil {
 		if errors.Is(err, PairingListEmptyError) {
 			// Emergency fallback chain: backup providers first, then blocked providers for maximum availability
@@ -891,9 +891,22 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 // GetSessions will return a ConsumerSession, given cu needed for that session.
 // The user can also request specific providers to not be included in the search for a session.
 // selectedProvider allows forcing selection of a specific provider by address (smartrouter only).
-func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProviderNumber int, cuNeededForSession uint64, usedProviders UsedProvidersInf, requestedBlock int64, addon string, extensions []*spectypes.Extension, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string) (
+// GetSessionsOptions carries optional cross-validation selection hints for GetSessions.
+type GetSessionsOptions struct {
+	// MinGroups > 1 makes selection fan out across at least this many distinct provider groups so a
+	// group-diversity cross-validation policy can be satisfied. Default 0/1 means group-blind selection.
+	MinGroups int
+}
+
+func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProviderNumber int, cuNeededForSession uint64, usedProviders UsedProvidersInf, requestedBlock int64, addon string, extensions []*spectypes.Extension, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, opts ...GetSessionsOptions) (
 	consumerSessionMap ConsumerSessionsMap, errRet error,
 ) {
+	// minGroups > 1 (cross-validation group diversity) makes selection fan out across distinct provider
+	// groups. Variadic so the many existing non-cross-validation callers are unchanged.
+	minGroups := 1
+	if len(opts) > 0 && opts[0].MinGroups > 1 {
+		minGroups = opts[0].MinGroups
+	}
 	// set usedProviders if they were chosen for this relay
 	timeoutCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
@@ -924,7 +937,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	utils.LavaFormatTrace("GetSessions tempIgnoredProviders", utils.LogAttr("tempIgnoredProviders", tempIgnoredProviders), utils.LogAttr("GUID", ctx))
 
 	// Get a valid consumerSessionsWithProvider
-	sessionWithProviderMap, err := csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider)
+	sessionWithProviderMap, err := csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups)
 	if err != nil {
 		utils.LavaFormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 		return nil, err
@@ -1056,7 +1069,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		}
 
 		// If we do not have enough fetch more
-		sessionWithProviderMap, err = csm.getSessionWithProviderOrError(ctx, 1, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider)
+		sessionWithProviderMap, err = csm.getSessionWithProviderOrError(ctx, 1, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups)
 		// If error exists but we have sessions, return them
 		if err != nil && len(sessions) != 0 {
 			return sessions, nil
@@ -1322,7 +1335,9 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 			utils.LavaFormatDebug("Epoch changed between getValidConsumerSessionsWithProvider to tryGetConsumerSessionWithProviderFromBlockedProviderList getting pairing from new epoch list", utils.LogAttr("GUID", ctx))
 		}
 		csm.lock.RUnlock() // unlock because getValidConsumerSessionsWithProvider is locking.
-		return csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, ignoredProviders, cuNeededForSession, requestedBlock, addon, extensions, stateful, virtualEpoch, "", "")
+		// Emergency blocked-provider fallback: group-blind selection (minGroups=1). The diversity gate
+		// still enforces the requirement, so a non-diverse fallback fails rather than under-validates.
+		return csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, ignoredProviders, cuNeededForSession, requestedBlock, addon, extensions, stateful, virtualEpoch, "", "", 1)
 	}
 
 	// if we got here we validated the epoch is still the same epoch as we expected and we need to fetch a session from the blocked provider list.
@@ -1474,7 +1489,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	return sessionWithProviderMap, nil
 }
 
-func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx context.Context, wantedProviderNumber int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string) (sessionWithProviderMap SessionWithProviderMap, err error) {
+func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx context.Context, wantedProviderNumber int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups int) (sessionWithProviderMap SessionWithProviderMap, err error) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
@@ -1487,11 +1502,25 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 		ignoredProviders.currentEpoch = currentEpoch
 	}
 
-	// Fetch provider addresses
-	providerAddresses, err := csm.getValidProviderAddresses(ctx, wantedProviderNumber, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider)
-	if err != nil {
-		utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get a provider addresses", utils.LogAttr("error", err), utils.LogAttr("GUID", ctx))
-		return nil, err
+	// Fetch provider addresses. When a cross-validation policy requires group diversity (minGroups > 1)
+	// we over-fetch the full QoS-ranked pool and reorder it so the front spans at least minGroups distinct
+	// provider groups (highest-QoS per group first), then fill the rest by QoS — otherwise group-blind
+	// selection could pick the top providers all from one group and fail the diversity gate even when a
+	// diverse set exists. minGroups <= 1 keeps the original group-blind selection byte-identical.
+	var providerAddresses []string
+	if minGroups > 1 {
+		ranked, rankErr := csm.getValidProviderAddresses(ctx, len(csm.validAddresses), ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "")
+		if rankErr != nil {
+			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get group-diverse provider addresses", utils.LogAttr("error", rankErr), utils.LogAttr("GUID", ctx))
+			return nil, rankErr
+		}
+		providerAddresses = csm.orderForGroupDiversity(ranked, wantedProviderNumber, minGroups)
+	} else {
+		providerAddresses, err = csm.getValidProviderAddresses(ctx, wantedProviderNumber, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider)
+		if err != nil {
+			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get a provider addresses", utils.LogAttr("error", err), utils.LogAttr("GUID", ctx))
+			return nil, err
+		}
 	}
 
 	// save how many providers we are aiming to return
@@ -1551,6 +1580,50 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 			return nil, err
 		}
 	}
+}
+
+// orderForGroupDiversity reorders a QoS-ranked address list so the front covers up to minGroups distinct
+// cross-validation groups (highest-QoS provider per new group first), then fills the remaining slots by
+// QoS order, returning at most `wanted` addresses. An empty GroupLabel folds into the "default" group.
+// Must be called with csm.lock held (reads csm.pairing).
+func (csm *ConsumerSessionManager) orderForGroupDiversity(ranked []string, wanted, minGroups int) []string {
+	groupOf := func(addr string) string {
+		if cswp, ok := csm.pairing[addr]; ok && cswp.GroupLabel != "" {
+			return cswp.GroupLabel
+		}
+		return "default"
+	}
+
+	picked := make([]string, 0, wanted)
+	pickedSet := make(map[string]struct{}, wanted)
+	coveredGroups := make(map[string]struct{}, minGroups)
+
+	// Phase 1: cover distinct groups, taking the highest-QoS provider from each newly seen group.
+	for _, addr := range ranked {
+		if len(coveredGroups) >= minGroups || len(picked) >= wanted {
+			break
+		}
+		g := groupOf(addr)
+		if _, seen := coveredGroups[g]; seen {
+			continue
+		}
+		picked = append(picked, addr)
+		pickedSet[addr] = struct{}{}
+		coveredGroups[g] = struct{}{}
+	}
+
+	// Phase 2: fill remaining slots by QoS order with providers not already picked.
+	for _, addr := range ranked {
+		if len(picked) >= wanted {
+			break
+		}
+		if _, already := pickedSet[addr]; already {
+			continue
+		}
+		picked = append(picked, addr)
+		pickedSet[addr] = struct{}{}
+	}
+	return picked
 }
 
 // must be locked before use
