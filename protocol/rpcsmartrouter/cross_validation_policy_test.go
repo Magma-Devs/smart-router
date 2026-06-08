@@ -325,6 +325,27 @@ func TestCrossValidationPolicy_Validate(t *testing.T) {
 	}
 }
 
+// TestCrossValidationFinality covers the tri-state finality classifier used to label mismatch metrics.
+func TestCrossValidationFinality(t *testing.T) {
+	cases := []struct {
+		name                                          string
+		requestedBlock, latestBlock, finalizationDist int64
+		want                                          string
+	}{
+		{"old enough -> finalized", 100, 200, 10, "finalized"},
+		{"boundary -> finalized", 190, 200, 10, "finalized"},
+		{"too recent -> not_finalized", 195, 200, 10, "not_finalized"},
+		{"sentinel requested block (latest) -> unknown", -2, 200, 10, "unknown"},
+		{"not-applicable requested block -> unknown", -1, 200, 10, "unknown"},
+		{"latest unknown -> unknown", 100, 0, 10, "unknown"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, crossValidationFinality(tc.requestedBlock, tc.latestBlock, tc.finalizationDist), "tc #%d, i #%d", i, i)
+		})
+	}
+}
+
 // TestCrossValidationPolicy_StatefulGuard_ProductionParser exercises the real production path of the
 // stateful guard (Fix 2): a real chain parser's ApiHasStatefulCategory lookup, fed through the exact
 // predicate ServeRPCRequests builds, must reject an enabled CV policy on a write method and allow one on
