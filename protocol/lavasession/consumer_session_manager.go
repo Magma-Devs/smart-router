@@ -101,14 +101,11 @@ func (csm *ConsumerSessionManager) GetNumberOfValidProviders() int {
 	return len(csm.validAddresses)
 }
 
-// NumberOfValidProviderGroups returns the count of distinct cross-validation group labels across the
-// currently valid providers. An empty GroupLabel is counted as the implicit "default" group. Used by the
-// cross-validation capacity check to verify a min-groups policy can be satisfied.
-func (csm *ConsumerSessionManager) NumberOfValidProviderGroups() int {
-	csm.lock.RLock()
-	defer csm.lock.RUnlock()
-	groups := make(map[string]struct{}, len(csm.validAddresses))
-	for _, addr := range csm.validAddresses {
+// countDistinctGroups counts distinct cross-validation group labels across the given provider addresses,
+// folding an empty GroupLabel into the implicit "default" group. Assumes csm.lock is held.
+func (csm *ConsumerSessionManager) countDistinctGroups(addresses []string) int {
+	groups := make(map[string]struct{}, len(addresses))
+	for _, addr := range addresses {
 		label := "default"
 		if cswp, ok := csm.pairing[addr]; ok && cswp.GroupLabel != "" {
 			label = cswp.GroupLabel
@@ -116,6 +113,26 @@ func (csm *ConsumerSessionManager) NumberOfValidProviderGroups() int {
 		groups[label] = struct{}{}
 	}
 	return len(groups)
+}
+
+// NumberOfValidProviderGroups returns the count of distinct cross-validation group labels across ALL
+// currently valid providers (ignoring addon/extension filtering). Used by the startup capacity check as
+// the upper bound on how many distinct groups a request could ever draw from.
+func (csm *ConsumerSessionManager) NumberOfValidProviderGroups() int {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	return csm.countDistinctGroups(csm.validAddresses)
+}
+
+// ProviderAndGroupCountsForRequest returns the number of providers and the number of distinct group
+// labels among the providers that actually support the request's addon + extensions — i.e. the concrete
+// candidate set, not all valid providers. Used by the per-request cross-validation capacity check so a
+// min-groups / max-participants policy is validated against what the request can really reach.
+func (csm *ConsumerSessionManager) ProviderAndGroupCountsForRequest(addon string, extensions []string, ctx context.Context) (providers, groups int) {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	addresses := csm.CalculateAddonValidAddresses(addon, extensions, ctx)
+	return len(addresses), csm.countDistinctGroups(addresses)
 }
 
 // IsStaticProvider returns true when the given provider address belongs to a
