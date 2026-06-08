@@ -10,6 +10,12 @@ type CrossValidationParams struct {
 	// 1 means no group-diversity requirement (the backwards-compatible default). Set by per-method
 	// policy; there is no request header for it.
 	MinGroups int
+	// PerGroupQuorum upgrades the diversity requirement from "one cross-group consensus spanning MinGroups
+	// groups" (the MinGroups default) to "each of MinGroups groups independently reaches its own internal
+	// quorum of AgreementThreshold matching responses, and the per-group winners agree". Opt-in via
+	// per-method policy; there is no request header for it. Implies selection front-loads
+	// AgreementThreshold sessions per group (see GetSessionsOptions.PerGroupTarget).
+	PerGroupQuorum bool
 }
 
 // DefaultCrossValidationParams are used when cross-validation is not enabled (Selection != CrossValidation)

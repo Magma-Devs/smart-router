@@ -144,6 +144,87 @@ func TestRelayProcessor_CrossValidationOutlierRealPath(t *testing.T) {
 	require.Equal(t, map[string]struct{}{"g3": {}}, outlierGroups, "only the divergent g3 is an outlier; hashes do not collapse to agreement")
 }
 
+// TestResponsesCrossValidation_PerGroupQuorum covers the 2.3 per-group quorum rule: each of MinGroups
+// groups must independently reach AgreementThreshold matching responses for the SAME hash. It is strictly
+// stronger than the MinGroups diversity gate (which only needs threshold total across the groups).
+func TestResponsesCrossValidation_PerGroupQuorum(t *testing.T) {
+	mkResult := func(data, group string) common.RelayResult {
+		return common.RelayResult{
+			Reply:        &pairingtypes.RelayReply{Data: []byte(data)},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "p-" + group + "-" + data, ProviderGroup: group},
+		}
+	}
+	cases := []struct {
+		name       string
+		minGroups  int
+		threshold  int
+		results    []common.RelayResult
+		wantOK     bool
+		wantData   string
+		wantReason string
+	}{
+		{
+			name: "each group reaches internal quorum and winners agree -> success", minGroups: 2, threshold: 2,
+			results:  []common.RelayResult{mkResult("A", "g1"), mkResult("A", "g1"), mkResult("A", "g2"), mkResult("A", "g2")},
+			wantOK:   true,
+			wantData: "A",
+		},
+		{
+			// g2 has only one matching response (< threshold) -> only one group corroborates -> fail.
+			name: "a group cannot reach its internal quorum -> group-quorum-unmet", minGroups: 2, threshold: 2,
+			results:    []common.RelayResult{mkResult("A", "g1"), mkResult("A", "g1"), mkResult("A", "g2")},
+			wantOK:     false,
+			wantReason: common.CrossValidationReasonGroupQuorumUnmet,
+		},
+		{
+			// Each group reaches its own internal quorum but on a DIFFERENT hash -> winners disagree -> fail.
+			name: "per-group winners disagree across groups -> group-quorum-unmet", minGroups: 2, threshold: 2,
+			results:    []common.RelayResult{mkResult("A", "g1"), mkResult("A", "g1"), mkResult("B", "g2"), mkResult("B", "g2")},
+			wantOK:     false,
+			wantReason: common.CrossValidationReasonGroupQuorumUnmet,
+		},
+		{
+			name: "three groups corroborate, need two -> success", minGroups: 2, threshold: 2,
+			results:  []common.RelayResult{mkResult("A", "g1"), mkResult("A", "g1"), mkResult("A", "g2"), mkResult("A", "g2"), mkResult("B", "g3"), mkResult("B", "g3")},
+			wantOK:   true,
+			wantData: "A",
+		},
+		{
+			// MinGroups diversity (1.2) would PASS this (2 matching A across 2 groups), but per-group quorum
+			// must FAIL it: neither group reached threshold=2 internally.
+			name: "diversity would pass but per-group fails (one-each)", minGroups: 2, threshold: 2,
+			results:    []common.RelayResult{mkResult("A", "g1"), mkResult("A", "g2")},
+			wantOK:     false,
+			wantReason: common.CrossValidationReasonGroupQuorumUnmet,
+		},
+		{
+			// Nil/empty replies are not an independent corroboration of a value -> no per-group winner.
+			name: "all-nil groups do not corroborate -> group-quorum-unmet", minGroups: 2, threshold: 2,
+			results:    []common.RelayResult{mkResult("", "g1"), mkResult("", "g1"), mkResult("", "g2"), mkResult("", "g2")},
+			wantOK:     false,
+			wantReason: common.CrossValidationReasonGroupQuorumUnmet,
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rp := &RelayProcessor{
+				crossValidationParams: &common.CrossValidationParams{AgreementThreshold: tc.threshold, MaxParticipants: 6, MinGroups: tc.minGroups, PerGroupQuorum: true},
+				selection:             CrossValidation,
+			}
+			result, reason, err := rp.responsesCrossValidation(tc.results, tc.threshold)
+			if tc.wantOK {
+				require.NoError(t, err, "tc #%d", i)
+				require.NotNil(t, result, "tc #%d", i)
+				require.Empty(t, reason, "tc #%d", i)
+				require.Equal(t, tc.wantData, string(result.Reply.Data), "tc #%d", i)
+			} else {
+				require.Error(t, err, "tc #%d", i)
+				require.Equal(t, tc.wantReason, reason, "tc #%d", i)
+			}
+		})
+	}
+}
+
 // TestRelayProcessor_CrossValidationFailureRealPath is the failure-path counterpart to the outlier real
 // path: it drives a real RelayProcessor to a quorum FAILURE (two successful responses with different data,
 // so no hash reaches the threshold) and proves ProcessingResult returns a NON-NIL minimal result carrying
@@ -230,14 +311,14 @@ func TestCrossValidationQuorumReached_Diversity(t *testing.T) {
 		crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5, MinGroups: 2},
 		selection:             CrossValidation,
 		quorumMap: map[[32]byte]*quorumStat{
-			hash: {count: 2, groups: map[string]struct{}{"g1": {}}}, // count met, only one group
+			hash: {count: 2, groupCounts: map[string]int{"g1": 2}}, // count met, only one group
 		},
 	}
 	require.False(t, rp.crossValidationQuorumReached(), "count met but diversity unmet must NOT early-exit")
 
 	// A later response with the same hash from a new group satisfies diversity.
 	rp.quorumMap[hash].count++
-	rp.quorumMap[hash].groups["g2"] = struct{}{}
+	rp.quorumMap[hash].groupCounts["g2"]++
 	require.True(t, rp.crossValidationQuorumReached(), "count + diversity met must early-exit")
 
 	// With MinGroups <= 1 the predicate reduces to count alone (pre-1.2 behavior).
@@ -245,7 +326,7 @@ func TestCrossValidationQuorumReached_Diversity(t *testing.T) {
 		crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5, MinGroups: 1},
 		selection:             CrossValidation,
 		quorumMap: map[[32]byte]*quorumStat{
-			hash: {count: 2, groups: map[string]struct{}{"g1": {}}},
+			hash: {count: 2, groupCounts: map[string]int{"g1": 2}},
 		},
 	}
 	require.True(t, rpNoGroups.crossValidationQuorumReached(), "MinGroups<=1 must reach quorum on count alone")

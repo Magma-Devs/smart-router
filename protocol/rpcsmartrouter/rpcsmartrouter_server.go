@@ -127,17 +127,17 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.crossValidationResolver = cvResolver
 	if cvResolver.HasPolicies() {
 		// Providers are already registered (UpdateAllProviders runs before ServeRPCRequests), so the
-		// configured distinct-group count is the upper bound for the startup capacity check.
-		if cvStartupErr := validateCrossValidationStartup(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, sessionManager.NumberOfValidProviderGroups()); cvStartupErr != nil {
-			return cvStartupErr
-		}
-		// Log the resolved provider->group layout once at startup so operators can confirm the diversity
-		// their config yields (a min-groups policy is only as good as the group spread of the fleet).
+		// configured group layout is the upper bound for the startup capacity checks.
 		groupAssignments := sessionManager.ProviderGroupAssignments()
 		groupSizes := make(map[string]int, len(groupAssignments))
 		for label, addrs := range groupAssignments {
 			groupSizes[label] = len(addrs)
 		}
+		if cvStartupErr := validateCrossValidationStartup(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, sessionManager.NumberOfValidProviderGroups(), groupSizes); cvStartupErr != nil {
+			return cvStartupErr
+		}
+		// Log the resolved provider->group layout once at startup so operators can confirm the diversity
+		// their config yields (a min-groups policy is only as good as the group spread of the fleet).
 		utils.LavaFormatInfo("cross-validation per-method policies loaded",
 			utils.LogAttr("policies", cvResolver.NumPolicies()),
 			utils.LogAttr("chainID", listenEndpoint.ChainID),
@@ -332,8 +332,10 @@ func (rpcss *RPCSmartRouterServer) craftRelay(ctx context.Context) (ok bool, rel
 //     the endpoint has configured can never be satisfied.
 //
 // configuredGroups is the total distinct provider-group count for the endpoint (the per-request check
-// tightens it to the addon/extension candidate set). It is passed in to keep this function testable.
-func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, chainParser chainlib.ChainParser, chainID, apiInterface string, configuredGroups int) error {
+// tightens it to the addon/extension candidate set). groupSizes maps each group label to its provider
+// count, used by the per-group-quorum capacity check (a per-group policy needs MinGroups groups that EACH
+// have >= Threshold providers). Both are passed in to keep this function testable.
+func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, chainParser chainlib.ChainParser, chainID, apiInterface string, configuredGroups int, groupSizes map[string]int) error {
 	if !resolver.HasPolicies() {
 		return nil
 	}
@@ -358,6 +360,29 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 			utils.LogAttr("configuredGroups", configuredGroups),
 			utils.LogAttr("chainID", chainID),
 			utils.LogAttr("apiInterface", apiInterface))
+	}
+	// Per-group-quorum capacity: each per-group policy needs MinGroups groups that EACH have >= Threshold
+	// providers. Without enough adequately-staffed groups the policy can never succeed (every request would
+	// fail group-quorum-unmet), so reject it at startup rather than at runtime. Skipped when groupSizes is
+	// empty (provider data unavailable) to avoid a false negative.
+	if len(groupSizes) > 0 {
+		for _, req := range resolver.PerGroupRequirements(chainID, apiInterface) {
+			adequateGroups := 0
+			for _, size := range groupSizes {
+				if size >= req.Threshold {
+					adequateGroups++
+				}
+			}
+			if adequateGroups < req.MinGroups {
+				return utils.LavaFormatError("cross-validation per-group-quorum policy cannot be satisfied: too few provider groups have enough providers to each reach the agreement threshold", nil,
+					utils.LogAttr("requiredGroups", req.MinGroups),
+					utils.LogAttr("agreementThreshold", req.Threshold),
+					utils.LogAttr("groupsWithEnoughProviders", adequateGroups),
+					utils.LogAttr("groupSizes", groupSizes),
+					utils.LogAttr("chainID", chainID),
+					utils.LogAttr("apiInterface", apiInterface))
+			}
+		}
 	}
 	return nil
 }
@@ -2036,10 +2061,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	}
 
 	// Group-aware fan-out: when a cross-validation policy requires group diversity, select across at
-	// least MinGroups distinct provider groups (1.2a). Default 1 leaves selection group-blind.
-	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1}
+	// least MinGroups distinct provider groups (1.2a). Default 1 leaves selection group-blind. For
+	// per-group quorum (2.3), also front-load AgreementThreshold providers per group so each group can
+	// independently reach its internal quorum — otherwise QoS-skewed selection starves the smaller groups.
+	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1, PerGroupTarget: 1}
 	if cvp := relayProcessor.GetCrossValidationParams(); cvp != nil && cvp.MinGroups > 1 {
 		sessionOpts.MinGroups = cvp.MinGroups
+		if cvp.PerGroupQuorum {
+			sessionOpts.PerGroupTarget = cvp.AgreementThreshold
+		}
 	}
 
 	_, sessSpan := tracing.StartInternalSpan(ctx, tracing.SpanGetSessions)

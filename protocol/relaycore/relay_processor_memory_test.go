@@ -127,11 +127,11 @@ func BenchmarkRelayProcessorCrossValidationMemory(b *testing.B) {
 				hash := sha256.Sum256(response.RelayResult.GetReply().GetData())
 				stat := rp.quorumMap[hash]
 				if stat == nil {
-					stat = &quorumStat{groups: make(map[string]struct{})}
+					stat = &quorumStat{groupCounts: make(map[string]int)}
 					rp.quorumMap[hash] = stat
 				}
 				stat.count++
-				stat.groups[quorumGroupOf(response.RelayResult)] = struct{}{}
+				stat.groupCounts[quorumGroupOf(response.RelayResult)]++
 				if stat.count > rp.currentQuorumEqualResults {
 					rp.currentQuorumEqualResults = stat.count
 				}
