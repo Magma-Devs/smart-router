@@ -50,6 +50,10 @@ type CrossValidationPolicy struct {
 	MaxParticipants    Bound `yaml:"max-participants,omitempty" json:"max-participants,omitempty" mapstructure:"max-participants,omitempty"`
 	AgreementThreshold Bound `yaml:"agreement-threshold,omitempty" json:"agreement-threshold,omitempty" mapstructure:"agreement-threshold,omitempty"`
 	MinGroups          Bound `yaml:"min-groups,omitempty" json:"min-groups,omitempty" mapstructure:"min-groups,omitempty"`
+	// PerGroupQuorum upgrades the MinGroups diversity requirement to per-group quorum (2.3): each of
+	// MinGroups groups must independently reach AgreementThreshold matching responses and the per-group
+	// winners must agree. Operator-only bool (no caller override). Requires MinGroups > 1.
+	PerGroupQuorum bool `yaml:"per-group-quorum,omitempty" json:"per-group-quorum,omitempty" mapstructure:"per-group-quorum,omitempty"`
 }
 
 // CrossValidationPolicyEntry is one entry in the `cross-validation.policies` list. method is a string
@@ -136,6 +140,39 @@ func (r *CrossValidationPolicyResolver) MaxResolvedMinGroups(chainID, apiInterfa
 		}
 	}
 	return maxMinGroups
+}
+
+// PerGroupRequirement is the no-caller resolved (min-groups, agreement-threshold) shape of one enabled
+// per-group-quorum policy: the request needs MinGroups distinct groups that EACH have >= Threshold
+// providers. Used by the startup capacity check.
+type PerGroupRequirement struct {
+	MinGroups int
+	Threshold int
+}
+
+// PerGroupRequirements returns the no-caller resolved requirement of every ENABLED per-group-quorum policy
+// for the given chain/api. Empty when no per-group policy applies. The threshold has a caller header, so a
+// caller could raise it at runtime (failing group-quorum-unmet), but the no-caller value is what a
+// well-provisioned fleet must support to satisfy the policy by default.
+func (r *CrossValidationPolicyResolver) PerGroupRequirements(chainID, apiInterface string) []PerGroupRequirement {
+	if r == nil {
+		return nil
+	}
+	wantChain, wantAPI := strings.ToLower(chainID), strings.ToLower(apiInterface)
+	var reqs []PerGroupRequirement
+	for key, policy := range r.policies {
+		if !policy.Enabled || !policy.PerGroupQuorum {
+			continue
+		}
+		kc, ka, _ := splitPolicyKey(key)
+		if kc != wantChain || ka != wantAPI {
+			continue
+		}
+		minGroups := resolveKnob(0, false, policy.MinGroups, defaultEnabledMinGroups)
+		threshold := resolveKnob(0, false, policy.AgreementThreshold, defaultEnabledAgreementThreshold)
+		reqs = append(reqs, PerGroupRequirement{MinGroups: minGroups, Threshold: threshold})
+	}
+	return reqs
 }
 
 // ParseCrossValidationConfig reads the optional top-level `cross-validation:` block from viper config.
@@ -254,6 +291,10 @@ func (r *CrossValidationPolicyResolver) Resolve(chainID, apiInterface, method st
 	if eff.MinGroups > eff.MaxParticipants {
 		eff.MinGroups = eff.MaxParticipants
 	}
+	// Per-group quorum is meaningless without real group diversity, so only activate it when MinGroups > 1
+	// survives the clamping above. Config feasibility (max-participants >= min-groups * threshold) is
+	// enforced by Validate(); a caller-induced infeasibility surfaces at runtime as group-quorum-unmet.
+	eff.PerGroupQuorum = policy.PerGroupQuorum && eff.MinGroups > 1
 	return eff, true
 }
 
@@ -337,6 +378,17 @@ func (p CrossValidationPolicy) Validate() error {
 		}
 		if noCallerMinGroups > noCallerMax {
 			return fmt.Errorf("min-groups resolves to %d with no caller but max-participants resolves to %d; an enabled policy must be satisfiable without caller headers (raise max-participants or lower min-groups)", noCallerMinGroups, noCallerMax)
+		}
+		// Per-group quorum needs real diversity AND room for each group to reach its own internal quorum:
+		// min-groups > 1 and max-participants >= min-groups * agreement-threshold. Reject a self-contradictory
+		// per-group policy at config-load rather than letting every request fail group-quorum-unmet at runtime.
+		if p.PerGroupQuorum {
+			if noCallerMinGroups <= 1 {
+				return fmt.Errorf("per-group-quorum requires min-groups > 1, but min-groups resolves to %d", noCallerMinGroups)
+			}
+			if needed := noCallerMinGroups * noCallerThreshold; needed > noCallerMax {
+				return fmt.Errorf("per-group-quorum needs max-participants >= min-groups * agreement-threshold (%d * %d = %d) but max-participants resolves to %d; raise max-participants or lower min-groups/agreement-threshold", noCallerMinGroups, noCallerThreshold, needed, noCallerMax)
+			}
 		}
 	}
 	return nil

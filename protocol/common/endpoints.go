@@ -71,6 +71,11 @@ const (
 	// should fall back rather than retry.
 	CrossValidationReasonInsufficientCapacity = "insufficient-capacity" // too few candidate providers/sessions for max-participants or the threshold
 	CrossValidationReasonInsufficientGroups   = "insufficient-groups"   // too few distinct candidate groups for min-groups
+
+	// Per-group-quorum reason (quorum-time): too few groups reached their own internal quorum, or the
+	// per-group winners disagreed across groups. Distinct from diversity-unmet (which is about one
+	// cross-group consensus spanning groups).
+	CrossValidationReasonGroupQuorumUnmet = "group-quorum-unmet"
 )
 
 var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{

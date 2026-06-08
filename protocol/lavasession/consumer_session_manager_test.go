@@ -386,34 +386,143 @@ func TestOrderForGroupDiversity(t *testing.T) {
 	}
 
 	t.Run("front spans minGroups, highest-QoS still first", func(t *testing.T) {
-		got := csm.orderForGroupDiversity(ranked, 3, 2)
+		got := csm.orderForGroupDiversity(ranked, 3, 2, 1)
 		require.Len(t, got, 3)
 		require.Len(t, distinctGroups(got[:2]), 2, "first two must cover two distinct groups")
 		require.Equal(t, "p0", got[0], "highest-QoS provider stays first")
 	})
 	t.Run("wanted == minGroups returns exactly the diverse front", func(t *testing.T) {
-		got := csm.orderForGroupDiversity(ranked, 2, 2)
+		got := csm.orderForGroupDiversity(ranked, 2, 2, 1)
 		require.Len(t, got, 2)
 		require.Len(t, distinctGroups(got), 2)
 	})
 	t.Run("minGroups 3 covers three groups", func(t *testing.T) {
-		got := csm.orderForGroupDiversity(ranked, 4, 3)
+		got := csm.orderForGroupDiversity(ranked, 4, 3, 1)
 		require.Len(t, got, 4)
 		require.GreaterOrEqual(t, len(distinctGroups(got[:3])), 3)
 	})
 	t.Run("too few groups -> best effort (gate fails later)", func(t *testing.T) {
-		got := csm.orderForGroupDiversity([]string{"p0", "p1"}, 2, 2) // both g1
+		got := csm.orderForGroupDiversity([]string{"p0", "p1"}, 2, 2, 1) // both g1
 		require.Len(t, got, 2)
 		require.Len(t, distinctGroups(got), 1, "only one group available")
 	})
 	t.Run("no duplicates", func(t *testing.T) {
-		got := csm.orderForGroupDiversity(ranked, 4, 2)
+		got := csm.orderForGroupDiversity(ranked, 4, 2, 1)
 		seen := map[string]bool{}
 		for _, a := range got {
 			require.False(t, seen[a], "duplicate %s", a)
 			seen[a] = true
 		}
 	})
+}
+
+// TestOrderForGroupDiversity_PerGroupTarget covers the 2.3 selection change: with perGroupTarget > 1 the
+// front-load takes up to perGroupTarget highest-QoS providers from EACH of minGroups groups, so a
+// QoS-dominant group cannot starve the smaller ones (the exact failure that made per-group quorum
+// unreachable with the 1-per-group selection).
+func TestOrderForGroupDiversity_PerGroupTarget(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	csm.pairing = map[string]*ConsumerSessionsWithProvider{
+		"a0": {PublicLavaAddress: "a0", GroupLabel: "A"},
+		"a1": {PublicLavaAddress: "a1", GroupLabel: "A"},
+		"a2": {PublicLavaAddress: "a2", GroupLabel: "A"},
+		"a3": {PublicLavaAddress: "a3", GroupLabel: "A"},
+		"a4": {PublicLavaAddress: "a4", GroupLabel: "A"},
+		"b0": {PublicLavaAddress: "b0", GroupLabel: "B"},
+		"b1": {PublicLavaAddress: "b1", GroupLabel: "B"},
+		"b2": {PublicLavaAddress: "b2", GroupLabel: "B"},
+	}
+	// QoS-ranked: all of group A's (higher-QoS) providers come before group B's.
+	ranked := []string{"a0", "a1", "a2", "a3", "a4", "b0", "b1", "b2"}
+	groupOf := func(addr string) string { return csm.pairing[addr].GroupLabel }
+	perGroupCounts := func(addrs []string) map[string]int {
+		m := map[string]int{}
+		for _, a := range addrs {
+			m[groupOf(a)]++
+		}
+		return m
+	}
+
+	t.Run("front-loads threshold per group (the advisor starvation trace)", func(t *testing.T) {
+		// threshold 2, minGroups 2, maxParticipants 4. The old 1-per-group selection returned 3A+1B,
+		// starving B below threshold; per-group target 2 must return 2A+2B.
+		got := csm.orderForGroupDiversity(ranked, 4, 2, 2)
+		require.Len(t, got, 4)
+		counts := perGroupCounts(got)
+		require.Equal(t, 2, counts["A"], "group A must get exactly its per-group target")
+		require.Equal(t, 2, counts["B"], "group B must not be starved below threshold")
+	})
+
+	t.Run("perGroupTarget 1 reproduces one-per-group then QoS fill", func(t *testing.T) {
+		got := csm.orderForGroupDiversity(ranked, 4, 2, 1)
+		require.Len(t, got, 4)
+		counts := perGroupCounts(got)
+		// One per covered group in Phase 1 (a0, b0), then QoS fill (a1, a2) -> 3A + 1B.
+		require.Equal(t, 3, counts["A"])
+		require.Equal(t, 1, counts["B"])
+	})
+
+	t.Run("Phase 2 fills leftover slots by QoS beyond the per-group front-load", func(t *testing.T) {
+		// wanted 5 > minGroups*target (4): the 5th slot is the next-highest QoS regardless of group.
+		got := csm.orderForGroupDiversity(ranked, 5, 2, 2)
+		require.Len(t, got, 5)
+		counts := perGroupCounts(got)
+		require.Equal(t, 3, counts["A"], "front-load 2A+2B, then the 5th by QoS is the next A")
+		require.Equal(t, 2, counts["B"])
+	})
+
+	t.Run("no duplicates", func(t *testing.T) {
+		got := csm.orderForGroupDiversity(ranked, 6, 2, 2)
+		seen := map[string]bool{}
+		for _, a := range got {
+			require.False(t, seen[a], "duplicate %s", a)
+			seen[a] = true
+		}
+	})
+}
+
+// TestGetSessions_PerGroupTargetEndToEnd is the end-to-end proof that PerGroupTarget threads from
+// GetSessionsOptions all the way through selection: a skewed fleet (group A larger than group B) with a
+// per-group target of 2 must yield sessions that give EACH of the two groups at least the threshold count,
+// rather than letting group A claim most of the slots. Without the 2.3 selection change this returned
+// group B below threshold and per-group quorum was unreachable.
+func TestGetSessions_PerGroupTargetEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	csm := CreateConsumerSessionManager()
+	mk := func(addr, group string) *ConsumerSessionsWithProvider {
+		return &ConsumerSessionsWithProvider{
+			PublicLavaAddress: addr,
+			Endpoints:         []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
+			Sessions:          map[int64]*SingleConsumerSession{},
+			MaxComputeUnits:   200,
+			PairingEpoch:      firstEpochHeight,
+			GroupLabel:        group,
+		}
+	}
+	pairingList := map[uint64]*ConsumerSessionsWithProvider{
+		0: mk("lava@a0", "A"), 1: mk("lava@a1", "A"), 2: mk("lava@a2", "A"),
+		3: mk("lava@a3", "A"), 4: mk("lava@a4", "A"),
+		5: mk("lava@b0", "B"), 6: mk("lava@b1", "B"), 7: mk("lava@b2", "B"),
+	}
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
+
+	groupOf := func(addr string) string {
+		if cswp, ok := csm.pairing[addr]; ok {
+			return cswp.GroupLabel
+		}
+		return ""
+	}
+	// threshold 2, minGroups 2, maxParticipants 4 -> per-group target 2 must select 2 from A and 2 from B.
+	sessions, err := csm.GetSessions(ctx, 4, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "",
+		GetSessionsOptions{MinGroups: 2, PerGroupTarget: 2})
+	require.NoError(t, err)
+
+	counts := map[string]int{}
+	for provider := range sessions {
+		counts[groupOf(provider)]++
+	}
+	require.GreaterOrEqual(t, counts["A"], 2, "group A must reach the per-group target")
+	require.GreaterOrEqual(t, counts["B"], 2, "group B must reach the per-group target (not be starved)")
 }
 
 func TestNoPairingAvailableFlow(t *testing.T) {

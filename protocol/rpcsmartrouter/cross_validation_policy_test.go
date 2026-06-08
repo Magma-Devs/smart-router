@@ -223,6 +223,33 @@ func TestParseCrossValidationConfig(t *testing.T) {
 		require.True(t, applies)
 		assert.Equal(t, common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2, MinGroups: 2}, got)
 	})
+
+	t.Run("per-group-quorum knob parses and resolves onto params", func(t *testing.T) {
+		const yamlBody = "cross-validation:\n" +
+			"  policies:\n" +
+			"    - chain-id: ETH1\n" +
+			"      api-interface: jsonrpc\n" +
+			"      method: eth_getBalance\n" +
+			"      enabled: true\n" +
+			"      agreement-threshold: 2\n" +
+			"      max-participants: 4\n" +
+			"      min-groups: 2\n" +
+			"      per-group-quorum: true\n"
+
+		v := viper.New()
+		v.SetConfigType("yaml")
+		require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
+		cfg, err := ParseCrossValidationConfig(v)
+		require.NoError(t, err)
+		require.Len(t, cfg.Policies, 1)
+		require.True(t, cfg.Policies[0].PerGroupQuorum, "per-group-quorum must parse from config")
+
+		r, err := NewCrossValidationPolicyResolver(cfg)
+		require.NoError(t, err)
+		got, applies := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", common.CrossValidationParams{}, false)
+		require.True(t, applies)
+		assert.Equal(t, common.CrossValidationParams{MaxParticipants: 4, AgreementThreshold: 2, MinGroups: 2, PerGroupQuorum: true}, got)
+	})
 }
 
 // TestParseCrossValidationConfig_RejectsFractional covers P2: a fractional knob value must be a config
@@ -266,27 +293,78 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 	groupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(3)}, MinGroups: Bound{Floor: intPtr(3)}}}
 
 	t.Run("no policies -> ok", func(t *testing.T) {
-		require.NoError(t, validateCrossValidationStartup(mkResolver(t), realParser, "ETH1", "jsonrpc", 5))
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t), realParser, "ETH1", "jsonrpc", 5, nil))
 	})
 	t.Run("read policy, enough groups -> ok", func(t *testing.T) {
-		require.NoError(t, validateCrossValidationStartup(mkResolver(t, readPolicy), realParser, "ETH1", "jsonrpc", 2))
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, readPolicy), realParser, "ETH1", "jsonrpc", 2, nil))
 	})
 	t.Run("write policy -> rejected by stateful guard", func(t *testing.T) {
-		require.Error(t, validateCrossValidationStartup(mkResolver(t, writePolicy), realParser, "ETH1", "jsonrpc", 5))
+		require.Error(t, validateCrossValidationStartup(mkResolver(t, writePolicy), realParser, "ETH1", "jsonrpc", 5, nil))
 	})
 	t.Run("min-groups 3 but only 2 configured groups -> rejected", func(t *testing.T) {
-		require.Error(t, validateCrossValidationStartup(mkResolver(t, groupPolicy), realParser, "ETH1", "jsonrpc", 2))
+		require.Error(t, validateCrossValidationStartup(mkResolver(t, groupPolicy), realParser, "ETH1", "jsonrpc", 2, nil))
 	})
 	t.Run("min-groups 3 with 3 configured groups -> ok", func(t *testing.T) {
-		require.NoError(t, validateCrossValidationStartup(mkResolver(t, groupPolicy), realParser, "ETH1", "jsonrpc", 3))
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, groupPolicy), realParser, "ETH1", "jsonrpc", 3, nil))
 	})
 	t.Run("parser cannot classify stateful -> fail closed", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 		// MockChainParser implements chainlib.ChainParser but NOT ApiHasStatefulCategory.
 		mockParser := chainlib.NewMockChainParser(ctrl)
-		require.Error(t, validateCrossValidationStartup(mkResolver(t, readPolicy), mockParser, "ETH1", "jsonrpc", 5),
+		require.Error(t, validateCrossValidationStartup(mkResolver(t, readPolicy), mockParser, "ETH1", "jsonrpc", 5, nil),
 			"policies + a parser that cannot classify stateful methods must fail closed")
+	})
+
+	// Per-group-quorum capacity (2.3): needs MinGroups groups that EACH have >= AgreementThreshold providers.
+	perGroupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}, MinGroups: Bound{Floor: intPtr(2)}}}
+	t.Run("per-group: two groups with >= threshold providers -> ok", func(t *testing.T) {
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, perGroupPolicy), realParser, "ETH1", "jsonrpc", 2, map[string]int{"A": 3, "B": 2}))
+	})
+	t.Run("per-group: only one group has enough providers -> rejected", func(t *testing.T) {
+		require.Error(t, validateCrossValidationStartup(mkResolver(t, perGroupPolicy), realParser, "ETH1", "jsonrpc", 2, map[string]int{"A": 3, "B": 1}),
+			"group B with one provider cannot reach an internal quorum of 2")
+	})
+	t.Run("per-group: empty group sizes skips the capacity check (no false negative)", func(t *testing.T) {
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, perGroupPolicy), realParser, "ETH1", "jsonrpc", 2, nil))
+	})
+}
+
+// TestCrossValidationPolicyResolver_ResolvePerGroup covers that the per-group-quorum bool is resolved onto
+// the effective params, and is only activated when MinGroups > 1 survives clamping.
+func TestCrossValidationPolicyResolver_ResolvePerGroup(t *testing.T) {
+	mk := func(p CrossValidationPolicy) *CrossValidationPolicyResolver {
+		p.Enabled = true
+		r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: p}}})
+		require.NoError(t, err)
+		return r
+	}
+	noCaller := common.CrossValidationParams{}
+
+	t.Run("per-group with min-groups 2 -> PerGroupQuorum true", func(t *testing.T) {
+		r := mk(CrossValidationPolicy{PerGroupQuorum: true, MinGroups: Bound{Floor: intPtr(2)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}})
+		eff, ok := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", noCaller, false)
+		require.True(t, ok)
+		require.True(t, eff.PerGroupQuorum)
+		require.Equal(t, 2, eff.MinGroups)
+	})
+	t.Run("Resolve guard: per-group with min-groups 1 (bypassing Validate) -> PerGroupQuorum false", func(t *testing.T) {
+		// Validate rejects this config at construction (see TestCrossValidationPolicy_Validate), so build the
+		// resolver's internal map directly to prove the defense-in-depth guard in Resolve: per-group never
+		// activates without real group diversity even if a degenerate policy slips past validation.
+		r := &CrossValidationPolicyResolver{policies: map[string]CrossValidationPolicy{
+			policyKey("ETH1", "jsonrpc", "eth_getBalance"): {Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}},
+		}}
+		eff, ok := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", noCaller, false)
+		require.True(t, ok)
+		require.Equal(t, 1, eff.MinGroups)
+		require.False(t, eff.PerGroupQuorum, "per-group must not activate without real group diversity")
+	})
+	t.Run("no per-group knob -> PerGroupQuorum false", func(t *testing.T) {
+		r := mk(CrossValidationPolicy{MinGroups: Bound{Floor: intPtr(2)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}})
+		eff, ok := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", noCaller, false)
+		require.True(t, ok)
+		require.False(t, eff.PerGroupQuorum)
 	})
 }
 
@@ -313,6 +391,13 @@ func TestCrossValidationPolicy_Validate(t *testing.T) {
 		{"enabled: threshold floor 5 with participants floor 5 is fine", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(5)}, MaxParticipants: Bound{Floor: intPtr(5)}}, false},
 		// A disabled policy never resolves on its own, so an unsatisfiable no-caller shape is allowed.
 		{"disabled: unsatisfiable floors allowed (dormant)", CrossValidationPolicy{Enabled: false, AgreementThreshold: Bound{Floor: intPtr(5)}, MaxParticipants: Bound{Floor: intPtr(3)}}, false},
+		// Per-group quorum (2.3): needs min-groups > 1 and max-participants >= min-groups * agreement-threshold.
+		{"per-group with min-groups 1 (default) -> rejected", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}}, true},
+		{"per-group min-groups 3 threshold 2 needs max 6, have 5 -> rejected", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, MinGroups: Bound{Floor: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(5)}}, true},
+		{"per-group min-groups 3 threshold 2 with max 6 -> ok", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, MinGroups: Bound{Floor: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(6)}}, false},
+		{"per-group min-groups 2 threshold 2 with max 4 -> ok", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, MinGroups: Bound{Floor: intPtr(2)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}}, false},
+		// Disabled per-group with an infeasible shape stays dormant (allowed).
+		{"disabled per-group infeasible allowed", CrossValidationPolicy{Enabled: false, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(2)}}, false},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
