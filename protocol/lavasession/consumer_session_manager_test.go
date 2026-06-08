@@ -479,6 +479,36 @@ func TestOrderForGroupDiversity_PerGroupTarget(t *testing.T) {
 			seen[a] = true
 		}
 	})
+
+	t.Run("prefers groups that can reach the per-group target over higher-QoS but under-provisioned groups", func(t *testing.T) {
+		// 3 groups, uneven: A=3, B=2, C=1. C's single provider out-ranks B's by QoS. With minGroups=2,
+		// perGroupTarget=2, a QoS-first Phase 1 would open A and C (skipping B), giving 3A+1C — C can never
+		// reach threshold, so per-group quorum spuriously fails even though A+B is satisfiable. Phase 1 must
+		// instead prefer groups that can actually reach the target (A and B).
+		csm3 := CreateConsumerSessionManager()
+		csm3.pairing = map[string]*ConsumerSessionsWithProvider{
+			"a0": {PublicLavaAddress: "a0", GroupLabel: "A"},
+			"a1": {PublicLavaAddress: "a1", GroupLabel: "A"},
+			"a2": {PublicLavaAddress: "a2", GroupLabel: "A"},
+			"c0": {PublicLavaAddress: "c0", GroupLabel: "C"},
+			"b0": {PublicLavaAddress: "b0", GroupLabel: "B"},
+			"b1": {PublicLavaAddress: "b1", GroupLabel: "B"},
+		}
+		ranked3 := []string{"a0", "a1", "a2", "c0", "b0", "b1"} // C ranked ahead of B
+		got := csm3.orderForGroupDiversity(ranked3, 4, 2, 2)
+		require.Len(t, got, 4)
+		counts := map[string]int{}
+		for _, a := range got {
+			counts[csm3.pairing[a].GroupLabel]++
+		}
+		adequate := 0
+		for _, n := range counts {
+			if n >= 2 {
+				adequate++
+			}
+		}
+		require.GreaterOrEqual(t, adequate, 2, "two groups must each reach the per-group target; got %v", counts)
+	})
 }
 
 // TestGetSessions_PerGroupTargetEndToEnd is the end-to-end proof that PerGroupTarget threads from
