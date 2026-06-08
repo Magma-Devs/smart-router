@@ -53,6 +53,16 @@ func TestResponsesCrossValidation_GroupDiversity(t *testing.T) {
 			results: []common.RelayResult{mkResult("A", "g1"), mkResult("A", "g2"), mkResult("A", "g3")},
 			wantOK:  true,
 		},
+		{
+			// P1: a larger single-group hash (A:3) must NOT shadow a smaller diverse hash (B:2 across
+			// 2 groups). The diverse quorum B is valid and must be chosen.
+			name: "diverse lower-count quorum chosen over larger single-group", minGroups: 2, threshold: 2,
+			results: []common.RelayResult{
+				mkResult("A", "g1"), mkResult("A", "g1"), mkResult("A", "g1"),
+				mkResult("B", "g2"), mkResult("B", "g3"),
+			},
+			wantOK: true,
+		},
 	}
 
 	for i, tc := range cases {
@@ -61,15 +71,48 @@ func TestResponsesCrossValidation_GroupDiversity(t *testing.T) {
 				crossValidationParams: &common.CrossValidationParams{AgreementThreshold: tc.threshold, MaxParticipants: 5, MinGroups: tc.minGroups},
 				selection:             CrossValidation,
 			}
-			result, err := rp.responsesCrossValidation(tc.results, tc.threshold)
+			result, reason, err := rp.responsesCrossValidation(tc.results, tc.threshold)
 			if tc.wantOK {
 				require.NoError(t, err, "tc #%d, i #%d", i, i)
 				require.NotNil(t, result, "tc #%d, i #%d", i, i)
+				require.Empty(t, reason, "tc #%d, i #%d", i, i)
 			} else {
 				require.Error(t, err, "tc #%d, i #%d", i, i)
+				require.Equal(t, common.CrossValidationReasonDiversityUnmet, reason, "tc #%d, i #%d", i, i)
 			}
 		})
 	}
+}
+
+// TestResponsesCrossValidation_FailureReasons covers the distinguishable failure reasons surfaced to the
+// client: no-agreement (count threshold never reached) vs diversity-unmet (count met but too few groups).
+func TestResponsesCrossValidation_FailureReasons(t *testing.T) {
+	mkResult := func(data, group string) common.RelayResult {
+		return common.RelayResult{
+			Reply:        &pairingtypes.RelayReply{Data: []byte(data)},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "p-" + group, ProviderGroup: group},
+		}
+	}
+
+	t.Run("no hash reaches threshold -> no-agreement", func(t *testing.T) {
+		rp := &RelayProcessor{
+			crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 3, MaxParticipants: 5, MinGroups: 2},
+			selection:             CrossValidation,
+		}
+		_, reason, err := rp.responsesCrossValidation([]common.RelayResult{mkResult("A", "g1"), mkResult("B", "g2")}, 3)
+		require.Error(t, err)
+		require.Equal(t, common.CrossValidationReasonNoAgreement, reason)
+	})
+
+	t.Run("count met but one group -> diversity-unmet", func(t *testing.T) {
+		rp := &RelayProcessor{
+			crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5, MinGroups: 2},
+			selection:             CrossValidation,
+		}
+		_, reason, err := rp.responsesCrossValidation([]common.RelayResult{mkResult("A", "g1"), mkResult("A", "g1")}, 2)
+		require.Error(t, err)
+		require.Equal(t, common.CrossValidationReasonDiversityUnmet, reason)
+	})
 }
 
 // TestCrossValidationQuorumReached_Diversity covers the Phase 1.2b diversity-aware early-exit predicate:

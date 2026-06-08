@@ -48,9 +48,18 @@ const (
 	CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME  = "lava-cross-validation-all-providers"
 	CROSS_VALIDATION_STATUS_HEADER_NAME         = "lava-cross-validation-status"
 	CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER  = "lava-cross-validation-agreeing-providers"
+	CROSS_VALIDATION_FAILURE_REASON_HEADER      = "lava-cross-validation-failure-reason"
 	// send http request to /lava/health to see if the process is up - (ret code 200)
 	DEFAULT_HEALTH_PATH                                       = "/lava/health"
 	MAXIMUM_ALLOWED_TIMEOUT_EXTEND_MULTIPLIER_BY_THE_CONSUMER = 4
+)
+
+// Cross-validation failure reasons, surfaced via CROSS_VALIDATION_FAILURE_REASON_HEADER so clients and
+// metrics can distinguish why a quorum was not reached.
+const (
+	CrossValidationReasonInsufficientResponses = "insufficient-responses" // fewer successful responses than the agreement threshold
+	CrossValidationReasonNoAgreement           = "no-agreement"           // enough responses, but none agreed up to the threshold
+	CrossValidationReasonDiversityUnmet        = "diversity-unmet"        // a quorum agreed, but did not span the required number of groups
 )
 
 var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
@@ -385,6 +394,9 @@ type RelayResult struct {
 	IsNodeError         bool
 	ResponseHash        [32]byte // cached SHA256 hash of Reply.Data for cross-validation comparison, zero-value if not computed
 	IsUnsupportedMethod bool     // Indicates this node error is an unsupported method (zero CU, cached)
+	// CrossValidationFailureReason distinguishes WHY cross-validation failed, surfaced to the client via
+	// the lava-cross-validation-failure-reason header. One of CrossValidationReason* ("" on success).
+	CrossValidationFailureReason string
 	// IsNonRetryable is the umbrella flag the retry state machine consults:
 	// it's true whenever the matched registry LavaError has Retryable=false,
 	// which covers unsupported method, execution reverted, out of gas,

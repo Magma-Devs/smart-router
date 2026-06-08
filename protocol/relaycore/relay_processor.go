@@ -557,9 +557,9 @@ func (rp *RelayProcessor) WaitForResults(ctx context.Context) error {
 	}
 }
 
-func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult, crossValidationSize int) (returnedResult *common.RelayResult, processingError error) {
+func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult, crossValidationSize int) (returnedResult *common.RelayResult, failureReason string, processingError error) {
 	if crossValidationSize <= 0 {
-		return nil, errors.New("crossValidationSize must be greater than zero")
+		return nil, "", errors.New("crossValidationSize must be greater than zero")
 	}
 
 	// Log quorum validation start
@@ -635,36 +635,58 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 		}
 	}
 
-	var maxCount int
-	var mostCommonResult common.RelayResult
-	var consensusHash [32]byte
-	var consensusGroups map[string]struct{} // distinct groups behind the winning response (for the diversity gate)
+	minGroups := rp.getMinGroups()
 
-	// Log all response groups
+	var (
+		mostCommonResult common.RelayResult
+		consensusHash    [32]byte
+		consensusGroups  map[string]struct{}
+		winnerCount      int
+		haveWinner       bool
+		maxCount         int // highest agreement count across ALL candidates, for the failure-reason split
+	)
+
 	utils.LavaFormatInfo("🔍 [Quorum] Response groups summary",
 		utils.LogAttr("GUID", rp.guid),
 		utils.LogAttr("uniqueResponseGroups", len(countMap)),
 		utils.LogAttr("nilReplies", nilReplies),
+		utils.LogAttr("minGroups", minGroups),
 	)
 
+	// Select the winner: the highest-count response hash that meets BOTH the agreement threshold AND the
+	// group-diversity requirement. A higher-count hash that fails diversity must NOT shadow a lower-count
+	// hash that satisfies both — otherwise a valid diverse quorum is discarded (P1). maxCount tracks the
+	// best count regardless of diversity, only to distinguish "no agreement" from "diversity unmet".
 	for hash, count := range countMap {
 		utils.LavaFormatDebug("🔍 [Quorum] Response group details",
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("responseHashHex", fmt.Sprintf("%x", hash[:8])),
 			utils.LogAttr("matchingProviders", count.count),
+			utils.LogAttr("distinctGroups", len(count.groups)),
 			utils.LogAttr("provider", count.result.ProviderInfo.ProviderAddress),
 		)
-
 		if count.count > maxCount {
 			maxCount = count.count
-			mostCommonResult = count.result
-			consensusHash = hash
-			consensusGroups = count.groups
+		}
+		if count.count >= crossValidationSize && len(count.groups) >= minGroups {
+			if !haveWinner || count.count > winnerCount {
+				haveWinner = true
+				winnerCount = count.count
+				mostCommonResult = count.result
+				consensusHash = hash
+				consensusGroups = count.groups
+			}
 		}
 	}
 
-	if nilReplies >= crossValidationSize && maxCount < crossValidationSize {
+	// Nil replies are a fallback consensus, preferred only when no real response hash formed a diverse
+	// quorum (mirrors the prior real-over-nil preference).
+	if nilReplies > maxCount {
 		maxCount = nilReplies
+	}
+	if !haveWinner && nilReplies >= crossValidationSize && len(nilReplyGroups) >= minGroups {
+		haveWinner = true
+		winnerCount = nilReplies
 		mostCommonResult = results[nilReplyIdx]
 		consensusGroups = nilReplyGroups
 		utils.LavaFormatInfo("🔍 [Quorum] Nil replies reached quorum",
@@ -674,40 +696,37 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 		)
 	}
 
-	if maxCount < crossValidationSize {
-		// Cross-validation failed: agreement threshold not reached
-		// Same behavior for both deterministic and non-deterministic APIs
-		if rp.selection == CrossValidation {
-			return nil, utils.LavaFormatInfo("cross-validation failed: agreement threshold not reached",
+	if !haveWinner {
+		if maxCount < crossValidationSize {
+			// No response hash reached the agreement threshold at all.
+			if rp.selection == CrossValidation {
+				return nil, common.CrossValidationReasonNoAgreement, utils.LavaFormatInfo("cross-validation failed: agreement threshold not reached",
+					utils.LogAttr("nilReplies", nilReplies),
+					utils.LogAttr("results", len(results)),
+					utils.LogAttr("maxMatchingResults", maxCount),
+					utils.LogAttr("agreementThreshold", crossValidationSize),
+					utils.LogAttr("maxParticipants", rp.getMaxParticipants()))
+			}
+			// Stateless/Stateful modes - return original error message
+			return nil, common.CrossValidationReasonNoAgreement, utils.LavaFormatInfo("❌ [Quorum] FAILED - Majority count is less than required quorum size",
+				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("nilReplies", nilReplies),
-				utils.LogAttr("results", len(results)),
-				utils.LogAttr("maxMatchingResults", maxCount),
-				utils.LogAttr("agreementThreshold", crossValidationSize),
-				utils.LogAttr("maxParticipants", rp.getMaxParticipants()))
+				utils.LogAttr("totalResults", len(results)),
+				utils.LogAttr("maxCount", maxCount),
+				utils.LogAttr("crossValidationSize", crossValidationSize))
 		}
-		// Stateless/Stateful modes - return original error message
-		return nil, utils.LavaFormatInfo("❌ [Quorum] FAILED - Majority count is less than required quorum size",
+		// Some hash reached the agreement threshold, but none spanned MinGroups distinct groups (1.2c).
+		// A quorum within too few groups is a failure, not a success (a single-group outage/compromise
+		// must not satisfy quorum on its own).
+		return nil, common.CrossValidationReasonDiversityUnmet, utils.LavaFormatInfo("cross-validation failed: group-diversity requirement not met",
 			utils.LogAttr("GUID", rp.guid),
-			utils.LogAttr("nilReplies", nilReplies),
-			utils.LogAttr("totalResults", len(results)),
-			utils.LogAttr("maxCount", maxCount),
-			utils.LogAttr("crossValidationSize", crossValidationSize))
-	}
-
-	// Group-diversity gate (1.2c): the count threshold is met, but the agreeing providers must also span
-	// at least MinGroups distinct groups. A quorum reached within too few groups is treated as a failure,
-	// not a success (a single-group outage/compromise must not satisfy quorum on its own). MinGroups <= 1
-	// disables this gate, keeping the pre-1.2 path byte-identical.
-	if minGroups := rp.getMinGroups(); minGroups > 1 && len(consensusGroups) < minGroups {
-		return nil, utils.LavaFormatInfo("cross-validation failed: group-diversity requirement not met",
-			utils.LogAttr("GUID", rp.guid),
-			utils.LogAttr("agreementCount", maxCount),
-			utils.LogAttr("agreeingGroups", len(consensusGroups)),
+			utils.LogAttr("bestAgreementCount", maxCount),
 			utils.LogAttr("minGroups", minGroups),
 			utils.LogAttr("agreementThreshold", crossValidationSize))
 	}
 
-	mostCommonResult.CrossValidation = maxCount
+	mostCommonResult.CrossValidation = winnerCount
+	maxCount = winnerCount // keep the success-log fields below referring to the winning quorum
 
 	// Log successful quorum consensus
 	utils.LavaFormatInfo("✅ [Quorum] CONSENSUS REACHED",
@@ -718,10 +737,11 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 		utils.LogAttr("requiredQuorumSize", crossValidationSize),
 		utils.LogAttr("totalResults", len(results)),
 		utils.LogAttr("uniqueResponseGroups", len(countMap)),
+		utils.LogAttr("consensusDistinctGroups", len(consensusGroups)),
 		utils.LogAttr("latestBlock", mostCommonResult.Reply.LatestBlock),
 	)
 
-	return &mostCommonResult, nil
+	return &mostCommonResult, "", nil
 }
 
 // this function returns the results according to the defined strategy
@@ -788,7 +808,7 @@ func (rp *RelayProcessor) processCrossValidationResult(
 ) (*common.RelayResult, error) {
 	// Check if we have enough successful responses
 	if successResultsCount >= requiredCrossValidationSize {
-		result, err := rp.responsesCrossValidation(successResults, requiredCrossValidationSize)
+		result, failureReason, err := rp.responsesCrossValidation(successResults, requiredCrossValidationSize)
 		if err == nil {
 			// Successes formed a quorum
 			utils.LavaFormatInfo("✅ [ProcessingResult] Quorum formed with success responses",
@@ -800,27 +820,30 @@ func (rp *RelayProcessor) processCrossValidationResult(
 			)
 			return result, nil
 		}
-		// Successful responses exist but don't agree
-		// Return a minimal result so headers can be attached
-		return &common.RelayResult{StatusCode: http.StatusInternalServerError}, utils.LavaFormatError("cross-validation failed: successful responses did not reach agreement",
-			err,
-			utils.LogAttr("GUID", rp.guid),
-			utils.LogAttr("successCount", successResultsCount),
-			utils.LogAttr("agreementThreshold", requiredCrossValidationSize),
-			utils.LogAttr("nodeErrorCount", nodeErrorCount),
-		)
+		// Successful responses exist but did not form a quorum (either no agreement or insufficient group
+		// diversity). Carry the specific reason on the minimal result so the client header can expose it.
+		return &common.RelayResult{StatusCode: http.StatusInternalServerError, CrossValidationFailureReason: failureReason},
+			utils.LavaFormatError("cross-validation failed: successful responses did not reach a diverse quorum",
+				err,
+				utils.LogAttr("GUID", rp.guid),
+				utils.LogAttr("failureReason", failureReason),
+				utils.LogAttr("successCount", successResultsCount),
+				utils.LogAttr("agreementThreshold", requiredCrossValidationSize),
+				utils.LogAttr("nodeErrorCount", nodeErrorCount),
+			)
 	}
 
 	// Not enough successful responses
 	// Return a minimal result so headers can be attached
-	return &common.RelayResult{StatusCode: http.StatusInternalServerError}, utils.LavaFormatError("cross-validation failed: insufficient successful responses",
-		nil,
-		utils.LogAttr("GUID", rp.guid),
-		utils.LogAttr("successCount", successResultsCount),
-		utils.LogAttr("agreementThreshold", requiredCrossValidationSize),
-		utils.LogAttr("nodeErrorCount", nodeErrorCount),
-		utils.LogAttr("maxParticipants", rp.getMaxParticipants()),
-	)
+	return &common.RelayResult{StatusCode: http.StatusInternalServerError, CrossValidationFailureReason: common.CrossValidationReasonInsufficientResponses},
+		utils.LavaFormatError("cross-validation failed: insufficient successful responses",
+			nil,
+			utils.LogAttr("GUID", rp.guid),
+			utils.LogAttr("successCount", successResultsCount),
+			utils.LogAttr("agreementThreshold", requiredCrossValidationSize),
+			utils.LogAttr("nodeErrorCount", nodeErrorCount),
+			utils.LogAttr("maxParticipants", rp.getMaxParticipants()),
+		)
 }
 
 // processStatefulResult handles result processing for Stateful mode.
