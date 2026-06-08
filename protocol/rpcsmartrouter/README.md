@@ -182,23 +182,32 @@ providers/groups), so the client should fall back:
 There is **no separate "outlier detection" step** for responses — an outlier is simply *a
 successful response whose `SHA256(reply.data)` differs from the reached consensus hash*. The
 quorum computation buckets every response by hash and the largest qualifying bucket wins; an
-outlier forms its own bucket-of-one and **loses the vote**. Net effect: the outlier never
-becomes the returned answer and cannot pull the majority below threshold, but it is **not
-removed by a detect-then-filter pass** — it is minority-loses, not a pre-filter.
+outlier forms its own bucket-of-one and **loses the vote**. The outlier never becomes the
+returned answer, and it is **not removed by a detect-then-filter pass** — it is minority-loses,
+not a pre-filter.
+
+Whether an outlier blocks the request depends on the policy: it is excluded from the result
+**as long as the agreeing providers still meet `agreement-threshold`**. Under a strict policy
+like 3-of-3 (`agreement-threshold == max-participants`), a single divergent provider drops the
+agreeing count below the threshold, so the request correctly **fails** with a quorum-failure
+reason rather than returning a quorum that excludes the outlier.
 
 An outlier provider is **not penalized, blocked, or deprioritized** by cross-validation (QoS
-scoring is separate). It is recorded for observability only:
+scoring is separate). It is recorded for observability only, and *only* when a quorum was
+actually reached on a deterministic method:
 
 - `lava_rpcsmartrouter_cross_validation_mismatch_total{spec, apiInterface, method, group, finality}`
-  is incremented for each successful content outlier — *only* after a quorum was reached, and
-  *only* on deterministic methods (non-deterministic methods legitimately differ, and quorum
-  failures emit a failure-reason instead, not a per-provider outlier). The `finality` label
-  (`finalized` / `not_finalized` / `unknown`) lets alerting prioritize post-finality divergence
-  over benign pre-finality propagation lag.
-- The dissenting provider also appears in the `lava-cross-validation-disagreeing-providers`
-  header.
+  is incremented **once per distinct outlier group** for a successful deterministic quorum — not
+  once per provider. (Non-deterministic methods legitimately differ and are not counted; a quorum
+  *failure* emits a `lava-cross-validation-failure-reason` instead, never this metric.) The
+  `finality` label (`finalized` / `not_finalized` / `unknown`) lets alerting prioritize
+  post-finality divergence over benign pre-finality propagation lag.
+- Provider-level detail is available separately: each dissenting provider is emitted in an info
+  log (`cross-validation outlier detected`, with provider/group/finality/hashes) and listed in the
+  `lava-cross-validation-disagreeing-providers` response header.
 
-A single divergent provider therefore does **not** block a quorum — it is observed and outvoted.
+So a single divergent provider is observed and outvoted **when enough providers still agree**;
+under a strict (unanimous) policy it instead causes a quorum failure.
 
 ## Usage
 
