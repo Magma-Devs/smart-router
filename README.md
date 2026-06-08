@@ -148,6 +148,8 @@ The hot path for a single request:
 4. **Relay + failover** — the request is sent to the chosen provider. On failure (timeout, malformed response, certain status codes), the retry state machine picks an alternate provider and retries within a configurable budget.
 5. **Response** — returned to the client with metadata headers (`Smart-Router-Version`, `Lava-Provider-Address`, retry counts, etc.) annotating which provider served the response. Prometheus metrics are emitted in parallel.
 
+**Cross-validation (optional).** For read methods that warrant extra assurance, the relay step can instead fan out to several providers in parallel and only return an answer once a quorum agree on an identical response — optionally requiring the quorum to span multiple distinct provider groups (or each group to reach its own quorum). It defends against a single provider returning a wrong-but-well-formed answer, and surfaces dissent via response headers and a bounded mismatch metric. See [`protocol/rpcsmartrouter/README.md`](protocol/rpcsmartrouter/README.md#cross-validation) for configuration.
+
 ### What it's not
 
 - **Not a load balancer.** Generic L4/L7 balancers don't speak RPC. They can't distinguish a transient timeout (retry against another provider), "block not yet produced" (retrying anywhere won't help), and a malformed JSON-RPC envelope (return the error, don't retry). They can't cache by method+params, and they can't back off a provider that's silently serving stale block data while still returning `200 OK`. Smart router does all of these.

@@ -172,6 +172,9 @@ with read/write.
 | `lava_rpcsmartrouter_cross_validation_failed_total` | Counter | `spec`, `apiInterface`, `method` | Requests that failed to reach consensus. |
 | `lava_rpcsmartrouter_cross_validation_provider_agreements_total` | Counter | `spec`, `apiInterface`, `method`, `provider_address` | Times a provider agreed with consensus. |
 | `lava_rpcsmartrouter_cross_validation_provider_disagreements_total` | Counter | `spec`, `apiInterface`, `method`, `provider_address` | Times a provider disagreed with consensus. |
+| `lava_rpcsmartrouter_cross_validation_mismatch_total` | Counter | `spec`, `apiInterface`, `method`, `group`, `finality` | Successful **content outliers** after a quorum was reached on a deterministic method — a response whose `SHA256(reply.data)` diverged from the consensus. Excludes quorum failures and node/protocol errors. `finality` is `finalized` / `not_finalized` / `unknown`; post-finality divergence is the high-signal alert. Bounded cardinality (keyed by operator-defined `group`, not provider address). |
+
+> The `_mismatch_total` series is the alerting surface for [outlier providers](../protocol/rpcsmartrouter/README.md#outlier-behavior): a single divergent provider does not block a quorum, it is outvoted and recorded here.
 
 #### Cache
 
