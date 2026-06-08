@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -354,6 +356,113 @@ func TestAppendHeadersToRelayResult_FailureReasonHeader(t *testing.T) {
 	require.Equal(t, "failed", statusHeader.Value)
 	require.NotNil(t, reasonHeader, "failure-reason header must be present on cross-validation failure")
 	require.Equal(t, common.CrossValidationReasonDiversityUnmet, reasonHeader.Value)
+}
+
+// TestAppendHeadersToRelayResult_MismatchMetric is the production-glue test for Section 1.3: a
+// deterministic SUCCESSFUL content outlier (after quorum) increments cross_validation_mismatch_total for
+// its group, while node/protocol errors and quorum failures do not.
+func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
+	ctx := context.Background()
+	// Empty NetworkAddress => metrics registered on the default registry, no HTTP server started.
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
+
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	newServer := func() *RPCSmartRouterServer {
+		s := &RPCSmartRouterServer{
+			smartRouterEndpointMetrics: mm,
+			listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			chainParser:                chainParser,
+		}
+		s.latestBlockHeight.Store(1_000_000) // so finality resolves (not "unknown")
+		return s
+	}
+
+	hashA := sha256.Sum256([]byte("A"))
+	hashB := sha256.Sum256([]byte("B"))
+	deterministicAPI := &spectypes.Api{Name: "test", Category: spectypes.SpecCategory{Deterministic: true}}
+	mkReply := func() *pairingtypes.RelayReply { return &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}} }
+
+	// mismatchCount sums cross_validation_mismatch_total over finality labels for one method+group.
+	mismatchCount := func(t *testing.T, method, group string) float64 {
+		mfs, err := prometheus.DefaultGatherer.Gather()
+		require.NoError(t, err)
+		var total float64
+		for _, mf := range mfs {
+			if mf.GetName() != "lava_rpcsmartrouter_cross_validation_mismatch_total" {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				lm := map[string]string{}
+				for _, lp := range m.GetLabel() {
+					lm[lp.GetName()] = lp.GetValue()
+				}
+				if lm["method"] == method && lm["group"] == group {
+					total += m.GetCounter().GetValue()
+				}
+			}
+		}
+		return total
+	}
+
+	t.Run("deterministic successful outlier increments for its group", func(t *testing.T) {
+		method := "cv_mismatch_outlier"
+		rp := &MockRelayProcessorForHeaders{
+			crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5},
+			selection:                       relaycore.CrossValidation,
+			crossValidationQueriedProviders: []string{"p1", "p2", "p3"},
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1", ProviderGroup: "g1"}, ResponseHash: hashA},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "p2", ProviderGroup: "g2"}, ResponseHash: hashA},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "p3", ProviderGroup: "g3"}, ResponseHash: hashB}, // outlier
+			},
+		}
+		relayResult := &common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1"}, CrossValidation: 2, ResponseHash: hashA, Reply: mkReply()}
+		newServer().appendHeadersToRelayResult(ctx, relayResult, 0, rp, &MockProtocolMessage{api: deterministicAPI, requestedBlock: 100}, method, nil, true)
+		require.Equal(t, float64(1), mismatchCount(t, method, "g3"), "outlier group g3 increments once")
+		require.Equal(t, float64(0), mismatchCount(t, method, "g1"), "agreeing group g1 does not increment")
+	})
+
+	t.Run("node error does not increment", func(t *testing.T) {
+		method := "cv_mismatch_nodeerr"
+		rp := &MockRelayProcessorForHeaders{
+			crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5},
+			selection:             relaycore.CrossValidation,
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1", ProviderGroup: "g1"}, ResponseHash: hashA},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "p2", ProviderGroup: "g2"}, ResponseHash: hashA},
+			},
+			nodeErrors: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "p3", ProviderGroup: "g3"}},
+			},
+		}
+		relayResult := &common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1"}, CrossValidation: 2, ResponseHash: hashA, Reply: mkReply()}
+		newServer().appendHeadersToRelayResult(ctx, relayResult, 0, rp, &MockProtocolMessage{api: deterministicAPI, requestedBlock: 100}, method, nil, true)
+		require.Equal(t, float64(0), mismatchCount(t, method, "g3"), "node error is not a content outlier")
+	})
+
+	t.Run("quorum failure does not increment", func(t *testing.T) {
+		method := "cv_mismatch_failure"
+		rp := &MockRelayProcessorForHeaders{
+			crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 3, MaxParticipants: 5},
+			selection:             relaycore.CrossValidation,
+			successResults: []common.RelayResult{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1", ProviderGroup: "g1"}, ResponseHash: hashA},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "p2", ProviderGroup: "g2"}, ResponseHash: hashB},
+			},
+		}
+		// CrossValidation 1 < threshold 3 => failed
+		relayResult := &common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1"}, CrossValidation: 1, ResponseHash: hashA, Reply: mkReply()}
+		newServer().appendHeadersToRelayResult(ctx, relayResult, 0, rp, &MockProtocolMessage{api: deterministicAPI, requestedBlock: 100}, method, nil, false)
+		require.Equal(t, float64(0), mismatchCount(t, method, "g1"), "quorum failure does not increment mismatch")
+		require.Equal(t, float64(0), mismatchCount(t, method, "g2"), "quorum failure does not increment mismatch")
+	})
 }
 
 // TestAppendHeadersToRelayResult_GroupLabelsInertWithoutPolicy is the Phase 0.2

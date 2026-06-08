@@ -343,10 +343,12 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, crossValidationProviderLabels)
 	// Bounded alerting surface: keyed by group (operator-defined, low cardinality) and finality
 	// (finalized/not_finalized/unknown) instead of provider address. Post-finality divergence is the
-	// high-signal alert. Only emitted for deterministic methods (see SetCrossValidationMismatchMetric).
+	// high-signal alert. Records only SUCCESSFUL content outliers after a quorum was reached, on
+	// deterministic methods — NOT quorum failures or node/protocol errors (see
+	// SetCrossValidationMismatchMetric).
 	crossValidationMismatchTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "lava_rpcsmartrouter_cross_validation_mismatch_total",
-		Help: "Total cross-validation mismatches (quorum failure or dissent) by provider group and finality.",
+		Help: "Successful cross-validation content outliers (a successful response that disagreed with a reached consensus on a deterministic method), by provider group and finality. Excludes quorum failures and node/protocol errors.",
 	}, []string{"spec", "apiInterface", "method", "group", "finality"})
 
 	// =========================================================================
@@ -1132,10 +1134,12 @@ func (m *SmartRouterMetricsManager) SetCrossValidationMetric(chainId, apiInterfa
 	}
 }
 
-// SetCrossValidationMismatchMetric records one cross-validation mismatch (a quorum failure, or a quorum
-// reached with dissent) for a dissenting provider group, labeled by finality
-// (finalized/not_finalized/unknown). This is the bounded alerting surface: group is operator-defined and
-// finality is tri-valued, so it stays low-cardinality. Callers must only invoke it for deterministic
+// SetCrossValidationMismatchMetric records one SUCCESSFUL cross-validation content outlier — a successful
+// response whose content disagreed with a reached consensus — for that provider's group, labeled by
+// finality (finalized/not_finalized/unknown). It is NOT incremented for quorum failures, no-agreement,
+// diversity-unmet, or node/protocol errors (those belong to the structured failure signal). This is the
+// bounded alerting surface: group is operator-defined and finality is tri-valued, so it stays
+// low-cardinality. Callers must only invoke it for deterministic
 // methods — non-deterministic methods legitimately return different responses and would be noise.
 func (m *SmartRouterMetricsManager) SetCrossValidationMismatchMetric(chainId, apiInterface, method, group, finality string) {
 	if m == nil {
