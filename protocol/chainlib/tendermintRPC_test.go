@@ -405,7 +405,7 @@ func startTestTendermintListener(t *testing.T, ctx context.Context) (*Tendermint
 		ApiInterface:    "tendermintrpc",
 		HealthCheckPath: "/lava/health",
 	}
-	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil, nil)
+	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	listener := NewTendermintRpcChainListener(ctx, endpoint, nil, nil, logger, nil, nil)
 

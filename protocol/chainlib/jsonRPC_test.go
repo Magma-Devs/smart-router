@@ -703,7 +703,7 @@ func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler boo
 		ApiInterface:    "jsonrpc",
 		HealthCheckPath: "/lava/health",
 	}
-	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil, nil)
+	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	listener := NewJrpcChainListener(ctx, endpoint, nil, nil, logger, nil, nil)
 
