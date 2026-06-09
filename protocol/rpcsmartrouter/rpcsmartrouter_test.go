@@ -63,7 +63,7 @@ func createTestSessionManager(chainID, apiInterface string) (*lavasession.Consum
 		NetworkAddress: "127.0.0.1:3333",
 	}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
-	sm := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	sm := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
 	return sm, rpcEndpoint
 }
 
@@ -110,7 +110,7 @@ func TestUpdateEpoch_FreshSessions(t *testing.T) {
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
 
 	chainKey := rpcEndpoint.Key()
-	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
 	rpsr.sessionManagers[chainKey] = sessionManager
 
 	// 3. Create initial provider session
@@ -172,7 +172,7 @@ func TestUpdateEpoch_ResetsDisabledEndpoints(t *testing.T) {
 	}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
 	chainKey := rpcEndpoint.Key()
-	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
 	rpsr.sessionManagers[chainKey] = sessionManager
 
 	// Create endpoints that are disabled — simulating 5 consecutive failures.
@@ -253,7 +253,7 @@ func TestUpdateEpoch_ResetsHealthMetric(t *testing.T) {
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, testChainID)
 	chainKey := rpcEndpoint.Key()
 	rpsr.sessionManagers[chainKey] = lavasession.NewConsumerSessionManager(
-		rpcEndpoint, optimizer, nil, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage(),
+		rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage(),
 	)
 
 	// Wire a real SmartRouterMetricsManager into a minimal RPCSmartRouterServer so
@@ -349,7 +349,7 @@ func TestUpdateEpoch_NilListenEndpointDoesNotPanic(t *testing.T) {
 		rpcServers:             make(map[string]*RPCSmartRouterServer),
 	}
 	rpsr.sessionManagers[chainKey] = lavasession.NewConsumerSessionManager(
-		rpcEndpoint, optimizer, nil, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage(),
+		rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage(),
 	)
 
 	// Server registered with nil listenEndpoint — the scenario the guard protects against.
@@ -862,7 +862,7 @@ func newReverifyTestRig(t *testing.T, chainID, networkAddress string) *reverifyT
 		reverifyInputs:         make(map[string]*chainReverifyInputs),
 	}
 	rpsr.sessionManagers[chainKey] = lavasession.NewConsumerSessionManager(
-		rpcEndpoint, optimizer, nil, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage(),
+		rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage(),
 	)
 	return &reverifyTestRig{rpsr: rpsr, chainKey: chainKey, endpoint: rpcEndpoint}
 }

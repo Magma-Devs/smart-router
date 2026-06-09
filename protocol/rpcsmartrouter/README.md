@@ -73,6 +73,23 @@ lavap rpcsmartrouter config.yml --geolocation 1 --use-static-spec specs/
 --concurrent-providers 3             # Max parallel provider attempts
 ```
 
+### Usage telemetry (OTel)
+
+Off by default. When enabled, the smart router emits two event types as
+OTLP/HTTP logs to a host-local OpenTelemetry collector — `relay_usage` (one
+per relay) and `optimizer_qos` (one per (chain, provider) per sampling tick).
+The collector fans out to whatever backend(s) you choose (S3 / Kafka /
+ClickHouse) via exporter YAML — no smart-router code change to swap
+destinations. With `--usage-otel-enabled=false` the relay/QoS paths pay one
+inlinable no-op call and nothing else.
+
+```bash
+--usage-otel-enabled                       # master switch (both event types); off by default
+--usage-otel-endpoint "127.0.0.1:4318"     # OTLP/HTTP collector endpoint
+--usage-otel-service-name "lava-rpcsmartrouter"
+--usage-otel-service-instance-id "$HOSTNAME-eth"  # default: hostname-pid
+```
+
 ## Architecture
 
 ```

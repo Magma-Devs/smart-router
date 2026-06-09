@@ -91,9 +91,8 @@ const (
 	ProviderOptimizerStakeWeight        = "provider-optimizer-stake-weight"         // weight for stake (default: 0.1)
 	ProviderOptimizerMinSelectionChance = "provider-optimizer-min-selection-chance" // minimum selection probability for any provider (default: 0.01)
 
-	// optimizer qos server flags
-	OptimizerQosServerAddressFlag          = "optimizer-qos-server-address"    // address of the optimizer qos server to send the qos reports
-	OptimizerQosServerPushIntervalFlag     = "optimizer-qos-push-interval"     // interval to push the qos reports to the optimizer qos server
+	// optimizer qos sampling cadence — drives the in-memory /metrics
+	// selection-score cache and the OTel optimizer_qos emit.
 	OptimizerQosServerSamplingIntervalFlag = "optimizer-qos-sampling-interval" // interval to sample the qos reports
 	// websocket flags
 	RateLimitWebSocketFlag                       = "rate-limit-websocket-requests-per-connection"

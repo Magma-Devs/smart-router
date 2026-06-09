@@ -55,7 +55,7 @@ func TestRebuildPairingFromConfig_ReadmitsDemotedProvider(t *testing.T) {
 	rpsr := &RPCSmartRouter{
 		sessionManagers: map[string]*lavasession.ConsumerSessionManager{
 			chainKey: lavasession.NewConsumerSessionManager(
-				rpcEndpoint, optimizer, nil, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage()),
+				rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage()),
 		},
 		providerSessions:       make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider),
 		backupProviderSessions: make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider),
