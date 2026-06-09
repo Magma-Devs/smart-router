@@ -528,6 +528,74 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 	})
 }
 
+// cvRequestCounter sums a named cross-validation counter over its `method` label across the default
+// registry (which accumulates across tests, so callers compare a before/after delta).
+func cvRequestCounter(t *testing.T, name, method string) float64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	var total float64
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "method" && lp.GetValue() == method {
+					total += m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return total
+}
+
+// TestCrossValidationFailFast_EmitsRequestFailedMetrics covers CV-1: a request-time structural fail-fast
+// returns from SendParsedRelay BEFORE appendHeadersToRelayResult, where requests/failed are normally
+// emitted. crossValidationFailFast must emit them itself — once each, never success — so structural
+// failures (insufficient-capacity / insufficient-groups) are counted without double-counting quorum-time
+// failures (the two return paths are mutually exclusive).
+func TestCrossValidationFailFast_EmitsRequestFailedMetrics(t *testing.T) {
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
+	logs, err := metrics.NewRPCConsumerLogs(mm, nil, nil, nil)
+	require.NoError(t, err)
+	srv := &RPCSmartRouterServer{
+		rpcSmartRouterLogs: logs,
+		listenEndpoint:     &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+	}
+	const method = "cv_failfast_metric"
+	pm := &MockProtocolMessage{api: &spectypes.Api{Name: method}}
+
+	reqName := "lava_rpcsmartrouter_cross_validation_requests_total"
+	failName := "lava_rpcsmartrouter_cross_validation_failed_total"
+	successName := "lava_rpcsmartrouter_cross_validation_success_total"
+	reqBefore := cvRequestCounter(t, reqName, method)
+	failBefore := cvRequestCounter(t, failName, method)
+	successBefore := cvRequestCounter(t, successName, method)
+
+	res := srv.crossValidationFailFast(common.CrossValidationReasonInsufficientGroups, pm)
+
+	require.Equal(t, reqBefore+1, cvRequestCounter(t, reqName, method), "requests_total must increment once")
+	require.Equal(t, failBefore+1, cvRequestCounter(t, failName, method), "failed_total must increment once")
+	require.Equal(t, successBefore, cvRequestCounter(t, successName, method), "success_total must not move")
+
+	// The returned minimal result still carries the structured status + failure-reason headers.
+	require.NotNil(t, res.Reply)
+	headers := map[string]string{}
+	for _, m := range res.Reply.Metadata {
+		headers[m.Name] = m.Value
+	}
+	require.Equal(t, "failed", headers[common.CROSS_VALIDATION_STATUS_HEADER_NAME])
+	require.Equal(t, common.CrossValidationReasonInsufficientGroups, headers[common.CROSS_VALIDATION_FAILURE_REASON_HEADER])
+
+	// A second fail-fast increments again (no accidental once-only guard) — proves per-request counting.
+	res2 := srv.crossValidationFailFast(common.CrossValidationReasonInsufficientCapacity, pm)
+	require.NotNil(t, res2)
+	require.Equal(t, reqBefore+2, cvRequestCounter(t, reqName, method))
+	require.Equal(t, failBefore+2, cvRequestCounter(t, failName, method))
+}
+
 // TestAppendHeadersToRelayResult_GroupLabelsInertWithoutPolicy is the Phase 0.2
 // backwards-compatibility lock for the cross-validation provider-group spine
 // (UC-7). The spine (Phase 0.1) carries a provider GroupLabel through to
