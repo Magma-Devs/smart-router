@@ -167,9 +167,9 @@ with read/write.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `lava_rpcsmartrouter_cross_validation_requests_total` | Counter | `spec`, `apiInterface`, `method` | Cross-validated requests. |
+| `lava_rpcsmartrouter_cross_validation_requests_total` | Counter | `spec`, `apiInterface`, `method` | Cross-validated requests. Includes request-time structural fail-fasts (`insufficient-capacity` / `insufficient-groups`) that abort **before fanning out to any provider**, so this is *not* the same as the number of provider fan-outs. |
 | `lava_rpcsmartrouter_cross_validation_success_total` | Counter | `spec`, `apiInterface`, `method` | Requests that reached consensus. |
-| `lava_rpcsmartrouter_cross_validation_failed_total` | Counter | `spec`, `apiInterface`, `method` | Requests that failed to reach consensus. |
+| `lava_rpcsmartrouter_cross_validation_failed_total` | Counter | `spec`, `apiInterface`, `method` | Requests that did not return a consensus answer — quorum-time failures (no-agreement / diversity / per-group) **and** request-time structural fail-fasts that never tried (`insufficient-capacity` / `insufficient-groups`). `requests_total == success_total + failed_total`. |
 | `lava_rpcsmartrouter_cross_validation_provider_agreements_total` | Counter | `spec`, `apiInterface`, `method`, `provider_address` | Times a provider agreed with consensus. |
 | `lava_rpcsmartrouter_cross_validation_provider_disagreements_total` | Counter | `spec`, `apiInterface`, `method`, `provider_address` | Times a provider disagreed with consensus. |
 | `lava_rpcsmartrouter_cross_validation_mismatch_total` | Counter | `spec`, `apiInterface`, `method`, `group`, `finality` | **Content outliers** by group: one increment **per distinct outlier group per successful deterministic cross-validation request** (a response whose `SHA256(reply.data)` diverged from the reached consensus) — not a per-provider counter. Only emitted when a quorum was reached; quorum failures and node/protocol errors are excluded (failures report a `lava-cross-validation-failure-reason` instead). `finality` is `finalized` / `not_finalized` / `unknown`; post-finality divergence is the high-signal alert. Bounded cardinality (keyed by operator-defined `group`, not provider address). |
