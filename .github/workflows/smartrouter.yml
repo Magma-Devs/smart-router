@@ -152,7 +152,7 @@ jobs:
           fi
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log into registry ${{ env.REGISTRY }}
         if: steps.plan.outputs.push == 'true'
