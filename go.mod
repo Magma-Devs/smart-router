@@ -8,7 +8,7 @@ require (
 	github.com/gofiber/fiber/v2 v2.52.12
 	github.com/gofiber/websocket/v2 v2.0.22
 	github.com/gogo/protobuf v1.3.3
-	github.com/segmentio/kafka-go v0.4.47
+	github.com/segmentio/kafka-go v0.4.51
 	github.com/spf13/cast v1.6.0 // indirect
 	github.com/spf13/cobra v1.8.0
 	github.com/stretchr/testify v1.11.1
