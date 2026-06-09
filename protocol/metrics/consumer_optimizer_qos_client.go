@@ -25,15 +25,12 @@ func sanitizeFloat(v float64) float64 {
 	return v
 }
 
-var (
-	OptimizerQosServerPushInterval     time.Duration
-	OptimizerQosServerSamplingInterval time.Duration
-)
+var OptimizerQosServerSamplingInterval time.Duration
 
 type ConsumerOptimizerQoSClient struct {
 	consumerHostname string
 	consumerAddress  string
-	queueSender      *QueueSender
+	usageSink        UsageEventSink
 	optimizers       map[string]OptimizerInf // keys are chain ids
 	// keys are chain ids, values are maps with provider addresses as keys
 	chainIdToProviderToRelaysCount     map[string]map[string]uint64
@@ -117,16 +114,24 @@ type OptimizerInf interface {
 	CalculateQoSScoresForMetrics(allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) []*OptimizerQoSReport
 }
 
-func NewConsumerOptimizerQoSClient(consumerAddress, endpointAddress string, geoLocation uint64, interval ...time.Duration) *ConsumerOptimizerQoSClient {
+// NewConsumerOptimizerQoSClient builds the periodic optimizer-QoS sampler.
+// usageSink receives one OptimizerQoSReportToSend per (chain, provider) on
+// every sampling tick (pass NoopUsageSink{} to disable OTel emission). The
+// in-memory reportsToSend cache is always maintained so the Prometheus
+// /metrics selection-score endpoint stays populated regardless of the sink.
+func NewConsumerOptimizerQoSClient(consumerAddress string, usageSink UsageEventSink, geoLocation uint64) *ConsumerOptimizerQoSClient {
 	hostname, err := os.Hostname()
 	if err != nil {
 		utils.LavaFormatWarning("Error while getting hostname for ConsumerOptimizerQoSClient", err)
 		hostname = "unknown" + strconv.FormatUint(rand.Uint64(), 10) // random seed for different unknowns
 	}
+	if usageSink == nil {
+		usageSink = NoopUsageSink{}
+	}
 	return &ConsumerOptimizerQoSClient{
 		consumerHostname:                   hostname,
 		consumerAddress:                    consumerAddress,
-		queueSender:                        NewQueueSender(endpointAddress, "ConsumerOptimizerQoS", nil, interval...),
+		usageSink:                          usageSink,
 		optimizers:                         map[string]OptimizerInf{},
 		chainIdToProviderToRelaysCount:     map[string]map[string]uint64{},
 		chainIdToProviderToNodeErrorsCount: map[string]map[string]uint64{},
@@ -254,7 +259,10 @@ func (coqc *ConsumerOptimizerQoSClient) appendOptimizerQoSReport(report *Optimiz
 		StakeContribution:        sanitizeFloat(report.StakeContribution),
 	}
 
-	coqc.queueSender.appendQueue(optimizerQoSReportToSend)
+	// Fire the report at the usage sink (OTel). Non-blocking; NoopUsageSink
+	// when OTel emission is disabled. The in-memory reportsToSend cache
+	// (built by the caller) still feeds the Prometheus /metrics endpoint.
+	coqc.usageSink.EmitOptimizerQoS(optimizerQoSReportToSend)
 	return optimizerQoSReportToSend
 }
 

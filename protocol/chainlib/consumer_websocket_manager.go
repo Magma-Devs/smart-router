@@ -28,6 +28,9 @@ var (
 const (
 	WebSocketRateLimitHeader            = "x-lava-websocket-rate-limit"
 	WebSocketOpenConnectionsLimitHeader = "x-lava-websocket-open-connections-limit"
+
+	SubscriptionDeliveryMethod           = "subscription_delivery"
+	DefaultSubscriptionDeliveryCU uint64 = 10
 )
 
 type ConsumerWebsocketManager struct {
@@ -247,7 +250,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			continue
 		}
 
-		dappID, ok := websocketConn.Locals("dapp-id").(string)
+		dappID, ok := websocketConn.Locals(ProjectIDHeader).(string)
 		if !ok {
 			// Log and remove the analyze
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), nil, msgSeed, []byte("Unable to extract dappID"), cwm.apiInterface, time.Since(startTime))
@@ -336,16 +339,17 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					if formatterMsg != nil {
 						sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 					}
-					continue
-				}
-
-				relayResultReply := relayResult.GetReply()
-				if relayResultReply != nil {
+				} else if relayResultReply := relayResult.GetReply(); relayResultReply != nil {
 					// No need to verify signature since this is already happening inside the SendParsedRelay flow
-					sendWS(webSocketMsgWithType{messageType: messageType, msg: relayResult.GetReply().Data})
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: relayResultReply.Data})
 				} else {
 					utils.LavaFormatError("Relay result is nil over websocket normal request flow, should not happen", err, utils.LogAttr("messageType", messageType))
 				}
+				// Emit the relay_usage event for every normal WS relay
+				// (success or failure). The pre-existing flow `continue`d
+				// before reaching AddMetricForWebSocket below, so normal WS
+				// relays were silently dropped from the analytics pipeline.
+				go logger.AddMetricForWebSocket(metricsData, err, websocketConn)
 				continue
 			}
 		}
@@ -382,6 +386,13 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			continue
 		}
 
+		// Snapshot the populated RelayMetrics fields for per-delivery
+		// emits. The start-of-subscription emit below races with the
+		// per-message emits on the same pointer (AddMetricForWebSocket
+		// mutates Success and Origin) — copy by value so each per-message
+		// goroutine works on its own struct.
+		subscriptionFields := *metricsData
+
 		if subscriptionMsgsChan != nil { // if == nil, it means that we already have an active subscription running on this query
 			go func() {
 				utils.LavaFormatTrace("created go routine for new websocketSubMsgsChan",
@@ -394,6 +405,16 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				for subscriptionMsgReply := range subscriptionMsgsChan {
 					idleFor.Store(time.Now().Unix())
 					sendWS(webSocketMsgWithType{messageType: messageType, msg: outputFormatter(subscriptionMsgReply.Data)})
+					// Per-delivery emission. The originating subscribe is
+					// billed at the spec CU under its real method; each
+					// pushed notification is its own operation charged at
+					// the flat delivery default, so downstream billing is
+					// plain SUM(cu) without subscription-specific rules.
+					perMessage := subscriptionFields
+					perMessage.Timestamp = time.Now()
+					perMessage.ApiMethod = SubscriptionDeliveryMethod
+					perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
+					go logger.AddMetricForWebSocket(&perMessage, nil, websocketConn)
 				}
 
 				utils.LavaFormatTrace("subscriptionMsgsChan was closed",

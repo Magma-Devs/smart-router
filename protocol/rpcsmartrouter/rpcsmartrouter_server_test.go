@@ -2513,7 +2513,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
 	sessionManager := lavasession.NewConsumerSessionManager(
-		rpcEndpoint, optimizer, nil, nil, "test-router",
+		rpcEndpoint, optimizer, nil, "test-router",
 		lavasession.NewActiveSubscriptionProvidersStorage())
 
 	rpcss := &RPCSmartRouterServer{
