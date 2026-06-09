@@ -553,6 +553,22 @@ func crossValidationFailFastResult(reason string) *common.RelayResult {
 	}
 }
 
+// crossValidationFailFast records the request/failed cross-validation metrics for a request-time
+// structural fail-fast and returns the minimal failure result. This path returns from SendParsedRelay
+// BEFORE appendHeadersToRelayResult — where requests_total / failed_total are normally emitted — so without
+// this a structural failure (insufficient-capacity / insufficient-groups) would never be counted. The
+// fail-fast and normal return paths are mutually exclusive, so this never double-counts a quorum-time
+// failure. No agreeing/disagreeing providers are reported because no relay completed. Emitted synchronously
+// (a cheap counter increment on an already-failing path) so the count is deterministic for callers/tests.
+func (rpcss *RPCSmartRouterServer) crossValidationFailFast(reason string, protocolMessage chainlib.ProtocolMessage) *common.RelayResult {
+	if rpcss.rpcSmartRouterLogs != nil && rpcss.listenEndpoint != nil {
+		rpcss.rpcSmartRouterLogs.SetCrossValidationMetric(
+			rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface,
+			protocolMessage.GetApi().GetName(), false, nil, nil)
+	}
+	return crossValidationFailFastResult(reason)
+}
+
 func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, retries int, initialRelays bool, protocolMessage chainlib.ProtocolMessage) (bool, error) {
 	success := false
 	var err error
@@ -816,7 +832,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// capacity/diversity failure from a generic upstream error (the "reuse header channel" contract).
 		if relayProcessor != nil {
 			if reason := relayProcessor.GetCrossValidationFailFastReason(); reason != "" {
-				return crossValidationFailFastResult(reason), err
+				return rpcss.crossValidationFailFast(reason, protocolMessage), err
 			}
 		}
 

@@ -57,8 +57,7 @@ backup-providers:
 Cross-validation fans a single request out to **N providers in parallel**, hashes each
 successful response (`SHA256(reply.data)`), and only returns an answer once a **quorum** of
 providers agree on the same hash. It defends against a single compromised or buggy provider
-returning a wrong-but-well-formed answer. It is **read-only**: it never runs on stateful
-(write) methods — such policies are rejected at startup.
+returning a wrong-but-well-formed answer. It is intended for **read** methods.
 
 Cross-validation can be turned on two ways, which compose via `clamp(caller, floor, cap)`:
 
@@ -68,6 +67,15 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
 - **Per-method operator policy** (config-driven, below). An operator policy can *mandate*
   cross-validation even with no caller headers (`enabled: true`), set a **floor** the caller
   may exceed, and a **cap** that overrides a stricter caller.
+
+> **Write / stateful methods.** An **operator policy** that enables cross-validation on a
+> stateful (write) method is **rejected at startup** — that path is guarded. The legacy
+> **caller-header** path is not: a request that sends the headers above still selects
+> cross-validation on any method, *including writes*, ahead of the normal stateful fan-out
+> (backwards compatibility). This is **not** a recommended way to harden writes —
+> cross-validating a write *response* (e.g. a transaction hash echoed back) does not
+> independently verify anything, so prefer policy-driven cross-validation on read methods and
+> leave writes to the stateful path.
 
 ### Provider group labels
 
@@ -144,8 +152,9 @@ provider→group layout is logged.
 
 ### Response headers
 
-Every cross-validated response carries headers so a client can see what happened without debug
-mode:
+A cross-validated response that **reached the relay stage** (a quorum was attempted — whether it
+succeeded or failed on disagreement) carries the full header set so a client can see what happened
+without debug mode:
 
 | Header | Value |
 | --- | --- |
@@ -154,6 +163,13 @@ mode:
 | `lava-cross-validation-agreeing-providers` | Providers whose response matched the consensus. |
 | `lava-cross-validation-disagreeing-providers` | Providers that dissented (node/protocol errors and hash-divergent responses; on a quorum failure, every successful provider, since there is no consensus to agree with). |
 | `lava-cross-validation-failure-reason` | On failure only — a stable enum (below). |
+
+A **request-time structural fail-fast** (a capacity/diversity check that aborts *before any
+upstream relay runs* — the `insufficient-capacity` / `insufficient-groups` reasons below) carries
+**only** `lava-cross-validation-status: failed` and `lava-cross-validation-failure-reason`. The
+provider-list headers are omitted because no providers were queried; `failure-reason` is the
+discriminator the client needs. (The request still increments
+`cross_validation_requests_total` / `cross_validation_failed_total`.)
 
 The router does **not** automatically retry with a different provider set on a quorum failure;
 the structured signal lets the client decide its next action. Note: on the gRPC interface,
