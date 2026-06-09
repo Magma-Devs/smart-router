@@ -11,7 +11,7 @@ require (
 	github.com/segmentio/kafka-go v0.4.47
 	github.com/spf13/cast v1.6.0 // indirect
 	github.com/spf13/cobra v1.8.0
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 	google.golang.org/genproto v0.0.0-20240123012728-ef4313101c80 // indirect
 	google.golang.org/grpc v1.62.1
 	google.golang.org/protobuf v1.34.2
@@ -19,7 +19,7 @@ require (
 
 require (
 	github.com/caio/go-tdigest/v5 v5.0.0
-	github.com/dgraph-io/ristretto/v2 v2.3.0
+	github.com/dgraph-io/ristretto/v2 v2.4.0
 	github.com/fullstorydev/grpcurl v1.8.5
 	github.com/goccy/go-json v0.10.5
 	github.com/gogo/status v1.1.0
@@ -133,7 +133,7 @@ require (
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
 	golang.org/x/net v0.39.0
 	golang.org/x/sync v0.13.0 // indirect
-	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/npipe.v2 v2.0.0-20160621034901-c1b8fa8bdcce
