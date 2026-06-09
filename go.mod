@@ -11,7 +11,7 @@ require (
 	github.com/segmentio/kafka-go v0.4.47
 	github.com/spf13/cast v1.6.0 // indirect
 	github.com/spf13/cobra v1.8.0
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 	google.golang.org/genproto v0.0.0-20240123012728-ef4313101c80 // indirect
 	google.golang.org/grpc v1.62.1
 	google.golang.org/protobuf v1.34.2
@@ -25,7 +25,7 @@ require (
 	github.com/gogo/status v1.1.0
 	github.com/golang/mock v1.6.0
 	github.com/golang/protobuf v1.5.4
-	github.com/grafana/pyroscope-go v1.2.7
+	github.com/grafana/pyroscope-go v1.3.1
 	github.com/itchyny/gojq v0.12.16
 	github.com/jhump/protoreflect v1.15.1
 	github.com/joho/godotenv v1.3.0
@@ -55,7 +55,7 @@ require (
 	github.com/gogo/googleapis v1.4.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/grafana/pyroscope-go/godeltaprof v0.1.9 // indirect
+	github.com/grafana/pyroscope-go/godeltaprof v0.1.11 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.16.0 // indirect
 	github.com/holiman/uint256 v1.3.1 // indirect
 	github.com/itchyny/timefmt-go v0.1.6 // indirect
@@ -104,7 +104,7 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/improbable-eng/grpc-web v0.15.0
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
