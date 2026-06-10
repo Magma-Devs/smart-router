@@ -1449,9 +1449,10 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 		return
 	}
 
-	// Compute cache key
+	// Compute cache key via the protocol message so the SET key matches the GET key,
+	// including any explicit lava-extension directive folded in by HashCacheRequest.
 	chainId := rpcss.listenEndpoint.ChainID
-	hashKey, _, hashErr := chainlib.HashCacheRequest(relayData, chainId)
+	hashKey, _, hashErr := protocolMessage.HashCacheRequest(chainId)
 	if hashErr != nil {
 		utils.LavaFormatDebug("cache write skipped: hash computation failed",
 			utils.LogAttr("error", hashErr),
@@ -2621,7 +2622,12 @@ func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestD
 		relayState.SetIsEarliestUsed()
 		relayRequestData := protocolMessage.RelayPrivateData()
 		userData := protocolMessage.GetUserData()
-		newProtocolMessage, err := rpcss.ParseRelay(ctx, relayRequestData.ApiUrl, string(relayRequestData.Data), relayRequestData.ConnectionType, userData.DappId, userData.ConsumerIp, nil)
+		// Preserve the client's directive headers (e.g. lava-extension, force-cache-refresh) across
+		// the re-parse. Passing nil drops them, which on the archive/earliest-block path would make
+		// the rebuilt message's cache key disagree with the original message's key (and silently
+		// discards the directive the client sent).
+		directiveMetadata := metadataFromDirectiveHeaders(protocolMessage.GetDirectiveHeaders())
+		newProtocolMessage, err := rpcss.ParseRelay(ctx, relayRequestData.ApiUrl, string(relayRequestData.Data), relayRequestData.ConnectionType, userData.DappId, userData.ConsumerIp, directiveMetadata)
 		if err != nil {
 			utils.LavaFormatError("failed copying protocol message in sendRelayToEndpoint", err)
 			return protocolMessage
@@ -2635,6 +2641,20 @@ func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestD
 		return newProtocolMessage
 	}
 	return protocolMessage
+}
+
+// metadataFromDirectiveHeaders rebuilds relay metadata entries from already-parsed directive
+// headers, so they can be re-fed through ParseRelay (which re-splits metadata into directives).
+// Used to carry directives across a re-parse without losing them.
+func metadataFromDirectiveHeaders(directiveHeaders map[string]string) []pairingtypes.Metadata {
+	if len(directiveHeaders) == 0 {
+		return nil
+	}
+	metadata := make([]pairingtypes.Metadata, 0, len(directiveHeaders))
+	for name, value := range directiveHeaders {
+		metadata = append(metadata, pairingtypes.Metadata{Name: name, Value: value})
+	}
+	return metadata
 }
 
 // classifyHTTPStatus classifies an HTTP status code for endpoint health decisions.
