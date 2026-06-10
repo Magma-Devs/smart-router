@@ -14,7 +14,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/utils"
@@ -119,12 +118,10 @@ func TestDebugResetScores_SmartRouter_ReturnsJSON(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Contains(t, rr.Body.String(), `"reset":true`)
 	require.Contains(t, rr.Body.String(), `"chains_reset":0`)
-	// trackers_reset and connections_reset are the chain-tracker / direct-
-	// connection contributions; with no router wired (deps.router == nil)
-	// both return 0 — but the fields must still appear so callers can rely
-	// on the shape regardless of fixture wiring.
+	// trackers_reset is the chain-tracker contribution; with no router wired
+	// (deps.router == nil) it returns 0 — but the field must still appear so
+	// callers can rely on the shape regardless of fixture wiring.
 	require.Contains(t, rr.Body.String(), `"trackers_reset":0`)
-	require.Contains(t, rr.Body.String(), `"connections_reset":0`)
 }
 
 func TestDebugResetScores_SmartRouter_MethodNotAllowed(t *testing.T) {
@@ -233,104 +230,6 @@ func TestDebugResetScores_SmartRouter_ResetsChainTrackers(t *testing.T) {
 		for i, f := range fakes {
 			require.Equal(t, int32(1), f.resetCalls.Load(),
 				"tracker %d should have had ResetLatestBlock called exactly once", i)
-		}
-	}
-}
-
-// recordingDirectRPCConnection is a minimal lavasession.DirectRPCConnection
-// fake that records MarkHealthy invocations. Only the methods the manager
-// touches (IsHealthy/MarkHealthy) carry real behavior; the rest return zero
-// values so the test doesn't pull in chainParser / Endpoint scaffolding it
-// doesn't need.
-type recordingDirectRPCConnection struct {
-	healthy          atomic.Bool
-	markHealthyCalls atomic.Int32
-}
-
-func (r *recordingDirectRPCConnection) SendRequest(context.Context, []byte, map[string]string) (*lavasession.DirectRPCResponse, error) {
-	return nil, errors.New("recordingDirectRPCConnection: SendRequest not implemented")
-}
-
-func (r *recordingDirectRPCConnection) GetProtocol() lavasession.DirectRPCProtocol {
-	return lavasession.DirectRPCProtocolHTTP
-}
-func (r *recordingDirectRPCConnection) Close() error                { return nil }
-func (r *recordingDirectRPCConnection) IsHealthy() bool             { return r.healthy.Load() }
-func (r *recordingDirectRPCConnection) GetURL() string              { return "" }
-func (r *recordingDirectRPCConnection) GetNodeUrl() *common.NodeUrl { return nil }
-
-func (r *recordingDirectRPCConnection) MarkHealthy() {
-	r.markHealthyCalls.Add(1)
-	r.healthy.Store(true)
-}
-
-// newRouterWithConnectionFetchers builds a minimal *RPCSmartRouter wired so
-// resetAllConnectionHealth can walk router→servers→manager.fetchers→connection.
-// Pre-populates each manager's fetchers map (not trackers) with the supplied
-// recording connection fakes, since ResetAllConnectionHealth iterates
-// fetchers — keeping the two reset paths' fixtures decoupled so one test
-// can fail without dragging the other.
-func newRouterWithConnectionFetchers(t *testing.T, byServer map[string][]*recordingDirectRPCConnection) *RPCSmartRouter {
-	t.Helper()
-	router := &RPCSmartRouter{
-		rpcServers: make(map[string]*RPCSmartRouterServer),
-	}
-	for serverKey, conns := range byServer {
-		manager := &EndpointChainTrackerManager{
-			trackers:          make(map[string]chaintracker.IChainTracker),
-			fetchers:          make(map[string]*EndpointChainFetcher),
-			cancelFuncs:       make(map[string]context.CancelFunc),
-			trackerStates:     make(map[string]EndpointChainTrackerState),
-			trackerLastErrors: make(map[string]string),
-		}
-		for i, c := range conns {
-			endpointURL := serverKey + "-endpoint-" + strconv.Itoa(i)
-			manager.fetchers[endpointURL] = &EndpointChainFetcher{directConnection: c}
-		}
-		router.rpcServers[serverKey] = &RPCSmartRouterServer{
-			endpointChainTrackerManager: manager,
-		}
-	}
-	return router
-}
-
-// TestDebugResetScores_SmartRouter_ResetsConnectionHealth verifies the
-// direct-connection health reset branch: every per-endpoint
-// DirectRPCConnection across all rpcServers must have MarkHealthy invoked
-// (to unstick the healthy atomic when CV's IsHealthy() gate is preventing
-// the very SendRequest that would naturally re-establish health), and the
-// response body must report the total count via connections_reset.
-func TestDebugResetScores_SmartRouter_ResetsConnectionHealth(t *testing.T) {
-	var offsetNano atomic.Int64
-
-	serverA := []*recordingDirectRPCConnection{{}, {}, {}}
-	serverB := []*recordingDirectRPCConnection{{}, {}}
-	for _, c := range append(append([]*recordingDirectRPCConnection{}, serverA...), serverB...) {
-		c.healthy.Store(false) // stuck-false precondition
-	}
-
-	router := newRouterWithConnectionFetchers(t, map[string][]*recordingDirectRPCConnection{
-		"chainA-jsonrpc": serverA,
-		"chainB-rest":    serverB,
-	})
-
-	mux := buildDebugMux(debugMuxDeps{
-		optimizers: newEmptyOptimizersRouter(),
-		offsetNano: &offsetNano,
-		router:     router,
-	})
-
-	rr := postResetScoresRouter(mux)
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), `"reset":true`)
-	require.Contains(t, rr.Body.String(), `"connections_reset":5`)
-
-	for _, conns := range [][]*recordingDirectRPCConnection{serverA, serverB} {
-		for i, c := range conns {
-			require.Equal(t, int32(1), c.markHealthyCalls.Load(),
-				"connection %d should have had MarkHealthy called exactly once", i)
-			require.True(t, c.IsHealthy(),
-				"connection %d healthy atomic should be true after MarkHealthy", i)
 		}
 	}
 }

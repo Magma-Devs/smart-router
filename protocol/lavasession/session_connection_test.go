@@ -26,39 +26,7 @@ func TestProviderRelayConnection_InterfaceCompliance(t *testing.T) {
 
 	// Test interface methods
 	assert.Equal(t, qosManager, prc.GetQoSManager())
-	assert.True(t, prc.IsHealthy())
 	assert.Equal(t, "provider.example.com:443", prc.GetEndpointAddress())
-}
-
-func TestProviderRelayConnection_IsHealthy(t *testing.T) {
-	tests := []struct {
-		name     string
-		conn     *ProviderRelayConnection
-		expected bool
-	}{
-		{
-			name: "healthy with endpoint connection",
-			conn: &ProviderRelayConnection{
-				EndpointConnection: &EndpointConnection{},
-				QoSManager:         &qos.QoSManager{},
-			},
-			expected: true,
-		},
-		{
-			name: "unhealthy with nil endpoint connection",
-			conn: &ProviderRelayConnection{
-				EndpointConnection: nil,
-				QoSManager:         &qos.QoSManager{},
-			},
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.conn.IsHealthy())
-		})
-	}
 }
 
 func TestDirectRPCSessionConnection_InterfaceCompliance(t *testing.T) {
@@ -81,45 +49,7 @@ func TestDirectRPCSessionConnection_InterfaceCompliance(t *testing.T) {
 
 	// Test interface methods
 	assert.Equal(t, qosManager, drsc.GetQoSManager())
-	assert.True(t, drsc.IsHealthy())
 	assert.Equal(t, "eth-mainnet.g.alchemy.com", drsc.GetEndpointAddress())
-}
-
-func TestDirectRPCSessionConnection_IsHealthy(t *testing.T) {
-	ctx := context.Background()
-	nodeUrl := common.NodeUrl{Url: "https://test.example.com"}
-
-	directConn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")
-	require.NoError(t, err)
-
-	tests := []struct {
-		name     string
-		conn     *DirectRPCSessionConnection
-		expected bool
-	}{
-		{
-			name: "healthy with direct connection",
-			conn: &DirectRPCSessionConnection{
-				DirectConnection: directConn,
-				QoSManager:       &qos.QoSManager{},
-			},
-			expected: true,
-		},
-		{
-			name: "unhealthy with nil direct connection",
-			conn: &DirectRPCSessionConnection{
-				DirectConnection: nil,
-				QoSManager:       &qos.QoSManager{},
-			},
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.conn.IsHealthy())
-		})
-	}
 }
 
 func TestSingleConsumerSession_GetDirectConnection(t *testing.T) {

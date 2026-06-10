@@ -43,7 +43,6 @@ func (list EndpointInfoList) Swap(i, j int) {
 // SessionConnection is the base interface for RPC connections with QoS management.
 type SessionConnection interface {
 	GetQoSManager() *qos.QoSManager
-	IsHealthy() bool
 	GetEndpointAddress() string
 }
 
@@ -56,10 +55,6 @@ type ProviderRelayConnection struct {
 
 func (prc *ProviderRelayConnection) GetQoSManager() *qos.QoSManager {
 	return prc.QoSManager
-}
-
-func (prc *ProviderRelayConnection) IsHealthy() bool {
-	return prc.EndpointConnection != nil
 }
 
 func (prc *ProviderRelayConnection) GetEndpointAddress() string {
@@ -76,10 +71,6 @@ type DirectRPCSessionConnection struct {
 
 func (drsc *DirectRPCSessionConnection) GetQoSManager() *qos.QoSManager {
 	return drsc.QoSManager
-}
-
-func (drsc *DirectRPCSessionConnection) IsHealthy() bool {
-	return drsc.DirectConnection != nil && drsc.DirectConnection.IsHealthy()
 }
 
 func (drsc *DirectRPCSessionConnection) GetEndpointAddress() string {

@@ -509,30 +509,6 @@ func resetAllChainTrackers(deps debugMuxDeps) int {
 	return count
 }
 
-// resetAllConnectionHealth walks the router's per-server
-// EndpointChainTrackerManagers and forcibly flips every direct connection's
-// healthy flag back to true. Recovery escape for the case where a transient
-// upstream failure stuck the flag false and the IsHealthy() gate (in CV
-// fan-out and elsewhere) prevents the very SendRequest that would naturally
-// re-establish health. Intentionally scoped to /debug/reset-scores only —
-// /debug/reset-all still has a separate session-manager regression we don't
-// want to entangle with this safe path.
-func resetAllConnectionHealth(deps debugMuxDeps) int {
-	if deps.router == nil {
-		return 0
-	}
-	deps.router.mu.Lock()
-	defer deps.router.mu.Unlock()
-	count := 0
-	for _, server := range deps.router.rpcServers {
-		if server == nil || server.endpointChainTrackerManager == nil {
-			continue
-		}
-		count += server.endpointChainTrackerManager.ResetAllConnectionHealth()
-	}
-	return count
-}
-
 // resetAllConsistencies flushes every per-chain seen-block cache that
 // implements consistencyResetter. Why this is necessary: SetSeenBlockFromKey
 // only writes monotonically (consistency.go: `block >= blockSeen → return`),
@@ -647,14 +623,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	})
 
 	// POST /debug/reset-scores — clears optimizer score state without changing
-	// current time offset or NowFunc. Also flushes per-chain seen-block caches,
-	// zeroes per-endpoint chain-tracker latest-block values, and forces every
-	// per-endpoint direct connection back to healthy=true. The connection-
-	// health reset unblocks CV fan-out for endpoints whose healthy atomic got
-	// stuck false from a long-ago transient (IsHealthy() gates the very
-	// SendRequest that would naturally re-establish health). Together these
-	// give a recovery path that does not touch session-manager state — which
-	// trips a separate BTC-router regression on /debug/reset-all.
+	// current time offset or NowFunc. Also flushes per-chain seen-block caches and
+	// zeroes per-endpoint chain-tracker latest-block values. Gives a recovery path
+	// that does not touch session-manager state — which trips a separate BTC-router
+	// regression on /debug/reset-all.
 	mux.HandleFunc("/debug/reset-scores", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -668,10 +640,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		})
 		resetAllConsistencies(deps.consistencies)
 		trackersReset := resetAllChainTrackers(deps)
-		connectionsReset := resetAllConnectionHealth(deps)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d,"trackers_reset":%d,"connections_reset":%d}`,
-			count, trackersReset, connectionsReset)
+		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d,"trackers_reset":%d}`,
+			count, trackersReset)
 	})
 
 	// POST /debug/reset-all — flush every state store the test framework

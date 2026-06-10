@@ -100,7 +100,6 @@ func TestHTTPConnectionCreation(t *testing.T) {
 	require.NotNil(t, conn)
 
 	assert.Equal(t, DirectRPCProtocolHTTP, conn.GetProtocol())
-	assert.True(t, conn.IsHealthy())
 	assert.Equal(t, "http://localhost:8545", conn.GetURL())
 
 	err = conn.Close()
@@ -116,7 +115,6 @@ func TestHTTPSConnectionCreation(t *testing.T) {
 	require.NotNil(t, conn)
 
 	assert.Equal(t, DirectRPCProtocolHTTPS, conn.GetProtocol())
-	assert.True(t, conn.IsHealthy())
 	assert.Equal(t, "https://eth-mainnet.g.alchemy.com/v2/test", conn.GetURL())
 
 	err = conn.Close()
@@ -132,7 +130,6 @@ func TestWebSocketConnectionCreation(t *testing.T) {
 	require.NotNil(t, conn)
 
 	assert.Equal(t, DirectRPCProtocolWSS, conn.GetProtocol())
-	assert.True(t, conn.IsHealthy())
 	assert.Equal(t, "wss://eth-mainnet.g.alchemy.com/v2/test", conn.GetURL())
 
 	err = conn.Close()
@@ -149,7 +146,6 @@ func TestGRPCConnectionCreation(t *testing.T) {
 	require.NotNil(t, conn)
 
 	assert.Equal(t, DirectRPCProtocolGRPC, conn.GetProtocol())
-	assert.True(t, conn.IsHealthy())
 	assert.Equal(t, "grpcs://localhost:9090", conn.GetURL())
 
 	err = conn.Close()
@@ -171,7 +167,6 @@ func TestGRPCConnectionCreationInsecure(t *testing.T) {
 	require.NotNil(t, conn)
 
 	assert.Equal(t, DirectRPCProtocolGRPC, conn.GetProtocol())
-	assert.True(t, conn.IsHealthy())
 
 	err = conn.Close()
 	assert.NoError(t, err)
@@ -209,7 +204,6 @@ func TestHTTPConnectionInterface(t *testing.T) {
 
 	// Test interface methods
 	assert.Equal(t, DirectRPCProtocolHTTPS, conn.GetProtocol())
-	assert.True(t, conn.IsHealthy())
 	assert.Equal(t, "https://test.example.com", conn.GetURL())
 	assert.NoError(t, conn.Close())
 }
@@ -275,7 +269,6 @@ func TestGRPCConnectionURLValidation(t *testing.T) {
 				grpcConn, ok := conn.(*GRPCDirectRPCConnection)
 				require.True(t, ok, "expected GRPCDirectRPCConnection type")
 				assert.Equal(t, DirectRPCProtocolGRPC, grpcConn.GetProtocol())
-				assert.True(t, grpcConn.IsHealthy())
 
 				err = conn.Close()
 				assert.NoError(t, err)
@@ -328,26 +321,13 @@ func TestGRPCConnectionWithGrpcConfig(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestHTTPDirectRPCConnection_IsHealthy_StartsTrue documents the
-// initialize-as-healthy behavior. A fresh connection is optimistically healthy
-// until proven otherwise — the first failed SendRequest flips it, after which
-// IsHealthy reflects real transport outcomes.
-func TestHTTPDirectRPCConnection_IsHealthy_StartsTrue(t *testing.T) {
-	ctx := context.Background()
-	nodeUrl := common.NodeUrl{Url: "http://127.0.0.1:1"} // port 1 is not accepting
-	conn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")
-	require.NoError(t, err)
-
-	require.True(t, conn.IsHealthy(),
-		"a brand-new HTTP connection must start healthy (optimistic init); the first probe or request flips it")
-}
-
-// TestHTTPDirectRPCConnection_IsHealthy_FlipsOnDialFailure is the core fix: a
+// TestHTTPDirectRPCConnection_SendRequest_SurfacesTransportError verifies a
 // transport-level failure (connection refused, DNS miss, TLS handshake failure,
-// timeout) must drop IsHealthy to false so the comprehensive probe path in
-// checkAndUnblockHealthyReBlockedProviders won't optimistically unblock a
-// backup whose upstream is actually unreachable.
-func TestHTTPDirectRPCConnection_IsHealthy_FlipsOnDialFailure(t *testing.T) {
+// timeout) is surfaced to the caller as an error rather than swallowed. The
+// relay path turns this error into an OnSessionFailure → QoS availability
+// penalty, which is what lets the optimizer route away from a dead upstream now
+// that selection no longer consults a per-socket health bit.
+func TestHTTPDirectRPCConnection_SendRequest_SurfacesTransportError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -357,22 +337,16 @@ func TestHTTPDirectRPCConnection_IsHealthy_FlipsOnDialFailure(t *testing.T) {
 	conn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
-	httpConn, ok := conn.(*HTTPDirectRPCConnection)
-	require.True(t, ok)
-
-	_, sendErr := httpConn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0","method":"probe","id":1}`), nil)
-	require.Error(t, sendErr, "SendRequest must surface the transport failure")
-	require.False(t, httpConn.IsHealthy(),
-		"a transport-layer failure must flip IsHealthy to false so the comprehensive probe skips this backup")
+	_, sendErr := conn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0","method":"probe","id":1}`), nil)
+	require.Error(t, sendErr, "SendRequest must surface the transport failure to the caller")
 }
 
-// TestHTTPDirectRPCConnection_IsHealthy_Stays4xxHealthy ensures the fix doesn't
-// overreach: a 4xx/5xx HTTP response is an *application* error (rate limit,
-// forbidden, server-side bug) — transport is still fine. A connection must not
-// be marked unhealthy just because the upstream RPC server returned a non-2xx.
-// Without this nuance, dashboards would flap any time an endpoint hit a rate
-// limit and the probe would wrongly refuse to unblock otherwise-healthy providers.
-func TestHTTPDirectRPCConnection_IsHealthy_Stays4xxHealthy(t *testing.T) {
+// TestHTTPDirectRPCConnection_SendRequest_4xxReturnsResponseAndError ensures a
+// 4xx/5xx HTTP response is treated as an *application* error: the transport
+// reached the upstream, so the response body is returned alongside an
+// HTTPStatusError. This is why a 429 alone must not take an endpoint out of
+// rotation — it stays a candidate, and QoS (not transport) decides its fate.
+func TestHTTPDirectRPCConnection_SendRequest_4xxReturnsResponseAndError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests) // 429 — application error, transport is fine
 		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
@@ -386,84 +360,10 @@ func TestHTTPDirectRPCConnection_IsHealthy_Stays4xxHealthy(t *testing.T) {
 	conn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
-	httpConn, ok := conn.(*HTTPDirectRPCConnection)
-	require.True(t, ok)
-
-	// 429 returns an HTTPStatusError but the transport succeeded.
-	_, sendErr := httpConn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0"}`), nil)
+	resp, sendErr := conn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0"}`), nil)
 	require.Error(t, sendErr, "4xx/5xx still returns an HTTPStatusError to the caller")
-	require.True(t, httpConn.IsHealthy(),
-		"a 4xx/5xx response is an application error; transport reached the upstream and health must remain true")
-}
-
-// TestDirectRPCConnection_MarkHealthy_FlipsHTTPHealthyToTrue verifies the
-// recovery-only escape: after a transient failure leaves healthy=false (a
-// state the natural SendRequest-success path cannot reach because
-// IsHealthy() gates the request itself), MarkHealthy must unstick it without
-// requiring a successful exchange. Same idea for the gRPC variant — both
-// have an internal atomic.Bool we expect to flip. WebSocket has no internal
-// flag so MarkHealthy is a no-op there (covered in
-// TestDirectRPCConnection_MarkHealthy_WebSocketIsNoOp).
-func TestDirectRPCConnection_MarkHealthy_FlipsHTTPHealthyToTrue(t *testing.T) {
-	httpConn := &HTTPDirectRPCConnection{}
-	httpConn.healthy.Store(false)
-	require.False(t, httpConn.IsHealthy(), "precondition: healthy starts false")
-
-	httpConn.MarkHealthy()
-
-	require.True(t, httpConn.IsHealthy(), "MarkHealthy must flip the atomic back to true")
-}
-
-func TestDirectRPCConnection_MarkHealthy_FlipsGRPCHealthyToTrue(t *testing.T) {
-	grpcConn := &GRPCDirectRPCConnection{}
-	grpcConn.healthy.Store(false)
-	require.False(t, grpcConn.IsHealthy(), "precondition: healthy starts false")
-
-	grpcConn.MarkHealthy()
-
-	require.True(t, grpcConn.IsHealthy(), "MarkHealthy must flip the atomic back to true")
-}
-
-// TestDirectRPCConnection_MarkHealthy_WebSocketIsNoOp documents that
-// WebSocketDirectRPCConnection has no internal healthy flag (IsHealthy is a
-// constant true). MarkHealthy must still satisfy the interface without
-// panicking; the call is intentionally a no-op.
-func TestDirectRPCConnection_MarkHealthy_WebSocketIsNoOp(t *testing.T) {
-	wsConn := &WebSocketDirectRPCConnection{}
-	require.True(t, wsConn.IsHealthy(), "precondition: WebSocket IsHealthy is constant true")
-
-	wsConn.MarkHealthy() // must not panic
-
-	require.True(t, wsConn.IsHealthy())
-}
-
-// TestHTTPDirectRPCConnection_IsHealthy_RecoversAfterFailure verifies the full
-// unhealthy → healthy transition: once a connection has observed a transport
-// failure, a subsequent successful exchange must flip IsHealthy back to true.
-// Without this, a single glitch would leave a backup permanently flagged as
-// unhealthy even after upstream recovery.
-func TestHTTPDirectRPCConnection_IsHealthy_RecoversAfterFailure(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":"ok","id":1}`))
-	}))
-	defer server.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	nodeUrl := common.NodeUrl{Url: server.URL}
-	conn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")
-	require.NoError(t, err)
-
-	httpConn, ok := conn.(*HTTPDirectRPCConnection)
-	require.True(t, ok)
-
-	httpConn.healthy.Store(false) // simulate a prior failure
-
-	_, sendErr := httpConn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0"}`), nil)
-	require.NoError(t, sendErr)
-	require.True(t, httpConn.IsHealthy(),
-		"a successful transport exchange must restore IsHealthy=true after a prior failure")
+	require.NotNil(t, resp, "the response body must still be returned for a 4xx/5xx")
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
 }
 
 // TestHTTPDirectRPCConnection_UsesSharedOptimizedTransport locks in the
