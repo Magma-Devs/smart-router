@@ -707,9 +707,16 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			connectEndpoint := func(cswp *ConsumerSessionsWithProvider, ctx context.Context, endpoint *Endpoint) (endpointConnection_ *EndpointConnection, connected_ bool) {
 				// Check if this is a direct RPC endpoint (smart router mode)
 				if endpoint.IsDirectRPC() {
-					// Direct RPC connections are already established in convertProvidersToSessions
-					// Just verify they're healthy and return success
-					if len(endpoint.DirectConnections) > 0 && endpoint.DirectConnections[0].IsHealthy() {
+					// Direct RPC connections are already established in convertProvidersToSessions.
+					// We no longer gate selection on a per-socket health bit: a transient
+					// transport blip used to latch that bit false with no automatic recovery,
+					// silently dropping the endpoint here and never sending the request that
+					// would heal it (the deadlock behind the `No pairings` bug class). Instead
+					// the relay is always attempted — a genuinely dead socket fails fast, feeds
+					// QoS via OnSessionFailure, and (after MaxConsecutiveConnectionAttempts) is
+					// backed off via endpoint.Enabled, both of which self-heal. This mirrors how
+					// WebSocket connections have always behaved (IsHealthy hardcoded true).
+					if len(endpoint.DirectConnections) > 0 {
 						utils.LavaFormatTrace("using direct RPC connection",
 							utils.LogAttr("url", endpoint.DirectConnections[0].GetURL()),
 							utils.LogAttr("protocol", endpoint.DirectConnections[0].GetProtocol()),
@@ -717,7 +724,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 						)
 						return nil, true
 					}
-					utils.LavaFormatWarning("direct RPC connection is unhealthy", nil,
+					utils.LavaFormatWarning("direct RPC endpoint has no connection object", nil,
 						utils.LogAttr("endpoint", endpoint.NetworkAddress),
 						utils.LogAttr("GUID", ctx),
 					)

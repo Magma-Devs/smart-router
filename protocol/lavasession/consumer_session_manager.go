@@ -599,9 +599,8 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 	consumerSessionsWithProvider.Lock.RLock()
 	defer consumerSessionsWithProvider.Lock.RUnlock()
 
-	var healthyEndpoints int
+	var usableEndpoints int
 	var totalEndpoints int
-	minLatency := time.Hour // Start with a large value
 
 	for _, endpoint := range consumerSessionsWithProvider.Endpoints {
 		if !endpoint.IsDirectRPC() {
@@ -610,12 +609,13 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 
 		totalEndpoints++
 
-		// Belt-and-suspenders with conn.IsHealthy(): the endpoint struct tracks
-		// cumulative relay-path failures via MarkUnhealthy → ConnectionRefusals,
-		// while IsHealthy() tracks the last transport attempt. A disabled endpoint
-		// must never be considered healthy at probe time — otherwise a backup with
-		// 5+ consecutive refusals could be unblocked at epoch transition despite
-		// the relay path having already confirmed it's down.
+		// The relay path no longer gates on a per-socket health bit (a dead socket
+		// fails the real relay, which feeds QoS via OnSessionFailure and trips the
+		// endpoint.Enabled consecutive-failure backoff — both self-healing). So the
+		// probe no longer reads connection health either. We still honour
+		// endpoint.Enabled: a backup with 5+ consecutive refusals stays backed off
+		// and must not be optimistically unblocked at epoch transition. Active
+		// per-endpoint probing/recovery is handled by the chain tracker (Step 3).
 		if !endpoint.Enabled {
 			utils.LavaFormatDebug("Direct RPC endpoint is disabled, skipping probe",
 				utils.LogAttr("provider", providerAddress),
@@ -629,28 +629,10 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 				continue
 			}
 
-			// Check connection health - this is a cheap operation
-			// that checks the internal health state without making a network call
-			startTime := time.Now()
-			healthy := conn.IsHealthy()
-			checkLatency := time.Since(startTime)
+			usableEndpoints++
 
-			if healthy {
-				healthyEndpoints++
-				// Track minimum latency (for consistent API with provider probe)
-				if checkLatency < minLatency {
-					minLatency = checkLatency
-				}
-
-				if DebugProbes {
-					utils.LavaFormatDebug("Direct RPC endpoint probe succeeded",
-						utils.LogAttr("provider", providerAddress),
-						utils.LogAttr("url", conn.GetURL()),
-						utils.LogAttr("protocol", conn.GetProtocol()),
-					)
-				}
-			} else {
-				utils.LavaFormatDebug("Direct RPC endpoint is unhealthy",
+			if DebugProbes {
+				utils.LavaFormatDebug("Direct RPC endpoint probe (no health gate)",
 					utils.LogAttr("provider", providerAddress),
 					utils.LogAttr("url", conn.GetURL()),
 					utils.LogAttr("protocol", conn.GetProtocol()),
@@ -663,18 +645,18 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 		return 0, providerAddress, fmt.Errorf("no direct RPC endpoints found for provider %s", providerAddress)
 	}
 
-	if healthyEndpoints == 0 {
-		return 0, providerAddress, fmt.Errorf("all direct RPC endpoints unhealthy for provider %s", providerAddress)
+	if usableEndpoints == 0 {
+		return 0, providerAddress, fmt.Errorf("no enabled direct RPC endpoints for provider %s", providerAddress)
 	}
 
-	// Reset latency to a reasonable default if we didn't measure any
-	if minLatency == time.Hour {
-		minLatency = time.Millisecond // Default minimal latency for healthy direct connections
-	}
+	// No per-connection latency is measured anymore (the old "latency" was just the
+	// time to read an atomic bool). Report a nominal minimal latency for parity with
+	// the provider-relay probe API.
+	minLatency := time.Millisecond
 
 	utils.LavaFormatTrace("Direct RPC endpoints probe completed",
 		utils.LogAttr("provider", providerAddress),
-		utils.LogAttr("healthyEndpoints", healthyEndpoints),
+		utils.LogAttr("usableEndpoints", usableEndpoints),
 		utils.LogAttr("totalEndpoints", totalEndpoints),
 		utils.LogAttr("latency", minLatency),
 	)
