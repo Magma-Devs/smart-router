@@ -47,14 +47,6 @@ func NewEndpointChainFetcher(
 	}
 }
 
-// GetDirectConnection returns the underlying DirectRPCConnection. The same
-// pointer is stored in endpoint.DirectConnections[0] at construction time
-// (see ConsumerSessionManager.GetAllDirectRPCEndpoints), so the tracker and the
-// relay path share one connection object.
-func (ecf *EndpointChainFetcher) GetDirectConnection() lavasession.DirectRPCConnection {
-	return ecf.directConnection
-}
-
 // FetchLatestBlockNum fetches the latest block number from the endpoint.
 // Uses spec-driven parsing to support any chain type (EVM, Tendermint, REST, etc.).
 func (ecf *EndpointChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {

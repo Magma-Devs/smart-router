@@ -2307,10 +2307,11 @@ func TestGetAllDirectRPCEndpoints_IncludesBackupProviders(t *testing.T) {
 }
 
 // TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint guards the endpoint.Enabled
-// gate added to probeDirectRPCEndpoints. A disabled endpoint (ConnectionRefusals
-// hit the MarkUnhealthy threshold in the relay hot path) must not be counted as
-// healthy at probe time — otherwise checkAndUnblockHealthyReBlockedProviders
-// could unblock a backup that the relay path has already confirmed is down.
+// gate in probeDirectRPCEndpoints. A disabled endpoint (ConnectionRefusals hit the
+// MarkUnhealthy threshold in the relay hot path) must not be counted as usable at
+// probe time — otherwise checkAndUnblockHealthyReBlockedProviders could unblock a
+// backup that the relay path has already confirmed is down. This is the only
+// remaining health signal the probe honours now that the per-socket bool is gone.
 func TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2336,7 +2337,7 @@ func TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	_, _, probeErr := csm.probeDirectRPCEndpoints(ctx, cswp, cswp.PublicLavaAddress)
 	require.Error(t, probeErr,
-		"a disabled endpoint must cause the direct RPC probe to fail, even though HTTPDirectRPCConnection.IsHealthy starts optimistically true")
+		"a disabled endpoint must cause the direct RPC probe to fail (no usable enabled endpoints)")
 }
 
 // stateSizeRecorder is a minimal ConsumerMetricsManagerInf used to observe

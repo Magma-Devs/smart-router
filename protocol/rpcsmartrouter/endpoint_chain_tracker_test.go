@@ -17,7 +17,6 @@ import (
 // mockDirectRPCConnection implements lavasession.DirectRPCConnection for testing
 type mockDirectRPCConnection struct {
 	url       string
-	healthy   bool
 	responses map[string][]byte // request -> response
 }
 
@@ -42,14 +41,6 @@ func (m *mockDirectRPCConnection) GetProtocol() lavasession.DirectRPCProtocol {
 
 func (m *mockDirectRPCConnection) Close() error {
 	return nil
-}
-
-func (m *mockDirectRPCConnection) IsHealthy() bool {
-	return m.healthy
-}
-
-func (m *mockDirectRPCConnection) MarkHealthy() {
-	m.healthy = true
 }
 
 func (m *mockDirectRPCConnection) GetURL() string {
