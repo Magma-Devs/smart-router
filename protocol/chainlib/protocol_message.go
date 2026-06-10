@@ -2,14 +2,15 @@ package chainlib
 
 import (
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 type UserData struct {
@@ -42,7 +43,31 @@ func (bpm *BaseProtocolMessage) RelayPrivateData() *pairingtypes.RelayPrivateDat
 }
 
 func (bpm *BaseProtocolMessage) HashCacheRequest(chainId string) ([]byte, func([]byte) []byte, error) {
-	return HashCacheRequest(bpm.relayRequestData, chainId)
+	return hashCacheRequest(bpm.relayRequestData, chainId, bpm.explicitExtensionDirective())
+}
+
+// explicitExtensionDirective returns the normalized value of the client's lava-extension directive
+// header, or "" when absent. Normalization makes equivalent directives such as "Archive",
+// " archive " and "archive,debug"/"debug,archive" collapse to the same cache lane.
+func (bpm *BaseProtocolMessage) explicitExtensionDirective() string {
+	if bpm.directiveHeaders == nil {
+		return ""
+	}
+	return normalizeExtensionDirective(bpm.directiveHeaders[common.EXTENSION_OVERRIDE_HEADER_NAME])
+}
+
+func normalizeExtensionDirective(raw string) string {
+	cleaned := make([]string, 0)
+	for _, part := range strings.Split(strings.ToLower(raw), ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			cleaned = append(cleaned, part)
+		}
+	}
+	if len(cleaned) == 0 {
+		return ""
+	}
+	sort.Strings(cleaned)
+	return strings.Join(cleaned, ",")
 }
 
 // addMissingExtensions adds any extensions from updatedProtocolExtensions that are not in currentPrivateDataExtensions
