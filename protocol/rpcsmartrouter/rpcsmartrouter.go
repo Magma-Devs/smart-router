@@ -745,6 +745,35 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 	})
 
+	// POST /debug/reset-pairing — cold-rebuild every chain's pairing table from
+	// the startup provider config, re-admitting providers the per-epoch spec
+	// re-verifier (applyReverification) demoted. Additive companion to
+	// /debug/reset-all, which intentionally leaves pairing intact (see the comment
+	// above): long test runs accumulate demotions faster than the 15m epoch tick
+	// recovers them, and a pod restart is otherwise the only way to readmit a
+	// demoted primary. Cold — no re-probing; the simulator controls provider
+	// behaviour in the tests this serves. No-op 200 (empty restored) when the
+	// router is absent (test fixtures) so callers can probe it unconditionally.
+	mux.HandleFunc("/debug/reset-pairing", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		restored := map[string][]string{}
+		if deps.router != nil {
+			restored = deps.router.rebuildPairingFromConfig()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		body, err := json.Marshal(map[string]any{"reset": true, "restored": restored})
+		if err != nil {
+			// restored is map[string][]string — Marshal can't realistically fail;
+			// emit a minimal valid body rather than a half-written response.
+			fmt.Fprint(w, `{"reset":true,"restored":{}}`)
+			return
+		}
+		w.Write(body)
+	})
+
 	return mux
 }
 
@@ -2400,6 +2429,155 @@ func (rpsr *RPCSmartRouter) retryFailedStaticProviders(
 			rpsr.mu.Unlock()
 		}
 	}
+}
+
+// rebuildPairingFromConfig restores configured static/backup providers that are
+// currently absent from the live pairing — e.g. ones the per-epoch spec
+// re-verifier (applyReverification) demoted after they returned errors — without
+// waiting for the next 15m epoch tick or a pod restart. It backs the dev/test-only
+// /debug/reset-pairing endpoint.
+//
+// COLD rebuild: absent providers are re-admitted straight from the startup config
+// (reverifyInputs) with no spec re-probing — the simulator drives provider
+// behaviour in the tests this serves, so verification is unnecessary. Only absent
+// providers are converted (which opens fresh DirectRPCConnections); already-active
+// sessions are reused untouched, so healthy providers are not churned. Mirrors
+// retryFailedStaticProviders' copy-on-write merge. Returns the restored provider
+// names per chainKey (chains needing no restore are omitted).
+func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
+	restored := make(map[string][]string)
+
+	rpsr.mu.Lock()
+	defer rpsr.mu.Unlock()
+
+	if rpsr.epochTimer == nil { // defensive: production always sets it in CreateSmartRouterEndpoint
+		return restored
+	}
+	currentEpoch := rpsr.epochTimer.GetCurrentEpoch()
+
+	for chainKey, sessionManager := range rpsr.sessionManagers {
+		inputs := rpsr.reverifyInputs[chainKey]
+		if sessionManager == nil || inputs == nil {
+			continue
+		}
+
+		mergedStatic, restoredStatic := mergeAbsentProviders(
+			rpsr.providerSessions[chainKey], inputs.configuredStatic, inputs.convertProvidersToSessions, currentEpoch)
+		mergedBackup, restoredBackup := mergeAbsentProviders(
+			rpsr.backupProviderSessions[chainKey], inputs.configuredBackup, inputs.convertProvidersToSessions, currentEpoch)
+
+		if len(restoredStatic) == 0 && len(restoredBackup) == 0 {
+			continue // pairing already whole — don't churn the session manager
+		}
+
+		rpsr.providerSessions[chainKey] = mergedStatic
+		if len(mergedBackup) > 0 {
+			rpsr.backupProviderSessions[chainKey] = mergedBackup
+		} else {
+			delete(rpsr.backupProviderSessions, chainKey)
+		}
+
+		// A re-admitted provider supersedes any pending failed-init retry: drop it
+		// from failedStaticProviders so retryFailedStaticProviders won't later merge
+		// a duplicate session for the same name (and can self-terminate once empty).
+		if failed := rpsr.failedStaticProviders[chainKey]; len(failed) > 0 {
+			restoredSet := make(map[string]struct{}, len(restoredStatic)+len(restoredBackup))
+			for _, n := range restoredStatic {
+				restoredSet[n] = struct{}{}
+			}
+			for _, n := range restoredBackup {
+				restoredSet[n] = struct{}{}
+			}
+			var kept []*lavasession.RPCStaticProviderEndpoint
+			for _, p := range failed {
+				if _, ok := restoredSet[p.Name]; !ok {
+					kept = append(kept, p)
+				}
+			}
+			if len(kept) > 0 {
+				rpsr.failedStaticProviders[chainKey] = kept
+			} else {
+				delete(rpsr.failedStaticProviders, chainKey)
+			}
+		}
+
+		// UpdateAllProviders stays under rpsr.mu so the (providerSessions write →
+		// csm push) pair is atomic with updateEpoch / retryFailedStaticProviders —
+		// otherwise a concurrent epoch tick can push to the csm in the opposite
+		// order it wrote providerSessions, silently dropping the restored providers.
+		if err := sessionManager.UpdateAllProviders(currentEpoch, mergedStatic, mergedBackup); err != nil {
+			utils.LavaFormatError("reset-pairing: failed to push rebuilt pairing to session manager", err,
+				utils.LogAttr("chainKey", chainKey))
+			continue
+		}
+
+		restored[chainKey] = append(restoredStatic, restoredBackup...)
+		utils.LavaFormatInfo("reset-pairing: restored providers from config",
+			utils.LogAttr("chainKey", chainKey),
+			utils.LogAttr("restored", restored[chainKey]),
+			utils.LogAttr("epoch", currentEpoch),
+		)
+	}
+
+	return restored
+}
+
+// mergeAbsentProviders returns a copy-on-write merge of current plus fresh sessions
+// for every configured provider whose Name is absent from current, and the list of
+// restored names (in config order, deterministic). Absent providers are built via
+// convert, which opens fresh connections — providers whose connections all fail are
+// skipped by convert and so are not reported restored. Present providers are reused
+// untouched. Returns (current, nil) when nothing is absent.
+func mergeAbsentProviders(
+	current map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	configured []*lavasession.RPCStaticProviderEndpoint,
+	convert func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	epoch uint64,
+) (map[uint64]*lavasession.ConsumerSessionsWithProvider, []string) {
+	active := make(map[string]struct{}, len(current))
+	for _, s := range current {
+		active[s.PublicLavaAddress] = struct{}{}
+	}
+
+	var absent []*lavasession.RPCStaticProviderEndpoint
+	for _, p := range configured {
+		if _, ok := active[p.Name]; !ok {
+			absent = append(absent, p)
+		}
+	}
+	if len(absent) == 0 {
+		return current, nil
+	}
+
+	// Copy-on-write: probeProviders / cleanupStaleTrackers may iterate the old map
+	// without the lock, so never mutate it in place. Re-key appended sessions past
+	// the existing max — convert() keys by its own list index, which would collide.
+	merged := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(current)+len(absent))
+	maxIdx := uint64(0)
+	for idx, s := range current {
+		merged[idx] = s
+		if idx >= maxIdx {
+			maxIdx = idx + 1
+		}
+	}
+
+	converted := make(map[string]struct{})
+	for _, session := range convert(absent) {
+		session.Lock.Lock()
+		session.PairingEpoch = epoch
+		session.Lock.Unlock()
+		merged[maxIdx] = session
+		maxIdx++
+		converted[session.PublicLavaAddress] = struct{}{}
+	}
+
+	var restored []string
+	for _, p := range absent { // config order → deterministic output
+		if _, ok := converted[p.Name]; ok {
+			restored = append(restored, p.Name)
+		}
+	}
+	return merged, restored
 }
 
 // cleanupStaleTrackers removes ChainTrackers for endpoints that are no longer in the current provider sessions.
