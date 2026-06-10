@@ -38,7 +38,7 @@ echo "============================================"
 echo ""
 
 echo "[Test Setup] installing all binaries"
-make install-all
+make install
 
 # Start cache services (required for cache testing)
 echo "[Test Setup] starting smart router cache service"

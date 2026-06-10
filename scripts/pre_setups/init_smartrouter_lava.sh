@@ -30,7 +30,7 @@ screen -wipe
 sleep 1
 
 echo "[Test Setup] installing all binaries"
-make install-all
+make install
 
 echo ""
 echo "[Test Setup] skipping local node — using PublicNode endpoints"

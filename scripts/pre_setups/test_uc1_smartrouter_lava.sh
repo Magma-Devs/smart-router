@@ -82,7 +82,7 @@ screen -wipe >/dev/null 2>&1
 sleep 1
 
 echo "[Setup] installing binaries"
-make install-all
+make install
 
 # --- Cache service ------------------------------------------------------------
 echo ""
@@ -109,6 +109,10 @@ done
 # policy sets NO min-groups (defaults to 1) — a plain "$CV_THRESHOLD of $CV_MAXPART"
 # COUNT quorum with no diversity requirement. (Group diversity is UC-2.)
 CONFIG_FILE="$PROJECT_ROOT/config/smartrouter_examples/smartrouter_lava_uc1.yml"
+# The router resolves the config arg via viper.SetConfigName + AddConfigPath(".") from the working
+# directory (PROJECT_ROOT), NOT as a filesystem path — so it must be passed RELATIVE to PROJECT_ROOT,
+# exactly like init_smartrouter_lava.sh. An absolute path is treated as a config name and not found.
+CONFIG_REL="config/smartrouter_examples/smartrouter_lava_uc1.yml"
 echo ""
 echo "[Setup] generating UC-1 config: $CONFIG_FILE"
 cat > "$CONFIG_FILE" <<EOF
@@ -198,7 +202,7 @@ sed -n '/^cross-validation:/,$p' "$CONFIG_FILE" | sed 's/^/    /'
 echo ""
 echo "[Setup] starting Smart Router (trace log -> $LOG_FILE)"
 screen -d -m -S smartrouter bash -c "cd \"$PROJECT_ROOT\" && source ~/.bashrc; smartrouter \
-\"$CONFIG_FILE\" \
+$CONFIG_REL \
 --geolocation 1 \
 --log-level trace \
 --cache-be \"$CACHE_ADDR\" \
