@@ -19,7 +19,7 @@
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 source "$__dir"/../useful_commands.sh
 
-LOGS_DIR=${__dir}/../../testutil/debugging/logs
+LOGS_DIR=${__dir}/../../debugging/logs
 mkdir -p "$LOGS_DIR"
 LOGS_DIR=$(cd "$LOGS_DIR" && pwd)
 rm "$LOGS_DIR"/*.log 2>/dev/null || true
