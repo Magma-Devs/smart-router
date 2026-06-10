@@ -14,7 +14,7 @@
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
 [![Release](https://img.shields.io/badge/release-v1.0.1-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
+[![License](https://img.shields.io/badge/license-source--available-orange.svg)](LICENSE.md)
 
 </div>
 
@@ -22,7 +22,7 @@ Centralised RPC routing gateway. Routes JSON-RPC, REST, gRPC, and Tendermint RPC
 
 <div align="center">
 
-[Quick Start](#quick-start) · [How it works](#how-it-works) · [Supported Chains](#supported-chains) · [Releases](#releases) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
+[Quick Start](#quick-start) · [How it works](#how-it-works) · [Supported Chains](#supported-chains) · [Releases](#releases) · [License](#license) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
 
 </div>
 
@@ -354,6 +354,12 @@ If you'd rather customers pull without authenticating, change the **package** vi
 
 For vulnerability reporting, see [SECURITY.md](SECURITY.md). Do **not** open public issues for security concerns.
 
+## License
+
+This repository is source-available under the terms described in [LICENSE.md](LICENSE.md). Noncommercial use is permitted subject to those terms, including personal, educational, research, evaluation, development, and testing use.
+
+Any commercial use, production use by or for a commercial entity, hosted/SaaS or managed-service use offered to customers or other third parties as part of a commercial product or service, resale, redistribution as part of a commercial offering, use as part of a paid product, or use of premium/enterprise features requires a separate written Enterprise License from Magma Devs. Review [LICENSE.md](LICENSE.md) for the full terms. For Enterprise licensing, contact Magma Devs at [sales@magmadevs.com](mailto:sales@magmadevs.com).
+
 ## Community
 
-- [Issues](https://github.com/magma-Devs/smart-router/issues)
+- [Issues](https://github.com/Magma-Devs/smart-router/issues)
