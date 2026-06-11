@@ -94,6 +94,8 @@ DASHBOARD_USERNAME=ops DASHBOARD_PASSWORD='change-me' \
   docker compose -f docker/docker-compose.dashboard.yml up
 ```
 
+The compose sets `NEXT_PUBLIC_LOCAL_MODE=true`, so the dashboard's live-test panel targets each chain directly at `http://localhost:<port>` (the port from `SR_CONFIG`) instead of the production gateway's `<chain>-<interface>.<domain>` URLs. The generated `curl` commands work as-is against the local stack — e.g. `curl -X POST -H "Content-Type: application/json" http://localhost:3360 -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'`.
+
 > The `admin` / `password` default is for local use only — set `DASHBOARD_PASSWORD` to a real secret for any non-local deployment.
 
 ### Configuration

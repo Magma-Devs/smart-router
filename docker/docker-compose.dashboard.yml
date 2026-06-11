@@ -87,6 +87,10 @@ services:
       - NEXT_PUBLIC_DOMAIN=localhost
       - NEXT_PUBLIC_PORT=8000
       - NEXT_PUBLIC_PROMETHEUS_URL=http://localhost:9090
+      # Local mode: the live-test panel reaches each chain directly at
+      # localhost:<port> (port from the router config) instead of the
+      # production <chain>-<interface>.<domain> gateway subdomain shape.
+      - NEXT_PUBLIC_LOCAL_MODE=true
     ports:
       - "3000:3000"
     restart: unless-stopped
