@@ -1,12 +1,15 @@
 #!/bin/bash
 # =============================================================================
-# UC-4 (Quorum Mismatch -> Metric for Alerting) + UC-6 (Outlier Excluded from
-# Result Set) test harness — smart-router driven against the provider_simulator
-# (a fault-injectable mock backend).
+# UC-4 (Quorum Mismatch -> Metric for Alerting) + UC-5 (Quorum Failure ->
+# Structured Signal to Client) + UC-6 (Outlier Excluded from Result Set) test
+# harness — smart-router driven against the provider_simulator (a fault-
+# injectable mock backend).
 #
-# UC-4 and UC-6 are the SAME fan-out seen two ways: one provider dissents, so the
-# operator gets an alerting metric (UC-4) AND the outlier is excluded from the
-# client's result while quorum still holds (UC-6). Scenario A asserts both.
+# These three are facets of ONE primitive — "make N providers diverge":
+#   * Scenario A (1 dissenter, quorum HOLDS): the operator gets an alerting metric
+#     (UC-4) AND the outlier is excluded from the client result + logged (UC-6).
+#   * Scenario B (all diverge, quorum LOST): the client gets a structured failure
+#     signal distinguishable from a generic upstream error (UC-5).
 #
 # UC-1/UC-2 work BECAUSE providers agree (shared upstream -> byte-identical ->
 # quorum forms). UC-4 needs the OPPOSITE: a provider that DISAGREES. A shared
@@ -70,6 +73,8 @@ MAX_PART=3                 # fan out to all 3 providers
 DISSENTER="sim-3"          # the provider we make disagree (group g-b)
 DISSENTER_GROUP="g-b"      # mismatch_total{group} we expect for scenario A
 HEIGHT=4000000             # << sim head (5,000,000) -> a settled, FINALIZED height
+OTHER_METHOD="health"      # a method with NO cross-validation policy — used by the UC-5
+                           # "distinguishable from a generic upstream error" contrast.
 
 # Divergent block bodies are distinguished by these 8-hex block_id.hash prefixes.
 SALT_A="DEADBEEF"          # scenario A: sim-3's lone dissent
@@ -90,7 +95,7 @@ print_policy_banner() {
 }
 
 echo "============================================"
-echo "UC-4 (Quorum Mismatch Metric) + UC-6 (Outlier Excluded) — smart-router + provider_simulator"
+echo "UC-4 (Mismatch Metric) + UC-5 (Structured Failure Signal) + UC-6 (Outlier Excluded) — provider_simulator"
 echo "============================================"
 print_policy_banner
 echo ""
@@ -126,6 +131,13 @@ print(json.dumps({'providers': {os.environ['PID']: {'chain_family': 'tendermintr
     'responses': {'block': {'status': 200, 'body': r}}}}}))
 ")
 	curl -s -X POST "http://$SIM_CONTROL/scenario" -H 'Content-Type: application/json' -d "$scenario" >/dev/null
+}
+
+# set_latency <provider_id> <ms> : delay that provider's responses (merges into its
+# scenario config). Used to order responses around the quorum early-exit (Scenario A).
+set_latency() {
+	curl -s -X POST "http://$SIM_CONTROL/scenario" -H 'Content-Type: application/json' \
+		-d "{\"providers\":{\"$1\":{\"chain_family\":\"tendermintrpc\",\"latency_ms\":$2}}}" >/dev/null
 }
 
 sim_reset() { curl -s -X POST "http://$SIM_CONTROL/reset/all" >/dev/null 2>&1; }
@@ -274,7 +286,7 @@ fire_block() { curl -sS -D "$HDR" -o "$BODY" -X POST "http://127.0.0.1:$TM_PORT/
 
 echo ""
 echo "============================================"
-echo "Running UC-4 + UC-6 checks"
+echo "Running UC-4 + UC-5 + UC-6 checks"
 echo "============================================"
 
 # --- Scenario A: quorum reached + 1 dissenter -> mismatch_total ---------------
@@ -282,7 +294,15 @@ echo ""
 echo "[A] QUORUM + DISSENT: $DISSENTER returns a divergent (but successful) '$CV_METHOD'"
 echo "    sim-1 & sim-2 agree -> quorum; $DISSENTER ($DISSENTER_GROUP) is the content outlier"
 sim_reset
-set_block_override "3" "$SALT_A"     # only sim-3 dissents; sim-1/sim-2 stay clean (agree)
+# Cross-validation EARLY-EXITS once the agreement threshold is met. If both honest
+# providers answered first, the quorum would form and the router would exit before
+# the dissenter's response was collected — so the dissent would never be observed and
+# the mismatch metric would not fire (a real race, not a test bug). Slow the two
+# honest providers so the fast dissenter is ALWAYS collected before the quorum
+# completes — modelling the case the metric targets: the outlier responded in time.
+set_latency "1" 500
+set_latency "2" 500
+set_block_override "3" "$SALT_A"     # sim-3 = the fast dissenter (group g-b); sim-1/sim-2 agree (slow)
 fire_block
 a_status=$(cv_status); a_agree=$(cv_agreeing); a_disagree=$(cv_disagreeing)
 echo "      status:                ${a_status:-<absent>}"
@@ -379,11 +399,57 @@ else
 	fail "cross_validation_failed_total did not increment (stayed $failed_after)"
 fi
 
+# --- UC-5 (Structured Signal to Client): the SAME quorum failure must reach the
+# client as a STRUCTURED, actionable signal — headers + body — DISTINGUISHABLE
+# from a generic upstream error. ($HDR/$BODY still hold Scenario B's failure.)
+echo ""
+echo "  [UC-5] the quorum failure must be a structured client signal, distinct from a generic upstream error"
+http_code=$(head -n1 "$HDR" | tr -d '\r' | awk '{print $2}')
+echo "      HTTP status: ${http_code:-<none>}   CV-status: $(cv_status)   failure-reason: $(cv_failure_reason)"
+# 1) Non-200 HTTP status — the failure is distinguishable at the transport layer.
+if [ -n "$http_code" ] && [ "$http_code" != "200" ]; then
+	pass "quorum failure carries a non-200 HTTP status ($http_code)"
+else
+	fail "expected a non-200 HTTP status on quorum failure; got '${http_code:-<none>}'"
+fi
+# 2) failure-reason is a known MACHINE-READABLE enum — enough for a client routing
+#    decision (structural reasons -> fall back; transient -> maybe retry).
+b_reason=$(cv_failure_reason)
+case "$b_reason" in
+	no-agreement|diversity-unmet|insufficient-responses|insufficient-capacity|insufficient-groups|group-quorum-unmet)
+		pass "failure-reason is a recognized cross-validation enum ($b_reason)" ;;
+	*) fail "failure-reason '${b_reason:-<absent>}' is not a recognized cross-validation enum" ;;
+esac
+# 3) The error BODY also carries the structured cross-validation detail (in-band
+#    signal that survives header-stripping proxies).
+if grep -qi "cross-validation" "$BODY"; then
+	pass "error body carries the structured cross-validation failure detail"
+else
+	fail "error body did not mention cross-validation"; head -c 200 "$BODY" 2>/dev/null | sed 's/^/        /'
+fi
+# 4) DISTINGUISHABLE from a generic upstream error: a NON-cross-validated method
+#    ('$OTHER_METHOD') — even with all providers erroring — must carry NO
+#    lava-cross-validation-* headers, so a client can tell the two apart by the
+#    presence of the cross-validation channel alone.
+curl -s -X POST "http://$SIM_CONTROL/scenario" -H 'Content-Type: application/json' \
+	-d '{"providers":{"1":{"chain_family":"tendermintrpc","mode":"error"},"2":{"chain_family":"tendermintrpc","mode":"error"},"3":{"chain_family":"tendermintrpc","mode":"error"}}}' >/dev/null
+curl -sS -D "$HDR" -o "$BODY" -X POST "http://127.0.0.1:$TM_PORT/" \
+	-d "{\"jsonrpc\":\"2.0\",\"method\":\"$OTHER_METHOD\",\"params\":[],\"id\":1}"
+if grep -qi '^lava-cross-validation' "$HDR"; then
+	fail "a generic upstream error on '$OTHER_METHOD' wrongly carried cross-validation headers:"
+	grep -i '^lava-cross-validation' "$HDR" | tr -d '\r' | sed 's/^/        /'
+else
+	pass "a generic upstream error ('$OTHER_METHOD') carries NO cross-validation headers — the quorum failure is distinguishable"
+fi
+
 rm -f "$HDR" "$BODY"
 
-# Leave the router in the Scenario-A state (single dissenter) so a manual 'block'
-# curl reproduces the headline mismatch. The simulator stays running.
+# Leave the router in the Scenario-A state (single dissenter, honest providers slowed
+# so the dissent is reliably observed) so a manual 'block' curl reproduces the headline
+# mismatch deterministically. The simulator stays running.
 sim_reset
+set_latency "1" 500
+set_latency "2" 500
 set_block_override "3" "$SALT_A"
 
 # =============================================================================
@@ -391,7 +457,7 @@ set_block_override "3" "$SALT_A"
 # =============================================================================
 echo ""
 echo "============================================"
-echo "UC-4 + UC-6 result: $PASS passed, $FAIL failed   (alerting metric + outlier-excluded + no-quorum)"
+echo "UC-4 + UC-5 + UC-6 result: $PASS passed, $FAIL failed   (alerting metric + outlier-excluded + structured failure signal)"
 echo "============================================"
 echo "Tendermint listener: http://127.0.0.1:$TM_PORT   (metrics: $METRICS_PORT)"
 echo "Config:              $CONFIG_FILE"
