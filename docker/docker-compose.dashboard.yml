@@ -67,8 +67,12 @@ services:
       - AUTH_PASSWORD=${DASHBOARD_PASSWORD:-password}
       - CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000","http://0.0.0.0:3000"]
     volumes:
-      # Sample router topology the backend reads for its component view.
-      - ./dashboard-helm-values:/app/helm-values:ro
+      # The backend reads the live router config — the exact same SR_CONFIG the
+      # router runs — and parses its endpoints/direct-rpc format natively, so
+      # the dashboard's component view always reflects the running topology
+      # with no duplicated config file. Mounted at <helm_values_dir>/core/values.yml,
+      # the path the backend's ConfigurationService reads.
+      - ../${SR_CONFIG:-config/smartrouter_examples/smartrouter_eth.yml}:/app/helm-values/core/values.yml:ro
     ports:
       - "8000:8000"
     restart: unless-stopped
