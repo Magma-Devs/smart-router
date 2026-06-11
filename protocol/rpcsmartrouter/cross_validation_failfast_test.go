@@ -169,3 +169,23 @@ func TestCrossValidationFailFastResult(t *testing.T) {
 	require.Equal(t, "failed", headers[common.CROSS_VALIDATION_STATUS_HEADER_NAME])
 	require.Equal(t, common.CrossValidationReasonInsufficientGroups, headers[common.CROSS_VALIDATION_FAILURE_REASON_HEADER])
 }
+
+// TestPreferStructuralFailureReason covers the precedence fix: when an earlier batch produced a non-quorum
+// result (so HasResults() was true and the fail-fast early-return was skipped) but a later batch hit a
+// structural capacity/diversity guard, the client must see the structural reason — strictly more actionable
+// than the final-eval "providers disagreed" reason — not the two reason channels disagreeing.
+func TestPreferStructuralFailureReason(t *testing.T) {
+	t.Run("structural fail-fast reason overrides the final-eval reason on failure", func(t *testing.T) {
+		res := &common.RelayResult{CrossValidationFailureReason: common.CrossValidationReasonNoAgreement}
+		preferStructuralFailureReason(res, common.CrossValidationReasonInsufficientGroups)
+		require.Equal(t, common.CrossValidationReasonInsufficientGroups, res.CrossValidationFailureReason)
+	})
+	t.Run("no fail-fast reason -> result reason unchanged", func(t *testing.T) {
+		res := &common.RelayResult{CrossValidationFailureReason: common.CrossValidationReasonDiversityUnmet}
+		preferStructuralFailureReason(res, "")
+		require.Equal(t, common.CrossValidationReasonDiversityUnmet, res.CrossValidationFailureReason)
+	})
+	t.Run("nil result -> no panic", func(t *testing.T) {
+		require.NotPanics(t, func() { preferStructuralFailureReason(nil, common.CrossValidationReasonInsufficientGroups) })
+	})
+}

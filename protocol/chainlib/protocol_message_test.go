@@ -92,6 +92,10 @@ func TestGetCrossValidationParameters(t *testing.T) {
 		assert.True(t, headersPresent)
 		assert.Equal(t, 5, params.MaxParticipants)
 		assert.Equal(t, 3, params.AgreementThreshold)
+		// A header-driven request has no group-diversity header, so it must resolve to exactly one group —
+		// matching DefaultCrossValidationParams. A zero here would mean "0 groups required" to any consumer
+		// that compares len(groups) >= MinGroups without the >1 guard.
+		assert.Equal(t, 1, params.MinGroups)
 	})
 
 	t.Run("threshold equals max - valid", func(t *testing.T) {

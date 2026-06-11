@@ -412,6 +412,18 @@ func crossValidationSuccessOutliers(successResults []common.RelayResult, consens
 	return outliers
 }
 
+// preferStructuralFailureReason overwrites a cross-validation FAILURE result's reason with a structural
+// request-time fail-fast reason (insufficient-capacity / insufficient-groups) when one was set. The
+// structural reason means the fleet cannot satisfy the policy at all — strictly more actionable for the
+// client than the final-eval reason (no-agreement / diversity-unmet, i.e. "the providers disagreed"). A
+// no-op when there is no result or no fail-fast reason. Callers gate this on failure (err != nil) so a
+// successful relay never inherits a stale reason.
+func preferStructuralFailureReason(result *common.RelayResult, failFastReason string) {
+	if result != nil && failFastReason != "" {
+		result.CrossValidationFailureReason = failFastReason
+	}
+}
+
 // crossValidationFinalityLabel returns the tri-state finality label (finalized / not_finalized / unknown)
 // for the request, used by the mismatch metric so alerts can prioritise post-finality divergence over
 // natural pre-finality propagation lag. "unknown" covers sentinel requested blocks (latest/pending/
@@ -857,6 +869,18 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		}
 		return r, e
 	}()
+
+	// A request-time cross-validation fail-fast (a capacity/diversity guard that aborted a LATER batch)
+	// may have set a structural reason on the shared processor even though an EARLIER batch produced a
+	// non-quorum result — so HasResults() was true and the early-return above was skipped, and the result
+	// here carries only the final-eval reason (no-agreement / diversity-unmet). A structural reason
+	// (insufficient-capacity / insufficient-groups: the fleet cannot satisfy the policy at all) is strictly
+	// more actionable for the client than "the providers disagreed", so on a FAILURE prefer it rather than
+	// letting the two reason channels disagree. Only on failure (err != nil): a later successful batch
+	// leaves err == nil and must not inherit a stale fail-fast reason.
+	if err != nil && relayProcessor != nil {
+		preferStructuralFailureReason(returnedResult, relayProcessor.GetCrossValidationFailFastReason())
+	}
 
 	utils.LavaFormatInfo("ProcessingResult RETURNED",
 		utils.LogAttr("has_result", returnedResult != nil),
