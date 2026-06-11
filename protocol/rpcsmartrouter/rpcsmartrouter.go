@@ -1542,7 +1542,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 				utils.LavaFormatInfo("Chain tracker started",
 					utils.LogAttr("chain", rpcEndpoint.ChainID),
-					utils.LogAttr("pollingInterval", averageBlockTime/time.Duration(chaintracker.MostFrequentPollingMultiplier)),
+					utils.LogAttr("pollingInterval", averageBlockTime/time.Duration(chaintracker.EffectivePollingMultiplier())),
 					utils.LogAttr("blocksToSave", blocksToSaveChainTracker),
 				)
 			}
@@ -1655,6 +1655,29 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			lavasession.AllowInsecureConnectionToProviders = viper.GetBool(lavasession.AllowInsecureConnectionToProvidersFlag)
 			if lavasession.AllowInsecureConnectionToProviders {
 				utils.LavaFormatWarning("AllowInsecureConnectionToProviders is set to true, this should be used only in development", nil, utils.Attribute{Key: lavasession.AllowInsecureConnectionToProvidersFlag, Value: lavasession.AllowInsecureConnectionToProviders})
+			}
+
+			// polling-relief: set the process-wide cadence/consistency overrides from flags
+			// BEFORE any chain tracker or consistency config is built. Zero = no relief;
+			// out-of-range values warn-and-revert to the built-in default (not silent clamp).
+			if m := viper.GetInt(chaintracker.ChainTrackerPollingMultiplierFlagName); m != 0 {
+				if m < chaintracker.MinPollingTimeMultiplier || m > chaintracker.MostFrequentPollingMultiplier {
+					utils.LavaFormatWarning("--"+chaintracker.ChainTrackerPollingMultiplierFlagName+" out of allowed range [4,16]; reverting to default", nil, utils.LogAttr("provided", m))
+				} else {
+					chaintracker.PollingTimeMultiplierOverride = m
+				}
+			}
+			if f := viper.GetInt(relaycore.ConsistencyBlockGapFactorFlagName); f != 0 {
+				if f < 2 || f > 8 {
+					utils.LavaFormatWarning("--"+relaycore.ConsistencyBlockGapFactorFlagName+" out of allowed range [2,8]; reverting to default", nil, utils.LogAttr("provided", f))
+				} else {
+					relaycore.ConsistencyBlockGapFactorOverride = int64(f)
+				}
+			}
+			if chaintracker.PollingTimeMultiplierOverride != 0 || relaycore.ConsistencyBlockGapFactorOverride != 0 {
+				utils.LavaFormatInfo("polling-relief active",
+					utils.LogAttr("chainTrackerPollingMultiplier", chaintracker.EffectivePollingMultiplier()),
+					utils.LogAttr("consistencyBlockGapFactor", relaycore.ConsistencyBlockGapFactorOverride))
 			}
 
 			var rpcEndpoints []*lavasession.RPCEndpoint
@@ -1949,6 +1972,8 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeBlockProfileRateFlagName, performance.DefaultBlockProfileRate, "block profile rate in nanoseconds (1 records all blocking events)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
+	cmdRPCSmartRouter.Flags().Int(chaintracker.ChainTrackerPollingMultiplierFlagName, 0, "polling-relief: override the chain-tracker polling multiplier (default 16). Allowed [4,16]; out-of-range reverts to default. Smaller = slower polling = fewer upstream calls.")
+	cmdRPCSmartRouter.Flags().Int(relaycore.ConsistencyBlockGapFactorFlagName, 0, "polling-relief: widen the consistency endpoint-lag gate (blockLagForQosSync x factor; default 2). Allowed [2,8]; out-of-range reverts to default. Companion to the polling multiplier.")
 	cmdRPCSmartRouter.Flags().Var(&strategyFlag, "strategy", fmt.Sprintf("the strategy to use to pick providers (%s)", strings.Join(strategyNames, "|")))
 	defaultWeightedConfig := provideroptimizer.DefaultWeightedSelectorConfig()
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerAvailabilityWeight, defaultWeightedConfig.AvailabilityWeight, "weight assigned to provider availability when computing selection scores")

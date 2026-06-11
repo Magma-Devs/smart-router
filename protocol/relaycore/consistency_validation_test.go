@@ -234,7 +234,7 @@ func TestConsistencyValidationConfig_Creation(t *testing.T) {
 
 	t.Run("config from chain spec - typical EVM", func(t *testing.T) {
 		// Typical EVM: blockLagForQosSync=3, finalization=64, avgBlockTime=12s
-		config := NewConsistencyValidationConfig(3, 64, 12*time.Second)
+		config := NewConsistencyValidationConfig(3, 64, 12*time.Second, 0)
 		require.NotNil(t, config)
 		// EndpointLagThreshold = max(3*2=6, 64) = 64, but min 10, so 64
 		require.Equal(t, int64(64), config.EndpointLagThreshold)
@@ -244,7 +244,7 @@ func TestConsistencyValidationConfig_Creation(t *testing.T) {
 
 	t.Run("config from chain spec - fast chain", func(t *testing.T) {
 		// Fast chain: blockLagForQosSync=10, finalization=32, avgBlockTime=2s
-		config := NewConsistencyValidationConfig(10, 32, 2*time.Second)
+		config := NewConsistencyValidationConfig(10, 32, 2*time.Second, 0)
 		require.NotNil(t, config)
 		// EndpointLagThreshold = max(10*2=20, 32) = 32
 		require.Equal(t, int64(32), config.EndpointLagThreshold)
@@ -254,7 +254,7 @@ func TestConsistencyValidationConfig_Creation(t *testing.T) {
 
 	t.Run("config from chain spec - slow chain", func(t *testing.T) {
 		// Slow chain: blockLagForQosSync=1, finalization=6, avgBlockTime=60s
-		config := NewConsistencyValidationConfig(1, 6, 60*time.Second)
+		config := NewConsistencyValidationConfig(1, 6, 60*time.Second, 0)
 		require.NotNil(t, config)
 		// EndpointLagThreshold = max(1*2=2, 6) = 10 (minimum)
 		require.Equal(t, int64(10), config.EndpointLagThreshold)
@@ -264,12 +264,23 @@ func TestConsistencyValidationConfig_Creation(t *testing.T) {
 
 	t.Run("config from chain spec - very fast block time", func(t *testing.T) {
 		// Very fast: blockLagForQosSync=20, finalization=100, avgBlockTime=100ms
-		config := NewConsistencyValidationConfig(20, 100, 100*time.Millisecond)
+		config := NewConsistencyValidationConfig(20, 100, 100*time.Millisecond, 0)
 		require.NotNil(t, config)
 		// EndpointLagThreshold = max(20*2=40, 100) = 100
 		require.Equal(t, int64(100), config.EndpointLagThreshold)
 		// MaxWaitTime = max(100ms*2=200ms, 500ms floor) = 500ms
 		require.Equal(t, 500*time.Millisecond, config.MaxWaitTime)
+	})
+
+	t.Run("block-gap-factor widens the threshold when QoS-lag dominates (polling-relief)", func(t *testing.T) {
+		// Solana-like: blockLagForQosSync=25 with a small finalization distance, so the
+		// QoS-lag term dominates the max() and the factor actually moves the threshold.
+		// (On finalization-dominated chains like EVM the factor is inert until it exceeds
+		// the finalization distance.)
+		require.Equal(t, int64(50), NewConsistencyValidationConfig(25, 5, 400*time.Millisecond, 0).EndpointLagThreshold)  // 0 -> default x2
+		require.Equal(t, int64(50), NewConsistencyValidationConfig(25, 5, 400*time.Millisecond, 2).EndpointLagThreshold)  // explicit 2 == default
+		require.Equal(t, int64(100), NewConsistencyValidationConfig(25, 5, 400*time.Millisecond, 4).EndpointLagThreshold) // x4
+		require.Equal(t, int64(200), NewConsistencyValidationConfig(25, 5, 400*time.Millisecond, 8).EndpointLagThreshold) // x8
 	})
 }
 
