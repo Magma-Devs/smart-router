@@ -28,7 +28,7 @@ require (
 	github.com/grafana/pyroscope-go v1.3.1
 	github.com/itchyny/gojq v0.12.16
 	github.com/jhump/protoreflect v1.15.1
-	github.com/joho/godotenv v1.3.0
+	github.com/joho/godotenv v1.5.1
 	github.com/newrelic/go-agent/v3 v3.20.4
 	github.com/spf13/pflag v1.0.5
 	github.com/tidwall/gjson v1.16.0
