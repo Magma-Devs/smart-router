@@ -78,7 +78,23 @@ To bring up the router together with Prometheus and the [Smart Router Dashboard]
 docker compose -f docker/docker-compose.dashboard.yml up
 ```
 
-This starts the router, a Prometheus that scrapes its `:7779` metrics, and the dashboard backend + frontend — fully self-contained, no dashboard source checkout needed. The UI is at http://localhost:3000 (login `admin` / `password`); Prometheus at http://localhost:9090. Override the dashboard image tag with `DASHBOARD_TAG` and the router config with `SR_CONFIG` as above.
+This starts the router, a Prometheus that scrapes its `:7779` metrics, and the dashboard backend + frontend — fully self-contained, no dashboard source checkout needed. The UI is at http://localhost:3000 and Prometheus at http://localhost:9090.
+
+The dashboard is protected by HTTP basic auth. The **default credentials are `admin` / `password`** — override them (and the image tag / router config) via environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DASHBOARD_USERNAME` | `admin` | Dashboard login username |
+| `DASHBOARD_PASSWORD` | `password` | Dashboard login password |
+| `DASHBOARD_TAG` | `latest` | Dashboard backend/frontend image tag |
+| `SR_CONFIG` | `config/smartrouter_examples/smartrouter_eth.yml` | Router config (mounted into the dashboard too) |
+
+```bash
+DASHBOARD_USERNAME=ops DASHBOARD_PASSWORD='change-me' \
+  docker compose -f docker/docker-compose.dashboard.yml up
+```
+
+> The `admin` / `password` default is for local use only — set `DASHBOARD_PASSWORD` to a real secret for any non-local deployment.
 
 ### Configuration
 
