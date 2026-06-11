@@ -116,6 +116,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		blockLagForQosSync,
 		blockDistanceForFinalizedData,
 		averageBlockTime,
+		relaycore.ConsistencyBlockGapFactorOverride, // polling-relief: 0 = default x2
 	)
 
 	// Assign before creating the manager so that goroutines spawned by

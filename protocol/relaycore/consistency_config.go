@@ -6,6 +6,16 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
+// ConsistencyBlockGapFactorFlagName is the polling-relief flag that widens the
+// endpoint-lag consistency gate (the blockLagForQosSync multiplier; default 2).
+const ConsistencyBlockGapFactorFlagName = "consistency-block-gap-factor"
+
+// ConsistencyBlockGapFactorOverride is the polling-relief process-wide override of
+// the blockLagForQosSync multiplier inside EndpointLagThreshold (default 2). 0 = no
+// relief. A larger value tolerates staler endpoints — the companion to slower polling.
+// Set once at startup from the flag and passed into NewConsistencyValidationConfig.
+var ConsistencyBlockGapFactorOverride int64 = 0
+
 // ConsistencyValidationConfig holds configuration for consistency validation
 // with chain-specific thresholds derived from chain spec values.
 // Only pre-request validation is used (post-response validation removed).
@@ -42,18 +52,24 @@ func DefaultConsistencyValidationConfig() *ConsistencyValidationConfig {
 //   - blockLagForQosSync: The block lag threshold used for QoS sync calculations
 //   - blockDistanceToFinalization: The number of blocks until finalization
 //   - averageBlockTime: The average time between blocks for this chain
+//   - blockGapFactor: polling-relief multiplier on blockLagForQosSync (0 = default 2)
 //
 // Derivation logic:
-//   - EndpointLagThreshold: max(blockLagForQosSync*2, blockDistanceToFinalization), minimum 10
+//   - EndpointLagThreshold: max(blockLagForQosSync*blockGapFactor, blockDistanceToFinalization), minimum 10
 //   - MaxWaitTime: averageBlockTime * 2 - wait up to 2 average block times
 func NewConsistencyValidationConfig(
 	blockLagForQosSync int64,
 	blockDistanceToFinalization uint32,
 	averageBlockTime time.Duration,
+	blockGapFactor int64,
 ) *ConsistencyValidationConfig {
 	// Calculate endpoint lag threshold: use the larger of double QoS sync lag
 	// or the finalization distance, to ensure endpoints can serve finalized blocks.
-	endpointLagThreshold := blockLagForQosSync * 2
+	gapFactor := int64(2)
+	if blockGapFactor != 0 {
+		gapFactor = blockGapFactor
+	}
+	endpointLagThreshold := blockLagForQosSync * gapFactor
 	if finalizationThreshold := int64(blockDistanceToFinalization); finalizationThreshold > endpointLagThreshold {
 		endpointLagThreshold = finalizationThreshold
 	}
