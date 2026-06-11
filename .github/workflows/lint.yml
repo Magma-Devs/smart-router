@@ -27,7 +27,7 @@ jobs:
       # and known to produce a clean run against this codebase, drop the
       # continue-on-error flags on the retries.
       - name: Lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         continue-on-error: true
         id: lint_first_try
         with:
@@ -36,7 +36,7 @@ jobs:
 
       - name: Lint Retry 1
         if: steps.lint_first_try.outcome == 'failure'
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         continue-on-error: true
         id: lint_retry_1
         with:
@@ -45,7 +45,7 @@ jobs:
 
       - name: Lint Retry 2
         if: steps.lint_retry_1.outcome == 'failure'
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         continue-on-error: true
         id: lint_retry_2
         with:
