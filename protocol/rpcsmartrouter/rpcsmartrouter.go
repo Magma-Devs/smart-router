@@ -329,6 +329,9 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// Start optional debug HTTP server for integration tests.
 	// Only starts when --debug-address flag is provided. Off by default.
 	if options.cmdFlags.DebugAddress != "" {
+		// Debug-mode-only: enable the in-memory ring-buffer log sink so the
+		// /debug/logs endpoint can serve recent logs to the test harness.
+		utils.EnableDebugLogBuffer(50000)
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers:    optimizers,
@@ -772,6 +775,72 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			return
 		}
 		w.Write(body)
+	})
+
+	// GET /debug/logs — return recent in-memory log records, optionally scoped
+	// by request_id and/or a [from,to] time window, so an external test harness
+	// can attach the router's logs to failing tests. The ring buffer is enabled
+	// only in debug mode (see EnableDebugLogBuffer in Start); when it was never
+	// enabled this returns an empty set. Each line is an already-valid JSON
+	// object (zerolog JSON record); we assemble the array by joining the raw
+	// bytes with commas rather than re-marshalling.
+	mux.HandleFunc("/debug/logs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		q := r.URL.Query()
+		requestID := q.Get("request_id")
+
+		// from/to are RFC3339; empty or unparseable → zero time (ignored).
+		var from, to time.Time
+		if v := q.Get("from"); v != "" {
+			if parsed, err := time.Parse(time.RFC3339, v); err == nil {
+				from = parsed
+			}
+		}
+		if v := q.Get("to"); v != "" {
+			if parsed, err := time.Parse(time.RFC3339, v); err == nil {
+				to = parsed
+			}
+		}
+
+		// limit defaults to 5000, capped at the ring capacity (50000).
+		limit := 5000
+		if v := q.Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if limit > 50000 {
+			limit = 50000
+		}
+
+		lines := utils.ReadDebugLogBuffer(requestID, from, to, limit)
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"count":%d,"lines":[`, len(lines))
+		for i, line := range lines {
+			if i > 0 {
+				w.Write([]byte{','})
+			}
+			// Strip a trailing newline zerolog appends to each record so the
+			// assembled array stays compact and valid.
+			w.Write([]byte(strings.TrimRight(string(line), "\n")))
+		}
+		fmt.Fprint(w, "]}")
+	})
+
+	// POST /debug/logs/clear — drop every buffered log record so a test can
+	// start from a clean slate before exercising a scenario.
+	mux.HandleFunc("/debug/logs/clear", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		utils.ClearDebugLogBuffer()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"cleared":true}`)
 	})
 
 	return mux
