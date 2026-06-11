@@ -1657,8 +1657,30 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				utils.LavaFormatWarning("AllowInsecureConnectionToProviders is set to true, this should be used only in development", nil, utils.Attribute{Key: lavasession.AllowInsecureConnectionToProvidersFlag, Value: lavasession.AllowInsecureConnectionToProviders})
 			}
 
-			// polling-relief: set the process-wide cadence/consistency overrides from flags
-			// BEFORE any chain tracker or consistency config is built. Zero = no relief;
+			var rpcEndpoints []*lavasession.RPCEndpoint
+			var viper_endpoints *viper.Viper
+			if len(args) > 1 {
+				viper_endpoints, err = common.ParseEndpointArgs(args, Yaml_config_properties, common.EndpointsConfigName)
+				if err != nil {
+					return utils.LavaFormatError("invalid endpoints arguments", err, utils.Attribute{Key: "endpoint_strings", Value: strings.Join(args, "")})
+				}
+				viper.MergeConfigMap(viper_endpoints.AllSettings())
+				err := viper.SafeWriteConfigAs(DefaultRPCSmartRouterFileName)
+				if err != nil {
+					utils.LavaFormatInfo("did not create new config file, if it's desired remove the config file", utils.Attribute{Key: "file_name", Value: viper.ConfigFileUsed()})
+				} else {
+					utils.LavaFormatInfo("created new config file", utils.Attribute{Key: "file_name", Value: DefaultRPCSmartRouterFileName})
+				}
+			} else if err = viper.ReadInConfig(); err != nil {
+				utils.LavaFormatFatal("could not load config file", err, utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
+			} else {
+				utils.LavaFormatInfo("read config file successfully", utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
+			}
+
+			// polling-relief: set the process-wide cadence/consistency overrides AFTER the
+			// config file is merged into viper (above), so the flags resolve from CLI *or*
+			// config.yml (viper precedence: CLI-if-passed > config file > default). Still set
+			// before any chain tracker or consistency config is built. Zero = no relief;
 			// out-of-range values warn-and-revert to the built-in default (not silent clamp).
 			if m := viper.GetInt(chaintracker.ChainTrackerPollingMultiplierFlagName); m != 0 {
 				if m < chaintracker.MinPollingTimeMultiplier || m > chaintracker.MostFrequentPollingMultiplier {
@@ -1680,25 +1702,6 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 					utils.LogAttr("consistencyBlockGapFactor", relaycore.ConsistencyBlockGapFactorOverride))
 			}
 
-			var rpcEndpoints []*lavasession.RPCEndpoint
-			var viper_endpoints *viper.Viper
-			if len(args) > 1 {
-				viper_endpoints, err = common.ParseEndpointArgs(args, Yaml_config_properties, common.EndpointsConfigName)
-				if err != nil {
-					return utils.LavaFormatError("invalid endpoints arguments", err, utils.Attribute{Key: "endpoint_strings", Value: strings.Join(args, "")})
-				}
-				viper.MergeConfigMap(viper_endpoints.AllSettings())
-				err := viper.SafeWriteConfigAs(DefaultRPCSmartRouterFileName)
-				if err != nil {
-					utils.LavaFormatInfo("did not create new config file, if it's desired remove the config file", utils.Attribute{Key: "file_name", Value: viper.ConfigFileUsed()})
-				} else {
-					utils.LavaFormatInfo("created new config file", utils.Attribute{Key: "file_name", Value: DefaultRPCSmartRouterFileName})
-				}
-			} else if err = viper.ReadInConfig(); err != nil {
-				utils.LavaFormatFatal("could not load config file", err, utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
-			} else {
-				utils.LavaFormatInfo("read config file successfully", utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
-			}
 			geolocation, err := cmd.Flags().GetUint64(lavasession.GeolocationFlag)
 			if err != nil {
 				utils.LavaFormatFatal("failed to read geolocation flag, required flag", err)
