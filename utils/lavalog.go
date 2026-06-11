@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	zerolog "github.com/rs/zerolog"
@@ -112,10 +113,20 @@ func (d *debugRingWriter) clear() {
 var (
 	// debugBufferLogger is the THIRD zerolog sink (alongside the std logger and
 	// rollingLogLogger). Disabled by default; enabled only in debug mode.
-	debugBufferLogger = zerolog.New(io.Discard).Level(zerolog.Disabled)
+	//
+	// Held in an atomic.Pointer because EnableDebugLogBuffer swaps the logger
+	// at startup while goroutines spawned by Start (epoch timer, monitoring)
+	// may already be logging — a plain assignment would be a data race on the
+	// read sites in LavaFormatLog.
+	debugBufferLogger atomic.Pointer[zerolog.Logger]
 	debugRingMu       sync.Mutex
 	debugRing         *debugRingWriter
 )
+
+func init() {
+	disabled := zerolog.New(io.Discard).Level(zerolog.Disabled)
+	debugBufferLogger.Store(&disabled)
+}
 
 // EnableDebugLogBuffer turns on the in-memory ring-buffer log sink with the
 // given capacity (number of records). Debug-mode only — called from
@@ -129,7 +140,8 @@ func EnableDebugLogBuffer(maxLines int) {
 	debugRing = newDebugRingWriter(maxLines)
 	ring := debugRing
 	debugRingMu.Unlock()
-	debugBufferLogger = zerolog.New(ring).Level(zerolog.TraceLevel).With().Timestamp().Logger()
+	logger := zerolog.New(ring).Level(zerolog.TraceLevel).With().Timestamp().Logger()
+	debugBufferLogger.Store(&logger)
 }
 
 // ClearDebugLogBuffer drops every record currently in the ring. No-op when the
@@ -502,7 +514,8 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 	var rollingLoggerEvent *zerolog.Event
 	var debugBufferEvent *zerolog.Event
 	rollingLogEnabled := rollingLogLogger.GetLevel() != zerolog.Disabled
-	debugBufferEnabled := debugBufferLogger.GetLevel() != zerolog.Disabled
+	dbgLogger := debugBufferLogger.Load()
+	debugBufferEnabled := dbgLogger.GetLevel() != zerolog.Disabled
 	switch severity {
 	case LAVA_LOG_PANIC:
 		logEvent = zerologlog.Panic()
@@ -510,7 +523,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			rollingLoggerEvent = rollingLogLogger.Panic()
 		}
 		if debugBufferEnabled {
-			debugBufferEvent = debugBufferLogger.Error()
+			debugBufferEvent = dbgLogger.Error()
 		}
 	case LAVA_LOG_FATAL:
 		logEvent = zerologlog.Fatal()
@@ -518,7 +531,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			rollingLoggerEvent = rollingLogLogger.Fatal()
 		}
 		if debugBufferEnabled {
-			debugBufferEvent = debugBufferLogger.Error()
+			debugBufferEvent = dbgLogger.Error()
 		}
 	case LAVA_LOG_ERROR:
 		logEvent = zerologlog.Error()
@@ -526,7 +539,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			rollingLoggerEvent = rollingLogLogger.Error()
 		}
 		if debugBufferEnabled {
-			debugBufferEvent = debugBufferLogger.Error()
+			debugBufferEvent = dbgLogger.Error()
 		}
 	case LAVA_LOG_WARN:
 		logEvent = zerologlog.Warn()
@@ -534,7 +547,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			rollingLoggerEvent = rollingLogLogger.Warn()
 		}
 		if debugBufferEnabled {
-			debugBufferEvent = debugBufferLogger.Warn()
+			debugBufferEvent = dbgLogger.Warn()
 		}
 	case LAVA_LOG_INFO:
 		logEvent = zerologlog.Info()
@@ -542,7 +555,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			rollingLoggerEvent = rollingLogLogger.Info()
 		}
 		if debugBufferEnabled {
-			debugBufferEvent = debugBufferLogger.Info()
+			debugBufferEvent = dbgLogger.Info()
 		}
 	case LAVA_LOG_DEBUG:
 		logEvent = zerologlog.Debug()
@@ -550,7 +563,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			rollingLoggerEvent = rollingLogLogger.Debug()
 		}
 		if debugBufferEnabled {
-			debugBufferEvent = debugBufferLogger.Debug()
+			debugBufferEvent = dbgLogger.Debug()
 		}
 	case LAVA_LOG_TRACE:
 		logEvent = zerologlog.Trace()
@@ -558,7 +571,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			rollingLoggerEvent = rollingLogLogger.Trace()
 		}
 		if debugBufferEnabled {
-			debugBufferEvent = debugBufferLogger.Trace()
+			debugBufferEvent = dbgLogger.Trace()
 		}
 	}
 	output := description
