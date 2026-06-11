@@ -56,17 +56,44 @@ type IChainTracker interface {
 }
 
 const (
-	initRetriesCount               = 4
-	BACKOFF_MAX_TIME               = 10 * time.Minute
-	maxFails                       = 10
-	GoodStabilityThreshold         = 0.3
-	PollingUpdateLength            = 10
-	MostFrequentPollingMultiplier  = 16
-	LavaPollingMultiplierFrequency = 4
-	PollingMultiplierFlagName      = "polling-multiplier"
+	initRetriesCount                      = 4
+	BACKOFF_MAX_TIME                      = 10 * time.Minute
+	maxFails                              = 10
+	GoodStabilityThreshold                = 0.3
+	PollingUpdateLength                   = 10
+	MostFrequentPollingMultiplier         = 16
+	MinPollingTimeMultiplier              = 4 // adaptive tiers compute base/(multiplier/4); below this divides by zero
+	ChainTrackerPollingMultiplierFlagName = "chain-tracker-polling-multiplier"
 )
 
-var PollingMultiplier = uint64(1)
+// PollingTimeMultiplierOverride is the polling-relief process-wide override of
+// MostFrequentPollingMultiplier (default 16). 0 = no relief (current behavior).
+// A smaller value = slower polling = fewer upstream calls. Set once at startup from
+// the --chain-tracker-polling-multiplier flag and honored in newCustomChainTracker,
+// so it applies to every tracker (the global one and all per-endpoint ones).
+var PollingTimeMultiplierOverride = 0
+
+// EffectivePollingMultiplier returns the multiplier actually in force: the
+// polling-relief override when set, otherwise the built-in MostFrequentPollingMultiplier.
+func EffectivePollingMultiplier() int {
+	if PollingTimeMultiplierOverride != 0 {
+		return PollingTimeMultiplierOverride
+	}
+	return MostFrequentPollingMultiplier
+}
+
+// clampPollingMultiplier enforces the divide-by-zero floor: updateTimer's adaptive
+// tiers compute base/(multiplier/4), so a multiplier below 4 divides by zero. Warns
+// when it has to clamp — the flag path is already range-validated, so this only fires
+// if a per-tracker config sets PollingTimeMultiplier below the floor.
+func clampPollingMultiplier(m int) int {
+	if m < MinPollingTimeMultiplier {
+		utils.LavaFormatWarning("chain-tracker polling multiplier below safe floor; clamping", nil,
+			utils.LogAttr("provided", m), utils.LogAttr("floor", MinPollingTimeMultiplier))
+		return MinPollingTimeMultiplier
+	}
+	return m
+}
 
 type ChainFetcher interface {
 	FetchLatestBlockNum(ctx context.Context) (int64, error)
@@ -505,9 +532,6 @@ func (cs *ChainTracker) updateTimer(tickerBaseTime time.Duration, fetchFails uin
 		newPollingTime = tickerBaseTime / cs.pollingTimeMultiplier
 	}
 	newTickerDuration := exponentialBackoff(newPollingTime, fetchFails)
-	if PollingMultiplier > 1 {
-		newTickerDuration /= time.Duration(PollingMultiplier)
-	}
 
 	cs.timer = time.NewTimer(newTickerDuration)
 }
@@ -670,10 +694,16 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		return &DummyChainTracker{}
 	}
 
+	// polling-relief: apply the process-wide override (flag) first, then any per-tracker
+	// config override, then clamp to the divide-by-zero floor.
 	pollingTime := MostFrequentPollingMultiplier
+	if PollingTimeMultiplierOverride != 0 {
+		pollingTime = PollingTimeMultiplierOverride
+	}
 	if config.PollingTimeMultiplier != 0 {
 		pollingTime = config.PollingTimeMultiplier
 	}
+	pollingTime = clampPollingMultiplier(pollingTime)
 	if chainFetcher == nil {
 		utils.LavaFormatFatal("can't start chainTracker with nil chainFetcher argument", nil)
 	}
