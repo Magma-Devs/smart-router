@@ -3,6 +3,7 @@ package utils
 import (
 	"encoding/json"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +17,8 @@ func resetDebugBuffer() {
 	debugRingMu.Lock()
 	debugRing = nil
 	debugRingMu.Unlock()
-	debugBufferLogger = zerolog.New(io.Discard).Level(zerolog.Disabled)
+	disabled := zerolog.New(io.Discard).Level(zerolog.Disabled)
+	debugBufferLogger.Store(&disabled)
 }
 
 func TestDebugRingWriter_EvictsOldestAtCapacity(t *testing.T) {
@@ -149,6 +151,43 @@ func TestClearDebugLogBuffer(t *testing.T) {
 	if got := ReadDebugLogBuffer("", time.Time{}, time.Time{}, 0); len(got) != 0 {
 		t.Fatalf("post-clear: %d records, want 0", len(got))
 	}
+}
+
+// TestDebugBuffer_ConcurrentEnableAndLog exercises the data race the
+// atomic.Pointer guards against: EnableDebugLogBuffer swaps the sink logger
+// while other goroutines are calling LavaFormat* (which reads it). Run under
+// `go test -race` to catch a regression to a plain assignment. The assertions
+// are weak on purpose — the point is the race detector, not the contents.
+func TestDebugBuffer_ConcurrentEnableAndLog(t *testing.T) {
+	resetDebugBuffer()
+	defer resetDebugBuffer()
+
+	const writers = 8
+	const iterations = 200
+	done := make(chan struct{})
+
+	// Concurrently swap the buffer in/out under the loggers.
+	go func() {
+		for i := 0; i < iterations; i++ {
+			EnableDebugLogBuffer(100)
+			ClearDebugLogBuffer()
+		}
+		close(done)
+	}()
+
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				LavaFormatInfo("concurrent line", LogAttr(KEY_REQUEST_ID, "race"))
+				_ = ReadDebugLogBuffer("race", time.Time{}, time.Time{}, 0)
+			}
+		}()
+	}
+	wg.Wait()
+	<-done
 }
 
 // --- helpers ---
