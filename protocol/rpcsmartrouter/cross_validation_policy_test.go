@@ -151,6 +151,33 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 			// participants capped to 3, threshold (caller 9, no cap) clamped down to participants
 			wantParams: common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 3, MinGroups: 1},
 		},
+		{
+			// Regression: an operator threshold floor with NO max-participants floor must NOT be weakened
+			// by a caller-shrunk max-participants. Pre-fix, eff.MaxParticipants=2 forced the threshold clamp
+			// down to 2, below the operator floor of 3. The effective max is now floored at the operator
+			// threshold (3) so the mandate holds.
+			name:     "caller-shrunk max-participants cannot drop threshold below operator floor (no max floor)",
+			method:   "eth_getBalance",
+			policy:   CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(3)}},
+			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_getBalance",
+			caller:        common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 2},
+			callerPresent: true,
+			wantApplies:   true,
+			wantParams:    common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 3, MinGroups: 1},
+		},
+		{
+			// Regression (more severe): min-groups has NO caller header, yet pre-fix a caller sending
+			// max-participants:1 clamped MinGroups (2) down to 1 — disabling the operator's diversity mandate
+			// entirely. The effective max is now floored at the operator min-groups (2) so diversity survives.
+			name:     "caller-shrunk max-participants cannot disable operator min-groups diversity (no max floor)",
+			method:   "eth_getBalance",
+			policy:   CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: intPtr(2)}},
+			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_getBalance",
+			caller:        common.CrossValidationParams{MaxParticipants: 1, AgreementThreshold: 1},
+			callerPresent: true,
+			wantApplies:   true,
+			wantParams:    common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 1, MinGroups: 2},
+		},
 	}
 
 	for i, tc := range cases {
@@ -441,6 +468,14 @@ func TestCrossValidationSuccessOutliers(t *testing.T) {
 		var zero [32]byte
 		zr := []common.RelayResult{mk("p1", "g1", zero), mk("p2", "g2", zero), mk("p3", "g3", zero)}
 		require.Empty(t, crossValidationSuccessOutliers(zr, zero, true, true))
+	})
+	t.Run("nil-reply consensus (zero hash) -> real responders are NOT flagged as outliers", func(t *testing.T) {
+		// When the reached consensus is the nil/empty-reply fallback, consensusHash is the zero sentinel.
+		// A provider that returned REAL data (non-zero hash) must NOT be emitted as a content outlier — the
+		// empty-reply majority is the anomaly, not the lone substantive responder. Pre-fix this returned p3.
+		var zero [32]byte
+		mixed := []common.RelayResult{mk("p1", "g1", zero), mk("p2", "g2", zero), mk("p3", "g3", hashA)}
+		require.Empty(t, crossValidationSuccessOutliers(mixed, zero, true, true))
 	})
 }
 

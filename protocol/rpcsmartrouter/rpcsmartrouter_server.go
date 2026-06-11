@@ -396,6 +396,13 @@ func crossValidationSuccessOutliers(successResults []common.RelayResult, consens
 	if !cvSuccess || !deterministic {
 		return nil
 	}
+	// When the reached consensus is the nil/empty-reply fallback, consensusHash is left as the zero
+	// sentinel: there is no real content consensus to diverge FROM. Comparing real responses against the
+	// zero hash would flag every substantive responder as a content outlier and inflate mismatch alerts —
+	// yet in that case the empty-reply majority is the anomaly, not the lone real responder. Emit nothing.
+	if consensusHash == ([32]byte{}) {
+		return nil
+	}
 	var outliers []common.RelayResult
 	for _, result := range successResults {
 		if result.ProviderInfo.ProviderAddress != "" && result.ResponseHash != consensusHash {

@@ -300,6 +300,27 @@ func TestResponsesCrossValidation_FailureReasons(t *testing.T) {
 		require.Error(t, err)
 		require.Equal(t, common.CrossValidationReasonDiversityUnmet, reason)
 	})
+
+	t.Run("plentiful nil replies that cannot span groups -> no-agreement, not diversity-unmet", func(t *testing.T) {
+		// Regression: nil replies must not inflate the count that drives the no-agreement/diversity-unmet
+		// split. No REAL hash reaches the threshold (one real response, count 1), and the nil replies all
+		// sit in one group so they cannot form a diverse nil-reply quorum. Pre-fix, nilReplies inflated
+		// maxCount >= threshold and the failure was mislabelled diversity-unmet (implying a quorum agreed).
+		mkNil := func(group string) common.RelayResult {
+			return common.RelayResult{
+				Reply:        &pairingtypes.RelayReply{Data: []byte{}},
+				ProviderInfo: common.ProviderInfo{ProviderAddress: "nil-" + group, ProviderGroup: group},
+			}
+		}
+		rp := &RelayProcessor{
+			crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5, MinGroups: 2},
+			selection:             CrossValidation,
+		}
+		results := []common.RelayResult{mkResult("A", "g1"), mkNil("g1"), mkNil("g1")}
+		_, reason, err := rp.responsesCrossValidation(results, 2)
+		require.Error(t, err)
+		require.Equal(t, common.CrossValidationReasonNoAgreement, reason)
+	})
 }
 
 // TestCrossValidationQuorumReached_Diversity covers the Phase 1.2b diversity-aware early-exit predicate:

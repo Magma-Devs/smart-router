@@ -280,11 +280,24 @@ func (r *CrossValidationPolicyResolver) Resolve(chainID, apiInterface, method st
 		MinGroups: resolveKnob(0, false, policy.MinGroups, defaultEnabledMinGroups),
 	}
 
-	// Keep the quorum shape satisfiable. Validate() guarantees the no-caller shape already satisfies
-	// threshold/min-groups <= max-participants, so this only fires when a caller asked for more
-	// participants than an operator cap allows (the approved cap-loosening): we then lower the caller's
-	// threshold to the capped participant count. It never reduces below an operator floor, because the
-	// capped participant count is itself >= max-participants' floor >= the threshold/min-groups floors.
+	// Protect the operator mandate against a caller-shrunk max-participants. max-participants IS caller-
+	// controllable and is not required to carry a floor, so without this guard a caller could send a small
+	// max-participants (down to 1) and force the clamps below to drop agreement-threshold / min-groups
+	// beneath the operator's no-caller minimums — silently weakening, or at max-participants:1 entirely
+	// disabling, an enabled policy (min-groups has no caller header at all). Floor the effective
+	// max-participants at the operator's no-caller threshold and min-groups so the clamps below can only
+	// ever lower a caller who asked for a STRICTER quorum than max-participants can hold. A caller may
+	// still RAISE max-participants (the approved cap-loosening).
+	operatorThreshold := resolveKnob(0, false, policy.AgreementThreshold, defaultEnabledAgreementThreshold)
+	operatorMinGroups := resolveKnob(0, false, policy.MinGroups, defaultEnabledMinGroups)
+	if operatorThreshold > eff.MaxParticipants {
+		eff.MaxParticipants = operatorThreshold
+	}
+	if operatorMinGroups > eff.MaxParticipants {
+		eff.MaxParticipants = operatorMinGroups
+	}
+	// Fit a caller who asked for a stricter threshold/min-groups than max-participants can hold (the
+	// operator floors are already protected above, so this only reduces caller-raised values).
 	if eff.AgreementThreshold > eff.MaxParticipants {
 		eff.AgreementThreshold = eff.MaxParticipants
 	}
