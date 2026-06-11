@@ -70,6 +70,16 @@ docker compose -f docker/docker-compose.yml up --build
 
 A single parameterized stack serves every example config (`SR_CONFIG=…`), with the cache added by layering an overlay compose file. See [`docs/LOCAL-COMPOSE.md`](docs/LOCAL-COMPOSE.md) for the full guide — config switching, the cache overlay, multi-chain examples, and logging/metrics.
 
+#### With the monitoring dashboard
+
+To bring up the router together with Prometheus and the [Smart Router Dashboard](https://github.com/Magma-Devs/smart-router-dashboard) (pre-built GHCR images), use the dashboard compose file:
+
+```bash
+docker compose -f docker/docker-compose.dashboard.yml up
+```
+
+This starts the router, a Prometheus that scrapes its `:7779` metrics, and the dashboard backend + frontend — fully self-contained, no dashboard source checkout needed. The UI is at http://localhost:3000 (login `admin` / `password`); Prometheus at http://localhost:9090. Override the dashboard image tag with `DASHBOARD_TAG` and the router config with `SR_CONFIG` as above.
+
 ### Configuration
 
 Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_lava.yml` for an example targeting the Lava blockchain via PublicNode.
