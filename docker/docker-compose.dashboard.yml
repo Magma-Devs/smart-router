@@ -1,0 +1,93 @@
+# Self-contained Smart Router + Dashboard stack.
+#
+# Brings up the full observability stack in one command:
+#
+#   router      — the smart-router itself (included from docker-compose.yml),
+#                 exposing Prometheus metrics on :7779
+#   prometheus  — scrapes router:7779 (config: docker/prometheus.yml)
+#   backend     — dashboard API (FastAPI), runs PromQL against Prometheus
+#   frontend    — dashboard UI (Next.js), talks to the backend
+#
+# The dashboard backend/frontend run from the pre-built images published to
+# GHCR by the smart-router-dashboard repo — no dashboard source checkout
+# needed. Override the tag with DASHBOARD_TAG (default: latest).
+#
+#   # Default (Ethereum router):
+#   docker compose -f docker/docker-compose.dashboard.yml up
+#
+#   # A different router example:
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_multichain.yml \
+#     docker compose -f docker/docker-compose.dashboard.yml up
+#
+#   # Pin a dashboard release:
+#   DASHBOARD_TAG=1.0.0 \
+#     docker compose -f docker/docker-compose.dashboard.yml up
+#
+# Endpoints once up:
+#   http://localhost:3000   dashboard UI (login: admin / password)
+#   http://localhost:8000   dashboard API  (/docs for the OpenAPI UI)
+#   http://localhost:9090   Prometheus
+#   http://localhost:3360   router ETH1 jsonrpc
+#   http://localhost:7779   router metrics
+#
+# `include` pulls in the router service + its published ports. The router
+# compose sets `name: smart-router`, so all four services share the
+# smart-router project's default network and reach each other by service name.
+
+name: smart-router
+
+include:
+  - docker-compose.yml
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    depends_on:
+      - router
+
+  backend:
+    image: ghcr.io/magma-devs/smart-router-dashboard/backend:${DASHBOARD_TAG:-latest}
+    pull_policy: always
+    environment:
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+      # Dashboard backend queries Prometheus (not the router) for its panels.
+      - PROMETHEUS_URL=http://prometheus:9090
+      - TENANT_ID=default
+      - AUTH_USERNAME=${DASHBOARD_USERNAME:-admin}
+      - AUTH_PASSWORD=${DASHBOARD_PASSWORD:-password}
+      - CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000","http://0.0.0.0:3000"]
+    volumes:
+      # Sample router topology the backend reads for its component view.
+      - ./dashboard-helm-values:/app/helm-values:ro
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+  frontend:
+    image: ghcr.io/magma-devs/smart-router-dashboard/frontend:${DASHBOARD_TAG:-latest}
+    pull_policy: always
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_DOMAIN=localhost
+      - NEXT_PUBLIC_PORT=8000
+      - NEXT_PUBLIC_PROMETHEUS_URL=http://localhost:9090
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+volumes:
+  prometheus-data:
