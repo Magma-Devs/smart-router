@@ -2,11 +2,14 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	zerolog "github.com/rs/zerolog"
@@ -54,6 +57,177 @@ var (
 	rollingLogLogger      = zerolog.New(os.Stderr).Level(zerolog.Disabled) // this is the singleton rolling logger.
 	defaultGlobalLogLevel = zerolog.DebugLevel
 )
+
+// debugRingWriter is a mutex-guarded fixed-capacity circular buffer of raw log
+// records. It implements io.Writer so a zerolog sink can write JSON records into
+// it. Used only in debug mode (--debug-address) as a forensic in-memory log
+// buffer fetched via /debug/logs.
+type debugRingWriter struct {
+	mu  sync.Mutex
+	buf [][]byte
+	cap int
+}
+
+func newDebugRingWriter(capacity int) *debugRingWriter {
+	if capacity <= 0 {
+		capacity = 1
+	}
+	return &debugRingWriter{
+		buf: make([][]byte, 0, capacity),
+		cap: capacity,
+	}
+}
+
+// Write copies p (zerolog reuses its write buffer, so we MUST copy) and appends
+// it to the ring, evicting the oldest record when at capacity.
+func (d *debugRingWriter) Write(p []byte) (int, error) {
+	cp := make([]byte, len(p))
+	copy(cp, p)
+	d.mu.Lock()
+	if len(d.buf) >= d.cap {
+		// evict the oldest record
+		d.buf = d.buf[1:]
+	}
+	d.buf = append(d.buf, cp)
+	d.mu.Unlock()
+	return len(p), nil
+}
+
+// snapshot returns a copy of the current ring contents in oldest-to-newest order.
+func (d *debugRingWriter) snapshot() [][]byte {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([][]byte, len(d.buf))
+	copy(out, d.buf)
+	return out
+}
+
+// clear empties the ring.
+func (d *debugRingWriter) clear() {
+	d.mu.Lock()
+	d.buf = d.buf[:0]
+	d.mu.Unlock()
+}
+
+var (
+	// debugBufferLogger is the THIRD zerolog sink (alongside the std logger and
+	// rollingLogLogger). Disabled by default; enabled only in debug mode.
+	debugBufferLogger = zerolog.New(io.Discard).Level(zerolog.Disabled)
+	debugRingMu       sync.Mutex
+	debugRing         *debugRingWriter
+)
+
+// EnableDebugLogBuffer turns on the in-memory ring-buffer log sink with the
+// given capacity (number of records). Debug-mode only — called from
+// rpcsmartrouter.Start when --debug-address is set. Captures EVERYTHING
+// (TraceLevel) as machine-parseable JSON; forensics is the point.
+func EnableDebugLogBuffer(maxLines int) {
+	if maxLines <= 0 {
+		maxLines = 5000
+	}
+	debugRingMu.Lock()
+	debugRing = newDebugRingWriter(maxLines)
+	ring := debugRing
+	debugRingMu.Unlock()
+	debugBufferLogger = zerolog.New(ring).Level(zerolog.TraceLevel).With().Timestamp().Logger()
+}
+
+// ClearDebugLogBuffer drops every record currently in the ring. No-op when the
+// buffer was never enabled.
+func ClearDebugLogBuffer() {
+	debugRingMu.Lock()
+	ring := debugRing
+	debugRingMu.Unlock()
+	if ring != nil {
+		ring.clear()
+	}
+}
+
+// ReadDebugLogBuffer returns the buffered log records, filtered by requestID
+// and/or time window, with the most recent `limit` records retained (tail).
+//
+//   - requestID != "": keep only records whose "request_id" field equals it. A
+//     record that fails to JSON-parse is skipped when a requestID filter is
+//     active, and kept when it is not.
+//   - from/to (non-zero): keep records whose "time" field (Unix-nano integer,
+//     since the package sets zerolog.TimeFieldFormat = TimeFormatUnixNano) falls
+//     within [from, to].
+//   - both given → ANDed.
+//   - limit <= 0 defaults to 5000.
+func ReadDebugLogBuffer(requestID string, from, to time.Time, limit int) [][]byte {
+	if limit <= 0 {
+		limit = 5000
+	}
+	debugRingMu.Lock()
+	ring := debugRing
+	debugRingMu.Unlock()
+	if ring == nil {
+		return [][]byte{}
+	}
+	records := ring.snapshot()
+
+	filterRequest := requestID != ""
+	filterFrom := !from.IsZero()
+	filterTo := !to.IsZero()
+	var fromNano, toNano int64
+	if filterFrom {
+		fromNano = from.UnixNano()
+	}
+	if filterTo {
+		toNano = to.UnixNano()
+	}
+
+	out := make([][]byte, 0, len(records))
+	for _, rec := range records {
+		var fields map[string]json.RawMessage
+		parsed := json.Unmarshal(rec, &fields) == nil
+
+		if !parsed {
+			// Unparseable lines: keep only when no requestID filter is active.
+			if filterRequest {
+				continue
+			}
+			out = append(out, rec)
+			continue
+		}
+
+		if filterRequest {
+			raw, ok := fields[KEY_REQUEST_ID]
+			if !ok {
+				continue
+			}
+			var rid string
+			if err := json.Unmarshal(raw, &rid); err != nil || rid != requestID {
+				continue
+			}
+		}
+
+		if filterFrom || filterTo {
+			raw, ok := fields["time"]
+			if !ok {
+				continue
+			}
+			var ts int64
+			if err := json.Unmarshal(raw, &ts); err != nil {
+				continue
+			}
+			if filterFrom && ts < fromNano {
+				continue
+			}
+			if filterTo && ts > toNano {
+				continue
+			}
+		}
+
+		out = append(out, rec)
+	}
+
+	// Apply limit LAST: keep the most recent `limit` records (tail).
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out
+}
 
 type Attribute struct {
 	Key   string
@@ -326,42 +500,65 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 
 	var logEvent *zerolog.Event
 	var rollingLoggerEvent *zerolog.Event
+	var debugBufferEvent *zerolog.Event
 	rollingLogEnabled := rollingLogLogger.GetLevel() != zerolog.Disabled
+	debugBufferEnabled := debugBufferLogger.GetLevel() != zerolog.Disabled
 	switch severity {
 	case LAVA_LOG_PANIC:
 		logEvent = zerologlog.Panic()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Panic()
 		}
+		if debugBufferEnabled {
+			debugBufferEvent = debugBufferLogger.Error()
+		}
 	case LAVA_LOG_FATAL:
 		logEvent = zerologlog.Fatal()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Fatal()
+		}
+		if debugBufferEnabled {
+			debugBufferEvent = debugBufferLogger.Error()
 		}
 	case LAVA_LOG_ERROR:
 		logEvent = zerologlog.Error()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Error()
 		}
+		if debugBufferEnabled {
+			debugBufferEvent = debugBufferLogger.Error()
+		}
 	case LAVA_LOG_WARN:
 		logEvent = zerologlog.Warn()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Warn()
+		}
+		if debugBufferEnabled {
+			debugBufferEvent = debugBufferLogger.Warn()
 		}
 	case LAVA_LOG_INFO:
 		logEvent = zerologlog.Info()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Info()
 		}
+		if debugBufferEnabled {
+			debugBufferEvent = debugBufferLogger.Info()
+		}
 	case LAVA_LOG_DEBUG:
 		logEvent = zerologlog.Debug()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Debug()
 		}
+		if debugBufferEnabled {
+			debugBufferEvent = debugBufferLogger.Debug()
+		}
 	case LAVA_LOG_TRACE:
 		logEvent = zerologlog.Trace()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Trace()
+		}
+		if debugBufferEnabled {
+			debugBufferEvent = debugBufferLogger.Trace()
 		}
 	}
 	output := description
@@ -370,6 +567,9 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		logEvent = logEvent.Err(err)
 		if rollingLoggerEvent != nil {
 			rollingLoggerEvent = rollingLoggerEvent.Err(err)
+		}
+		if debugBufferEvent != nil {
+			debugBufferEvent = debugBufferEvent.Err(err)
 		}
 		output = fmt.Sprintf("%s ErrMsg: %s", output, err.Error())
 	}
@@ -382,6 +582,9 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			if rollingLoggerEvent != nil {
 				rollingLoggerEvent = rollingLoggerEvent.Str(key, st_val)
 			}
+			if debugBufferEvent != nil {
+				debugBufferEvent = debugBufferEvent.Str(key, st_val)
+			}
 			attrStrings = append(attrStrings, fmt.Sprintf("%s:%s", attr.Key, st_val))
 		}
 		attributesStr := "{" + strings.Join(attrStrings, ",") + "}"
@@ -390,6 +593,9 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 	logEvent.Msg(description)
 	if rollingLoggerEvent != nil {
 		rollingLoggerEvent.Msg(description)
+	}
+	if debugBufferEvent != nil {
+		debugBufferEvent.Msg(description)
 	}
 	// Return a wrappedLavaError that supports both Unwrap() (stdlib) and
 	// Cause() (pkg-errors causer interface), preserving error chain

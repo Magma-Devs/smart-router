@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -252,9 +254,9 @@ func (r *recordingDirectRPCConnection) SendRequest(context.Context, []byte, map[
 func (r *recordingDirectRPCConnection) GetProtocol() lavasession.DirectRPCProtocol {
 	return lavasession.DirectRPCProtocolHTTP
 }
-func (r *recordingDirectRPCConnection) Close() error              { return nil }
-func (r *recordingDirectRPCConnection) IsHealthy() bool           { return r.healthy.Load() }
-func (r *recordingDirectRPCConnection) GetURL() string            { return "" }
+func (r *recordingDirectRPCConnection) Close() error                { return nil }
+func (r *recordingDirectRPCConnection) IsHealthy() bool             { return r.healthy.Load() }
+func (r *recordingDirectRPCConnection) GetURL() string              { return "" }
 func (r *recordingDirectRPCConnection) GetNodeUrl() *common.NodeUrl { return nil }
 
 func (r *recordingDirectRPCConnection) MarkHealthy() {
@@ -677,4 +679,107 @@ func TestDebugResetAll_SmartRouter_CacheBeUnimplemented_DegradesGracefully(t *te
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Equal(t, 1, flusher.flushCalls)
 	require.NotContains(t, rr.Body.String(), `"cache-be"`)
+}
+
+// --- /debug/logs ---
+
+// TestDebugLogs_SmartRouter_ReturnsJSON verifies the GET /debug/logs contract:
+// 200 + a JSON body carrying "count" and "lines". We enable the in-memory
+// buffer and emit a log line so there is something to return; ClearDebugLogBuffer
+// keeps the package-level ring from leaking across tests.
+func TestDebugLogs_SmartRouter_ReturnsJSON(t *testing.T) {
+	utils.EnableDebugLogBuffer(100)
+	defer utils.ClearDebugLogBuffer()
+	utils.ClearDebugLogBuffer()
+	utils.LavaFormatInfo("debug-logs test line", utils.LogAttr(utils.KEY_REQUEST_ID, "req-logs-1"))
+
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/logs", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	body := rr.Body.String()
+	require.Contains(t, body, `"count":`)
+	require.Contains(t, body, `"lines":[`)
+	require.Contains(t, body, "debug-logs test line")
+	// The assembled body must be valid JSON.
+	var parsed struct {
+		Count int               `json:"count"`
+		Lines []json.RawMessage `json:"lines"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &parsed))
+	require.Equal(t, parsed.Count, len(parsed.Lines))
+	require.GreaterOrEqual(t, parsed.Count, 1)
+}
+
+// TestDebugLogs_SmartRouter_RequestIDFilter verifies the request_id query
+// param scopes results to a single request.
+func TestDebugLogs_SmartRouter_RequestIDFilter(t *testing.T) {
+	utils.EnableDebugLogBuffer(100)
+	defer utils.ClearDebugLogBuffer()
+	utils.ClearDebugLogBuffer()
+	utils.LavaFormatInfo("line a", utils.LogAttr(utils.KEY_REQUEST_ID, "req-A"))
+	utils.LavaFormatInfo("line b", utils.LogAttr(utils.KEY_REQUEST_ID, "req-B"))
+
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/logs?request_id=req-A", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	body := rr.Body.String()
+	require.Contains(t, body, "line a")
+	require.NotContains(t, body, "line b")
+}
+
+func TestDebugLogs_SmartRouter_MethodNotAllowed(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	req := httptest.NewRequest(http.MethodPost, "/debug/logs", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
+func TestDebugLogsClear_SmartRouter_ReturnsJSON(t *testing.T) {
+	utils.EnableDebugLogBuffer(100)
+	defer utils.ClearDebugLogBuffer()
+	utils.LavaFormatInfo("to be cleared")
+
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	req := httptest.NewRequest(http.MethodPost, "/debug/logs/clear", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.Contains(t, rr.Body.String(), `"cleared":true`)
+
+	// After clearing, GET /debug/logs reports an empty set.
+	getReq := httptest.NewRequest(http.MethodGet, "/debug/logs", nil)
+	getRR := httptest.NewRecorder()
+	mux.ServeHTTP(getRR, getReq)
+	require.Equal(t, http.StatusOK, getRR.Code)
+	require.Contains(t, getRR.Body.String(), `"count":0`)
+}
+
+func TestDebugLogsClear_SmartRouter_MethodNotAllowed(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/logs/clear", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
