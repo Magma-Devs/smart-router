@@ -1,7 +1,12 @@
 #!/bin/bash
 # =============================================================================
-# UC-4 (Quorum Mismatch -> Metric for Alerting) test harness — smart-router
-# driven against the provider_simulator (a fault-injectable mock backend).
+# UC-4 (Quorum Mismatch -> Metric for Alerting) + UC-6 (Outlier Excluded from
+# Result Set) test harness — smart-router driven against the provider_simulator
+# (a fault-injectable mock backend).
+#
+# UC-4 and UC-6 are the SAME fan-out seen two ways: one provider dissents, so the
+# operator gets an alerting metric (UC-4) AND the outlier is excluded from the
+# client's result while quorum still holds (UC-6). Scenario A asserts both.
 #
 # UC-1/UC-2 work BECAUSE providers agree (shared upstream -> byte-identical ->
 # quorum forms). UC-4 needs the OPPOSITE: a provider that DISAGREES. A shared
@@ -85,7 +90,7 @@ print_policy_banner() {
 }
 
 echo "============================================"
-echo "UC-4 — Quorum Mismatch -> Metric for Alerting (smart-router + provider_simulator)"
+echo "UC-4 (Quorum Mismatch Metric) + UC-6 (Outlier Excluded) — smart-router + provider_simulator"
 echo "============================================"
 print_policy_banner
 echo ""
@@ -249,6 +254,7 @@ echo "✓ router is answering on :$TM_PORT"
 PASS=0
 FAIL=0
 HDR=$(mktemp)
+BODY=$(mktemp)   # client response body — Scenario A (UC-6) checks the client got the CONSENSUS value
 pass() { echo "  ✅ PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  ❌ FAIL: $1"; FAIL=$((FAIL + 1)); }
 cv_status()         { grep -i '^lava-cross-validation-status:'           "$HDR" | tr -d '\r' | awk '{print $2}'; }
@@ -263,12 +269,12 @@ metric_value() {
 }
 ge1() { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($1 >= 1)}"; }
 
-fire_block() { curl -sS -D "$HDR" -o /dev/null -X POST "http://127.0.0.1:$TM_PORT/" \
+fire_block() { curl -sS -D "$HDR" -o "$BODY" -X POST "http://127.0.0.1:$TM_PORT/" \
 	-d "{\"jsonrpc\":\"2.0\",\"method\":\"$CV_METHOD\",\"params\":{\"height\":\"$HEIGHT\"},\"id\":1}"; }
 
 echo ""
 echo "============================================"
-echo "Running UC-4 checks"
+echo "Running UC-4 + UC-6 checks"
 echo "============================================"
 
 # --- Scenario A: quorum reached + 1 dissenter -> mismatch_total ---------------
@@ -323,6 +329,31 @@ else
 	fail "provider_disagreements_total{provider_address=\"$DISSENTER\"} not >= 1"
 fi
 
+# --- UC-6 (Outlier Excluded from Result Set): the SAME fan-out also proves the
+# outlier is excluded from the RESULT (not just flagged) and that the exclusion is
+# observable in the log. The outlier was made divergent via block_id.hash prefix
+# $SALT_A, so the client must receive the HONEST consensus hash, never $SALT_A.
+echo ""
+echo "  [UC-6] outlier '$DISSENTER' must be EXCLUDED from the result + the exclusion recorded in the log"
+client_hash=$("$SIM_PY" -c "import sys,json;print(json.load(open('$BODY'))['result']['block_id']['hash'])" 2>/dev/null)
+honest_hash=$(clean_block "$SIM_TM_1" | "$SIM_PY" -c "import sys,json;print(json.load(sys.stdin)['result']['block_id']['hash'])" 2>/dev/null)
+echo "      client block_id.hash:  ${client_hash:0:16}...   (honest: ${honest_hash:0:16}..., outlier prefix: $SALT_A)"
+if [ -n "$client_hash" ] && [ "$client_hash" = "$honest_hash" ] && [ "${client_hash:0:8}" != "$SALT_A" ]; then
+	pass "client received the CONSENSUS value — outlier excluded from the result set"
+else
+	fail "client did not receive the consensus value (got '${client_hash:0:16}...', expected honest '${honest_hash:0:16}...')"
+fi
+# Exclusion is observable in the log (UC-6 accepts 'metric OR log' — we have both).
+# Tiny grace so the tee'd INFO line is flushed before we grep.
+sleep 1
+if grep -q "cross-validation outlier detected.*provider=$DISSENTER" "$LOG_FILE"; then
+	pass "exclusion recorded in the log ('cross-validation outlier detected' names $DISSENTER)"
+	grep "cross-validation outlier detected.*provider=$DISSENTER" "$LOG_FILE" | tail -n1 \
+		| grep -o 'consensusHashHex=[^ ]*\|outlierHashHex=[^ ]*\|finality=[^ ]*' | tr '\n' ' ' | sed 's/^/        /'; echo ""
+else
+	fail "no 'cross-validation outlier detected' log line naming $DISSENTER in $LOG_FILE"
+fi
+
 # --- Scenario B: no quorum -> failed_total ------------------------------------
 echo ""
 echo "[B] NO QUORUM: 3 distinct successful '$CV_METHOD' values (threshold $CV_THRESHOLD) -> failure metric"
@@ -348,7 +379,7 @@ else
 	fail "cross_validation_failed_total did not increment (stayed $failed_after)"
 fi
 
-rm -f "$HDR"
+rm -f "$HDR" "$BODY"
 
 # Leave the router in the Scenario-A state (single dissenter) so a manual 'block'
 # curl reproduces the headline mismatch. The simulator stays running.
@@ -360,7 +391,7 @@ set_block_override "3" "$SALT_A"
 # =============================================================================
 echo ""
 echo "============================================"
-echo "UC-4 result: $PASS passed, $FAIL failed   (mismatch->metric: quorum+dissent and no-quorum)"
+echo "UC-4 + UC-6 result: $PASS passed, $FAIL failed   (alerting metric + outlier-excluded + no-quorum)"
 echo "============================================"
 echo "Tendermint listener: http://127.0.0.1:$TM_PORT   (metrics: $METRICS_PORT)"
 echo "Config:              $CONFIG_FILE"
