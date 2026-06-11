@@ -353,11 +353,11 @@ func TestCrossValidationQuorumReached_Diversity(t *testing.T) {
 	require.True(t, rpNoGroups.crossValidationQuorumReached(), "MinGroups<=1 must reach quorum on count alone")
 }
 
-// TestCrossValidationQuorumReached_PerGroupIgnoresNilReplies covers the per-group early-exit fix: empty/nil
-// successful replies accumulate under the zero hash, but per-group quorum never corroborates on a nil reply.
-// The early-exit must ignore the zero-hash bucket (matching responsesCrossValidation), so nil replies cannot
-// trip a premature exit that the final per-group check then fails. Default mode keeps the zero hash for its
-// legitimate nil-reply fallback.
+// TestCrossValidationQuorumReached_PerGroupIgnoresNilReplies covers the nil-reply early-exit rule: empty/nil
+// successful replies accumulate under the zero hash, but a nil/empty consensus is a FALLBACK that
+// responsesCrossValidation accepts only when no real hash formed a quorum. The early-exit must therefore
+// ignore the zero-hash bucket in ALL modes — committing to the nil fallback before real responses (still in
+// flight) could form a preferred real quorum would be premature. The nil fallback is resolved at final eval.
 func TestCrossValidationQuorumReached_PerGroupIgnoresNilReplies(t *testing.T) {
 	zero := [32]byte{}     // nil/empty replies bucket here
 	real := [32]byte{0xAA} // a real response hash
@@ -376,7 +376,9 @@ func TestCrossValidationQuorumReached_PerGroupIgnoresNilReplies(t *testing.T) {
 	rp.quorumMap[real] = &quorumStat{count: 4, groupCounts: map[string]int{"g1": 2, "g2": 2}}
 	require.True(t, rp.crossValidationQuorumReached(), "real per-group quorum must early-exit even with nil replies present")
 
-	// Default (non-per-group) mode is unchanged: the zero-hash bucket is a legitimate nil-reply consensus.
+	// Default (non-per-group) mode now ALSO ignores the zero-hash bucket: a nil/empty consensus is a
+	// fallback resolved at final eval, so the early-exit must not commit to it before a preferred real
+	// quorum could form. A zero bucket that would otherwise "reach" the count+diversity rule does NOT exit.
 	rpDefault := &RelayProcessor{
 		crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 6, MinGroups: 2},
 		selection:             CrossValidation,
@@ -384,7 +386,11 @@ func TestCrossValidationQuorumReached_PerGroupIgnoresNilReplies(t *testing.T) {
 			zero: {count: 4, groupCounts: map[string]int{"g1": 2, "g2": 2}},
 		},
 	}
-	require.True(t, rpDefault.crossValidationQuorumReached(), "default mode must still count nil replies for early-exit")
+	require.False(t, rpDefault.crossValidationQuorumReached(), "default mode must NOT early-exit on the nil-reply fallback bucket")
+
+	// But a real-hash diverse quorum in default mode DOES early-exit — the fix changes only nil handling.
+	rpDefault.quorumMap[real] = &quorumStat{count: 2, groupCounts: map[string]int{"g1": 1, "g2": 1}}
+	require.True(t, rpDefault.crossValidationQuorumReached(), "default mode must early-exit on a real diverse quorum")
 }
 
 // TestRelayProcessor_PerGroupNilReplyRealPath drives a real RelayProcessor through handleResponse: empty

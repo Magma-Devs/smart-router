@@ -184,6 +184,10 @@ func (bpm *BaseProtocolMessage) GetCrossValidationParameters() (common.CrossVali
 	return common.CrossValidationParams{
 		MaxParticipants:    maxParticipants,
 		AgreementThreshold: agreementThreshold,
+		// There is no caller header for group diversity, so a header-driven request requires exactly one
+		// group. Set MinGroups:1 explicitly to match DefaultCrossValidationParams — a zero here would mean
+		// "0 groups required" to any consumer that compares against MinGroups without the >1 guard.
+		MinGroups: 1,
 	}, true, nil
 }
 
