@@ -1566,6 +1566,20 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 	// diverse set exists. minGroups <= 1 keeps the original group-blind selection byte-identical.
 	var providerAddresses []string
 	if minGroups > 1 {
+		// A group-diversity policy (an operator mandate) needs >= minGroups distinct provider groups, which
+		// is fundamentally incompatible with a single-provider directive: lava-select-provider and a sticky
+		// session each pin selection to exactly ONE provider (getValidProviderAddresses returns just that
+		// address). The operator policy wins (UC-1: stricter validation regardless of what the caller asked),
+		// so we intentionally pass empty stickiness/selectedProvider into the diverse fetch below — but make
+		// the override OBSERVABLE instead of silently discarding the caller's directive.
+		if selectedProvider != "" || stickiness != "" {
+			utils.LavaFormatWarning("cross-validation group-diversity policy overrides caller provider selection / stickiness", nil,
+				utils.LogAttr("selectedProvider", selectedProvider),
+				utils.LogAttr("stickiness", stickiness),
+				utils.LogAttr("minGroups", minGroups),
+				utils.LogAttr("chainID", csm.rpcEndpoint.ChainID),
+				utils.LogAttr("GUID", ctx))
+		}
 		ranked, rankErr := csm.getValidProviderAddresses(ctx, len(csm.validAddresses), ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "")
 		if rankErr != nil {
 			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get group-diverse provider addresses", utils.LogAttr("error", rankErr), utils.LogAttr("GUID", ctx))

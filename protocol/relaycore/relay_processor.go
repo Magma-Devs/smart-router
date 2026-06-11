@@ -764,6 +764,13 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 		}
 	}
 
+	// Capture the best REAL response-hash agreement count before nil replies inflate maxCount. The
+	// no-agreement vs diversity-unmet split below must key off real agreement: a large nil count that did
+	// NOT form a diverse quorum means nothing agreed (no-agreement), not "a quorum agreed but failed to
+	// span the required groups" (diversity-unmet). Without this, a request where only nils are plentiful
+	// is mislabelled diversity-unmet, misdirecting a client deciding whether to retry vs fall back.
+	maxRealCount := maxCount
+
 	// Nil replies are a fallback consensus, preferred only when no real response hash formed a diverse
 	// quorum (mirrors the prior real-over-nil preference). Per-group quorum excludes nil replies entirely:
 	// an empty reply is not an independent corroboration of a value, so an all-nil group cannot qualify.
@@ -794,8 +801,9 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 				utils.LogAttr("agreementThreshold", crossValidationSize),
 				utils.LogAttr("maxParticipants", rp.getMaxParticipants()))
 		}
-		if maxCount < crossValidationSize {
-			// No response hash reached the agreement threshold at all.
+		if maxRealCount < crossValidationSize {
+			// No REAL response hash reached the agreement threshold (a plentiful nil count that failed to
+			// form a diverse quorum is still "nothing agreed", not a diversity failure).
 			if rp.selection == CrossValidation {
 				return nil, common.CrossValidationReasonNoAgreement, utils.LavaFormatInfo("cross-validation failed: agreement threshold not reached",
 					utils.LogAttr("nilReplies", nilReplies),
