@@ -707,7 +707,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					// QoS via OnSessionFailure, and (after MaxConsecutiveConnectionAttempts) is
 					// backed off via endpoint.Enabled, both of which self-heal. This mirrors how
 					// WebSocket connections have always behaved (IsHealthy hardcoded true).
-					if len(endpoint.DirectConnections) > 0 {
+					if len(endpoint.DirectConnections) > 0 && endpoint.DirectConnections[0] != nil {
 						utils.LavaFormatTrace("using direct RPC connection",
 							utils.LogAttr("url", endpoint.DirectConnections[0].GetURL()),
 							utils.LogAttr("protocol", endpoint.DirectConnections[0].GetProtocol()),
