@@ -69,4 +69,9 @@ mock-node-server/
 .claude/
 Claude.md
 lavap
+# Built smartrouter binary at the repo root (e.g. from `make build`). Anchored with a leading slash so it
+# does NOT ignore the cmd/smartrouter/ source package.
+/smartrouter
+# Local license key — a credential, must never be committed. Anchored to the repo root.
+/license.key
 debugging/logs/
