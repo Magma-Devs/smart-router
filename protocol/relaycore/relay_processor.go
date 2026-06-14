@@ -539,7 +539,11 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	// header path would compare zero hashes and treat real dissent as agreement. Computed for any reply
 	// with data; only successful replies are counted toward quorum below (empty/nil replies stay zero).
 	if response != nil && response.RelayResult.GetReply() != nil && len(response.RelayResult.GetReply().GetData()) > 0 {
-		response.RelayResult.ResponseHash = sha256.Sum256(response.RelayResult.GetReply().GetData())
+		// Canonicalize before hashing so semantically-identical responses that
+		// differ only in JSON key order share a quorum bucket (MAG-2062). Must
+		// match the fallback hashing in responsesCrossValidation, or the cached
+		// and recomputed hashes would disagree.
+		response.RelayResult.ResponseHash = canonicalResponseHash(response.RelayResult.GetReply().GetData())
 	}
 
 	nodeError := rp.ResultsManager.SetResponse(response, rp.RelayStateMachine.GetProtocolMessage())
@@ -553,7 +557,7 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 
 	// Only successful responses (not errors) count toward cross-validation quorum.
 	if response != nil && nodeError == nil && response.Err == nil {
-		hash := response.RelayResult.ResponseHash // already cached above (before SetResponse)
+		hash := response.RelayResult.ResponseHash // already cached above (before SetResponse), canonicalized
 		stat := rp.quorumMap[hash]
 		if stat == nil {
 			stat = &quorumStat{groupCounts: make(map[string]int)}
