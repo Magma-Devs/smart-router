@@ -1,8 +1,10 @@
 package relaycore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -373,6 +375,37 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 	return false, nodeErrors
 }
 
+// canonicalResponseHash returns a hash of a provider response that is invariant
+// to JSON object key ordering and insignificant whitespace. Cross-validation
+// must place two providers that return the same semantic answer in the same
+// quorum bucket even when their JSON envelope keys are serialized in a different
+// order — e.g. {"jsonrpc","id","result"} from one provider vs
+// {"id","jsonrpc","result"} from another. Hashing the raw bytes would split
+// these into separate buckets and falsely fail agreement (see MAG-2062).
+//
+// It decodes into an interface{} and re-marshals; Go's encoding/json sorts map
+// keys alphabetically on marshal, yielding a deterministic canonical byte form.
+// json.Number (via UseNumber) preserves the literal numeric token rather than
+// coercing through float64 — without this, two distinct large integers could
+// round to the same float64 and produce a *false agreement*, which is worse
+// than the false negative this fixes.
+//
+// If the data is not valid JSON (e.g. binary gRPC payloads) it falls back to
+// hashing the raw bytes, preserving prior behavior for non-JSON interfaces.
+func canonicalResponseHash(data []byte) [32]byte {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return sha256.Sum256(data)
+	}
+	canonical, err := json.Marshal(v)
+	if err != nil {
+		return sha256.Sum256(data)
+	}
+	return sha256.Sum256(canonical)
+}
+
 func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	nodeError := rp.ResultsManager.SetResponse(response, rp.RelayStateMachine.GetProtocolMessage())
 
@@ -386,8 +419,10 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	// Only hash successful responses (not errors) for cross-validation tracking
 	// This prevents error responses from being counted toward cross-validation
 	if response != nil && nodeError == nil && response.Err == nil {
-		// Hash the response data once and cache it in the RelayResult
-		hash := sha256.Sum256(response.RelayResult.GetReply().GetData())
+		// Hash the response data once and cache it in the RelayResult.
+		// Canonicalize first so semantically-identical responses that differ only
+		// in JSON key order land in the same quorum bucket (MAG-2062).
+		hash := canonicalResponseHash(response.RelayResult.GetReply().GetData())
 		response.RelayResult.ResponseHash = hash // Cache the hash for later reuse
 		rp.quorumMap[hash]++
 		if rp.quorumMap[hash] > rp.currentQuorumEqualResults {
@@ -484,8 +519,10 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 			// This eliminates redundant SHA256 computation for responses already hashed
 			hash := result.ResponseHash
 			if hash == [32]byte{} {
-				// Fallback: hash not cached (e.g., for old code paths or error cases)
-				hash = sha256.Sum256(result.Reply.Data)
+				// Fallback: hash not cached (e.g., for old code paths or error
+				// cases). Must use the same canonicalization as handleResponse so
+				// the cached and recomputed hashes agree (MAG-2062).
+				hash = canonicalResponseHash(result.Reply.Data)
 			}
 
 			if count, exists := countMap[hash]; exists {
