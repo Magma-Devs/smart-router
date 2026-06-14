@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -390,13 +391,27 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 // round to the same float64 and produce a *false agreement*, which is worse
 // than the false negative this fixes.
 //
-// If the data is not valid JSON (e.g. binary gRPC payloads) it falls back to
-// hashing the raw bytes, preserving prior behavior for non-JSON interfaces.
+// Canonicalization normalizes structure only (key order, whitespace), never
+// values: json.Number keeps numeric literals distinct, so the same value sent
+// as 1.0 vs 1, or 100 vs 1e2, still hashes differently. That is intentional —
+// the alternative (collapsing numerics) would risk a false agreement.
+//
+// If the data is not valid JSON (e.g. binary gRPC payloads), is not exactly one
+// JSON value (trailing bytes or multiple concatenated documents), or fails to
+// re-marshal, it falls back to hashing the raw bytes. The single-value check
+// matters for safety: json.Decoder.Decode reads only the first value and
+// silently ignores any trailing data, so without it two byte-different payloads
+// (e.g. "{...}A" vs "{...}B") would collapse into one bucket — a false agreement
+// that the raw-byte hash would otherwise have caught.
 func canonicalResponseHash(data []byte) [32]byte {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var v interface{}
 	if err := dec.Decode(&v); err != nil {
+		return sha256.Sum256(data)
+	}
+	// Reject trailing data: a canonical response must be exactly one JSON value.
+	if _, err := dec.Token(); err != io.EOF {
 		return sha256.Sum256(data)
 	}
 	canonical, err := json.Marshal(v)
@@ -417,8 +432,12 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	}
 
 	// Only hash successful responses (not errors) for cross-validation tracking
-	// This prevents error responses from being counted toward cross-validation
-	if response != nil && nodeError == nil && response.Err == nil {
+	// This prevents error responses from being counted toward cross-validation.
+	// The hash and quorumMap are only consumed in CrossValidation mode (see
+	// checkEndProcessing / HasRequiredNodeResults), so skip the canonicalization
+	// work entirely for Stateless/Stateful traffic — it would otherwise decode
+	// and re-marshal every response body (potentially large) for a map nothing reads.
+	if rp.selection == CrossValidation && response != nil && nodeError == nil && response.Err == nil {
 		// Hash the response data once and cache it in the RelayResult.
 		// Canonicalize first so semantically-identical responses that differ only
 		// in JSON key order land in the same quorum bucket (MAG-2062).
