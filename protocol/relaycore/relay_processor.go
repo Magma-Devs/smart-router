@@ -189,6 +189,13 @@ func (rp *RelayProcessor) crossValidationQuorumReached() bool {
 		// per-group mode the final check excludes nils entirely. So the early-exit ignores the zero bucket
 		// in ALL modes; the nil fallback is resolved at final eval once every response is in (or the batch
 		// is exhausted). The cost is at most waiting out an all-nil batch instead of exiting at threshold.
+		//
+		// Backwards-compat note (UC-7): this skip applies even to the legacy header-only path (MinGroups<=1,
+		// not per-group), so an all-nil batch no longer early-exits there either. It STILL forms a quorum at
+		// final eval via the nil fallback, so no empty-response quorum case is broken — only the latency
+		// changes. This is a deliberate decision (commit c0c77a8) and supersedes development-plan item
+		// 2.3-R1's "default mode still counts the zero hash". Pinned by
+		// TestCrossValidationQuorumReached_LegacyHeaderOnlyNilBackwardsCompat + TestResponsesCrossValidation_LegacyNilFallback.
 		if hash == ([32]byte{}) {
 			continue
 		}

@@ -34,9 +34,10 @@ func (NoOpConsumerMetrics) RecordIncidentConsistency(string, string, string, boo
 func (NoOpConsumerMetrics) RecordIncidentHedgeResult(string, string, string, uint64, bool) {}
 func (NoOpConsumerMetrics) SetCrossValidationMetric(string, string, string, bool, []string, []string) {
 }
-func (NoOpConsumerMetrics) UpdateHealthCheckStatus(bool)                          {}
-func (NoOpConsumerMetrics) UpdateHealthcheckStatusBreakdown(string, string, bool) {}
-func (NoOpConsumerMetrics) SetProviderLiveness(string, string, string, bool)      {}
+func (NoOpConsumerMetrics) SetCrossValidationFailureMetric(string, string, string, string) {}
+func (NoOpConsumerMetrics) UpdateHealthCheckStatus(bool)                                   {}
+func (NoOpConsumerMetrics) UpdateHealthcheckStatusBreakdown(string, string, bool)          {}
+func (NoOpConsumerMetrics) SetProviderLiveness(string, string, string, bool)               {}
 func (NoOpConsumerMetrics) SetProviderSelected(string, string, string, []ProviderSelectionScores, float64) {
 }
 func (NoOpConsumerMetrics) SetBlockedProvider(string, string, string, string, bool) {}
@@ -89,6 +90,7 @@ type ConsumerMetricsManagerInf interface {
 
 	// --- Cross-validation (RPCConsumerLogs) ---
 	SetCrossValidationMetric(chainId, apiInterface, method string, success bool, agreeingProviders, disagreeingProviders []string)
+	SetCrossValidationFailureMetric(chainId, apiInterface, method, reason string)
 
 	// --- Health (RelaysMonitorAggregator) ---
 	UpdateHealthCheckStatus(status bool)

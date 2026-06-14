@@ -81,25 +81,39 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 	apiInterface string,
 ) (RelayStateMachine, error) {
 	var cvOverride *common.CrossValidationParams
+	var forbidCallerCV bool
 	if resolver.HasPolicies() {
-		caller, callerPresent, err := protocolMessage.GetCrossValidationParameters()
-		if callerPresent && err != nil {
-			return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
-		}
 		method := protocolMessage.GetApi().GetName()
-		if eff, applies := resolver.Resolve(chainID, apiInterface, method, caller, callerPresent); applies {
-			cvOverride = &eff
-			if debugRelays {
-				utils.LavaFormatDebug("[CrossValidation] per-method policy resolved",
-					utils.LogAttr("chainID", chainID),
-					utils.LogAttr("apiInterface", apiInterface),
-					utils.LogAttr("method", method),
-					utils.LogAttr("maxParticipants", eff.MaxParticipants),
-					utils.LogAttr("agreementThreshold", eff.AgreementThreshold),
-					utils.LogAttr("minGroups", eff.MinGroups),
-					utils.LogAttr("callerHeadersPresent", callerPresent),
-					utils.LogAttr("GUID", ctx))
+		// A forbid-caller-cv policy disables CV for the method: skip the header read entirely (so invalid CV
+		// headers do not even error) and signal the state machine to ignore caller headers. This must be
+		// checked before Resolve, since Resolve returns applies=false for a forbid policy — which on its own
+		// would just let the machine fall back to the caller's headers.
+		forbidCallerCV = resolver.ForbidsCallerCV(chainID, apiInterface, method)
+		if !forbidCallerCV {
+			caller, callerPresent, err := protocolMessage.GetCrossValidationParameters()
+			if callerPresent && err != nil {
+				return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
 			}
+			if eff, applies := resolver.Resolve(chainID, apiInterface, method, caller, callerPresent); applies {
+				cvOverride = &eff
+				if debugRelays {
+					utils.LavaFormatDebug("[CrossValidation] per-method policy resolved",
+						utils.LogAttr("chainID", chainID),
+						utils.LogAttr("apiInterface", apiInterface),
+						utils.LogAttr("method", method),
+						utils.LogAttr("maxParticipants", eff.MaxParticipants),
+						utils.LogAttr("agreementThreshold", eff.AgreementThreshold),
+						utils.LogAttr("minGroups", eff.MinGroups),
+						utils.LogAttr("callerHeadersPresent", callerPresent),
+						utils.LogAttr("GUID", ctx))
+				}
+			}
+		} else if debugRelays {
+			utils.LavaFormatDebug("[CrossValidation] per-method policy forbids caller-driven cross-validation",
+				utils.LogAttr("chainID", chainID),
+				utils.LogAttr("apiInterface", apiInterface),
+				utils.LogAttr("method", method),
+				utils.LogAttr("GUID", ctx))
 		}
 	}
 
@@ -114,5 +128,6 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		SmartRouterStateMachineConfig(),
 		policy,
 		cvOverride,
+		forbidCallerCV,
 	)
 }

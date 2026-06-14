@@ -337,7 +337,12 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("grpc in/out", true, method, string(reqBody), "", errMasking, msgSeed, time.Since(startTime), err)
-			return nil, nil, utils.LavaFormatError("Failed to SendRelay", fmt.Errorf("%s", errMasking))
+			// Even on error the relay result may carry response metadata — notably the
+			// lava-cross-validation-* failure headers synthesized on a quorum/structural failure. Surface it
+			// (the proxy attaches it as gRPC trailers on the error path) so gRPC clients get the same
+			// structured cross-validation signal as the HTTP interfaces. nil/empty when there is nothing to
+			// propagate, preserving prior behavior for ordinary errors.
+			return nil, convertRelayMetaDataToMDMetaData(relayReply.GetMetadata()), utils.LavaFormatError("Failed to SendRelay", fmt.Errorf("%s", errMasking))
 		}
 		apil.logger.LogRequestAndResponse("grpc in/out", false, method, string(reqBody), "", "", msgSeed, time.Since(startTime), nil)
 

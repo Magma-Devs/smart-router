@@ -613,3 +613,45 @@ func TestCrossValidationPolicyResolver_EmptyConfig(t *testing.T) {
 	assert.False(t, appliesOff)
 	assert.Equal(t, common.CrossValidationParams{}, gotOff)
 }
+
+// TestCrossValidationPolicyResolver_ForbidCallerCV covers the `forbid-caller-cv` knob (PRD UC-1 "disable
+// cross-validation for specific methods"): Resolve never produces an override for a forbid policy, even when
+// the caller sent CV headers, and ForbidsCallerCV reports the suppression the state machine needs. Contrast
+// with a plain disabled policy, where caller headers still drive CV.
+func TestCrossValidationPolicyResolver_ForbidCallerCV(t *testing.T) {
+	caller := common.CrossValidationParams{MaxParticipants: 4, AgreementThreshold: 2, MinGroups: 1}
+
+	t.Run("forbid policy: Resolve does not apply even with caller headers", func(t *testing.T) {
+		r := newResolver(t, "eth_getBalance", CrossValidationPolicy{ForbidCallerCV: true})
+		got, applies := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", caller, true)
+		assert.False(t, applies, "a forbid policy must never produce a CV override")
+		assert.Equal(t, common.CrossValidationParams{}, got)
+		assert.True(t, r.ForbidsCallerCV("ETH1", "jsonrpc", "eth_getBalance"))
+		// case-insensitive chain/api, exact method
+		assert.True(t, r.ForbidsCallerCV("eth1", "JSONRPC", "eth_getBalance"))
+		assert.False(t, r.ForbidsCallerCV("ETH1", "jsonrpc", "eth_call"), "other methods are unaffected")
+	})
+
+	t.Run("disabled (not forbidden) policy: caller headers still drive CV", func(t *testing.T) {
+		r := newResolver(t, "eth_getBalance", CrossValidationPolicy{Enabled: false})
+		got, applies := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", caller, true)
+		assert.True(t, applies, "a plain disabled policy must still defer to caller headers")
+		assert.Equal(t, caller, got)
+		assert.False(t, r.ForbidsCallerCV("ETH1", "jsonrpc", "eth_getBalance"))
+	})
+
+	t.Run("enabled + forbid-caller-cv is a config error", func(t *testing.T) {
+		_, err := NewCrossValidationPolicyResolver(CrossValidationConfig{
+			Policies: []CrossValidationPolicyEntry{
+				{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, ForbidCallerCV: true}},
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mutually exclusive")
+	})
+
+	t.Run("nil resolver never forbids", func(t *testing.T) {
+		var r *CrossValidationPolicyResolver
+		assert.False(t, r.ForbidsCallerCV("ETH1", "jsonrpc", "eth_getBalance"))
+	})
+}

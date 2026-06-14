@@ -393,6 +393,93 @@ func TestCrossValidationQuorumReached_PerGroupIgnoresNilReplies(t *testing.T) {
 	require.True(t, rpDefault.crossValidationQuorumReached(), "default mode must early-exit on a real diverse quorum")
 }
 
+// TestCrossValidationQuorumReached_LegacyHeaderOnlyNilBackwardsCompat pins the UC-7 backwards-compatibility
+// contract for the LEGACY header-only cross-validation path (MinGroups <= 1, not per-group) around empty
+// replies. It documents a deliberate behavior decision (commit c0c77a8): the early-exit predicate skips the
+// zero-hash (nil/empty-reply) bucket in ALL modes — including this legacy path — so that an in-flight REAL
+// response can still form the preferred quorum instead of the router committing early to the nil fallback.
+//
+// The cost is latency only: an all-nil batch no longer early-exits and instead waits out the batch — but it
+// STILL forms a quorum at final eval via the nil fallback (asserted in
+// TestResponsesCrossValidation_LegacyNilFallback), so no empty-response quorum case is broken; it merely
+// resolves a few responses later. This is outside the strict UC-7 scope ("no policies, no group labels, no
+// thresholds") because a header-only CV request carries a threshold (it opted in), but we pin it explicitly
+// so the latency tradeoff is a visible, chosen behavior rather than a silent regression.
+//
+// NOTE: this contradicts development-plan item 2.3-R1's "default mode still counts the zero hash" — the
+// implemented behavior (this test) is authoritative; the plan note was corrected.
+func TestCrossValidationQuorumReached_LegacyHeaderOnlyNilBackwardsCompat(t *testing.T) {
+	zero := [32]byte{}     // nil/empty replies bucket here
+	real := [32]byte{0xCC} // a real response hash
+
+	// Legacy header-only shape: MinGroups 1, per-group off, threshold 2.
+	newRP := func() *RelayProcessor {
+		return &RelayProcessor{
+			crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 3, MinGroups: 1},
+			selection:             CrossValidation,
+			quorumMap:             map[[32]byte]*quorumStat{},
+		}
+	}
+
+	// An all-nil batch that meets the count threshold must NOT early-exit (deliberate latency tradeoff).
+	rpNil := newRP()
+	rpNil.quorumMap[zero] = &quorumStat{count: 2, groupCounts: map[string]int{"default": 2}}
+	require.False(t, rpNil.crossValidationQuorumReached(), "legacy header-only mode must NOT early-exit on the nil-reply bucket")
+
+	// A real-hash bucket meeting the threshold DOES early-exit (unchanged legacy behavior for real replies).
+	rpReal := newRP()
+	rpReal.quorumMap[real] = &quorumStat{count: 2, groupCounts: map[string]int{"default": 2}}
+	require.True(t, rpReal.crossValidationQuorumReached(), "legacy header-only mode must early-exit on a real-hash quorum")
+
+	// Real-over-nil: with both present, the real quorum drives the early-exit (nils are ignored, not blocking).
+	rpBoth := newRP()
+	rpBoth.quorumMap[zero] = &quorumStat{count: 2, groupCounts: map[string]int{"default": 2}}
+	rpBoth.quorumMap[real] = &quorumStat{count: 2, groupCounts: map[string]int{"default": 2}}
+	require.True(t, rpBoth.crossValidationQuorumReached(), "a real quorum must early-exit regardless of nil replies present")
+}
+
+// TestResponsesCrossValidation_LegacyNilFallback is the other half of the backwards-compat contract above:
+// although the early-exit skips the nil bucket, final eval still accepts an all-nil quorum as a FALLBACK in
+// the legacy header-only path (MinGroups 1), and still PREFERS a real quorum when one exists. So the
+// empty-response quorum case keeps succeeding — only the early-exit latency changed.
+func TestResponsesCrossValidation_LegacyNilFallback(t *testing.T) {
+	nilResult := func(group string) common.RelayResult {
+		return common.RelayResult{
+			Reply:        &pairingtypes.RelayReply{Data: nil}, // empty -> nil reply bucket
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "p-" + group, ProviderGroup: group},
+		}
+	}
+	realResult := func(data, group string) common.RelayResult {
+		return common.RelayResult{
+			Reply:        &pairingtypes.RelayReply{Data: []byte(data)},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "p-" + group, ProviderGroup: group},
+		}
+	}
+
+	rp := func() *RelayProcessor {
+		return &RelayProcessor{
+			crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 4, MinGroups: 1},
+			selection:             CrossValidation,
+		}
+	}
+
+	t.Run("all-nil batch still forms a quorum via the nil fallback", func(t *testing.T) {
+		result, reason, err := rp().responsesCrossValidation([]common.RelayResult{nilResult("g1"), nilResult("g2")}, 2)
+		require.NoError(t, err, "empty-response quorum must still succeed (backwards compat)")
+		require.NotNil(t, result)
+		require.Empty(t, reason)
+	})
+
+	t.Run("real quorum preferred over nil replies", func(t *testing.T) {
+		results := []common.RelayResult{nilResult("g1"), nilResult("g2"), realResult("X", "g3"), realResult("X", "g4")}
+		result, reason, err := rp().responsesCrossValidation(results, 2)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.Empty(t, reason)
+		require.Equal(t, []byte("X"), result.Reply.Data, "the real consensus must win over the nil fallback")
+	})
+}
+
 // TestRelayProcessor_PerGroupNilReplyRealPath drives a real RelayProcessor through handleResponse: empty
 // successful replies arrive first (accumulating under the zero hash), then real replies form a per-group
 // quorum. It proves the live path does not prematurely report group-quorum-unmet on the nil replies and

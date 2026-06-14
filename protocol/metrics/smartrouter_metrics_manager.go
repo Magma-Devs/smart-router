@@ -82,6 +82,7 @@ type SmartRouterMetricsManager struct {
 	crossValidationProviderAgreementsTotalMetric    *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_provider_agreements_total    {spec, apiInterface, method, provider_address}
 	crossValidationProviderDisagreementsTotalMetric *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_provider_disagreements_total {spec, apiInterface, method, provider_address}
 	crossValidationMismatchTotalMetric              *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_mismatch_total {spec, apiInterface, method, group, finality} — bounded alerting surface
+	crossValidationFailuresTotalMetric              *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_failures_total {spec, apiInterface, method, reason} — bounded by the CrossValidationReason* enum
 
 	// Incident group metrics
 	incidentNodeErrorsTotalMetric     *prometheus.CounterVec   // lava_rpcsmartrouter_node_errors_total         {spec, apiInterface, provider_address, method}
@@ -350,6 +351,14 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "lava_rpcsmartrouter_cross_validation_mismatch_total",
 		Help: "Successful cross-validation content outliers (a successful response that disagreed with a reached consensus on a deterministic method), by provider group and finality. Excludes quorum failures and node/protocol errors.",
 	}, []string{"spec", "apiInterface", "method", "group", "finality"})
+	// Bounded failure breakdown: the existing cross_validation_failed_total is unlabeled-by-reason, so a
+	// dashboard cannot tell a structural capacity failure (fall back) from a quorum disagreement (retry may
+	// help). This series adds the reason, drawn from the closed CrossValidationReason* enum (low cardinality),
+	// without touching the existing series' label sets. Covers both quorum-time and request-time fail-fast.
+	crossValidationFailuresTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "lava_rpcsmartrouter_cross_validation_failures_total",
+		Help: "Cross-validation failures by reason (CrossValidationReason* enum: insufficient-responses, no-agreement, diversity-unmet, group-quorum-unmet, insufficient-capacity, insufficient-groups). Bounded — the reason set is a closed enum.",
+	}, []string{"spec", "apiInterface", "method", "reason"})
 
 	// =========================================================================
 	// Incident group metrics
@@ -511,6 +520,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	crossValidationProviderAgreementsTotalMetric = registerOrReuse(crossValidationProviderAgreementsTotalMetric)
 	crossValidationProviderDisagreementsTotalMetric = registerOrReuse(crossValidationProviderDisagreementsTotalMetric)
 	crossValidationMismatchTotalMetric = registerOrReuse(crossValidationMismatchTotalMetric)
+	crossValidationFailuresTotalMetric = registerOrReuse(crossValidationFailuresTotalMetric)
 	incidentNodeErrorsTotalMetric = registerOrReuse(incidentNodeErrorsTotalMetric)
 	incidentProtocolErrorsTotalMetric = registerOrReuse(incidentProtocolErrorsTotalMetric)
 	incidentRetriesTotalMetric = registerOrReuse(incidentRetriesTotalMetric)
@@ -582,6 +592,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		crossValidationProviderAgreementsTotalMetric:    crossValidationProviderAgreementsTotalMetric,
 		crossValidationProviderDisagreementsTotalMetric: crossValidationProviderDisagreementsTotalMetric,
 		crossValidationMismatchTotalMetric:              crossValidationMismatchTotalMetric,
+		crossValidationFailuresTotalMetric:              crossValidationFailuresTotalMetric,
 
 		// Incident group
 		incidentNodeErrorsTotalMetric:     incidentNodeErrorsTotalMetric,
@@ -1149,6 +1160,19 @@ func (m *SmartRouterMetricsManager) SetCrossValidationMismatchMetric(chainId, ap
 		group = "default"
 	}
 	m.crossValidationMismatchTotalMetric.WithLabelValues(chainId, apiInterface, method, group, finality).Inc()
+}
+
+// SetCrossValidationFailureMetric records one cross-validation failure broken down by reason. reason is one
+// of the closed CrossValidationReason* enum (common.CrossValidationReason*), so the series stays bounded.
+// This complements the unlabeled cross_validation_failed_total: it lets a dashboard separate a structural
+// capacity failure (the client should fall back) from a quorum disagreement (a retry may help). A caller
+// that has no reason (reason == "") is skipped rather than emitting an empty label value. The existing
+// failed_total series is left untouched, so dashboards keyed off it keep working.
+func (m *SmartRouterMetricsManager) SetCrossValidationFailureMetric(chainId, apiInterface, method, reason string) {
+	if m == nil || reason == "" {
+		return
+	}
+	m.crossValidationFailuresTotalMetric.WithLabelValues(chainId, apiInterface, method, reason).Inc()
 }
 
 func (m *SmartRouterMetricsManager) UpdateHealthCheckStatus(status bool) {
