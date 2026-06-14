@@ -18,11 +18,11 @@ import (
 	lavasession "github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
+	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1096,4 +1096,63 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSmartRouterStateMachine_ForbidCallerCV proves the `forbid-caller-cv` policy actually disables
+// cross-validation end-to-end: with the headers present and a forbid policy, the resolved Selection is NOT
+// CrossValidation. The control case (no forbid policy) shows the same headers DO turn CV on — so the test
+// catches a forbid that silently no-ops (the resolver returning applies=false alone would not suppress the
+// state machine's own header read). See TestCrossValidationPolicyResolver_ForbidCallerCV for the unit-level
+// resolver checks.
+func TestSmartRouterStateMachine_ForbidCallerCV(t *testing.T) {
+	ctx := context.Background()
+	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	specId := "ETH1"
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	const apiInterface = "jsonrpc"
+	// A read method (eth_blockNumber) so the normal category is Stateless — forbid must route there.
+	chainMsg, err := chainParser.ParseMsg("", []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	method := chainMsg.GetApi().GetName()
+
+	// Caller opts into cross-validation via headers.
+	callerCVHeaders := map[string]string{
+		common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
+		common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+	}
+	buildPM := func() chainlib.ProtocolMessage {
+		// Re-parse per case so each ProtocolMessage is independent.
+		cm, perr := chainParser.ParseMsg("", []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, perr)
+		return chainlib.NewProtocolMessage(cm, callerCVHeaders, nil, "dapp", "1.2.3.4")
+	}
+
+	newResolverWith := func(policy CrossValidationPolicy) *CrossValidationPolicyResolver {
+		r, rerr := NewCrossValidationPolicyResolver(CrossValidationConfig{
+			Policies: []CrossValidationPolicyEntry{
+				{ChainID: specId, ApiInterface: apiInterface, Method: method, CrossValidationPolicy: policy},
+			},
+		})
+		require.NoError(t, rerr)
+		return r
+	}
+
+	t.Run("control: caller headers turn CV on with no forbid policy", func(t *testing.T) {
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, buildPM(), nil, false, nil, specId, apiInterface)
+		require.NoError(t, smErr)
+		require.Equal(t, relaycore.CrossValidation, sm.GetSelection(), "caller CV headers must enable cross-validation when not forbidden")
+	})
+
+	t.Run("forbid policy suppresses caller-driven CV", func(t *testing.T) {
+		resolver := newResolverWith(CrossValidationPolicy{ForbidCallerCV: true})
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, buildPM(), nil, false, resolver, specId, apiInterface)
+		require.NoError(t, smErr)
+		require.NotEqual(t, relaycore.CrossValidation, sm.GetSelection(), "forbid-caller-cv must disable cross-validation even with caller headers present")
+		require.Nil(t, sm.GetCrossValidationParams(), "no cross-validation params when CV is forbidden")
+	})
 }

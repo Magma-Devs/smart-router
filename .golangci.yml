@@ -19,8 +19,9 @@ linters:
     - nakedret
     - nilnil
     - nolintlint
+    # staticcheck now also runs the former `stylecheck` (ST*) checks — golangci-lint v2.4+ merged
+    # stylecheck into staticcheck, so listing `stylecheck` separately is an "unknown linter" error.
     - staticcheck
-    - stylecheck
     - unconvert
     - whitespace
   settings:
@@ -47,14 +48,20 @@ linters:
       - linters:
           - gocritic
         text: "ifElseChain"
+      # ST1003 / ST1016 are now emitted by staticcheck (stylecheck was merged in). Keep them excluded to
+      # preserve the prior intent. https://github.com/dominikh/go-tools/issues/389
       - linters:
-          - stylecheck
+          - staticcheck
         text: "ST1003:"
-      # FIXME: Disabled until golangci-lint updates stylecheck with this fix:
-      # https://github.com/dominikh/go-tools/issues/389
       - linters:
-          - stylecheck
+          - staticcheck
         text: "ST1016:"
+      # golangci-lint v2 folded stylecheck into staticcheck and additionally turns on the QF* "quickfix"
+      # category by default. The prior config (separate stylecheck) never ran QF*, so exclude it to keep
+      # this a like-for-like migration rather than expanding the lint surface with style-only refactors.
+      - linters:
+          - staticcheck
+        text: "QF\\d+:"
       - linters:
           - staticcheck
         text: 'SA1019:.*"github.com/golang/protobuf/proto" is deprecated.*'

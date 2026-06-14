@@ -107,9 +107,6 @@ func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
 			return err
 		}
 		respBytes, md, err := callBack(stream.Context(), methodName[1:], reqBytes) // strip first '/' of the method name
-		if err != nil {
-			return err
-		}
 
 		// Convert metadata keys to lowercase
 		lowercaseMD := metadata.New(map[string]string{})
@@ -118,6 +115,18 @@ func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
 			lowercaseMD[lowerKey] = v
 		}
 		md = lowercaseMD
+
+		if err != nil {
+			// On error the handler returns no message, so gRPC sends a trailers-only response — SetHeader
+			// metadata is unreliable there, but trailers are always flushed with the status. Attach the
+			// reply metadata (e.g. lava-cross-validation-* failure headers) as trailers so error responses
+			// still carry it, matching the success path's SetHeader. Skipped when empty, so non-CV errors
+			// are unchanged.
+			if len(md) > 0 {
+				stream.SetTrailer(md)
+			}
+			return err
+		}
 
 		if err := stream.SetHeader(md); err != nil {
 			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headers", md))

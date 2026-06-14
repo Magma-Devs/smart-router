@@ -66,16 +66,18 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
   - `lava-cross-validation-agreement-threshold: M` — require M identical responses.
 - **Per-method operator policy** (config-driven, below). An operator policy can *mandate*
   cross-validation even with no caller headers (`enabled: true`), set a **floor** the caller
-  may exceed, and a **cap** that overrides a stricter caller.
+  may exceed, a **cap** that overrides a stricter caller, or *forbid* caller-driven
+  cross-validation entirely for a method (`forbid-caller-cv: true`).
 
 > **Write / stateful methods.** An **operator policy** that enables cross-validation on a
-> stateful (write) method is **rejected at startup** — that path is guarded. The legacy
-> **caller-header** path is not: a request that sends the headers above still selects
-> cross-validation on any method, *including writes*, ahead of the normal stateful fan-out
-> (backwards compatibility). This is **not** a recommended way to harden writes —
-> cross-validating a write *response* (e.g. a transaction hash echoed back) does not
-> independently verify anything, so prefer policy-driven cross-validation on read methods and
-> leave writes to the stateful path.
+> stateful (write) method is **rejected at startup** — that path is guarded. By default the
+> legacy **caller-header** path is *not* guarded: a request that sends the headers above still
+> selects cross-validation on any method, *including writes*, ahead of the normal stateful
+> fan-out (backwards compatibility). To close that off for a specific method, set
+> `forbid-caller-cv: true` on its policy (see below) — the router then ignores the CV headers
+> and routes the method normally. Cross-validating a write *response* (e.g. a transaction hash
+> echoed back) does not independently verify anything, so prefer policy-driven cross-validation
+> on read methods and leave writes to the stateful path.
 
 ### Provider group labels
 
@@ -127,15 +129,26 @@ cross-validation:
       min-groups: 2                 # number of groups that must each reach their own quorum
       max-participants: 4           # must be >= min-groups * agreement-threshold
       per-group-quorum: true        # see "Per-group quorum" below
+
+    - chain-id: ETH1
+      api-interface: jsonrpc
+      method: eth_sendRawTransaction
+      forbid-caller-cv: true        # disable CV for this method even if the caller sends CV headers
 ```
 
 | Knob | Meaning |
 | --- | --- |
 | `enabled` | `true` mandates CV for this method even with no caller headers. |
+| `forbid-caller-cv` | `true` disables CV for this method: the caller's CV headers are ignored and the method routes by its normal category. Mutually exclusive with `enabled` (rejected at startup if both set); the other knobs are ignored when set. |
 | `max-participants` | How many providers to fan out to. |
 | `agreement-threshold` | How many identical responses form a quorum (in per-group mode, *within each group*). |
 | `min-groups` | Distinct provider groups the quorum must span (`1` = no diversity requirement). |
 | `per-group-quorum` | Upgrade `min-groups` to per-group quorum (operator-only; requires `min-groups > 1`). |
+
+There are three mutually exclusive intents for a method's policy: **mandate** CV (`enabled: true`),
+**forbid** caller-driven CV (`forbid-caller-cv: true`), or neither (omit both / `enabled: false`) —
+which leaves the method caller-driven (the caller's CV headers still work). A policy that sets both
+`enabled` and `forbid-caller-cv` is a startup error.
 
 **Group diversity (`min-groups`)** requires the single agreeing quorum to be returned by
 providers from at least `min-groups` distinct groups. **Per-group quorum** (`per-group-quorum:
@@ -172,9 +185,10 @@ discriminator the client needs. (The request still increments
 `cross_validation_requests_total` / `cross_validation_failed_total`.)
 
 The router does **not** automatically retry with a different provider set on a quorum failure;
-the structured signal lets the client decide its next action. Note: on the gRPC interface,
-response metadata is currently not surfaced on the error path, so these headers reach clients
-on the JSON-RPC, REST, and Tendermint interfaces.
+the structured signal lets the client decide its next action. The failure headers reach clients on
+all interfaces: as HTTP response headers on JSON-RPC, REST, and Tendermint, and as gRPC **trailers**
+on the gRPC interface (an errored gRPC call returns a trailers-only response, so read them with the
+`grpc.Trailer(&md)` call option rather than as headers).
 
 ### Failure reasons
 

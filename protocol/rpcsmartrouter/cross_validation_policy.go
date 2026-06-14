@@ -26,7 +26,9 @@ import (
 //
 // With no policy for a method, behavior is exactly caller-driven (backwards compatible). A policy with
 // Enabled=true forces cross-validation on even when the caller sent no headers; Enabled=false means the
-// operator does not mandate CV for the method (caller headers still work).
+// operator does not mandate CV for the method (caller headers still work) — UNLESS ForbidCallerCV is set,
+// which truly disables cross-validation for the method (caller headers are ignored). Enabled and
+// ForbidCallerCV are mutually exclusive (mandate vs. forbid) and the combination is rejected at load.
 //
 // This type and resolver are pure: they do not touch the relay hot path. Wiring the resolver into the
 // state machine's selection decision is a separate step.
@@ -54,6 +56,12 @@ type CrossValidationPolicy struct {
 	// MinGroups groups must independently reach AgreementThreshold matching responses and the per-group
 	// winners must agree. Operator-only bool (no caller override). Requires MinGroups > 1.
 	PerGroupQuorum bool `yaml:"per-group-quorum,omitempty" json:"per-group-quorum,omitempty" mapstructure:"per-group-quorum,omitempty"`
+	// ForbidCallerCV truly disables cross-validation for this method: even if a request sends the
+	// lava-cross-validation-* headers, the router will NOT cross-validate — the method routes by its normal
+	// stateful/stateless category. This is the explicit "disable cross-validation for specific methods" knob
+	// (PRD UC-1). It is mutually exclusive with Enabled (Enabled mandates CV; ForbidCallerCV forbids it) and
+	// the combination is rejected by Validate. The other knobs are ignored when this is set.
+	ForbidCallerCV bool `yaml:"forbid-caller-cv,omitempty" json:"forbid-caller-cv,omitempty" mapstructure:"forbid-caller-cv,omitempty"`
 }
 
 // CrossValidationPolicyEntry is one entry in the `cross-validation.policies` list. method is a string
@@ -107,6 +115,19 @@ func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidati
 // HasPolicies reports whether any policy is configured (used to keep the no-policy path identical to today).
 func (r *CrossValidationPolicyResolver) HasPolicies() bool {
 	return r != nil && len(r.policies) > 0
+}
+
+// ForbidsCallerCV reports whether a per-method policy explicitly forbids caller-driven cross-validation for
+// this method. When true, the state machine must ignore the request's cross-validation headers and route
+// the method by its normal category — this is what truly disables CV for the method (PRD UC-1). Only a
+// non-enabled policy can forbid (Enabled and ForbidCallerCV are mutually exclusive, enforced by Validate),
+// so the !Enabled guard is belt-and-suspenders against a misconfiguration slipping past validation.
+func (r *CrossValidationPolicyResolver) ForbidsCallerCV(chainID, apiInterface, method string) bool {
+	if r == nil {
+		return false
+	}
+	policy, ok := r.policies[policyKey(chainID, apiInterface, method)]
+	return ok && policy.ForbidCallerCV && !policy.Enabled
 }
 
 // NumPolicies returns how many per-method policies are configured (for startup logging).
@@ -259,15 +280,23 @@ func floatToInt(f float64) (int, error) {
 // Resolve returns the effective cross-validation params for a request and whether cross-validation
 // applies. callerParams/callerPresent come from the request's cross-validation headers.
 //
-// Precedence: no policy or a disabled policy => pure caller-driven (backwards compatible). An enabled
-// policy => CV applies, with each knob = clamp(caller-or-floor-or-default, floor, cap). The structural
-// invariants agreement-threshold <= max-participants and min-groups <= max-participants are enforced on
-// the final values so the resolved quorum shape is always satisfiable.
+// Precedence: no policy or a disabled policy => pure caller-driven (backwards compatible). A
+// forbid-caller-cv policy => never applies (CV is disabled for the method; the caller-driven header read
+// must be suppressed separately via ForbidsCallerCV, since applies=false alone means "defer to caller").
+// An enabled policy => CV applies, with each knob = clamp(caller-or-floor-or-default, floor, cap). The
+// structural invariants agreement-threshold <= max-participants and min-groups <= max-participants are
+// enforced on the final values so the resolved quorum shape is always satisfiable.
 func (r *CrossValidationPolicyResolver) Resolve(chainID, apiInterface, method string, callerParams common.CrossValidationParams, callerPresent bool) (common.CrossValidationParams, bool) {
 	if r == nil {
 		return callerParams, callerPresent
 	}
 	policy, hasPolicy := r.policies[policyKey(chainID, apiInterface, method)]
+	if hasPolicy && policy.ForbidCallerCV {
+		// CV is forbidden for this method: never produce an override. The state machine reads
+		// ForbidsCallerCV separately to also suppress its own header-driven CV decision — without that,
+		// returning false here would just make the machine fall back to reading the caller's headers.
+		return common.CrossValidationParams{}, false
+	}
 	if !hasPolicy || !policy.Enabled {
 		// No policy, or operator does not mandate CV here: caller headers alone decide.
 		return callerParams, callerPresent
@@ -362,6 +391,11 @@ func splitPolicyKey(key string) (chainID, apiInterface, method string) {
 
 // Validate checks a single policy's internal consistency (config-load time, no spec/provider context).
 func (p CrossValidationPolicy) Validate() error {
+	// Enabled mandates CV; ForbidCallerCV forbids it. A policy that does both is self-contradictory, so
+	// reject it at load rather than silently picking one (Resolve/ForbidsCallerCV guard against this too).
+	if p.Enabled && p.ForbidCallerCV {
+		return fmt.Errorf("enabled and forbid-caller-cv are mutually exclusive: a policy cannot both mandate and forbid cross-validation")
+	}
 	for name, b := range map[string]Bound{
 		"max-participants":    p.MaxParticipants,
 		"agreement-threshold": p.AgreementThreshold,

@@ -21,8 +21,29 @@ func newSmartRouterForCVTest() *SmartRouterMetricsManager {
 		crossValidationProviderAgreementsTotalMetric:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_agreements"}, cvProviderLabels),
 		crossValidationProviderDisagreementsTotalMetric: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_disagreements"}, cvProviderLabels),
 		crossValidationMismatchTotalMetric:              prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_mismatch"}, []string{"spec", "apiInterface", "method", "group", "finality"}),
+		crossValidationFailuresTotalMetric:              prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_failures"}, []string{"spec", "apiInterface", "method", "reason"}),
 		urlToProviderNames:                              make(map[string][]string),
 	}
+}
+
+// TestSetCrossValidationFailureMetric covers the bounded by-reason failures counter: the right series
+// increments per reason, repeated calls accumulate, and an empty reason is a no-op (no empty-label series).
+func TestSetCrossValidationFailureMetric(t *testing.T) {
+	m := newSmartRouterForCVTest()
+	m.SetCrossValidationFailureMetric("ETH1", "jsonrpc", "eth_getBalance", "no-agreement")
+	m.SetCrossValidationFailureMetric("ETH1", "jsonrpc", "eth_getBalance", "no-agreement")
+	m.SetCrossValidationFailureMetric("ETH1", "jsonrpc", "eth_getBalance", "diversity-unmet")
+	m.SetCrossValidationFailureMetric("ETH1", "jsonrpc", "eth_getBalance", "insufficient-groups")
+	m.SetCrossValidationFailureMetric("ETH1", "jsonrpc", "eth_getBalance", "") // no reason -> no-op
+
+	require.Equal(t, float64(2), testutil.ToFloat64(m.crossValidationFailuresTotalMetric.WithLabelValues("ETH1", "jsonrpc", "eth_getBalance", "no-agreement")))
+	require.Equal(t, float64(1), testutil.ToFloat64(m.crossValidationFailuresTotalMetric.WithLabelValues("ETH1", "jsonrpc", "eth_getBalance", "diversity-unmet")))
+	require.Equal(t, float64(1), testutil.ToFloat64(m.crossValidationFailuresTotalMetric.WithLabelValues("ETH1", "jsonrpc", "eth_getBalance", "insufficient-groups")))
+	// Empty reason produced no series.
+	require.Equal(t, 3, testutil.CollectAndCount(m.crossValidationFailuresTotalMetric))
+
+	var nilM *SmartRouterMetricsManager
+	require.NotPanics(t, func() { nilM.SetCrossValidationFailureMetric("a", "b", "c", "no-agreement") })
 }
 
 // TestSetCrossValidationMismatchMetric covers the bounded group+finality mismatch counter (1.3): the

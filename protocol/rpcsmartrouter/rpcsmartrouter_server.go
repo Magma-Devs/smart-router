@@ -581,9 +581,10 @@ func crossValidationFailFastResult(reason string) *common.RelayResult {
 // (a cheap counter increment on an already-failing path) so the count is deterministic for callers/tests.
 func (rpcss *RPCSmartRouterServer) crossValidationFailFast(reason string, protocolMessage chainlib.ProtocolMessage) *common.RelayResult {
 	if rpcss.rpcSmartRouterLogs != nil && rpcss.listenEndpoint != nil {
-		rpcss.rpcSmartRouterLogs.SetCrossValidationMetric(
-			rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface,
-			protocolMessage.GetApi().GetName(), false, nil, nil)
+		chainID, apiInterface, method := rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, protocolMessage.GetApi().GetName()
+		rpcss.rpcSmartRouterLogs.SetCrossValidationMetric(chainID, apiInterface, method, false, nil, nil)
+		// Bounded by-reason breakdown for the structural fail-fast (insufficient-capacity / insufficient-groups).
+		rpcss.rpcSmartRouterLogs.SetCrossValidationFailureMetric(chainID, apiInterface, method, reason)
 	}
 	return crossValidationFailFastResult(reason)
 }
@@ -2654,6 +2655,16 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				chainId, apiInterface, apiName, cvSuccess,
 				agreeingProvidersList, disagreeingProvidersList,
 			)
+			// Bounded by-reason breakdown for a quorum-time failure (no-agreement / diversity-unmet /
+			// group-quorum-unmet / insufficient-responses). The reason rides on the minimal failure result;
+			// it is "" on success, where SetCrossValidationFailureMetric is a no-op. The request-time
+			// structural fail-fast emits its own reason via crossValidationFailFast (the two paths are
+			// mutually exclusive).
+			if !cvSuccess && relayResult != nil && relayResult.CrossValidationFailureReason != "" {
+				go rpcss.rpcSmartRouterLogs.SetCrossValidationFailureMetric(
+					chainId, apiInterface, apiName, relayResult.CrossValidationFailureReason,
+				)
+			}
 		}
 
 		// Mismatch alerting surface (1.3): record one bounded group+finality-labeled metric per distinct

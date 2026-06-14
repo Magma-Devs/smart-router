@@ -135,6 +135,16 @@ func (rpccl *RPCConsumerLogs) SetCrossValidationMetric(
 	rpccl.consumerMetricsManager.SetCrossValidationMetric(chainId, apiInterface, method, success, agreeingProviders, disagreeingProviders)
 }
 
+// SetCrossValidationFailureMetric records a cross-validation failure broken down by reason (the bounded
+// failures_total series). Sits alongside SetCrossValidationMetric so the server emits both at every failure
+// site; a no-reason call is a no-op.
+func (rpccl *RPCConsumerLogs) SetCrossValidationFailureMetric(chainId, apiInterface, method, reason string) {
+	if rpccl == nil {
+		return
+	}
+	rpccl.consumerMetricsManager.SetCrossValidationFailureMetric(chainId, apiInterface, method, reason)
+}
+
 func (rpccl *RPCConsumerLogs) GetMessageSeed() string {
 	return "GUID_" + strconv.Itoa(rand.Intn(10000000000))
 }

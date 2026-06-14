@@ -49,6 +49,12 @@ func NewUnifiedRelayStateMachine(
 	// rpcsmartrouter layer sets it from a per-method policy (it owns the policy resolver; relaycore
 	// must not import it). nil => the legacy header-driven decision below, unchanged.
 	cvOverride *common.CrossValidationParams,
+	// forbidCallerCrossValidation, when true, suppresses the caller-header-driven CrossValidation decision
+	// for this method: the request's lava-cross-validation-* headers are ignored entirely (not even
+	// validated) and the method routes by its normal stateful/stateless category. The rpcsmartrouter layer
+	// sets it from a per-method `forbid-caller-cv` policy. It is moot when cvOverride != nil (an operator
+	// that mandates CV cannot also forbid it — Validate rejects that combination upstream).
+	forbidCallerCrossValidation bool,
 ) (RelayStateMachine, error) {
 	var selection Selection
 	var cvParams *common.CrossValidationParams
@@ -63,6 +69,19 @@ func NewUnifiedRelayStateMachine(
 			utils.LogAttr("agreementThreshold", cvOverride.AgreementThreshold),
 			utils.LogAttr("minGroups", cvOverride.MinGroups),
 			utils.LogAttr("GUID", ctx))
+	} else if forbidCallerCrossValidation {
+		// Operator policy forbids caller-driven CV for this method. Ignore any cross-validation headers
+		// (deliberately disregarded, so they are not even parsed/validated) and route by the method's normal
+		// category — exactly as if the request had sent no CV headers. This is what makes `forbid-caller-cv`
+		// truly disable cross-validation for the method; without skipping the header read below, a caller
+		// could still turn CV on via headers.
+		utils.LavaFormatDebug("[StateMachine] caller cross-validation headers ignored (forbidden by per-method policy)",
+			utils.LogAttr("GUID", ctx))
+		if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+			selection = Stateful
+		} else {
+			selection = Stateless
+		}
 	} else if crossValidationParams, headersPresent, err := protocolMessage.GetCrossValidationParameters(); headersPresent && err != nil {
 		return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
 	} else if headersPresent {
