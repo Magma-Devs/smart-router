@@ -3,6 +3,7 @@ package relaycore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"sync"
@@ -2190,4 +2191,109 @@ func TestHasRequiredNodeResults_RelayRetryLimitMixed(t *testing.T) {
 			require.Equal(t, tc.expectedNodeErrors, nodeErrors, "nodeErrors count mismatch")
 		})
 	}
+}
+
+// TestCrossValidationAgreesOnDifferentKeyOrder is the MAG-2062 regression test.
+// Two providers return the same semantic Solana getGenesisHash result but with
+// their JSON envelope keys in a different order. Before the canonical-form fix,
+// raw-byte hashing placed them in separate quorum buckets (maxMatchingResults:1)
+// and cross-validation failed with HTTP 500. They must now agree.
+//
+// The payloads are copied verbatim from the ticket's wire proof.
+func TestCrossValidationAgreesOnDifferentKeyOrder(t *testing.T) {
+	ctx := context.Background()
+	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	specId := "LAVA"
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
+
+	usedProviders := lavasession.NewUsedProviders(nil)
+	cvParams := &common.CrossValidationParams{
+		AgreementThreshold: 2,
+		MaxParticipants:    2,
+	}
+	relayProcessor := NewRelayProcessor(
+		ctx,
+		cvParams,
+		nil,
+		RelayProcessorMetrics,
+		RelayProcessorMetrics,
+		RelayRetriesManagerInstance,
+		newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation),
+	)
+
+	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{
+		"lavagateway": &lavasession.SessionInfo{},
+		"tatum1":      &lavasession.SessionInfo{},
+	}, nil)
+
+	// Same result value, byte-different envelopes (key order differs).
+	lavaGatewayData := []byte(`{"jsonrpc":"2.0","id":1,"result":"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"}`)
+	tatumData := []byte(`{"id":1,"jsonrpc":"2.0","result":"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"}`)
+	// Guard the premise: the two envelopes really are byte-different.
+	require.NotEqual(t, lavaGatewayData, tatumData, "test payloads must differ at the byte level")
+
+	relayProcessor.SetResponse(createMockRelayResponseWithData("lavagateway", lavaGatewayData, nil))
+	relayProcessor.SetResponse(createMockRelayResponseWithData("tatum1", tatumData, nil))
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
+	defer cancel()
+	relayProcessor.WaitForResults(waitCtx)
+
+	result, err := relayProcessor.ProcessingResult()
+	require.NoError(t, err, "Cross-validation should succeed for semantically-identical responses with different key order")
+	require.NotNil(t, result)
+	require.GreaterOrEqual(t, result.CrossValidation, 2, "CrossValidation count should meet the agreement threshold")
+	// The returned bytes must be one of the verbatim provider envelopes — the
+	// fix changes only the bucket key, never the body returned to the client.
+	returned := result.Reply.Data
+	require.True(t, bytes.Equal(returned, lavaGatewayData) || bytes.Equal(returned, tatumData),
+		"returned body must be a verbatim provider envelope, got: %s", string(returned))
+}
+
+func TestCanonicalResponseHash(t *testing.T) {
+	t.Run("key order invariance", func(t *testing.T) {
+		a := []byte(`{"jsonrpc":"2.0","id":1,"result":"abc"}`)
+		b := []byte(`{"id":1,"result":"abc","jsonrpc":"2.0"}`)
+		require.Equal(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"same object with reordered keys must hash equally")
+	})
+
+	t.Run("whitespace invariance", func(t *testing.T) {
+		a := []byte(`{"id":1,"result":"abc"}`)
+		b := []byte("{ \"id\": 1, \n \"result\": \"abc\" }")
+		require.Equal(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"insignificant whitespace must not affect the hash")
+	})
+
+	t.Run("distinct large integers do not falsely agree", func(t *testing.T) {
+		// 9007199254740993 and 9007199254740992 both round to 2^53 as float64;
+		// UseNumber must keep them distinct so CV never reports false agreement.
+		a := []byte(`{"id":1,"result":9007199254740993}`)
+		b := []byte(`{"id":1,"result":9007199254740992}`)
+		require.NotEqual(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"distinct large integers must hash differently")
+	})
+
+	t.Run("genuinely different results disagree", func(t *testing.T) {
+		a := []byte(`{"jsonrpc":"2.0","id":1,"result":"hashA"}`)
+		b := []byte(`{"jsonrpc":"2.0","id":1,"result":"hashB"}`)
+		require.NotEqual(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"different result values must hash differently")
+	})
+
+	t.Run("non-JSON falls back to raw-byte hash", func(t *testing.T) {
+		raw := []byte{0x00, 0x01, 0x02, 0xff} // e.g. binary gRPC payload
+		require.Equal(t, sha256.Sum256(raw), canonicalResponseHash(raw),
+			"invalid JSON must fall back to hashing the raw bytes")
+	})
 }
