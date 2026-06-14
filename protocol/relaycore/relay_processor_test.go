@@ -2315,4 +2315,37 @@ func TestCanonicalResponseHash(t *testing.T) {
 		require.NotEqual(t, canonicalResponseHash(a), canonicalResponseHash(b),
 			"differing trailing documents must hash differently")
 	})
+
+	t.Run("nested object keys are sorted recursively", func(t *testing.T) {
+		// Decoding into interface{} yields map[string]interface{} at every depth,
+		// and json.Marshal sorts keys recursively — so reordering keys inside a
+		// nested object must not change the hash.
+		a := []byte(`{"jsonrpc":"2.0","id":1,"result":{"hash":"0xabc","number":"0x10","gasUsed":"0x5"}}`)
+		b := []byte(`{"id":1,"jsonrpc":"2.0","result":{"number":"0x10","gasUsed":"0x5","hash":"0xabc"}}`)
+		require.Equal(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"reordered keys in a nested object must hash equally")
+	})
+
+	t.Run("top-level array is normalized and order-sensitive", func(t *testing.T) {
+		// Top-level JSON arrays (e.g. eth_getLogs []) decode and re-marshal
+		// correctly. Object keys inside elements are sorted, but array element
+		// order is significant and must be preserved.
+		a := []byte(`[{"a":1,"b":2},{"c":3}]`)
+		reorderedObjKeys := []byte(`[{"b":2,"a":1},{"c":3}]`)
+		require.Equal(t, canonicalResponseHash(a), canonicalResponseHash(reorderedObjKeys),
+			"reordered object keys inside array elements must hash equally")
+
+		reorderedElems := []byte(`[{"c":3},{"a":1,"b":2}]`)
+		require.NotEqual(t, canonicalResponseHash(a), canonicalResponseHash(reorderedElems),
+			"array element order is significant and must change the hash")
+	})
+
+	t.Run("empty array canonicalizes", func(t *testing.T) {
+		// Empty result arrays (e.g. eth_getLogs with no matches) are valid JSON
+		// and must hash consistently rather than fall back to raw bytes.
+		a := []byte(`[]`)
+		b := []byte(`[ ]`)
+		require.Equal(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"empty arrays differing only in whitespace must hash equally")
+	})
 }
