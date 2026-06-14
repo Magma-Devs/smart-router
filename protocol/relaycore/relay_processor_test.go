@@ -2296,4 +2296,23 @@ func TestCanonicalResponseHash(t *testing.T) {
 		require.Equal(t, sha256.Sum256(raw), canonicalResponseHash(raw),
 			"invalid JSON must fall back to hashing the raw bytes")
 	})
+
+	t.Run("trailing bytes after a JSON value do not falsely agree", func(t *testing.T) {
+		// json.Decoder.Decode reads only the first value and ignores the rest;
+		// without the single-value guard these byte-different payloads would
+		// collapse into one quorum bucket (a false agreement).
+		a := []byte(`{"id":1,"result":"abc"}TRAILING-A`)
+		b := []byte(`{"id":1,"result":"abc"}TRAILING-B`)
+		require.NotEqual(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"trailing bytes must keep payloads in distinct buckets")
+	})
+
+	t.Run("multi-document bodies do not falsely agree", func(t *testing.T) {
+		// NDJSON / concatenated documents: only the first is canonicalized, so a
+		// differing later document must still produce a distinct hash.
+		a := []byte("{\"a\":1}\n{\"b\":2}")
+		b := []byte("{\"a\":1}\n{\"b\":999}")
+		require.NotEqual(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"differing trailing documents must hash differently")
+	})
 }
