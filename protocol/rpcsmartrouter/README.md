@@ -90,6 +90,22 @@ inlinable no-op call and nothing else.
 --usage-otel-service-instance-id "$HOSTNAME-eth"  # default: hostname-pid
 ```
 
+#### Migrating from the old push / Kafka pipeline (breaking)
+
+The Kafka producer, reports client, and relay-server push client were removed;
+relay-usage and optimizer-QoS telemetry now flow exclusively through the OTel
+pipeline above. The flags that configured the old paths are **gone** — passing
+any of them now fails at startup with `unknown flag`, so update launch scripts
+before upgrading:
+
+| Removed flag | Replacement |
+| --- | --- |
+| `--relay-server-address` | `--usage-otel-*` (`relay_usage` events) |
+| `--relay-kafka-address` / `-topic` / `-username` / `-password` / `-mechanism` / `-tls-enabled` / `-tls-insecure` | `--usage-otel-*` → collector → Kafka exporter |
+| `--reports-be-address` | removed (reports flow dropped) |
+| `--optimizer-qos-server-address` | `--usage-otel-*` (`optimizer_qos` events); the `/metrics` selection-score gauge is unaffected |
+| `--optimizer-qos-push-interval` | `--optimizer-qos-sampling-interval` (drives both the `/metrics` cache and the OTel emit) |
+
 ## Architecture
 
 ```
