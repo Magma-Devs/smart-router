@@ -19,7 +19,7 @@ metrics manager.
 | Flag / env | Default | Effect |
 | --- | --- | --- |
 | `--metrics-listen-address` | `disabled` | Address to expose Prometheus metrics on, e.g. `:7779` or `localhost:7779`. The literal `disabled` turns the metrics server off entirely. |
-| `--optimizer-qos-server-address` | `""` | Push optimizer QoS reports to this address. Independent of `/metrics` — the `lava_rpc_optimizer_selection_score` gauge is collected and exposed regardless (see below). |
+| `--optimizer-qos-sampling-interval` | `1s` | How often the optimizer-QoS sampler refreshes the `lava_rpc_optimizer_selection_score` gauge and — when `--usage-otel-enabled` is set — emits `optimizer_qos` events to the OTel usage pipeline. |
 
 ```bash
 # enable, then scrape
@@ -34,9 +34,10 @@ name and the `disabled` sentinel live in
 
 > **Optimizer scores are always on.** The optimizer-QoS client is created
 > unconditionally, so `lava_rpc_optimizer_selection_score` is populated on `/metrics`
-> whether or not `--optimizer-qos-server-address` is set — the address only adds a remote
-> push. (There is no separate `GET /provider_optimizer_metrics` endpoint; that handler was
-> removed along with the dead consumer metrics manager.)
+> regardless of telemetry config. Remote shipping of these reports now flows through the
+> OTel usage pipeline (`--usage-otel-enabled`), not a dedicated push address. (There is no
+> separate `GET /provider_optimizer_metrics` endpoint; that handler was removed along with
+> the dead consumer metrics manager.)
 
 ### Conventions
 
