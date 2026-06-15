@@ -1612,6 +1612,16 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 			} else {
 				// first time reported, allowing a second chance.
 				csm.secondChanceGivenToAddresses[address] = struct{}{}
+				// Mark the provider as on probation: it has now consumed its single
+				// second chance. A later successful relay (OnSessionDone) clears both
+				// this flag and the secondChanceGivenToAddresses entry, so genuine
+				// recovery renews eligibility. Without this, in direct-rpc mode (no
+				// epoch transitions to clear the map) any provider that trips a block
+				// twice — even with full health in between — is hard-blocked for the
+				// rest of the process lifetime.
+				if provider, ok := csm.pairing[address]; ok {
+					provider.atomicMarkSecondChanceProbation()
+				}
 				// address was removed from valid addresses, we can still return it after a duration for second chance.
 				runSecondChance = true
 			}
@@ -1752,6 +1762,16 @@ func (csm *ConsumerSessionManager) validateAndReturnBlockedProviderToValidAddres
 	// if we didn't find it, we might had two sessions in parallel and thats ok. the first one dealt with it we can just return
 }
 
+// forgetSecondChanceGiven removes a provider from the second-chance memory after
+// it has proven recovery with a successful relay (see OnSessionDone). This lets a
+// future isolated failure be treated as a first offense again instead of an
+// immediate hard block. Must NOT be called while holding csm.lock.
+func (csm *ConsumerSessionManager) forgetSecondChanceGiven(providerAddress string) {
+	csm.lock.Lock()
+	defer csm.lock.Unlock()
+	delete(csm.secondChanceGivenToAddresses, providerAddress)
+}
+
 // On a successful session this function will update all necessary fields in the consumerSession. and unlock it when it finishes
 func (csm *ConsumerSessionManager) OnSessionDone(
 	consumerSession *SingleConsumerSession,
@@ -1778,6 +1798,16 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		// we want this method to run last after we unlock the consumer session
 		// golang defer operates in a Last-In-First-Out (LIFO) order, meaning this defer will run last.
 		defer func() { go csm.validateAndReturnBlockedProviderToValidAddressesList(providerAddress) }()
+	}
+
+	// A successful relay proves the provider has recovered. If it was on
+	// second-chance probation, forget that it ever used its second chance so a
+	// future isolated failure is treated as a first offense again (gets a fresh
+	// 3-minute second chance) instead of an immediate, lifetime-long hard block.
+	// The atomic CAS ensures exactly one cleanup is scheduled across concurrent relays.
+	if consumerSession.Parent.atomicTryClearSecondChanceProbation() {
+		recoveredProviderAddress := consumerSession.Parent.PublicLavaAddress
+		defer func() { go csm.forgetSecondChanceGiven(recoveredProviderAddress) }()
 	}
 
 	defer consumerSession.Free(nil)                        // we need to be locked here, if we didn't get it locked we try lock anyway

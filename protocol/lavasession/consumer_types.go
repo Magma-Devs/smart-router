@@ -317,7 +317,12 @@ type ConsumerSessionsWithProvider struct {
 	// blocked provider recovery status if 0 currently not used, if 1 a session has tried resume communication with this provider
 	// if the provider is not blocked at all this field is irrelevant
 	blockedAndUsedWithChanceForRecoveryStatus uint32
-	StaticProvider                            bool
+	// onSecondChanceProbation is 1 once this provider has consumed its single
+	// second chance (see ConsumerSessionManager.secondChanceGivenToAddresses). A
+	// successful relay clears it so a future isolated failure is treated as a
+	// first offense again instead of an immediate hard block. 0 == not on probation.
+	onSecondChanceProbation uint32
+	StaticProvider          bool
 }
 
 func NewConsumerSessionWithProvider(publicLavaAddress string, pairingEndpoints []*Endpoint, maxCu uint64, epoch uint64, stakeSize int64) *ConsumerSessionsWithProvider {
@@ -337,6 +342,19 @@ func (cswp *ConsumerSessionsWithProvider) atomicReadBlockedStatus() uint32 {
 
 func (cswp *ConsumerSessionsWithProvider) atomicWriteBlockedStatus(status uint32) {
 	atomic.StoreUint32(&cswp.blockedAndUsedWithChanceForRecoveryStatus, status) // we can only set conflict to "reported".
+}
+
+// atomicMarkSecondChanceProbation records that the provider has used its single
+// second chance. Called under ConsumerSessionManager.lock from blockProvider.
+func (cswp *ConsumerSessionsWithProvider) atomicMarkSecondChanceProbation() {
+	atomic.StoreUint32(&cswp.onSecondChanceProbation, 1)
+}
+
+// atomicTryClearSecondChanceProbation transitions the probation flag 1->0 and
+// reports whether this call performed the transition. Only the first caller
+// after a successful relay returns true, so exactly one cleanup is scheduled.
+func (cswp *ConsumerSessionsWithProvider) atomicTryClearSecondChanceProbation() bool {
+	return atomic.CompareAndSwapUint32(&cswp.onSecondChanceProbation, 1, 0)
 }
 
 func (cswp *ConsumerSessionsWithProvider) atomicReadConflictReported() bool {
