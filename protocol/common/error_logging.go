@@ -48,7 +48,7 @@ func buildCodedAttrs(lavaError *LavaError, chainID string, chainErrorCode int, c
 }
 
 // EmitErrorMetric fires the registered metrics callback for a classified error
-// without emitting any log line. Prefer LogCodedError/LogCodedWarning for the
+// without emitting any log line. Prefer LogCodedError for the
 // common case; use this directly only when the caller has already logged (or
 // is about to log) the same failure via a different path and needs to ensure
 // the Prometheus counter is still incremented exactly once.
