@@ -417,6 +417,80 @@ func TestSecondChanceRecoveryFlow(t *testing.T) {
 	require.True(t, csm.reportedProviders.IsReported(pairingList[0].PublicLavaAddress))
 }
 
+// TestSecondChanceRenewedAfterProvenRecovery verifies that a provider which has
+// consumed its single second chance earns it back once it proves recovery with a
+// successful relay. Without this, in direct-rpc mode (no epoch transitions to
+// clear secondChanceGivenToAddresses) a provider that tripped a block twice over
+// its lifetime — even with full health in between — would stay hard-blocked for
+// the rest of the process lifetime. See MAG-1860.
+func TestSecondChanceRenewedAfterProvenRecovery(t *testing.T) {
+	retrySecondChanceAfter = time.Second * 2
+	ctx := context.Background()
+	csm := CreateConsumerSessionManager()
+	pairingList := createPairingList("", true)
+	err := csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{0: pairingList[0], 1: pairingList[1]}, nil)
+	require.NoError(t, err)
+	provider0 := pairingList[0].PublicLavaAddress
+	timeLimit := time.Second * 30
+
+	// Phase 1: fail provider0 (provider1 directive-blocked) until it consumes its single second chance.
+	loopStartTime := time.Now()
+	for {
+		directiveHeaders := DirectiveHeaders{map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress}}
+		usedProviders := NewUsedProviders(directiveHeaders)
+		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+		require.NoError(t, err)
+		_, gotProvider0 := css[provider0]
+		require.True(t, gotProvider0)
+		for _, sessionInfo := range css {
+			csm.OnSessionFailure(sessionInfo.Session, fmt.Errorf("testError"))
+		}
+		if _, ok := csm.secondChanceGivenToAddresses[provider0]; ok {
+			break
+		}
+		require.True(t, time.Since(loopStartTime) < timeLimit)
+	}
+	// Precondition: provider0 has used its single second chance and is on probation.
+	require.Equal(t, uint32(1), csm.pairing[provider0].onSecondChanceProbation)
+
+	// Phase 2: wait for the second-chance timer to return provider0 to the valid pool.
+	loopStartTime = time.Now()
+	for !func() bool {
+		csm.lock.RLock()
+		defer csm.lock.RUnlock()
+		return lavaslices.Contains(csm.validAddresses, provider0)
+	}() {
+		time.Sleep(100 * time.Millisecond)
+		require.True(t, time.Since(loopStartTime) < timeLimit)
+	}
+	require.False(t, csm.reportedProviders.IsReported(provider0))
+
+	// Phase 3: a successful relay proves recovery — it must clear the probation
+	// marker (synchronously) and the second-chance memory (via deferred goroutine).
+	directiveHeaders := DirectiveHeaders{map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress}}
+	usedProviders := NewUsedProviders(directiveHeaders)
+	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+	require.NoError(t, err)
+	_, gotProvider0 := css[provider0]
+	require.True(t, gotProvider0)
+	for _, sessionInfo := range css {
+		doneErr := csm.OnSessionDone(sessionInfo.Session, servicedBlockNumber, cuForFirstRequest, time.Millisecond, sessionInfo.Session.CalculateExpectedLatency(2*time.Millisecond), 1, numberOfProviders, numberOfProviders, false, nil)
+		require.NoError(t, doneErr)
+	}
+	require.Equal(t, uint32(0), csm.pairing[provider0].onSecondChanceProbation, "probation must clear on a successful relay")
+
+	loopStartTime = time.Now()
+	for func() bool {
+		csm.lock.RLock()
+		defer csm.lock.RUnlock()
+		_, ok := csm.secondChanceGivenToAddresses[provider0]
+		return ok
+	}() {
+		time.Sleep(50 * time.Millisecond)
+		require.True(t, time.Since(loopStartTime) < timeLimit, "second-chance memory must be forgotten after proven recovery")
+	}
+}
+
 func runOnSessionDoneForConsumerSessionMap(t *testing.T, css ConsumerSessionsMap, csm *ConsumerSessionManager) {
 	for _, cs := range css {
 		require.NotNil(t, cs)
