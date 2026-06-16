@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol/protocolerrors"
-	"github.com/magma-Devs/smart-router/utils"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // ShouldSkipConsistencyValidation returns true when consistency validation
