@@ -210,7 +210,7 @@ func (rp *RelayProcessor) crossValidationQuorumReached() bool {
 // into the implicit "default" group.
 func quorumGroupOf(result common.RelayResult) string {
 	if result.ProviderInfo.ProviderGroup == "" {
-		return "default"
+		return common.DefaultProviderGroup
 	}
 	return result.ProviderInfo.ProviderGroup
 }

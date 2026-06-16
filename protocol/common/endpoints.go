@@ -393,9 +393,14 @@ type ProviderInfo struct {
 	ProviderStake             int64
 	// ProviderGroup is the provider's configured group label (from RPCStaticProviderEndpoint.GroupLabel),
 	// carried on each result so cross-validation group-diversity checks and mismatch metrics can read it
-	// locally. Empty string means the implicit "default" group.
+	// locally. Empty string means the implicit DefaultProviderGroup group.
 	ProviderGroup string
 }
+
+// DefaultProviderGroup is the label used for cross-validation group-diversity counting when a provider has
+// no explicit GroupLabel. An empty GroupLabel/ProviderGroup folds into this single implicit group, so every
+// site that buckets providers by group must use this constant for the empty case to stay consistent.
+const DefaultProviderGroup = "default"
 
 type RelayResult struct {
 	Request             *pairingtypes.RelayRequest

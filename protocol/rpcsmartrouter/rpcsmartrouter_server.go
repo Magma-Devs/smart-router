@@ -1217,7 +1217,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			if sessionInfo == nil || sessionInfo.Session == nil || sessionInfo.Session.Parent == nil {
 				continue
 			}
-			label := "default"
+			label := common.DefaultProviderGroup
 			if g := sessionInfo.Session.Parent.GroupLabel; g != "" {
 				label = g
 			}
@@ -2685,7 +2685,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			for _, outlier := range successOutliers {
 				group := outlier.ProviderInfo.ProviderGroup
 				if group == "" {
-					group = "default"
+					group = common.DefaultProviderGroup
 				}
 				outlierGroups[group] = struct{}{}
 				utils.LavaFormatInfo("cross-validation outlier detected",
