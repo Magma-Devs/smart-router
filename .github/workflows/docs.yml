@@ -8,9 +8,7 @@ on:
     branches:
       - main
     paths:
-      - docs/**
-      - mkdocs.yml
-      - requirements-docs.txt
+      - docs/documentation-website/**
       - .github/workflows/docs.yml
   workflow_dispatch:
 
@@ -37,15 +35,15 @@ jobs:
           python-version: "3.x"
 
       - name: Install dependencies
-        run: pip install -r requirements-docs.txt
+        run: pip install -r docs/documentation-website/requirements-docs.txt
 
       - name: Build site
-        run: mkdocs build --strict
+        run: mkdocs build --strict -f docs/documentation-website/mkdocs.yml
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: docs/documentation-website/site
 
   deploy:
     needs: build
