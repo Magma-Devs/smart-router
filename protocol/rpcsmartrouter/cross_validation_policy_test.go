@@ -17,8 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func intPtr(i int) *int { return &i }
-
 // newResolver builds a single-policy resolver for ETH1/jsonrpc/<method>.
 func newResolver(t *testing.T, method string, policy CrossValidationPolicy) *CrossValidationPolicyResolver {
 	t.Helper()
@@ -49,7 +47,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 		{
 			name:     "enabled policy, no caller headers -> floor values, CV on",
 			method:   "eth_getBalance",
-			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MinGroups: Bound{Floor: intPtr(2)}},
+			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(3)}, AgreementThreshold: Bound{Floor: new(2)}, MinGroups: Bound{Floor: new(2)}},
 			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_getBalance",
 			callerPresent: false,
 			wantApplies:   true,
@@ -58,7 +56,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 		{
 			name:     "caller stricter than floor -> caller wins (floor is a minimum)",
 			method:   "eth_getBalance",
-			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(2)}},
+			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(3)}, AgreementThreshold: Bound{Floor: new(2)}},
 			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_getBalance",
 			caller:        common.CrossValidationParams{MaxParticipants: 5, AgreementThreshold: 4},
 			callerPresent: true,
@@ -68,7 +66,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 		{
 			name:     "caller looser than floor -> floor wins (cannot go below operator minimum)",
 			method:   "eth_getBalance",
-			policy:   CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(3)}, MaxParticipants: Bound{Floor: intPtr(3)}},
+			policy:   CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(3)}, MaxParticipants: Bound{Floor: new(3)}},
 			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_getBalance",
 			caller:        common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 1},
 			callerPresent: true,
@@ -78,7 +76,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 		{
 			name:     "cap overrides a stricter caller (the approved loosening)",
 			method:   "eth_getBalance",
-			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(3), Cap: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(2), Cap: intPtr(2)}},
+			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(3), Cap: new(3)}, AgreementThreshold: Bound{Floor: new(2), Cap: new(2)}},
 			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_getBalance",
 			caller:        common.CrossValidationParams{MaxParticipants: 9, AgreementThreshold: 9},
 			callerPresent: true,
@@ -88,7 +86,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 		{
 			name:     "floor == cap -> exact/authoritative regardless of caller",
 			method:   "eth_getTransactionReceipt",
-			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(3), Cap: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(3), Cap: intPtr(3)}, MinGroups: Bound{Floor: intPtr(2), Cap: intPtr(2)}},
+			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(3), Cap: new(3)}, AgreementThreshold: Bound{Floor: new(3), Cap: new(3)}, MinGroups: Bound{Floor: new(2), Cap: new(2)}},
 			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_getTransactionReceipt",
 			caller:        common.CrossValidationParams{MaxParticipants: 1, AgreementThreshold: 1},
 			callerPresent: true,
@@ -116,7 +114,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 		{
 			name:     "no policy for method -> pure caller passthrough",
 			method:   "eth_getBalance",
-			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(2)}},
+			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(3)}, AgreementThreshold: Bound{Floor: new(2)}},
 			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_blockNumber", // different method
 			caller:        common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 2},
 			callerPresent: true,
@@ -126,7 +124,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 		{
 			name:     "policy keyed to ETH1 does not apply to a different chain",
 			method:   "eth_getBalance",
-			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(2)}},
+			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(3)}, AgreementThreshold: Bound{Floor: new(2)}},
 			reqChain: "POLYGON", reqAPI: "jsonrpc", reqMethod: "eth_getBalance",
 			callerPresent: false,
 			wantApplies:   false,
@@ -134,7 +132,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 		{
 			name:     "chain/api match is case-insensitive",
 			method:   "eth_getBalance",
-			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(2)}},
+			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(3)}, AgreementThreshold: Bound{Floor: new(2)}},
 			reqChain: "eth1", reqAPI: "JSONRPC", reqMethod: "eth_getBalance",
 			callerPresent: false,
 			wantApplies:   true,
@@ -143,7 +141,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 		{
 			name:     "structural invariant: caller threshold clamped to effective max-participants",
 			method:   "eth_getBalance",
-			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(3), Cap: intPtr(3)}},
+			policy:   CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(3), Cap: new(3)}},
 			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_getBalance",
 			caller:        common.CrossValidationParams{MaxParticipants: 9, AgreementThreshold: 9},
 			callerPresent: true,
@@ -158,7 +156,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 			// threshold (3) so the mandate holds.
 			name:     "caller-shrunk max-participants cannot drop threshold below operator floor (no max floor)",
 			method:   "eth_getBalance",
-			policy:   CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(3)}},
+			policy:   CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(3)}},
 			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_getBalance",
 			caller:        common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 2},
 			callerPresent: true,
@@ -171,7 +169,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 			// entirely. The effective max is now floored at the operator min-groups (2) so diversity survives.
 			name:     "caller-shrunk max-participants cannot disable operator min-groups diversity (no max floor)",
 			method:   "eth_getBalance",
-			policy:   CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: intPtr(2)}},
+			policy:   CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: new(2)}},
 			reqChain: "ETH1", reqAPI: "jsonrpc", reqMethod: "eth_getBalance",
 			caller:        common.CrossValidationParams{MaxParticipants: 1, AgreementThreshold: 1},
 			callerPresent: true,
@@ -315,9 +313,9 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 		require.NoError(t, err)
 		return r
 	}
-	readPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(2)}}}
-	writePolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(2)}}}
-	groupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(3)}, MinGroups: Bound{Floor: intPtr(3)}}}
+	readPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}}
+	writePolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}}
+	groupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(3)}, MinGroups: Bound{Floor: new(3)}}}
 
 	t.Run("no policies -> ok", func(t *testing.T) {
 		require.NoError(t, validateCrossValidationStartup(mkResolver(t), realParser, "ETH1", "jsonrpc", 5, nil))
@@ -344,7 +342,7 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 	})
 
 	// Per-group-quorum capacity (2.3): needs MinGroups groups that EACH have >= AgreementThreshold providers.
-	perGroupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}, MinGroups: Bound{Floor: intPtr(2)}}}
+	perGroupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(4)}, MinGroups: Bound{Floor: new(2)}}}
 	t.Run("per-group: two groups with >= threshold providers -> ok", func(t *testing.T) {
 		require.NoError(t, validateCrossValidationStartup(mkResolver(t, perGroupPolicy), realParser, "ETH1", "jsonrpc", 2, map[string]int{"A": 3, "B": 2}))
 	})
@@ -369,7 +367,7 @@ func TestCrossValidationPolicyResolver_ResolvePerGroup(t *testing.T) {
 	noCaller := common.CrossValidationParams{}
 
 	t.Run("per-group with min-groups 2 -> PerGroupQuorum true", func(t *testing.T) {
-		r := mk(CrossValidationPolicy{PerGroupQuorum: true, MinGroups: Bound{Floor: intPtr(2)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}})
+		r := mk(CrossValidationPolicy{PerGroupQuorum: true, MinGroups: Bound{Floor: new(2)}, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(4)}})
 		eff, ok := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", noCaller, false)
 		require.True(t, ok)
 		require.True(t, eff.PerGroupQuorum)
@@ -380,7 +378,7 @@ func TestCrossValidationPolicyResolver_ResolvePerGroup(t *testing.T) {
 		// resolver's internal map directly to prove the defense-in-depth guard in Resolve: per-group never
 		// activates without real group diversity even if a degenerate policy slips past validation.
 		r := &CrossValidationPolicyResolver{policies: map[string]CrossValidationPolicy{
-			policyKey("ETH1", "jsonrpc", "eth_getBalance"): {Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}},
+			policyKey("ETH1", "jsonrpc", "eth_getBalance"): {Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(4)}},
 		}}
 		eff, ok := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", noCaller, false)
 		require.True(t, ok)
@@ -388,7 +386,7 @@ func TestCrossValidationPolicyResolver_ResolvePerGroup(t *testing.T) {
 		require.False(t, eff.PerGroupQuorum, "per-group must not activate without real group diversity")
 	})
 	t.Run("no per-group knob -> PerGroupQuorum false", func(t *testing.T) {
-		r := mk(CrossValidationPolicy{MinGroups: Bound{Floor: intPtr(2)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}})
+		r := mk(CrossValidationPolicy{MinGroups: Bound{Floor: new(2)}, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(4)}})
 		eff, ok := r.Resolve("ETH1", "jsonrpc", "eth_getBalance", noCaller, false)
 		require.True(t, ok)
 		require.False(t, eff.PerGroupQuorum)
@@ -402,29 +400,29 @@ func TestCrossValidationPolicy_Validate(t *testing.T) {
 		policy  CrossValidationPolicy
 		wantErr bool
 	}{
-		{"valid floor only", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}}, false},
-		{"valid floor and cap", CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(3), Cap: intPtr(5)}}, false},
-		{"valid floor==cap", CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(3), Cap: intPtr(3)}}, false},
-		{"floor below 1", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(0)}}, true},
-		{"cap below 1", CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Cap: intPtr(0)}}, true},
-		{"floor exceeds cap", CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: intPtr(5), Cap: intPtr(3)}}, true},
-		{"threshold floor exceeds participants cap (unsatisfiable)", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(5)}, MaxParticipants: Bound{Cap: intPtr(3)}}, true},
-		{"min-groups floor exceeds participants cap (unsatisfiable)", CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: intPtr(4)}, MaxParticipants: Bound{Cap: intPtr(3)}}, true},
+		{"valid floor only", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}}, false},
+		{"valid floor and cap", CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(3), Cap: new(5)}}, false},
+		{"valid floor==cap", CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(3), Cap: new(3)}}, false},
+		{"floor below 1", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(0)}}, true},
+		{"cap below 1", CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Cap: new(0)}}, true},
+		{"floor exceeds cap", CrossValidationPolicy{Enabled: true, MaxParticipants: Bound{Floor: new(5), Cap: new(3)}}, true},
+		{"threshold floor exceeds participants cap (unsatisfiable)", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(5)}, MaxParticipants: Bound{Cap: new(3)}}, true},
+		{"min-groups floor exceeds participants cap (unsatisfiable)", CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: new(4)}, MaxParticipants: Bound{Cap: new(3)}}, true},
 		// Fix 4: an enabled policy must be satisfiable with NO caller — reject instead of silently
 		// clamping agreement-threshold / min-groups down to max-participants.
-		{"enabled: threshold floor 5 > participants floor 3", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(5)}, MaxParticipants: Bound{Floor: intPtr(3)}}, true},
-		{"enabled: threshold floor 5 > default participants (3)", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(5)}}, true},
-		{"enabled: min-groups floor 4 > participants floor 3", CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: intPtr(4)}, MaxParticipants: Bound{Floor: intPtr(3)}}, true},
-		{"enabled: threshold floor 5 with participants floor 5 is fine", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(5)}, MaxParticipants: Bound{Floor: intPtr(5)}}, false},
+		{"enabled: threshold floor 5 > participants floor 3", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(5)}, MaxParticipants: Bound{Floor: new(3)}}, true},
+		{"enabled: threshold floor 5 > default participants (3)", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(5)}}, true},
+		{"enabled: min-groups floor 4 > participants floor 3", CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: new(4)}, MaxParticipants: Bound{Floor: new(3)}}, true},
+		{"enabled: threshold floor 5 with participants floor 5 is fine", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(5)}, MaxParticipants: Bound{Floor: new(5)}}, false},
 		// A disabled policy never resolves on its own, so an unsatisfiable no-caller shape is allowed.
-		{"disabled: unsatisfiable floors allowed (dormant)", CrossValidationPolicy{Enabled: false, AgreementThreshold: Bound{Floor: intPtr(5)}, MaxParticipants: Bound{Floor: intPtr(3)}}, false},
+		{"disabled: unsatisfiable floors allowed (dormant)", CrossValidationPolicy{Enabled: false, AgreementThreshold: Bound{Floor: new(5)}, MaxParticipants: Bound{Floor: new(3)}}, false},
 		// Per-group quorum (2.3): needs min-groups > 1 and max-participants >= min-groups * agreement-threshold.
-		{"per-group with min-groups 1 (default) -> rejected", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}}, true},
-		{"per-group min-groups 3 threshold 2 needs max 6, have 5 -> rejected", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, MinGroups: Bound{Floor: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(5)}}, true},
-		{"per-group min-groups 3 threshold 2 with max 6 -> ok", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, MinGroups: Bound{Floor: intPtr(3)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(6)}}, false},
-		{"per-group min-groups 2 threshold 2 with max 4 -> ok", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, MinGroups: Bound{Floor: intPtr(2)}, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}}, false},
+		{"per-group with min-groups 1 (default) -> rejected", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(4)}}, true},
+		{"per-group min-groups 3 threshold 2 needs max 6, have 5 -> rejected", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, MinGroups: Bound{Floor: new(3)}, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(5)}}, true},
+		{"per-group min-groups 3 threshold 2 with max 6 -> ok", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, MinGroups: Bound{Floor: new(3)}, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(6)}}, false},
+		{"per-group min-groups 2 threshold 2 with max 4 -> ok", CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, MinGroups: Bound{Floor: new(2)}, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(4)}}, false},
 		// Disabled per-group with an infeasible shape stays dormant (allowed).
-		{"disabled per-group infeasible allowed", CrossValidationPolicy{Enabled: false, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(2)}}, false},
+		{"disabled per-group infeasible allowed", CrossValidationPolicy{Enabled: false, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}, false},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -526,12 +524,12 @@ func TestCrossValidationPolicy_StatefulGuard_ProductionParser(t *testing.T) {
 		return checker.ApiHasStatefulCategory(method)
 	}
 
-	writePolicy := []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(2)}}}}
+	writePolicy := []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}}}
 	rWrite, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: writePolicy})
 	require.NoError(t, err)
 	require.Error(t, rWrite.ValidateNoStatefulPolicies(isStateful), "enabled CV policy on a write method must be rejected at startup")
 
-	readPolicy := []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(2)}}}}
+	readPolicy := []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}}}
 	rRead, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: readPolicy})
 	require.NoError(t, err)
 	require.NoError(t, rRead.ValidateNoStatefulPolicies(isStateful), "CV policy on a read method must be allowed")
@@ -577,8 +575,8 @@ func TestGroupLabel_ConfigToSession_InertWithoutPolicy(t *testing.T) {
 func TestCrossValidationPolicyResolver_StatefulGuard(t *testing.T) {
 	r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{
 		Policies: []CrossValidationPolicyEntry{
-			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}}},
-			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}}},
+			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}}},
+			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}}},
 			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_disabledWrite", CrossValidationPolicy: CrossValidationPolicy{Enabled: false}}, // disabled write policy is allowed
 		},
 	})
@@ -593,7 +591,7 @@ func TestCrossValidationPolicyResolver_StatefulGuard(t *testing.T) {
 	assert.Contains(t, err.Error(), "eth_sendRawTransaction")
 
 	// With only read policies enabled, the guard passes.
-	rReads := newResolver(t, "eth_getBalance", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}})
+	rReads := newResolver(t, "eth_getBalance", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}})
 	require.NoError(t, rReads.ValidateNoStatefulPolicies(isStateful))
 }
 
