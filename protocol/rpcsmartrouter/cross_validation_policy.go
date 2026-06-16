@@ -84,10 +84,15 @@ type CrossValidationPolicyResolver struct {
 	policies map[string]CrossValidationPolicy // keyed by policyKey(chain, api, method)
 }
 
+// policyKeySeparator joins the three identifiers in a policy key. NUL is used because it cannot appear in a
+// chain-id, api-interface, or RPC method name, so it delimits the parts unambiguously. policyKey and
+// splitPolicyKey MUST use the same separator — hence the shared constant.
+const policyKeySeparator = "\x00"
+
 // policyKey builds the canonical lookup key. chain-id and api-interface are matched case-insensitively
 // (they are deployment identifiers); method names are matched exactly (RPC methods are case-sensitive).
 func policyKey(chainID, apiInterface, method string) string {
-	return strings.ToLower(chainID) + "\x00" + strings.ToLower(apiInterface) + "\x00" + method
+	return strings.ToLower(chainID) + policyKeySeparator + strings.ToLower(apiInterface) + policyKeySeparator + method
 }
 
 // NewCrossValidationPolicyResolver flattens and validates the nested config into a resolver. An empty or
@@ -407,7 +412,7 @@ func (r *CrossValidationPolicyResolver) ValidateNoStatefulPolicies(isStateful fu
 
 // splitPolicyKey reverses policyKey for diagnostics. chain-id and api-interface come back lowercased.
 func splitPolicyKey(key string) (chainID, apiInterface, method string) {
-	parts := strings.SplitN(key, "\x00", 3)
+	parts := strings.SplitN(key, policyKeySeparator, 3)
 	for len(parts) < 3 {
 		parts = append(parts, "")
 	}
