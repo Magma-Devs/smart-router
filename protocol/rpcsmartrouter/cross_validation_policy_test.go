@@ -277,23 +277,33 @@ func TestParseCrossValidationConfig(t *testing.T) {
 	})
 }
 
-// TestParseCrossValidationConfig_RejectsFractional covers P2: a fractional knob value must be a config
-// error, not silently truncated.
-func TestParseCrossValidationConfig_RejectsFractional(t *testing.T) {
-	const yamlBody = "cross-validation:\n" +
-		"  policies:\n" +
-		"    - chain-id: ETH1\n" +
-		"      api-interface: jsonrpc\n" +
-		"      method: eth_getBalance\n" +
-		"      enabled: true\n" +
-		"      agreement-threshold: 2.9\n" // fractional -> must be rejected
+// TestParseCrossValidationConfig_RejectsNonInteger covers the int-only knob contract: cross-validation
+// knobs are whole-number counts, so float scalars (fractional OR whole) and quoted strings are config
+// errors rather than silently coerced. The float tolerance was percentage-quorum-era legacy.
+func TestParseCrossValidationConfig_RejectsNonInteger(t *testing.T) {
+	for _, tc := range []struct {
+		desc      string
+		knobValue string
+	}{
+		{"fractional float", "2.9"},
+		{"whole-number float", "2.0"},
+		{"quoted string", "\"2\""},
+	} {
+		yamlBody := "cross-validation:\n" +
+			"  policies:\n" +
+			"    - chain-id: ETH1\n" +
+			"      api-interface: jsonrpc\n" +
+			"      method: eth_getBalance\n" +
+			"      enabled: true\n" +
+			"      agreement-threshold: " + tc.knobValue + "\n"
 
-	v := viper.New()
-	v.SetConfigType("yaml")
-	require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
+		v := viper.New()
+		v.SetConfigType("yaml")
+		require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)), tc.desc)
 
-	_, err := ParseCrossValidationConfig(v)
-	require.Error(t, err, "fractional knob value must be rejected, not truncated to an int")
+		_, err := ParseCrossValidationConfig(v)
+		require.Error(t, err, "non-integer knob value must be rejected, not coerced: %s", tc.desc)
+	}
 }
 
 // TestValidateCrossValidationStartup covers the startup guards: the stateful-write guard (with a real
