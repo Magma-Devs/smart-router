@@ -119,28 +119,31 @@ func (rp *RelayProcessor) GetCrossValidationParams() *common.CrossValidationPara
 	return rp.crossValidationParams
 }
 
-// getAgreementThreshold returns the agreement threshold or 1 if not in CrossValidation mode
+// getAgreementThreshold returns the agreement threshold, or noCrossValidationRequirement when not in
+// CrossValidation mode.
 func (rp *RelayProcessor) getAgreementThreshold() int {
 	if rp.crossValidationParams != nil {
 		return rp.crossValidationParams.AgreementThreshold
 	}
-	return 1
+	return noCrossValidationRequirement
 }
 
-// getMaxParticipants returns the max participants or 1 if not in CrossValidation mode
+// getMaxParticipants returns the max participants, or noCrossValidationRequirement when not in
+// CrossValidation mode.
 func (rp *RelayProcessor) getMaxParticipants() int {
 	if rp.crossValidationParams != nil {
 		return rp.crossValidationParams.MaxParticipants
 	}
-	return 1
+	return noCrossValidationRequirement
 }
 
-// getMinGroups returns the required number of distinct provider groups (1 = no diversity requirement).
+// getMinGroups returns the required number of distinct provider groups
+// (noCrossValidationRequirement = no diversity requirement).
 func (rp *RelayProcessor) getMinGroups() int {
-	if rp.crossValidationParams != nil && rp.crossValidationParams.MinGroups > 1 {
+	if rp.crossValidationParams != nil && rp.crossValidationParams.MinGroups > noCrossValidationRequirement {
 		return rp.crossValidationParams.MinGroups
 	}
-	return 1
+	return noCrossValidationRequirement
 }
 
 // perGroupQuorum reports whether the stronger per-group-quorum variant is active (each of MinGroups groups

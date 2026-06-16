@@ -4,6 +4,10 @@ type Selection int
 
 const (
 	MaxCallsPerRelay = 50
+	// noCrossValidationRequirement is the value every cross-validation knob (agreement threshold, max
+	// participants, min groups) collapses to when CrossValidation is inactive: a single relay with no
+	// agreement, fan-out, or group-diversity requirement.
+	noCrossValidationRequirement = 1
 )
 
 var RelayRetryLimit = 2
