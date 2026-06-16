@@ -635,6 +635,109 @@ func (rp *RelayProcessor) WaitForResults(ctx context.Context) error {
 	}
 }
 
+// resultCount is the per-hash agreement tally built while scanning cross-validation responses: how many
+// providers returned this exact response hash, one representative result for it, and the per-group breakdown
+// of those providers (len(groupCounts) is the distinct-group count).
+type resultCount struct {
+	count       int
+	result      common.RelayResult
+	groupCounts map[string]int // per-group tally among the providers with this hash (len = distinct groups)
+}
+
+// quorumWinner is the outcome of selecting a cross-validation consensus winner over the per-hash tallies.
+// `found` reports whether any candidate (a real response hash, or the nil-reply fallback) satisfied the
+// quorum; the remaining fields let the caller both build the success result and, when found is false,
+// classify the failure (no-agreement vs diversity-unmet vs group-quorum-unmet).
+type quorumWinner struct {
+	found            bool
+	result           common.RelayResult
+	hash             [32]byte // zero for a nil-reply winner (the empty-reply sentinel), as before
+	count            int      // total agreement count of the chosen winner
+	distinctGroups   int      // distinct groups of the chosen winner (for logging)
+	qualifyingGroups int      // per-group: groups that EACH independently corroborated the chosen winner
+
+	// Auxiliary counts for the failure-reason split, valid even when found is false:
+	maxCount              int  // highest agreement count across ALL candidates, including nil replies
+	maxRealCount          int  // highest REAL response-hash count, before nil replies inflate maxCount
+	anyGroupReachedQuorum bool // per-group: did any single group reach its internal threshold at all
+}
+
+// selectQuorumWinner picks the cross-validation consensus winner from the per-hash agreement tallies. It is
+// a pure function of its inputs (no RelayProcessor state) so the selection matrix can be unit-tested directly.
+//
+// Default (MinGroups) mode: the highest-count response hash that meets BOTH the agreement threshold AND the
+// group-diversity requirement — a higher-count hash that fails diversity must NOT shadow a lower-count hash
+// that satisfies both (P1). Per-group mode: the hash corroborated by the most groups that EACH independently
+// reached the threshold, requiring at least minGroups such groups (tie-broken by total count). maxCount
+// tracks the best total count regardless, only to distinguish the failure reasons.
+//
+// Nil replies are a fallback consensus, preferred only when no real response hash formed a diverse quorum.
+// Per-group mode excludes them entirely: an empty reply is not an independent corroboration of a value.
+// Ties on the deciding metric resolve to whichever hash map iteration visits first (unspecified order);
+// callers and tests must not depend on the identity of a winner among equal candidates.
+func selectQuorumWinner(guid uint64, countMap map[[32]byte]*resultCount, results []common.RelayResult, nilReplies, nilReplyIdx int, nilReplyGroups map[string]struct{}, crossValidationSize, minGroups int, perGroup bool) quorumWinner {
+	var w quorumWinner
+	for hash, count := range countMap {
+		utils.LavaFormatDebug("🔍 [Quorum] Response group details",
+			utils.LogAttr("GUID", guid),
+			utils.LogAttr("responseHashHex", fmt.Sprintf("%x", hash[:8])),
+			utils.LogAttr("matchingProviders", count.count),
+			utils.LogAttr("distinctGroups", len(count.groupCounts)),
+			utils.LogAttr("provider", count.result.ProviderInfo.ProviderAddress),
+		)
+		if count.count > w.maxCount {
+			w.maxCount = count.count
+		}
+		if perGroup {
+			qualGroups := qualifyingGroupCount(count.groupCounts, crossValidationSize)
+			if qualGroups > 0 {
+				w.anyGroupReachedQuorum = true
+			}
+			if qualGroups >= minGroups {
+				if !w.found || qualGroups > w.qualifyingGroups || (qualGroups == w.qualifyingGroups && count.count > w.count) {
+					w.found = true
+					w.qualifyingGroups = qualGroups
+					w.count = count.count
+					w.result = count.result
+					w.hash = hash
+					w.distinctGroups = len(count.groupCounts)
+				}
+			}
+		} else if count.count >= crossValidationSize && len(count.groupCounts) >= minGroups {
+			if !w.found || count.count > w.count {
+				w.found = true
+				w.count = count.count
+				w.result = count.result
+				w.hash = hash
+				w.distinctGroups = len(count.groupCounts)
+			}
+		}
+	}
+
+	// Capture the best REAL response-hash agreement count before nil replies inflate maxCount. The
+	// no-agreement vs diversity-unmet split must key off real agreement: a large nil count that did NOT form
+	// a diverse quorum means nothing agreed (no-agreement), not "a quorum agreed but failed to span the
+	// required groups" (diversity-unmet).
+	w.maxRealCount = w.maxCount
+
+	if nilReplies > w.maxCount {
+		w.maxCount = nilReplies
+	}
+	if !perGroup && !w.found && nilReplies >= crossValidationSize && len(nilReplyGroups) >= minGroups {
+		w.found = true
+		w.count = nilReplies
+		w.result = results[nilReplyIdx]
+		w.distinctGroups = len(nilReplyGroups)
+		// Note: w.hash is intentionally left zero — the nil/empty-reply consensus has no real response hash.
+		utils.LavaFormatInfo("🔍 [Quorum] Nil replies reached quorum",
+			utils.LogAttr("GUID", guid),
+			utils.LogAttr("nilRepliesCount", nilReplies),
+			utils.LogAttr("requiredQuorumSize", crossValidationSize),
+		)
+	}
+	return w
+}
+
 func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult, crossValidationSize int) (returnedResult *common.RelayResult, failureReason string, processingError error) {
 	if crossValidationSize <= 0 {
 		return nil, "", errors.New("crossValidationSize must be greater than zero")
@@ -648,12 +751,6 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 		utils.LogAttr("agreementThreshold", rp.getAgreementThreshold()),
 		utils.LogAttr("maxParticipants", rp.getMaxParticipants()),
 	)
-
-	type resultCount struct {
-		count       int
-		result      common.RelayResult
-		groupCounts map[string]int // per-group tally among the providers with this hash (len = distinct groups)
-	}
 
 	countMap := make(map[[32]byte]*resultCount)
 	nilReplies := 0
@@ -716,17 +813,6 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 	minGroups := rp.getMinGroups()
 	perGroup := rp.perGroupQuorum()
 
-	var (
-		mostCommonResult        common.RelayResult
-		consensusHash           [32]byte
-		consensusDistinctGroups int // distinct groups of the chosen winner, for logging
-		winnerCount             int // total agreement count of the chosen winner
-		winnerQualGroups        int // per-group: number of groups that corroborated the chosen winner
-		haveWinner              bool
-		maxCount                int  // highest agreement count across ALL candidates, for the failure-reason split
-		anyGroupReachedQuorum   bool // per-group: did any single group reach its internal threshold at all
-	)
-
 	utils.LavaFormatInfo("🔍 [Quorum] Response groups summary",
 		utils.LogAttr("GUID", rp.guid),
 		utils.LogAttr("uniqueResponseGroups", len(countMap)),
@@ -735,94 +821,28 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 		utils.LogAttr("perGroupQuorum", perGroup),
 	)
 
-	// Select the winner. Default (MinGroups) mode: the highest-count response hash that meets BOTH the
-	// agreement threshold AND the group-diversity requirement — a higher-count hash that fails diversity
-	// must NOT shadow a lower-count hash that satisfies both (P1). Per-group mode: the hash corroborated by
-	// the most groups that EACH independently reached the threshold, requiring at least MinGroups such
-	// groups (tie-broken by total count). maxCount tracks the best total count regardless, only to
-	// distinguish the failure reasons.
-	for hash, count := range countMap {
-		utils.LavaFormatDebug("🔍 [Quorum] Response group details",
-			utils.LogAttr("GUID", rp.guid),
-			utils.LogAttr("responseHashHex", fmt.Sprintf("%x", hash[:8])),
-			utils.LogAttr("matchingProviders", count.count),
-			utils.LogAttr("distinctGroups", len(count.groupCounts)),
-			utils.LogAttr("provider", count.result.ProviderInfo.ProviderAddress),
-		)
-		if count.count > maxCount {
-			maxCount = count.count
-		}
-		if perGroup {
-			qualGroups := qualifyingGroupCount(count.groupCounts, crossValidationSize)
-			if qualGroups > 0 {
-				anyGroupReachedQuorum = true
-			}
-			if qualGroups >= minGroups {
-				if !haveWinner || qualGroups > winnerQualGroups || (qualGroups == winnerQualGroups && count.count > winnerCount) {
-					haveWinner = true
-					winnerQualGroups = qualGroups
-					winnerCount = count.count
-					mostCommonResult = count.result
-					consensusHash = hash
-					consensusDistinctGroups = len(count.groupCounts)
-				}
-			}
-		} else if count.count >= crossValidationSize && len(count.groupCounts) >= minGroups {
-			if !haveWinner || count.count > winnerCount {
-				haveWinner = true
-				winnerCount = count.count
-				mostCommonResult = count.result
-				consensusHash = hash
-				consensusDistinctGroups = len(count.groupCounts)
-			}
-		}
-	}
+	winner := selectQuorumWinner(rp.guid, countMap, results, nilReplies, nilReplyIdx, nilReplyGroups, crossValidationSize, minGroups, perGroup)
 
-	// Capture the best REAL response-hash agreement count before nil replies inflate maxCount. The
-	// no-agreement vs diversity-unmet split below must key off real agreement: a large nil count that did
-	// NOT form a diverse quorum means nothing agreed (no-agreement), not "a quorum agreed but failed to
-	// span the required groups" (diversity-unmet). Without this, a request where only nils are plentiful
-	// is mislabelled diversity-unmet, misdirecting a client deciding whether to retry vs fall back.
-	maxRealCount := maxCount
-
-	// Nil replies are a fallback consensus, preferred only when no real response hash formed a diverse
-	// quorum (mirrors the prior real-over-nil preference). Per-group quorum excludes nil replies entirely:
-	// an empty reply is not an independent corroboration of a value, so an all-nil group cannot qualify.
-	if nilReplies > maxCount {
-		maxCount = nilReplies
-	}
-	if !perGroup && !haveWinner && nilReplies >= crossValidationSize && len(nilReplyGroups) >= minGroups {
-		haveWinner = true
-		winnerCount = nilReplies
-		mostCommonResult = results[nilReplyIdx]
-		consensusDistinctGroups = len(nilReplyGroups)
-		utils.LavaFormatInfo("🔍 [Quorum] Nil replies reached quorum",
-			utils.LogAttr("GUID", rp.guid),
-			utils.LogAttr("nilRepliesCount", nilReplies),
-			utils.LogAttr("requiredQuorumSize", crossValidationSize),
-		)
-	}
-
-	if !haveWinner {
+	if !winner.found {
 		if perGroup {
 			// Per-group mode: either too few groups reached their own internal quorum, or the per-group
 			// winners disagreed across groups (no single hash was corroborated by MinGroups groups). Both
 			// surface as group-quorum-unmet, distinct from the MinGroups-mode diversity-unmet/no-agreement.
 			return nil, common.CrossValidationReasonGroupQuorumUnmet, utils.LavaFormatInfo("cross-validation failed: per-group quorum not reached",
 				utils.LogAttr("GUID", rp.guid),
-				utils.LogAttr("anyGroupReachedInternalQuorum", anyGroupReachedQuorum),
+				utils.LogAttr("anyGroupReachedInternalQuorum", winner.anyGroupReachedQuorum),
 				utils.LogAttr("minGroups", minGroups),
 				utils.LogAttr("agreementThreshold", crossValidationSize),
 				utils.LogAttr("maxParticipants", rp.getMaxParticipants()))
 		}
-		if maxRealCount < crossValidationSize {
+		if winner.maxRealCount < crossValidationSize {
 			// No REAL response hash reached the agreement threshold (a plentiful nil count that failed to
 			// form a diverse quorum is still "nothing agreed", not a diversity failure).
 			if rp.selection == CrossValidation {
 				return nil, common.CrossValidationReasonNoAgreement, utils.LavaFormatInfo("cross-validation failed: agreement threshold not reached",
 					utils.LogAttr("nilReplies", nilReplies),
 					utils.LogAttr("results", len(results)),
-					utils.LogAttr("maxMatchingResults", maxCount),
+					utils.LogAttr("maxMatchingResults", winner.maxCount),
 					utils.LogAttr("agreementThreshold", crossValidationSize),
 					utils.LogAttr("maxParticipants", rp.getMaxParticipants()))
 			}
@@ -831,7 +851,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("nilReplies", nilReplies),
 				utils.LogAttr("totalResults", len(results)),
-				utils.LogAttr("maxCount", maxCount),
+				utils.LogAttr("maxCount", winner.maxCount),
 				utils.LogAttr("crossValidationSize", crossValidationSize))
 		}
 		// Some hash reached the agreement threshold, but none spanned MinGroups distinct groups (1.2c).
@@ -839,27 +859,27 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 		// must not satisfy quorum on its own).
 		return nil, common.CrossValidationReasonDiversityUnmet, utils.LavaFormatInfo("cross-validation failed: group-diversity requirement not met",
 			utils.LogAttr("GUID", rp.guid),
-			utils.LogAttr("bestAgreementCount", maxCount),
+			utils.LogAttr("bestAgreementCount", winner.maxCount),
 			utils.LogAttr("minGroups", minGroups),
 			utils.LogAttr("agreementThreshold", crossValidationSize))
 	}
 
-	mostCommonResult.CrossValidation = winnerCount
-	mostCommonResult.ResponseHash = consensusHash // ensure the returned consensus carries the winning hash
-	maxCount = winnerCount                        // keep the success-log fields below referring to the winning quorum
+	mostCommonResult := winner.result
+	mostCommonResult.CrossValidation = winner.count
+	mostCommonResult.ResponseHash = winner.hash // ensure the returned consensus carries the winning hash
 
 	// Log successful quorum consensus
 	utils.LavaFormatInfo("✅ [Quorum] CONSENSUS REACHED",
 		utils.LogAttr("GUID", rp.guid),
 		utils.LogAttr("consensusProvider", mostCommonResult.ProviderInfo.ProviderAddress),
-		utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
-		utils.LogAttr("agreementCount", maxCount),
+		utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", winner.hash[:8])),
+		utils.LogAttr("agreementCount", winner.count),
 		utils.LogAttr("requiredQuorumSize", crossValidationSize),
 		utils.LogAttr("totalResults", len(results)),
 		utils.LogAttr("uniqueResponseGroups", len(countMap)),
-		utils.LogAttr("consensusDistinctGroups", consensusDistinctGroups),
+		utils.LogAttr("consensusDistinctGroups", winner.distinctGroups),
 		utils.LogAttr("perGroupQuorum", perGroup),
-		utils.LogAttr("corroboratingGroups", winnerQualGroups),
+		utils.LogAttr("corroboratingGroups", winner.qualifyingGroups),
 		utils.LogAttr("latestBlock", mostCommonResult.Reply.LatestBlock),
 	)
 
