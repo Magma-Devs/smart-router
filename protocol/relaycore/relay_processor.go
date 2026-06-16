@@ -52,7 +52,7 @@ type RelayProcessor struct {
 
 // quorumStat is the per-hash agreement tally for cross-validation: how many providers returned this exact
 // response, and the per-group breakdown of those providers (group label -> count, empty label folded into
-// "default"). len(groupCounts) is the number of distinct groups (the diversity count used by MinGroups);
+// common.DefaultProviderGroup). len(groupCounts) is the number of distinct groups (the diversity count used by MinGroups);
 // the per-group values are what PerGroupQuorum needs (each group's own internal tally for this hash).
 type quorumStat struct {
 	count       int
@@ -210,7 +210,7 @@ func (rp *RelayProcessor) crossValidationQuorumReached() bool {
 }
 
 // quorumGroupOf returns the group label used for diversity counting for a result, folding an empty label
-// into the implicit "default" group.
+// into the implicit common.DefaultProviderGroup.
 func quorumGroupOf(result common.RelayResult) string {
 	if result.ProviderInfo.ProviderGroup == "" {
 		return common.DefaultProviderGroup
