@@ -196,6 +196,41 @@ func (r *CrossValidationPolicyResolver) PerGroupRequirements(chainID, apiInterfa
 	return reqs
 }
 
+// MinGroupsRequirement is the no-caller resolved (min-groups, agreement-threshold) shape of one enabled
+// DEFAULT-mode (non-per-group) policy. Used only by the startup SPOF advisory, not a capacity bound: in
+// default mode the threshold counts agreement ACROSS groups, so a fleet with under-staffed groups is still
+// satisfiable — the requirement is informational, surfacing the threshold each diversity policy weighs.
+type MinGroupsRequirement struct {
+	MinGroups int
+	Threshold int
+}
+
+// MinGroupsRequirements returns the no-caller resolved requirement of every ENABLED default-mode
+// (non-per-group) policy for the given chain/api. Empty when none apply. The per-group variant has its own
+// PerGroupRequirements; the two are disjoint by the PerGroupQuorum flag so a policy is reported by exactly
+// one of them. Used by the startup SPOF warning to compare each diversity policy's threshold against the
+// configured group sizes.
+func (r *CrossValidationPolicyResolver) MinGroupsRequirements(chainID, apiInterface string) []MinGroupsRequirement {
+	if r == nil {
+		return nil
+	}
+	wantChain, wantAPI := strings.ToLower(chainID), strings.ToLower(apiInterface)
+	var reqs []MinGroupsRequirement
+	for key, policy := range r.policies {
+		if !policy.Enabled || policy.PerGroupQuorum {
+			continue
+		}
+		kc, ka, _ := splitPolicyKey(key)
+		if kc != wantChain || ka != wantAPI {
+			continue
+		}
+		minGroups := resolveKnob(0, false, policy.MinGroups, defaultEnabledMinGroups)
+		threshold := resolveKnob(0, false, policy.AgreementThreshold, defaultEnabledAgreementThreshold)
+		reqs = append(reqs, MinGroupsRequirement{MinGroups: minGroups, Threshold: threshold})
+	}
+	return reqs
+}
+
 // ParseCrossValidationConfig reads the optional top-level `cross-validation:` block from viper config.
 // An absent key yields an empty config (fully backwards compatible). Each knob accepts either the object
 // form `{floor: N, cap: M}` or the scalar shorthand `N` (meaning `{floor: N}`).
