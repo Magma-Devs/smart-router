@@ -272,11 +272,111 @@ func TestWebSocketSendRequest_RoundTrip(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, string(resp.Data), `"result":"0x10"`)
+	assert.Contains(t, string(resp.Data), `"id":1`, "caller's id must be restored on the reply")
 
-	// Second call reuses the cached client (no re-dial).
+	// Second call reuses the cached client (no re-dial) and carries its own id.
 	resp2, err := conn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}`), nil)
 	require.NoError(t, err)
 	assert.Contains(t, string(resp2.Data), `"result":"0x10"`)
+	assert.Contains(t, string(resp2.Data), `"id":2`)
+}
+
+// TestWebSocketSendRequest_ConcurrentSameID fires many concurrent requests that
+// all reuse caller id "1". Because rpcclient multiplexes them on one socket and
+// routes replies by id, the connection must issue unique wire ids internally —
+// otherwise replies misroute. The server echoes each request's first param back
+// as the result, so each goroutine can verify it got its own response.
+func TestWebSocketSendRequest_ConcurrentSameID(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		var writeMu sync.Mutex // gorilla/websocket forbids concurrent writers
+		for {
+			_, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID     json.RawMessage `json:"id"`
+				Params []string        `json:"params"`
+			}
+			if err := json.Unmarshal(msg, &req); err != nil {
+				return
+			}
+			go func(id json.RawMessage, params []string) {
+				time.Sleep(20 * time.Millisecond) // keep many requests in-flight at once
+				val := ""
+				if len(params) > 0 {
+					val = params[0]
+				}
+				resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":%q}`, string(id), val)
+				writeMu.Lock()
+				_ = c.WriteMessage(websocket.TextMessage, []byte(resp))
+				writeMu.Unlock()
+			}(req.ID, req.Params)
+		}
+	}))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: wsURL}, 5, "")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	const n = 25
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	got := make([]string, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			want := fmt.Sprintf("v%d", i)
+			// Every request deliberately reuses caller id "1".
+			body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"echo","params":[%q]}`, want)
+			resp, err := conn.SendRequest(ctx, []byte(body), nil)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			got[i] = string(resp.Data)
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		require.NoErrorf(t, errs[i], "request %d failed", i)
+		assert.Containsf(t, got[i], fmt.Sprintf(`"result":"v%d"`, i),
+			"request %d got a misrouted response: %s", i, got[i])
+		assert.Containsf(t, got[i], `"id":1`, "request %d should carry caller id 1", i)
+	}
+}
+
+// TestWebSocketSendRequest_AfterClose verifies Close() is terminal: a closed
+// connection must not silently re-dial on a subsequent SendRequest.
+func TestWebSocketSendRequest_AfterClose(t *testing.T) {
+	wsURL, cleanup := newTestWSJSONRPCServer(t, `"0x10"`)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: wsURL}, 5, "")
+	require.NoError(t, err)
+
+	_, err = conn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), nil)
+	require.NoError(t, err)
+
+	require.NoError(t, conn.Close())
+
+	_, err = conn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}`), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "closed")
 }
 
 // TestWebSocketSendRequest_DialFailure verifies that an unreachable WebSocket
