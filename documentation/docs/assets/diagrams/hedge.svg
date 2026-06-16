@@ -1,0 +1,62 @@
+<svg viewBox="0 0 880 340" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Hedge timing diagram: provider 1 attempt and parallel hedged attempt to provider 2, hedge wins">
+  <defs>
+    <linearGradient id="magmaH" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FF6633"/>
+      <stop offset="100%" stop-color="#FF3900"/>
+    </linearGradient>
+    <linearGradient id="fadeOut" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#212630" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#212630" stop-opacity="0.05"/>
+    </linearGradient>
+    <marker id="arrowOk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#FF3900"/>
+    </marker>
+  </defs>
+  <style>
+    .lbl  { font-family: Inter, system-ui, sans-serif; font-weight: 500; fill: #212630; font-size: 13px; }
+    .lblw { font-family: Inter, system-ui, sans-serif; font-weight: 700; fill: #FFFFFF; font-size: 14px; }
+    .sub  { font-family: Inter, system-ui, sans-serif; font-size: 11px; fill: #6b7280; }
+    .pill { font-family: Inter, system-ui, sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; fill: #6b7280; }
+    .axis { stroke: #212630; stroke-opacity: 0.2; stroke-width: 1; stroke-dasharray: 2 4; }
+  </style>
+
+  <rect width="880" height="340" fill="#FFFFFF"/>
+
+  <text x="440" y="36" text-anchor="middle" class="pill">REQUEST TIMELINE</text>
+
+  <line x1="60" y1="60" x2="820" y2="60" stroke="#212630" stroke-opacity="0.3" stroke-width="1"/>
+  <text x="60"  y="50" class="sub">0ms</text>
+  <text x="320" y="50" class="sub" text-anchor="middle">tick fires</text>
+  <text x="820" y="50" class="sub" text-anchor="end">response</text>
+
+  <line x1="320" y1="60" x2="320" y2="280" class="axis"/>
+
+  <rect x="20" y="80" width="100" height="40" rx="8" stroke="#212630" stroke-opacity="0.18" fill="#FFFFFF" stroke-width="1.5"/>
+  <text x="70" y="105" text-anchor="middle" class="lbl">Client</text>
+
+  <line x1="120" y1="100" x2="158" y2="100" stroke="#212630" stroke-opacity="0.45" stroke-width="2"/>
+  <polygon points="158,96 168,100 158,104" fill="#212630" fill-opacity="0.45"/>
+  <text x="139" y="92" text-anchor="middle" class="sub">request</text>
+
+  <rect x="170" y="80" width="160" height="40" rx="8" fill="url(#magmaH)"/>
+  <text x="250" y="105" text-anchor="middle" class="lblw">Smart Router</text>
+
+  <text x="20" y="180" class="pill">PROVIDER 1</text>
+  <line x1="60" y1="200" x2="820" y2="200" stroke="#212630" stroke-opacity="0.12" stroke-width="1"/>
+  <rect x="170" y="190" width="610" height="20" rx="10" fill="url(#fadeOut)" stroke="#212630" stroke-opacity="0.25" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="190" y="204" class="sub">attempt 1 · slow / late</text>
+
+  <text x="20" y="245" class="pill">PROVIDER 2</text>
+  <line x1="60" y1="265" x2="820" y2="265" stroke="#212630" stroke-opacity="0.12" stroke-width="1"/>
+  <rect x="320" y="255" width="380" height="20" rx="10" fill="#FF3900" opacity="0.92"/>
+  <text x="335" y="269" font-family="Inter, system-ui, sans-serif" font-weight="600" font-size="11" fill="#FFFFFF">hedge attempt · response wins</text>
+  <circle cx="700" cy="265" r="6" fill="#FF3900"/>
+  <path d="M 696 265 L 699 268 L 705 262" stroke="#FFFFFF" stroke-width="1.8" fill="none"/>
+
+  <path d="M 700 255 Q 700 140, 250 130 L 175 130" stroke="#FF3900" stroke-opacity="0.6" stroke-width="2" fill="none" marker-end="url(#arrowOk)"/>
+  <text x="540" y="160" text-anchor="middle" class="sub">first response wins</text>
+
+  <circle cx="320" cy="60" r="5" fill="#FF3900"/>
+
+  <text x="780" y="208" text-anchor="end" class="sub">discarded</text>
+</svg>

@@ -1,0 +1,23 @@
+<svg viewBox="0 0 320 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Configure">
+  <defs>
+    <pattern id="cfg-grid" width="16" height="16" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#FF3900" fill-opacity="0.10"/>
+    </pattern>
+  </defs>
+  <rect width="320" height="200" fill="#FFFFFF"/>
+  <rect width="320" height="200" fill="url(#cfg-grid)"/>
+  <g transform="translate(80 60)">
+    <line x1="0" y1="0" x2="160" y2="0" stroke="#FF3900" stroke-opacity="0.25" stroke-width="3" stroke-linecap="round"/>
+    <line x1="0" y1="0" x2="100" y2="0" stroke="#FF3900" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="100" cy="0" r="9" fill="#FFFFFF" stroke="#CC2E00" stroke-width="2"/>
+    <circle cx="100" cy="0" r="3" fill="#FF3900"/>
+    <line x1="0" y1="40" x2="160" y2="40" stroke="#FF3900" stroke-opacity="0.25" stroke-width="3" stroke-linecap="round"/>
+    <line x1="0" y1="40" x2="45" y2="40" stroke="#FF3900" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="45" cy="40" r="9" fill="#FFFFFF" stroke="#CC2E00" stroke-width="2"/>
+    <circle cx="45" cy="40" r="3" fill="#FF3900"/>
+    <line x1="0" y1="80" x2="160" y2="80" stroke="#FF3900" stroke-opacity="0.25" stroke-width="3" stroke-linecap="round"/>
+    <line x1="0" y1="80" x2="135" y2="80" stroke="#FF3900" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="135" cy="80" r="9" fill="#FFFFFF" stroke="#CC2E00" stroke-width="2"/>
+    <circle cx="135" cy="80" r="3" fill="#FF3900"/>
+  </g>
+</svg>

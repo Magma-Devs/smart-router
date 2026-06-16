@@ -1,0 +1,70 @@
+<svg viewBox="0 0 880 340" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Smart Router topology: your app to providers via Smart Router with shared cache">
+  <defs>
+    <linearGradient id="magmaGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF6633"/>
+      <stop offset="100%" stop-color="#FF3900"/>
+    </linearGradient>
+    <filter id="magmaGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feFlood flood-color="#FF3900" flood-opacity="0.32"/>
+      <feComposite in2="blur" operator="in"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="softShadow"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-opacity="0.10"/></filter>
+    <marker id="arrowOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#FF3900"/>
+    </marker>
+    <marker id="arrowMuted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#212630" fill-opacity="0.45"/>
+    </marker>
+  </defs>
+  <style>
+    .lbl   { font-family: Inter, system-ui, -apple-system, sans-serif; font-weight: 500; fill: #212630; font-size: 14px; }
+    .hero  { font-family: Inter, system-ui, sans-serif; font-weight: 700; fill: #FFFFFF; }
+    .sub   { font-family: Inter, system-ui, sans-serif; font-size: 11px; fill: #6b7280; }
+    .card  { stroke: #212630; stroke-opacity: 0.18; fill: #FFFFFF; }
+  </style>
+
+  <rect width="880" height="340" fill="#FFFFFF"/>
+
+  <path d="M 154 170 L 316 170" stroke="#212630" stroke-opacity="0.35" stroke-width="2" stroke-dasharray="6 4" fill="none" marker-end="url(#arrowMuted)"/>
+  <text x="235" y="158" text-anchor="middle" class="sub">request</text>
+
+  <path d="M 542 150 Q 620 92, 696 92" stroke="#FF3900" stroke-opacity="0.7" stroke-width="2" fill="none" marker-end="url(#arrowOrange)"/>
+  <path d="M 542 170 L 696 170" stroke="#FF3900" stroke-opacity="0.7" stroke-width="2" fill="none" marker-end="url(#arrowOrange)"/>
+  <path d="M 542 190 Q 620 248, 696 248" stroke="#FF3900" stroke-opacity="0.7" stroke-width="2" fill="none" marker-end="url(#arrowOrange)"/>
+
+  <path d="M 432 220 L 432 268" stroke="#212630" stroke-opacity="0.45" stroke-width="2" fill="none"/>
+  <circle cx="432" cy="220" r="3" fill="#212630" opacity="0.55"/>
+  <circle cx="432" cy="268" r="3" fill="#212630" opacity="0.55"/>
+
+  <rect x="44" y="140" width="110" height="60" rx="10" class="card" stroke-width="1.5"/>
+  <text x="99" y="170" text-anchor="middle" class="lbl">Your app</text>
+  <text x="99" y="186" text-anchor="middle" class="sub">RPC client</text>
+
+  <rect x="320" y="120" width="222" height="100" rx="14" fill="url(#magmaGrad)" filter="url(#magmaGlow)"/>
+  <circle cx="346" cy="144" r="2.5" fill="#FFFFFF" opacity="0.4"/>
+  <circle cx="356" cy="144" r="2.5" fill="#FFFFFF" opacity="0.7"/>
+  <circle cx="366" cy="144" r="2.5" fill="#FFFFFF"/>
+  <text x="431" y="172" text-anchor="middle" class="hero" font-size="20">Smart Router</text>
+  <text x="431" y="194" text-anchor="middle" class="hero" font-size="11" opacity="0.85" font-weight="500">routes · caches · fails over</text>
+
+  <rect x="696" y="60" width="148" height="64" rx="10" class="card" stroke-width="1.5"/>
+  <text x="770" y="88" text-anchor="middle" class="lbl">Provider 1</text>
+  <text x="770" y="106" text-anchor="middle" class="sub">paid · archive</text>
+
+  <rect x="696" y="138" width="148" height="64" rx="10" class="card" stroke-width="1.5"/>
+  <text x="770" y="166" text-anchor="middle" class="lbl">Provider 2</text>
+  <text x="770" y="184" text-anchor="middle" class="sub">your own node</text>
+
+  <rect x="696" y="216" width="148" height="64" rx="10" class="card" stroke-width="1.5"/>
+  <text x="770" y="244" text-anchor="middle" class="lbl">Provider 3</text>
+  <text x="770" y="262" text-anchor="middle" class="sub">free / public</text>
+
+  <g filter="url(#softShadow)">
+    <ellipse cx="432" cy="316" rx="92" ry="11" fill="#212630"/>
+    <rect x="340" y="280" width="184" height="36" fill="#212630"/>
+    <ellipse cx="432" cy="280" rx="92" ry="11" fill="#0c121a"/>
+  </g>
+  <text x="432" y="306" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-weight="600" font-size="14" fill="#FFFFFF">Shared cache</text>
+</svg>
