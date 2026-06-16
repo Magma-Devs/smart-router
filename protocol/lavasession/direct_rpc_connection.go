@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -159,12 +160,24 @@ type HTTPDirectRPCConnection struct {
 // Subscriptions/streaming are NOT served here — those use the dedicated
 // UpstreamWSPool layer.
 type WebSocketDirectRPCConnection struct {
-	nodeUrl   common.NodeUrl
-	protocol  DirectRPCProtocol
-	isJsonRPC bool // true → EVM JSON-RPC framing; false → Tendermint RPC framing
+	nodeUrl  common.NodeUrl
+	protocol DirectRPCProtocol
+	// isJsonRPC carries the EVM-vs-Tendermint distinction for parity with the
+	// HTTP/Tendermint call sites and is forwarded to CallContext. NOTE: rpcclient
+	// only consumes this flag on its HTTP path (non-2xx HTTP-status handling);
+	// over a WebSocket frame it is currently ignored. Kept for forward-correctness.
+	isJsonRPC bool
 
 	mu     sync.Mutex
 	client *rpcclient.Client // lazily dialed on first SendRequest, then cached
+	closed bool              // set by Close(); prevents re-dialing a closed connection
+
+	// wireID issues a connection-unique JSON-RPC id per request. rpcclient.Client
+	// multiplexes concurrent requests on one socket and routes replies by id
+	// (handler.respWait is a plain id→op map), so reusing a caller-supplied id
+	// across concurrent calls would misroute responses. We send a unique wire id
+	// and restore the caller's original id on the reply before returning.
+	wireID atomic.Uint64
 }
 
 // GRPCDirectRPCConnection implements DirectRPCConnection for gRPC.
@@ -534,17 +547,24 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 	if err := json.Unmarshal(data, &reqMsg); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON-RPC request for WebSocket %s: %w", w.nodeUrl.Url, err)
 	}
-	id := reqMsg.ID
-	if len(id) == 0 {
-		id = json.RawMessage("1")
-	}
 
-	reply, err := client.CallContext(ctx, id, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
+	// Send a connection-unique wire id so concurrent requests can't collide in
+	// the client's id→response map, then restore the caller's id on the reply.
+	wireID := json.RawMessage(strconv.FormatUint(w.wireID.Add(1), 10))
+
+	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
 	if err != nil {
 		return nil, err
 	}
 
-	respBytes, err := json.Marshal(reply)
+	// Restore the caller's id on a COPY of the reply. The rpcclient dispatch
+	// goroutine may still read the returned reply concurrently, so mutating it
+	// in place is a data race — we only read it (to copy) and write the id on
+	// our own value.
+	out := *reply
+	out.ID = reqMsg.ID // caller's id (omitted/empty for notifications)
+
+	respBytes, err := json.Marshal(&out)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal WebSocket response for %s: %w", w.nodeUrl.Url, err)
 	}
@@ -565,6 +585,9 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 func (w *WebSocketDirectRPCConnection) ensureClient(ctx context.Context) (*rpcclient.Client, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed {
+		return nil, fmt.Errorf("WebSocket connection is closed for endpoint %s", w.nodeUrl.Url)
+	}
 	if w.client != nil {
 		return w.client, nil
 	}
@@ -590,6 +613,7 @@ func (w *WebSocketDirectRPCConnection) GetProtocol() DirectRPCProtocol {
 func (w *WebSocketDirectRPCConnection) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.closed = true
 	if w.client != nil {
 		w.client.Close()
 		w.client = nil
