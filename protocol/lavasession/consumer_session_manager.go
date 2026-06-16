@@ -920,6 +920,16 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 // The user can also request specific providers to not be included in the search for a session.
 // selectedProvider allows forcing selection of a specific provider by address (smartrouter only).
 // GetSessionsOptions carries optional cross-validation selection hints for GetSessions.
+const (
+	// groupBlindMinGroups / groupBlindPerGroupTarget request provider selection with NO cross-validation
+	// group-diversity fan-out: providers are chosen purely by QoS. This is the default for the many
+	// non-cross-validation callers, and the deliberate mode for the emergency blocked-provider fallback —
+	// the downstream diversity / per-group gate still enforces any real requirement, so a non-diverse
+	// fallback fails rather than under-validates.
+	groupBlindMinGroups      = 1
+	groupBlindPerGroupTarget = 1
+)
+
 type GetSessionsOptions struct {
 	// MinGroups > 1 makes selection fan out across at least this many distinct provider groups so a
 	// group-diversity cross-validation policy can be satisfied. Default 0/1 means group-blind selection.
@@ -936,8 +946,8 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 ) {
 	// minGroups > 1 (cross-validation group diversity) makes selection fan out across distinct provider
 	// groups. Variadic so the many existing non-cross-validation callers are unchanged.
-	minGroups := 1
-	perGroupTarget := 1
+	minGroups := groupBlindMinGroups
+	perGroupTarget := groupBlindPerGroupTarget
 	if len(opts) > 0 {
 		if opts[0].MinGroups > 1 {
 			minGroups = opts[0].MinGroups
@@ -1374,10 +1384,9 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 			utils.LavaFormatDebug("Epoch changed between getValidConsumerSessionsWithProvider to tryGetConsumerSessionWithProviderFromBlockedProviderList getting pairing from new epoch list", utils.LogAttr("GUID", ctx))
 		}
 		csm.lock.RUnlock() // unlock because getValidConsumerSessionsWithProvider is locking.
-		// Emergency blocked-provider fallback: group-blind selection (minGroups=1, perGroupTarget=1). The
-		// diversity / per-group gate still enforces the requirement, so a non-diverse fallback fails rather
-		// than under-validates.
-		return csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, ignoredProviders, cuNeededForSession, requestedBlock, addon, extensions, stateful, virtualEpoch, "", "", 1, 1)
+		// Emergency blocked-provider fallback: group-blind selection. The diversity / per-group gate still
+		// enforces the requirement, so a non-diverse fallback fails rather than under-validates.
+		return csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, ignoredProviders, cuNeededForSession, requestedBlock, addon, extensions, stateful, virtualEpoch, "", "", groupBlindMinGroups, groupBlindPerGroupTarget)
 	}
 
 	// if we got here we validated the epoch is still the same epoch as we expected and we need to fetch a session from the blocked provider list.
