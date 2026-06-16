@@ -2,9 +2,7 @@ package rpcsmartrouter
 
 import (
 	"fmt"
-	"math"
 	"reflect"
-	"strconv"
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -246,8 +244,13 @@ func ParseCrossValidationConfig(v *viper.Viper) (CrossValidationConfig, error) {
 	return cfg, nil
 }
 
-// boundScalarShorthandHook lets a Bound be written as a bare number: `agreement-threshold: 2` is
-// decoded as `{floor: 2}`. The object form (a map) is passed through untouched for normal decoding.
+// boundScalarShorthandHook lets a Bound be written as a bare integer: `agreement-threshold: 2` is decoded
+// as `{floor: 2}`. The object form (a map) is passed through untouched for normal decoding.
+//
+// Cross-validation knobs are whole-number counts, so only integer scalars are accepted. Float (`2.0`/`2.9`)
+// and quoted-string (`"2"`) scalars are rejected at parse time with a clear error rather than coerced — the
+// float tolerance was a leftover from the percentage-quorum era (when a fractional `0.66` was meaningful)
+// and is no longer valid now that the threshold is an integer count.
 func boundScalarShorthandHook() mapstructure.DecodeHookFuncType {
 	boundType := reflect.TypeOf(Bound{})
 	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
@@ -256,20 +259,22 @@ func boundScalarShorthandHook() mapstructure.DecodeHookFuncType {
 		}
 		switch from.Kind() {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-			reflect.Float32, reflect.Float64, reflect.String:
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 			n, err := scalarToInt(data)
 			if err != nil {
 				return nil, fmt.Errorf("invalid cross-validation knob value %v: %w", data, err)
 			}
 			return Bound{Floor: &n}, nil
+		case reflect.Float32, reflect.Float64, reflect.String:
+			return nil, fmt.Errorf("invalid cross-validation knob value %v: must be a whole-number integer, not a %s", data, from.Kind())
 		default:
 			return data, nil // object form: let mapstructure decode the map into Bound
 		}
 	}
 }
 
-// scalarToInt converts a YAML scalar (int / float / numeric string) to an int for the Bound shorthand.
+// scalarToInt converts a YAML integer scalar to an int for the Bound shorthand. Cross-validation knobs are
+// whole-number counts; only integer kinds reach here (the hook rejects float/string scalars upstream).
 func scalarToInt(data interface{}) (int, error) {
 	switch x := data.(type) {
 	case int:
@@ -292,24 +297,9 @@ func scalarToInt(data interface{}) (int, error) {
 		return int(x), nil
 	case uint64:
 		return int(x), nil
-	case float32:
-		return floatToInt(float64(x))
-	case float64:
-		return floatToInt(x)
-	case string:
-		return strconv.Atoi(strings.TrimSpace(x))
 	default:
-		return 0, fmt.Errorf("unsupported numeric type %T", data)
+		return 0, fmt.Errorf("must be a whole-number integer, got %T", data)
 	}
-}
-
-// floatToInt converts a YAML float to an int, rejecting fractional values: cross-validation knobs are
-// positive integers, so `agreement-threshold: 2.9` is a config error rather than a silent truncation.
-func floatToInt(f float64) (int, error) {
-	if f != math.Trunc(f) {
-		return 0, fmt.Errorf("value %v must be a whole number", f)
-	}
-	return int(f), nil
 }
 
 // Resolve returns the effective cross-validation params for a request and whether cross-validation
