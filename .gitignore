@@ -71,7 +71,5 @@ Claude.md
 lavap
 debugging/logs/
 
-# Smart Router documentation site (MkDocs) — re-include despite docs/ ignore
-!documentation/docs/
-!documentation/docs/**
-documentation/site/
+# Smart Router documentation site (MkDocs) — source lives in /docs, build output ignored
+/site/
