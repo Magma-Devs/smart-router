@@ -1,0 +1,90 @@
+<svg viewBox="0 0 880 460" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Failsafe pipeline: request flows through integrity, selection, attempt, then branches to success, retry, hedge, or circuit-breaker trip">
+  <defs>
+    <linearGradient id="magmaF" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF6633"/>
+      <stop offset="100%" stop-color="#FF3900"/>
+    </linearGradient>
+    <marker id="arrowF" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#212630" fill-opacity="0.55"/>
+    </marker>
+  </defs>
+  <style>
+    .lbl   { font-family: Inter, system-ui, sans-serif; font-weight: 600; fill: #212630; font-size: 13px; }
+    .lblw  { font-family: Inter, system-ui, sans-serif; font-weight: 700; fill: #FFFFFF; font-size: 14px; }
+    .sub   { font-family: Inter, system-ui, sans-serif; font-size: 11px; fill: #6b7280; }
+    .step  { stroke: #212630; stroke-opacity: 0.18; fill: #FFFFFF; stroke-width: 1.5; }
+    .pill  { font-family: Inter, system-ui, sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.55; fill: #6b7280; }
+  </style>
+
+  <rect width="880" height="460" fill="#FFFFFF"/>
+
+  <rect x="40" y="50" width="150" height="50" rx="25" class="step"/>
+  <circle cx="70" cy="75" r="6" fill="#212630" opacity="0.4"/>
+  <text x="105" y="80" class="lbl" font-size="13">Inbound request</text>
+
+  <line x1="115" y1="100" x2="115" y2="130" stroke="#212630" stroke-opacity="0.45" stroke-width="1.8" marker-end="url(#arrowF)"/>
+
+  <rect x="40" y="135" width="220" height="56" rx="12" class="step"/>
+  <text x="56" y="158" class="pill">STEP 1</text>
+  <text x="56" y="178" class="lbl">Integrity · skip lagging</text>
+
+  <line x1="150" y1="191" x2="150" y2="221" stroke="#212630" stroke-opacity="0.45" stroke-width="1.8" marker-end="url(#arrowF)"/>
+
+  <rect x="40" y="226" width="220" height="56" rx="12" class="step"/>
+  <text x="56" y="249" class="pill">STEP 2</text>
+  <text x="56" y="269" class="lbl">Selection · pick upstream</text>
+
+  <line x1="150" y1="282" x2="150" y2="312" stroke="#212630" stroke-opacity="0.45" stroke-width="1.8" marker-end="url(#arrowF)"/>
+
+  <rect x="40" y="317" width="220" height="64" rx="12" fill="url(#magmaF)"/>
+  <circle cx="232" cy="334" r="3" fill="#FFFFFF" opacity="0.5"/>
+  <circle cx="224" cy="334" r="3" fill="#FFFFFF" opacity="0.7"/>
+  <circle cx="216" cy="334" r="3" fill="#FFFFFF"/>
+  <text x="56" y="338" class="pill" fill="#FFFFFF" opacity="0.7">STEP 3</text>
+  <text x="56" y="362" class="lblw">Attempt · timeout</text>
+
+  <text x="430" y="80" class="pill">RESULT</text>
+
+  <path d="M 260 349 Q 320 349, 360 100" stroke="#212630" stroke-opacity="0.35" stroke-width="1.8" fill="none"/>
+  <path d="M 260 349 Q 320 349, 360 200" stroke="#212630" stroke-opacity="0.35" stroke-width="1.8" fill="none"/>
+  <path d="M 260 349 Q 320 349, 360 300" stroke="#212630" stroke-opacity="0.35" stroke-width="1.8" fill="none"/>
+  <path d="M 260 349 Q 320 349, 360 400" stroke="#212630" stroke-opacity="0.35" stroke-width="1.8" fill="none"/>
+
+  <g>
+    <rect x="360" y="78" width="220" height="50" rx="10" fill="#00b873" fill-opacity="0.10" stroke="#00b873" stroke-width="1.5"/>
+    <circle cx="380" cy="103" r="9" fill="#00b873"/>
+    <path d="M 376 103 L 379 106 L 385 100" stroke="#FFFFFF" stroke-width="1.8" fill="none"/>
+    <text x="400" y="100" class="lbl">Success</text>
+    <text x="400" y="116" class="sub">return to client</text>
+  </g>
+
+  <g>
+    <rect x="360" y="178" width="220" height="50" rx="10" fill="#f59e0b" fill-opacity="0.10" stroke="#f59e0b" stroke-width="1.5"/>
+    <circle cx="380" cy="203" r="9" fill="#f59e0b"/>
+    <path d="M 383.4 200.1 A 4.3 4.3 0 1 0 384.3 204.6" fill="none" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M 380.7 198.2 L 384 199.9 L 382.2 203" fill="none" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="400" y="200" class="lbl">Retryable error</text>
+    <text x="400" y="216" class="sub">→ next provider</text>
+  </g>
+
+  <g>
+    <rect x="360" y="278" width="220" height="50" rx="10" fill="#FF3900" fill-opacity="0.08" stroke="#FF3900" stroke-width="1.5"/>
+    <circle cx="380" cy="303" r="9" fill="#FF3900"/>
+    <text x="400" y="300" class="lbl">No response by tick</text>
+    <text x="400" y="316" class="sub">→ parallel hedge attempt</text>
+  </g>
+
+  <g>
+    <rect x="360" y="378" width="220" height="50" rx="10" fill="#d92d20" fill-opacity="0.10" stroke="#d92d20" stroke-width="1.5"/>
+    <circle cx="380" cy="403" r="9" fill="#d92d20"/>
+    <line x1="376" y1="399" x2="384" y2="407" stroke="#FFFFFF" stroke-width="1.8"/>
+    <line x1="384" y1="399" x2="376" y2="407" stroke="#FFFFFF" stroke-width="1.8"/>
+    <text x="400" y="400" class="lbl">Pool exhausted</text>
+    <text x="400" y="416" class="sub">→ circuit breaker trips</text>
+  </g>
+
+  <path d="M 580 203 Q 720 203, 720 349 L 720 349 Q 720 349, 580 349" stroke="#f59e0b" stroke-opacity="0.5" stroke-width="1.8" stroke-dasharray="4 4" fill="none" marker-end="url(#arrowF)"/>
+  <text x="730" y="276" class="sub">retry / hedge</text>
+  <text x="730" y="292" class="sub">return to attempt</text>
+  <path d="M 580 303 Q 720 303, 720 349" stroke="#FF3900" stroke-opacity="0.5" stroke-width="1.8" stroke-dasharray="4 4" fill="none"/>
+</svg>

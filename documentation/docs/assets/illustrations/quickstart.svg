@@ -1,0 +1,24 @@
+<svg viewBox="0 0 320 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Quickstart">
+  <defs>
+    <pattern id="qs-grid" width="16" height="16" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#FF3900" fill-opacity="0.10"/>
+    </pattern>
+    <linearGradient id="qs-rocket" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FF6633"/>
+      <stop offset="100%" stop-color="#FF3900"/>
+    </linearGradient>
+  </defs>
+  <rect width="320" height="200" fill="#FFFFFF"/>
+  <rect width="320" height="200" fill="url(#qs-grid)"/>
+  <g transform="translate(160 100)">
+    <g transform="rotate(-12)">
+      <path d="M 0 -42 C 14 -42, 22 -28, 22 -10 L 22 22 L -22 22 L -22 -10 C -22 -28, -14 -42, 0 -42 Z" fill="url(#qs-rocket)" stroke="#CC2E00" stroke-width="1.5" stroke-linejoin="round"/>
+      <circle cx="0" cy="-12" r="7" fill="#FFFFFF" stroke="#CC2E00" stroke-width="1.5"/>
+      <circle cx="0" cy="-12" r="3" fill="#FF3900"/>
+      <path d="M -22 8 L -34 26 L -22 22 Z" fill="#FF3900" stroke="#CC2E00" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M 22 8 L 34 26 L 22 22 Z" fill="#FF3900" stroke="#CC2E00" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M -10 22 Q -8 38, 0 44 Q 8 38, 10 22 Z" fill="#FFB300" opacity="0.9"/>
+      <path d="M -5 22 Q -4 32, 0 36 Q 4 32, 5 22 Z" fill="#FFFFFF" opacity="0.7"/>
+    </g>
+  </g>
+</svg>

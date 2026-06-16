@@ -70,3 +70,8 @@ mock-node-server/
 Claude.md
 lavap
 debugging/logs/
+
+# Smart Router documentation site (MkDocs) — re-include despite docs/ ignore
+!documentation/docs/
+!documentation/docs/**
+documentation/site/

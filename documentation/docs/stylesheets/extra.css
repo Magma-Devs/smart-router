@@ -1,0 +1,790 @@
+/* ============================================================================
+   Smart Router docs — design system
+   Brand color: magma orange. Layout/typography per the documentation spec.
+   ============================================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap');
+
+:root {
+  /* Mintlify-extracted warm gray ramp (RGB triplets) */
+  --gray-50:  243 246 244;
+  --gray-100: 238 241 239;
+  --gray-200: 223 225 224;
+  --gray-300: 206 209 207;
+  --gray-400: 159 161 160;
+  --gray-500: 112 115 113;
+  --gray-600: 80 83 81;
+  --gray-700: 63 65 64;
+  --gray-800: 38 40 39;
+  --gray-900: 23 26 24;
+  --gray-950: 10 13 12;
+  --bg-light: 255 255 255;
+  --bg-dark:  10 13 13;
+
+  /* --- Brand --- */
+  --primary:      #FF3900;
+  --primary-dark: #CC2E00;
+
+  /* Standard transition token — apply to all hover-able chrome */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --t: 0.15s var(--ease);
+
+  /* Material accent → magma */
+  --md-accent-fg-color:              var(--primary);
+  --md-accent-fg-color--transparent: rgba(255, 57, 0, 0.08);
+  --md-typeset-a-color:              var(--primary);
+}
+
+/* === Light scheme: three-tier text ramp + surfaces === */
+[data-md-color-scheme="default"] {
+  --text-strong:    rgb(var(--gray-900));   /* headings, bold */
+  --text-body:      rgb(var(--gray-700));   /* paragraphs, lists */
+  --text-muted:     rgb(var(--gray-500));   /* nav, TOC, secondary */
+  --surface:        rgb(var(--bg-light));
+  --surface-subtle: rgba(23, 26, 24, 0.05);
+  --border-subtle:  rgba(23, 26, 24, 0.09);
+
+  --md-default-fg-color:           var(--text-strong);
+  --md-default-fg-color--light:    var(--text-body);
+  --md-default-fg-color--lighter:  var(--text-muted);
+  --md-default-fg-color--lightest: rgb(var(--gray-200));
+  --md-default-bg-color:           var(--surface);
+  --md-default-bg-color--light:    rgb(var(--gray-50));
+  --md-primary-fg-color:           #fff;
+  --md-primary-bg-color:           rgb(var(--gray-900));
+  --md-code-fg-color:              var(--text-strong);
+  --md-code-bg-color:              var(--surface);
+}
+
+/* === Dark scheme === */
+[data-md-color-scheme="slate"] {
+  --text-strong:    rgb(var(--gray-100));
+  --text-body:      rgb(var(--gray-300));
+  --text-muted:     rgb(var(--gray-400));
+  --surface:        rgb(var(--bg-dark));
+  --surface-subtle: rgba(255, 255, 255, 0.06);
+  --border-subtle:  rgba(255, 255, 255, 0.09);
+
+  --md-default-fg-color:           var(--text-strong);
+  --md-default-fg-color--light:    var(--text-body);
+  --md-default-fg-color--lighter:  var(--text-muted);
+  --md-default-fg-color--lightest: rgb(var(--gray-800));
+  --md-default-bg-color:           var(--surface);
+  --md-default-bg-color--light:    rgb(var(--gray-900));
+  --md-default-bg-color--lighter:  rgb(var(--gray-800));
+  --md-default-bg-color--lightest: rgb(var(--gray-700));
+  --md-primary-fg-color:           var(--surface);
+  --md-primary-bg-color:           rgb(var(--gray-100));
+  --md-code-fg-color:              var(--text-strong);
+  --md-code-bg-color:              var(--surface);
+}
+
+/* ============================================================================
+   1–2. Foundations & typographic scale
+   Body 16px/1.5; paragraphs 1.75. Headings medium (500), tight tracking,
+   text-strong. Body copy text-body (lighter than headings).
+   ============================================================================ */
+
+.md-typeset {
+  font-family: 'Inter', -apple-system, system-ui, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-feature-settings: "ss01", "cv11";
+  font-size: 16px;
+  line-height: 1.5;            /* 24px base */
+  color: var(--text-body);     /* body copy is one tier lighter than headings */
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  font-family: 'Inter', -apple-system, system-ui, 'Segoe UI', sans-serif;
+  color: var(--text-strong);
+  scroll-margin-top: 96px;     /* sticky-header offset for anchor jumps */
+}
+
+.md-typeset h1 {
+  font-size: 30px;
+  font-weight: 500;
+  line-height: 36px;
+  letter-spacing: -0.5px;
+  margin: 0 0 16px;
+}
+.md-typeset h2 {
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 32px;
+  letter-spacing: -0.6px;
+  margin: 48px 0 16px;
+}
+.md-typeset h3 {
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: normal;
+  margin: 48px 0 12px;
+}
+.md-typeset h4 {
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: normal;
+  margin: 32px 0 8px;
+}
+.md-typeset h5,
+.md-typeset h6 {
+  font-size: 14px;
+  font-weight: 500;
+  margin: 24px 0 8px;
+}
+.md-typeset h6 { font-style: italic; font-weight: 400; }
+
+.md-typeset > h1:first-child { margin-top: 12px; }
+
+/* Lead paragraph — first <p> after the page title */
+.md-typeset h1 + p {
+  font-size: 20px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  margin: 16px 0 24px;
+}
+
+/* Body paragraphs — looser 1.75 line-height for comfortable reading */
+.md-typeset p {
+  font-size: 16px;
+  line-height: 1.75;          /* 28px */
+  margin: 16px 0;
+}
+
+/* Bold/strong inline — semibold, strongest tier */
+.md-typeset strong,
+.md-typeset b {
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+/* Inline code inside headings reads slightly smaller */
+.md-typeset h2 code { font-size: 0.875em; }
+.md-typeset h3 code { font-size: 0.9em; }
+
+/* ============================================================================
+   4. Links (in-content / prose)
+   Same color as surrounding text, semibold, 1px primary underline accent.
+   Hover thickens the underline 1px→2px; color does NOT change.
+   ============================================================================ */
+
+.md-typeset p a,
+.md-typeset li a,
+.md-typeset td a {
+  color: var(--primary);
+  font-weight: 600;
+  text-decoration: none;
+  border-bottom: 1px solid var(--primary);
+  word-wrap: break-word;
+  transition: border-bottom-width var(--t), color var(--t);
+}
+.md-typeset p a:hover,
+.md-typeset li a:hover,
+.md-typeset td a:hover {
+  color: var(--primary-dark);
+  border-bottom-width: 2px;
+}
+/* Inline code inside a link inherits the orange link color (so it stays legible) */
+.md-typeset p a code,
+.md-typeset li a code,
+.md-typeset td a code {
+  color: var(--primary);
+  background-color: rgba(255, 57, 0, 0.08);
+}
+/* Don't double-style links wrapped in <strong> */
+.md-typeset strong a,
+.md-typeset a strong { color: inherit; font-weight: inherit; }
+
+/* ============================================================================
+   8. Inline code vs. code blocks
+   ============================================================================ */
+
+/* Inline code — mono 14px medium, text-strong on a faint tint, no border */
+.md-typeset code {
+  font-family: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-strong);
+  background-color: var(--surface-subtle);
+  border-radius: 6px;
+  padding: 2px 8px;
+  border: none;
+}
+
+/* Code block — surface card, rounded, subtle outline */
+.md-typeset .highlight > pre,
+.md-typeset pre.highlight,
+.md-typeset > pre {
+  background-color: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  box-shadow: none;
+  padding: 14px 16px;
+}
+.md-typeset .highlight pre > code,
+.md-typeset > pre > code {
+  font-family: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.7;
+  color: var(--text-strong);
+  background: transparent;
+  padding: 0;
+}
+
+/* Copy button — subtle, appears on hover, tints primary */
+.md-clipboard {
+  width: 1.4em;
+  height: 1.4em;
+  top: 0.6em;
+  right: 0.6em;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity var(--t), color var(--t);
+}
+.md-typeset .highlight:hover .md-clipboard,
+.md-clipboard:focus { opacity: 1; }
+.md-clipboard::after { width: 0.95em; height: 0.95em; background-color: currentColor; }
+.md-clipboard:hover { color: var(--primary); }
+
+/* Line numbers — recede */
+.md-typeset .highlighttable .linenos {
+  background: transparent;
+  color: var(--text-muted);
+  border-right: 1px solid var(--border-subtle);
+  padding-right: 0.75em;
+  font-size: 14px;
+}
+
+/* Tabbed code (=== "tab" syntax) */
+.md-typeset .tabbed-set { margin: 1.25em 0; }
+.md-typeset .tabbed-labels { border-bottom: 1px solid var(--border-subtle); }
+.md-typeset .tabbed-labels > label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 0.6em 1em;
+  transition: color var(--t);
+}
+.md-typeset .tabbed-labels > label:hover { color: var(--text-strong); }
+.md-typeset .tabbed-set > input:checked + label {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* ============================================================================
+   9. Lists — body copy, 8px gap, recessive bullet markers
+   ============================================================================ */
+
+.md-typeset ul,
+.md-typeset ol { margin: 16px 0; }
+.md-typeset li {
+  font-size: 16px;
+  line-height: 1.75;          /* 28px */
+  margin-bottom: 8px;
+}
+.md-typeset ul > li::marker { color: rgb(var(--gray-400)); }
+
+/* ============================================================================
+   7. Buttons
+   ============================================================================ */
+
+/* Primary — solid pill; hover drops opacity only */
+.md-typeset .md-button--primary {
+  background-color: var(--primary);
+  border: none;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 9999px;
+  padding: 0.55em 16px;
+  box-shadow: none;
+  transition: opacity var(--t);
+}
+.md-typeset .md-button--primary:hover,
+.md-typeset .md-button--primary:focus {
+  background-color: var(--primary);
+  color: #fff;
+  opacity: 0.8;
+}
+
+/* Secondary / utility — outlined, surface bg */
+.md-typeset .md-button {
+  background-color: var(--surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 12px;
+  padding: 6px 12px;
+  transition: color var(--t), background-color var(--t), border-color var(--t);
+}
+.md-typeset .md-button:not(.md-button--primary):hover {
+  color: var(--text-strong);
+  border-color: var(--border-subtle);
+  background-color: var(--surface-subtle);
+}
+
+/* ============================================================================
+   Tables
+   ============================================================================ */
+
+.md-typeset table:not([class]) {
+  border-radius: 12px;
+  overflow: hidden;
+  font-size: 14px;
+  border: 1px solid var(--border-subtle);
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.md-typeset table:not([class]) th {
+  background-color: var(--surface-subtle);
+  color: var(--text-strong);
+  font-weight: 600;
+}
+.md-typeset table:not([class]) td { color: var(--text-body); }
+
+/* ============================================================================
+   Admonitions
+   ============================================================================ */
+
+.md-typeset .admonition,
+.md-typeset details {
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--surface-subtle);
+  box-shadow: none;
+  font-size: 14px;
+}
+.md-typeset .admonition.tip,
+.md-typeset details.tip {
+  background-color: rgba(255, 57, 0, 0.06);
+  border-color: rgba(255, 57, 0, 0.18);
+}
+.md-typeset .tip > .admonition-title,
+.md-typeset .tip > summary { background-color: transparent; }
+.md-typeset .tip > .admonition-title::before,
+.md-typeset .tip > summary::before { background-color: var(--primary); }
+
+/* ============================================================================
+   3. Layout — three columns, ~980px content, sidebars flank
+   ============================================================================ */
+
+.md-grid { max-width: 100%; padding: 0; margin: 0; }
+.md-main__inner { margin-top: 0; }
+.md-content {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 1.5rem 3rem 4rem;
+}
+.md-content__inner { padding-top: 0.5rem; padding-bottom: 4rem; }
+.md-content__inner::before { height: 0; }
+
+/* ============================================================================
+   6. Header
+   ============================================================================ */
+
+.md-header {
+  box-shadow: none;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-strong);
+  height: 4rem;
+}
+[data-md-color-scheme="default"] .md-header { background-color: #fff; }
+[data-md-color-scheme="slate"]   .md-header { background-color: var(--surface); }
+.md-header__inner {
+  padding: 0 1rem;
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+.md-header__inner > * { align-self: center; }
+.md-header__option,
+.md-header__source,
+.md-header__button { display: flex; align-items: center; margin-top: 0; margin-bottom: 0; }
+/* Search pushed to the right side of the header */
+.md-search { display: flex; align-items: center; margin-left: auto; }
+
+/* Volcanic accent hairline at the very top edge */
+.md-header::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--primary) 50%, transparent);
+  opacity: 0.6;
+}
+
+/* Top-nav pill links (if tabs re-enabled): 14px medium muted, tinted hover */
+.md-tabs { background: transparent; }
+.md-tabs__link {
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.35px;
+  color: var(--text-muted);
+  opacity: 1;
+  border-radius: 9999px;
+  padding: 0 16px;
+  transition: color var(--t), background-color var(--t);
+}
+.md-tabs__link:hover {
+  color: var(--text-strong);
+  background-color: rgba(23, 26, 24, 0.03);
+}
+.md-tabs__link--active { color: var(--text-strong); }
+
+/* Search input — rounded pill */
+.md-search__form {
+  background-color: var(--surface-subtle);
+  border-radius: 9999px;
+  border: 1px solid var(--border-subtle);
+}
+.md-search__input { color: var(--text-strong); border-radius: 9999px; }
+.md-search__input::placeholder { color: var(--text-muted); }
+.md-search__icon { color: var(--text-muted); }
+
+/* ============================================================================
+   Logo
+   ============================================================================ */
+
+.md-header__button.md-logo { margin: 0.4rem 0.6rem 0.4rem 0.4rem; padding: 0; }
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg { height: 1.5rem; width: auto; }
+[data-md-color-scheme="slate"] .md-header__button.md-logo img {
+  content: url('../assets/magma-logo-white.svg');
+}
+.md-header__title { display: none; }
+.md-sidebar--primary .md-nav__title { display: none; }
+@media (max-width: 76.1875em) {
+  .md-sidebar--primary .md-nav__title { display: block; }
+}
+
+/* ============================================================================
+   5. Sidebar (left navigation)
+   Section labels: 12px semibold text-strong, capitalized, non-interactive.
+   Nav links: 14px/400 text-muted, indented; hover & active = primary, no fill.
+   ============================================================================ */
+
+.md-sidebar--primary {
+  width: 16.5rem;
+  padding-left: 0;
+  border-right: 1px solid var(--border-subtle);
+}
+@media screen and (min-width: 76.25em) {
+  .md-sidebar--primary { padding-top: 1rem; }
+}
+.md-sidebar--primary .md-sidebar__scrollwrap {
+  padding-left: 1.25rem;
+  padding-right: 0.25rem;
+  margin-right: 0;
+}
+
+/* Reset list/item box model so the section label sits flush-left */
+.md-sidebar--primary .md-nav,
+.md-sidebar--primary .md-nav .md-nav,
+.md-sidebar--primary .md-nav__list,
+.md-sidebar--primary .md-nav__item {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+/* Nav links (inactive): 14px / 400 / muted, indented 16px left */
+.md-sidebar--primary .md-nav__item .md-nav__link {
+  background: transparent !important;
+  border-radius: 0;
+  padding: 6px 12px 6px 16px;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--text-muted);
+  transition: color var(--t);
+}
+.md-sidebar--primary .md-nav__item .md-nav__link:hover { color: var(--primary); }
+/* Active: primary color, SAME weight/size as inactive — no fill, no border */
+.md-sidebar--primary .md-nav__item .md-nav__link--active {
+  color: var(--primary) !important;
+  font-weight: 400;
+}
+
+/* Section labels: 12px / 600 / text-strong / capitalized + leading icon */
+.md-sidebar--primary .md-nav__item--section > .md-nav__link {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: capitalize;
+  color: var(--text-strong) !important;
+  margin: 24px 0 8px !important;
+  padding: 0 !important;
+  background: transparent !important;
+  cursor: default;
+  display: flex;
+  align-items: center;
+}
+.md-sidebar--primary .md-nav__item--section > .md-nav__link:hover { color: var(--text-strong) !important; }
+.md-sidebar--primary .md-nav > .md-nav__list > .md-nav__item--section:first-child > .md-nav__link { margin-top: 0 !important; }
+
+/* Section icons — 14×14 currentColor mask, inline before the label */
+.md-sidebar--primary .md-nav__item--section > .md-nav__link::before {
+  content: '';
+  display: inline-block;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  background-color: currentColor;
+  -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-size: contain; mask-size: contain;
+}
+/* Get started — rocket */
+.md-sidebar--primary .md-nav > .md-nav__list > .md-nav__item--section:nth-of-type(1) > .md-nav__link::before {
+  -webkit-mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z'/%3E%3Cpath d='m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z'/%3E%3Cpath d='M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0'/%3E%3Cpath d='M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5'/%3E%3C/svg%3E");
+          mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z'/%3E%3Cpath d='m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z'/%3E%3Cpath d='M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0'/%3E%3Cpath d='M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5'/%3E%3C/svg%3E");
+}
+/* Using the API — code */
+.md-sidebar--primary .md-nav > .md-nav__list > .md-nav__item--section:nth-of-type(2) > .md-nav__link::before {
+  -webkit-mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='16 18 22 12 16 6'/%3E%3Cpolyline points='8 6 2 12 8 18'/%3E%3C/svg%3E");
+          mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='16 18 22 12 16 6'/%3E%3Cpolyline points='8 6 2 12 8 18'/%3E%3C/svg%3E");
+}
+/* Configuration — sliders */
+.md-sidebar--primary .md-nav > .md-nav__list > .md-nav__item--section:nth-of-type(3) > .md-nav__link::before {
+  -webkit-mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='4' x2='4' y1='21' y2='14'/%3E%3Cline x1='4' x2='4' y1='10' y2='3'/%3E%3Cline x1='12' x2='12' y1='21' y2='12'/%3E%3Cline x1='12' x2='12' y1='8' y2='3'/%3E%3Cline x1='20' x2='20' y1='21' y2='16'/%3E%3Cline x1='20' x2='20' y1='12' y2='3'/%3E%3Cline x1='2' x2='6' y1='14' y2='14'/%3E%3Cline x1='10' x2='14' y1='8' y2='8'/%3E%3Cline x1='18' x2='22' y1='16' y2='16'/%3E%3C/svg%3E");
+          mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='4' x2='4' y1='21' y2='14'/%3E%3Cline x1='4' x2='4' y1='10' y2='3'/%3E%3Cline x1='12' x2='12' y1='21' y2='12'/%3E%3Cline x1='12' x2='12' y1='8' y2='3'/%3E%3Cline x1='20' x2='20' y1='21' y2='16'/%3E%3Cline x1='20' x2='20' y1='12' y2='3'/%3E%3Cline x1='2' x2='6' y1='14' y2='14'/%3E%3Cline x1='10' x2='14' y1='8' y2='8'/%3E%3Cline x1='18' x2='22' y1='16' y2='16'/%3E%3C/svg%3E");
+}
+/* Deployment — server */
+.md-sidebar--primary .md-nav > .md-nav__list > .md-nav__item--section:nth-of-type(4) > .md-nav__link::before {
+  -webkit-mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect width='20' height='8' x='2' y='2' rx='2'/%3E%3Crect width='20' height='8' x='2' y='14' rx='2'/%3E%3Cline x1='6' x2='6.01' y1='6' y2='6'/%3E%3Cline x1='6' x2='6.01' y1='18' y2='18'/%3E%3C/svg%3E");
+          mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect width='20' height='8' x='2' y='2' rx='2'/%3E%3Crect width='20' height='8' x='2' y='14' rx='2'/%3E%3Cline x1='6' x2='6.01' y1='6' y2='6'/%3E%3Cline x1='6' x2='6.01' y1='18' y2='18'/%3E%3C/svg%3E");
+}
+/* Reference — book */
+.md-sidebar--primary .md-nav > .md-nav__list > .md-nav__item--section:nth-of-type(5) > .md-nav__link::before {
+  -webkit-mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20'/%3E%3C/svg%3E");
+          mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20'/%3E%3C/svg%3E");
+}
+
+/* Nested sub-section labels (e.g. Projects, Failover) — lighter, no icon */
+.md-sidebar--primary .md-nav .md-nav .md-nav__item--section > .md-nav__link {
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: capitalize;
+  color: var(--text-muted) !important;
+  margin: 12px 0 4px !important;
+}
+.md-sidebar--primary .md-nav .md-nav .md-nav__item--section > .md-nav__link::before { display: none; }
+
+/* === Indentation by nesting depth ===
+   Every row at a given depth shares one left edge (whether or not it has
+   children); each nested level is offset relative to its parent. Depth 0
+   section labels stay flush (icon at the edge); depth-1 rows align under the
+   parent's text (icon 14 + gap 8 = 22px); depth 2 steps in a further 16px. */
+.md-nav--primary > .md-nav__list > .md-nav__item
+  > .md-nav > .md-nav__list > .md-nav__item
+  > .md-nav__link {
+  padding-left: 22px !important;
+}
+.md-nav--primary > .md-nav__list > .md-nav__item
+  > .md-nav > .md-nav__list > .md-nav__item
+  > .md-nav > .md-nav__list > .md-nav__item
+  > .md-nav__link {
+  padding-left: 38px !important;
+}
+
+/* === Chevron (expand/collapse) — fixed gap after the title text ===
+   Material pushes the toggle arrow to the far right (margin-left:auto), so the
+   text→chevron gap varies by label length. Pack it right after the text with a
+   fixed gap instead. */
+.md-sidebar--primary .md-nav__item--nested > .md-nav__link {
+  display: flex !important;
+  align-items: center;
+  justify-content: flex-start !important;
+}
+.md-sidebar--primary .md-nav__item--nested > .md-nav__link > .md-nav__icon {
+  margin-left: 6px !important;
+  margin-right: 0 !important;
+  width: 0.85rem;
+  height: 0.85rem;
+  color: var(--text-muted);
+}
+.md-sidebar--primary .md-nav__icon svg { width: 100%; height: 100%; }
+
+/* === Active nested section ===
+   The current section renders via a `div.md-nav__container` wrapping a separate
+   <a> (text) and <label> (chevron). Left as-is it double-indents and floats the
+   chevron right. Treat the container as the single row: it carries the depth
+   indent, the inner link/label add none, and the chevron sits inline. */
+.md-sidebar--primary .md-nav__container {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+.md-sidebar--primary .md-nav__container > .md-nav__link {
+  padding: 0 !important;
+  flex: 0 1 auto;
+}
+.md-sidebar--primary .md-nav__container > .md-nav__link:first-child {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.md-sidebar--primary .md-nav__container .md-nav__icon {
+  margin-left: 6px !important;
+  margin-right: 0 !important;
+  width: 0.85rem;
+  height: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* ============================================================================
+   10. Right "On this page" TOC
+   14px/400 muted; active section darkens to text-strong, no underline/marker.
+   ============================================================================ */
+
+.md-sidebar--secondary {
+  width: 14rem;
+  padding-right: 0;
+  border-left: 1px solid var(--border-subtle);
+}
+.md-sidebar--secondary .md-sidebar__scrollwrap { padding: 1rem 1.5rem 1rem 0.75rem; margin-left: 0; }
+
+.md-sidebar--secondary .md-nav__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+  margin: 0 0 0.7rem;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  box-shadow: none;
+}
+.md-sidebar--secondary .md-nav__title::before {
+  content: '';
+  display: inline-block;
+  flex-shrink: 0;
+  width: 14px; height: 14px;
+  background-color: currentColor;
+  -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-size: contain; mask-size: contain;
+  -webkit-mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='8' x2='21' y1='6' y2='6'/%3E%3Cline x1='8' x2='21' y1='12' y2='12'/%3E%3Cline x1='8' x2='21' y1='18' y2='18'/%3E%3Cline x1='3' x2='3.01' y1='6' y2='6'/%3E%3Cline x1='3' x2='3.01' y1='12' y2='12'/%3E%3Cline x1='3' x2='3.01' y1='18' y2='18'/%3E%3C/svg%3E");
+          mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='8' x2='21' y1='6' y2='6'/%3E%3Cline x1='8' x2='21' y1='12' y2='12'/%3E%3Cline x1='8' x2='21' y1='18' y2='18'/%3E%3Cline x1='3' x2='3.01' y1='6' y2='6'/%3E%3Cline x1='3' x2='3.01' y1='12' y2='12'/%3E%3Cline x1='3' x2='3.01' y1='18' y2='18'/%3E%3C/svg%3E");
+}
+.md-sidebar--secondary .md-nav__list { padding: 0; border-left: none; }
+.md-sidebar--secondary .md-nav__link {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-muted);
+  padding: 6px 0 6px 22px;
+  margin: 0;
+  line-height: 1.4;
+  border-left: none;
+  background: transparent;
+  transition: color var(--t);
+}
+.md-sidebar--secondary .md-nav__link:hover { color: var(--text-strong); }
+/* Active section: darken to text-strong (contrast, not color/box) */
+.md-sidebar--secondary .md-nav__link--active { color: var(--text-strong) !important; font-weight: 400; }
+
+/* ============================================================================
+   Diagrams & illustrations
+   ============================================================================ */
+
+.md-typeset img[src$=".svg"] {
+  display: block;
+  margin: 1.75rem auto;
+  max-width: 100%;
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+}
+
+/* Eyebrow label above page titles */
+.md-typeset .eyebrow {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--primary);
+  margin: 0 0 0.3rem;
+}
+
+/* ============================================================================
+   Landing-page card grid
+   ============================================================================ */
+
+.md-typeset .card-grid.grid.cards,
+.md-typeset .card-grid.grid.cards > ul {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+  margin: 1.75rem 0 2.5rem;
+}
+.md-typeset .card-grid.grid.cards > ul > li {
+  border-radius: 16px;
+  border: 1px solid var(--border-subtle);
+  padding: 0;
+  margin: 0;
+  overflow: hidden;
+  background-color: var(--surface);
+  display: flex;
+  flex-direction: column;
+  transition: transform 220ms var(--ease), box-shadow 220ms var(--ease), border-color 220ms var(--ease);
+}
+.md-typeset .card-grid.grid.cards > ul > li:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 57, 0, 0.35);
+  box-shadow: 0 10px 30px rgba(255, 57, 0, 0.10), 0 2px 6px rgba(0, 0, 0, 0.04);
+}
+.md-typeset .card-grid.grid.cards img.card-illustration {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.md-typeset .card-grid.grid.cards > ul > li > * { padding: 0 1.25rem; }
+.md-typeset .card-grid.grid.cards > ul > li > p:has(img.card-illustration) { padding: 0; margin: 0; }
+.md-typeset .card-grid.grid.cards > ul > li > p:nth-of-type(2) {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-strong);
+  margin: 1.1rem 0 0.4rem;
+}
+.md-typeset .card-grid.grid.cards > ul > li > p:nth-of-type(3) {
+  color: var(--text-body);
+  font-size: 14px;
+  line-height: 1.55;
+  margin-bottom: 1.1rem;
+  flex: 1;
+}
+.md-typeset .card-grid.grid.cards > ul > li > p:last-child { margin-bottom: 1.25rem; }
+.md-typeset .card-grid.grid.cards a {
+  color: var(--primary);
+  border-bottom: none;
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 14px;
+  transition: color var(--t);
+}
+.md-typeset .card-grid.grid.cards a:hover { color: var(--primary-dark); }
+
+@media (max-width: 720px) {
+  .md-typeset .card-grid.grid.cards,
+  .md-typeset .card-grid.grid.cards > ul { grid-template-columns: 1fr; }
+}
+
+/* ============================================================================
+   Footer & scrollbar
+   ============================================================================ */
+
+.md-footer-meta { background-color: var(--surface); border-top: 1px solid var(--border-subtle); }
+.md-footer-meta__inner,
+.md-footer__inner { color: var(--text-muted); }
+::-webkit-scrollbar-thumb:hover { background-color: var(--primary); }

@@ -1,0 +1,96 @@
+site_name: Smart Router
+site_description: Centralised RPC routing gateway with QoS-based selection, caching, and failover policies.
+site_url: https://magma-devs.github.io/smart-router/
+repo_url: https://github.com/Magma-Devs/smart-router
+repo_name: Magma-Devs/smart-router
+edit_uri: edit/main/documentation/docs/
+
+theme:
+  name: material
+
+  # Magma brand — real logos shipped from design
+  logo: assets/magma-logo-black.svg
+  favicon: assets/magma-mark.svg
+  font:
+    text: Inter
+    code: Geist Mono
+
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.expand
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - search.suggest
+    - search.highlight
+    - toc.follow
+
+  icon:
+    repo: fontawesome/brands/github
+
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - toc
+
+# Nav lists only pages that exist. Add entries as content is written.
+nav:
+  - Get started:
+      - Quick start: index.md
+      - Why Smart Router?: why.md
+  - Using the API:
+      - Overview: api/index.md
+      - Endpoint URL: api/url.md
+      - Directives: api/directives.md
+  - Configuration:
+      - Overview: configuration/index.md
+      - Projects:
+          - Selection policies: configuration/projects/selection-policies.md
+      - Failover & retry:
+          - Overview: configuration/failover/index.md
+          - Retry: configuration/failover/retry.md
+          - Hedge: configuration/failover/hedge.md
+          - Timeout: configuration/failover/timeout.md
+          - Consensus: configuration/failover/consensus.md
+          - Integrity: configuration/failover/integrity.md
+          - Circuit breaker: configuration/failover/circuit-breaker.md
+  - Deployment (on-premise):
+      - Overview: deployment/index.md
+      - Docker: deployment/docker.md
+      - Kubernetes: deployment/kubernetes.md
+      - Bare metal: deployment/bare-metal.md
+  - Reference:
+      - Supported chains:
+          - Overview: reference/chains/index.md
+          - Ethereum: reference/chains/ethereum.md
+          - Lava: reference/chains/lava.md

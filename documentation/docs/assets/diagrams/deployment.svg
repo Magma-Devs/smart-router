@@ -1,0 +1,92 @@
+<svg viewBox="0 0 900 470" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Production deployment topology: client load-balances across three stateless Smart Router replicas that share one cache and route to upstream providers">
+  <defs>
+    <linearGradient id="magmaGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF6633"/>
+      <stop offset="100%" stop-color="#FF3900"/>
+    </linearGradient>
+    <filter id="softShadow2"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-opacity="0.10"/></filter>
+    <filter id="magmaGlow2" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feFlood flood-color="#FF3900" flood-opacity="0.22"/>
+      <feComposite in2="blur" operator="in"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <style>
+    .lbl  { font-family: Inter, system-ui, sans-serif; font-weight: 500; fill: #212630; font-size: 14px; }
+    .lblw { font-family: Inter, system-ui, sans-serif; font-weight: 600; fill: #FFFFFF; }
+    .sub  { font-family: Inter, system-ui, sans-serif; font-size: 11px; fill: #6b7280; }
+    .cap  { font-family: Inter, system-ui, sans-serif; font-size: 11px; font-weight: 500; fill: #6b7280; }
+    .legend { font-family: Inter, system-ui, sans-serif; font-size: 11px; fill: #6b7280; }
+    .card { stroke: #212630; stroke-opacity: 0.18; fill: #FFFFFF; }
+  </style>
+
+  <rect width="900" height="470" fill="#FFFFFF"/>
+
+  <!-- caption -->
+  <text x="450" y="30" text-anchor="middle" class="cap">Stateless replicas · scale horizontally · share one cache</text>
+
+  <!-- Client -->
+  <rect x="380" y="50" width="140" height="56" rx="10" class="card" stroke-width="1.5"/>
+  <text x="450" y="80" text-anchor="middle" class="lbl">Client app</text>
+  <text x="450" y="97" text-anchor="middle" class="sub">load balancer</text>
+
+  <!-- client -> routers -->
+  <path d="M 450 106 L 200 178" stroke="#212630" stroke-opacity="0.28" stroke-width="1.5" fill="none"/>
+  <path d="M 450 106 L 450 178" stroke="#212630" stroke-opacity="0.28" stroke-width="1.5" fill="none"/>
+  <path d="M 450 106 L 700 178" stroke="#212630" stroke-opacity="0.28" stroke-width="1.5" fill="none"/>
+
+  <!-- routers -->
+  <g>
+    <rect x="120" y="180" width="160" height="72" rx="12" fill="url(#magmaGrad2)" filter="url(#magmaGlow2)"/>
+    <text x="200" y="214" text-anchor="middle" class="lblw" font-size="14">Router #1</text>
+    <text x="200" y="232" text-anchor="middle" class="lblw" font-size="11" opacity="0.85" font-weight="500">us-east</text>
+  </g>
+  <g>
+    <rect x="370" y="180" width="160" height="72" rx="12" fill="url(#magmaGrad2)" filter="url(#magmaGlow2)"/>
+    <text x="450" y="214" text-anchor="middle" class="lblw" font-size="14">Router #2</text>
+    <text x="450" y="232" text-anchor="middle" class="lblw" font-size="11" opacity="0.85" font-weight="500">us-east</text>
+  </g>
+  <g>
+    <rect x="620" y="180" width="160" height="72" rx="12" fill="url(#magmaGrad2)" filter="url(#magmaGlow2)"/>
+    <text x="700" y="214" text-anchor="middle" class="lblw" font-size="14">Router #3</text>
+    <text x="700" y="232" text-anchor="middle" class="lblw" font-size="11" opacity="0.85" font-weight="500">eu-west</text>
+  </g>
+
+  <!-- routers -> shared cache (dashed, gray) -->
+  <path d="M 200 252 C 240 286, 360 290, 392 294" stroke="#212630" stroke-opacity="0.38" stroke-width="1.5" stroke-dasharray="4 3" fill="none"/>
+  <path d="M 700 252 C 660 286, 540 290, 508 294" stroke="#212630" stroke-opacity="0.38" stroke-width="1.5" stroke-dasharray="4 3" fill="none"/>
+  <path d="M 450 252 L 450 290" stroke="#212630" stroke-opacity="0.38" stroke-width="1.5" stroke-dasharray="4 3" fill="none"/>
+
+  <!-- routers -> upstreams (solid, orange). R2 bows left around the cache. -->
+  <path d="M 200 252 C 185 300, 172 330, 167 374" stroke="#FF3900" stroke-opacity="0.6" stroke-width="2" fill="none"/>
+  <path d="M 700 252 C 715 300, 728 330, 733 374" stroke="#FF3900" stroke-opacity="0.6" stroke-width="2" fill="none"/>
+  <path d="M 450 252 C 300 300, 300 345, 450 374" stroke="#FF3900" stroke-opacity="0.6" stroke-width="2" fill="none"/>
+
+  <!-- shared cache cylinder -->
+  <g filter="url(#softShadow2)">
+    <ellipse cx="450" cy="322" rx="78" ry="10" fill="#212630"/>
+    <rect x="372" y="290" width="156" height="32" fill="#212630"/>
+    <ellipse cx="450" cy="290" rx="78" ry="10" fill="#0c121a"/>
+  </g>
+  <text x="450" y="316" text-anchor="middle" class="lblw" font-size="13">Shared cache</text>
+
+  <!-- upstreams -->
+  <rect x="102" y="374" width="130" height="62" rx="10" class="card" stroke-width="1.5"/>
+  <text x="167" y="402" text-anchor="middle" class="lbl">Upstream A</text>
+  <text x="167" y="420" text-anchor="middle" class="sub">paid · archive</text>
+
+  <rect x="385" y="374" width="130" height="62" rx="10" class="card" stroke-width="1.5"/>
+  <text x="450" y="402" text-anchor="middle" class="lbl">Upstream B</text>
+  <text x="450" y="420" text-anchor="middle" class="sub">your node</text>
+
+  <rect x="668" y="374" width="130" height="62" rx="10" class="card" stroke-width="1.5"/>
+  <text x="733" y="402" text-anchor="middle" class="lbl">Upstream C</text>
+  <text x="733" y="420" text-anchor="middle" class="sub">free / public</text>
+
+  <!-- legend -->
+  <line x1="40" y1="450" x2="64" y2="450" stroke="#FF3900" stroke-opacity="0.6" stroke-width="2"/>
+  <text x="70" y="454" class="legend">upstream traffic</text>
+  <line x1="190" y1="450" x2="214" y2="450" stroke="#212630" stroke-opacity="0.38" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="220" y="454" class="legend">shared cache</text>
+</svg>
