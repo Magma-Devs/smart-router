@@ -71,5 +71,5 @@ Claude.md
 lavap
 debugging/logs/
 
-# Smart Router documentation site (MkDocs) — source lives in /docs, build output ignored
-/site/
+# Smart Router documentation site (MkDocs) — source under docs/documentation-website/, build output ignored
+docs/documentation-website/site/

@@ -3,7 +3,7 @@ site_description: Centralised RPC routing gateway with QoS-based selection, cach
 site_url: https://magma-devs.github.io/smart-router/
 repo_url: https://github.com/Magma-Devs/smart-router
 repo_name: Magma-Devs/smart-router
-edit_uri: edit/main/docs/
+edit_uri: edit/main/docs/documentation-website/docs/
 
 theme:
   name: material
