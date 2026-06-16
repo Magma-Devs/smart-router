@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
@@ -1157,7 +1158,7 @@ func (m *SmartRouterMetricsManager) SetCrossValidationMismatchMetric(chainId, ap
 		return
 	}
 	if group == "" {
-		group = "default"
+		group = common.DefaultProviderGroup
 	}
 	m.crossValidationMismatchTotalMetric.WithLabelValues(chainId, apiInterface, method, group, finality).Inc()
 }

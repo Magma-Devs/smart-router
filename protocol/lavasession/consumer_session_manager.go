@@ -106,7 +106,7 @@ func (csm *ConsumerSessionManager) GetNumberOfValidProviders() int {
 func (csm *ConsumerSessionManager) countDistinctGroups(addresses []string) int {
 	groups := make(map[string]struct{}, len(addresses))
 	for _, addr := range addresses {
-		label := "default"
+		label := common.DefaultProviderGroup
 		if cswp, ok := csm.pairing[addr]; ok && cswp.GroupLabel != "" {
 			label = cswp.GroupLabel
 		}
@@ -120,7 +120,7 @@ func (csm *ConsumerSessionManager) countDistinctGroups(addresses []string) int {
 func (csm *ConsumerSessionManager) countByGroup(addresses []string) map[string]int {
 	counts := make(map[string]int, len(addresses))
 	for _, addr := range addresses {
-		label := "default"
+		label := common.DefaultProviderGroup
 		if cswp, ok := csm.pairing[addr]; ok && cswp.GroupLabel != "" {
 			label = cswp.GroupLabel
 		}
@@ -147,7 +147,7 @@ func (csm *ConsumerSessionManager) ProviderGroupAssignments() map[string][]strin
 	defer csm.lock.RUnlock()
 	assignments := make(map[string][]string)
 	for _, addr := range csm.validAddresses {
-		label := "default"
+		label := common.DefaultProviderGroup
 		if cswp, ok := csm.pairing[addr]; ok && cswp.GroupLabel != "" {
 			label = cswp.GroupLabel
 		}
@@ -1653,7 +1653,7 @@ func (csm *ConsumerSessionManager) orderForGroupDiversity(ranked []string, wante
 		if cswp, ok := csm.pairing[addr]; ok && cswp.GroupLabel != "" {
 			return cswp.GroupLabel
 		}
-		return "default"
+		return common.DefaultProviderGroup
 	}
 
 	// Count how many providers each group has available in the ranked pool, so Phase 1 can prefer groups
