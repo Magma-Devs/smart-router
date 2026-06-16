@@ -325,7 +325,7 @@ type ConsumerSessionsWithProvider struct {
 	StaticProvider          bool
 	// GroupLabel is the provider's configured cross-validation group (from RPCStaticProviderEndpoint.GroupLabel).
 	// It rides on the provider record so it can be read off a session's Parent without an address-keyed lookup.
-	// Empty string means the implicit "default" group.
+	// Empty string means the implicit common.DefaultProviderGroup.
 	GroupLabel string
 }
 
