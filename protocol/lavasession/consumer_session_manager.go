@@ -102,7 +102,7 @@ func (csm *ConsumerSessionManager) GetNumberOfValidProviders() int {
 }
 
 // countDistinctGroups counts distinct cross-validation group labels across the given provider addresses,
-// folding an empty GroupLabel into the implicit "default" group. Assumes csm.lock is held.
+// folding an empty GroupLabel into the implicit common.DefaultProviderGroup. Assumes csm.lock is held.
 func (csm *ConsumerSessionManager) countDistinctGroups(addresses []string) int {
 	groups := make(map[string]struct{}, len(addresses))
 	for _, addr := range addresses {
@@ -116,7 +116,7 @@ func (csm *ConsumerSessionManager) countDistinctGroups(addresses []string) int {
 }
 
 // countByGroup returns the per-group provider count for the given addresses (empty label folded into
-// "default"). Assumes csm.lock is held.
+// common.DefaultProviderGroup). Assumes csm.lock is held.
 func (csm *ConsumerSessionManager) countByGroup(addresses []string) map[string]int {
 	counts := make(map[string]int, len(addresses))
 	for _, addr := range addresses {
@@ -140,7 +140,7 @@ func (csm *ConsumerSessionManager) NumberOfValidProviderGroups() int {
 
 // ProviderGroupAssignments returns a snapshot of how the currently valid providers map onto
 // cross-validation group labels (label -> sorted provider addresses), folding an empty label into
-// "default". It is meant for one-shot startup/diagnostic logging so operators can see the diversity
+// common.DefaultProviderGroup. It is meant for one-shot startup/diagnostic logging so operators can see the diversity
 // their config actually yields; it is not on any hot path.
 func (csm *ConsumerSessionManager) ProviderGroupAssignments() map[string][]string {
 	csm.lock.RLock()
@@ -171,7 +171,7 @@ func (csm *ConsumerSessionManager) ProviderAndGroupCountsForRequest(addon string
 }
 
 // GroupCountsForRequest returns the per-group provider count among the candidate set that supports the
-// request's addon + extensions (group label -> count, empty label folded into "default"). Used by the
+// request's addon + extensions (group label -> count, empty label folded into common.DefaultProviderGroup). Used by the
 // per-group-quorum capacity check, which needs to know not just how many distinct groups exist but how many
 // of them have enough providers to each reach the agreement threshold.
 func (csm *ConsumerSessionManager) GroupCountsForRequest(addon string, extensions []string, ctx context.Context) map[string]int {
@@ -1647,7 +1647,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 
 // orderForGroupDiversity reorders a QoS-ranked address list so the front covers up to minGroups distinct
 // cross-validation groups (highest-QoS provider per new group first), then fills the remaining slots by
-// QoS order, returning at most `wanted` addresses. An empty GroupLabel folds into the "default" group.
+// QoS order, returning at most `wanted` addresses. An empty GroupLabel folds into common.DefaultProviderGroup.
 //
 // perGroupTarget controls how many providers Phase 1 front-loads from each covered group: 1 (the default)
 // reproduces the original "one highest-QoS provider per group" behavior; a larger value (the per-group

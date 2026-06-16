@@ -453,7 +453,7 @@ func crossValidationFinality(requestedBlock, latestBlock, finalizationDistance i
 // validateCrossValidationCapacity returns an error when CrossValidation mode is active but the request's
 // concrete candidate set (providers that support the request's addon + extensions) cannot satisfy the
 // requested shape: either MaxParticipants exceeds the number of candidate endpoints, or MinGroups exceeds
-// the number of distinct candidate provider groups (empty GroupLabel counts as the "default" group).
+// the number of distinct candidate provider groups (empty GroupLabel counts as common.DefaultProviderGroup).
 // Counting against the addon/extension-filtered candidate set — not all valid providers — avoids passing a
 // request that is actually satisfiable only by a narrower, under-grouped set. The MinGroups check is the
 // Phase 1.1 capacity guard; full group-aware quorum selection lands in Phase 1.2.
