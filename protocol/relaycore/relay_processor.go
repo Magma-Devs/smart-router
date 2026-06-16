@@ -168,6 +168,15 @@ func qualifyingGroupCount(groupCounts map[string]int, threshold int) int {
 // hashQuorumReached reports whether a single hash's tally satisfies the active quorum rule. In the default
 // (MinGroups) mode: total count >= threshold AND distinct groups >= minGroups. In per-group-quorum mode:
 // at least minGroups groups each independently reached the threshold for this hash.
+//
+// Core semantic worth stating outright: once minGroups > 1, a hash whose matching providers all fall in a
+// single group can NEVER win, no matter how many providers returned it — len(groupCounts) is 1 and fails the
+// diversity gate. Diversity is weighed over raw count: a smaller multi-group agreement beats a larger
+// single-group one (e.g. with threshold 2 / minGroups 2, two single-node groups B+C outvote a 3-node group
+// A, and A is then the cross_validation_mismatch outlier). This is the anti-Sybil intent — one group is
+// treated as one operator/failure domain, so cross-group agreement is trusted over node count — but it
+// assumes groups are independent; the startup SPOF warning in validateCrossValidationStartup flags fleets
+// where that diversity rests on groups too small to corroborate a value on their own.
 func (rp *RelayProcessor) hashQuorumReached(count int, groupCounts map[string]int, threshold, minGroups int) bool {
 	if rp.perGroupQuorum() {
 		return qualifyingGroupCount(groupCounts, threshold) >= minGroups
@@ -704,6 +713,8 @@ func selectQuorumWinner(guid uint64, countMap map[[32]byte]*resultCount, results
 				}
 			}
 		} else if count.count >= crossValidationSize && len(count.groupCounts) >= minGroups {
+			// Default mode: count alone is never enough — len(groupCounts) >= minGroups means a single-group
+			// hash can't win regardless of count (see hashQuorumReached for the full rule and rationale).
 			if !w.found || count.count > w.count {
 				w.found = true
 				w.count = count.count

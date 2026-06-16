@@ -353,7 +353,46 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 	t.Run("per-group: empty group sizes skips the capacity check (no false negative)", func(t *testing.T) {
 		require.NoError(t, validateCrossValidationStartup(mkResolver(t, perGroupPolicy), realParser, "ETH1", "jsonrpc", 2, nil))
 	})
+
+	// SPOF advisory (default min-groups mode): under-staffed groups only WARN — the config is still
+	// satisfiable, so startup must not fail. groupPolicy is MinGroups 3 / threshold 2, non-per-group.
+	t.Run("default min-groups: groups below threshold -> ok (SPOF warning only, not an error)", func(t *testing.T) {
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, groupPolicy), realParser, "ETH1", "jsonrpc", 3, map[string]int{"A": 3, "B": 1, "C": 1}),
+			"single-node groups B/C are satisfiable in default mode; they only trigger the SPOF warning")
+	})
+	t.Run("default min-groups: all groups at/above threshold -> ok (no warning condition)", func(t *testing.T) {
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, groupPolicy), realParser, "ETH1", "jsonrpc", 3, map[string]int{"A": 3, "B": 2, "C": 2}))
+	})
 }
+
+// TestGroupsBelowThreshold pins the pure helper behind the startup SPOF advisory: it returns the
+// sorted labels of groups smaller than the agreement threshold, and nothing when all groups are big enough.
+func TestGroupsBelowThreshold(t *testing.T) {
+	require.Equal(t, []string{"B", "C"}, groupsBelowThreshold(map[string]int{"A": 3, "B": 1, "C": 1}, 2),
+		"groups B and C are below threshold 2 and must be returned sorted")
+	require.Empty(t, groupsBelowThreshold(map[string]int{"A": 3, "B": 2}, 2),
+		"a group exactly at the threshold is not below it")
+	require.Empty(t, groupsBelowThreshold(nil, 2),
+		"no group sizes -> nothing below threshold")
+}
+
+// TestMinGroupsRequirements_DisjointFromPerGroup pins the comment claim that a policy is reported by
+// exactly one of MinGroupsRequirements / PerGroupRequirements, keyed on the PerGroupQuorum flag.
+func TestMinGroupsRequirements_DisjointFromPerGroup(t *testing.T) {
+	defaultPolicy := CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(3)}, MinGroups: Bound{Floor: intPtr(2)}}
+	perGroupPolicy := CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}, MinGroups: Bound{Floor: intPtr(2)}}
+
+	dr := newResolver(t, "eth_getBalance", defaultPolicy)
+	require.Len(t, dr.MinGroupsRequirements("ETH1", "jsonrpc"), 1, "a default-mode policy is reported by MinGroupsRequirements")
+	require.Empty(t, dr.PerGroupRequirements("ETH1", "jsonrpc"), "...and NOT by PerGroupRequirements")
+
+	pr := newResolver(t, "eth_getBalance", perGroupPolicy)
+	require.Empty(t, pr.MinGroupsRequirements("ETH1", "jsonrpc"), "a per-group policy is NOT reported by MinGroupsRequirements")
+	require.Len(t, pr.PerGroupRequirements("ETH1", "jsonrpc"), 1, "...but is reported by PerGroupRequirements")
+}
+
+// intPtr returns a pointer to v, for building Bound floors in tests.
+func intPtr(v int) *int { return &v }
 
 // TestCrossValidationPolicyResolver_ResolvePerGroup covers that the per-group-quorum bool is resolved onto
 // the effective params, and is only activated when MinGroups > 1 survives clamping.

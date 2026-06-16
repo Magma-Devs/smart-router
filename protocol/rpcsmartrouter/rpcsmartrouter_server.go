@@ -384,7 +384,49 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 			}
 		}
 	}
+	// SPOF advisory for DEFAULT min-groups mode (per-group mode is hard-failed on the stronger shape above).
+	// When a diversity policy (MinGroups > 1) is active but some groups are smaller than the agreement
+	// threshold, a diverse quorum can be carried by groups too small to corroborate a value on their own — so
+	// the diversity guarantee rests on single points of failure (two such groups colluding, or both wrong at a
+	// block boundary, outvote a larger honest group). This is still a SATISFIABLE config (default mode counts
+	// agreement across groups, not within them), so it is a WARNING, not a startup error. Skipped when
+	// groupSizes is empty (provider data unavailable) to avoid a false warning.
+	if len(groupSizes) > 0 {
+		for _, req := range resolver.MinGroupsRequirements(chainID, apiInterface) {
+			if req.MinGroups <= 1 {
+				continue // no diversity requirement, so nothing rests on under-staffed groups
+			}
+			if below := groupsBelowThreshold(groupSizes, req.Threshold); len(below) > 0 {
+				utils.LavaFormatWarning("cross-validation group-diversity may rest on single points of failure: some provider groups are smaller than the agreement threshold and cannot corroborate a response on their own, yet can still carry the required group diversity", nil,
+					utils.LogAttr("groupsBelowThreshold", below),
+					utils.LogAttr("agreementThreshold", req.Threshold),
+					utils.LogAttr("minGroups", req.MinGroups),
+					utils.LogAttr("groupSizes", groupSizes),
+					utils.LogAttr("chainID", chainID),
+					utils.LogAttr("apiInterface", apiInterface))
+			}
+		}
+	}
 	return nil
+}
+
+// groupsBelowThreshold returns, sorted for stable logging, the labels of provider groups whose size is below
+// the agreement threshold. It is a pure function so the startup SPOF advisory can be unit-tested directly.
+//
+// Such a group can still contribute to the distinct-group count that default-mode min-groups quorum requires
+// (default mode counts agreement ACROSS groups, so a single-node group is a valid corroborator), yet it
+// cannot reach the agreement threshold on its own — so a diverse quorum can end up carried by groups too
+// small to corroborate a value internally. This is the SPOF condition the startup warning reports; it is
+// advisory only (the config is still satisfiable), never a startup error.
+func groupsBelowThreshold(groupSizes map[string]int, threshold int) []string {
+	var below []string
+	for label, size := range groupSizes {
+		if size < threshold {
+			below = append(below, label)
+		}
+	}
+	sort.Strings(below)
+	return below
 }
 
 // crossValidationSuccessOutliers returns the successful responses whose content diverged from the reached
