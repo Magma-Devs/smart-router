@@ -11,6 +11,10 @@ permissions:
   contents: read
   pull-requests: read
 
+concurrency:
+  group: pr-gate-dev-sim-prtests
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build PR artifact
@@ -104,4 +108,110 @@ jobs:
             echo "- Short SHA: \`${SHORT_SHA}\`"
             echo "- Version: \`${VERSION}\`"
             echo "- Artifact name: \`${ARTIFACT_NAME}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preflight dev-sim-prtests
+        env:
+          SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
+          SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          ARTIFACT_NAME: ${{ steps.pr.outputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          preflight_result="failed"
+
+          write_summary() {
+            {
+              echo "### dev-sim-prtests preflight"
+              echo ""
+              echo "- Target environment: \`dev-sim-prtests\`"
+              echo "- Artifact name: \`${ARTIFACT_NAME}\`"
+              echo "- PR number: \`${PR_NUMBER}\`"
+              echo "- PR head SHA: \`${HEAD_SHA}\`"
+              echo "- Preflight result: \`${preflight_result}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          if [ -z "${SSH_HOST:-}" ]; then
+            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_HOST"
+            exit 1
+          fi
+          if [ -z "${SSH_KEY:-}" ]; then
+            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_KEY"
+            exit 1
+          fi
+
+          key_file="$(mktemp)"
+          ssh_stdout="$(mktemp)"
+          ssh_stderr="$(mktemp)"
+          trap 'rm -f "$key_file" "$ssh_stdout" "$ssh_stderr"; write_summary' EXIT
+          printf '%s' "$SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          if ! ssh \
+            -i "$key_file" \
+            -o StrictHostKeyChecking=accept-new \
+            -o BatchMode=yes \
+            -o RemoteCommand=none \
+            -o RequestTTY=no \
+            "$SSH_HOST" \
+            'set -euo pipefail
+             hostname
+             test -x /root/smart-router-binary
+             kubectl get ns lava-infra
+             kubectl get deploy -n lava-infra
+             kubectl get pods -n lava-infra' >"$ssh_stdout" 2>"$ssh_stderr"; then
+            echo "::error::dev-sim-prtests preflight failed while connecting or running read-only checks"
+            exit 1
+          fi
+
+          preflight_result="passed"
+          echo "dev-sim-prtests preflight passed"
+
+      - name: Plan dev-sim-prtests deployment
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          ARTIFACT_NAME: ${{ steps.pr.outputs.artifact_name }}
+          TARGET_ENVIRONMENT: dev-sim-prtests
+          DRY_RUN: "true"
+          CONCURRENCY_GROUP: pr-gate-dev-sim-prtests
+        run: |
+          set -euo pipefail
+          echo "PR number: ${PR_NUMBER}"
+          echo "PR head SHA: ${HEAD_SHA}"
+          echo "artifact name: ${ARTIFACT_NAME}"
+          echo "target environment: ${TARGET_ENVIRONMENT}"
+          echo "dry-run: ${DRY_RUN}"
+          echo "concurrency group: ${CONCURRENCY_GROUP}"
+          echo "Deployment performed: false"
+          echo "planned actions:"
+          echo "1. wait for exclusive dev-sim-prtests workflow slot"
+          echo "2. download PR artifact"
+          echo "3. copy artifact to dev-sim-prtests"
+          echo "4. reset test environment"
+          echo "5. restart Smart Router with PR artifact"
+          echo "6. wait for Smart Router readiness"
+
+          {
+            echo "### dev-sim-prtests deployment plan"
+            echo ""
+            echo "- PR number: \`${PR_NUMBER}\`"
+            echo "- PR head SHA: \`${HEAD_SHA}\`"
+            echo "- Artifact name: \`${ARTIFACT_NAME}\`"
+            echo "- Target environment: \`${TARGET_ENVIRONMENT}\`"
+            echo "- Dry-run: \`${DRY_RUN}\`"
+            echo "- Concurrency group: \`${CONCURRENCY_GROUP}\`"
+            echo "- Deployment performed: \`false\`"
+            echo ""
+            echo "Planned actions:"
+            echo "1. wait for exclusive dev-sim-prtests workflow slot"
+            echo "2. download PR artifact"
+            echo "3. copy artifact to dev-sim-prtests"
+            echo "4. reset test environment"
+            echo "5. restart Smart Router with PR artifact"
+            echo "6. wait for Smart Router readiness"
           } >> "$GITHUB_STEP_SUMMARY"
