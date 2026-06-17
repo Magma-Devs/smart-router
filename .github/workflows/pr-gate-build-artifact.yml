@@ -1,0 +1,107 @@
+name: PR Gate - Build Artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  build:
+    name: Build PR artifact
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+      GOOS: linux
+      GOARCH: amd64
+      GOAMD64: v3
+    steps:
+      - name: Fetch PR metadata
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+          head_sha=$(jq -r '.head.sha' <<< "$pr_json")
+          head_repo=$(jq -r '.head.repo.full_name' <<< "$pr_json")
+          if [ -z "$head_sha" ] || [ "$head_sha" = "null" ]; then
+            echo "::error::Could not resolve head SHA for PR #${PR_NUMBER}"
+            exit 1
+          fi
+          if [ -z "$head_repo" ] || [ "$head_repo" = "null" ]; then
+            echo "::error::Could not resolve head repository for PR #${PR_NUMBER}"
+            exit 1
+          fi
+          if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::PR head repo must be ${GITHUB_REPOSITORY}, got ${head_repo}"
+            exit 1
+          fi
+          short_sha="${head_sha:0:7}"
+          artifact_name="smartrouter-pr-${PR_NUMBER}-${short_sha}-linux-amd64"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "head_repo=$head_repo" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "Resolved PR #${PR_NUMBER} head SHA: ${head_sha}"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.head_repo }}
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Resolve version from git
+        id: ver
+        run: |
+          set -euo pipefail
+          v=$(git describe --tags --always --dirty)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $v"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build smartrouter
+        run: |
+          mkdir -p out
+          GOWORK=off go build \
+            -mod=readonly \
+            -trimpath \
+            -ldflags "-X github.com/magma-Devs/smart-router/version.Version=${{ steps.ver.outputs.version }} -X github.com/magma-Devs/smart-router/version.Commit=${{ steps.pr.outputs.head_sha }} -w -s" \
+            -o out/smartrouter ./cmd/smartrouter
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.pr.outputs.artifact_name }}
+          path: out/smartrouter
+
+      - name: Write summary
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          SHORT_SHA: ${{ steps.pr.outputs.short_sha }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          ARTIFACT_NAME: ${{ steps.pr.outputs.artifact_name }}
+        run: |
+          {
+            echo "### PR Gate artifact build"
+            echo ""
+            echo "- PR number: \`${PR_NUMBER}\`"
+            echo "- PR head SHA: \`${HEAD_SHA}\`"
+            echo "- Short SHA: \`${SHORT_SHA}\`"
+            echo "- Version: \`${VERSION}\`"
+            echo "- Artifact name: \`${ARTIFACT_NAME}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
