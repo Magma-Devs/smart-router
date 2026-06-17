@@ -53,7 +53,7 @@ jobs:
           # GITHUB_TOKEN gets rejected by `main`'s PR-required branch
           # protection. The PAT owner must be in `main`'s bypass list
           # (Settings → Branches → main → "Allow specified actors to
-          # bypass required pull requests"). See RELEASING.md.
+          # bypass required pull requests"). See docs/RELEASING.md.
           #
           # Setting `token:` here configures git credentials for every
           # subsequent step in this job, so `git push origin HEAD:main`
@@ -181,7 +181,7 @@ jobs:
       # directly at this commit (GitHub honors the marker on the
       # tagged commit's message).
       #
-      # Branch protection caveat: see RELEASING.md (`RELEASE_BOT_PAT`).
+      # Branch protection caveat: see docs/RELEASING.md (`RELEASE_BOT_PAT`).
       - name: Commit release-time updates to main
         if: ${{ steps.generate.outputs.did_generate == 'true' || steps.badge.outputs.did_update == 'true' }}
         run: |
