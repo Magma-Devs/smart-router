@@ -122,10 +122,15 @@ jobs:
           preflight_result="failed"
 
           write_summary() {
+            ssh_target="missing"
+            if [ -n "${SSH_HOST:-}" ]; then
+              ssh_target="configured"
+            fi
             {
               echo "### dev-sim-prtests preflight"
               echo ""
               echo "- Target environment: \`dev-sim-prtests\`"
+              echo "- SSH target: \`${ssh_target}\`"
               echo "- Artifact name: \`${ARTIFACT_NAME}\`"
               echo "- PR number: \`${PR_NUMBER}\`"
               echo "- PR head SHA: \`${HEAD_SHA}\`"
