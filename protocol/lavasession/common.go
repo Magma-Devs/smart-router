@@ -33,7 +33,7 @@ func GetMaxAllowedBlockListedSessionPerProvider() int {
 }
 
 const (
-	MaxConsecutiveConnectionAttempts                 = 5
+	MaxConsecutiveConnectionAttempts                 = 50
 	TimeoutForEstablishingAConnection                = 1500 * time.Millisecond // 1.5 seconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession = 15
 	RelayNumberIncrement                             = 1
