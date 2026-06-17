@@ -404,6 +404,22 @@ func TestMinGroupsRequirements_DisjointFromPerGroup(t *testing.T) {
 // intPtr returns a pointer to v, for building Bound floors in tests.
 func intPtr(v int) *int { return &v }
 
+// TestPolicyKeyPrefix_ApiBoundary locks in the trailing-separator property the HasPrefix-based endpoint
+// filtering relies on: api-interface "json" must NOT prefix-match policies registered under "jsonrpc".
+// Without the trailing separator in policyKeyPrefix, a "json" query would wrongly fold in the "jsonrpc"
+// policy and return its (higher) min-groups.
+func TestPolicyKeyPrefix_ApiBoundary(t *testing.T) {
+	r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: []CrossValidationPolicyEntry{
+		{ChainID: "ETH1", ApiInterface: "json", Method: "eth_call", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(3)}, MinGroups: Bound{Floor: intPtr(2)}}},
+		{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}, MinGroups: Bound{Floor: intPtr(4)}}},
+	}})
+	require.NoError(t, err)
+
+	// "json" must see ONLY its own policy (min-groups 2), never the "jsonrpc" one (min-groups 4).
+	assert.Equal(t, 2, r.MaxResolvedMinGroups("ETH1", "json"), "api 'json' must not prefix-match 'jsonrpc'")
+	assert.Equal(t, 4, r.MaxResolvedMinGroups("ETH1", "jsonrpc"), "api 'jsonrpc' resolves its own policy")
+}
+
 // TestCrossValidationPolicyResolver_ResolvePerGroup covers that the per-group-quorum bool is resolved onto
 // the effective params, and is only activated when MinGroups > 1 survives clamping.
 func TestCrossValidationPolicyResolver_ResolvePerGroup(t *testing.T) {
