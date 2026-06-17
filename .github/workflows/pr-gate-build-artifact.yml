@@ -1,4 +1,4 @@
-name: PR Gate - Build Artifact
+name: PR Gate - Dev Sim Preflight
 
 on:
   workflow_dispatch:
@@ -138,6 +138,31 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           }
 
+          redact_remote_output() {
+            SSH_HOST_VALUE="$SSH_HOST" perl -0pe '
+              BEGIN {
+                $target = $ENV{"SSH_HOST_VALUE"} // "";
+                @redactions = grep { length } ($target);
+                if ($target =~ /\@([^:@\s]+)(?::\d+)?$/) {
+                  push @redactions, $1;
+                } elsif ($target =~ /^([^:@\s]+)(?::\d+)?$/) {
+                  push @redactions, $1;
+                }
+              }
+              for $value (@redactions) {
+                s/\Q$value\E/[redacted-host]/g;
+              }
+            ' "$1"
+          }
+
+          print_sanitized_remote_output() {
+            echo "dev-sim-prtests preflight failed. Sanitized remote output:"
+            echo "----- ssh stdout -----"
+            redact_remote_output "$ssh_stdout"
+            echo "----- ssh stderr -----"
+            redact_remote_output "$ssh_stderr"
+          }
+
           if [ -z "${SSH_HOST:-}" ]; then
             echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_HOST"
             exit 1
@@ -170,6 +195,7 @@ jobs:
              kubectl get deploy -n lava-infra
              kubectl get pods -n lava-infra' >"$ssh_stdout" 2>"$ssh_stderr"; then
             echo "::error::dev-sim-prtests preflight failed while connecting or running read-only checks"
+            print_sanitized_remote_output
             exit 1
           fi
 
