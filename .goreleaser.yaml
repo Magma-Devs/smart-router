@@ -111,14 +111,14 @@ checksum:
 # fixes that.
 #
 # The conventional-commit grouping logic that used to live here is now
-# in scripts/changelog-bump.sh — see RELEASING.md.
+# in scripts/changelog-bump.sh — see docs/RELEASING.md.
 
 # Cosign keyless signing of the checksum file. Requires `id-token: write`
 # in the release workflow and cosign installed on the runner (added by
 # sigstore/cosign-installer in .github/workflows/release.yml). The OIDC
 # token from GitHub Actions is exchanged with Sigstore Fulcio for a
 # short-lived signing certificate — no private key to manage or rotate.
-# Verification recipe is in RELEASING.md.
+# Verification recipe is in docs/RELEASING.md.
 signs:
   - id: cosign-checksums
     cmd: cosign

@@ -76,7 +76,7 @@ snapshot: setup
 #
 # This is only needed for local previews or hand-written special-case
 # entries — CI does the same thing automatically on tag push. See
-# RELEASING.md for the full release workflow.
+# docs/RELEASING.md for the full release workflow.
 #
 # GEMINI_API_KEY is required to get a Highlights draft (the repo
 # secret is only visible inside GitHub Actions — locally you need your
