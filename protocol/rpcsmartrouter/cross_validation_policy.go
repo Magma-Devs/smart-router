@@ -85,14 +85,23 @@ type CrossValidationPolicyResolver struct {
 }
 
 // policyKeySeparator joins the three identifiers in a policy key. NUL is used because it cannot appear in a
-// chain-id, api-interface, or RPC method name, so it delimits the parts unambiguously. policyKey and
+// chain-id, api-interface, or RPC method name, so it delimits the parts unambiguously. policyKeyPrefix and
 // splitPolicyKey MUST use the same separator — hence the shared constant.
 const policyKeySeparator = "\x00"
 
-// policyKey builds the canonical lookup key. chain-id and api-interface are matched case-insensitively
-// (they are deployment identifiers); method names are matched exactly (RPC methods are case-sensitive).
+// policyKeyPrefix builds the chain+api portion shared by every policy key for an endpoint (method-agnostic),
+// including the trailing separator. A key belongs to the endpoint iff strings.HasPrefix(key, thisPrefix):
+// the trailing separator bounds the api segment so "eth"/"1" cannot prefix-match "eth"/"10". chain-id and
+// api-interface are matched case-insensitively (deployment identifiers), so they are lowercased here.
+func policyKeyPrefix(chainID, apiInterface string) string {
+	return strings.ToLower(chainID) + policyKeySeparator + strings.ToLower(apiInterface) + policyKeySeparator
+}
+
+// policyKey builds the canonical lookup key as prefix + method (method names are matched exactly — RPC
+// methods are case-sensitive). Defining it as policyKeyPrefix + method is what makes the HasPrefix-based
+// endpoint filtering correct by construction: the full key and the filter prefix can never disagree.
 func policyKey(chainID, apiInterface, method string) string {
-	return strings.ToLower(chainID) + policyKeySeparator + strings.ToLower(apiInterface) + policyKeySeparator + method
+	return policyKeyPrefix(chainID, apiInterface) + method
 }
 
 // NewCrossValidationPolicyResolver flattens and validates the nested config into a resolver. An empty or
@@ -149,14 +158,13 @@ func (r *CrossValidationPolicyResolver) MaxResolvedMinGroups(chainID, apiInterfa
 	if r == nil {
 		return 0
 	}
-	wantChain, wantAPI := strings.ToLower(chainID), strings.ToLower(apiInterface)
+	prefix := policyKeyPrefix(chainID, apiInterface)
 	maxMinGroups := 0
 	for key, policy := range r.policies {
 		if !policy.Enabled {
 			continue
 		}
-		kc, ka, _ := splitPolicyKey(key)
-		if kc != wantChain || ka != wantAPI {
+		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
 		if mg := resolveKnob(0, false, policy.MinGroups, defaultEnabledMinGroups); mg > maxMinGroups {
@@ -182,14 +190,13 @@ func (r *CrossValidationPolicyResolver) PerGroupRequirements(chainID, apiInterfa
 	if r == nil {
 		return nil
 	}
-	wantChain, wantAPI := strings.ToLower(chainID), strings.ToLower(apiInterface)
+	prefix := policyKeyPrefix(chainID, apiInterface)
 	var reqs []PerGroupRequirement
 	for key, policy := range r.policies {
 		if !policy.Enabled || !policy.PerGroupQuorum {
 			continue
 		}
-		kc, ka, _ := splitPolicyKey(key)
-		if kc != wantChain || ka != wantAPI {
+		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
 		minGroups := resolveKnob(0, false, policy.MinGroups, defaultEnabledMinGroups)
@@ -217,14 +224,13 @@ func (r *CrossValidationPolicyResolver) MinGroupsRequirements(chainID, apiInterf
 	if r == nil {
 		return nil
 	}
-	wantChain, wantAPI := strings.ToLower(chainID), strings.ToLower(apiInterface)
+	prefix := policyKeyPrefix(chainID, apiInterface)
 	var reqs []MinGroupsRequirement
 	for key, policy := range r.policies {
 		if !policy.Enabled || policy.PerGroupQuorum {
 			continue
 		}
-		kc, ka, _ := splitPolicyKey(key)
-		if kc != wantChain || ka != wantAPI {
+		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
 		minGroups := resolveKnob(0, false, policy.MinGroups, defaultEnabledMinGroups)
@@ -410,7 +416,9 @@ func (r *CrossValidationPolicyResolver) ValidateNoStatefulPolicies(isStateful fu
 	return nil
 }
 
-// splitPolicyKey reverses policyKey for diagnostics. chain-id and api-interface come back lowercased.
+// splitPolicyKey reverses policyKey into its three parts; chain-id and api-interface come back lowercased.
+// Endpoint filtering uses HasPrefix with policyKeyPrefix instead — this is only for the few callers that
+// need the method back out of the key (e.g. ValidateNoStatefulPolicies, which reports the offending method).
 func splitPolicyKey(key string) (chainID, apiInterface, method string) {
 	parts := strings.SplitN(key, policyKeySeparator, 3)
 	for len(parts) < 3 {
