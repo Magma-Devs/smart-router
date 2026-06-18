@@ -348,10 +348,15 @@ jobs:
               wait "$smoke_pid" 2>/dev/null || true
             elif [ -f "$smoke_pid_file" ]; then
               pid="$(cat "$smoke_pid_file" 2>/dev/null || true)"
-              if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                kill "$pid" 2>/dev/null || true
-                wait "$pid" 2>/dev/null || true
-              fi
+              case "$pid" in
+                ''|*[!0-9]*) ;;
+                *)
+                  if process_is_prtests "$pid" && kill -0 "$pid" 2>/dev/null; then
+                    kill "$pid" 2>/dev/null || true
+                    wait "$pid" 2>/dev/null || true
+                  fi
+                  ;;
+              esac
             fi
             rm -f "$smoke_pid_file"
           }
@@ -381,8 +386,9 @@ jobs:
           }
 
           process_is_prtests() {
-            case "$(process_command "$1")" in
-              *"/opt/smart-router-prtests/"*) return 0 ;;
+            command_line="$(process_command "$1")"
+            case "$command_line" in
+              *"$REMOTE_DIR"*|*"$REMOTE_BINARY"*|*"/opt/smart-router-prtests/"*) return 0 ;;
               *) return 1 ;;
             esac
           }
