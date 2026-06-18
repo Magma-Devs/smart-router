@@ -704,9 +704,15 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					// silently dropping the endpoint here and never sending the request that
 					// would heal it (the deadlock behind the `No pairings` bug class). Instead
 					// the relay is always attempted — a genuinely dead socket fails fast, feeds
-					// QoS via OnSessionFailure, and (after MaxConsecutiveConnectionAttempts) is
-					// backed off via endpoint.Enabled, both of which self-heal. This mirrors how
-					// WebSocket connections have always behaved (IsHealthy hardcoded true).
+					// QoS via OnSessionFailure, and (after MaxConsecutiveConnectionAttempts
+					// consecutive failures, currently 50) is backed off via endpoint.Enabled,
+					// both of which self-heal. With the bit gone endpoint.Enabled is now the
+					// *sole* automatic disable, so in a multi-endpoint pool a dead endpoint
+					// stays in selection rotation for up to that many dial-and-fail cycles
+					// before backoff (the threshold was raised 5→50 — see
+					// MaxConsecutiveConnectionAttempts in common.go for why and the tradeoff).
+					// This mirrors how WebSocket connections have always behaved (IsHealthy
+					// hardcoded true).
 					//
 					// The != nil check is defensive: construction (rpcsmartrouter.go, via the
 					// error-checked `continue` in convertProvidersToSessions) already guarantees a
