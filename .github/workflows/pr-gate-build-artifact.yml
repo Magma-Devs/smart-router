@@ -342,6 +342,10 @@ jobs:
           trap cleanup EXIT
 
           print_rollout_diagnostics() {
+            redact_sensitive_output() {
+              sed -E 's/((token|secret|password|apikey|api_key|authorization)[=: ]+)[^ &"]+/\1[REDACTED]/Ig'
+            }
+
             echo "Deployment status:"
             kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o wide || true
             echo "ReplicaSets:"
@@ -352,6 +356,27 @@ jobs:
             kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{" phase="}{.status.phase}{" containers="}{range .status.containerStatuses[*]}{.name}{":ready="}{.ready}{":restarts="}{.restartCount}{":waiting="}{.state.waiting.reason}{":terminated="}{.state.terminated.reason}{";"}{end}{"\n"}{end}' || true
             echo "Recent target pod events:"
             kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp --field-selector involvedObject.kind=Pod | grep "$DEPLOYMENT" | tail -20 || true
+            echo "PR pod logs:"
+            kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.containers[?(@.name=="router")]}{.image}{end}{"\n"}{end}' \
+              | awk -v image="$PR_IMAGE" '$2 == image {print $1}' \
+              | while IFS= read -r pod; do
+                  [ -z "$pod" ] && continue
+                  echo "Logs for ${pod} (previous container):"
+                  kubectl -n "$NAMESPACE" logs "$pod" -c "$CONTAINER" --previous --tail=80 2>&1 | redact_sensitive_output || true
+                  echo "Logs for ${pod} (current container):"
+                  kubectl -n "$NAMESPACE" logs "$pod" -c "$CONTAINER" --tail=80 2>&1 | redact_sensitive_output || true
+                done
+          }
+
+          fail_if_pr_pod_crashed() {
+            crash_reasons="$(kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.containers[?(@.name=="router")]}{.image}{end}{"\t"}{range .status.containerStatuses[?(@.name=="router")]}{.state.waiting.reason}{"\t"}{.lastState.terminated.reason}{"\t"}{.lastState.terminated.exitCode}{end}{"\n"}{end}' \
+              | awk -F '\t' -v image="$PR_IMAGE" '$2 == image && ($3 ~ /CrashLoopBackOff|Error|RunContainerError|CreateContainerConfigError|ImagePullBackOff|ErrImagePull/ || ($5 != "" && $5 != "0")) {print}')"
+            if [ -n "$crash_reasons" ]; then
+              echo "PR image pod exited or entered a waiting failure state:"
+              printf '%s\n' "$crash_reasons"
+              print_rollout_diagnostics
+              exit 1
+            fi
           }
 
           if [ -z "$previous_image" ]; then
@@ -364,6 +389,11 @@ jobs:
 
           kubectl -n "$NAMESPACE" set image "deployment/${DEPLOYMENT}" "${CONTAINER}=${PR_IMAGE}"
           rollback_needed=true
+
+          for _ in $(seq 1 30); do
+            fail_if_pr_pod_crashed
+            sleep 2
+          done
 
           echo "Rollout status command: kubectl -n ${NAMESPACE} rollout status deployment/${DEPLOYMENT} --timeout=600s"
           if ! kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s; then
