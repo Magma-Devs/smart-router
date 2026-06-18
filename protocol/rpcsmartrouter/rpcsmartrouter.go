@@ -488,7 +488,7 @@ type consistencyResetter interface {
 	ResetState()
 }
 
-// resetAllChainTrackers walks the router's per-server EndpointChainTrackerManagers
+// resetAllChainTrackers walks the router's per-server EndpointMonitors
 // and zeroes every cached latest-block, so consistency pre-validation skips the
 // lag check until the next poll repopulates the value. Returns the total number
 // of trackers reset across all servers. Nil-safe at every level so test fixtures

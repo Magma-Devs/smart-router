@@ -1,4 +1,4 @@
-package rpcsmartrouter
+package endpointstate
 
 import (
 	"context"
@@ -35,17 +35,17 @@ const (
 	EndpointChainTrackerStopped       EndpointChainTrackerState = "stopped"
 )
 
-// EndpointChainTrackerManager manages per-endpoint ChainTrackers for the Smart Router.
+// EndpointMonitor manages per-endpoint ChainTrackers for the Smart Router.
 // Each endpoint gets its own ChainTracker that continuously polls for block data,
 // enabling accurate pre-request consistency validation and sync scoring.
-type EndpointChainTrackerManager struct {
+type EndpointMonitor struct {
 	mu sync.RWMutex
 
 	// Map from endpoint URL to ChainTracker
 	trackers map[string]chaintracker.IChainTracker
 
 	// Map from endpoint URL to ChainFetcher (needed to access fetcher methods)
-	fetchers map[string]*EndpointChainFetcher
+	fetchers map[string]*EndpointPoller
 
 	// Map from endpoint URL to cancel function for per-tracker context cancellation
 	// This enables stopping individual trackers without affecting others
@@ -92,8 +92,8 @@ type EndpointChainTrackerConfig struct {
 	OnFetchError  func(endpointURL string)
 }
 
-// NewEndpointChainTrackerManager creates a new manager for per-endpoint ChainTrackers.
-func NewEndpointChainTrackerManager(ctx context.Context, config EndpointChainTrackerConfig) *EndpointChainTrackerManager {
+// NewEndpointMonitor creates a new manager for per-endpoint ChainTrackers.
+func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) *EndpointMonitor {
 	blocksToSave := config.BlocksToSave
 	if blocksToSave == 0 {
 		blocksToSave = DefaultBlocksToSave
@@ -122,9 +122,9 @@ func NewEndpointChainTrackerManager(ctx context.Context, config EndpointChainTra
 
 	ctxWithCancel, cancel := context.WithCancel(ctx)
 
-	manager := &EndpointChainTrackerManager{
+	manager := &EndpointMonitor{
 		trackers:          make(map[string]chaintracker.IChainTracker),
-		fetchers:          make(map[string]*EndpointChainFetcher),
+		fetchers:          make(map[string]*EndpointPoller),
 		cancelFuncs:       make(map[string]context.CancelFunc),
 		trackerStates:     make(map[string]EndpointChainTrackerState),
 		trackerLastErrors: make(map[string]string),
@@ -148,7 +148,7 @@ func NewEndpointChainTrackerManager(ctx context.Context, config EndpointChainTra
 
 // GetOrCreateTracker returns an existing ChainTracker for the endpoint or creates a new one.
 // Thread-safe - uses lazy initialization to avoid creating trackers for unused endpoints.
-func (m *EndpointChainTrackerManager) GetOrCreateTracker(
+func (m *EndpointMonitor) GetOrCreateTracker(
 	endpoint *lavasession.Endpoint,
 	directConnection lavasession.DirectRPCConnection,
 ) (chaintracker.IChainTracker, error) {
@@ -172,7 +172,7 @@ func (m *EndpointChainTrackerManager) GetOrCreateTracker(
 	}
 
 	// Create the chain fetcher
-	fetcher := NewEndpointChainFetcher(
+	fetcher := NewEndpointPoller(
 		endpoint,
 		directConnection,
 		m.chainParser,
@@ -260,7 +260,7 @@ func (m *EndpointChainTrackerManager) GetOrCreateTracker(
 	return tracker, nil
 }
 
-func (m *EndpointChainTrackerManager) startTrackerWithRetry(tracker chaintracker.IChainTracker, trackerCtx context.Context, endpointURL string) {
+func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTracker, trackerCtx context.Context, endpointURL string) {
 	for attempt := 0; ; attempt++ {
 		m.setTrackerState(endpointURL, EndpointChainTrackerStarting, nil)
 
@@ -297,7 +297,7 @@ func (m *EndpointChainTrackerManager) startTrackerWithRetry(tracker chaintracker
 	}
 }
 
-func (m *EndpointChainTrackerManager) trackerStartRetryDelay(attempt int) time.Duration {
+func (m *EndpointMonitor) trackerStartRetryDelay(attempt int) time.Duration {
 	delay := m.averageBlockTime
 	if delay < m.retryMinDelay {
 		delay = m.retryMinDelay
@@ -320,7 +320,7 @@ func (m *EndpointChainTrackerManager) trackerStartRetryDelay(attempt int) time.D
 	return delay + time.Duration(time.Now().UnixNano()%int64(jitterRange))
 }
 
-func (m *EndpointChainTrackerManager) setTrackerState(endpointURL string, state EndpointChainTrackerState, err error) {
+func (m *EndpointMonitor) setTrackerState(endpointURL string, state EndpointChainTrackerState, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -343,14 +343,14 @@ func (m *EndpointChainTrackerManager) setTrackerState(endpointURL string, state 
 }
 
 // GetTracker returns the ChainTracker for an endpoint if it exists.
-func (m *EndpointChainTrackerManager) GetTracker(endpointURL string) (chaintracker.IChainTracker, bool) {
+func (m *EndpointMonitor) GetTracker(endpointURL string) (chaintracker.IChainTracker, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	tracker, exists := m.trackers[endpointURL]
 	return tracker, exists
 }
 
-func (m *EndpointChainTrackerManager) GetTrackerState(endpointURL string) (state EndpointChainTrackerState, lastError string, exists bool) {
+func (m *EndpointMonitor) GetTrackerState(endpointURL string) (state EndpointChainTrackerState, lastError string, exists bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -369,7 +369,7 @@ func (m *EndpointChainTrackerManager) GetTrackerState(endpointURL string) (state
 
 // GetLatestBlockNum returns the latest block number for an endpoint.
 // Returns 0 if no tracker exists for the endpoint.
-func (m *EndpointChainTrackerManager) GetLatestBlockNum(endpointURL string) int64 {
+func (m *EndpointMonitor) GetLatestBlockNum(endpointURL string) int64 {
 	m.mu.RLock()
 	tracker, exists := m.trackers[endpointURL]
 	m.mu.RUnlock()
@@ -383,7 +383,7 @@ func (m *EndpointChainTrackerManager) GetLatestBlockNum(endpointURL string) int6
 
 // GetLatestBlockData returns detailed block data for an endpoint.
 // Returns latest block number, change time, and whether data exists.
-func (m *EndpointChainTrackerManager) GetLatestBlockData(endpointURL string) (latestBlock int64, changeTime time.Time, exists bool) {
+func (m *EndpointMonitor) GetLatestBlockData(endpointURL string) (latestBlock int64, changeTime time.Time, exists bool) {
 	m.mu.RLock()
 	tracker, trackerExists := m.trackers[endpointURL]
 	m.mu.RUnlock()
@@ -401,7 +401,7 @@ func (m *EndpointChainTrackerManager) GetLatestBlockData(endpointURL string) (la
 // repopulates the cached value. Used by /debug/reset-scores to clear per-
 // endpoint chain-tracker pollution without restarting the tracker goroutines.
 // Returns the number of trackers that were reset.
-func (m *EndpointChainTrackerManager) ResetAllLatestBlocks() int {
+func (m *EndpointMonitor) ResetAllLatestBlocks() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	count := 0
@@ -414,7 +414,7 @@ func (m *EndpointChainTrackerManager) ResetAllLatestBlocks() int {
 
 // RemoveTracker removes and stops a ChainTracker for an endpoint.
 // It cancels the tracker's context first, which signals the goroutine to exit cleanly.
-func (m *EndpointChainTrackerManager) RemoveTracker(endpointURL string) {
+func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -440,7 +440,7 @@ func (m *EndpointChainTrackerManager) RemoveTracker(endpointURL string) {
 }
 
 // GetAllEndpoints returns all endpoint URLs with active ChainTrackers.
-func (m *EndpointChainTrackerManager) GetAllEndpoints() []string {
+func (m *EndpointMonitor) GetAllEndpoints() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -452,7 +452,7 @@ func (m *EndpointChainTrackerManager) GetAllEndpoints() []string {
 }
 
 // GetEndpointCount returns the number of active ChainTrackers.
-func (m *EndpointChainTrackerManager) GetEndpointCount() int {
+func (m *EndpointMonitor) GetEndpointCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.trackers)
@@ -460,7 +460,7 @@ func (m *EndpointChainTrackerManager) GetEndpointCount() int {
 
 // Stop stops all ChainTrackers and cleans up resources.
 // It cancels all individual tracker contexts first, then the parent context.
-func (m *EndpointChainTrackerManager) Stop() {
+func (m *EndpointMonitor) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -477,12 +477,12 @@ func (m *EndpointChainTrackerManager) Stop() {
 
 	// Clear maps
 	m.trackers = make(map[string]chaintracker.IChainTracker)
-	m.fetchers = make(map[string]*EndpointChainFetcher)
+	m.fetchers = make(map[string]*EndpointPoller)
 	m.cancelFuncs = make(map[string]context.CancelFunc)
 	m.trackerStates = make(map[string]EndpointChainTrackerState)
 	m.trackerLastErrors = make(map[string]string)
 
-	utils.LavaFormatInfo("stopped EndpointChainTrackerManager",
+	utils.LavaFormatInfo("stopped EndpointMonitor",
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("trackersStopped", trackerCount),
 	)
@@ -490,7 +490,7 @@ func (m *EndpointChainTrackerManager) Stop() {
 
 // ValidateEndpointSync checks if an endpoint is synced within the given threshold.
 // Returns true if the endpoint's latest block is within threshold of the reference block.
-func (m *EndpointChainTrackerManager) ValidateEndpointSync(endpointURL string, referenceBlock int64, threshold int64) bool {
+func (m *EndpointMonitor) ValidateEndpointSync(endpointURL string, referenceBlock int64, threshold int64) bool {
 	latestBlock := m.GetLatestBlockNum(endpointURL)
 	if latestBlock == 0 {
 		// No data yet - don't filter
@@ -503,7 +503,7 @@ func (m *EndpointChainTrackerManager) ValidateEndpointSync(endpointURL string, r
 
 // GetSyncGap returns the sync gap between an endpoint and a reference block.
 // Returns 0 if endpoint is ahead or no data exists.
-func (m *EndpointChainTrackerManager) GetSyncGap(endpointURL string, referenceBlock int64) int64 {
+func (m *EndpointMonitor) GetSyncGap(endpointURL string, referenceBlock int64) int64 {
 	latestBlock := m.GetLatestBlockNum(endpointURL)
 	if latestBlock == 0 || latestBlock >= referenceBlock {
 		return 0
@@ -512,6 +512,6 @@ func (m *EndpointChainTrackerManager) GetSyncGap(endpointURL string, referenceBl
 }
 
 // IsDummy returns false - this is a real manager.
-func (m *EndpointChainTrackerManager) IsDummy() bool {
+func (m *EndpointMonitor) IsDummy() bool {
 	return false
 }

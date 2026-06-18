@@ -16,6 +16,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -69,7 +70,7 @@ type RPCSmartRouterServer struct {
 	enableSelectionStats   bool // feature flag to enable selection stats header
 
 	// Per-endpoint ChainTracker manager for continuous block polling
-	endpointChainTrackerManager *EndpointChainTrackerManager
+	endpointChainTrackerManager *endpointstate.EndpointMonitor
 
 	// Direct WS subscription manager (nil if not configured); retained so
 	// graceful shutdown can call Close() to drain upstream WS pools.
@@ -161,12 +162,12 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.smartRouterEndpointMetrics = smartRouterEndpointMetrics
 
 	// Initialize per-endpoint ChainTracker manager for continuous block polling
-	rpcss.endpointChainTrackerManager = NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	rpcss.endpointChainTrackerManager = endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
 		ChainParser:      chainParser,
 		ChainID:          listenEndpoint.ChainID,
 		ApiInterface:     listenEndpoint.ApiInterface,
 		AverageBlockTime: averageBlockTime,
-		BlocksToSave:     DefaultBlocksToSave,
+		BlocksToSave:     endpointstate.DefaultBlocksToSave,
 		OnNewBlock: func(endpointURL string, fromBlock, toBlock int64) {
 			utils.LavaFormatTrace("endpoint ChainTracker detected new block",
 				utils.LogAttr("endpoint", endpointURL),
@@ -1597,7 +1598,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 
 		// If we still have no block data, skip validation for this endpoint (allow first relay)
 		if endpointLatest == 0 {
-			trackerState := EndpointChainTrackerMissing
+			trackerState := endpointstate.EndpointChainTrackerMissing
 			trackerLastError := ""
 			if rpcss.endpointChainTrackerManager != nil && endpointURL != "" {
 				trackerState, trackerLastError, _ = rpcss.endpointChainTrackerManager.GetTrackerState(endpointURL)

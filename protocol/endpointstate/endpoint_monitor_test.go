@@ -1,4 +1,4 @@
-package rpcsmartrouter
+package endpointstate
 
 import (
 	"context"
@@ -84,12 +84,12 @@ func (b *blockingDummyChainTracker) StartAndServe(context.Context) error {
 	return nil
 }
 
-func TestEndpointChainTrackerManager_GetOrCreateTracker(t *testing.T) {
+func TestEndpointMonitor_GetOrCreateTracker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Create manager with minimal config
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -105,11 +105,11 @@ func TestEndpointChainTrackerManager_GetOrCreateTracker(t *testing.T) {
 	manager.Stop()
 }
 
-func TestEndpointChainTrackerManager_GetLatestBlockNum(t *testing.T) {
+func TestEndpointMonitor_GetLatestBlockNum(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -125,11 +125,11 @@ func TestEndpointChainTrackerManager_GetLatestBlockNum(t *testing.T) {
 	manager.Stop()
 }
 
-func TestEndpointChainTrackerManager_GetTrackerState(t *testing.T) {
+func TestEndpointMonitor_GetTrackerState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -144,11 +144,11 @@ func TestEndpointChainTrackerManager_GetTrackerState(t *testing.T) {
 	require.Empty(t, lastError)
 }
 
-func TestEndpointChainTrackerManager_StartTrackerRetriesAfterStartupFailure(t *testing.T) {
+func TestEndpointMonitor_StartTrackerRetriesAfterStartupFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -196,11 +196,11 @@ func TestEndpointChainTrackerManager_StartTrackerRetriesAfterStartupFailure(t *t
 	require.Equal(t, int32(3), tracker.attempts.Load(), "tracker should retry until startup succeeds")
 }
 
-func TestEndpointChainTrackerManager_RemoveTrackerClearsTrackerStates(t *testing.T) {
+func TestEndpointMonitor_RemoveTrackerClearsTrackerStates(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -234,11 +234,11 @@ func TestEndpointChainTrackerManager_RemoveTrackerClearsTrackerStates(t *testing
 	require.Empty(t, lastError)
 }
 
-func TestEndpointChainTrackerManager_LateStateWriteAfterRemoveIsDropped(t *testing.T) {
+func TestEndpointMonitor_LateStateWriteAfterRemoveIsDropped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -295,11 +295,11 @@ func TestEndpointChainTrackerManager_LateStateWriteAfterRemoveIsDropped(t *testi
 	require.Equal(t, EndpointChainTrackerMissing, state, "GetTrackerState should report Missing, not Polling, after removal")
 }
 
-func TestEndpointChainTrackerManager_ValidateEndpointSync(t *testing.T) {
+func TestEndpointMonitor_ValidateEndpointSync(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -315,11 +315,11 @@ func TestEndpointChainTrackerManager_ValidateEndpointSync(t *testing.T) {
 	manager.Stop()
 }
 
-func TestEndpointChainTrackerManager_GetSyncGap(t *testing.T) {
+func TestEndpointMonitor_GetSyncGap(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -335,11 +335,11 @@ func TestEndpointChainTrackerManager_GetSyncGap(t *testing.T) {
 	manager.Stop()
 }
 
-func TestEndpointChainTrackerManager_GetAllEndpoints(t *testing.T) {
+func TestEndpointMonitor_GetAllEndpoints(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -355,11 +355,11 @@ func TestEndpointChainTrackerManager_GetAllEndpoints(t *testing.T) {
 	manager.Stop()
 }
 
-func TestEndpointChainTrackerManager_RemoveTracker(t *testing.T) {
+func TestEndpointMonitor_RemoveTracker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -377,14 +377,14 @@ func TestEndpointChainTrackerManager_RemoveTracker(t *testing.T) {
 	manager.Stop()
 }
 
-func TestEndpointChainTrackerManager_Callbacks(t *testing.T) {
+func TestEndpointMonitor_Callbacks(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	forkCalled := false
 	newBlockCalled := false
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -411,7 +411,7 @@ func TestEndpointChainTrackerConfig_DefaultValues(t *testing.T) {
 	defer cancel()
 
 	// Create with minimal config (should use defaults)
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:      "ETH",
 		ApiInterface: "jsonrpc",
 		// AverageBlockTime and BlocksToSave not set - should use defaults
@@ -425,13 +425,13 @@ func TestEndpointChainTrackerConfig_DefaultValues(t *testing.T) {
 	manager.Stop()
 }
 
-// TestEndpointChainTrackerManager_LifecyclePerTrackerContext verifies that each tracker
+// TestEndpointMonitor_LifecyclePerTrackerContext verifies that each tracker
 // gets its own cancellable context, enabling individual tracker shutdown.
-func TestEndpointChainTrackerManager_LifecyclePerTrackerContext(t *testing.T) {
+func TestEndpointMonitor_LifecyclePerTrackerContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -445,13 +445,13 @@ func TestEndpointChainTrackerManager_LifecyclePerTrackerContext(t *testing.T) {
 	require.Empty(t, manager.cancelFuncs)
 }
 
-// TestEndpointChainTrackerManager_RemoveTrackerCancelsContext verifies that RemoveTracker
+// TestEndpointMonitor_RemoveTrackerCancelsContext verifies that RemoveTracker
 // properly cancels the tracker's context before removing it from maps.
-func TestEndpointChainTrackerManager_RemoveTrackerCancelsContext(t *testing.T) {
+func TestEndpointMonitor_RemoveTrackerCancelsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -474,13 +474,13 @@ func TestEndpointChainTrackerManager_RemoveTrackerCancelsContext(t *testing.T) {
 	require.Empty(t, manager.cancelFuncs, "cancelFuncs should be empty after removal")
 }
 
-// TestEndpointChainTrackerManager_StopCancelsAllTrackers verifies that Stop()
+// TestEndpointMonitor_StopCancelsAllTrackers verifies that Stop()
 // properly cancels all individual tracker contexts.
-func TestEndpointChainTrackerManager_StopCancelsAllTrackers(t *testing.T) {
+func TestEndpointMonitor_StopCancelsAllTrackers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,
@@ -508,13 +508,13 @@ func TestEndpointChainTrackerManager_StopCancelsAllTrackers(t *testing.T) {
 	require.Empty(t, manager.cancelFuncs, "cancelFuncs should be empty after Stop")
 }
 
-// TestEndpointChainTrackerManager_ConcurrentCreateRemove tests that concurrent
+// TestEndpointMonitor_ConcurrentCreateRemove tests that concurrent
 // create and remove operations are thread-safe.
-func TestEndpointChainTrackerManager_ConcurrentCreateRemove(t *testing.T) {
+func TestEndpointMonitor_ConcurrentCreateRemove(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 12 * time.Second,

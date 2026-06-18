@@ -1,4 +1,4 @@
-package rpcsmartrouter
+package endpointstate
 
 import (
 	"context"
@@ -15,9 +15,9 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// EndpointChainFetcher implements chaintracker.ChainFetcher for direct RPC endpoints.
+// EndpointPoller implements chaintracker.ChainFetcher for direct RPC endpoints.
 // It enables per-endpoint ChainTracker to continuously poll block data.
-type EndpointChainFetcher struct {
+type EndpointPoller struct {
 	endpoint         *lavasession.Endpoint
 	directConnection lavasession.DirectRPCConnection
 	chainParser      chainlib.ChainParser
@@ -29,15 +29,15 @@ type EndpointChainFetcher struct {
 	endpointURL string
 }
 
-// NewEndpointChainFetcher creates a new ChainFetcher for a direct RPC endpoint.
-func NewEndpointChainFetcher(
+// NewEndpointPoller creates a new ChainFetcher for a direct RPC endpoint.
+func NewEndpointPoller(
 	endpoint *lavasession.Endpoint,
 	directConnection lavasession.DirectRPCConnection,
 	chainParser chainlib.ChainParser,
 	chainID string,
 	apiInterface string,
-) *EndpointChainFetcher {
-	return &EndpointChainFetcher{
+) *EndpointPoller {
+	return &EndpointPoller{
 		endpoint:         endpoint,
 		directConnection: directConnection,
 		chainParser:      chainParser,
@@ -49,7 +49,7 @@ func NewEndpointChainFetcher(
 
 // FetchLatestBlockNum fetches the latest block number from the endpoint.
 // Uses spec-driven parsing to support any chain type (EVM, Tendermint, REST, etc.).
-func (ecf *EndpointChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
+func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (int64, error) {
 	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCKNUM.String()
 	if !ok {
@@ -131,7 +131,7 @@ func (ecf *EndpointChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64
 // numbers (blockNum-1, blockNum-2, ...) up to maxBlockNotAvailableRetries times.
 // This handles both propagation delays (the latest slot data hasn't reached the
 // node yet) and skipped slots (Solana occasionally produces no block for a slot).
-func (ecf *EndpointChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
+func (ecf *EndpointPoller) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
 	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM.String()
 	if !ok {
@@ -187,7 +187,7 @@ func (ecf *EndpointChainFetcher) FetchBlockHashByNum(ctx context.Context, blockN
 
 // fetchSingleBlockHash fetches the block hash for a single block number.
 // Returns the hash, the raw response data (for error inspection), and any error.
-func (ecf *EndpointChainFetcher) fetchSingleBlockHash(
+func (ecf *EndpointPoller) fetchSingleBlockHash(
 	ctx context.Context,
 	blockNum int64,
 	parsing *spectypes.ParseDirective,
@@ -248,7 +248,7 @@ func (ecf *EndpointChainFetcher) fetchSingleBlockHash(
 
 // FetchEndpoint returns the endpoint information for this fetcher.
 // Required by chaintracker.ChainFetcher interface.
-func (ecf *EndpointChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
+func (ecf *EndpointPoller) FetchEndpoint() lavasession.RPCProviderEndpoint {
 	return lavasession.RPCProviderEndpoint{
 		ChainID:      ecf.chainID,
 		ApiInterface: ecf.apiInterface,
@@ -268,14 +268,14 @@ func (ecf *EndpointChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint
 // (like SVMChainTracker) pass the body in `data` with `path=""`, and GET
 // callers already encode the URL suffix in `data` per sendRawRequest's REST
 // convention (see connectionType == "GET" branch below).
-func (ecf *EndpointChainFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
+func (ecf *EndpointPoller) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
 	return ecf.sendRawRequest(ctx, data, connectionType, apiName)
 }
 
 // sendRawRequest sends a raw request to the endpoint and returns the response.
 // For REST/GET requests, requestData is a URL path that must be appended to the base URL.
 // For JSON-RPC/POST requests, requestData is the JSON body.
-func (ecf *EndpointChainFetcher) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string) ([]byte, error) {
+func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string) ([]byte, error) {
 	if ecf.directConnection == nil {
 		return nil, fmt.Errorf("no direct connection for endpoint %s", ecf.endpointURL)
 	}
@@ -288,7 +288,7 @@ func (ecf *EndpointChainFetcher) sendRawRequest(ctx context.Context, requestData
 			return nil, fmt.Errorf("connection does not support HTTP requests for endpoint %s", ecf.endpointURL)
 		}
 
-		fullURL, err := joinURLPath(ecf.directConnection.GetURL(), string(requestData))
+		fullURL, err := common.JoinURLPath(ecf.directConnection.GetURL(), string(requestData))
 		if err != nil {
 			return nil, fmt.Errorf("failed to build REST URL: %w", err)
 		}
@@ -320,11 +320,11 @@ func (ecf *EndpointChainFetcher) sendRawRequest(ctx context.Context, requestData
 }
 
 // chainFetcherMetadata returns metadata for constructing chain messages.
-func (ecf *EndpointChainFetcher) chainFetcherMetadata() []pairingtypes.Metadata {
+func (ecf *EndpointPoller) chainFetcherMetadata() []pairingtypes.Metadata {
 	return nil // No special metadata needed for block tracking
 }
 
 // GetLatestBlock returns the last known latest block number.
-func (ecf *EndpointChainFetcher) GetLatestBlock() int64 {
+func (ecf *EndpointPoller) GetLatestBlock() int64 {
 	return atomic.LoadInt64(&ecf.latestBlock)
 }

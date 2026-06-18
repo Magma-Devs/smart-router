@@ -6,14 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/utils"
@@ -153,67 +152,41 @@ func TestDebugResetScores_SmartRouter_DoesNotChangeOffset(t *testing.T) {
 	require.Contains(t, getRR.Body.String(), `"offset_seconds":3600`)
 }
 
-// recordingChainTracker is a fake IChainTracker that records ResetLatestBlock
-// calls. We embed *chaintracker.DummyChainTracker for all the methods we don't
-// care about and shadow ResetLatestBlock with our own counter. The atomic
-// counter is required because EndpointChainTrackerManager.ResetAllLatestBlocks
-// only takes RLock while iterating — multiple tracker resets could race in
-// principle (in practice they run sequentially in the loop, but make the test
-// fixture safe regardless).
-type recordingChainTracker struct {
-	*chaintracker.DummyChainTracker
-	resetCalls atomic.Int32
-}
-
-func (r *recordingChainTracker) ResetLatestBlock() {
-	r.resetCalls.Add(1)
-}
-
-// newRouterWithChainTrackers builds a minimal *RPCSmartRouter wired with
-// rpcServers, each holding an EndpointChainTrackerManager whose trackers map
-// is pre-populated with the supplied fakes. The router itself has no real
-// session managers or other state — just enough scaffolding for
-// resetAllChainTrackers to walk router→servers→manager and reach the fakes.
-func newRouterWithChainTrackers(t *testing.T, byServer map[string][]*recordingChainTracker) *RPCSmartRouter {
-	t.Helper()
-	router := &RPCSmartRouter{
-		rpcServers: make(map[string]*RPCSmartRouterServer),
-	}
-	for serverKey, fakes := range byServer {
-		manager := &EndpointChainTrackerManager{
-			trackers:          make(map[string]chaintracker.IChainTracker),
-			fetchers:          make(map[string]*EndpointChainFetcher),
-			cancelFuncs:       make(map[string]context.CancelFunc),
-			trackerStates:     make(map[string]EndpointChainTrackerState),
-			trackerLastErrors: make(map[string]string),
-		}
-		for i, f := range fakes {
-			endpointURL := serverKey + "-endpoint-" + strconv.Itoa(i)
-			manager.trackers[endpointURL] = f
-		}
-		router.rpcServers[serverKey] = &RPCSmartRouterServer{
-			endpointChainTrackerManager: manager,
-		}
-	}
-	return router
-}
-
-// TestDebugResetScores_SmartRouter_ResetsChainTrackers verifies the
-// chain-tracker reset branch added for BTC pollution recovery: every per-
-// endpoint ChainTracker across all rpcServers must have ResetLatestBlock
-// invoked, and the response body must report the total count via
-// trackers_reset so the test framework can assert it from the outside.
-func TestDebugResetScores_SmartRouter_ResetsChainTrackers(t *testing.T) {
+// TestDebugResetScores_SmartRouter_WalksChainTrackerManagers verifies the
+// router-walk branch of /debug/reset-scores: resetAllChainTrackers visits every
+// rpcServer, sums each EndpointMonitor's reset count into trackers_reset, and is
+// nil-safe when a server has no monitor wired.
+//
+// It exercises walk structure + nil-safety using only exported behavior — real
+// but traffic-empty EndpointMonitors built via NewEndpointMonitor (no registered
+// trackers, so each contributes 0). The per-tracker reset-count correctness (that
+// ResetAllLatestBlocks resets each of N registered trackers and returns N) is
+// covered in-package by endpointstate.TestEndpointMonitor_ResetAllLatestBlocks,
+// which can inject fake trackers without spinning real poll goroutines. Asserting
+// a non-zero cross-server total here would require either that fake injection
+// (now an unexported-map access across the package boundary) or real
+// ChainTracker poll goroutines — neither worth it for a nil-safe summing loop.
+func TestDebugResetScores_SmartRouter_WalksChainTrackerManagers(t *testing.T) {
 	var offsetNano atomic.Int64
 
-	// Two servers (e.g. eth/jsonrpc and btc/rest), one with 3 providers and
-	// one with 2 — total of 5 trackers across the router.
-	serverA := []*recordingChainTracker{{}, {}, {}}
-	serverB := []*recordingChainTracker{{}, {}}
-	router := newRouterWithChainTrackers(t, map[string][]*recordingChainTracker{
-		"chainA-jsonrpc": serverA,
-		"chainB-rest":    serverB,
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	managed := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainID:          "ETH",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 12 * time.Second,
+		BlocksToSave:     10,
 	})
+	defer managed.Stop()
+
+	router := &RPCSmartRouter{
+		rpcServers: map[string]*RPCSmartRouterServer{
+			"chainA-jsonrpc": {endpointChainTrackerManager: managed},
+			// nil-manager server must be skipped by the walk, not panic.
+			"chainB-rest": {endpointChainTrackerManager: nil},
+		},
+	}
 
 	mux := buildDebugMux(debugMuxDeps{
 		optimizers: newEmptyOptimizersRouter(),
@@ -224,14 +197,9 @@ func TestDebugResetScores_SmartRouter_ResetsChainTrackers(t *testing.T) {
 	rr := postResetScoresRouter(mux)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Contains(t, rr.Body.String(), `"reset":true`)
-	require.Contains(t, rr.Body.String(), `"trackers_reset":5`)
-
-	for _, fakes := range [][]*recordingChainTracker{serverA, serverB} {
-		for i, f := range fakes {
-			require.Equal(t, int32(1), f.resetCalls.Load(),
-				"tracker %d should have had ResetLatestBlock called exactly once", i)
-		}
-	}
+	// No registered trackers (no traffic) → zero reset; the nil-manager server
+	// contributes nothing rather than panicking.
+	require.Contains(t, rr.Body.String(), `"trackers_reset":0`)
 }
 
 func postResetAllRouter(mux http.Handler) *httptest.ResponseRecorder {

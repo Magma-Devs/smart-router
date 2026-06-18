@@ -1,4 +1,4 @@
-package rpcsmartrouter
+package endpointstate
 
 import (
 	"context"
@@ -8,14 +8,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestEndpointChainFetcher_CustomMessage_POSTDelegatesToConnection verifies the
+// TestEndpointPoller_CustomMessage_POSTDelegatesToConnection verifies the
 // Solana path: SVMChainTracker calls CustomMessage with the getLatestBlockhash
 // JSON-RPC body. The previous implementation returned a hard error, so on every
 // Solana-family chain the per-endpoint ChainTracker silently failed to start —
 // no OnNewBlock callback, no per-endpoint metrics, backup rows stuck at N/A.
 // This test asserts that CustomMessage now delegates to the direct RPC connection
 // and returns the real response payload.
-func TestEndpointChainFetcher_CustomMessage_POSTDelegatesToConnection(t *testing.T) {
+func TestEndpointPoller_CustomMessage_POSTDelegatesToConnection(t *testing.T) {
 	const (
 		url        = "https://solana.lava.build:443/"
 		svmRequest = `{"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[{"commitment":"finalized"}]}`
@@ -28,7 +28,7 @@ func TestEndpointChainFetcher_CustomMessage_POSTDelegatesToConnection(t *testing
 			svmRequest: []byte(svmResp),
 		},
 	}
-	fetcher := NewEndpointChainFetcher(
+	fetcher := NewEndpointPoller(
 		&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
 		conn,
 		nil, // chainParser unused by the POST path
@@ -43,12 +43,12 @@ func TestEndpointChainFetcher_CustomMessage_POSTDelegatesToConnection(t *testing
 		"CustomMessage must return the actual upstream response body")
 }
 
-// TestEndpointChainTrackerManager_ForcesBlocksToSave1ForSolana guards the blocksToSave
+// TestEndpointMonitor_ForcesBlocksToSave1ForSolana guards the blocksToSave
 // override that sidesteps SVMChainTracker's slot-cache-only-for-latest-block limitation.
 // When blocksToSave > 1 the ChainTracker init loop fetches hashes for historical blocks,
 // and on every Solana-family chain those fetches fail with "slot not found in cache",
 // killing the tracker before OnNewBlock can fire.
-func TestEndpointChainTrackerManager_ForcesBlocksToSave1ForSolana(t *testing.T) {
+func TestEndpointMonitor_ForcesBlocksToSave1ForSolana(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -64,7 +64,7 @@ func TestEndpointChainTrackerManager_ForcesBlocksToSave1ForSolana(t *testing.T) 
 		{"LAVA", 10, "non-SVM chains keep the caller-requested blocksToSave"},
 	} {
 		t.Run(tc.chainID, func(t *testing.T) {
-			m := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+			m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 				ChainID:      tc.chainID,
 				ApiInterface: "jsonrpc",
 				BlocksToSave: 10,
@@ -76,14 +76,14 @@ func TestEndpointChainTrackerManager_ForcesBlocksToSave1ForSolana(t *testing.T) 
 	}
 }
 
-// TestEndpointChainFetcher_CustomMessage_PropagatesMissingConnection guards the
+// TestEndpointPoller_CustomMessage_PropagatesMissingConnection guards the
 // remaining nil-connection check in sendRawRequest: with no direct connection the
 // fetcher must surface an error rather than treat an empty body as a successful
 // fetch. (The old per-socket health gate is gone — a live-but-failing socket now
 // surfaces its failure through SendRequest itself, which the relay path turns into
 // a QoS penalty, instead of being pre-empted by a latched health bit.)
-func TestEndpointChainFetcher_CustomMessage_PropagatesMissingConnection(t *testing.T) {
-	fetcher := NewEndpointChainFetcher(
+func TestEndpointPoller_CustomMessage_PropagatesMissingConnection(t *testing.T) {
+	fetcher := NewEndpointPoller(
 		&lavasession.Endpoint{NetworkAddress: "https://solana.lava.build:443/", Enabled: true},
 		nil, // no direct connection
 		nil,
