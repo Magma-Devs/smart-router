@@ -27,7 +27,7 @@ require (
 	github.com/itchyny/gojq v0.12.16
 	github.com/jhump/protoreflect v1.18.0
 	github.com/joho/godotenv v1.5.1
-	github.com/newrelic/go-agent/v3 v3.20.4
+	github.com/newrelic/go-agent/v3 v3.43.3
 	github.com/spf13/pflag v1.0.10
 	github.com/tidwall/gjson v1.16.0
 	github.com/tidwall/sjson v1.2.5
