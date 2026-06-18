@@ -10,20 +10,19 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  statuses: write
 
 concurrency:
   group: pr-gate-dev-sim-prtests
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build PR artifact
+  metadata:
+    name: Fetch PR metadata
     runs-on: ubuntu-latest
-    env:
-      CGO_ENABLED: "0"
-      GOOS: linux
-      GOARCH: amd64
-      GOAMD64: v3
+    outputs:
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      artifact_name: ${{ steps.pr.outputs.artifact_name }}
     steps:
       - name: Fetch PR metadata
         id: pr
@@ -50,15 +49,23 @@ jobs:
           short_sha="${head_sha:0:7}"
           artifact_name="smartrouter-pr-${PR_NUMBER}-${short_sha}-linux-amd64"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-          echo "head_repo=$head_repo" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
           echo "Resolved PR #${PR_NUMBER} head SHA: ${head_sha}"
 
+  build:
+    name: Build PR artifact
+    runs-on: ubuntu-latest
+    needs: metadata
+    env:
+      CGO_ENABLED: "0"
+      GOOS: linux
+      GOARCH: amd64
+      GOAMD64: v3
+
+    steps:
       - uses: actions/checkout@v4
         with:
-          repository: ${{ steps.pr.outputs.head_repo }}
-          ref: ${{ steps.pr.outputs.head_sha }}
+          ref: ${{ needs.metadata.outputs.head_sha }}
           fetch-depth: 0
 
       - name: Resolve version from git
@@ -83,23 +90,23 @@ jobs:
           GOWORK=off go build \
             -mod=readonly \
             -trimpath \
-            -ldflags "-X github.com/magma-Devs/smart-router/version.Version=${{ steps.ver.outputs.version }} -X github.com/magma-Devs/smart-router/version.Commit=${{ steps.pr.outputs.head_sha }} -w -s" \
+            -ldflags "-X github.com/magma-Devs/smart-router/version.Version=${{ steps.ver.outputs.version }} -X github.com/magma-Devs/smart-router/version.Commit=${{ needs.metadata.outputs.head_sha }} -w -s" \
             -o out/smartrouter ./cmd/smartrouter
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.pr.outputs.artifact_name }}
+          name: ${{ needs.metadata.outputs.artifact_name }}
           path: out/smartrouter
 
       - name: Write summary
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-          SHORT_SHA: ${{ steps.pr.outputs.short_sha }}
+          HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
           VERSION: ${{ steps.ver.outputs.version }}
-          ARTIFACT_NAME: ${{ steps.pr.outputs.artifact_name }}
+          ARTIFACT_NAME: ${{ needs.metadata.outputs.artifact_name }}
         run: |
+          SHORT_SHA="${HEAD_SHA:0:7}"
           {
             echo "### PR Gate artifact build"
             echo ""
@@ -115,8 +122,8 @@ jobs:
           SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
           SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-          ARTIFACT_NAME: ${{ steps.pr.outputs.artifact_name }}
+          HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
+          ARTIFACT_NAME: ${{ needs.metadata.outputs.artifact_name }}
         run: |
           set -euo pipefail
           preflight_result="failed"
@@ -178,9 +185,6 @@ jobs:
           trap 'rm -f "$key_file" "$ssh_stdout" "$ssh_stderr"; write_summary' EXIT
           printf '%s\n' "$SSH_KEY" > "$key_file"
           chmod 600 "$key_file"
-          ls -l "$key_file"
-          file "$key_file"
-          head -n 2 "$key_file" | sed 's/./*/g'
           if ! ssh-keygen -y -f "$key_file" >/dev/null; then
             echo "SSH key validation failed"
             exit 1
@@ -208,47 +212,108 @@ jobs:
           preflight_result="passed"
           echo "dev-sim-prtests preflight passed"
 
-      - name: Plan dev-sim-prtests deployment
+      - name: Validate dev-sim-prtests artifact
         env:
+          SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
+          SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-          ARTIFACT_NAME: ${{ steps.pr.outputs.artifact_name }}
-          TARGET_ENVIRONMENT: dev-sim-prtests
-          DRY_RUN: "true"
-          CONCURRENCY_GROUP: pr-gate-dev-sim-prtests
+          HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          ARTIFACT_NAME: ${{ needs.metadata.outputs.artifact_name }}
         run: |
           set -euo pipefail
-          echo "PR number: ${PR_NUMBER}"
-          echo "PR head SHA: ${HEAD_SHA}"
-          echo "artifact name: ${ARTIFACT_NAME}"
-          echo "target environment: ${TARGET_ENVIRONMENT}"
-          echo "dry-run: ${DRY_RUN}"
-          echo "concurrency group: ${CONCURRENCY_GROUP}"
-          echo "Deployment performed: false"
-          echo "planned actions:"
-          echo "1. wait for exclusive dev-sim-prtests workflow slot"
-          echo "2. download PR artifact"
-          echo "3. copy artifact to dev-sim-prtests"
-          echo "4. reset test environment"
-          echo "5. restart Smart Router with PR artifact"
-          echo "6. wait for Smart Router readiness"
+          if [ -z "${SSH_HOST:-}" ]; then
+            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_HOST"
+            exit 1
+          fi
+          if [ -z "${SSH_KEY:-}" ]; then
+            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_KEY"
+            exit 1
+          fi
+          if [ ! -f out/smartrouter ]; then
+            echo "::error::Missing built artifact out/smartrouter"
+            exit 1
+          fi
+
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          if ! ssh-keygen -y -f "$key_file" >/dev/null; then
+            echo "SSH key validation failed"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          remote_dir="/opt/smart-router-prtests/pr-${PR_NUMBER}/${HEAD_SHA}"
+          remote_binary="${remote_dir}/smartrouter"
+          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RemoteCommand=none -o RequestTTY=no)
+          scp_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+
+          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "mkdir -p '$remote_dir'" >/dev/null 2>&1; then
+            echo "::error::Failed to create remote artifact directory"
+            exit 1
+          fi
+          if ! scp "${scp_opts[@]}" out/smartrouter "${SSH_HOST}:${remote_binary}" >/dev/null 2>&1; then
+            echo "::error::Failed to copy artifact to dev-sim-prtests"
+            exit 1
+          fi
+          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "chmod +x '$remote_binary'" >/dev/null 2>&1; then
+            echo "::error::Failed to chmod remote artifact"
+            exit 1
+          fi
+          if ! version_output="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "'$remote_binary' --version" 2>/dev/null)"; then
+            echo "::error::Failed to execute remote artifact"
+            exit 1
+          fi
+          if [[ "$version_output" != *"$HEAD_SHA"* && "$version_output" != *"$VERSION"* ]]; then
+            echo "::error::Remote artifact version did not match expected version or commit"
+            exit 1
+          fi
 
           {
-            echo "### dev-sim-prtests deployment plan"
+            echo "### dev-sim-prtests artifact validation"
             echo ""
             echo "- PR number: \`${PR_NUMBER}\`"
             echo "- PR head SHA: \`${HEAD_SHA}\`"
             echo "- Artifact name: \`${ARTIFACT_NAME}\`"
-            echo "- Target environment: \`${TARGET_ENVIRONMENT}\`"
-            echo "- Dry-run: \`${DRY_RUN}\`"
-            echo "- Concurrency group: \`${CONCURRENCY_GROUP}\`"
+            echo "- Remote path: \`${remote_binary}\`"
+            echo "- Version: \`${VERSION}\`"
+            echo "- Validation result: \`passed\`"
             echo "- Deployment performed: \`false\`"
-            echo ""
-            echo "Planned actions:"
-            echo "1. wait for exclusive dev-sim-prtests workflow slot"
-            echo "2. download PR artifact"
-            echo "3. copy artifact to dev-sim-prtests"
-            echo "4. reset test environment"
-            echo "5. restart Smart Router with PR artifact"
-            echo "6. wait for Smart Router readiness"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  preflight-status:
+    name: Publish dev-sim-prtests preflight status
+    runs-on: ubuntu-latest
+    needs: [metadata, build]
+    if: ${{ always() }}
+    steps:
+      - name: Publish commit status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HEAD_SHA" ]; then
+            echo "::error::Could not resolve head SHA for preflight status"
+            exit 1
+          fi
+
+          state="failure"
+          description="dev-sim-prtests preflight failed"
+          if [ "$BUILD_RESULT" = "success" ]; then
+            state="success"
+            description="dev-sim-prtests preflight passed"
+          fi
+
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state="$state" \
+            -f context="dev-sim-prtests / preflight" \
+            -f description="$description" \
+            -f target_url="$RUN_URL"
