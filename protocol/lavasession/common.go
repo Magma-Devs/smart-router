@@ -33,6 +33,14 @@ func GetMaxAllowedBlockListedSessionPerProvider() int {
 }
 
 const (
+	// MaxConsecutiveConnectionAttempts is the number of consecutive connection
+	// failures after which an endpoint is backed off (endpoint.Enabled = false).
+	// Raised from 5 to 50 alongside removing the per-socket health gate: with that
+	// gate gone the (often sole) direct endpoint must not be disabled too eagerly on
+	// a transient blip, since disabling the only endpoint reproduces the "No pairings"
+	// symptom until an epoch/successful relay re-enables it. A successful relay resets
+	// the counter (see Endpoint.ResetHealth), so this is a consecutive-failure budget.
+	// Shared by the provider-relay path and blockProvider — this threshold gates both.
 	MaxConsecutiveConnectionAttempts                 = 50
 	TimeoutForEstablishingAConnection                = 1500 * time.Millisecond // 1.5 seconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession = 15

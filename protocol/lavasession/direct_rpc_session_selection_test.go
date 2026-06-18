@@ -182,3 +182,75 @@ func TestFetchEndpointConnection_DirectRPC(t *testing.T) {
 	assert.NotNil(t, endpoints[0].endpoint, "Should have endpoint reference")
 	assert.True(t, endpoints[0].endpoint.IsDirectRPC(), "Endpoint should be direct RPC")
 }
+
+// TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal is the regression guard
+// for PR #100 (drop the per-socket isHealthy selection gate). It locks in the three
+// properties the fix depends on:
+//
+//  1. Selection ignores transport state. The endpoint points at an unreachable
+//     upstream (port 1), yet it is still offered for relay — connecting is the relay
+//     path's job, not selection's. Before the fix a single transport blip latched a
+//     per-socket health bit false with no auto-recovery, silently dropping the
+//     endpoint here forever (the "No pairings available" deadlock).
+//  2. Backoff is the only disable signal, and only after MaxConsecutiveConnectionAttempts
+//     consecutive failures: one short of the threshold the endpoint stays selectable;
+//     crossing it disables the endpoint, after which selection skips it and reports
+//     all-endpoints-disabled.
+//  3. Self-heal: a single ResetHealth (what a successful relay performs) puts the
+//     endpoint straight back into rotation — recovery is automatic, not restart-only.
+func TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx := context.Background()
+	// Unreachable upstream (port 1 never accepts): a "dead socket" that under the old
+	// gate would have latched unhealthy and been dropped by selection.
+	nodeUrl := common.NodeUrl{Url: "http://127.0.0.1:1"}
+
+	directConn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	require.NoError(t, err)
+
+	endpoint := &Endpoint{
+		NetworkAddress:    nodeUrl.Url,
+		Enabled:           true,
+		DirectConnections: []DirectRPCConnection{directConn},
+	}
+	cswp := &ConsumerSessionsWithProvider{
+		Sessions:          make(map[int64]*SingleConsumerSession),
+		PairingEpoch:      100,
+		StaticProvider:    true,
+		PublicLavaAddress: "direct-rpc-provider",
+		Endpoints:         []*Endpoint{endpoint},
+	}
+
+	fetch := func() (bool, []*EndpointAndChosenConnection, error) {
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, "", nil)
+		return connected, endpoints, err
+	}
+
+	// (1) + (2a): one short of the threshold the endpoint is still enabled and is
+	// offered for relay despite the unreachable upstream.
+	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
+		endpoint.MarkUnhealthy()
+	}
+	require.True(t, endpoint.Enabled, "endpoint must stay enabled below the consecutive-failure threshold")
+	connected, endpoints, err := fetch()
+	require.NoError(t, err)
+	require.True(t, connected, "an enabled direct RPC endpoint must be selectable regardless of transport state")
+	require.Len(t, endpoints, 1)
+
+	// (2b): crossing the threshold disables the endpoint; selection now skips it and
+	// reports the provider as fully disabled.
+	endpoint.MarkUnhealthy()
+	require.False(t, endpoint.Enabled, "endpoint must back off after MaxConsecutiveConnectionAttempts consecutive failures")
+	connected, _, err = fetch()
+	require.ErrorIs(t, err, AllProviderEndpointsDisabledError)
+	require.False(t, connected, "a disabled endpoint must not be selected")
+
+	// (3): a successful relay's ResetHealth re-enables the endpoint and it is
+	// immediately selectable again — the self-heal that replaces restart-only recovery.
+	require.True(t, endpoint.ResetHealth(), "ResetHealth must report it re-enabled a disabled endpoint")
+	require.True(t, endpoint.Enabled)
+	connected, endpoints, err = fetch()
+	require.NoError(t, err)
+	require.True(t, connected, "the endpoint must be selectable again after self-heal")
+	require.Len(t, endpoints, 1)
+}
