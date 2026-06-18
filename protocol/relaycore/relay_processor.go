@@ -557,7 +557,11 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	// if we hashed after SetResponse the stored copy in successResults would keep the zero hash and the
 	// header path would compare zero hashes and treat real dissent as agreement. Computed for any reply
 	// with data; only successful replies are counted toward quorum below (empty/nil replies stay zero).
-	if response != nil && response.RelayResult.GetReply() != nil && len(response.RelayResult.GetReply().GetData()) > 0 {
+	//
+	// Gated on CrossValidation mode: the hash is only consumed by the CV quorum/header path, so canonicalizing
+	// (decode + re-marshal of a potentially large body) for Stateless/Stateful traffic would be wasted work.
+	// The winner path in responsesCrossValidation recomputes on a zero hash, so a missed cache stays correct.
+	if rp.selection == CrossValidation && response != nil && response.RelayResult.GetReply() != nil && len(response.RelayResult.GetReply().GetData()) > 0 {
 		// Canonicalize before hashing so semantically-identical responses that
 		// differ only in JSON key order share a quorum bucket (MAG-2062). Must
 		// match the fallback hashing in responsesCrossValidation, or the cached
@@ -575,7 +579,11 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	}
 
 	// Only successful responses (not errors) count toward cross-validation quorum.
-	if response != nil && nodeError == nil && response.Err == nil {
+	// Gate on CrossValidation mode: the quorumMap and per-group tally are only
+	// consumed in CV mode (checkEndProcessing / HasRequiredNodeResults), so
+	// Stateless/Stateful traffic skips the bookkeeping entirely — the hash was
+	// already canonicalized above (before SetResponse) only when in CV mode.
+	if rp.selection == CrossValidation && response != nil && nodeError == nil && response.Err == nil {
 		hash := response.RelayResult.ResponseHash // already cached above (before SetResponse), canonicalized
 		stat := rp.quorumMap[hash]
 		if stat == nil {
