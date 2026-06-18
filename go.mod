@@ -3,7 +3,7 @@ module github.com/magma-Devs/smart-router
 go 1.26.2
 
 require (
-	github.com/cometbft/cometbft v0.38.21
+	github.com/cometbft/cometbft v1.0.1
 	github.com/ethereum/go-ethereum v1.17.0
 	github.com/gofiber/fiber/v2 v2.52.13
 	github.com/gofiber/websocket/v2 v2.0.22
@@ -85,7 +85,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.44.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
-	go.uber.org/multierr v1.10.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )
