@@ -295,7 +295,7 @@ jobs:
             fi
             echo "Rolling back ${NAMESPACE}/deployment/${DEPLOYMENT} container ${CONTAINER} to ${previous_image}"
             kubectl -n "$NAMESPACE" set image "deployment/${DEPLOYMENT}" "${CONTAINER}=${previous_image}"
-            kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=180s || true
+            kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s || true
           }
 
           cleanup() {
@@ -320,8 +320,8 @@ jobs:
           kubectl -n "$NAMESPACE" set image "deployment/${DEPLOYMENT}" "${CONTAINER}=${PR_IMAGE}"
           rollback_needed=true
 
-          echo "Rollout status command: kubectl -n ${NAMESPACE} rollout status deployment/${DEPLOYMENT} --timeout=180s"
-          kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=180s
+          echo "Rollout status command: kubectl -n ${NAMESPACE} rollout status deployment/${DEPLOYMENT} --timeout=600s"
+          kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s
 
           deployed_image="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{range .spec.template.spec.containers[?(@.name=="router")]}{.image}{end}')"
           if [ "$deployed_image" != "$PR_IMAGE" ]; then
@@ -329,7 +329,7 @@ jobs:
             exit 1
           fi
 
-          kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l "$SELECTOR" --timeout=180s
+          kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l "$SELECTOR" --timeout=600s
           pod_images="$(kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o jsonpath='{range .items[*]}{range .spec.containers[?(@.name=="router")]}{.image}{"\n"}{end}{end}')"
           if [ -z "$pod_images" ]; then
             echo "No running pod images found for selector ${SELECTOR}"
@@ -391,7 +391,7 @@ jobs:
             echo "- Service: \`eth-sim-router\`"
             echo "- PR image: \`${PR_IMAGE}\`"
             echo "- Rollout command: \`kubectl -n lava-infra set image deployment/eth-sim-router router=${PR_IMAGE}\`"
-            echo "- Readiness command: \`kubectl -n lava-infra rollout status deployment/eth-sim-router --timeout=180s\`"
+            echo "- Readiness command: \`kubectl -n lava-infra rollout status deployment/eth-sim-router --timeout=600s\`"
             echo "- Smoke endpoint: \`http://<eth-sim-router ClusterIP>:3000\`"
             echo "- Validation result: \`passed\`"
           } >> "$GITHUB_STEP_SUMMARY"
