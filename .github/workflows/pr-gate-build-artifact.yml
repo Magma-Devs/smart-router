@@ -213,6 +213,108 @@ jobs:
           preflight_result="passed"
           echo "dev-sim-prtests preflight passed"
 
+      - name: Discover dev-prtests Kubernetes resources
+        env:
+          SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
+          SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_HOST:-}" ]; then
+            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_HOST"
+            exit 1
+          fi
+          if [ -z "${SSH_KEY:-}" ]; then
+            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_KEY"
+            exit 1
+          fi
+
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          if ! ssh-keygen -y -f "$key_file" >/dev/null; then
+            echo "SSH key validation failed"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RemoteCommand=none -o RequestTTY=no)
+
+          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" 'bash -s' <<'REMOTE_DISCOVERY'
+          set -euo pipefail
+
+          section() {
+            echo "::group::$1"
+          }
+
+          end_section() {
+            echo "::endgroup::"
+          }
+
+          run_readonly() {
+            echo "\$ $*"
+            "$@"
+          }
+
+          section "namespaces"
+          run_readonly kubectl get ns
+          end_section
+
+          section "deployments"
+          run_readonly kubectl get deploy -A -o wide --show-labels
+          end_section
+
+          section "statefulsets"
+          run_readonly kubectl get sts -A -o wide --show-labels
+          end_section
+
+          section "pods"
+          run_readonly kubectl get pods -A -o wide --show-labels
+          end_section
+
+          section "services"
+          run_readonly kubectl get svc -A -o wide --show-labels
+          end_section
+
+          section "endpoints"
+          run_readonly kubectl get endpoints -A
+          end_section
+
+          section "deployment containers images ports selectors"
+          kubectl get deploy -A -o jsonpath='{range .items[*]}namespace={.metadata.namespace} name={.metadata.name} labels={.metadata.labels} selector={.spec.selector.matchLabels} containers={range .spec.template.spec.containers[*]}{.name}:{.image}:ports={range .ports[*]}{.containerPort}/{.protocol},{end};{end}{"\n"}{end}'
+          end_section
+
+          section "statefulset containers images ports selectors"
+          kubectl get sts -A -o jsonpath='{range .items[*]}namespace={.metadata.namespace} name={.metadata.name} labels={.metadata.labels} selector={.spec.selector.matchLabels} containers={range .spec.template.spec.containers[*]}{.name}:{.image}:ports={range .ports[*]}{.containerPort}/{.protocol},{end};{end}{"\n"}{end}'
+          end_section
+
+          section "service ports selectors"
+          kubectl get svc -A -o jsonpath='{range .items[*]}namespace={.metadata.namespace} name={.metadata.name} type={.spec.type} labels={.metadata.labels} selector={.spec.selector} ports={range .spec.ports[*]}{.name}:{.port}->{.targetPort}/{.protocol},{end}{"\n"}{end}'
+          end_section
+
+          section "smart-router related resources"
+          {
+            kubectl get deploy -A -o wide --show-labels
+            kubectl get sts -A -o wide --show-labels
+            kubectl get pods -A -o wide --show-labels
+            kubectl get svc -A -o wide --show-labels
+            kubectl get endpoints -A
+          } | grep -Ei 'smart|smartrouter|router|lava' || true
+          end_section
+          REMOTE_DISCOVERY
+          then
+            echo "::error::dev-prtests Kubernetes discovery failed"
+            exit 1
+          fi
+
+          {
+            echo "### dev-prtests Kubernetes discovery"
+            echo ""
+            echo "- Discovery result: \`passed\`"
+            echo "- Kubernetes mutation performed: \`false\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run artifact version smoke test
         env:
           SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
