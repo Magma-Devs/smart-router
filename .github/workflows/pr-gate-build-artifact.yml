@@ -176,8 +176,15 @@ jobs:
           ssh_stdout="$(mktemp)"
           ssh_stderr="$(mktemp)"
           trap 'rm -f "$key_file" "$ssh_stdout" "$ssh_stderr"; write_summary' EXIT
-          printf '%s' "$SSH_KEY" > "$key_file"
+          printf '%s\n' "$SSH_KEY" > "$key_file"
           chmod 600 "$key_file"
+          ls -l "$key_file"
+          file "$key_file"
+          head -n 2 "$key_file" | sed 's/./*/g'
+          if ! ssh-keygen -y -f "$key_file" >/dev/null; then
+            echo "SSH key validation failed"
+            exit 1
+          fi
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
