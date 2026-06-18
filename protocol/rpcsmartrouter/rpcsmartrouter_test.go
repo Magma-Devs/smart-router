@@ -175,7 +175,7 @@ func TestUpdateEpoch_ResetsDisabledEndpoints(t *testing.T) {
 	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
 	rpsr.sessionManagers[chainKey] = sessionManager
 
-	// Create endpoints that are disabled — simulating 5 consecutive failures.
+	// Create endpoints that are disabled — simulating MaxConsecutiveConnectionAttempts consecutive failures.
 	disabledEndpoint := &lavasession.Endpoint{
 		NetworkAddress:     "http://provider1:8080",
 		Enabled:            false,

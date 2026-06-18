@@ -43,7 +43,6 @@ func (list EndpointInfoList) Swap(i, j int) {
 // SessionConnection is the base interface for RPC connections with QoS management.
 type SessionConnection interface {
 	GetQoSManager() *qos.QoSManager
-	IsHealthy() bool
 	GetEndpointAddress() string
 }
 
@@ -56,10 +55,6 @@ type ProviderRelayConnection struct {
 
 func (prc *ProviderRelayConnection) GetQoSManager() *qos.QoSManager {
 	return prc.QoSManager
-}
-
-func (prc *ProviderRelayConnection) IsHealthy() bool {
-	return prc.EndpointConnection != nil
 }
 
 func (prc *ProviderRelayConnection) GetEndpointAddress() string {
@@ -76,10 +71,6 @@ type DirectRPCSessionConnection struct {
 
 func (drsc *DirectRPCSessionConnection) GetQoSManager() *qos.QoSManager {
 	return drsc.QoSManager
-}
-
-func (drsc *DirectRPCSessionConnection) IsHealthy() bool {
-	return drsc.DirectConnection != nil && drsc.DirectConnection.IsHealthy()
 }
 
 func (drsc *DirectRPCSessionConnection) GetEndpointAddress() string {
@@ -707,9 +698,28 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			connectEndpoint := func(cswp *ConsumerSessionsWithProvider, ctx context.Context, endpoint *Endpoint) (endpointConnection_ *EndpointConnection, connected_ bool) {
 				// Check if this is a direct RPC endpoint (smart router mode)
 				if endpoint.IsDirectRPC() {
-					// Direct RPC connections are already established in convertProvidersToSessions
-					// Just verify they're healthy and return success
-					if len(endpoint.DirectConnections) > 0 && endpoint.DirectConnections[0].IsHealthy() {
+					// Direct RPC connections are already established in convertProvidersToSessions.
+					// We no longer gate selection on a per-socket health bit: a transient
+					// transport blip used to latch that bit false with no automatic recovery,
+					// silently dropping the endpoint here and never sending the request that
+					// would heal it (the deadlock behind the `No pairings` bug class). Instead
+					// the relay is always attempted — a genuinely dead socket fails fast, feeds
+					// QoS via OnSessionFailure, and (after MaxConsecutiveConnectionAttempts
+					// consecutive failures, currently 50) is backed off via endpoint.Enabled,
+					// both of which self-heal. With the bit gone endpoint.Enabled is now the
+					// *sole* automatic disable, so in a multi-endpoint pool a dead endpoint
+					// stays in selection rotation for up to that many dial-and-fail cycles
+					// before backoff (the threshold was raised 5→50 — see
+					// MaxConsecutiveConnectionAttempts in common.go for why and the tradeoff).
+					// This mirrors how WebSocket connections have always behaved (IsHealthy
+					// hardcoded true).
+					//
+					// The != nil check is defensive: construction (rpcsmartrouter.go, via the
+					// error-checked `continue` in convertProvidersToSessions) already guarantees a
+					// non-nil element, so this guards a future construction regression — not a live
+					// case — and lets a nil element fall through to the (nil, false) skip below
+					// instead of panicking the relay goroutine.
+					if len(endpoint.DirectConnections) > 0 && endpoint.DirectConnections[0] != nil {
 						utils.LavaFormatTrace("using direct RPC connection",
 							utils.LogAttr("url", endpoint.DirectConnections[0].GetURL()),
 							utils.LogAttr("protocol", endpoint.DirectConnections[0].GetProtocol()),
@@ -717,7 +727,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 						)
 						return nil, true
 					}
-					utils.LavaFormatWarning("direct RPC connection is unhealthy", nil,
+					utils.LavaFormatWarning("direct RPC endpoint has no connection object", nil,
 						utils.LogAttr("endpoint", endpoint.NetworkAddress),
 						utils.LogAttr("GUID", ctx),
 					)

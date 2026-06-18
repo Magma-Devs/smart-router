@@ -23,8 +23,7 @@ func TestEndpointChainFetcher_CustomMessage_POSTDelegatesToConnection(t *testing
 	)
 
 	conn := &mockDirectRPCConnection{
-		url:     url,
-		healthy: true,
+		url: url,
 		responses: map[string][]byte{
 			svmRequest: []byte(svmResp),
 		},
@@ -77,23 +76,21 @@ func TestEndpointChainTrackerManager_ForcesBlocksToSave1ForSolana(t *testing.T) 
 	}
 }
 
-// TestEndpointChainFetcher_CustomMessage_PropagatesUnhealthyConnection guards against
-// silently swallowing upstream failures: when the direct connection is unhealthy,
-// CustomMessage should surface an error so the SVM tracker's retry logic kicks in
-// instead of treating an empty body as a successful fetch.
-func TestEndpointChainFetcher_CustomMessage_PropagatesUnhealthyConnection(t *testing.T) {
-	conn := &mockDirectRPCConnection{
-		url:     "https://solana.lava.build:443/",
-		healthy: false, // the whole point of the check
-	}
+// TestEndpointChainFetcher_CustomMessage_PropagatesMissingConnection guards the
+// remaining nil-connection check in sendRawRequest: with no direct connection the
+// fetcher must surface an error rather than treat an empty body as a successful
+// fetch. (The old per-socket health gate is gone — a live-but-failing socket now
+// surfaces its failure through SendRequest itself, which the relay path turns into
+// a QoS penalty, instead of being pre-empted by a latched health bit.)
+func TestEndpointChainFetcher_CustomMessage_PropagatesMissingConnection(t *testing.T) {
 	fetcher := NewEndpointChainFetcher(
-		&lavasession.Endpoint{NetworkAddress: conn.url, Enabled: true},
-		conn,
+		&lavasession.Endpoint{NetworkAddress: "https://solana.lava.build:443/", Enabled: true},
+		nil, // no direct connection
 		nil,
 		"SOLANA",
 		"jsonrpc",
 	)
 
 	_, err := fetcher.CustomMessage(context.Background(), "", []byte(`{}`), "POST", "getLatestBlockhash")
-	require.Error(t, err, "CustomMessage must fail when the direct connection is not healthy")
+	require.Error(t, err, "CustomMessage must fail when there is no direct connection")
 }

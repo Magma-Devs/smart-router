@@ -25,7 +25,7 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Resolve version from git
@@ -51,7 +51,7 @@ jobs:
       GOAMD64: v3
       GOARM64: v8.2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -87,7 +87,7 @@ jobs:
       IMAGE_NAME: magma-devs/smart-router
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download linux/amd64 binary
         uses: actions/download-artifact@v8
@@ -174,13 +174,13 @@ jobs:
 
       - name: Extract OCI labels
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile.ci
@@ -212,7 +212,7 @@ jobs:
     name: GoReleaser config check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser

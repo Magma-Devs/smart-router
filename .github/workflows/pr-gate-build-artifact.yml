@@ -63,7 +63,7 @@ jobs:
       GOAMD64: v3
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.metadata.outputs.head_sha }}
           fetch-depth: 0

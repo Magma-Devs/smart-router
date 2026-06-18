@@ -47,15 +47,6 @@ func NewEndpointChainFetcher(
 	}
 }
 
-// GetDirectConnection returns the underlying DirectRPCConnection. The same
-// pointer is stored in endpoint.DirectConnections[0] at construction time
-// (see ConsumerSessionManager.GetAllDirectRPCEndpoints), so a MarkHealthy()
-// call through this getter affects the exact atomic the cross-validation
-// path's IsHealthy() reads.
-func (ecf *EndpointChainFetcher) GetDirectConnection() lavasession.DirectRPCConnection {
-	return ecf.directConnection
-}
-
 // FetchLatestBlockNum fetches the latest block number from the endpoint.
 // Uses spec-driven parsing to support any chain type (EVM, Tendermint, REST, etc.).
 func (ecf *EndpointChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
@@ -285,8 +276,8 @@ func (ecf *EndpointChainFetcher) CustomMessage(ctx context.Context, path string,
 // For REST/GET requests, requestData is a URL path that must be appended to the base URL.
 // For JSON-RPC/POST requests, requestData is the JSON body.
 func (ecf *EndpointChainFetcher) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string) ([]byte, error) {
-	if ecf.directConnection == nil || !ecf.directConnection.IsHealthy() {
-		return nil, fmt.Errorf("direct connection is not healthy for endpoint %s", ecf.endpointURL)
+	if ecf.directConnection == nil {
+		return nil, fmt.Errorf("no direct connection for endpoint %s", ecf.endpointURL)
 	}
 
 	// REST GET: requestData is a URL path (e.g. "/cosmos/base/tendermint/v1beta1/blocks/latest")

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -73,22 +75,6 @@ type DirectRPCConnection interface {
 	// Close closes the connection and cleans up resources
 	Close() error
 
-	// IsHealthy returns true if the connection is healthy
-	IsHealthy() bool
-
-	// MarkHealthy forcibly sets the connection's healthy flag back to true.
-	// Intended only for the /debug/reset-scores recovery path so a stuck-false
-	// flag from a transient earlier failure (network blip, brief read error)
-	// does not permanently exclude an endpoint from CV fan-out or pairing
-	// selection. Production code paths must rely on the natural
-	// healthy→false (SendRequest error) and healthy→true (SendRequest
-	// success) transitions; this only shortcuts the recovery when the next
-	// IsHealthy() gate would otherwise block the very request that would
-	// re-establish health. Side effect: the probe path that consults
-	// IsHealthy() at epoch transitions will also see true after a reset
-	// until the next SendRequest outcome resettles it.
-	MarkHealthy()
-
 	// GetURL returns the endpoint URL
 	GetURL() string
 
@@ -137,20 +123,37 @@ type HTTPDirectRPCConnection struct {
 	nodeUrl  common.NodeUrl
 	protocol DirectRPCProtocol
 	client   *http.Client
-
-	// healthy reflects the last observed transport outcome (dial / TLS / read).
-	// It is updated by every SendRequest / DoHTTPRequest call: any transport-level
-	// error flips it to false; a successful exchange (including HTTP 4xx / 5xx,
-	// which are application-level errors, not transport failures) flips it back
-	// to true. The comprehensive probe path reads this via IsHealthy to decide
-	// whether to unblock a backup provider at epoch transition.
-	healthy atomic.Bool
 }
 
-// WebSocketDirectRPCConnection implements DirectRPCConnection for WebSocket/WSS
+// WebSocketDirectRPCConnection implements DirectRPCConnection for WebSocket/WSS.
+//
+// Request/response is served over a persistent JSON-RPC-over-WebSocket client
+// (rpcclient.Client), dialed lazily on first SendRequest and cached. The client
+// multiplexes concurrent requests by JSON-RPC id and transparently reconnects a
+// dropped socket, so callers (chain-tracker polls, direct relays) get the same
+// raw-bytes contract as HTTP with no WebSocket-specific handling.
+//
+// Subscriptions/streaming are NOT served here — those use the dedicated
+// UpstreamWSPool layer.
 type WebSocketDirectRPCConnection struct {
 	nodeUrl  common.NodeUrl
 	protocol DirectRPCProtocol
+	// isJsonRPC carries the EVM-vs-Tendermint distinction for parity with the
+	// HTTP/Tendermint call sites and is forwarded to CallContext. NOTE: rpcclient
+	// only consumes this flag on its HTTP path (non-2xx HTTP-status handling);
+	// over a WebSocket frame it is currently ignored. Kept for forward-correctness.
+	isJsonRPC bool
+
+	mu     sync.Mutex
+	client *rpcclient.Client // lazily dialed on first SendRequest, then cached
+	closed bool              // set by Close(); prevents re-dialing a closed connection
+
+	// wireID issues a connection-unique JSON-RPC id per request. rpcclient.Client
+	// multiplexes concurrent requests on one socket and routes replies by id
+	// (handler.respWait is a plain id→op map), so reusing a caller-supplied id
+	// across concurrent calls would misroute responses. We send a unique wire id
+	// and restore the caller's original id on the reply before returning.
+	wireID atomic.Uint64
 }
 
 // GRPCDirectRPCConnection implements DirectRPCConnection for gRPC.
@@ -170,9 +173,6 @@ type GRPCDirectRPCConnection struct {
 	registry         *dyncodec.Registry
 	codec            *dyncodec.Codec
 	descriptorsCache *common.SafeSyncMap[string, *desc.MethodDescriptor]
-
-	// Health tracking
-	healthy atomic.Bool
 
 	// Initialization state
 	initialized atomic.Bool
@@ -235,15 +235,16 @@ func NewDirectRPCConnection(
 			protocol: protocol,
 			client:   common.OptimizedHttpClient(),
 		}
-		conn.healthy.Store(true) // Start as healthy until proven otherwise
 		return conn, nil
 
 	case DirectRPCProtocolWS, DirectRPCProtocolWSS:
-		// WebSocket support is handled via a dedicated subscription/streaming layer.
-		// See WEBSOCKET_SUPPORT.md for the design (connection lifecycle differs from request/response).
+		// Request/response over WebSocket uses the shared go-ethereum-derived
+		// JSON-RPC client (rpcclient), dialed lazily on first SendRequest.
+		// Subscriptions/streaming continue to use the dedicated UpstreamWSPool layer.
 		return &WebSocketDirectRPCConnection{
-			nodeUrl:  nodeUrl,
-			protocol: protocol,
+			nodeUrl:   nodeUrl,
+			protocol:  protocol,
+			isJsonRPC: !strings.EqualFold(apiInterface, "tendermintrpc"),
 		}, nil
 
 	case DirectRPCProtocolGRPC:
@@ -251,7 +252,6 @@ func NewDirectRPCConnection(
 			nodeUrl:          nodeUrl,
 			descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
 		}
-		conn.healthy.Store(true) // Start as healthy until proven otherwise
 		return conn, nil
 
 	default:
@@ -310,9 +310,8 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	// (GET/POST/etc.). This transport layer sends bytes and returns bytes; method selection is driven by chain spec.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.nodeUrl.AuthConfig.AddAuthPath(h.nodeUrl.Url), bytes.NewReader(data))
 	if err != nil {
-		// NewRequestWithContext only fails on malformed URL / method; not a transport
-		// failure, so leave `healthy` alone — flipping it here would give false negatives
-		// on programmer error while leaving genuine upstream outages unreported.
+		// NewRequestWithContext only fails on malformed URL / method — a programmer
+		// error, not a transport failure or upstream outage.
 		return nil, fmt.Errorf("failed to build request: %w", err)
 	}
 
@@ -335,19 +334,14 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		h.healthy.Store(false)
 		return nil, fmt.Errorf("http request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		h.healthy.Store(false)
 		return nil, fmt.Errorf("failed reading response body: %w", err)
 	}
-
-	// Got a response (even 4xx/5xx) — transport is reachable.
-	h.healthy.Store(true)
 
 	// Build response with metadata (HTTP headers)
 	response := &DirectRPCResponse{
@@ -388,30 +382,6 @@ func (h *HTTPDirectRPCConnection) GetProtocol() DirectRPCProtocol {
 
 func (h *HTTPDirectRPCConnection) Close() error {
 	return nil
-}
-
-// IsHealthy returns whether the last transport attempt through this connection
-// reached the upstream. Used by probeDirectRPCEndpoints to decide whether a
-// static HTTP backup is safe to unblock at epoch transition.
-//
-// Note: a brand-new connection that has never been exercised returns true
-// (initialized state). That means the first comprehensive probe after startup
-// may optimistically trust an unreachable upstream — the relay hot path and
-// MarkUnhealthy → endpoint.Enabled gate in probeDirectRPCEndpoints catches the
-// typical cases (connection failed at least once; or 5+ relay failures), but a
-// never-hit backup with an unreachable upstream can still be optimistically
-// unblocked on the first epoch. Closing that cold-start gap requires an active
-// probe request (chain-specific no-op), which is a separate follow-up.
-func (h *HTTPDirectRPCConnection) IsHealthy() bool {
-	return h.healthy.Load()
-}
-
-// MarkHealthy forcibly resets healthy to true. See the interface docstring;
-// this is the recovery-only escape for stuck-false caused by a one-off
-// transient that the natural SendRequest-success transition can never reach
-// because IsHealthy gates the request itself.
-func (h *HTTPDirectRPCConnection) MarkHealthy() {
-	h.healthy.Store(true)
 }
 
 func (h *HTTPDirectRPCConnection) GetURL() string {
@@ -469,7 +439,6 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	// Send request
 	resp, err := h.client.Do(req)
 	if err != nil {
-		h.healthy.Store(false)
 		return nil, fmt.Errorf("http request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -477,12 +446,8 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	// Read response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		h.healthy.Store(false)
 		return nil, fmt.Errorf("failed reading response: %w", err)
 	}
-
-	// Got a response (even 4xx/5xx) — transport is reachable.
-	h.healthy.Store(true)
 
 	// Return complete response (status + headers + body)
 	// Don't return error for 4xx/5xx - client needs the response
@@ -493,13 +458,88 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	}, nil
 }
 
-// SendRequest implements DirectRPCConnection for WebSocket/WSS
+// SendRequest implements DirectRPCConnection for WebSocket/WSS.
+//
+// It ships the already-built request body as a single JSON-RPC frame over a
+// persistent WebSocket connection and waits for the id-correlated response
+// frame, presenting the same raw-bytes-in / raw-bytes-out contract as the HTTP
+// transport. This is request/response only — subscriptions/streaming use the
+// dedicated UpstreamWSPool layer.
 func (w *WebSocketDirectRPCConnection) SendRequest(
 	ctx context.Context,
 	data []byte,
 	headers map[string]string,
 ) (*DirectRPCResponse, error) {
-	return nil, fmt.Errorf("WebSocket SendRequest not implemented; use subscription/streaming flow")
+	client, err := w.ensureClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial WebSocket %s: %w", w.nodeUrl.Url, err)
+	}
+
+	// Decode the already-built request body to recover id/method/params for the
+	// typed client API. Params is interface{}, so a JSON array decodes to
+	// []interface{} and an object to map[string]interface{} — exactly the shapes
+	// CallContext accepts.
+	var reqMsg rpcInterfaceMessages.JsonrpcMessage
+	if err := json.Unmarshal(data, &reqMsg); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON-RPC request for WebSocket %s: %w", w.nodeUrl.Url, err)
+	}
+
+	// Send a connection-unique wire id so concurrent requests can't collide in
+	// the client's id→response map, then restore the caller's id on the reply.
+	wireID := json.RawMessage(strconv.FormatUint(w.wireID.Add(1), 10))
+
+	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Restore the caller's id on a COPY of the reply. The rpcclient dispatch
+	// goroutine may still read the returned reply concurrently, so mutating it
+	// in place is a data race — we only read it (to copy) and write the id on
+	// our own value.
+	out := *reply
+	out.ID = reqMsg.ID // caller's id (omitted/empty for notifications)
+
+	respBytes, err := json.Marshal(&out)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal WebSocket response for %s: %w", w.nodeUrl.Url, err)
+	}
+	utils.LavaFormatTrace("WebSocket SendRequest succeeded",
+		utils.LogAttr("endpoint", w.nodeUrl.Url),
+		utils.LogAttr("method", reqMsg.Method),
+		utils.LogAttr("responseBytes", len(respBytes)),
+	)
+	return &DirectRPCResponse{Data: respBytes, StatusCode: http.StatusOK}, nil
+}
+
+// ensureClient lazily dials the WebSocket on first use and caches the resulting
+// rpcclient.Client. The client owns reconnection internally (Client.write ->
+// reconnect, using each call's context), so a single successful dial survives
+// transient socket drops; only a failed initial dial leaves client nil, and the
+// next call retries the dial. The dial context is used only to establish the
+// connection — it does not bound the connection's lifetime.
+func (w *WebSocketDirectRPCConnection) ensureClient(ctx context.Context) (*rpcclient.Client, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil, fmt.Errorf("WebSocket connection is closed for endpoint %s", w.nodeUrl.Url)
+	}
+	if w.client != nil {
+		return w.client, nil
+	}
+
+	headers := make(map[string]string)
+	for k, v := range w.nodeUrl.GetAuthHeaders() {
+		headers[k] = v
+	}
+	endpoint := w.nodeUrl.AuthConfig.AddAuthPath(w.nodeUrl.Url)
+
+	client, err := rpcclient.DialWebsocket(ctx, endpoint, headers)
+	if err != nil {
+		return nil, err
+	}
+	w.client = client
+	return client, nil
 }
 
 func (w *WebSocketDirectRPCConnection) GetProtocol() DirectRPCProtocol {
@@ -507,17 +547,15 @@ func (w *WebSocketDirectRPCConnection) GetProtocol() DirectRPCProtocol {
 }
 
 func (w *WebSocketDirectRPCConnection) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
+	if w.client != nil {
+		w.client.Close()
+		w.client = nil
+	}
 	return nil
 }
-
-func (w *WebSocketDirectRPCConnection) IsHealthy() bool {
-	return true // health tracking is done at the endpoint/QoS layer
-}
-
-// MarkHealthy is a no-op for WebSocket: this type has no internal healthy
-// flag (IsHealthy already always returns true). The interface method exists
-// so /debug/reset-scores can call it uniformly across transport types.
-func (w *WebSocketDirectRPCConnection) MarkHealthy() {}
 
 func (w *WebSocketDirectRPCConnection) GetURL() string {
 	return w.nodeUrl.Url
@@ -550,7 +588,6 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	// Get gRPC connection from pool
 	conn, err := g.connector.GetRpc(ctx, true)
 	if err != nil {
-		g.healthy.Store(false)
 		return nil, utils.LavaFormatError("gRPC get connection failed", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
@@ -613,8 +650,6 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 		return nil, utils.LavaFormatError("failed to marshal gRPC response", err,
 			utils.LogAttr("method", methodPath))
 	}
-
-	g.healthy.Store(true)
 
 	// Return response with metadata from gRPC headers
 	return &DirectRPCResponse{
@@ -688,7 +723,6 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
 
-	g.healthy.Store(true)
 	utils.LavaFormatInfo("gRPC direct connection initialized",
 		utils.LogAttr("url", g.nodeUrl.Url),
 		utils.LogAttr("tls", parsedURL.Scheme == "grpcs"))
@@ -870,17 +904,8 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	if statusErr, ok := status.FromError(err); ok {
 		errorCode = uint32(statusErr.Code())
 		errorMessage = statusErr.Message()
-
-		// Mark as unhealthy for certain error codes
-		switch statusErr.Code() {
-		case 14: // UNAVAILABLE
-			g.healthy.Store(false)
-		case 13: // INTERNAL
-			g.healthy.Store(false)
-		}
 	} else {
 		errorMessage = err.Error()
-		g.healthy.Store(false)
 	}
 
 	// Return error as JSON response
@@ -935,18 +960,6 @@ func (g *GRPCDirectRPCConnection) Close() error {
 	}
 
 	return nil
-}
-
-func (g *GRPCDirectRPCConnection) IsHealthy() bool {
-	return g.healthy.Load()
-}
-
-// MarkHealthy forcibly resets healthy to true. See the interface docstring;
-// this is the recovery-only escape for stuck-false caused by a one-off
-// transient that the natural SendRequest-success transition can never reach
-// because IsHealthy gates the request itself.
-func (g *GRPCDirectRPCConnection) MarkHealthy() {
-	g.healthy.Store(true)
 }
 
 func (g *GRPCDirectRPCConnection) GetURL() string {
