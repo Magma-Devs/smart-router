@@ -197,7 +197,6 @@ jobs:
             "$SSH_HOST" \
             'set -euo pipefail
              hostname
-             test -x /root/smart-router-binary
              kubectl get ns lava-infra
              kubectl get deploy -n lava-infra
              kubectl get pods -n lava-infra' >"$ssh_stdout" 2>"$ssh_stderr"; then
