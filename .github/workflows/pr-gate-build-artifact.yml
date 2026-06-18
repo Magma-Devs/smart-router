@@ -440,6 +440,14 @@ jobs:
 
           current_args_json="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o json | jq -c --arg container "$CONTAINER" '.spec.template.spec.containers[] | select(.name == $container).args // []')"
           sanitized_args_json="$(printf '%s' "$current_args_json" | jq -c '
+            def retired_flag($arg):
+              ($arg == "--optimizer-qos-listen") or
+              ($arg | startswith("--optimizer-qos-listen=")) or
+              ($arg == "--show-provider-address-in-metrics") or
+              ($arg | startswith("--show-provider-address-in-metrics="));
+            def retired_flag_without_value($arg):
+              ($arg == "--optimizer-qos-listen") or
+              ($arg == "--show-provider-address-in-metrics");
             reduce .[] as $arg ({out: [], drop_next: false};
               if .drop_next then
                 if ($arg | startswith("--")) then
@@ -447,9 +455,9 @@ jobs:
                 else
                   .drop_next = false
                 end
-              elif $arg == "--optimizer-qos-listen" then
+              elif retired_flag_without_value($arg) then
                 .drop_next = true
-              elif ($arg | startswith("--optimizer-qos-listen=")) then
+              elif retired_flag($arg) then
                 .
               else
                 .out += [$arg]
@@ -457,7 +465,7 @@ jobs:
             ) | .out
           ')"
           if [ "$sanitized_args_json" != "$current_args_json" ]; then
-            echo "Removing unsupported --optimizer-qos-listen router arg for PR validation"
+            echo "Removing unsupported legacy metrics router args for PR validation"
             patch_router_args "$sanitized_args_json"
             args_changed=true
             rollback_needed=true
