@@ -263,7 +263,7 @@ jobs:
             echo "::error::Failed to chmod remote artifact"
             exit 1
           fi
-          if ! version_output="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "'$remote_binary' --version" 2>/dev/null)"; then
+          if ! version_output="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "'$remote_binary' version" 2>/dev/null)"; then
             echo "::error::Failed to execute remote artifact"
             exit 1
           fi
