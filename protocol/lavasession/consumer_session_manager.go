@@ -613,8 +613,9 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 		// fails the real relay, which feeds QoS via OnSessionFailure and trips the
 		// endpoint.Enabled consecutive-failure backoff — both self-healing). So the
 		// probe no longer reads connection health either. We still honour
-		// endpoint.Enabled: a backup with 5+ consecutive refusals stays backed off
-		// and must not be optimistically unblocked at epoch transition. Active
+		// endpoint.Enabled: a backup that hit MaxConsecutiveConnectionAttempts
+		// consecutive refusals stays backed off and must not be optimistically
+		// unblocked at epoch transition. Active
 		// per-endpoint probing/recovery is handled by the chain tracker (Step 3).
 		if !endpoint.Enabled {
 			utils.LavaFormatDebug("Direct RPC endpoint is disabled, skipping probe",
