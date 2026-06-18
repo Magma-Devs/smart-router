@@ -341,6 +341,19 @@ jobs:
           }
           trap cleanup EXIT
 
+          print_rollout_diagnostics() {
+            echo "Deployment status:"
+            kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o wide || true
+            echo "ReplicaSets:"
+            kubectl -n "$NAMESPACE" get rs -l "$SELECTOR" -o wide || true
+            echo "Pods:"
+            kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o wide || true
+            echo "Pod container states:"
+            kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{" phase="}{.status.phase}{" containers="}{range .status.containerStatuses[*]}{.name}{":ready="}{.ready}{":restarts="}{.restartCount}{":waiting="}{.state.waiting.reason}{":terminated="}{.state.terminated.reason}{";"}{end}{"\n"}{end}' || true
+            echo "Recent target pod events:"
+            kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp --field-selector involvedObject.kind=Pod | grep "$DEPLOYMENT" | tail -20 || true
+          }
+
           if [ -z "$previous_image" ]; then
             echo "Could not capture current image for ${NAMESPACE}/deployment/${DEPLOYMENT} container ${CONTAINER}"
             exit 1
@@ -353,7 +366,10 @@ jobs:
           rollback_needed=true
 
           echo "Rollout status command: kubectl -n ${NAMESPACE} rollout status deployment/${DEPLOYMENT} --timeout=600s"
-          kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s
+          if ! kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s; then
+            print_rollout_diagnostics
+            exit 1
+          fi
 
           deployed_image="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{range .spec.template.spec.containers[?(@.name=="router")]}{.image}{end}')"
           if [ "$deployed_image" != "$PR_IMAGE" ]; then
