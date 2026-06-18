@@ -285,6 +285,208 @@ jobs:
             echo "- Deployment performed: \`false\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Run isolated runtime smoke test
+        env:
+          SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
+          SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_HOST:-}" ]; then
+            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_HOST"
+            exit 1
+          fi
+          if [ -z "${SSH_KEY:-}" ]; then
+            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_KEY"
+            exit 1
+          fi
+
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          if ! ssh-keygen -y -f "$key_file" >/dev/null; then
+            echo "SSH key validation failed"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          remote_dir="/opt/smart-router-prtests/pr-${PR_NUMBER}/${HEAD_SHA}"
+          remote_binary="${remote_dir}/smartrouter"
+          remote_config="${remote_dir}/smoke_smartrouter.yml"
+          remote_specs_dir="${remote_dir}/specs"
+          smoke_port=$((30000 + (PR_NUMBER % 1000) * 10 + (0x${HEAD_SHA:0:4} % 10)))
+          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RemoteCommand=none -o RequestTTY=no)
+          scp_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+
+          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "mkdir -p '$remote_specs_dir'" >/dev/null 2>&1; then
+            echo "::error::Failed to prepare remote smoke test directory"
+            exit 1
+          fi
+          if ! scp "${scp_opts[@]}" config/smartrouter_examples/smartrouter_eth.yml "${SSH_HOST}:${remote_config}" >/dev/null 2>&1; then
+            echo "::error::Failed to copy smoke test config"
+            exit 1
+          fi
+          if ! scp "${scp_opts[@]}" specs/*.json "${SSH_HOST}:${remote_specs_dir}/" >/dev/null 2>&1; then
+            echo "::error::Failed to copy static specs"
+            exit 1
+          fi
+
+          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" \
+            "REMOTE_DIR='$remote_dir' REMOTE_BINARY='$remote_binary' REMOTE_CONFIG='$remote_config' REMOTE_SPECS_DIR='$remote_specs_dir' SMOKE_PORT='$smoke_port' bash -s" <<'REMOTE_SMOKE'
+          set -euo pipefail
+
+          smoke_pid=""
+          smoke_log="${REMOTE_DIR}/smoke.log"
+          smoke_pid_file="${REMOTE_DIR}/smoke.pid"
+
+          cleanup() {
+            if [ -n "${smoke_pid:-}" ] && kill -0 "$smoke_pid" 2>/dev/null; then
+              kill "$smoke_pid" 2>/dev/null || true
+              wait "$smoke_pid" 2>/dev/null || true
+            elif [ -f "$smoke_pid_file" ]; then
+              pid="$(cat "$smoke_pid_file" 2>/dev/null || true)"
+              case "$pid" in
+                ''|*[!0-9]*) ;;
+                *)
+                  if process_is_prtests "$pid" && kill -0 "$pid" 2>/dev/null; then
+                    kill "$pid" 2>/dev/null || true
+                    wait "$pid" 2>/dev/null || true
+                  fi
+                  ;;
+              esac
+            fi
+            rm -f "$smoke_pid_file"
+          }
+          trap cleanup EXIT
+
+          terminate_pid() {
+            pid="$1"
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              kill "$pid" 2>/dev/null || true
+              for _ in $(seq 1 10); do
+                if ! kill -0 "$pid" 2>/dev/null; then
+                  return 0
+                fi
+                sleep 1
+              done
+              kill -9 "$pid" 2>/dev/null || true
+            fi
+          }
+
+          process_command() {
+            pid="$1"
+            if [ -r "/proc/${pid}/cmdline" ]; then
+              tr '\0' ' ' < "/proc/${pid}/cmdline"
+            else
+              ps -p "$pid" -o args= 2>/dev/null || true
+            fi
+          }
+
+          process_is_prtests() {
+            command_line="$(process_command "$1")"
+            case "$command_line" in
+              *"$REMOTE_DIR"*|*"$REMOTE_BINARY"*|*"/opt/smart-router-prtests/"*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          if [ ! -x "$REMOTE_BINARY" ]; then
+            echo "Remote PR binary is not executable"
+            exit 1
+          fi
+          if [ ! -f "$REMOTE_CONFIG" ]; then
+            echo "Smoke test config is missing"
+            exit 1
+          fi
+          if [ ! -d "$REMOTE_SPECS_DIR" ]; then
+            echo "Static specs directory is missing"
+            exit 1
+          fi
+
+          sed -i \
+            -e "s/0\.0\.0\.0:3360/127.0.0.1:${SMOKE_PORT}/g" \
+            -e "s/0\.0\.0\.0:7779/disabled/g" \
+            "$REMOTE_CONFIG"
+
+          if [ -f "$smoke_pid_file" ]; then
+            old_pid="$(cat "$smoke_pid_file" 2>/dev/null || true)"
+            case "$old_pid" in
+              ''|*[!0-9]*) ;;
+              *) process_is_prtests "$old_pid" && terminate_pid "$old_pid" ;;
+            esac
+            rm -f "$smoke_pid_file"
+          fi
+
+          port_pids=""
+          if command -v lsof >/dev/null 2>&1; then
+            port_pids="$(lsof -tiTCP:"$SMOKE_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+          elif command -v ss >/dev/null 2>&1; then
+            port_pids="$(ss -ltnp "sport = :$SMOKE_PORT" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u || true)"
+          elif command -v fuser >/dev/null 2>&1; then
+            port_pids="$(fuser -n tcp "$SMOKE_PORT" 2>/dev/null || true)"
+          fi
+          for old_pid in $port_pids; do
+            case "$old_pid" in
+              ''|*[!0-9]*) continue ;;
+            esac
+            process_is_prtests "$old_pid" && terminate_pid "$old_pid"
+          done
+
+          (
+            cd "$REMOTE_DIR"
+            OTEL_SDK_DISABLED=true exec "$REMOTE_BINARY" smoke_smartrouter \
+              --geolocation 1 \
+              --use-static-spec "$REMOTE_SPECS_DIR" \
+              --skip-websocket-verification \
+              --metrics-listen-address disabled \
+              --log-level warn
+          ) >"$smoke_log" 2>&1 &
+          smoke_pid="$!"
+          echo "$smoke_pid" > "$smoke_pid_file"
+
+          ready=false
+          for _ in $(seq 1 60); do
+            if ! kill -0 "$smoke_pid" 2>/dev/null; then
+              echo "Smoke process exited during startup"
+              tail -50 "$smoke_log" || true
+              exit 1
+            fi
+            if curl -fsS "http://127.0.0.1:${SMOKE_PORT}/lava/health" >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != "true" ]; then
+            echo "Smoke process did not become ready"
+            tail -50 "$smoke_log" || true
+            exit 1
+          fi
+
+          smoke_response="$(curl -fsS \
+            -X POST "http://127.0.0.1:${SMOKE_PORT}" \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}')"
+          if ! grep -q '"result"' <<< "$smoke_response"; then
+            echo "Smoke RPC response did not include a result"
+            printf '%s\n' "$smoke_response"
+            tail -50 "$smoke_log" || true
+            exit 1
+          fi
+          if ! kill -0 "$smoke_pid" 2>/dev/null; then
+            echo "Smoke process exited after RPC request"
+            tail -50 "$smoke_log" || true
+            exit 1
+          fi
+          REMOTE_SMOKE
+          then
+            echo "::error::Isolated runtime smoke test failed"
+            exit 1
+          fi
+
   preflight-status:
     name: Publish PR Validation Status
     runs-on: ubuntu-latest
