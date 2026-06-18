@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
   pull-requests: read
   statuses: write
 
@@ -23,6 +24,8 @@ jobs:
     outputs:
       head_sha: ${{ steps.pr.outputs.head_sha }}
       artifact_name: ${{ steps.pr.outputs.artifact_name }}
+      image_tag: ${{ steps.pr.outputs.image_tag }}
+      short_sha: ${{ steps.pr.outputs.short_sha }}
     steps:
       - name: Fetch PR metadata
         id: pr
@@ -48,12 +51,15 @@ jobs:
           fi
           short_sha="${head_sha:0:7}"
           artifact_name="smartrouter-pr-${PR_NUMBER}-${short_sha}-linux-amd64"
+          image_tag="pr-${PR_NUMBER}-${short_sha}"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
           echo "Resolved PR #${PR_NUMBER} head SHA: ${head_sha}"
 
   build:
-    name: Build and Validate PR Artifact
+    name: Build and Validate PR Image
     runs-on: ubuntu-latest
     needs: metadata
     env:
@@ -61,6 +67,8 @@ jobs:
       GOOS: linux
       GOARCH: amd64
       GOAMD64: v3
+      REGISTRY: ghcr.io
+      IMAGE_NAME: magma-devs/smart-router
 
     steps:
       - name: Checkout PR head commit
@@ -94,28 +102,55 @@ jobs:
             -ldflags "-X github.com/magma-Devs/smart-router/version.Version=${{ steps.ver.outputs.version }} -X github.com/magma-Devs/smart-router/version.Commit=${{ needs.metadata.outputs.head_sha }} -w -s" \
             -o out/smartrouter ./cmd/smartrouter
 
-      - name: Upload PR artifact
-        uses: actions/upload-artifact@v7
+      - name: Stage Docker build artifact
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/linux/amd64
+          cp out/smartrouter artifacts/linux/amd64/smartrouter
+          chmod +x artifacts/linux/amd64/smartrouter
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log into GHCR
+        uses: docker/login-action@v4
         with:
-          name: ${{ needs.metadata.outputs.artifact_name }}
-          path: out/smartrouter
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push PR image
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile.ci
+          platforms: linux/amd64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.image_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.metadata.outputs.head_sha }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          push: true
 
       - name: Write summary
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
           VERSION: ${{ steps.ver.outputs.version }}
-          ARTIFACT_NAME: ${{ needs.metadata.outputs.artifact_name }}
+          PR_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.image_tag }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           SHORT_SHA="${HEAD_SHA:0:7}"
           {
-            echo "### PR Gate artifact build"
+            echo "### PR Gate image build"
             echo ""
             echo "- PR number: \`${PR_NUMBER}\`"
             echo "- PR head SHA: \`${HEAD_SHA}\`"
             echo "- Short SHA: \`${SHORT_SHA}\`"
             echo "- Version: \`${VERSION}\`"
-            echo "- Artifact name: \`${ARTIFACT_NAME}\`"
+            echo "- Image: \`${PR_IMAGE}\`"
+            echo "- Image digest: \`${IMAGE_DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check dev-sim-prtests access
@@ -124,7 +159,6 @@ jobs:
           SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
-          ARTIFACT_NAME: ${{ needs.metadata.outputs.artifact_name }}
         run: |
           set -euo pipefail
           preflight_result="failed"
@@ -139,7 +173,6 @@ jobs:
               echo ""
               echo "- Target environment: \`dev-sim-prtests\`"
               echo "- SSH target: \`${ssh_target}\`"
-              echo "- Artifact name: \`${ARTIFACT_NAME}\`"
               echo "- PR number: \`${PR_NUMBER}\`"
               echo "- PR head SHA: \`${HEAD_SHA}\`"
               echo "- Preflight result: \`${preflight_result}\`"
@@ -213,14 +246,11 @@ jobs:
           preflight_result="passed"
           echo "dev-sim-prtests preflight passed"
 
-      - name: Run artifact version smoke test
+      - name: Deploy and validate dev-prtests Kubernetes rollout
         env:
           SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
           SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
-          VERSION: ${{ steps.ver.outputs.version }}
-          ARTIFACT_NAME: ${{ needs.metadata.outputs.artifact_name }}
+          PR_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.image_tag }}
         run: |
           set -euo pipefail
           if [ -z "${SSH_HOST:-}" ]; then
@@ -229,10 +259,6 @@ jobs:
           fi
           if [ -z "${SSH_KEY:-}" ]; then
             echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_KEY"
-            exit 1
-          fi
-          if [ ! -f out/smartrouter ]; then
-            echo "::error::Missing built artifact out/smartrouter"
             exit 1
           fi
 
@@ -247,245 +273,291 @@ jobs:
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          remote_dir="/opt/smart-router-prtests/pr-${PR_NUMBER}/${HEAD_SHA}"
-          remote_binary="${remote_dir}/smartrouter"
-          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RemoteCommand=none -o RequestTTY=no)
-          scp_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RemoteCommand=none -o RequestTTY=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20)
 
-          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "mkdir -p '$remote_dir'" >/dev/null 2>&1; then
-            echo "::error::Failed to create remote artifact directory"
+          previous_image="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "kubectl -n lava-infra get deployment eth-sim-router -o jsonpath='{range .spec.template.spec.containers[?(@.name==\"router\")]}{.image}{end}'")"
+          if [ -z "$previous_image" ]; then
+            echo "::error::Could not capture current image for lava-infra/deployment/eth-sim-router container router"
             exit 1
           fi
-          if ! scp "${scp_opts[@]}" out/smartrouter "${SSH_HOST}:${remote_binary}" >/dev/null 2>&1; then
-            echo "::error::Failed to copy artifact to dev-sim-prtests"
+          previous_args_b64="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "kubectl -n lava-infra get deployment eth-sim-router -o json | jq -c '.spec.template.spec.containers[] | select(.name==\"router\").args // []' | base64 | tr -d '\n'")"
+          if [ -z "$previous_args_b64" ]; then
+            echo "::error::Could not capture current args for lava-infra/deployment/eth-sim-router container router"
             exit 1
           fi
-          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "chmod +x '$remote_binary'" >/dev/null 2>&1; then
-            echo "::error::Failed to chmod remote artifact"
+
+          rollback_remote() {
+            echo "Attempting rollback for lava-infra/deployment/eth-sim-router container router"
+            ssh "${ssh_opts[@]}" "$SSH_HOST" "PREVIOUS_IMAGE='${previous_image}' PREVIOUS_ARGS_B64='${previous_args_b64}' bash -s" <<'REMOTE_ROLLBACK'
+          set -euo pipefail
+
+          NAMESPACE="lava-infra"
+          DEPLOYMENT="eth-sim-router"
+          CONTAINER="router"
+
+          if [ -z "${PREVIOUS_IMAGE:-}" ]; then
+            echo "Previous image was not captured; cannot rollback"
             exit 1
           fi
-          if ! version_output="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "'$remote_binary' version" 2>/dev/null)"; then
-            echo "::error::Failed to execute remote artifact"
+          if [ -z "${PREVIOUS_ARGS_B64:-}" ]; then
+            echo "Previous args were not captured; cannot rollback"
             exit 1
           fi
-          if [[ "$version_output" != *"$HEAD_SHA"* && "$version_output" != *"$VERSION"* ]]; then
-            echo "::error::Remote artifact version did not match expected version or commit"
+
+          patch_router_args() {
+            args_json="$1"
+            container_index="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o json | jq -r --arg container "$CONTAINER" '.spec.template.spec.containers | to_entries[] | select(.value.name == $container).key')"
+            if [ -z "$container_index" ]; then
+              echo "Could not resolve container index for ${CONTAINER}"
+              exit 1
+            fi
+            patch_json="$(jq -cn --arg path "/spec/template/spec/containers/${container_index}/args" --argjson args "$args_json" '[{op:"replace", path:$path, value:$args}]')"
+            kubectl -n "$NAMESPACE" patch deployment "$DEPLOYMENT" --type=json -p "$patch_json"
+          }
+
+          restore_router_args() {
+            previous_args_json="$(printf '%s' "$PREVIOUS_ARGS_B64" | base64 -d)"
+            patch_router_args "$previous_args_json"
+          }
+
+          current_image="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{range .spec.template.spec.containers[?(@.name=="router")]}{.image}{end}')"
+          if [ "$current_image" = "$PREVIOUS_IMAGE" ]; then
+            echo "${NAMESPACE}/deployment/${DEPLOYMENT} container ${CONTAINER} already uses ${PREVIOUS_IMAGE}"
+            restore_router_args
+            kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s || true
+            exit 0
+          fi
+
+          echo "Rolling back ${NAMESPACE}/deployment/${DEPLOYMENT} container ${CONTAINER} to ${PREVIOUS_IMAGE}"
+          kubectl -n "$NAMESPACE" set image "deployment/${DEPLOYMENT}" "${CONTAINER}=${PREVIOUS_IMAGE}"
+          restore_router_args
+          kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s || true
+          REMOTE_ROLLBACK
+          }
+
+          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "PR_IMAGE='${PR_IMAGE}' PREVIOUS_IMAGE='${previous_image}' PREVIOUS_ARGS_B64='${previous_args_b64}' bash -s" <<'REMOTE_ROLLOUT'
+          set -euo pipefail
+
+          NAMESPACE="lava-infra"
+          DEPLOYMENT="eth-sim-router"
+          SERVICE="eth-sim-router"
+          CONTAINER="router"
+          SELECTOR="app.lavanet.io/router=eth-sim"
+          SERVICE_PORT="3000"
+          HEALTH_PATH="/lava/health"
+          previous_image="${PREVIOUS_IMAGE:-}"
+          rollback_needed=false
+          args_changed=false
+
+          patch_router_args() {
+            args_json="$1"
+            container_index="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o json | jq -r --arg container "$CONTAINER" '.spec.template.spec.containers | to_entries[] | select(.value.name == $container).key')"
+            if [ -z "$container_index" ]; then
+              echo "Could not resolve container index for ${CONTAINER}"
+              exit 1
+            fi
+            patch_json="$(jq -cn --arg path "/spec/template/spec/containers/${container_index}/args" --argjson args "$args_json" '[{op:"replace", path:$path, value:$args}]')"
+            kubectl -n "$NAMESPACE" patch deployment "$DEPLOYMENT" --type=json -p "$patch_json"
+          }
+
+          restore_router_args() {
+            previous_args_json="$(printf '%s' "$PREVIOUS_ARGS_B64" | base64 -d)"
+            patch_router_args "$previous_args_json"
+          }
+
+          rollback() {
+            if [ -z "${previous_image:-}" ]; then
+              echo "Previous image was not captured; cannot rollback"
+              return 1
+            fi
+            echo "Rolling back ${NAMESPACE}/deployment/${DEPLOYMENT} container ${CONTAINER} to ${previous_image}"
+            kubectl -n "$NAMESPACE" set image "deployment/${DEPLOYMENT}" "${CONTAINER}=${previous_image}"
+            if [ "$args_changed" = "true" ]; then
+              restore_router_args
+            fi
+            kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s || true
+          }
+
+          cleanup() {
+            status="$?"
+            if [ "$status" -ne 0 ] && [ "$rollback_needed" = "true" ]; then
+              set +e
+              rollback
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          print_rollout_diagnostics() {
+            redact_sensitive_output() {
+              sed -E 's/((token|secret|password|apikey|api_key|authorization)[=: ]+)[^ &"]+/\1[REDACTED]/Ig'
+            }
+
+            echo "Deployment status:"
+            kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o wide || true
+            echo "ReplicaSets:"
+            kubectl -n "$NAMESPACE" get rs -l "$SELECTOR" -o wide || true
+            echo "Pods:"
+            kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o wide || true
+            echo "Pod container states:"
+            kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{" phase="}{.status.phase}{" containers="}{range .status.containerStatuses[*]}{.name}{":ready="}{.ready}{":restarts="}{.restartCount}{":waiting="}{.state.waiting.reason}{":terminated="}{.state.terminated.reason}{";"}{end}{"\n"}{end}' || true
+            echo "Recent target pod events:"
+            kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp --field-selector involvedObject.kind=Pod | grep "$DEPLOYMENT" | tail -20 || true
+            echo "PR pod logs:"
+            kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.containers[?(@.name=="router")]}{.image}{end}{"\n"}{end}' \
+              | awk -v image="$PR_IMAGE" '$2 == image {print $1}' \
+              | while IFS= read -r pod; do
+                  [ -z "$pod" ] && continue
+                  echo "Logs for ${pod} (previous container):"
+                  kubectl -n "$NAMESPACE" logs "$pod" -c "$CONTAINER" --previous --tail=80 2>&1 | redact_sensitive_output || true
+                  echo "Logs for ${pod} (current container):"
+                  kubectl -n "$NAMESPACE" logs "$pod" -c "$CONTAINER" --tail=80 2>&1 | redact_sensitive_output || true
+                done
+          }
+
+          fail_if_pr_pod_crashed() {
+            crash_reasons="$(kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.containers[?(@.name=="router")]}{.image}{end}{"\t"}{range .status.containerStatuses[?(@.name=="router")]}{.state.waiting.reason}{"\t"}{.lastState.terminated.reason}{"\t"}{.lastState.terminated.exitCode}{end}{"\n"}{end}' \
+              | awk -F '\t' -v image="$PR_IMAGE" '$2 == image && ($3 ~ /CrashLoopBackOff|Error|RunContainerError|CreateContainerConfigError|ImagePullBackOff|ErrImagePull/ || ($5 != "" && $5 != "0")) {print}')"
+            if [ -n "$crash_reasons" ]; then
+              echo "PR image pod exited or entered a waiting failure state:"
+              printf '%s\n' "$crash_reasons"
+              print_rollout_diagnostics
+              exit 1
+            fi
+          }
+
+          if [ -z "$previous_image" ]; then
+            echo "Could not capture current image for ${NAMESPACE}/deployment/${DEPLOYMENT} container ${CONTAINER}"
+            exit 1
+          fi
+          if [ -z "${PREVIOUS_ARGS_B64:-}" ]; then
+            echo "Could not capture current args for ${NAMESPACE}/deployment/${DEPLOYMENT} container ${CONTAINER}"
+            exit 1
+          fi
+          echo "Previous image: ${previous_image}"
+          echo "PR image: ${PR_IMAGE}"
+          echo "Rollout command: kubectl -n ${NAMESPACE} set image deployment/${DEPLOYMENT} ${CONTAINER}=${PR_IMAGE}"
+
+          current_args_json="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o json | jq -c --arg container "$CONTAINER" '.spec.template.spec.containers[] | select(.name == $container).args // []')"
+          sanitized_args_json="$(printf '%s' "$current_args_json" | jq -c '
+            def retired_flag($arg):
+              ($arg == "--optimizer-qos-listen") or
+              ($arg | startswith("--optimizer-qos-listen=")) or
+              ($arg == "--show-provider-address-in-metrics") or
+              ($arg | startswith("--show-provider-address-in-metrics="));
+            def retired_flag_without_value($arg):
+              ($arg == "--optimizer-qos-listen") or
+              ($arg == "--show-provider-address-in-metrics");
+            reduce .[] as $arg ({out: [], drop_next: false};
+              if .drop_next then
+                if ($arg | startswith("--")) then
+                  .drop_next = false | .out += [$arg]
+                else
+                  .drop_next = false
+                end
+              elif retired_flag_without_value($arg) then
+                .drop_next = true
+              elif retired_flag($arg) then
+                .
+              else
+                .out += [$arg]
+              end
+            ) | .out
+          ')"
+          if [ "$sanitized_args_json" != "$current_args_json" ]; then
+            echo "Removing unsupported legacy metrics router args for PR validation"
+            patch_router_args "$sanitized_args_json"
+            args_changed=true
+            rollback_needed=true
+          fi
+
+          kubectl -n "$NAMESPACE" set image "deployment/${DEPLOYMENT}" "${CONTAINER}=${PR_IMAGE}"
+          rollback_needed=true
+
+          for _ in $(seq 1 30); do
+            fail_if_pr_pod_crashed
+            sleep 2
+          done
+
+          echo "Rollout status command: kubectl -n ${NAMESPACE} rollout status deployment/${DEPLOYMENT} --timeout=600s"
+          if ! kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s; then
+            print_rollout_diagnostics
+            exit 1
+          fi
+
+          deployed_image="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{range .spec.template.spec.containers[?(@.name=="router")]}{.image}{end}')"
+          if [ "$deployed_image" != "$PR_IMAGE" ]; then
+            echo "Deployment image mismatch: expected ${PR_IMAGE}, got ${deployed_image}"
+            exit 1
+          fi
+
+          kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l "$SELECTOR" --timeout=600s
+          pod_images="$(kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o jsonpath='{range .items[*]}{range .spec.containers[?(@.name=="router")]}{.image}{"\n"}{end}{end}')"
+          if [ -z "$pod_images" ]; then
+            echo "No running pod images found for selector ${SELECTOR}"
+            exit 1
+          fi
+          while IFS= read -r pod_image; do
+            [ -z "$pod_image" ] && continue
+            if [ "$pod_image" != "$PR_IMAGE" ]; then
+              echo "Pod image mismatch: expected ${PR_IMAGE}, got ${pod_image}"
+              exit 1
+            fi
+          done <<< "$pod_images"
+
+          service_ip="$(kubectl -n "$NAMESPACE" get service "$SERVICE" -o jsonpath='{.spec.clusterIP}')"
+          if [ -z "$service_ip" ] || [ "$service_ip" = "None" ]; then
+            echo "Service ${NAMESPACE}/${SERVICE} has no ClusterIP"
+            exit 1
+          fi
+          smoke_endpoint="http://${service_ip}:${SERVICE_PORT}"
+          echo "Smoke endpoint: ${smoke_endpoint}"
+
+          health_ok=false
+          for _ in $(seq 1 60); do
+            if curl -fsS "${smoke_endpoint}${HEALTH_PATH}" >/dev/null; then
+              health_ok=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$health_ok" != "true" ]; then
+            echo "Health check failed: ${smoke_endpoint}${HEALTH_PATH}"
+            exit 1
+          fi
+
+          rpc_response="$(curl -fsS \
+            -X POST "$smoke_endpoint" \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}')"
+          if grep -q '"error"' <<< "$rpc_response" || ! grep -q '"result"' <<< "$rpc_response"; then
+            echo "RPC smoke failed"
+            printf '%s\n' "$rpc_response"
+            exit 1
+          fi
+
+          echo "Kubernetes rollout validation passed"
+          rollback_needed=false
+          REMOTE_ROLLOUT
+          then
+            echo "::error::dev-prtests Kubernetes rollout validation failed"
+            rollback_remote || true
             exit 1
           fi
 
           {
-            echo "### dev-sim-prtests artifact validation"
+            echo "### dev-prtests Kubernetes rollout validation"
             echo ""
-            echo "- PR number: \`${PR_NUMBER}\`"
-            echo "- PR head SHA: \`${HEAD_SHA}\`"
-            echo "- Artifact name: \`${ARTIFACT_NAME}\`"
-            echo "- Remote path: \`${remote_binary}\`"
-            echo "- Version: \`${VERSION}\`"
+            echo "- Namespace: \`lava-infra\`"
+            echo "- Deployment: \`eth-sim-router\`"
+            echo "- Container: \`router\`"
+            echo "- Service: \`eth-sim-router\`"
+            echo "- PR image: \`${PR_IMAGE}\`"
+            echo "- Rollout command: \`kubectl -n lava-infra set image deployment/eth-sim-router router=${PR_IMAGE}\`"
+            echo "- Readiness command: \`kubectl -n lava-infra rollout status deployment/eth-sim-router --timeout=600s\`"
+            echo "- Smoke endpoint: \`http://<eth-sim-router ClusterIP>:3000\`"
             echo "- Validation result: \`passed\`"
-            echo "- Deployment performed: \`false\`"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Run isolated runtime smoke test
-        env:
-          SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
-          SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SSH_HOST:-}" ]; then
-            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_HOST"
-            exit 1
-          fi
-          if [ -z "${SSH_KEY:-}" ]; then
-            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_KEY"
-            exit 1
-          fi
-
-          key_file="$(mktemp)"
-          trap 'rm -f "$key_file"' EXIT
-          printf '%s\n' "$SSH_KEY" > "$key_file"
-          chmod 600 "$key_file"
-          if ! ssh-keygen -y -f "$key_file" >/dev/null; then
-            echo "SSH key validation failed"
-            exit 1
-          fi
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-
-          remote_dir="/opt/smart-router-prtests/pr-${PR_NUMBER}/${HEAD_SHA}"
-          remote_binary="${remote_dir}/smartrouter"
-          remote_config="${remote_dir}/smoke_smartrouter.yml"
-          remote_specs_dir="${remote_dir}/specs"
-          smoke_port=$((30000 + (PR_NUMBER % 1000) * 10 + (0x${HEAD_SHA:0:4} % 10)))
-          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RemoteCommand=none -o RequestTTY=no)
-          scp_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
-
-          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "mkdir -p '$remote_specs_dir'" >/dev/null 2>&1; then
-            echo "::error::Failed to prepare remote smoke test directory"
-            exit 1
-          fi
-          if ! scp "${scp_opts[@]}" config/smartrouter_examples/smartrouter_eth.yml "${SSH_HOST}:${remote_config}" >/dev/null 2>&1; then
-            echo "::error::Failed to copy smoke test config"
-            exit 1
-          fi
-          if ! scp "${scp_opts[@]}" specs/*.json "${SSH_HOST}:${remote_specs_dir}/" >/dev/null 2>&1; then
-            echo "::error::Failed to copy static specs"
-            exit 1
-          fi
-
-          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" \
-            "REMOTE_DIR='$remote_dir' REMOTE_BINARY='$remote_binary' REMOTE_CONFIG='$remote_config' REMOTE_SPECS_DIR='$remote_specs_dir' SMOKE_PORT='$smoke_port' bash -s" <<'REMOTE_SMOKE'
-          set -euo pipefail
-
-          smoke_pid=""
-          smoke_log="${REMOTE_DIR}/smoke.log"
-          smoke_pid_file="${REMOTE_DIR}/smoke.pid"
-
-          cleanup() {
-            if [ -n "${smoke_pid:-}" ] && kill -0 "$smoke_pid" 2>/dev/null; then
-              kill "$smoke_pid" 2>/dev/null || true
-              wait "$smoke_pid" 2>/dev/null || true
-            elif [ -f "$smoke_pid_file" ]; then
-              pid="$(cat "$smoke_pid_file" 2>/dev/null || true)"
-              case "$pid" in
-                ''|*[!0-9]*) ;;
-                *)
-                  if process_is_prtests "$pid" && kill -0 "$pid" 2>/dev/null; then
-                    kill "$pid" 2>/dev/null || true
-                    wait "$pid" 2>/dev/null || true
-                  fi
-                  ;;
-              esac
-            fi
-            rm -f "$smoke_pid_file"
-          }
-          trap cleanup EXIT
-
-          terminate_pid() {
-            pid="$1"
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-              kill "$pid" 2>/dev/null || true
-              for _ in $(seq 1 10); do
-                if ! kill -0 "$pid" 2>/dev/null; then
-                  return 0
-                fi
-                sleep 1
-              done
-              kill -9 "$pid" 2>/dev/null || true
-            fi
-          }
-
-          process_command() {
-            pid="$1"
-            if [ -r "/proc/${pid}/cmdline" ]; then
-              tr '\0' ' ' < "/proc/${pid}/cmdline"
-            else
-              ps -p "$pid" -o args= 2>/dev/null || true
-            fi
-          }
-
-          process_is_prtests() {
-            command_line="$(process_command "$1")"
-            case "$command_line" in
-              *"$REMOTE_DIR"*|*"$REMOTE_BINARY"*|*"/opt/smart-router-prtests/"*) return 0 ;;
-              *) return 1 ;;
-            esac
-          }
-
-          if [ ! -x "$REMOTE_BINARY" ]; then
-            echo "Remote PR binary is not executable"
-            exit 1
-          fi
-          if [ ! -f "$REMOTE_CONFIG" ]; then
-            echo "Smoke test config is missing"
-            exit 1
-          fi
-          if [ ! -d "$REMOTE_SPECS_DIR" ]; then
-            echo "Static specs directory is missing"
-            exit 1
-          fi
-
-          sed -i \
-            -e "s/0\.0\.0\.0:3360/127.0.0.1:${SMOKE_PORT}/g" \
-            -e "s/0\.0\.0\.0:7779/disabled/g" \
-            "$REMOTE_CONFIG"
-
-          if [ -f "$smoke_pid_file" ]; then
-            old_pid="$(cat "$smoke_pid_file" 2>/dev/null || true)"
-            case "$old_pid" in
-              ''|*[!0-9]*) ;;
-              *) process_is_prtests "$old_pid" && terminate_pid "$old_pid" ;;
-            esac
-            rm -f "$smoke_pid_file"
-          fi
-
-          port_pids=""
-          if command -v lsof >/dev/null 2>&1; then
-            port_pids="$(lsof -tiTCP:"$SMOKE_PORT" -sTCP:LISTEN 2>/dev/null || true)"
-          elif command -v ss >/dev/null 2>&1; then
-            port_pids="$(ss -ltnp "sport = :$SMOKE_PORT" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u || true)"
-          elif command -v fuser >/dev/null 2>&1; then
-            port_pids="$(fuser -n tcp "$SMOKE_PORT" 2>/dev/null || true)"
-          fi
-          for old_pid in $port_pids; do
-            case "$old_pid" in
-              ''|*[!0-9]*) continue ;;
-            esac
-            process_is_prtests "$old_pid" && terminate_pid "$old_pid"
-          done
-
-          (
-            cd "$REMOTE_DIR"
-            OTEL_SDK_DISABLED=true exec "$REMOTE_BINARY" smoke_smartrouter \
-              --geolocation 1 \
-              --use-static-spec "$REMOTE_SPECS_DIR" \
-              --skip-websocket-verification \
-              --metrics-listen-address disabled \
-              --log-level warn
-          ) >"$smoke_log" 2>&1 &
-          smoke_pid="$!"
-          echo "$smoke_pid" > "$smoke_pid_file"
-
-          ready=false
-          for _ in $(seq 1 60); do
-            if ! kill -0 "$smoke_pid" 2>/dev/null; then
-              echo "Smoke process exited during startup"
-              tail -50 "$smoke_log" || true
-              exit 1
-            fi
-            if curl -fsS "http://127.0.0.1:${SMOKE_PORT}/lava/health" >/dev/null 2>&1; then
-              ready=true
-              break
-            fi
-            sleep 1
-          done
-          if [ "$ready" != "true" ]; then
-            echo "Smoke process did not become ready"
-            tail -50 "$smoke_log" || true
-            exit 1
-          fi
-
-          smoke_response="$(curl -fsS \
-            -X POST "http://127.0.0.1:${SMOKE_PORT}" \
-            -H 'Content-Type: application/json' \
-            -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}')"
-          if ! grep -q '"result"' <<< "$smoke_response"; then
-            echo "Smoke RPC response did not include a result"
-            printf '%s\n' "$smoke_response"
-            tail -50 "$smoke_log" || true
-            exit 1
-          fi
-          if ! kill -0 "$smoke_pid" 2>/dev/null; then
-            echo "Smoke process exited after RPC request"
-            tail -50 "$smoke_log" || true
-            exit 1
-          fi
-          REMOTE_SMOKE
-          then
-            echo "::error::Isolated runtime smoke test failed"
-            exit 1
-          fi
 
   preflight-status:
     name: Publish PR Validation Status
