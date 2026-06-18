@@ -273,9 +273,42 @@ jobs:
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RemoteCommand=none -o RequestTTY=no)
+          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RemoteCommand=none -o RequestTTY=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20)
 
-          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "PR_IMAGE='${PR_IMAGE}' bash -s" <<'REMOTE_ROLLOUT'
+          previous_image="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "kubectl -n lava-infra get deployment eth-sim-router -o jsonpath='{range .spec.template.spec.containers[?(@.name==\"router\")]}{.image}{end}'")"
+          if [ -z "$previous_image" ]; then
+            echo "::error::Could not capture current image for lava-infra/deployment/eth-sim-router container router"
+            exit 1
+          fi
+
+          rollback_remote() {
+            echo "Attempting rollback for lava-infra/deployment/eth-sim-router container router"
+            ssh "${ssh_opts[@]}" "$SSH_HOST" "PREVIOUS_IMAGE='${previous_image}' bash -s" <<'REMOTE_ROLLBACK'
+          set -euo pipefail
+
+          NAMESPACE="lava-infra"
+          DEPLOYMENT="eth-sim-router"
+          CONTAINER="router"
+
+          if [ -z "${PREVIOUS_IMAGE:-}" ]; then
+            echo "Previous image was not captured; cannot rollback"
+            exit 1
+          fi
+
+          current_image="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{range .spec.template.spec.containers[?(@.name=="router")]}{.image}{end}')"
+          if [ "$current_image" = "$PREVIOUS_IMAGE" ]; then
+            echo "${NAMESPACE}/deployment/${DEPLOYMENT} container ${CONTAINER} already uses ${PREVIOUS_IMAGE}"
+            kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s || true
+            exit 0
+          fi
+
+          echo "Rolling back ${NAMESPACE}/deployment/${DEPLOYMENT} container ${CONTAINER} to ${PREVIOUS_IMAGE}"
+          kubectl -n "$NAMESPACE" set image "deployment/${DEPLOYMENT}" "${CONTAINER}=${PREVIOUS_IMAGE}"
+          kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout=600s || true
+          REMOTE_ROLLBACK
+          }
+
+          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "PR_IMAGE='${PR_IMAGE}' PREVIOUS_IMAGE='${previous_image}' bash -s" <<'REMOTE_ROLLOUT'
           set -euo pipefail
 
           NAMESPACE="lava-infra"
@@ -285,7 +318,7 @@ jobs:
           SELECTOR="app.lavanet.io/router=eth-sim"
           SERVICE_PORT="3000"
           HEALTH_PATH="/lava/health"
-          previous_image=""
+          previous_image="${PREVIOUS_IMAGE:-}"
           rollback_needed=false
 
           rollback() {
@@ -308,7 +341,6 @@ jobs:
           }
           trap cleanup EXIT
 
-          previous_image="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{range .spec.template.spec.containers[?(@.name=="router")]}{.image}{end}')"
           if [ -z "$previous_image" ]; then
             echo "Could not capture current image for ${NAMESPACE}/deployment/${DEPLOYMENT} container ${CONTAINER}"
             exit 1
@@ -379,6 +411,7 @@ jobs:
           REMOTE_ROLLOUT
           then
             echo "::error::dev-prtests Kubernetes rollout validation failed"
+            rollback_remote || true
             exit 1
           fi
 
