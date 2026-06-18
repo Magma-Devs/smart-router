@@ -169,7 +169,7 @@ func TestUpdateEpoch_PreservesGroupLabel(t *testing.T) {
 	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "tendermintrpc", NetworkAddress: "127.0.0.1:3333"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
 	chainKey := rpcEndpoint.Key()
-	rpsr.sessionManagers[chainKey] = lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	rpsr.sessionManagers[chainKey] = lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
 
 	primary := lavasession.NewConsumerSessionWithProvider("lava@primary",
 		[]*lavasession.Endpoint{{NetworkAddress: "http://primary:8080", Enabled: true}}, 100, 1, int64(1))

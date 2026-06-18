@@ -23,7 +23,7 @@ func newCapacityTestServer(t *testing.T, groupByAddr map[string]string) *RPCSmar
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
 	csm := lavasession.NewConsumerSessionManager(
 		&lavasession.RPCEndpoint{NetworkAddress: "stub", ChainID: "LAVA", ApiInterface: "rest"},
-		optimizer, nil, nil, "lava@test", lavasession.NewActiveSubscriptionProvidersStorage())
+		optimizer, nil, "lava@test", lavasession.NewActiveSubscriptionProvidersStorage())
 
 	pairingList := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(groupByAddr))
 	var i uint64

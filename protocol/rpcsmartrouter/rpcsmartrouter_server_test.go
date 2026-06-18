@@ -558,7 +558,7 @@ func cvRequestCounter(t *testing.T, name, method string) float64 {
 func TestCrossValidationFailFast_EmitsRequestFailedMetrics(t *testing.T) {
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	require.NotNil(t, mm)
-	logs, err := metrics.NewRPCConsumerLogs(mm, nil, nil, nil)
+	logs, err := metrics.NewRPCConsumerLogs(mm, nil, nil)
 	require.NoError(t, err)
 	srv := &RPCSmartRouterServer{
 		rpcSmartRouterLogs: logs,
