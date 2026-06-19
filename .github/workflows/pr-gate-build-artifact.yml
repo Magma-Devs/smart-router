@@ -559,6 +559,48 @@ jobs:
             echo "- Validation result: \`passed\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Checkout smart-router-automation
+        uses: actions/checkout@v6
+        with:
+          repository: Magma-Devs/smart-router-automation
+          token: ${{ secrets.SMART_ROUTER_AUTOMATION_READ_TOKEN }}
+          path: smart-router-automation
+          persist-credentials: false
+
+      - name: Set up Python for automation tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install smart-router-automation dependencies
+        working-directory: smart-router-automation
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+
+      - name: Run smart-router-automation public readiness smoke
+        working-directory: smart-router-automation
+        env:
+          CLUSTER_HOST: prtests.magmadevs.com
+          SERVER_HOST: prtests.magmadevs.com
+          SMART_ROUTER_FETCH_VALUES_YML: "0"
+        run: |
+          set -euo pipefail
+          echo "Automation target: https://eth-sim-jsonrpc.${CLUSTER_HOST}"
+          python -m src.config.build_defaults
+          python -m src.config.build_deployment
+          python -m pytest tests/ -m cluster_readiness_smoke_public -v --no-cov
+          {
+            echo "### smart-router-automation public readiness"
+            echo ""
+            echo "- Checkout path: \`smart-router-automation\`"
+            echo "- Target host: \`${CLUSTER_HOST}\`"
+            echo "- Target URL: \`https://eth-sim-jsonrpc.${CLUSTER_HOST}\`"
+            echo "- Pytest command: \`python -m pytest tests/ -m cluster_readiness_smoke_public -v --no-cov\`"
+            echo "- Result: \`passed\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   preflight-status:
     name: Publish PR Validation Status
     runs-on: ubuntu-latest
