@@ -80,11 +80,11 @@ const (
 	EnableSelectionStatsHeaderFlag = "enable-selection-stats" // enable selection stats header for debugging provider selection // allows the user to manually load a spec providing a path, this is useful to test spec changes before they hit the blockchain
 
 	// weighted selection flags (new system replacing tiers)
-	ProviderOptimizerAvailabilityWeight = "provider-optimizer-availability-weight"  // weight for availability score (default: 0.4)
-	ProviderOptimizerLatencyWeight      = "provider-optimizer-latency-weight"       // weight for latency score (default: 0.3)
-	ProviderOptimizerSyncWeight         = "provider-optimizer-sync-weight"          // weight for sync score (default: 0.2)
-	ProviderOptimizerStakeWeight        = "provider-optimizer-stake-weight"         // weight for stake (default: 0.1)
-	ProviderOptimizerMinSelectionChance = "provider-optimizer-min-selection-chance" // minimum selection probability for any provider (default: 0.01)
+	ProviderOptimizerAvailabilityWeight = "qos-availability-weight"  // weight for availability score (default: 0.4)
+	ProviderOptimizerLatencyWeight      = "qos-latency-weight"       // weight for latency score (default: 0.3)
+	ProviderOptimizerSyncWeight         = "qos-sync-weight"          // weight for sync score (default: 0.2)
+	ProviderOptimizerStakeWeight        = "qos-stake-weight"         // weight for stake (default: 0.1)
+	ProviderOptimizerMinSelectionChance = "qos-min-selection-chance" // minimum selection probability for any provider (default: 0.01)
 
 	// optimizer qos sampling cadence — drives the in-memory /metrics
 	// selection-score cache and the OTel optimizer_qos emit.
