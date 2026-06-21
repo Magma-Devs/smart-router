@@ -8,6 +8,162 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.0.3 — 2026-06-21
+
+### Highlights
+
+Smart Router v1.0.3 introduces two breaking changes that require immediate operator action: the `--geolocation` CLI flag has been removed entirely, and the deprecated `static-providers:` and `backup-providers:` YAML configuration keys are no longer read. Invocations passing `--geolocation` will now fail with an "unknown flag" error, and operators must rename the legacy configuration keys to `direct-rpc:` and `backup-direct-rpc:` to prevent startup failures, while also updating any dashboards that rely on the dropped `geo_location` attribute in optimizer-QoS metrics. Beyond these breaking changes, this release implements a group-aware cross-validation engine that evaluates responses across diverse provider sets using per-method policies, exposing validation failures through a new `disagreeing-providers` header and dedicated mismatch metrics. WebSocket connections now support JSON-formatted requests and assign unique wire IDs to safely multiplex concurrent calls without re-dialing closed sockets. Connection resilience is adjusted by increasing the maximum consecutive connection attempts from 5 to 50 and removing the dead per-socket `isHealthy` selection gate, while the provider optimizer now calculates sync scores using per-endpoint blocks. Finally, the `/debug/pprof` endpoint is no longer exposed on the cache metrics port to prevent unintended profiling access.
+
+### Changes
+
+#### ⚠ Breaking changes
+- chore!: remove geolocation entirely from smart-router ([#134]) [`afe1805`]
+  - the --geolocation CLI flag is removed. Invocations that pass --geolocation will now fail with "unknown flag". The emitted optimizer-QoS metric also drops its geo_location attribute. Update any scripts, deployments, or dashboards that reference them.
+- chore!: drop deprecated static-providers/backup-providers config keys ([#135]) [`1735bdc`]
+  - smart-router no longer reads "static-providers:" or "backup-providers:" YAML keys. Configs still using them must rename to "direct-rpc:" / "backup-direct-rpc:" or the router fails to start with "requires direct-rpc endpoints configuration".
+
+#### New Features
+- feat(cross-validation): add provider group-label spine (Phase 0.1) ([#102]) [`47a337a`]
+- feat(cross-validation): per-method policy resolver (Phase 1.1 core) ([#102]) [`d8f6808`]
+- feat(cross-validation): wire per-method policy resolver into selection (Phase 1.1) ([#102]) [`080d114`]
+- feat(cross-validation): group-aware quorum termination + gate (Phase 1.2b/1.2c) ([#102]) [`2388b8c`]
+- feat(cross-validation): group-aware provider selection (Phase 1.2a) ([#102]) [`8f7beab`]
+- feat(cross-validation): group + finality mismatch metrics (Phase 1.3) ([#102]) [`9ed936d`]
+- feat(cross-validation): disagreeing-providers header + validation-set scope guard ([#102]) [`0b2a3ac`]
+- feat(cross-validation): per-group quorum (Phase 2.3) ([#102]) [`ff0b56a`]
+- feat(cross-validation): close PRD-contract gaps + restore golangci-lint ([#102]) [`e3ae66e`]
+- feat(rpcsmartrouter): warn when CV group-diversity rests on small groups ([#102]) [`f9cd04c`]
+- feat(changelog): flag breaking changes in Highlights and Changes ([#136]) [`eed776e`]
+
+#### Bug fixes
+- fix(smart-router/health): stop gating selection on the per-socket isHealthy bit ([#100]) [`e868552`]
+- refactor(smart-router/health): rip out the dead per-socket healthy bit & its debug reset ([#100]) [`4f5f208`]
+- fix(smart-router/health): guard against a nil direct-connection element ([#100]) [`39bbe65`]
+- fix(protocol/lavasession): increase max consecutive connection attempts from 5 to 50 ([#100]) [`1c67b2f`]
+- fix(cross-validation): address Phase 0/1.1 review findings ([#102]) [`5d2cff8`]
+- fix(cross-validation): tighten min-groups capacity, float parsing, guard fail-closed ([#102]) [`6bab82c`]
+- fix(cross-validation): diverse-quorum selection, post-filter capacity, failure reason ([#102]) [`ae4c7ba`]
+- fix(cross-validation): preserve response hashes + scope mismatch metric to outliers (Section 1.3) ([#102]) [`513409a`]
+- fix(cross-validation): surface failure-reason header on request-time fail-fast ([#102]) [`cd4f5ad`]
+- fix(cross-validation): set fail-fast reason on all-sessions-failed-consistency path ([#102]) [`e675c83`]
+- fix(cross-validation): per-group selection prefers groups that can reach threshold ([#102]) [`6940865`]
+- fix(cross-validation): per-group nil-reply early-exit + runtime capacity guards ([#102]) [`d8bafac`]
+- fix(cross-validation): count request-time fail-fast in CV metrics; doc accuracy ([#102]) [`b6f7244`]
+- fix(scripts): correct make target and config path in setup scripts ([#102]) [`584925f`]
+- fix(scripts): point UC-1 test at reachable Lava mainnet endpoint; keep router up ([#102]) [`e2aea61`]
+- fix(cross-validation): close 4 review findings (caller policy weakening, dropped pin, failure-reason + outlier mislabels) ([#102]) [`8e05be4`]
+- fix(cross-validation): close review findings 5-7 (header MinGroups default, nil early-exit, fail-fast reason precedence) ([#102]) [`ffa38d6`]
+- fix(relaycore): canonicalize response before cross-validation hashing ([#102]) [`b154d8b`]
+- refactor(cross-validation): drop intPtr helper for Go 1.26 new(expr) ([#102]) [`22e51f9`]
+- refactor(cross-validation): extract default group label into a constant ([#102]) [`8daa448`]
+- refactor(lavasession): name the group-blind selection sentinels ([#102]) [`f030eca`]
+- refactor(relaycore): name the no-cross-validation default knob value ([#102]) [`c81a8b5`]
+- refactor(relaycore): extract selectQuorumWinner with unit tests ([#102]) [`1b929b0`]
+- refactor(rpcsmartrouter): require integer cross-validation knobs ([#102]) [`5984395`]
+- refactor(rpcsmartrouter): extract policyKeySeparator constant ([#102]) [`3687599`]
+- refactor(rpcsmartrouter): filter policies by key prefix, not split-compare ([#102]) [`e33eac9`]
+- fix(cross-validation): reconcile main's CV-mode hashing gate + test signatures after rebase ([#102]) [`f925ac0`]
+- fix(cache): stop exposing /debug/pprof on the cache metrics endpoint ([#128]) [`10d8464`]
+- fix(provider-optimizer): use per-endpoint block for sync-score (MAG-1748) ([#132]) [`d329b9c`]
+
+#### Documentation updates
+- docs(smart-router/health): note the nil-connection guard is defensive ([#100]) [`e57a7b2`]
+- docs(smart-router/health): spell out the 5→50 backoff leniency tradeoff in the relay-path comment ([#100]) [`3a79c18`]
+- docs(cross-validation): document CV config, headers, outlier behavior (Phase 2.4) ([#102]) [`61f94fa`]
+- docs(cross-validation): tighten outlier-behavior accuracy ([#102]) [`6aaef2e`]
+- docs(metrics): note structural fail-fasts in CV requests/failed totals ([#102]) [`e1a994f`]
+- docs(relaycore): name common.DefaultProviderGroup in group-folding comments ([#102]) [`df053f3`]
+- docs(lavasession,rpcsmartrouter): name common.DefaultProviderGroup in group comments ([#102]) [`ba03abc`]
+
+#### Build process updates
+- ci: validate PR artifact on dev-sim-prtests ([#123]) [`fe45489`]
+- ci: rename dev-sim PR validation workflow ([#124]) [`171cfca`]
+- ci: add dev-sim runtime PR validation ([#125]) [`9264e2a`]
+- ci: add dev-prtests Kubernetes rollout validation ([#126]) [`a15654c`]
+- ci: run automation readiness in PR gate ([#127]) [`58d64d5`]
+
+#### Other work
+- add support for send request as json format to websocket ([#68]) [`92c4013`]
+- Enhance WebSocketDirectRPCConnection to support unique wire IDs for concurrent requests and ensure closed connections do not re-dial. Added tests for concurrent requests with the same caller ID and verified behavior after connection closure. ([#68]) [`7688977`]
+- solana init enviroment scripts ([#100]) [`14c3dd9`]
+- docs+test(cross-validation): correct mismatch metric text + glue test (Section 1.3 P3) ([#102]) [`4ffb1fa`]
+- style(relaycore): gofmt import ordering in two files ([#102]) [`77c70f6`]
+- chore!: remove geolocation entirely from smart-router ([#134]) [`afe1805`]
+- chore!: drop deprecated static-providers/backup-providers config keys ([#135]) [`1735bdc`]
+
+[#100]: https://github.com/magma-Devs/smart-router/pull/100
+[#102]: https://github.com/magma-Devs/smart-router/pull/102
+[#123]: https://github.com/magma-Devs/smart-router/pull/123
+[#124]: https://github.com/magma-Devs/smart-router/pull/124
+[#125]: https://github.com/magma-Devs/smart-router/pull/125
+[#126]: https://github.com/magma-Devs/smart-router/pull/126
+[#127]: https://github.com/magma-Devs/smart-router/pull/127
+[#128]: https://github.com/magma-Devs/smart-router/pull/128
+[#132]: https://github.com/magma-Devs/smart-router/pull/132
+[#134]: https://github.com/magma-Devs/smart-router/pull/134
+[#135]: https://github.com/magma-Devs/smart-router/pull/135
+[#136]: https://github.com/magma-Devs/smart-router/pull/136
+[#68]: https://github.com/magma-Devs/smart-router/pull/68
+[`080d114`]: https://github.com/magma-Devs/smart-router/commit/080d1145122b549215697e67d4aec95efbdb1932
+[`0b2a3ac`]: https://github.com/magma-Devs/smart-router/commit/0b2a3acc2adc417e6c38d4d8e1cc02577c88f861
+[`10d8464`]: https://github.com/magma-Devs/smart-router/commit/10d84646ec374ad9b44b903fa350fa0fb2234ed2
+[`14c3dd9`]: https://github.com/magma-Devs/smart-router/commit/14c3dd9066506ae80fdaf3fe17979a76e4dfa9f9
+[`171cfca`]: https://github.com/magma-Devs/smart-router/commit/171cfca85fdd2f69e04bd75ca6fb11f1d3ba6b67
+[`1735bdc`]: https://github.com/magma-Devs/smart-router/commit/1735bdc3f5b2f0c863361fe91308fdc848d687b8
+[`1b929b0`]: https://github.com/magma-Devs/smart-router/commit/1b929b0b33529583aa59d2ee082bf19f307148bb
+[`1c67b2f`]: https://github.com/magma-Devs/smart-router/commit/1c67b2f84ac632b9a61cbdd81d2985102461dc3e
+[`22e51f9`]: https://github.com/magma-Devs/smart-router/commit/22e51f996206b2f8b3b9c8780d2a422083c7dda9
+[`2388b8c`]: https://github.com/magma-Devs/smart-router/commit/2388b8c4e5903f14f11212e82e1fa33260cb5bf9
+[`3687599`]: https://github.com/magma-Devs/smart-router/commit/3687599ad59a51109f8e60a69318d67ae2780712
+[`39bbe65`]: https://github.com/magma-Devs/smart-router/commit/39bbe65a31899f3430506dd0e6e941306f1a4e0b
+[`3a79c18`]: https://github.com/magma-Devs/smart-router/commit/3a79c189d413e4294ee4a2ac1101d5c1bb5805d6
+[`47a337a`]: https://github.com/magma-Devs/smart-router/commit/47a337a696ae31f16f371ac8e587518b4fb143f8
+[`4f5f208`]: https://github.com/magma-Devs/smart-router/commit/4f5f2080b4bc6446d18adf178ae72c21b83423c2
+[`4ffb1fa`]: https://github.com/magma-Devs/smart-router/commit/4ffb1fa5a90a2780453b595bcb94b09265d9747c
+[`513409a`]: https://github.com/magma-Devs/smart-router/commit/513409a13b102ea880800e0e1f90f5c0bb28936a
+[`584925f`]: https://github.com/magma-Devs/smart-router/commit/584925f7124b941d3c8a62c1330fca5236dfb0e5
+[`58d64d5`]: https://github.com/magma-Devs/smart-router/commit/58d64d5a4a412842b281f1282cf410c752383544
+[`5984395`]: https://github.com/magma-Devs/smart-router/commit/598439515635b97978624c694ff3c861c33601fd
+[`5d2cff8`]: https://github.com/magma-Devs/smart-router/commit/5d2cff8d022879758f6ffbb0f2ee5d368ca32490
+[`61f94fa`]: https://github.com/magma-Devs/smart-router/commit/61f94fa6c4f480b065eb40310713bfa81d70a127
+[`6940865`]: https://github.com/magma-Devs/smart-router/commit/6940865d83349824ead96e8a756eb9dfbd789035
+[`6aaef2e`]: https://github.com/magma-Devs/smart-router/commit/6aaef2eef5443f2b6182c5808ee6d02cc5af1f97
+[`6bab82c`]: https://github.com/magma-Devs/smart-router/commit/6bab82c9466327d2c480e03f1a0774f82623aa5d
+[`7688977`]: https://github.com/magma-Devs/smart-router/commit/76889773f2f27fb50b928c6b91835111e9df26fd
+[`77c70f6`]: https://github.com/magma-Devs/smart-router/commit/77c70f6f3e05dcd8df10b72479132824e35f9a0f
+[`8daa448`]: https://github.com/magma-Devs/smart-router/commit/8daa4481cad35640ba887624445fb79a50d7d6bc
+[`8e05be4`]: https://github.com/magma-Devs/smart-router/commit/8e05be4868b2f930d18638613d93a44d3fc31a62
+[`8f7beab`]: https://github.com/magma-Devs/smart-router/commit/8f7beab7db905502c0708c5a4cf44fd59bf1e592
+[`9264e2a`]: https://github.com/magma-Devs/smart-router/commit/9264e2a0439256863e8b32d6d45996d89fc7e819
+[`92c4013`]: https://github.com/magma-Devs/smart-router/commit/92c4013e4ecd309e884401c4141c4ba8e30210db
+[`9ed936d`]: https://github.com/magma-Devs/smart-router/commit/9ed936dc6161568ff140a86a3f3ae95425f7ff81
+[`a15654c`]: https://github.com/magma-Devs/smart-router/commit/a15654c408a9fe2a184bf81bb4702f54d673d5bd
+[`ae4c7ba`]: https://github.com/magma-Devs/smart-router/commit/ae4c7ba59bba0c1efa17b0ef4f11adf1765c3cc5
+[`afe1805`]: https://github.com/magma-Devs/smart-router/commit/afe1805c9cd84166439ba12ee88720b6a11fc630
+[`b154d8b`]: https://github.com/magma-Devs/smart-router/commit/b154d8bb1c7fc8c7a5d88887237609f4388355a7
+[`b6f7244`]: https://github.com/magma-Devs/smart-router/commit/b6f7244c1b8f562dce807deec2349c2789b17b63
+[`ba03abc`]: https://github.com/magma-Devs/smart-router/commit/ba03abc25e46d309be117df5dc75080abd5e8059
+[`c81a8b5`]: https://github.com/magma-Devs/smart-router/commit/c81a8b537a6e380c5f7328aa449cf54380f21592
+[`cd4f5ad`]: https://github.com/magma-Devs/smart-router/commit/cd4f5ad5c41bae3fffb909b524cd864b7d9aa0bb
+[`d329b9c`]: https://github.com/magma-Devs/smart-router/commit/d329b9c87e090292caa6989c1c3f6f5ce759c363
+[`d8bafac`]: https://github.com/magma-Devs/smart-router/commit/d8bafac0a30563e99449ade6e7488778e720d9de
+[`d8f6808`]: https://github.com/magma-Devs/smart-router/commit/d8f6808a95066be7768dbd545b200cb84f017b29
+[`df053f3`]: https://github.com/magma-Devs/smart-router/commit/df053f3ceb548bfca0dadd4a91d71a96b29ba540
+[`e1a994f`]: https://github.com/magma-Devs/smart-router/commit/e1a994f3444179d6e0171c0220ec82cdac3e97c7
+[`e2aea61`]: https://github.com/magma-Devs/smart-router/commit/e2aea612148bec489d6c93e95dcfb3171084a501
+[`e33eac9`]: https://github.com/magma-Devs/smart-router/commit/e33eac95dd43f36dee7a2ecf86307c36c31d094a
+[`e3ae66e`]: https://github.com/magma-Devs/smart-router/commit/e3ae66eb6710ca093cb3497e63336c43e3acbc07
+[`e57a7b2`]: https://github.com/magma-Devs/smart-router/commit/e57a7b272da2994e43ad69962819ee785372387c
+[`e675c83`]: https://github.com/magma-Devs/smart-router/commit/e675c831cc1fc0b5a2e1ec3c2a52991812755132
+[`e868552`]: https://github.com/magma-Devs/smart-router/commit/e8685529a09a1dc6ac5848a7fd71b8c834046907
+[`eed776e`]: https://github.com/magma-Devs/smart-router/commit/eed776ee3ee3191ac920067cf037f4ddeb6ecd08
+[`f030eca`]: https://github.com/magma-Devs/smart-router/commit/f030eca0d8b241a07bf06b03dcdc8b486a3ccea1
+[`f925ac0`]: https://github.com/magma-Devs/smart-router/commit/f925ac0d6fb8cfc50296f0dedb84ba875fde9c65
+[`f9cd04c`]: https://github.com/magma-Devs/smart-router/commit/f9cd04c76a453b7dfd6b574ac9cffb7a4ecc456e
+[`fe45489`]: https://github.com/magma-Devs/smart-router/commit/fe45489b54bbf04ac8a6b360aa3598f9c2bd68d5
+[`ff0b56a`]: https://github.com/magma-Devs/smart-router/commit/ff0b56a4c88b50bf9b1dfcbec0ad78ac836a59f4
+[`ffa38d6`]: https://github.com/magma-Devs/smart-router/commit/ffa38d678bd89df8f38c0099d3e4a024a3fe8e6d
+
 ## v1.0.2 — 2026-06-18
 
 ### Highlights
