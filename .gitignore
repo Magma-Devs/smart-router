@@ -35,10 +35,6 @@ rpcconsumer.yml
 .env.local
 config/smartrouter_examples/smartrouter_*.yml
 
-# Local TLS cert/key files (do not commit)
-protocol/rpcprovider/cert.pem
-protocol/rpcprovider/key.pem
-
 # Node modules
 **/node_modules
 
@@ -68,7 +64,6 @@ agent_docs/
 mock-node-server/
 .claude/
 Claude.md
-lavap
 # Built smartrouter binary at the repo root (e.g. from `make build`). Anchored with a leading slash so it
 # does NOT ignore the cmd/smartrouter/ source package.
 /smartrouter
