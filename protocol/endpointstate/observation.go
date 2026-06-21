@@ -87,10 +87,10 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 	if m.stopped {
 		return
 	}
-	// Generation gate: ignore callbacks from a removed/replaced tracker instance. A
-	// removed URL has no generation entry (0), and a replaced tracker bumps it, so a
-	// stale gen never matches the current one.
-	if m.generations[endpointURL] != gen {
+	// Generation gate: ignore callbacks from a removed/replaced tracker instance. The
+	// generation must still EXIST (a removed URL has no entry) and match — requiring
+	// existence also rejects a stray gen==0 rather than matching the absent-map default.
+	if liveGen, ok := m.generations[endpointURL]; !ok || liveGen != gen {
 		return
 	}
 
@@ -129,9 +129,19 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 
 // RecordRelayObservation records a block harvested from a served relay response. It
 // updates only the block triple (Source = Relay) — never the poll-health fields — and
-// honors the monotonic ObservedAt guard. The call site (the relay-response chokepoint)
-// is wired by Topic B; the API is defined here so the contract is complete.
-func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, block int64, at time.Time) {
+// honors the monotonic ObservedAt guard.
+//
+// gen is the observation generation the caller captured for this endpoint (see
+// ObservationGeneration / GetOrCreateTracker). Like recordPollObservation, the write is
+// accepted only if gen still matches the URL's live generation under the lock and the
+// monitor is not stopped — so a relay completing after RemoveTracker cannot recreate a
+// deleted record, an old relay from a replaced same-URL endpoint cannot overwrite the new
+// tracker's record, and a relay after Stop cannot resurrect anything (MAG-2159 finding 5).
+// A removed/unknown URL has no live generation (0), which no captured gen matches.
+//
+// The production call site is the relay-response chokepoint (rpcsmartrouter), which
+// harvests only reliable current-tip observations (MAG-2159 findings 1 & 2).
+func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64, block int64, at time.Time) {
 	if block <= 0 {
 		return
 	}
@@ -140,6 +150,13 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, block int64
 	defer m.obsMu.Unlock()
 
 	if m.stopped {
+		return
+	}
+	// Generation gate: reject relays whose captured generation no longer matches the live
+	// one (removed/replaced tracker), mirroring recordPollObservation. Requiring existence
+	// rejects an unknown endpoint (and a stray gen==0) instead of matching the absent
+	// map default of 0.
+	if liveGen, ok := m.generations[endpointURL]; !ok || liveGen != gen {
 		return
 	}
 

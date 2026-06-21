@@ -67,10 +67,14 @@ const (
 )
 
 // PollingTimeMultiplierOverride is the polling-relief process-wide override of
-// MostFrequentPollingMultiplier (default 16). 0 = no relief (current behavior).
-// A smaller value = slower polling = fewer upstream calls. Set once at startup from
-// the --chain-tracker-polling-multiplier flag and honored in newCustomChainTracker,
-// so it applies to every tracker (the global one and all per-endpoint ones).
+// MostFrequentPollingMultiplier (default 16). 0 = no relief. A smaller value = slower
+// polling = fewer upstream calls. Set once at startup from the
+// --chain-tracker-polling-multiplier flag and honored in newCustomChainTracker.
+//
+// MAG-2159: this now affects only trackers on the legacy adaptive cadence — i.e. the
+// global tracker. Per-endpoint trackers run a FIXED flatPollInterval (avgBlockTime/2) and
+// ignore the multiplier entirely until the knob consolidation (pass 2) folds this into a
+// single floored relief control.
 var PollingTimeMultiplierOverride = 0
 
 // EffectivePollingMultiplier returns the multiplier actually in force: the
@@ -146,11 +150,12 @@ type ChainTracker struct {
 
 	// initial config
 	averageBlockTime time.Duration
-	// pollIntervalFloor, when > 0, enables the flat floored cadence (MAG-2159): the poll
-	// runs at a single interval never faster than this floor, with the adaptive tiers off.
-	// 0 keeps the legacy adaptive cadence. See ChainTrackerConfig.PollIntervalFloor.
-	pollIntervalFloor time.Duration
-	serverAddress     string
+	// flatPollInterval, when > 0, selects the FIXED flat cadence (MAG-2159): the poll runs
+	// at exactly this interval, slowed only by failure backoff; the adaptive tiers and
+	// block-gap recalibration no longer drive the timer. 0 keeps the legacy adaptive
+	// cadence. See ChainTrackerConfig.FlatPollInterval.
+	flatPollInterval time.Duration
+	serverAddress    string
 
 	// allows us to mock the chain fetcher for different use cases for example: Solana needs slot to block number
 	iChainFetcherWrapper IChainFetcherWrapper
@@ -476,17 +481,29 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 	// start polling every averageBlockTime/4, then averageBlockTime/8 after passing middle, then averageBlockTime/16 after passing averageBlockTime*3/4
 	// so polling at averageBlockTime/4,averageBlockTime/2,averageBlockTime*5/8,averageBlockTime*3/4,averageBlockTime*13/16,,averageBlockTime*14/16,,averageBlockTime*15/16,averageBlockTime*16/16,averageBlockTime*17/16
 	// initial polling = averageBlockTime/16
-	initialPollingTime := pollingTime / cs.pollingTimeMultiplier // on boot we need to query often to catch changes
-	// MAG-2159: per-endpoint trackers never poll faster than the floor, even on boot.
-	if cs.pollIntervalFloor > 0 && initialPollingTime < cs.pollIntervalFloor {
-		initialPollingTime = cs.pollIntervalFloor
-	}
 	cs.latestChangeTime = time.Time{} // we will discard the first change time, so this is uninitialized
-	cs.timer = time.NewTimer(initialPollingTime)
+
+	// Per-endpoint trackers (flatPollInterval > 0) poll at exactly flatPollInterval.
+	// CRITICAL (MAG-2159 finding 3): the periodic timer must NOT start counting until
+	// initialization completes — otherwise a slow init lets the timer fire immediately
+	// after the goroutine starts, polling faster than the configured interval on boot.
+	// So for the flat cadence we create the timer AFTER fetchInitDataWithRetry; the legacy
+	// adaptive path (global tracker) keeps its original ordering, unchanged.
+	if cs.flatPollInterval == 0 {
+		initialPollingTime := pollingTime / cs.pollingTimeMultiplier // on boot we need to query often to catch changes
+		cs.timer = time.NewTimer(initialPollingTime)
+	}
+
 	err := cs.fetchInitDataWithRetry(ctx)
 	if err != nil {
-		cs.timer.Stop()
+		if cs.timer != nil {
+			cs.timer.Stop()
+		}
 		return err
+	}
+	if cs.flatPollInterval > 0 {
+		// First periodic poll is a full interval after the final init fetch.
+		cs.timer = time.NewTimer(cs.flatPollInterval)
 	}
 	utils.LavaFormatDebug("ChainTracker fetched init data successfully")
 	blockGapTicker := time.NewTicker(pollingTime) // initially every block we check for a polling time
@@ -534,24 +551,21 @@ func (cs *ChainTracker) updateTimer(tickerBaseTime time.Duration, fetchFails uin
 
 // computePollInterval returns the next dedicated-poll interval.
 //
-// When pollIntervalFloor > 0 (per-endpoint trackers, MAG-2159 / Topic B) the cadence is
-// flat and floored: a single interval derived from the multiplier, clamped so it is never
-// faster than the floor (avgBlockTime/2). The old adaptive /4, /2, /16 tiers are gone —
-// relay harvest is the primary block signal, so the dedicated poll is a sparse fallback.
-// Failure backoff can only slow it further.
+// When flatPollInterval > 0 (per-endpoint trackers, MAG-2159 / Topic B) the cadence is
+// FIXED: exactly flatPollInterval (avgBlockTime/2), slowed only by failure backoff. The
+// old adaptive /4, /2, /16 tiers are gone and the block-gap recalibration (which mutates
+// tickerBaseTime) is deliberately ignored here — relay harvest is the primary block
+// signal, so the dedicated poll is a sparse, predictable fallback. (Block-gap estimation
+// still runs for block-time consumers; it just no longer moves this timer — finding 4.)
 //
-// When pollIntervalFloor == 0 (the global tracker, until Topic C removes it) the legacy
+// When flatPollInterval == 0 (the global tracker, until Topic C removes it) the legacy
 // adaptive tiers are preserved, since its readers are not yet harvest-fed.
 func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchFails uint64) time.Duration {
-	var newPollingTime time.Duration
-	if cs.pollIntervalFloor > 0 {
-		newPollingTime = tickerBaseTime / cs.pollingTimeMultiplier
-		if newPollingTime < cs.pollIntervalFloor {
-			newPollingTime = cs.pollIntervalFloor
-		}
-		return exponentialBackoff(newPollingTime, fetchFails)
+	if cs.flatPollInterval > 0 {
+		return exponentialBackoff(cs.flatPollInterval, fetchFails)
 	}
 
+	var newPollingTime time.Duration
 	blockGap := cs.smallestBlockGap()
 	timeSinceLastUpdate := time.Since(cs.getLatestChangeTime())
 	if timeSinceLastUpdate <= tickerBaseTime/2 && blockGap > tickerBaseTime/4 {
@@ -572,6 +586,14 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 			break
 		}
 		utils.LavaFormatDebug("failed fetching block num data on chain tracker init, retry", utils.Attribute{Key: "retry Num", Value: idx}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
+		// MAG-2159 finding 3: space out failed init retries for per-endpoint (flat) trackers
+		// so a failing endpoint cannot burst the upstream at startup. Cancellation stays
+		// prompt (sleepCtx returns immediately on ctx.Done). No delay after the last attempt.
+		if cs.flatPollInterval > 0 && idx < initRetriesCount {
+			if ctxErr := sleepCtx(ctx, cs.flatPollInterval); ctxErr != nil {
+				return ctxErr
+			}
+		}
 	}
 	if err != nil {
 		// Add suggestion if error is due to context deadline exceeded
@@ -586,6 +608,12 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 			break
 		}
 		utils.LavaFormatDebug("failed fetching data on chain tracker init, retry", utils.Attribute{Key: "retry Num", Value: idx}, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
+		// MAG-2159 finding 3: same startup spacing for the previous-blocks init retries.
+		if cs.flatPollInterval > 0 && idx < initRetriesCount-1 {
+			if ctxErr := sleepCtx(ctx, cs.flatPollInterval); ctxErr != nil {
+				return ctxErr
+			}
+		}
 	}
 	if err != nil {
 		// Add suggestion if error is due to context deadline exceeded
@@ -753,7 +781,7 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		startupTime:             time.Now(),
 		pollingTimeMultiplier:   time.Duration(pollingTime),
 		averageBlockTime:        config.AverageBlockTime,
-		pollIntervalFloor:       config.PollIntervalFloor,
+		flatPollInterval:        config.FlatPollInterval,
 		serverAddress:           config.ServerAddress,
 		endpoint:                endpoint,
 	}

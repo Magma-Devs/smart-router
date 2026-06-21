@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/url"
@@ -81,6 +82,47 @@ func extractBlockHeightFromJSONResponse(
 
 	// Fallback to EVM-specific parsing for backwards compatibility
 	return extractBlockHeightFromEVMResponse(responseData, chainMessage.GetApi().Name)
+}
+
+// extractSolanaContextSlot returns result.context.slot from a SINGLE successful Solana
+// JSON-RPC response, and whether it was found. Solana stamps most successful responses
+// (getBalance, getAccountInfo, getLatestBlockhash, ...) with the slot the query was
+// processed at, which is the node's current tip — unlike an EVM historical block. It is
+// deliberately strict (MAG-2159 finding 2):
+//   - single response objects only; a JSON-RPC batch (top-level array) returns false,
+//     since per-call slots can't be attributed to one endpoint tip;
+//   - successful responses only (a present, non-null "error" member → false);
+//   - only the nested result.context.slot envelope — a bare numeric "slot" elsewhere is
+//     NOT interpreted, avoiding coincidental matches.
+//
+// The caller (tipBlockFromRelay) additionally gates on chain family so this is never
+// applied to non-Solana chains.
+func extractSolanaContextSlot(data []byte) (int64, bool) {
+	trimmed := bytes.TrimLeft(data, " \t\r\n")
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return 0, false // not a single JSON object (e.g. a batch array)
+	}
+	var resp struct {
+		Error  json.RawMessage `json:"error"`
+		Result *struct {
+			Context *struct {
+				Slot *int64 `json:"slot"`
+			} `json:"context"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(trimmed, &resp); err != nil {
+		return 0, false
+	}
+	if e := bytes.TrimSpace(resp.Error); len(e) > 0 && string(e) != "null" {
+		return 0, false // JSON-RPC error response
+	}
+	if resp.Result == nil || resp.Result.Context == nil || resp.Result.Context.Slot == nil {
+		return 0, false
+	}
+	if slot := *resp.Result.Context.Slot; slot > 0 {
+		return slot, true
+	}
+	return 0, false
 }
 
 // extractBlockHeightFromEVMResponse extracts block height from EVM JSON-RPC responses.

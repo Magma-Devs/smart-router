@@ -1417,6 +1417,20 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					rpcss.ensureEndpointChainTracker(goroutineCtx, targetEndpoint, directConn)
 				}
 
+				// MAG-2159 (Topic B) relay harvest. Record ONLY a reliable current-tip
+				// observation into the per-endpoint store (findings 1 & 2): a block that
+				// merely appears in a historical response (eth_getBlockByNumber(N),
+				// getBlockByHash, getTransactionReceipt, getLogs) must NOT move the tip. This
+				// is independent of the legacy Reply.LatestBlock handling below because the
+				// Solana tip comes from result.context.slot, which is not in Reply.LatestBlock.
+				// The generation is captured AFTER ensuring the tracker so the write is
+				// rejected if the tracker is later removed/replaced (finding 5).
+				if targetEndpoint != nil {
+					if tip, ok := rpcss.tipBlockFromRelay(chainMessage, localRelayResult.Reply); ok {
+						rpcss.recordRelayBlockObservation(targetEndpoint, rpcss.endpointObservationGeneration(targetEndpoint.NetworkAddress), tip)
+					}
+				}
+
 				// Get latest block: prefer response extraction, fallback to ChainTracker
 				latestBlock := int64(0)
 				if localRelayResult.Reply != nil && localRelayResult.Reply.LatestBlock > 0 {
@@ -1432,10 +1446,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 							utils.LogAttr("latest_block", latestBlock),
 							utils.LogAttr("GUID", goroutineCtx),
 						)
-
-						// MAG-2159 (Topic B): harvest the served-relay block into the
-						// per-endpoint observation store (Source=Relay).
-						rpcss.recordRelayBlockObservation(targetEndpoint, latestBlock)
 					}
 
 					// Update global latest block height and estimator (for getLatestBlock fallback)
@@ -1682,19 +1692,62 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 // If not, it creates one lazily. This enables continuous block polling for accurate
 // consistency pre-validation.
 // This is called the first time we successfully communicate with an endpoint.
-// recordRelayBlockObservation harvests a block parsed from a served relay response into
-// the per-endpoint observation store (MAG-2159 / Topic B), tagged Source=Relay. It is
+// recordRelayBlockObservation harvests a reliable current-tip block (see tipBlockFromRelay)
+// into the per-endpoint observation store (MAG-2159 / Topic B), tagged Source=Relay. It is
 // keyed on endpoint.NetworkAddress — the same key the dedicated poll path uses
 // (EndpointMonitor.GetOrCreateTracker) — so relay and poll observations land on one
-// record. This makes relay traffic the primary observation feed that the cadence
-// traffic-gate and the per-chain tip (Topic C) read. Side-effect-free: RecordRelayObservation
-// only updates the observation record, never QoS or endpoint.Enabled. No-op when no
-// monitor is wired, the endpoint is unknown, or no positive block was parsed.
-func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavasession.Endpoint, block int64) {
+// record. gen is the observation generation captured for this endpoint (after ensuring its
+// tracker); RecordRelayObservation rejects the write if gen no longer matches the live
+// generation, so a relay from a removed/replaced tracker cannot corrupt the record
+// (finding 5). Side-effect-free: it never touches QoS or endpoint.Enabled. No-op when no
+// monitor is wired, the endpoint is nil, or block is non-positive.
+func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavasession.Endpoint, gen uint64, block int64) {
 	if rpcss.endpointChainTrackerManager == nil || endpoint == nil || block <= 0 {
 		return
 	}
-	rpcss.endpointChainTrackerManager.RecordRelayObservation(endpoint.NetworkAddress, block, time.Now())
+	rpcss.endpointChainTrackerManager.RecordRelayObservation(endpoint.NetworkAddress, gen, block, time.Now())
+}
+
+// endpointObservationGeneration returns the live observation generation for an endpoint
+// URL (0 if no monitor or no active tracker). The relay-harvest path captures it after
+// ensuring the tracker and passes it to recordRelayBlockObservation.
+func (rpcss *RPCSmartRouterServer) endpointObservationGeneration(endpointURL string) uint64 {
+	if rpcss.endpointChainTrackerManager == nil {
+		return 0
+	}
+	gen, _ := rpcss.endpointChainTrackerManager.ObservationGeneration(endpointURL)
+	return gen
+}
+
+// tipBlockFromRelay returns a reliable current-tip block observed from a served relay
+// response, and whether one is available — distinguishing a "block associated with a
+// response" (historical) from a "current-tip observation" (MAG-2159 findings 1 & 2).
+//
+// Tip sources, by transport/chain:
+//   - Solana family (JSON-RPC): result.context.slot — the slot the query was processed at,
+//     i.e. the node's current tip — present on most successful Solana responses
+//     (getBalance, getAccountInfo, getLatestBlockhash, ...). Chain-aware; never applied to
+//     other chains. See extractSolanaContextSlot.
+//   - Otherwise: Reply.LatestBlock is the tip ONLY when the request asked for the latest
+//     block (RequestedBlock == LATEST_BLOCK). For any concrete-block request the reply's
+//     block is historical and must not move the tip. Reply.LatestBlock is populated for
+//     JSON-RPC and gRPC (extractBlockHeightFrom{JSON,GRPC}Response); REST harvests nothing.
+//
+// Note: RequestedBlock() is not concretized during the relay flow (the
+// UpdateLatestBlockInMessage call in relaycore/results_manager.go is disabled), so it still
+// reads LATEST_BLOCK here for latest-requesting methods.
+func (rpcss *RPCSmartRouterServer) tipBlockFromRelay(chainMessage chainlib.ChainMessage, reply *pairingtypes.RelayReply) (int64, bool) {
+	if reply == nil {
+		return 0, false
+	}
+	if common.IsSolanaFamily(rpcss.listenEndpoint.ChainID) {
+		return extractSolanaContextSlot(reply.Data)
+	}
+	requestedLatest, _ := chainMessage.RequestedBlock()
+	if requestedLatest == spectypes.LATEST_BLOCK && reply.LatestBlock > 0 {
+		return reply.LatestBlock, true
+	}
+	return 0, false
 }
 
 func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(

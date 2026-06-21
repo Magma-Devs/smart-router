@@ -231,11 +231,12 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		BlocksCheckpointDistance: chaintracker.DefaultBlockCheckpointDistance,
 		ChainId:                  m.chainID,
 		ParseDirectiveEnabled:    true, // Always enabled for direct RPC
-		// MAG-2159 (Topic B): per-endpoint trackers use a flat, floored cadence — the
-		// dedicated poll runs at avgBlockTime/2 at most, because relay harvest is the
-		// primary block signal and the poll is a sparse fallback. (The global tracker
-		// leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
-		PollIntervalFloor: m.averageBlockTime / 2,
+		// MAG-2159 (Topic B): per-endpoint trackers use a FIXED flat cadence — the
+		// dedicated poll runs at exactly avgBlockTime/2 (slowed only by failure backoff),
+		// because relay harvest is the primary block signal and the poll is a sparse
+		// fallback. (The global tracker leaves this 0 and keeps its legacy adaptive
+		// cadence until Topic C.)
+		FlatPollInterval: m.averageBlockTime / 2,
 	}
 
 	// Set up callbacks with endpoint context
@@ -500,6 +501,17 @@ func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 		utils.LogAttr("endpoint", endpointURL),
 		utils.LogAttr("chainID", m.chainID),
 	)
+}
+
+// ObservationGeneration returns the live observation generation for an endpoint URL and
+// whether one is active. The relay-harvest path (MAG-2159) captures this after ensuring
+// the tracker and passes it to RecordRelayObservation, so a relay from a removed/replaced
+// tracker is rejected by the generation gate. Returns (0, false) for an unknown URL.
+func (m *EndpointMonitor) ObservationGeneration(endpointURL string) (uint64, bool) {
+	m.obsMu.RLock()
+	defer m.obsMu.RUnlock()
+	gen, ok := m.generations[endpointURL]
+	return gen, ok
 }
 
 // GetAllEndpoints returns all endpoint URLs with active ChainTrackers.

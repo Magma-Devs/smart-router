@@ -160,9 +160,10 @@ func TestEndpointMonitor_Observation_SourceUnknownUntilBlockObserved(t *testing.
 func TestEndpointMonitor_RecordRelayObservation(t *testing.T) {
 	m := newObsMonitor(t)
 	url := "http://ep:8545"
+	gen := registerGen(m, url)
 	at := time.Unix(2000, 0)
 
-	m.RecordRelayObservation(url, 555, at)
+	m.RecordRelayObservation(url, gen, 555, at)
 
 	o, ok := m.GetObservation(url)
 	require.True(t, ok)
@@ -178,9 +179,73 @@ func TestEndpointMonitor_RecordRelayObservation(t *testing.T) {
 func TestEndpointMonitor_RecordRelayObservation_IgnoresNonPositiveBlock(t *testing.T) {
 	m := newObsMonitor(t)
 	url := "http://ep:8545"
-	m.RecordRelayObservation(url, 0, time.Unix(2000, 0))
+	gen := registerGen(m, url)
+	m.RecordRelayObservation(url, gen, 0, time.Unix(2000, 0))
 	_, ok := m.GetObservation(url)
 	require.False(t, ok, "a non-positive relay block records nothing")
+}
+
+// MAG-2159 finding 5: relay observations are generation-safe.
+
+// A relay completing after RemoveTracker must not recreate the deleted observation — the
+// generation was cleared, so the captured generation no longer matches.
+func TestEndpointMonitor_RecordRelayObservation_AfterRemoveTrackerDoesNotRecreate(t *testing.T) {
+	m := newObsMonitor(t)
+	url := "http://ep:8545"
+	gen := registerGen(m, url)
+	m.RecordRelayObservation(url, gen, 100, time.Unix(1000, 0))
+	_, ok := m.GetObservation(url)
+	require.True(t, ok)
+
+	m.RemoveTracker(url) // clears observation + generation
+
+	m.RecordRelayObservation(url, gen, 200, time.Unix(2000, 0))
+	_, ok = m.GetObservation(url)
+	require.False(t, ok, "a relay from a removed tracker must not recreate the record")
+}
+
+// An old relay from a replaced same-URL endpoint must not overwrite the new tracker's
+// record, even with a strictly newer timestamp.
+func TestEndpointMonitor_RecordRelayObservation_StaleGenerationDoesNotOverwriteNewTracker(t *testing.T) {
+	m := newObsMonitor(t)
+	url := "http://ep:8545"
+	oldGen := registerGen(m, url)
+	m.RecordRelayObservation(url, oldGen, 100, time.Unix(1000, 0))
+
+	m.RemoveTracker(url)
+	newGen := registerGen(m, url)
+	require.NotEqual(t, oldGen, newGen)
+	m.RecordRelayObservation(url, newGen, 200, time.Unix(2000, 0))
+
+	// Old relay completes late (newer timestamp) but carries the stale generation → ignored.
+	m.RecordRelayObservation(url, oldGen, 999, time.Unix(3000, 0))
+
+	o, ok := m.GetObservation(url)
+	require.True(t, ok)
+	require.Equal(t, int64(200), o.LatestBlock, "stale-generation relay must not overwrite the new tracker")
+	require.Equal(t, ObservationSourceRelay, o.Source)
+}
+
+// A relay carrying the active generation is recorded (the valid case) — the gate must not
+// over-reject.
+func TestEndpointMonitor_RecordRelayObservation_ActiveGenerationRecords(t *testing.T) {
+	m := newObsMonitor(t)
+	url := "http://ep:8545"
+	gen := registerGen(m, url)
+	m.RecordRelayObservation(url, gen, 777, time.Unix(1000, 0))
+	o, ok := m.GetObservation(url)
+	require.True(t, ok)
+	require.Equal(t, int64(777), o.LatestBlock)
+	require.Equal(t, ObservationSourceRelay, o.Source)
+}
+
+// A relay for a URL with no active tracker (generation 0) records nothing.
+func TestEndpointMonitor_RecordRelayObservation_UnknownEndpointIgnored(t *testing.T) {
+	m := newObsMonitor(t)
+	url := "http://ep:8545"
+	m.RecordRelayObservation(url, 0, 100, time.Unix(1000, 0)) // gen 0 = no active tracker
+	_, ok := m.GetObservation(url)
+	require.False(t, ok, "a relay for an endpoint with no active tracker records nothing")
 }
 
 // The block triple is monotonic in ObservedAt: a stale observation (older timestamp)
@@ -192,7 +257,7 @@ func TestEndpointMonitor_Observation_MonotonicObservedAt(t *testing.T) {
 	tNew := time.Unix(3000, 0)
 	tOld := tNew.Add(-1 * time.Minute)
 
-	m.RecordRelayObservation(url, 900, tNew) // newest block via relay
+	m.RecordRelayObservation(url, gen, 900, tNew) // newest block via relay
 
 	// A stale poll arrives late: it must NOT overwrite the newer relay block triple,
 	// but it MUST still update poll-health (it was a real, successful poll attempt, and
@@ -207,7 +272,7 @@ func TestEndpointMonitor_Observation_MonotonicObservedAt(t *testing.T) {
 	require.Equal(t, 30*time.Millisecond, o.LastPollLatency)
 
 	// A stale relay is fully ignored.
-	m.RecordRelayObservation(url, 870, tOld)
+	m.RecordRelayObservation(url, gen, 870, tOld)
 	o, _ = m.GetObservation(url)
 	require.Equal(t, int64(900), o.LatestBlock)
 	require.Equal(t, ObservationSourceRelay, o.Source)
@@ -315,7 +380,7 @@ func TestEndpointMonitor_RecordObservation_AfterStopIgnored(t *testing.T) {
 	_, ok := m.GetObservation(url)
 	require.False(t, ok, "no poll-observation writes after Stop")
 
-	m.RecordRelayObservation(url, 300, time.Unix(3000, 0))
+	m.RecordRelayObservation(url, gen, 300, time.Unix(3000, 0))
 	_, ok = m.GetObservation(url)
 	require.False(t, ok, "no relay-observation writes after Stop")
 }
@@ -341,7 +406,7 @@ func TestEndpointMonitor_GetObservation_ConcurrentSnapshot(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
-			m.RecordRelayObservation(url, int64(2000+i), base.Add(time.Duration(i)*time.Millisecond))
+			m.RecordRelayObservation(url, gen, int64(2000+i), base.Add(time.Duration(i)*time.Millisecond))
 		}
 	}()
 	var torn int32

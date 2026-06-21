@@ -24,13 +24,18 @@ type ChainTrackerConfig struct {
 	ChainId                  string
 	ParseDirectiveEnabled    bool
 
-	// PollIntervalFloor, when > 0, switches this tracker to the flat, floored cadence
-	// (MAG-2159 / Topic B): a single poll interval that is never faster than this floor,
-	// with the adaptive /4, /2, /16 tiers disabled. Per-endpoint trackers set it to
+	// FlatPollInterval, when > 0, switches this tracker to a FIXED flat cadence
+	// (MAG-2159 / Topic B): the dedicated poll runs at exactly this interval, slowed only
+	// by failure backoff. The adaptive /4, /2, /16 tiers AND the block-gap recalibration
+	// are disconnected from scheduling (block-gap estimation still runs for block-time
+	// consumers, it just no longer moves the timer). Per-endpoint trackers set it to
 	// avgBlockTime/2 because relay harvest is the primary block signal, so the dedicated
 	// poll is a sparse fallback. Left 0 (the default) preserves the legacy adaptive
 	// cadence — used by the global tracker, whose readers are not yet harvest-fed.
-	PollIntervalFloor time.Duration
+	//
+	// It is named for what it does (selects the fixed-interval scheduler), not a "floor":
+	// a min-clamp that silently changed the scheduling algorithm would be a footgun.
+	FlatPollInterval time.Duration
 }
 
 func (cnf *ChainTrackerConfig) validate() error {

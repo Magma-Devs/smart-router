@@ -673,6 +673,10 @@ type mockChainMessage struct {
 	// checkResponseError, when non-nil, overrides the default (false, "") so
 	// tests can drive the call site's hasError branch with a custom message.
 	checkResponseError func(data []byte, httpStatusCode int) (bool, string)
+	// requestedBlock is returned by RequestedBlock(); defaults to 0. Set to
+	// spectypes.LATEST_BLOCK for a latest-requesting method, or a concrete height for a
+	// historical request (used by the MAG-2159 tip-eligibility tests).
+	requestedBlock int64
 }
 
 func (m *mockChainMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
@@ -711,7 +715,9 @@ func (m *mockChainMessage) GetApiCollection() *spectypes.ApiCollection {
 
 // Implement remaining ChainMessage interface methods (stubs for testing)
 func (m *mockChainMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string { return "" }
-func (m *mockChainMessage) RequestedBlock() (latest int64, earliest int64)                 { return 0, 0 }
+func (m *mockChainMessage) RequestedBlock() (latest int64, earliest int64) {
+	return m.requestedBlock, m.requestedBlock
+}
 func (m *mockChainMessage) UpdateLatestBlockInMessage(latestBlock int64, modifyContent bool) bool {
 	return false
 }

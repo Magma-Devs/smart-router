@@ -1800,6 +1800,12 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 					utils.LavaFormatWarning("--"+chaintracker.ChainTrackerPollingMultiplierFlagName+" out of allowed range [4,16]; reverting to default", nil, utils.LogAttr("provided", m))
 				} else {
 					chaintracker.PollingTimeMultiplierOverride = m
+					// MAG-2159: per-endpoint trackers now use a fixed avgBlockTime/2 cadence,
+					// so this override only affects the global tracker until the knob
+					// consolidation (pass 2). Make the interim behavior explicit at runtime
+					// rather than relying on docs alone.
+					utils.LavaFormatWarning("--"+chaintracker.ChainTrackerPollingMultiplierFlagName+" no longer affects per-endpoint trackers (they use a fixed avgBlockTime/2 cadence); it still tunes the global tracker until knob consolidation", nil,
+						utils.LogAttr("multiplier", m))
 				}
 			}
 			if f := viper.GetInt(relaycore.ConsistencyBlockGapFactorFlagName); f != 0 {
@@ -2087,7 +2093,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeBlockProfileRateFlagName, performance.DefaultBlockProfileRate, "block profile rate in nanoseconds (1 records all blocking events)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
-	cmdRPCSmartRouter.Flags().Int(chaintracker.ChainTrackerPollingMultiplierFlagName, 0, "polling-relief: override the chain-tracker polling multiplier (default 16). Allowed [4,16]; out-of-range reverts to default. Smaller = slower polling = fewer upstream calls.")
+	cmdRPCSmartRouter.Flags().Int(chaintracker.ChainTrackerPollingMultiplierFlagName, 0, "polling-relief: override the chain-tracker polling multiplier (default 16). Allowed [4,16]; out-of-range reverts to default. Smaller = slower polling = fewer upstream calls. NOTE (MAG-2159): no longer affects per-endpoint trackers, which use a fixed avgBlockTime/2 cadence until knob consolidation; it still tunes the global tracker.")
 	cmdRPCSmartRouter.Flags().Int(relaycore.ConsistencyBlockGapFactorFlagName, 0, "polling-relief: widen the consistency endpoint-lag gate (blockLagForQosSync x factor; default 2). Allowed [2,8]; out-of-range reverts to default. Companion to the polling multiplier.")
 	cmdRPCSmartRouter.Flags().Var(&strategyFlag, "strategy", fmt.Sprintf("the strategy to use to pick providers (%s)", strings.Join(strategyNames, "|")))
 	defaultWeightedConfig := provideroptimizer.DefaultWeightedSelectorConfig()
