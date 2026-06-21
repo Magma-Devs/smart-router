@@ -2016,8 +2016,20 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 	// calculate QoS - syncGap is the difference between expected and actual block height (0 if not tracked)
 	csm.qosManager.CalculateQoS(csm.atomicReadCurrentEpoch(), consumerSession.SessionId, consumerSession.Parent.PublicLavaAddress, currentLatency, expectedLatency, syncGap, numOfProviders, int64(providersCount))
 	if !isHangingApi {
+		// MAG-1748: latestServicedBlock is the GLOBAL chain-tracker head for methods whose
+		// response body carries no block height (eth_getBalance/eth_call/eth_estimateGas) —
+		// it is identical for every provider, so feeding it here leaves the optimizer's
+		// per-provider sync-score blind to a stale provider. Prefer the per-endpoint
+		// ChainTracker block (endpoint_chain_tracker_manager keeps Endpoint.LatestBlock
+		// current regardless of method), so a lagging provider is actually demoted.
+		syncBlock := uint64(latestServicedBlock)
+		if drsc, ok := consumerSession.Connection.(*DirectRPCSessionConnection); ok && drsc.Endpoint != nil {
+			if endpointBlock := drsc.Endpoint.LatestBlock.Load(); endpointBlock > 0 {
+				syncBlock = uint64(endpointBlock)
+			}
+		}
 		// append relay data only for non hanging apis
-		go csm.providerOptimizer.AppendRelayData(consumerSession.Parent.PublicLavaAddress, currentLatency, specComputeUnits, uint64(latestServicedBlock))
+		go csm.providerOptimizer.AppendRelayData(consumerSession.Parent.PublicLavaAddress, currentLatency, specComputeUnits, syncBlock)
 	}
 
 	csm.updateMetricsManager(consumerSession, currentLatency, !isHangingApi) // apply latency only for non hanging apis
