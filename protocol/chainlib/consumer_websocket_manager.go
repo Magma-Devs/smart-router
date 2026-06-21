@@ -364,7 +364,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				utils.LogAttr("GUID", webSocketCtx),
 				utils.LogAttr("dappID", dappID),
 				utils.LogAttr("userIp", userIp),
-				utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
+				utils.LogAttr("params", utils.RedactPayloadAny(protocolMessage.GetRPCMessage().GetParams())),
 			)
 
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not start subscription", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
@@ -399,7 +399,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					utils.LogAttr("GUID", webSocketCtx),
 					utils.LogAttr("dappID", dappID),
 					utils.LogAttr("userIp", userIp),
-					utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
+					utils.LogAttr("params", utils.RedactPayloadAny(protocolMessage.GetRPCMessage().GetParams())),
 				)
 
 				for subscriptionMsgReply := range subscriptionMsgsChan {
@@ -421,7 +421,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					utils.LogAttr("GUID", webSocketCtx),
 					utils.LogAttr("dappID", dappID),
 					utils.LogAttr("userIp", userIp),
-					utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
+					utils.LogAttr("params", utils.RedactPayloadAny(protocolMessage.GetRPCMessage().GetParams())),
 				)
 			}()
 		}

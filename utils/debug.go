@@ -45,3 +45,18 @@ func RedactPayload(payload string) string {
 	}
 	return fmt.Sprintf("%s(%d bytes)", redactedPayloadValue, len(payload))
 }
+
+// RedactPayloadAny is the any-typed variant for log attributes that carry
+// already-parsed RPC params/values (interface{}). When unsafe logging is off it
+// returns a fixed placeholder rather than the value, so wallet addresses, tx
+// data, or query arguments embedded in params do not leak. When on, it returns
+// the value unchanged for verbatim local debugging.
+func RedactPayloadAny(payload interface{}) interface{} {
+	if LogUnsafePayloadsEnabled() {
+		return payload
+	}
+	if payload == nil {
+		return nil
+	}
+	return redactedPayloadValue
+}

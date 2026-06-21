@@ -325,7 +325,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		utils.LavaFormatDebug("in <<< GRPC Relay ",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr("_method", method),
-			utils.LogAttr("headers", redactSensitiveMetadata(grpcHeaders)),
+			utils.LogAttr("headers", RedactSensitiveMetadata(grpcHeaders)),
 		)
 		metricsData := metrics.NewRelayAnalytics(dappID, apil.endpoint.ChainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
@@ -562,7 +562,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 
 	utils.LavaFormatTrace("provider sending node message",
 		utils.LogAttr("_method", nodeMessage.Path),
-		utils.LogAttr("headers", redactSensitiveStringMap(metadataMap)),
+		utils.LogAttr("headers", RedactSensitiveStringMap(metadataMap)),
 		utils.LogAttr("apiInterface", "grpc"),
 	)
 

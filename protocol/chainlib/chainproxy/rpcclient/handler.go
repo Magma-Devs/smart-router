@@ -283,7 +283,7 @@ func (h *handler) handleSubscriptionResultEthereum(msg *JsonrpcMessage) {
 	if err := json.Unmarshal(msg.Params, &result); err != nil {
 		utils.LavaFormatTrace("Dropping invalid ethereum subscription message",
 			utils.LogAttr("err", err),
-			utils.LogAttr("params", string(msg.Params)),
+			utils.LogAttr("params", utils.RedactPayload(string(msg.Params))),
 		)
 		h.log.Debug("Dropping invalid subscription message")
 		return
@@ -298,7 +298,7 @@ func (h *handler) handleSubscriptionResultSolana(msg *JsonrpcMessage) {
 	if err := json.Unmarshal(msg.Params, &result); err != nil {
 		utils.LavaFormatTrace("Dropping invalid solana subscription message",
 			utils.LogAttr("err", err),
-			utils.LogAttr("params", string(msg.Params)),
+			utils.LogAttr("params", utils.RedactPayload(string(msg.Params))),
 		)
 		h.log.Debug("Dropping invalid subscription message")
 		return

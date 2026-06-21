@@ -32,7 +32,7 @@ func TestRedactSensitiveMetadata(t *testing.T) {
 		{Name: "X-Lava-Dapp-Id", Value: "dapp-42"},        // safe, preserved
 	}
 
-	out := redactSensitiveMetadata(in)
+	out := RedactSensitiveMetadata(in)
 
 	require.Equal(t, redactedHeaderValue, valueFor(t, out, "Authorization"))
 	require.Equal(t, redactedHeaderValue, valueFor(t, out, "authorization"))
@@ -55,7 +55,7 @@ func TestRedactSensitiveHeaderMap(t *testing.T) {
 		"Accept":        {"application/json"},
 	}
 
-	out := redactSensitiveHeaderMap(in)
+	out := RedactSensitiveHeaderMap(in)
 
 	require.Equal(t, []string{redactedHeaderValue}, out["Authorization"])
 	require.Equal(t, []string{redactedHeaderValue}, out["Set-Cookie"])
@@ -74,7 +74,7 @@ func TestRedactSensitiveStringMap(t *testing.T) {
 		"user-agent":     "smart-router-test",
 	}
 
-	out := redactSensitiveStringMap(in)
+	out := RedactSensitiveStringMap(in)
 
 	require.Equal(t, redactedHeaderValue, out["authorization"])
 	require.Equal(t, redactedHeaderValue, out["apikey"])

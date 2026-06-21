@@ -486,7 +486,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("body", utils.RedactPayload(logFormattedMsg)),
-			utils.LogAttr("headers", redactSensitiveMetadata(headers)),
+			utils.LogAttr("headers", RedactSensitiveMetadata(headers)),
 		)
 
 		relayResult, err := apil.relaySender.SendRelay(ctx, path, msg, http.MethodPost, dappID, userIp, metricsData, headers)

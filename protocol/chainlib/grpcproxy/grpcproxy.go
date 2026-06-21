@@ -120,7 +120,7 @@ func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
 		md = lowercaseMD
 
 		if err := stream.SetHeader(md); err != nil {
-			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headers", md))
+			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headerCount", len(md)))
 		}
 		return stream.SendMsg(respBytes)
 	}
@@ -139,7 +139,7 @@ func (RawBytesCodec) Marshal(v interface{}) ([]byte, error) {
 func (RawBytesCodec) Unmarshal(data []byte, v interface{}) error {
 	bufferPtr, ok := v.(*[]byte)
 	if !ok {
-		return utils.LavaFormatDebug("cannot decode into type", utils.LogAttr("v", v), utils.LogAttr("data", data))
+		return utils.LavaFormatDebug("cannot decode into type", utils.LogAttr("v", v), utils.LogAttr("data", utils.RedactPayload(string(data))))
 	}
 	*bufferPtr = data
 	return nil

@@ -112,7 +112,7 @@ func (ecf *EndpointChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
 			utils.LogAttr("method", parsing.ApiName),
-			utils.LogAttr("response", parser.CapStringLen(string(responseData))),
+			utils.LogAttr("response", utils.RedactPayload(parser.CapStringLen(string(responseData)))),
 			utils.LogAttr("error", err),
 		)
 	}
@@ -124,7 +124,7 @@ func (ecf *EndpointChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
 			utils.LogAttr("method", parsing.ApiName),
-			utils.LogAttr("response", parser.CapStringLen(string(responseData))),
+			utils.LogAttr("response", utils.RedactPayload(parser.CapStringLen(string(responseData)))),
 		)
 	}
 
@@ -237,7 +237,7 @@ func (ecf *EndpointChainFetcher) fetchSingleBlockHash(
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
 			utils.LogAttr("method", parsing.ApiName),
-			utils.LogAttr("response", parser.CapStringLen(string(responseData))),
+			utils.LogAttr("response", utils.RedactPayload(parser.CapStringLen(string(responseData)))),
 		)
 	}
 
@@ -248,7 +248,7 @@ func (ecf *EndpointChainFetcher) fetchSingleBlockHash(
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
 			utils.LogAttr("method", parsing.ApiName),
-			utils.LogAttr("response", parser.CapStringLen(string(responseData))),
+			utils.LogAttr("response", utils.RedactPayload(parser.CapStringLen(string(responseData)))),
 		)
 	}
 

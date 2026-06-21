@@ -468,10 +468,12 @@ func isSensitiveHeader(name string) bool {
 	return ok
 }
 
-// redactSensitiveMetadata returns a copy of the metadata slice with the values
+// RedactSensitiveMetadata returns a copy of the metadata slice with the values
 // of credential-bearing headers replaced by a placeholder. The input is left
 // untouched so redaction never affects the headers actually forwarded upstream.
-func redactSensitiveMetadata(md []pairingtypes.Metadata) []pairingtypes.Metadata {
+// Exported so other packages that log relay metadata (e.g. relaycore) share the
+// same redaction list instead of growing a divergent copy.
+func RedactSensitiveMetadata(md []pairingtypes.Metadata) []pairingtypes.Metadata {
 	out := make([]pairingtypes.Metadata, len(md))
 	for i, m := range md {
 		if isSensitiveHeader(m.Name) {
@@ -483,10 +485,10 @@ func redactSensitiveMetadata(md []pairingtypes.Metadata) []pairingtypes.Metadata
 	return out
 }
 
-// redactSensitiveHeaderMap returns a copy of a map-shaped header set (e.g.
+// RedactSensitiveHeaderMap returns a copy of a map-shaped header set (e.g.
 // http.Header / map[string][]string) with credential-bearing values redacted.
 // The original map is never mutated.
-func redactSensitiveHeaderMap(headers map[string][]string) map[string][]string {
+func RedactSensitiveHeaderMap(headers map[string][]string) map[string][]string {
 	out := make(map[string][]string, len(headers))
 	for k, v := range headers {
 		if isSensitiveHeader(k) {
@@ -498,10 +500,10 @@ func redactSensitiveHeaderMap(headers map[string][]string) map[string][]string {
 	return out
 }
 
-// redactSensitiveStringMap is the map[string]string variant (e.g. the grpc
+// RedactSensitiveStringMap is the map[string]string variant (e.g. the grpc
 // metadataMap), with credential-bearing values redacted. The original map is
 // never mutated.
-func redactSensitiveStringMap(headers map[string]string) map[string]string {
+func RedactSensitiveStringMap(headers map[string]string) map[string]string {
 	out := make(map[string]string, len(headers))
 	for k, v := range headers {
 		if isSensitiveHeader(k) {

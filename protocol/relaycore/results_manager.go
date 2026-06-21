@@ -8,6 +8,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -136,7 +137,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// Log node error payload and headers for troubleshooting
 		// also log the original request payload and request headers if available
 		reqPayload := ""
-		var reqHeaders interface{}
+		var reqHeaders []pairingtypes.Metadata
 		if response.RelayResult.Request != nil && response.RelayResult.Request.RelayData != nil {
 			reqPayload = string(response.RelayResult.Request.RelayData.Data)
 			reqHeaders = response.RelayResult.Request.RelayData.Metadata
@@ -170,10 +171,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			utils.LogAttr("statusCode", response.RelayResult.StatusCode),
 			utils.LogAttr("api", protocolMessage.GetApi().Name),
 			utils.LogAttr("requestUrl", requestUrl),
-			utils.LogAttr("payload", parser.CapStringLen(string(response.RelayResult.Reply.Data))),
-			utils.LogAttr("headers", response.RelayResult.Reply.Metadata),
-			utils.LogAttr("requestPayload", parser.CapStringLen(reqPayload)),
-			utils.LogAttr("requestHeaders", reqHeaders),
+			utils.LogAttr("payload", utils.RedactPayload(parser.CapStringLen(string(response.RelayResult.Reply.Data)))),
+			utils.LogAttr("headers", chainlib.RedactSensitiveMetadata(response.RelayResult.Reply.Metadata)),
+			utils.LogAttr("requestPayload", utils.RedactPayload(parser.CapStringLen(reqPayload))),
+			utils.LogAttr("requestHeaders", chainlib.RedactSensitiveMetadata(reqHeaders)),
 		)
 		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: nodeClassified})
 		return err

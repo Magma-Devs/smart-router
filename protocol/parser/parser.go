@@ -116,7 +116,7 @@ func ParseRawBlock(rpcInput RPCInput, parsedInput *ParsedInput, defaultValue str
 				parsedInput.UsedDefaultValue = true
 			}
 			utils.LavaFormatDebug("Failed parsing block from string, assuming default value",
-				utils.LogAttr("params", rpcInput.GetParams()),
+				utils.LogAttr("params", utils.RedactPayloadAny(rpcInput.GetParams())),
 				utils.LogAttr("failed_parsed_value", rawBlock),
 				utils.LogAttr("default_value", defaultValue),
 				utils.LogAttr("parsedBlock", parsedBlock),
@@ -844,7 +844,7 @@ func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int)
 
 		// Else return not set error)
 		utils.LavaFormatDebug("Failed parsing parseDictionaryOrOrdered",
-			utils.LogAttr("params", rpcInput.GetParams()),
+			utils.LogAttr("params", utils.RedactPayloadAny(rpcInput.GetParams())),
 			utils.LogAttr("propName", propName),
 			utils.LogAttr("inp", inp),
 			utils.LogAttr("unmarshalledDataTyped", unmarshalledDataTyped),

@@ -489,7 +489,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("_msg", utils.RedactPayload(logFormattedMsg)),
 			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("headers", redactSensitiveMetadata(headers)),
+			utils.LogAttr("headers", RedactSensitiveMetadata(headers)),
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, "", msg, "", dappID, userIp, metricsData, headers)
 		reply := relayResult.GetReply()
@@ -558,9 +558,11 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		utils.LavaFormatDebug("urirpc in <<<",
 			utils.LogAttr("GUID", ctx),
-			utils.LogAttr("_msg", path),
+			// The URI path can carry query-string credentials (?api_key=…), so
+			// redact it unless --log-unsafe-payloads is set.
+			utils.LogAttr("_msg", utils.RedactPayload(path)),
 			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("headers", redactSensitiveMetadata(headers)),
+			utils.LogAttr("headers", RedactSensitiveMetadata(headers)),
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, "", "", dappID, userIp, metricsData, headers)
 		msgSeed := strconv.FormatUint(guid, 10)
@@ -882,7 +884,7 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 		}
 		subscriptionID, ok = paramsMap["query"].(string)
 		if !ok {
-			utils.LavaFormatTrace("could not get subscriptionID from query params", utils.LogAttr("params", params))
+			utils.LavaFormatTrace("could not get subscriptionID from query params", utils.LogAttr("params", utils.RedactPayloadAny(params)))
 			// This is probably because of a misuse, therefore the provider will return a node error to the user as the subscription failed
 			subscriptionID = ""
 		}

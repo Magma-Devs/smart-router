@@ -307,7 +307,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr("msgSeed", msgSeed),
 			utils.LogAttr("body", utils.RedactPayload(requestBody)),
-			utils.LogAttr("headers", redactSensitiveMetadata(restHeaders)),
+			utils.LogAttr("headers", RedactSensitiveMetadata(restHeaders)),
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, http.MethodPost, dappID, userIp, analytics, restHeaders)
 		reply := relayResult.GetReply()
@@ -368,6 +368,8 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		}
 		defer cancel() // incase there's a problem make sure to cancel the connection
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
+		// Headers are sensitive — log them at debug only (redacted), keeping the
+		// info line to safe metadata. A non-POST request carries no body.
 		utils.LavaFormatInfo("Consumer received a new REST non-POST request",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
@@ -376,7 +378,11 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("path", path),
 			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("headers", redactSensitiveMetadata(restHeaders)),
+		)
+		utils.LavaFormatDebug("REST non-POST request headers",
+			utils.LogAttr("GUID", guid),
+			utils.LogAttr("seed", msgSeed),
+			utils.LogAttr("headers", RedactSensitiveMetadata(restHeaders)),
 		)
 
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, "", fiberCtx.Method(), dappID, userIp, analytics, restHeaders)
@@ -510,9 +516,11 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{},
 	rcp.NodeUrl.SetAuthHeaders(ctx, req.Header.Set)
 	rcp.NodeUrl.SetIpForwardingIfNecessary(ctx, req.Header.Set)
 
-	utils.LavaFormatInfo("Sending request to node from provider",
+	// req.Header now carries upstream provider auth (set just above), so log it
+	// at debug only and redacted — never at the default info level.
+	utils.LavaFormatDebug("Sending request to node from provider",
 		utils.LogAttr("_method", nodeMessage.Path),
-		utils.LogAttr("headers", redactSensitiveHeaderMap(req.Header)),
+		utils.LogAttr("headers", RedactSensitiveHeaderMap(req.Header)),
 		utils.LogAttr("apiInterface", "rest"),
 	)
 

@@ -42,7 +42,7 @@ func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 	headers := rm.GetHeaders()
 	headersByteArray, err := json.Marshal(headers)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", headers))
+		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headerCount", len(headers)))
 		return []byte{}, err
 	}
 	pathByteArray := []byte(rm.Path)
@@ -125,7 +125,7 @@ func extractErrorMessage(data []byte, httpStatusCode int) string {
 func checkGenericRESTError(data []byte) (bool, string) {
 	result := make(map[string]interface{})
 	if err := json.Unmarshal(data, &result); err != nil {
-		utils.LavaFormatWarning("Failed unmarshalling REST error response", err, utils.LogAttr("data", string(data)))
+		utils.LavaFormatWarning("Failed unmarshalling REST error response", err, utils.LogAttr("data", utils.RedactPayload(string(data))))
 		return false, ""
 	}
 

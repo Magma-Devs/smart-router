@@ -41,7 +41,7 @@ func (jm *JsonrpcMessage) GetRawRequestHash() ([]byte, error) {
 	headers := jm.GetHeaders()
 	headersByteArray, err := json.Marshal(headers)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", headers))
+		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headerCount", len(headers)))
 		return []byte{}, err
 	}
 
@@ -49,7 +49,7 @@ func (jm *JsonrpcMessage) GetRawRequestHash() ([]byte, error) {
 
 	paramsByteArray, err := json.Marshal(jm.Params)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("headers", jm.Params))
+		utils.LavaFormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("method", jm.Method))
 		return []byte{}, err
 	}
 	return sigs.HashMsg(append(append(methodByteArray, paramsByteArray...), headersByteArray...)), nil
@@ -95,7 +95,7 @@ func truncateForLog(data []byte) string {
 func checkJsonrpcEnvelope(data []byte, kind string) (hasError bool, errorMessage string, resultBytes []byte) {
 	scan, err := scanJsonrpcEnvelope(data)
 	if err != nil {
-		utils.LavaFormatWarning("malformed "+kind+" response", err, utils.LogAttr("data", truncateForLog(data)))
+		utils.LavaFormatWarning("malformed "+kind+" response", err, utils.LogAttr("data", utils.RedactPayload(truncateForLog(data))))
 		return true, fmt.Sprintf("malformed %s response: %v", kind, err), nil
 	}
 	hasErr := scan.hasError && !isJSONNull(scan.errorBytes)
@@ -363,7 +363,7 @@ func CheckResponseErrorForJsonRpcBatch(data []byte, httpStatusCode int) (hasErro
 	})
 
 	if walkErr != nil {
-		utils.LavaFormatWarning("malformed JSON-RPC batch response", walkErr, utils.LogAttr("data", truncateForLog(data)))
+		utils.LavaFormatWarning("malformed JSON-RPC batch response", walkErr, utils.LogAttr("data", utils.RedactPayload(truncateForLog(data))))
 		return true, fmt.Sprintf("malformed JSON-RPC batch response: %v", walkErr)
 	}
 
