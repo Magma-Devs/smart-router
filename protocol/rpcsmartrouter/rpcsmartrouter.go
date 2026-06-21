@@ -1742,11 +1742,11 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 		if no arguments are passed, assumes default config file: ` + DefaultRPCSmartRouterFileName + `
 		if one argument is passed, its assumed the config file name
 		`,
-		Example: `required flags: --geolocation 1 --static-providers ...
+		Example: `required: --static-providers ...   (--geolocation is optional, defaults to 1)
 rpcsmartrouter <flags>
 rpcsmartrouter rpcsmartrouter_conf <flags>
 rpcsmartrouter 127.0.0.1:3333 OSMOSIS tendermintrpc 127.0.0.1:3334 OSMOSIS rest <flags>
-rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127.0.0.1:7778" --geolocation 1 [--debug-relays] --log_level <debug|warn|...>`,
+rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127.0.0.1:7778" [--geolocation 1] [--debug-relays] --log_level <debug|warn|...>`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			// Optionally run one of the validators provided by cobra
 			if err := cobra.RangeArgs(0, 1)(cmd, args); err == nil {
@@ -1845,7 +1845,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 
 			geolocation, err := cmd.Flags().GetUint64(lavasession.GeolocationFlag)
 			if err != nil {
-				utils.LavaFormatFatal("failed to read geolocation flag, required flag", err)
+				utils.LavaFormatFatal("failed to read geolocation flag", err)
 			}
 			rpcEndpoints, err = ParseEndpoints(viper.GetViper(), geolocation)
 			if err != nil || len(rpcEndpoints) == 0 {
@@ -2097,9 +2097,12 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	}
 
 	// RPCSmartRouter command flags - no blockchain flags needed
-	cmdRPCSmartRouter.Flags().Uint64(common.GeolocationFlag, 0, "geolocation to run from")
+	// Optional: smart-router uses static, pre-configured providers and does not
+	// pair on-chain, so geolocation has no effect on provider discovery and only
+	// a dulled effect on QoS reputation (the reputation-nulling branch is skipped
+	// for static providers). Defaults to 1; operators rarely need to set it.
+	cmdRPCSmartRouter.Flags().Uint64(common.GeolocationFlag, 1, "geolocation to run from (optional; static providers don't pair by geo)")
 	cmdRPCSmartRouter.Flags().Uint(common.MaximumConcurrentProvidersFlagName, 3, "max number of concurrent providers to communicate with")
-	cmdRPCSmartRouter.MarkFlagRequired(common.GeolocationFlag)
 	cmdRPCSmartRouter.Flags().Bool(lavasession.AllowInsecureConnectionToProvidersFlag, false, "allow insecure provider-dialing. used for development and testing")
 	cmdRPCSmartRouter.Flags().String(common.ResponseCompressionFlag, common.DefaultResponseCompression, "client-facing response compression: gzip (default), brotli, or off")
 	cmdRPCSmartRouter.Flags().Uint64Var(&lavasession.MaximumStreamsOverASingleConnection, lavasession.MaximumStreamsOverASingleConnectionFlag, lavasession.DefaultMaximumStreamsOverASingleConnection, "maximum number of parallel streams over a single provider connection")
