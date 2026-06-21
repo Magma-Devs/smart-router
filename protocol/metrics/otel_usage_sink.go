@@ -197,7 +197,6 @@ func (s *OTelUsageSink) EmitOptimizerQoS(r OptimizerQoSReportToSend) {
 		otellog.String("chain_id", r.ChainId),
 		otellog.Int64("epoch", int64(r.Epoch)),
 		otellog.Int64("entry_index", int64(r.EntryIndex)),
-		otellog.Int64("geo_location", int64(r.GeoLocation)),
 		otellog.Int64("provider_stake", r.ProviderStake),
 		// WRS normalized scores
 		otellog.Float64("selection_availability", r.SelectionAvailability),

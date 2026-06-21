@@ -18,11 +18,6 @@ import (
 // — the path actually used by the cobra command at
 // rpcsmartrouter.go:1683-1701.
 func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
-	// Geolocation is supplied via the CLI --geolocation flag at runtime; the
-	// parser stamps it onto every parsed endpoint regardless of whether the
-	// YAML specifies one.
-	const flagGeolocation uint64 = 7
-
 	cases := []struct {
 		name          string
 		yamlBody      string
@@ -80,19 +75,16 @@ func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
 				return
 			}
 
-			endpoints, err := ParseStaticProviderEndpoints(v, common.BackupProvidersConfigName, flagGeolocation)
+			endpoints, err := ParseStaticProviderEndpoints(v, common.BackupProvidersConfigName)
 			require.NoError(t, err)
 			require.Len(t, endpoints, tc.wantEndpoints)
 			for i, ep := range endpoints {
-				assert.Equal(t, flagGeolocation, ep.Geolocation,
-					"endpoint #%d must inherit --geolocation flag value, got %d", i, ep.Geolocation)
 				assert.NoError(t, ep.Validate(),
 					"parsed endpoint #%d must satisfy Validate() (chain-id, api-interface, node-urls, name)", i)
 			}
 		})
 	}
 }
-
 // TestParseStaticProviderEndpoints_GroupLabel covers the cross-validation provider-group
 // spine (Phase 0.1): the optional `group-label` YAML key must deserialize into
 // RPCStaticProviderEndpoint.GroupLabel, an absent key must yield the empty string (the
@@ -100,8 +92,6 @@ func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
 // of the group plumbing that later flows to common.ProviderInfo.ProviderGroup via the
 // provider session record.
 func TestParseStaticProviderEndpoints_GroupLabel(t *testing.T) {
-	const flagGeolocation uint64 = 1
-
 	const yamlBody = "direct-rpc:\n" +
 		"  - name: eth-rpc-1\n" +
 		"    group-label: tier-1\n" +
@@ -125,7 +115,7 @@ func TestParseStaticProviderEndpoints_GroupLabel(t *testing.T) {
 	v.SetConfigType("yaml")
 	require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
 
-	endpoints, err := ParseStaticProviderEndpoints(v, common.DirectRPCConfigName, flagGeolocation)
+	endpoints, err := ParseStaticProviderEndpoints(v, common.DirectRPCConfigName)
 	require.NoError(t, err)
 	require.Len(t, endpoints, 3)
 
@@ -137,50 +127,4 @@ func TestParseStaticProviderEndpoints_GroupLabel(t *testing.T) {
 	assert.Equal(t, "tier-1", byName["eth-rpc-1"], "group-label must deserialize into GroupLabel")
 	assert.Equal(t, "tier-1", byName["eth-rpc-2"], "providers may share a group label")
 	assert.Equal(t, "", byName["eth-rpc-3"], "absent group-label must yield empty string (implicit default group)")
-}
-
-// TestParseEndpoints_GeolocationFlagBinding backfills MAG-1872 item 10: the
-// --geolocation CLI flag must propagate to every parsed RPCEndpoint via
-// ParseEndpoints. TestGeoOrdering in protocol/lavasession/common_test.go
-// covers the sort behavior across pre-set geolocations but does NOT exercise
-// the flag → endpoint roundtrip.
-func TestParseEndpoints_GeolocationFlagBinding(t *testing.T) {
-	// lavasession.RPCEndpoint.NetworkAddress is a plain string (HOST:PORT),
-	// unlike RPCProviderEndpoint which carries a nested NetworkAddressData
-	// struct. The YAML schema must match the target field type.
-	const yamlBody = "endpoints:\n" +
-		"  - chain-id: ETH1\n" +
-		"    api-interface: jsonrpc\n" +
-		"    network-address: 127.0.0.1:3333\n" +
-		"  - chain-id: LAV1\n" +
-		"    api-interface: rest\n" +
-		"    network-address: 127.0.0.1:3334\n"
-
-	cases := []struct {
-		name        string
-		geolocation uint64
-	}{
-		{name: "geolocation_1_USC", geolocation: 1},
-		{name: "geolocation_2_USE", geolocation: 2},
-		{name: "geolocation_4_EU", geolocation: 4},
-		{name: "geolocation_65535_all_regions", geolocation: 65535},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			v := viper.New()
-			v.SetConfigType("yaml")
-			require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
-
-			endpoints, err := ParseEndpoints(v, tc.geolocation)
-			require.NoError(t, err)
-			require.NotEmpty(t, endpoints, "endpoints must be parsed from YAML")
-			for i, ep := range endpoints {
-				assert.Equal(t, tc.geolocation, ep.Geolocation,
-					"endpoint #%d must inherit CLI --geolocation flag value, got %d", i, ep.Geolocation)
-				assert.NotEmpty(t, ep.HealthCheckPath,
-					"endpoint #%d must have default HealthCheckPath populated when YAML omits it", i)
-			}
-		})
-	}
 }

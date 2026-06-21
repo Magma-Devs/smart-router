@@ -55,7 +55,6 @@ func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEn
 			rpcEndpoint := lavasession.RPCEndpoint{
 				ChainID:      rpcProviderEndpoint.ChainID,
 				ApiInterface: rpcProviderEndpoint.ApiInterface,
-				Geolocation:  1,
 			}
 			if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(
 				ctx, chainParser, staticSpecPaths, rpcEndpoint,
@@ -167,7 +166,7 @@ func CreateTestRPCSmartRouterCobraCommand() *cobra.Command {
 			}
 			viper.MergeConfigMap(viper_endpoints.AllSettings())
 			var rpcEndpoints []*lavasession.RPCEndpoint
-			rpcEndpoints, err = ParseEndpoints(viper.GetViper(), 1)
+			rpcEndpoints, err = ParseEndpoints(viper.GetViper())
 			if err != nil || len(rpcEndpoints) == 0 {
 				return utils.LavaFormatError("invalid endpoints definition", err)
 			}
@@ -182,7 +181,6 @@ func CreateTestRPCSmartRouterCobraCommand() *cobra.Command {
 					NetworkAddress: lavasession.NetworkAddressData{Address: ""},
 					ChainID:        endpoint.ChainID,
 					ApiInterface:   endpoint.ApiInterface,
-					Geolocation:    1, // doesn't matter
 					NodeUrls: []commonlib.NodeUrl{{
 						Url: endpoint.NetworkAddress,
 						AuthConfig: commonlib.AuthConfig{

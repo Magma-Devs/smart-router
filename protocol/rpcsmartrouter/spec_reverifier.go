@@ -258,7 +258,6 @@ func validateProvider(
 		NetworkAddress: provider.NetworkAddress,
 		ChainID:        provider.ChainID,
 		ApiInterface:   provider.ApiInterface,
-		Geolocation:    provider.Geolocation,
 		NodeUrls:       verificationNodeUrls,
 	}
 

@@ -191,7 +191,6 @@ echo ""
 echo "[Test Setup] starting Smart Router (DIRECT RPC mode, REST + gRPC + Tendermint RPC)"
 screen -d -m -S smartrouter bash -c "cd \"$PROJECT_ROOT\" && source ~/.bashrc; smartrouter \
 config/smartrouter_examples/smartrouter_lava.yml \
---geolocation 1 \
 --log-level trace \
 --cache-be \"127.0.0.1:20100\" \
 --use-static-spec \"$SPECS_DIR\" \

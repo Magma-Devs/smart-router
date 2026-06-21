@@ -41,7 +41,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
-	planstypes "github.com/magma-Devs/smart-router/types/plans"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -214,7 +213,6 @@ type rpcSmartRouterStartOptions struct {
 	stateShare               bool
 	staticProvidersList      []*lavasession.RPCStaticProviderEndpoint // define static providers as primary providers
 	backupProvidersList      []*lavasession.RPCStaticProviderEndpoint // define backup providers as emergency fallback when no providers available
-	geoLocation              uint64
 	weightedSelectorConfig   provideroptimizer.WeightedSelectorConfig
 }
 
@@ -273,7 +271,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// Always collect optimizer QoS reports so the lava_rpc_optimizer_selection_score
 	// metric is exposed on /metrics regardless of OTel. Each sampling tick also
 	// fires the reports at usageSink (Noop when OTel is off).
-	smartRouterOptimizerQoSClient := metrics.NewConsumerOptimizerQoSClient(smartRouterIdentifier, usageSink, options.geoLocation)
+	smartRouterOptimizerQoSClient := metrics.NewConsumerOptimizerQoSClient(smartRouterIdentifier, usageSink)
 	smartRouterOptimizerQoSClient.StartOptimizersQoSReportsCollecting(ctx, metrics.OptimizerQosServerSamplingInterval)
 	// SmartRouterMetricsManager is the single metrics owner for the smart router.
 	// It serves its own HTTP endpoint and implements ConsumerMetricsManagerInf so it
@@ -1099,7 +1097,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 					Extensions:        extensions,
 					Connections:       nil,
 					DirectConnections: []lavasession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
-					Geolocation:       planstypes.Geolocation(provider.Geolocation),
 				}
 				endpoints = append(endpoints, endpoint)
 
@@ -1203,7 +1200,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				NetworkAddress: staticProvider.NetworkAddress,
 				ChainID:        staticProvider.ChainID,
 				ApiInterface:   staticProvider.ApiInterface,
-				Geolocation:    staticProvider.Geolocation,
 				NodeUrls:       verificationNodeUrls,
 			}
 
@@ -1336,7 +1332,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				NetworkAddress: backupProvider.NetworkAddress,
 				ChainID:        backupProvider.ChainID,
 				ApiInterface:   backupProvider.ApiInterface,
-				Geolocation:    backupProvider.Geolocation,
 				NodeUrls:       verificationNodeUrls,
 			}
 
@@ -1601,7 +1596,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			NetworkAddress: firstProvider.NetworkAddress,
 			ChainID:        firstProvider.ChainID,
 			ApiInterface:   firstProvider.ApiInterface,
-			Geolocation:    firstProvider.Geolocation,
 			NodeUrls: []common.NodeUrl{
 				{
 					Url:        firstProvider.NodeUrls[0].Url,
@@ -1685,13 +1679,12 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	return nil
 }
 
-func ParseEndpoints(viper_endpoints *viper.Viper, geolocation uint64) (endpoints []*lavasession.RPCEndpoint, err error) {
+func ParseEndpoints(viper_endpoints *viper.Viper) (endpoints []*lavasession.RPCEndpoint, err error) {
 	err = viper_endpoints.UnmarshalKey(common.EndpointsConfigName, &endpoints)
 	if err != nil {
 		utils.LavaFormatFatal("could not unmarshal endpoints", err, utils.Attribute{Key: "viper_endpoints", Value: viper_endpoints.AllSettings()})
 	}
 	for _, endpoint := range endpoints {
-		endpoint.Geolocation = geolocation
 		if endpoint.HealthCheckPath == "" {
 			endpoint.HealthCheckPath = common.DEFAULT_HEALTH_PATH
 		}
@@ -1714,11 +1707,11 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 		if no arguments are passed, assumes default config file: ` + DefaultRPCSmartRouterFileName + `
 		if one argument is passed, its assumed the config file name
 		`,
-		Example: `required: --static-providers ...   (--geolocation is optional, defaults to 1)
+		Example: `required: --static-providers ...
 rpcsmartrouter <flags>
 rpcsmartrouter rpcsmartrouter_conf <flags>
 rpcsmartrouter 127.0.0.1:3333 OSMOSIS tendermintrpc 127.0.0.1:3334 OSMOSIS rest <flags>
-rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127.0.0.1:7778" [--geolocation 1] [--debug-relays] --log_level <debug|warn|...>`,
+rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127.0.0.1:7778" [--debug-relays] --log_level <debug|warn|...>`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			// Optionally run one of the validators provided by cobra
 			if err := cobra.RangeArgs(0, 1)(cmd, args); err == nil {
@@ -1815,11 +1808,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 					utils.LogAttr("consistencyBlockGapFactor", relaycore.ConsistencyBlockGapFactorOverride))
 			}
 
-			geolocation, err := cmd.Flags().GetUint64(lavasession.GeolocationFlag)
-			if err != nil {
-				utils.LavaFormatFatal("failed to read geolocation flag", err)
-			}
-			rpcEndpoints, err = ParseEndpoints(viper.GetViper(), geolocation)
+			rpcEndpoints, err = ParseEndpoints(viper.GetViper())
 			if err != nil || len(rpcEndpoints) == 0 {
 				return utils.LavaFormatError("invalid endpoints definition", err)
 			}
@@ -1887,7 +1876,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				directRPCConfigKey = common.StaticProvidersConfigName // backward compat
 			}
 			if viper.IsSet(directRPCConfigKey) {
-				directRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), directRPCConfigKey, geolocation)
+				directRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), directRPCConfigKey)
 				if err != nil {
 					return utils.LavaFormatError("invalid direct-rpc endpoints definition", err)
 				}
@@ -1909,7 +1898,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			}
 			if viper.IsSet(backupConfigKey) {
 				utils.LavaFormatInfo("Backup direct-rpc config found", utils.Attribute{Key: "configKey", Value: backupConfigKey})
-				backupDirectRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), backupConfigKey, geolocation)
+				backupDirectRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), backupConfigKey)
 				if err != nil {
 					return utils.LavaFormatError("invalid backup-direct-rpc endpoints definition", err)
 				}
@@ -2050,7 +2039,6 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				stateShare:               rpcSmartRouterSharedState,
 				staticProvidersList:      directRPCEndpoints,
 				backupProvidersList:      backupDirectRPCEndpoints,
-				geoLocation:              geolocation,
 				weightedSelectorConfig:   weightedSelectorConfig,
 			})
 			if err != nil {
@@ -2069,11 +2057,6 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	}
 
 	// RPCSmartRouter command flags - no blockchain flags needed
-	// Optional: smart-router uses static, pre-configured providers and does not
-	// pair on-chain, so geolocation has no effect on provider discovery and only
-	// a dulled effect on QoS reputation (the reputation-nulling branch is skipped
-	// for static providers). Defaults to 1; operators rarely need to set it.
-	cmdRPCSmartRouter.Flags().Uint64(common.GeolocationFlag, 1, "geolocation to run from (optional; static providers don't pair by geo)")
 	cmdRPCSmartRouter.Flags().Uint(common.MaximumConcurrentProvidersFlagName, 3, "max number of concurrent providers to communicate with")
 	cmdRPCSmartRouter.Flags().Bool(lavasession.AllowInsecureConnectionToProvidersFlag, false, "allow insecure provider-dialing. used for development and testing")
 	cmdRPCSmartRouter.Flags().String(common.ResponseCompressionFlag, common.DefaultResponseCompression, "client-facing response compression: gzip (default), brotli, or off")
@@ -2436,7 +2419,6 @@ func (rpsr *RPCSmartRouter) retryFailedStaticProviders(
 				NetworkAddress: provider.NetworkAddress,
 				ChainID:        provider.ChainID,
 				ApiInterface:   provider.ApiInterface,
-				Geolocation:    provider.Geolocation,
 				NodeUrls:       verificationNodeUrls,
 			}
 

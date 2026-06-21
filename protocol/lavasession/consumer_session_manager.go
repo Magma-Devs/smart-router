@@ -1100,13 +1100,6 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 				sessions[providerAddress] = sessionInfo
 
 				qosReport, _ := csm.providerOptimizer.GetReputationReportForProvider(providerAddress)
-				if csm.rpcEndpoint.Geolocation != uint64(endpoint.endpoint.Geolocation) && !consumerSessionsWithProvider.StaticProvider {
-					// rawQosReport is used only when building the relay payment message to be used to update
-					// the provider's reputation on-chain. If the consumer and provider don't share geolocation
-					// (consumer geo: csm.rpcEndpoint.Geolocation, provider geo: endpoint.endpoint.Geolocation)
-					// we don't want to update the reputation by it, so we null the rawQosReport
-					qosReport = nil
-				}
 				consumerSession.SetUsageForSession(cuNeededForSession, qosReport, usedProviders, routerKey)
 				// We successfully added provider, we should ignore it if we need to fetch new
 				tempIgnoredProviders.providers[providerAddress] = struct{}{}
@@ -2082,19 +2075,17 @@ func (csm *ConsumerSessionManager) GetReportedProviders(epoch uint64) []*pairing
 	reportedProviders := csm.reportedProviders.GetReportedProviders()
 	filteredReportedProviders := []*pairingtypes.ReportedProvider{}
 	for _, reportedProvider := range reportedProviders {
-		provider, ok := csm.pairing[reportedProvider.Address]
+		_, ok := csm.pairing[reportedProvider.Address]
 		if !ok {
 			// Provider may be a backup provider — they are stored separately
 			// from the main pairing but can still be reported on failure.
-			provider, ok = csm.backupProviders[reportedProvider.Address]
+			_, ok = csm.backupProviders[reportedProvider.Address]
 		}
 		if !ok {
 			utils.LavaFormatError("Failed to find a reported provider in pairing list", nil, utils.LogAttr("provider_address", reportedProvider.Address), utils.LogAttr("epoch", csm.currentEpoch))
 			continue
 		}
-		if provider.doesProviderEndpointsContainGeolocation(csm.RPCEndpoint().Geolocation) {
-			filteredReportedProviders = append(filteredReportedProviders, reportedProvider)
-		}
+		filteredReportedProviders = append(filteredReportedProviders, reportedProvider)
 	}
 	return filteredReportedProviders
 }
