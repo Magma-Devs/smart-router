@@ -331,15 +331,3 @@ func UpgradeToArchiveIfNeeded(ctx context.Context, protocolMessage chainlib.Prot
 	return protocolMessage
 }
 
-// Legacy method wrapper for backward compatibility
-func (rs *RelayState) UpgradeToArchiveIfNeeded(numberOfRetriesLaunched int, numberOfNodeErrors uint64) {
-	if rs == nil || rs.archiveStatus == nil {
-		return
-	}
-
-	// Use the static function to get the upgraded protocol message
-	upgradedProtocolMessage := UpgradeToArchiveIfNeeded(rs.ctx, rs.GetProtocolMessage(), rs.archiveStatus, rs.relayParser, rs.cache, numberOfRetriesLaunched, numberOfNodeErrors)
-
-	// Update the RelayState with the new protocol message
-	rs.SetProtocolMessage(upgradedProtocolMessage)
-}

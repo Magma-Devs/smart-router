@@ -120,26 +120,6 @@ func extractErrorMessage(data []byte, httpStatusCode int) string {
 	return fmt.Sprintf("HTTP %d", httpStatusCode)
 }
 
-// checkGenericRESTError detects errors in generic REST API responses (deprecated - kept for backward compatibility)
-// Expects format: {"message": "error text", "code": <error_code>}
-func checkGenericRESTError(data []byte) (bool, string) {
-	result := make(map[string]interface{})
-	if err := json.Unmarshal(data, &result); err != nil {
-		utils.LavaFormatWarning("Failed unmarshalling REST error response", err, utils.LogAttr("data", string(data)))
-		return false, ""
-	}
-
-	// Valid error requires both message and code fields
-	if errMsg, ok := result["message"].(string); ok {
-		if _, hasCode := result["code"]; hasCode {
-			return true, errMsg
-		}
-		utils.LavaFormatWarning("found message without code in REST response", nil, utils.LogAttr("result", result))
-	}
-
-	return false, ""
-}
-
 // GetParams will be deprecated after we remove old client
 // Currently needed because of parser.RPCInput interface
 func (rm RestMessage) GetParams() interface{} {

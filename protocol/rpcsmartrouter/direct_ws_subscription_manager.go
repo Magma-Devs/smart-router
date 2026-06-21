@@ -19,17 +19,6 @@ import (
 )
 
 // Note: Configuration constants are now in WebsocketConfig (websocket_config.go)
-// Legacy constants kept for backwards compatibility
-const (
-	// DefaultMaxSubscriptionsPerClient is the default max subscriptions per client
-	DefaultMaxSubscriptionsPerClient = 25
-
-	// DefaultCleanupInterval is the default interval for periodic cleanup
-	DefaultCleanupInterval = 1 * time.Minute
-
-	// DefaultMaxMessageSize is the default maximum message size (1 MB)
-	DefaultMaxMessageSize = 1048576
-)
 
 // directActiveSubscription holds state for an active upstream subscription
 type directActiveSubscription struct {

@@ -117,11 +117,6 @@ func (q *QualityOfServiceReport) ComputeReputation(opts ...Option) (float64, err
 	return total, nil
 }
 
-// ComputeReputationFloat64 is an alias for ComputeReputation for backward compatibility.
-func (q *QualityOfServiceReport) ComputeReputationFloat64(opts ...Option) (float64, error) {
-	return q.ComputeReputation(opts...)
-}
-
 // ComputeQoS computes the geometric mean of availability, latency, and sync
 // scores (all expected in [0,1]). Returns an error if any score is out of range.
 func (q *QualityOfServiceReport) ComputeQoS() (float64, error) {
