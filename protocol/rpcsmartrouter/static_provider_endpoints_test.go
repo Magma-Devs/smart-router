@@ -11,12 +11,11 @@ import (
 )
 
 // TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading backfills
-// MAG-1872 item 1: --backup-providers enabled vs disabled through the
+// MAG-1872 item 1: backup-direct-rpc enabled vs disabled through the
 // YAML-config-loading path. The previous coverage exercised backup-provider
 // selection via the direct API (consumer_session_manager_test.go), but did
 // not validate that the YAML key-presence and absent-key branches both work
-// — the path actually used by the cobra command at
-// rpcsmartrouter.go:1683-1701.
+// — the path actually used by the cobra command.
 func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -32,7 +31,7 @@ func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
 		},
 		{
 			name: "enabled_single_backup",
-			yamlBody: "backup-providers:\n" +
+			yamlBody: "backup-direct-rpc:\n" +
 				"  - name: backup-1\n" +
 				"    chain-id: ETH1\n" +
 				"    api-interface: jsonrpc\n" +
@@ -43,7 +42,7 @@ func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
 		},
 		{
 			name: "enabled_multiple_backups",
-			yamlBody: "backup-providers:\n" +
+			yamlBody: "backup-direct-rpc:\n" +
 				"  - name: backup-1\n" +
 				"    chain-id: ETH1\n" +
 				"    api-interface: jsonrpc\n" +
@@ -65,8 +64,8 @@ func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
 			v.SetConfigType("yaml")
 			require.NoError(t, v.ReadConfig(strings.NewReader(tc.yamlBody)))
 
-			require.Equal(t, tc.expectIsSet, v.IsSet(common.BackupProvidersConfigName),
-				"viper.IsSet(backup-providers) must reflect YAML key presence")
+			require.Equal(t, tc.expectIsSet, v.IsSet(common.BackupDirectRPCConfigName),
+				"viper.IsSet(backup-direct-rpc) must reflect YAML key presence")
 
 			if !tc.expectIsSet {
 				// Disabled branch: caller short-circuits and skips the parser.
@@ -75,7 +74,7 @@ func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
 				return
 			}
 
-			endpoints, err := ParseStaticProviderEndpoints(v, common.BackupProvidersConfigName)
+			endpoints, err := ParseStaticProviderEndpoints(v, common.BackupDirectRPCConfigName)
 			require.NoError(t, err)
 			require.Len(t, endpoints, tc.wantEndpoints)
 			for i, ep := range endpoints {
