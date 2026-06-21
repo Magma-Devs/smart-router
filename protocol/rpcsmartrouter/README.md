@@ -256,7 +256,6 @@ lavap rpcsmartrouter config.yml --use-static-spec specs/
 --strategy balanced                   # Provider selection strategy
 --metrics-listen-address ":7779"     # Prometheus metrics
 --log_level debug                    # Log verbosity
---concurrent-providers 3             # Max parallel provider attempts
 ```
 
 ### Usage telemetry (OTel)

@@ -20,7 +20,6 @@ const (
 	BackupProvidersConfigName          = "backup-providers" // Deprecated: use BackupDirectRPCConfigName
 	SaveConfigFlagName                 = "save-conf"
 	TestModeFlagName                   = "test-mode"
-	MaximumConcurrentProvidersFlagName = "concurrent-providers"
 	StatusCodeMetadataKey              = "status-code"
 	VersionMetadataKey                 = "lavap-version"
 	LavaChainIdMetadataKey             = "lavap-chain-id"
