@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -629,7 +628,6 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 			probeResp, err := client.Probe(connectCtx, probeReq, grpc.Trailer(&trailer))
 
 			relayLatency := time.Since(relaySentTime)
-			versions := trailer.Get(common.VersionMetadataKey)
 			if err != nil {
 				return utils.LavaFormatError("probe call error", err, utils.Attribute{Key: "provider", Value: providerAddress})
 			}
@@ -647,7 +645,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 			})
 			// public lava address is a value that is not changing, so it's thread safe
 			if DebugProbes {
-				utils.LavaFormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicLavaAddress}, utils.LogAttr("version", strings.Join(versions, ",")))
+				utils.LavaFormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicLavaAddress})
 			}
 			return nil
 		}()

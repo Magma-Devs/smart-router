@@ -17,7 +17,6 @@ const (
 	BackupDirectRPCConfigName = "backup-direct-rpc"
 	TestModeFlagName          = "test-mode"
 	StatusCodeMetadataKey     = "status-code"
-	VersionMetadataKey        = "lavap-version"
 )
 
 func ParseEndpointArgs(endpoint_strings, yaml_config_properties []string, endpointsConfigName string) (viper_endpoints *viper.Viper, err error) {
