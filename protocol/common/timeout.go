@@ -12,7 +12,6 @@ const (
 	TimePerCU                           = uint64(100 * time.Millisecond)
 	CacheWriteTimeout                   = 5 * time.Second
 	AverageWorldLatency                 = 300 * time.Millisecond
-	CommunicateWithLocalLavaNodeTimeout = (3 * time.Second) + AverageWorldLatency
 	DefaultTimeoutSeconds               = 30 // default timeout in seconds, can be overridden by flag
 	CacheTimeout                        = 50 * time.Millisecond
 	// On subscriptions we must use context.Background(),

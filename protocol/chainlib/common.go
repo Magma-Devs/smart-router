@@ -33,17 +33,14 @@ const (
 	// HTTP upgrade context to the websocket handler.
 	ProjectIDHeader            = "project-id"
 	RetryListeningInterval     = 10 // seconds
-	debug                      = false
 	relayMsgLogMaxChars        = 200
 	RPCProviderNodeAddressHash = "Lava-Provider-Node-Address-Hash"
 	RPCProviderNodeExtension   = "Lava-Provider-Node-Extension"
-	RpcProviderLoadRateHeader  = "Lava-Provider-Load-Rate"
-	RpcProviderUniqueIdHeader  = "Lava-Provider-Unique-Id"
 	WebSocketExtension         = "websocket"
 )
 
 var (
-	TrailersToAddToHeaderResponse      = []string{RPCProviderNodeExtension, RpcProviderLoadRateHeader}
+	TrailersToAddToHeaderResponse      = []string{RPCProviderNodeExtension}
 	InvalidResponses                   = []string{"null", "", "nil", "undefined"}
 	FailedSendingSubscriptionToClients = errors.New("Failed Sending Subscription To Clients connection might have been closed by the user")
 	NoActiveSubscriptionFound          = errors.New("no active subscriptions for hashed params.")

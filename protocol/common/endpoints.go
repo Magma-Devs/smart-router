@@ -32,7 +32,6 @@ const (
 	LAVA_IDENTIFIED_NODE_ERROR_HEADER               = "lava-identified-node-error"
 	LAVA_HEDGE_TRIGGERED_HEADER                     = "lava-hedge-triggered"
 	SMART_ROUTER_VERSION_HEADER_NAME                = "Smart-Router-Version"
-	LAVA_CONSUMER_PROCESS_GUID                      = "lava-consumer-process-guid"
 	// these headers need to be lowercase
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME         = "lava-providers-block"
 	RELAY_TIMEOUT_HEADER_NAME                     = "lava-relay-timeout"

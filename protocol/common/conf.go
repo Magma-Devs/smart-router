@@ -11,19 +11,15 @@ import (
 type Test_mode_ctx_key struct{}
 
 const (
-	PlainTextConnection                = "allow-plaintext-connection"
-	EndpointsConfigName                = "endpoints"
-	DirectRPCConfigName                = "direct-rpc"
-	CrossValidationConfigName          = "cross-validation"
-	BackupDirectRPCConfigName          = "backup-direct-rpc"
-	StaticProvidersConfigName          = "static-providers" // Deprecated: use DirectRPCConfigName
-	BackupProvidersConfigName          = "backup-providers" // Deprecated: use BackupDirectRPCConfigName
-	SaveConfigFlagName                 = "save-conf"
-	TestModeFlagName                   = "test-mode"
-	StatusCodeMetadataKey              = "status-code"
-	VersionMetadataKey                 = "lavap-version"
-	LavaChainIdMetadataKey             = "lavap-chain-id"
-	TimeOutForFetchingLavaBlocksFlag   = "timeout-for-fetching-lava-blocks"
+	EndpointsConfigName       = "endpoints"
+	DirectRPCConfigName       = "direct-rpc"
+	CrossValidationConfigName = "cross-validation"
+	BackupDirectRPCConfigName = "backup-direct-rpc"
+	StaticProvidersConfigName = "static-providers" // Deprecated: use DirectRPCConfigName
+	BackupProvidersConfigName = "backup-providers" // Deprecated: use BackupDirectRPCConfigName
+	TestModeFlagName          = "test-mode"
+	StatusCodeMetadataKey     = "status-code"
+	VersionMetadataKey        = "lavap-version"
 )
 
 func ParseEndpointArgs(endpoint_strings, yaml_config_properties []string, endpointsConfigName string) (viper_endpoints *viper.Viper, err error) {

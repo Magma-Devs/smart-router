@@ -42,21 +42,7 @@ const (
 	TimeoutForEstablishingAConnection                = 1500 * time.Millisecond // 1.5 seconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession = 15
 	RelayNumberIncrement                             = 1
-	TendermintUnsubscribeAll                         = "unsubscribe_all"
-	IndexNotFound                                    = -15
-	MinValidAddressesForBlockingProbing              = 2
-	BACKOFF_TIME_ON_FAILURE                          = 3 * time.Second
-	BLOCKING_PROBE_SLEEP_TIME                        = 1000 * time.Millisecond // maximum amount of time to sleep before triggering probe, to scatter probes uniformly across chains
-	BLOCKING_PROBE_TIMEOUT                           = time.Minute             // maximum time to wait for probe to complete before updating pairing
 	unixPrefix                                       = "unix:"
-)
-
-const (
-	OptimizerPerturbation  = 0.10
-	LatencyThresholdStatic = 1 * time.Second
-	LatencyThresholdSlope  = 1 * time.Millisecond
-	StaleEpochDistance     = 3 // relays done 3 epochs back are ready to be rewarded
-
 )
 
 func IsSessionSyncLoss(err error) bool {
