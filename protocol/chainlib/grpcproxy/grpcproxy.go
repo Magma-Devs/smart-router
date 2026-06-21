@@ -120,7 +120,7 @@ func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
 		md = lowercaseMD
 
 		if err := stream.SetHeader(md); err != nil {
-			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headerCount", len(md)))
+			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headers", utils.RedactPayloadAny(md)))
 		}
 		return stream.SendMsg(respBytes)
 	}

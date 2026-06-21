@@ -45,7 +45,7 @@ func (gm *GrpcMessage) GetRawRequestHash() ([]byte, error) {
 	headers := gm.GetHeaders()
 	headersByteArray, err := json.Marshal(headers)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headerCount", len(headers)))
+		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", utils.RedactPayloadAny(headers)))
 		return []byte{}, err
 	}
 	pathByteArray := []byte(gm.Path)

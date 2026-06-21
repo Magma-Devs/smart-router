@@ -41,7 +41,7 @@ func (jm *JsonrpcMessage) GetRawRequestHash() ([]byte, error) {
 	headers := jm.GetHeaders()
 	headersByteArray, err := json.Marshal(headers)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headerCount", len(headers)))
+		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", utils.RedactPayloadAny(headers)))
 		return []byte{}, err
 	}
 
@@ -49,7 +49,7 @@ func (jm *JsonrpcMessage) GetRawRequestHash() ([]byte, error) {
 
 	paramsByteArray, err := json.Marshal(jm.Params)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("method", jm.Method))
+		utils.LavaFormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("params", utils.RedactPayloadAny(jm.Params)))
 		return []byte{}, err
 	}
 	return sigs.HashMsg(append(append(methodByteArray, paramsByteArray...), headersByteArray...)), nil

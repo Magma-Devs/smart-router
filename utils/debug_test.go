@@ -1,40 +1,79 @@
 package utils_test
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 
-func TestRedactPayload(t *testing.T) {
-	// Ensure the global toggle is restored regardless of how the test exits, so
-	// other tests in the package are not affected by the writes below.
+func TestScrubSecrets(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          string
+		mustNotHave []string
+		mustHave    []string // structure that should survive scrubbing
+	}{
+		{
+			name:        "url query api key",
+			in:          `provider https://node.example.com/rpc?api_key=SECRETKEY12345 ok`,
+			mustNotHave: []string{"SECRETKEY12345"},
+			mustHave:    []string{"node.example.com", "api_key=[REDACTED]"},
+		},
+		{
+			name:        "url path token",
+			in:          `https://lb.drpc.live/ethereum/AbCdEf0123456789AbCdEf0123456789`,
+			mustNotHave: []string{"AbCdEf0123456789AbCdEf0123456789"},
+			mustHave:    []string{"lb.drpc.live", "[REDACTED]"},
+		},
+		{
+			name:        "ipv4 scrubbed, method kept",
+			in:          `{"method":"eth_call","client":"192.168.1.42"}`,
+			mustNotHave: []string{"192.168.1.42"},
+			mustHave:    []string{"eth_call", "[REDACTED]"},
+		},
+		{
+			name:        "no secrets left intact",
+			in:          `{"method":"eth_blockNumber","params":[]}`,
+			mustNotHave: []string{"[REDACTED]"},
+			mustHave:    []string{"eth_blockNumber"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := utils.ScrubSecrets(tc.in)
+			for _, s := range tc.mustNotHave {
+				require.NotContains(t, out, s, "secret/IP should be scrubbed")
+			}
+			for _, s := range tc.mustHave {
+				require.Contains(t, out, s, "readable structure should survive")
+			}
+		})
+	}
+}
+
+func TestRedactPayloadHonorsUnsafeFlag(t *testing.T) {
 	t.Cleanup(func() { utils.SetLogUnsafePayloads(false) })
 
-	const body = `{"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":["0xdeadbeef"]}`
+	const body = `{"method":"eth_call","key":"https://x/v2/SECRET_TOKEN_VALUE_123","ip":"10.0.0.1"}`
 
-	// Default (safe): payload is redacted to a length-only placeholder, and the
-	// raw contents never appear.
+	// Safe (default): keys/IPs scrubbed, structure readable.
 	utils.SetLogUnsafePayloads(false)
-	require.False(t, utils.LogUnsafePayloadsEnabled())
-
 	redacted := utils.RedactPayload(body)
-	require.NotContains(t, redacted, "eth_sendRawTransaction")
-	require.NotContains(t, redacted, "0xdeadbeef")
-	require.Contains(t, redacted, "REDACTED")
-	require.Contains(t, redacted, "bytes", "redacted form should preserve the byte length for traffic shape")
+	require.NotContains(t, redacted, "SECRET_TOKEN_VALUE_123")
+	require.NotContains(t, redacted, "10.0.0.1")
+	require.Contains(t, redacted, "eth_call")
 
-	// Empty bodies stay empty (no noisy "[REDACTED](0 bytes)").
+	// Empty stays empty.
 	require.Equal(t, "", utils.RedactPayload(""))
 
-	// Unsafe mode: the raw payload passes through verbatim.
+	// Unsafe: verbatim passthrough.
 	utils.SetLogUnsafePayloads(true)
-	require.True(t, utils.LogUnsafePayloadsEnabled())
 	require.Equal(t, body, utils.RedactPayload(body))
 
-	// Toggling back off re-redacts.
+	// any-typed variant follows the same flag.
+	require.Equal(t, body, utils.RedactPayloadAny(body))
 	utils.SetLogUnsafePayloads(false)
-	require.True(t, strings.HasPrefix(utils.RedactPayload(body), "[REDACTED]"))
+	require.NotContains(t, utils.RedactPayloadAny(body).(string), "SECRET_TOKEN_VALUE_123")
 }

@@ -22,7 +22,7 @@ type TendermintrpcMessage struct {
 func (tm TendermintrpcMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
 	params, err := json.Marshal(tm.GetParams())
 	if err != nil {
-		utils.LavaFormatWarning("failed marshaling params", err, utils.LogAttr("method", tm.Method))
+		utils.LavaFormatWarning("failed marshaling params", err, utils.LogAttr("request", utils.RedactPayloadAny(tm)))
 		return ""
 	}
 	return string(params)
@@ -33,14 +33,14 @@ func (tm *TendermintrpcMessage) GetRawRequestHash() ([]byte, error) {
 	headers := tm.GetHeaders()
 	headersByteArray, err := json.Marshal(headers)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headerCount", len(headers)))
+		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", utils.RedactPayloadAny(headers)))
 		return []byte{}, err
 	}
 	methodByteArray := []byte(tm.Method + tm.Path)
 
 	paramsByteArray, err := json.Marshal(tm.Params)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("method", tm.Method))
+		utils.LavaFormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("params", utils.RedactPayloadAny(tm.Params)))
 		return []byte{}, err
 	}
 	return sigs.HashMsg(append(append(methodByteArray, paramsByteArray...), headersByteArray...)), nil

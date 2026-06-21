@@ -292,19 +292,16 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		analytics.SetProcessingTimestampBeforeRelay(startTime)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		requestBody := string(fiberCtx.Body())
-		// Body and headers are sensitive — log them at debug only, body redacted
-		// unless --log-unsafe-payloads is set, so nothing leaks at info level.
-		utils.LavaFormatInfo("Consumer received a new REST POST request",
+		// Body/headers are sensitive — logged at debug, with API keys and IPs
+		// scrubbed from the body and credential headers redacted unless
+		// --log-unsafe-payloads is set.
+		utils.LavaFormatDebug("Consumer received a new REST POST request",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
 			utils.LogAttr(utils.KEY_TASK_ID, ctx),
 			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("path", path),
 			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("msgSeed", msgSeed),
-		)
-		utils.LavaFormatDebug("REST POST request payload",
-			utils.LogAttr("GUID", guid),
 			utils.LogAttr("msgSeed", msgSeed),
 			utils.LogAttr("body", utils.RedactPayload(requestBody)),
 			utils.LogAttr("headers", RedactSensitiveMetadata(restHeaders)),
@@ -368,9 +365,9 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		}
 		defer cancel() // incase there's a problem make sure to cancel the connection
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
-		// Headers are sensitive — log them at debug only (redacted), keeping the
-		// info line to safe metadata. A non-POST request carries no body.
-		utils.LavaFormatInfo("Consumer received a new REST non-POST request",
+		// Headers are sensitive — logged at debug, credential headers redacted
+		// unless --log-unsafe-payloads is set. A non-POST request carries no body.
+		utils.LavaFormatDebug("Consumer received a new REST non-POST request",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
 			utils.LogAttr(utils.KEY_TASK_ID, ctx),
@@ -378,10 +375,6 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("path", path),
 			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("dappID", dappID),
-		)
-		utils.LavaFormatDebug("REST non-POST request headers",
-			utils.LogAttr("GUID", guid),
-			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("headers", RedactSensitiveMetadata(restHeaders)),
 		)
 

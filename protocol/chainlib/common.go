@@ -468,49 +468,62 @@ func isSensitiveHeader(name string) bool {
 	return ok
 }
 
-// RedactSensitiveMetadata returns a copy of the metadata slice with the values
-// of credential-bearing headers replaced by a placeholder. The input is left
-// untouched so redaction never affects the headers actually forwarded upstream.
+// RedactSensitiveMetadata returns a copy of the metadata slice safe for
+// logging: credential-bearing headers (Authorization, Cookie, x-api-key, …)
+// are blanked, and any API key / IP that slipped into another header value is
+// scrubbed. When --log-unsafe-payloads is set the input is returned verbatim.
+// The input is never mutated, so the headers forwarded upstream are unchanged.
 // Exported so other packages that log relay metadata (e.g. relaycore) share the
 // same redaction list instead of growing a divergent copy.
 func RedactSensitiveMetadata(md []pairingtypes.Metadata) []pairingtypes.Metadata {
+	if utils.LogUnsafePayloadsEnabled() {
+		return md
+	}
 	out := make([]pairingtypes.Metadata, len(md))
 	for i, m := range md {
 		if isSensitiveHeader(m.Name) {
 			out[i] = pairingtypes.Metadata{Name: m.Name, Value: redactedHeaderValue}
 			continue
 		}
-		out[i] = m
+		out[i] = pairingtypes.Metadata{Name: m.Name, Value: utils.ScrubSecrets(m.Value)}
 	}
 	return out
 }
 
-// RedactSensitiveHeaderMap returns a copy of a map-shaped header set (e.g.
-// http.Header / map[string][]string) with credential-bearing values redacted.
-// The original map is never mutated.
+// RedactSensitiveHeaderMap is the map-shaped variant (e.g. http.Header /
+// map[string][]string). Same semantics as RedactSensitiveMetadata.
 func RedactSensitiveHeaderMap(headers map[string][]string) map[string][]string {
+	if utils.LogUnsafePayloadsEnabled() {
+		return headers
+	}
 	out := make(map[string][]string, len(headers))
 	for k, v := range headers {
 		if isSensitiveHeader(k) {
 			out[k] = []string{redactedHeaderValue}
 			continue
 		}
-		out[k] = v
+		scrubbed := make([]string, len(v))
+		for i, val := range v {
+			scrubbed[i] = utils.ScrubSecrets(val)
+		}
+		out[k] = scrubbed
 	}
 	return out
 }
 
 // RedactSensitiveStringMap is the map[string]string variant (e.g. the grpc
-// metadataMap), with credential-bearing values redacted. The original map is
-// never mutated.
+// metadataMap). Same semantics as RedactSensitiveMetadata.
 func RedactSensitiveStringMap(headers map[string]string) map[string]string {
+	if utils.LogUnsafePayloadsEnabled() {
+		return headers
+	}
 	out := make(map[string]string, len(headers))
 	for k, v := range headers {
 		if isSensitiveHeader(k) {
 			out[k] = redactedHeaderValue
 			continue
 		}
-		out[k] = v
+		out[k] = utils.ScrubSecrets(v)
 	}
 	return out
 }
