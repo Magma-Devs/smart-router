@@ -22,7 +22,6 @@ import (
 )
 
 const (
-	TendermintStatusQuery  = "status"
 	ChainFetcherHeaderName = "X-LAVA-Provider"
 )
 
