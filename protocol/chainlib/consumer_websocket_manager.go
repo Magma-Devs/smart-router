@@ -269,7 +269,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		utils.LavaFormatDebug("ws in <<<",
 			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("GUID", webSocketCtx),
-			utils.LogAttr("msg", logFormattedMsg),
+			utils.LogAttr("msg", utils.RedactPayload(logFormattedMsg)),
 			utils.LogAttr("dappID", dappID),
 		)
 
@@ -277,7 +277,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 
 		protocolMessage, err := cwm.relaySender.ParseRelay(webSocketCtx, "", string(msg), cwm.connectionType, dappID, userIp, nil)
 		if err != nil {
-			utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", msg), utils.LogAttr("err", err))
+			utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", utils.RedactPayload(string(msg))), utils.LogAttr("err", err))
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})

@@ -37,6 +37,11 @@ const (
 	// BatchNodeErrorOnAny controls batch request error detection for JSON-RPC batch requests
 	BatchNodeErrorOnAnyFlag = "batch-node-error-on-any"
 
+	// LogUnsafePayloadsFlagName enables verbatim logging of RPC request/response
+	// bodies. Off by default — bodies are redacted to a length-only placeholder.
+	// Local-debugging only; never enable on a publicly reachable deployment.
+	LogUnsafePayloadsFlagName = "log-unsafe-payloads"
+
 	// UseStaticSpecFlag allows loading specs from various sources instead of the blockchain.
 	// This flag can be specified multiple times to aggregate specs from multiple sources.
 	// Later sources override earlier ones for the same chain ID (last-wins).

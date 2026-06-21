@@ -487,7 +487,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		utils.LavaFormatDebug("in <<<",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr("seed", msgSeed),
-			utils.LogAttr("_msg", logFormattedMsg),
+			utils.LogAttr("_msg", utils.RedactPayload(logFormattedMsg)),
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("headers", redactSensitiveMetadata(headers)),
 		)

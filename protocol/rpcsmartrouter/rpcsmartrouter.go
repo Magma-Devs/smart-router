@@ -1861,6 +1861,15 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			}
 			utils.SetGlobalLoggingLevel(logLevel)
 
+			logUnsafePayloads, err := cmd.Flags().GetBool(common.LogUnsafePayloadsFlagName)
+			if err != nil {
+				utils.LavaFormatFatal("failed to read log-unsafe-payloads flag", err)
+			}
+			utils.SetLogUnsafePayloads(logUnsafePayloads)
+			if logUnsafePayloads {
+				utils.LavaFormatWarning("UNSAFE: --log-unsafe-payloads is enabled — raw RPC request/response bodies will be written to logs verbatim. Use for local debugging only; never on a publicly reachable or shared-logging deployment.", nil)
+			}
+
 			test_mode, err := cmd.Flags().GetBool(common.TestModeFlagName)
 			if err != nil {
 				utils.LavaFormatFatal("failed to read test_mode flag", err)
@@ -2218,6 +2227,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	// Log level/format flags (previously provided by cosmos-sdk AddTxFlagsToCmd)
 	cmdRPCSmartRouter.Flags().String("log-level", "info", "log level (debug|info|warn|error|fatal)")
 	cmdRPCSmartRouter.Flags().String("log-format", "text", "log format (text|json)")
+	cmdRPCSmartRouter.Flags().Bool(common.LogUnsafePayloadsFlagName, false, "UNSAFE: log raw RPC request/response bodies verbatim instead of redacting them. Local debugging only — never enable on a publicly reachable or shared-logging deployment.")
 	return cmdRPCSmartRouter
 }
 

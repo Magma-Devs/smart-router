@@ -292,6 +292,8 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		analytics.SetProcessingTimestampBeforeRelay(startTime)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		requestBody := string(fiberCtx.Body())
+		// Body and headers are sensitive — log them at debug only, body redacted
+		// unless --log-unsafe-payloads is set, so nothing leaks at info level.
 		utils.LavaFormatInfo("Consumer received a new REST POST request",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
@@ -300,7 +302,11 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("path", path),
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("msgSeed", msgSeed),
-			utils.LogAttr("body", requestBody),
+		)
+		utils.LavaFormatDebug("REST POST request payload",
+			utils.LogAttr("GUID", guid),
+			utils.LogAttr("msgSeed", msgSeed),
+			utils.LogAttr("body", utils.RedactPayload(requestBody)),
 			utils.LogAttr("headers", redactSensitiveMetadata(restHeaders)),
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, http.MethodPost, dappID, userIp, analytics, restHeaders)

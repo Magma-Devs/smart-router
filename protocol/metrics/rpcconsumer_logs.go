@@ -199,11 +199,16 @@ func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSoc
 }
 
 func (rpccl *RPCConsumerLogs) LogRequestAndResponse(module string, hasError bool, method, path, req, resp, msgSeed string, timeTaken time.Duration, err error) {
+	// req/resp are raw RPC payloads — redact unless --log-unsafe-payloads is set.
+	// The error branch logs at error level (always emitted), so redaction here is
+	// what keeps payloads out of the logs at the default verbosity.
+	loggedReq := utils.RedactPayload(req)
+	loggedResp := utils.RedactPayload(parser.CapStringLen(resp))
 	if hasError && err != nil {
-		utils.LavaFormatError(module, err, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
+		utils.LavaFormatError(module, err, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: loggedReq}, {Key: "response", Value: loggedResp}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
 		return
 	}
-	utils.LavaFormatDebug(module, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
+	utils.LavaFormatDebug(module, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: loggedReq}, {Key: "response", Value: loggedResp}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
 }
 
 func (rpccl *RPCConsumerLogs) LogStartTransaction(name string) func() {

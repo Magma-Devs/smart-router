@@ -469,6 +469,10 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		}
 
 		path := "/" + fiberCtx.Params("*")
+		// The request body and headers are sensitive (wallet addresses, tx data,
+		// dapp ids, credentials). Log them at debug level only, with the body
+		// redacted unless --log-unsafe-payloads is set, so nothing leaks at the
+		// default (info) verbosity. A safe info line still records the request.
 		utils.LavaFormatInfo("Consumer received a new JSON-RPC request",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
@@ -476,8 +480,12 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("path", path),
 			utils.LogAttr("seed", msgSeed),
-			utils.LogAttr("body", logFormattedMsg),
 			utils.LogAttr("dappID", dappID),
+		)
+		utils.LavaFormatDebug("JSON-RPC request payload",
+			utils.LogAttr("GUID", guid),
+			utils.LogAttr("seed", msgSeed),
+			utils.LogAttr("body", utils.RedactPayload(logFormattedMsg)),
 			utils.LogAttr("headers", redactSensitiveMetadata(headers)),
 		)
 
