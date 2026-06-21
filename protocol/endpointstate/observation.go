@@ -6,8 +6,13 @@ import "time"
 type ObservationSource int
 
 const (
+	// ObservationSourceUnknown is the zero value: no block has been observed yet. Making
+	// it the zero value means a freshly-created record — or one that has only ever seen
+	// failed polls — reports Source = Unknown rather than masquerading as a poll-sourced
+	// block.
+	ObservationSourceUnknown ObservationSource = iota
 	// ObservationSourcePoll is a block observed by the dedicated ChainTracker poll.
-	ObservationSourcePoll ObservationSource = iota
+	ObservationSourcePoll
 	// ObservationSourceRelay is a block harvested from a served relay response.
 	ObservationSourceRelay
 )
@@ -51,7 +56,7 @@ type EndpointObservation struct {
 	ConsecutivePollFailures int           // reset to 0 on a successful poll
 }
 
-// RecordPollObservation records the outcome of a single dedicated poll. It fires on
+// recordPollObservation records the outcome of a single dedicated poll. It fires on
 // every poll — success or failure, block-changed or not — and is side-effect-free
 // (it only updates the observation record, never QoS or endpoint.Enabled).
 //
@@ -60,11 +65,42 @@ type EndpointObservation struct {
 // the block triple (Source = Poll). On failure it stamps the attempt, records the
 // error, and increments the consecutive-failure counter, leaving LastSuccessfulPoll
 // and the block triple untouched.
-func (m *EndpointMonitor) RecordPollObservation(endpointURL string, block int64, latency time.Duration, err error, at time.Time) {
+//
+// gen is the observation generation captured when the calling tracker was created (see
+// GetOrCreateTracker). A poll callback from a removed or replaced tracker carries a
+// stale generation and is ignored, so a late in-flight poll can neither recreate a
+// deleted record nor overwrite a freshly-created tracker's record for the same URL.
+// After Stop, all writes are dropped (no resurrection).
+//
+// Poll-health is monotonic in the attempt timestamp: a poll older than the last attempt
+// already recorded (at.Before(LastPollAttempt)) is dropped wholesale — it moves no
+// field (attempt, latency, error, success stamp, or failure counter) backward. Equal
+// timestamps apply (last-writer-wins), the documented deterministic tie-break.
+//
+// This is unexported: the only production caller is the poll-observation callback wired
+// in GetOrCreateTracker, which owns the generation. Tests in this package drive it
+// directly after registering a generation.
+func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, block int64, latency time.Duration, err error, at time.Time) {
 	m.obsMu.Lock()
 	defer m.obsMu.Unlock()
 
+	if m.stopped {
+		return
+	}
+	// Generation gate: ignore callbacks from a removed/replaced tracker instance. A
+	// removed URL has no generation entry (0), and a replaced tracker bumps it, so a
+	// stale gen never matches the current one.
+	if m.generations[endpointURL] != gen {
+		return
+	}
+
 	o := m.observations[endpointURL] // zero value if absent
+
+	// Monotonic poll-health: drop a stale poll wholesale so no field regresses. The
+	// attempt stamp is the high-water mark every poll advances, so it gates them all.
+	if at.Before(o.LastPollAttempt) {
+		return
+	}
 	o.LastPollAttempt = at
 
 	if err == nil && block > 0 {
@@ -102,6 +138,10 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, block int64
 
 	m.obsMu.Lock()
 	defer m.obsMu.Unlock()
+
+	if m.stopped {
+		return
+	}
 
 	o := m.observations[endpointURL]
 	if at.Before(o.ObservedAt) {

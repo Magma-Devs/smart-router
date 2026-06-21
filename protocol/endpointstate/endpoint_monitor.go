@@ -64,6 +64,17 @@ type EndpointMonitor struct {
 	// never acquire mu while holding obsMu.
 	obsMu        sync.RWMutex
 	observations map[string]EndpointObservation
+	// generations tracks the live observation generation per endpoint URL. Each tracker
+	// created by GetOrCreateTracker is stamped with a fresh generation (nextObsGen), and
+	// its poll callback captures that generation. recordPollObservation accepts a write
+	// only if the callback's generation still matches the live one, so a late poll from a
+	// removed or replaced tracker cannot recreate a deleted record or clobber a new
+	// tracker's record for the same URL. Guarded by obsMu alongside observations.
+	generations map[string]uint64
+	nextObsGen  uint64
+	// stopped is set by Stop. Once set, no further observation writes are accepted, so a
+	// late in-flight poll cannot resurrect an observation after shutdown.
+	stopped bool
 
 	// Shared configuration
 	chainParser  chainlib.ChainParser
@@ -139,6 +150,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		trackerStates:     make(map[string]EndpointChainTrackerState),
 		trackerLastErrors: make(map[string]string),
 		observations:      make(map[string]EndpointObservation),
+		generations:       make(map[string]uint64),
 		chainParser:       config.ChainParser,
 		chainID:           config.ChainID,
 		apiInterface:      config.ApiInterface,
@@ -191,11 +203,24 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.apiInterface,
 	)
 
+	// Assign a fresh observation generation for this tracker instance and wire the poll
+	// callback to it. The callback captures gen by value, so recordPollObservation can
+	// reject a late poll from this instance once it has been removed or replaced (the
+	// live generation for the URL will no longer match). We already hold m.mu here; take
+	// obsMu only for the generation write, preserving the m.mu → obsMu lock order.
+	m.obsMu.Lock()
+	m.nextObsGen++
+	gen := m.nextObsGen
+	m.generations[endpointURL] = gen
+	m.obsMu.Unlock()
+
 	// Record a per-endpoint observation on every poll (Topic A). This fires on every
-	// FetchLatestBlockNum round-trip — success or failure, block-changed or not — and
-	// is side-effect-free (it only writes the observation record, never QoS/Enabled).
+	// latest-block poll round-trip — success or failure, block-changed or not — and is
+	// side-effect-free (it only writes the observation record, never QoS/Enabled). Both
+	// the default path (EndpointPoller.FetchLatestBlockNum) and the SVM path
+	// (SVMChainTracker.FetchLatestBlockNum via the PollObserver hook) funnel through here.
 	fetcher.onPollObservation = func(block int64, latency time.Duration, pollErr error, at time.Time) {
-		m.RecordPollObservation(endpointURL, block, latency, pollErr, at)
+		m.recordPollObservation(endpointURL, gen, block, latency, pollErr, at)
 	}
 
 	// Configure the ChainTracker
@@ -252,6 +277,12 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	tracker, err := chaintracker.NewChainTracker(trackerCtx, fetcher, config)
 	if err != nil {
 		trackerCancel() // Clean up on failure
+		// No tracker was created, so drop the generation we just registered to keep the
+		// map tidy. (Leaving it is harmless — nothing can write through it — but a clean
+		// failure path is easier to reason about.)
+		m.obsMu.Lock()
+		delete(m.generations, endpointURL)
+		m.obsMu.Unlock()
 		return nil, utils.LavaFormatError("failed to create ChainTracker for endpoint", err,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
@@ -451,9 +482,13 @@ func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	delete(m.trackerLastErrors, endpointURL)
 	delete(m.trackerStates, endpointURL)
 
-	// Drop the observation record too, so it stays bounded as endpoints churn.
+	// Drop the observation record too, so it stays bounded as endpoints churn. Clearing
+	// the generation also disarms any in-flight poll callback from this instance: the URL
+	// now has no live generation, so a late recordPollObservation cannot recreate the
+	// record we just deleted.
 	m.obsMu.Lock()
 	delete(m.observations, endpointURL)
+	delete(m.generations, endpointURL)
 	m.obsMu.Unlock()
 
 	utils.LavaFormatInfo("stopped and removed ChainTracker for endpoint",
@@ -505,8 +540,13 @@ func (m *EndpointMonitor) Stop() {
 	m.trackerStates = make(map[string]EndpointChainTrackerState)
 	m.trackerLastErrors = make(map[string]string)
 
+	// Mark stopped and clear observation state. stopped is sticky: recordPollObservation
+	// and RecordRelayObservation both bail when it is set, so an in-flight poll that
+	// completes after Stop cannot resurrect an observation.
 	m.obsMu.Lock()
+	m.stopped = true
 	m.observations = make(map[string]EndpointObservation)
+	m.generations = make(map[string]uint64)
 	m.obsMu.Unlock()
 
 	utils.LavaFormatInfo("stopped EndpointMonitor",

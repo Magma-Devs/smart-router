@@ -58,13 +58,13 @@ func NewEndpointPoller(
 func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum int64, err error) {
 	// Record a per-endpoint observation for this poll on every return path (Topic A).
 	// pollLatency captures only the transport round-trip (set around sendRawRequest);
-	// the observation is success iff err == nil && block > 0 (see RecordPollObservation).
+	// the observation is success iff err == nil && block > 0 (see recordPollObservation).
+	// Routed through ObserveLatestBlockPoll (nil-safe) so the poll and SVM paths share a
+	// single recording chokepoint.
 	var pollLatency time.Duration
-	if ecf.onPollObservation != nil {
-		defer func() {
-			ecf.onPollObservation(blockNum, pollLatency, err, time.Now())
-		}()
-	}
+	defer func() {
+		ecf.ObserveLatestBlockPoll(blockNum, pollLatency, err)
+	}()
 
 	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCKNUM.String()
@@ -288,6 +288,23 @@ func (ecf *EndpointPoller) FetchEndpoint() lavasession.RPCProviderEndpoint {
 // convention (see connectionType == "GET" branch below).
 func (ecf *EndpointPoller) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
 	return ecf.sendRawRequest(ctx, data, connectionType, apiName)
+}
+
+// ObserveLatestBlockPoll records a single latest-block poll observation for this
+// endpoint (Topic A / MAG-2158). It implements chaintracker.PollObserver so the SVM
+// wrapper — whose latest-block poll uses CustomMessage and therefore bypasses
+// FetchLatestBlockNum's own instrumentation — can record exactly one observation per
+// poll. The non-SVM path also funnels through here from FetchLatestBlockNum's defer, so
+// every poll path records through a single chokepoint.
+//
+// block is the parsed latest block (0 on failure), transportLatency is the request
+// round-trip only, and err is the poll error (nil on success). Nil-safe: a no-op in
+// standalone/test use where no observation sink is wired.
+func (ecf *EndpointPoller) ObserveLatestBlockPoll(block int64, transportLatency time.Duration, err error) {
+	if ecf.onPollObservation == nil {
+		return
+	}
+	ecf.onPollObservation(block, transportLatency, err, time.Now())
 }
 
 // sendRawRequest sends a raw request to the endpoint and returns the response.

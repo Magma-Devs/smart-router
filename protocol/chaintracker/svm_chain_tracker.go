@@ -26,6 +26,24 @@ type IChainFetcherWrapper interface {
 	FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error)
 }
 
+// PollObserver is the optional hook a ChainFetcher may implement to receive a
+// per-poll observation for the latest-block poll (Topic A / MAG-2158).
+//
+// It exists for the SVM wrapper: SVMChainTracker fetches the latest block via
+// CustomMessage, which bypasses the EndpointPoller's own FetchLatestBlockNum
+// instrumentation. Without this hook, Solana-family endpoints would never record a
+// poll observation. The non-SVM (DefaultChainTrackerFetcher) path needs no hook — it
+// records inside EndpointPoller.FetchLatestBlockNum directly — so the two paths are
+// mutually exclusive by chain family and never double-record.
+//
+// transportLatency is the poll request round-trip only (no response parsing/caching);
+// block is the parsed latest block (0 on failure); err is the poll error (nil on
+// success). The chaintracker package defines the interface and discovers it via a type
+// assertion so it need not import the package that implements it.
+type PollObserver interface {
+	ObserveLatestBlockPoll(block int64, transportLatency time.Duration, err error)
+}
+
 type IChainTrackerDataFetcher interface {
 	GetAtomicLatestBlockNum() int64
 	GetServerBlockMemory() uint64
@@ -50,15 +68,21 @@ type SVMLatestBlockResponse struct {
 	} `json:"result"`
 }
 
-func (cs *SVMChainTracker) fetchLatestBlockNumInner(ctx context.Context) (int64, error) {
+// fetchLatestBlockNumInner performs the SVM latest-block poll and returns the parsed
+// slot, the transport round-trip latency of the CustomMessage call (measured around the
+// network request only, excluding JSON unmarshalling and cache writes), and any error.
+// On any error path the returned slot is 0 so callers can treat it as a failed poll.
+func (cs *SVMChainTracker) fetchLatestBlockNumInner(ctx context.Context) (int64, time.Duration, error) {
+	reqStart := time.Now()
 	latestBlockResponse, err := cs.chainFetcher.CustomMessage(ctx, "", []byte(latestBlockRequest), "POST", "getLatestBlockhash")
+	transportLatency := time.Since(reqStart)
 	if err != nil {
-		return 0, err
+		return 0, transportLatency, err
 	}
 
 	var response SVMLatestBlockResponse
 	if err := json.Unmarshal(latestBlockResponse, &response); err != nil {
-		return 0, fmt.Errorf("failed to unmarshal response: %v", err)
+		return 0, transportLatency, fmt.Errorf("failed to unmarshal response: %v", err)
 	}
 
 	// Solana uses slot (not block height) as the canonical chain-position primitive.
@@ -76,11 +100,22 @@ func (cs *SVMChainTracker) fetchLatestBlockNumInner(ctx context.Context) (int64,
 		utils.LogAttr("block_hash", blockHash),
 	)
 
-	return slot, nil
+	return slot, transportLatency, nil
 }
 
 func (cs *SVMChainTracker) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	latestBlockNum, err := cs.fetchLatestBlockNumInner(ctx)
+	latestBlockNum, transportLatency, err := cs.fetchLatestBlockNumInner(ctx)
+
+	// Record exactly one per-endpoint poll observation for this poll (Topic A / MAG-2158).
+	// The SVM latest-block poll uses CustomMessage, bypassing the EndpointPoller's own
+	// FetchLatestBlockNum instrumentation, so this is the only place Solana-family
+	// endpoints record a poll observation. latestBlockNum is 0 on failure (treated as a
+	// failed poll) and the slot on success; transportLatency is the CustomMessage
+	// round-trip only.
+	if observer, ok := cs.chainFetcher.(PollObserver); ok {
+		observer.ObserveLatestBlockPoll(latestBlockNum, transportLatency, err)
+	}
+
 	if err != nil {
 		return 0, utils.LavaFormatWarning("[SVMChainTracker] failed to get latest block num, getting from chain fetcher", err,
 			utils.LogAttr("block_num", latestBlockNum),
