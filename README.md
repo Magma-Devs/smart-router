@@ -50,7 +50,7 @@ The fastest way to start: install the binary, point it at a YAML config, run.
 
 ```bash
 make install
-smartrouter config/smartrouter_examples/smartrouter_lava.yml --geolocation 1 --use-static-spec specs/
+smartrouter config/smartrouter_examples/smartrouter_lava.yml --use-static-spec specs/
 ```
 
 After running, you get:

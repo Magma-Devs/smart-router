@@ -616,7 +616,7 @@ func TestGroupLabel_ConfigToSession_InertWithoutPolicy(t *testing.T) {
 	require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
 
 	// config -> RPCStaticProviderEndpoint.GroupLabel
-	endpoints, err := ParseStaticProviderEndpoints(v, common.DirectRPCConfigName, 1)
+	endpoints, err := ParseStaticProviderEndpoints(v, common.DirectRPCConfigName)
 	require.NoError(t, err)
 	require.Len(t, endpoints, 1)
 	require.Equal(t, "tier-1", endpoints[0].GroupLabel)

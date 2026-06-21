@@ -74,7 +74,6 @@ func TestRPCStaticProviderEndpoint_ToBase(t *testing.T) {
 		NodeUrls: []common.NodeUrl{
 			{Url: "https://example.com"},
 		},
-		Geolocation: 1,
 		Name:        "TestProvider",
 	}
 
@@ -84,7 +83,6 @@ func TestRPCStaticProviderEndpoint_ToBase(t *testing.T) {
 	require.Equal(t, staticEndpoint.ChainID, baseEndpoint.ChainID)
 	require.Equal(t, staticEndpoint.ApiInterface, baseEndpoint.ApiInterface)
 	require.Equal(t, staticEndpoint.NodeUrls, baseEndpoint.NodeUrls)
-	require.Equal(t, staticEndpoint.Geolocation, baseEndpoint.Geolocation)
 
 	// Verify that the base endpoint is a new instance with copied values
 	require.NotEqual(t, staticEndpoint, baseEndpoint)
@@ -138,7 +136,6 @@ func TestRPCStaticProviderEndpoint_CompleteConfig(t *testing.T) {
 			{Url: "https://primary.example.com"},
 			{Url: "https://backup.example.com"},
 		},
-		Geolocation: 1,
 		Name:        "EthereumMainnetProvider",
 	}
 

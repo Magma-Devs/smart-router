@@ -19,7 +19,6 @@ const (
 	StaticProvidersConfigName          = "static-providers" // Deprecated: use DirectRPCConfigName
 	BackupProvidersConfigName          = "backup-providers" // Deprecated: use BackupDirectRPCConfigName
 	SaveConfigFlagName                 = "save-conf"
-	GeolocationFlag                    = "geolocation"
 	TestModeFlagName                   = "test-mode"
 	MaximumConcurrentProvidersFlagName = "concurrent-providers"
 	StatusCodeMetadataKey              = "status-code"

@@ -209,7 +209,7 @@ YAML
     ROUTER_LOG="$(mktemp -t smartrouter_mag2062_log.XXXXXX)"
     info "starting router on :$ROUTER_PORT (log: $ROUTER_LOG)"
     ( cd "$REPO_ROOT" && exec "$ROUTER_BIN" "$(basename "$ROUTER_CFG")" \
-        --geolocation 1 --use-static-spec "$SPEC_DIR" \
+        --use-static-spec "$SPEC_DIR" \
         --skip-websocket-verification --log-level warn ) > "$ROUTER_LOG" 2>&1 &
     ROUTER_PID=$!
 

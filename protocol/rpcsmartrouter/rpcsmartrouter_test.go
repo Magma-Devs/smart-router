@@ -839,9 +839,6 @@ func TestRPCSmartRouterCobraCommand_StartupErrorDoesNotDumpUsage(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	// Pass the required --geolocation so cobra reaches RunE rather than failing
-	// on required-flag enforcement (which has its own usage-dump path).
-	cmd.SetArgs([]string{"--geolocation", "1"})
 
 	require.Error(t, cmd.Execute(), "expected Execute() to return synthetic error")
 

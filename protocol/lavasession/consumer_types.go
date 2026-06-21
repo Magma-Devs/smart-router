@@ -11,7 +11,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
-	planstypes "github.com/magma-Devs/smart-router/types/plans"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -182,7 +181,6 @@ type Endpoint struct {
 	ConnectionRefusals uint64
 	Addons             map[string]struct{}
 	Extensions         map[string]struct{}
-	Geolocation        planstypes.Geolocation
 	mu                 sync.RWMutex // Protects Connections, ConnectionRefusals, and Enabled fields
 
 	// Per-endpoint sync tracking (for direct RPC QoS)
@@ -272,21 +270,11 @@ type RPCEndpoint struct {
 	ApiInterface    string `yaml:"api-interface,omitempty" json:"api-interface,omitempty" mapstructure:"api-interface"`
 	TLSEnabled      bool   `yaml:"tls-enabled,omitempty" json:"tls-enabled,omitempty" mapstructure:"tls-enabled"`
 	HealthCheckPath string `yaml:"health-check-path,omitempty" json:"health-check-path,omitempty" mapstructure:"health-check-path"` // health check status code 200 path, default is "/"
-	Geolocation     uint64 `yaml:"geolocation,omitempty" json:"geolocation,omitempty" mapstructure:"geolocation"`
 }
 
 func (endpoint *RPCEndpoint) String() (retStr string) {
-	retStr = endpoint.ChainID + ":" + endpoint.ApiInterface + " Network Address:" + endpoint.NetworkAddress + " Geolocation:" + strconv.FormatUint(endpoint.Geolocation, 10)
+	retStr = endpoint.ChainID + ":" + endpoint.ApiInterface + " Network Address:" + endpoint.NetworkAddress
 	return retStr
-}
-
-func (rpce *RPCEndpoint) New(address, chainID, apiInterface string, geolocation uint64) *RPCEndpoint {
-	// TODO: validate correct url address
-	rpce.NetworkAddress = address
-	rpce.ChainID = chainID
-	rpce.ApiInterface = apiInterface
-	rpce.Geolocation = geolocation
-	return rpce
 }
 
 func (rpce *RPCEndpoint) Key() string {
@@ -465,20 +453,6 @@ func (cswp *ConsumerSessionsWithProvider) addUsedComputeUnits(cu, virtualEpoch u
 	}
 	cswp.UsedComputeUnits += cu
 	return nil
-}
-
-// check whether the provider has a specific geolocation
-// used to filter reports. if the provider does not have our geolocation we do not report it
-func (cswp *ConsumerSessionsWithProvider) doesProviderEndpointsContainGeolocation(geolocation uint64) bool {
-	cswp.Lock.RLock()
-	defer cswp.Lock.RUnlock()
-	// add additional CU for virtual epochs
-	for _, endpoint := range cswp.Endpoints {
-		if uint64(endpoint.Geolocation) == geolocation {
-			return true
-		}
-	}
-	return false
 }
 
 // getProviderStakeSize returns the stake size (in ulava) for this provider.
