@@ -18,6 +18,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -1780,6 +1781,19 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 					utils.LavaFormatInfo("created new config file", utils.Attribute{Key: "file_name", Value: DefaultRPCSmartRouterFileName})
 				}
 			} else if err = viper.ReadInConfig(); err != nil {
+				// A missing config file is the most common operator mistake (e.g.
+				// running `smartrouter` with no args in the wrong directory). Treat
+				// it as a clean, actionable error instead of a fatal stack-trace
+				// dump — reserve the loud path for genuinely unexpected read
+				// failures like malformed YAML.
+				var notFound viper.ConfigFileNotFoundError
+				if errors.As(err, &notFound) {
+					return utils.LavaFormatError(
+						"no config file found — pass a config file as an argument (e.g. `smartrouter <config-file>.yml`), or place "+DefaultRPCSmartRouterFileName+" in one of the search paths",
+						err,
+						utils.Attribute{Key: "config_name", Value: DefaultRPCSmartRouterFileName},
+					)
+				}
 				utils.LavaFormatFatal("could not load config file", err, utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
 			} else {
 				utils.LavaFormatInfo("read config file successfully", utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})

@@ -242,11 +242,7 @@ under a strict (unanimous) policy it instead causes a quorum failure.
 ## Usage
 
 ```bash
-# Using standalone binary
 smartrouter config.yml --use-static-spec specs/
-
-# Using lavap
-lavap rpcsmartrouter config.yml --use-static-spec specs/
 ```
 
 ### Common Flags

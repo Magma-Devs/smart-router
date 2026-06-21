@@ -19,8 +19,8 @@ echo "Upstream: PublicNode REST + gRPC + Tendermint RPC"
 echo "============================================"
 echo ""
 
-# Kill any running smartrouter / lavap processes (best-effort)
-killall smartrouter lavap 2>/dev/null || true
+# Kill any running smartrouter processes (best-effort)
+killall smartrouter 2>/dev/null || true
 sleep 1
 
 # Kill all screen sessions (best-effort)
@@ -264,7 +264,7 @@ echo "📊 Monitor Logs:"
 echo "  tail -f $LOGS_DIR/SMARTROUTER_LAVA.log"
 echo ""
 echo "✋ To Stop All Services:"
-echo "  killall smartrouter lavap"
+echo "  killall smartrouter"
 echo "  screen -wipe"
 echo "============================================"
 
