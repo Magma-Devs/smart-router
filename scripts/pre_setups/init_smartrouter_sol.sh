@@ -35,8 +35,8 @@ if [[ "$REGENERATE_CONFIG" == "1" ]]; then
     rm -f "$CONFIG_FILE" 2>/dev/null || true
 fi
 
-# Kill any running smartrouter / lavap processes
-killall smartrouter lavap 2>/dev/null || true
+# Kill any running smartrouter processes
+killall smartrouter 2>/dev/null || true
 sleep 1
 
 # Kill all screen sessions
