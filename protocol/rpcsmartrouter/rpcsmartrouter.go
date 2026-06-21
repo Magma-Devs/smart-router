@@ -1709,7 +1709,7 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 		if no arguments are passed, assumes default config file: ` + DefaultRPCSmartRouterFileName + `
 		if one argument is passed, its assumed the config file name
 		`,
-		Example: `required: --static-providers ...
+		Example: `required: --direct-rpc ...
 rpcsmartrouter <flags>
 rpcsmartrouter rpcsmartrouter_conf <flags>
 rpcsmartrouter 127.0.0.1:3333 OSMOSIS tendermintrpc 127.0.0.1:3334 OSMOSIS rest <flags>
@@ -1871,12 +1871,9 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				}
 			}
 
-			// Parse direct RPC endpoints (new key: "direct-rpc", backward compat: "static-providers")
+			// Parse direct RPC endpoints
 			var directRPCEndpoints []*lavasession.RPCStaticProviderEndpoint
 			directRPCConfigKey := common.DirectRPCConfigName
-			if !viper.IsSet(directRPCConfigKey) {
-				directRPCConfigKey = common.StaticProvidersConfigName // backward compat
-			}
 			if viper.IsSet(directRPCConfigKey) {
 				directRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), directRPCConfigKey)
 				if err != nil {
@@ -1892,12 +1889,9 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				}
 			}
 
-			// Parse backup direct RPC endpoints (new key: "backup-direct-rpc", backward compat: "backup-providers")
+			// Parse backup direct RPC endpoints
 			var backupDirectRPCEndpoints []*lavasession.RPCStaticProviderEndpoint
 			backupConfigKey := common.BackupDirectRPCConfigName
-			if !viper.IsSet(backupConfigKey) {
-				backupConfigKey = common.BackupProvidersConfigName // backward compat
-			}
 			if viper.IsSet(backupConfigKey) {
 				utils.LavaFormatInfo("Backup direct-rpc config found", utils.Attribute{Key: "configKey", Value: backupConfigKey})
 				backupDirectRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), backupConfigKey)

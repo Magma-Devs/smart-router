@@ -15,8 +15,6 @@ const (
 	DirectRPCConfigName       = "direct-rpc"
 	CrossValidationConfigName = "cross-validation"
 	BackupDirectRPCConfigName = "backup-direct-rpc"
-	StaticProvidersConfigName = "static-providers" // Deprecated: use DirectRPCConfigName
-	BackupProvidersConfigName = "backup-providers" // Deprecated: use BackupDirectRPCConfigName
 	TestModeFlagName          = "test-mode"
 	StatusCodeMetadataKey     = "status-code"
 	VersionMetadataKey        = "lavap-version"
