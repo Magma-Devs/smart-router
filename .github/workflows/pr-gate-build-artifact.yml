@@ -1,4 +1,4 @@
-name: PR Validation - Dev Sim Artifact Test
+name: PR Gate - Dev K8S Rollout and Automation
 
 on:
   workflow_dispatch:
@@ -52,10 +52,12 @@ jobs:
           short_sha="${head_sha:0:7}"
           artifact_name="smartrouter-pr-${PR_NUMBER}-${short_sha}-linux-amd64"
           image_tag="pr-${PR_NUMBER}-${short_sha}"
-          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
-          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "head_sha=$head_sha"
+            echo "artifact_name=$artifact_name"
+            echo "image_tag=$image_tag"
+            echo "short_sha=$short_sha"
+          } >> "$GITHUB_OUTPUT"
           echo "Resolved PR #${PR_NUMBER} head SHA: ${head_sha}"
 
   build:
@@ -153,7 +155,7 @@ jobs:
             echo "- Image digest: \`${IMAGE_DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Check dev-sim-prtests access
+      - name: Check dev-prtests access
         env:
           SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
           SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
@@ -169,9 +171,9 @@ jobs:
               ssh_target="configured"
             fi
             {
-              echo "### dev-sim-prtests preflight"
+              echo "### dev-prtests preflight"
               echo ""
-              echo "- Target environment: \`dev-sim-prtests\`"
+              echo "- Target environment: \`dev-prtests\`"
               echo "- SSH target: \`${ssh_target}\`"
               echo "- PR number: \`${PR_NUMBER}\`"
               echo "- PR head SHA: \`${HEAD_SHA}\`"
@@ -197,7 +199,7 @@ jobs:
           }
 
           print_sanitized_remote_output() {
-            echo "dev-sim-prtests preflight failed. Sanitized remote output:"
+            echo "dev-prtests preflight failed. Sanitized remote output:"
             echo "----- ssh stdout -----"
             redact_remote_output "$ssh_stdout"
             echo "----- ssh stderr -----"
@@ -238,13 +240,13 @@ jobs:
              kubectl get ns lava-infra
              kubectl get deploy -n lava-infra
              kubectl get pods -n lava-infra' >"$ssh_stdout" 2>"$ssh_stderr"; then
-            echo "::error::dev-sim-prtests preflight failed while connecting or running read-only checks"
+            echo "::error::dev-prtests preflight failed while connecting or running read-only checks"
             print_sanitized_remote_output
             exit 1
           fi
 
           preflight_result="passed"
-          echo "dev-sim-prtests preflight passed"
+          echo "dev-prtests preflight passed"
 
       - name: Deploy and validate dev-prtests Kubernetes rollout
         env:
@@ -263,7 +265,8 @@ jobs:
           fi
 
           key_file="$(mktemp)"
-          trap 'rm -f "$key_file"' EXIT
+          rollout_output="$(mktemp)"
+          trap 'rm -f "$key_file" "$rollout_output"' EXIT
           printf '%s\n' "$SSH_KEY" > "$key_file"
           chmod 600 "$key_file"
           if ! ssh-keygen -y -f "$key_file" >/dev/null; then
@@ -288,6 +291,7 @@ jobs:
 
           rollback_remote() {
             echo "Attempting rollback for lava-infra/deployment/eth-sim-router container router"
+            # shellcheck disable=SC2029
             ssh "${ssh_opts[@]}" "$SSH_HOST" "PREVIOUS_IMAGE='${previous_image}' PREVIOUS_ARGS_B64='${previous_args_b64}' bash -s" <<'REMOTE_ROLLBACK'
           set -euo pipefail
 
@@ -335,7 +339,8 @@ jobs:
           REMOTE_ROLLBACK
           }
 
-          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "PR_IMAGE='${PR_IMAGE}' PREVIOUS_IMAGE='${previous_image}' PREVIOUS_ARGS_B64='${previous_args_b64}' bash -s" <<'REMOTE_ROLLOUT'
+          # shellcheck disable=SC2029
+          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "PR_IMAGE='${PR_IMAGE}' PREVIOUS_IMAGE='${previous_image}' PREVIOUS_ARGS_B64='${previous_args_b64}' bash -s" 2>&1 <<'REMOTE_ROLLOUT' | tee "$rollout_output"
           set -euo pipefail
 
           NAMESPACE="lava-infra"
@@ -545,6 +550,12 @@ jobs:
             exit 1
           fi
 
+          smoke_endpoint="$(awk -F 'Smoke endpoint: ' '/^Smoke endpoint: / {value=$2} END {print value}' "$rollout_output")"
+          if [ -z "$smoke_endpoint" ]; then
+            echo "::error::Could not resolve smoke endpoint from rollout output"
+            exit 1
+          fi
+
           {
             echo "### dev-prtests Kubernetes rollout validation"
             echo ""
@@ -555,7 +566,7 @@ jobs:
             echo "- PR image: \`${PR_IMAGE}\`"
             echo "- Rollout command: \`kubectl -n lava-infra set image deployment/eth-sim-router router=${PR_IMAGE}\`"
             echo "- Readiness command: \`kubectl -n lava-infra rollout status deployment/eth-sim-router --timeout=600s\`"
-            echo "- Smoke endpoint: \`http://<eth-sim-router ClusterIP>:3000\`"
+            echo "- Smoke endpoint: \`${smoke_endpoint}\`"
             echo "- Validation result: \`passed\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -568,7 +579,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python for automation tests
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -607,7 +618,7 @@ jobs:
     needs: [metadata, build]
     if: ${{ always() }}
     steps:
-      - name: Publish dev-sim-prtests status
+      - name: Publish dev-prtests status
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
@@ -621,10 +632,10 @@ jobs:
           fi
 
           state="failure"
-          description="dev-sim-prtests preflight failed"
+          description="dev-prtests preflight failed"
           if [ "$BUILD_RESULT" = "success" ]; then
             state="success"
-            description="dev-sim-prtests preflight passed"
+            description="dev-prtests preflight passed"
           fi
 
           gh api \
