@@ -40,7 +40,7 @@ longer DefaultExpirationForNonFinalized will reduce sync QoS for "latest" reques
 				}
 				pyroscopeAppName, err := cmd.Flags().GetString(performance.PyroscopeAppNameFlagName)
 				if err != nil || pyroscopeAppName == "" {
-					pyroscopeAppName = "lavap-cache"
+					pyroscopeAppName = "cache"
 				}
 				mutexProfileFraction, err := cmd.Flags().GetInt(performance.PyroscopeMutexProfileFractionFlagName)
 				if err != nil {
@@ -76,7 +76,7 @@ longer DefaultExpirationForNonFinalized will reduce sync QoS for "latest" reques
 	cacheCmd.Flags().String(FlagMetricsAddress, DisabledFlagOption, "address to listen to prometheus metrics 127.0.0.1:5555, later you can curl http://127.0.0.1:5555/metrics")
 	cacheCmd.Flags().Int64(FlagCacheSizeName, 2*1024*1024*1024, "the maximal amount of entries to save")
 	cacheCmd.Flags().String(performance.PyroscopeAddressFlagName, "", "pyroscope server address for continuous profiling (e.g., http://pyroscope:4040)")
-	cacheCmd.Flags().String(performance.PyroscopeAppNameFlagName, "lavap-cache", "pyroscope application name for identifying this service")
+	cacheCmd.Flags().String(performance.PyroscopeAppNameFlagName, "cache", "pyroscope application name for identifying this service")
 	cacheCmd.Flags().Int(performance.PyroscopeMutexProfileFractionFlagName, performance.DefaultMutexProfileFraction, "mutex profile sampling rate (1 in N mutex events)")
 	cacheCmd.Flags().Int(performance.PyroscopeBlockProfileRateFlagName, performance.DefaultBlockProfileRate, "block profile rate in nanoseconds (1 records all blocking events)")
 	cacheCmd.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=cache-1,region=us-east)")
