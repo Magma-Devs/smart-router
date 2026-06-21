@@ -55,6 +55,16 @@ type EndpointMonitor struct {
 	trackerStates     map[string]EndpointChainTrackerState
 	trackerLastErrors map[string]string
 
+	// Per-endpoint observation records (MAG-2158 / Topic A): the side-effect-free
+	// telemetry the probing layer (Topic D) and the per-chain ChainState (Topic C)
+	// read. Written by the poll path (RecordPollObservation) and the relay-harvest
+	// path (RecordRelayObservation, call site wired by Topic B); read as a consistent
+	// snapshot via GetObservation. Guarded by its own mutex so the hot observation
+	// path does not contend on mu (which serializes tracker lifecycle). Lock ordering:
+	// never acquire mu while holding obsMu.
+	obsMu        sync.RWMutex
+	observations map[string]EndpointObservation
+
 	// Shared configuration
 	chainParser  chainlib.ChainParser
 	chainID      string
@@ -128,6 +138,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		cancelFuncs:       make(map[string]context.CancelFunc),
 		trackerStates:     make(map[string]EndpointChainTrackerState),
 		trackerLastErrors: make(map[string]string),
+		observations:      make(map[string]EndpointObservation),
 		chainParser:       config.ChainParser,
 		chainID:           config.ChainID,
 		apiInterface:      config.ApiInterface,
@@ -179,6 +190,13 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.chainID,
 		m.apiInterface,
 	)
+
+	// Record a per-endpoint observation on every poll (Topic A). This fires on every
+	// FetchLatestBlockNum round-trip — success or failure, block-changed or not — and
+	// is side-effect-free (it only writes the observation record, never QoS/Enabled).
+	fetcher.onPollObservation = func(block int64, latency time.Duration, pollErr error, at time.Time) {
+		m.RecordPollObservation(endpointURL, block, latency, pollErr, at)
+	}
 
 	// Configure the ChainTracker
 	config := chaintracker.ChainTrackerConfig{
@@ -433,6 +451,11 @@ func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	delete(m.trackerLastErrors, endpointURL)
 	delete(m.trackerStates, endpointURL)
 
+	// Drop the observation record too, so it stays bounded as endpoints churn.
+	m.obsMu.Lock()
+	delete(m.observations, endpointURL)
+	m.obsMu.Unlock()
+
 	utils.LavaFormatInfo("stopped and removed ChainTracker for endpoint",
 		utils.LogAttr("endpoint", endpointURL),
 		utils.LogAttr("chainID", m.chainID),
@@ -481,6 +504,10 @@ func (m *EndpointMonitor) Stop() {
 	m.cancelFuncs = make(map[string]context.CancelFunc)
 	m.trackerStates = make(map[string]EndpointChainTrackerState)
 	m.trackerLastErrors = make(map[string]string)
+
+	m.obsMu.Lock()
+	m.observations = make(map[string]EndpointObservation)
+	m.obsMu.Unlock()
 
 	utils.LavaFormatInfo("stopped EndpointMonitor",
 		utils.LogAttr("chainID", m.chainID),

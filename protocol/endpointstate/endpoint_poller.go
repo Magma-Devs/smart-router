@@ -27,6 +27,12 @@ type EndpointPoller struct {
 
 	// Metadata for requests
 	endpointURL string
+
+	// onPollObservation, if set, is invoked after every FetchLatestBlockNum round-trip
+	// (success or failure) with the parsed block, the transport round-trip latency, the
+	// poll error (nil on success), and the completion time. The EndpointMonitor sets it
+	// to record the per-endpoint observation (Topic A). Nil in standalone/test use.
+	onPollObservation func(block int64, latency time.Duration, err error, at time.Time)
 }
 
 // NewEndpointPoller creates a new ChainFetcher for a direct RPC endpoint.
@@ -49,7 +55,17 @@ func NewEndpointPoller(
 
 // FetchLatestBlockNum fetches the latest block number from the endpoint.
 // Uses spec-driven parsing to support any chain type (EVM, Tendermint, REST, etc.).
-func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (int64, error) {
+func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum int64, err error) {
+	// Record a per-endpoint observation for this poll on every return path (Topic A).
+	// pollLatency captures only the transport round-trip (set around sendRawRequest);
+	// the observation is success iff err == nil && block > 0 (see RecordPollObservation).
+	var pollLatency time.Duration
+	if ecf.onPollObservation != nil {
+		defer func() {
+			ecf.onPollObservation(blockNum, pollLatency, err, time.Now())
+		}()
+	}
+
 	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCKNUM.String()
 	if !ok {
@@ -71,8 +87,10 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (int64, erro
 
 	requestData := []byte(parsing.FunctionTemplate)
 
-	// Send request via direct RPC connection
+	// Send request via direct RPC connection (measure the transport round-trip)
+	reqStart := time.Now()
 	responseData, err := ecf.sendRawRequest(ctx, requestData, collectionData.Type, parsing.ApiName)
+	pollLatency = time.Since(reqStart)
 	if err != nil {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebug(tagName+" failed sending request",
 			utils.LogAttr("chainID", ecf.chainID),
@@ -109,7 +127,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (int64, erro
 	}
 
 	parsedInput := parser.ParseBlockFromReply(parserInput, parsing.ResultParsing, parsing.Parsers)
-	blockNum := parsedInput.GetBlock()
+	blockNum = parsedInput.GetBlock()
 	if blockNum == spectypes.NOT_APPLICABLE {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebug(tagName+" failed to parse response",
 			utils.LogAttr("chainID", ecf.chainID),
