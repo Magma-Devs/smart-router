@@ -23,6 +23,14 @@ type ChainTrackerConfig struct {
 	PollingTimeMultiplier    int
 	ChainId                  string
 	ParseDirectiveEnabled    bool
+
+	// PollIntervalFloor, when > 0, switches this tracker to the flat, floored cadence
+	// (MAG-2159 / Topic B): a single poll interval that is never faster than this floor,
+	// with the adaptive /4, /2, /16 tiers disabled. Per-endpoint trackers set it to
+	// avgBlockTime/2 because relay harvest is the primary block signal, so the dedicated
+	// poll is a sparse fallback. Left 0 (the default) preserves the legacy adaptive
+	// cadence — used by the global tracker, whose readers are not yet harvest-fed.
+	PollIntervalFloor time.Duration
 }
 
 func (cnf *ChainTrackerConfig) validate() error {

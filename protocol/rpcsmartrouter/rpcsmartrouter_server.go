@@ -1432,6 +1432,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 							utils.LogAttr("latest_block", latestBlock),
 							utils.LogAttr("GUID", goroutineCtx),
 						)
+
+						// MAG-2159 (Topic B): harvest the served-relay block into the
+						// per-endpoint observation store (Source=Relay).
+						rpcss.recordRelayBlockObservation(targetEndpoint, latestBlock)
 					}
 
 					// Update global latest block height and estimator (for getLatestBlock fallback)
@@ -1678,6 +1682,21 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 // If not, it creates one lazily. This enables continuous block polling for accurate
 // consistency pre-validation.
 // This is called the first time we successfully communicate with an endpoint.
+// recordRelayBlockObservation harvests a block parsed from a served relay response into
+// the per-endpoint observation store (MAG-2159 / Topic B), tagged Source=Relay. It is
+// keyed on endpoint.NetworkAddress — the same key the dedicated poll path uses
+// (EndpointMonitor.GetOrCreateTracker) — so relay and poll observations land on one
+// record. This makes relay traffic the primary observation feed that the cadence
+// traffic-gate and the per-chain tip (Topic C) read. Side-effect-free: RecordRelayObservation
+// only updates the observation record, never QoS or endpoint.Enabled. No-op when no
+// monitor is wired, the endpoint is unknown, or no positive block was parsed.
+func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavasession.Endpoint, block int64) {
+	if rpcss.endpointChainTrackerManager == nil || endpoint == nil || block <= 0 {
+		return
+	}
+	rpcss.endpointChainTrackerManager.RecordRelayObservation(endpoint.NetworkAddress, block, time.Now())
+}
+
 func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 	ctx context.Context,
 	endpoint *lavasession.Endpoint,

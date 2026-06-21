@@ -231,6 +231,11 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		BlocksCheckpointDistance: chaintracker.DefaultBlockCheckpointDistance,
 		ChainId:                  m.chainID,
 		ParseDirectiveEnabled:    true, // Always enabled for direct RPC
+		// MAG-2159 (Topic B): per-endpoint trackers use a flat, floored cadence — the
+		// dedicated poll runs at avgBlockTime/2 at most, because relay harvest is the
+		// primary block signal and the poll is a sparse fallback. (The global tracker
+		// leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
+		PollIntervalFloor: m.averageBlockTime / 2,
 	}
 
 	// Set up callbacks with endpoint context

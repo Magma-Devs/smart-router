@@ -146,7 +146,11 @@ type ChainTracker struct {
 
 	// initial config
 	averageBlockTime time.Duration
-	serverAddress    string
+	// pollIntervalFloor, when > 0, enables the flat floored cadence (MAG-2159): the poll
+	// runs at a single interval never faster than this floor, with the adaptive tiers off.
+	// 0 keeps the legacy adaptive cadence. See ChainTrackerConfig.PollIntervalFloor.
+	pollIntervalFloor time.Duration
+	serverAddress     string
 
 	// allows us to mock the chain fetcher for different use cases for example: Solana needs slot to block number
 	iChainFetcherWrapper IChainFetcherWrapper
@@ -473,7 +477,11 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 	// so polling at averageBlockTime/4,averageBlockTime/2,averageBlockTime*5/8,averageBlockTime*3/4,averageBlockTime*13/16,,averageBlockTime*14/16,,averageBlockTime*15/16,averageBlockTime*16/16,averageBlockTime*17/16
 	// initial polling = averageBlockTime/16
 	initialPollingTime := pollingTime / cs.pollingTimeMultiplier // on boot we need to query often to catch changes
-	cs.latestChangeTime = time.Time{}                            // we will discard the first change time, so this is uninitialized
+	// MAG-2159: per-endpoint trackers never poll faster than the floor, even on boot.
+	if cs.pollIntervalFloor > 0 && initialPollingTime < cs.pollIntervalFloor {
+		initialPollingTime = cs.pollIntervalFloor
+	}
+	cs.latestChangeTime = time.Time{} // we will discard the first change time, so this is uninitialized
 	cs.timer = time.NewTimer(initialPollingTime)
 	err := cs.fetchInitDataWithRetry(ctx)
 	if err != nil {
@@ -521,9 +529,31 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 }
 
 func (cs *ChainTracker) updateTimer(tickerBaseTime time.Duration, fetchFails uint64) {
+	cs.timer = time.NewTimer(cs.computePollInterval(tickerBaseTime, fetchFails))
+}
+
+// computePollInterval returns the next dedicated-poll interval.
+//
+// When pollIntervalFloor > 0 (per-endpoint trackers, MAG-2159 / Topic B) the cadence is
+// flat and floored: a single interval derived from the multiplier, clamped so it is never
+// faster than the floor (avgBlockTime/2). The old adaptive /4, /2, /16 tiers are gone —
+// relay harvest is the primary block signal, so the dedicated poll is a sparse fallback.
+// Failure backoff can only slow it further.
+//
+// When pollIntervalFloor == 0 (the global tracker, until Topic C removes it) the legacy
+// adaptive tiers are preserved, since its readers are not yet harvest-fed.
+func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchFails uint64) time.Duration {
+	var newPollingTime time.Duration
+	if cs.pollIntervalFloor > 0 {
+		newPollingTime = tickerBaseTime / cs.pollingTimeMultiplier
+		if newPollingTime < cs.pollIntervalFloor {
+			newPollingTime = cs.pollIntervalFloor
+		}
+		return exponentialBackoff(newPollingTime, fetchFails)
+	}
+
 	blockGap := cs.smallestBlockGap()
 	timeSinceLastUpdate := time.Since(cs.getLatestChangeTime())
-	var newPollingTime time.Duration
 	if timeSinceLastUpdate <= tickerBaseTime/2 && blockGap > tickerBaseTime/4 {
 		newPollingTime = tickerBaseTime / (cs.pollingTimeMultiplier / 4)
 	} else if timeSinceLastUpdate <= (tickerBaseTime*3)/4 && blockGap > tickerBaseTime/4 {
@@ -531,9 +561,7 @@ func (cs *ChainTracker) updateTimer(tickerBaseTime time.Duration, fetchFails uin
 	} else {
 		newPollingTime = tickerBaseTime / cs.pollingTimeMultiplier
 	}
-	newTickerDuration := exponentialBackoff(newPollingTime, fetchFails)
-
-	cs.timer = time.NewTimer(newTickerDuration)
+	return exponentialBackoff(newPollingTime, fetchFails)
 }
 
 func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) {
@@ -725,6 +753,7 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		startupTime:             time.Now(),
 		pollingTimeMultiplier:   time.Duration(pollingTime),
 		averageBlockTime:        config.AverageBlockTime,
+		pollIntervalFloor:       config.PollIntervalFloor,
 		serverAddress:           config.ServerAddress,
 		endpoint:                endpoint,
 	}
