@@ -243,16 +243,16 @@ under a strict (unanimous) policy it instead causes a quorum failure.
 
 ```bash
 # Using standalone binary
-smartrouter config.yml --geolocation 1 --use-static-spec specs/
+smartrouter config.yml --use-static-spec specs/
 
 # Using lavap
-lavap rpcsmartrouter config.yml --geolocation 1 --use-static-spec specs/
+lavap rpcsmartrouter config.yml --use-static-spec specs/
 ```
 
 ### Common Flags
 
 ```bash
---geolocation 1                      # Geographic location code
+--geolocation 1                      # Geographic location code (optional, defaults to 1)
 --cache-be "127.0.0.1:7778"          # Enable caching
 --strategy balanced                   # Provider selection strategy
 --metrics-listen-address ":7779"     # Prometheus metrics
