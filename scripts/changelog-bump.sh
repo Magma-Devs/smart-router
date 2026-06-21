@@ -6,7 +6,15 @@
 # section with:
 #   - ### Highlights  (Gemini draft, then $EDITOR for human review)
 #   - ### Changes     (grouped commit bullets, each tagged with [hash])
+#       leads with a "#### ⚠ Breaking changes" group when any commit is
+#       breaking; the same commits also appear under their normal group
 #   - reference-link blob mapping [hash] -> commit URL
+#
+# Breaking changes are detected from BOTH conventional-commit conventions:
+# the `!` marker in the subject (feat!:, chore(x)!:) and a BREAKING CHANGE:
+# footer in the commit body. The footer's migration note is surfaced as a
+# sub-bullet, and the breaking set is fed to Gemini as its own block with
+# an instruction to lead the Highlights with it.
 #
 # Usage:
 #   VERSION=v1.0.0 scripts/changelog-bump.sh
@@ -95,6 +103,14 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 for i in "${!GROUP_TITLES[@]}"; do : > "$tmp_dir/g$i"; done
 : > "$tmp_dir/refs"
+# Breaking changes are collected separately and rendered as a dedicated
+# group at the TOP of ### Changes (and fed to Gemini as a distinct block),
+# regardless of which conventional-commit bucket they'd otherwise land in.
+# A commit is "breaking" if either convention is present:
+#   - the `!` marker before the colon in the subject (feat!:, chore(x)!:)
+#   - a `BREAKING CHANGE:` / `BREAKING-CHANGE:` footer in the commit body
+: > "$tmp_dir/breaking"
+BREAKING_SUBJECT_RE='^[a-z]+(\([^)]*\))?!:'
 
 # `git log --reverse` yields oldest-first inside the range; the inline
 # bullet list ends up in chronological order, matching the old goreleaser
@@ -109,6 +125,32 @@ for i in "${!GROUP_TITLES[@]}"; do : > "$tmp_dir/g$i"; done
 while IFS=$'\t' read -r short long subject; do
   if [[ "$subject" =~ $EXCLUDE_REGEX ]]; then
     continue
+  fi
+
+  # Detect a breaking change. The subject `!` marker is cheap to test
+  # inline; the BREAKING CHANGE: footer lives in the body, so pull the
+  # body for this one commit and grep it. (We can't read the body in the
+  # main `git log` stream because bodies are multi-line and would break
+  # the tab-delimited `read`.)
+  is_breaking=0
+  breaking_note=""
+  if [[ "$subject" =~ $BREAKING_SUBJECT_RE ]]; then
+    is_breaking=1
+  fi
+  body="$(git log -1 --pretty=format:'%b' "$long")"
+  if printf '%s' "$body" | grep -qiE '^BREAKING[ -]CHANGE:'; then
+    is_breaking=1
+    # Capture the full footer paragraph (the BREAKING CHANGE: footer can
+    # wrap across several lines; it ends at the next blank line or EOF) so
+    # the human reader and Gemini get the whole migration note, not just
+    # its first wrapped line. Strip the leading token, then collapse the
+    # paragraph to a single line so it renders as one clean markdown
+    # sub-bullet.
+    breaking_note="$(printf '%s\n' "$body" | awk '
+      /^BREAKING[ -]CHANGE:/ { c=1 }
+      c && /^[[:space:]]*$/   { exit }
+      c                       { print }
+    ' | sed -E '1 s/^BREAKING[ -]CHANGE:[[:space:]]*//' | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/[[:space:]]+$//')"
   fi
 
   pr_num=""
@@ -127,6 +169,19 @@ while IFS=$'\t' read -r short long subject; do
       | jq -r '.[0].number // empty' 2>/dev/null || true)"
     if [ -n "$pr_num" ]; then
       subject_rendered="${subject} ([#${pr_num}])"
+    fi
+  fi
+
+  if [ "$is_breaking" = "1" ]; then
+    # Append the migration note inline when the footer gave us one.
+    if [ -n "$breaking_note" ]; then
+      printf -- '- %s [`%s`]\n  - %s\n' "$subject_rendered" "$short" "$breaking_note" >> "$tmp_dir/breaking"
+    else
+      printf -- '- %s [`%s`]\n' "$subject_rendered" "$short" >> "$tmp_dir/breaking"
+    fi
+    printf '[`%s`]: %s/commit/%s\n' "$short" "$REPO_URL" "$long" >> "$tmp_dir/refs"
+    if [ -n "$pr_num" ]; then
+      printf '[#%s]: %s/pull/%s\n' "$pr_num" "$REPO_URL" "$pr_num" >> "$tmp_dir/refs"
     fi
   fi
 
@@ -149,6 +204,13 @@ done < <(git log --reverse --no-merges --pretty=tformat:'%h%x09%H%x09%s' "${prev
 sort -u -o "$tmp_dir/refs" "$tmp_dir/refs"
 
 changes_md=""
+# Breaking changes lead the section so a reader scanning the changelog
+# sees what will break before the routine feature/fix bullets. The same
+# commits still also appear under their normal conventional-commit group.
+if [ -s "$tmp_dir/breaking" ]; then
+  changes_md+=$'\n'"#### ⚠ Breaking changes"$'\n'
+  changes_md+="$(cat "$tmp_dir/breaking")"$'\n'
+fi
 for i in "${!GROUP_TITLES[@]}"; do
   if [ -s "$tmp_dir/g$i" ]; then
     changes_md+=$'\n'"#### ${GROUP_TITLES[$i]}"$'\n'
@@ -181,6 +243,13 @@ if [ "${AI:-1}" != "0" ] && [ -n "${GEMINI_API_KEY:-}" ]; then
     fi
   done
 
+  # Breaking changes are pulled out into their own block so the prompt can
+  # instruct Gemini to lead with them. Empty when the release has none.
+  breaking_for_prompt=""
+  if [ -s "$tmp_dir/breaking" ]; then
+    breaking_for_prompt="$(cat "$tmp_dir/breaking")"
+  fi
+
   prompt="$(cat <<EOF
 You are drafting the Highlights paragraph for smart-router release ${VERSION}.
 
@@ -196,6 +265,17 @@ commits. Name concrete artifacts (commands, endpoints, flags, headers,
 env vars, file names) inline when they fit the sentence naturally;
 don't shoehorn every feature in.
 
+BREAKING CHANGES — this is the most important rule. The commits listed
+under "Breaking changes" below remove, rename, or change the behavior of
+something integrators depend on; upgrading without action will break a
+working deployment. You MUST call out every breaking change explicitly
+and FIRST, before describing new features. State plainly what was removed
+or changed and what the operator must do (e.g. "the X flag is gone —
+move to Y", "config key Z is no longer read"). Name the exact flag /
+config key / endpoint / env var. Do not soften, bury, or omit a breaking
+change. If the "Breaking changes" block below is empty, say nothing about
+breaking changes and do not claim the release is backward-compatible.
+
 Style: factual, engineering tone, specific. Banned marketing words:
 "powerful", "enhanced", "seamless", "robust", "leverage", "ecosystem",
 "comprehensive", "unlock", "delight". Skip pure CI / build-plumbing
@@ -204,6 +284,9 @@ platform support).
 
 Prior release Highlights (match this voice; do not copy):
 ${prior_highlights:-<this is the first release with a Highlights section - no prior reference>}
+
+Breaking changes in this release (lead the paragraph with these; empty = none):
+${breaking_for_prompt:-<none - this release has no breaking changes>}
 
 Commits in this release, grouped by type:
 ${grouped_for_prompt}
