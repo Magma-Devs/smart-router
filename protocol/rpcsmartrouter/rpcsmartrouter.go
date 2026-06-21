@@ -1853,7 +1853,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				}
 				pyroscopeAppName, err := cmd.Flags().GetString(performance.PyroscopeAppNameFlagName)
 				if err != nil || pyroscopeAppName == "" {
-					pyroscopeAppName = "lavap-smartrouter"
+					pyroscopeAppName = "smartrouter"
 				}
 				mutexProfileFraction, err := cmd.Flags().GetInt(performance.PyroscopeMutexProfileFractionFlagName)
 				if err != nil {
@@ -2061,7 +2061,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 		utils.LavaFormatFatal("failed binding debug-address flag", err)
 	}
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeAddressFlagName, "", "pyroscope server address for continuous profiling (e.g., http://pyroscope:4040)")
-	cmdRPCSmartRouter.Flags().String(performance.PyroscopeAppNameFlagName, "lavap-smartrouter", "pyroscope application name for identifying this service")
+	cmdRPCSmartRouter.Flags().String(performance.PyroscopeAppNameFlagName, "smartrouter", "pyroscope application name for identifying this service")
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeMutexProfileFractionFlagName, performance.DefaultMutexProfileFraction, "mutex profile sampling rate (1 in N mutex events)")
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeBlockProfileRateFlagName, performance.DefaultBlockProfileRate, "block profile rate in nanoseconds (1 records all blocking events)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
