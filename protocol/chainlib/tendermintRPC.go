@@ -489,7 +489,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("_msg", logFormattedMsg),
 			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("headers", headers),
+			utils.LogAttr("headers", redactSensitiveMetadata(headers)),
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, "", msg, "", dappID, userIp, metricsData, headers)
 		reply := relayResult.GetReply()
@@ -560,7 +560,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr("_msg", path),
 			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("headers", headers),
+			utils.LogAttr("headers", redactSensitiveMetadata(headers)),
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, "", "", dappID, userIp, metricsData, headers)
 		msgSeed := strconv.FormatUint(guid, 10)

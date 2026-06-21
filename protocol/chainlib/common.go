@@ -442,6 +442,77 @@ func GetHeaderFromCachedMap(headers map[string][]string, key string, defaultValu
 	return defaultValue
 }
 
+// sensitiveHeaderNames is the set of header keys whose values must never reach
+// the logs. Request bodies and headers are logged across the chainlib request
+// paths (jsonRPC / REST / tendermint / grpc); without this filter an
+// Authorization bearer, a cookie, an API key, or a provider key pasted into a
+// header would be written verbatim to container logs, log collectors, and
+// support bundles. Keys are matched case-insensitively.
+var sensitiveHeaderNames = map[string]struct{}{
+	"authorization":       {},
+	"proxy-authorization": {},
+	"cookie":              {},
+	"set-cookie":          {},
+	"x-api-key":           {},
+	"api-key":             {},
+	"apikey":              {},
+	"x-auth-token":        {},
+	"x-access-token":      {},
+	"token":               {},
+}
+
+const redactedHeaderValue = "[REDACTED]"
+
+func isSensitiveHeader(name string) bool {
+	_, ok := sensitiveHeaderNames[strings.ToLower(strings.TrimSpace(name))]
+	return ok
+}
+
+// redactSensitiveMetadata returns a copy of the metadata slice with the values
+// of credential-bearing headers replaced by a placeholder. The input is left
+// untouched so redaction never affects the headers actually forwarded upstream.
+func redactSensitiveMetadata(md []pairingtypes.Metadata) []pairingtypes.Metadata {
+	out := make([]pairingtypes.Metadata, len(md))
+	for i, m := range md {
+		if isSensitiveHeader(m.Name) {
+			out[i] = pairingtypes.Metadata{Name: m.Name, Value: redactedHeaderValue}
+			continue
+		}
+		out[i] = m
+	}
+	return out
+}
+
+// redactSensitiveHeaderMap returns a copy of a map-shaped header set (e.g.
+// http.Header / map[string][]string) with credential-bearing values redacted.
+// The original map is never mutated.
+func redactSensitiveHeaderMap(headers map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(headers))
+	for k, v := range headers {
+		if isSensitiveHeader(k) {
+			out[k] = []string{redactedHeaderValue}
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// redactSensitiveStringMap is the map[string]string variant (e.g. the grpc
+// metadataMap), with credential-bearing values redacted. The original map is
+// never mutated.
+func redactSensitiveStringMap(headers map[string]string) map[string]string {
+	out := make(map[string]string, len(headers))
+	for k, v := range headers {
+		if isSensitiveHeader(k) {
+			out[k] = redactedHeaderValue
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // rest request headers are formatted like map[string]string
 func convertToMetadataMap(md map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, len(md))
