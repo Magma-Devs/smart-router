@@ -36,38 +36,38 @@ var _ ConsumerMetricsManagerInf = (*SmartRouterMetricsManager)(nil)
 
 // SmartRouterMetricsManager manages metrics for the RPC Smart Router.
 // It follows the post-unification metric spec with:
-// - Endpoint-scoped metrics: lava_rpc_endpoint_*
-// - Router-scoped metrics: lava_rpcsmartrouter_*
+// - Endpoint-scoped metrics: rpc_endpoint_*
+// - Router-scoped metrics: smartrouter_*
 //
 // Relay/latency metrics include a `function` label so a single metric covers
 // both the per-function breakdown and, via sum aggregation, the endpoint/router
 // aggregate — no duplicate metrics needed.
 type SmartRouterMetricsManager struct {
 	// Endpoint-scoped metrics (labels: spec, apiInterface, endpoint_id, function)
-	endpointTotalRelaysServiced *MappedLabelsCounterVec  // lava_rpc_endpoint_total_relays_serviced
-	endpointTotalErrored        *MappedLabelsCounterVec  // lava_rpc_endpoint_total_errored
-	endpointEndToEndLatency     *prometheus.HistogramVec // lava_rpc_endpoint_end_to_end_latency_milliseconds
-	endpointInFlight            *MappedLabelsGaugeVec    // lava_rpc_endpoint_requests_in_flight
+	endpointTotalRelaysServiced *MappedLabelsCounterVec  // rpc_endpoint_total_relays_serviced
+	endpointTotalErrored        *MappedLabelsCounterVec  // rpc_endpoint_total_errored
+	endpointEndToEndLatency     *prometheus.HistogramVec // rpc_endpoint_end_to_end_latency_milliseconds
+	endpointInFlight            *MappedLabelsGaugeVec    // rpc_endpoint_requests_in_flight
 
 	// Endpoint-scoped metrics (labels: spec, apiInterface, endpoint_id)
-	endpointOverallHealth          *MappedLabelsGaugeVec   // lava_rpc_endpoint_overall_health
-	endpointOverallHealthBreakdown *prometheus.GaugeVec    // lava_rpc_endpoint_overall_health_breakdown {spec, apiInterface}
-	endpointSelectionScore         *prometheus.GaugeVec    // lava_rpc_endpoint_selection_score {spec, apiInterface, endpoint_id, score_type}
-	optimizerSelectionScore        *prometheus.GaugeVec    // lava_rpc_optimizer_selection_score {spec, endpoint_id, score_type}
-	endpointLatestBlock            *MappedLabelsGaugeVec   // lava_rpc_endpoint_latest_block
-	endpointFetchLatestFails       *MappedLabelsCounterVec // lava_rpc_endpoint_fetch_latest_fails
-	endpointFetchBlockFails        *MappedLabelsCounterVec // lava_rpc_endpoint_fetch_block_fails
-	endpointFetchLatestSuccess     *MappedLabelsCounterVec // lava_rpc_endpoint_fetch_latest_success
-	endpointFetchBlockSuccess      *MappedLabelsCounterVec // lava_rpc_endpoint_fetch_block_success
+	endpointOverallHealth          *MappedLabelsGaugeVec   // rpc_endpoint_overall_health
+	endpointOverallHealthBreakdown *prometheus.GaugeVec    // rpc_endpoint_overall_health_breakdown {spec, apiInterface}
+	endpointSelectionScore         *prometheus.GaugeVec    // rpc_endpoint_selection_score {spec, apiInterface, endpoint_id, score_type}
+	optimizerSelectionScore        *prometheus.GaugeVec    // rpc_optimizer_selection_score {spec, endpoint_id, score_type}
+	endpointLatestBlock            *MappedLabelsGaugeVec   // rpc_endpoint_latest_block
+	endpointFetchLatestFails       *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_fails
+	endpointFetchBlockFails        *MappedLabelsCounterVec // rpc_endpoint_fetch_block_fails
+	endpointFetchLatestSuccess     *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_success
+	endpointFetchBlockSuccess      *MappedLabelsCounterVec // rpc_endpoint_fetch_block_success
 
 	// Router-scoped metrics (labels: spec, apiInterface, function)
-	routerTotalRelaysServiced *prometheus.CounterVec   // lava_rpcsmartrouter_total_relays_serviced
-	routerTotalErrored        *prometheus.CounterVec   // lava_rpcsmartrouter_total_errored
-	routerEndToEndLatency     *prometheus.HistogramVec // lava_rpcsmartrouter_end_to_end_latency_milliseconds
+	routerTotalRelaysServiced *prometheus.CounterVec   // smartrouter_total_relays_serviced
+	routerTotalErrored        *prometheus.CounterVec   // smartrouter_total_errored
+	routerEndToEndLatency     *prometheus.HistogramVec // smartrouter_end_to_end_latency_milliseconds
 
 	// Router-scoped scalar metrics (no labels)
 	routerOverallHealth          prometheus.Gauge
-	routerOverallHealthBreakdown *prometheus.GaugeVec // lava_rpcsmartrouter_overall_health_breakdown {spec, apiInterface}
+	routerOverallHealthBreakdown *prometheus.GaugeVec // smartrouter_overall_health_breakdown {spec, apiInterface}
 
 	// Router-scoped metrics (labels: spec, apiInterface)
 	routerLatestBlock          *prometheus.GaugeVec
@@ -77,42 +77,42 @@ type SmartRouterMetricsManager struct {
 	routerWsSubscriptionErrors *prometheus.CounterVec
 
 	// Cross-validation group metrics
-	crossValidationRequestsTotalMetric              *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_requests_total        {spec, apiInterface, method}
-	crossValidationSuccessTotalMetric               *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_success_total         {spec, apiInterface, method}
-	crossValidationFailedTotalMetric                *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_failed_total          {spec, apiInterface, method}
-	crossValidationProviderAgreementsTotalMetric    *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_provider_agreements_total    {spec, apiInterface, method, provider_address}
-	crossValidationProviderDisagreementsTotalMetric *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_provider_disagreements_total {spec, apiInterface, method, provider_address}
-	crossValidationMismatchTotalMetric              *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_mismatch_total {spec, apiInterface, method, group, finality} — bounded alerting surface
-	crossValidationFailuresTotalMetric              *prometheus.CounterVec // lava_rpcsmartrouter_cross_validation_failures_total {spec, apiInterface, method, reason} — bounded by the CrossValidationReason* enum
+	crossValidationRequestsTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_requests_total        {spec, apiInterface, method}
+	crossValidationSuccessTotalMetric               *prometheus.CounterVec // smartrouter_cross_validation_success_total         {spec, apiInterface, method}
+	crossValidationFailedTotalMetric                *prometheus.CounterVec // smartrouter_cross_validation_failed_total          {spec, apiInterface, method}
+	crossValidationProviderAgreementsTotalMetric    *prometheus.CounterVec // smartrouter_cross_validation_provider_agreements_total    {spec, apiInterface, method, provider_address}
+	crossValidationProviderDisagreementsTotalMetric *prometheus.CounterVec // smartrouter_cross_validation_provider_disagreements_total {spec, apiInterface, method, provider_address}
+	crossValidationMismatchTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_mismatch_total {spec, apiInterface, method, group, finality} — bounded alerting surface
+	crossValidationFailuresTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_failures_total {spec, apiInterface, method, reason} — bounded by the CrossValidationReason* enum
 
 	// Incident group metrics
-	incidentNodeErrorsTotalMetric     *prometheus.CounterVec   // lava_rpcsmartrouter_node_errors_total         {spec, apiInterface, provider_address, method}
-	incidentProtocolErrorsTotalMetric *prometheus.CounterVec   // lava_rpcsmartrouter_protocol_errors_total     {spec, apiInterface, provider_address, method}
-	incidentRetriesTotalMetric        *prometheus.CounterVec   // lava_rpcsmartrouter_retries_total             {spec, apiInterface, method}
-	incidentRetriesSuccessMetric      *prometheus.CounterVec   // lava_rpcsmartrouter_retries_success_total     {spec, apiInterface, method}
-	incidentRetriesFailedMetric       *prometheus.CounterVec   // lava_rpcsmartrouter_retries_failed_total      {spec, apiInterface, method}
-	incidentRetryAttemptsHistogram    *prometheus.HistogramVec // lava_rpcsmartrouter_retry_attempts            {spec, apiInterface, method}
-	incidentConsistencyTotalMetric    *prometheus.CounterVec   // lava_rpcsmartrouter_consistency_total         {spec, apiInterface, method}
-	incidentConsistencySuccessMetric  *prometheus.CounterVec   // lava_rpcsmartrouter_consistency_success_total {spec, apiInterface, method}
-	incidentConsistencyFailedMetric   *prometheus.CounterVec   // lava_rpcsmartrouter_consistency_failed_total  {spec, apiInterface, method}
-	incidentHedgeTotalMetric          *prometheus.CounterVec   // lava_rpcsmartrouter_hedge_total               {spec, apiInterface, method}
-	incidentHedgeSuccessMetric        *prometheus.CounterVec   // lava_rpcsmartrouter_hedge_success_total       {spec, apiInterface, method}
-	incidentHedgeFailedMetric         *prometheus.CounterVec   // lava_rpcsmartrouter_hedge_failed_total        {spec, apiInterface, method}
-	incidentHedgeAttemptsHistogram    *prometheus.HistogramVec // lava_rpcsmartrouter_hedge_attempts            {spec, apiInterface, method}
+	incidentNodeErrorsTotalMetric     *prometheus.CounterVec   // smartrouter_node_errors_total         {spec, apiInterface, provider_address, method}
+	incidentProtocolErrorsTotalMetric *prometheus.CounterVec   // smartrouter_protocol_errors_total     {spec, apiInterface, provider_address, method}
+	incidentRetriesTotalMetric        *prometheus.CounterVec   // smartrouter_retries_total             {spec, apiInterface, method}
+	incidentRetriesSuccessMetric      *prometheus.CounterVec   // smartrouter_retries_success_total     {spec, apiInterface, method}
+	incidentRetriesFailedMetric       *prometheus.CounterVec   // smartrouter_retries_failed_total      {spec, apiInterface, method}
+	incidentRetryAttemptsHistogram    *prometheus.HistogramVec // smartrouter_retry_attempts            {spec, apiInterface, method}
+	incidentConsistencyTotalMetric    *prometheus.CounterVec   // smartrouter_consistency_total         {spec, apiInterface, method}
+	incidentConsistencySuccessMetric  *prometheus.CounterVec   // smartrouter_consistency_success_total {spec, apiInterface, method}
+	incidentConsistencyFailedMetric   *prometheus.CounterVec   // smartrouter_consistency_failed_total  {spec, apiInterface, method}
+	incidentHedgeTotalMetric          *prometheus.CounterVec   // smartrouter_hedge_total               {spec, apiInterface, method}
+	incidentHedgeSuccessMetric        *prometheus.CounterVec   // smartrouter_hedge_success_total       {spec, apiInterface, method}
+	incidentHedgeFailedMetric         *prometheus.CounterVec   // smartrouter_hedge_failed_total        {spec, apiInterface, method}
+	incidentHedgeAttemptsHistogram    *prometheus.HistogramVec // smartrouter_hedge_attempts            {spec, apiInterface, method}
 
 	// Cache group metrics (labels: spec, apiInterface, method)
-	cacheRequestsTotalMetric *prometheus.CounterVec   // lava_rpcsmartrouter_cache_requests_total
-	cacheSuccessTotalMetric  *prometheus.CounterVec   // lava_rpcsmartrouter_cache_success_total
-	cacheFailedTotalMetric   *prometheus.CounterVec   // lava_rpcsmartrouter_cache_failed_total
-	cacheLatencyHistogram    *prometheus.HistogramVec // lava_rpcsmartrouter_cache_latency_milliseconds
+	cacheRequestsTotalMetric *prometheus.CounterVec   // smartrouter_cache_requests_total
+	cacheSuccessTotalMetric  *prometheus.CounterVec   // smartrouter_cache_success_total
+	cacheFailedTotalMetric   *prometheus.CounterVec   // smartrouter_cache_failed_total
+	cacheLatencyHistogram    *prometheus.HistogramVec // smartrouter_cache_latency_milliseconds
 
 	// CSM state-store size gauges (labels: spec, apiInterface). Expose otherwise
 	// black-box internal state so integration tests can verify /debug/reset-all
 	// emptied each store. See MAG-1762.
-	csmBlockedProvidersCount       *prometheus.GaugeVec // lava_rpcsmartrouter_csm_blocked_providers
-	csmBlockedBackupProvidersCount *prometheus.GaugeVec // lava_rpcsmartrouter_csm_blocked_backup_providers
-	csmStickySessionsCount         *prometheus.GaugeVec // lava_rpcsmartrouter_csm_sticky_sessions
-	csmReportedProvidersCount      *prometheus.GaugeVec // lava_rpcsmartrouter_csm_reported_providers
+	csmBlockedProvidersCount       *prometheus.GaugeVec // smartrouter_csm_blocked_providers
+	csmBlockedBackupProvidersCount *prometheus.GaugeVec // smartrouter_csm_blocked_backup_providers
+	csmStickySessionsCount         *prometheus.GaugeVec // smartrouter_csm_sticky_sessions
+	csmReportedProvidersCount      *prometheus.GaugeVec // smartrouter_csm_reported_providers
 
 	// Router-scoped request group metrics (labels: spec, apiInterface, provider_address, method)
 	routerRequestsTotal      *prometheus.CounterVec
@@ -165,7 +165,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}
 
 	// =========================================================================
-	// Endpoint-scoped metrics (lava_rpc_endpoint_*)
+	// Endpoint-scoped metrics (rpc_endpoint_*)
 	// labels: spec, apiInterface, endpoint_id, function
 	// Aggregate with sum by (...) to drop labels you don't need.
 	// =========================================================================
@@ -174,78 +174,78 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	endpointLabels := []string{"spec", "apiInterface", "endpoint_id"}
 
 	endpointTotalRelaysServiced := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "lava_rpc_endpoint_total_relays_serviced",
+		Name:       "rpc_endpoint_total_relays_serviced",
 		Help:       "Total relays successfully serviced by this RPC endpoint, by function.",
 		Labels:     endpointFunctionLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
 	endpointTotalErrored := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "lava_rpc_endpoint_total_errored",
+		Name:       "rpc_endpoint_total_errored",
 		Help:       "Total errored relays for this RPC endpoint, by function.",
 		Labels:     endpointFunctionLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
 	endpointInFlight := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-		Name:       "lava_rpc_endpoint_requests_in_flight",
+		Name:       "rpc_endpoint_requests_in_flight",
 		Help:       "Current number of in-flight relays for this RPC endpoint, by function.",
 		Labels:     endpointFunctionLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
 	endpointOverallHealth := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-		Name:       "lava_rpc_endpoint_overall_health",
+		Name:       "rpc_endpoint_overall_health",
 		Help:       "Health status of this RPC endpoint (1=healthy, 0=unhealthy).",
 		Labels:     endpointLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
 	endpointOverallHealthBreakdown := registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpc_endpoint_overall_health_breakdown",
+		Name: "rpc_endpoint_overall_health_breakdown",
 		Help: "Health check status per chain for RPC endpoints (1=healthy, 0=unhealthy).",
 	}, []string{"spec", "apiInterface"}))
 
 	endpointSelectionScore := registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpc_endpoint_selection_score",
+		Name: "rpc_endpoint_selection_score",
 		Help: "Latest selection score for each RPC endpoint by score type (availability/latency/sync/stake/composite).",
 	}, []string{"spec", "apiInterface", "endpoint_id", "score_type"}))
 
 	optimizerSelectionScore := registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpc_optimizer_selection_score",
+		Name: "rpc_optimizer_selection_score",
 		Help: "Periodic optimizer selection score per provider by score type (availability/latency/sync/stake/composite). Chain-level, not scoped to apiInterface.",
 	}, []string{"spec", "endpoint_id", "score_type"}))
 
 	endpointLatestBlock := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-		Name:       "lava_rpc_endpoint_latest_block",
+		Name:       "rpc_endpoint_latest_block",
 		Help:       "Latest block known by this RPC endpoint.",
 		Labels:     endpointLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
 	endpointFetchLatestFails := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "lava_rpc_endpoint_fetch_latest_fails",
+		Name:       "rpc_endpoint_fetch_latest_fails",
 		Help:       "Total failed latest-block fetch operations for this RPC endpoint.",
 		Labels:     endpointLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
 	endpointFetchBlockFails := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "lava_rpc_endpoint_fetch_block_fails",
+		Name:       "rpc_endpoint_fetch_block_fails",
 		Help:       "Total failed specific-block fetch operations for this RPC endpoint.",
 		Labels:     endpointLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
 	endpointFetchLatestSuccess := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "lava_rpc_endpoint_fetch_latest_success",
+		Name:       "rpc_endpoint_fetch_latest_success",
 		Help:       "Total successful latest-block fetch operations for this RPC endpoint.",
 		Labels:     endpointLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
 	endpointFetchBlockSuccess := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "lava_rpc_endpoint_fetch_block_success",
+		Name:       "rpc_endpoint_fetch_block_success",
 		Help:       "Total successful specific-block fetch operations for this RPC endpoint.",
 		Labels:     endpointLabels,
 		Registerer: prometheus.DefaultRegisterer,
@@ -256,91 +256,91 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// =========================================================================
 
 	endpointEndToEndLatency := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "lava_rpc_endpoint_end_to_end_latency_milliseconds",
+		Name:    "rpc_endpoint_end_to_end_latency_milliseconds",
 		Help:    "Distribution of end-to-end relay latency for this RPC endpoint by function in milliseconds. Use histogram_quantile() for percentiles.",
 		Buckets: latencyBuckets,
 	}, endpointFunctionLabels)
 
 	// =========================================================================
-	// Router-scoped metrics (lava_rpcsmartrouter_*)
+	// Router-scoped metrics (smartrouter_*)
 	// labels: spec, apiInterface, function  — aggregate with sum by to drop function
 	// =========================================================================
 
 	routerFunctionLabels := []string{"spec", "apiInterface", "function"}
 
 	routerTotalRelaysServiced := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_total_relays_serviced",
+		Name: "smartrouter_total_relays_serviced",
 		Help: "Total relays successfully serviced by the smart router, by function.",
 	}, routerFunctionLabels)
 
 	routerTotalErrored := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_total_errored",
+		Name: "smartrouter_total_errored",
 		Help: "Total errored relays on the smart router, by function.",
 	}, routerFunctionLabels)
 
 	routerEndToEndLatency := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "lava_rpcsmartrouter_end_to_end_latency_milliseconds",
+		Name:    "smartrouter_end_to_end_latency_milliseconds",
 		Help:    "Distribution of end-to-end relay latency across all endpoints on the smart router by function in milliseconds. Use histogram_quantile() for percentiles.",
 		Buckets: latencyBuckets,
 	}, routerFunctionLabels)
 
 	routerOverallHealth := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "lava_rpcsmartrouter_overall_health",
+		Name: "smartrouter_overall_health",
 		Help: "Overall health of the RPC smart router (1=healthy, 0=unhealthy).",
 	})
 	routerOverallHealth = registerOrReuse(routerOverallHealth)
 	routerOverallHealth.Set(1)
 
 	routerOverallHealthBreakdown := registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpcsmartrouter_overall_health_breakdown",
+		Name: "smartrouter_overall_health_breakdown",
 		Help: "Health check status per chain on the smart router (1=healthy, 0=unhealthy).",
 	}, []string{"spec", "apiInterface"}))
 
 	routerLatestBlock := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpcsmartrouter_latest_block",
+		Name: "smartrouter_latest_block",
 		Help: "Latest block known by the RPC smart router for this chain/interface.",
 	}, []string{"spec", "apiInterface"})
 
 	routerProtocolVersion := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpcsmartrouter_protocol_version",
+		Name: "smartrouter_protocol_version",
 		Help: "Protocol version of the RPC smart router encoded as major*1e6+minor*1e3+patch.",
 	}, []string{"version"})
 
 	routerWsConnectionsActive := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpcsmartrouter_ws_connections_active",
+		Name: "smartrouter_ws_connections_active",
 		Help: "Number of currently active WebSocket connections served by the smart router.",
 	}, []string{"spec", "apiInterface"})
 
 	routerWsSubscriptionsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_ws_subscriptions_total",
+		Name: "smartrouter_ws_subscriptions_total",
 		Help: "Total WebSocket subscription requests received by the smart router.",
 	}, []string{"spec", "apiInterface"})
 
 	routerWsSubscriptionErrors := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_ws_subscription_errors_total",
+		Name: "smartrouter_ws_subscription_errors_total",
 		Help: "Total failed WebSocket subscription requests on the smart router.",
 	}, []string{"spec", "apiInterface"})
 
 	crossValidationLabels := []string{"spec", "apiInterface", "method"}
 	crossValidationProviderLabels := []string{"spec", "apiInterface", "method", "provider_address"}
 	crossValidationRequestsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_cross_validation_requests_total",
+		Name: "smartrouter_cross_validation_requests_total",
 		Help: "Total number of cross-validated requests.",
 	}, crossValidationLabels)
 	crossValidationSuccessTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_cross_validation_success_total",
+		Name: "smartrouter_cross_validation_success_total",
 		Help: "Total number of cross-validated requests that reached consensus.",
 	}, crossValidationLabels)
 	crossValidationFailedTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_cross_validation_failed_total",
+		Name: "smartrouter_cross_validation_failed_total",
 		Help: "Total number of cross-validated requests that failed to reach consensus.",
 	}, crossValidationLabels)
 	crossValidationProviderAgreementsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_cross_validation_provider_agreements_total",
+		Name: "smartrouter_cross_validation_provider_agreements_total",
 		Help: "Total number of times a provider agreed with the cross-validation consensus.",
 	}, crossValidationProviderLabels)
 	crossValidationProviderDisagreementsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_cross_validation_provider_disagreements_total",
+		Name: "smartrouter_cross_validation_provider_disagreements_total",
 		Help: "Total number of times a provider's response disagreed with the cross-validation consensus.",
 	}, crossValidationProviderLabels)
 	// Bounded alerting surface: keyed by group (operator-defined, low cardinality) and finality
@@ -349,7 +349,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// deterministic methods — NOT quorum failures or node/protocol errors (see
 	// SetCrossValidationMismatchMetric).
 	crossValidationMismatchTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_cross_validation_mismatch_total",
+		Name: "smartrouter_cross_validation_mismatch_total",
 		Help: "Successful cross-validation content outliers (a successful response that disagreed with a reached consensus on a deterministic method), by provider group and finality. Excludes quorum failures and node/protocol errors.",
 	}, []string{"spec", "apiInterface", "method", "group", "finality"})
 	// Bounded failure breakdown: the existing cross_validation_failed_total is unlabeled-by-reason, so a
@@ -357,7 +357,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// help). This series adds the reason, drawn from the closed CrossValidationReason* enum (low cardinality),
 	// without touching the existing series' label sets. Covers both quorum-time and request-time fail-fast.
 	crossValidationFailuresTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_cross_validation_failures_total",
+		Name: "smartrouter_cross_validation_failures_total",
 		Help: "Cross-validation failures by reason (CrossValidationReason* enum: insufficient-responses, no-agreement, diversity-unmet, group-quorum-unmet, insufficient-capacity, insufficient-groups). Bounded — the reason set is a closed enum.",
 	}, []string{"spec", "apiInterface", "method", "reason"})
 
@@ -368,56 +368,56 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	incidentMethodLabels := []string{"spec", "apiInterface", "method"}
 
 	incidentNodeErrorsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_node_errors_total",
+		Name: "smartrouter_node_errors_total",
 		Help: "Total node errors received from RPC endpoints by the smart router.",
 	}, incidentProviderLabels)
 	incidentProtocolErrorsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_protocol_errors_total",
+		Name: "smartrouter_protocol_errors_total",
 		Help: "Total protocol errors (transport/timeout) encountered by the smart router.",
 	}, incidentProviderLabels)
 	incidentRetriesTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_retries_total",
+		Name: "smartrouter_retries_total",
 		Help: "Total relay retries attempted by the smart router (extra attempts beyond the first).",
 	}, incidentMethodLabels)
 	incidentRetriesSuccessMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_retries_success_total",
+		Name: "smartrouter_retries_success_total",
 		Help: "Retried relay requests on the smart router that ultimately succeeded.",
 	}, incidentMethodLabels)
 	incidentRetriesFailedMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_retries_failed_total",
+		Name: "smartrouter_retries_failed_total",
 		Help: "Retried relay requests on the smart router that ultimately failed.",
 	}, incidentMethodLabels)
 	incidentRetryAttemptsHistogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "lava_rpcsmartrouter_retry_attempts",
+		Name:    "smartrouter_retry_attempts",
 		Help:    "Distribution of how many provider attempts were needed per retried request.",
 		Buckets: []float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
 	}, incidentMethodLabels)
 	incidentConsistencyTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_consistency_total",
+		Name: "smartrouter_consistency_total",
 		Help: "Total relay requests on the smart router that enforced a minimum seen block (consistency).",
 	}, incidentMethodLabels)
 	incidentConsistencySuccessMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_consistency_success_total",
+		Name: "smartrouter_consistency_success_total",
 		Help: "Consistency-enforced relay requests on the smart router that succeeded.",
 	}, incidentMethodLabels)
 	incidentConsistencyFailedMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_consistency_failed_total",
+		Name: "smartrouter_consistency_failed_total",
 		Help: "Consistency-enforced relay requests on the smart router that failed.",
 	}, incidentMethodLabels)
 	incidentHedgeTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_hedge_total",
+		Name: "smartrouter_hedge_total",
 		Help: "Total relay requests on the smart router that triggered a hedge (batch ticker).",
 	}, incidentMethodLabels)
 	incidentHedgeSuccessMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_hedge_success_total",
+		Name: "smartrouter_hedge_success_total",
 		Help: "Hedged relay requests on the smart router that succeeded.",
 	}, incidentMethodLabels)
 	incidentHedgeFailedMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_hedge_failed_total",
+		Name: "smartrouter_hedge_failed_total",
 		Help: "Hedged relay requests on the smart router that failed.",
 	}, incidentMethodLabels)
 	incidentHedgeAttemptsHistogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "lava_rpcsmartrouter_hedge_attempts",
+		Name:    "smartrouter_hedge_attempts",
 		Help:    "Distribution of how many hedge relays were sent per hedged request.",
 		Buckets: []float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
 	}, incidentMethodLabels)
@@ -430,19 +430,19 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// =========================================================================
 	csmStateLabels := []string{"spec", "apiInterface"}
 	csmBlockedProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpcsmartrouter_csm_blocked_providers",
+		Name: "smartrouter_csm_blocked_providers",
 		Help: "Size of ConsumerSessionManager.previousEpochBlockedProviders (cross-epoch known-bad provider memory). Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels)
 	csmBlockedBackupProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpcsmartrouter_csm_blocked_backup_providers",
+		Name: "smartrouter_csm_blocked_backup_providers",
 		Help: "Size of ConsumerSessionManager.blockedBackupProviders (per-epoch backup-provider failure memory). Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels)
 	csmStickySessionsCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpcsmartrouter_csm_sticky_sessions",
+		Name: "smartrouter_csm_sticky_sessions",
 		Help: "Number of live sticky-session affinities tracked by the smart router. Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels)
 	csmReportedProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "lava_rpcsmartrouter_csm_reported_providers",
+		Name: "smartrouter_csm_reported_providers",
 		Help: "Number of providers currently in the ReportedProviders unresponsiveness register. Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels)
 
@@ -452,53 +452,53 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerRequestLabels := []string{"spec", "apiInterface", "provider_address", "method"}
 
 	routerRequestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_requests_total",
+		Name: "smartrouter_requests_total",
 		Help: "Total number of requests on the smart router.",
 	}, routerRequestLabels)
 	routerRequestsSuccess := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_requests_success_total",
+		Name: "smartrouter_requests_success_total",
 		Help: "Total number of successful requests on the smart router.",
 	}, routerRequestLabels)
 	routerRequestsFailed := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_requests_failed_total",
+		Name: "smartrouter_requests_failed_total",
 		Help: "Total number of failed requests on the smart router.",
 	}, routerRequestLabels)
 	routerRequestsRead := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_requests_read_total",
+		Name: "smartrouter_requests_read_total",
 		Help: "Total number of read (stateful=0) requests on the smart router.",
 	}, routerRequestLabels)
 	routerRequestsWrite := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_requests_write_total",
+		Name: "smartrouter_requests_write_total",
 		Help: "Total number of write (stateful=1) requests on the smart router.",
 	}, routerRequestLabels)
 	routerRequestsDebugTrace := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_requests_debug_trace_total",
+		Name: "smartrouter_requests_debug_trace_total",
 		Help: "Total number of debug/trace addon requests on the smart router.",
 	}, routerRequestLabels)
 	routerRequestsArchive := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_requests_archive_total",
+		Name: "smartrouter_requests_archive_total",
 		Help: "Total number of archive requests on the smart router.",
 	}, routerRequestLabels)
 	routerRequestsBatch := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_requests_batch_total",
+		Name: "smartrouter_requests_batch_total",
 		Help: "Total number of batch requests on the smart router.",
 	}, routerRequestLabels)
 
 	cacheLabels := []string{"spec", "apiInterface", "method"}
 	cacheRequestsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_cache_requests_total",
+		Name: "smartrouter_cache_requests_total",
 		Help: "Total number of cache lookup attempts.",
 	}, cacheLabels)
 	cacheSuccessTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_cache_success_total",
+		Name: "smartrouter_cache_success_total",
 		Help: "Total number of cache lookups that returned a cached response (hits).",
 	}, cacheLabels)
 	cacheFailedTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_rpcsmartrouter_cache_failed_total",
+		Name: "smartrouter_cache_failed_total",
 		Help: "Total number of cache lookups that did not find a cached response (misses).",
 	}, cacheLabels)
 	cacheLatencyHistogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "lava_rpcsmartrouter_cache_latency_milliseconds",
+		Name:    "smartrouter_cache_latency_milliseconds",
 		Help:    "Distribution of cache lookup latency in milliseconds.",
 		Buckets: latencyBuckets,
 	}, cacheLabels)

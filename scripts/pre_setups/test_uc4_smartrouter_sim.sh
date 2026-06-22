@@ -277,7 +277,7 @@ cv_disagreeing()    { grep -i '^lava-cross-validation-disagreeing-providers:' "$
 # metric_value <name-fragment> <label-grep> : the value of the first matching metric line, or "" .
 metric_value() {
 	curl -sS "http://127.0.0.1:$METRICS_PORT/metrics" 2>/dev/null \
-		| grep "^lava_rpcsmartrouter_cross_validation_$1" | grep "$2" | awk '{print $NF}' | head -n1
+		| grep "^smartrouter_cross_validation_$1" | grep "$2" | awk '{print $NF}' | head -n1
 }
 ge1() { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($1 >= 1)}"; }
 
@@ -320,7 +320,7 @@ else
 fi
 # THE UC-4 HEADLINE: a bounded group+finality-labeled mismatch metric fired.
 mismatch_line=$(curl -sS "http://127.0.0.1:$METRICS_PORT/metrics" 2>/dev/null \
-	| grep '^lava_rpcsmartrouter_cross_validation_mismatch_total' | grep "group=\"$DISSENTER_GROUP\"" | grep "method=\"$CV_METHOD\"")
+	| grep '^smartrouter_cross_validation_mismatch_total' | grep "group=\"$DISSENTER_GROUP\"" | grep "method=\"$CV_METHOD\"")
 echo "      ${mismatch_line:-<mismatch metric not found>}"
 mismatch_val=$(echo "$mismatch_line" | awk '{print $NF}' | head -n1)
 if ge1 "$mismatch_val"; then
