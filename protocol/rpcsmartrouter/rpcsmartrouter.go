@@ -1586,91 +1586,14 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		)
 	}
 
-	// ============================================================================
-	// PHASE 2: Chain Tracker Setup
-	// ============================================================================
-	// Create ChainTracker for latest block tracking using first healthy provider.
-	// ChainTracker polls for latest block and maintains block history for sync verification.
-	// Uses healthyStaticProviders (not the unfiltered list) to avoid polling a dead node.
-	var chainTracker chaintracker.IChainTracker
-	if len(healthyStaticProviders) > 0 {
-		firstProvider := healthyStaticProviders[0]
-
-		// Minimal endpoint for ChainTracker (no addons needed, only polls latest block)
-		chainTrackerEndpoint := &lavasession.RPCProviderEndpoint{
-			NetworkAddress: firstProvider.NetworkAddress,
-			ChainID:        firstProvider.ChainID,
-			ApiInterface:   firstProvider.ApiInterface,
-			Geolocation:    firstProvider.Geolocation,
-			NodeUrls: []common.NodeUrl{
-				{
-					Url:        firstProvider.NodeUrls[0].Url,
-					AuthConfig: firstProvider.NodeUrls[0].AuthConfig,
-					Addons:     []string{},
-				},
-			},
-		}
-
-		parallelConnections := uint(lavasession.MaximumStreamsOverASingleConnection)
-		chainRouter, err := chainlib.GetChainRouter(ctx, parallelConnections, chainTrackerEndpoint, chainParser)
-		if err != nil {
-			utils.LavaFormatWarning("Failed to create chain router for chain tracker", err,
-				utils.LogAttr("chain", rpcEndpoint.ChainID),
-			)
-		} else {
-			// Full ChainFetcher for chain tracker (matches provider behavior)
-			chainFetcher := chainlib.NewChainFetcher(ctx, &chainlib.ChainFetcherOptions{
-				ChainRouter: chainRouter,
-				ChainParser: chainParser,
-				Endpoint:    chainTrackerEndpoint,
-				Cache:       options.cache,
-			})
-
-			_, averageBlockTime, blocksToFinalization, blocksInFinalizationData := chainParser.ChainBlockStats()
-			blocksToSaveChainTracker := uint64(blocksToFinalization + blocksInFinalizationData)
-
-			chainTrackerConfig := chaintracker.ChainTrackerConfig{
-				BlocksToSave:          blocksToSaveChainTracker,
-				AverageBlockTime:      averageBlockTime,
-				ServerBlockMemory:     chaintracker.ChainTrackerDefaultMemory + blocksToSaveChainTracker,
-				ChainId:               rpcEndpoint.ChainID,
-				ParseDirectiveEnabled: chainParser.ParseDirectiveEnabled(),
-			}
-
-			chainTracker, err = chaintracker.NewChainTracker(ctx, chainFetcher, chainTrackerConfig)
-			if err != nil {
-				utils.LavaFormatWarning("Failed to create chain tracker, sync tracking disabled", err,
-					utils.LogAttr("chain", rpcEndpoint.ChainID),
-				)
-				chainTracker = nil
-			} else {
-				go func() {
-					err := chainTracker.StartAndServe(ctx)
-					if err != nil {
-						utils.LavaFormatError("Chain tracker failed", err,
-							utils.LogAttr("chain", rpcEndpoint.ChainID),
-						)
-					}
-				}()
-
-				utils.LavaFormatInfo("Chain tracker started",
-					utils.LogAttr("chain", rpcEndpoint.ChainID),
-					utils.LogAttr("pollingInterval", averageBlockTime/time.Duration(chaintracker.EffectivePollingMultiplier())),
-					utils.LogAttr("blocksToSave", blocksToSaveChainTracker),
-				)
-			}
-		}
-	}
-
-	if chainTracker == nil {
-		utils.LavaFormatInfo("Starting without chain tracker (sync tracking disabled)",
-			utils.LogAttr("chain", rpcEndpoint.ChainID),
-		)
-	}
+	// The redundant global ChainTracker (bound to healthyStaticProviders[0]) was removed in
+	// MAG-2160 / Topic C: the per-chain tip now comes from ChainState (fed by per-endpoint
+	// relay + poll observations, with strict-majority consensus), constructed inside
+	// ServeRPCRequests. No single-node tip, no fire-and-forget poller per pod.
 
 	utils.LavaFormatInfo("RPCSmartRouter Listening", utils.Attribute{Key: "endpoints", Value: rpcEndpoint.String()})
 	// Convert smartRouterIdentifier string to empty sdk.AccAddress for smart router
-	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, chainTracker, sessionManager, options.cache, rpcSmartRouterMetrics, smartRouterConsistency, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
+	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, rpcSmartRouterMetrics, smartRouterConsistency, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
 	if err != nil {
 		err = utils.LavaFormatError("failed serving rpc requests", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err

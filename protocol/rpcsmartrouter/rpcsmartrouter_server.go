@@ -15,7 +15,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
-	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
@@ -53,8 +52,7 @@ const (
 // implements Relay Sender interfaced and uses an ChainListener to get it called
 type RPCSmartRouterServer struct {
 	chainParser            chainlib.ChainParser
-	chainTracker           chaintracker.IChainTracker
-	chainState             *chainstate.ChainState // MAG-2160 (Topic C): per-chain consensus tip (replaces chainTracker/estimator/atomic; reads migrate in phase 3)
+	chainState             *chainstate.ChainState // MAG-2160 (Topic C): per-chain consensus tip — replaces the global ChainTracker, the estimator, and the atomic
 	sessionManager         *lavasession.ConsumerSessionManager
 	listenEndpoint         *lavasession.RPCEndpoint
 	rpcSmartRouterLogs     *metrics.RPCConsumerLogs
@@ -67,9 +65,8 @@ type RPCSmartRouterServer struct {
 	chainListener          chainlib.ChainListener
 	relayRetriesManager    *lavaprotocol.RelayRetriesManager
 	initialized            atomic.Bool
-	latestBlockHeight      atomic.Uint64
-	latestBlockEstimator   *relaycore.LatestBlockEstimator
-	enableSelectionStats   bool // feature flag to enable selection stats header
+	latestBlockHeight      atomic.Uint64 // MAG-2160: retained only as the cold-start fallback for getLatestBlock (the estimator is retired)
+	enableSelectionStats   bool          // feature flag to enable selection stats header
 
 	// Per-endpoint ChainTracker manager for continuous block polling
 	endpointChainTrackerManager *endpointstate.EndpointMonitor
@@ -92,7 +89,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	ctx context.Context,
 	listenEndpoint *lavasession.RPCEndpoint,
 	chainParser chainlib.ChainParser,
-	chainTracker chaintracker.IChainTracker,
 	sessionManager *lavasession.ConsumerSessionManager,
 	cache *performance.Cache,
 	rpcSmartRouterLogs *metrics.RPCConsumerLogs,
@@ -106,7 +102,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.sessionManager = sessionManager
 	rpcss.listenEndpoint = listenEndpoint
 	rpcss.cache = cache
-	rpcss.chainTracker = chainTracker
 	rpcss.rpcSmartRouterLogs = rpcSmartRouterLogs
 	rpcss.chainParser = chainParser
 	rpcss.smartRouterConsistency = smartRouterConsistency
@@ -115,7 +110,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.debugRelays = cmdFlags.DebugRelays
 	rpcss.enableSelectionStats = cmdFlags.EnableSelectionStats
 	rpcss.relayRetriesManager = lavaprotocol.NewRelayRetriesManager()
-	rpcss.latestBlockEstimator = relaycore.NewLatestBlockEstimator()
 
 	// Load optional per-method cross-validation policies (empty => header-driven CV only, fully
 	// backwards compatible). Fail fast on invalid config.
@@ -790,10 +784,6 @@ func (rpcss *RPCSmartRouterServer) updateLatestBlockHeight(blockHeight uint64, p
 			}
 			break
 		}
-	}
-
-	if providerAddress != "" && rpcss.latestBlockEstimator != nil {
-		rpcss.latestBlockEstimator.Record(providerAddress, int64(blockHeight))
 	}
 }
 
