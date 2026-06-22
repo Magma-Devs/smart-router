@@ -754,20 +754,18 @@ func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays 
 }
 
 func (rpcss *RPCSmartRouterServer) getLatestBlock() uint64 {
-	// Return latest block from chain tracker (for archive extension routing)
-	if rpcss.chainTracker != nil && !rpcss.chainTracker.IsDummy() {
-		if block, _ := rpcss.chainTracker.GetLatestBlockNum(); block > 0 {
+	// Site A (MAG-2160): the router-wide tip (archive routing + cache-finalization) is the
+	// per-chain ChainState consensus tip — TTL-fresh, monotonic, outlier-guarded — replacing the
+	// global-tracker → estimator → atomic ladder.
+	if rpcss.chainState != nil {
+		if block, ok := rpcss.chainState.GetLatestBlock(); ok && block > 0 {
 			return uint64(block)
 		}
 	}
 
-	if rpcss.latestBlockEstimator != nil {
-		latestKnownBlock, numProviders := rpcss.latestBlockEstimator.Estimate(rpcss.chainParser)
-		if numProviders > 0 && latestKnownBlock > 0 {
-			return uint64(latestKnownBlock)
-		}
-	}
-
+	// Cold-start fallback: in the bootstrap window before the first observation (or after a TTL
+	// gap with no fresh writes) the ChainState tip is unknown; fall back to the monotonic atomic
+	// (still fed by tip-eligible relay harvests) so getLatestBlock never returns 0 prematurely.
 	if latest := rpcss.latestBlockHeight.Load(); latest > 0 {
 		return latest
 	}
@@ -1455,39 +1453,46 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// historical), used for OnSessionDone and propagated to downstream consumers
 				// (consistency, caching). This is intentionally NOT gated on tip-eligibility — it
 				// is "the block returned by this response", a separate concept from "the current
-				// tip" updated above. Falls back to the global ChainTracker when the response
-				// carried no block of its own.
+				// tip" updated above. Site B (MAG-2160): when the response carried no block, fall
+				// back to THIS endpoint's own observed latest — never another node's tip. The old
+				// global-tracker fallback stamped provider[0]'s value onto this endpoint's
+				// QoS/seenBlock (cross-attribution S6); the per-endpoint value is the honest one.
 				latestBlock := int64(0)
 				if localRelayResult.Reply != nil && localRelayResult.Reply.LatestBlock > 0 {
 					latestBlock = localRelayResult.Reply.LatestBlock
-				} else if rpcss.chainTracker != nil && !rpcss.chainTracker.IsDummy() {
-					latestBlock, _ = rpcss.chainTracker.GetLatestBlockNum()
+				} else if targetEndpoint != nil && rpcss.endpointChainTrackerManager != nil {
+					latestBlock = rpcss.endpointChainTrackerManager.GetLatestBlockNum(targetEndpoint.NetworkAddress)
 					if latestBlock > 0 && localRelayResult.Reply != nil {
 						localRelayResult.Reply.LatestBlock = latestBlock
 					}
-					utils.LavaFormatTrace("using latest block from chain tracker",
+					utils.LavaFormatTrace("using this endpoint's own latest block (site B)",
+						utils.LogAttr("endpoint", endpointAddress),
 						utils.LogAttr("latest_block", latestBlock),
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
 
-				// Calculate syncGap (detect lagging endpoints)
+				// Calculate syncGap (detect lagging endpoints). Site C (MAG-2160): the chain tip
+				// is the per-chain ChainState consensus tip (TTL-fresh), not the single global
+				// tracker node — so every endpoint is judged against the real chain head (fixes
+				// the syncGap-bias S5). The this-endpoint half stays the endpoint's own latest.
 				syncGap := int64(0)
-				if targetEndpoint != nil && rpcss.chainTracker != nil && !rpcss.chainTracker.IsDummy() {
-					globalLatest, _ := rpcss.chainTracker.GetLatestBlockNum()
-					endpointLatest := targetEndpoint.LatestBlock.Load()
-					if globalLatest > 0 && endpointLatest > 0 {
-						syncGap = globalLatest - endpointLatest
-						if syncGap < 0 {
-							syncGap = 0 // Endpoint ahead is fine
+				if targetEndpoint != nil && rpcss.chainState != nil {
+					if chainLatest, _, ok := rpcss.chainState.GetLatestBlockWithTime(); ok && chainLatest > 0 {
+						endpointLatest := targetEndpoint.LatestBlock.Load()
+						if endpointLatest > 0 {
+							syncGap = chainLatest - endpointLatest
+							if syncGap < 0 {
+								syncGap = 0 // Endpoint ahead is fine
+							}
+							utils.LavaFormatDebug("calculated sync gap",
+								utils.LogAttr("endpoint", endpointAddress),
+								utils.LogAttr("chain_latest", chainLatest),
+								utils.LogAttr("endpoint_latest", endpointLatest),
+								utils.LogAttr("sync_gap", syncGap),
+								utils.LogAttr("GUID", goroutineCtx),
+							)
 						}
-						utils.LavaFormatDebug("calculated sync gap",
-							utils.LogAttr("endpoint", endpointAddress),
-							utils.LogAttr("global_latest", globalLatest),
-							utils.LogAttr("endpoint_latest", endpointLatest),
-							utils.LogAttr("sync_gap", syncGap),
-							utils.LogAttr("GUID", goroutineCtx),
-						)
 					}
 				}
 
