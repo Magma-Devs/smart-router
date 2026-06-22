@@ -202,7 +202,7 @@ assert `/debug/reset-all` emptied each store (see MAG-1762). All drop to `0` aft
 
 ## Shared metrics
 
-### Classified errors — `lava_errors_*`
+### Classified errors — `smartrouter_errors_*`
 
 Defined in [`error_metrics.go`](../protocol/metrics/error_metrics.go).
 
