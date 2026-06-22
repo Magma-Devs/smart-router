@@ -318,7 +318,7 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 
 	require.Equal(t, int64(0), ep.LatestBlock.Load(), "a historical response must NOT move the endpoint tip")
 	require.True(t, ep.LastBlockUpdate.IsZero(), "a historical response must NOT stamp LastBlockUpdate")
-	require.Equal(t, uint64(0), rpcss.latestBlockHeight.Load(), "a historical response must NOT move the global estimator")
+	require.Equal(t, uint64(0), rpcss.latestBlockHeight.Load(), "a historical response must NOT move the bootstrap atomic")
 	// The store may hold a failed-poll record from the nil-connection background poll; what must
 	// NOT exist is a Relay-sourced write of the historical block.
 	if o, exists := m.GetObservation(url); exists {
@@ -332,7 +332,7 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 
 	require.Equal(t, int64(20_000_000), ep.LatestBlock.Load(), "a tip-eligible response moves the endpoint tip")
 	require.False(t, ep.LastBlockUpdate.IsZero(), "a tip-eligible response stamps LastBlockUpdate")
-	require.Equal(t, uint64(20_000_000), rpcss.latestBlockHeight.Load(), "a tip-eligible response moves the global estimator")
+	require.Equal(t, uint64(20_000_000), rpcss.latestBlockHeight.Load(), "a tip-eligible response moves the bootstrap atomic")
 	o, obsExists := m.GetObservation(url)
 	require.True(t, obsExists)
 	require.Equal(t, int64(20_000_000), o.LatestBlock)

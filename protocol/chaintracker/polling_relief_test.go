@@ -7,18 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestEffectivePollingMultiplier verifies the relief override takes effect and falls
-// back to the built-in multiplier when unset.
-func TestEffectivePollingMultiplier(t *testing.T) {
-	defer func(orig int) { PollingTimeMultiplierOverride = orig }(PollingTimeMultiplierOverride)
-
-	PollingTimeMultiplierOverride = 0
-	require.Equal(t, MostFrequentPollingMultiplier, EffectivePollingMultiplier(), "unset -> built-in default 16")
-
-	PollingTimeMultiplierOverride = 4
-	require.Equal(t, 4, EffectivePollingMultiplier(), "override in force")
-}
-
 // TestComputePollInterval_FixedFlatCadence guards the MAG-2159 per-endpoint cadence:
 // when flatPollInterval > 0 the poll runs at EXACTLY that interval regardless of the
 // (block-gap-mutated) base, with the adaptive tiers gone and failure backoff the only

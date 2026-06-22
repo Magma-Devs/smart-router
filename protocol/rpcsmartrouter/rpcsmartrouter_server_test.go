@@ -2820,10 +2820,10 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 // restart then drops every cached entry — the failure mode reported in
 // test_phase2_5_caching.py::test_cache_survives_router_pod_restart.
 //
-// The fix consults the router's tracked chain tip (chainTracker /
-// latestBlockEstimator / atomic latestBlockHeight, surfaced via
-// rpcss.getLatestBlock()) and prefers it when it is ahead of the reply's
-// per-response value.
+// The fix consults the router's tracked chain tip (the per-chain ChainState
+// consensus tip, with the bootstrap atomic latestBlockHeight as cold-start
+// fallback, surfaced via rpcss.getLatestBlock()) and prefers it when it is
+// ahead of the reply's per-response value.
 func TestIsFinalizedForCacheWrite(t *testing.T) {
 	tests := []struct {
 		name        string

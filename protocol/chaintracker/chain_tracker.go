@@ -61,39 +61,15 @@ const (
 	// FlatPollInterval of avgBlockTime/2 the atomic is at most ~2 blocks stale — far inside the
 	// default 10-block EndpointLagThreshold.
 	defaultMaxRelaySkipsBeforePoll = 4
-	MostFrequentPollingMultiplier  = 16
-	// MinPollingTimeMultiplier is the allowed minimum for the polling multiplier and the
-	// adaptive divide-by-zero floor: the legacy adaptive tiers compute base/(multiplier/4),
-	// so a multiplier below 4 divides by zero. After the MAG-2159 / Topic B knob
-	// consolidation there is no longer a second-layer clamp inside the tracker — this floor
-	// is enforced ONCE, where the operator value enters: the --chain-tracker-polling-multiplier
-	// flag validation in rpcsmartrouter (range [MinPollingTimeMultiplier, MostFrequentPollingMultiplier]).
-	// The only other multiplier feeder is the built-in default 16, so every value reaching
-	// the adaptive tiers is >= 4 by construction.
-	MinPollingTimeMultiplier              = 4
-	ChainTrackerPollingMultiplierFlagName = "chain-tracker-polling-multiplier"
+	// MostFrequentPollingMultiplier is the fixed multiplier the legacy adaptive cadence uses
+	// (global tracker only — per-endpoint trackers run a fixed FlatPollInterval and never reach
+	// the adaptive tiers). It is the SOLE feeder of cs.pollingTimeMultiplier. The adaptive tiers
+	// compute base/(multiplier/4), so the multiplier must stay >= 4 to avoid a divide-by-zero;
+	// 16 satisfies that by construction. MAG-2160 removed the --chain-tracker-polling-multiplier
+	// runtime override (it only ever tuned the now-deleted global tracker), so there is no longer
+	// any operator-supplied value to range-validate.
+	MostFrequentPollingMultiplier = 16
 )
-
-// PollingTimeMultiplierOverride is the polling-relief process-wide override of
-// MostFrequentPollingMultiplier (default 16). 0 = no relief. A smaller value = slower
-// polling = fewer upstream calls. Set once at startup from the
-// --chain-tracker-polling-multiplier flag and honored in newCustomChainTracker.
-//
-// MAG-2159: this affects only trackers on the legacy adaptive cadence — i.e. the global
-// tracker (removed in Topic C). Per-endpoint trackers run a FIXED flatPollInterval
-// (avgBlockTime/2) and ignore the multiplier entirely. After the knob consolidation this
-// override (resolved via EffectivePollingMultiplier) is the single relief control; the
-// redundant per-tracker config knob and the in-tracker clamp were removed.
-var PollingTimeMultiplierOverride = 0
-
-// EffectivePollingMultiplier returns the multiplier actually in force: the
-// polling-relief override when set, otherwise the built-in MostFrequentPollingMultiplier.
-func EffectivePollingMultiplier() int {
-	if PollingTimeMultiplierOverride != 0 {
-		return PollingTimeMultiplierOverride
-	}
-	return MostFrequentPollingMultiplier
-}
 
 type ChainFetcher interface {
 	FetchLatestBlockNum(ctx context.Context) (int64, error)
@@ -697,8 +673,9 @@ func (ct *ChainTracker) smallestBlockGap() time.Duration {
 
 // StartAndServe starts the chain tracker's poll loop. The historical gRPC `IChainTracker`
 // server (the only thing the old `serve()` did) was removed in MAG-2160 / Topic C along with
-// the global tracker that exposed it — nothing in or out of the tree consumed it, and no
-// tracker ever set a server address. The method name is kept for the IChainTracker interface.
+// the global tracker that exposed it: no in-tree caller consumed it and no tracker ever set a
+// server address, so it was dead in this fork (any external gRPC consumer outside this tree was
+// not surveyed). The method name is kept for the IChainTracker interface.
 func (ct *ChainTracker) StartAndServe(ctx context.Context) error {
 	return ct.start(ctx, ct.averageBlockTime)
 }
@@ -708,14 +685,13 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		return &DummyChainTracker{}
 	}
 
-	// polling-relief: the legacy adaptive cadence (global tracker only — per-endpoint
-	// trackers set FlatPollInterval and ignore this) uses a single multiplier, resolved by
-	// EffectivePollingMultiplier: the process-wide flag override when set, else the built-in
-	// MostFrequentPollingMultiplier. Both are >= MinPollingTimeMultiplier (the flag is
-	// range-validated at its parse site; the default is 16), so no second-layer clamp is
-	// needed here. The old per-tracker config.PollingTimeMultiplier knob was set by nobody
-	// and was removed in the MAG-2159 knob consolidation.
-	pollingTime := EffectivePollingMultiplier()
+	// The legacy adaptive cadence (global tracker only — per-endpoint trackers set
+	// FlatPollInterval and never reach the adaptive tiers) uses the fixed built-in
+	// MostFrequentPollingMultiplier (16, >= the divide-by-zero floor of 4). MAG-2160 removed
+	// the --chain-tracker-polling-multiplier runtime override along with the global tracker it
+	// tuned; the old per-tracker config.PollingTimeMultiplier knob was set by nobody and was
+	// removed in the MAG-2159 knob consolidation.
+	pollingTime := MostFrequentPollingMultiplier
 
 	// Traffic-gate skip bound (MAG-2159): default when the caller leaves it 0.
 	maxRelaySkips := config.MaxRelaySkipsBeforePoll

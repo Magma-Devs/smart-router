@@ -755,11 +755,19 @@ func (rpcss *RPCSmartRouterServer) getLatestBlock() uint64 {
 		if block, ok := rpcss.chainState.GetLatestBlock(); ok && block > 0 {
 			return uint64(block)
 		}
+		// ChainState is the authority once it has EVER observed a tip. If it is Initialized but
+		// not fresh, the tip has aged past TTL — we must NOT revive a frozen atomic value
+		// (Finding 1). Report unknown (0); a stale-but-real tip is worse than an honest "unknown",
+		// and the atomic's last write could itself be the stale value we just rejected.
+		if rpcss.chainState.Initialized() {
+			return 0
+		}
 	}
 
-	// Cold-start fallback: in the bootstrap window before the first observation (or after a TTL
-	// gap with no fresh writes) the ChainState tip is unknown; fall back to the monotonic atomic
-	// (still fed by tip-eligible relay harvests) so getLatestBlock never returns 0 prematurely.
+	// Genuine cold-start ONLY (ChainState never initialized): in the bootstrap window before the
+	// first observation, fall back to the monotonic atomic — seeded by the tip-eligible init
+	// relay — so getLatestBlock isn't 0 during startup. Once ChainState initializes, this branch
+	// is never taken again, so a post-TTL gap cannot resurrect a frozen atomic.
 	if latest := rpcss.latestBlockHeight.Load(); latest > 0 {
 		return latest
 	}
@@ -1451,7 +1459,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				if localRelayResult.Reply != nil && localRelayResult.Reply.LatestBlock > 0 {
 					latestBlock = localRelayResult.Reply.LatestBlock
 				} else if targetEndpoint != nil && rpcss.endpointChainTrackerManager != nil {
-					latestBlock = rpcss.endpointChainTrackerManager.GetLatestBlockNum(targetEndpoint.NetworkAddress)
+					// MAG-2160 Finding 6: read this endpoint's freshest OBSERVATION record, not the
+					// dedicated tracker's atomic (GetLatestBlockNum). Under the MAG-2159 traffic gate
+					// the tracker's poll cycle is skipped while served relays keep the tip current, so
+					// the tracker atomic can lag the latest relay-harvested block (or still be 0 on a
+					// purely relay-fed endpoint). The observation store is updated on every harvest, so
+					// it is the honest, freshest per-endpoint value.
+					if obsv, ok := rpcss.endpointChainTrackerManager.GetObservation(targetEndpoint.NetworkAddress); ok {
+						latestBlock = obsv.LatestBlock
+					}
 					if latestBlock > 0 && localRelayResult.Reply != nil {
 						localRelayResult.Reply.LatestBlock = latestBlock
 					}
@@ -1462,22 +1478,26 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					)
 				}
 
-				// Calculate syncGap (detect lagging endpoints). Site C (MAG-2160): the chain tip
-				// is the per-chain ChainState consensus tip (TTL-fresh), not the single global
-				// tracker node — so every endpoint is judged against the real chain head (fixes
-				// the syncGap-bias S5). The this-endpoint half stays the endpoint's own latest.
+				// Calculate syncGap (detect lagging endpoints). Site C (MAG-2160 Finding 2): an
+				// endpoint is judged against the strict-majority CONSENSUS baseline, NOT the
+				// optimistic observed tip. Measuring against the observed tip would penalize the
+				// whole pod whenever a single endpoint races ahead (baseline 1000, one node reports
+				// 1099 → everyone at 1000 gets a bogus syncGap of 99). When there is no fresh
+				// consensus baseline (single-endpoint pod, or a baseline aged past TTL) we DO NOT
+				// substitute the observed tip — syncGap stays 0, so no endpoint is penalized against
+				// a reference the pod has not actually agreed on.
 				syncGap := int64(0)
 				if targetEndpoint != nil && rpcss.chainState != nil {
-					if chainLatest, _, ok := rpcss.chainState.GetLatestBlockWithTime(); ok && chainLatest > 0 {
+					if baseline, ok := rpcss.chainState.GetConsensusBaseline(); ok && baseline > 0 {
 						endpointLatest := targetEndpoint.LatestBlock.Load()
 						if endpointLatest > 0 {
-							syncGap = chainLatest - endpointLatest
+							syncGap = baseline - endpointLatest
 							if syncGap < 0 {
-								syncGap = 0 // Endpoint ahead is fine
+								syncGap = 0 // Endpoint ahead of the baseline is fine
 							}
 							utils.LavaFormatDebug("calculated sync gap",
 								utils.LogAttr("endpoint", endpointAddress),
-								utils.LogAttr("chain_latest", chainLatest),
+								utils.LogAttr("consensus_baseline", baseline),
 								utils.LogAttr("endpoint_latest", endpointLatest),
 								utils.LogAttr("sync_gap", syncGap),
 								utils.LogAttr("GUID", goroutineCtx),
@@ -1728,10 +1748,11 @@ func (rpcss *RPCSmartRouterServer) recomputeChainStateConsensus() {
 	if rpcss.chainState == nil || rpcss.endpointChainTrackerManager == nil {
 		return
 	}
+	// MAG-2160 Finding 5: do NOT early-return on an empty snapshot. An empty (or sub-majority)
+	// snapshot must still reach ChainState.Recompute so it CLEARS any previously-set baseline —
+	// otherwise a pod that has lost all its endpoints keeps anti-lie-guarding against a baseline
+	// no live endpoint still supports. Recompute(empty) is the explicit "no consensus" signal.
 	snap := rpcss.endpointChainTrackerManager.SnapshotObservations()
-	if len(snap) == 0 {
-		return
-	}
 	obs := make([]chainstate.BlockObservation, 0, len(snap))
 	for url, o := range snap {
 		if o.LatestBlock <= 0 {
@@ -1748,8 +1769,9 @@ func (rpcss *RPCSmartRouterServer) recomputeChainStateConsensus() {
 // getTransactionReceipt, getLogs — all carry a positive Reply.LatestBlock) from a "current-tip
 // observation" (eth_blockNumber / eth_getBlockByNumber("latest") / Solana result.context.slot).
 // ONLY the latter may move tip state: the per-endpoint observation store, the endpoint's
-// reactive LatestBlock (read by consistency pre-validation), the global estimator, and the
-// latest-block metric. A historical response updates NONE of these, so it can no longer poison
+// reactive LatestBlock (read by consistency pre-validation), the bootstrap atomic (latestBlockHeight,
+// the cold-start fallback for getLatestBlock), and the latest-block metric. A historical response
+// updates NONE of these, so it can no longer poison
 // the endpoint tip. "The block this response serviced" (latestServicedBlock) is a separate
 // concept the caller handles ungated. No-op when targetEndpoint is nil or the response is not
 // tip-eligible. harvestGen is the generation captured before dispatch (finding 5).
@@ -1925,8 +1947,9 @@ func (rpcss *RPCSmartRouterServer) initializeChainTrackers(ctx context.Context) 
 // cache-write goes to the long-TTL finalized store or the short-TTL temp
 // store. Reply.LatestBlock is unreliable for methods that echo the requested
 // block (eth_getBlockByNumber returns result.number = requested), so the
-// router's tracked tip (chainTracker / latestBlockEstimator / atomic
-// latestBlockHeight, surfaced via getLatestBlock()) wins when it is higher.
+// router's tracked tip (the per-chain ChainState consensus tip, with the
+// bootstrap atomic latestBlockHeight as cold-start fallback, surfaced via
+// getLatestBlock()) wins when it is higher.
 func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlock, finalizationDistance int64) bool {
 	latest := replyLatestBlock
 	if trackedLatestBlock > latest {
@@ -2311,9 +2334,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							StatusCode:   200,
 							ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
 						}
-						if reply.LatestBlock > 0 {
-							rpcss.updateLatestBlockHeight(uint64(reply.LatestBlock), "")
-						}
+						// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was
+						// current when the response was CACHED — it is not a fresh observation of the
+						// chain head and is not gated on tip-eligibility, so it must NOT feed the
+						// bootstrap atomic (it would freeze a stale value during cold start). Tip state
+						// is advanced only by tip-eligible live relays (harvestAndUpdateTipFromRelay)
+						// and the per-endpoint observation store, never by cache replays.
 						relayProcessor.SetResponse(&relaycore.RelayResponse{
 							RelayResult: relayResult,
 							Err:         nil,
