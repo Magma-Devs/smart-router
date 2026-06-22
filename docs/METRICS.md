@@ -208,4 +208,4 @@ Defined in [`error_metrics.go`](../protocol/metrics/error_metrics.go).
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `lava_errors_total` | Counter | `error_name`, `error_category`, `retryable`, `chain_id` | Errors classified by name, category, retryability, and chain. |
+| `smartrouter_errors_total` | Counter | `error_name`, `error_category`, `retryable`, `chain_id` | Errors classified by name, category, retryability, and chain. |

@@ -14,7 +14,7 @@ func TestInitErrorMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 
 	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_errors_total_test",
+		Name: "smartrouter_errors_total_test",
 		Help: "Test counter",
 	}, []string{"error_code", "error_name", "error_category", "retryable", "chain_id"})
 	reg.MustRegister(counter)
@@ -50,7 +50,7 @@ func TestInitErrorMetrics(t *testing.T) {
 	require.Len(t, families, 1)
 
 	family := families[0]
-	assert.Equal(t, "lava_errors_total_test", *family.Name)
+	assert.Equal(t, "smartrouter_errors_total_test", *family.Name)
 	assert.Len(t, family.Metric, 2) // 2 distinct label combos
 
 	// Find the ETH1 nonce metric

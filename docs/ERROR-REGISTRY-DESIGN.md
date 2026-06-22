@@ -519,7 +519,7 @@ Log output automatically includes:
 ### Phase 2: Logging Integration
 - [x] Add `LavaFormatCodedError` helper to `utils/lavalog.go` that takes a `LavaError` code
 - [x] Ensure coded errors emit `error_code`, `error_name`, `error_category`, `retryable`, `chain_error_code`, `chain_error_message` fields in structured logs
-- [x] Add Prometheus counter that auto-increments per error code (`lava_errors_total{code, name, category, retryable, chain_id}`)
+- [x] Add Prometheus counter that auto-increments per error code (`smartrouter_errors_total{code, name, category, retryable, chain_id}`)
 - [x] Write unit tests for coded error logging
 
 ### Phase 3: Migrate Existing Errors — Protocol Layer
@@ -554,10 +554,10 @@ Log output automatically includes:
 - [x] Update provider server (`rpcprovider/rpcprovider_server.go`) to log with codes
 
 ### Phase 6: Metrics & Observability
-- [x] Verify Prometheus counter `lava_errors_total{code, name, category, retryable}` works end-to-end
-- [x] Update `protocol/metrics/consumer_metrics_manager.go` to use error codes (lava_errors_total auto-fires via LogCodedError — existing incident metrics kept for backwards compat)
+- [x] Verify Prometheus counter `smartrouter_errors_total{code, name, category, retryable}` works end-to-end
+- [x] Update `protocol/metrics/consumer_metrics_manager.go` to use error codes (smartrouter_errors_total auto-fires via LogCodedError — existing incident metrics kept for backwards compat)
 - [x] Update `protocol/metrics/rpcconsumer_logs.go` to use error codes (same — LogCodedError handles it)
-- [x] Verify error codes appear in existing dashboards/alerts (lava_errors_total emits all labels needed for dashboards)
+- [x] Verify error codes appear in existing dashboards/alerts (smartrouter_errors_total emits all labels needed for dashboards)
 
 ### Phase 7: Refactor — Replace Legacy Errors with LavaError
 - [x] Remove `UnsupportedMethodError` / `SolanaNonRetryableError` custom types, replace with `LavaWrappedError` + `LavaError.SubCategory` / `LavaError.Retryable`
