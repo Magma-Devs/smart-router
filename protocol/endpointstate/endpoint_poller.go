@@ -33,16 +33,6 @@ type EndpointPoller struct {
 	// poll error (nil on success), and the completion time. The EndpointMonitor sets it
 	// to record the per-endpoint observation (Topic A). Nil in standalone/test use.
 	onPollObservation func(block int64, latency time.Duration, err error, at time.Time)
-
-	// relayGate, if set, lets a dedicated poll borrow a fresh relay-harvested tip instead
-	// of spending an upstream call (MAG-2159 Topic B / Pass 2 — the traffic gate). It
-	// returns (block, true) when a recent RELAY observation already covers this endpoint.
-	// FetchLatestBlockNum then returns that block WITHOUT an upstream round-trip and WITHOUT
-	// recording a poll observation — no poll happened, so poll-health stays owned by the
-	// poll path. The borrowed block is still returned (and cached) so the ChainTracker
-	// advances its atomic latest, which GetSyncGap / consistency read. The EndpointMonitor
-	// wires this to freshRelayTip; nil in standalone/test use, so a bare poller always polls.
-	relayGate func(now time.Time) (block int64, ok bool)
 }
 
 // NewEndpointPoller creates a new ChainFetcher for a direct RPC endpoint.
@@ -66,20 +56,6 @@ func NewEndpointPoller(
 // FetchLatestBlockNum fetches the latest block number from the endpoint.
 // Uses spec-driven parsing to support any chain type (EVM, Tendermint, REST, etc.).
 func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum int64, err error) {
-	// Traffic gate (MAG-2159 Topic B / Pass 2): if a fresh relay-harvested tip already
-	// covers this endpoint, borrow it instead of spending an upstream call. We return the
-	// block (and cache it) so the ChainTracker advances its atomic latest — which
-	// GetSyncGap / consistency read — but we return BEFORE arming the observation defer
-	// below, because no poll happened: poll-health must not be stamped for a borrowed tip.
-	// The gate fires only on a recent RELAY observation (see freshRelayTip), so a busy
-	// endpoint suppresses its own redundant polls while an idle one still hits the floor.
-	if ecf.relayGate != nil {
-		if tip, ok := ecf.relayGate(time.Now()); ok {
-			atomic.StoreInt64(&ecf.latestBlock, tip)
-			return tip, nil
-		}
-	}
-
 	// Record a per-endpoint observation for this poll on every return path (Topic A).
 	// pollLatency captures only the transport round-trip (set around sendRawRequest);
 	// the observation is success iff err == nil && block > 0 (see recordPollObservation).

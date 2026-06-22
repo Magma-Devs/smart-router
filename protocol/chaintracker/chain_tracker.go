@@ -56,12 +56,19 @@ type IChainTracker interface {
 }
 
 const (
-	initRetriesCount              = 4
-	BACKOFF_MAX_TIME              = 10 * time.Minute
-	maxFails                      = 10
-	GoodStabilityThreshold        = 0.3
-	PollingUpdateLength           = 10
-	MostFrequentPollingMultiplier = 16
+	initRetriesCount       = 4
+	BACKOFF_MAX_TIME       = 10 * time.Minute
+	maxFails               = 10
+	GoodStabilityThreshold = 0.3
+	PollingUpdateLength    = 10
+	// defaultMaxRelaySkipsBeforePoll bounds how many consecutive poll cycles the traffic gate
+	// (MAG-2159) may skip before forcing one real poll for independent fork/liveness
+	// verification. Deliberately small: store-#2 staleness (the tracker atomic that consistency
+	// pre-validation reads) scales linearly as N * FlatPollInterval, so at N=4 with a
+	// FlatPollInterval of avgBlockTime/2 the atomic is at most ~2 blocks stale — far inside the
+	// default 10-block EndpointLagThreshold.
+	defaultMaxRelaySkipsBeforePoll = 4
+	MostFrequentPollingMultiplier  = 16
 	// MinPollingTimeMultiplier is the allowed minimum for the polling multiplier and the
 	// adaptive divide-by-zero floor: the legacy adaptive tiers compute base/(multiplier/4),
 	// so a multiplier below 4 divides by zero. After the MAG-2159 / Topic B knob
@@ -151,7 +158,14 @@ type ChainTracker struct {
 	// block-gap recalibration no longer drive the timer. 0 keeps the legacy adaptive
 	// cadence. See ChainTrackerConfig.FlatPollInterval.
 	flatPollInterval time.Duration
-	serverAddress    string
+	// relayTipFresh is the traffic gate (MAG-2159 / Topic B): when set and it reports a fresh
+	// relay-harvested tip, the poll cycle is skipped entirely. See ChainTrackerConfig.RelayTipFresh.
+	// maxRelaySkipsBeforePoll bounds consecutive skips; relaySkipsSinceRealPoll is the live
+	// counter, touched only by the single poll goroutine (no lock needed).
+	relayTipFresh           func(now time.Time) bool
+	maxRelaySkipsBeforePoll int
+	relaySkipsSinceRealPoll int
+	serverAddress           string
 
 	// allows us to mock the chain fetcher for different use cases for example: Solana needs slot to block number
 	iChainFetcherWrapper IChainFetcherWrapper
@@ -406,6 +420,22 @@ func (cs *ChainTracker) gotNewBlock(ctx context.Context, newLatestBlock int64) (
 // this function is periodically called, it checks if there is a new block or a fork and fetches all necessary previous data in order to fill gaps if any.
 // if a new block or fork is not found, check the emergency mode
 func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (err error) {
+	// Traffic gate (MAG-2159 / Topic B). When a fresh relay-harvested tip already covers this
+	// endpoint, the whole poll cycle is redundant — skip it: no FetchLatestBlockNum AND no
+	// fork-check FetchBlockHashByNum (forkChanged fetches a hash every tick, even when the block
+	// is unchanged, so gating only the latest-block fetch would still cost one upstream call per
+	// tick). The gate sits here, above the generic/SVM wrapper split, so it suppresses both
+	// families; a skip touches nothing (no upstream call, no poll-health write, no SVM cache
+	// mutation), which is why SVM seenBlock/slot/hash stay consistent. Bounded: after
+	// maxRelaySkipsBeforePoll consecutive skips we force one real poll for independent
+	// fork/liveness verification. relaySkipsSinceRealPoll is touched only by this single poll
+	// goroutine. The global tracker leaves relayTipFresh nil and never skips.
+	if cs.relayTipFresh != nil && cs.relaySkipsSinceRealPoll < cs.maxRelaySkipsBeforePoll && cs.relayTipFresh(time.Now()) {
+		cs.relaySkipsSinceRealPoll++
+		return nil
+	}
+	cs.relaySkipsSinceRealPoll = 0
+
 	newLatestBlock, err := cs.iChainFetcherWrapper.FetchLatestBlockNum(ctx)
 	if err != nil {
 		type wrappedError interface {
@@ -754,6 +784,13 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 	// needed here. The old per-tracker config.PollingTimeMultiplier knob was set by nobody
 	// and was removed in the MAG-2159 knob consolidation.
 	pollingTime := EffectivePollingMultiplier()
+
+	// Traffic-gate skip bound (MAG-2159): default when the caller leaves it 0.
+	maxRelaySkips := config.MaxRelaySkipsBeforePoll
+	if maxRelaySkips <= 0 {
+		maxRelaySkips = defaultMaxRelaySkipsBeforePoll
+	}
+
 	if chainFetcher == nil {
 		utils.LavaFormatFatal("can't start chainTracker with nil chainFetcher argument", nil)
 	}
@@ -776,6 +813,8 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		pollingTimeMultiplier:   time.Duration(pollingTime),
 		averageBlockTime:        config.AverageBlockTime,
 		flatPollInterval:        config.FlatPollInterval,
+		relayTipFresh:           config.RelayTipFresh,
+		maxRelaySkipsBeforePoll: maxRelaySkips,
 		serverAddress:           config.ServerAddress,
 		endpoint:                endpoint,
 	}

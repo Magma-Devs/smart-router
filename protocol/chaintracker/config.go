@@ -35,6 +35,22 @@ type ChainTrackerConfig struct {
 	// It is named for what it does (selects the fixed-interval scheduler), not a "floor":
 	// a min-clamp that silently changed the scheduling algorithm would be a footgun.
 	FlatPollInterval time.Duration
+
+	// RelayTipFresh, when set, is the traffic gate (MAG-2159 / Topic B): it reports whether a
+	// FRESH relay-harvested tip already covers this endpoint. When it returns true the dedicated
+	// poll skips the ENTIRE cycle — no FetchLatestBlockNum and no fork-check FetchBlockHashByNum
+	// — because served traffic is keeping the tip current. The gate lives here, ABOVE the
+	// generic/SVM iChainFetcherWrapper split, so it suppresses both EVM and Solana polls (the
+	// per-poller hook could only ever see the generic path). A skip touches nothing: no upstream
+	// call, no poll-health write, and no SVM cache mutation. Per-endpoint trackers set this; the
+	// global tracker leaves it nil (not harvest-fed). Bounded by MaxRelaySkipsBeforePoll.
+	RelayTipFresh func(now time.Time) bool
+
+	// MaxRelaySkipsBeforePoll bounds consecutive gate skips: after this many skipped cycles the
+	// tracker forces one real poll for independent fork/liveness verification, so relay traffic
+	// reporting a stable-but-wrong tip cannot suppress the dedicated poll forever. 0 selects
+	// defaultMaxRelaySkipsBeforePoll. Only meaningful when RelayTipFresh is set.
+	MaxRelaySkipsBeforePoll int
 }
 
 func (cnf *ChainTrackerConfig) validate() error {

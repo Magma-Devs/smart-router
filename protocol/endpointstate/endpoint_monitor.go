@@ -231,14 +231,6 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.recordPollObservation(endpointURL, gen, block, latency, pollErr, at)
 	}
 
-	// Traffic gate (Topic B / Pass 2): let this endpoint's dedicated poll borrow a fresh
-	// relay-harvested tip instead of calling upstream. The poll stays the liveness floor —
-	// the gate fires only when a recent RELAY observation covers the endpoint, so an idle
-	// endpoint (no fresh relays) always polls.
-	fetcher.relayGate = func(now time.Time) (int64, bool) {
-		return m.freshRelayTip(endpointURL, now)
-	}
-
 	// Configure the ChainTracker
 	config := chaintracker.ChainTrackerConfig{
 		BlocksToSave:             m.blocksToSave,
@@ -253,6 +245,16 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// fallback. (The global tracker leaves this 0 and keeps its legacy adaptive
 		// cadence until Topic C.)
 		FlatPollInterval: m.averageBlockTime / 2,
+		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
+		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
+		// (above the generic/SVM wrapper split) so it suppresses Solana polls too — the old
+		// per-poller hook could only ever see the generic path. The gate fires only on a fresh
+		// RELAY observation (freshRelayTip), so an idle endpoint with no fresh relays still
+		// polls; a bounded number of consecutive skips then forces a verifying real poll.
+		RelayTipFresh: func(now time.Time) bool {
+			_, ok := m.freshRelayTip(endpointURL, now)
+			return ok
+		},
 	}
 
 	// Set up callbacks with endpoint context
