@@ -5,9 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
-	"os"
-	"os/signal"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,14 +12,10 @@ import (
 	"github.com/dgraph-io/ristretto/v2"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 
-	"github.com/improbable-eng/grpc-web/go/grpcweb"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/lavaslices"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-	grpc "google.golang.org/grpc"
 )
 
 // IChainTracker represents the interface for chain tracking functionality
@@ -165,7 +158,6 @@ type ChainTracker struct {
 	relayTipFresh           func(now time.Time) bool
 	maxRelaySkipsBeforePoll int
 	relaySkipsSinceRealPoll int
-	serverAddress           string
 
 	// allows us to mock the chain fetcher for different use cases for example: Solana needs slot to block number
 	iChainFetcherWrapper IChainFetcherWrapper
@@ -703,72 +695,12 @@ func (ct *ChainTracker) smallestBlockGap() time.Duration {
 	return ct.blockEventsGap[0] // this list is sorted
 }
 
-// this function serves a grpc server if configuration for it was provided, the goal is to enable stateTracker to serve several processes and minimize node queries
-func (ct *ChainTracker) serve(ctx context.Context, listenAddr string) error {
-	if listenAddr == "" {
-		return nil
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt)
-	defer func() {
-		signal.Stop(signalChan)
-		cancel()
-	}()
-	lis, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		utils.LavaFormatFatal("Chain Tracker failure setting up listener", err, utils.Attribute{Key: "listenAddr", Value: listenAddr})
-	}
-	s := grpc.NewServer()
-
-	wrappedServer := grpcweb.WrapServer(s)
-	handler := func(resp http.ResponseWriter, req *http.Request) {
-		// Set CORS headers
-		resp.Header().Set("Access-Control-Allow-Origin", "*")
-		resp.Header().Set("Access-Control-Allow-Headers", "Content-Type,x-grpc-web")
-
-		wrappedServer.ServeHTTP(resp, req)
-	}
-
-	httpServer := http.Server{
-		Handler: h2c.NewHandler(http.HandlerFunc(handler), &http2.Server{}),
-	}
-
-	go func() {
-		select {
-		case <-ctx.Done():
-			utils.LavaFormatInfo("Chain Tracker Server ctx.Done")
-		case <-signalChan:
-			utils.LavaFormatInfo("Chain Tracker Server signalChan")
-		}
-
-		shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), 10*time.Second)
-		defer shutdownRelease()
-
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			utils.LavaFormatFatal("chainTracker failed to shutdown", err)
-		}
-	}()
-
-	server := &ChainTrackerService{ChainTracker: ct}
-
-	RegisterChainTrackerServiceServer(s, server)
-
-	utils.LavaFormatInfo("Chain Tracker Listening", utils.Attribute{Key: "Address", Value: lis.Addr().String()})
-	if err := httpServer.Serve(lis); !errors.Is(err, http.ErrServerClosed) {
-		utils.LavaFormatFatal("Chain Tracker failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr()})
-	}
-	return nil
-}
-
+// StartAndServe starts the chain tracker's poll loop. The historical gRPC `IChainTracker`
+// server (the only thing the old `serve()` did) was removed in MAG-2160 / Topic C along with
+// the global tracker that exposed it — nothing in or out of the tree consumed it, and no
+// tracker ever set a server address. The method name is kept for the IChainTracker interface.
 func (ct *ChainTracker) StartAndServe(ctx context.Context) error {
-	err := ct.start(ctx, ct.averageBlockTime)
-	if err != nil {
-		return err
-	}
-
-	err = ct.serve(ctx, ct.serverAddress)
-	return err
+	return ct.start(ctx, ct.averageBlockTime)
 }
 
 func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig) IChainTracker {
@@ -815,7 +747,6 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		flatPollInterval:        config.FlatPollInterval,
 		relayTipFresh:           config.RelayTipFresh,
 		maxRelaySkipsBeforePoll: maxRelaySkips,
-		serverAddress:           config.ServerAddress,
 		endpoint:                endpoint,
 	}
 

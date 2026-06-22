@@ -15,7 +15,6 @@ type ChainTrackerConfig struct {
 	ConsistencyCallback      func(oldBlock int64, block int64)
 	OldBlockCallback         func(latestBlockTime time.Time)
 	FetchErrorCallback       func() // a function to be called when the latest-block fetch fails
-	ServerAddress            string // if not empty will open up a grpc server for that address
 	BlocksToSave             uint64
 	AverageBlockTime         time.Duration // how often to query latest block
 	ServerBlockMemory        uint64
