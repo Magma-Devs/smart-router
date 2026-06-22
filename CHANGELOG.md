@@ -8,6 +8,39 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.0.4 — 2026-06-22
+
+### Highlights
+
+Smart Router v1.0.4 introduces critical breaking changes to observability and configuration, requiring operators to update dashboards, alerts, and startup scripts before upgrading. All Prometheus metrics have been stripped of the legacy `lava` prefix, meaning any monitoring infrastructure referencing `lava_rpc*` or the specific `lava_errors_total` counter must be migrated to the new `smartrouter_*` and `rpc_*` namespaces, with errors now tracked under `smartrouter_errors_total`. Additionally, the default OpenTelemetry `service.name` has been changed from `lava-rpcsmartrouter` to `smartrouter`, which will break existing trace filtering and aggregation if not adjusted in collector configurations. Finally, the CLI flags used to tune upstream routing weights have been renamed; operators must replace all instances of `provider-optimizer-*` weight flags with their new `qos-*` equivalents to prevent unrecognized flag errors during startup.
+
+### Changes
+
+#### ⚠ Breaking changes
+- refactor!: drop the lava prefix from smart-router metric names ([#138]) [`4e21206`]
+  - All Prometheus metric names emitted by the smart router are renamed. Any dashboard, alerting rule, recording rule, or scrape relabeling that references the old `lava_rpc*` names must be updated to the new `smartrouter_*` / `rpc_*` names. The default OTel service.name also changes from "lava-rpcsmartrouter" to "smartrouter".
+- refactor!: rename lava_errors_total -> smartrouter_errors_total ([#138]) [`bce3a24`]
+  - The lava_errors_total Prometheus counter is renamed to smartrouter_errors_total. Dashboards/alerts referencing the old name must be updated.
+- refactor(flags)!: rename provider-optimizer-* weight flags to qos-* ([#137]) [`abe524c`]
+
+#### Bug fixes
+- fix(ci): align dev-sim-prtests naming ([#130]) [`f60a314`]
+- refactor!: drop the lava prefix from smart-router metric names ([#138]) [`4e21206`]
+- refactor!: rename lava_errors_total -> smartrouter_errors_total ([#138]) [`bce3a24`]
+- refactor(flags)!: rename provider-optimizer-* weight flags to qos-* ([#137]) [`abe524c`]
+
+#### Documentation updates
+- docs: fix stale lava_errors_* section header in METRICS.md ([#138]) [`028f9dc`]
+
+[#130]: https://github.com/magma-Devs/smart-router/pull/130
+[#137]: https://github.com/magma-Devs/smart-router/pull/137
+[#138]: https://github.com/magma-Devs/smart-router/pull/138
+[`028f9dc`]: https://github.com/magma-Devs/smart-router/commit/028f9dcc98de680e221808f47bcb8551823b1cbf
+[`4e21206`]: https://github.com/magma-Devs/smart-router/commit/4e21206602b59004c675b776481038dea1295ce0
+[`abe524c`]: https://github.com/magma-Devs/smart-router/commit/abe524c8ca9a2d75eb0e4a7b07272001fb4692c6
+[`bce3a24`]: https://github.com/magma-Devs/smart-router/commit/bce3a249c195c9951172b32d098e3ffc4d26c6cf
+[`f60a314`]: https://github.com/magma-Devs/smart-router/commit/f60a3143f278d42e8e3842f22419a52533574207
+
 ## v1.0.3 — 2026-06-21
 
 ### Highlights
