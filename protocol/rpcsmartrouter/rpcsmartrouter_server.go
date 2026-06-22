@@ -14,6 +14,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
@@ -53,6 +54,7 @@ const (
 type RPCSmartRouterServer struct {
 	chainParser            chainlib.ChainParser
 	chainTracker           chaintracker.IChainTracker
+	chainState             *chainstate.ChainState // MAG-2160 (Topic C): per-chain consensus tip (replaces chainTracker/estimator/atomic; reads migrate in phase 3)
 	sessionManager         *lavasession.ConsumerSessionManager
 	listenEndpoint         *lavasession.RPCEndpoint
 	rpcSmartRouterLogs     *metrics.RPCConsumerLogs
@@ -161,6 +163,12 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// initializeChainTrackers always observe the field on their first callback.
 	rpcss.smartRouterEndpointMetrics = smartRouterEndpointMetrics
 
+	// Per-chain ChainState tip (MAG-2160 / Topic C). Constructed BEFORE the monitor so the
+	// monitor's OnTipObservation hook can feed it. Phase 2 wires the writes (relay+poll
+	// observations → SetLatestBlock) and the internal consensus recompute tick; the read sites
+	// still use the legacy sources until phase 3.
+	rpcss.chainState = chainstate.New(listenEndpoint.ChainID, chainstate.DefaultConfig(averageBlockTime))
+
 	// Initialize per-endpoint ChainTracker manager for continuous block polling
 	rpcss.endpointChainTrackerManager = endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
 		ChainParser:      chainParser,
@@ -168,6 +176,10 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		ApiInterface:     listenEndpoint.ApiInterface,
 		AverageBlockTime: averageBlockTime,
 		BlocksToSave:     endpointstate.DefaultBlocksToSave,
+		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write).
+		OnTipObservation: func(block int64) {
+			rpcss.chainState.SetLatestBlock(block)
+		},
 		OnNewBlock: func(endpointURL string, fromBlock, toBlock int64) {
 			utils.LavaFormatTrace("endpoint ChainTracker detected new block",
 				utils.LogAttr("endpoint", endpointURL),
@@ -187,6 +199,13 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 			rpcss.smartRouterEndpointMetrics.RecordBlockFetch(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, true, false)
 		},
 	})
+
+	// Consensus recompute tick (MAG-2160 / Topic C): periodically pull all per-endpoint
+	// observation snapshots and let ChainState recompute its strict-majority baseline +
+	// realign down. Off the hot path (relays/polls only do the cheap SetLatestBlock write via
+	// OnTipObservation). The snapshot is taken under the monitor lock and released before
+	// Recompute touches the ChainState lock — the two locks never nest.
+	go rpcss.runChainStateConsensusLoop(ctx, averageBlockTime)
 
 	// NewChainListener now accepts WSSubscriptionManager interface, which is implemented
 	// by both ConsumerWSSubscriptionManager (provider-relay mode) and
@@ -1681,6 +1700,51 @@ func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavases
 		return
 	}
 	rpcss.endpointChainTrackerManager.RecordRelayObservation(endpoint.NetworkAddress, gen, block, time.Now())
+}
+
+// minChainStateRecomputeInterval floors the consensus recompute cadence so very fast chains
+// don't recompute the strict-majority baseline excessively (it's a windowed, off-hot-path step).
+const minChainStateRecomputeInterval = time.Second
+
+// runChainStateConsensusLoop periodically recomputes the per-chain ChainState consensus
+// baseline (MAG-2160 / Topic C) until ctx is cancelled. The cadence is the chain's average
+// block time, floored at minChainStateRecomputeInterval.
+func (rpcss *RPCSmartRouterServer) runChainStateConsensusLoop(ctx context.Context, averageBlockTime time.Duration) {
+	interval := averageBlockTime
+	if interval < minChainStateRecomputeInterval {
+		interval = minChainStateRecomputeInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rpcss.recomputeChainStateConsensus()
+		}
+	}
+}
+
+// recomputeChainStateConsensus pulls one snapshot of all per-endpoint observations (single
+// monitor lock, released before touching ChainState) and hands them to ChainState.Recompute,
+// which computes the strict-majority baseline and realigns the tip downward if needed.
+func (rpcss *RPCSmartRouterServer) recomputeChainStateConsensus() {
+	if rpcss.chainState == nil || rpcss.endpointChainTrackerManager == nil {
+		return
+	}
+	snap := rpcss.endpointChainTrackerManager.SnapshotObservations()
+	if len(snap) == 0 {
+		return
+	}
+	obs := make([]chainstate.BlockObservation, 0, len(snap))
+	for url, o := range snap {
+		if o.LatestBlock <= 0 {
+			continue
+		}
+		obs = append(obs, chainstate.BlockObservation{URL: url, Block: o.LatestBlock, ObservedAt: o.ObservedAt})
+	}
+	rpcss.chainState.Recompute(obs)
 }
 
 // harvestAndUpdateTipFromRelay applies a served relay's block to TIP state — but only when the

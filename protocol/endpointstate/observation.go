@@ -81,6 +81,16 @@ type EndpointObservation struct {
 // in GetOrCreateTracker, which owns the generation. Tests in this package drive it
 // directly after registering a generation.
 func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, block int64, latency time.Duration, err error, at time.Time) {
+	// Feed the per-chain tip AFTER releasing obsMu (registered before the unlock defer, so LIFO
+	// runs it last) — SetLatestBlock takes the ChainState lock, which must never nest inside
+	// obsMu. tipBlock stays 0 unless this poll recorded a positive block.
+	var tipBlock int64
+	defer func() {
+		if tipBlock > 0 && m.onTipObservation != nil {
+			m.onTipObservation(tipBlock)
+		}
+	}()
+
 	m.obsMu.Lock()
 	defer m.obsMu.Unlock()
 
@@ -114,6 +124,7 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 			o.LatestBlock = block
 			o.ObservedAt = at
 			o.Source = ObservationSourcePoll
+			tipBlock = block // feed the per-chain tip after unlock
 		}
 	} else {
 		if err != nil {
@@ -146,6 +157,15 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 		return
 	}
 
+	// Feed the per-chain tip after releasing obsMu (see recordPollObservation). tipBlock stays
+	// 0 unless the relay write is accepted (generation + monotonic guards pass).
+	var tipBlock int64
+	defer func() {
+		if tipBlock > 0 && m.onTipObservation != nil {
+			m.onTipObservation(tipBlock)
+		}
+	}()
+
 	m.obsMu.Lock()
 	defer m.obsMu.Unlock()
 
@@ -168,6 +188,7 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 	o.ObservedAt = at
 	o.Source = ObservationSourceRelay
 	m.observations[endpointURL] = o
+	tipBlock = block // feed the per-chain tip after unlock
 }
 
 // GetObservation returns a consistent snapshot of an endpoint's observation record and
@@ -178,6 +199,20 @@ func (m *EndpointMonitor) GetObservation(endpointURL string) (EndpointObservatio
 	defer m.obsMu.RUnlock()
 	o, ok := m.observations[endpointURL]
 	return o, ok
+}
+
+// SnapshotObservations returns a copy of every endpoint's observation record under a single
+// read lock. The per-chain ChainState (Topic C) pulls this on its recompute tick to compute
+// consensus, so it acquires the monitor lock ONCE per cycle (not once per endpoint) and
+// releases it before touching ChainState — keeping the two locks un-nested.
+func (m *EndpointMonitor) SnapshotObservations() map[string]EndpointObservation {
+	m.obsMu.RLock()
+	defer m.obsMu.RUnlock()
+	out := make(map[string]EndpointObservation, len(m.observations))
+	for url, o := range m.observations {
+		out[url] = o
+	}
+	return out
 }
 
 // freshRelayTip reports the relay-harvested tip for an endpoint when it is fresh enough to

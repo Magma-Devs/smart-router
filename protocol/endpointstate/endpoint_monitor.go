@@ -98,6 +98,11 @@ type EndpointMonitor struct {
 	onNewBlock    func(endpointURL string, fromBlock, toBlock int64)
 	onConsistency func(endpointURL string, oldBlock, newBlock int64)
 	onFetchError  func(endpointURL string)
+	// onTipObservation, if set, is invoked with every positive block observed by EITHER the
+	// poll path or the relay-harvest path (MAG-2160 / Topic C): it feeds the cheap monotonic
+	// per-chain ChainState tip (SetLatestBlock). Fired AFTER obsMu is released so the tip lock
+	// is never taken while holding the observation lock. Set once at construction; immutable.
+	onTipObservation func(block int64)
 
 	// Context for managing goroutines (parent context for all trackers)
 	ctx    context.Context
@@ -117,6 +122,9 @@ type EndpointChainTrackerConfig struct {
 	OnNewBlock    func(endpointURL string, fromBlock, toBlock int64)
 	OnConsistency func(endpointURL string, oldBlock, newBlock int64)
 	OnFetchError  func(endpointURL string)
+	// OnTipObservation, if set, feeds every positive poll/relay block into the per-chain
+	// ChainState tip (MAG-2160). See EndpointMonitor.onTipObservation.
+	OnTipObservation func(block int64)
 }
 
 // NewEndpointMonitor creates a new manager for per-endpoint ChainTrackers.
@@ -170,6 +178,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		onNewBlock:         config.OnNewBlock,
 		onConsistency:      config.OnConsistency,
 		onFetchError:       config.OnFetchError,
+		onTipObservation:   config.OnTipObservation,
 		ctx:                ctxWithCancel,
 		cancel:             cancel,
 	}
