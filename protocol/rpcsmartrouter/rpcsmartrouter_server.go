@@ -163,6 +163,29 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// still use the legacy sources until phase 3.
 	rpcss.chainState = chainstate.New(listenEndpoint.ChainID, chainstate.DefaultConfig(averageBlockTime))
 
+	// Topic E (MAG-2160 Finding 2): point the provider optimizer's QoS sync dimension at THIS
+	// chain's consensus baseline, so relay + probe sync lag are measured against the agreed tip
+	// rather than max-block-across-providers (which one fast/lying reporter could inflate, dinging
+	// the whole pod). The getter is read-only toward the data plane and falls back to the legacy
+	// reference whenever there is no fresh majority (cold start / single-endpoint pod). The
+	// optimizer is shared per-chain while ChainState is per-interface, but every interface tracks
+	// the same chain head, so installing this interface's getter is correct regardless of ordering.
+	if rpcss.sessionManager != nil {
+		if opt := rpcss.sessionManager.GetProviderOptimizer(); opt != nil {
+			if setter, ok := opt.(interface {
+				SetSyncReferenceGetter(func() (uint64, time.Time, bool))
+			}); ok {
+				setter.SetSyncReferenceGetter(func() (uint64, time.Time, bool) {
+					block, at, fresh := rpcss.chainState.GetConsensusBaselineWithTime()
+					if !fresh || block <= 0 {
+						return 0, time.Time{}, false
+					}
+					return uint64(block), at, true
+				})
+			}
+		}
+	}
+
 	// Initialize per-endpoint ChainTracker manager for continuous block polling
 	rpcss.endpointChainTrackerManager = endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
 		ChainParser:      chainParser,

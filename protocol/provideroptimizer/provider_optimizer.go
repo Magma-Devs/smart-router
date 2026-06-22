@@ -61,6 +61,15 @@ type ProviderOptimizer struct {
 	globalSyncCalculator            *score.AdaptiveMaxCalculator // Global T-Digest for all providers' sync samples
 	adaptiveLock                    sync.RWMutex                 // Lock for accessing adaptive calculators
 	NowFunc                         func() time.Time             // NowFunc overrides the clock used for score updates nil = use real time.Now()
+
+	// syncReferenceGetter is the Topic E / MAG-2160-Finding-2 sync reference: when set and fresh it
+	// supplies the per-chain CONSENSUS baseline (block + the time it was computed) that BOTH the
+	// relay and probe sync dimensions measure lag against, instead of the legacy max-block-across-
+	// providers (latestSyncData) — which one fast/lying reporter could inflate, penalizing the whole
+	// pod. nil, or returning ok=false (cold start / no majority / stale), falls back to the legacy
+	// reference. Read-only toward the data plane (it reads ChainState).
+	syncRefLock         sync.RWMutex
+	syncReferenceGetter func() (block uint64, at time.Time, ok bool)
 }
 
 type ProviderData struct {
@@ -253,9 +262,38 @@ func (po *ProviderOptimizer) AppendRelayData(provider string, latency time.Durat
 	po.appendRelayData(provider, latency, true, cu, syncBlock, po.now())
 }
 
+// SetSyncReferenceGetter installs the sync-lag reference the relay and probe QoS-sync dimensions
+// measure against (Topic E). The getter returns the per-chain consensus baseline, the time it was
+// computed, and whether it is fresh; returning ok=false makes the optimizer fall back to its legacy
+// max-block-across-providers reference. Passing nil restores the legacy behavior. The getter is
+// read-only toward the data plane (it reads ChainState.GetConsensusBaselineWithTime).
+func (po *ProviderOptimizer) SetSyncReferenceGetter(getter func() (block uint64, at time.Time, ok bool)) {
+	po.syncRefLock.Lock()
+	defer po.syncRefLock.Unlock()
+	po.syncReferenceGetter = getter
+}
+
+// syncReference resolves the (referenceBlock, referenceTime) a sample's sync lag is measured
+// against. It PREFERS the per-chain consensus baseline (Finding 2) when the injected getter reports
+// it fresh, and ALWAYS keeps the legacy max-across-providers store warm so a cold/stale baseline
+// falls back gracefully (never worse than the pre-MAG-2160 behavior). providerBlock is the block
+// this sample reports (the relay's serviced block or the probe's aggregated provider block).
+func (po *ProviderOptimizer) syncReference(providerBlock uint64, sampleTime time.Time) (uint64, time.Time) {
+	fallbackBlock, fallbackTime := po.updateLatestSyncData(providerBlock, sampleTime)
+	po.syncRefLock.RLock()
+	getter := po.syncReferenceGetter
+	po.syncRefLock.RUnlock()
+	if getter != nil {
+		if refBlock, refTime, ok := getter(); ok && refBlock > 0 {
+			return refBlock, refTime
+		}
+	}
+	return fallbackBlock, fallbackTime
+}
+
 // appendRelayData gets three new QoS metrics samples and updates the provider's metrics using a decaying weighted average
 func (po *ProviderOptimizer) appendRelayData(provider string, latency time.Duration, success bool, cu, syncBlock uint64, sampleTime time.Time) {
-	latestSync, timeSync := po.updateLatestSyncData(syncBlock, sampleTime)
+	latestSync, timeSync := po.syncReference(syncBlock, sampleTime)
 	providerData, _ := po.getProviderData(provider)
 	halfTime := po.calculateHalfTime(provider, sampleTime)
 	weight := score.RelayUpdateWeight
@@ -329,6 +367,57 @@ func (po *ProviderOptimizer) AppendProbeRelayData(providerAddress string, latenc
 		utils.LogAttr("providerAddress", providerAddress),
 		utils.LogAttr("latency", latency),
 		utils.LogAttr("success", success),
+	)
+}
+
+// AppendProbeData feeds one provider-aggregated probe sample — the Topic E contract's probe path,
+// the proactive baseline that scores providers between (or without) real relays. Unlike the legacy
+// AppendProbeRelayData (availability + latency only), it feeds all three dimensions:
+//   - availability is a FRACTION in [0,1] (the share of the provider's endpoints healthy this cycle,
+//     per the fraction-healthy aggregation rule) and is ALWAYS fed, including 0 when the provider is
+//     fully down — so partial degradation decays the score;
+//   - when healthy (>=1 endpoint up), latency and sync are also fed. Sync lag uses the SAME reference
+//     as relays (syncReference → consensus baseline when fresh), so probe and relay measure lag
+//     identically (rule E5). syncBlock is the provider's freshest observed block (max over healthy
+//     endpoints).
+//
+// Samples use ProbeUpdateWeight, 4x lighter than relays (RelayUpdateWeight), so high traffic adapts
+// fast while probes keep idle providers scored. One call per provider per cycle (rule E2) — the
+// caller (the prober) aggregates per-endpoint verdicts before calling.
+func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availability float64, latency time.Duration, syncBlock uint64, healthy bool) {
+	providerData, _ := po.getProviderData(providerAddress)
+	sampleTime := po.now()
+	halfTime := po.calculateHalfTime(providerAddress, sampleTime)
+	weight := score.ProbeUpdateWeight
+
+	providerData, updateErr := po.updateDecayingWeightedAverage(providerData, score.AvailabilityScoreType, availability, weight, halfTime, 0, sampleTime)
+	if updateErr != nil {
+		return
+	}
+	if healthy {
+		providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.LatencyScoreType, latency.Seconds(), weight, halfTime, 0, sampleTime)
+		if updateErr != nil {
+			return
+		}
+		if syncBlock > providerData.SyncBlock {
+			// do not allow providers to go back
+			providerData.SyncBlock = syncBlock
+		}
+		latestSync, timeSync := po.syncReference(syncBlock, sampleTime)
+		syncLag := po.calculateSyncLag(latestSync, timeSync, providerData.SyncBlock, sampleTime)
+		providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.SyncScoreType, syncLag.Seconds(), weight, halfTime, 0, sampleTime)
+		if updateErr != nil {
+			return
+		}
+	}
+	po.providersStorage.Set(providerAddress, providerData, 1)
+
+	utils.LavaFormatTrace("[Optimizer] probe data update",
+		utils.LogAttr("providerAddress", providerAddress),
+		utils.LogAttr("availability", availability),
+		utils.LogAttr("latency", latency),
+		utils.LogAttr("syncBlock", syncBlock),
+		utils.LogAttr("healthy", healthy),
 	)
 }
 

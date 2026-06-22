@@ -95,6 +95,13 @@ func (csm *ConsumerSessionManager) GetQoSManager() *qos.QoSManager {
 	return csm.qosManager
 }
 
+// GetProviderOptimizer exposes the provider optimizer so callers can wire optional capabilities
+// onto it — e.g. installing the Topic E sync-reference getter (the consensus baseline the QoS sync
+// dimension measures lag against). Returns the interface; callers type-assert for the capability.
+func (csm *ConsumerSessionManager) GetProviderOptimizer() ProviderOptimizer {
+	return csm.providerOptimizer
+}
+
 func (csm *ConsumerSessionManager) GetNumberOfValidProviders() int {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()

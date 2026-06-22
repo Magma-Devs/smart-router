@@ -186,15 +186,24 @@ func (cs *ChainState) GetLatestBlock() (int64, bool) {
 // or when that baseline has since aged past TTL — callers must treat "no baseline" explicitly
 // (e.g. sync gap 0) rather than silently substituting the optimistic observed tip (Finding 2).
 func (cs *ChainState) GetConsensusBaseline() (int64, bool) {
+	block, _, ok := cs.GetConsensusBaselineWithTime()
+	return block, ok
+}
+
+// GetConsensusBaselineWithTime is GetConsensusBaseline plus the wall-clock at which the baseline
+// was last computed (baselineAt), returned atomically under one lock. The timestamp is needed by
+// consumers that compute a time-based sync lag against the baseline (e.g. the provider optimizer's
+// sync dimension, Topic E) — they measure "how long ago was this the tip" from baselineAt.
+func (cs *ChainState) GetConsensusBaselineWithTime() (block int64, at time.Time, ok bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	if !cs.hasBaseline || cs.baseline <= 0 {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 	if cs.cfg.TTL > 0 && cs.now().Sub(cs.baselineAt) > cs.cfg.TTL {
-		return 0, false
+		return 0, time.Time{}, false
 	}
-	return cs.baseline, true
+	return cs.baseline, cs.baselineAt, true
 }
 
 // Initialized reports whether ChainState has ever accepted a positive observation. It is sticky

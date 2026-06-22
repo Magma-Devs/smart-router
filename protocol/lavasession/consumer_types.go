@@ -180,10 +180,16 @@ type Endpoint struct {
 	DirectConnections []DirectRPCConnection // Direct RPC connections
 
 	ConnectionRefusals uint64
-	Addons             map[string]struct{}
-	Extensions         map[string]struct{}
-	Geolocation        planstypes.Geolocation
-	mu                 sync.RWMutex // Protects Connections, ConnectionRefusals, and Enabled fields
+	// consecutiveHealthyProbes counts back-to-back healthy probe verdicts while the endpoint is
+	// DISABLED — the hysteresis used by the probe's proactive re-enable (Topic E). It is reset on
+	// any unhealthy verdict and on re-enable, and is held at 0 while the endpoint is Enabled (the
+	// probe never touches an enabled endpoint's state, so it cannot undo the relay path's climb to
+	// the disable threshold).
+	consecutiveHealthyProbes uint64
+	Addons                   map[string]struct{}
+	Extensions               map[string]struct{}
+	Geolocation              planstypes.Geolocation
+	mu                       sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, and consecutiveHealthyProbes
 
 	// Per-endpoint sync tracking (for direct RPC QoS)
 	LatestBlock     atomic.Int64 // Latest block seen from this endpoint
@@ -235,6 +241,54 @@ func (e *Endpoint) MarkUnhealthy() {
 			utils.LogAttr("is_direct_rpc", isDirect),
 		)
 	}
+}
+
+// RecordProbeVerdict applies one probe-cycle health verdict to the endpoint's enable state — the
+// PROACTIVE re-enable half of the Topic E contract (the O1 win). It is the only probe-driven
+// transition; the relay path stays the fast disabler (MarkUnhealthy at MaxConsecutiveConnectionAttempts).
+//
+// Ownership / anti-flap rules:
+//   - The probe NEVER touches an enabled endpoint. While Enabled, an endpoint's health is the relay
+//     path's domain; if the probe reset ConnectionRefusals here it would undo a mid-climb toward the
+//     disable threshold and the endpoint could never disable under partial failure. So we hold the
+//     hysteresis counter at 0 and return without effect.
+//   - On a DISABLED endpoint, the probe re-enables only after reEnableAfterK consecutive healthy
+//     verdicts (hysteresis). This threshold is deliberately distinct from the relay disable threshold
+//     so the two actors don't oscillate. A single unhealthy verdict resets the streak.
+//   - Re-enabling gives the endpoint a clean slate (ConnectionRefusals = 0): it was already disabled
+//     (refusals >= threshold), and it earned the reset by proving K healthy cycles.
+//
+// reEnableAfterK < 1 is treated as 1. Returns true only on the cycle it actually re-enables.
+func (e *Endpoint) RecordProbeVerdict(healthy bool, reEnableAfterK uint64) (reenabled bool) {
+	if reEnableAfterK < 1 {
+		reEnableAfterK = 1
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.Enabled {
+		// Enabled endpoints are the relay path's domain — keep the probe out of the refusal climb.
+		e.consecutiveHealthyProbes = 0
+		return false
+	}
+	if !healthy {
+		e.consecutiveHealthyProbes = 0
+		return false
+	}
+	e.consecutiveHealthyProbes++
+	if e.consecutiveHealthyProbes < reEnableAfterK {
+		return false
+	}
+
+	e.Enabled = true
+	e.ConnectionRefusals = 0
+	e.consecutiveHealthyProbes = 0
+	utils.LavaFormatInfo("probe re-enabled recovered endpoint",
+		utils.LogAttr("endpoint", e.NetworkAddress),
+		utils.LogAttr("is_direct_rpc", e.IsDirectRPC()),
+		utils.LogAttr("re_enable_after_k", reEnableAfterK),
+	)
+	return true
 }
 
 // ResetHealth resets connection refusals and re-enables endpoint.
