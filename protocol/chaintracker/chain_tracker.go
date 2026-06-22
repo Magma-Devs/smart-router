@@ -56,13 +56,21 @@ type IChainTracker interface {
 }
 
 const (
-	initRetriesCount                      = 4
-	BACKOFF_MAX_TIME                      = 10 * time.Minute
-	maxFails                              = 10
-	GoodStabilityThreshold                = 0.3
-	PollingUpdateLength                   = 10
-	MostFrequentPollingMultiplier         = 16
-	MinPollingTimeMultiplier              = 4 // adaptive tiers compute base/(multiplier/4); below this divides by zero
+	initRetriesCount              = 4
+	BACKOFF_MAX_TIME              = 10 * time.Minute
+	maxFails                      = 10
+	GoodStabilityThreshold        = 0.3
+	PollingUpdateLength           = 10
+	MostFrequentPollingMultiplier = 16
+	// MinPollingTimeMultiplier is the allowed minimum for the polling multiplier and the
+	// adaptive divide-by-zero floor: the legacy adaptive tiers compute base/(multiplier/4),
+	// so a multiplier below 4 divides by zero. After the MAG-2159 / Topic B knob
+	// consolidation there is no longer a second-layer clamp inside the tracker — this floor
+	// is enforced ONCE, where the operator value enters: the --chain-tracker-polling-multiplier
+	// flag validation in rpcsmartrouter (range [MinPollingTimeMultiplier, MostFrequentPollingMultiplier]).
+	// The only other multiplier feeder is the built-in default 16, so every value reaching
+	// the adaptive tiers is >= 4 by construction.
+	MinPollingTimeMultiplier              = 4
 	ChainTrackerPollingMultiplierFlagName = "chain-tracker-polling-multiplier"
 )
 
@@ -71,10 +79,11 @@ const (
 // polling = fewer upstream calls. Set once at startup from the
 // --chain-tracker-polling-multiplier flag and honored in newCustomChainTracker.
 //
-// MAG-2159: this now affects only trackers on the legacy adaptive cadence — i.e. the
-// global tracker. Per-endpoint trackers run a FIXED flatPollInterval (avgBlockTime/2) and
-// ignore the multiplier entirely until the knob consolidation (pass 2) folds this into a
-// single floored relief control.
+// MAG-2159: this affects only trackers on the legacy adaptive cadence — i.e. the global
+// tracker (removed in Topic C). Per-endpoint trackers run a FIXED flatPollInterval
+// (avgBlockTime/2) and ignore the multiplier entirely. After the knob consolidation this
+// override (resolved via EffectivePollingMultiplier) is the single relief control; the
+// redundant per-tracker config knob and the in-tracker clamp were removed.
 var PollingTimeMultiplierOverride = 0
 
 // EffectivePollingMultiplier returns the multiplier actually in force: the
@@ -84,19 +93,6 @@ func EffectivePollingMultiplier() int {
 		return PollingTimeMultiplierOverride
 	}
 	return MostFrequentPollingMultiplier
-}
-
-// clampPollingMultiplier enforces the divide-by-zero floor: updateTimer's adaptive
-// tiers compute base/(multiplier/4), so a multiplier below 4 divides by zero. Warns
-// when it has to clamp — the flag path is already range-validated, so this only fires
-// if a per-tracker config sets PollingTimeMultiplier below the floor.
-func clampPollingMultiplier(m int) int {
-	if m < MinPollingTimeMultiplier {
-		utils.LavaFormatWarning("chain-tracker polling multiplier below safe floor; clamping", nil,
-			utils.LogAttr("provided", m), utils.LogAttr("floor", MinPollingTimeMultiplier))
-		return MinPollingTimeMultiplier
-	}
-	return m
 }
 
 type ChainFetcher interface {
@@ -750,16 +746,14 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		return &DummyChainTracker{}
 	}
 
-	// polling-relief: apply the process-wide override (flag) first, then any per-tracker
-	// config override, then clamp to the divide-by-zero floor.
-	pollingTime := MostFrequentPollingMultiplier
-	if PollingTimeMultiplierOverride != 0 {
-		pollingTime = PollingTimeMultiplierOverride
-	}
-	if config.PollingTimeMultiplier != 0 {
-		pollingTime = config.PollingTimeMultiplier
-	}
-	pollingTime = clampPollingMultiplier(pollingTime)
+	// polling-relief: the legacy adaptive cadence (global tracker only — per-endpoint
+	// trackers set FlatPollInterval and ignore this) uses a single multiplier, resolved by
+	// EffectivePollingMultiplier: the process-wide flag override when set, else the built-in
+	// MostFrequentPollingMultiplier. Both are >= MinPollingTimeMultiplier (the flag is
+	// range-validated at its parse site; the default is 16), so no second-layer clamp is
+	// needed here. The old per-tracker config.PollingTimeMultiplier knob was set by nobody
+	// and was removed in the MAG-2159 knob consolidation.
+	pollingTime := EffectivePollingMultiplier()
 	if chainFetcher == nil {
 		utils.LavaFormatFatal("can't start chainTracker with nil chainFetcher argument", nil)
 	}

@@ -16,9 +16,6 @@ const (
 	// DefaultBlocksToSave is the number of finalized blocks to keep in memory for fork detection
 	DefaultBlocksToSave = 10
 
-	// MinPollingInterval prevents too aggressive polling for fast chains
-	MinPollingInterval = 100 * time.Millisecond
-
 	defaultTrackerStartRetryMin = time.Second
 	defaultTrackerStartRetryMax = 30 * time.Second
 	trackerStartRetryJitterDiv  = 5

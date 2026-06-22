@@ -20,7 +20,6 @@ type ChainTrackerConfig struct {
 	AverageBlockTime         time.Duration // how often to query latest block
 	ServerBlockMemory        uint64
 	BlocksCheckpointDistance uint64 // this causes the chainTracker to trigger it's checkpoint every X blocks
-	PollingTimeMultiplier    int
 	ChainId                  string
 	ParseDirectiveEnabled    bool
 

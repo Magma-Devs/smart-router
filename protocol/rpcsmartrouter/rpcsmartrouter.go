@@ -1796,15 +1796,19 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			// before any chain tracker or consistency config is built. Zero = no relief;
 			// out-of-range values warn-and-revert to the built-in default (not silent clamp).
 			if m := viper.GetInt(chaintracker.ChainTrackerPollingMultiplierFlagName); m != 0 {
+				// This range check is the SOLE divide-by-zero guard for the legacy adaptive
+				// tiers (base/(multiplier/4)) after the MAG-2159 knob consolidation removed
+				// the in-tracker clamp: the only multiplier feeders are this validated flag
+				// and the built-in default 16, both >= MinPollingTimeMultiplier.
 				if m < chaintracker.MinPollingTimeMultiplier || m > chaintracker.MostFrequentPollingMultiplier {
 					utils.LavaFormatWarning("--"+chaintracker.ChainTrackerPollingMultiplierFlagName+" out of allowed range [4,16]; reverting to default", nil, utils.LogAttr("provided", m))
 				} else {
 					chaintracker.PollingTimeMultiplierOverride = m
-					// MAG-2159: per-endpoint trackers now use a fixed avgBlockTime/2 cadence,
-					// so this override only affects the global tracker until the knob
-					// consolidation (pass 2). Make the interim behavior explicit at runtime
+					// MAG-2159: per-endpoint trackers use a fixed avgBlockTime/2 cadence and
+					// ignore this multiplier — it tunes only the global tracker's legacy
+					// adaptive cadence (removed in Topic C). Make that explicit at runtime
 					// rather than relying on docs alone.
-					utils.LavaFormatWarning("--"+chaintracker.ChainTrackerPollingMultiplierFlagName+" no longer affects per-endpoint trackers (they use a fixed avgBlockTime/2 cadence); it still tunes the global tracker until knob consolidation", nil,
+					utils.LavaFormatWarning("--"+chaintracker.ChainTrackerPollingMultiplierFlagName+" affects only the global tracker (per-endpoint trackers use a fixed avgBlockTime/2 cadence)", nil,
 						utils.LogAttr("multiplier", m))
 				}
 			}
@@ -2093,7 +2097,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeBlockProfileRateFlagName, performance.DefaultBlockProfileRate, "block profile rate in nanoseconds (1 records all blocking events)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
-	cmdRPCSmartRouter.Flags().Int(chaintracker.ChainTrackerPollingMultiplierFlagName, 0, "polling-relief: override the chain-tracker polling multiplier (default 16). Allowed [4,16]; out-of-range reverts to default. Smaller = slower polling = fewer upstream calls. NOTE (MAG-2159): no longer affects per-endpoint trackers, which use a fixed avgBlockTime/2 cadence until knob consolidation; it still tunes the global tracker.")
+	cmdRPCSmartRouter.Flags().Int(chaintracker.ChainTrackerPollingMultiplierFlagName, 0, "polling-relief: override the global chain-tracker polling multiplier (default 16). Allowed [4,16]; out-of-range reverts to default. Smaller = slower polling = fewer upstream calls. NOTE (MAG-2159): affects ONLY the global tracker — per-endpoint trackers use a fixed avgBlockTime/2 cadence and ignore this.")
 	cmdRPCSmartRouter.Flags().Int(relaycore.ConsistencyBlockGapFactorFlagName, 0, "polling-relief: widen the consistency endpoint-lag gate (blockLagForQosSync x factor; default 2). Allowed [2,8]; out-of-range reverts to default. Companion to the polling multiplier.")
 	cmdRPCSmartRouter.Flags().Var(&strategyFlag, "strategy", fmt.Sprintf("the strategy to use to pick providers (%s)", strings.Join(strategyNames, "|")))
 	defaultWeightedConfig := provideroptimizer.DefaultWeightedSelectorConfig()
