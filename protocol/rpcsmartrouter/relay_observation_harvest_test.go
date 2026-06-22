@@ -224,15 +224,10 @@ func TestTipBlockFromRelay_RealParser_EVMEligibility(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
-	require.NoError(t, err)
-	if closeServer != nil {
-		t.Cleanup(closeServer)
-	}
+	// Lightweight real parser (no CreateChainLibMocks): its SetGlobalLoggingLevel write races
+	// with concurrent background-poll logging from other tests' trackers under -race.
+	chainParser := newRealChainParserForHarvest(t, "ETH1")
 
 	rpcss := ethTipServer(t, "ETH1")
 	parse := func(body string) chainlib.ChainMessage {
@@ -267,6 +262,158 @@ func TestTipBlockFromRelay_RealParser_EVMEligibility(t *testing.T) {
 		_, ok := rpcss.tipBlockFromRelay(cm, &pairingtypes.RelayReply{LatestBlock: 17_460_400})
 		require.False(t, ok, "a historical eth_getBlockByNumber must not be harvested as a tip")
 	})
+}
+
+// ---------------------------------------------------------------------------
+// F4: tip-state writes must be gated on tip-eligibility. harvestAndUpdateTipFromRelay is
+// the production code the relay response path runs; this drives it with REAL parsed
+// chainMessages (a historical eth_getBlockByNumber(N) vs a latest eth_blockNumber) and a
+// real endpoint + estimator, and asserts that a historical response — which carries a
+// positive Reply.LatestBlock — moves NONE of the tip state, while a tip-eligible one moves
+// all of it. This is the integration the reviewer asked for: not the tipBlockFromRelay
+// helper in isolation, but the actual side-effecting writes it gates.
+// ---------------------------------------------------------------------------
+
+func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	chainParser := newRealChainParserForHarvest(t, "ETH1")
+	parse := func(body string) chainlib.ChainMessage {
+		cm, perr := chainParser.ParseMsg("", []byte(body), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, perr)
+		return cm
+	}
+
+	// A monitor so the observation-store write (Source=Relay) is exercised too.
+	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainParser:      newRealChainParserForHarvest(t, "ETH1"),
+		ChainID:          "ETH1",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 200 * time.Millisecond,
+		BlocksToSave:     1,
+	})
+	t.Cleanup(m.Stop)
+
+	const url = "http://ep:8545"
+	const addr = "lava@provider1"
+	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	_, err := m.GetOrCreateTracker(ep, nil)
+	require.NoError(t, err)
+	gen, ok := m.ObservationGeneration(url)
+	require.True(t, ok)
+
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		endpointChainTrackerManager: m,
+	}
+
+	// A historical response: eth_getBlockByNumber(0x10a7eb0) carries Reply.LatestBlock = that
+	// concrete block, but it is NOT the tip.
+	histMsg := parse(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x10a7eb0",false]}`)
+	rpcss.harvestAndUpdateTipFromRelay(ep, histMsg, &pairingtypes.RelayReply{LatestBlock: 17_460_400}, gen, addr)
+
+	require.Equal(t, int64(0), ep.LatestBlock.Load(), "a historical response must NOT move the endpoint tip")
+	require.True(t, ep.LastBlockUpdate.IsZero(), "a historical response must NOT stamp LastBlockUpdate")
+	require.Equal(t, uint64(0), rpcss.latestBlockHeight.Load(), "a historical response must NOT move the global estimator")
+	// The store may hold a failed-poll record from the nil-connection background poll; what must
+	// NOT exist is a Relay-sourced write of the historical block.
+	if o, exists := m.GetObservation(url); exists {
+		require.NotEqual(t, endpointstate.ObservationSourceRelay, o.Source, "a historical response must NOT write a Relay observation")
+		require.NotEqual(t, int64(17_460_400), o.LatestBlock, "the historical block must NOT reach the observation store")
+	}
+
+	// A tip-eligible response: eth_blockNumber → the current tip.
+	tipMsg := parse(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`)
+	rpcss.harvestAndUpdateTipFromRelay(ep, tipMsg, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, gen, addr)
+
+	require.Equal(t, int64(20_000_000), ep.LatestBlock.Load(), "a tip-eligible response moves the endpoint tip")
+	require.False(t, ep.LastBlockUpdate.IsZero(), "a tip-eligible response stamps LastBlockUpdate")
+	require.Equal(t, uint64(20_000_000), rpcss.latestBlockHeight.Load(), "a tip-eligible response moves the global estimator")
+	o, obsExists := m.GetObservation(url)
+	require.True(t, obsExists)
+	require.Equal(t, int64(20_000_000), o.LatestBlock)
+	require.Equal(t, endpointstate.ObservationSourceRelay, o.Source)
+}
+
+// ---------------------------------------------------------------------------
+// F3: capturing the generation BEFORE dispatch makes the harvest safe against a same-URL
+// tracker replacement mid-relay. This models the race with REAL monitor incarnations (real
+// RemoveTracker + GetOrCreateTracker, real generations) — not a fabricated generation value:
+// the generation captured for incarnation A is rejected once the URL is replaced by
+// incarnation B, while B's live generation is accepted.
+//
+// The production call site (sendRelayToDirectEndpoints) captures the generation at
+// rpcsmartrouter_server.go right before relayInnerDirect and threads that captured value to
+// harvestAndUpdateTipFromRelay — so a relay that began against incarnation A carries A's
+// generation when it completes, which is exactly genA here. A full end-to-end test that drives
+// the live goroutine while blocking the relay is not included: there is no successful-relay
+// harness for sendRelayToDirectEndpoints (the existing driver exercises the consistency-filter
+// failure path), and the capture-before-dispatch ordering is a straight-line property of the
+// goroutine verified by reading the call site.
+// ---------------------------------------------------------------------------
+
+func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainParser:      newRealChainParserForHarvest(t, "ETH1"),
+		ChainID:          "ETH1",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 200 * time.Millisecond,
+		BlocksToSave:     1,
+	})
+	t.Cleanup(m.Stop)
+
+	const url = "http://ep:8545"
+	const addr = "lava@provider1"
+	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		endpointChainTrackerManager: m,
+	}
+
+	// Incarnation A: tracker created, generation captured "before dispatch" of relay A.
+	_, err := m.GetOrCreateTracker(ep, nil)
+	require.NoError(t, err)
+	genA := rpcss.endpointObservationGeneration(url)
+	require.NotZero(t, genA)
+
+	// While relay A is "in flight", the endpoint's tracker is removed and recreated for the
+	// same URL (incarnation B) — a new generation.
+	m.RemoveTracker(url)
+	_, err = m.GetOrCreateTracker(ep, nil)
+	require.NoError(t, err)
+	genB := rpcss.endpointObservationGeneration(url)
+	require.NotEqual(t, genA, genB, "a recreated same-URL tracker must get a new generation")
+
+	// Relay A now completes and harvests with the generation it captured BEFORE dispatch (genA).
+	// The gate must reject it — it belongs to the dead incarnation, not B.
+	tipMsg, perr := newRealChainParserForHarvest(t, "ETH1").ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, perr)
+	rpcss.harvestAndUpdateTipFromRelay(ep, tipMsg, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, genA, addr)
+
+	// The store may carry a failed-poll record from incarnation B's nil-connection poll; what
+	// must NOT exist is a Relay write of 20M attributed to B from relay A's stale generation.
+	if o, exists := m.GetObservation(url); exists {
+		require.NotEqual(t, int64(20_000_000), o.LatestBlock,
+			"a relay that captured the OLD generation must be rejected after same-URL replacement")
+	}
+
+	// Sanity: harvesting with the live generation (genB) IS accepted — proving the rejection
+	// above was the generation gate, not a broken store.
+	rpcss.harvestAndUpdateTipFromRelay(ep, tipMsg, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, genB, addr)
+	o, obsExists := m.GetObservation(url)
+	require.True(t, obsExists)
+	require.Equal(t, int64(20_000_000), o.LatestBlock)
+	require.Equal(t, endpointstate.ObservationSourceRelay, o.Source)
 }
 
 // newRealChainParserForHarvest builds a real ChainParser from the on-disk spec (the

@@ -1346,6 +1346,26 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				)
 			}
 
+			// Resolve the endpoint + its direct connection, ensure the per-endpoint ChainTracker,
+			// and capture its observation generation BEFORE dispatching the relay (MAG-2159
+			// finding 5). Capturing pre-dispatch is the safety property: a relay that completes
+			// after this URL's tracker is removed and recreated (a new incarnation, new
+			// generation) carries the OLD generation, so RecordRelayObservation's gate rejects
+			// it — instead of misattributing it to the new tracker, which is exactly what
+			// re-reading the live generation post-relay would do. Resolved here once and reused
+			// in the success path below.
+			var targetEndpoint *lavasession.Endpoint
+			var directConn lavasession.DirectRPCConnection
+			if drsc, ok := singleConsumerSession.Connection.(*lavasession.DirectRPCSessionConnection); ok {
+				targetEndpoint = drsc.Endpoint
+				directConn = drsc.DirectConnection
+			}
+			var harvestGen uint64
+			if targetEndpoint != nil && directConn != nil {
+				rpcss.ensureEndpointChainTracker(goroutineCtx, targetEndpoint, directConn)
+				harvestGen = rpcss.endpointObservationGeneration(targetEndpoint.NetworkAddress)
+			}
+
 			relayLatency, err, _ := rpcss.relayInnerDirect(
 				spanCtx,
 				singleConsumerSession,
@@ -1403,76 +1423,31 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			shouldFailSession := err != nil || statusCode >= 500 || statusCode == 429
 
 			if !shouldFailSession {
-				// Success or client error (4xx except 429) - update session as success
-				// Get endpoint reference for per-endpoint tracking
-				var targetEndpoint *lavasession.Endpoint
-				var directConn lavasession.DirectRPCConnection
-				if drsc, ok := singleConsumerSession.Connection.(*lavasession.DirectRPCSessionConnection); ok {
-					targetEndpoint = drsc.Endpoint     // Use stored reference (robust)
-					directConn = drsc.DirectConnection // Get direct connection for ChainTracker
-				}
+				// Success or client error (4xx except 429) - update session as success.
+				// targetEndpoint / directConn were resolved and the tracker ensured before
+				// dispatch (above), so harvestGen is the generation captured pre-relay.
 
-				// Ensure ChainTracker exists for this endpoint (lazily initialized)
-				if targetEndpoint != nil && directConn != nil {
-					rpcss.ensureEndpointChainTracker(goroutineCtx, targetEndpoint, directConn)
-				}
+				// MAG-2159 (Topic B) tip harvest + tip-state update — gated on tip-eligibility so
+				// historical responses cannot poison the endpoint tip / estimator / metric
+				// (finding 4). harvestGen was captured before dispatch (finding 5).
+				rpcss.harvestAndUpdateTipFromRelay(targetEndpoint, chainMessage, localRelayResult.Reply, harvestGen, endpointAddress)
 
-				// MAG-2159 (Topic B) relay harvest. Record ONLY a reliable current-tip
-				// observation into the per-endpoint store (findings 1 & 2): a block that
-				// merely appears in a historical response (eth_getBlockByNumber(N),
-				// getBlockByHash, getTransactionReceipt, getLogs) must NOT move the tip. This
-				// is independent of the legacy Reply.LatestBlock handling below because the
-				// Solana tip comes from result.context.slot, which is not in Reply.LatestBlock.
-				// The generation is captured AFTER ensuring the tracker so the write is
-				// rejected if the tracker is later removed/replaced (finding 5).
-				if targetEndpoint != nil {
-					if tip, ok := rpcss.tipBlockFromRelay(chainMessage, localRelayResult.Reply); ok {
-						rpcss.recordRelayBlockObservation(targetEndpoint, rpcss.endpointObservationGeneration(targetEndpoint.NetworkAddress), tip)
-					}
-				}
-
-				// Get latest block: prefer response extraction, fallback to ChainTracker
+				// latestServicedBlock: the block this response actually serviced (may be
+				// historical), used for OnSessionDone and propagated to downstream consumers
+				// (consistency, caching). This is intentionally NOT gated on tip-eligibility — it
+				// is "the block returned by this response", a separate concept from "the current
+				// tip" updated above. Falls back to the global ChainTracker when the response
+				// carried no block of its own.
 				latestBlock := int64(0)
 				if localRelayResult.Reply != nil && localRelayResult.Reply.LatestBlock > 0 {
-					// Block extracted from response (eth_blockNumber, eth_getBlockByNumber, etc.)
 					latestBlock = localRelayResult.Reply.LatestBlock
-
-					// Update endpoint's latest block (per-endpoint tracking)
-					if targetEndpoint != nil {
-						targetEndpoint.LatestBlock.Store(latestBlock)
-						targetEndpoint.LastBlockUpdate = time.Now()
-						utils.LavaFormatTrace("updated endpoint latest block",
-							utils.LogAttr("endpoint", endpointAddress),
-							utils.LogAttr("latest_block", latestBlock),
-							utils.LogAttr("GUID", goroutineCtx),
-						)
-					}
-
-					// Update global latest block height and estimator (for getLatestBlock fallback)
-					rpcss.updateLatestBlockHeight(uint64(latestBlock), endpointAddress)
-
-					// Update Prometheus endpoint latest-block metric.
-					// endpointAddress is the provider name (session map key), so resolveProviderName
-					// returns it unchanged — giving endpoint_id = provider name in the metric.
-					rpcss.smartRouterEndpointMetrics.SetEndpointLatestBlock(
-						rpcss.listenEndpoint.ChainID,
-						rpcss.listenEndpoint.ApiInterface,
-						endpointAddress,
-						latestBlock,
-					)
 				} else if rpcss.chainTracker != nil && !rpcss.chainTracker.IsDummy() {
-					// Fallback to ChainTracker (global) -- propagate to relay result
-					// so downstream consumers (consistency, caching) see the actual latest block
 					latestBlock, _ = rpcss.chainTracker.GetLatestBlockNum()
 					if latestBlock > 0 && localRelayResult.Reply != nil {
 						localRelayResult.Reply.LatestBlock = latestBlock
 					}
 					utils.LavaFormatTrace("using latest block from chain tracker",
 						utils.LogAttr("latest_block", latestBlock),
-						utils.LogAttr("GUID", goroutineCtx),
-					)
-				} else {
-					utils.LavaFormatDebug("no latest block available",
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
@@ -1706,6 +1681,47 @@ func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavases
 		return
 	}
 	rpcss.endpointChainTrackerManager.RecordRelayObservation(endpoint.NetworkAddress, gen, block, time.Now())
+}
+
+// harvestAndUpdateTipFromRelay applies a served relay's block to TIP state — but only when the
+// response is tip-eligible (MAG-2159 finding 4). tipBlockFromRelay distinguishes a "block
+// associated with a response" (historical: eth_getBlockByNumber(N), getBlockByHash,
+// getTransactionReceipt, getLogs — all carry a positive Reply.LatestBlock) from a "current-tip
+// observation" (eth_blockNumber / eth_getBlockByNumber("latest") / Solana result.context.slot).
+// ONLY the latter may move tip state: the per-endpoint observation store, the endpoint's
+// reactive LatestBlock (read by consistency pre-validation), the global estimator, and the
+// latest-block metric. A historical response updates NONE of these, so it can no longer poison
+// the endpoint tip. "The block this response serviced" (latestServicedBlock) is a separate
+// concept the caller handles ungated. No-op when targetEndpoint is nil or the response is not
+// tip-eligible. harvestGen is the generation captured before dispatch (finding 5).
+func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
+	targetEndpoint *lavasession.Endpoint,
+	chainMessage chainlib.ChainMessage,
+	reply *pairingtypes.RelayReply,
+	harvestGen uint64,
+	endpointAddress string,
+) {
+	if targetEndpoint == nil {
+		return
+	}
+	tip, ok := rpcss.tipBlockFromRelay(chainMessage, reply)
+	if !ok {
+		return
+	}
+	rpcss.recordRelayBlockObservation(targetEndpoint, harvestGen, tip)
+	targetEndpoint.LatestBlock.Store(tip)
+	targetEndpoint.LastBlockUpdate = time.Now()
+	rpcss.updateLatestBlockHeight(uint64(tip), endpointAddress)
+	if rpcss.smartRouterEndpointMetrics != nil {
+		// endpointAddress is the provider name (session map key), so resolveProviderName
+		// returns it unchanged — endpoint_id = provider name in the metric.
+		rpcss.smartRouterEndpointMetrics.SetEndpointLatestBlock(
+			rpcss.listenEndpoint.ChainID,
+			rpcss.listenEndpoint.ApiInterface,
+			endpointAddress,
+			tip,
+		)
+	}
 }
 
 // endpointObservationGeneration returns the live observation generation for an endpoint
