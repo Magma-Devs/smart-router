@@ -39,7 +39,7 @@ func InitErrorMetrics() {
 		// structured logs for operator search; the Prometheus series only
 		// needs one identity key.
 		counter := prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "lava_errors_total",
+			Name: "smartrouter_errors_total",
 			Help: "Total classified errors by name, category, retryability, and chain.",
 		}, []string{"error_name", "error_category", "retryable", "chain_id"})
 
@@ -50,7 +50,7 @@ func InitErrorMetrics() {
 		//     collector so both callers share the same counter.
 		//  3. Any OTHER registration failure (collector with same name but
 		//     mismatched labels, Prometheus internal error, etc.) → log a
-		//     warning so operators know lava_errors_total will not be
+		//     warning so operators know smartrouter_errors_total will not be
 		//     scrapable. The callback is still wired up so the counter
 		//     keeps accumulating in-process and can be reached via direct
 		//     introspection, but /metrics will be missing the series.
@@ -60,7 +60,7 @@ func InitErrorMetrics() {
 					counter = reused
 				}
 			} else {
-				utils.LavaFormatWarning("failed to register lava_errors_total Prometheus counter; metric will not appear in /metrics scrapes", err)
+				utils.LavaFormatWarning("failed to register smartrouter_errors_total Prometheus counter; metric will not appear in /metrics scrapes", err)
 			}
 		}
 
