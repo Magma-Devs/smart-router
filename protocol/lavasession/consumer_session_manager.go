@@ -561,7 +561,13 @@ func (csm *ConsumerSessionManager) probeProviders(ctx context.Context, pairingLi
 			latency, providerAddress, err := csm.probeProvider(ctx, consumerSessionsWithProvider, epoch, false)
 			success := err == nil // if failure then regard it in availability
 			csm.consumerMetricsManager.SetProviderLiveness(csm.rpcEndpoint.ChainID, providerAddress, consumerSessionWithProvider.Endpoints[0].NetworkAddress, success)
-			csm.providerOptimizer.AppendProbeRelayData(providerAddress, latency, success)
+			// MAG-2161 (Topic D): direct-RPC (static) providers are scored by the real telemetry-driven
+			// prober (runProbeLoop → AppendProbeData), so the legacy SYNTHETIC probe feed
+			// (success=true, 1ms) must not double-feed the same per-provider EWMAs. Only provider-relay
+			// (gRPC) providers, which this loop probes for real, still feed AppendProbeRelayData.
+			if !consumerSessionWithProvider.StaticProvider {
+				csm.providerOptimizer.AppendProbeRelayData(providerAddress, latency, success)
+			}
 		}(consumerSessionWithProvider)
 	}
 	done := make(chan struct{})

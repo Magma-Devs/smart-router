@@ -19,35 +19,37 @@ const DefaultProbeReEnableHysteresis uint64 = 3
 // telemetry (Topic A observations) + the per-chain tip (Topic C) — no upstream call. The prober
 // (Topic D) produces these; this package only defines the shape and the aggregation rule.
 type EndpointVerdict struct {
-	// Healthy is the endpoint's overall verdict: alive (recent successful poll within the staleness
-	// window), keeping up (block within tolerance of the consensus baseline), and reachable. When
-	// false, the endpoint contributes a failure to its provider's availability and no latency/sync.
+	// Healthy is the endpoint's overall verdict: alive (fresh observation within the staleness
+	// window) and keeping up (block within tolerance of the consensus baseline). When false, the
+	// endpoint contributes a failure to its provider's availability and no latency/sync.
 	Healthy bool
-	// Latency is the endpoint's most recent poll/probe latency. Meaningful only when Healthy.
+	// Latency is the endpoint's most recent poll latency; 0 means UNKNOWN (no successful poll yet —
+	// e.g. a relay-fed endpoint under the MAG-2159 traffic gate, or recovery's first healthy cycle).
+	// An unknown latency must NOT be fed as a fake 0 (it would falsely win the per-provider min and
+	// clobber a real relay-fed latency), so aggregation ignores it.
 	Latency time.Duration
-	// Block is the endpoint's most recently observed block (0 = unknown). Meaningful only when
-	// Healthy; the optimizer computes sync lag from it against the consensus baseline.
+	// Block is the endpoint's most recently observed block; 0 means unknown. Aggregation ignores
+	// unknown blocks; the optimizer computes sync lag from the provider's freshest known block.
 	Block uint64
 }
 
 // ProviderSample is the SINGLE QoS sample a provider emits per probe cycle (rule E2 — one sample
-// per provider per cycle, so a provider with more endpoints does not get extra EWMA weight). The
-// prober feeds exactly one of these to the optimizer per provider.
+// per provider per cycle, so a provider with more endpoints does not get extra EWMA weight). Each
+// quality dimension carries a "has" flag so the prober can feed availability while OMITTING a
+// dimension no endpoint could measure this cycle (latency-unknown, or no block yet).
 type ProviderSample struct {
 	// Availability is the fraction of the provider's endpoints that were healthy this cycle, in
-	// [0,1] (rule: fraction-healthy, not best-endpoint — so partial degradation decays the score
-	// rather than reading "fully available" while 4 of 5 endpoints are dead).
+	// [0,1] (fraction-healthy, not best-endpoint — so partial degradation decays the score rather
+	// than reading "fully available" while 4 of 5 endpoints are dead). Always fed.
 	Availability float64
-	// Healthy is true when at least one endpoint was healthy, i.e. Latency and Block carry a real
-	// sample. When false the provider delivered nothing this cycle: only the (zero) Availability is
-	// fed, no latency/sync.
-	Healthy bool
-	// Latency is the MIN latency across the provider's healthy endpoints — what the provider can
-	// deliver via its best endpoint. Meaningful only when Healthy.
-	Latency time.Duration
-	// Block is the MAX observed block across the provider's healthy endpoints — the freshest the
-	// provider can serve. Meaningful only when Healthy; the optimizer derives sync lag from it.
-	Block uint64
+	// HasLatency is true when at least one healthy endpoint reported a real (non-zero) latency;
+	// Latency is then the MIN across those — what the provider delivers via its best endpoint.
+	HasLatency bool
+	Latency    time.Duration
+	// HasBlock is true when at least one healthy endpoint reported a block; Block is then the MAX
+	// across those — the provider's freshest observed block, from which the optimizer derives sync.
+	HasBlock bool
+	Block    uint64
 }
 
 // AggregateProviderSample collapses one provider's per-endpoint verdicts into its single
@@ -55,11 +57,11 @@ type ProviderSample struct {
 // has nothing to sample this cycle — emit nothing rather than a spurious zero).
 //
 // Collapse rules:
-//   - Availability = healthy / total (fraction-healthy).
-//   - Latency      = min over healthy endpoints (the provider's best deliverable latency).
-//   - Block        = max over healthy endpoints (the provider's freshest observed block).
-//
-// When no endpoint is healthy, Availability is 0 and Healthy is false (no latency/sync sample).
+//   - Availability = healthy / total (fraction-healthy);
+//   - Latency = min over healthy endpoints that have a KNOWN (non-zero) latency (HasLatency=false
+//     when none do — the latency dimension is then omitted, not fed as 0);
+//   - Block = max over healthy endpoints that have a KNOWN (non-zero) block (HasBlock=false when
+//     none do).
 func AggregateProviderSample(verdicts []EndpointVerdict) (ProviderSample, bool) {
 	total := len(verdicts)
 	if total == 0 {
@@ -70,27 +72,27 @@ func AggregateProviderSample(verdicts []EndpointVerdict) (ProviderSample, bool) 
 	var minLatency time.Duration
 	var maxBlock uint64
 	haveLatency := false
+	haveBlock := false
 	for _, v := range verdicts {
 		if !v.Healthy {
 			continue
 		}
 		healthy++
-		if !haveLatency || v.Latency < minLatency {
+		if v.Latency > 0 && (!haveLatency || v.Latency < minLatency) {
 			minLatency = v.Latency
 			haveLatency = true
 		}
-		if v.Block > maxBlock {
+		if v.Block > 0 && v.Block > maxBlock {
 			maxBlock = v.Block
+			haveBlock = true
 		}
 	}
 
-	sample := ProviderSample{
+	return ProviderSample{
 		Availability: float64(healthy) / float64(total),
-		Healthy:      healthy > 0,
-	}
-	if sample.Healthy {
-		sample.Latency = minLatency
-		sample.Block = maxBlock
-	}
-	return sample, true
+		HasLatency:   haveLatency,
+		Latency:      minLatency,
+		HasBlock:     haveBlock,
+		Block:        maxBlock,
+	}, true
 }

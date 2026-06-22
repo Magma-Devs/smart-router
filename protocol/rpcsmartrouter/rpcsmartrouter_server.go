@@ -22,6 +22,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/performance"
+	"github.com/magma-Devs/smart-router/protocol/probing"
+	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
@@ -223,6 +225,12 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// OnTipObservation). The snapshot is taken under the monitor lock and released before
 	// Recompute touches the ChainState lock — the two locks never nest.
 	go rpcss.runChainStateConsensusLoop(ctx, averageBlockTime)
+
+	// Proactive health prober (MAG-2160 / Topic D): on its own cadence, score EVERY direct-RPC
+	// endpoint from stored telemetry + the consensus baseline (zero upstream calls), proactively
+	// re-enable recovered endpoints, and feed one QoS sample per provider. Replaces the synthetic
+	// direct-RPC probe (the legacy AppendProbeRelayData feed is gated off for static providers).
+	go rpcss.runProbeLoop(ctx, defaultProbeCadence, probing.DefaultVerdictConfig(averageBlockTime))
 
 	// NewChainListener now accepts WSSubscriptionManager interface, which is implemented
 	// by both ConsumerWSSubscriptionManager (provider-relay mode) and
@@ -1784,6 +1792,103 @@ func (rpcss *RPCSmartRouterServer) recomputeChainStateConsensus() {
 		obs = append(obs, chainstate.BlockObservation{URL: url, Block: o.LatestBlock, ObservedAt: o.ObservedAt})
 	}
 	rpcss.chainState.Recompute(obs)
+}
+
+// probeQoSAppender is the narrow optimizer capability the prober uses to feed QoS (Topic E's
+// AppendProbeData). The concrete *provideroptimizer.ProviderOptimizer satisfies it; an inline
+// assertion keeps the lavasession optimizer interface unchanged.
+type probeQoSAppender interface {
+	AppendProbeData(provider string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool)
+}
+
+// Compile-time guard: the concrete optimizer must satisfy probeQoSAppender. Without this, the
+// inline type assertion in runProbeLoop would silently degrade to a nil appender (re-enable-only,
+// no QoS feed) if AppendProbeData's signature ever drifts — a regression no test would catch.
+var _ probeQoSAppender = (*provideroptimizer.ProviderOptimizer)(nil)
+
+// defaultProbeCadence is the prober's own polling period — distinct from the legacy synthetic
+// probe's PeriodicProbeProvidersInterval. It floors runProbeLoop's cadence so time.NewTicker can
+// never be handed a non-positive duration (which panics).
+const defaultProbeCadence = 5 * time.Second
+
+// runProbeLoop is the Topic D proactive health prober (MAG-2161). On its own cadence it reads stored
+// per-endpoint telemetry (Topic A) + the consensus baseline (Topic C) — making NO upstream call —
+// renders a health verdict for EVERY direct-RPC endpoint (regular AND backup), proactively
+// re-enables recovered endpoints (the O1 win), and feeds ONE aggregated QoS sample per provider
+// (Topic E contract). It is read-only toward the data plane: it never writes block/consensus state.
+func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence time.Duration, cfg probing.VerdictConfig) {
+	if rpcss.sessionManager == nil || rpcss.endpointChainTrackerManager == nil {
+		return
+	}
+	if cadence <= 0 {
+		cadence = defaultProbeCadence
+	}
+	// The optimizer's AppendProbeData is optional (inline assertion) so the loop degrades to
+	// re-enable-only if a future optimizer lacks it, rather than failing to start.
+	appender, _ := rpcss.sessionManager.GetProviderOptimizer().(probeQoSAppender)
+
+	ticker := time.NewTicker(cadence)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rpcss.runProbeCycle(appender, cfg)
+		}
+	}
+}
+
+// runProbeCycle pulls this server's live dependencies and runs one probe cycle.
+func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg probing.VerdictConfig) {
+	var baseline int64
+	var hasBaseline bool
+	if rpcss.chainState != nil {
+		baseline, hasBaseline = rpcss.chainState.GetConsensusBaseline()
+	}
+	runProbeCycleCore(
+		rpcss.sessionManager.GetAllDirectRPCEndpoints(),
+		rpcss.endpointChainTrackerManager.GetObservation,
+		baseline, hasBaseline, time.Now(), cfg, appender,
+	)
+}
+
+// runProbeCycleCore is the pure probe-cycle body (no rpcss fields), so it is testable with
+// constructed endpoints + a fake observation getter + a fake appender. For every endpoint it renders
+// a verdict, applies the proactive re-enable, then feeds ONE aggregated QoS sample per provider
+// (rule E2). A nil appender still performs the re-enable (QoS feed simply skipped).
+func runProbeCycleCore(
+	endpoints []*lavasession.EndpointWithDirectConnection,
+	getObservation func(url string) (endpointstate.EndpointObservation, bool),
+	baseline int64,
+	hasBaseline bool,
+	now time.Time,
+	cfg probing.VerdictConfig,
+	appender probeQoSAppender,
+) {
+	// One verdict per endpoint (regular + backup), grouped by provider for the single-sample rule.
+	verdictsByProvider := make(map[string][]probing.EndpointVerdict)
+	for _, ep := range endpoints {
+		if ep == nil || ep.Endpoint == nil {
+			continue
+		}
+		obs, _ := getObservation(ep.Endpoint.NetworkAddress)
+		verdict := probing.RenderEndpointVerdict(obs, baseline, hasBaseline, now, cfg)
+		// Proactive re-enable (no-op on enabled endpoints; never disturbs the relay refusal climb).
+		ep.Endpoint.RecordProbeVerdict(verdict.Healthy, cfg.ReEnableHysteresis)
+		verdictsByProvider[ep.ProviderAddress] = append(verdictsByProvider[ep.ProviderAddress], verdict)
+	}
+
+	if appender == nil {
+		return // re-enable still happened above; QoS feed unavailable
+	}
+	for provider, verdicts := range verdictsByProvider {
+		sample, ok := probing.AggregateProviderSample(verdicts)
+		if !ok {
+			continue
+		}
+		appender.AppendProbeData(provider, sample.Availability, sample.Latency, sample.HasLatency, sample.Block, sample.HasBlock)
+	}
 }
 
 // harvestAndUpdateTipFromRelay applies a served relay's block to TIP state — but only when the

@@ -67,20 +67,20 @@ func TestAppendProbeData_TracksBlockAndFeedsDimensions(t *testing.T) {
 	const addr = "provider1"
 
 	// Unhealthy probe (provider fully down this cycle): availability decays, no sync block.
-	po.AppendProbeData(addr, 0, 0, 0, false)
+	po.AppendProbeData(addr, 0, 0, false, 0, false)
 	time.Sleep(5 * time.Millisecond) // ristretto Set is async — let it admit the entry
 	data, found := po.getProviderData(addr)
 	require.True(t, found, "an unhealthy probe still records a provider entry (availability decay)")
 	require.Equal(t, uint64(0), data.SyncBlock, "an unhealthy probe feeds no sync block")
 
 	// Healthy probe with a block: sync block advances.
-	po.AppendProbeData(addr, 1.0, 20*time.Millisecond, 1500, true)
+	po.AppendProbeData(addr, 1.0, 20*time.Millisecond, true, 1500, true)
 	time.Sleep(5 * time.Millisecond)
 	data, _ = po.getProviderData(addr)
 	require.Equal(t, uint64(1500), data.SyncBlock)
 
 	// A lower block must not regress the provider's tracked sync block (monotonic).
-	po.AppendProbeData(addr, 1.0, 20*time.Millisecond, 1400, true)
+	po.AppendProbeData(addr, 1.0, 20*time.Millisecond, true, 1400, true)
 	time.Sleep(5 * time.Millisecond)
 	data, _ = po.getProviderData(addr)
 	require.Equal(t, uint64(1500), data.SyncBlock, "provider sync block is monotonic")
@@ -93,8 +93,8 @@ func TestAppendProbeData_FractionalAvailabilityDecaysScore(t *testing.T) {
 
 	// Feed many samples so the EWMA settles near the fed value for each provider.
 	for i := 0; i < 20; i++ {
-		po.AppendProbeData("healthy", 1.0, 10*time.Millisecond, 1000, true)
-		po.AppendProbeData("degraded", 0.5, 10*time.Millisecond, 1000, true)
+		po.AppendProbeData("healthy", 1.0, 10*time.Millisecond, true, 1000, true)
+		po.AppendProbeData("degraded", 0.5, 10*time.Millisecond, true, 1000, true)
 	}
 	time.Sleep(5 * time.Millisecond) // ristretto Set is async
 
@@ -117,9 +117,9 @@ func TestAppendProbeData_FractionalAvailabilityDecaysScore(t *testing.T) {
 func TestRelayVsProbeWeighting_RelayMovesAvailabilityMore(t *testing.T) {
 	po := setupProviderOptimizer(1)
 
-	po.AppendRelayFailure("relay")              // weight 1, availability 0
-	po.AppendProbeData("probe", 0, 0, 0, false) // weight 0.25, availability 0
-	time.Sleep(5 * time.Millisecond)            // ristretto Set is async
+	po.AppendRelayFailure("relay")                     // weight 1, availability 0
+	po.AppendProbeData("probe", 0, 0, false, 0, false) // weight 0.25, availability 0
+	time.Sleep(5 * time.Millisecond)                   // ristretto Set is async
 
 	relay, ok := po.getProviderData("relay")
 	require.True(t, ok)

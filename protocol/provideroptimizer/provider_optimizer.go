@@ -376,15 +376,17 @@ func (po *ProviderOptimizer) AppendProbeRelayData(providerAddress string, latenc
 //   - availability is a FRACTION in [0,1] (the share of the provider's endpoints healthy this cycle,
 //     per the fraction-healthy aggregation rule) and is ALWAYS fed, including 0 when the provider is
 //     fully down — so partial degradation decays the score;
-//   - when healthy (>=1 endpoint up), latency and sync are also fed. Sync lag uses the SAME reference
+//   - latency is fed only when hasLatency; sync only when hasSync. Sync lag uses the SAME reference
 //     as relays (syncReference → consensus baseline when fresh), so probe and relay measure lag
-//     identically (rule E5). syncBlock is the provider's freshest observed block (max over healthy
-//     endpoints).
+//     identically (rule E5). syncBlock is the provider's freshest observed block.
 //
 // Samples use ProbeUpdateWeight, 4x lighter than relays (RelayUpdateWeight), so high traffic adapts
 // fast while probes keep idle providers scored. One call per provider per cycle (rule E2) — the
 // caller (the prober) aggregates per-endpoint verdicts before calling.
-func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availability float64, latency time.Duration, syncBlock uint64, healthy bool) {
+// Each quality dimension is gated by its own "has" flag so a dimension no endpoint could measure
+// this cycle (latency-unknown on a relay-fed endpoint; no block yet) is OMITTED, not fed as a 0 —
+// a fake 0 would falsely improve the score and clobber a busy endpoint's real relay-fed latency.
+func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool) {
 	providerData, _ := po.getProviderData(providerAddress)
 	sampleTime := po.now()
 	halfTime := po.calculateHalfTime(providerAddress, sampleTime)
@@ -394,11 +396,13 @@ func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availabilit
 	if updateErr != nil {
 		return
 	}
-	if healthy {
+	if hasLatency {
 		providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.LatencyScoreType, latency.Seconds(), weight, halfTime, 0, sampleTime)
 		if updateErr != nil {
 			return
 		}
+	}
+	if hasSync {
 		if syncBlock > providerData.SyncBlock {
 			// do not allow providers to go back
 			providerData.SyncBlock = syncBlock
@@ -416,8 +420,9 @@ func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availabilit
 		utils.LogAttr("providerAddress", providerAddress),
 		utils.LogAttr("availability", availability),
 		utils.LogAttr("latency", latency),
+		utils.LogAttr("hasLatency", hasLatency),
 		utils.LogAttr("syncBlock", syncBlock),
-		utils.LogAttr("healthy", healthy),
+		utils.LogAttr("hasSync", hasSync),
 	)
 }
 
