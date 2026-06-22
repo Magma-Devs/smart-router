@@ -478,7 +478,7 @@ fi
 echo ""
 echo "[C] cross_validation_requests_total{method=\"$CV_METHOD\"} must be >= 1"
 metric_line=$(curl -sS "http://127.0.0.1:$METRICS_PORT/metrics" 2>/dev/null \
-	| grep '^lava_rpcsmartrouter_cross_validation_requests_total' | grep "method=\"$CV_METHOD\"")
+	| grep '^smartrouter_cross_validation_requests_total' | grep "method=\"$CV_METHOD\"")
 metric_val=$(echo "$metric_line" | awk '{print $NF}' | head -n1)
 echo "      ${metric_line:-<metric not found>}"
 if [[ "$metric_val" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($metric_val >= 1)}"; then
@@ -548,7 +548,7 @@ else
 	fail "per-group quorum spans only ${pg_ngroups:-0} group(s) — expected >= $PG_MIN_GROUPS"
 fi
 pg_metric=$(curl -sS "http://127.0.0.1:$METRICS_PORT/metrics" 2>/dev/null \
-	| grep '^lava_rpcsmartrouter_cross_validation_requests_total' | grep "method=\"$PG_METHOD\"" | awk '{print $NF}' | head -n1)
+	| grep '^smartrouter_cross_validation_requests_total' | grep "method=\"$PG_METHOD\"" | awk '{print $NF}' | head -n1)
 if [[ "$pg_metric" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($pg_metric >= 1)}"; then
 	pass "requests_total counted the per-group '$PG_METHOD' request ($pg_metric)"
 else

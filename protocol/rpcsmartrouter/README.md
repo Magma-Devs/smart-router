@@ -226,7 +226,7 @@ An outlier provider is **not penalized, blocked, or deprioritized** by cross-val
 scoring is separate). It is recorded for observability only, and *only* when a quorum was
 actually reached on a deterministic method:
 
-- `lava_rpcsmartrouter_cross_validation_mismatch_total{spec, apiInterface, method, group, finality}`
+- `smartrouter_cross_validation_mismatch_total{spec, apiInterface, method, group, finality}`
   is incremented **once per distinct outlier group** for a successful deterministic quorum — not
   once per provider. (Non-deterministic methods legitimately differ and are not counted; a quorum
   *failure* emits a `lava-cross-validation-failure-reason` instead, never this metric.) The
@@ -267,7 +267,7 @@ inlinable no-op call and nothing else.
 ```bash
 --usage-otel-enabled                       # master switch (both event types); off by default
 --usage-otel-endpoint "127.0.0.1:4318"     # OTLP/HTTP collector endpoint
---usage-otel-service-name "lava-rpcsmartrouter"
+--usage-otel-service-name "smartrouter"
 --usage-otel-service-instance-id "$HOSTNAME-eth"  # default: hostname-pid
 ```
 

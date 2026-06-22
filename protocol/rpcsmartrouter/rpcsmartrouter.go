@@ -268,7 +268,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	usageSink := newUsageSinkFromOptions(options)
 	rpsr.usageSink = usageSink
 
-	// Always collect optimizer QoS reports so the lava_rpc_optimizer_selection_score
+	// Always collect optimizer QoS reports so the rpc_optimizer_selection_score
 	// metric is exposed on /metrics regardless of OTel. Each sampling tick also
 	// fires the reports at usageSink (Noop when OTel is off).
 	smartRouterOptimizerQoSClient := metrics.NewConsumerOptimizerQoSClient(smartRouterIdentifier, usageSink)
@@ -2115,7 +2115,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Int(metrics.UsageOTelBatchSizeFlagName, 1000, "usage event batch-size flush trigger")
 	cmdRPCSmartRouter.Flags().Duration(metrics.UsageOTelFlushIntervalFlagName, 500*time.Millisecond, "usage event time-based flush trigger")
 	cmdRPCSmartRouter.Flags().Duration(metrics.UsageOTelExportTimeoutFlagName, 10*time.Second, "OTLP per-batch export timeout")
-	cmdRPCSmartRouter.Flags().String(metrics.UsageOTelServiceNameFlagName, "lava-rpcsmartrouter", "OTel service.name resource attribute")
+	cmdRPCSmartRouter.Flags().String(metrics.UsageOTelServiceNameFlagName, "smartrouter", "OTel service.name resource attribute")
 	cmdRPCSmartRouter.Flags().String(metrics.UsageOTelInstanceIDFlagName, "", "OTel service.instance.id (default: hostname-pid); useful when running multiple processes per host")
 	cmdRPCSmartRouter.Flags().Bool(DebugRelaysFlagName, false, "adding debug information to relays")
 	cmdRPCSmartRouter.Flags().Bool(common.EnableSelectionStatsHeaderFlag, false, "enable selection stats header for debugging provider selection")
@@ -2208,7 +2208,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// Resolve the per-chain metrics manager once so endpoint health resets below
 		// can also reset the corresponding Prometheus gauge. Without this, #2256's
 		// endpoint.ResetHealth() fixes the in-memory struct but the
-		// lava_rpc_endpoint_overall_health gauge stays stuck at 0 (unhealthy) forever,
+		// rpc_endpoint_overall_health gauge stays stuck at 0 (unhealthy) forever,
 		// since the only path back to 1 is a successful relay that calls
 		// SetEndpointOverallHealth(..., true) — which a backup may never receive.
 		var epochMetrics *metrics.SmartRouterMetricsManager
