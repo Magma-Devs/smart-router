@@ -179,3 +179,32 @@ func (m *EndpointMonitor) GetObservation(endpointURL string) (EndpointObservatio
 	o, ok := m.observations[endpointURL]
 	return o, ok
 }
+
+// freshRelayTip reports the relay-harvested tip for an endpoint when it is fresh enough to
+// suppress a dedicated poll (MAG-2159 Topic B / Pass 2 traffic gate). It returns
+// (block, true) only when the latest observation is RELAY-sourced and younger than
+// relayGateFreshness.
+//
+// The Source == Relay requirement is the gate's load-bearing invariant: a poll-sourced
+// (or unknown) observation must NEVER suppress the next poll, or a single successful poll
+// would throttle every subsequent poll until the window lapses — the tracker would
+// self-throttle instead of being relay-driven. Only served traffic earns a skipped poll.
+//
+// Note (Pass 2 deferral): suppression here is unbounded — a continuously busy endpoint may
+// never run an independent poll, so its poll-health fields (LastSuccessfulPoll,
+// ConsecutivePollFailures) freeze. That is safe today because no decision-plane consumer
+// reads poll-health (GetObservation has no production reader other than this gate); the
+// relay observation's own freshness is the liveness signal. A busy-endpoint poll ceiling
+// (force a real poll every N intervals, to independently catch a cached/lying upstream)
+// is the unstated half of the ticket's idle-endpoint-minimum item and lands with the
+// probing layer (Topic D), when a live poll-health consumer first exists.
+func (m *EndpointMonitor) freshRelayTip(endpointURL string, now time.Time) (int64, bool) {
+	o, ok := m.GetObservation(endpointURL)
+	if !ok || o.Source != ObservationSourceRelay || o.LatestBlock <= 0 {
+		return 0, false
+	}
+	if now.Sub(o.ObservedAt) > m.relayGateFreshness {
+		return 0, false // tip too stale: fall through to a real poll (the liveness floor)
+	}
+	return o.LatestBlock, true
+}

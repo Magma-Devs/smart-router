@@ -87,6 +87,15 @@ type EndpointMonitor struct {
 	retryMinDelay    time.Duration
 	retryMaxDelay    time.Duration
 
+	// relayGateFreshness is the maximum age of a relay-harvested tip that still suppresses
+	// a dedicated poll (MAG-2159 Topic B / Pass 2 — the "gate freshness threshold"). A
+	// relay observation younger than this means served traffic kept the tip at most ~one
+	// block stale, so this tick's dedicated poll is redundant and is borrowed instead of
+	// sent upstream (see freshRelayTip / EndpointPoller.relayGate). Defaults to
+	// averageBlockTime: ~1 block of staleness, conveniently 2x the flat poll interval
+	// (avgBlockTime/2), enough margin to suppress consecutive ticks without flapping.
+	relayGateFreshness time.Duration
+
 	// Callbacks for events (optional)
 	onFork        func(endpointURL string, blockNum int64)
 	onNewBlock    func(endpointURL string, fromBlock, toBlock int64)
@@ -158,12 +167,14 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		blocksToSave:      blocksToSave,
 		retryMinDelay:     defaultTrackerStartRetryMin,
 		retryMaxDelay:     defaultTrackerStartRetryMax,
-		onFork:            config.OnFork,
-		onNewBlock:        config.OnNewBlock,
-		onConsistency:     config.OnConsistency,
-		onFetchError:      config.OnFetchError,
-		ctx:               ctxWithCancel,
-		cancel:            cancel,
+		// One block of tip staleness suppresses a redundant poll (see field doc).
+		relayGateFreshness: avgBlockTime,
+		onFork:             config.OnFork,
+		onNewBlock:         config.OnNewBlock,
+		onConsistency:      config.OnConsistency,
+		onFetchError:       config.OnFetchError,
+		ctx:                ctxWithCancel,
+		cancel:             cancel,
 	}
 
 	return manager
@@ -221,6 +232,14 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	// (SVMChainTracker.FetchLatestBlockNum via the PollObserver hook) funnel through here.
 	fetcher.onPollObservation = func(block int64, latency time.Duration, pollErr error, at time.Time) {
 		m.recordPollObservation(endpointURL, gen, block, latency, pollErr, at)
+	}
+
+	// Traffic gate (Topic B / Pass 2): let this endpoint's dedicated poll borrow a fresh
+	// relay-harvested tip instead of calling upstream. The poll stays the liveness floor —
+	// the gate fires only when a recent RELAY observation covers the endpoint, so an idle
+	// endpoint (no fresh relays) always polls.
+	fetcher.relayGate = func(now time.Time) (int64, bool) {
+		return m.freshRelayTip(endpointURL, now)
 	}
 
 	// Configure the ChainTracker
