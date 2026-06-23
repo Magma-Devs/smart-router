@@ -5,6 +5,7 @@ import (
 	"fmt"
 	stdmath "math"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +41,65 @@ func (pg *providersGenerator) setupProvidersForTest(count int) *providersGenerat
 		pg.providersAddresses[i] = "lava@test_" + strconv.Itoa(i)
 	}
 	return pg
+}
+
+// readSyncFloor reads the authoritative monotonic SyncBlock floor for a provider — the source of
+// truth for the "never decreases" invariant, immune to ristretto's async Set settling (white-box).
+func (po *ProviderOptimizer) readSyncFloor(provider string) uint64 {
+	stripe := po.providerStripe(provider)
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+	return stripe.floor[provider]
+}
+
+// TestProviderOptimizer_SyncBlockNeverDecreasesUnderConcurrency is the Finding 5 regression: a
+// relay carrying block 200 and a probe carrying block 150 (plus the legacy availability-only
+// AppendProbeRelayData) race on ONE provider. Without serialized RMW + an authoritative floor, the
+// probe's stale-cache read could write 150 back AFTER the relay wrote 200, silently regressing the
+// block. The floor must guarantee SyncBlock settles at 200 and is NEVER observed below it. Run with
+// -race -count to actually hit the interleaving.
+func TestProviderOptimizer_SyncBlockNeverDecreasesUnderConcurrency(t *testing.T) {
+	po := setupProviderOptimizer(1)
+	const provider = "lava@sync_race"
+	freshRef := func(block uint64) SyncReference {
+		return SyncReference{ConsensusConfigured: true, Block: block, Time: po.now(), Fresh: true}
+	}
+
+	const rounds = 300
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// Relay writer: the high block (200).
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			po.AppendRelayDataConsensus(provider, TEST_BASE_WORLD_LATENCY, 10, 200, freshRef(200))
+			// Immediately after this writer floored to 200 under the stripe lock, no concurrent
+			// probe (150) or legacy write can pull it back below 200 — assert that mid-race.
+			require.GreaterOrEqual(t, po.readSyncFloor(provider), uint64(200),
+				"once a relay floored SyncBlock to 200, a concurrent writer must not regress it")
+		}
+	}()
+	// Probe writer: the LOW block (150) — the would-be clobberer.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			po.AppendProbeData(provider, 1, TEST_BASE_WORLD_LATENCY, true, 150, true, freshRef(150))
+		}
+	}()
+	// Legacy availability-only writer: reads + writes back the whole providerData, incl. SyncBlock.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			po.AppendProbeRelayData(provider, TEST_BASE_WORLD_LATENCY, true)
+		}
+	}()
+	wg.Wait()
+
+	// After the race, the authoritative floor is exactly the highest block any writer carried (200),
+	// never the probe's 150 nor a legacy-clobbered 0.
+	require.Equal(t, uint64(200), po.readSyncFloor(provider),
+		"SyncBlock floor must settle at the highest observed block, never regress to the probe's 150")
 }
 
 // TestProviderOptimizerProviderDataSetGet tests that the providerData

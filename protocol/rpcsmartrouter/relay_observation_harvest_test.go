@@ -8,6 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -34,7 +35,14 @@ func newHarvestMonitor(t *testing.T) *endpointstate.EndpointMonitor {
 
 func ethTipServer(t *testing.T, chainID string) *RPCSmartRouterServer {
 	t.Helper()
-	return &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"}}
+	// Attach a REAL parser: the tip gate resolves GET_BLOCKNUM / GET_BLOCK_BY_NUM via
+	// chainParser.GetParsingByTag, so a nil parser makes isMethodTagged return false for
+	// everything (every tip would be dropped). The Solana path short-circuits before touching
+	// the parser, but a real SOLANA parser still constructs cleanly so we keep this uniform.
+	return &RPCSmartRouterServer{
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"},
+		chainParser:    newRealChainParserForHarvest(t, chainID),
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -79,26 +87,37 @@ func TestExtractSolanaContextSlot(t *testing.T) {
 func TestTipBlockFromRelay_EVM_OnlyLatestRequestIsTip(t *testing.T) {
 	rpcss := ethTipServer(t, "ETH1")
 
-	// Valid tip: the request asked for the latest block.
-	cm := &mockChainMessage{requestedBlock: spectypes.LATEST_BLOCK}
+	// Valid tip #1: eth_blockNumber — the GET_BLOCKNUM method whose result IS the node's tip.
+	// (Default api name on mockChainMessage is "eth_blockNumber"; spell it out for clarity.)
+	cm := &mockChainMessage{api: &spectypes.Api{Name: "eth_blockNumber"}, requestedBlock: spectypes.LATEST_BLOCK}
 	block, ok := rpcss.tipBlockFromRelay(cm, &pairingtypes.RelayReply{LatestBlock: 20_000_000})
-	require.True(t, ok, "a latest-block request yields a current-tip observation")
+	require.True(t, ok, "eth_blockNumber (GET_BLOCKNUM) yields a current-tip observation")
 	require.Equal(t, int64(20_000_000), block)
 
-	// Historical responses: a block is present but it is NOT the tip. Each is represented
-	// by its RequestedBlock (never LATEST_BLOCK).
+	// Valid tip #2: eth_getBlockByNumber(latest) — the GET_BLOCK_BY_NUM method, requesting LATEST.
+	// This is the only mock case that exercises the GET_BLOCK_BY_NUM+LATEST branch of the gate.
+	cm = &mockChainMessage{api: &spectypes.Api{Name: "eth_getBlockByNumber"}, requestedBlock: spectypes.LATEST_BLOCK}
+	block, ok = rpcss.tipBlockFromRelay(cm, &pairingtypes.RelayReply{LatestBlock: 20_000_001})
+	require.True(t, ok, "eth_getBlockByNumber(latest) yields a current-tip observation")
+	require.Equal(t, int64(20_000_001), block)
+
+	// Historical responses: a block is present in Reply.LatestBlock but it is NOT the tip.
+	// Each carries an explicit api name so the gate's method discriminator is exercised — the
+	// NOT_APPLICABLE cases REQUIRE this, since the default "eth_blockNumber" name would otherwise
+	// match GET_BLOCKNUM and wrongly report a tip regardless of RequestedBlock.
 	for _, tc := range []struct {
 		name           string
+		apiName        string
 		requestedBlock int64
 		replyBlock     int64
 	}{
-		{"eth_getBlockByNumber(N)", 17_500_000, 17_500_000},
-		{"eth_getBlockByHash", spectypes.NOT_APPLICABLE, 17_500_000},
-		{"eth_getTransactionReceipt", spectypes.NOT_APPLICABLE, 16_000_000},
-		{"eth_getLogs (historical)", 15_000_000, 15_000_500},
+		{"eth_getBlockByNumber(N)", "eth_getBlockByNumber", 17_500_000, 17_500_000},
+		{"eth_getBlockByHash", "eth_getBlockByHash", spectypes.NOT_APPLICABLE, 17_500_000},
+		{"eth_getTransactionReceipt", "eth_getTransactionReceipt", spectypes.NOT_APPLICABLE, 16_000_000},
+		{"eth_getLogs (historical)", "eth_getLogs", 15_000_000, 15_000_500},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cm := &mockChainMessage{requestedBlock: tc.requestedBlock}
+			cm := &mockChainMessage{api: &spectypes.Api{Name: tc.apiName}, requestedBlock: tc.requestedBlock}
 			_, ok := rpcss.tipBlockFromRelay(cm, &pairingtypes.RelayReply{LatestBlock: tc.replyBlock})
 			require.False(t, ok, "a historical response must not produce a tip observation")
 		})
@@ -241,6 +260,10 @@ func TestTipBlockFromRelay_RealParser_EVMEligibility(t *testing.T) {
 		requested, _ := cm.RequestedBlock()
 		require.Equal(t, spectypes.LATEST_BLOCK, requested,
 			"eth_blockNumber must parse to LATEST_BLOCK or the harvest gate drops the canonical tip relay")
+		// eth_blockNumber has no block param, so it DEFAULTS to LATEST — same as a receipt. It is
+		// tip-eligible via the GET_BLOCKNUM spec tag, not via the explicit-latest rule. (We do NOT
+		// assert GetUsedDefaultValue here: it is non-deterministic for eth_blockNumber across runs,
+		// which is exactly why eligibility is gated on the spec tag rather than on that flag.)
 		block, ok := rpcss.tipBlockFromRelay(cm, &pairingtypes.RelayReply{LatestBlock: 20_000_000})
 		require.True(t, ok)
 		require.Equal(t, int64(20_000_000), block)
@@ -261,6 +284,26 @@ func TestTipBlockFromRelay_RealParser_EVMEligibility(t *testing.T) {
 			"a concrete block number must not parse to LATEST_BLOCK")
 		_, ok := rpcss.tipBlockFromRelay(cm, &pairingtypes.RelayReply{LatestBlock: 17_460_400})
 		require.False(t, ok, "a historical eth_getBlockByNumber must not be harvested as a tip")
+	})
+
+	// P1-#2: methods with no parseable block param (receipt / by-hash) fall back to the DEFAULT
+	// parser, which reports LATEST_BLOCK — but Reply.LatestBlock is the HISTORICAL block of the
+	// tx/block. They are neither GET_BLOCKNUM nor GET_BLOCK_BY_NUM, so the tag gate drops them.
+	// (RequestedBlock==LATEST_BLOCK here proves RequestedBlock alone cannot be the discriminator.)
+	t.Run("eth_getTransactionReceipt is historical (defaulted LATEST, not a tip)", func(t *testing.T) {
+		cm := parse(`{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["0x1111111111111111111111111111111111111111111111111111111111111111"]}`)
+		requested, _ := cm.RequestedBlock()
+		require.Equal(t, spectypes.LATEST_BLOCK, requested, "receipt has no block param → parser defaults to LATEST_BLOCK")
+		_, ok := rpcss.tipBlockFromRelay(cm, &pairingtypes.RelayReply{LatestBlock: 17_460_400})
+		require.False(t, ok, "a historical transaction-receipt response must not be harvested as a tip")
+	})
+
+	t.Run("eth_getBlockByHash is historical (defaulted LATEST, not a tip)", func(t *testing.T) {
+		cm := parse(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByHash","params":["0x2222222222222222222222222222222222222222222222222222222222222222",false]}`)
+		requested, _ := cm.RequestedBlock()
+		require.Equal(t, spectypes.LATEST_BLOCK, requested, "by-hash has no block-number param → parser defaults to LATEST_BLOCK")
+		_, ok := rpcss.tipBlockFromRelay(cm, &pairingtypes.RelayReply{LatestBlock: 17_460_400})
+		require.False(t, ok, "a historical block-by-hash response must not be harvested as a tip")
 	})
 }
 
@@ -309,6 +352,9 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
+		// The tip gate resolves GET_BLOCKNUM via the parser; without one every relay (even the
+		// tip-eligible eth_blockNumber below) is rejected and the tip-eligible assertions fail.
+		chainParser: newRealChainParserForHarvest(t, "ETH1"),
 	}
 
 	// A historical response: eth_getBlockByNumber(0x10a7eb0) carries Reply.LatestBlock = that
@@ -378,6 +424,9 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
+		// Needed so the tip gate admits the eth_blockNumber harvest below; the focus here is the
+		// generation gate, but a nil parser would reject the relay before generation is even checked.
+		chainParser: newRealChainParserForHarvest(t, "ETH1"),
 	}
 
 	// Incarnation A: tracker created, generation captured "before dispatch" of relay A.
@@ -414,6 +463,74 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 	require.True(t, obsExists)
 	require.Equal(t, int64(20_000_000), o.LatestBlock)
 	require.Equal(t, endpointstate.ObservationSourceRelay, o.Source)
+}
+
+// ---------------------------------------------------------------------------
+// F4: ensureEndpointChainTracker must register the tracker and allocate its observation
+// generation SYNCHRONOUSLY, so the relay dispatched immediately after captures a real (nonzero)
+// generation — not 0 from a tracker that an async goroutine had not yet created. Before the fix
+// the whole GetOrCreateTracker ran in `go func(){...}`, so endpointObservationGeneration could
+// read 0 and the first relay's harvested tip was recorded against a generation the real tracker
+// would never match (silently dropped). The blocking poll loop stays async, so this does not
+// block dispatch on the network even when the endpoint URL is dead (as here).
+// ---------------------------------------------------------------------------
+
+func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainParser:      newRealChainParserForHarvest(t, "ETH1"),
+		ChainID:          "ETH1",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 200 * time.Millisecond,
+		BlocksToSave:     1,
+	})
+	t.Cleanup(m.Stop)
+
+	// A real connection to a dead URL: ensureEndpointChainTracker requires a non-nil connection,
+	// and GetOrCreateTracker does no network I/O (the poll that would hit this URL is async and
+	// fails gracefully), so registration is synchronous and deterministic.
+	const url = "http://127.0.0.1:0"
+	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = directConn.Close() })
+
+	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		endpointChainTrackerManager: m,
+		chainParser:                 newRealChainParserForHarvest(t, "ETH1"),
+	}
+
+	// SYNCHRONOUS contract: immediately after ensureEndpointChainTracker returns — with NO sleep,
+	// poll, or Eventually — the generation must already exist and be nonzero. This is exactly the
+	// capture order the relay path uses (ensure → endpointObservationGeneration → dispatch).
+	rpcss.ensureEndpointChainTracker(ctx, ep, directConn)
+	gen := rpcss.endpointObservationGeneration(url)
+	require.NotZero(t, gen, "the generation must be allocated synchronously, before the relay captures it")
+
+	// The early relay's captured generation is valid: a tip-eligible harvest with it is recorded.
+	tipMsg := newRealChainParserForHarvest(t, "ETH1")
+	cm, perr := tipMsg.ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, perr)
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 21_000_000}, gen, "lava@provider1")
+	o, ok := m.GetObservation(url)
+	require.True(t, ok)
+	require.Equal(t, int64(21_000_000), o.LatestBlock, "the early relay's tip is recorded under the synchronous generation")
+	require.Equal(t, endpointstate.ObservationSourceRelay, o.Source)
+
+	// Generation safety is preserved: after the tracker is removed, a harvest carrying the old
+	// generation is rejected (a removed URL has no live generation to match).
+	m.RemoveTracker(url)
+	require.Zero(t, rpcss.endpointObservationGeneration(url), "a removed tracker has no live generation")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 22_000_000}, gen, "lava@provider1")
+	if o, exists := m.GetObservation(url); exists {
+		require.NotEqual(t, int64(22_000_000), o.LatestBlock, "a harvest with a removed tracker's generation must be rejected")
+	}
 }
 
 // newRealChainParserForHarvest builds a real ChainParser from the on-disk spec (the

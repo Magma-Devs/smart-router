@@ -1977,10 +1977,17 @@ func (rpcss *RPCSmartRouterServer) endpointObservationGeneration(endpointURL str
 //     i.e. the node's current tip — present on most successful Solana responses
 //     (getBalance, getAccountInfo, getLatestBlockhash, ...). Chain-aware; never applied to
 //     other chains. See extractSolanaContextSlot.
-//   - Otherwise: Reply.LatestBlock is the tip ONLY when the request asked for the latest
-//     block (RequestedBlock == LATEST_BLOCK). For any concrete-block request the reply's
-//     block is historical and must not move the tip. Reply.LatestBlock is populated for
-//     JSON-RPC and gRPC (extractBlockHeightFrom{JSON,GRPC}Response); REST harvests nothing.
+//   - Otherwise (EVM/gRPC): Reply.LatestBlock is the tip ONLY for a method whose semantics make the
+//     reply's block the node's current tip, identified by SPEC TAG (not by RequestedBlock alone):
+//     1. GET_BLOCKNUM (eth_blockNumber-equivalent): the result IS the tip.
+//     2. GET_BLOCK_BY_NUM (eth_getBlockByNumber-equivalent) AND RequestedBlock == LATEST_BLOCK.
+//     Methods with no parseable block param (eth_getTransactionReceipt, eth_getBlockByHash, ...)
+//     fall back to a DEFAULT parser that ALSO reports RequestedBlock == LATEST_BLOCK, while
+//     Reply.LatestBlock is the HISTORICAL block of the tx/block — so RequestedBlock == LATEST_BLOCK
+//     cannot discriminate, and neither can GetUsedDefaultValue() (non-deterministic for
+//     eth_blockNumber across runs). The spec tag is the only reliable discriminator. A concrete
+//     eth_getBlockByNumber(N) requests N (not LATEST) and is historical.
+//     Reply.LatestBlock is populated for JSON-RPC and gRPC; REST harvests nothing.
 //
 // Note: RequestedBlock() is not concretized during the relay flow (the
 // UpdateLatestBlockInMessage call in relaycore/results_manager.go is disabled), so it still
@@ -1992,11 +1999,50 @@ func (rpcss *RPCSmartRouterServer) tipBlockFromRelay(chainMessage chainlib.Chain
 	if common.IsSolanaFamily(rpcss.listenEndpoint.ChainID) {
 		return extractSolanaContextSlot(reply.Data)
 	}
+	if reply.LatestBlock <= 0 {
+		return 0, false
+	}
+	// A response is a CURRENT-TIP observation in exactly two method-defined cases (NOT by RequestedBlock
+	// alone — receipt/by-hash also default to LATEST_BLOCK but carry a HISTORICAL Reply.LatestBlock):
+	//   1. The GET_BLOCKNUM method (eth_blockNumber-equivalent): its result IS the node's tip. (It has
+	//      no block param, so it parses to LATEST via the default — indistinguishable from a receipt by
+	//      RequestedBlock/UsedDefaultValue — and must be matched by its spec tag.)
+	//   2. The GET_BLOCK_BY_NUM method (eth_getBlockByNumber-equivalent) when it requested the LATEST
+	//      block. A concrete eth_getBlockByNumber(N) requests N (not LATEST) and is historical.
+	// Everything else — receipt, by-hash, logs — is neither tagged method and is dropped.
+	// Deliberately does NOT consult GetUsedDefaultValue (which is unreliable for eth_blockNumber).
+	if rpcss.isGetBlockNumMethod(chainMessage) {
+		return reply.LatestBlock, true
+	}
 	requestedLatest, _ := chainMessage.RequestedBlock()
-	if requestedLatest == spectypes.LATEST_BLOCK && reply.LatestBlock > 0 {
+	if requestedLatest == spectypes.LATEST_BLOCK && rpcss.isGetBlockByNumMethod(chainMessage) {
 		return reply.LatestBlock, true
 	}
 	return 0, false
+}
+
+// isMethodTagged reports whether the message's API is the method the spec marks with the given tag.
+func (rpcss *RPCSmartRouterServer) isMethodTagged(chainMessage chainlib.ChainMessage, tag spectypes.FUNCTION_TAG) bool {
+	if rpcss.chainParser == nil {
+		return false
+	}
+	parsing, _, ok := rpcss.chainParser.GetParsingByTag(tag)
+	if !ok || parsing == nil {
+		return false
+	}
+	api := chainMessage.GetApi()
+	return api != nil && api.Name == parsing.ApiName
+}
+
+// isGetBlockNumMethod: the "current block number" call (e.g. eth_blockNumber) — result IS the tip.
+func (rpcss *RPCSmartRouterServer) isGetBlockNumMethod(chainMessage chainlib.ChainMessage) bool {
+	return rpcss.isMethodTagged(chainMessage, spectypes.FUNCTION_TAG_GET_BLOCKNUM)
+}
+
+// isGetBlockByNumMethod: the "get block by number" call (e.g. eth_getBlockByNumber) — a tip only when
+// it requested LATEST.
+func (rpcss *RPCSmartRouterServer) isGetBlockByNumMethod(chainMessage chainlib.ChainMessage) bool {
+	return rpcss.isMethodTagged(chainMessage, spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
 }
 
 func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
@@ -2014,15 +2060,19 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 		return
 	}
 
-	// Create ChainTracker lazily (in a goroutine to avoid blocking relay)
-	go func() {
-		_, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(endpoint, directConnection)
-		if err != nil {
-			utils.LavaFormatWarning("failed to create ChainTracker for endpoint", err,
-				utils.LogAttr("endpoint", endpointURL),
-			)
-		}
-	}()
+	// Create the ChainTracker SYNCHRONOUSLY (Finding 4). GetOrCreateTracker registers the tracker
+	// and allocates its observation generation under the manager lock with NO network I/O — the
+	// blocking poll loop is started internally via `go startTrackerWithRetry`. Running it inline
+	// (not in a goroutine) guarantees the generation EXISTS before this relay's dispatch captures
+	// it via endpointObservationGeneration: an async creation let an early relay capture generation
+	// 0 (no tracker yet), so its harvested tip was recorded against a generation that the real
+	// tracker would never match — silently dropping the first relay's tip. The poll loop stays
+	// async, so dispatch is not blocked on the network.
+	if _, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(endpoint, directConnection); err != nil {
+		utils.LavaFormatWarning("failed to create ChainTracker for endpoint", err,
+			utils.LogAttr("endpoint", endpointURL),
+		)
+	}
 }
 
 // initializeChainTrackers creates ChainTrackers for all direct RPC endpoints on startup.

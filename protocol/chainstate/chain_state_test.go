@@ -399,6 +399,100 @@ func TestRecompute_EmptySnapshotClearsBaseline(t *testing.T) {
 	require.Equal(t, int64(2_000_000), tip)
 }
 
+// --- Recompute: baseline establishment time (Finding 3) ---------------------------------
+
+// TestRecompute_BaselineSincePreservedWhileBlockUnchanged is the Finding 3 regression: the
+// timestamp returned by GetConsensusBaselineWithTime — the origin sync-lag is measured from —
+// must reflect when the baseline BLOCK was established, NOT when it was last reconfirmed. A
+// baseline stuck at N across many Recomputes must accrue real age; resetting it each time made an
+// old baseline look new and silently understated every lagging provider's sync lag.
+func TestRecompute_BaselineSincePreservedWhileBlockUnchanged(t *testing.T) {
+	cs, clk := newTestState(t)
+
+	establishedAt := clk.now()
+	majorityAt := func(block int64) []BlockObservation {
+		return []BlockObservation{
+			{URL: "a", Block: block, ObservedAt: clk.now()},
+			{URL: "b", Block: block, ObservedAt: clk.now()},
+		}
+	}
+
+	// Establish the baseline at 1000.
+	cs.Recompute(majorityAt(1000))
+	block, since, ok := cs.GetConsensusBaselineWithTime()
+	require.True(t, ok)
+	require.Equal(t, int64(1000), block)
+	require.Equal(t, establishedAt, since, "establishment time is when the block first became consensus")
+
+	// Reconfirm the SAME block 5s later: TTL freshness refreshes (baseline stays valid), but the
+	// establishment time must be PRESERVED so age keeps growing.
+	clk.advance(5 * time.Second)
+	cs.Recompute(majorityAt(1000))
+	block, since, ok = cs.GetConsensusBaselineWithTime()
+	require.True(t, ok, "a reconfirmed baseline is still fresh (TTL measured from baselineAt, refreshed)")
+	require.Equal(t, int64(1000), block)
+	require.Equal(t, establishedAt, since, "an unchanged baseline block must PRESERVE its establishment time")
+
+	// Reconfirm again past the original TTL window (5+6 = 11s > 10s TTL): proves freshness is
+	// tracked separately from establishment — the baseline did NOT expire despite establishedAt
+	// now being 11s old, because each Recompute refreshed baselineAt.
+	clk.advance(6 * time.Second)
+	cs.Recompute(majorityAt(1000))
+	block, since, ok = cs.GetConsensusBaselineWithTime()
+	require.True(t, ok, "a continuously reconfirmed baseline never expires, even past TTL-from-establishment")
+	require.Equal(t, establishedAt, since, "establishment time is still preserved across the TTL boundary")
+
+	// A FORWARD advance to a new block resets the establishment clock to now.
+	clk.advance(2 * time.Second)
+	advancedAt := clk.now()
+	cs.Recompute(majorityAt(1002))
+	block, since, ok = cs.GetConsensusBaselineWithTime()
+	require.True(t, ok)
+	require.Equal(t, int64(1002), block)
+	require.Equal(t, advancedAt, since, "a forward baseline advance resets the establishment time")
+
+	// A DOWNWARD reorg/realign to a lower block is ALSO a new baseline → reset.
+	clk.advance(2 * time.Second)
+	reorgAt := clk.now()
+	cs.Recompute(majorityAt(1001))
+	block, since, ok = cs.GetConsensusBaselineWithTime()
+	require.True(t, ok)
+	require.Equal(t, int64(1001), block)
+	require.Equal(t, reorgAt, since, "a downward baseline reorg resets the establishment time")
+}
+
+// TestRecompute_BaselineSinceResetsAfterConsensusGap covers re-establishment: if consensus is
+// lost (sub-majority/empty snapshot) and later regained at the SAME block, the establishment
+// clock restarts — during the gap there was no baseline, so the prior age is not carried over.
+func TestRecompute_BaselineSinceResetsAfterConsensusGap(t *testing.T) {
+	cs, clk := newTestState(t)
+
+	cs.Recompute([]BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: clk.now()},
+		{URL: "b", Block: 1000, ObservedAt: clk.now()},
+	})
+	_, firstSince, ok := cs.GetConsensusBaselineWithTime()
+	require.True(t, ok)
+
+	// Consensus lost (single endpoint → no majority): baseline cleared.
+	clk.advance(3 * time.Second)
+	cs.Recompute([]BlockObservation{{URL: "a", Block: 1000, ObservedAt: clk.now()}})
+	_, _, ok = cs.GetConsensusBaselineWithTime()
+	require.False(t, ok, "a sub-majority snapshot clears the baseline")
+
+	// Regained at the same block later: establishment time is the re-establishment instant.
+	clk.advance(3 * time.Second)
+	reestablishedAt := clk.now()
+	cs.Recompute([]BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: clk.now()},
+		{URL: "b", Block: 1000, ObservedAt: clk.now()},
+	})
+	_, since, ok := cs.GetConsensusBaselineWithTime()
+	require.True(t, ok)
+	require.Equal(t, reestablishedAt, since, "re-establishment after a consensus gap restarts the age clock")
+	require.NotEqual(t, firstSince, since, "the prior establishment time is not carried across the gap")
+}
+
 // --- Config defaults (Finding 8) --------------------------------------------------------
 
 func TestDefaultConfig_DerivesWindowFromBlockTime(t *testing.T) {

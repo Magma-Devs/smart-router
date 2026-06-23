@@ -103,9 +103,18 @@ type ChainState struct {
 	// It distinguishes a genuine cold start (no observation yet → bootstrap fallback is allowed)
 	// from a tip that has merely gone stale by TTL (Finding 1). It never resets to false.
 	initialized bool
-	baseline    int64     // last computed strict-majority consensus baseline (valid iff hasBaseline)
-	hasBaseline bool      // whether a fresh majority existed at the last Recompute
-	baselineAt  time.Time // wall-clock of the last Recompute that set the baseline (for TTL)
+	baseline    int64 // last computed strict-majority consensus baseline (valid iff hasBaseline)
+	hasBaseline bool  // whether a fresh majority existed at the last Recompute
+	// baselineAt is the TTL-freshness timestamp: refreshed on EVERY Recompute that confirms a
+	// majority (even at an unchanged block), exactly like lastObservedAt refreshes the tip. It
+	// answers "is consensus still being actively computed" and gates GetConsensusBaseline's TTL.
+	baselineAt time.Time
+	// baselineSince is the ESTABLISHMENT timestamp: when the current baseline BLOCK first became
+	// the consensus, preserved across confirming Recomputes while the block is unchanged and reset
+	// only when the block changes (forward advance OR downward reorg). It is what sync-lag is
+	// measured from ("how long ago did this become the tip"), so a baseline stuck at N accrues real
+	// first-block lag instead of looking forever-fresh. Distinct from baselineAt (Finding 3).
+	baselineSince time.Time
 }
 
 // New builds a ChainState with the production clock. Zero-valued Config fields fall back to
@@ -190,10 +199,12 @@ func (cs *ChainState) GetConsensusBaseline() (int64, bool) {
 	return block, ok
 }
 
-// GetConsensusBaselineWithTime is GetConsensusBaseline plus the wall-clock at which the baseline
-// was last computed (baselineAt), returned atomically under one lock. The timestamp is needed by
-// consumers that compute a time-based sync lag against the baseline (e.g. the provider optimizer's
-// sync dimension, Topic E) — they measure "how long ago was this the tip" from baselineAt.
+// GetConsensusBaselineWithTime is GetConsensusBaseline plus the wall-clock at which the current
+// baseline BLOCK was ESTABLISHED (baselineSince), returned atomically under one lock. Consumers
+// that compute a time-based sync lag (e.g. the provider optimizer's sync dimension, Topic E)
+// measure "how long ago did this become the tip" from this timestamp — so it must reflect the
+// baseline's true age, not the last Recompute. Freshness (TTL) is still measured from baselineAt,
+// which every confirming Recompute refreshes; the two are deliberately distinct (Finding 3).
 func (cs *ChainState) GetConsensusBaselineWithTime() (block int64, at time.Time, ok bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -203,7 +214,7 @@ func (cs *ChainState) GetConsensusBaselineWithTime() (block int64, at time.Time,
 	if cs.cfg.TTL > 0 && cs.now().Sub(cs.baselineAt) > cs.cfg.TTL {
 		return 0, time.Time{}, false
 	}
-	return cs.baseline, cs.baselineAt, true
+	return cs.baseline, cs.baselineSince, true
 }
 
 // Initialized reports whether ChainState has ever accepted a positive observation. It is sticky
@@ -245,10 +256,21 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	prevBaseline := cs.baseline
+	prevHasBaseline := cs.hasBaseline
 	cs.hasBaseline = ok
 	cs.baseline = baseline
 	if ok {
+		// TTL freshness: every confirming Recompute re-proves consensus is live (mirrors
+		// lastObservedAt for the optimistic tip), so a stable-but-reconfirmed baseline never expires.
 		cs.baselineAt = now
+		// Establishment time: reset ONLY when the baseline block changes — a forward advance, a
+		// downward reorg/realign, or re-establishment after a consensus gap (prevHasBaseline false).
+		// When the block is unchanged we PRESERVE baselineSince so sync-lag reflects the baseline's
+		// true age (Finding 3); resetting it here is the bug that made an old baseline look new.
+		if !prevHasBaseline || prevBaseline != baseline {
+			cs.baselineSince = now
+		}
 		if cs.latestBlock > baseline+cs.cfg.OutlierThreshold {
 			cs.latestBlock = baseline
 			cs.lastObservedAt = now
