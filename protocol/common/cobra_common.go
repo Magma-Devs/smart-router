@@ -105,6 +105,9 @@ const (
 	PeriodicProbeProvidersFlagName         = "enable-periodic-probe-providers"
 	PeriodicProbeProvidersIntervalFlagName = "periodic-probe-providers-interval"
 	ProbeUpdateWeightFlagName              = "probe-update-weight"
+	// ProbeLoopIntervalFlagName is the cadence of the MAG-2161 (Topic D) proactive health prober —
+	// the real telemetry-driven loop, distinct from the legacy synthetic periodic-probe loop above.
+	ProbeLoopIntervalFlagName = "probe-loop-interval"
 
 	// batch request size limit
 	MaxBatchRequestSizeFlag        = "max-batch-request-size"

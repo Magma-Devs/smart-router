@@ -7,6 +7,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/probing"
+	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,10 +24,11 @@ type probeCall struct {
 	hasLatency   bool
 	block        uint64
 	hasSync      bool
+	syncRef      provideroptimizer.SyncReference
 }
 
-func (r *recordingAppender) AppendProbeData(provider string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool) {
-	r.calls = append(r.calls, probeCall{provider, availability, latency, hasLatency, syncBlock, hasSync})
+func (r *recordingAppender) AppendProbeData(provider string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool, syncRef provideroptimizer.SyncReference) {
+	r.calls = append(r.calls, probeCall{provider, availability, latency, hasLatency, syncBlock, hasSync, syncRef})
 }
 
 func ep(url, provider string, enabled bool) *lavasession.EndpointWithDirectConnection {
@@ -40,55 +42,101 @@ func probeCfg() probing.VerdictConfig {
 	return probing.VerdictConfig{StalenessWindow: 10 * time.Second, LagToleranceBlocks: 10, ReEnableHysteresis: 3}
 }
 
-// TestProbeCycle_ReEnablesRecoveredEndpoint is the headline O1 behavior: a disabled endpoint whose
-// telemetry shows it is fresh and keeping up is proactively re-enabled after K probe cycles —
-// recovery in seconds, not at the 15-min epoch.
-func TestProbeCycle_ReEnablesRecoveredEndpoint(t *testing.T) {
-	const url = "http://ep:8545"
-	now := time.Unix(1_700_000_000, 0)
-
-	// The endpoint is DISABLED (relay path backed it off) but its tracker keeps polling, so its
-	// observation is fresh and at the tip.
-	disabled := ep(url, "provider1", false)
-	getObs := func(string) (endpointstate.EndpointObservation, bool) {
-		return endpointstate.EndpointObservation{LatestBlock: 1000, ObservedAt: now.Add(-time.Second), LastPollLatency: 20 * time.Millisecond}, true
+// freshObs is a healthy poll observation: fresh, keeping up, with a successful poll at pollTime.
+func freshObs(block int64, observedAt, pollTime time.Time, latency time.Duration) endpointstate.EndpointObservation {
+	return endpointstate.EndpointObservation{
+		LatestBlock:             block,
+		ObservedAt:              observedAt,
+		LastSuccessfulPoll:      pollTime,
+		LastPollLatency:         latency,
+		ConsecutivePollFailures: 0,
 	}
-	endpoints := []*lavasession.EndpointWithDirectConnection{disabled}
-
-	// K-1 cycles: still disabled (hysteresis not satisfied).
-	for i := uint64(0); i < probeCfg().ReEnableHysteresis-1; i++ {
-		runProbeCycleCore(endpoints, getObs, 1000, true, now, probeCfg(), nil)
-		require.False(t, disabled.Endpoint.Enabled, "must not re-enable before K healthy cycles")
-	}
-	// K-th cycle re-enables.
-	runProbeCycleCore(endpoints, getObs, 1000, true, now, probeCfg(), nil)
-	require.True(t, disabled.Endpoint.Enabled, "the probe re-enables a recovered endpoint after K cycles")
 }
 
-// TestProbeCycle_StaleEndpointStaysDisabled: a disabled endpoint whose telemetry is stale (upstream
-// still down) is never re-enabled.
+// TestProbeCycle_ReEnablesRecoveredEndpoint is the headline O1 + F1 + F2 behavior: a DISABLED endpoint
+// whose telemetry shows DISTINCT successful polls is proactively re-enabled after K cycles, AND the
+// prober restores its provider's routing state (onRecover fires). (The pre-disable / edge-triggered
+// disabledAt cases are pinned in lavasession's endpoint_probe_reenable_test.go, which can drive the
+// disable instant directly; here we prove the prober→endpoint→routing wiring.)
+func TestProbeCycle_ReEnablesRecoveredEndpoint(t *testing.T) {
+	const url = "http://ep:8545"
+	base := time.Unix(1_700_000_000, 0)
+
+	// Endpoint constructed disabled (disabledAt zero); recovery needs DISTINCT advancing polls.
+	dc := ep(url, "provider1", false)
+	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+
+	var recovered []string
+	onRecover := func(p string) { recovered = append(recovered, p) }
+	cycle := func(i int) {
+		pollTime := base.Add(time.Duration(i) * time.Second) // strictly advancing distinct polls
+		now := pollTime.Add(time.Millisecond)
+		getObs := func(string) (endpointstate.EndpointObservation, bool) {
+			return freshObs(1000, now.Add(-time.Second), pollTime, 20*time.Millisecond), true
+		}
+		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, onRecover)
+	}
+
+	// K-1 distinct polls: still disabled, no recovery callback.
+	for i := 1; i < int(probeCfg().ReEnableHysteresis); i++ {
+		cycle(i)
+		require.False(t, dc.Endpoint.Enabled, "must not re-enable before K distinct healthy polls")
+		require.Empty(t, recovered)
+	}
+	// K-th distinct poll re-enables AND restores routing.
+	cycle(int(probeCfg().ReEnableHysteresis))
+	require.True(t, dc.Endpoint.Enabled, "the probe re-enables a recovered endpoint after K distinct polls")
+	require.Equal(t, []string{"provider1"}, recovered, "recovery restores the provider's routing state (F2)")
+}
+
+// TestProbeCycle_FailedPollDoesNotReEnable: a disabled endpoint whose last poll FAILED
+// (ConsecutivePollFailures > 0) is never re-enabled — PollHealthy is false even if a stale relay keeps
+// ObservedAt fresh (F1: recovery is poll-driven, and a trailing failure invalidates it).
+func TestProbeCycle_FailedPollDoesNotReEnable(t *testing.T) {
+	const url = "http://ep:8545"
+	now := time.Unix(1_700_000_000, 0)
+	dc := ep(url, "provider1", false)
+	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	getObs := func(string) (endpointstate.EndpointObservation, bool) {
+		// Fresh block/ObservedAt, but the last poll FAILED.
+		return endpointstate.EndpointObservation{
+			LatestBlock:             1000,
+			ObservedAt:              now.Add(-time.Second),
+			LastSuccessfulPoll:      now.Add(-2 * time.Second),
+			ConsecutivePollFailures: 3,
+		}, true
+	}
+	var recovered []string
+	for i := 0; i < 10; i++ {
+		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, func(p string) { recovered = append(recovered, p) })
+	}
+	require.False(t, dc.Endpoint.Enabled, "a failed last poll must never re-enable")
+	require.Empty(t, recovered)
+}
+
+// TestProbeCycle_StaleEndpointStaysDisabled: a disabled endpoint with stale telemetry (no recent
+// successful poll) is never re-enabled.
 func TestProbeCycle_StaleEndpointStaysDisabled(t *testing.T) {
 	const url = "http://ep:8545"
 	now := time.Unix(1_700_000_000, 0)
-	disabled := ep(url, "provider1", false)
+	dc := ep(url, "provider1", false)
+	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
 	getObs := func(string) (endpointstate.EndpointObservation, bool) {
-		// Last observation is well past the staleness window → not alive.
+		// Last observation well past the staleness window and no fresh poll.
 		return endpointstate.EndpointObservation{LatestBlock: 1000, ObservedAt: now.Add(-60 * time.Second)}, true
 	}
-	endpoints := []*lavasession.EndpointWithDirectConnection{disabled}
 	for i := 0; i < 10; i++ {
-		runProbeCycleCore(endpoints, getObs, 1000, true, now, probeCfg(), nil)
+		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, nil)
 	}
-	require.False(t, disabled.Endpoint.Enabled, "a still-stale endpoint must not be re-enabled")
+	require.False(t, dc.Endpoint.Enabled, "a still-stale endpoint must not be re-enabled")
 }
 
 // TestProbeCycle_OneSamplePerProvider: a provider with multiple endpoints yields exactly ONE
 // AppendProbeData call (rule E2), with fraction-healthy availability.
 func TestProbeCycle_OneSamplePerProvider(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	// provider1 has 3 endpoints: 2 healthy, 1 stale (dead) → availability 2/3.
 	healthy := func(string) (endpointstate.EndpointObservation, bool) {
-		return endpointstate.EndpointObservation{LatestBlock: 1000, ObservedAt: now.Add(-time.Second), LastPollLatency: 20 * time.Millisecond}, true
+		return freshObs(1000, now.Add(-time.Second), now.Add(-time.Second), 20*time.Millisecond), true
 	}
 	obsByURL := map[string]func(string) (endpointstate.EndpointObservation, bool){
 		"http://a:8545": healthy,
@@ -105,13 +153,33 @@ func TestProbeCycle_OneSamplePerProvider(t *testing.T) {
 	}
 
 	rec := &recordingAppender{}
-	runProbeCycleCore(endpoints, getObs, 1000, true, now, probeCfg(), rec)
+	ref := provideroptimizer.SyncReference{ConsensusConfigured: true, Block: 1000, Time: now, Fresh: true}
+	runProbeCycleCore(endpoints, getObs, 1000, true, ref, now, probeCfg(), rec, nil)
 
 	require.Len(t, rec.calls, 1, "exactly one QoS sample per provider per cycle (rule E2)")
 	require.Equal(t, "provider1", rec.calls[0].provider)
 	require.InDelta(t, 2.0/3.0, rec.calls[0].availability, 1e-9, "2 of 3 endpoints healthy")
 	require.True(t, rec.calls[0].hasLatency)
 	require.Equal(t, 20*time.Millisecond, rec.calls[0].latency, "min latency over healthy endpoints")
+	require.True(t, rec.calls[0].hasSync, "a fresh baseline → sync is fed")
+	require.Equal(t, ref, rec.calls[0].syncRef, "the per-interface consensus reference is threaded through")
+}
+
+// TestProbeCycle_NoBaselineOmitsSync: with no consensus baseline this cycle, availability/latency
+// still feed but hasSync is false — the F5 guard wired through the prober.
+func TestProbeCycle_NoBaselineOmitsSync(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	getObs := func(string) (endpointstate.EndpointObservation, bool) {
+		return freshObs(1000, now.Add(-time.Second), now.Add(-time.Second), 10*time.Millisecond), true
+	}
+	endpoints := []*lavasession.EndpointWithDirectConnection{ep("http://a:8545", "provider1", true)}
+	rec := &recordingAppender{}
+	// hasBaseline=false → the prober must not set hasSync.
+	runProbeCycleCore(endpoints, getObs, 0, false, provideroptimizer.SyncReference{ConsensusConfigured: true}, now, probeCfg(), rec, nil)
+
+	require.Len(t, rec.calls, 1)
+	require.Equal(t, 1.0, rec.calls[0].availability)
+	require.False(t, rec.calls[0].hasSync, "no baseline → sync omitted (F5)")
 }
 
 // TestProbeCycle_CoversBackupsAndMultipleProviders: every endpoint across multiple providers
@@ -119,14 +187,14 @@ func TestProbeCycle_OneSamplePerProvider(t *testing.T) {
 func TestProbeCycle_CoversBackupsAndMultipleProviders(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	getObs := func(string) (endpointstate.EndpointObservation, bool) {
-		return endpointstate.EndpointObservation{LatestBlock: 1000, ObservedAt: now.Add(-time.Second), LastPollLatency: 10 * time.Millisecond}, true
+		return freshObs(1000, now.Add(-time.Second), now.Add(-time.Second), 10*time.Millisecond), true
 	}
 	endpoints := []*lavasession.EndpointWithDirectConnection{
 		ep("http://a:8545", "regular-provider", true),
 		ep("http://b:8545", "backup-provider", true), // GetAllDirectRPCEndpoints includes backups
 	}
 	rec := &recordingAppender{}
-	runProbeCycleCore(endpoints, getObs, 1000, true, now, probeCfg(), rec)
+	runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), rec, nil)
 
 	require.Len(t, rec.calls, 2, "both the regular and backup providers get a sample")
 	seen := map[string]bool{}
@@ -146,10 +214,18 @@ func TestProbeCycle_NoObservationIsUnhealthy(t *testing.T) {
 	}
 	endpoints := []*lavasession.EndpointWithDirectConnection{ep("http://a:8545", "provider1", true)}
 	rec := &recordingAppender{}
-	runProbeCycleCore(endpoints, getObs, 0, false, now, probeCfg(), rec)
+	runProbeCycleCore(endpoints, getObs, 0, false, provideroptimizer.SyncReference{}, now, probeCfg(), rec, nil)
 
 	require.Len(t, rec.calls, 1)
 	require.Equal(t, 0.0, rec.calls[0].availability, "an unobserved endpoint scores unhealthy")
 	require.False(t, rec.calls[0].hasLatency, "no telemetry → no latency sample")
 	require.False(t, rec.calls[0].hasSync, "no telemetry → no sync sample")
+}
+
+// TestValidatedProbeCadence pins the F6 validation: a non-positive configured cadence is rejected to
+// the default; a positive value passes through.
+func TestValidatedProbeCadence(t *testing.T) {
+	require.Equal(t, defaultProbeCadence, validatedProbeCadence(0), "zero falls back to default")
+	require.Equal(t, defaultProbeCadence, validatedProbeCadence(-time.Second), "negative falls back to default")
+	require.Equal(t, 7*time.Second, validatedProbeCadence(7*time.Second), "a positive cadence is honored")
 }

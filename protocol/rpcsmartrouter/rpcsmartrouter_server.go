@@ -165,27 +165,21 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// still use the legacy sources until phase 3.
 	rpcss.chainState = chainstate.New(listenEndpoint.ChainID, chainstate.DefaultConfig(averageBlockTime))
 
-	// Topic E (MAG-2160 Finding 2): point the provider optimizer's QoS sync dimension at THIS
-	// chain's consensus baseline, so relay + probe sync lag are measured against the agreed tip
-	// rather than max-block-across-providers (which one fast/lying reporter could inflate, dinging
-	// the whole pod). The getter is read-only toward the data plane and falls back to the legacy
-	// reference whenever there is no fresh majority (cold start / single-endpoint pod). The
-	// optimizer is shared per-chain while ChainState is per-interface, but every interface tracks
-	// the same chain head, so installing this interface's getter is correct regardless of ordering.
+	// Topic E (MAG-2160 Finding 2 / F4): point the relay sync dimension at THIS chain+interface's
+	// consensus baseline, so relay sync lag is measured against the agreed tip rather than
+	// max-block-across-providers (which one fast/lying reporter could inflate, dinging the whole pod).
+	// The getter is installed on the per-interface CSM (NOT the shared per-chain optimizer, whose
+	// single getter slot the last interface to start would overwrite — the F4 bug). It is read-only
+	// toward the data plane (reads ChainState.GetConsensusBaselineWithTime). When there is no fresh
+	// majority the relay omits the sync update rather than falling back to the legacy reference (F5).
 	if rpcss.sessionManager != nil {
-		if opt := rpcss.sessionManager.GetProviderOptimizer(); opt != nil {
-			if setter, ok := opt.(interface {
-				SetSyncReferenceGetter(func() (uint64, time.Time, bool))
-			}); ok {
-				setter.SetSyncReferenceGetter(func() (uint64, time.Time, bool) {
-					block, at, fresh := rpcss.chainState.GetConsensusBaselineWithTime()
-					if !fresh || block <= 0 {
-						return 0, time.Time{}, false
-					}
-					return uint64(block), at, true
-				})
+		rpcss.sessionManager.SetConsensusBaselineGetter(func() (uint64, time.Time, bool) {
+			block, at, fresh := rpcss.chainState.GetConsensusBaselineWithTime()
+			if !fresh || block <= 0 {
+				return 0, time.Time{}, false
 			}
-		}
+			return uint64(block), at, true
+		})
 	}
 
 	// Initialize per-endpoint ChainTracker manager for continuous block polling
@@ -230,7 +224,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// endpoint from stored telemetry + the consensus baseline (zero upstream calls), proactively
 	// re-enable recovered endpoints, and feed one QoS sample per provider. Replaces the synthetic
 	// direct-RPC probe (the legacy AppendProbeRelayData feed is gated off for static providers).
-	go rpcss.runProbeLoop(ctx, defaultProbeCadence, probing.DefaultVerdictConfig(averageBlockTime))
+	go rpcss.runProbeLoop(ctx, validatedProbeCadence(lavasession.ProbeLoopInterval), probing.DefaultVerdictConfig(averageBlockTime))
 
 	// NewChainListener now accepts WSSubscriptionManager interface, which is implemented
 	// by both ConsumerWSSubscriptionManager (provider-relay mode) and
@@ -1798,7 +1792,7 @@ func (rpcss *RPCSmartRouterServer) recomputeChainStateConsensus() {
 // AppendProbeData). The concrete *provideroptimizer.ProviderOptimizer satisfies it; an inline
 // assertion keeps the lavasession optimizer interface unchanged.
 type probeQoSAppender interface {
-	AppendProbeData(provider string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool)
+	AppendProbeData(provider string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool, syncRef provideroptimizer.SyncReference)
 }
 
 // Compile-time guard: the concrete optimizer must satisfy probeQoSAppender. Without this, the
@@ -1810,6 +1804,20 @@ var _ probeQoSAppender = (*provideroptimizer.ProviderOptimizer)(nil)
 // probe's PeriodicProbeProvidersInterval. It floors runProbeLoop's cadence so time.NewTicker can
 // never be handed a non-positive duration (which panics).
 const defaultProbeCadence = 5 * time.Second
+
+// validatedProbeCadence validates the operator-configured probe cadence (MAG-2161 D5): a non-positive
+// value (which would panic time.NewTicker and is never a sane config) is rejected back to the default
+// with a warning, so a misconfiguration degrades loudly to the default rather than crashing the loop.
+func validatedProbeCadence(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		utils.LavaFormatWarning("invalid probe-loop-interval, falling back to default", nil,
+			utils.LogAttr("configured", configured),
+			utils.LogAttr("default", defaultProbeCadence),
+		)
+		return defaultProbeCadence
+	}
+	return configured
+}
 
 // runProbeLoop is the Topic D proactive health prober (MAG-2161). On its own cadence it reads stored
 // per-endpoint telemetry (Topic A) + the consensus baseline (Topic C) — making NO upstream call —
@@ -1839,17 +1847,24 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 	}
 }
 
-// runProbeCycle pulls this server's live dependencies and runs one probe cycle.
+// runProbeCycle pulls this server's live dependencies and runs one probe cycle. It resolves THIS
+// interface's consensus baseline once — feeding both the verdict (keeping-up check) and the QoS
+// sync reference (F4: scoped to this interface; F5: sync fed only when a fresh majority exists).
 func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg probing.VerdictConfig) {
 	var baseline int64
 	var hasBaseline bool
+	syncRef := provideroptimizer.SyncReference{ConsensusConfigured: true}
 	if rpcss.chainState != nil {
-		baseline, hasBaseline = rpcss.chainState.GetConsensusBaseline()
+		if block, at, ok := rpcss.chainState.GetConsensusBaselineWithTime(); ok && block > 0 {
+			baseline, hasBaseline = block, true
+			syncRef.Block, syncRef.Time, syncRef.Fresh = uint64(block), at, true
+		}
 	}
 	runProbeCycleCore(
 		rpcss.sessionManager.GetAllDirectRPCEndpoints(),
 		rpcss.endpointChainTrackerManager.GetObservation,
-		baseline, hasBaseline, time.Now(), cfg, appender,
+		baseline, hasBaseline, syncRef, time.Now(), cfg, appender,
+		rpcss.sessionManager.RestoreRecoveredProvider,
 	)
 }
 
@@ -1862,9 +1877,11 @@ func runProbeCycleCore(
 	getObservation func(url string) (endpointstate.EndpointObservation, bool),
 	baseline int64,
 	hasBaseline bool,
+	syncRef provideroptimizer.SyncReference,
 	now time.Time,
 	cfg probing.VerdictConfig,
 	appender probeQoSAppender,
+	onRecover func(provider string),
 ) {
 	// One verdict per endpoint (regular + backup), grouped by provider for the single-sample rule.
 	verdictsByProvider := make(map[string][]probing.EndpointVerdict)
@@ -1874,8 +1891,12 @@ func runProbeCycleCore(
 		}
 		obs, _ := getObservation(ep.Endpoint.NetworkAddress)
 		verdict := probing.RenderEndpointVerdict(obs, baseline, hasBaseline, now, cfg)
-		// Proactive re-enable (no-op on enabled endpoints; never disturbs the relay refusal climb).
-		ep.Endpoint.RecordProbeVerdict(verdict.Healthy, cfg.ReEnableHysteresis)
+		// Proactive re-enable from POST-DISABLE successful-poll evidence only (F1). RecordProbeVerdict
+		// releases the endpoint mutex before returning, so onRecover (which takes csm.lock) cannot
+		// nest under endpoint.mu — no lock-order inversion (F2).
+		if ep.Endpoint.RecordProbeVerdict(verdict.Recovery.LastSuccessfulPoll, verdict.Recovery.PollHealthy, cfg.ReEnableHysteresis) && onRecover != nil {
+			onRecover(ep.ProviderAddress)
+		}
 		verdictsByProvider[ep.ProviderAddress] = append(verdictsByProvider[ep.ProviderAddress], verdict)
 	}
 
@@ -1887,7 +1908,10 @@ func runProbeCycleCore(
 		if !ok {
 			continue
 		}
-		appender.AppendProbeData(provider, sample.Availability, sample.Latency, sample.HasLatency, sample.Block, sample.HasBlock)
+		// hasSync only when an accepted consensus baseline exists (F5): no baseline → no sync evidence,
+		// never the legacy max-across-providers reference. syncRef carries the same baseline.
+		hasSync := sample.HasBlock && hasBaseline
+		appender.AppendProbeData(provider, sample.Availability, sample.Latency, sample.HasLatency, sample.Block, hasSync, syncRef)
 	}
 }
 

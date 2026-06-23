@@ -74,9 +74,19 @@ func RenderEndpointVerdict(obs endpointstate.EndpointObservation, baseline int64
 		block = uint64(obs.LatestBlock)
 	}
 
+	// Recovery evidence (F1) is POLL-ONLY and stricter than Healthy: a disabled endpoint earns
+	// re-enable only from a successful poll (LastSuccessfulPoll set, last poll not failed →
+	// ConsecutivePollFailures == 0) while keeping up with consensus. ObservedAt (which a relay can
+	// refresh) is deliberately NOT used here — only the dedicated poll path proves a backed-off
+	// endpoint is reachable again. The endpoint compares LastSuccessfulPoll to its own disable instant.
+	pollSucceededLast := obs.ConsecutivePollFailures == 0 && !obs.LastSuccessfulPoll.IsZero()
 	return EndpointVerdict{
 		Healthy: alive && keepingUp,
 		Latency: obs.LastPollLatency, // 0 = unknown
 		Block:   block,
+		Recovery: RecoveryEvidence{
+			LastSuccessfulPoll: obs.LastSuccessfulPoll,
+			PollHealthy:        pollSucceededLast && keepingUp,
+		},
 	}
 }

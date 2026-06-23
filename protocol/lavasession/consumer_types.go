@@ -113,6 +113,7 @@ type ProviderOptimizer interface {
 	AppendProbeRelayData(providerAddress string, latency time.Duration, success bool)
 	AppendRelayFailure(providerAddress string)
 	AppendRelayData(providerAddress string, latency time.Duration, cu, syncBlock uint64)
+	AppendRelayDataConsensus(providerAddress string, latency time.Duration, cu, syncBlock uint64, syncRef provideroptimizer.SyncReference)
 	ChooseProvider(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
 	ChooseProviderWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string, stats *provideroptimizer.SelectionStats)
 	ChooseBestProvider(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
@@ -180,16 +181,25 @@ type Endpoint struct {
 	DirectConnections []DirectRPCConnection // Direct RPC connections
 
 	ConnectionRefusals uint64
-	// consecutiveHealthyProbes counts back-to-back healthy probe verdicts while the endpoint is
-	// DISABLED — the hysteresis used by the probe's proactive re-enable (Topic E). It is reset on
-	// any unhealthy verdict and on re-enable, and is held at 0 while the endpoint is Enabled (the
-	// probe never touches an enabled endpoint's state, so it cannot undo the relay path's climb to
-	// the disable threshold).
+	// consecutiveHealthyProbes counts DISTINCT post-disable successful polls confirmed while the
+	// endpoint is DISABLED — the hysteresis used by the probe's proactive re-enable (Topic E / F1). It
+	// is reset on any non-recovery verdict (failed/stale/pre-disable poll) and on re-enable, and is
+	// held at 0 while the endpoint is Enabled (the probe never touches an enabled endpoint's state, so
+	// it cannot undo the relay path's climb to the disable threshold).
 	consecutiveHealthyProbes uint64
-	Addons                   map[string]struct{}
-	Extensions               map[string]struct{}
-	Geolocation              planstypes.Geolocation
-	mu                       sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, and consecutiveHealthyProbes
+	// disabledAt is the instant the endpoint last transitioned Enabled→false (edge-triggered in
+	// MarkUnhealthy, NOT re-stamped on repeated calls). Recovery requires a successful poll strictly
+	// after this instant, so a poll that succeeded BEFORE the disable can never re-enable (F1).
+	// Cleared (zeroed) on every re-enable.
+	disabledAt time.Time
+	// lastRecoveryPoll is the LastSuccessfulPoll value already counted toward the hysteresis streak,
+	// so a probe cadence faster than the poll cadence cannot count one successful poll twice — only a
+	// strictly newer successful poll advances the streak (F1: "distinct post-disable polls").
+	lastRecoveryPoll time.Time
+	Addons           map[string]struct{}
+	Extensions       map[string]struct{}
+	Geolocation      planstypes.Geolocation
+	mu               sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll
 
 	// Per-endpoint sync tracking (for direct RPC QoS)
 	LatestBlock     atomic.Int64 // Latest block seen from this endpoint
@@ -199,6 +209,15 @@ type Endpoint struct {
 // IsDirectRPC returns true if this endpoint uses direct RPC connections (smart router mode)
 func (e *Endpoint) IsDirectRPC() bool {
 	return len(e.DirectConnections) > 0
+}
+
+// IsEnabled returns the endpoint's enable bit under the endpoint mutex. Enabled is written under
+// e.mu by MarkUnhealthy / ResetHealth / RecordProbeVerdict; every production READ must go through a
+// synchronized accessor like this to avoid the data race the race detector flagged (F3).
+func (e *Endpoint) IsEnabled() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.Enabled
 }
 
 // IsProviderRelay returns true if this endpoint uses provider-relay connections (consumer mode)
@@ -223,18 +242,33 @@ func (e *Endpoint) CheckSupportForServices(addon string, extensions []string) (s
 	return true
 }
 
-// MarkUnhealthy increments connection refusals and disables endpoint if threshold exceeded
+// MarkUnhealthy increments connection refusals and disables endpoint if threshold exceeded.
 func (e *Endpoint) MarkUnhealthy() {
+	e.markUnhealthyAt(time.Now())
+}
+
+// markUnhealthyAt is MarkUnhealthy with an injectable clock (tests drive the disable instant so they
+// can order it relative to a poll's LastSuccessfulPoll). disabledAt is stamped ONLY on the actual
+// Enabled→false transition (edge-triggered): a repeated MarkUnhealthy on an already-disabled endpoint
+// must NOT push disabledAt forward, or it would silently invalidate post-disable poll evidence the
+// prober has already accumulated (F1).
+func (e *Endpoint) markUnhealthyAt(at time.Time) {
 	e.mu.Lock()
 	e.ConnectionRefusals++
+	wasEnabled := e.Enabled
 	disabled := e.ConnectionRefusals >= MaxConsecutiveConnectionAttempts
-	if disabled {
+	transitioned := false
+	if disabled && wasEnabled {
 		e.Enabled = false
+		e.disabledAt = at
+		e.consecutiveHealthyProbes = 0
+		e.lastRecoveryPoll = time.Time{}
+		transitioned = true
 	}
 	addr, refusals, isDirect := e.NetworkAddress, e.ConnectionRefusals, e.IsDirectRPC()
 	e.mu.Unlock()
 
-	if disabled {
+	if transitioned {
 		utils.LavaFormatWarning("disabled unhealthy endpoint", nil,
 			utils.LogAttr("endpoint", addr),
 			utils.LogAttr("refusals", refusals),
@@ -258,8 +292,15 @@ func (e *Endpoint) MarkUnhealthy() {
 //   - Re-enabling gives the endpoint a clean slate (ConnectionRefusals = 0): it was already disabled
 //     (refusals >= threshold), and it earned the reset by proving K healthy cycles.
 //
+// recoveryPoll is the endpoint's LastSuccessfulPoll and recoveryHealthy asserts the last poll
+// succeeded AND the endpoint is keeping up (probing.RecoveryEvidence, passed as primitives to avoid a
+// probing→lavasession import cycle). Re-enable requires a SUCCESSFUL POLL produced strictly AFTER the
+// disable instant (recoveryPoll.After(disabledAt)) — a pre-disable observation, however fresh, never
+// re-enables. Hysteresis counts DISTINCT such polls (a probe cadence faster than the poll cadence
+// cannot count one poll twice), and ANY non-recovery verdict resets the streak.
+//
 // reEnableAfterK < 1 is treated as 1. Returns true only on the cycle it actually re-enables.
-func (e *Endpoint) RecordProbeVerdict(healthy bool, reEnableAfterK uint64) (reenabled bool) {
+func (e *Endpoint) RecordProbeVerdict(recoveryPoll time.Time, recoveryHealthy bool, reEnableAfterK uint64) (reenabled bool) {
 	if reEnableAfterK < 1 {
 		reEnableAfterK = 1
 	}
@@ -269,12 +310,23 @@ func (e *Endpoint) RecordProbeVerdict(healthy bool, reEnableAfterK uint64) (reen
 	if e.Enabled {
 		// Enabled endpoints are the relay path's domain — keep the probe out of the refusal climb.
 		e.consecutiveHealthyProbes = 0
+		e.lastRecoveryPoll = time.Time{}
 		return false
 	}
-	if !healthy {
+
+	// Valid recovery evidence = the last poll succeeded and is keeping up, AND that successful poll
+	// landed after the disable. Anything else (failed/stale/pre-disable poll) resets the streak.
+	validEvidence := recoveryHealthy && !recoveryPoll.IsZero() && recoveryPoll.After(e.disabledAt)
+	if !validEvidence {
 		e.consecutiveHealthyProbes = 0
 		return false
 	}
+	// Only a STRICTLY NEWER successful poll than the one already counted advances the streak; seeing
+	// the same poll again across faster probe cycles holds (neither advances nor resets).
+	if !recoveryPoll.After(e.lastRecoveryPoll) {
+		return false
+	}
+	e.lastRecoveryPoll = recoveryPoll
 	e.consecutiveHealthyProbes++
 	if e.consecutiveHealthyProbes < reEnableAfterK {
 		return false
@@ -283,6 +335,8 @@ func (e *Endpoint) RecordProbeVerdict(healthy bool, reEnableAfterK uint64) (reen
 	e.Enabled = true
 	e.ConnectionRefusals = 0
 	e.consecutiveHealthyProbes = 0
+	e.disabledAt = time.Time{}
+	e.lastRecoveryPoll = time.Time{}
 	utils.LavaFormatInfo("probe re-enabled recovered endpoint",
 		utils.LogAttr("endpoint", e.NetworkAddress),
 		utils.LogAttr("is_direct_rpc", e.IsDirectRPC()),
@@ -302,6 +356,9 @@ func (e *Endpoint) ResetHealth() bool {
 	}
 	e.ConnectionRefusals = 0
 	e.Enabled = true
+	e.consecutiveHealthyProbes = 0
+	e.disabledAt = time.Time{}
+	e.lastRecoveryPoll = time.Time{}
 	addr, isDirect := e.NetworkAddress, e.IsDirectRPC()
 	e.mu.Unlock()
 
@@ -903,7 +960,17 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					)
 
 					if endpoint.ConnectionRefusals >= MaxConsecutiveConnectionAttempts {
-						endpoint.Enabled = false
+						// Edge-trigger disabledAt on the actual enabled→false transition, mirroring
+						// MarkUnhealthy (F1). This path disables only PROVIDER-RELAY endpoints (direct-RPC
+						// returns early above and is disabled solely via MarkUnhealthy), so it is inert for
+						// the prober's recovery today — but stamping here keeps "every disable transition
+						// records disabledAt" an invariant of the type, not a property of one caller.
+						if endpoint.Enabled {
+							endpoint.Enabled = false
+							endpoint.disabledAt = time.Now()
+							endpoint.consecutiveHealthyProbes = 0
+							endpoint.lastRecoveryPoll = time.Time{}
+						}
 						utils.LavaFormatWarning("disabling provider endpoint for the duration of current epoch.", nil,
 							utils.LogAttr("Endpoint", networkAddress),
 							utils.LogAttr("address", cswp.PublicLavaAddress),
@@ -924,6 +991,10 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			}
 			endpoint.mu.Lock()
 			cswp.Endpoints[idx].Enabled = true // return enabled once we successfully reconnect
+			// Clear recovery tracking on re-enable so a future disable starts a fresh streak (F1).
+			cswp.Endpoints[idx].consecutiveHealthyProbes = 0
+			cswp.Endpoints[idx].disabledAt = time.Time{}
+			cswp.Endpoints[idx].lastRecoveryPoll = time.Time{}
 			endpoint.mu.Unlock()
 			// successful new connection add to endpoints list
 			endpoints = append(endpoints, &EndpointAndChosenConnection{endpoint: endpoint, chosenEndpointConnection: endpointConnection})

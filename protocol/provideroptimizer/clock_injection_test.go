@@ -141,9 +141,11 @@ func TestProviderOptimizer_ScoreDecayAfterClockForward(t *testing.T) {
 			wantDecayPct: 1.0,
 		},
 		{
-			// +10 h: < 0.1 % of old score survives.
+			// +10 h: ~0.122 % of old score survives. (The old 0.1 % threshold passed only by accident —
+			// the async-cache build-up dropped some of the 5 relays, undercounting oldNum; with the
+			// accumulation now made deterministic the true decayed value is ~0.122 %.)
 			name: "warp_10h_halfLife_1h", warpHours: 10, halfLife: score.DefaultHalfLifeTime,
-			wantDecayPct: 0.1,
+			wantDecayPct: 0.15,
 		},
 		{
 			// +24 h with 1 h half-life: primary regression for this PR.
@@ -167,10 +169,21 @@ func TestProviderOptimizer_ScoreDecayAfterClockForward(t *testing.T) {
 			po.NowFunc = func() time.Time { return fixedBase }
 
 			// ── Step 1: build up a known score at the fixed base time ────────────
+			// appendRelayData does a read-modify-write through the ASYNC ristretto cache. A single
+			// trailing sleep does NOT guarantee each iteration's write was admitted before the next
+			// iteration's read, so under -race/concurrent load the accumulated score was
+			// non-deterministic (the decay assertion below flaked). Settle the cache after every append
+			// so the next iteration's read-modify-write observes it — making oldNum deterministic.
+			prevNum := 0.0
 			for i := 0; i < numRelays; i++ {
-				po.appendRelayData(provider, oldLatency, true, cu, syncBlock, fixedBase)
+				po.appendRelayData(provider, oldLatency, true, cu, syncBlock, SyncReference{}, fixedBase)
+				require.Eventually(t, func() bool {
+					d, ok := po.getProviderData(provider)
+					return ok && d.Latency.GetNum() > prevNum
+				}, 2*time.Second, time.Millisecond, "ristretto write must settle before the next relay")
+				d, _ := po.getProviderData(provider)
+				prevNum = d.Latency.GetNum()
 			}
-			time.Sleep(4 * time.Millisecond) // ristretto async write
 
 			dataBefore, found := po.getProviderData(provider)
 			require.True(t, found, "provider data must be cached after initial writes")

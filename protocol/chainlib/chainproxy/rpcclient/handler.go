@@ -331,21 +331,20 @@ func (h *handler) handleResponse(msg *JsonrpcMessage) {
 		return
 	}
 	delete(h.respWait, string(msg.ID))
-	// For normal responses, just forward the reply to Call/BatchCall.
-	op.resp <- msg
 	if op.sub == nil {
+		// Normal call response: forward the reply to Call/BatchCall. op.err stays nil.
+		op.resp <- msg
 		return
 	}
-	// For subscription responses, start the subscription if the server
-	// indicates success. EthSubscribe gets unblocked in either case through
-	// the op.resp channel.
+	// Subscription response: populate op.err and start the subscription BEFORE signaling the waiter.
+	// op.resp<-msg is the happens-before edge wait() relies on to read op.err — sending it first (as
+	// this code previously did) let wait() read op.err while these lines were still writing it (a data
+	// race under -race). The send still happens (Subscribe needs the msg value), just after op.err/sub
+	// are fully set. EthSubscribe gets unblocked either way.
 	defer close(op.resp)
 	if msg.Error != nil {
 		op.err = msg.Error
-		return
-	}
-
-	if op.subId != "" {
+	} else if op.subId != "" {
 		go op.sub.run()
 		h.clientSubs[op.subId] = op.sub
 	} else if op.err = json.Unmarshal(msg.Result, &op.sub.subid); op.err == nil {
@@ -361,6 +360,7 @@ func (h *handler) handleResponse(msg *JsonrpcMessage) {
 			h.clientSubs[op.sub.subid] = op.sub
 		}
 	}
+	op.resp <- msg
 }
 
 // handleCallMsg executes a call message and returns the answer.

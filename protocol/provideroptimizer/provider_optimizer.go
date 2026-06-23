@@ -61,15 +61,27 @@ type ProviderOptimizer struct {
 	globalSyncCalculator            *score.AdaptiveMaxCalculator // Global T-Digest for all providers' sync samples
 	adaptiveLock                    sync.RWMutex                 // Lock for accessing adaptive calculators
 	NowFunc                         func() time.Time             // NowFunc overrides the clock used for score updates nil = use real time.Now()
+}
 
-	// syncReferenceGetter is the Topic E / MAG-2160-Finding-2 sync reference: when set and fresh it
-	// supplies the per-chain CONSENSUS baseline (block + the time it was computed) that BOTH the
-	// relay and probe sync dimensions measure lag against, instead of the legacy max-block-across-
-	// providers (latestSyncData) — which one fast/lying reporter could inflate, penalizing the whole
-	// pod. nil, or returning ok=false (cold start / no majority / stale), falls back to the legacy
-	// reference. Read-only toward the data plane (it reads ChainState).
-	syncRefLock         sync.RWMutex
-	syncReferenceGetter func() (block uint64, at time.Time, ok bool)
+// SyncReference is the per-sample consensus baseline a relay/probe sync-lag is measured against
+// (Topic E / MAG-2160-Finding-2). It is resolved by the PER-INTERFACE caller (the CSM for relays,
+// the prober for probes) from that interface's own ChainState and passed in with the sample —
+// replacing the former single mutable getter on the shared per-chain optimizer, which let the last
+// API interface to start overwrite the reference for every interface of the chain (the F4 bug).
+//
+// The two booleans encode the three cases the optimizer must distinguish:
+//   - ConsensusConfigured == false: no consensus integration is wired for this interface → the
+//     optimizer keeps its LEGACY max-block-across-providers reference (back-compat).
+//   - ConsensusConfigured == true && Fresh && Block > 0: an accepted consensus baseline exists →
+//     measure lag against it.
+//   - ConsensusConfigured == true && !Fresh: consensus is wired but has no fresh majority right now
+//     (cold start / split / stale) → the sample's sync dimension is OMITTED, never falling back to
+//     max-across-providers (which one fast/lying reporter could inflate — the F5 poisoning).
+type SyncReference struct {
+	ConsensusConfigured bool
+	Block               uint64
+	Time                time.Time
+	Fresh               bool
 }
 
 type ProviderData struct {
@@ -254,46 +266,51 @@ func (po *ProviderOptimizer) ResetState() {
 
 // AppendRelayFailure updates a provider's QoS metrics for a failed relay
 func (po *ProviderOptimizer) AppendRelayFailure(provider string) {
-	po.appendRelayData(provider, 0, false, 0, 0, po.now())
+	po.appendRelayData(provider, 0, false, 0, 0, SyncReference{}, po.now())
 }
 
 // AppendRelayData updates a provider's QoS metrics for a successful relay
+// AppendRelayData is the legacy / no-consensus relay entrypoint: it measures sync lag against the
+// max-block-across-providers reference. Used by paths that carry no consensus baseline (the direct
+// subscription managers, which pass syncBlock=0 anyway) and by tests. The consensus-aware relay
+// path (the CSM's OnSessionDone) uses AppendRelayDataConsensus.
 func (po *ProviderOptimizer) AppendRelayData(provider string, latency time.Duration, cu, syncBlock uint64) {
-	po.appendRelayData(provider, latency, true, cu, syncBlock, po.now())
+	po.appendRelayData(provider, latency, true, cu, syncBlock, SyncReference{}, po.now())
 }
 
-// SetSyncReferenceGetter installs the sync-lag reference the relay and probe QoS-sync dimensions
-// measure against (Topic E). The getter returns the per-chain consensus baseline, the time it was
-// computed, and whether it is fresh; returning ok=false makes the optimizer fall back to its legacy
-// max-block-across-providers reference. Passing nil restores the legacy behavior. The getter is
-// read-only toward the data plane (it reads ChainState.GetConsensusBaselineWithTime).
-func (po *ProviderOptimizer) SetSyncReferenceGetter(getter func() (block uint64, at time.Time, ok bool)) {
-	po.syncRefLock.Lock()
-	defer po.syncRefLock.Unlock()
-	po.syncReferenceGetter = getter
+// AppendRelayDataConsensus is the per-interface consensus-aware relay entrypoint (Topic E / F4): the
+// caller resolves THIS interface's consensus baseline (from its own ChainState) into syncRef and
+// passes it with the sample, so sync lag is measured against the agreed tip — never another
+// interface's baseline (the shared-getter F4 bug) and never the max-across-providers poisoning when
+// consensus has no fresh majority (F5).
+func (po *ProviderOptimizer) AppendRelayDataConsensus(provider string, latency time.Duration, cu, syncBlock uint64, syncRef SyncReference) {
+	po.appendRelayData(provider, latency, true, cu, syncBlock, syncRef, po.now())
 }
 
-// syncReference resolves the (referenceBlock, referenceTime) a sample's sync lag is measured
-// against. It PREFERS the per-chain consensus baseline (Finding 2) when the injected getter reports
-// it fresh, and ALWAYS keeps the legacy max-across-providers store warm so a cold/stale baseline
-// falls back gracefully (never worse than the pre-MAG-2160 behavior). providerBlock is the block
-// this sample reports (the relay's serviced block or the probe's aggregated provider block).
-func (po *ProviderOptimizer) syncReference(providerBlock uint64, sampleTime time.Time) (uint64, time.Time) {
-	fallbackBlock, fallbackTime := po.updateLatestSyncData(providerBlock, sampleTime)
-	po.syncRefLock.RLock()
-	getter := po.syncReferenceGetter
-	po.syncRefLock.RUnlock()
-	if getter != nil {
-		if refBlock, refTime, ok := getter(); ok && refBlock > 0 {
-			return refBlock, refTime
+// resolveSyncReference turns a per-sample SyncReference into the concrete (referenceBlock,
+// referenceTime, ok) the sync-lag is measured against. ok=false means "no usable reference this
+// sample" — the caller must then OMIT the sync update rather than invent one (F5: never fall back
+// to max-across-providers when consensus is configured but currently has no majority).
+//
+//   - consensus configured + fresh majority → that baseline (the agreed tip).
+//   - consensus configured + no fresh majority → ok=false (omit; no poisoning).
+//   - consensus NOT configured → legacy max-across-providers, kept warm via updateLatestSyncData
+//     (back-compat for deployments without the Topic C integration).
+//
+// providerBlock is the block this sample reports; it only feeds the legacy warm store.
+func (po *ProviderOptimizer) resolveSyncReference(ref SyncReference, providerBlock uint64, sampleTime time.Time) (block uint64, at time.Time, ok bool) {
+	if ref.ConsensusConfigured {
+		if ref.Fresh && ref.Block > 0 {
+			return ref.Block, ref.Time, true
 		}
+		return 0, time.Time{}, false
 	}
-	return fallbackBlock, fallbackTime
+	fallbackBlock, fallbackTime := po.updateLatestSyncData(providerBlock, sampleTime)
+	return fallbackBlock, fallbackTime, true
 }
 
 // appendRelayData gets three new QoS metrics samples and updates the provider's metrics using a decaying weighted average
-func (po *ProviderOptimizer) appendRelayData(provider string, latency time.Duration, success bool, cu, syncBlock uint64, sampleTime time.Time) {
-	latestSync, timeSync := po.syncReference(syncBlock, sampleTime)
+func (po *ProviderOptimizer) appendRelayData(provider string, latency time.Duration, success bool, cu, syncBlock uint64, syncRef SyncReference, sampleTime time.Time) {
 	providerData, _ := po.getProviderData(provider)
 	halfTime := po.calculateHalfTime(provider, sampleTime)
 	weight := score.RelayUpdateWeight
@@ -308,14 +325,23 @@ func (po *ProviderOptimizer) appendRelayData(provider string, latency time.Durat
 		if updateErr != nil {
 			return
 		}
-		if syncBlock > providerData.SyncBlock {
-			// do not allow providers to go back
-			providerData.SyncBlock = syncBlock
-		}
-		syncLag := po.calculateSyncLag(latestSync, timeSync, providerData.SyncBlock, sampleTime)
-		providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.SyncScoreType, syncLag.Seconds(), weight, halfTime, cu, sampleTime)
-		if updateErr != nil {
-			return
+		// Sync dimension only when this sample actually reports a block (syncBlock > 0): a no-block
+		// relay (e.g. a subscription open) carries no sync evidence, so it must not re-score sync
+		// against a stale persisted SyncBlock — and crucially must not drag in the legacy
+		// max-across-providers reference (F5/dwsm). The reference itself is resolved per-interface
+		// (F4); ok=false (consensus configured but no fresh majority) likewise omits the update.
+		if syncBlock > 0 {
+			if syncBlock > providerData.SyncBlock {
+				// do not allow providers to go back
+				providerData.SyncBlock = syncBlock
+			}
+			if latestSync, timeSync, ok := po.resolveSyncReference(syncRef, syncBlock, sampleTime); ok {
+				syncLag := po.calculateSyncLag(latestSync, timeSync, providerData.SyncBlock, sampleTime)
+				providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.SyncScoreType, syncLag.Seconds(), weight, halfTime, cu, sampleTime)
+				if updateErr != nil {
+					return
+				}
+			}
 		}
 	} else {
 		// on a failed relay, update the availability metric with a failure score
@@ -386,7 +412,7 @@ func (po *ProviderOptimizer) AppendProbeRelayData(providerAddress string, latenc
 // Each quality dimension is gated by its own "has" flag so a dimension no endpoint could measure
 // this cycle (latency-unknown on a relay-fed endpoint; no block yet) is OMITTED, not fed as a 0 —
 // a fake 0 would falsely improve the score and clobber a busy endpoint's real relay-fed latency.
-func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool) {
+func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool, syncRef SyncReference) {
 	providerData, _ := po.getProviderData(providerAddress)
 	sampleTime := po.now()
 	halfTime := po.calculateHalfTime(providerAddress, sampleTime)
@@ -402,16 +428,21 @@ func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availabilit
 			return
 		}
 	}
-	if hasSync {
+	// Sync only when the caller asserts a usable block AND an accepted consensus reference resolves
+	// (F5): hasSync is set by the prober only when a consensus baseline exists, and resolveSyncReference
+	// double-guards against a baseline that expired between the prober's read and here. No fallback to
+	// max-across-providers — an absent baseline means no sync evidence, not a poisoned one.
+	if hasSync && syncBlock > 0 {
 		if syncBlock > providerData.SyncBlock {
 			// do not allow providers to go back
 			providerData.SyncBlock = syncBlock
 		}
-		latestSync, timeSync := po.syncReference(syncBlock, sampleTime)
-		syncLag := po.calculateSyncLag(latestSync, timeSync, providerData.SyncBlock, sampleTime)
-		providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.SyncScoreType, syncLag.Seconds(), weight, halfTime, 0, sampleTime)
-		if updateErr != nil {
-			return
+		if latestSync, timeSync, ok := po.resolveSyncReference(syncRef, syncBlock, sampleTime); ok {
+			syncLag := po.calculateSyncLag(latestSync, timeSync, providerData.SyncBlock, sampleTime)
+			providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.SyncScoreType, syncLag.Seconds(), weight, halfTime, 0, sampleTime)
+			if updateErr != nil {
+				return
+			}
 		}
 	}
 	po.providersStorage.Set(providerAddress, providerData, 1)

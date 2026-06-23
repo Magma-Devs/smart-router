@@ -268,19 +268,30 @@ func (ss *ScoreStore) GetName() string {
 	return ss.Name
 }
 
+// The getters below read fields that Update/UpdateConfig mutate under ss.lock, so they must read
+// under RLock — without it, a concurrent Update (e.g. a relay sample) races a score read (selection
+// / metrics). The lock already existed on the type; these readers simply weren't taking it.
 func (ss *ScoreStore) GetNum() float64 {
+	ss.lock.RLock()
+	defer ss.lock.RUnlock()
 	return ss.Num
 }
 
 func (ss *ScoreStore) GetDenom() float64 {
+	ss.lock.RLock()
+	defer ss.lock.RUnlock()
 	return ss.Denom
 }
 
 func (ss *ScoreStore) GetLastUpdateTime() time.Time {
+	ss.lock.RLock()
+	defer ss.lock.RUnlock()
 	return ss.Time
 }
 
 func (ss *ScoreStore) GetConfig() Config {
+	ss.lock.RLock()
+	defer ss.lock.RUnlock()
 	return ss.Config
 }
 

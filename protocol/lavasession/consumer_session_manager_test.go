@@ -146,10 +146,15 @@ func TestEndpointSortingFlow(t *testing.T) {
 	_, ok := csm.pairing[pairingList[0].PublicLavaAddress]
 	require.True(t, ok)
 
-	// because probing is in a routine we need to wait for the sorting and probing to end asynchronously
+	// because probing is in a routine we need to wait for the sorting and probing to end asynchronously.
+	// The probe goroutine reorders Endpoints under pairingList[0].Lock, so read the slice under that
+	// lock — an unsynchronized read here races the sort (data race under -race).
 	swapped := false
 	for i := 0; i < 20; i++ {
-		if pairingList[0].Endpoints[0].NetworkAddress == grpcListener {
+		pairingList[0].Lock.RLock()
+		firstEndpoint := pairingList[0].Endpoints[0].NetworkAddress
+		pairingList[0].Lock.RUnlock()
+		if firstEndpoint == grpcListener {
 			fmt.Println("Endpoints Are Sorted!", i)
 			swapped = true
 			break
@@ -591,7 +596,12 @@ func TestNoPairingAvailableFlow(t *testing.T) {
 	usedProviders := NewUsedProviders(nil)
 	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 	require.NoError(t, err)
-	_, expectedProviderAddress := css[csm.validAddresses[0]]
+	// Read csm.validAddresses under the lock: async OnSessionDone unblock goroutines write it
+	// concurrently, so a direct field read here is a data race under -race.
+	csm.lock.RLock()
+	firstValidAddress := csm.validAddresses[0]
+	csm.lock.RUnlock()
+	_, expectedProviderAddress := css[firstValidAddress]
 	require.True(t, expectedProviderAddress)
 
 	css2, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
@@ -602,16 +612,20 @@ func TestNoPairingAvailableFlow(t *testing.T) {
 	runOnSessionDoneForConsumerSessionMap(t, css, csm)
 	runOnSessionDoneForConsumerSessionMap(t, css2, csm)
 	time.Sleep(time.Second)
-	require.Equal(t, len(csm.validAddresses), 2)
+	require.Equal(t, csm.GetNumberOfValidProviders(), 2) // synchronized count read
 
 	css3, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 	require.NoError(t, err)
 	runOnSessionFailureForConsumerSessionMap(t, css3, csm)
-	// check we still have only 2 valid addresses as this one failed
+	// check we still have only 2 valid addresses as this one failed. Snapshot under the lock to avoid
+	// racing the async unblock goroutines.
+	csm.lock.RLock()
+	validSnapshot := append([]string(nil), csm.validAddresses...)
+	csm.lock.RUnlock()
 	for _, addr := range css3 {
-		require.False(t, lavaslices.Contains(csm.validAddresses, addr.Session.Parent.PublicLavaAddress))
+		require.False(t, lavaslices.Contains(validSnapshot, addr.Session.Parent.PublicLavaAddress))
 	}
-	require.Equal(t, len(csm.validAddresses), 2)
+	require.Equal(t, len(validSnapshot), 2)
 }
 
 func TestSecondChanceRecoveryFlow(t *testing.T) {

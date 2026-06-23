@@ -31,6 +31,27 @@ type EndpointVerdict struct {
 	// Block is the endpoint's most recently observed block; 0 means unknown. Aggregation ignores
 	// unknown blocks; the optimizer computes sync lag from the provider's freshest known block.
 	Block uint64
+	// Recovery is the POLL-ONLY evidence used to proactively re-enable a DISABLED endpoint (F1). It is
+	// deliberately stricter than Healthy: Healthy may rest on a relay-fed ObservedAt (fine for general
+	// QoS liveness), but re-enabling a backed-off endpoint must be driven only by a SUCCESSFUL POLL
+	// produced AFTER the disable — otherwise a pre-disable relay observation, still fresh within the
+	// staleness window, could re-enable an endpoint that never actually recovered.
+	Recovery RecoveryEvidence
+}
+
+// RecoveryEvidence is the poll-derived proof a disabled endpoint is healthy again. The endpoint
+// itself (Endpoint.RecordProbeVerdict) finalizes the decision under its mutex by comparing
+// LastSuccessfulPoll against its own disabledAt — this struct carries only what the prober can read
+// from telemetry without locking the endpoint.
+type RecoveryEvidence struct {
+	// LastSuccessfulPoll is the timestamp of the endpoint's most recent SUCCESSFUL poll (reached
+	// upstream and parsed a block). Zero means the endpoint has never had a successful poll. The
+	// endpoint re-enables only when this is strictly after its disable instant.
+	LastSuccessfulPoll time.Time
+	// PollHealthy is true only when the LAST poll attempt succeeded (no trailing failure) AND the
+	// endpoint is keeping up with the consensus baseline. A later failed poll flips this false, which
+	// invalidates recovery readiness even if LastSuccessfulPoll is recent.
+	PollHealthy bool
 }
 
 // ProviderSample is the SINGLE QoS sample a provider emits per probe cycle (rule E2 — one sample
