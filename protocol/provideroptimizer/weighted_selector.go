@@ -225,7 +225,7 @@ func (ws *WeightedSelector) CalculateScore(
 	sync := qos.Sync
 
 	// Normalize individual metrics to 0-1 range where higher is better
-	availabilityScore := ws.normalizeAvailability(availability) // Rescale [0.9, 1.0] → [0.0, 1.0]
+	availabilityScore := ws.normalizeAvailability(availability) // Rescale [0.8, 1.0] → [0.0, 1.0]
 
 	// For latency and sync, lower raw values are better, so we invert them
 	latencyScore := ws.normalizeLatency(latency)       // Convert to 0-1 where higher is better
@@ -291,25 +291,26 @@ func (ws *WeightedSelector) CalculateScore(
 //
 // Phase 1 (Simple Rescaling):
 //   - Rescales [MIN_ACCEPTABLE, 1.0] → [0.0, 1.0]
-//   - Below MIN_ACCEPTABLE (0.90) = score of 0.0
-//   - Formula: normalized = (availability - 0.90) / (1.0 - 0.90) = (availability - 0.90) / 0.10
+//   - Below MIN_ACCEPTABLE (score.MinAcceptableAvailability, currently 0.80) = score of 0.0
+//   - Formula: normalized = (availability - 0.80) / (1.0 - 0.80) = (availability - 0.80) / 0.20
 //   - This achieves 100% range utilization vs current ~5% (0.95-1.0 → 0.95-1.0)
 //
-// Example:
+// Example (computed at the current MIN_ACCEPTABLE = 0.80; recompute if it changes):
 //   - Provider with 100% availability (1.00) → score 1.0 (perfect)
-//   - Provider with 99% availability (0.99) → score 0.9
-//   - Provider with 95% availability (0.95) → score 0.5
-//   - Provider with 90% availability (0.90) → score 0.0 (threshold)
-//   - Provider with 85% availability (0.85) → score 0.0 (below threshold)
+//   - Provider with 95% availability (0.95) → score 0.75
+//   - Provider with 90% availability (0.90) → score 0.5
+//   - Provider with 85% availability (0.85) → score 0.25
+//   - Provider with 80% availability (0.80) → score 0.0 (threshold)
+//   - Provider with 75% availability (0.75) → score 0.0 (below threshold)
 //
 // Advantages:
 //   - ✅ Uses full [0,1] range (100% vs 5%)
 //   - ✅ Zero complexity, no state, no memory overhead
-//   - ✅ Clear business rule: < 90% availability = unacceptable
+//   - ✅ Clear business rule: < 80% availability = unacceptable
 //   - ✅ Stable and predictable
 func (ws *WeightedSelector) normalizeAvailability(availability float64) float64 {
 	// Phase 1: Simple Rescaling
-	const minAcceptable = score.MinAcceptableAvailability // 0.90
+	const minAcceptable = score.MinAcceptableAvailability // currently 0.80
 	const maxAvailability = 1.0
 
 	// Below minimum threshold = score of 0
