@@ -42,7 +42,9 @@ func (r RelayerRemote) sendReq(req *grpc_reflection_v1alpha.ServerReflectionRequ
 		return nil, err
 	}
 
-	respBytes, _, err := r.relay(context.Background(), "grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo", reqBytes)
+	// The method name MUST be fully-qualified with a leading slash ("/pkg.Service/Method"); newer gRPC
+	// rejects the slash-less form as "malformed method name: ... Unimplemented".
+	respBytes, _, err := r.relay(context.Background(), "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo", reqBytes)
 	if err != nil {
 		return nil, err
 	}

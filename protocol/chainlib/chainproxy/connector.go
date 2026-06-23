@@ -366,7 +366,9 @@ func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector,
 			)
 		}
 	}
-	utils.LavaFormatInfo("Finished adding clients asynchronously", utils.LogAttr("count", len(connector.freeClients)))
+	// Read the count through the locked accessor: addClient / GetRpc mutate freeClients under the lock
+	// concurrently, so a bare len(connector.freeClients) here is a data race.
+	utils.LavaFormatInfo("Finished adding clients asynchronously", utils.LogAttr("count", connector.numberOfFreeClients()))
 	go connector.connectorLoop(ctx)
 }
 

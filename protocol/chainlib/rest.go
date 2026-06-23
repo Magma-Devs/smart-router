@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
@@ -229,7 +230,7 @@ type RestChainListener struct {
 	relaySender      RelaySender
 	healthReporter   HealthReporter
 	logger           *metrics.RPCConsumerLogs
-	listeningAddress string
+	listeningAddress atomic.Pointer[string]
 	app              *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
@@ -421,14 +422,17 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	addrChannelSafe := common.NewSafeChannelSender(ctx, addrChannel)
 	go func() {
 		addr := <-addrChannel
-		apil.listeningAddress = addr
+		apil.listeningAddress.Store(&addr)
 	}()
 
 	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
 }
 
 func (apil *RestChainListener) GetListeningAddress() string {
-	return apil.listeningAddress
+	if p := apil.listeningAddress.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 type RestChainProxy struct {

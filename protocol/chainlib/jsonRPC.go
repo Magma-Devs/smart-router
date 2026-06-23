@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -331,7 +332,7 @@ type JsonRPCChainListener struct {
 	logger                     *metrics.RPCConsumerLogs
 	refererData                *RefererData
 	wsSubscriptionManager      WSSubscriptionManager
-	listeningAddress           string
+	listeningAddress           atomic.Pointer[string]
 	websocketConnectionLimiter *WebsocketConnectionLimiter
 	app                        *fiber.App     // captured during Serve so Shutdown can drain HTTP
 	wsWG                       sync.WaitGroup // tracks active downstream WS goroutines for Shutdown drain
@@ -558,14 +559,17 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	addrChannelSafe := common.NewSafeChannelSender(ctx, addrChannel)
 	go func() {
 		addr := <-addrChannel
-		apil.listeningAddress = addr
+		apil.listeningAddress.Store(&addr)
 	}()
 
 	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
 }
 
 func (apil *JsonRPCChainListener) GetListeningAddress() string {
-	return apil.listeningAddress
+	if p := apil.listeningAddress.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 type JrpcChainProxy struct {

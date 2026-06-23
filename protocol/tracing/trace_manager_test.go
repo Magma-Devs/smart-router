@@ -92,10 +92,12 @@ func TestBuildSamplerFromEnv(t *testing.T) {
 			expectParent:   false,
 		},
 		{
-			// SDK optimizes TraceIDRatioBased(1.0) → AlwaysOnSampler.
-			name:           "traceidratio with no arg defaults to 1.0 (SDK optimizes to AlwaysOn)",
+			// traceidratio with no arg defaults to ratio 1.0 → TraceIDRatioBased{1} (samples 100%).
+			// (Older OTel SDKs collapsed 1.0 to AlwaysOnSampler; the current SDK keeps it as a ratio
+			// sampler, which is spec-compliant and functionally identical.)
+			name:           "traceidratio with no arg defaults to 1.0",
 			samplerEnv:     "traceidratio",
-			expectContains: "AlwaysOnSampler",
+			expectContains: "TraceIDRatioBased",
 			expectParent:   false,
 		},
 		{
@@ -124,19 +126,19 @@ func TestBuildSamplerFromEnv(t *testing.T) {
 			expectParent:   true,
 		},
 		{
-			// Falls back to ratio 1.0, which the SDK optimizes to AlwaysOnSampler.
+			// Falls back to ratio 1.0 → TraceIDRatioBased{1} (samples 100%).
 			name:           "invalid ratio falls back to default",
 			samplerEnv:     "traceidratio",
 			argEnv:         "not-a-number",
-			expectContains: "AlwaysOnSampler",
+			expectContains: "TraceIDRatioBased",
 			expectParent:   false,
 		},
 		{
-			// Falls back to ratio 1.0, which the SDK optimizes to AlwaysOnSampler.
+			// Falls back to ratio 1.0 → TraceIDRatioBased{1} (samples 100%).
 			name:           "ratio above 1.0 falls back to default",
 			samplerEnv:     "traceidratio",
 			argEnv:         "1.5",
-			expectContains: "AlwaysOnSampler",
+			expectContains: "TraceIDRatioBased",
 			expectParent:   false,
 		},
 		{

@@ -161,11 +161,17 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				// Server-wide shutdown — send a CloseGoingAway (1001) frame so the
-				// client can distinguish an intentional shutdown from a crash, then
-				// close the underlying TCP conn so the read loop unblocks.
+				// Server-wide shutdown — send a CloseGoingAway (1001) frame so the client can
+				// distinguish an intentional shutdown from a crash, then unblock the read loop by
+				// setting an immediate read deadline rather than Close()-ing the conn here.
+				//
+				// Close() from this goroutine raced gofiber's handler cleanup: it unblocks ReadMessage,
+				// the handler returns, and gofiber recycles the Conn (fasthttp pooling) WHILE this
+				// goroutine is still inside Close() — a use-after-recycle data race. SetReadDeadline
+				// returns immediately (the read loop breaks on the resulting error) and lets the handler,
+				// the conn's sole owner, do the single Close on return.
 				_ = cwm.websocketConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
-				_ = cwm.websocketConn.Close()
+				_ = cwm.websocketConn.SetReadDeadline(time.Now())
 				return
 			case <-webSocketCtx.Done():
 				utils.LavaFormatTrace("websocket's context cancelled", utils.LogAttr("GUID", webSocketCtx))

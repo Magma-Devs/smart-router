@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -275,7 +276,7 @@ type GrpcChainListener struct {
 	logger           *metrics.RPCConsumerLogs
 	chainParser      *GrpcChainParser
 	healthReporter   HealthReporter
-	listeningAddress string
+	listeningAddress atomic.Pointer[string]
 	httpServer       *http.Server // captured during Serve so Shutdown can call httpServer.Shutdown
 }
 
@@ -306,7 +307,8 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}
 
 	lis := GetListenerWithRetryGrpc("tcp", apil.endpoint.NetworkAddress)
-	apil.listeningAddress = lis.Addr().String()
+	addr := lis.Addr().String()
+	apil.listeningAddress.Store(&addr)
 	apiInterface := apil.endpoint.ApiInterface
 	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
 		if method == "grpc.reflection.v1.ServerReflection/ServerReflectionInfo" {
@@ -404,7 +406,10 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 }
 
 func (apil *GrpcChainListener) GetListeningAddress() string {
-	return apil.listeningAddress
+	if p := apil.listeningAddress.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 type GrpcChainProxy struct {
