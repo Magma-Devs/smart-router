@@ -208,7 +208,15 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					utils.LavaFormatDebug("checking idle time", utils.LogAttr("idleFor", idleFor.Load()), utils.LogAttr("maxIdleTime", MaxIdleTimeInSeconds), utils.LogAttr("now", time.Now().Unix()))
 					idleDuration := idleFor.Load() + MaxIdleTimeInSeconds
 					if time.Now().Unix() > idleDuration {
-						websocketConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, fmt.Sprintf("Connection idle for too long, closing connection. Idle time: %d", idleDuration)))
+						// Route the idle-close frame through the single writer goroutine (sendWS), NOT a
+						// direct WriteMessage: this goroutine is separate from the writer, and gofiber/
+						// gorilla forbids concurrent writers — a direct write here raced the writer
+						// goroutine's WriteMessage (data race). The client closing on this frame unblocks
+						// the read loop, which tears the connection down.
+						sendWS(webSocketMsgWithType{
+							messageType: websocket.CloseMessage,
+							msg:         websocket.FormatCloseMessage(websocket.CloseNormalClosure, fmt.Sprintf("Connection idle for too long, closing connection. Idle time: %d", idleDuration)),
+						})
 						return
 					}
 				}
