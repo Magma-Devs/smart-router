@@ -526,6 +526,52 @@ func resetAllConsistencies(m *common.SafeSyncMap[string, relaycore.Consistency])
 	})
 }
 
+// resetEndpointHealthAndGauge re-enables every endpoint across all session managers
+// (ConsumerSessionManager.ResetEndpointHealth — clears ConnectionRefusals, sets
+// Enabled=true) and mirrors the reset onto the per-endpoint Prometheus health gauge for
+// every provider (primary + backup), matching what the epoch tick does in updateEpoch.
+// Returns the number of endpoints actually re-enabled.
+//
+// Endpoints disabled after MaxConsecutiveConnectionAttempts consecutive failures (e.g. an
+// all-providers-down stress burst) otherwise stay disabled until the next epoch tick, the
+// only other ResetHealth caller — contaminating later tests. Shared by /debug/reset-all
+// and /debug/reset-endpoint-health.
+func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
+	if deps.router == nil {
+		return 0
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	total := 0
+	for chainKey, csm := range deps.router.sessionManagers {
+		if csm == nil {
+			continue
+		}
+		total += csm.ResetEndpointHealth()
+
+		// Mirror the struct reset onto the Prometheus health gauge so operators see
+		// providers recover immediately rather than at the next epoch tick — without it
+		// the gauge stays stuck at 0 until a successful relay, one a rarely-used backup
+		// may never receive.
+		server := deps.router.rpcServers[chainKey]
+		if server == nil || server.smartRouterEndpointMetrics == nil || server.listenEndpoint == nil {
+			continue
+		}
+		for _, sessions := range []map[uint64]*lavasession.ConsumerSessionsWithProvider{
+			deps.router.providerSessions[chainKey],
+			deps.router.backupProviderSessions[chainKey],
+		} {
+			for _, cswp := range sessions {
+				if cswp != nil {
+					server.smartRouterEndpointMetrics.SetEndpointOverallHealth(
+						server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, cswp.PublicLavaAddress, true)
+				}
+			}
+		}
+	}
+	return total
+}
+
 // buildDebugMux constructs the /debug/time-warp, /debug/time, /debug/reset-scores,
 // and /debug/reset-all HTTP handlers.
 //
@@ -744,20 +790,32 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 		}
 
+		// MAG-2186: additionally recover endpoint health and cold-rebuild pairing so a
+		// single /debug/reset-all returns the router to a serving state after an
+		// all-providers-down stress burst. Disabled endpoints (Endpoint.Enabled=false from
+		// MaxConsecutiveConnectionAttempts) and demoted providers otherwise persist across
+		// tests and contaminate later runs. rebuildPairingFromConfig is a cold rebuild (no
+		// re-probing) and a no-op when the pairing is already whole, so the historical
+		// "leave pairing intact" stance no longer applies — and every existing
+		// /debug/reset-all caller inherits the fix for free, with no test migration.
+		if deps.router != nil {
+			deps.router.rebuildPairingFromConfig()
+		}
+		resetEndpointHealthAndGauge(deps)
+
 		// Capability advertisement — hardcoded for in-process stores, plus a
 		// conditional "cache-be" key when the external pod was actually
 		// flushed. The test framework probes this body to decide between this
 		// endpoint and the legacy 4-call dance; "seen-block" was added to
 		// signal the per-chain consistency-cache flush, "cache-be" signals
-		// MAG-1764 end-to-end coverage, "blocked-providers" signals MAG-1810
-		// (currentlyBlockedProviderAddresses is now restored to
-		// pairingAddresses, the per-provider redemption flag is reset, and the
-		// addon cache is purged).
+		// MAG-1764 end-to-end coverage, "blocked-providers" signals MAG-1810,
+		// and "endpoint-health" + "pairing" signal the MAG-2186 endpoint-health
+		// reset and cold pairing rebuild added above.
 		w.Header().Set("Content-Type", "application/json")
 		if cacheBeFlushed {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","cache-be"]}`)
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","endpoint-health","pairing","cache-be"]}`)
 		} else {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers"]}`)
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","endpoint-health","pairing"]}`)
 		}
 	})
 
@@ -854,6 +912,20 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		utils.ClearDebugLogBuffer()
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"cleared":true}`)
+	})
+
+	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):
+	// re-enable every provider endpoint disabled by MaxConsecutiveConnectionAttempts
+	// (Endpoint.Enabled=false) and mirror the reset onto the Prometheus health gauge,
+	// nothing else. The name mirrors Endpoint.ResetHealth() in the source for discoverability.
+	mux.HandleFunc("/debug/reset-endpoint-health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		reenabled := resetEndpointHealthAndGauge(deps)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
 	})
 
 	return mux

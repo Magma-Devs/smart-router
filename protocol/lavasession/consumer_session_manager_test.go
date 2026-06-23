@@ -94,6 +94,81 @@ func TestHappyFlow(t *testing.T) {
 	}
 }
 
+// TestEndpointHealthRecovery is the MAG-1939 repro + acceptance test. It proves the
+// diagnosis and the fix end to end at the session-manager layer:
+//  1. endpoints disabled by ConnectionRefusals (the all-providers-down burst) make
+//     GetSessions fail with "No pairings available";
+//  2. the /debug/reset-all session work (ResetTransientFailureState + ResetBlockedProviders)
+//     does NOT recover — the next selection re-blocks the providers on their still-disabled
+//     endpoints, which is the exact gap the new debug endpoint closes;
+//  3. ResetEndpointHealth re-enables the endpoints and the very next GetSessions serves again.
+func TestEndpointHealthRecovery(t *testing.T) {
+	ctx := context.Background()
+	csm := CreateConsumerSessionManager()
+
+	mkProvider := func(addr string) *ConsumerSessionsWithProvider {
+		return &ConsumerSessionsWithProvider{
+			PublicLavaAddress: addr,
+			Endpoints:         []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
+			Sessions:          map[int64]*SingleConsumerSession{},
+			MaxComputeUnits:   200,
+			PairingEpoch:      firstEpochHeight,
+		}
+	}
+	pairingList := map[uint64]*ConsumerSessionsWithProvider{
+		0: mkProvider("lava@prov0"),
+		1: mkProvider("lava@prov1"),
+		2: mkProvider("lava@prov2"),
+	}
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
+
+	getSessions := func() error {
+		_, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+		return err
+	}
+
+	// Baseline: a healthy CSM serves.
+	require.NoError(t, getSessions(), "baseline GetSessions should succeed")
+
+	// Reproduce the all-providers-down disable: every endpoint hits the refusal cap.
+	for _, p := range pairingList {
+		for _, e := range p.Endpoints {
+			e.Enabled = false
+			e.ConnectionRefusals = MaxConsecutiveConnectionAttempts
+		}
+	}
+
+	// Symptom: selection now reports "No pairings available".
+	err := getSessions()
+	require.Error(t, err, "disabled endpoints should make GetSessions fail")
+	require.Contains(t, err.Error(), "No pairings available")
+
+	// The gap: the /debug/reset-all session work does NOT recover. ResetBlockedProviders
+	// refills validAddresses, but the next selection re-blocks the providers because their
+	// endpoints are still disabled.
+	csm.ResetTransientFailureState()
+	csm.ResetBlockedProviders()
+	err = getSessions()
+	require.Error(t, err, "reset-all session work alone must NOT recover (the gap this endpoint fixes)")
+	require.Contains(t, err.Error(), "No pairings available")
+
+	// /debug/reset-pairing is also insufficient, by inspection rather than re-proof here:
+	// rebuildPairingFromConfig only rebuilds providers ABSENT from the pairing (it `continue`s
+	// when nothing was restored), so a present-but-disabled provider is left untouched and its
+	// endpoints stay disabled. We do NOT simulate it with UpdateAllProviders: that re-registers
+	// providers under a new epoch and triggers a comprehensive reconnection probe which, against
+	// this test's live grpc server, would re-enable the endpoints and mask the gap — the exact
+	// path that is unavailable in the all-providers-down scenario where the providers are down.
+	//
+	// The fix: ResetEndpointHealth re-enables the endpoints. ResetBlockedProviders alone just
+	// failed above; the only new ingredient here is the endpoint-health reset. The follow-up
+	// ResetBlockedProviders refills validAddresses the failed probe re-emptied, mirroring what
+	// the debug endpoint runs in one shot.
+	require.Equal(t, 3, csm.ResetEndpointHealth(), "all three providers' endpoints should be re-enabled")
+	csm.ResetBlockedProviders()
+	require.NoError(t, getSessions(), "after ResetEndpointHealth the very next GetSessions must succeed")
+}
+
 func getDelayedAddress() string {
 	delayedServerAddress := "127.0.0.1:3335"
 	// because grpcListener is random we might have overlap. in that case just change the port.
