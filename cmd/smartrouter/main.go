@@ -30,6 +30,7 @@ func main() {
 
 	rootCmd.AddCommand(cmdVersion)
 	rootCmd.AddCommand(cache.CreateCacheCobraCommand())
+	rootCmd.AddCommand(rpcsmartrouter.CreateHealthCobraCommand())
 
 	testCmd := &cobra.Command{
 		Use:   "test",

@@ -152,6 +152,93 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 	return nil
 }
 
+// VerificationResult is the outcome of running a single spec verification against one node URL.
+// It carries the spec-derived identity of the verification (Name/Addon/Extension) plus whether
+// the crafted relay succeeded. It is used by the `smartrouter health` command, which needs every
+// verification's result as data rather than short-circuiting on the first failure (as Validate does).
+type VerificationResult struct {
+	Name      string `json:"name"`
+	Addon     string `json:"addon"`
+	Extension string `json:"extension"`
+	Ok        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
+// NodeURLValidation is the full health outcome for one node URL: the latest block observed (or
+// NOT_APPLICABLE when it couldn't be fetched) and every spec verification's result.
+type NodeURLValidation struct {
+	URL           string
+	LatestBlock   int64
+	Verifications []VerificationResult
+}
+
+// ValidateCollect runs the same spec-driven verifications as Validate, but instead of returning on
+// the first hard failure it executes every verification for every node URL and returns the
+// structured results. This is the engine behind the `smartrouter health` command — the caller
+// decides the health rollup (an endpoint is healthy iff the spec loaded and every verification
+// passed, regardless of severity). Severity is intentionally not surfaced: for a health probe a
+// failed verification is a failed verification.
+func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation {
+	results := make([]NodeURLValidation, 0, len(cf.endpoint.NodeUrls))
+	defer cf.invalidateVerificationsCache()
+	for _, url := range cf.endpoint.NodeUrls {
+		nodeResult := NodeURLValidation{URL: url.UrlStr(), LatestBlock: spectypes.NOT_APPLICABLE}
+		addons := url.Addons
+		verifications, err := cf.chainParser.GetVerifications(addons, url.InternalPath, cf.endpoint.ApiInterface)
+		if err != nil {
+			nodeResult.Verifications = append(nodeResult.Verifications, VerificationResult{
+				Name:  "get-verifications",
+				Ok:    false,
+				Error: err.Error(),
+			})
+			results = append(results, nodeResult)
+			continue
+		}
+
+		var latestBlock int64
+		needToFetchLatestBlock := false
+		for _, v := range verifications {
+			if v.Value == "" && v.LatestDistance != 0 {
+				needToFetchLatestBlock = true
+			}
+		}
+		if needToFetchLatestBlock {
+			for attempts := 0; attempts < 3; attempts++ {
+				latestBlock, err = cf.FetchLatestBlockNum(ctx)
+				if err == nil {
+					break
+				}
+			}
+		}
+		nodeResult.LatestBlock = latestBlock
+
+		for _, verification := range verifications {
+			if slices.Contains(url.SkipVerifications, verification.Name) {
+				continue
+			}
+			var verifyErr error
+			for attempts := 0; attempts < 3; attempts++ {
+				verifyErr = cf.Verify(ctx, verification, uint64(latestBlock))
+				if verifyErr == nil {
+					break
+				}
+			}
+			res := VerificationResult{
+				Name:      verification.Name,
+				Addon:     verification.Addon,
+				Extension: verification.Extension,
+				Ok:        verifyErr == nil,
+			}
+			if verifyErr != nil {
+				res.Error = verifyErr.Error()
+			}
+			nodeResult.Verifications = append(nodeResult.Verifications, res)
+		}
+		results = append(results, nodeResult)
+	}
+	return results
+}
+
 func (cf *ChainFetcher) populateCache(relayData *pairingtypes.RelayPrivateData, reply *pairingtypes.RelayReply, requestedBlockHash []byte, finalized bool) {
 	if cf.cache.CacheActive() && (requestedBlockHash != nil || finalized) {
 		new_ctx := context.Background()
