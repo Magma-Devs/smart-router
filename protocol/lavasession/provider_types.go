@@ -2,7 +2,6 @@ package lavasession
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -20,7 +19,6 @@ type RPCProviderEndpoint struct {
 	NetworkAddress NetworkAddressData `yaml:"network-address,omitempty" json:"network-address,omitempty" mapstructure:"network-address,omitempty"`
 	ChainID        string             `yaml:"chain-id,omitempty" json:"chain-id,omitempty" mapstructure:"chain-id"` // spec chain identifier
 	ApiInterface   string             `yaml:"api-interface,omitempty" json:"api-interface,omitempty" mapstructure:"api-interface"`
-	Geolocation    uint64             `yaml:"geolocation,omitempty" json:"geolocation,omitempty" mapstructure:"geolocation"`
 	NodeUrls       []common.NodeUrl   `yaml:"node-urls,omitempty" json:"node-urls,omitempty" mapstructure:"node-urls"`
 	Name           string             `yaml:"provider-name,omitempty" json:"provider-name,omitempty" mapstructure:"provider-name"`
 }
@@ -31,7 +29,6 @@ type RPCStaticProviderEndpoint struct {
 	NetworkAddress NetworkAddressData `yaml:"network-address,omitempty" json:"network-address,omitempty" mapstructure:"network-address,omitempty"`
 	ChainID        string             `yaml:"chain-id,omitempty" json:"chain-id,omitempty" mapstructure:"chain-id"` // spec chain identifier
 	ApiInterface   string             `yaml:"api-interface,omitempty" json:"api-interface,omitempty" mapstructure:"api-interface"`
-	Geolocation    uint64             `yaml:"geolocation,omitempty" json:"geolocation,omitempty" mapstructure:"geolocation"`
 	NodeUrls       []common.NodeUrl   `yaml:"node-urls,omitempty" json:"node-urls,omitempty" mapstructure:"node-urls"`
 	Name           string             `yaml:"name,omitempty" json:"name,omitempty" mapstructure:"name,omitempty"`
 	// Stake is an optional stake amount (in ulava) used for provider selection scoring in static-provider tests.
@@ -51,7 +48,6 @@ func (ext *RPCStaticProviderEndpoint) ToBase() *RPCProviderEndpoint {
 		NetworkAddress: ext.NetworkAddress,
 		ChainID:        ext.ChainID,
 		ApiInterface:   ext.ApiInterface,
-		Geolocation:    ext.Geolocation,
 		NodeUrls:       ext.NodeUrls,
 	}
 }
@@ -90,7 +86,7 @@ func (endpoint *RPCProviderEndpoint) AddonsString() string {
 }
 
 func (endpoint *RPCProviderEndpoint) String() string {
-	return endpoint.ChainID + ":" + endpoint.ApiInterface + " Network Address:" + endpoint.NetworkAddress.Address + " Node:" + endpoint.UrlsString() + " Geolocation:" + strconv.FormatUint(endpoint.Geolocation, 10) + " Addons:" + endpoint.AddonsString()
+	return endpoint.ChainID + ":" + endpoint.ApiInterface + " Network Address:" + endpoint.NetworkAddress.Address + " Node:" + endpoint.UrlsString() + " Addons:" + endpoint.AddonsString()
 }
 
 func (endpoint *RPCProviderEndpoint) Validate() error {

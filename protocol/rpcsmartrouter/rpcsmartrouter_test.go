@@ -19,7 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// gatherHealthGauge reads the lava_rpc_endpoint_overall_health gauge directly from the
+// gatherHealthGauge reads the rpc_endpoint_overall_health gauge directly from the
 // default Prometheus gatherer for a specific (spec, apiInterface, endpoint_id) tuple.
 // Returns (value, true) if found, (0, false) otherwise.
 func gatherHealthGauge(t *testing.T, spec, apiInterface, endpointID string) (float64, bool) {
@@ -27,7 +27,7 @@ func gatherHealthGauge(t *testing.T, spec, apiInterface, endpointID string) (flo
 	families, err := prometheus.DefaultGatherer.Gather()
 	require.NoError(t, err)
 	for _, mf := range families {
-		if mf.GetName() != "lava_rpc_endpoint_overall_health" {
+		if mf.GetName() != "rpc_endpoint_overall_health" {
 			continue
 		}
 		for _, m := range mf.GetMetric() {
@@ -262,7 +262,7 @@ func TestUpdateEpoch_ResetsDisabledEndpoints(t *testing.T) {
 }
 
 // TestUpdateEpoch_ResetsHealthMetric is the companion to the struct-level reset above:
-// it verifies that updateEpoch also resets the Prometheus lava_rpc_endpoint_overall_health
+// it verifies that updateEpoch also resets the Prometheus rpc_endpoint_overall_health
 // gauge back to 1 for both primary and backup providers. Prior to this fix, #2256 reset
 // the in-memory endpoint struct but left the metric stuck at 0, so operators saw 0% uptime
 // on backups even after the router considered them healthy again.
@@ -839,9 +839,6 @@ func TestRPCSmartRouterCobraCommand_StartupErrorDoesNotDumpUsage(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	// Pass the required --geolocation so cobra reaches RunE rather than failing
-	// on required-flag enforcement (which has its own usage-dump path).
-	cmd.SetArgs([]string{"--geolocation", "1"})
 
 	require.Error(t, cmd.Execute(), "expected Execute() to return synthetic error")
 

@@ -12,7 +12,7 @@
 # Smart Router
 
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
-[![Release](https://img.shields.io/badge/release-v1.0.2-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.0.4-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-source--available-orange.svg)](LICENSE.md)
 
@@ -50,7 +50,7 @@ The fastest way to start: install the binary, point it at a YAML config, run.
 
 ```bash
 make install
-smartrouter config/smartrouter_examples/smartrouter_lava.yml --geolocation 1 --use-static-spec specs/
+smartrouter config/smartrouter_examples/smartrouter_lava.yml --use-static-spec specs/
 ```
 
 After running, you get:
@@ -59,6 +59,82 @@ After running, you get:
 - Prometheus metrics on `:7779` — see [docs/METRICS.md](docs/METRICS.md) for the full reference.
 - A health endpoint at `/lava/health`.
 - Provider rotation, RPC-aware retry, response caching, and metrics — all driven by the YAML config.
+
+### Health check (`smartrouter health`)
+
+A spec-driven, one-shot diagnostic that crafts and sends the relays each spec defines to every
+configured upstream node URL, then prints a single JSON report to stdout. It's **chain-agnostic** —
+it relies entirely on the loaded specs, so any chain or interface with a spec works out of the box
+with no per-chain code. For each node URL it runs the standard latest-block call plus every
+verification the spec declares for that node's `addons`/`extensions` (archive / debug / trace and,
+when the spec supports subscriptions, a websocket check on `wss://` URLs).
+
+```bash
+# Probe every node-url under direct-rpc in a config file
+smartrouter health config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
+
+# Or probe an ad-hoc endpoint inline (address chain-id api-interface)
+smartrouter health https://eth1.lava.build ETH1 jsonrpc --use-static-spec specs/
+```
+
+The report is the only thing on **stdout** (all logs go to stderr), so it pipes cleanly into `jq`
+or a downstream verifier:
+
+```bash
+smartrouter health smartrouter_eth.yml --use-static-spec specs/ 2>/dev/null | jq '.results[] | {name, url, ok}'
+```
+
+The document is a uniform envelope — consumers always `JSON.parse` stdout and read `.ok` / `.error` /
+`.results`; **they never inspect the exit code**, which is `0` for any completed run (endpoint
+failures are reported as data, not as a non-zero exit). Only a fatal setup error (bad config,
+missing `--use-static-spec`) exits non-zero, and even then a JSON envelope with a populated `error`
+is printed first.
+
+```json
+{
+  "ok": false,
+  "error": null,
+  "results": [
+    {
+      "name": "eth-lava-build",
+      "chainId": "ETH1",
+      "apiInterface": "jsonrpc",
+      "url": "wss://eth1.lava.build/websocket",
+      "transport": "ws",
+      "addons": ["debug"],
+      "extensions": ["archive"],
+      "specValid": true,
+      "latestBlock": 25374584,
+      "ok": false,
+      "verifications": [
+        { "name": "chain-id", "addon": "",      "extension": "",        "ok": true },
+        { "name": "archive",  "addon": "",      "extension": "archive", "ok": false, "error": "block not found" }
+      ]
+    }
+  ]
+}
+```
+
+A provider with multiple node URLs (e.g. an `https://` and a `wss://` endpoint) yields **one row per
+URL**, distinguished by `url`/`transport`. An endpoint's `ok` is `true` only when the spec loaded
+(`specValid`) **and** every verification passed. Top-level `ok` is the AND of all rows.
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--use-static-spec` | (required) | Spec source(s) — file, directory, or remote URL (same paths as the main command) |
+| `--include-backup` | `false` | Also probe providers under `backup-direct-rpc` |
+| `--timeout` | `30s` | Per-provider timeout, and the basis for the global wall-clock cap (providers probe concurrently; the run never exceeds `timeout + 5s`). A slow/blocked node aborts instead of hanging |
+| `--skip-websocket-verification` | `false` | Exclude `ws://`/`wss://` endpoints and the spec's websocket verification (see note) |
+| `--log-level` | `info` | Log verbosity (written to stderr) |
+
+> **Websocket is verified by default.** For any chain whose spec supports subscriptions, the command
+> probes the configured `ws://`/`wss://` endpoints and runs the spec's websocket verification — so the
+> health check exercises the full surface a supported chain exposes. A blocked or slow ws node can't
+> stall the run: each provider is bounded by `--timeout`, providers probe concurrently, and a global
+> wall-clock cap (`timeout + 5s`) guarantees the command returns even if a connector wedges (a provider
+> that doesn't finish in time is reported as a timed-out row). Pass `--skip-websocket-verification` to
+> exclude ws endpoints — useful for a fast HTTP-only sanity check; each excluded URL is then reported as
+> a row marked `"websocket verification skipped"`.
 
 ### Run with Docker Compose
 

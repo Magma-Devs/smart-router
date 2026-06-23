@@ -289,7 +289,6 @@ func CreateChainLibMocks(
 		NetworkAddress: lavasession.NetworkAddressData{},
 		ChainID:        specIndex,
 		ApiInterface:   apiInterface,
-		Geolocation:    1,
 		NodeUrls:       []common.NodeUrl{},
 	}
 	addons, extensions, err := chainParser.SeparateAddonsExtensions(context.Background(), services)

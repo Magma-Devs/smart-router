@@ -28,9 +28,6 @@ const (
 	RelaysHealthEnableFlag  = "relays-health-enable"   // enable relays health check, default true
 	RelayHealthIntervalFlag = "relays-health-interval" // interval between each relay health check, default 5m
 	SharedStateFlag         = "shared-state"
-	// Disable relay retries when we get node errors.
-	// This feature is suppose to help with successful relays in some chains that return node errors on rare race conditions on the serviced chains.
-	SetRelayCountOnNodeErrorFlag = "set-retry-count-on-node-error"
 	// SetRelayRetryLimitFlag controls the maximum number of retry attempts on relay errors
 	// (both node errors and protocol errors) for consumers and smart routers.
 	SetRelayRetryLimitFlag = "set-relay-retry-limit"
@@ -73,7 +70,6 @@ const (
 	GitLabTokenFlag = "gitlab-token"
 
 	EpochDurationFlag       = "epoch-duration" // duration of each epoch for time-based epoch system (standalone mode)
-	DefaultEpochDuration    = 30 * time.Minute // default epoch duration for regular mode (if using time-based epochs)
 	StandaloneEpochDuration = 15 * time.Minute // default epoch duration for standalone/static provider mode
 
 	// ShutdownGracePeriodFlag controls how long graceful shutdown waits for in-flight
@@ -84,12 +80,11 @@ const (
 	EnableSelectionStatsHeaderFlag = "enable-selection-stats" // enable selection stats header for debugging provider selection // allows the user to manually load a spec providing a path, this is useful to test spec changes before they hit the blockchain
 
 	// weighted selection flags (new system replacing tiers)
-	UseWeightedSelection                = "use-weighted-provider-selection"         // enable weighted random selection based on composite QoS scores
-	ProviderOptimizerAvailabilityWeight = "provider-optimizer-availability-weight"  // weight for availability score (default: 0.4)
-	ProviderOptimizerLatencyWeight      = "provider-optimizer-latency-weight"       // weight for latency score (default: 0.3)
-	ProviderOptimizerSyncWeight         = "provider-optimizer-sync-weight"          // weight for sync score (default: 0.2)
-	ProviderOptimizerStakeWeight        = "provider-optimizer-stake-weight"         // weight for stake (default: 0.1)
-	ProviderOptimizerMinSelectionChance = "provider-optimizer-min-selection-chance" // minimum selection probability for any provider (default: 0.01)
+	ProviderOptimizerAvailabilityWeight = "qos-availability-weight"  // weight for availability score (default: 0.4)
+	ProviderOptimizerLatencyWeight      = "qos-latency-weight"       // weight for latency score (default: 0.3)
+	ProviderOptimizerSyncWeight         = "qos-sync-weight"          // weight for sync score (default: 0.2)
+	ProviderOptimizerStakeWeight        = "qos-stake-weight"         // weight for stake (default: 0.1)
+	ProviderOptimizerMinSelectionChance = "qos-min-selection-chance" // minimum selection probability for any provider (default: 0.01)
 
 	// optimizer qos sampling cadence — drives the in-memory /metrics
 	// selection-score cache and the OTel optimizer_qos emit.
@@ -99,7 +94,6 @@ const (
 	BanDurationForWebsocketRateLimitExceededFlag = "ban-duration-for-websocket-rate-limit-exceeded"
 	LimitParallelWebsocketConnectionsPerIpFlag   = "limit-parallel-websocket-connections-per-ip"
 	LimitWebsocketIdleTimeFlag                   = "limit-websocket-connection-idle-time"
-	RateLimitRequestPerSecondFlag                = "rate-limit-requests-per-second"
 	SkipWebsocketVerificationFlag                = "skip-websocket-verification"
 	// specification default flags
 	PeriodicProbeProvidersFlagName         = "enable-periodic-probe-providers"
@@ -116,7 +110,6 @@ const (
 	// DisableBatchRequestRetryFlag prevents batch requests from being retried on consumer/smartrouter side
 	DisableBatchRequestRetryFlag = "disable-batch-request-retry"
 
-	MemoryGCThresholdGBFlagName      = "memory-gc-threshold-gb"     // Memory GC threshold in GB (0 = disabled)
 	MaxSessionsPerProviderFlagName   = "max-sessions-per-provider"  // Max number of sessions allowed per provider
 	DefaultProcessingTimeoutFlagName = "default-processing-timeout" // default timeout for relay processing
 	MinRelayTimeoutFlagName          = "min-relay-timeout"          // minimum relay timeout floor (default 1s)

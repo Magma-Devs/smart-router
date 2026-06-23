@@ -460,7 +460,7 @@ type errorMapping struct {
 //   - The relay-race design sends one attempt per provider per retry, not
 //     a tight loop against a single struggling provider.
 //
-// If a new unknown-error class starts dominating lava_errors_total in
+// If a new unknown-error class starts dominating smartrouter_errors_total in
 // production, the right response is to add a matcher for it in
 // error_classifier.go (demoting it from Unknown to a specific code with
 // the appropriate Retryable flag), not to flip this default.

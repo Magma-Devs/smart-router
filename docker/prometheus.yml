@@ -2,7 +2,7 @@
 #
 # Scrapes the smart-router's metrics endpoint (metrics-listen-address in the
 # router config, default 0.0.0.0:7779). The dashboard backend then runs PromQL
-# against this Prometheus (lava_rpcsmartrouter_* series) to build its panels.
+# against this Prometheus (smartrouter_* series) to build its panels.
 global:
   scrape_interval: 15s
   evaluation_interval: 15s

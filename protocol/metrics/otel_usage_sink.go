@@ -197,7 +197,6 @@ func (s *OTelUsageSink) EmitOptimizerQoS(r OptimizerQoSReportToSend) {
 		otellog.String("chain_id", r.ChainId),
 		otellog.Int64("epoch", int64(r.Epoch)),
 		otellog.Int64("entry_index", int64(r.EntryIndex)),
-		otellog.Int64("geo_location", int64(r.GeoLocation)),
 		otellog.Int64("provider_stake", r.ProviderStake),
 		// WRS normalized scores
 		otellog.Float64("selection_availability", r.SelectionAvailability),
@@ -253,11 +252,10 @@ func applyOTelSinkDefaults(cfg *OTelUsageSinkConfig) {
 	if cfg.ExportTimeout <= 0 {
 		cfg.ExportTimeout = defaultOTelExportTimeout
 	}
-	// ServiceName intentionally has no package-level default — the consumer
-	// and smart router each set their own via their respective cobra flag's
-	// defValue ("lava-rpcconsumer" / "lava-rpcsmartrouter"), and the
-	// constructor logs the resolved value so an empty one is visible to the
-	// operator at startup.
+	// ServiceName intentionally has no package-level default — the smart
+	// router sets its own via its cobra flag's defValue ("smartrouter"), and
+	// the constructor logs the resolved value so an empty one is visible to
+	// the operator at startup.
 	if cfg.ServiceInstanceID == "" {
 		// Default to hostname-pid so multiple consumer processes on the
 		// same bare-metal host (e.g., one process per chain) get unique

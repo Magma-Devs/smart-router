@@ -16,7 +16,7 @@ func TestErrorMetrics_EndToEnd(t *testing.T) {
 	// Use a fresh registry to avoid interference from other tests
 	reg := prometheus.NewRegistry()
 	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "lava_errors_total_e2e",
+		Name: "smartrouter_errors_total_e2e",
 		Help: "End-to-end test counter",
 	}, []string{"error_code", "error_name", "error_category", "retryable", "chain_id"})
 	reg.MustRegister(counter)
@@ -49,7 +49,7 @@ func TestErrorMetrics_EndToEnd(t *testing.T) {
 	require.Len(t, families, 1)
 
 	family := families[0]
-	assert.Equal(t, "lava_errors_total_e2e", *family.Name)
+	assert.Equal(t, "smartrouter_errors_total_e2e", *family.Name)
 	assert.Len(t, family.Metric, 3) // 3 distinct label combos
 
 	for _, m := range family.Metric {

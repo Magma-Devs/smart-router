@@ -39,8 +39,6 @@ services:
     image: smart-router:dev
     command:
       - "${SR_CONFIG:-config/smartrouter_examples/smartrouter_eth.yml}"
-      - "--geolocation"
-      - "1"
       - "--use-static-spec"
       - "specs/"
       - "--log-level"

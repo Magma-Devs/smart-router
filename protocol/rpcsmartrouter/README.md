@@ -226,7 +226,7 @@ An outlier provider is **not penalized, blocked, or deprioritized** by cross-val
 scoring is separate). It is recorded for observability only, and *only* when a quorum was
 actually reached on a deterministic method:
 
-- `lava_rpcsmartrouter_cross_validation_mismatch_total{spec, apiInterface, method, group, finality}`
+- `smartrouter_cross_validation_mismatch_total{spec, apiInterface, method, group, finality}`
   is incremented **once per distinct outlier group** for a successful deterministic quorum — not
   once per provider. (Non-deterministic methods legitimately differ and are not counted; a quorum
   *failure* emits a `lava-cross-validation-failure-reason` instead, never this metric.) The
@@ -242,22 +242,16 @@ under a strict (unanimous) policy it instead causes a quorum failure.
 ## Usage
 
 ```bash
-# Using standalone binary
-smartrouter config.yml --geolocation 1 --use-static-spec specs/
-
-# Using lavap
-lavap rpcsmartrouter config.yml --geolocation 1 --use-static-spec specs/
+smartrouter config.yml --use-static-spec specs/
 ```
 
 ### Common Flags
 
 ```bash
---geolocation 1                      # Geographic location code
 --cache-be "127.0.0.1:7778"          # Enable caching
 --strategy balanced                   # Provider selection strategy
 --metrics-listen-address ":7779"     # Prometheus metrics
 --log_level debug                    # Log verbosity
---concurrent-providers 3             # Max parallel provider attempts
 ```
 
 ### Usage telemetry (OTel)
@@ -273,7 +267,7 @@ inlinable no-op call and nothing else.
 ```bash
 --usage-otel-enabled                       # master switch (both event types); off by default
 --usage-otel-endpoint "127.0.0.1:4318"     # OTLP/HTTP collector endpoint
---usage-otel-service-name "lava-rpcsmartrouter"
+--usage-otel-service-name "smartrouter"
 --usage-otel-service-instance-id "$HOSTNAME-eth"  # default: hostname-pid
 ```
 

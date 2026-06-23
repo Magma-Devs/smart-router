@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	_ "net/http/pprof"
 	"os"
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache"
@@ -31,6 +30,7 @@ func main() {
 
 	rootCmd.AddCommand(cmdVersion)
 	rootCmd.AddCommand(cache.CreateCacheCobraCommand())
+	rootCmd.AddCommand(rpcsmartrouter.CreateHealthCobraCommand())
 
 	testCmd := &cobra.Command{
 		Use:   "test",

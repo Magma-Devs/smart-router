@@ -18,6 +18,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -40,7 +41,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
-	planstypes "github.com/magma-Devs/smart-router/types/plans"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -207,13 +207,11 @@ type rpcSmartRouterStartOptions struct {
 	rpcEndpoints             []*lavasession.RPCEndpoint
 	cache                    *performance.Cache
 	strategy                 provideroptimizer.Strategy
-	maxConcurrentProviders   uint
 	analyticsServerAddresses AnalyticsServerAddresses
 	cmdFlags                 common.ConsumerCmdFlags
 	stateShare               bool
 	staticProvidersList      []*lavasession.RPCStaticProviderEndpoint // define static providers as primary providers
 	backupProvidersList      []*lavasession.RPCStaticProviderEndpoint // define backup providers as emergency fallback when no providers available
-	geoLocation              uint64
 	weightedSelectorConfig   provideroptimizer.WeightedSelectorConfig
 }
 
@@ -269,10 +267,10 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	usageSink := newUsageSinkFromOptions(options)
 	rpsr.usageSink = usageSink
 
-	// Always collect optimizer QoS reports so the lava_rpc_optimizer_selection_score
+	// Always collect optimizer QoS reports so the rpc_optimizer_selection_score
 	// metric is exposed on /metrics regardless of OTel. Each sampling tick also
 	// fires the reports at usageSink (Noop when OTel is off).
-	smartRouterOptimizerQoSClient := metrics.NewConsumerOptimizerQoSClient(smartRouterIdentifier, usageSink, options.geoLocation)
+	smartRouterOptimizerQoSClient := metrics.NewConsumerOptimizerQoSClient(smartRouterIdentifier, usageSink)
 	smartRouterOptimizerQoSClient.StartOptimizersQoSReportsCollecting(ctx, metrics.OptimizerQosServerSamplingInterval)
 	// SmartRouterMetricsManager is the single metrics owner for the smart router.
 	// It serves its own HTTP endpoint and implements ConsumerMetricsManagerInf so it
@@ -1006,7 +1004,10 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	defer chainMutexes[chainID].Unlock()
 
 	// Create / Use existing optimizer
-	newOptimizer := provideroptimizer.NewProviderOptimizer(options.strategy, averageBlockTime, options.maxConcurrentProviders, smartRouterOptimizerQoSClient, chainID)
+	// Smart-router serves each relay from a single selected provider (cross-validation
+	// aside), so the optimizer's wanted-concurrency is always 1. The legacy
+	// --concurrent-providers flag fed a write-only optimizer field and is removed.
+	newOptimizer := provideroptimizer.NewProviderOptimizer(options.strategy, averageBlockTime, 1, smartRouterOptimizerQoSClient, chainID)
 	newOptimizer.ConfigureWeightedSelector(options.weightedSelectorConfig)
 	optimizer, loaded, err := optimizers.LoadOrStore(chainID, newOptimizer)
 	if err != nil {
@@ -1098,7 +1099,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 					Extensions:        extensions,
 					Connections:       nil,
 					DirectConnections: []lavasession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
-					Geolocation:       planstypes.Geolocation(provider.Geolocation),
 				}
 				endpoints = append(endpoints, endpoint)
 
@@ -1202,7 +1202,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				NetworkAddress: staticProvider.NetworkAddress,
 				ChainID:        staticProvider.ChainID,
 				ApiInterface:   staticProvider.ApiInterface,
-				Geolocation:    staticProvider.Geolocation,
 				NodeUrls:       verificationNodeUrls,
 			}
 
@@ -1335,7 +1334,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				NetworkAddress: backupProvider.NetworkAddress,
 				ChainID:        backupProvider.ChainID,
 				ApiInterface:   backupProvider.ApiInterface,
-				Geolocation:    backupProvider.Geolocation,
 				NodeUrls:       verificationNodeUrls,
 			}
 
@@ -1607,13 +1605,12 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	return nil
 }
 
-func ParseEndpoints(viper_endpoints *viper.Viper, geolocation uint64) (endpoints []*lavasession.RPCEndpoint, err error) {
+func ParseEndpoints(viper_endpoints *viper.Viper) (endpoints []*lavasession.RPCEndpoint, err error) {
 	err = viper_endpoints.UnmarshalKey(common.EndpointsConfigName, &endpoints)
 	if err != nil {
 		utils.LavaFormatFatal("could not unmarshal endpoints", err, utils.Attribute{Key: "viper_endpoints", Value: viper_endpoints.AllSettings()})
 	}
 	for _, endpoint := range endpoints {
-		endpoint.Geolocation = geolocation
 		if endpoint.HealthCheckPath == "" {
 			endpoint.HealthCheckPath = common.DEFAULT_HEALTH_PATH
 		}
@@ -1636,11 +1633,11 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 		if no arguments are passed, assumes default config file: ` + DefaultRPCSmartRouterFileName + `
 		if one argument is passed, its assumed the config file name
 		`,
-		Example: `required flags: --geolocation 1 --static-providers ...
+		Example: `required: --direct-rpc ...
 rpcsmartrouter <flags>
 rpcsmartrouter rpcsmartrouter_conf <flags>
 rpcsmartrouter 127.0.0.1:3333 OSMOSIS tendermintrpc 127.0.0.1:3334 OSMOSIS rest <flags>
-rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127.0.0.1:7778" --geolocation 1 [--debug-relays] --log_level <debug|warn|...>`,
+rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127.0.0.1:7778" [--debug-relays] --log_level <debug|warn|...>`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			// Optionally run one of the validators provided by cobra
 			if err := cobra.RangeArgs(0, 1)(cmd, args); err == nil {
@@ -1710,6 +1707,19 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 					utils.LavaFormatInfo("created new config file", utils.Attribute{Key: "file_name", Value: DefaultRPCSmartRouterFileName})
 				}
 			} else if err = viper.ReadInConfig(); err != nil {
+				// A missing config file is the most common operator mistake (e.g.
+				// running `smartrouter` with no args in the wrong directory). Treat
+				// it as a clean, actionable error instead of a fatal stack-trace
+				// dump — reserve the loud path for genuinely unexpected read
+				// failures like malformed YAML.
+				var notFound viper.ConfigFileNotFoundError
+				if errors.As(err, &notFound) {
+					return utils.LavaFormatError(
+						"no config file found — pass a config file as an argument (e.g. `smartrouter <config-file>.yml`), or place "+DefaultRPCSmartRouterFileName+" in one of the search paths",
+						err,
+						utils.Attribute{Key: "config_name", Value: DefaultRPCSmartRouterFileName},
+					)
+				}
 				utils.LavaFormatFatal("could not load config file", err, utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
 			} else {
 				utils.LavaFormatInfo("read config file successfully", utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
@@ -1736,11 +1746,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 					utils.LogAttr("consistencyBlockGapFactor", relaycore.ConsistencyBlockGapFactorOverride))
 			}
 
-			geolocation, err := cmd.Flags().GetUint64(lavasession.GeolocationFlag)
-			if err != nil {
-				utils.LavaFormatFatal("failed to read geolocation flag, required flag", err)
-			}
-			rpcEndpoints, err = ParseEndpoints(viper.GetViper(), geolocation)
+			rpcEndpoints, err = ParseEndpoints(viper.GetViper())
 			if err != nil || len(rpcEndpoints) == 0 {
 				return utils.LavaFormatError("invalid endpoints definition", err)
 			}
@@ -1783,7 +1789,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				}
 				pyroscopeAppName, err := cmd.Flags().GetString(performance.PyroscopeAppNameFlagName)
 				if err != nil || pyroscopeAppName == "" {
-					pyroscopeAppName = "lavap-smartrouter"
+					pyroscopeAppName = "smartrouter"
 				}
 				mutexProfileFraction, err := cmd.Flags().GetInt(performance.PyroscopeMutexProfileFractionFlagName)
 				if err != nil {
@@ -1801,14 +1807,11 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				}
 			}
 
-			// Parse direct RPC endpoints (new key: "direct-rpc", backward compat: "static-providers")
+			// Parse direct RPC endpoints
 			var directRPCEndpoints []*lavasession.RPCStaticProviderEndpoint
 			directRPCConfigKey := common.DirectRPCConfigName
-			if !viper.IsSet(directRPCConfigKey) {
-				directRPCConfigKey = common.StaticProvidersConfigName // backward compat
-			}
 			if viper.IsSet(directRPCConfigKey) {
-				directRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), directRPCConfigKey, geolocation)
+				directRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), directRPCConfigKey)
 				if err != nil {
 					return utils.LavaFormatError("invalid direct-rpc endpoints definition", err)
 				}
@@ -1822,15 +1825,12 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				}
 			}
 
-			// Parse backup direct RPC endpoints (new key: "backup-direct-rpc", backward compat: "backup-providers")
+			// Parse backup direct RPC endpoints
 			var backupDirectRPCEndpoints []*lavasession.RPCStaticProviderEndpoint
 			backupConfigKey := common.BackupDirectRPCConfigName
-			if !viper.IsSet(backupConfigKey) {
-				backupConfigKey = common.BackupProvidersConfigName // backward compat
-			}
 			if viper.IsSet(backupConfigKey) {
 				utils.LavaFormatInfo("Backup direct-rpc config found", utils.Attribute{Key: "configKey", Value: backupConfigKey})
-				backupDirectRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), backupConfigKey, geolocation)
+				backupDirectRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), backupConfigKey)
 				if err != nil {
 					return utils.LavaFormatError("invalid backup-direct-rpc endpoints definition", err)
 				}
@@ -1904,7 +1904,6 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				UsageOTelInstanceID:    viper.GetString(metrics.UsageOTelInstanceIDFlagName),
 			}
 
-			maxConcurrentProviders := viper.GetUint(common.MaximumConcurrentProvidersFlagName)
 			if err := scoreutils.SetProbeUpdateWeight(viper.GetFloat64(common.ProbeUpdateWeightFlagName)); err != nil {
 				return err
 			}
@@ -1965,13 +1964,11 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				rpcEndpoints:             rpcEndpoints,
 				cache:                    cache,
 				strategy:                 strategyFlag.Strategy,
-				maxConcurrentProviders:   maxConcurrentProviders,
 				analyticsServerAddresses: analyticsServerAddresses,
 				cmdFlags:                 consumerPropagatedFlags,
 				stateShare:               rpcSmartRouterSharedState,
 				staticProvidersList:      directRPCEndpoints,
 				backupProvidersList:      backupDirectRPCEndpoints,
-				geoLocation:              geolocation,
 				weightedSelectorConfig:   weightedSelectorConfig,
 			})
 			if err != nil {
@@ -1990,9 +1987,6 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	}
 
 	// RPCSmartRouter command flags - no blockchain flags needed
-	cmdRPCSmartRouter.Flags().Uint64(common.GeolocationFlag, 0, "geolocation to run from")
-	cmdRPCSmartRouter.Flags().Uint(common.MaximumConcurrentProvidersFlagName, 3, "max number of concurrent providers to communicate with")
-	cmdRPCSmartRouter.MarkFlagRequired(common.GeolocationFlag)
 	cmdRPCSmartRouter.Flags().Bool(lavasession.AllowInsecureConnectionToProvidersFlag, false, "allow insecure provider-dialing. used for development and testing")
 	cmdRPCSmartRouter.Flags().String(common.ResponseCompressionFlag, common.DefaultResponseCompression, "client-facing response compression: gzip (default), brotli, or off")
 	cmdRPCSmartRouter.Flags().Uint64Var(&lavasession.MaximumStreamsOverASingleConnection, lavasession.MaximumStreamsOverASingleConnectionFlag, lavasession.DefaultMaximumStreamsOverASingleConnection, "maximum number of parallel streams over a single provider connection")
@@ -2003,7 +1997,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 		utils.LavaFormatFatal("failed binding debug-address flag", err)
 	}
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeAddressFlagName, "", "pyroscope server address for continuous profiling (e.g., http://pyroscope:4040)")
-	cmdRPCSmartRouter.Flags().String(performance.PyroscopeAppNameFlagName, "lavap-smartrouter", "pyroscope application name for identifying this service")
+	cmdRPCSmartRouter.Flags().String(performance.PyroscopeAppNameFlagName, "smartrouter", "pyroscope application name for identifying this service")
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeMutexProfileFractionFlagName, performance.DefaultMutexProfileFraction, "mutex profile sampling rate (1 in N mutex events)")
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeBlockProfileRateFlagName, performance.DefaultBlockProfileRate, "block profile rate in nanoseconds (1 records all blocking events)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
@@ -2042,7 +2036,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Int(metrics.UsageOTelBatchSizeFlagName, 1000, "usage event batch-size flush trigger")
 	cmdRPCSmartRouter.Flags().Duration(metrics.UsageOTelFlushIntervalFlagName, 500*time.Millisecond, "usage event time-based flush trigger")
 	cmdRPCSmartRouter.Flags().Duration(metrics.UsageOTelExportTimeoutFlagName, 10*time.Second, "OTLP per-batch export timeout")
-	cmdRPCSmartRouter.Flags().String(metrics.UsageOTelServiceNameFlagName, "lava-rpcsmartrouter", "OTel service.name resource attribute")
+	cmdRPCSmartRouter.Flags().String(metrics.UsageOTelServiceNameFlagName, "smartrouter", "OTel service.name resource attribute")
 	cmdRPCSmartRouter.Flags().String(metrics.UsageOTelInstanceIDFlagName, "", "OTel service.instance.id (default: hostname-pid); useful when running multiple processes per host")
 	cmdRPCSmartRouter.Flags().Bool(DebugRelaysFlagName, false, "adding debug information to relays")
 	cmdRPCSmartRouter.Flags().Bool(common.EnableSelectionStatsHeaderFlag, false, "enable selection stats header for debugging provider selection")
@@ -2139,7 +2133,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// Resolve the per-chain metrics manager once so endpoint health resets below
 		// can also reset the corresponding Prometheus gauge. Without this, #2256's
 		// endpoint.ResetHealth() fixes the in-memory struct but the
-		// lava_rpc_endpoint_overall_health gauge stays stuck at 0 (unhealthy) forever,
+		// rpc_endpoint_overall_health gauge stays stuck at 0 (unhealthy) forever,
 		// since the only path back to 1 is a successful relay that calls
 		// SetEndpointOverallHealth(..., true) — which a backup may never receive.
 		var epochMetrics *metrics.SmartRouterMetricsManager
@@ -2357,7 +2351,6 @@ func (rpsr *RPCSmartRouter) retryFailedStaticProviders(
 				NetworkAddress: provider.NetworkAddress,
 				ChainID:        provider.ChainID,
 				ApiInterface:   provider.ApiInterface,
-				Geolocation:    provider.Geolocation,
 				NodeUrls:       verificationNodeUrls,
 			}
 

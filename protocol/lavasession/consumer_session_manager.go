@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -695,7 +694,6 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 			probeResp, err := client.Probe(connectCtx, probeReq, grpc.Trailer(&trailer))
 
 			relayLatency := time.Since(relaySentTime)
-			versions := trailer.Get(common.VersionMetadataKey)
 			if err != nil {
 				return utils.LavaFormatError("probe call error", err, utils.Attribute{Key: "provider", Value: providerAddress})
 			}
@@ -713,7 +711,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 			})
 			// public lava address is a value that is not changing, so it's thread safe
 			if DebugProbesEnabled() {
-				utils.LavaFormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicLavaAddress}, utils.LogAttr("version", strings.Join(versions, ",")))
+				utils.LavaFormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicLavaAddress})
 			}
 			return nil
 		}()
@@ -1172,13 +1170,6 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 				sessions[providerAddress] = sessionInfo
 
 				qosReport, _ := csm.providerOptimizer.GetReputationReportForProvider(providerAddress)
-				if csm.rpcEndpoint.Geolocation != uint64(endpoint.endpoint.Geolocation) && !consumerSessionsWithProvider.StaticProvider {
-					// rawQosReport is used only when building the relay payment message to be used to update
-					// the provider's reputation on-chain. If the consumer and provider don't share geolocation
-					// (consumer geo: csm.rpcEndpoint.Geolocation, provider geo: endpoint.endpoint.Geolocation)
-					// we don't want to update the reputation by it, so we null the rawQosReport
-					qosReport = nil
-				}
 				consumerSession.SetUsageForSession(cuNeededForSession, qosReport, usedProviders, routerKey)
 				// We successfully added provider, we should ignore it if we need to fetch new
 				tempIgnoredProviders.providers[providerAddress] = struct{}{}
@@ -2123,11 +2114,25 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 	// calculate QoS - syncGap is the difference between expected and actual block height (0 if not tracked)
 	csm.qosManager.CalculateQoS(csm.atomicReadCurrentEpoch(), consumerSession.SessionId, consumerSession.Parent.PublicLavaAddress, currentLatency, expectedLatency, syncGap, numOfProviders, int64(providersCount))
 	if !isHangingApi {
-		// append relay data only for non hanging apis. Resolve THIS interface's consensus baseline
-		// (F4) up front so the optimizer measures sync lag against the agreed tip — or omits sync when
-		// there is no fresh majority (F5) — instead of the shared-getter/max-across-providers behavior.
+		// Append relay data only for non-hanging apis. Two composed fixes:
+		//
+		// MAG-1748: latestServicedBlock is the GLOBAL chain-tracker head for methods whose response
+		// body carries no block height (eth_getBalance/eth_call/eth_estimateGas) — identical for every
+		// provider, so feeding it would leave the per-provider sync-score blind to a stale provider.
+		// Prefer the per-endpoint ChainTracker block (Endpoint.LatestBlock, kept current regardless of
+		// method) so a lagging provider is actually demoted.
+		syncBlock := uint64(latestServicedBlock)
+		if drsc, ok := consumerSession.Connection.(*DirectRPCSessionConnection); ok && drsc.Endpoint != nil {
+			if endpointBlock := drsc.Endpoint.LatestBlock.Load(); endpointBlock > 0 {
+				syncBlock = uint64(endpointBlock)
+			}
+		}
+		// F4/F5: resolve THIS interface's consensus baseline so the optimizer measures sync lag
+		// against the agreed tip — or omits sync when there is no fresh majority — instead of the
+		// shared-getter/max-across-providers behavior. The per-endpoint block above is the provider's
+		// observed position; syncRef is the reference it is compared against.
 		syncRef := csm.resolveSyncReference()
-		go csm.providerOptimizer.AppendRelayDataConsensus(consumerSession.Parent.PublicLavaAddress, currentLatency, specComputeUnits, uint64(latestServicedBlock), syncRef)
+		go csm.providerOptimizer.AppendRelayDataConsensus(consumerSession.Parent.PublicLavaAddress, currentLatency, specComputeUnits, syncBlock, syncRef)
 	}
 
 	csm.updateMetricsManager(consumerSession, currentLatency, !isHangingApi) // apply latency only for non hanging apis
@@ -2198,19 +2203,17 @@ func (csm *ConsumerSessionManager) GetReportedProviders(epoch uint64) []*pairing
 	reportedProviders := csm.reportedProviders.GetReportedProviders()
 	filteredReportedProviders := []*pairingtypes.ReportedProvider{}
 	for _, reportedProvider := range reportedProviders {
-		provider, ok := csm.pairing[reportedProvider.Address]
+		_, ok := csm.pairing[reportedProvider.Address]
 		if !ok {
 			// Provider may be a backup provider — they are stored separately
 			// from the main pairing but can still be reported on failure.
-			provider, ok = csm.backupProviders[reportedProvider.Address]
+			_, ok = csm.backupProviders[reportedProvider.Address]
 		}
 		if !ok {
 			utils.LavaFormatError("Failed to find a reported provider in pairing list", nil, utils.LogAttr("provider_address", reportedProvider.Address), utils.LogAttr("epoch", csm.currentEpoch))
 			continue
 		}
-		if provider.doesProviderEndpointsContainGeolocation(csm.RPCEndpoint().Geolocation) {
-			filteredReportedProviders = append(filteredReportedProviders, reportedProvider)
-		}
+		filteredReportedProviders = append(filteredReportedProviders, reportedProvider)
 	}
 	return filteredReportedProviders
 }

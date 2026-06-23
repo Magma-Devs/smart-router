@@ -19,8 +19,8 @@ if [[ "$REGENERATE_CONFIG" == "1" ]]; then
     rm -f "$CONFIG_FILE" 2>/dev/null || true
 fi
 
-# Kill any running smartrouter / lavap processes
-killall smartrouter lavap 2>/dev/null || true
+# Kill any running smartrouter processes
+killall smartrouter 2>/dev/null || true
 sleep 1
 
 # Kill all screen sessions
@@ -270,7 +270,6 @@ echo ""
 
 screen -d -m -S smartrouter bash -c "cd $PROJECT_ROOT && source ~/.bashrc; smartrouter \
 config/smartrouter_examples/smartrouter_eth.yml \
---geolocation 1 \
 --log-level debug \
 --cache-be \"127.0.0.1:20100\" \
 --use-static-spec $SPECS_DIR \
@@ -446,7 +445,7 @@ if [[ "$WS_ENABLED" == "true" ]]; then
 fi
 echo ""
 echo "To Stop All Services:"
-echo "  killall smartrouter lavap"
+echo "  killall smartrouter"
 echo "  screen -wipe"
 echo ""
 echo "============================================"

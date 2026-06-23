@@ -39,21 +39,6 @@ const (
 	GRPCNotImplemented       = "not implemented"
 	GRPCServiceNotFound      = "service not found"
 
-	// HTTP status codes for unsupported endpoints
-	HTTPStatusNotFound         = 404
-	HTTPStatusMethodNotAllowed = 405
-
-	// JSON-RPC error code for method not found
-	JSONRPCMethodNotFoundCode = -32601
-
-	// JSON-RPC error code for invalid params
-	JSONRPCInvalidParamsCode = -32602
-
-	// Solana non-retryable error codes
-	// - Error code -32009: Slot was skipped or missing in long-term storage (permanent)
-	// Note: -32007 (ledger jump to snapshot) IS retryable as another provider may have the data
-	SolanaMissingInLongTermStorageCode = -32009
-
 	// Solana non-retryable error patterns (message-based)
 	SolanaMissingInLongTermStorage = "missing in long-term storage"
 )

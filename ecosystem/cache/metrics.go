@@ -62,10 +62,16 @@ func NewCacheMetricsServer(listenAddress string) *CacheMetrics {
 	prometheus.MustRegister(totalExpired)
 	prometheus.MustRegister(currentCacheSize)
 	prometheus.MustRegister(apiSpecifics)
-	http.Handle("/metrics", promhttp.Handler())
+	// Serve metrics on a dedicated mux rather than http.DefaultServeMux. A nil
+	// handler would serve the default mux, which any blank `net/http/pprof`
+	// import elsewhere in the binary silently populates with /debug/pprof/* —
+	// exposing heap/goroutine dumps and CPU profiling (a DoS lever) on this
+	// listener. An explicit mux serves only the routes we register here.
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
 	go func() {
 		utils.LavaFormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: listenAddress})
-		http.ListenAndServe(listenAddress, nil) //nolint:errcheck
+		http.ListenAndServe(listenAddress, mux) //nolint:errcheck
 	}()
 
 	totalExpired.WithLabelValues(totalExpiredKey).Add(0)

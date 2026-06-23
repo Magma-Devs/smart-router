@@ -233,7 +233,6 @@ func (*chainRouterImpl) setRouterKeyInBatch(nodeUrl common.NodeUrl, returnedBatc
 		NetworkAddress: rpcProviderEndpoint.NetworkAddress,
 		ChainID:        rpcProviderEndpoint.ChainID,
 		ApiInterface:   rpcProviderEndpoint.ApiInterface,
-		Geolocation:    rpcProviderEndpoint.Geolocation,
 		NodeUrls:       []common.NodeUrl{nodeUrl},
 	}
 }

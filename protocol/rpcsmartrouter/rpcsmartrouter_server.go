@@ -2826,7 +2826,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// same rule.
 		//
 		// Compute the cancellation flag BEFORE logging so race losers don't get
-		// tagged as errors and don't pollute lava_errors_total — on a busy router
+		// tagged as errors and don't pollute smartrouter_errors_total — on a busy router
 		// doing parallel races, the race-loser count would otherwise swamp the
 		// real error count.
 		isClientCancel := common.IsClientCancellation(err, ctx)

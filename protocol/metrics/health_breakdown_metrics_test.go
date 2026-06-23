@@ -16,7 +16,7 @@ func newSmartRouterForHealthBreakdownTest() *SmartRouterMetricsManager {
 	}
 }
 
-// ---- lava_rpcsmartrouter_overall_health_breakdown ----
+// ---- smartrouter_overall_health_breakdown ----
 
 func TestSmartRouterUpdateHealthcheckStatusBreakdown_Healthy(t *testing.T) {
 	m := newSmartRouterForHealthBreakdownTest()
@@ -59,7 +59,7 @@ func TestSmartRouterUpdateHealthcheckStatusBreakdown_NilSafe(t *testing.T) {
 	require.NotPanics(t, func() { m.UpdateHealthcheckStatusBreakdown("ETH1", "jsonrpc", true) })
 }
 
-// ---- lava_rpc_endpoint_overall_health_breakdown ----
+// ---- rpc_endpoint_overall_health_breakdown ----
 
 func TestSmartRouterSetEndpointOverallHealthBreakdown_Healthy(t *testing.T) {
 	m := newSmartRouterForHealthBreakdownTest()

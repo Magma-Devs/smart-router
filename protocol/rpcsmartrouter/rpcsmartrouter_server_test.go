@@ -458,7 +458,7 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 		require.NoError(t, err)
 		var total float64
 		for _, mf := range mfs {
-			if mf.GetName() != "lava_rpcsmartrouter_cross_validation_mismatch_total" {
+			if mf.GetName() != "smartrouter_cross_validation_mismatch_total" {
 				continue
 			}
 			for _, m := range mf.GetMetric() {
@@ -567,9 +567,9 @@ func TestCrossValidationFailFast_EmitsRequestFailedMetrics(t *testing.T) {
 	const method = "cv_failfast_metric"
 	pm := &MockProtocolMessage{api: &spectypes.Api{Name: method}}
 
-	reqName := "lava_rpcsmartrouter_cross_validation_requests_total"
-	failName := "lava_rpcsmartrouter_cross_validation_failed_total"
-	successName := "lava_rpcsmartrouter_cross_validation_success_total"
+	reqName := "smartrouter_cross_validation_requests_total"
+	failName := "smartrouter_cross_validation_failed_total"
+	successName := "smartrouter_cross_validation_success_total"
 	reqBefore := cvRequestCounter(t, reqName, method)
 	failBefore := cvRequestCounter(t, failName, method)
 	successBefore := cvRequestCounter(t, successName, method)

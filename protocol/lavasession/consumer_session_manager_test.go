@@ -170,7 +170,7 @@ func CreateConsumerSessionManager() *ConsumerSessionManager {
 	rand.InitRandomSeed()
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
 	optimizer.SetDeterministicSeed(1234567)
-	return NewConsumerSessionManager(&RPCEndpoint{"stub", "stub", "stub", false, "/", 0}, optimizer, nil, "lava@test", NewActiveSubscriptionProvidersStorage())
+	return NewConsumerSessionManager(&RPCEndpoint{"stub", "stub", "stub", false, "/"}, optimizer, nil, "lava@test", NewActiveSubscriptionProvidersStorage())
 }
 
 func TestMain(m *testing.M) {
@@ -2683,7 +2683,7 @@ func createConsumerSessionManagerWithMetrics(m metrics.ConsumerMetricsManagerInf
 	rand.InitRandomSeed()
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
 	optimizer.SetDeterministicSeed(1234567)
-	return NewConsumerSessionManager(&RPCEndpoint{"stub", "stub", "stub", false, "/", 0}, optimizer, m, "lava@test", NewActiveSubscriptionProvidersStorage())
+	return NewConsumerSessionManager(&RPCEndpoint{"stub", "stub", "stub", false, "/"}, optimizer, m, "lava@test", NewActiveSubscriptionProvidersStorage())
 }
 
 // TestPublishStateSizes_PopulateThenReset verifies that publishStateSizes

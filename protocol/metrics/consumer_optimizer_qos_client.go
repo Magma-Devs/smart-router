@@ -43,7 +43,6 @@ type ConsumerOptimizerQoSClient struct {
 	currentEpoch                       atomic.Uint64
 	lock                               sync.RWMutex
 	reportsToSend                      []OptimizerQoSReportToSend
-	geoLocation                        uint64
 }
 
 type OptimizerQoSReport struct {
@@ -83,7 +82,6 @@ type OptimizerQoSReportToSend struct {
 	Epoch            uint64  `json:"epoch"`
 	ProviderStake    int64   `json:"provider_stake"`
 	EntryIndex       int     `json:"entry_index"`
-	GeoLocation      uint64  `json:"geo_location"`
 	// WRS normalized scores - Used in weighted random selection algorithm (0-1, higher is better)
 	SelectionAvailability float64 `json:"selection_availability"` // Normalized availability after Phase 1 rescaling
 	SelectionLatency      float64 `json:"selection_latency"`      // Normalized latency after Phase 2 P10-P90
@@ -119,7 +117,7 @@ type OptimizerInf interface {
 // every sampling tick (pass NoopUsageSink{} to disable OTel emission). The
 // in-memory reportsToSend cache is always maintained so the Prometheus
 // /metrics selection-score endpoint stays populated regardless of the sink.
-func NewConsumerOptimizerQoSClient(consumerAddress string, usageSink UsageEventSink, geoLocation uint64) *ConsumerOptimizerQoSClient {
+func NewConsumerOptimizerQoSClient(consumerAddress string, usageSink UsageEventSink) *ConsumerOptimizerQoSClient {
 	hostname, err := os.Hostname()
 	if err != nil {
 		utils.LavaFormatWarning("Error while getting hostname for ConsumerOptimizerQoSClient", err)
@@ -140,7 +138,6 @@ func NewConsumerOptimizerQoSClient(consumerAddress string, usageSink UsageEventS
 		chainIdToProviderToLastRNGValue:    map[string]map[string]float64{},
 		chainIdToProviderToEpochToStake:    map[string]map[string]map[uint64]int64{},
 		chainIdToTotalSelections:           map[string]uint64{},
-		geoLocation:                        geoLocation,
 	}
 }
 
@@ -240,7 +237,6 @@ func (coqc *ConsumerOptimizerQoSClient) appendOptimizerQoSReport(report *Optimiz
 		Epoch:             epoch,
 		NodeErrorRate:     sanitizeFloat(coqc.calculateNodeErrorRate(chainId, report.ProviderAddress)),
 		ProviderStake:     coqc.getProviderChainStake(chainId, report.ProviderAddress, epoch),
-		GeoLocation:       coqc.geoLocation,
 		// WRS normalized scores
 		SelectionAvailability: sanitizeFloat(report.SelectionAvailability),
 		SelectionLatency:      sanitizeFloat(report.SelectionLatency),

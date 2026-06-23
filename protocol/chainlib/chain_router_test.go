@@ -144,7 +144,6 @@ func TestChainRouterWithDisabledWebSocketInSpec(t *testing.T) {
 		NetworkAddress: lavasession.NetworkAddressData{},
 		ChainID:        spec.Index,
 		ApiInterface:   apiInterface,
-		Geolocation:    1,
 		NodeUrls:       []common.NodeUrl{},
 	}
 
@@ -502,7 +501,6 @@ func TestChainRouterWithEnabledWebSocketInSpec(t *testing.T) {
 		NetworkAddress: lavasession.NetworkAddressData{},
 		ChainID:        spec.Index,
 		ApiInterface:   apiInterface,
-		Geolocation:    1,
 		NodeUrls:       []common.NodeUrl{},
 	}
 
@@ -876,7 +874,6 @@ func TestChainRouterWithMethodRoutes(t *testing.T) {
 		NetworkAddress: lavasession.NetworkAddressData{},
 		ChainID:        spec.Index,
 		ApiInterface:   apiInterface,
-		Geolocation:    1,
 		NodeUrls:       []common.NodeUrl{},
 	}
 	const extMarker = "::ext::"
@@ -2181,7 +2178,6 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				NetworkAddress: lavasession.NetworkAddressData{},
 				ChainID:        spec.Index,
 				ApiInterface:   play.apiInterface,
-				Geolocation:    1,
 				NodeUrls:       play.nodeUrls,
 			}
 

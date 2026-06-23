@@ -13,11 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"slices"
-
 	"github.com/gogo/status"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
-	planstypes "github.com/magma-Devs/smart-router/types/plans"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -45,22 +42,7 @@ const (
 	TimeoutForEstablishingAConnection                = 1500 * time.Millisecond // 1.5 seconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession = 15
 	RelayNumberIncrement                             = 1
-	GeolocationFlag                                  = "geolocation"
-	TendermintUnsubscribeAll                         = "unsubscribe_all"
-	IndexNotFound                                    = -15
-	MinValidAddressesForBlockingProbing              = 2
-	BACKOFF_TIME_ON_FAILURE                          = 3 * time.Second
-	BLOCKING_PROBE_SLEEP_TIME                        = 1000 * time.Millisecond // maximum amount of time to sleep before triggering probe, to scatter probes uniformly across chains
-	BLOCKING_PROBE_TIMEOUT                           = time.Minute             // maximum time to wait for probe to complete before updating pairing
 	unixPrefix                                       = "unix:"
-)
-
-const (
-	OptimizerPerturbation  = 0.10
-	LatencyThresholdStatic = 1 * time.Second
-	LatencyThresholdSlope  = 1 * time.Millisecond
-	StaleEpochDistance     = 3 // relays done 3 epochs back are ready to be rewarded
-
 )
 
 func IsSessionSyncLoss(err error) bool {
@@ -181,19 +163,4 @@ func GetTlsConfig(networkAddress NetworkAddressData) *tls.Config {
 		}
 	}
 	return tlsConfig
-}
-
-func SortByGeolocations(pairingEndpoints []*Endpoint, currentGeo planstypes.Geolocation) {
-	latencyToGeo := func(a, b planstypes.Geolocation) int64 {
-		_, latency := CalcGeoLatency(a, []planstypes.Geolocation{b})
-		return latency
-	}
-
-	// sort the endpoints by geolocation relevance:
-	cmpFunc := func(a *Endpoint, b *Endpoint) int {
-		latencyA := int(latencyToGeo(a.Geolocation, currentGeo))
-		latencyB := int(latencyToGeo(b.Geolocation, currentGeo))
-		return latencyA - latencyB
-	}
-	slices.SortStableFunc(pairingEndpoints, cmpFunc)
 }
