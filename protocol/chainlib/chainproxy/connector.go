@@ -385,7 +385,13 @@ func (connector *GRPCConnector) numberOfFreeClients() int {
 }
 
 func (connector *GRPCConnector) numberOfUsedClients() int {
-	return int(atomic.LoadInt64(&connector.usedClients))
+	// Read under the lock, NOT via atomic: every other access to usedClients (GetRpc/ReturnRpc/Close)
+	// is a plain read/write under connector.lock. A lone atomic.Load here doesn't synchronize with
+	// those mutex-protected writes (atomic and mutex are different happens-before domains), so it
+	// raced GetRpc's usedClients++ under -race. Match numberOfFreeClients().
+	connector.lock.RLock()
+	defer connector.lock.RUnlock()
+	return int(connector.usedClients)
 }
 
 func (connector *GRPCConnector) createConnection(ctx context.Context, nodeUrl common.NodeUrl, currentNumberOfConnections int) (*grpc.ClientConn, error) {
