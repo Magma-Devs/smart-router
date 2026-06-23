@@ -269,6 +269,11 @@ func TestDebugResetAll_SmartRouter_ReturnsCapabilityAdvertisement(t *testing.T) 
 	// tests trigger blockProvider. reset-all must restore the list to
 	// pairingAddresses for the test bundle to recover.
 	require.Contains(t, body, `"blocked-providers"`)
+	// endpoint-health + pairing (MAG-2186): reset-all now also re-enables endpoints
+	// disabled by MaxConsecutiveConnectionAttempts and cold-rebuilds pairing, so every
+	// existing reset-all call site recovers stuck endpoint state with no test migration.
+	require.Contains(t, body, `"endpoint-health"`)
+	require.Contains(t, body, `"pairing"`)
 }
 
 func TestDebugResetAll_SmartRouter_MethodNotAllowed(t *testing.T) {
@@ -317,6 +322,40 @@ func TestDebugResetAll_SmartRouter_NilRouterIsSafe(t *testing.T) {
 
 	rr := postResetAllRouter(mux)
 	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func postResetEndpointHealthRouter(mux http.Handler) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/debug/reset-endpoint-health", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// TestDebugResetEndpointHealth_SmartRouter_ReturnsJSON covers the focused MAG-2186
+// endpoint's HTTP contract. The recovery behavior itself is proven at the session-manager
+// layer by lavasession.TestEndpointHealthRecovery.
+func TestDebugResetEndpointHealth_SmartRouter_ReturnsJSON(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	rr := postResetEndpointHealthRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%q", rr.Body.String())
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	body := rr.Body.String()
+	require.Contains(t, body, `"reset":true`)
+	// nil router → nothing wired → 0 endpoints, but the field must still appear so
+	// callers can rely on the shape.
+	require.Contains(t, body, `"endpoints_reenabled":0`)
+}
+
+func TestDebugResetEndpointHealth_SmartRouter_MethodNotAllowed(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/reset-endpoint-health", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
 
 // corruptedMsTimestampBlock is the exact value reported in the 2026-05-14

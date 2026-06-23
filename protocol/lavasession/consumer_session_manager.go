@@ -2337,6 +2337,50 @@ func (csm *ConsumerSessionManager) ResetTransientFailureState() {
 	csm.publishStateSizes()
 }
 
+// ResetEndpointHealth re-enables every endpoint across this manager's active pairing and
+// backup providers via Endpoint.ResetHealth (clears ConnectionRefusals, sets Enabled = true).
+// Returns the number of endpoints that were actually unhealthy and got re-enabled.
+//
+// Why this is needed and not covered by the other resets: an endpoint that hits
+// MaxConsecutiveConnectionAttempts is disabled (Endpoint.Enabled = false). The ONLY paths
+// back are a successful relay through that endpoint or the per-epoch updateEpoch tick, which
+// is the only other ResetHealth caller. After an all-providers-down burst every endpoint is
+// disabled, so no relay can succeed to re-enable them — and ResetBlockedProviders only refills
+// validAddresses, so the next selection immediately re-blocks the providers on their still-
+// disabled endpoints. Without re-enabling endpoint health the router stays stuck until the
+// next epoch or a pod restart. The debug reset endpoint calls this to recover synchronously.
+//
+// Snapshot the provider records under csm.lock, then call ResetHealth without holding it:
+// ResetHealth and the per-cswp Endpoints read carry their own locks, and not holding csm.lock
+// across them avoids the lock-ordering hazards the sibling reset helpers warn about.
+func (csm *ConsumerSessionManager) ResetEndpointHealth() int {
+	csm.lock.RLock()
+	cswps := make([]*ConsumerSessionsWithProvider, 0, len(csm.pairing)+len(csm.backupProviders))
+	for _, cswp := range csm.pairing {
+		cswps = append(cswps, cswp)
+	}
+	for _, cswp := range csm.backupProviders {
+		cswps = append(cswps, cswp)
+	}
+	csm.lock.RUnlock()
+
+	count := 0
+	for _, cswp := range cswps {
+		if cswp == nil {
+			continue
+		}
+		cswp.Lock.RLock()
+		endpoints := cswp.Endpoints
+		cswp.Lock.RUnlock()
+		for _, endpoint := range endpoints {
+			if endpoint.ResetHealth() {
+				count++
+			}
+		}
+	}
+	return count
+}
+
 // ResetBlockedProviders is the direct-rpc-mode escape hatch for
 // /debug/reset-all. It bypasses the epoch-boundary invariant documented on
 // ResetTransientFailureState by atomically restoring every
