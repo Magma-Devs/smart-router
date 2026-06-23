@@ -41,6 +41,11 @@ services:
       - "${SR_CONFIG:-config/smartrouter_examples/smartrouter_eth.yml}"
       - "--use-static-spec"
       - "specs/"
+      # Browser dashboards (the live-test panel) preflight cross-origin POSTs
+      # carrying Content-Type: application/json. Echo "*" so the preflight's
+      # Access-Control-Allow-Headers isn't empty — an empty list blocks the call.
+      - "--cors-headers"
+      - "*"
       - "--log-level"
       - "${SR_LOG_LEVEL:-info}"
       - "--log-format"
