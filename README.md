@@ -60,6 +60,20 @@ After running, you get:
 - A health endpoint at `/lava/health`.
 - Provider rotation, RPC-aware retry, response caching, and metrics — all driven by the YAML config.
 
+### Config wizard
+
+Don't want to hand-write the YAML? A Charm-based TUI builds a smartrouter config
+and runs the local docker compose stack — from "which chains?" to a running,
+health-verified router.
+
+```bash
+make wizard          # from the repo root (builds the router, then launches)
+# or
+cd tools/wizard && go run . --repo /path/to/smart-router
+```
+
+See [tools/wizard/README.md](tools/wizard/README.md) for the full walkthrough.
+
 ### Health check (`smartrouter health`)
 
 A spec-driven, one-shot diagnostic that crafts and sends the relays each spec defines to every

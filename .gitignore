@@ -70,3 +70,4 @@ Claude.md
 # Local license key — a credential, must never be committed. Anchored to the repo root.
 /license.key
 debugging/logs/
+config/local/
