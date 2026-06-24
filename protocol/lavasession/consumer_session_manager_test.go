@@ -663,8 +663,8 @@ func TestSecondChanceRecoveryFlow(t *testing.T) {
 	timeLimit := time.Second * 30
 	loopStartTime := time.Now()
 	for {
-		// implement a struct that returns: map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress} in the implementation for the DirectiveHeadersInf interface
-		directiveHeaders := DirectiveHeaders{map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress}}
+		// implement a struct that returns: map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress} in the implementation for the DirectiveHeadersInf interface
+		directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress}}
 		usedProviders := NewUsedProviders(directiveHeaders)
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 		require.NoError(t, err)
@@ -715,7 +715,7 @@ func TestSecondChanceRecoveryFlow(t *testing.T) {
 	loopStartTime = time.Now()
 	for {
 		utils.LavaFormatDebug("Test", utils.LogAttr("csm.validAddresses", csm.validAddresses), utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus", csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus))
-		directiveHeaders := DirectiveHeaders{map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress}}
+		directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress}}
 		usedProviders := NewUsedProviders(directiveHeaders)
 		require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus)
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
@@ -755,7 +755,7 @@ func TestSecondChanceRenewedAfterProvenRecovery(t *testing.T) {
 	// Phase 1: fail provider0 (provider1 directive-blocked) until it consumes its single second chance.
 	loopStartTime := time.Now()
 	for {
-		directiveHeaders := DirectiveHeaders{map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress}}
+		directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress}}
 		usedProviders := NewUsedProviders(directiveHeaders)
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
 		require.NoError(t, err)
@@ -786,7 +786,7 @@ func TestSecondChanceRenewedAfterProvenRecovery(t *testing.T) {
 
 	// Phase 3: a successful relay proves recovery — it must clear the probation
 	// marker (synchronously) and the second-chance memory (via deferred goroutine).
-	directiveHeaders := DirectiveHeaders{map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress}}
+	directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress}}
 	usedProviders := NewUsedProviders(directiveHeaders)
 	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
 	require.NoError(t, err)
