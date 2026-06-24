@@ -13,7 +13,7 @@ import (
 // Relayer service
 // ---------------------------------------------------------------------------
 
-const Relayer_ServiceName = "lavanet.lava.pairing.Relayer"
+const Relayer_ServiceName = "smartrouter.pairing.Relayer"
 
 // RelayerClient is the client API for the Relayer service.
 type RelayerClient interface {
@@ -69,7 +69,7 @@ func NewRelayerClient(cc grpc.ClientConnInterface) RelayerClient {
 
 func (c *relayerClient) Relay(ctx context.Context, in *RelayRequest, opts ...grpc.CallOption) (*RelayReply, error) {
 	out := new(RelayReply)
-	err := c.cc.Invoke(ctx, "/lavanet.lava.pairing.Relayer/Relay", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/smartrouter.pairing.Relayer/Relay", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +77,7 @@ func (c *relayerClient) Relay(ctx context.Context, in *RelayRequest, opts ...grp
 }
 
 func (c *relayerClient) RelaySubscribe(ctx context.Context, in *RelayRequest, opts ...grpc.CallOption) (Relayer_RelaySubscribeClient, error) {
-	stream, err := c.cc.NewStream(ctx, &_Relayer_serviceDesc.Streams[0], "/lavanet.lava.pairing.Relayer/RelaySubscribe", opts...)
+	stream, err := c.cc.NewStream(ctx, &_Relayer_serviceDesc.Streams[0], "/smartrouter.pairing.Relayer/RelaySubscribe", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +105,7 @@ func (x *relayerRelaySubscribeClient) Recv() (*RelayReply, error) {
 
 func (c *relayerClient) Probe(ctx context.Context, in *ProbeRequest, opts ...grpc.CallOption) (*ProbeReply, error) {
 	out := new(ProbeReply)
-	err := c.cc.Invoke(ctx, "/lavanet.lava.pairing.Relayer/Probe", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/smartrouter.pairing.Relayer/Probe", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +127,7 @@ func _Relayer_Relay_Handler(srv interface{}, ctx context.Context, dec func(inter
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/lavanet.lava.pairing.Relayer/Relay",
+		FullMethod: "/smartrouter.pairing.Relayer/Relay",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RelayerServer).Relay(ctx, req.(*RelayRequest))
@@ -145,7 +145,7 @@ func _Relayer_Probe_Handler(srv interface{}, ctx context.Context, dec func(inter
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/lavanet.lava.pairing.Relayer/Probe",
+		FullMethod: "/smartrouter.pairing.Relayer/Probe",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RelayerServer).Probe(ctx, req.(*ProbeRequest))
@@ -170,7 +170,7 @@ func (x *relayerRelaySubscribeServer) Send(m *RelayReply) error {
 }
 
 var _Relayer_serviceDesc = grpc.ServiceDesc{
-	ServiceName: "lavanet.lava.pairing.Relayer",
+	ServiceName: "smartrouter.pairing.Relayer",
 	HandlerType: (*RelayerServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -196,7 +196,7 @@ var _Relayer_serviceDesc = grpc.ServiceDesc{
 // RelayerCache service
 // ---------------------------------------------------------------------------
 
-const RelayerCache_ServiceName = "lavanet.lava.pairing.RelayerCache"
+const RelayerCache_ServiceName = "smartrouter.pairing.RelayerCache"
 
 // RelayerCacheClient is the client API for the RelayerCache service.
 type RelayerCacheClient interface {
@@ -248,7 +248,7 @@ func NewRelayerCacheClient(cc grpc.ClientConnInterface) RelayerCacheClient {
 
 func (c *relayerCacheClient) GetRelay(ctx context.Context, in *RelayCacheGet, opts ...grpc.CallOption) (*CacheRelayReply, error) {
 	out := new(CacheRelayReply)
-	err := c.cc.Invoke(ctx, "/lavanet.lava.pairing.RelayerCache/GetRelay", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/smartrouter.pairing.RelayerCache/GetRelay", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +257,7 @@ func (c *relayerCacheClient) GetRelay(ctx context.Context, in *RelayCacheGet, op
 
 func (c *relayerCacheClient) SetRelay(ctx context.Context, in *RelayCacheSet, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, "/lavanet.lava.pairing.RelayerCache/SetRelay", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/smartrouter.pairing.RelayerCache/SetRelay", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ func (c *relayerCacheClient) SetRelay(ctx context.Context, in *RelayCacheSet, op
 
 func (c *relayerCacheClient) Health(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*CacheUsage, error) {
 	out := new(CacheUsage)
-	err := c.cc.Invoke(ctx, "/lavanet.lava.pairing.RelayerCache/Health", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/smartrouter.pairing.RelayerCache/Health", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +275,7 @@ func (c *relayerCacheClient) Health(ctx context.Context, in *emptypb.Empty, opts
 
 func (c *relayerCacheClient) FlushCache(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, "/lavanet.lava.pairing.RelayerCache/FlushCache", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/smartrouter.pairing.RelayerCache/FlushCache", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +297,7 @@ func _RelayerCache_GetRelay_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/lavanet.lava.pairing.RelayerCache/GetRelay",
+		FullMethod: "/smartrouter.pairing.RelayerCache/GetRelay",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RelayerCacheServer).GetRelay(ctx, req.(*RelayCacheGet))
@@ -315,7 +315,7 @@ func _RelayerCache_SetRelay_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/lavanet.lava.pairing.RelayerCache/SetRelay",
+		FullMethod: "/smartrouter.pairing.RelayerCache/SetRelay",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RelayerCacheServer).SetRelay(ctx, req.(*RelayCacheSet))
@@ -333,7 +333,7 @@ func _RelayerCache_Health_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/lavanet.lava.pairing.RelayerCache/Health",
+		FullMethod: "/smartrouter.pairing.RelayerCache/Health",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RelayerCacheServer).Health(ctx, req.(*emptypb.Empty))
@@ -351,7 +351,7 @@ func _RelayerCache_FlushCache_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/lavanet.lava.pairing.RelayerCache/FlushCache",
+		FullMethod: "/smartrouter.pairing.RelayerCache/FlushCache",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RelayerCacheServer).FlushCache(ctx, req.(*emptypb.Empty))
@@ -360,7 +360,7 @@ func _RelayerCache_FlushCache_Handler(srv interface{}, ctx context.Context, dec 
 }
 
 var _RelayerCache_serviceDesc = grpc.ServiceDesc{
-	ServiceName: "lavanet.lava.pairing.RelayerCache",
+	ServiceName: "smartrouter.pairing.RelayerCache",
 	HandlerType: (*RelayerCacheServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{

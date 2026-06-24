@@ -57,7 +57,7 @@ type queryClient struct {
 
 func (c *queryClient) Spec(ctx context.Context, in *QueryGetSpecRequest, opts ...grpc.CallOption) (*QueryGetSpecResponse, error) {
 	out := new(QueryGetSpecResponse)
-	if err := c.cc.Invoke(ctx, "/lavanet.lava.spec.Query/Spec", in, out, opts...); err != nil {
+	if err := c.cc.Invoke(ctx, "/smartrouter.spec.Query/Spec", in, out, opts...); err != nil {
 		return nil, err
 	}
 	return out, nil
