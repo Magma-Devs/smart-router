@@ -349,7 +349,7 @@ jobs:
           CONTAINER="router"
           SELECTOR="app.lavanet.io/router=eth-sim"
           SERVICE_PORT="3000"
-          HEALTH_PATH="/lava/health"
+          HEALTH_PATH="/health"
           previous_image="${PREVIOUS_IMAGE:-}"
           rollback_needed=false
           args_changed=false
