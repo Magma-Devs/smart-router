@@ -62,8 +62,8 @@ returning a wrong-but-well-formed answer. It is intended for **read** methods.
 Cross-validation can be turned on two ways, which compose via `clamp(caller, floor, cap)`:
 
 - **Per-request headers** (the caller opts in per call):
-  - `lava-cross-validation-max-participants: N` — fan out to N providers.
-  - `lava-cross-validation-agreement-threshold: M` — require M identical responses.
+  - `smartrouter-cross-validation-max-participants: N` — fan out to N providers.
+  - `smartrouter-cross-validation-agreement-threshold: M` — require M identical responses.
 - **Per-method operator policy** (config-driven, below). An operator policy can *mandate*
   cross-validation even with no caller headers (`enabled: true`), set a **floor** the caller
   may exceed, a **cap** that overrides a stricter caller, or *forbid* caller-driven
@@ -171,15 +171,15 @@ without debug mode:
 
 | Header | Value |
 | --- | --- |
-| `lava-cross-validation-status` | `success` or `failed`. |
-| `lava-cross-validation-all-providers` | All providers queried (comma-separated). |
-| `lava-cross-validation-agreeing-providers` | Providers whose response matched the consensus. |
-| `lava-cross-validation-disagreeing-providers` | Providers that dissented (node/protocol errors and hash-divergent responses; on a quorum failure, every successful provider, since there is no consensus to agree with). |
-| `lava-cross-validation-failure-reason` | On failure only — a stable enum (below). |
+| `smartrouter-cross-validation-status` | `success` or `failed`. |
+| `smartrouter-cross-validation-all-providers` | All providers queried (comma-separated). |
+| `smartrouter-cross-validation-agreeing-providers` | Providers whose response matched the consensus. |
+| `smartrouter-cross-validation-disagreeing-providers` | Providers that dissented (node/protocol errors and hash-divergent responses; on a quorum failure, every successful provider, since there is no consensus to agree with). |
+| `smartrouter-cross-validation-failure-reason` | On failure only — a stable enum (below). |
 
 A **request-time structural fail-fast** (a capacity/diversity check that aborts *before any
 upstream relay runs* — the `insufficient-capacity` / `insufficient-groups` reasons below) carries
-**only** `lava-cross-validation-status: failed` and `lava-cross-validation-failure-reason`. The
+**only** `smartrouter-cross-validation-status: failed` and `smartrouter-cross-validation-failure-reason`. The
 provider-list headers are omitted because no providers were queried; `failure-reason` is the
 discriminator the client needs. (The request still increments
 `cross_validation_requests_total` / `cross_validation_failed_total`.)
@@ -192,7 +192,7 @@ on the gRPC interface (an errored gRPC call returns a trailers-only response, so
 
 ### Failure reasons
 
-`lava-cross-validation-failure-reason` is one of a small closed enum. **Quorum-time** reasons
+`smartrouter-cross-validation-failure-reason` is one of a small closed enum. **Quorum-time** reasons
 mean responses came back but didn't agree — a retry against a different set *may* help:
 
 - `no-agreement` — enough responses, but none agreed up to the threshold.
@@ -229,12 +229,12 @@ actually reached on a deterministic method:
 - `smartrouter_cross_validation_mismatch_total{spec, apiInterface, method, group, finality}`
   is incremented **once per distinct outlier group** for a successful deterministic quorum — not
   once per provider. (Non-deterministic methods legitimately differ and are not counted; a quorum
-  *failure* emits a `lava-cross-validation-failure-reason` instead, never this metric.) The
+  *failure* emits a `smartrouter-cross-validation-failure-reason` instead, never this metric.) The
   `finality` label (`finalized` / `not_finalized` / `unknown`) lets alerting prioritize
   post-finality divergence over benign pre-finality propagation lag.
 - Provider-level detail is available separately: each dissenting provider is emitted in an info
   log (`cross-validation outlier detected`, with provider/group/finality/hashes) and listed in the
-  `lava-cross-validation-disagreeing-providers` response header.
+  `smartrouter-cross-validation-disagreeing-providers` response header.
 
 So a single divergent provider is observed and outvoted **when enough providers still agree**;
 under a strict (unanimous) policy it instead causes a quorum failure.
@@ -299,5 +299,5 @@ User Request --> Smart Router --> Provider Selection (QoS-based)
 curl http://localhost:7779/metrics
 
 # Health check
-curl http://localhost:3333/lava/health
+curl http://localhost:3333/health
 ```

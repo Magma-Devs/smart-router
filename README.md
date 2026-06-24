@@ -57,7 +57,7 @@ After running, you get:
 
 - An RPC endpoint per chain interface (ports from the YAML config; conventional default `:3360`).
 - Prometheus metrics on `:7779` — see [docs/METRICS.md](docs/METRICS.md) for the full reference.
-- A health endpoint at `/lava/health`.
+- A health endpoint at `/health`.
 - Provider rotation, RPC-aware retry, response caching, and metrics — all driven by the YAML config.
 
 ### Config wizard
@@ -236,7 +236,7 @@ The hot path for a single request:
 2. **Cache lookup** — for cacheable methods (historical block data, immutable receipts, etc.), the cache layer (`ecosystem/cache`) checks for a recent response. Hits return immediately.
 3. **Provider selection** — on cache miss, the provider optimiser (`protocol/provideroptimizer`) picks an upstream from the configured pool using QoS-weighted scoring. Healthy/fast providers are preferred; flaky ones get backed off automatically.
 4. **Relay + failover** — the request is sent to the chosen provider. On failure (timeout, malformed response, certain status codes), the retry state machine picks an alternate provider and retries within a configurable budget.
-5. **Response** — returned to the client with metadata headers (`Smart-Router-Version`, `Lava-Provider-Address`, retry counts, etc.) annotating which provider served the response. Prometheus metrics are emitted in parallel.
+5. **Response** — returned to the client with metadata headers (`Smart-Router-Version`, `Smart-Router-Provider-Address`, retry counts, etc.) annotating which provider served the response. Prometheus metrics are emitted in parallel.
 
 **Cross-validation (optional).** For read methods that warrant extra assurance, the relay step can instead fan out to several providers in parallel and only return an answer once a quorum agree on an identical response — optionally requiring the quorum to span multiple distinct provider groups (or each group to reach its own quorum). It defends against a single provider returning a wrong-but-well-formed answer, and surfaces dissent via response headers and a bounded mismatch metric. See [`protocol/rpcsmartrouter/README.md`](protocol/rpcsmartrouter/README.md#cross-validation) for configuration.
 
@@ -461,7 +461,7 @@ docker pull ghcr.io/magma-devs/smart-router:vX.Y.Z
 
 - Trigger pattern: `v[0-9]+.[0-9]+.[0-9]+*`. A tag like `1.2.0` (without the leading `v`) does _not_ fire the workflow.
 - Follow [semver](https://semver.org/) `MAJOR.MINOR.PATCH`. For smart-router specifically:
-  - **MAJOR** — breaking change to the wire surface customers integrate with: HTTP metadata headers (e.g. `Smart-Router-Version`, `Lava-Provider-Address`), JSON-RPC envelope shape, removed/renamed CLI flags, removed/renamed config fields.
+  - **MAJOR** — breaking change to the wire surface customers integrate with: HTTP metadata headers (e.g. `Smart-Router-Version`, `Smart-Router-Provider-Address`), JSON-RPC envelope shape, removed/renamed CLI flags, removed/renamed config fields.
   - **MINOR** — new capabilities: additional supported chains in `specs/`, new CLI flags, new metrics, new config fields with safe defaults, new HTTP metadata headers.
   - **PATCH** — internal-only changes: bug fixes, performance improvements, refactors, dependency bumps, docs.
 
