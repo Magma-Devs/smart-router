@@ -75,6 +75,26 @@ func blockNumRequestBody(apiInterface, functionTemplate string) (body []byte, ok
 	return nil, false
 }
 
+// hydrateGrpcChainMessage attaches the gRPC method descriptor (resolved and cached by the
+// DirectRPCConnection during the send) to a freshly-crafted chain message so its BINARY-protobuf
+// response can be decoded. No-op for non-gRPC interfaces and when the connection exposes no descriptor.
+// MUST be called after a successful send, when the descriptor is in the connection's cache. Both
+// spec-driven poll paths (latest block AND block-hash-by-number) parse gRPC responses, so both call it.
+func (ecf *EndpointPoller) hydrateGrpcChainMessage(chainMessage chainlib.ChainMessageForSend, apiName string) error {
+	if ecf.apiInterface != spectypes.APIInterfaceGrpc {
+		return nil
+	}
+	provider, ok := ecf.directConnection.(lavasession.GRPCDescriptorProvider)
+	if !ok {
+		return nil
+	}
+	methodDesc := provider.GetCachedMethodDescriptor(apiName)
+	if methodDesc == nil {
+		return nil
+	}
+	return chainlib.HydrateGrpcResponseParsing(chainMessage, methodDesc)
+}
+
 // FetchLatestBlockNum fetches the latest block number from the endpoint.
 // Uses spec-driven parsing to support any chain type (EVM, Tendermint, REST, etc.).
 func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum int64, err error) {
@@ -133,6 +153,15 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 		)
+	}
+
+	// gRPC responses are binary protobuf; the crafted message has no method descriptor because
+	// reflection runs INSIDE the DirectRPCConnection during the send (which already succeeded above),
+	// not in CraftChainMessage. Wire the connection's just-cached descriptor in so the response can be
+	// decoded — otherwise FormatResponseForParsing fails "does not have a methodDescriptor set in
+	// grpcMessage" and the per-endpoint gRPC ChainTracker never completes.
+	if err := ecf.hydrateGrpcChainMessage(chainMessage, parsing.ApiName); err != nil {
+		return spectypes.NOT_APPLICABLE, err
 	}
 
 	// Parse the response using spec-driven rules
@@ -260,6 +289,12 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 		)
 	}
 
+	// gRPC block-hash responses are binary protobuf too — hydrate the connection's cached descriptor
+	// so this path decodes like FetchLatestBlockNum (the ChainTracker fetches hashes for fork detection).
+	if err := ecf.hydrateGrpcChainMessage(chainMessage, parsing.ApiName); err != nil {
+		return "", responseData, err
+	}
+
 	parserInput, err := chainlib.FormatResponseForParsing(&pairingtypes.RelayReply{Data: responseData}, chainMessage)
 	if err != nil {
 		return "", responseData, utils.LavaFormatDebug(tagName+" failed formatResponseForParsing",
@@ -366,8 +401,16 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 		return resp.Body, nil
 	}
 
-	// JSON-RPC / Tendermint RPC / POST: send requestData as body
+	// JSON-RPC / Tendermint RPC / gRPC / POST: send requestData as the body.
 	headers := map[string]string{"Content-Type": "application/json"}
+	// gRPC carries the method PATH in a header, not in the URL or body: the connection dials apiName
+	// (e.g. cosmos.base.tendermint.v1beta1.Service/GetLatestBlock) and sends requestData as the request
+	// payload. Without this header GRPCDirectRPCConnection.SendRequest rejects every call with "gRPC
+	// method path not provided", so the per-endpoint gRPC poll never completes. The relay path sets
+	// this header already; the poll path must too.
+	if ecf.apiInterface == spectypes.APIInterfaceGrpc {
+		headers[lavasession.GRPCMethodHeader] = apiName
+	}
 	response, err := ecf.directConnection.SendRequest(ctx, requestData, headers)
 	if err != nil {
 		return nil, err

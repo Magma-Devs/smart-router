@@ -162,6 +162,43 @@ func (apip *GrpcChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 	return apip.newChainMessage(apiCont.api, parsedInput, grpcMessage, apiCollection), nil
 }
 
+// HydrateGrpcResponseParsing attaches the protobuf method descriptor (and a JSON formatter built
+// from it) to a crafted gRPC chain message so its BINARY-protobuf response can be parsed.
+//
+// The chain proxy's relay path resolves the descriptor via live reflection during the send
+// (see the SendNodeMsg path) and calls SetParsingData itself. But a caller that sends a gRPC poll
+// through a lavasession.DirectRPCConnection — the per-endpoint ChainTracker poller — gets the
+// descriptor resolved INSIDE the connection (it caches it and exposes it via GetCachedMethodDescriptor)
+// and a raw protobuf response back, so the crafted message has no descriptor. This wires the
+// connection's descriptor into that message.
+//
+// The formatter is grpcurl FormatJSON — the SAME formatter the relay path uses (RequestParserAndFormatter
+// above), so the JSON it emits has identical (camelCase) field names and the spec's result_parsing
+// parser_arg navigation behaves identically on poll and relay responses.
+func HydrateGrpcResponseParsing(chainMessage ChainMessageForSend, methodDescriptor *desc.MethodDescriptor) error {
+	if methodDescriptor == nil {
+		return utils.LavaFormatError("HydrateGrpcResponseParsing: nil method descriptor", nil)
+	}
+	grpcMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
+	if !ok {
+		return utils.LavaFormatError("HydrateGrpcResponseParsing: chain message is not a gRPC message", nil)
+	}
+	descriptorSource, err := grpcurl.DescriptorSourceFromFileDescriptors(methodDescriptor.GetFile())
+	if err != nil {
+		return utils.LavaFormatError("HydrateGrpcResponseParsing: failed building descriptor source", err)
+	}
+	_, formatter, err := grpcurl.RequestParserAndFormatter(grpcurl.FormatJSON, descriptorSource, nil, grpcurl.FormatOptions{
+		EmitJSONDefaultFields: false,
+		IncludeTextSeparator:  false,
+		AllowUnknownFields:    true,
+	})
+	if err != nil {
+		return utils.LavaFormatError("HydrateGrpcResponseParsing: failed building formatter", err)
+	}
+	grpcMessage.SetParsingData(methodDescriptor, formatter)
+	return nil
+}
+
 // ParseMsg parses message data into chain message object
 func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType string, metadata []pairingtypes.Metadata, extensionInfo extensionslib.ExtensionInfo) (ChainMessage, error) {
 	// Guard that the GrpcChainParser instance exists
