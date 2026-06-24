@@ -403,7 +403,7 @@ func startTestTendermintListener(t *testing.T, ctx context.Context) (*Tendermint
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "COS5",
 		ApiInterface:    "tendermintrpc",
-		HealthCheckPath: "/lava/health",
+		HealthCheckPath: "/health",
 	}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)

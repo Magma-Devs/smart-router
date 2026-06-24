@@ -701,7 +701,7 @@ func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler boo
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "ETH1",
 		ApiInterface:    "jsonrpc",
-		HealthCheckPath: "/lava/health",
+		HealthCheckPath: "/health",
 	}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
