@@ -34,8 +34,8 @@ const (
 	ProjectIDHeader            = "project-id"
 	RetryListeningInterval     = 10 // seconds
 	relayMsgLogMaxChars        = 200
-	RPCProviderNodeAddressHash = "Lava-Provider-Node-Address-Hash"
-	RPCProviderNodeExtension   = "Lava-Provider-Node-Extension"
+	RPCProviderNodeAddressHash = "Smart-Router-Provider-Node-Address-Hash"
+	RPCProviderNodeExtension   = "Smart-Router-Provider-Node-Extension"
 	WebSocketExtension         = "websocket"
 )
 

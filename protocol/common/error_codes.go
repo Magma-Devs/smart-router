@@ -74,7 +74,7 @@ var (
 	LavaErrorRateLimited = registerError(&LavaError{
 		Code: 1020, Name: "PROTOCOL_RATE_LIMITED", Category: CategoryInternal,
 		SubCategory: SubCategoryRateLimit,
-		Description: "Lava-side rate limit exceeded", Retryable: false,
+		Description: "Smart-Router-side rate limit exceeded", Retryable: false,
 	})
 	LavaErrorMaxCUExceeded = registerError(&LavaError{
 		Code: 1021, Name: "PROTOCOL_MAX_CU_EXCEEDED", Category: CategoryInternal,
