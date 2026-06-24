@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	EventPrefix = "lava_"
+	EventPrefix = "smartrouter_"
 )
 
 // wrappedLavaError wraps a cause error and preserves error chain traversal
