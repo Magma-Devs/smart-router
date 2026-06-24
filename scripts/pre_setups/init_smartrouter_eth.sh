@@ -324,7 +324,7 @@ fi
 echo ""
 echo "Parallel Relay: Requests sent to ALL 3 endpoints simultaneously"
 echo "   First successful response wins (lower latency!)"
-echo "   Cross-validation: use lava-cross-validation-* headers for consensus"
+echo "   Cross-validation: use smartrouter-cross-validation-* headers for consensus"
 echo ""
 echo "TESTING $PHASE_STATUS"
 echo "  Phase 1: DirectRPCConnection foundation"
@@ -380,21 +380,21 @@ echo ""
 echo "  # 2-of-3 consensus (query 3 providers, 2 must agree):"
 echo '  curl -v -X POST http://127.0.0.1:3360 \'
 echo '    -H "Content-Type: application/json" \'
-echo '    -H "lava-cross-validation-max-participants: 3" \'
-echo '    -H "lava-cross-validation-agreement-threshold: 2" \'
+echo '    -H "smartrouter-cross-validation-max-participants: 3" \'
+echo '    -H "smartrouter-cross-validation-agreement-threshold: 2" \'
 echo '    -d '\''{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'\'''
 echo ""
 echo "  # 3-of-3 strict consensus (all must agree):"
 echo '  curl -v -X POST http://127.0.0.1:3360 \'
 echo '    -H "Content-Type: application/json" \'
-echo '    -H "lava-cross-validation-max-participants: 3" \'
-echo '    -H "lava-cross-validation-agreement-threshold: 3" \'
+echo '    -H "smartrouter-cross-validation-max-participants: 3" \'
+echo '    -H "smartrouter-cross-validation-agreement-threshold: 3" \'
 echo '    -d '\''{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'\'''
 echo ""
 echo "  Response headers to check:"
-echo "    lava-cross-validation-status          — consensus result"
-echo "    lava-cross-validation-agreeing-providers — which providers agreed"
-echo "    lava-cross-validation-all-providers    — all participants"
+echo "    smartrouter-cross-validation-status          — consensus result"
+echo "    smartrouter-cross-validation-agreeing-providers — which providers agreed"
+echo "    smartrouter-cross-validation-all-providers    — all participants"
 echo ""
 echo "============================================"
 echo "CACHE TESTING (use these to verify cache)"
@@ -413,7 +413,7 @@ echo ""
 echo "Step 3: Force cache bypass (expect CACHE MISS even with cached data):"
 echo '  curl -s -X POST http://127.0.0.1:3360 \'
 echo '    -H "Content-Type: application/json" \'
-echo '    -H "lava-force-cache-refresh: true" \'
+echo '    -H "smartrouter-force-cache-refresh: true" \'
 echo '    -d '\''{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'\'''
 echo ""
 echo "Monitor CACHE logs (look for HIT/MISS/WRITE):"

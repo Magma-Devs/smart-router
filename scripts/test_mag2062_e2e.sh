@@ -38,7 +38,7 @@
 #                 own block-independent method (Solana getGenesisHash).
 #   RESULT        the shared "result" value both providers return. Default "0x1"
 #   ALT_RESULT    the divergent value for the negative control. Default "0x89"
-#   CV_HEADER     response header carrying CV status. Default lava-cross-validation-status
+#   CV_HEADER     response header carrying CV status. Default smartrouter-cross-validation-status
 #   ROUTER_PORT   port the --start-router router listens on. Default 3340
 #   SPEC_DIR      spec directory for --use-static-spec. Default <repo>/specs
 #
@@ -63,10 +63,10 @@ ROUTER_PORT="${ROUTER_PORT:-3340}"
 METHOD="${METHOD:-eth_chainId}"
 RESULT="${RESULT:-0x1}"
 ALT_RESULT="${ALT_RESULT:-0x89}"
-CV_HEADER="${CV_HEADER:-lava-cross-validation-status}"
+CV_HEADER="${CV_HEADER:-smartrouter-cross-validation-status}"
 # Request directive headers that ACTIVATE cross-validation (both required).
-MAX_PARTICIPANTS_HEADER="${MAX_PARTICIPANTS_HEADER:-lava-cross-validation-max-participants}"
-AGREEMENT_THRESHOLD_HEADER="${AGREEMENT_THRESHOLD_HEADER:-lava-cross-validation-agreement-threshold}"
+MAX_PARTICIPANTS_HEADER="${MAX_PARTICIPANTS_HEADER:-smartrouter-cross-validation-max-participants}"
+AGREEMENT_THRESHOLD_HEADER="${AGREEMENT_THRESHOLD_HEADER:-smartrouter-cross-validation-agreement-threshold}"
 MAX_PARTICIPANTS="${MAX_PARTICIPANTS:-2}"
 AGREEMENT_THRESHOLD="${AGREEMENT_THRESHOLD:-2}"
 START_SIM=false
