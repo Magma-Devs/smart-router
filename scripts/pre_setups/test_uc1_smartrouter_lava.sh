@@ -8,7 +8,7 @@
 #     fans out to $CV_MAXPART providers and needs $CV_THRESHOLD identical
 #     responses (a "$CV_THRESHOLD of $CV_MAXPART" quorum).
 #   * EVERY OTHER method is NOT cross-validated — unless the caller explicitly
-#     opts in with the lava-cross-validation-* request headers.
+#     opts in with the smartrouter-cross-validation-* request headers.
 #
 # Why 'block' (and a fixed height): a block is CONSENSUS state — byte-identical
 # on every node — so the fan-out responses agree and the 2-of-3 quorum forms
@@ -172,7 +172,7 @@ direct-rpc:
 
 # UC-1: '$CV_METHOD' is MANDATED (enabled: true) -> always cross-validated, no
 # caller headers needed. Every other method is absent from this list, so it is
-# only cross-validated when the caller sends the lava-cross-validation-* headers.
+# only cross-validated when the caller sends the smartrouter-cross-validation-* headers.
 cross-validation:
   policies:
     - chain-id: $CV_CHAIN
@@ -241,8 +241,8 @@ FAIL=0
 HDR=$(mktemp)
 pass() { echo "  ✅ PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  ❌ FAIL: $1"; FAIL=$((FAIL + 1)); }
-cv_status() { grep -i '^lava-cross-validation-status:' "$HDR" | tr -d '\r' | awk '{print $2}'; }
-cv_headers_present() { grep -qi '^lava-cross-validation-' "$HDR"; }
+cv_status() { grep -i '^smartrouter-cross-validation-status:' "$HDR" | tr -d '\r' | awk '{print $2}'; }
+cv_headers_present() { grep -qi '^smartrouter-cross-validation-' "$HDR"; }
 
 echo ""
 echo "============================================"
@@ -256,11 +256,11 @@ echo "[A] '$CV_METHOD' (height $HEIGHT) must be cross-validated by POLICY (no ca
 echo "    POST $CV_PAYLOAD"
 curl -sS -D "$HDR" -o /dev/null -X POST "http://127.0.0.1:$TM_PORT/" -d "$CV_PAYLOAD"
 status=$(cv_status)
-agreeing=$(grep -i '^lava-cross-validation-agreeing-providers:' "$HDR" | tr -d '\r' | cut -d' ' -f2-)
-all_providers=$(grep -i '^lava-cross-validation-all-providers:' "$HDR" | tr -d '\r' | cut -d' ' -f2-)
-echo "      lava-cross-validation-status:            ${status:-<absent>}"
-echo "      lava-cross-validation-all-providers:     ${all_providers:-<absent>}"
-echo "      lava-cross-validation-agreeing-providers:${agreeing:-<absent>}"
+agreeing=$(grep -i '^smartrouter-cross-validation-agreeing-providers:' "$HDR" | tr -d '\r' | cut -d' ' -f2-)
+all_providers=$(grep -i '^smartrouter-cross-validation-all-providers:' "$HDR" | tr -d '\r' | cut -d' ' -f2-)
+echo "      smartrouter-cross-validation-status:            ${status:-<absent>}"
+echo "      smartrouter-cross-validation-all-providers:     ${all_providers:-<absent>}"
+echo "      smartrouter-cross-validation-agreeing-providers:${agreeing:-<absent>}"
 if [ -n "$status" ]; then
 	pass "policy mandated cross-validation on '$CV_METHOD' (status header present)"
 else
@@ -284,7 +284,7 @@ echo "    POST $OTHER_PAYLOAD"
 curl -sS -D "$HDR" -o /dev/null -X POST "http://127.0.0.1:$TM_PORT/" -d "$OTHER_PAYLOAD"
 if cv_headers_present; then
 	fail "unexpected cross-validation header on non-policy method '$OTHER_METHOD':"
-	grep -i '^lava-cross-validation-' "$HDR" | tr -d '\r' | sed 's/^/        /'
+	grep -i '^smartrouter-cross-validation-' "$HDR" | tr -d '\r' | sed 's/^/        /'
 else
 	pass "no cross-validation on '$OTHER_METHOD' (policy is scoped to '$CV_METHOD')"
 fi
@@ -292,10 +292,10 @@ fi
 # --- Check C: that same method IS cross-validated WITH caller headers (opt-in) -
 echo ""
 echo "[C] '$OTHER_METHOD' must be cross-validated WHEN the caller sends the headers"
-echo "    POST $OTHER_PAYLOAD  + lava-cross-validation-max-participants/agreement-threshold"
+echo "    POST $OTHER_PAYLOAD  + smartrouter-cross-validation-max-participants/agreement-threshold"
 curl -sS -D "$HDR" -o /dev/null -X POST "http://127.0.0.1:$TM_PORT/" \
-	-H "lava-cross-validation-max-participants: $CV_MAXPART" \
-	-H "lava-cross-validation-agreement-threshold: $CV_THRESHOLD" \
+	-H "smartrouter-cross-validation-max-participants: $CV_MAXPART" \
+	-H "smartrouter-cross-validation-agreement-threshold: $CV_THRESHOLD" \
 	-d "$OTHER_PAYLOAD"
 if [ -n "$(cv_status)" ]; then
 	pass "header-driven cross-validation works on '$OTHER_METHOD' (status=$(cv_status))"
@@ -354,8 +354,8 @@ echo "  curl -i -X POST http://127.0.0.1:$TM_PORT/ -d '$OTHER_PAYLOAD'"
 echo ""
 echo "  # cross-validated only because of the explicit caller headers:"
 echo "  curl -i -X POST http://127.0.0.1:$TM_PORT/ \\"
-echo "    -H 'lava-cross-validation-max-participants: $CV_MAXPART' \\"
-echo "    -H 'lava-cross-validation-agreement-threshold: $CV_THRESHOLD' \\"
+echo "    -H 'smartrouter-cross-validation-max-participants: $CV_MAXPART' \\"
+echo "    -H 'smartrouter-cross-validation-agreement-threshold: $CV_THRESHOLD' \\"
 echo "    -d '$OTHER_PAYLOAD'"
 echo ""
 echo "  # the CV counters:"

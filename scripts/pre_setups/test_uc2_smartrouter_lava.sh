@@ -406,10 +406,10 @@ PG_PAYLOAD="{\"jsonrpc\":\"2.0\",\"method\":\"$PG_METHOD\",\"params\":{\"height\
 # UC-2 POSITIVE CHECKS
 # =============================================================================
 HDR=$(mktemp)
-cv_status() { grep -i '^lava-cross-validation-status:' "$HDR" | tr -d '\r' | awk '{print $2}'; }
-cv_failure_reason() { grep -i '^lava-cross-validation-failure-reason:' "$HDR" | tr -d '\r' | awk '{print $2}'; }
-cv_headers_present() { grep -qi '^lava-cross-validation-' "$HDR"; }
-cv_agreeing() { grep -i '^lava-cross-validation-agreeing-providers:' "$HDR" | tr -d '\r' | cut -d' ' -f2-; }
+cv_status() { grep -i '^smartrouter-cross-validation-status:' "$HDR" | tr -d '\r' | awk '{print $2}'; }
+cv_failure_reason() { grep -i '^smartrouter-cross-validation-failure-reason:' "$HDR" | tr -d '\r' | awk '{print $2}'; }
+cv_headers_present() { grep -qi '^smartrouter-cross-validation-' "$HDR"; }
+cv_agreeing() { grep -i '^smartrouter-cross-validation-agreeing-providers:' "$HDR" | tr -d '\r' | cut -d' ' -f2-; }
 
 # distinct_groups_of "<comma,sep,names>" -> number of distinct groups they belong to
 distinct_groups_of() {
@@ -437,10 +437,10 @@ echo "    POST $CV_PAYLOAD"
 curl -sS -D "$HDR" -o /dev/null -X POST "http://127.0.0.1:$TM_PORT/" -d "$CV_PAYLOAD"
 status=$(cv_status)
 agreeing=$(cv_agreeing)
-all_providers=$(grep -i '^lava-cross-validation-all-providers:' "$HDR" | tr -d '\r' | cut -d' ' -f2-)
-echo "      lava-cross-validation-status:            ${status:-<absent>}"
-echo "      lava-cross-validation-all-providers:     ${all_providers:-<absent>}"
-echo "      lava-cross-validation-agreeing-providers:${agreeing:-<absent>}"
+all_providers=$(grep -i '^smartrouter-cross-validation-all-providers:' "$HDR" | tr -d '\r' | cut -d' ' -f2-)
+echo "      smartrouter-cross-validation-status:            ${status:-<absent>}"
+echo "      smartrouter-cross-validation-all-providers:     ${all_providers:-<absent>}"
+echo "      smartrouter-cross-validation-agreeing-providers:${agreeing:-<absent>}"
 if [ -n "$status" ]; then
 	pass "policy mandated cross-validation on '$CV_METHOD' (status header present)"
 else
@@ -469,7 +469,7 @@ echo "    POST $OTHER_PAYLOAD"
 curl -sS -D "$HDR" -o /dev/null -X POST "http://127.0.0.1:$TM_PORT/" -d "$OTHER_PAYLOAD"
 if cv_headers_present; then
 	fail "unexpected cross-validation header on non-policy method '$OTHER_METHOD':"
-	grep -i '^lava-cross-validation-' "$HDR" | tr -d '\r' | sed 's/^/        /'
+	grep -i '^smartrouter-cross-validation-' "$HDR" | tr -d '\r' | sed 's/^/        /'
 else
 	pass "no cross-validation on '$OTHER_METHOD' (policy is scoped to '$CV_METHOD')"
 fi
@@ -533,8 +533,8 @@ echo "    POST $PG_PAYLOAD"
 curl -sS -D "$HDR" -o /dev/null -X POST "http://127.0.0.1:$TM_PORT/" -d "$PG_PAYLOAD"
 pg_status=$(cv_status)
 pg_agreeing=$(cv_agreeing)
-echo "      lava-cross-validation-status:            ${pg_status:-<absent>}"
-echo "      lava-cross-validation-agreeing-providers:${pg_agreeing:-<absent>}"
+echo "      smartrouter-cross-validation-status:            ${pg_status:-<absent>}"
+echo "      smartrouter-cross-validation-agreeing-providers:${pg_agreeing:-<absent>}"
 if [ "$pg_status" = "success" ]; then
 	pass "per-group-quorum policy reached consensus on '$PG_METHOD' (status=success)"
 else
