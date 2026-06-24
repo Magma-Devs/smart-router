@@ -53,6 +53,28 @@ func NewEndpointPoller(
 	}
 }
 
+// blockNumRequestBody returns the request body for the GET_BLOCKNUM poll and whether the
+// (apiInterface, functionTemplate) pair is pollable at all.
+//
+// For gRPC the spec's api_name carries the method and the function_template is only the request
+// PAYLOAD — which is legitimately empty for a no-argument call (e.g. cosmos
+// Service/GetLatestBlock). So an empty gRPC template means "empty body", not "undefined method",
+// and we send "{}" (the canonical empty JSON message the gRPC codec marshals to an empty proto).
+// This mirrors the relay path, which already serves gRPC GetLatestBlock with an empty body.
+//
+// REST (needs a URL path) and Tendermint (needs a method) genuinely cannot poll without a
+// template, so an empty one there is a real spec gap and stays a hard error — otherwise the
+// per-endpoint ChainTracker for a misconfigured chain would silently poll garbage.
+func blockNumRequestBody(apiInterface, functionTemplate string) (body []byte, ok bool) {
+	if functionTemplate != "" {
+		return []byte(functionTemplate), true
+	}
+	if apiInterface == spectypes.APIInterfaceGrpc {
+		return []byte("{}"), true
+	}
+	return nil, false
+}
+
 // FetchLatestBlockNum fetches the latest block number from the endpoint.
 // Uses spec-driven parsing to support any chain type (EVM, Tendermint, REST, etc.).
 func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum int64, err error) {
@@ -77,15 +99,14 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 
 	collectionData := apiCollection.CollectionData
 
-	// Get the request data from the function template
-	if parsing.FunctionTemplate == "" {
+	// Build the request body from the function template.
+	requestData, ok := blockNumRequestBody(ecf.apiInterface, parsing.FunctionTemplate)
+	if !ok {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" missing function template", nil,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 		)
 	}
-
-	requestData := []byte(parsing.FunctionTemplate)
 
 	// Send request via direct RPC connection (measure the transport round-trip)
 	reqStart := time.Now()

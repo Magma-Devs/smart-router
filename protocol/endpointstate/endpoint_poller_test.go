@@ -5,8 +5,42 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
+
+// TestBlockNumRequestBody pins the GET_BLOCKNUM template resolution. The bug it guards: the cosmos
+// gRPC GET_BLOCKNUM directive (Service/GetLatestBlock) carries the method in api_name and a
+// legitimately-EMPTY request body, but the poller treated an empty function_template as "method
+// undefined" and hard-failed — so every cosmos-gRPC endpoint's per-endpoint ChainTracker retried
+// forever ("GET_BLOCKNUM missing function template apiInterface=grpc"). gRPC must resolve an empty
+// template to "{}"; REST/Tendermint must still reject it (they genuinely need a path/method).
+func TestBlockNumRequestBody(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		apiInterface string
+		template     string
+		wantBody     string
+		wantOK       bool
+	}{
+		{"grpc empty template → {}", spectypes.APIInterfaceGrpc, "", "{}", true},
+		{"grpc explicit template passes through", spectypes.APIInterfaceGrpc, `{"height":"%d"}`, `{"height":"%d"}`, true},
+		{"rest empty template is a hard error", spectypes.APIInterfaceRest, "", "", false},
+		{"rest path passes through", spectypes.APIInterfaceRest, "/cosmos/base/tendermint/v1beta1/blocks/latest", "/cosmos/base/tendermint/v1beta1/blocks/latest", true},
+		{"tendermintrpc empty template is a hard error", spectypes.APIInterfaceTendermintRPC, "", "", false},
+		{"jsonrpc empty template is a hard error", spectypes.APIInterfaceJsonRPC, "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, ok := blockNumRequestBody(tc.apiInterface, tc.template)
+			require.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				require.Equal(t, tc.wantBody, string(body))
+			} else {
+				require.Nil(t, body)
+			}
+		})
+	}
+}
 
 // TestEndpointPoller_CustomMessage_POSTDelegatesToConnection verifies the
 // Solana path: SVMChainTracker calls CustomMessage with the getLatestBlockhash
