@@ -449,18 +449,13 @@ Customers should pin to `:vX.Y.Z`. `:latest` is for non-production "just give me
 
 The version string is injected at build time from the git tag — `smartrouter version` prints the tag verbatim, including the `v` prefix. Builds from non-tagged commits carry `git describe` output (e.g. `v1.2.0-3-gabc1234`), so a dev binary cannot masquerade as a release.
 
-#### Pulling the image (private repo)
+#### Pulling the image
 
-This repository is private, so the GHCR package inherits private visibility. Anonymous `docker pull` returns `unauthorized`. To pull:
+Smart Router Docker images are published to GHCR:
 
 ```bash
-# Create a PAT at https://github.com/settings/tokens with at least the `read:packages` scope.
-echo "<your-PAT>" | docker login ghcr.io -u <your-github-username> --password-stdin
-
 docker pull ghcr.io/magma-devs/smart-router:vX.Y.Z
 ```
-
-If you'd rather customers pull without authenticating, change the **package** visibility (not the repo) to public at `https://github.com/orgs/Magma-Devs/packages` → smart-router → Package settings → Change visibility. The Go source stays private; only the published images become public.
 
 ### Tag conventions
 
