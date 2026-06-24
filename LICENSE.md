@@ -8,9 +8,9 @@ described in this notice.
 
 Noncommercial use is permitted subject to the PolyForm Noncommercial License
 1.0.0 terms below, including personal, educational, research, evaluation,
-development, and testing use.
+development, and testing use. For the avoidance of doubt the  "permitted purpose" under this license (including under the PolyForm Noncommerical License 1.0.0) is limited to noncommercial use. Further, any distribution of software hereunder (including under the PolyForm Noncommerical License 1.0.0) must be distributed with these licenses and subject to the terms hereof such that any use of the software shall only be permitted under these licenses, and limited to noncommercial use.
 
-The following uses require a separate written Enterprise License from Magma Devs:
+The following uses (the "noncommercial use") require a separate written Enterprise License from Magma Devs:
 
 - Any commercial use.
 - Any production use by or for a commercial entity.
