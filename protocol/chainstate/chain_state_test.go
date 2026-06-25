@@ -498,13 +498,40 @@ func TestRecompute_BaselineSinceResetsAfterConsensusGap(t *testing.T) {
 func TestDefaultConfig_DerivesWindowFromBlockTime(t *testing.T) {
 	cfg := DefaultConfig(400 * time.Millisecond) // Solana-ish
 	require.Equal(t, DefaultBucketWidth, cfg.BucketWidth)
-	require.Equal(t, DefaultOutlierThreshold, cfg.OutlierThreshold)
+	// 1200s / 0.4s = 3000 blocks → clamped to the ceiling (the anti-lie guard must stay tight on
+	// a fast chain, not tolerate a 3000-slot lead).
+	require.Equal(t, outlierCeilBlocks, cfg.OutlierThreshold)
 	require.Equal(t, time.Duration(DefaultStalenessMultiplier)*400*time.Millisecond, cfg.StalenessWindow)
 	require.Equal(t, cfg.StalenessWindow, cfg.TTL)
 
 	// Very fast chain: floored, not collapsed to a tiny constant.
 	fast := DefaultConfig(10 * time.Millisecond)
 	require.Equal(t, minStalenessWindow, fast.StalenessWindow)
+}
+
+// TestOutlierThresholdForBlockTime pins the block-time-aware outlier derivation:
+// clamp(round(OutlierTimeBudget / avgBlockTime), floor, ceiling). The threshold is denominated
+// in blocks but bounds a TIME quantity, so a fixed 100-block constant meant ~240x different
+// poison tolerance across chains; this table is the design's worked example.
+func TestOutlierThresholdForBlockTime(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		blockTime time.Duration
+		want      int64
+		why       string
+	}{
+		{"unknown block time → fixed fallback", 0, DefaultOutlierThreshold, "avgBlockTime<=0 degrades to historical 100, never 0"},
+		{"negative block time → fixed fallback", -1, DefaultOutlierThreshold, "guard against a bogus spec value"},
+		{"slow L1 60s → floored", 60 * time.Second, outlierFloorBlocks, "1200/60=20 < floor 32; floor keeps the guard above the ~10-20 legit lead"},
+		{"ethereum 12s → historical 100", 12 * time.Second, 100, "1200/12=100; anchor keeps the one chain running today unchanged"},
+		{"cosmos/lava 6s → midrange", 6 * time.Second, 200, "1200/6=200, inside [floor,ceil]"},
+		{"solana 0.4s → ceilinged", 400 * time.Millisecond, outlierCeilBlocks, "1200/0.4=3000 > ceil 512; ceiling keeps the guard meaningful on a fast chain"},
+		{"very fast 0.25s → ceilinged", 250 * time.Millisecond, outlierCeilBlocks, "1200/0.25=4800 > ceil 512"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, outlierThresholdForBlockTime(tc.blockTime), tc.why)
+		})
+	}
 }
 
 // TestNew_ZeroStalenessWindowDoesNotDisableExpiry covers Finding 8: a caller-supplied zero

@@ -28,10 +28,29 @@ const (
 	// within this many blocks of each other are treated as agreeing on the tip. Compile-time
 	// default (no per-chain runtime plumbing yet), not locked.
 	DefaultBucketWidth int64 = 2
-	// DefaultOutlierThreshold bounds both the anti-lie write guard (reject a write more than
-	// this far above the consensus baseline) and downward realignment (snap the tip down when a
-	// fresh majority sits more than this far below it). Compile-time default, not locked.
+	// DefaultOutlierThreshold is the FALLBACK anti-lie / realignment distance, in blocks, used
+	// only when a chain's average block time is unknown (avgBlockTime <= 0, e.g. a spec without
+	// average_block_time) or a caller supplies a non-positive OutlierThreshold. With a known
+	// block time, DefaultConfig derives a block-time-aware threshold instead — see
+	// outlierThresholdForBlockTime. Kept at 100 so an unknown-cadence chain degrades to the
+	// historical behavior, not to zero. Compile-time default, not locked.
 	DefaultOutlierThreshold int64 = 100
+	// OutlierTimeBudget is the wall-clock "poison tolerance" the outlier threshold targets in the
+	// unclamped midrange: how far (in TIME) the optimistic tip may lead consensus before a write
+	// is treated as a lie. The threshold is this budget expressed in BLOCKS (budget /
+	// avgBlockTime), so the guard means the same thing in time across chains instead of the same
+	// count of blocks — a fixed block count is ~100min of tolerance on a 60s chain but ~40s on a
+	// 0.4s chain. 1200s keeps a 12s chain (Ethereum) at the historical 100 blocks. Not locked.
+	OutlierTimeBudget = 1200 * time.Second
+	// outlierFloorBlocks / outlierCeilBlocks clamp the derived threshold:
+	//   - floor keeps slow chains above the ~10-20-block legitimate lead (staleness window in
+	//     blocks ≈ DefaultStalenessMultiplier, plus a few blocks of propagation), so the guard
+	//     never false-rejects an honest advance;
+	//   - ceiling keeps fast chains from deriving an enormous threshold (e.g. ~3000 Solana slots)
+	//     that would make the anti-lie guard meaningless. The ceiling is the primary fast-chain
+	//     safety knob.
+	outlierFloorBlocks int64 = 32
+	outlierCeilBlocks  int64 = 512
 	// DefaultStalenessMultiplier × avgBlockTime is the default staleness window / TTL when
 	// derived from a chain's block time (D6). A multiplier on the block time, NOT a fixed
 	// constant — compile-time default, not locked.
@@ -71,14 +90,39 @@ type Config struct {
 	TTL time.Duration
 }
 
-// DefaultConfig derives the freshness/consensus window from a chain's average block time
-// (D6): StalenessWindow = TTL = max(DefaultStalenessMultiplier × avgBlockTime, floor). The
-// bucket/outlier defaults are block-count constants, independent of block time.
+// outlierThresholdForBlockTime derives the anti-lie / realignment threshold (in blocks) from a
+// chain's average block time: clamp(round(OutlierTimeBudget / avgBlockTime), floor, ceiling).
+// The threshold is denominated in blocks but the quantity it must bound (how long the optimistic
+// tip may lead consensus) is denominated in time, so a fixed block count means inconsistent time
+// semantics per chain; dividing a wall-clock budget by the block time fixes that. A non-positive
+// block time falls back to the fixed DefaultOutlierThreshold (historical behavior, never zero).
+//
+// Note: OutlierTimeBudget / avgBlockTime is a ratio of two time.Durations (both int64 ns), i.e.
+// a dimensionless block count; the round-half-up is done on the underlying nanoseconds.
+func outlierThresholdForBlockTime(averageBlockTime time.Duration) int64 {
+	if averageBlockTime <= 0 {
+		return DefaultOutlierThreshold
+	}
+	bt := int64(averageBlockTime)
+	blocks := (int64(OutlierTimeBudget) + bt/2) / bt // round to nearest block
+	if blocks < outlierFloorBlocks {
+		return outlierFloorBlocks
+	}
+	if blocks > outlierCeilBlocks {
+		return outlierCeilBlocks
+	}
+	return blocks
+}
+
+// DefaultConfig derives the freshness/consensus window AND the outlier threshold from a chain's
+// average block time (D6): StalenessWindow = TTL = max(DefaultStalenessMultiplier × avgBlockTime,
+// floor); OutlierThreshold = clamp(OutlierTimeBudget / avgBlockTime, floor, ceiling). BucketWidth
+// stays a block-count constant (clustering tolerance is intrinsically in blocks, not time).
 func DefaultConfig(averageBlockTime time.Duration) Config {
 	window := max(time.Duration(DefaultStalenessMultiplier)*averageBlockTime, minStalenessWindow)
 	return Config{
 		BucketWidth:      DefaultBucketWidth,
-		OutlierThreshold: DefaultOutlierThreshold,
+		OutlierThreshold: outlierThresholdForBlockTime(averageBlockTime),
 		StalenessWindow:  window,
 		TTL:              window,
 	}
