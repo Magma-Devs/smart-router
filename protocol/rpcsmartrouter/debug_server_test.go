@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/utils"
@@ -285,6 +287,140 @@ func TestDebugResetAll_SmartRouter_NilRouterIsSafe(t *testing.T) {
 
 	rr := postResetAllRouter(mux)
 	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+// --- MAG-2202 read-only state endpoints -------------------------------------------------
+
+func getDebugRouter(mux http.Handler, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// stateEndpointPaths are the three read-only state endpoints added for MAG-2202.
+var stateEndpointPaths = []string{"/debug/endpoint-state", "/debug/chain-state", "/debug/provider-routing"}
+
+// TestDebugStateEndpoints_MethodNotAllowed: all three are GET-only (the acceptance criterion that any
+// non-GET method returns 405).
+func TestDebugStateEndpoints_MethodNotAllowed(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+	for _, path := range stateEndpointPaths {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rr.Code, path)
+	}
+}
+
+// TestDebugStateEndpoints_NilRouterIsSafe: usable from a fixture that didn't wire a full router —
+// each returns 200 with an empty object rather than panicking, so the suite can probe unconditionally.
+func TestDebugStateEndpoints_NilRouterIsSafe(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: nil})
+	for _, path := range stateEndpointPaths {
+		rr := getDebugRouter(mux, path)
+		require.Equal(t, http.StatusOK, rr.Code, path)
+		require.JSONEq(t, `[]`, rr.Body.String(), path)
+	}
+}
+
+// TestDebugChainState_ReportsRawSnapshot wires a real per-chain ChainState and verifies the JSON
+// shape (flat Go-identifier keys, RFC3339 BaselineSince) and that a nil-chainState server is skipped.
+func TestDebugChainState_ReportsRawSnapshot(t *testing.T) {
+	var offsetNano atomic.Int64
+	cs := chainstate.New("ETH1", chainstate.Config{
+		BucketWidth: 2, OutlierThreshold: 100, StalenessWindow: 10 * time.Second, TTL: 10 * time.Second,
+	})
+	cs.SetLatestBlock(1000)
+	now := time.Now()
+	cs.Recompute([]chainstate.BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: now},
+		{URL: "b", Block: 1000, ObservedAt: now},
+		{URL: "c", Block: 1000, ObservedAt: now},
+	})
+
+	router := &RPCSmartRouter{
+		rpcServers: map[string]*RPCSmartRouterServer{
+			"ETH1-jsonrpc": {chainState: cs, listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
+			"NIL-rest":     {chainState: nil}, // skipped, not panic
+		},
+	}
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
+
+	rr := getDebugRouter(mux, "/debug/chain-state")
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	require.Len(t, rows, 1, "only the wired chainState contributes a row; the nil-chainState server is skipped")
+	row := rows[0]
+	require.Equal(t, "ETH1", row["ChainID"])
+	require.Equal(t, "jsonrpc", row["ApiInterface"])
+	require.Equal(t, float64(1000), row["ObservedTip"])
+	require.Equal(t, float64(1000), row["ConsensusBaseline"])
+	require.Equal(t, true, row["HasBaseline"])
+	require.Equal(t, true, row["Initialized"])
+	require.NotEmpty(t, row["BaselineSince"], "established baseline carries an RFC3339 timestamp")
+}
+
+// TestDebugProviderRouting_ReportsPerCSMShape verifies the handler keys output per session manager and
+// emits the three address fields as JSON arrays (non-null) even when empty, and skips a nil CSM.
+func TestDebugProviderRouting_ReportsPerCSMShape(t *testing.T) {
+	var offsetNano atomic.Int64
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "ETH1")
+	csm := lavasession.NewConsumerSessionManager(
+		&lavasession.RPCEndpoint{NetworkAddress: "stub", ChainID: "ETH1", ApiInterface: "jsonrpc", HealthCheckPath: "/"},
+		optimizer, nil, "lava@test", lavasession.NewActiveSubscriptionProvidersStorage(),
+	)
+	router := &RPCSmartRouter{
+		sessionManagers: map[string]*lavasession.ConsumerSessionManager{
+			"ETH1-jsonrpc": csm,
+			"NIL-rest":     nil, // skipped, not panic
+		},
+	}
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
+
+	rr := getDebugRouter(mux, "/debug/provider-routing")
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	require.Len(t, rows, 1, "nil CSM is skipped")
+	row := rows[0]
+	require.Equal(t, "ETH1", row["ChainID"])
+	require.Equal(t, "jsonrpc", row["ApiInterface"])
+	for _, k := range []string{"ValidAddresses", "CurrentlyBlockedProviderAddresses", "BlockedBackupProviders"} {
+		require.Contains(t, row, k)
+		require.IsType(t, []any{}, row[k], k+" must be a JSON array, not null")
+	}
+}
+
+// TestDebugEndpointState_WiringSafe verifies per-chain iteration, the nil-manager skip, and that a
+// chain whose session manager has no endpoints yields an empty (non-panicking) object. The full
+// observation↔health join is covered by the lavasession/endpointstate accessor tests.
+func TestDebugEndpointState_WiringSafe(t *testing.T) {
+	var offsetNano atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	monitor := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainID: "ETH1", ApiInterface: "jsonrpc", AverageBlockTime: 12 * time.Second, BlocksToSave: 10,
+	})
+	defer monitor.Stop()
+
+	router := &RPCSmartRouter{
+		rpcServers: map[string]*RPCSmartRouterServer{
+			"ETH1-jsonrpc": {endpointChainTrackerManager: monitor, listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
+			"NIL-rest":     {endpointChainTrackerManager: nil}, // skipped, not panic
+		},
+		sessionManagers: map[string]*lavasession.ConsumerSessionManager{}, // no CSM for the chain → no rows, no panic
+	}
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
+
+	rr := getDebugRouter(mux, "/debug/endpoint-state")
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.JSONEq(t, `[]`, rr.Body.String(), "no session manager wired for the chain → empty array, no panic")
 }
 
 // corruptedMsTimestampBlock is the exact value reported in the 2026-05-14

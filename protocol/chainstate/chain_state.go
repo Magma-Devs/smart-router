@@ -331,6 +331,36 @@ func (cs *ChainState) HasConsensusBaseline() (int64, bool) {
 	return cs.baseline, cs.hasBaseline
 }
 
+// ChainStateSnapshot is the RAW, NON-TTL-gated view of ChainState for read-only debug introspection
+// (MAG-2202 /debug/chain-state). Unlike GetLatestBlock / GetConsensusBaseline it never applies the
+// TTL freshness gate: black-box tests assert TTL expiry, downward realignment, and empty-snapshot
+// baseline clearing from the raw (block, timestamp) pairs — a gated getter would hide exactly those
+// transitions by collapsing to (0, false). BaselineSince is the establishment time (distinct from
+// the TTL-freshness baselineAt that GetConsensusBaselineWithTime exposes).
+type ChainStateSnapshot struct {
+	ObservedTip       int64
+	LastObservedAt    time.Time
+	ConsensusBaseline int64
+	HasBaseline       bool
+	BaselineSince     time.Time
+	Initialized       bool
+}
+
+// DebugSnapshot returns the raw ChainState fields under one read lock, without the TTL gate the
+// production getters apply. For telemetry / black-box introspection only — not a sync-scoring path.
+func (cs *ChainState) DebugSnapshot() ChainStateSnapshot {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return ChainStateSnapshot{
+		ObservedTip:       cs.latestBlock,
+		LastObservedAt:    cs.lastObservedAt,
+		ConsensusBaseline: cs.baseline,
+		HasBaseline:       cs.hasBaseline,
+		BaselineSince:     cs.baselineSince,
+		Initialized:       cs.initialized,
+	}
+}
+
 // computeMajorityBaseline implements the locked consensus rules over a snapshot:
 //   - fresh-only: drop observations older than StalenessWindow and non-positive blocks;
 //   - dedup by URL: each endpoint votes once, with its most recent observation;
