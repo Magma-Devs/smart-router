@@ -2987,3 +2987,84 @@ func TestIsFinalizedForCacheWrite(t *testing.T) {
 		})
 	}
 }
+
+// TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch is the
+// symptom-level companion to the chaintracker unit test for MAG-1591. It locks the
+// fix at the decision point where the unit mismatch actually became "No pairings":
+// filterEndpointsByConsistency compares each endpoint's tracked tip against the
+// consumer's seen block. On Solana the seen block is a slot (~424M); if an endpoint's
+// tracker reports value.lastValidBlockHeight (~403M) instead of context.slot, the
+// computed lag is the ~21M unit gap, blows past the threshold, and the endpoint is
+// filtered. With one endpoint that means an all-failed result -> ConsistencyError ->
+// the "No pairings available" the customer saw.
+//
+// The numbers are the real incident values from the GK8 logs:
+// seenBlock=424549212, block-height tip=403165980, gap=21383232.
+func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		seenSlot         = int64(424549212) // consumer's seen block — a Solana slot
+		slotTip          = int64(424549212) // a tracker that correctly reports context.slot
+		blockHeightTip   = int64(403165980) // the buggy tracker reporting value.lastValidBlockHeight
+		expectedBlockGap = int64(21383232)  // seenSlot - blockHeightTip, matches the log's blockGap
+	)
+	require.Equal(t, expectedBlockGap, seenSlot-blockHeightTip, "guard: incident magnitudes are consistent")
+
+	userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
+	config := relaycore.DefaultConsistencyValidationConfig()
+	protocolMsg := &MockProtocolMessage{
+		api:            &spectypes.Api{Name: "getLatestBlockhash"},
+		requestedBlock: spectypes.LATEST_BLOCK,
+		userData:       userData,
+	}
+
+	newServer := func() *RPCSmartRouterServer {
+		consistency := newMockConsistency()
+		consistency.SetSeenBlock(seenSlot, userData)
+		return &RPCSmartRouterServer{consistencyConfig: config, smartRouterConsistency: consistency}
+	}
+	endpointSession := func(addr string, latest int64) *lavasession.SessionInfo {
+		ep := &lavasession.Endpoint{NetworkAddress: addr}
+		ep.LatestBlock.Store(latest)
+		return &lavasession.SessionInfo{Session: &lavasession.SingleConsumerSession{
+			Connection: &lavasession.DirectRPCSessionConnection{Endpoint: ep},
+		}}
+	}
+
+	t.Run("slot tip (fixed) is in sync -> endpoint valid", func(t *testing.T) {
+		rpcss := newServer()
+		sessions := lavasession.ConsumerSessionsMap{
+			"http://slot:8899": endpointSession("http://slot:8899", slotTip),
+		}
+		valid, failed, err := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMsg)
+		require.NoError(t, err)
+		require.Len(t, valid, 1, "a tracker reporting slot is at the seen slot and must pass")
+		require.Len(t, failed, 0)
+	})
+
+	t.Run("block-height tip (regression) looks ~21M behind -> filtered, no pairings", func(t *testing.T) {
+		rpcss := newServer()
+		sessions := lavasession.ConsumerSessionsMap{
+			"http://blockheight:8899": endpointSession("http://blockheight:8899", blockHeightTip),
+		}
+		valid, failed, err := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMsg)
+		require.Error(t, err, "the only endpoint is filtered, so all-failed -> ConsistencyError (the No-pairings precursor)")
+		require.Len(t, valid, 0)
+		require.Len(t, failed, 1, "the block-height tip is filtered out by the ~21M unit gap")
+	})
+
+	t.Run("mixed fleet -> only the slot tip survives", func(t *testing.T) {
+		rpcss := newServer()
+		sessions := lavasession.ConsumerSessionsMap{
+			"http://slot:8899":        endpointSession("http://slot:8899", slotTip),
+			"http://blockheight:8899": endpointSession("http://blockheight:8899", blockHeightTip),
+		}
+		valid, failed, err := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMsg)
+		require.NoError(t, err, "at least one endpoint is valid, so no all-failed error")
+		require.Len(t, valid, 1)
+		require.Len(t, failed, 1)
+		_, slotKept := valid["http://slot:8899"]
+		require.True(t, slotKept, "the slot-reporting endpoint must be the survivor")
+	})
+}

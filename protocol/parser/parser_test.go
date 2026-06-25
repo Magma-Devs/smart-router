@@ -9,6 +9,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/stretchr/testify/require"
 )
 
@@ -973,4 +974,56 @@ func TestParseRawBlock(t *testing.T) {
 		ParseRawBlock(&rpcInput, parsedInput, "")
 		require.Equal(t, spectypes.NOT_APPLICABLE, parsedInput.GetBlock())
 	})
+}
+
+// TestSolanaSpec_GetBlocknumParsesSlotNotBlockHeight is the spec-side guard for
+// the MAG-1591 unit mismatch. The two earlier tests cover the runtime sides — the
+// SVMChainTracker exposing context.slot, and filterEndpointsByConsistency rejecting
+// a block-height tip — but both assume the tracked value is a *slot* in the first
+// place. That guarantee originates here: the SOLANA spec's GET_BLOCKNUM parse
+// directive must extract context.slot from a getLatestBlockhash reply, not
+// value.lastValidBlockHeight.
+//
+// This test loads the real specs/solana.json (not a hand-built BlockParser) and
+// runs the directive's actual ResultParsing, so editing the spec to parse
+// lastValidBlockHeight — the field whose ~22M divergence caused the incident —
+// fails here.
+func TestSolanaSpec_GetBlocknumParsesSlotNotBlockHeight(t *testing.T) {
+	const specPath = "../../specs/solana.json"
+
+	specs, err := keeper.GetAllSpecsFromFile(specPath)
+	require.NoError(t, err, "must be able to load %s", specPath)
+
+	solana, ok := specs["SOLANA"]
+	require.True(t, ok, "SOLANA spec must be present in %s", specPath)
+
+	// Locate the GET_BLOCKNUM parse directive — the one the chain tracker uses to
+	// derive the canonical chain position from a getLatestBlockhash reply.
+	var blockParser *spectypes.BlockParser
+	for _, collection := range solana.ApiCollections {
+		for _, directive := range collection.ParseDirectives {
+			if directive.FunctionTag == spectypes.FUNCTION_TAG_GET_BLOCKNUM {
+				bp := directive.ResultParsing
+				blockParser = &bp
+			}
+		}
+	}
+	require.NotNil(t, blockParser, "SOLANA spec must define a GET_BLOCKNUM parse directive")
+
+	// Sanity-check the directive targets the slot path, so a mis-pointed parser_arg
+	// fails with a readable message rather than only via the numeric assertion below.
+	require.Contains(t, blockParser.ParserArg, "slot",
+		"GET_BLOCKNUM must parse context.slot; parser_arg was %v", blockParser.ParserArg)
+	require.NotContains(t, blockParser.ParserArg, "lastValidBlockHeight",
+		"GET_BLOCKNUM must not parse value.lastValidBlockHeight — that is the MAG-1591 unit mismatch")
+
+	// A getLatestBlockhash result with slot and lastValidBlockHeight diverging by
+	// the ~22M gap seen on Solana mainnet (here scaled to 100 vs 42).
+	reply := &RPCInputTest{
+		Result: []byte(`{"context":{"slot":100},"value":{"blockhash":"abc","lastValidBlockHeight":42}}`),
+	}
+
+	parsed := ParseBlockFromReply(reply, *blockParser, nil)
+	require.Equal(t, int64(100), parsed.GetBlock(),
+		"GET_BLOCKNUM must yield context.slot (100), not value.lastValidBlockHeight (42)")
 }
