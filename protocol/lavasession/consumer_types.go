@@ -218,6 +218,32 @@ func (e *Endpoint) IsEnabled() bool {
 	return e.Enabled
 }
 
+// EndpointHealthSnapshot is a consistent, point-in-time view of an endpoint's enable/recovery state
+// for read-only debug introspection (MAG-2202 /debug/endpoint-state). Captured under e.mu so a caller
+// never observes a half-applied MarkUnhealthy / RecordProbeVerdict transition. DisabledAt and
+// LastRecoveryPoll are zero while the endpoint is enabled / has never disabled.
+type EndpointHealthSnapshot struct {
+	Enabled                  bool
+	DisabledAt               time.Time
+	ConsecutiveHealthyProbes uint64 // distinct post-disable successful polls counted toward F1 re-enable
+	LastRecoveryPoll         time.Time
+}
+
+// HealthSnapshot returns the endpoint's enable/recovery state under e.mu. Read-only companion to
+// IsEnabled for debug introspection — it never mutates state. The unexported recovery fields
+// (disabledAt / consecutiveHealthyProbes / lastRecoveryPoll) are otherwise invisible outside the
+// package, so this is the only synchronized read path for them.
+func (e *Endpoint) HealthSnapshot() EndpointHealthSnapshot {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return EndpointHealthSnapshot{
+		Enabled:                  e.Enabled,
+		DisabledAt:               e.disabledAt,
+		ConsecutiveHealthyProbes: e.consecutiveHealthyProbes,
+		LastRecoveryPoll:         e.lastRecoveryPoll,
+	}
+}
+
 // IsProviderRelay returns true if this endpoint uses provider-relay connections (consumer mode)
 func (e *Endpoint) IsProviderRelay() bool {
 	return len(e.Connections) > 0

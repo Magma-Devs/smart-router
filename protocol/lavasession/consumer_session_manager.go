@@ -151,6 +151,34 @@ func (csm *ConsumerSessionManager) GetProviderOptimizer() ProviderOptimizer {
 	return csm.providerOptimizer
 }
 
+// ProviderRoutingSnapshot is a consistent copy of the CSM's routing-pool state for read-only debug
+// introspection (MAG-2202 /debug/provider-routing): the addresses currently eligible to route, the
+// primary providers blocked this epoch, and the blocked backup providers. Every slice is a copy, so
+// the caller never aliases CSM-internal state; backup providers are sorted for deterministic output.
+// All slices are non-nil (empty rather than nil) so the JSON encodes as [] rather than null.
+type ProviderRoutingSnapshot struct {
+	ValidAddresses                    []string
+	CurrentlyBlockedProviderAddresses []string
+	BlockedBackupProviders            []string
+}
+
+// ProviderRoutingSnapshot returns a copy of this CSM's valid / blocked / blocked-backup provider
+// addresses under csm.lock. Read-only — it never mutates routing state.
+func (csm *ConsumerSessionManager) ProviderRoutingSnapshot() ProviderRoutingSnapshot {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	backups := make([]string, 0, len(csm.blockedBackupProviders))
+	for addr := range csm.blockedBackupProviders {
+		backups = append(backups, addr)
+	}
+	sort.Strings(backups)
+	return ProviderRoutingSnapshot{
+		ValidAddresses:                    append([]string{}, csm.validAddresses...),
+		CurrentlyBlockedProviderAddresses: append([]string{}, csm.currentlyBlockedProviderAddresses...),
+		BlockedBackupProviders:            backups,
+	}
+}
+
 func (csm *ConsumerSessionManager) GetNumberOfValidProviders() int {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()

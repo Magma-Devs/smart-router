@@ -23,6 +23,7 @@ import (
 	"math"
 	"net/http"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -855,7 +856,155 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		fmt.Fprint(w, `{"cleared":true}`)
 	})
 
+	// GET /debug/endpoint-state — per-endpoint poll-health + enable/recovery state (MAG-2202 endpoint 1).
+	// Returns a flat array of self-describing records (ChainID + ApiInterface + NetworkAddress identify
+	// each row; no object nesting), joining the per-endpoint observation record
+	// (EndpointMonitor.SnapshotObservations: LatestBlock/ObservedAt/Source + poll-health) with the
+	// endpoint's enable/recovery state (Endpoint.HealthSnapshot: Enabled/DisabledAt/
+	// ConsecutiveHealthyProbes). Lets the automation suite verify F1 re-enable, recovery latency, the
+	// relay-vs-poll Source gate, and failure-streak reset from the wire. Read-only; nil-router safe.
+	mux.HandleFunc("/debug/endpoint-state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			deps.router.mu.Lock()
+			for chainKey, server := range deps.router.rpcServers {
+				if server == nil || server.endpointChainTrackerManager == nil || server.listenEndpoint == nil {
+					continue
+				}
+				csm := deps.router.sessionManagers[chainKey]
+				if csm == nil {
+					continue
+				}
+				observations := server.endpointChainTrackerManager.SnapshotObservations()
+				for _, ep := range csm.GetAllDirectRPCEndpoints() {
+					if ep == nil || ep.Endpoint == nil {
+						continue
+					}
+					url := ep.Endpoint.NetworkAddress
+					health := ep.Endpoint.HealthSnapshot()
+					obs := observations[url] // zero value when no observation recorded yet
+					rows = append(rows, map[string]any{
+						"ChainID":                  server.listenEndpoint.ChainID,
+						"ApiInterface":             server.listenEndpoint.ApiInterface,
+						"NetworkAddress":           url,
+						"Enabled":                  health.Enabled,
+						"DisabledAt":               debugTimeRFC3339(health.DisabledAt),
+						"ConsecutiveHealthyProbes": health.ConsecutiveHealthyProbes,
+						"ConsecutivePollFailures":  obs.ConsecutivePollFailures,
+						"LastSuccessfulPoll":       debugTimeRFC3339(obs.LastSuccessfulPoll),
+						"LatestBlock":              obs.LatestBlock,
+						"ObservedAt":               debugTimeRFC3339(obs.ObservedAt),
+						"Source":                   obs.Source.String(),
+					})
+				}
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
+	// GET /debug/chain-state — per-chain consensus/tip state (MAG-2202 endpoint 2). Flat array of
+	// self-describing records (ChainID + ApiInterface). Raw, NON-TTL-gated snapshot
+	// (ChainState.DebugSnapshot) so the suite can assert anti-lie outlier rejection, downward
+	// realignment, TTL expiry, empty-snapshot baseline clearing, and cold-start bootstrap from the raw
+	// (block, timestamp) pairs — a TTL-gated getter would hide exactly those transitions. Read-only;
+	// nil-router safe.
+	mux.HandleFunc("/debug/chain-state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			deps.router.mu.Lock()
+			for _, server := range deps.router.rpcServers {
+				if server == nil || server.chainState == nil || server.listenEndpoint == nil {
+					continue
+				}
+				s := server.chainState.DebugSnapshot()
+				rows = append(rows, map[string]any{
+					"ChainID":           server.listenEndpoint.ChainID,
+					"ApiInterface":      server.listenEndpoint.ApiInterface,
+					"ObservedTip":       s.ObservedTip,
+					"LastObservedAt":    debugTimeRFC3339(s.LastObservedAt),
+					"ConsensusBaseline": s.ConsensusBaseline,
+					"HasBaseline":       s.HasBaseline,
+					"BaselineSince":     debugTimeRFC3339(s.BaselineSince),
+					"Initialized":       s.Initialized,
+				})
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
+	// GET /debug/provider-routing — per-CSM routing-pool state (MAG-2202 endpoint 3). Flat array of
+	// self-describing records (ChainID + ApiInterface): ValidAddresses / CurrentlyBlockedProviderAddresses
+	// / BlockedBackupProviders, so the suite can confirm a re-enabled provider is actually back in the
+	// routing pool rather than enabled-but-unroutable (F2). Read-only; nil-router safe.
+	mux.HandleFunc("/debug/provider-routing", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			deps.router.mu.Lock()
+			for _, csm := range deps.router.sessionManagers {
+				if csm == nil {
+					continue
+				}
+				ep := csm.RPCEndpoint()
+				s := csm.ProviderRoutingSnapshot()
+				rows = append(rows, map[string]any{
+					"ChainID":                           ep.ChainID,
+					"ApiInterface":                      ep.ApiInterface,
+					"ValidAddresses":                    s.ValidAddresses,
+					"CurrentlyBlockedProviderAddresses": s.CurrentlyBlockedProviderAddresses,
+					"BlockedBackupProviders":            s.BlockedBackupProviders,
+				})
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
 	return mux
+}
+
+// debugTimeRFC3339 formats a timestamp for the read-only /debug/* state endpoints, matching the
+// /debug/time convention (UTC RFC3339). A zero time renders as the empty string rather than the
+// Go zero-date ("0001-01-01T00:00:00Z"), so a test can cheaply distinguish "never happened"
+// (e.g. DisabledAt on an enabled endpoint) from a real instant.
+func debugTimeRFC3339(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// debugRowKey is the deterministic sort key for a /debug/* state row: ChainID, then ApiInterface,
+// then NetworkAddress (absent on chain/CSM rows → ""). comma-ok avoids a panic on the missing key.
+func debugRowKey(m map[string]any) string {
+	cid, _ := m["ChainID"].(string)
+	api, _ := m["ApiInterface"].(string)
+	na, _ := m["NetworkAddress"].(string)
+	return cid + "\x00" + api + "\x00" + na
+}
+
+// writeDebugRows sorts the records deterministically (so Go map-iteration order never leaks into the
+// response, keeping output stable for test fixtures and humans) and encodes them as a JSON array.
+// rows is always non-nil, so an empty result encodes as [] rather than null.
+func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
+	sort.Slice(rows, func(i, j int) bool { return debugRowKey(rows[i]) < debugRowKey(rows[j]) })
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(rows); err != nil {
+		utils.LavaFormatWarning("failed encoding debug response", err)
+	}
 }
 
 func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
