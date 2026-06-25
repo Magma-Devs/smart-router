@@ -8,6 +8,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -276,16 +277,14 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	if m.onNewBlock != nil {
 		config.NewLatestCallback = func(fromBlock, toBlock int64, hash string) {
 			m.onNewBlock(endpointURL, fromBlock, toBlock)
-			// Also update the endpoint's LatestBlock atomically
-			endpoint.LatestBlock.Store(toBlock)
-			endpoint.LastBlockUpdate = time.Now()
+			// The endpoint tip is owned by the endpointtip store and written through the
+			// gated recordPollObservation (which fires on every poll) — this callback no
+			// longer writes a second, ungated copy. It only advances the tracker state.
 			m.setTrackerState(endpointURL, EndpointChainTrackerPolling, nil)
 		}
 	} else {
-		// Default: just update the endpoint's block data
+		// Default: just advance the tracker state (tip is written via recordPollObservation).
 		config.NewLatestCallback = func(fromBlock, toBlock int64, hash string) {
-			endpoint.LatestBlock.Store(toBlock)
-			endpoint.LastBlockUpdate = time.Now()
 			m.setTrackerState(endpointURL, EndpointChainTrackerPolling, nil)
 		}
 	}
@@ -524,6 +523,10 @@ func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	delete(m.generations, endpointURL)
 	m.obsMu.Unlock()
 
+	// Drop this endpoint's tip from the shared store too, so a removed endpoint leaves no
+	// stale entry in the process-global map.
+	endpointtip.Default().Remove(m.tipKey(endpointURL))
+
 	utils.LavaFormatInfo("stopped and removed ChainTracker for endpoint",
 		utils.LogAttr("endpoint", endpointURL),
 		utils.LogAttr("chainID", m.chainID),
@@ -589,6 +592,11 @@ func (m *EndpointMonitor) Stop() {
 	// completes after Stop cannot resurrect an observation.
 	m.obsMu.Lock()
 	m.stopped = true
+	// Drop this chain's tips from the shared store before clearing the local maps, so a
+	// stopped monitor leaves no stale entries behind in the process-global store.
+	for url := range m.observations {
+		endpointtip.Default().Remove(m.tipKey(url))
+	}
 	m.observations = make(map[string]EndpointObservation)
 	m.generations = make(map[string]uint64)
 	m.obsMu.Unlock()

@@ -12,6 +12,7 @@ import (
 	"errors"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	metrics "github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
@@ -2123,7 +2124,13 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		// method) so a lagging provider is actually demoted.
 		syncBlock := uint64(latestServicedBlock)
 		if drsc, ok := consumerSession.Connection.(*DirectRPCSessionConnection); ok && drsc.Endpoint != nil {
-			if endpointBlock := drsc.Endpoint.LatestBlock.Load(); endpointBlock > 0 {
+			// Read the per-endpoint tip from the shared single-source-of-truth store (keyed
+			// by chain+apiInterface+url). This used to read drsc.Endpoint.LatestBlock, a
+			// second copy written ungated; the store is fed only through the gated poll/relay
+			// observers, so a lagging provider is demoted against a consistent tip.
+			info := csm.RPCEndpoint()
+			tipKey := endpointtip.Key(info.ChainID, info.ApiInterface, drsc.Endpoint.NetworkAddress)
+			if endpointBlock := endpointtip.Default().Block(tipKey); endpointBlock > 0 {
 				syncBlock = uint64(endpointBlock)
 			}
 		}

@@ -199,9 +199,10 @@ type Endpoint struct {
 	Extensions       map[string]struct{}
 	mu               sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll
 
-	// Per-endpoint sync tracking (for direct RPC QoS)
-	LatestBlock     atomic.Int64 // Latest block seen from this endpoint
-	LastBlockUpdate time.Time    // When LatestBlock was last updated
+	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
+	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
+	// poll and relay-harvest writers and the QoS reader all touch one gated store instead
+	// of this struct holding a second, ungated copy.
 }
 
 // IsDirectRPC returns true if this endpoint uses direct RPC connections (smart router mode)

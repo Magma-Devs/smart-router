@@ -10,6 +10,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -357,13 +358,17 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 		chainParser: newRealChainParserForHarvest(t, "ETH1"),
 	}
 
+	// The endpoint tip now lives in the shared endpointtip store; reset so a leftover entry
+	// can't satisfy the "historical did NOT move the tip" assertion below.
+	endpointtip.Default().Reset()
+
 	// A historical response: eth_getBlockByNumber(0x10a7eb0) carries Reply.LatestBlock = that
 	// concrete block, but it is NOT the tip.
 	histMsg := parse(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x10a7eb0",false]}`)
 	rpcss.harvestAndUpdateTipFromRelay(ep, histMsg, &pairingtypes.RelayReply{LatestBlock: 17_460_400}, gen, addr)
 
-	require.Equal(t, int64(0), ep.LatestBlock.Load(), "a historical response must NOT move the endpoint tip")
-	require.True(t, ep.LastBlockUpdate.IsZero(), "a historical response must NOT stamp LastBlockUpdate")
+	require.Equal(t, int64(0), endpointtip.Default().Block(endpointtip.Key("ETH1", "jsonrpc", url)),
+		"a historical response must NOT move the endpoint tip")
 	require.Equal(t, uint64(0), rpcss.latestBlockHeight.Load(), "a historical response must NOT move the bootstrap atomic")
 	// The store may hold a failed-poll record from the nil-connection background poll; what must
 	// NOT exist is a Relay-sourced write of the historical block.
@@ -376,8 +381,8 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 	tipMsg := parse(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`)
 	rpcss.harvestAndUpdateTipFromRelay(ep, tipMsg, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, gen, addr)
 
-	require.Equal(t, int64(20_000_000), ep.LatestBlock.Load(), "a tip-eligible response moves the endpoint tip")
-	require.False(t, ep.LastBlockUpdate.IsZero(), "a tip-eligible response stamps LastBlockUpdate")
+	require.Equal(t, int64(20_000_000), endpointtip.Default().Block(endpointtip.Key("ETH1", "jsonrpc", url)),
+		"a tip-eligible response moves the endpoint tip")
 	require.Equal(t, uint64(20_000_000), rpcss.latestBlockHeight.Load(), "a tip-eligible response moves the bootstrap atomic")
 	o, obsExists := m.GetObservation(url)
 	require.True(t, obsExists)

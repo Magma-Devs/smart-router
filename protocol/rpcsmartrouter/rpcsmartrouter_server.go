@@ -17,6 +17,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -1514,7 +1515,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				syncGap := int64(0)
 				if targetEndpoint != nil && rpcss.chainState != nil {
 					if baseline, ok := rpcss.chainState.GetConsensusBaseline(); ok && baseline > 0 {
-						endpointLatest := targetEndpoint.LatestBlock.Load()
+						endpointLatest := rpcss.endpointTipBlock(targetEndpoint.NetworkAddress)
 						if endpointLatest > 0 {
 							syncGap = baseline - endpointLatest
 							if syncGap < 0 {
@@ -1637,11 +1638,10 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 			endpointLatest = rpcss.endpointChainTrackerManager.GetLatestBlockNum(endpointURL)
 		}
 
-		// Fallback: if ChainTracker has no data yet, use the endpoint's reactive LatestBlock
+		// Fallback: if the ChainTracker has no data yet, use the shared endpointtip store
+		// (single source of truth, fed by the gated poll/relay observers).
 		if endpointLatest == 0 {
-			if drsc, ok := sessionInfo.Session.Connection.(*lavasession.DirectRPCSessionConnection); ok && drsc.Endpoint != nil {
-				endpointLatest = drsc.Endpoint.LatestBlock.Load()
-			}
+			endpointLatest = rpcss.endpointTipBlock(endpointURL)
 		}
 
 		// If we still have no block data, skip validation for this endpoint (allow first relay)
@@ -1740,6 +1740,19 @@ func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavases
 		return
 	}
 	rpcss.endpointChainTrackerManager.RecordRelayObservation(endpoint.NetworkAddress, gen, block, time.Now())
+}
+
+// endpointTipBlock reads an endpoint's observed tip from the shared single-source-of-truth
+// endpointtip store, keyed by this server's chain + apiInterface + the endpoint URL. It
+// returns 0 (the "unknown tip" sentinel) when the listen endpoint is unset or the URL is
+// empty, so callers never need to nil-check listenEndpoint.
+func (rpcss *RPCSmartRouterServer) endpointTipBlock(endpointURL string) int64 {
+	if rpcss.listenEndpoint == nil || endpointURL == "" {
+		return 0
+	}
+	return endpointtip.Default().Block(
+		endpointtip.Key(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL),
+	)
 }
 
 // minChainStateRecomputeInterval floors the consensus recompute cadence so very fast chains
@@ -1941,9 +1954,11 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 	if !ok {
 		return
 	}
+	// recordRelayBlockObservation is the ONLY tip write: it funnels through the gated
+	// RecordRelayObservation into the single-source-of-truth endpointtip store. The
+	// previous unconditional second write to targetEndpoint.LatestBlock is gone — it
+	// bypassed the generation/monotonic gate and was the source of tip divergence.
 	rpcss.recordRelayBlockObservation(targetEndpoint, harvestGen, tip)
-	targetEndpoint.LatestBlock.Store(tip)
-	targetEndpoint.LastBlockUpdate = time.Now()
 	rpcss.updateLatestBlockHeight(uint64(tip), endpointAddress)
 	if rpcss.smartRouterEndpointMetrics != nil {
 		// endpointAddress is the provider name (session map key), so resolveProviderName

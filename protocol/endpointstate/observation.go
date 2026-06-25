@@ -1,6 +1,10 @@
 package endpointstate
 
-import "time"
+import (
+	"time"
+
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
+)
 
 // ObservationSource identifies where a block observation came from.
 type ObservationSource int
@@ -34,16 +38,19 @@ func (s ObservationSource) String() string {
 // probing layer (Topic D) read. It explicitly distinguishes poll observations from
 // relay-harvest observations:
 //
-//   - The block triple (LatestBlock / ObservedAt / Source) is written by *whichever*
-//     source produced the most recent block. ObservedAt is monotonic — a later write
-//     never moves it backward, and a stale observation (older than the current
-//     ObservedAt) is ignored for the triple.
+//   - The block triple (LatestBlock / ObservedAt / Source) is the single-source-of-truth
+//     tip owned by the endpointtip store, NOT stored on this record. GetObservation and
+//     SnapshotObservations populate the triple from that store at read time, so callers
+//     see a consistent value while the tip lives in exactly one place. ObservedAt is
+//     monotonic — a later write never moves it backward, and a stale observation (older
+//     than the current ObservedAt) is ignored — enforced in endpointtip.Store.Set.
 //   - The poll-health fields (LastPollAttempt, LastSuccessfulPoll, LastPollLatency,
-//     LastPollError, ConsecutivePollFailures) are written *only* by the poll path.
+//     LastPollError, ConsecutivePollFailures) are written *only* by the poll path and
+//     are the only fields physically stored in the monitor's observation map.
 //
 // A zero EndpointObservation is the valid "nothing observed yet" state.
 type EndpointObservation struct {
-	// Block observation (written by either source):
+	// Block observation (delegated to the endpointtip store; filled on read, never stored here):
 	LatestBlock int64             // most recent observed block for this endpoint
 	ObservedAt  time.Time         // wall-clock of the observation that set LatestBlock (monotonic)
 	Source      ObservationSource // origin of the latest block observation
@@ -118,12 +125,17 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		o.LastPollLatency = latency
 		o.LastPollError = ""
 		o.ConsecutivePollFailures = 0
-		// Monotonic: only advance the block triple if this observation is not older
-		// than what we already have.
-		if !at.Before(o.ObservedAt) {
-			o.LatestBlock = block
-			o.ObservedAt = at
-			o.Source = ObservationSourcePoll
+		// The block triple lives in the single-source-of-truth endpointtip store, not on
+		// this record. Set applies the same time-monotonic guard the record used to (a
+		// poll older than the stored observation is dropped wholesale) and reports whether
+		// it advanced the tip — only then do we feed the per-chain consensus tip. Called
+		// under obsMu: lock order is obsMu → store lock everywhere (the store has no
+		// callbacks, so this cannot deadlock).
+		if endpointtip.Default().Set(m.tipKey(endpointURL), endpointtip.Tip{
+			Block:      block,
+			ObservedAt: at,
+			Source:     endpointtip.SourcePoll,
+		}) {
 			tipBlock = block // feed the per-chain tip after unlock
 		}
 	} else {
@@ -180,15 +192,23 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 		return
 	}
 
-	o := m.observations[endpointURL]
-	if at.Before(o.ObservedAt) {
-		return // stale: a newer observation already set the triple
+	// Register the endpoint in the observation map (if a relay is the first thing we ever
+	// see for it) so SnapshotObservations — which iterates the map — includes a relay-only
+	// endpoint in the per-chain consensus. The block triple itself lives in the endpointtip
+	// store; the map entry carries only poll-health, which a relay never touches.
+	if _, exists := m.observations[endpointURL]; !exists {
+		m.observations[endpointURL] = EndpointObservation{}
 	}
-	o.LatestBlock = block
-	o.ObservedAt = at
-	o.Source = ObservationSourceRelay
-	m.observations[endpointURL] = o
-	tipBlock = block // feed the per-chain tip after unlock
+
+	// Set applies the time-monotonic guard (a relay older than the stored observation is
+	// dropped) and reports whether it advanced the tip. Lock order obsMu → store lock.
+	if endpointtip.Default().Set(m.tipKey(endpointURL), endpointtip.Tip{
+		Block:      block,
+		ObservedAt: at,
+		Source:     endpointtip.SourceRelay,
+	}) {
+		tipBlock = block // feed the per-chain tip after unlock
+	}
 }
 
 // GetObservation returns a consistent snapshot of an endpoint's observation record and
@@ -198,7 +218,16 @@ func (m *EndpointMonitor) GetObservation(endpointURL string) (EndpointObservatio
 	m.obsMu.RLock()
 	defer m.obsMu.RUnlock()
 	o, ok := m.observations[endpointURL]
-	return o, ok
+	// Compose the block triple from the single-source-of-truth tip store (lock order
+	// obsMu → store lock). An endpoint can exist in the store (a relay-only tip) without a
+	// poll-health entry, or vice versa — either presence makes the observation "exist".
+	tip, tipOK := endpointtip.Default().Get(m.tipKey(endpointURL))
+	if tipOK {
+		o.LatestBlock = tip.Block
+		o.ObservedAt = tip.ObservedAt
+		o.Source = observationSourceFromTip(tip.Source)
+	}
+	return o, ok || tipOK
 }
 
 // SnapshotObservations returns a copy of every endpoint's observation record under a single
@@ -210,6 +239,13 @@ func (m *EndpointMonitor) SnapshotObservations() map[string]EndpointObservation 
 	defer m.obsMu.RUnlock()
 	out := make(map[string]EndpointObservation, len(m.observations))
 	for url, o := range m.observations {
+		// Fill the block triple from the tip store (every relay-observed endpoint is also
+		// registered in the map, so iterating the map covers both poll and relay tips).
+		if tip, ok := endpointtip.Default().Get(m.tipKey(url)); ok {
+			o.LatestBlock = tip.Block
+			o.ObservedAt = tip.ObservedAt
+			o.Source = observationSourceFromTip(tip.Source)
+		}
 		out[url] = o
 	}
 	return out
@@ -234,12 +270,34 @@ func (m *EndpointMonitor) SnapshotObservations() map[string]EndpointObservation 
 // is the unstated half of the ticket's idle-endpoint-minimum item and lands with the
 // probing layer (Topic D), when a live poll-health consumer first exists.
 func (m *EndpointMonitor) freshRelayTip(endpointURL string, now time.Time) (int64, bool) {
-	o, ok := m.GetObservation(endpointURL)
-	if !ok || o.Source != ObservationSourceRelay || o.LatestBlock <= 0 {
+	// Read the tip straight from the single-source-of-truth store (no obsMu needed — the
+	// triple no longer lives in the observation map).
+	tip, ok := endpointtip.Default().Get(m.tipKey(endpointURL))
+	if !ok || tip.Source != endpointtip.SourceRelay || tip.Block <= 0 {
 		return 0, false
 	}
-	if now.Sub(o.ObservedAt) > m.relayGateFreshness {
+	if now.Sub(tip.ObservedAt) > m.relayGateFreshness {
 		return 0, false // tip too stale: fall through to a real poll (the liveness floor)
 	}
-	return o.LatestBlock, true
+	return tip.Block, true
+}
+
+// tipKey builds this monitor's composite key into the shared endpointtip store. Keying
+// by chain AND apiInterface AND url keeps a process-global store from colliding when two
+// chains (or interfaces) reuse a url string.
+func (m *EndpointMonitor) tipKey(endpointURL string) string {
+	return endpointtip.Key(m.chainID, m.apiInterface, endpointURL)
+}
+
+// observationSourceFromTip maps the leaf store's Source back to the endpointstate enum
+// for the EndpointObservation DTO.
+func observationSourceFromTip(s endpointtip.Source) ObservationSource {
+	switch s {
+	case endpointtip.SourcePoll:
+		return ObservationSourcePoll
+	case endpointtip.SourceRelay:
+		return ObservationSourceRelay
+	default:
+		return ObservationSourceUnknown
+	}
 }
