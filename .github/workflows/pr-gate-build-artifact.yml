@@ -6,6 +6,8 @@ on:
       pr_number:
         description: Pull request number
         required: true
+  pull_request_review:
+    types: [submitted]
 
 permissions:
   contents: read
@@ -20,8 +22,10 @@ concurrency:
 jobs:
   metadata:
     name: Resolve PR Metadata
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.review.state == 'approved' && github.event.pull_request.base.ref == 'main') }}
     runs-on: ubuntu-latest
     outputs:
+      pr_number: ${{ steps.pr.outputs.pr_number }}
       head_sha: ${{ steps.pr.outputs.head_sha }}
       artifact_name: ${{ steps.pr.outputs.artifact_name }}
       image_tag: ${{ steps.pr.outputs.image_tag }}
@@ -31,7 +35,7 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
         run: |
           set -euo pipefail
           pr_json=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
@@ -53,6 +57,7 @@ jobs:
           artifact_name="smartrouter-pr-${PR_NUMBER}-${short_sha}-linux-amd64"
           image_tag="pr-${PR_NUMBER}-${short_sha}"
           {
+            echo "pr_number=$PR_NUMBER"
             echo "head_sha=$head_sha"
             echo "artifact_name=$artifact_name"
             echo "image_tag=$image_tag"
@@ -137,7 +142,7 @@ jobs:
 
       - name: Write summary
         env:
-          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
           HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
           VERSION: ${{ steps.ver.outputs.version }}
           PR_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.image_tag }}
@@ -159,7 +164,7 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
           SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
-          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
           HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
         run: |
           set -euo pipefail
@@ -617,7 +622,7 @@ jobs:
     name: Publish PR Validation Status
     runs-on: ubuntu-latest
     needs: [metadata, build]
-    if: ${{ always() }}
+    if: ${{ always() && needs.metadata.result != 'skipped' }}
     steps:
       - name: Publish dev-sim-prtests status
         env:
