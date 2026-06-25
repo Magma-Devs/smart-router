@@ -20,7 +20,7 @@ require (
 	github.com/dgraph-io/ristretto/v2 v2.4.0
 	github.com/fullstorydev/grpcurl v1.8.5
 	github.com/goccy/go-json v0.10.5
-	github.com/gogo/status v1.1.0
+	github.com/gogo/status v1.1.1
 	github.com/golang/mock v1.6.0
 	github.com/golang/protobuf v1.5.4
 	github.com/grafana/pyroscope-go v1.3.1
