@@ -222,6 +222,61 @@ func TestProbeCycle_NoObservationIsUnhealthy(t *testing.T) {
 	require.False(t, rec.calls[0].hasSync, "no telemetry → no sync sample")
 }
 
+// TestProbeCycleCore_ReturnsCycleCounts asserts the per-cycle telemetry runProbeCycleCore returns for
+// /debug/probe-loop (MAG-2202 endpoint 4): endpoints scored, endpoints re-enabled (F1), and providers
+// whose sample fed no sync evidence (F5).
+func TestProbeCycleCore_ReturnsCycleCounts(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	healthy := func(string) (endpointstate.EndpointObservation, bool) {
+		return freshObs(1000, now.Add(-time.Second), now.Add(-time.Second), 20*time.Millisecond), true
+	}
+	endpoints := []*lavasession.EndpointWithDirectConnection{
+		ep("http://a:8545", "p1", true),
+		ep("http://b:8545", "p2", true),
+	}
+
+	// Fresh baseline → sync fed for both providers, nothing omitted.
+	scored, reEnabled, syncOmitted := runProbeCycleCore(
+		endpoints, healthy, 1000, true,
+		provideroptimizer.SyncReference{ConsensusConfigured: true, Block: 1000, Time: now, Fresh: true},
+		now, probeCfg(), &recordingAppender{}, nil)
+	require.Equal(t, 2, scored, "both endpoints scored")
+	require.Equal(t, 0, reEnabled, "already-enabled endpoints are never re-enabled")
+	require.Equal(t, 0, syncOmitted, "fresh baseline → no sync omitted")
+
+	// No baseline → F5: sync omitted for every provider sample.
+	_, _, syncOmitted = runProbeCycleCore(
+		endpoints, healthy, 0, false,
+		provideroptimizer.SyncReference{ConsensusConfigured: true},
+		now, probeCfg(), &recordingAppender{}, nil)
+	require.Equal(t, 2, syncOmitted, "no fresh baseline → both providers' sync omitted (F5)")
+}
+
+// TestProbeCycleCore_CountsReEnable: the cycle that crosses the K-hysteresis reports exactly one
+// re-enable, and earlier cycles report none.
+func TestProbeCycleCore_CountsReEnable(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	dc := ep("http://ep:8545", "provider1", false) // disabled, disabledAt zero
+	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+
+	K := int(probeCfg().ReEnableHysteresis)
+	var lastReEnabled int
+	for i := 1; i <= K; i++ {
+		pollTime := base.Add(time.Duration(i) * time.Second) // strictly advancing distinct polls
+		now := pollTime.Add(time.Millisecond)
+		getObs := func(string) (endpointstate.EndpointObservation, bool) {
+			return freshObs(1000, now.Add(-time.Second), pollTime, 20*time.Millisecond), true
+		}
+		_, reEnabled, _ := runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, nil)
+		lastReEnabled = reEnabled
+		if i < K {
+			require.Equal(t, 0, reEnabled, "no re-enable before the K-th distinct healthy poll")
+		}
+	}
+	require.True(t, dc.Endpoint.Enabled)
+	require.Equal(t, 1, lastReEnabled, "the K-th cycle reports exactly one re-enable")
+}
+
 // TestValidatedProbeCadence pins the F6 validation: a non-positive configured cadence is rejected to
 // the default; a positive value passes through.
 func TestValidatedProbeCadence(t *testing.T) {

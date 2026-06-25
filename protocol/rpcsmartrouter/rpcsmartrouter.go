@@ -973,6 +973,42 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		writeDebugRows(w, rows)
 	})
 
+	// GET /debug/probe-loop — per-chain proactive-prober cycle telemetry (MAG-2202 endpoint 4). Flat
+	// array of self-describing records (ChainID + ApiInterface): the configured --probe-loop-interval
+	// cadence (CycleIntervalMs) plus a snapshot of the last completed runProbeCycle — start/duration,
+	// endpoints scored, endpoints re-enabled (F1), and providers whose QoS sample fed no sync evidence
+	// (F5). CyclesCompleted is the monotonic liveness counter for verifying the prober ticks on its own
+	// cadence (F6). Read-only; nil-router safe. Timestamps/durations: RFC3339 + integer milliseconds.
+	mux.HandleFunc("/debug/probe-loop", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			deps.router.mu.Lock()
+			for _, server := range deps.router.rpcServers {
+				if server == nil || server.listenEndpoint == nil {
+					continue
+				}
+				s := server.probeStats.snapshot()
+				rows = append(rows, map[string]any{
+					"ChainID":             server.listenEndpoint.ChainID,
+					"ApiInterface":        server.listenEndpoint.ApiInterface,
+					"CycleIntervalMs":     s.CycleIntervalMs,
+					"CyclesCompleted":     s.CyclesCompleted,
+					"LastCycleStartedAt":  debugTimeRFC3339(s.LastCycleStartedAt),
+					"LastCycleDurationMs": s.LastCycleDurationMs,
+					"EndpointsScored":     s.EndpointsScored,
+					"ReEnabledCount":      s.ReEnabledCount,
+					"SyncOmittedCount":    s.SyncOmittedCount,
+				})
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
 	return mux
 }
 
