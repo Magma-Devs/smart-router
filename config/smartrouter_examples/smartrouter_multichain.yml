@@ -1,18 +1,23 @@
-# Smart Router Direct RPC Configuration — multi-chain (Ethereum + Arbitrum + Base)
-# Mode: Direct connections to public RPC endpoints (no Lava providers!)
+# Smart Router Direct RPC Configuration — multi-chain (all bundled example chains)
+# Mode: Direct connections to the Lava public gateways (no Lava providers!)
 #
-# Three JSON-RPC chains on three ports, each with 2 upstreams (HTTP + WS).
-# The ETH1 spec — which ARBITRUM and BASE both import — requires websocket
-# support, so every provider pairs an http url with a wss url; http-only
-# providers are excluded at startup.
-#   - Lava public gateway (<chain>.lava.build, ws at /websocket)
-#   - PublicNode
-# All endpoints verified live (correct eth_chainId, blockNumber + ws handshake).
+# Serves every chain that ships with a standalone example, each on its own port,
+# all via <chain>.lava.build (no API key required):
+#   3360  ETH1     jsonrpc        eth1.lava.build
+#   3361  ARBITRUM jsonrpc        arbitrum.lava.build
+#   3362  BASE     jsonrpc        base.lava.build
+#   3363  SOLANA   jsonrpc        solana.lava.build
+#   3364  LAVA     rest           lava.rest.lava.build
+#   3365  LAVA     tendermintrpc  lava.tendermintrpc.lava.build
+#   3366  LAVA     grpc           lava.grpc.lava.build
 #
-# Specs required (resolve via --use-static-spec specs/):
-#   ETH1     -> specs/ethereum.json   (already in repo)
-#   ARBITRUM -> specs/arbitrum.json   (imports ETH1)  — from Magma-Devs/lava-specs
-#   BASE     -> specs/base.json       (imports ETH1)  — from Magma-Devs/lava-specs
+# The EVM chains (ETH1/ARBITRUM/BASE, which import ETH1) require a ws:// leg, so
+# each pairs an https url with a wss one. SOLANA is HTTP-only here, so start the
+# router with --skip-websocket-verification (the docker-compose example does this).
+#
+# Specs resolve from the bundled specs/ (pass --use-static-spec specs/): ETH1,
+# ARBITRUM (imports ETH1), BASE (imports ETH1), SOLANA, and LAVA (imports
+# COSMOSSDK, which imports IBC + TENDERMINT) — all present in the repo.
 
 # Prometheus metrics (scrape at http://<host>:7779/metrics). Set to
 # "disabled" to turn off. Read via viper, so the --metrics-listen-address
@@ -35,6 +40,26 @@ endpoints:
     api-interface: "jsonrpc"
     network-address: "0.0.0.0:3362"
 
+  - listen-address: "0.0.0.0:3363"
+    chain-id: "SOLANA"
+    api-interface: "jsonrpc"
+    network-address: "0.0.0.0:3363"
+
+  - listen-address: "0.0.0.0:3364"
+    chain-id: "LAVA"
+    api-interface: "rest"
+    network-address: "0.0.0.0:3364"
+
+  - listen-address: "0.0.0.0:3365"
+    chain-id: "LAVA"
+    api-interface: "tendermintrpc"
+    network-address: "0.0.0.0:3365"
+
+  - listen-address: "0.0.0.0:3366"
+    chain-id: "LAVA"
+    api-interface: "grpc"
+    network-address: "0.0.0.0:3366"
+
 direct-rpc:
   # ---- Ethereum (ETH1, chainId 0x1) ----
   - name: "eth-lava-build"
@@ -44,13 +69,6 @@ direct-rpc:
       - url: "https://eth1.lava.build"
       - url: "wss://eth1.lava.build/websocket"
 
-  - name: "eth-publicnode"
-    chain-id: "ETH1"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://ethereum-rpc.publicnode.com"
-      - url: "wss://ethereum-rpc.publicnode.com"
-
   # ---- Arbitrum One (ARBITRUM, chainId 0xa4b1) ----
   - name: "arb-lava-build"
     chain-id: "ARBITRUM"
@@ -58,13 +76,6 @@ direct-rpc:
     node-urls:
       - url: "https://arbitrum.lava.build"
       - url: "wss://arbitrum.lava.build/websocket"
-
-  - name: "arb-publicnode"
-    chain-id: "ARBITRUM"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://arbitrum-one-rpc.publicnode.com"
-      - url: "wss://arbitrum-one-rpc.publicnode.com"
 
   # ---- Base (BASE, chainId 0x2105) ----
   - name: "base-lava-build"
@@ -74,9 +85,33 @@ direct-rpc:
       - url: "https://base.lava.build"
       - url: "wss://base.lava.build/websocket"
 
-  - name: "base-publicnode"
-    chain-id: "BASE"
+  # ---- Solana (SOLANA) — HTTP-only; run with --skip-websocket-verification ----
+  - name: "sol-lava-build"
+    chain-id: "SOLANA"
     api-interface: "jsonrpc"
     node-urls:
-      - url: "https://base-rpc.publicnode.com"
-      - url: "wss://base-rpc.publicnode.com"
+      - url: "https://solana.lava.build"
+
+  # ---- Lava (LAVA) — REST + Tendermint RPC + gRPC via the Lava gateways ----
+  - name: "lava-rest-lava-build"
+    chain-id: "LAVA"
+    api-interface: "rest"
+    node-urls:
+      - url: "https://lava.rest.lava.build"
+        timeout: 10s
+
+  - name: "lava-tendermintrpc-lava-build"
+    chain-id: "LAVA"
+    api-interface: "tendermintrpc"
+    node-urls:
+      - url: "https://lava.tendermintrpc.lava.build"
+        timeout: 10s
+      - url: "wss://lava.tendermintrpc.lava.build/websocket"
+
+  - name: "lava-grpc-lava-build"
+    chain-id: "LAVA"
+    api-interface: "grpc"
+    node-urls:
+      - url: "grpcs://lava.grpc.lava.build:443"
+        auth-config:
+          use-tls: true
