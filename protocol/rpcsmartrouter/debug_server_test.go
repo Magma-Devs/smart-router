@@ -298,8 +298,8 @@ func getDebugRouter(mux http.Handler, path string) *httptest.ResponseRecorder {
 	return rr
 }
 
-// stateEndpointPaths are the three read-only state endpoints added for MAG-2202.
-var stateEndpointPaths = []string{"/debug/endpoint-state", "/debug/chain-state", "/debug/provider-routing"}
+// stateEndpointPaths are the read-only state endpoints added for MAG-2202.
+var stateEndpointPaths = []string{"/debug/endpoint-state", "/debug/chain-state", "/debug/provider-routing", "/debug/probe-loop"}
 
 // TestDebugStateEndpoints_MethodNotAllowed: all three are GET-only (the acceptance criterion that any
 // non-GET method returns 405).
@@ -421,6 +421,41 @@ func TestDebugEndpointState_WiringSafe(t *testing.T) {
 	rr := getDebugRouter(mux, "/debug/endpoint-state")
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.JSONEq(t, `[]`, rr.Body.String(), "no session manager wired for the chain → empty array, no panic")
+}
+
+// TestDebugProbeLoop_ReportsCycleStats verifies the per-chain probe-cycle record: interval +
+// last-cycle snapshot (durations as integer ms, start as RFC3339), and that a listenEndpoint-less
+// server is skipped.
+func TestDebugProbeLoop_ReportsCycleStats(t *testing.T) {
+	var offsetNano atomic.Int64
+	server := &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
+	server.probeStats.setInterval(5 * time.Second)
+	server.probeStats.recordCycle(time.Now(), 7*time.Millisecond, 4, 1, 2)
+
+	router := &RPCSmartRouter{
+		rpcServers: map[string]*RPCSmartRouterServer{
+			"ETH1-jsonrpc": server,
+			"NIL-rest":     {listenEndpoint: nil}, // skipped, not panic
+		},
+	}
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
+
+	rr := getDebugRouter(mux, "/debug/probe-loop")
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	require.Len(t, rows, 1, "the listenEndpoint-less server is skipped")
+	row := rows[0]
+	require.Equal(t, "ETH1", row["ChainID"])
+	require.Equal(t, "jsonrpc", row["ApiInterface"])
+	require.Equal(t, float64(5000), row["CycleIntervalMs"], "interval reported in milliseconds")
+	require.Equal(t, float64(1), row["CyclesCompleted"])
+	require.Equal(t, float64(7), row["LastCycleDurationMs"], "duration in milliseconds")
+	require.Equal(t, float64(4), row["EndpointsScored"])
+	require.Equal(t, float64(1), row["ReEnabledCount"])
+	require.Equal(t, float64(2), row["SyncOmittedCount"])
+	require.NotEmpty(t, row["LastCycleStartedAt"], "cycle start carries an RFC3339 timestamp")
 }
 
 // corruptedMsTimestampBlock is the exact value reported in the 2026-05-14

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -86,6 +87,10 @@ type RPCSmartRouterServer struct {
 
 	// Per-method cross-validation policy resolver (nil/empty => header-driven CV only).
 	crossValidationResolver *CrossValidationPolicyResolver
+
+	// probeStats holds the most-recent runProbeLoop cycle telemetry for /debug/probe-loop
+	// (MAG-2202 endpoint 4). Written off the data plane by runProbeCycle; read by the debug handler.
+	probeStats probeLoopStats
 }
 
 func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
@@ -1832,6 +1837,67 @@ func validatedProbeCadence(configured time.Duration) time.Duration {
 	return configured
 }
 
+// probeLoopStats holds the most-recent runProbeLoop cycle telemetry for /debug/probe-loop (MAG-2202
+// endpoint 4): the configured cadence plus a snapshot of the LAST completed cycle. Written once per
+// cycle by runProbeCycle (off the data plane) and read by the debug handler, under its own mutex so
+// a debug read never contends with relay/probe state. One per RPCSmartRouterServer, like the chain
+// it probes. The zero value is a valid "no cycle run yet" state.
+type probeLoopStats struct {
+	mu               sync.Mutex
+	cycleIntervalMs  int64     // configured --probe-loop-interval; set once when the loop starts
+	cyclesCompleted  uint64    // monotonic count of completed cycles (F6 liveness)
+	lastCycleStarted time.Time // wall-clock the last cycle began (zero before the first cycle)
+	lastCycleDurMs   int64     // wall-clock duration of the last cycle
+	endpointsScored  int       // endpoints scored in the last cycle
+	reEnabledCount   int       // endpoints the probe re-enabled in the last cycle (F1)
+	syncOmittedCount int       // providers whose last-cycle QoS sample fed no sync evidence (F5)
+}
+
+// setInterval publishes the effective probe cadence. Called once at loop start.
+func (s *probeLoopStats) setInterval(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cycleIntervalMs = d.Milliseconds()
+}
+
+// recordCycle overwrites the last-cycle snapshot and bumps the completed-cycle counter.
+func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, scored, reEnabled, syncOmitted int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cyclesCompleted++
+	s.lastCycleStarted = startedAt
+	s.lastCycleDurMs = dur.Milliseconds()
+	s.endpointsScored = scored
+	s.reEnabledCount = reEnabled
+	s.syncOmittedCount = syncOmitted
+}
+
+// probeLoopSnapshot is the read-only view the /debug/probe-loop handler emits per chain.
+type probeLoopSnapshot struct {
+	CycleIntervalMs     int64
+	CyclesCompleted     uint64
+	LastCycleStartedAt  time.Time
+	LastCycleDurationMs int64
+	EndpointsScored     int
+	ReEnabledCount      int
+	SyncOmittedCount    int
+}
+
+// snapshot returns a consistent copy of the stats under the lock (no mutex in the returned value).
+func (s *probeLoopStats) snapshot() probeLoopSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return probeLoopSnapshot{
+		CycleIntervalMs:     s.cycleIntervalMs,
+		CyclesCompleted:     s.cyclesCompleted,
+		LastCycleStartedAt:  s.lastCycleStarted,
+		LastCycleDurationMs: s.lastCycleDurMs,
+		EndpointsScored:     s.endpointsScored,
+		ReEnabledCount:      s.reEnabledCount,
+		SyncOmittedCount:    s.syncOmittedCount,
+	}
+}
+
 // runProbeLoop is the Topic D proactive health prober (MAG-2161). On its own cadence it reads stored
 // per-endpoint telemetry (Topic A) + the consensus baseline (Topic C) — making NO upstream call —
 // renders a health verdict for EVERY direct-RPC endpoint (regular AND backup), proactively
@@ -1844,6 +1910,9 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 	if cadence <= 0 {
 		cadence = defaultProbeCadence
 	}
+	// Publish the effective cadence for /debug/probe-loop (CycleIntervalMs) before the first tick,
+	// so the endpoint reports the interval even before a cycle has completed.
+	rpcss.probeStats.setInterval(cadence)
 	// The optimizer's AppendProbeData is optional (inline assertion) so the loop degrades to
 	// re-enable-only if a future optimizer lacks it, rather than failing to start.
 	appender, _ := rpcss.sessionManager.GetProviderOptimizer().(probeQoSAppender)
@@ -1873,18 +1942,25 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 			syncRef.Block, syncRef.Time, syncRef.Fresh = uint64(block), at, true
 		}
 	}
-	runProbeCycleCore(
+	startedAt := time.Now()
+	scored, reEnabled, syncOmitted := runProbeCycleCore(
 		rpcss.sessionManager.GetAllDirectRPCEndpoints(),
 		rpcss.endpointChainTrackerManager.GetObservation,
-		baseline, hasBaseline, syncRef, time.Now(), cfg, appender,
+		baseline, hasBaseline, syncRef, startedAt, cfg, appender,
 		rpcss.sessionManager.RestoreRecoveredProvider,
 	)
+	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted)
 }
 
 // runProbeCycleCore is the pure probe-cycle body (no rpcss fields), so it is testable with
 // constructed endpoints + a fake observation getter + a fake appender. For every endpoint it renders
 // a verdict, applies the proactive re-enable, then feeds ONE aggregated QoS sample per provider
 // (rule E2). A nil appender still performs the re-enable (QoS feed simply skipped).
+//
+// Returns the per-cycle telemetry for /debug/probe-loop (MAG-2202 endpoint 4): scored = endpoints
+// that received a verdict; reEnabled = endpoints the probe re-enabled this cycle (F1); syncOmitted =
+// providers whose QoS sample fed NO sync evidence (F5: no fresh consensus baseline, or no block in
+// the sample). syncOmitted is 0 when appender is nil (no QoS feed happens, so nothing is omitted).
 func runProbeCycleCore(
 	endpoints []*lavasession.EndpointWithDirectConnection,
 	getObservation func(url string) (endpointstate.EndpointObservation, bool),
@@ -1895,26 +1971,30 @@ func runProbeCycleCore(
 	cfg probing.VerdictConfig,
 	appender probeQoSAppender,
 	onRecover func(provider string),
-) {
+) (scored, reEnabled, syncOmitted int) {
 	// One verdict per endpoint (regular + backup), grouped by provider for the single-sample rule.
 	verdictsByProvider := make(map[string][]probing.EndpointVerdict)
 	for _, ep := range endpoints {
 		if ep == nil || ep.Endpoint == nil {
 			continue
 		}
+		scored++
 		obs, _ := getObservation(ep.Endpoint.NetworkAddress)
 		verdict := probing.RenderEndpointVerdict(obs, baseline, hasBaseline, now, cfg)
 		// Proactive re-enable from POST-DISABLE successful-poll evidence only (F1). RecordProbeVerdict
 		// releases the endpoint mutex before returning, so onRecover (which takes csm.lock) cannot
 		// nest under endpoint.mu — no lock-order inversion (F2).
-		if ep.Endpoint.RecordProbeVerdict(verdict.Recovery.LastSuccessfulPoll, verdict.Recovery.PollHealthy, cfg.ReEnableHysteresis) && onRecover != nil {
-			onRecover(ep.ProviderAddress)
+		if ep.Endpoint.RecordProbeVerdict(verdict.Recovery.LastSuccessfulPoll, verdict.Recovery.PollHealthy, cfg.ReEnableHysteresis) {
+			reEnabled++
+			if onRecover != nil {
+				onRecover(ep.ProviderAddress)
+			}
 		}
 		verdictsByProvider[ep.ProviderAddress] = append(verdictsByProvider[ep.ProviderAddress], verdict)
 	}
 
 	if appender == nil {
-		return // re-enable still happened above; QoS feed unavailable
+		return scored, reEnabled, syncOmitted // re-enable still happened above; QoS feed unavailable
 	}
 	for provider, verdicts := range verdictsByProvider {
 		sample, ok := probing.AggregateProviderSample(verdicts)
@@ -1924,8 +2004,12 @@ func runProbeCycleCore(
 		// hasSync only when an accepted consensus baseline exists (F5): no baseline → no sync evidence,
 		// never the legacy max-across-providers reference. syncRef carries the same baseline.
 		hasSync := sample.HasBlock && hasBaseline
+		if !hasSync {
+			syncOmitted++ // F5: this provider's QoS sample carries no sync evidence this cycle
+		}
 		appender.AppendProbeData(provider, sample.Availability, sample.Latency, sample.HasLatency, sample.Block, hasSync, syncRef)
 	}
+	return scored, reEnabled, syncOmitted
 }
 
 // harvestAndUpdateTipFromRelay applies a served relay's block to TIP state — but only when the
