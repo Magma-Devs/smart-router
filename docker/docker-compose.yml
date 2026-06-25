@@ -27,6 +27,10 @@
 #   3360  ETH1 jsonrpc (eth, multichain)
 #   3361  ARBITRUM jsonrpc (multichain)
 #   3362  BASE jsonrpc (multichain)
+#   3363  SOLANA jsonrpc (solana, multichain)
+#   3364  LAVA rest (multichain; lava example uses 3360)
+#   3365  LAVA tendermintrpc (multichain; lava example uses 3362)
+#   3366  LAVA grpc (multichain; lava example uses 3361)
 #   7779  router prometheus metrics
 
 name: smart-router
@@ -57,8 +61,17 @@ services:
       - "${SR_LOG_LEVEL:-info}"
       - "--log-format"
       - "${SR_LOG_FORMAT:-json}"
+      # Some bundled examples have HTTP-only listeners (e.g. SOLANA in the solana
+      # and multichain configs). Skip the startup websocket reachability check so
+      # those boot cleanly; ws subscriptions still work at runtime where a wss url
+      # is configured (the EVM examples pair https + wss).
+      - "--skip-websocket-verification"
     ports:
       - "3360:3360" # ETH1 jsonrpc
       - "3361:3361" # ARBITRUM jsonrpc
       - "3362:3362" # BASE jsonrpc
+      - "3363:3363" # SOLANA jsonrpc
+      - "3364:3364" # LAVA rest
+      - "3365:3365" # LAVA tendermintrpc
+      - "3366:3366" # LAVA grpc
       - "7779:7779" # router prometheus metrics
