@@ -455,12 +455,14 @@ jobs:
               ($arg == "--geolocation") or
               ($arg | startswith("--geolocation=")) or
               ($arg == "--concurrent-providers") or
-              ($arg | startswith("--concurrent-providers="));
+              ($arg | startswith("--concurrent-providers=")) or
+              ($arg | startswith("--provider-optimizer-"));
             def retired_flag_without_value($arg):
               ($arg == "--optimizer-qos-listen") or
               ($arg == "--show-provider-address-in-metrics") or
               ($arg == "--geolocation") or
-              ($arg == "--concurrent-providers");
+              ($arg == "--concurrent-providers") or
+              ($arg | startswith("--provider-optimizer-"));
             reduce .[] as $arg ({out: [], drop_next: false};
               if .drop_next then
                 if ($arg | startswith("--")) then
