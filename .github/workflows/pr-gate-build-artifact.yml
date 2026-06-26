@@ -447,35 +447,31 @@ jobs:
 
           current_args_json="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o json | jq -c --arg container "$CONTAINER" '.spec.template.spec.containers[] | select(.name == $container).args // []')"
           sanitized_args_json="$(printf '%s' "$current_args_json" | jq -c '
-            def retired_flag($arg):
+            def retired_flag_name($arg):
               ($arg == "--optimizer-qos-listen") or
+              ($arg == "--show-provider-address-in-metrics") or
+              ($arg == "--geolocation") or
+              ($arg == "--concurrent-providers") or
+              (($arg | startswith("--provider-optimizer-")) and (($arg | contains("=")) | not));
+            def retired_flag_assignment($arg):
               ($arg | startswith("--optimizer-qos-listen=")) or
-              ($arg == "--show-provider-address-in-metrics") or
               ($arg | startswith("--show-provider-address-in-metrics=")) or
-              ($arg == "--geolocation") or
               ($arg | startswith("--geolocation=")) or
-              ($arg == "--concurrent-providers") or
               ($arg | startswith("--concurrent-providers=")) or
-              ($arg | startswith("--provider-optimizer-"));
-            def retired_flag_without_value($arg):
-              ($arg == "--optimizer-qos-listen") or
-              ($arg == "--show-provider-address-in-metrics") or
-              ($arg == "--geolocation") or
-              ($arg == "--concurrent-providers") or
-              ($arg | startswith("--provider-optimizer-"));
-            reduce .[] as $arg ({out: [], drop_next: false};
-              if .drop_next then
-                if ($arg | startswith("--")) then
-                  .drop_next = false | .out += [$arg]
-                else
-                  .drop_next = false
-                end
-              elif retired_flag_without_value($arg) then
+              (($arg | startswith("--provider-optimizer-")) and ($arg | contains("=")));
+            def sanitize_arg($arg):
+              if retired_flag_name($arg) then
                 .drop_next = true
-              elif retired_flag($arg) then
+              elif retired_flag_assignment($arg) then
                 .
               else
                 .out += [$arg]
+              end;
+            reduce .[] as $arg ({out: [], drop_next: false};
+              if .drop_next and (($arg | startswith("--")) | not) then
+                .drop_next = false
+              else
+                .drop_next = false | sanitize_arg($arg)
               end
             ) | .out
           ')"
