@@ -457,7 +457,8 @@ jobs:
             def retired_flag_without_value($arg):
               ($arg == "--optimizer-qos-listen") or
               ($arg == "--show-provider-address-in-metrics") or
-              ($arg == "--geolocation");
+              ($arg == "--geolocation") or
+    ($arg == "--concurrent-providers");
             reduce .[] as $arg ({out: [], drop_next: false};
               if .drop_next then
                 if ($arg | startswith("--")) then
