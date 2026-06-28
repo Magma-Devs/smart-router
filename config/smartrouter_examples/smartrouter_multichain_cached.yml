@@ -47,7 +47,7 @@ endpoints:
 
 direct-rpc:
   # ---- Ethereum (ETH1, chainId 0x1) ----
-  - name: "eth-lava-build"
+  - name: "eth-lava"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
     node-urls:
@@ -62,7 +62,7 @@ direct-rpc:
       - url: "wss://ethereum-rpc.publicnode.com"
 
   # ---- Arbitrum One (ARBITRUM, chainId 0xa4b1) ----
-  - name: "arb-lava-build"
+  - name: "arb-lava"
     chain-id: "ARBITRUM"
     api-interface: "jsonrpc"
     node-urls:
@@ -77,7 +77,7 @@ direct-rpc:
       - url: "wss://arbitrum-one-rpc.publicnode.com"
 
   # ---- Base (BASE, chainId 0x2105) ----
-  - name: "base-lava-build"
+  - name: "base-lava"
     chain-id: "BASE"
     api-interface: "jsonrpc"
     node-urls:

@@ -34,7 +34,7 @@ endpoints:
 
 direct-rpc:
   # Endpoint 1 — Lava public gateway (HTTP + WS)
-  - name: "eth-lava-build"
+  - name: "eth-lava"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
     node-urls:
