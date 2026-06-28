@@ -1960,6 +1960,29 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	}()
 }
 
+// resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,
+// honored only on the first attempt. On a retry (firstAttempt == false) both are returned
+// empty so the relay falls through to a different provider instead of re-pinning the one
+// that just failed — otherwise a pinned provider that returned a retryable node error gets
+// re-selected, or the retry dead-ends on "Selected provider already failed in this request"
+// (MAG-2228). firstAttempt is BatchNumber()==0, which stays 0 when attempt 1 never reached a
+// provider (e.g. PairingListEmpty), so the pin is correctly re-honored in that case. Mirrors
+// preserveRetrySafeDirectives, which omits both directives on a rebuilt archive retry.
+func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string, firstAttempt bool) (selectedProvider, stickiness string) {
+	if !firstAttempt {
+		return "", ""
+	}
+	if id, ok := directiveHeaders[common.STICKINESS_HEADER_NAME]; ok {
+		stickiness = id
+		utils.LavaFormatTrace("found stickiness header", utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
+	}
+	if providerAddr, exists := directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME]; exists {
+		selectedProvider = providerAddr
+		utils.LavaFormatTrace("found provider selection header", utils.LogAttr("provider", selectedProvider), utils.LogAttr("GUID", ctx))
+	}
+	return selectedProvider, stickiness
+}
+
 func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	ctx context.Context,
 	numOfEndpoints int,
@@ -2211,18 +2234,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	usedProviders := relayProcessor.GetUsedProviders()
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 
-	// stickines id for future use
-	stickiness, ok := directiveHeaders[common.STICKINESS_HEADER_NAME]
-	if ok {
-		utils.LavaFormatTrace("found stickiness header", utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
-	}
-
-	// provider selection via header (smartrouter only)
-	selectedProvider := ""
-	if providerAddr, exists := directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME]; exists {
-		selectedProvider = providerAddr
-		utils.LavaFormatTrace("found provider selection header", utils.LogAttr("provider", selectedProvider), utils.LogAttr("GUID", ctx))
-	}
+	// MAG-2228: honor lava-select-provider / lava-stickiness only on the FIRST attempt.
+	// On a retry (a provider batch has already been dispatched, so BatchNumber > 0) the
+	// relay must be free to fall through to a different provider. See resolvePinDirectives.
+	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
 
 	// Group-aware fan-out: when a cross-validation policy requires group diversity, select across at
 	// least MinGroups distinct provider groups (1.2a). Default 1 leaves selection group-blind. For

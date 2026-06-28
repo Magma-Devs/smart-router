@@ -174,6 +174,17 @@ func (sm *UnifiedRelayStateMachine) stateTransition(relayState *RelayState, numb
 			upgradedProtocolMessage = UpgradeToArchiveIfNeeded(sm.ctx, protocolMessage, archiveStatus, sm.relaySender, sm.relayRetriesManager, batchNumber, numberOfNodeErrors)
 		}
 
+		// MAG-2228: a mutation that changes the extensions (archive add/remove) rebuilds the
+		// message under a different routerKey. The used/unwanted-provider exclusion is keyed
+		// by routerKey, so providers already tried under the old key would not be excluded
+		// under the new one and a just-failed provider could be re-selected for the retry.
+		// Carry the exclusion across the toggle.
+		oldRouterKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
+		newRouterKey := lavasession.NewRouterKeyFromExtensions(upgradedProtocolMessage.GetExtensions())
+		if oldRouterKey.String() != newRouterKey.String() {
+			sm.usedProviders.MigrateUnwantedProviders(oldRouterKey, newRouterKey)
+		}
+
 		nextState = NewRelayState(sm.ctx, upgradedProtocolMessage, relayState.GetStateNumber()+1, sm.relayRetriesManager, sm.relaySender, archiveStatus)
 	}
 	sm.appendRelayState(nextState)
