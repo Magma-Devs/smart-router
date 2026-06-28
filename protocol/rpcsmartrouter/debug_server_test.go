@@ -850,3 +850,51 @@ func TestDebugRuntimeConfig_SmartRouter_MethodNotAllowed(t *testing.T) {
 
 	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
+
+// TestDebugRuntimeConfig_SmartRouter_PerChainOptimizer exercises the only branching
+// logic in the handler: the live optimizers map is ranged and each entry's config is
+// run through toWeights into PerChainOptimizer. The _ReturnsValues test above always
+// sees an empty map, so the field mapping and the chainID keying are otherwise
+// unverified.
+//
+// Each chain uses four DISTINCT weights that already sum to 1.0. Distinct so a
+// field-swap in toWeights (e.g. Sync<->Stake) can't pass — the default weights would
+// mask it, since they are pairwise equal (0.3/0.3, 0.2/0.2). Summing to 1.0 so
+// NewWeightedSelector's normalizer leaves them untouched and the assertions stay exact.
+// Two chains with non-overlapping weight sets prove the map is keyed per chainID rather
+// than collapsing or cross-wiring entries.
+func TestDebugRuntimeConfig_SmartRouter_PerChainOptimizer(t *testing.T) {
+	newConfiguredOptimizer := func(chainID string, cfg provideroptimizer.WeightedSelectorConfig) *provideroptimizer.ProviderOptimizer {
+		opt := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
+		opt.ConfigureWeightedSelector(cfg)
+		return opt
+	}
+
+	want := map[string]routerConfigOptimizerWeights{
+		"ETH1": {AvailabilityWeight: 0.4, LatencyWeight: 0.3, SyncWeight: 0.2, StakeWeight: 0.1, MinSelectionChance: 0.05},
+		"BTC1": {AvailabilityWeight: 0.1, LatencyWeight: 0.2, SyncWeight: 0.3, StakeWeight: 0.4, MinSelectionChance: 0.07},
+	}
+
+	optimizers := newEmptyOptimizersRouter()
+	for chainID, w := range want {
+		optimizers.Store(chainID, newConfiguredOptimizer(chainID, provideroptimizer.WeightedSelectorConfig{
+			AvailabilityWeight: w.AvailabilityWeight,
+			LatencyWeight:      w.LatencyWeight,
+			SyncWeight:         w.SyncWeight,
+			StakeWeight:        w.StakeWeight,
+			MinSelectionChance: w.MinSelectionChance,
+		}))
+	}
+
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: optimizers, offsetNano: &offsetNano})
+
+	rr := getRuntimeConfigRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%q", rr.Body.String())
+
+	var resp routerConfigResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+
+	// Exactly the chains we wired — no extras, none dropped.
+	require.Equal(t, want, resp.PerChainOptimizer)
+}
