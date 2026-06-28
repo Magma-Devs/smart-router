@@ -5,7 +5,7 @@
 // Charm UI dependency tree lives only here. Build via `make wizard`.
 module github.com/magma-Devs/smart-router/tools/wizard
 
-go 1.25.0
+go 1.26.4
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
