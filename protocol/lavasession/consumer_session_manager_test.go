@@ -160,13 +160,16 @@ func TestEndpointHealthRecovery(t *testing.T) {
 	// this test's live grpc server, would re-enable the endpoints and mask the gap — the exact
 	// path that is unavailable in the all-providers-down scenario where the providers are down.
 	//
-	// The fix: ResetEndpointHealth re-enables the endpoints. ResetBlockedProviders alone just
-	// failed above; the only new ingredient here is the endpoint-health reset. The follow-up
-	// ResetBlockedProviders refills validAddresses the failed probe re-emptied, mirroring what
-	// the debug endpoint runs in one shot.
+	// The fix: ResetEndpointHealth re-enables the endpoints, and that is the ONLY external
+	// ingredient recovery needs. ResetBlockedProviders alone just failed above; re-enabling the
+	// endpoints was the missing piece. The blocked-provider state then self-heals on the very next
+	// GetSessions: with validAddresses empty it runs validatePairingListNotEmpty → resetValidAddresses
+	// → setValidAddressesToDefaultValue, which clears the blocked list and refills validAddresses from
+	// the pairing pool, so the now-enabled endpoints get selected. No explicit ResetBlockedProviders
+	// is required here — which is exactly why /debug/reset-endpoint-health re-enables endpoints and
+	// nothing else.
 	require.Equal(t, 3, csm.ResetEndpointHealth(), "all three providers' endpoints should be re-enabled")
-	csm.ResetBlockedProviders()
-	require.NoError(t, getSessions(), "after ResetEndpointHealth the very next GetSessions must succeed")
+	require.NoError(t, getSessions(), "ResetEndpointHealth alone must recover: the next GetSessions self-heals the blocked list")
 }
 
 func getDelayedAddress() string {
