@@ -110,7 +110,7 @@ is printed first.
   "error": null,
   "results": [
     {
-      "name": "eth-lava-build",
+      "name": "eth-lava",
       "chainId": "ETH1",
       "apiInterface": "jsonrpc",
       "url": "wss://eth1.lava.build/websocket",
@@ -190,7 +190,7 @@ The compose sets `NEXT_PUBLIC_LOCAL_MODE=true`, so the dashboard's live-test pan
 
 ### Configuration
 
-Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_lava.yml` for an example targeting the Lava blockchain via PublicNode.
+Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_lava.yml` for an example targeting the Lava blockchain with three distinct sources per interface, and `config/smartrouter_examples/smartrouter_multichain_cross_validation.yml` for a multi-chain fleet with an active [cross-validation](docs/CROSS-VALIDATION.md) policy block.
 
 Setup scripts are available in `scripts/pre_setups/`:
 
@@ -238,7 +238,7 @@ The hot path for a single request:
 4. **Relay + failover** — the request is sent to the chosen provider. On failure (timeout, malformed response, certain status codes), the retry state machine picks an alternate provider and retries within a configurable budget.
 5. **Response** — returned to the client with metadata headers (`Smart-Router-Version`, `Lava-Provider-Address`, retry counts, etc.) annotating which provider served the response. Prometheus metrics are emitted in parallel.
 
-**Cross-validation (optional).** For read methods that warrant extra assurance, the relay step can instead fan out to several providers in parallel and only return an answer once a quorum agree on an identical response — optionally requiring the quorum to span multiple distinct provider groups (or each group to reach its own quorum). It defends against a single provider returning a wrong-but-well-formed answer, and surfaces dissent via response headers and a bounded mismatch metric. See [`protocol/rpcsmartrouter/README.md`](protocol/rpcsmartrouter/README.md#cross-validation) for configuration.
+**Cross-validation (optional).** For read methods that warrant extra assurance, the relay step can instead fan out to several providers in parallel and only return an answer once a quorum agree on an identical response — optionally requiring the quorum to span multiple distinct provider groups (or each group to reach its own quorum). It defends against a single provider returning a wrong-but-well-formed answer, and surfaces dissent via response headers and a bounded mismatch metric. See [`docs/CROSS-VALIDATION.md`](docs/CROSS-VALIDATION.md) for an operator setup guide with runnable example configs, or [`protocol/rpcsmartrouter/README.md`](protocol/rpcsmartrouter/README.md#cross-validation) for the full knob/header reference.
 
 ### What it's not
 

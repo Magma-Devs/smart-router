@@ -18,7 +18,7 @@ endpoints:
     network-address: "0.0.0.0:3360"
 
 direct-rpc:
-  - name: "arb-lava-build"
+  - name: "arb-lava"
     group-label: "lava"
     chain-id: "ARBITRUM"
     api-interface: "jsonrpc"

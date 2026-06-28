@@ -19,7 +19,7 @@ endpoints:
     network-address: "0.0.0.0:3360"
 
 direct-rpc:
-  - name: "sol-lava-build"
+  - name: "sol-lava"
     group-label: "lava"
     chain-id: "SOLANA"
     api-interface: "jsonrpc"

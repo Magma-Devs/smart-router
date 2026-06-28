@@ -1,16 +1,19 @@
-# Smart Router Direct RPC Configuration — multi-chain (all bundled example chains)
+# Smart Router Direct RPC Configuration — multi-chain + CROSS-VALIDATION
 # Mode: Direct connections to public endpoints (no Lava providers!)
 #
-# Serves every chain that ships with a standalone example, each on its own port,
-# with TWO distinct sources per chain<>interface — the Lava public gateway
-# (<chain>.lava.build, no API key) and PublicNode (*.publicnode.com):
-#   3360  ETH1     jsonrpc        eth1.lava.build
-#   3361  ARBITRUM jsonrpc        arbitrum.lava.build
-#   3362  BASE     jsonrpc        base.lava.build
-#   3363  SOLANA   jsonrpc        solana.lava.build
-#   3364  LAVA     rest           lava.rest.lava.build
-#   3365  LAVA     tendermintrpc  lava.tendermintrpc.lava.build
-#   3366  LAVA     grpc           lava.grpc.lava.build
+# Same upstream layout as smartrouter_multichain.yml — every bundled chain on
+# its own port, with TWO distinct sources per chain<>interface (the Lava public
+# gateway, group-label: lava; and PublicNode, group-label: publicnode) — but
+# this variant ALSO enables per-method cross-validation so reads are corroborated
+# across both vendor groups before being returned.
+#
+#   3360  ETH1     jsonrpc        eth1.lava.build       + ethereum-rpc.publicnode.com
+#   3361  ARBITRUM jsonrpc        arbitrum.lava.build   + arbitrum-one-rpc.publicnode.com
+#   3362  BASE     jsonrpc        base.lava.build       + base-rpc.publicnode.com
+#   3363  SOLANA   jsonrpc        solana.lava.build     + solana-rpc.publicnode.com
+#   3364  LAVA     rest           lava.rest.lava.build  + lava-rest.publicnode.com
+#   3365  LAVA     tendermintrpc  lava.tendermintrpc…   + lava-rpc.publicnode.com
+#   3366  LAVA     grpc           lava.grpc.lava.build  + lava-grpc.publicnode.com
 #
 # The EVM chains (ETH1/ARBITRUM/BASE, which import ETH1) require a ws:// leg, so
 # each pairs an https url with a wss one. SOLANA is HTTP-only here, so start the
@@ -63,9 +66,8 @@ endpoints:
 
 direct-rpc:
   # Two distinct sources per chain<>interface: the Lava public gateway
-  # (group-label: lava) and PublicNode (group-label: publicnode). group-label
-  # tags the vendor group so cross-validation group-diversity policies can
-  # require a quorum to span both — see smartrouter_multichain_cross_validation.yml.
+  # (group-label: lava) and PublicNode (group-label: publicnode). The
+  # cross-validation block below requires both groups to corroborate reads.
 
   # ---- Ethereum (ETH1, chainId 0x1) ----
   - name: "eth-lava"
@@ -194,3 +196,49 @@ direct-rpc:
         skip-verifications:
           - pruning
           - tx-indexing
+
+# Per-method cross-validation. Each knob resolves as clamp(caller, floor, cap):
+# floor = operator minimum the caller may exceed, cap = operator maximum that
+# overrides a stricter caller. A bare number N means {floor: N}. chain-id/
+# api-interface match case-insensitively; method exactly. Policies on stateful
+# (write) methods are rejected at startup.
+#
+# With exactly two group-labels per chain<>interface (lava + publicnode), the
+# meaningful diversity bar is min-groups: 2 — both vendors must corroborate.
+cross-validation:
+  policies:
+    # ETH1 — balance reads corroborated by both vendors before returning.
+    - chain-id: ETH1
+      api-interface: jsonrpc
+      method: eth_getBalance
+      enabled: true
+      agreement-threshold: 2          # both sources must return identical responses
+      max-participants: 2             # fan out to both
+      min-groups: 2                   # spanning both distinct group-labels (lava + publicnode)
+
+    # ETH1 — receipts must be unanimous across both groups.
+    - chain-id: ETH1
+      api-interface: jsonrpc
+      method: eth_getTransactionReceipt
+      enabled: true
+      agreement-threshold: 2
+      max-participants: 2
+      min-groups: 2
+
+    # BASE — same balance corroboration on the Base port.
+    - chain-id: BASE
+      api-interface: jsonrpc
+      method: eth_getBalance
+      enabled: true
+      agreement-threshold: 2
+      max-participants: 2
+      min-groups: 2
+
+    # LAVA REST — corroborate a bank balance query across both vendors.
+    - chain-id: LAVA
+      api-interface: rest
+      method: cosmos.bank.v1beta1.Query/Balance
+      enabled: true
+      agreement-threshold: 2
+      max-participants: 2
+      min-groups: 2

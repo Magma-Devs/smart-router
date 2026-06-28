@@ -18,8 +18,7 @@ endpoints:
     network-address: "0.0.0.0:3360"
 
 direct-rpc:
-  - name: "base-lava-build"
-    group-label: "lava"
+  - name: "base-lava"
     chain-id: "BASE"
     api-interface: "jsonrpc"
     node-urls:
