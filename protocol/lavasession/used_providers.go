@@ -367,3 +367,32 @@ func (up *UsedProviders) GetUnwantedProvidersToSend(routerKey RouterKey) map[str
 	}
 	return unwantedProvidersToSend
 }
+
+// MigrateUnwantedProviders copies every provider already tried under the src
+// routerKey (whether still in-flight in providers, or already responded and moved
+// to unwantedProviders) into the unwanted set of the dst routerKey.
+//
+// The used/unwanted exclusion is partitioned per routerKey, and routerKey is derived
+// from the request's extensions. When a retry toggles an extension (e.g. the
+// speculative archive add/remove) the routerKey changes, so a provider that just
+// failed under the old key would not be excluded under the new one and could be
+// re-selected for the retry (MAG-2228). Calling this on a toggle keeps an
+// already-tried provider excluded across the change.
+func (up *UsedProviders) MigrateUnwantedProviders(src, dst RouterKey) {
+	if up == nil {
+		return
+	}
+	if src.String() == dst.String() {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	srcProviders := up.createOrUseUniqueUsedProvidersForKey(src)
+	dstProviders := up.createOrUseUniqueUsedProvidersForKey(dst)
+	for provider := range srcProviders.providers {
+		dstProviders.unwantedProviders[provider] = struct{}{}
+	}
+	for provider := range srcProviders.unwantedProviders {
+		dstProviders.unwantedProviders[provider] = struct{}{}
+	}
+}
