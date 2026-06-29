@@ -512,6 +512,13 @@ func (c *Client) Subscribe(ctx context.Context, id json.RawMessage, method strin
 		if !ok {
 			return nil, nil, fmt.Errorf("Subscribe - p['query'].(string) - type assertion failed")
 		}
+	case nil:
+		// Subscriptions whose request omits "params" (e.g. Solana slotSubscribe /
+		// rootSubscribe, which take no parameters) arrive here as nil. Mirror
+		// CallContext: build an empty-array message and let the omitempty tag drop
+		// the field. Without this, nil falls through to the default below and the
+		// subscription is rejected with "unknown parameters type".
+		msg, err = c.newMessageArrayWithID(method, id, nil)
 	default:
 		return nil, nil, fmt.Errorf("%s unknown parameters type %s", p, reflect.TypeOf(p))
 	}
