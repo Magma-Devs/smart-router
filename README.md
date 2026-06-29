@@ -18,25 +18,26 @@
 
 </div>
 
-Centralised RPC routing gateway. Routes JSON-RPC, REST, gRPC, and Tendermint RPC requests to statically configured provider endpoints with QoS-based selection, caching, and automatic failover.
+The reliability and security layer for blockchain RPC. Smart Router monitors and orchestrates multiple RPC upstreams in real-time, providing failover, cross-validation, caching, observability & more — across EVM and non-EVM networks.
 
 <div align="center">
 
-[Quick Start](#quick-start) · [How it works](#how-it-works) · [Supported Chains](#supported-chains) · [Releases](#releases) · [License](#license) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
+[Docs](https://docs.magmadevs.com) · [Quick Start](#quick-start) · [How it works](#how-it-works) · [Supported Chains](#supported-chains) · [Releases](#releases) · [License](#license) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
 
 </div>
 
 ---
 
-## What is smart router
+## What is Smart Router
 
-Smart router is a reverse proxy specialised for blockchain RPC. Applications point at one stable endpoint; under the hood, it handles the provider multiplexing, RPC-aware retry, response caching, and observability that you'd otherwise rebuild in every service that touches RPC.
+RPC proxies have been built in-house thousands of times — along with the failover, caching, and monitoring that surround them. Smart Router is that layer as a standard, actively maintained component: a single endpoint in front of all your RPC upstreams. Instead of building and maintaining your own, you get:
 
-- **Multi-protocol** — JSON-RPC, REST, gRPC, and Tendermint RPC on the same router.
-- **QoS-based provider selection** — picks the healthiest of N configured upstreams per request; flaky providers get backed off automatically.
-- **RPC-aware retry + failover** — distinguishes transient failures, "block not yet produced" responses, and malformed envelopes; retries only the first.
-- **Response caching** — caches what's safe to cache, keyed by method, params, and block height.
-- **First-class observability** — Prometheus metrics fine-grained enough to see which provider is letting you down.
+- **Automatic failover** — retries a bad upstream on another, hedges slow ones in parallel, skips out-of-sync upstreams, and trips a circuit breaker when the pool is exhausted.
+- **Data cross-validation** — fans a read out to several upstreams and returns only once a quorum agrees, stopping conflicting or malicious responses before they reach you.
+- **Block-aware caching** — serves repeat reads without hitting an upstream and without serving stale data; shareable across replicas.
+- **Transaction broadcasting** — sends writes (`eth_sendRawTransaction` and equivalents) to all eligible upstreams in parallel to raise success rate and speed.
+- **Multi-chain, multi-protocol** — JSON-RPC, REST, gRPC, Tendermint RPC, and WebSocket across EVM chains, Solana, UTXO chains, Cosmos chains, and more; chains are defined by JSON specs.
+- **Built-in observability** — Prometheus metrics, OpenTelemetry traces, structured logs, and a typed error taxonomy, with a prebuilt dashboard.
 
 ## Quick Start
 
@@ -129,23 +130,23 @@ is printed first.
 }
 ```
 
-A provider with multiple node URLs (e.g. an `https://` and a `wss://` endpoint) yields **one row per
+An upstream with multiple node URLs (e.g. an `https://` and a `wss://` endpoint) yields **one row per
 URL**, distinguished by `url`/`transport`. An endpoint's `ok` is `true` only when the spec loaded
 (`specValid`) **and** every verification passed. Top-level `ok` is the AND of all rows.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--use-static-spec` | (required) | Spec source(s) — file, directory, or remote URL (same paths as the main command) |
-| `--include-backup` | `false` | Also probe providers under `backup-direct-rpc` |
-| `--timeout` | `30s` | Per-provider timeout, and the basis for the global wall-clock cap (providers probe concurrently; the run never exceeds `timeout + 5s`). A slow/blocked node aborts instead of hanging |
+| `--include-backup` | `false` | Also probe upstreams under `backup-direct-rpc` |
+| `--timeout` | `30s` | Per-upstream timeout, and the basis for the global wall-clock cap (upstreams probe concurrently; the run never exceeds `timeout + 5s`). A slow/blocked node aborts instead of hanging |
 | `--skip-websocket-verification` | `false` | Exclude `ws://`/`wss://` endpoints and the spec's websocket verification (see note) |
 | `--log-level` | `info` | Log verbosity (written to stderr) |
 
 > **Websocket is verified by default.** For any chain whose spec supports subscriptions, the command
 > probes the configured `ws://`/`wss://` endpoints and runs the spec's websocket verification — so the
 > health check exercises the full surface a supported chain exposes. A blocked or slow ws node can't
-> stall the run: each provider is bounded by `--timeout`, providers probe concurrently, and a global
-> wall-clock cap (`timeout + 5s`) guarantees the command returns even if a connector wedges (a provider
+> stall the run: each upstream is bounded by `--timeout`, upstreams probe concurrently, and a global
+> wall-clock cap (`timeout + 5s`) guarantees the command returns even if a connector wedges (an upstream
 > that doesn't finish in time is reported as a timed-out row). Pass `--skip-websocket-verification` to
 > exclude ws endpoints — useful for a fast HTTP-only sanity check; each excluded URL is then reported as
 > a row marked `"websocket verification skipped"`.
@@ -190,7 +191,7 @@ The compose sets `NEXT_PUBLIC_LOCAL_MODE=true`, so the dashboard's live-test pan
 
 ### Configuration
 
-Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_cosmos.yml` for an example targeting Cosmos Hub with two distinct public sources per interface (REST + gRPC + Tendermint RPC), and `config/smartrouter_examples/smartrouter_multichain_cross_validation.yml` for a multi-chain fleet with an active [cross-validation](docs/CROSS-VALIDATION.md) policy block. Every bundled example points at public RPC vendors (PublicNode and each chain's official/community endpoints) — no API key required.
+Upstream endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_cosmos.yml` for an example targeting Cosmos Hub with two distinct public sources per interface (REST + gRPC + Tendermint RPC), and `config/smartrouter_examples/smartrouter_multichain_cross_validation.yml` for a multi-chain fleet with an active [cross-validation](docs/CROSS-VALIDATION.md) policy block. Every bundled example points at public RPC vendors (PublicNode and each chain's official/community endpoints) — no API key required.
 
 Setup scripts are available in `scripts/pre_setups/`:
 
@@ -214,7 +215,7 @@ Setup scripts are available in `scripts/pre_setups/`:
    │   per-interface listener  ─▶  cache check  ─▶  hit? ──┐  │
    │                                       │ miss          │  │
    │                                       ▼               │  │
-   │                              QoS-weighted provider    │  │
+   │                              QoS-weighted upstream    │  │
    │                                   selection           │  │
    │                                       │               │  │
    │                                       ▼               │  │
@@ -234,20 +235,20 @@ The hot path for a single request:
 
 1. **Listen** — a per-interface listener (JSON-RPC, REST, gRPC, or Tendermint RPC) accepts the request and parses it into a normalised internal shape.
 2. **Cache lookup** — for cacheable methods (historical block data, immutable receipts, etc.), the cache layer (`ecosystem/cache`) checks for a recent response. Hits return immediately.
-3. **Provider selection** — on cache miss, the provider optimiser (`protocol/provideroptimizer`) picks an upstream from the configured pool using QoS-weighted scoring. Healthy/fast providers are preferred; flaky ones get backed off automatically.
-4. **Relay + failover** — the request is sent to the chosen provider. On failure (timeout, malformed response, certain status codes), the retry state machine picks an alternate provider and retries within a configurable budget.
-5. **Response** — returned to the client with metadata headers (`Smart-Router-Version`, `Lava-Provider-Address`, retry counts, etc.) annotating which provider served the response. Prometheus metrics are emitted in parallel.
+3. **Upstream selection** — on cache miss, the upstream optimiser (`protocol/provideroptimizer`) picks an upstream from the configured pool using QoS-weighted scoring. Healthy/fast upstreams are preferred; flaky ones get backed off automatically.
+4. **Relay + failover** — the request is sent to the chosen upstream. On failure (timeout, malformed response, certain status codes), the retry state machine picks an alternate upstream and retries within a configurable budget.
+5. **Response** — returned to the client with metadata headers (`Smart-Router-Version`, `Lava-Provider-Address`, retry counts, etc.) annotating which upstream served the response. Prometheus metrics are emitted in parallel.
 
-**Cross-validation (optional).** For read methods that warrant extra assurance, the relay step can instead fan out to several providers in parallel and only return an answer once a quorum agree on an identical response — optionally requiring the quorum to span multiple distinct provider groups (or each group to reach its own quorum). It defends against a single provider returning a wrong-but-well-formed answer, and surfaces dissent via response headers and a bounded mismatch metric. See [`docs/CROSS-VALIDATION.md`](docs/CROSS-VALIDATION.md) for an operator setup guide with runnable example configs, or [`protocol/rpcsmartrouter/README.md`](protocol/rpcsmartrouter/README.md#cross-validation) for the full knob/header reference.
+**Cross-validation (optional).** For read methods that warrant extra assurance, the relay step can instead fan out to several upstreams in parallel and only return an answer once a quorum agree on an identical response — optionally requiring the quorum to span multiple distinct upstream groups (or each group to reach its own quorum). It defends against a single upstream returning a wrong-but-well-formed answer, and surfaces dissent via response headers and a bounded mismatch metric. See [`docs/CROSS-VALIDATION.md`](docs/CROSS-VALIDATION.md) for an operator setup guide with runnable example configs, or [`protocol/rpcsmartrouter/README.md`](protocol/rpcsmartrouter/README.md#cross-validation) for the full knob/header reference.
 
 ### What it's not
 
-- **Not a load balancer.** Generic L4/L7 balancers don't speak RPC. They can't distinguish a transient timeout (retry against another provider), "block not yet produced" (retrying anywhere won't help), and a malformed JSON-RPC envelope (return the error, don't retry). They can't cache by method+params, and they can't back off a provider that's silently serving stale block data while still returning `200 OK`. Smart router does all of these.
-- **Not a node.** Smart router doesn't sync chain state or hold a block tree. It forwards requests to upstream providers (managed services or self-hosted nodes) configured statically via YAML and scores them on response quality. If every configured upstream goes dark, the router has nothing to fall back on — pair it with a provider set wide enough to survive operator-level outages.
+- **Not a load balancer.** Generic L4/L7 balancers don't speak RPC. They can't distinguish a transient timeout (retry against another upstream), "block not yet produced" (retrying anywhere won't help), and a malformed JSON-RPC envelope (return the error, don't retry). They can't cache by method+params, and they can't back off an upstream that's silently serving stale block data while still returning `200 OK`. Smart Router does all of these.
+- **Not a node.** Smart Router doesn't sync chain state or hold a block tree. It forwards requests to upstreams (managed services or self-hosted nodes) configured statically via YAML and scores them on response quality. If every configured upstream goes dark, the router has nothing to fall back on — pair it with an upstream set wide enough to survive operator-level outages.
 
 ## Supported Chains
 
-Smart router ships with specs for **120 chain networks** — EVM L1s and L2s, Cosmos SDK chains, non-EVM L1s (Solana, Sui, TON, Starknet, NEAR, Aptos, Move, …), Bitcoin-family chains, Ethereum Beacon, and more. The **Index** column is the value to reference in your YAML config or `--chain-id`.
+Smart Router ships with specs for **120 chain networks** — EVM L1s and L2s, Cosmos SDK chains, non-EVM L1s (Solana, Sui, TON, Starknet, NEAR, Aptos, Move, …), Bitcoin-family chains, Ethereum Beacon, and more. The **Index** column is the value to reference in your YAML config or `--chain-id`.
 
 <details>
 <summary>Full list (click to expand)</summary>
@@ -398,12 +399,12 @@ make clean          # Remove build artifacts
 ### Project structure
 
 ```
-cmd/smartrouter/    — Standalone smart router binary
+cmd/smartrouter/    — Standalone Smart Router binary
 protocol/           — Core protocol implementation
   chainlib/         — Chain-specific parsers and proxies
   rpcsmartrouter/   — Smart router server and relay logic
   lavasession/      — Session and connection management
-  provideroptimizer/ — QoS-based provider selection
+  provideroptimizer/ — QoS-based upstream selection
   relaycore/        — Relay processing pipeline
   metrics/          — Prometheus metrics
 types/              — Shared type definitions
@@ -490,6 +491,8 @@ For vulnerability reporting, see [SECURITY.md](SECURITY.md). Do **not** open pub
 Smart Router is **dual-licensed**. Noncommercial use is free under the [PolyForm Noncommercial License 1.0.0](LICENSE.md), including personal, educational, research, evaluation, development, and testing use. Commercial use requires a separate written Enterprise License from Magma Devs. See [LICENSING.md](LICENSING.md) for the dual-license summary and the full commercial terms.
 
 Any commercial use, production use by or for a commercial entity, hosted/SaaS or managed-service use offered to customers or other third parties as part of a commercial product or service, resale, redistribution as part of a commercial offering, use as part of a paid product, or use of premium/enterprise features requires a separate written Enterprise License from Magma Devs. For Enterprise licensing, contact Magma Devs at [sales@magmadevs.com](mailto:sales@magmadevs.com).
+
+**Enterprise** — production support, SLAs, and custom features beyond the open edition are available under that license. [Talk to us](https://magmadevs.com/contact).
 
 ## Community
 
