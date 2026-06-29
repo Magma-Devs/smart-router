@@ -599,8 +599,8 @@ jobs:
       - name: Run smart-router-automation public readiness smoke
         working-directory: smart-router-automation
         env:
-          CLUSTER_HOST: prtests.magmadevs.com
-          SERVER_HOST: prtests.magmadevs.com
+          CLUSTER_HOST: ${{ vars.CLUSTER_HOST }}
+          SERVER_HOST: ${{ vars.CLUSTER_HOST }}
           SMART_ROUTER_FETCH_VALUES_YML: "0"
         run: |
           set -euo pipefail
