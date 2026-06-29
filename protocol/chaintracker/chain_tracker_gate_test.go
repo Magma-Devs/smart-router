@@ -148,3 +148,56 @@ func TestTrafficGate_NilGate_GlobalTrackerAlwaysPolls(t *testing.T) {
 	}
 	require.Equal(t, int32(5), fetcher.latestCalls.Load(), "an ungated tracker polls every cycle")
 }
+
+// advancingFetcher is a minimal in-package ChainFetcher whose latest block advances on demand,
+// enough to drive gotNewBlock through the real poll path so AddBlockGap would fire on a non-flat
+// tracker. It lives in package chaintracker so the test can read the unexported blockEventsGap.
+type advancingFetcher struct {
+	block atomic.Int64
+}
+
+func (f *advancingFetcher) FetchLatestBlockNum(context.Context) (int64, error) {
+	return f.block.Load(), nil
+}
+
+func (f *advancingFetcher) FetchBlockHashByNum(_ context.Context, blockNum int64) (string, error) {
+	return fmt.Sprintf("hash-%d", blockNum), nil
+}
+
+func (f *advancingFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
+	return lavasession.RPCProviderEndpoint{}
+}
+
+func (f *advancingFetcher) CustomMessage(context.Context, string, []byte, string, string) ([]byte, error) {
+	return nil, fmt.Errorf("advancingFetcher: custom message not supported")
+}
+
+// TestFlatTracker_SkipsBlockGapMachinery is the PR #143 efficiency guard: a per-endpoint (flat)
+// tracker must NOT accumulate block-gap samples. The adaptive sweep that consumes them is skipped
+// for flat trackers (computePollInterval ignores it AND no block-time-update consumer registers),
+// so the per-block AddBlockGap append is gated off — driving real advancing blocks must leave
+// blockEventsGap empty. Without the flatPollInterval guard each advance would append a sample.
+func TestFlatTracker_SkipsBlockGapMachinery(t *testing.T) {
+	fetcher := &advancingFetcher{}
+	fetcher.block.Store(1000)
+	tracker := newCustomChainTracker(fetcher, ChainTrackerConfig{
+		BlocksToSave:          1,
+		AverageBlockTime:      100 * time.Millisecond,
+		ServerBlockMemory:     100,
+		ChainId:               "ETH1",
+		ParseDirectiveEnabled: true,
+		FlatPollInterval:      50 * time.Millisecond, // > 0 → flat per-endpoint tracker
+	})
+	ct, ok := tracker.(*ChainTracker)
+	require.True(t, ok)
+
+	// Drive several real block advances through the poll path. The first advance has a zero
+	// prevChangeTime (no sample either way); the rest would each append a blockEventsGap sample
+	// on a NON-flat tracker. The flat tracker must append none.
+	require.NoError(t, ct.fetchAllPreviousBlocksIfNecessary(context.Background()))
+	for i := 0; i < 5; i++ {
+		fetcher.block.Add(1)
+		require.NoError(t, ct.fetchAllPreviousBlocksIfNecessary(context.Background()))
+	}
+	require.Empty(t, ct.blockEventsGap, "a flat tracker must not accumulate block-gap samples")
+}

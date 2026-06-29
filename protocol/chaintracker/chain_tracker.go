@@ -435,10 +435,13 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 			if cs.newLatestCallback != nil {
 				cs.newLatestCallback(prev_latest, newLatestBlock, latestHash) // TODO: this is calling the latest hash only repeatedly, this is not precise, currently not used anywhere except for prints
 			}
-			blocksUpdated := uint64(newLatestBlock - prev_latest)
-			// update our timer resolution
+			// update our timer resolution. AddBlockGap only feeds the adaptive block-gap sweep,
+			// which flat per-endpoint trackers do not run (fixed cadence, and no block-time-update
+			// consumer registers on them) — so skip the per-block append for them. setLatestChangeTime
+			// stays unconditional: getLatestChangeTime still drives the not-updated/emergency path.
 			prevChangeTime := cs.getLatestChangeTime()
-			if !prevChangeTime.IsZero() {
+			if cs.flatPollInterval == 0 && !prevChangeTime.IsZero() {
+				blocksUpdated := uint64(newLatestBlock - prev_latest)
 				cs.AddBlockGap(time.Since(prevChangeTime), blocksUpdated)
 			}
 			cs.setLatestChangeTime(time.Now())
@@ -500,10 +503,22 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 		cs.timer = time.NewTimer(cs.flatPollInterval)
 	}
 	utils.LavaFormatDebug("ChainTracker fetched init data successfully")
-	blockGapTicker := time.NewTicker(pollingTime) // initially every block we check for a polling time
+	// The block-gap ticker drives the adaptive cadence sweep (Percentile+Stability over
+	// blockEventsGap) and feeds block-time-update registrations. Flat per-endpoint trackers poll
+	// at a FIXED cadence (computePollInterval ignores the sweep) and have no registered block-time
+	// consumers, so the sweep would be pure wasted CPU/allocation per endpoint — start the ticker
+	// ONLY for the global adaptive tracker. A nil channel parks the select case forever.
+	var blockGapTicker *time.Ticker
+	var blockGapTick <-chan time.Time
+	if cs.flatPollInterval == 0 {
+		blockGapTicker = time.NewTicker(pollingTime) // initially every block we check for a polling time
+		blockGapTick = blockGapTicker.C
+	}
 	// Polls blocks and keeps a queue of them
 	go func() {
-		defer blockGapTicker.Stop() // Ensure ticker is stopped when goroutine exits
+		if blockGapTicker != nil {
+			defer blockGapTicker.Stop() // Ensure ticker is stopped when goroutine exits
+		}
 		fetchFails := uint64(0)
 		for {
 			select {
@@ -524,7 +539,9 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 					cs.updateTimer(pollingTime, 0)
 					fetchFails = 0
 				}
-			case <-blockGapTicker.C:
+			case <-blockGapTick:
+				// Only reachable for the global adaptive tracker (flat trackers leave blockGapTick
+				// nil), so blockGapTicker is non-nil here.
 				var enoughSamples bool
 				pollingTime, enoughSamples = cs.updatePollingTimeBasedOnBlockGap(pollingTime)
 				if enoughSamples {
@@ -549,8 +566,10 @@ func (cs *ChainTracker) updateTimer(tickerBaseTime time.Duration, fetchFails uin
 // FIXED: exactly flatPollInterval (avgBlockTime/2), slowed only by failure backoff. The
 // old adaptive /4, /2, /16 tiers are gone and the block-gap recalibration (which mutates
 // tickerBaseTime) is deliberately ignored here — relay harvest is the primary block
-// signal, so the dedicated poll is a sparse, predictable fallback. (Block-gap estimation
-// still runs for block-time consumers; it just no longer moves this timer — finding 4.)
+// signal, so the dedicated poll is a sparse, predictable fallback. Because nothing consumes
+// the sweep for a flat tracker (this timer ignores it AND no block-time-update consumer
+// registers on per-endpoint trackers), start() does not even run the block-gap machinery for
+// them — the ticker and the per-block AddBlockGap append are skipped entirely (finding 4).
 //
 // When flatPollInterval == 0 (the global tracker, until Topic C removes it) the legacy
 // adaptive tiers are preserved, since its readers are not yet harvest-fed.
