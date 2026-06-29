@@ -487,9 +487,9 @@ For vulnerability reporting, see [SECURITY.md](SECURITY.md). Do **not** open pub
 
 ## License
 
-This repository is source-available under the terms described in [LICENSE.md](LICENSE.md). Noncommercial use is permitted subject to those terms, including personal, educational, research, evaluation, development, and testing use.
+Smart Router is **dual-licensed**. Noncommercial use is free under the [PolyForm Noncommercial License 1.0.0](LICENSE.md), including personal, educational, research, evaluation, development, and testing use. Commercial use requires a separate written Enterprise License from Magma Devs. See [LICENSING.md](LICENSING.md) for the dual-license summary and the full commercial terms.
 
-Any commercial use, production use by or for a commercial entity, hosted/SaaS or managed-service use offered to customers or other third parties as part of a commercial product or service, resale, redistribution as part of a commercial offering, use as part of a paid product, or use of premium/enterprise features requires a separate written Enterprise License from Magma Devs. Review [LICENSE.md](LICENSE.md) for the full terms. For Enterprise licensing, contact Magma Devs at [sales@magmadevs.com](mailto:sales@magmadevs.com).
+Any commercial use, production use by or for a commercial entity, hosted/SaaS or managed-service use offered to customers or other third parties as part of a commercial product or service, resale, redistribution as part of a commercial offering, use as part of a paid product, or use of premium/enterprise features requires a separate written Enterprise License from Magma Devs. For Enterprise licensing, contact Magma Devs at [sales@magmadevs.com](mailto:sales@magmadevs.com).
 
 ## Community
 
