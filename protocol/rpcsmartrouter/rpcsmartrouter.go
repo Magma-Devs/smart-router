@@ -572,6 +572,81 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 	return total
 }
 
+// routerConfigOptimizerWeights is the JSON shape for a single provider-optimizer's
+// active selection weights, used for each per-chain entry in the PerChainOptimizer map
+// returned by GET /debug/runtime-config. Fields carry no json tags, so each key marshals
+// as the bare Go identifier — tests grep the same string in test code and router source.
+type routerConfigOptimizerWeights struct {
+	AvailabilityWeight float64
+	LatencyWeight      float64
+	SyncWeight         float64
+	StakeWeight        float64
+	MinSelectionChance float64
+}
+
+// routerConfigResponse is the JSON body of GET /debug/runtime-config. It exposes the
+// router's live tuning values so the test suite can read them at runtime instead of
+// hardcoding copies that silently drift when the source changes (e.g. when
+// MaxConsecutiveConnectionAttempts was raised from 5 to 50). Each field carries no json
+// tag, so every key marshals as the exact Go identifier of its source symbol (no
+// snake_case, no package prefix) — a test greps the same string in test code and router
+// source. Durations are integer milliseconds.
+type routerConfigResponse struct {
+	SchemaVersion int
+
+	// lavasession
+	MaxConsecutiveConnectionAttempts                 int
+	TimeoutForEstablishingAConnection                int64 // milliseconds
+	MaximumNumberOfFailuresAllowedPerConsumerSession int
+
+	// relaycore (flag-bound package vars — these report the live value)
+	RelayRetryLimit          int
+	DisableBatchRequestRetry bool
+
+	// rpcsmartrouter retry/attempt ceilings
+	MaximumNumberOfTickerRelayRetries int
+	SendRelayAttempts                 int
+
+	// SmartRouter state-machine config (read from SmartRouterStateMachineConfig())
+	EnableCircuitBreaker    bool
+	CircuitBreakerThreshold int
+	EnableTimeoutPriority   bool
+
+	// timeouts (integer milliseconds)
+	TimePerCU                int64
+	MinimumTimePerRelayDelay int64
+	DefaultTimeout           int64
+	CacheTimeout             int64
+
+	// score config
+	ProbeUpdateWeight         float64
+	DefaultProbeUpdateWeight  float64
+	MinAcceptableAvailability float64
+	HighCuThreshold           uint64
+	MidCuThreshold            uint64
+
+	// chain-tracker polling. There is no fixed probe interval — the tracker polls
+	// adaptively at averageBlockTime/multiplier — so the multipliers are what a test
+	// timing assumption actually depends on. Extension beyond the ticket's listed
+	// symbols; bare Go identifiers, no package prefix.
+	MostFrequentPollingMultiplier int
+	MinPollingTimeMultiplier      int
+	PollingUpdateLength           int
+	EffectivePollingMultiplier    int
+
+	// optimizer selection weights from DefaultWeightedSelectorConfig(), as flat
+	// top-level keys (the ticket's Phase 2 shape rule).
+	AvailabilityWeight float64
+	LatencyWeight      float64
+	SyncWeight         float64
+	StakeWeight        float64
+	MinSelectionChance float64
+
+	// Live per-chain optimizer weights — extension beyond the ticket. Keyed by chainID,
+	// so it is inherently nested and sits alongside the flat defaults above.
+	PerChainOptimizer map[string]routerConfigOptimizerWeights
+}
+
 // buildDebugMux constructs the /debug/time-warp, /debug/time, /debug/reset-scores,
 // and /debug/reset-all HTTP handlers.
 //
@@ -926,6 +1001,97 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		reenabled := resetEndpointHealthAndGauge(deps)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
+	})
+
+	// GET /debug/runtime-config — expose the router's live tuning values as JSON so the
+	// test suite can read them at runtime instead of hardcoding copies that silently
+	// drift when the source changes. Read-only; registered only in debug mode like the
+	// rest of /debug/*. Values are read straight from their source symbols (and, for the
+	// flag-bound vars, report the live value); the per-chain optimizer section is read
+	// from the same optimizers map /debug/reset-scores uses.
+	mux.HandleFunc("/debug/runtime-config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+
+		toWeights := func(c provideroptimizer.WeightedSelectorConfig) routerConfigOptimizerWeights {
+			return routerConfigOptimizerWeights{
+				AvailabilityWeight: c.AvailabilityWeight,
+				LatencyWeight:      c.LatencyWeight,
+				SyncWeight:         c.SyncWeight,
+				StakeWeight:        c.StakeWeight,
+				MinSelectionChance: c.MinSelectionChance,
+			}
+		}
+
+		// Non-nil so the JSON is {} rather than null when no optimizers are wired
+		// (e.g. test fixtures).
+		perChain := map[string]routerConfigOptimizerWeights{}
+		if optimizers != nil {
+			optimizers.Range(func(chainID string, opt *provideroptimizer.ProviderOptimizer) bool {
+				perChain[chainID] = toWeights(opt.GetWeightedSelectorConfig())
+				return true
+			})
+		}
+
+		smConfig := SmartRouterStateMachineConfig()
+
+		optimizerDefaults := provideroptimizer.DefaultWeightedSelectorConfig()
+
+		resp := routerConfigResponse{
+			SchemaVersion: 1,
+
+			MaxConsecutiveConnectionAttempts:                 lavasession.MaxConsecutiveConnectionAttempts,
+			TimeoutForEstablishingAConnection:                lavasession.TimeoutForEstablishingAConnection.Milliseconds(),
+			MaximumNumberOfFailuresAllowedPerConsumerSession: lavasession.MaximumNumberOfFailuresAllowedPerConsumerSession,
+
+			RelayRetryLimit:          relaycore.RelayRetryLimit,
+			DisableBatchRequestRetry: relaycore.DisableBatchRequestRetry,
+
+			MaximumNumberOfTickerRelayRetries: MaximumNumberOfTickerRelayRetries,
+			SendRelayAttempts:                 SendRelayAttempts,
+
+			EnableCircuitBreaker:    smConfig.EnableCircuitBreaker,
+			CircuitBreakerThreshold: smConfig.CircuitBreakerThreshold,
+			EnableTimeoutPriority:   smConfig.EnableTimeoutPriority,
+
+			// TimePerCU is a uint64 of nanoseconds (not a time.Duration), so it is
+			// divided by time.Millisecond rather than using .Milliseconds().
+			TimePerCU:                int64(common.TimePerCU) / int64(time.Millisecond),
+			MinimumTimePerRelayDelay: common.MinimumTimePerRelayDelay.Milliseconds(),
+			DefaultTimeout:           common.DefaultTimeout.Milliseconds(),
+			CacheTimeout:             common.CacheTimeout.Milliseconds(),
+
+			ProbeUpdateWeight:         scoreutils.ProbeUpdateWeight,
+			DefaultProbeUpdateWeight:  scoreutils.DefaultProbeUpdateWeight,
+			MinAcceptableAvailability: scoreutils.MinAcceptableAvailability,
+			HighCuThreshold:           scoreutils.HighCuThreshold,
+			MidCuThreshold:            scoreutils.MidCuThreshold,
+
+			MostFrequentPollingMultiplier: chaintracker.MostFrequentPollingMultiplier,
+			MinPollingTimeMultiplier:      chaintracker.MinPollingTimeMultiplier,
+			PollingUpdateLength:           chaintracker.PollingUpdateLength,
+			EffectivePollingMultiplier:    chaintracker.EffectivePollingMultiplier(),
+
+			AvailabilityWeight: optimizerDefaults.AvailabilityWeight,
+			LatencyWeight:      optimizerDefaults.LatencyWeight,
+			SyncWeight:         optimizerDefaults.SyncWeight,
+			StakeWeight:        optimizerDefaults.StakeWeight,
+			MinSelectionChance: optimizerDefaults.MinSelectionChance,
+
+			PerChainOptimizer: perChain,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		body, err := json.Marshal(resp)
+		if err != nil {
+			// resp is a flat struct of scalars + a string-keyed map — Marshal can't
+			// realistically fail; surface a 500 rather than a half-written body.
+			http.Error(w, "failed to marshal router config", http.StatusInternalServerError)
+			return
+		}
+		w.Write(body)
 	})
 
 	return mux
