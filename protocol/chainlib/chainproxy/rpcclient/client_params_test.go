@@ -3,7 +3,9 @@ package rpcclient
 import (
 	"testing"
 
+	"github.com/goccy/go-json"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Test that demonstrates the fix for Client.CallContext nil parameter handling
@@ -108,6 +110,28 @@ func TestOmitemptyBehavior_WhenNilReachesMessage(t *testing.T) {
 		assert.NotNil(t, params, "empty map is a real value, not nil")
 		assert.Empty(t, params, "but it's empty")
 	})
+}
+
+// MAG-2246: a subscription whose request omits "params" (e.g. Solana slotSubscribe,
+// which takes no parameters) reaches Client.Subscribe as nil. Before the fix, the
+// type switch had no nil case and rejected it with "unknown parameters type". The
+// fix routes nil through newMessageArrayWithID(method, id, nil) — the same helper
+// CallContext uses — which must produce a spec-compliant request that omits the
+// params field entirely (not "params":null, which strict providers reject).
+func TestSubscribe_NilParams_OmitsParamsField(t *testing.T) {
+	c := &Client{}
+	id := json.RawMessage(`1`)
+
+	msg, err := c.newMessageArrayWithID("slotSubscribe", id, nil)
+	require.NoError(t, err)
+	require.Nil(t, msg.Params, "nil params must stay nil so the omitempty tag drops the field")
+
+	raw, err := json.Marshal(msg)
+	require.NoError(t, err)
+	got := string(raw)
+	require.NotContains(t, got, "params", "request must omit the params field entirely")
+	require.NotContains(t, got, "null", "must never emit params:null")
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":1,"method":"slotSubscribe"}`, got)
 }
 
 // Test the end-to-end intent of the fix: parameter format compliance
