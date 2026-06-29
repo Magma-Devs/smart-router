@@ -193,6 +193,9 @@ direct-rpc:
     api-interface: "grpc"
     node-urls:
       - url: "grpc://cosmos-grpc.polkachu.com:14990"
+        # Polkachu's gRPC is plaintext (no TLS), so explicitly allow it.
+        grpc-config:
+          allow-insecure: true
         skip-verifications:
           - pruning
           - tx-indexing
