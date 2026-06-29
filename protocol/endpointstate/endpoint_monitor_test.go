@@ -295,46 +295,6 @@ func TestEndpointMonitor_LateStateWriteAfterRemoveIsDropped(t *testing.T) {
 	require.Equal(t, EndpointChainTrackerMissing, state, "GetTrackerState should report Missing, not Polling, after removal")
 }
 
-func TestEndpointMonitor_ValidateEndpointSync(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
-		ChainID:          "ETH",
-		ApiInterface:     "jsonrpc",
-		AverageBlockTime: 12 * time.Second,
-		BlocksToSave:     10,
-	})
-	require.NotNil(t, manager)
-
-	// Non-existent endpoint should pass validation (no data = allow)
-	result := manager.ValidateEndpointSync("http://non-existent:8545", 100, 10)
-	require.True(t, result)
-
-	// Cleanup
-	manager.Stop()
-}
-
-func TestEndpointMonitor_GetSyncGap(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
-		ChainID:          "ETH",
-		ApiInterface:     "jsonrpc",
-		AverageBlockTime: 12 * time.Second,
-		BlocksToSave:     10,
-	})
-	require.NotNil(t, manager)
-
-	// Non-existent endpoint should have 0 sync gap
-	syncGap := manager.GetSyncGap("http://non-existent:8545", 100)
-	require.Equal(t, int64(0), syncGap)
-
-	// Cleanup
-	manager.Stop()
-}
-
 func TestEndpointMonitor_GetAllEndpoints(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

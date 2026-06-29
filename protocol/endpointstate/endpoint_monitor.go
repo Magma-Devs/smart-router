@@ -607,29 +607,6 @@ func (m *EndpointMonitor) Stop() {
 	)
 }
 
-// ValidateEndpointSync checks if an endpoint is synced within the given threshold.
-// Returns true if the endpoint's latest block is within threshold of the reference block.
-func (m *EndpointMonitor) ValidateEndpointSync(endpointURL string, referenceBlock int64, threshold int64) bool {
-	latestBlock := m.GetLatestBlockNum(endpointURL)
-	if latestBlock == 0 {
-		// No data yet - don't filter
-		return true
-	}
-
-	gap := referenceBlock - latestBlock
-	return gap <= threshold
-}
-
-// GetSyncGap returns the sync gap between an endpoint and a reference block.
-// Returns 0 if endpoint is ahead or no data exists.
-func (m *EndpointMonitor) GetSyncGap(endpointURL string, referenceBlock int64) int64 {
-	latestBlock := m.GetLatestBlockNum(endpointURL)
-	if latestBlock == 0 || latestBlock >= referenceBlock {
-		return 0
-	}
-	return referenceBlock - latestBlock
-}
-
 // IsDummy returns false - this is a real manager.
 func (m *EndpointMonitor) IsDummy() bool {
 	return false
