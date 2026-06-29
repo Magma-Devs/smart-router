@@ -3,6 +3,7 @@ package probing
 import (
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 )
 
@@ -13,11 +14,6 @@ import (
 // the Topic E contract (AggregateProviderSample / AppendProbeData / Endpoint.RecordProbeVerdict).
 
 const (
-	// defaultStalenessMultiplier × averageBlockTime is the default "alive" horizon: an endpoint is
-	// alive if it produced a fresh observation (poll OR relay) within this window. A multiple of the
-	// block time so fast chains get a tighter horizon. Mirrors the chainstate consensus window
-	// concept but is judged per endpoint.
-	defaultStalenessMultiplier = 10
 	// minProbeStaleness floors the alive horizon so it always spans several probe cycles even on
 	// very fast chains — a single skipped/slow poll must not flip a healthy endpoint to "dead".
 	minProbeStaleness = 5 * time.Second
@@ -38,10 +34,15 @@ type VerdictConfig struct {
 	ReEnableHysteresis uint64
 }
 
-// DefaultVerdictConfig derives the verdict thresholds from a chain's average block time.
+// DefaultVerdictConfig derives the verdict thresholds from a chain's average block time. The
+// per-endpoint "alive" horizon (StalenessWindow) shares ONE multiplier with the chainstate
+// consensus window — chainstate.DefaultStalenessMultiplier — so the liveness horizon and the
+// consensus freshness window never silently diverge when that horizon is tuned. Only the floor
+// differs (minProbeStaleness here vs chainstate.minStalenessWindow), since a per-endpoint probe
+// tolerates a slightly wider floor than the per-chain consensus.
 func DefaultVerdictConfig(averageBlockTime time.Duration) VerdictConfig {
 	return VerdictConfig{
-		StalenessWindow:    max(time.Duration(defaultStalenessMultiplier)*averageBlockTime, minProbeStaleness),
+		StalenessWindow:    max(time.Duration(chainstate.DefaultStalenessMultiplier)*averageBlockTime, minProbeStaleness),
 		LagToleranceBlocks: DefaultLagToleranceBlocks,
 		ReEnableHysteresis: DefaultProbeReEnableHysteresis,
 	}

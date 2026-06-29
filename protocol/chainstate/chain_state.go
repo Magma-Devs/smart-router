@@ -53,7 +53,10 @@ const (
 	outlierCeilBlocks  int64 = 512
 	// DefaultStalenessMultiplier × avgBlockTime is the default staleness window / TTL when
 	// derived from a chain's block time (D6). A multiplier on the block time, NOT a fixed
-	// constant — compile-time default, not locked.
+	// constant — compile-time default, not locked. This is the ONE source of truth for the
+	// "fresh/alive horizon" concept: the probing package's per-endpoint liveness window
+	// (probing.DefaultVerdictConfig) reuses it, so tuning the consensus freshness window here
+	// moves the per-endpoint liveness horizon in lockstep (the two must not diverge).
 	DefaultStalenessMultiplier = 10
 	// minStalenessWindow floors the derived window so very fast chains still allow a usefully
 	// wide consensus/freshness horizon, and is also the fallback when a caller supplies a

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/stretchr/testify/require"
 )
@@ -97,7 +98,7 @@ func TestRenderEndpointVerdict_RelayFedNoPollLatency(t *testing.T) {
 func TestDefaultVerdictConfig(t *testing.T) {
 	// 1s block time → 10s window, above the 5s floor.
 	c := DefaultVerdictConfig(1 * time.Second)
-	require.Equal(t, time.Duration(defaultStalenessMultiplier)*time.Second, c.StalenessWindow)
+	require.Equal(t, time.Duration(chainstate.DefaultStalenessMultiplier)*time.Second, c.StalenessWindow)
 	require.Equal(t, DefaultLagToleranceBlocks, c.LagToleranceBlocks)
 	require.Equal(t, DefaultProbeReEnableHysteresis, c.ReEnableHysteresis)
 
