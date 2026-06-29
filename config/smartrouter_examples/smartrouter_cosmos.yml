@@ -88,7 +88,9 @@ direct-rpc:
           - pruning
           - tx-indexing
 
-  # ---- TendermintRPC — 2 sources (HTTP + WS where the provider serves it) ----
+  # ---- TendermintRPC — 2 sources (HTTP + WS where the provider serves it).
+  # PublicNode serves a real tendermint websocket at /websocket; Polkachu serves
+  # tendermint over HTTP only, so it has no wss leg. ----
   - name: "cosmos-tendermintrpc-publicnode"
     group-label: "publicnode"
     chain-id: "COSMOSHUB"
@@ -109,8 +111,5 @@ direct-rpc:
     node-urls:
       - url: "https://cosmos-rpc.polkachu.com"
         timeout: 10s
-        skip-verifications:
-          - pruning
-      - url: "wss://cosmos-rpc.polkachu.com/websocket"
         skip-verifications:
           - pruning
