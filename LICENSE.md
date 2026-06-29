@@ -1,26 +1,12 @@
-# Smart Router Source-Available License Notice
-
 Required Notice: Copyright 2026 Magma Devs
 
-This repository is made source-available under the PolyForm Noncommercial
-License 1.0.0 below, with the additional Enterprise License requirements
-described in this notice.
-
-Noncommercial use is permitted subject to the PolyForm Noncommercial License
-1.0.0 terms below, including personal, educational, research, evaluation,
-development, and testing use.
-
-The following uses require a separate written Enterprise License from Magma Devs:
-
-- Any commercial use.
-- Any production use by or for a commercial entity.
-- Any hosted, software-as-a-service (SaaS), or managed-service use offered to
-  customers or other third parties as part of a commercial product or service.
-- Any resale, redistribution as part of a commercial offering, or use as part
-  of a paid product.
-- Any use of premium or enterprise features made available by Magma Devs.
-
-For Enterprise licensing, contact Magma Devs at [sales@magmadevs.com](mailto:sales@magmadevs.com).
+<!--
+Smart Router is dual-licensed: noncommercial use under the PolyForm
+Noncommercial License 1.0.0 below, and commercial use under a separate
+Magma Devs Enterprise License. See LICENSING.md for the dual-license
+summary and the commercial terms. For Enterprise licensing, contact
+sales@magmadevs.com.
+-->
 
 # PolyForm Noncommercial License 1.0.0
 

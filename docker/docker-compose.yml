@@ -25,8 +25,13 @@
 # Ports: the superset every bundled example uses is published. A given config
 # only binds the listeners it declares; the rest sit idle — harmless.
 #   3360  ETH1 jsonrpc (eth, multichain)
-#   3361  ARBITRUM jsonrpc (multichain)
-#   3362  BASE jsonrpc (multichain)
+#   3361  SOLANA jsonrpc (solana example uses 3360; multichain)
+#   3362  BTC jsonrpc (bitcoin example uses 3360; multichain)
+#   3363  HYPERLIQUID jsonrpc (hyperliquid example uses 3360; multichain)
+#   3364  COSMOSHUB rest (cosmos example uses 3360; multichain)
+#   3365  COSMOSHUB tendermintrpc (cosmos example uses 3362; multichain)
+#   3366  COSMOSHUB grpc (cosmos example uses 3361; multichain)
+#   3367  APT1 rest (aptos example uses 3360; multichain)
 #   7779  router prometheus metrics
 
 name: smart-router
@@ -40,13 +45,35 @@ services:
     command:
       - "${SR_CONFIG:-config/smartrouter_examples/smartrouter_eth.yml}"
       - "--use-static-spec"
-      - "specs/"
+      # SR_SPEC selects the spec source. Default "specs/" is the spec dir bundled
+      # into the image (covers the bundled examples). The wizard overrides it with
+      # the lava-specs GitHub URL when its catalog came from remote, so chains
+      # absent from the bundled specs/ (e.g. LAV1) still resolve. The router
+      # accepts a local dir OR a GitHub/GitLab URL here.
+      - "${SR_SPEC:-specs/}"
+      # --cors-headers "*" is really only needed when the dashboard overlay is in
+      # play: its browser live-test panel preflights cross-origin POSTs carrying
+      # Content-Type: application/json, and an empty Access-Control-Allow-Headers
+      # blocks the call. It's harmless for router-only / cache runs (no browser
+      # calling), so we keep it unconditionally rather than fork the command.
+      - "--cors-headers"
+      - "*"
       - "--log-level"
       - "${SR_LOG_LEVEL:-info}"
       - "--log-format"
       - "${SR_LOG_FORMAT:-json}"
+      # Some bundled examples have HTTP-only listeners (e.g. SOLANA in the solana
+      # and multichain configs). Skip the startup websocket reachability check so
+      # those boot cleanly; ws subscriptions still work at runtime where a wss url
+      # is configured (the EVM examples pair https + wss).
+      - "--skip-websocket-verification"
     ports:
       - "3360:3360" # ETH1 jsonrpc
-      - "3361:3361" # ARBITRUM jsonrpc
-      - "3362:3362" # BASE jsonrpc
+      - "3361:3361" # SOLANA jsonrpc
+      - "3362:3362" # BTC jsonrpc
+      - "3363:3363" # HYPERLIQUID jsonrpc
+      - "3364:3364" # COSMOSHUB rest
+      - "3365:3365" # COSMOSHUB tendermintrpc
+      - "3366:3366" # COSMOSHUB grpc
+      - "3367:3367" # APT1 rest
       - "7779:7779" # router prometheus metrics

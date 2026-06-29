@@ -627,8 +627,16 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 		if c.Method() == "OPTIONS" {
 			// set up all allowed methods.
 			c.Set("Access-Control-Allow-Methods", cmdFlags.MethodsFlag)
-			// allow headers
-			c.Set("Access-Control-Allow-Headers", cmdFlags.HeadersFlag)
+			// allow headers — the cors-headers flag defaults to "", which would
+			// echo an empty allow-list and make the browser reject any preflight
+			// that carries a non-simple header (e.g. Content-Type: application/json).
+			// Treat empty as "*" so the default posture matches the flag's help text
+			// ("* for all") and the wild-card origin we already set above.
+			allowHeaders := cmdFlags.HeadersFlag
+			if allowHeaders == "" {
+				allowHeaders = "*"
+			}
+			c.Set("Access-Control-Allow-Headers", allowHeaders)
 			// allow credentials
 			c.Set("Access-Control-Allow-Credentials", cmdFlags.CredentialsFlag)
 			// Cache preflight request for 24 hours (in seconds)

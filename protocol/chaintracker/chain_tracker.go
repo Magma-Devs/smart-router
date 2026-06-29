@@ -464,6 +464,12 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 }
 
 func (cs *ChainTracker) notUpdated() {
+	// oldBlockCallback is optional and is never wired up in normal operation, so
+	// it is usually nil. With no callback there is nothing to notify; skip rather
+	// than dereference a nil func, which segfaults the tracker's poll goroutine.
+	if cs.oldBlockCallback == nil {
+		return
+	}
 	latestBlockTime := cs.getLatestChangeTime()
 	if latestBlockTime.IsZero() {
 		latestBlockTime = cs.startupTime

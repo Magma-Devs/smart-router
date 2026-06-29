@@ -23,7 +23,6 @@ All types of contributions are encouraged and valued. See the [Table of Contents
   - [Improving The Documentation](#improving-the-documentation)
 - [Styleguides](#styleguides)
   - [Commit Messages](#commit-messages)
-- [Join The Project Team](#join-the-project-team)
 
 
 ## Code of Conduct
@@ -31,7 +30,7 @@ All types of contributions are encouraged and valued. See the [Table of Contents
 This project and everyone participating in it is governed by the
 [Smart Router Code of Conduct](https://github.com/magma-Devs/smart-router/blob/main/CODE_OF_CONDUCT.md).
 By participating, you are expected to uphold this code. Please report unacceptable behavior
-to <>.
+to [conduct@magmadevs.com](mailto:conduct@magmadevs.com).
 
 
 ## I Have a Question
@@ -65,8 +64,18 @@ Depending on how large the project is, you may want to outsource the questioning
 
 ## I Want To Contribute
 
-> ### Legal Notice <!-- omit in toc -->
-> When contributing to this project, you must agree that you have authored 100% of the content, that you have the necessary rights to the content and that the content you contribute may be provided under the project license.
+> ### Legal Notice — Contributor License Grant <!-- omit in toc -->
+> Smart Router is offered under a source-available license for noncommercial use, and separately under a paid Enterprise License for commercial use (see [LICENSE.md](./LICENSE.md)). To keep this dual model workable, contributions must be licensed to Magma Devs broadly enough to be included in **both** distributions.
+>
+> By submitting a contribution (a pull request, patch, or any other content) to this project, you agree that:
+>
+> 1. You have authored 100% of the content, or you otherwise have the necessary rights to submit it, and submitting it does not violate any third party's rights or any agreement you are bound by.
+> 2. You grant Magma Devs a perpetual, worldwide, non-exclusive, royalty-free, irrevocable copyright and patent license to use, reproduce, modify, prepare derivative works of, publicly display, sublicense, and distribute your contribution and such derivative works — **under any license terms, including the PolyForm Noncommercial License, the Magma Devs Enterprise License, and any future or commercial license terms** Magma Devs may choose.
+> 3. This grant does not transfer ownership: you retain copyright in your contribution and may continue to use it for any purpose.
+>
+> If you are contributing on behalf of your employer or another entity, you confirm you are authorized to make this grant on its behalf. If you cannot make this grant, please do not submit a contribution.
+>
+> For substantial contributions we may ask you to sign a separate Contributor License Agreement (CLA) recording the same grant; submitting a pull request indicates your agreement to these terms in the meantime.
 
 ### Reporting Bugs
 
@@ -89,7 +98,7 @@ A good bug report shouldn't leave others needing to chase you up for more inform
 <!-- omit in toc -->
 #### How Do I Submit a Good Bug Report?
 
-> You must never report security related issues, vulnerabilities or bugs including sensitive information to the issue tracker, or elsewhere in public. Instead sensitive bugs must be sent by email to <>.
+> You must never report security related issues, vulnerabilities or bugs including sensitive information to the issue tracker, or elsewhere in public. Instead sensitive bugs must be sent by email to [security@magmadevs.com](mailto:security@magmadevs.com) (see [SECURITY.md](./SECURITY.md)).
 <!-- You may add a PGP key to allow the messages to be sent encrypted as well. -->
 
 We use GitHub issues to track bugs and errors. If you run into an issue with the project:
@@ -132,9 +141,6 @@ Enhancement suggestions are tracked as [GitHub issues](https://github.com/magma-
 - **Explain why this enhancement would be useful** to most Smart Router users. You may also want to point out the other projects that solved it better and which could serve as inspiration.
 
 <!-- You might want to create an issue template for enhancement suggestions that can be used as a guide and that defines the structure of the information to be included. If you do so, reference it here in the description. -->
-
-## Join The Project Team
-<!-- TODO -->
 
 <!-- omit in toc -->
 ## Attribution

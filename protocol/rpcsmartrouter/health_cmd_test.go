@@ -145,7 +145,7 @@ func TestTransportForURL(t *testing.T) {
 func TestHealthReport_JSONShape(t *testing.T) {
 	report := buildHealthReport([]healthEndpointResult{
 		{
-			Name: "eth-lava-build", ChainID: "ETH1", APIInterface: "jsonrpc",
+			Name: "eth-lava", ChainID: "ETH1", APIInterface: "jsonrpc",
 			URL: "wss://eth1.lava.build/websocket", Transport: "ws",
 			Addons: []string{}, Extensions: []string{"archive"},
 			SpecValid: true, LatestBlock: 2030011, Ok: false,

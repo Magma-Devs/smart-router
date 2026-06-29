@@ -1,24 +1,27 @@
-# Smart Router Direct RPC Configuration — multi-chain (ETH + Arbitrum + Base) WITH cache
+# Smart Router Direct RPC Configuration — multi-chain (ETH + Solana + Cosmos) WITH cache
 # Mode: Direct connections to public RPC endpoints (no Lava providers!)
 #
-# Same as smartrouter_multichain.yml, but with the external cache-be address
-# baked into the config (cache-be: below). Run it with the cache overlay:
+# Same shape as smartrouter_multichain.yml, but trimmed to three chains and with
+# the external cache-be address baked into the config (cache-be: below). Run it
+# with the cache overlay:
 #   SR_CONFIG=config/smartrouter_examples/smartrouter_multichain_cached.yml \
 #     docker compose -f docker/docker-compose.yml \
 #                    -f docker/docker-compose.cache.yml up --build
 #
-# Three JSON-RPC chains on three ports, each with 2 upstreams (HTTP + WS).
-# The ETH1 spec — which ARBITRUM and BASE both import — requires websocket
-# support, so every provider pairs an http url with a wss url; http-only
-# providers are excluded at startup.
-#   - Lava public gateway (<chain>.lava.build, ws at /websocket)
-#   - PublicNode
-# All endpoints verified live (correct eth_chainId, blockNumber + ws handshake).
+# Three chains on three ports, each with 2 distinct public vendor groups:
+#   3360  ETH1       jsonrpc   ethereum-rpc.publicnode.com + mainnet.gateway.tenderly.co
+#   3361  SOLANA     jsonrpc   solana-rpc.publicnode.com   + api.mainnet-beta.solana.com
+#   3362  COSMOSHUB  rest      cosmos-rest.publicnode.com  + cosmos-api.polkachu.com
+#
+# ETH1 requires websocket support, so its providers pair an http url with a wss
+# url; http-only providers are excluded at startup. SOLANA (jsonrpc) and
+# COSMOSHUB (rest) are HTTP-only here, so run with --skip-websocket-verification
+# (the docker-compose example does this).
 #
 # Specs required (resolve via --use-static-spec specs/):
-#   ETH1     -> specs/ethereum.json   (already in repo)
-#   ARBITRUM -> specs/arbitrum.json   (imports ETH1)  — from Magma-Devs/lava-specs
-#   BASE     -> specs/base.json       (imports ETH1)  — from Magma-Devs/lava-specs
+#   ETH1      -> specs/ethereum.json   (already in repo)
+#   SOLANA    -> specs/solana.json     (already in repo)
+#   COSMOSHUB -> specs/cosmoshub.json  (imports COSMOSSDK50 + COSMOSWASM)  — from Magma-Devs/lava-specs
 
 # External cache-be server (the `smart-router cache` sidecar). "cache:20100"
 # is the compose service name + port. Remove this key (or run without the
@@ -36,24 +39,17 @@ endpoints:
     network-address: "0.0.0.0:3360"
 
   - listen-address: "0.0.0.0:3361"
-    chain-id: "ARBITRUM"
+    chain-id: "SOLANA"
     api-interface: "jsonrpc"
     network-address: "0.0.0.0:3361"
 
   - listen-address: "0.0.0.0:3362"
-    chain-id: "BASE"
-    api-interface: "jsonrpc"
+    chain-id: "COSMOSHUB"
+    api-interface: "rest"
     network-address: "0.0.0.0:3362"
 
 direct-rpc:
   # ---- Ethereum (ETH1, chainId 0x1) ----
-  - name: "eth-lava-build"
-    chain-id: "ETH1"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://eth1.lava.build"
-      - url: "wss://eth1.lava.build/websocket"
-
   - name: "eth-publicnode"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
@@ -61,32 +57,45 @@ direct-rpc:
       - url: "https://ethereum-rpc.publicnode.com"
       - url: "wss://ethereum-rpc.publicnode.com"
 
-  # ---- Arbitrum One (ARBITRUM, chainId 0xa4b1) ----
-  - name: "arb-lava-build"
-    chain-id: "ARBITRUM"
+  - name: "eth-tenderly"
+    chain-id: "ETH1"
     api-interface: "jsonrpc"
     node-urls:
-      - url: "https://arbitrum.lava.build"
-      - url: "wss://arbitrum.lava.build/websocket"
+      - url: "https://mainnet.gateway.tenderly.co"
+      - url: "wss://mainnet.gateway.tenderly.co"
 
-  - name: "arb-publicnode"
-    chain-id: "ARBITRUM"
+  # ---- Solana (SOLANA) — HTTP-only ----
+  - name: "sol-publicnode"
+    chain-id: "SOLANA"
     api-interface: "jsonrpc"
     node-urls:
-      - url: "https://arbitrum-one-rpc.publicnode.com"
-      - url: "wss://arbitrum-one-rpc.publicnode.com"
+      - url: "https://solana-rpc.publicnode.com"
+        # PublicNode's free tier blocks getProgramAccounts (the spec's
+        # tokens-owner-indexed verification), so skip that startup check here.
+        skip-verifications:
+          - tokens-owner-indexed
 
-  # ---- Base (BASE, chainId 0x2105) ----
-  - name: "base-lava-build"
-    chain-id: "BASE"
+  - name: "sol-solana-labs"
+    chain-id: "SOLANA"
     api-interface: "jsonrpc"
     node-urls:
-      - url: "https://base.lava.build"
-      - url: "wss://base.lava.build/websocket"
+      - url: "https://api.mainnet-beta.solana.com"
 
-  - name: "base-publicnode"
-    chain-id: "BASE"
-    api-interface: "jsonrpc"
+  # ---- Cosmos Hub (COSMOSHUB) — REST; HTTP-only ----
+  - name: "cosmos-rest-publicnode"
+    chain-id: "COSMOSHUB"
+    api-interface: "rest"
     node-urls:
-      - url: "https://base-rpc.publicnode.com"
-      - url: "wss://base-rpc.publicnode.com"
+      - url: "https://cosmos-rest.publicnode.com"
+        timeout: 10s
+        skip-verifications:
+          - pruning
+
+  - name: "cosmos-rest-polkachu"
+    chain-id: "COSMOSHUB"
+    api-interface: "rest"
+    node-urls:
+      - url: "https://cosmos-api.polkachu.com"
+        timeout: 10s
+        skip-verifications:
+          - pruning

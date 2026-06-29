@@ -58,7 +58,14 @@ func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFla
 
 		if req.Method == http.MethodOptions {
 			resp.Header().Set("Access-Control-Allow-Methods", cmdFlags.MethodsFlag)
-			resp.Header().Set("Access-Control-Allow-Headers", cmdFlags.HeadersFlag)
+			// Empty cors-headers flag (the default) would echo an empty allow-list and
+			// make the browser reject any preflight carrying a non-simple header. Treat
+			// empty as "*" to match the flag's help text and the wild-card origin above.
+			allowHeaders := cmdFlags.HeadersFlag
+			if allowHeaders == "" {
+				allowHeaders = "*"
+			}
+			resp.Header().Set("Access-Control-Allow-Headers", allowHeaders)
 			resp.Header().Set("Access-Control-Allow-Credentials", cmdFlags.CredentialsFlag)
 			resp.Header().Set("Access-Control-Max-Age", cmdFlags.CDNCacheDuration)
 			resp.WriteHeader(fiber.StatusNoContent)

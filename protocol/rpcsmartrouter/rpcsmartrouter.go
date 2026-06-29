@@ -33,6 +33,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -526,6 +527,125 @@ func resetAllConsistencies(m *common.SafeSyncMap[string, relaycore.Consistency])
 	})
 }
 
+// resetEndpointHealthAndGauge re-enables every endpoint across all session managers
+// (ConsumerSessionManager.ResetEndpointHealth — clears ConnectionRefusals, sets
+// Enabled=true) and mirrors the reset onto the per-endpoint Prometheus health gauge for
+// every provider (primary + backup), matching what the epoch tick does in updateEpoch.
+// Returns the number of endpoints actually re-enabled.
+//
+// Endpoints disabled after MaxConsecutiveConnectionAttempts consecutive failures (e.g. an
+// all-providers-down stress burst) otherwise stay disabled until the next epoch tick, the
+// only other ResetHealth caller — contaminating later tests. Shared by /debug/reset-all
+// and /debug/reset-endpoint-health.
+func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
+	if deps.router == nil {
+		return 0
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	total := 0
+	for chainKey, csm := range deps.router.sessionManagers {
+		if csm == nil {
+			continue
+		}
+		total += csm.ResetEndpointHealth()
+
+		// Mirror the struct reset onto the Prometheus health gauge so operators see
+		// providers recover immediately rather than at the next epoch tick — without it
+		// the gauge stays stuck at 0 until a successful relay, one a rarely-used backup
+		// may never receive.
+		server := deps.router.rpcServers[chainKey]
+		if server == nil || server.smartRouterEndpointMetrics == nil || server.listenEndpoint == nil {
+			continue
+		}
+		for _, sessions := range []map[uint64]*lavasession.ConsumerSessionsWithProvider{
+			deps.router.providerSessions[chainKey],
+			deps.router.backupProviderSessions[chainKey],
+		} {
+			for _, cswp := range sessions {
+				if cswp != nil {
+					server.smartRouterEndpointMetrics.SetEndpointOverallHealth(
+						server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, cswp.PublicLavaAddress, true)
+				}
+			}
+		}
+	}
+	return total
+}
+
+// routerConfigOptimizerWeights is the JSON shape for a single provider-optimizer's
+// active selection weights, used for each per-chain entry in the PerChainOptimizer map
+// returned by GET /debug/runtime-config. Fields carry no json tags, so each key marshals
+// as the bare Go identifier — tests grep the same string in test code and router source.
+type routerConfigOptimizerWeights struct {
+	AvailabilityWeight float64
+	LatencyWeight      float64
+	SyncWeight         float64
+	StakeWeight        float64
+	MinSelectionChance float64
+}
+
+// routerConfigResponse is the JSON body of GET /debug/runtime-config. It exposes the
+// router's live tuning values so the test suite can read them at runtime instead of
+// hardcoding copies that silently drift when the source changes (e.g. when
+// MaxConsecutiveConnectionAttempts was raised from 5 to 50). Each field carries no json
+// tag, so every key marshals as the exact Go identifier of its source symbol (no
+// snake_case, no package prefix) — a test greps the same string in test code and router
+// source. Durations are integer milliseconds.
+type routerConfigResponse struct {
+	SchemaVersion int
+
+	// lavasession
+	MaxConsecutiveConnectionAttempts                 int
+	TimeoutForEstablishingAConnection                int64 // milliseconds
+	MaximumNumberOfFailuresAllowedPerConsumerSession int
+
+	// relaycore (flag-bound package vars — these report the live value)
+	RelayRetryLimit          int
+	DisableBatchRequestRetry bool
+
+	// rpcsmartrouter retry/attempt ceilings
+	MaximumNumberOfTickerRelayRetries int
+	SendRelayAttempts                 int
+
+	// SmartRouter state-machine config (read from SmartRouterStateMachineConfig())
+	EnableCircuitBreaker    bool
+	CircuitBreakerThreshold int
+	EnableTimeoutPriority   bool
+
+	// timeouts (integer milliseconds)
+	TimePerCU                int64
+	MinimumTimePerRelayDelay int64
+	DefaultTimeout           int64
+	CacheTimeout             int64
+
+	// score config
+	ProbeUpdateWeight         float64
+	DefaultProbeUpdateWeight  float64
+	MinAcceptableAvailability float64
+	HighCuThreshold           uint64
+	MidCuThreshold            uint64
+
+	// chain-tracker polling. There is no fixed probe interval — the tracker polls
+	// adaptively at averageBlockTime/multiplier — so the multipliers are what a test
+	// timing assumption actually depends on. Extension beyond the ticket's listed
+	// symbols; bare Go identifiers, no package prefix.
+	MostFrequentPollingMultiplier int
+	PollingUpdateLength           int
+
+	// optimizer selection weights from DefaultWeightedSelectorConfig(), as flat
+	// top-level keys (the ticket's Phase 2 shape rule).
+	AvailabilityWeight float64
+	LatencyWeight      float64
+	SyncWeight         float64
+	StakeWeight        float64
+	MinSelectionChance float64
+
+	// Live per-chain optimizer weights — extension beyond the ticket. Keyed by chainID,
+	// so it is inherently nested and sits alongside the flat defaults above.
+	PerChainOptimizer map[string]routerConfigOptimizerWeights
+}
+
 // buildDebugMux constructs the /debug/time-warp, /debug/time, /debug/reset-scores,
 // and /debug/reset-all HTTP handlers.
 //
@@ -744,20 +864,32 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 		}
 
+		// MAG-2186: additionally recover endpoint health and cold-rebuild pairing so a
+		// single /debug/reset-all returns the router to a serving state after an
+		// all-providers-down stress burst. Disabled endpoints (Endpoint.Enabled=false from
+		// MaxConsecutiveConnectionAttempts) and demoted providers otherwise persist across
+		// tests and contaminate later runs. rebuildPairingFromConfig is a cold rebuild (no
+		// re-probing) and a no-op when the pairing is already whole, so the historical
+		// "leave pairing intact" stance no longer applies — and every existing
+		// /debug/reset-all caller inherits the fix for free, with no test migration.
+		if deps.router != nil {
+			deps.router.rebuildPairingFromConfig()
+		}
+		resetEndpointHealthAndGauge(deps)
+
 		// Capability advertisement — hardcoded for in-process stores, plus a
 		// conditional "cache-be" key when the external pod was actually
 		// flushed. The test framework probes this body to decide between this
 		// endpoint and the legacy 4-call dance; "seen-block" was added to
 		// signal the per-chain consistency-cache flush, "cache-be" signals
-		// MAG-1764 end-to-end coverage, "blocked-providers" signals MAG-1810
-		// (currentlyBlockedProviderAddresses is now restored to
-		// pairingAddresses, the per-provider redemption flag is reset, and the
-		// addon cache is purged).
+		// MAG-1764 end-to-end coverage, "blocked-providers" signals MAG-1810,
+		// and "endpoint-health" + "pairing" signal the MAG-2186 endpoint-health
+		// reset and cold pairing rebuild added above.
 		w.Header().Set("Content-Type", "application/json")
 		if cacheBeFlushed {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","cache-be"]}`)
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","endpoint-health","pairing","cache-be"]}`)
 		} else {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers"]}`)
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","endpoint-health","pairing"]}`)
 		}
 	})
 
@@ -1007,6 +1139,109 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			deps.router.mu.Unlock()
 		}
 		writeDebugRows(w, rows)
+	})
+
+	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):
+	// re-enable every provider endpoint disabled by MaxConsecutiveConnectionAttempts
+	// (Endpoint.Enabled=false) and mirror the reset onto the Prometheus health gauge,
+	// nothing else. The name mirrors Endpoint.ResetHealth() in the source for discoverability.
+	mux.HandleFunc("/debug/reset-endpoint-health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		reenabled := resetEndpointHealthAndGauge(deps)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
+	})
+
+	// GET /debug/runtime-config — expose the router's live tuning values as JSON so the
+	// test suite can read them at runtime instead of hardcoding copies that silently
+	// drift when the source changes. Read-only; registered only in debug mode like the
+	// rest of /debug/*. Values are read straight from their source symbols (and, for the
+	// flag-bound vars, report the live value); the per-chain optimizer section is read
+	// from the same optimizers map /debug/reset-scores uses.
+	mux.HandleFunc("/debug/runtime-config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+
+		toWeights := func(c provideroptimizer.WeightedSelectorConfig) routerConfigOptimizerWeights {
+			return routerConfigOptimizerWeights{
+				AvailabilityWeight: c.AvailabilityWeight,
+				LatencyWeight:      c.LatencyWeight,
+				SyncWeight:         c.SyncWeight,
+				StakeWeight:        c.StakeWeight,
+				MinSelectionChance: c.MinSelectionChance,
+			}
+		}
+
+		// Non-nil so the JSON is {} rather than null when no optimizers are wired
+		// (e.g. test fixtures).
+		perChain := map[string]routerConfigOptimizerWeights{}
+		if optimizers != nil {
+			optimizers.Range(func(chainID string, opt *provideroptimizer.ProviderOptimizer) bool {
+				perChain[chainID] = toWeights(opt.GetWeightedSelectorConfig())
+				return true
+			})
+		}
+
+		smConfig := SmartRouterStateMachineConfig()
+
+		optimizerDefaults := provideroptimizer.DefaultWeightedSelectorConfig()
+
+		resp := routerConfigResponse{
+			SchemaVersion: 1,
+
+			MaxConsecutiveConnectionAttempts:                 lavasession.MaxConsecutiveConnectionAttempts,
+			TimeoutForEstablishingAConnection:                lavasession.TimeoutForEstablishingAConnection.Milliseconds(),
+			MaximumNumberOfFailuresAllowedPerConsumerSession: lavasession.MaximumNumberOfFailuresAllowedPerConsumerSession,
+
+			RelayRetryLimit:          relaycore.RelayRetryLimit,
+			DisableBatchRequestRetry: relaycore.DisableBatchRequestRetry,
+
+			MaximumNumberOfTickerRelayRetries: MaximumNumberOfTickerRelayRetries,
+			SendRelayAttempts:                 SendRelayAttempts,
+
+			EnableCircuitBreaker:    smConfig.EnableCircuitBreaker,
+			CircuitBreakerThreshold: smConfig.CircuitBreakerThreshold,
+			EnableTimeoutPriority:   smConfig.EnableTimeoutPriority,
+
+			// TimePerCU is a uint64 of nanoseconds (not a time.Duration), so it is
+			// divided by time.Millisecond rather than using .Milliseconds().
+			TimePerCU:                int64(common.TimePerCU) / int64(time.Millisecond),
+			MinimumTimePerRelayDelay: common.MinimumTimePerRelayDelay.Milliseconds(),
+			DefaultTimeout:           common.DefaultTimeout.Milliseconds(),
+			CacheTimeout:             common.CacheTimeout.Milliseconds(),
+
+			ProbeUpdateWeight:         scoreutils.ProbeUpdateWeight,
+			DefaultProbeUpdateWeight:  scoreutils.DefaultProbeUpdateWeight,
+			MinAcceptableAvailability: scoreutils.MinAcceptableAvailability,
+			HighCuThreshold:           scoreutils.HighCuThreshold,
+			MidCuThreshold:            scoreutils.MidCuThreshold,
+
+			MostFrequentPollingMultiplier: chaintracker.MostFrequentPollingMultiplier,
+			PollingUpdateLength:           chaintracker.PollingUpdateLength,
+
+			AvailabilityWeight: optimizerDefaults.AvailabilityWeight,
+			LatencyWeight:      optimizerDefaults.LatencyWeight,
+			SyncWeight:         optimizerDefaults.SyncWeight,
+			StakeWeight:        optimizerDefaults.StakeWeight,
+			MinSelectionChance: optimizerDefaults.MinSelectionChance,
+
+			PerChainOptimizer: perChain,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		body, err := json.Marshal(resp)
+		if err != nil {
+			// resp is a flat struct of scalars + a string-keyed map — Marshal can't
+			// realistically fail; surface a 500 rather than a half-written body.
+			http.Error(w, "failed to marshal router config", http.StatusInternalServerError)
+			return
+		}
+		w.Write(body)
 	})
 
 	return mux

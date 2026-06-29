@@ -22,6 +22,7 @@ jobs:
     name: Resolve PR Metadata
     runs-on: ubuntu-latest
     outputs:
+      pr_number: ${{ steps.pr.outputs.pr_number }}
       head_sha: ${{ steps.pr.outputs.head_sha }}
       artifact_name: ${{ steps.pr.outputs.artifact_name }}
       image_tag: ${{ steps.pr.outputs.image_tag }}
@@ -53,6 +54,7 @@ jobs:
           artifact_name="smartrouter-pr-${PR_NUMBER}-${short_sha}-linux-amd64"
           image_tag="pr-${PR_NUMBER}-${short_sha}"
           {
+            echo "pr_number=$PR_NUMBER"
             echo "head_sha=$head_sha"
             echo "artifact_name=$artifact_name"
             echo "image_tag=$image_tag"
@@ -74,7 +76,7 @@ jobs:
 
     steps:
       - name: Checkout PR head commit
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.metadata.outputs.head_sha }}
           fetch-depth: 0
@@ -445,27 +447,31 @@ jobs:
 
           current_args_json="$(kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o json | jq -c --arg container "$CONTAINER" '.spec.template.spec.containers[] | select(.name == $container).args // []')"
           sanitized_args_json="$(printf '%s' "$current_args_json" | jq -c '
-            def retired_flag($arg):
+            def retired_flag_name($arg):
               ($arg == "--optimizer-qos-listen") or
-              ($arg | startswith("--optimizer-qos-listen=")) or
               ($arg == "--show-provider-address-in-metrics") or
-              ($arg | startswith("--show-provider-address-in-metrics="));
-            def retired_flag_without_value($arg):
-              ($arg == "--optimizer-qos-listen") or
-              ($arg == "--show-provider-address-in-metrics");
-            reduce .[] as $arg ({out: [], drop_next: false};
-              if .drop_next then
-                if ($arg | startswith("--")) then
-                  .drop_next = false | .out += [$arg]
-                else
-                  .drop_next = false
-                end
-              elif retired_flag_without_value($arg) then
+              ($arg == "--geolocation") or
+              ($arg == "--concurrent-providers") or
+              (($arg | startswith("--provider-optimizer-")) and (($arg | contains("=")) | not));
+            def retired_flag_assignment($arg):
+              ($arg | startswith("--optimizer-qos-listen=")) or
+              ($arg | startswith("--show-provider-address-in-metrics=")) or
+              ($arg | startswith("--geolocation=")) or
+              ($arg | startswith("--concurrent-providers=")) or
+              (($arg | startswith("--provider-optimizer-")) and ($arg | contains("=")));
+            def sanitize_arg($arg):
+              if retired_flag_name($arg) then
                 .drop_next = true
-              elif retired_flag($arg) then
+              elif retired_flag_assignment($arg) then
                 .
               else
                 .out += [$arg]
+              end;
+            reduce .[] as $arg ({out: [], drop_next: false};
+              if .drop_next and (($arg | startswith("--")) | not) then
+                .drop_next = false
+              else
+                .drop_next = false | sanitize_arg($arg)
               end
             ) | .out
           ')"
@@ -571,7 +577,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout smart-router-automation
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: Magma-Devs/smart-router-automation
           token: ${{ secrets.SMART_ROUTER_AUTOMATION_READ_TOKEN }}
@@ -593,8 +599,8 @@ jobs:
       - name: Run smart-router-automation public readiness smoke
         working-directory: smart-router-automation
         env:
-          CLUSTER_HOST: prtests.magmadevs.com
-          SERVER_HOST: prtests.magmadevs.com
+          CLUSTER_HOST: ${{ vars.CLUSTER_HOST }}
+          SERVER_HOST: ${{ vars.CLUSTER_HOST }}
           SMART_ROUTER_FETCH_VALUES_YML: "0"
         run: |
           set -euo pipefail
@@ -616,7 +622,7 @@ jobs:
     name: Publish PR Validation Status
     runs-on: ubuntu-latest
     needs: [metadata, build]
-    if: ${{ always() }}
+    if: ${{ always() && needs.metadata.result != 'skipped' }}
     steps:
       - name: Publish dev-sim-prtests status
         env:

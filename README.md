@@ -12,7 +12,7 @@
 # Smart Router
 
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
-[![Release](https://img.shields.io/badge/release-v1.0.4-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.0.5-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-source--available-orange.svg)](LICENSE.md)
 
@@ -50,7 +50,7 @@ The fastest way to start: install the binary, point it at a YAML config, run.
 
 ```bash
 make install
-smartrouter config/smartrouter_examples/smartrouter_lava.yml --use-static-spec specs/
+smartrouter config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
 ```
 
 After running, you get:
@@ -59,6 +59,20 @@ After running, you get:
 - Prometheus metrics on `:7779` — see [docs/METRICS.md](docs/METRICS.md) for the full reference.
 - A health endpoint at `/lava/health`.
 - Provider rotation, RPC-aware retry, response caching, and metrics — all driven by the YAML config.
+
+### Config wizard
+
+Don't want to hand-write the YAML? A Charm-based TUI builds a smartrouter config
+and runs the local docker compose stack — from "which chains?" to a running,
+health-verified router.
+
+```bash
+make wizard          # from the repo root (builds the router, then launches)
+# or
+cd tools/wizard && go run . --repo /path/to/smart-router
+```
+
+See [tools/wizard/README.md](tools/wizard/README.md) for the full walkthrough.
 
 ### Health check (`smartrouter health`)
 
@@ -74,7 +88,7 @@ when the spec supports subscriptions, a websocket check on `wss://` URLs).
 smartrouter health config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
 
 # Or probe an ad-hoc endpoint inline (address chain-id api-interface)
-smartrouter health https://eth1.lava.build ETH1 jsonrpc --use-static-spec specs/
+smartrouter health https://ethereum-rpc.publicnode.com ETH1 jsonrpc --use-static-spec specs/
 ```
 
 The report is the only thing on **stdout** (all logs go to stderr), so it pipes cleanly into `jq`
@@ -96,10 +110,10 @@ is printed first.
   "error": null,
   "results": [
     {
-      "name": "eth-lava-build",
+      "name": "eth-publicnode",
       "chainId": "ETH1",
       "apiInterface": "jsonrpc",
-      "url": "wss://eth1.lava.build/websocket",
+      "url": "wss://ethereum-rpc.publicnode.com",
       "transport": "ws",
       "addons": ["debug"],
       "extensions": ["archive"],
@@ -176,7 +190,7 @@ The compose sets `NEXT_PUBLIC_LOCAL_MODE=true`, so the dashboard's live-test pan
 
 ### Configuration
 
-Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_lava.yml` for an example targeting the Lava blockchain via PublicNode.
+Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_cosmos.yml` for an example targeting Cosmos Hub with two distinct public sources per interface (REST + gRPC + Tendermint RPC), and `config/smartrouter_examples/smartrouter_multichain_cross_validation.yml` for a multi-chain fleet with an active [cross-validation](docs/CROSS-VALIDATION.md) policy block. Every bundled example points at public RPC vendors (PublicNode and each chain's official/community endpoints) — no API key required.
 
 Setup scripts are available in `scripts/pre_setups/`:
 
@@ -224,7 +238,7 @@ The hot path for a single request:
 4. **Relay + failover** — the request is sent to the chosen provider. On failure (timeout, malformed response, certain status codes), the retry state machine picks an alternate provider and retries within a configurable budget.
 5. **Response** — returned to the client with metadata headers (`Smart-Router-Version`, `Lava-Provider-Address`, retry counts, etc.) annotating which provider served the response. Prometheus metrics are emitted in parallel.
 
-**Cross-validation (optional).** For read methods that warrant extra assurance, the relay step can instead fan out to several providers in parallel and only return an answer once a quorum agree on an identical response — optionally requiring the quorum to span multiple distinct provider groups (or each group to reach its own quorum). It defends against a single provider returning a wrong-but-well-formed answer, and surfaces dissent via response headers and a bounded mismatch metric. See [`protocol/rpcsmartrouter/README.md`](protocol/rpcsmartrouter/README.md#cross-validation) for configuration.
+**Cross-validation (optional).** For read methods that warrant extra assurance, the relay step can instead fan out to several providers in parallel and only return an answer once a quorum agree on an identical response — optionally requiring the quorum to span multiple distinct provider groups (or each group to reach its own quorum). It defends against a single provider returning a wrong-but-well-formed answer, and surfaces dissent via response headers and a bounded mismatch metric. See [`docs/CROSS-VALIDATION.md`](docs/CROSS-VALIDATION.md) for an operator setup guide with runnable example configs, or [`protocol/rpcsmartrouter/README.md`](protocol/rpcsmartrouter/README.md#cross-validation) for the full knob/header reference.
 
 ### What it's not
 
@@ -396,6 +410,22 @@ types/              — Shared type definitions
 specs/              — Chain specification JSON files
 ```
 
+### Debug endpoints
+
+When started with `--debug-address <addr>` (and `devMode.enabled=true`), the router serves a small reset HTTP API for integration tests. It is **off by default and absent from production builds**.
+
+The reset tests rely on is **`POST /debug/reset-all`**, which drains the router's internal state stores (optimizer scores, Ristretto, seen-block caches, retry bans, session-manager state) and — so a single call returns the router to a serving state after an all-providers-down stress burst — also **re-enables endpoint health and cold-rebuilds pairing**.
+
+Why that matters: an endpoint that hits `MaxConsecutiveConnectionAttempts` consecutive connection failures is disabled (`Endpoint.Enabled=false`), and the only paths back are a successful relay or the ~15-minute epoch tick. After a stress test drives every provider down, those endpoints stay disabled and contaminate later tests until a pod restart. `reset-all` now re-enables them (mirroring the reset onto the Prometheus health gauge) and re-admits demoted providers via a cold `rebuildPairingFromConfig` (no re-probing). Every existing `reset-all` caller inherits this — no test migration.
+
+For tests that only need the endpoint-health reset, **`POST /debug/reset-endpoint-health`** does exactly that and nothing else; its name mirrors `Endpoint.ResetHealth()` in the source. Response (any method other than `POST` returns 405):
+
+```json
+{"reset": true, "endpoints_reenabled": 3}
+```
+
+`/debug/reset-pairing` and `/debug/reset-scores` remain available for targeted cleanup.
+
 ## Releases
 
 Releases are cut by pushing a semver tag matching `vX.Y.Z` (pre-release suffixes like `v1.2.0-rc1` are allowed). The tag push triggers `.github/workflows/release.yml`, which builds the release artifacts.
@@ -435,18 +465,13 @@ Customers should pin to `:vX.Y.Z`. `:latest` is for non-production "just give me
 
 The version string is injected at build time from the git tag — `smartrouter version` prints the tag verbatim, including the `v` prefix. Builds from non-tagged commits carry `git describe` output (e.g. `v1.2.0-3-gabc1234`), so a dev binary cannot masquerade as a release.
 
-#### Pulling the image (private repo)
+#### Pulling the image
 
-This repository is private, so the GHCR package inherits private visibility. Anonymous `docker pull` returns `unauthorized`. To pull:
+Smart Router Docker images are published to GHCR:
 
 ```bash
-# Create a PAT at https://github.com/settings/tokens with at least the `read:packages` scope.
-echo "<your-PAT>" | docker login ghcr.io -u <your-github-username> --password-stdin
-
 docker pull ghcr.io/magma-devs/smart-router:vX.Y.Z
 ```
-
-If you'd rather customers pull without authenticating, change the **package** visibility (not the repo) to public at `https://github.com/orgs/Magma-Devs/packages` → smart-router → Package settings → Change visibility. The Go source stays private; only the published images become public.
 
 ### Tag conventions
 
@@ -462,9 +487,9 @@ For vulnerability reporting, see [SECURITY.md](SECURITY.md). Do **not** open pub
 
 ## License
 
-This repository is source-available under the terms described in [LICENSE.md](LICENSE.md). Noncommercial use is permitted subject to those terms, including personal, educational, research, evaluation, development, and testing use.
+Smart Router is **dual-licensed**. Noncommercial use is free under the [PolyForm Noncommercial License 1.0.0](LICENSE.md), including personal, educational, research, evaluation, development, and testing use. Commercial use requires a separate written Enterprise License from Magma Devs. See [LICENSING.md](LICENSING.md) for the dual-license summary and the full commercial terms.
 
-Any commercial use, production use by or for a commercial entity, hosted/SaaS or managed-service use offered to customers or other third parties as part of a commercial product or service, resale, redistribution as part of a commercial offering, use as part of a paid product, or use of premium/enterprise features requires a separate written Enterprise License from Magma Devs. Review [LICENSE.md](LICENSE.md) for the full terms. For Enterprise licensing, contact Magma Devs at [sales@magmadevs.com](mailto:sales@magmadevs.com).
+Any commercial use, production use by or for a commercial entity, hosted/SaaS or managed-service use offered to customers or other third parties as part of a commercial product or service, resale, redistribution as part of a commercial offering, use as part of a paid product, or use of premium/enterprise features requires a separate written Enterprise License from Magma Devs. For Enterprise licensing, contact Magma Devs at [sales@magmadevs.com](mailto:sales@magmadevs.com).
 
 ## Community
 

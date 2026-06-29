@@ -1,0 +1,40 @@
+# Smart Router Direct RPC Configuration — Solana (SOLANA)
+# Mode: Direct connections to public Solana JSON-RPC endpoints (no Lava providers!)
+#
+# 2 upstreams (HTTP):
+#   1. PublicNode               (solana-rpc.publicnode.com)
+#   2. Solana Labs public RPC   (api.mainnet-beta.solana.com)
+# Solana serves subscriptions over a separate ws endpoint; this example is
+# HTTP-only, so start the router with --skip-websocket-verification.
+#
+# Run it:
+#   smartrouter config/smartrouter_examples/smartrouter_solana.yml \
+#     --use-static-spec specs/ --skip-websocket-verification
+
+# Prometheus metrics (scrape at http://<host>:7779/metrics). "disabled" turns it off.
+metrics-listen-address: "0.0.0.0:7779"
+
+endpoints:
+  - listen-address: "0.0.0.0:3360"
+    chain-id: "SOLANA"
+    api-interface: "jsonrpc"
+    network-address: "0.0.0.0:3360"
+
+direct-rpc:
+  - name: "sol-publicnode"
+    group-label: "publicnode"
+    chain-id: "SOLANA"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://solana-rpc.publicnode.com"
+        # PublicNode's free tier blocks getProgramAccounts (the spec's
+        # tokens-owner-indexed verification), so skip that startup check here.
+        skip-verifications:
+          - tokens-owner-indexed
+
+  - name: "sol-solana-labs"
+    group-label: "solana-labs"
+    chain-id: "SOLANA"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://api.mainnet-beta.solana.com"

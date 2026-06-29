@@ -27,6 +27,26 @@ install:
 build:
 	go build $(GOFLAGS) -o build/smartrouter ./cmd/smartrouter
 
+# Interactive config wizard (separate go module under tools/wizard). Builds the
+# router first so the wizard's spec-driven `health` checks have a binary, then
+# launches the TUI. The wizard fetches chain specs + icons from the docs at
+# runtime; nothing is vendored.
+wizard: build
+	@cd tools/wizard && go run . --repo $(CURDIR)
+
+# Reprint the run command from the most recent wizard run (no router build, no
+# TUI — just reads the saved record under ~/.config/smartrouter-wizard).
+wizard-last:
+	@cd tools/wizard && go run . --last
+
+# Build the wizard binary into build/ without launching it.
+wizard-build:
+	cd tools/wizard && go build -o $(CURDIR)/build/sr-wizard .
+
+# Test the wizard's non-TUI packages.
+wizard-test:
+	cd tools/wizard && go test ./...
+
 BUILDX_BUILDER ?= smartrouter-builder
 export BUILDX_BUILDER
 
@@ -112,4 +132,4 @@ lint:
 clean:
 	rm -rf build/ dist/
 
-.PHONY: install build setup snapshot changelog test test-short tidy lint clean
+.PHONY: install build wizard wizard-last wizard-build wizard-test setup snapshot changelog test test-short tidy lint clean

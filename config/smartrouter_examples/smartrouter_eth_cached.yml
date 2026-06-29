@@ -11,11 +11,10 @@
 #     docker compose -f docker/docker-compose.yml \
 #                    -f docker/docker-compose.cache.yml up --build
 #
-# 3 upstreams, each HTTP + WebSocket (the ETH1 spec requires ws for
+# 2 upstreams, each HTTP + WebSocket (the ETH1 spec requires ws for
 # subscriptions; http-only providers are excluded at startup):
-#   1. Lava public gateway (eth1.lava.build, ws at /websocket)
-#   2. PublicNode
-#   3. Tenderly public gateway
+#   1. PublicNode
+#   2. Tenderly public gateway
 
 # External cache-be server (the `smart-router cache` sidecar). "cache:20100"
 # is the compose service name + port. Remove this key (or run without the
@@ -33,15 +32,7 @@ endpoints:
     network-address: "0.0.0.0:3360"
 
 direct-rpc:
-  # Endpoint 1 — Lava public gateway (HTTP + WS)
-  - name: "eth-lava-build"
-    chain-id: "ETH1"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://eth1.lava.build"
-      - url: "wss://eth1.lava.build/websocket"
-
-  # Endpoint 2 — PublicNode (HTTP + WS)
+  # Endpoint 1 — PublicNode (HTTP + WS)
   - name: "eth-publicnode"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
@@ -49,7 +40,7 @@ direct-rpc:
       - url: "https://ethereum-rpc.publicnode.com"
       - url: "wss://ethereum-rpc.publicnode.com"
 
-  # Endpoint 3 — Tenderly public gateway (HTTP + WS)
+  # Endpoint 2 — Tenderly public gateway (HTTP + WS)
   - name: "eth-tenderly"
     chain-id: "ETH1"
     api-interface: "jsonrpc"

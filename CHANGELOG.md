@@ -8,6 +8,67 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.0.5 — 2026-06-28
+
+### Highlights
+
+Smart Router v1.0.5 introduces an interactive configuration wizard to assist operators in generating upstream routing definitions and gateway settings. To support this setup process, the release now bundles a complete set of example configuration files for all supported chains. Once configured, integrators can validate their deployments using the new `smartrouter health` CLI command, which executes spec-driven diagnostic checks against the running instance. Finally, this release resolves a cross-origin request bug by ensuring the gateway correctly emits the `Access-Control-Allow-Headers: *` response header whenever the `cors-headers` configuration field is empty.
+
+### Changes
+
+#### New Features
+- feat(health): add spec-driven `smartrouter health` CLI command ([#140]) [`5b5679b`]
+- feat(wizard): interactive Go/Charm config wizard for smart-router ([#142]) [`7b71b38`]
+- feat: add example configs for all bundled chains ([#160]) [`89cf8ff`]
+
+#### Bug fixes
+- fix(cors): emit Access-Control-Allow-Headers "*" when cors-headers is empty ([#145]) [`215c8f4`]
+- fix: correct license typo ([#148]) [`1453612`]
+
+#### Documentation updates
+- docs(provider-optimizer): correct stale availability-cliff comments (0.90 -> 0.80) ([#141]) [`9774263`]
+- docs(readme): align docker pull docs with public release ([#148]) [`e776280`]
+
+#### Build process updates
+- ci: trigger PR gate after approval ([#156]) [`ea5763d`]
+- ci: run PR gate directly after approval ([#161]) [`4be0d2f`]
+- ci: fix PR gate YAML indentation ([#162]) [`c8f0998`]
+- ci: restore PR gate approval dispatcher ([#164]) [`21ecc36`]
+- ci: strip legacy concurrent-providers arg in PR gate ([#166]) [`de80bed`]
+- ci: fix concurrent-providers YAML indentation ([#167]) [`1f24ae4`]
+- ci: strip legacy provider optimizer args in PR gate ([#168]) [`3875aab`]
+- ci: fix legacy arg stripping in PR gate ([#169]) [`4eff13d`]
+
+[#140]: https://github.com/magma-Devs/smart-router/pull/140
+[#141]: https://github.com/magma-Devs/smart-router/pull/141
+[#142]: https://github.com/magma-Devs/smart-router/pull/142
+[#145]: https://github.com/magma-Devs/smart-router/pull/145
+[#148]: https://github.com/magma-Devs/smart-router/pull/148
+[#156]: https://github.com/magma-Devs/smart-router/pull/156
+[#160]: https://github.com/magma-Devs/smart-router/pull/160
+[#161]: https://github.com/magma-Devs/smart-router/pull/161
+[#162]: https://github.com/magma-Devs/smart-router/pull/162
+[#164]: https://github.com/magma-Devs/smart-router/pull/164
+[#166]: https://github.com/magma-Devs/smart-router/pull/166
+[#167]: https://github.com/magma-Devs/smart-router/pull/167
+[#168]: https://github.com/magma-Devs/smart-router/pull/168
+[#169]: https://github.com/magma-Devs/smart-router/pull/169
+[`1453612`]: https://github.com/magma-Devs/smart-router/commit/1453612c7968ae3f4d38af82eb4b1f56bd0cc1c7
+[`1f24ae4`]: https://github.com/magma-Devs/smart-router/commit/1f24ae46a7815d586d8c74330b54e9b6e7402a51
+[`215c8f4`]: https://github.com/magma-Devs/smart-router/commit/215c8f4562da9e94b4fc9b1b65aa676e374c492f
+[`21ecc36`]: https://github.com/magma-Devs/smart-router/commit/21ecc36d375752577b48af9d748126485672b688
+[`3875aab`]: https://github.com/magma-Devs/smart-router/commit/3875aab79cf33072cc88eea6c93e2d9f338f039f
+[`4be0d2f`]: https://github.com/magma-Devs/smart-router/commit/4be0d2f57e611923476f1c566b7e4fae42170b0d
+[`4eff13d`]: https://github.com/magma-Devs/smart-router/commit/4eff13dfda00cc9082c29ebef3b58bce28f9fdcd
+[`5b5679b`]: https://github.com/magma-Devs/smart-router/commit/5b5679b47b1fcd573aa300b7c6df53a97ed91d9e
+[`7b71b38`]: https://github.com/magma-Devs/smart-router/commit/7b71b380c4f0a25d141166d1b87485d470bc7ba3
+[`89cf8ff`]: https://github.com/magma-Devs/smart-router/commit/89cf8ff915b2ad2ea48dff78c19bc8169f61cc88
+[`9774263`]: https://github.com/magma-Devs/smart-router/commit/97742634189805403c9afb8d20d2b617d7c35452
+[`c8f0998`]: https://github.com/magma-Devs/smart-router/commit/c8f09986fba943f42afd7ec7e1a3d3648c4f2dab
+[`de80bed`]: https://github.com/magma-Devs/smart-router/commit/de80beda8d537dd298103705323f4dc07b278332
+[`e776280`]: https://github.com/magma-Devs/smart-router/commit/e7762808462fc549fd24d2942cdeaefe9d96614c
+[`ea5763d`]: https://github.com/magma-Devs/smart-router/commit/ea5763d1bd06265a00fc33d9234c4e5bb97b0346
+
 ## v1.0.4 — 2026-06-22
 
 ### Highlights

@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
+	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/utils"
+	scoreutils "github.com/magma-Devs/smart-router/utils/score"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -239,6 +241,11 @@ func TestDebugResetAll_SmartRouter_ReturnsCapabilityAdvertisement(t *testing.T) 
 	// tests trigger blockProvider. reset-all must restore the list to
 	// pairingAddresses for the test bundle to recover.
 	require.Contains(t, body, `"blocked-providers"`)
+	// endpoint-health + pairing (MAG-2186): reset-all now also re-enables endpoints
+	// disabled by MaxConsecutiveConnectionAttempts and cold-rebuilds pairing, so every
+	// existing reset-all call site recovers stuck endpoint state with no test migration.
+	require.Contains(t, body, `"endpoint-health"`)
+	require.Contains(t, body, `"pairing"`)
 }
 
 func TestDebugResetAll_SmartRouter_MethodNotAllowed(t *testing.T) {
@@ -293,6 +300,13 @@ func TestDebugResetAll_SmartRouter_NilRouterIsSafe(t *testing.T) {
 
 func getDebugRouter(mux http.Handler, path string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+func postResetEndpointHealthRouter(mux http.Handler) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/debug/reset-endpoint-health", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	return rr
@@ -456,6 +470,33 @@ func TestDebugProbeLoop_ReportsCycleStats(t *testing.T) {
 	require.Equal(t, float64(1), row["ReEnabledCount"])
 	require.Equal(t, float64(2), row["SyncOmittedCount"])
 	require.NotEmpty(t, row["LastCycleStartedAt"], "cycle start carries an RFC3339 timestamp")
+}
+
+// TestDebugResetEndpointHealth_SmartRouter_ReturnsJSON covers the focused MAG-2186
+// endpoint's HTTP contract. The recovery behavior itself is proven at the session-manager
+// layer by lavasession.TestEndpointHealthRecovery.
+func TestDebugResetEndpointHealth_SmartRouter_ReturnsJSON(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	rr := postResetEndpointHealthRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%q", rr.Body.String())
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	body := rr.Body.String()
+	require.Contains(t, body, `"reset":true`)
+	// nil router → nothing wired → 0 endpoints, but the field must still appear so
+	// callers can rely on the shape.
+	require.Contains(t, body, `"endpoints_reenabled":0`)
+}
+
+func TestDebugResetEndpointHealth_SmartRouter_MethodNotAllowed(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/reset-endpoint-health", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
 
 // corruptedMsTimestampBlock is the exact value reported in the 2026-05-14
@@ -820,4 +861,175 @@ func TestDebugLogsClear_SmartRouter_MethodNotAllowed(t *testing.T) {
 	mux.ServeHTTP(rr, req)
 
 	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
+func getRuntimeConfigRouter(mux http.Handler) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/debug/runtime-config", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// TestDebugRuntimeConfig_SmartRouter_ReturnsValues asserts every exposed value against
+// its source symbol — never a hardcoded literal. That is the whole point of the
+// endpoint, and it keeps this test from drifting the same way the hand-copied
+// constants in the Python suite do.
+func TestDebugRuntimeConfig_SmartRouter_ReturnsValues(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	rr := getRuntimeConfigRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%q", rr.Body.String())
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+
+	// Wire-format contract. The struct round-trip below verifies VALUES, but Marshal and
+	// Unmarshal both key off the same Go field names — so a field rename would round-trip
+	// green while silently breaking every consumer that greps the key by name (the exact
+	// failure this endpoint exists to prevent). The ticket requires each key to be the
+	// exact Go identifier of its source symbol, so decode into a raw map and assert the
+	// literal identifier strings. "Contains", not "equals", so the schema can grow
+	// additively.
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+	for _, k := range []string{
+		"SchemaVersion",
+		"MaxConsecutiveConnectionAttempts",
+		"TimeoutForEstablishingAConnection",
+		"MaximumNumberOfFailuresAllowedPerConsumerSession",
+		"RelayRetryLimit",
+		"DisableBatchRequestRetry",
+		"MaximumNumberOfTickerRelayRetries",
+		"SendRelayAttempts",
+		"EnableCircuitBreaker",
+		"CircuitBreakerThreshold",
+		"EnableTimeoutPriority",
+		"TimePerCU",
+		"MinimumTimePerRelayDelay",
+		"DefaultTimeout",
+		"CacheTimeout",
+		"ProbeUpdateWeight",
+		"DefaultProbeUpdateWeight",
+		"MinAcceptableAvailability",
+		"HighCuThreshold",
+		"MidCuThreshold",
+		"MostFrequentPollingMultiplier",
+		"PollingUpdateLength",
+		"AvailabilityWeight",
+		"LatencyWeight",
+		"SyncWeight",
+		"StakeWeight",
+		"MinSelectionChance",
+		"PerChainOptimizer",
+	} {
+		require.Contains(t, raw, k, "missing wire key %q", k)
+	}
+
+	var resp routerConfigResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+
+	require.Equal(t, 1, resp.SchemaVersion)
+
+	require.Equal(t, lavasession.MaxConsecutiveConnectionAttempts, resp.MaxConsecutiveConnectionAttempts)
+	require.Equal(t, lavasession.MaximumNumberOfFailuresAllowedPerConsumerSession, resp.MaximumNumberOfFailuresAllowedPerConsumerSession)
+
+	require.Equal(t, relaycore.RelayRetryLimit, resp.RelayRetryLimit)
+	require.Equal(t, relaycore.DisableBatchRequestRetry, resp.DisableBatchRequestRetry)
+
+	require.Equal(t, MaximumNumberOfTickerRelayRetries, resp.MaximumNumberOfTickerRelayRetries)
+	require.Equal(t, SendRelayAttempts, resp.SendRelayAttempts)
+
+	smConfig := SmartRouterStateMachineConfig()
+	require.Equal(t, smConfig.EnableCircuitBreaker, resp.EnableCircuitBreaker)
+	require.Equal(t, smConfig.CircuitBreakerThreshold, resp.CircuitBreakerThreshold)
+	require.Equal(t, smConfig.EnableTimeoutPriority, resp.EnableTimeoutPriority)
+
+	// Durations are integer milliseconds, asserted against their source symbols. TimePerCU
+	// is a uint64 of nanoseconds (not a time.Duration), so it divides by time.Millisecond;
+	// the rest are time.Duration and use .Milliseconds().
+	require.Equal(t, int64(common.TimePerCU)/int64(time.Millisecond), resp.TimePerCU)
+	require.Equal(t, common.MinimumTimePerRelayDelay.Milliseconds(), resp.MinimumTimePerRelayDelay)
+	require.Equal(t, common.DefaultTimeout.Milliseconds(), resp.DefaultTimeout)
+	require.Equal(t, common.CacheTimeout.Milliseconds(), resp.CacheTimeout)
+	require.Equal(t, lavasession.TimeoutForEstablishingAConnection.Milliseconds(), resp.TimeoutForEstablishingAConnection)
+
+	require.Equal(t, scoreutils.ProbeUpdateWeight, resp.ProbeUpdateWeight)
+	require.Equal(t, scoreutils.DefaultProbeUpdateWeight, resp.DefaultProbeUpdateWeight)
+	require.Equal(t, scoreutils.MinAcceptableAvailability, resp.MinAcceptableAvailability)
+	require.Equal(t, scoreutils.HighCuThreshold, resp.HighCuThreshold)
+	require.Equal(t, scoreutils.MidCuThreshold, resp.MidCuThreshold)
+
+	require.Equal(t, chaintracker.MostFrequentPollingMultiplier, resp.MostFrequentPollingMultiplier)
+	require.Equal(t, chaintracker.PollingUpdateLength, resp.PollingUpdateLength)
+
+	// Optimizer defaults are flat top-level keys (the ticket's Phase 2 shape rule),
+	// asserted against DefaultWeightedSelectorConfig().
+	def := provideroptimizer.DefaultWeightedSelectorConfig()
+	require.Equal(t, def.AvailabilityWeight, resp.AvailabilityWeight)
+	require.Equal(t, def.LatencyWeight, resp.LatencyWeight)
+	require.Equal(t, def.SyncWeight, resp.SyncWeight)
+	require.Equal(t, def.StakeWeight, resp.StakeWeight)
+	require.Equal(t, def.MinSelectionChance, resp.MinSelectionChance)
+
+	// PerChainOptimizer must be an object ({}), never null, even with no optimizers wired.
+	require.NotNil(t, resp.PerChainOptimizer)
+	require.Empty(t, resp.PerChainOptimizer)
+}
+
+func TestDebugRuntimeConfig_SmartRouter_MethodNotAllowed(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	req := httptest.NewRequest(http.MethodPost, "/debug/runtime-config", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
+// TestDebugRuntimeConfig_SmartRouter_PerChainOptimizer exercises the only branching
+// logic in the handler: the live optimizers map is ranged and each entry's config is
+// run through toWeights into PerChainOptimizer. The _ReturnsValues test above always
+// sees an empty map, so the field mapping and the chainID keying are otherwise
+// unverified.
+//
+// Each chain uses four DISTINCT weights that already sum to 1.0. Distinct so a
+// field-swap in toWeights (e.g. Sync<->Stake) can't pass — the default weights would
+// mask it, since they are pairwise equal (0.3/0.3, 0.2/0.2). Summing to 1.0 so
+// NewWeightedSelector's normalizer leaves them untouched and the assertions stay exact.
+// Two chains with non-overlapping weight sets prove the map is keyed per chainID rather
+// than collapsing or cross-wiring entries.
+func TestDebugRuntimeConfig_SmartRouter_PerChainOptimizer(t *testing.T) {
+	newConfiguredOptimizer := func(chainID string, cfg provideroptimizer.WeightedSelectorConfig) *provideroptimizer.ProviderOptimizer {
+		opt := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
+		opt.ConfigureWeightedSelector(cfg)
+		return opt
+	}
+
+	want := map[string]routerConfigOptimizerWeights{
+		"ETH1": {AvailabilityWeight: 0.4, LatencyWeight: 0.3, SyncWeight: 0.2, StakeWeight: 0.1, MinSelectionChance: 0.05},
+		"BTC1": {AvailabilityWeight: 0.1, LatencyWeight: 0.2, SyncWeight: 0.3, StakeWeight: 0.4, MinSelectionChance: 0.07},
+	}
+
+	optimizers := newEmptyOptimizersRouter()
+	for chainID, w := range want {
+		optimizers.Store(chainID, newConfiguredOptimizer(chainID, provideroptimizer.WeightedSelectorConfig{
+			AvailabilityWeight: w.AvailabilityWeight,
+			LatencyWeight:      w.LatencyWeight,
+			SyncWeight:         w.SyncWeight,
+			StakeWeight:        w.StakeWeight,
+			MinSelectionChance: w.MinSelectionChance,
+		}))
+	}
+
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: optimizers, offsetNano: &offsetNano})
+
+	rr := getRuntimeConfigRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%q", rr.Body.String())
+
+	var resp routerConfigResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+
+	// Exactly the chains we wired — no extras, none dropped.
+	require.Equal(t, want, resp.PerChainOptimizer)
 }
