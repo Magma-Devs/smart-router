@@ -1,5 +1,8 @@
 # Smart Router Source-Available License Notice
 
+<!-- SPDX-License-Identifier: LicenseRef-MagmaDevs-SourceAvailable -->
+SPDX-License-Identifier: LicenseRef-MagmaDevs-SourceAvailable
+
 Required Notice: Copyright 2026 Magma Devs
 
 This repository is made source-available under the PolyForm Noncommercial
