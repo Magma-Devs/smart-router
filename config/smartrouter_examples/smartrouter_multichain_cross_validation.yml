@@ -167,11 +167,9 @@ direct-rpc:
     chain-id: "COSMOSHUB"
     api-interface: "tendermintrpc"
     node-urls:
+      # Polkachu serves tendermint over HTTP only (no websocket leg).
       - url: "https://cosmos-rpc.polkachu.com"
         timeout: 10s
-        skip-verifications:
-          - pruning
-      - url: "wss://cosmos-rpc.polkachu.com/websocket"
         skip-verifications:
           - pruning
 
