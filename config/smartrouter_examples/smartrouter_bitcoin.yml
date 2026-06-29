@@ -1,0 +1,27 @@
+# Smart Router Direct RPC Configuration — Bitcoin (BTC)
+# Mode: Direct connection to a public Bitcoin JSON-RPC endpoint (no Lava providers!)
+#
+# Upstream: PublicNode (bitcoin-rpc.publicnode.com), HTTP. Bitcoin Core's
+# JSON-RPC has no websocket/subscription surface, so this example is HTTP-only —
+# start the router with --skip-websocket-verification.
+#
+# Run it:
+#   smartrouter config/smartrouter_examples/smartrouter_bitcoin.yml \
+#     --use-static-spec specs/ --skip-websocket-verification
+
+# Prometheus metrics (scrape at http://<host>:7779/metrics). "disabled" turns it off.
+metrics-listen-address: "0.0.0.0:7779"
+
+endpoints:
+  - listen-address: "0.0.0.0:3360"
+    chain-id: "BTC"
+    api-interface: "jsonrpc"
+    network-address: "0.0.0.0:3360"
+
+direct-rpc:
+  - name: "btc-publicnode"
+    group-label: "publicnode"
+    chain-id: "BTC"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://bitcoin-rpc.publicnode.com"

@@ -37,15 +37,20 @@ SR_CONFIG=config/smartrouter_examples/smartrouter_multichain.yml \
 
 Adding a new example is just a new YAML in `config/smartrouter_examples/` —
 no compose change. The file publishes the **superset** of ports the bundled
-examples use (`3360`–`3362`, `7779`); a config only binds the listeners it
+examples use (`3360`–`3367`, `7779`); a config only binds the listeners it
 declares, the rest sit idle.
 
-| Port   | Used by                                         |
-|--------|-------------------------------------------------|
-| `3360` | ETH1 jsonrpc (eth, multichain)                  |
-| `3361` | ARBITRUM jsonrpc (multichain)                   |
-| `3362` | BASE jsonrpc (multichain)                       |
-| `7779` | router prometheus metrics                       |
+| Port   | Used by                                              |
+|--------|-----------------------------------------------------|
+| `3360` | ETH1 jsonrpc (eth, multichain)                      |
+| `3361` | SOLANA jsonrpc (solana example uses 3360; multichain) |
+| `3362` | BTC jsonrpc (bitcoin example uses 3360; multichain) |
+| `3363` | HYPERLIQUID jsonrpc (hyperliquid example uses 3360; multichain) |
+| `3364` | COSMOSHUB rest (cosmos example uses 3360; multichain) |
+| `3365` | COSMOSHUB tendermintrpc (cosmos example uses 3362; multichain) |
+| `3366` | COSMOSHUB grpc (cosmos example uses 3361; multichain) |
+| `3367` | APT1 rest (aptos example uses 3360; multichain)     |
+| `7779` | router prometheus metrics                           |
 
 ## Enabling the cache
 
@@ -78,36 +83,58 @@ it (see `smartrouter_eth_cached.yml`) and run it with the overlay.
 
 ### `smartrouter_eth.yml` — Ethereum (default)
 
-3 upstreams (`eth1.lava.build` + PublicNode + Tenderly), each HTTP + WS.
+2 upstreams (PublicNode + Tenderly), each HTTP + WS. No Lava endpoints.
 
 ### `smartrouter_eth_cached.yml` — Ethereum with cache
 
 Same as `smartrouter_eth.yml` plus `cache-be: cache:20100`. Run with
 the cache overlay (see [Enabling the cache](#enabling-the-cache)).
 
-### `smartrouter_multichain.yml` — Ethereum + Arbitrum + Base
+### `smartrouter_solana.yml` / `smartrouter_bitcoin.yml` / `smartrouter_hyperliquid.yml` / `smartrouter_aptos.yml`
 
-Three JSON-RPC chains at once, 2 upstreams each (`<chain>.lava.build` + a
-public RPC).
+Single-chain JSON-RPC (Solana, Bitcoin, Hyperliquid) or REST (Aptos) examples,
+each on port `3360` and HTTP-only — run with `--skip-websocket-verification`
+(the compose command already passes it). Upstreams are PublicNode and each
+chain's official/community endpoint; no Lava endpoints.
 
-| Chain    | Port   | eth_chainId |
-|----------|--------|-------------|
-| Ethereum | `3360` | `0x1`       |
-| Arbitrum | `3361` | `0xa4b1`    |
-| Base     | `3362` | `0x2105`    |
+### `smartrouter_cosmos.yml` — Cosmos Hub (REST + gRPC + Tendermint RPC)
 
-Requires `specs/arbitrum.json` + `specs/base.json` (both import `ETH1` from
-`specs/ethereum.json`), sourced from
-[`Magma-Devs/lava-specs`](https://github.com/Magma-Devs/lava-specs).
+Cosmos Hub across all three interfaces, two distinct public vendor groups each
+(PublicNode + Polkachu). The `COSMOSHUB` spec imports `COSMOSSDK50` +
+`COSMOSWASM` (which pull in `COSMOSSDK` → `IBC` + `TENDERMINT`); all ship in
+`specs/`.
 
-> The ETH1 spec — which Arbitrum and Base import — requires websocket support,
-> so every provider pairs an `http` url with a `wss` url. The `lava.build`
-> gateways serve ws at the `/websocket` path.
+### `smartrouter_multichain.yml` — Ethereum + Solana + Bitcoin + Hyperliquid + Cosmos + Aptos
+
+Every bundled example chain at once, each on its own port; two distinct public
+vendor groups per `chain<>interface` where a second source exists.
+
+| Chain       | Port   | Interface     | Identity        |
+|-------------|--------|---------------|-----------------|
+| Ethereum    | `3360` | jsonrpc       | `eth_chainId 0x1`   |
+| Solana      | `3361` | jsonrpc       | mainnet-beta    |
+| Bitcoin     | `3362` | jsonrpc       | mainnet         |
+| Hyperliquid | `3363` | jsonrpc       | `eth_chainId 0x3e7` |
+| Cosmos Hub  | `3364` | rest          | `cosmoshub-4`   |
+| Cosmos Hub  | `3365` | tendermintrpc | `cosmoshub-4`   |
+| Cosmos Hub  | `3366` | grpc          | `cosmoshub-4`   |
+| Aptos       | `3367` | rest          | `chain_id 1`    |
+
+Requires `specs/btc.json`, `specs/hyperliquid.json`, `specs/aptos.json`,
+`specs/cosmoshub.json` (+ its `specs/cosmossdkv50.json` / `specs/cosmoswasm.json`
+import closure), all sourced from
+[`Magma-Devs/lava-specs`](https://github.com/Magma-Devs/lava-specs) and already
+bundled in `specs/`.
+
+> Only ETH1 requires websocket support (its providers pair an `http` url with a
+> `wss` one). Solana, Bitcoin, Hyperliquid (jsonrpc) and Aptos (rest) are
+> HTTP-only, so the compose command runs with `--skip-websocket-verification`.
 
 ### `smartrouter_multichain_cached.yml` — multi-chain with cache
 
-Same as `smartrouter_multichain.yml` plus `cache-be: cache:20100`. Run with
-the cache overlay (see [Enabling the cache](#enabling-the-cache)).
+A trimmed multi-chain fleet (Ethereum + Solana + Cosmos REST) plus
+`cache-be: cache:20100`. Run with the cache overlay (see
+[Enabling the cache](#enabling-the-cache)).
 
 ## Rebuilding after code changes
 
