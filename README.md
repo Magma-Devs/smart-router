@@ -3,7 +3,7 @@
 <a href="https://github.com/Magma-Devs/smart-router" target="_blank" rel="noopener noreferrer">
   <img
     src="./docs/assets/banner.png"
-    alt="Smart Router — Centralised RPC routing gateway"
+    alt="Smart Router — the reliability and security layer for blockchain RPC"
     width="100%"
     style="cursor: pointer;"
   >
@@ -19,6 +19,8 @@
 </div>
 
 The reliability and security layer for blockchain RPC. Smart Router monitors and orchestrates multiple RPC upstreams in real-time, providing failover, cross-validation, caching, observability & more — across EVM and non-EVM networks.
+
+> **Free for non-commercial use.** Commercial use requires an Enterprise License from Magma Devs — full details under [License](#license).
 
 <div align="center">
 
