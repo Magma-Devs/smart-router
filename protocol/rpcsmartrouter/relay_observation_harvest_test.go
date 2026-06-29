@@ -460,6 +460,11 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 		require.NotEqual(t, int64(20_000_000), o.LatestBlock,
 			"a relay that captured the OLD generation must be rejected after same-URL replacement")
 	}
+	// The generation gate must also block the downstream ungated tip-state writes: a stale relay
+	// dropped from the store must NOT still bump the router bootstrap atomic (the poisoning the
+	// harvest gate exists to prevent).
+	require.Equal(t, uint64(0), rpcss.latestBlockHeight.Load(),
+		"a stale-generation relay must not move the bootstrap atomic after the store rejects it")
 
 	// Sanity: harvesting with the live generation (genB) IS accepted — proving the rejection
 	// above was the generation gate, not a broken store.

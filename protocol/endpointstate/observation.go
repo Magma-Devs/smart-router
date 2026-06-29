@@ -164,9 +164,14 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 //
 // The production call site is the relay-response chokepoint (rpcsmartrouter), which
 // harvests only reliable current-tip observations (MAG-2159 findings 1 & 2).
-func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64, block int64, at time.Time) {
+//
+// Returns true iff the write was accepted (passed the generation + monotonic guards and
+// advanced the stored tip). The caller uses this to gate the remaining ungated tip-state
+// writes (router bootstrap atomic, per-endpoint metric) so a stale/replaced-tracker relay
+// that this method correctly drops cannot still poison them.
+func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64, block int64, at time.Time) bool {
 	if block <= 0 {
-		return
+		return false
 	}
 
 	// Feed the per-chain tip after releasing obsMu (see recordPollObservation). tipBlock stays
@@ -182,14 +187,14 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 	defer m.obsMu.Unlock()
 
 	if m.stopped {
-		return
+		return false
 	}
 	// Generation gate: reject relays whose captured generation no longer matches the live
 	// one (removed/replaced tracker), mirroring recordPollObservation. Requiring existence
 	// rejects an unknown endpoint (and a stray gen==0) instead of matching the absent
 	// map default of 0.
 	if liveGen, ok := m.generations[endpointURL]; !ok || liveGen != gen {
-		return
+		return false
 	}
 
 	// Register the endpoint in the observation map (if a relay is the first thing we ever
@@ -208,7 +213,9 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 		Source:     endpointtip.SourceRelay,
 	}) {
 		tipBlock = block // feed the per-chain tip after unlock
+		return true
 	}
+	return false
 }
 
 // GetObservation returns a consistent snapshot of an endpoint's observation record and

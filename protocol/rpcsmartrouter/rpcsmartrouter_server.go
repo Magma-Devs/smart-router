@@ -1740,11 +1740,15 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 // generation, so a relay from a removed/replaced tracker cannot corrupt the record
 // (finding 5). Side-effect-free: it never touches QoS or endpoint.Enabled. No-op when no
 // monitor is wired, the endpoint is nil, or block is non-positive.
-func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavasession.Endpoint, gen uint64, block int64) {
+//
+// Returns whether the observation was accepted (passed the generation + monotonic guards).
+// The caller gates the remaining ungated tip-state writes on this so a relay this method
+// drops cannot still poison them.
+func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavasession.Endpoint, gen uint64, block int64) bool {
 	if rpcss.endpointChainTrackerManager == nil || endpoint == nil || block <= 0 {
-		return
+		return false
 	}
-	rpcss.endpointChainTrackerManager.RecordRelayObservation(endpoint.NetworkAddress, gen, block, time.Now())
+	return rpcss.endpointChainTrackerManager.RecordRelayObservation(endpoint.NetworkAddress, gen, block, time.Now())
 }
 
 // endpointTipBlock reads an endpoint's observed tip from the shared single-source-of-truth
@@ -2038,11 +2042,15 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 	if !ok {
 		return
 	}
-	// recordRelayBlockObservation is the ONLY tip write: it funnels through the gated
-	// RecordRelayObservation into the single-source-of-truth endpointtip store. The
-	// previous unconditional second write to targetEndpoint.LatestBlock is gone — it
-	// bypassed the generation/monotonic gate and was the source of tip divergence.
-	rpcss.recordRelayBlockObservation(targetEndpoint, harvestGen, tip)
+	// recordRelayBlockObservation funnels through the gated RecordRelayObservation into the
+	// single-source-of-truth endpointtip store. The previous unconditional second write to
+	// targetEndpoint.LatestBlock is gone — it bypassed the generation/monotonic gate and was
+	// the source of tip divergence. The remaining tip-state writes below (router bootstrap
+	// atomic, per-endpoint metric) are gated on acceptance so a stale relay the store drops
+	// (replaced/removed tracker, or older-than-stored observation) cannot still poison them.
+	if !rpcss.recordRelayBlockObservation(targetEndpoint, harvestGen, tip) {
+		return
+	}
 	rpcss.updateLatestBlockHeight(uint64(tip), endpointAddress)
 	if rpcss.smartRouterEndpointMetrics != nil {
 		// endpointAddress is the provider name (session map key), so resolveProviderName
