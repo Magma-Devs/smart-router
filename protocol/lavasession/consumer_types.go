@@ -267,6 +267,28 @@ func (e *Endpoint) CheckSupportForServices(addon string, extensions []string) (s
 	return true
 }
 
+// clearRecoveryStreakLocked resets ONLY the F1 hysteresis streak — the post-disable healthy-poll
+// progress (consecutiveHealthyProbes) and the newest poll already counted toward it
+// (lastRecoveryPoll). It deliberately leaves disabledAt untouched so the disable path (which
+// stamps disabledAt) and the enabled-domain reset share one definition of "forget the streak".
+// Caller must hold e.mu. NOTE: the invalid-evidence reset in RecordProbeVerdict intentionally does
+// NOT use this — it zeroes the counter but PRESERVES lastRecoveryPoll, so a faster probe cadence
+// cannot re-count an already-counted poll across a streak break (the recoveryPoll.After guard).
+func (e *Endpoint) clearRecoveryStreakLocked() {
+	e.consecutiveHealthyProbes = 0
+	e.lastRecoveryPoll = time.Time{}
+}
+
+// clearRecoveryTrackingLocked resets ALL F1 recovery state for an Enabled→true transition: the
+// streak AND the disable timestamp, so a re-enabled endpoint gets a clean slate and a future
+// disable starts a fresh streak. Every re-enable site funnels through this, making "an Enabled
+// transition resets the recovery fields" a property of the type rather than a block each caller
+// must remember to copy. Caller must hold e.mu.
+func (e *Endpoint) clearRecoveryTrackingLocked() {
+	e.clearRecoveryStreakLocked()
+	e.disabledAt = time.Time{}
+}
+
 // MarkUnhealthy increments connection refusals and disables endpoint if threshold exceeded.
 func (e *Endpoint) MarkUnhealthy() {
 	e.markUnhealthyAt(time.Now())
@@ -286,8 +308,7 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 	if disabled && wasEnabled {
 		e.Enabled = false
 		e.disabledAt = at
-		e.consecutiveHealthyProbes = 0
-		e.lastRecoveryPoll = time.Time{}
+		e.clearRecoveryStreakLocked()
 		transitioned = true
 	}
 	addr, refusals, isDirect := e.NetworkAddress, e.ConnectionRefusals, e.IsDirectRPC()
@@ -334,8 +355,7 @@ func (e *Endpoint) RecordProbeVerdict(recoveryPoll time.Time, recoveryHealthy bo
 
 	if e.Enabled {
 		// Enabled endpoints are the relay path's domain — keep the probe out of the refusal climb.
-		e.consecutiveHealthyProbes = 0
-		e.lastRecoveryPoll = time.Time{}
+		e.clearRecoveryStreakLocked()
 		return false
 	}
 
@@ -359,9 +379,7 @@ func (e *Endpoint) RecordProbeVerdict(recoveryPoll time.Time, recoveryHealthy bo
 
 	e.Enabled = true
 	e.ConnectionRefusals = 0
-	e.consecutiveHealthyProbes = 0
-	e.disabledAt = time.Time{}
-	e.lastRecoveryPoll = time.Time{}
+	e.clearRecoveryTrackingLocked()
 	utils.LavaFormatInfo("probe re-enabled recovered endpoint",
 		utils.LogAttr("endpoint", e.NetworkAddress),
 		utils.LogAttr("is_direct_rpc", e.IsDirectRPC()),
@@ -381,9 +399,7 @@ func (e *Endpoint) ResetHealth() bool {
 	}
 	e.ConnectionRefusals = 0
 	e.Enabled = true
-	e.consecutiveHealthyProbes = 0
-	e.disabledAt = time.Time{}
-	e.lastRecoveryPoll = time.Time{}
+	e.clearRecoveryTrackingLocked()
 	addr, isDirect := e.NetworkAddress, e.IsDirectRPC()
 	e.mu.Unlock()
 
@@ -969,8 +985,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 						if endpoint.Enabled {
 							endpoint.Enabled = false
 							endpoint.disabledAt = time.Now()
-							endpoint.consecutiveHealthyProbes = 0
-							endpoint.lastRecoveryPoll = time.Time{}
+							endpoint.clearRecoveryStreakLocked()
 						}
 						utils.LavaFormatWarning("disabling provider endpoint for the duration of current epoch.", nil,
 							utils.LogAttr("Endpoint", networkAddress),
@@ -993,9 +1008,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			endpoint.mu.Lock()
 			cswp.Endpoints[idx].Enabled = true // return enabled once we successfully reconnect
 			// Clear recovery tracking on re-enable so a future disable starts a fresh streak (F1).
-			cswp.Endpoints[idx].consecutiveHealthyProbes = 0
-			cswp.Endpoints[idx].disabledAt = time.Time{}
-			cswp.Endpoints[idx].lastRecoveryPoll = time.Time{}
+			cswp.Endpoints[idx].clearRecoveryTrackingLocked()
 			endpoint.mu.Unlock()
 			// successful new connection add to endpoints list
 			endpoints = append(endpoints, &EndpointAndChosenConnection{endpoint: endpoint, chosenEndpointConnection: endpointConnection})
