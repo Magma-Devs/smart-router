@@ -334,15 +334,6 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 	}
 }
 
-// HasConsensusBaseline reports the last computed baseline and whether a fresh majority existed
-// at the last Recompute, WITHOUT applying the TTL freshness check. Exposed for telemetry/tests;
-// not the sync-scoring path (that is GetConsensusBaseline, which enforces TTL).
-func (cs *ChainState) HasConsensusBaseline() (int64, bool) {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return cs.baseline, cs.hasBaseline
-}
-
 // ChainStateSnapshot is the RAW, NON-TTL-gated view of ChainState for read-only debug introspection
 // (MAG-2202 /debug/chain-state). Unlike GetLatestBlock / GetConsensusBaseline it never applies the
 // TTL freshness gate: black-box tests assert TTL expiry, downward realignment, and empty-snapshot

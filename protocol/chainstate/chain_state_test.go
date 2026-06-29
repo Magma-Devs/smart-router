@@ -62,7 +62,8 @@ func TestSetLatestBlock_OutlierGuard_OnlyWithBaseline(t *testing.T) {
 		{URL: "b", Block: 1001, ObservedAt: clk.now()},
 		{URL: "c", Block: 1000, ObservedAt: clk.now()},
 	})
-	base, ok := cs.HasConsensusBaseline()
+	snap := cs.DebugSnapshot()
+	base, ok := snap.ConsensusBaseline, snap.HasBaseline
 	require.True(t, ok)
 	require.Equal(t, int64(1001), base, "baseline is the most-advanced block in the agreeing cluster")
 
@@ -195,8 +196,9 @@ func TestGetConsensusBaseline_HonorsTTL(t *testing.T) {
 	_, ok = cs.GetConsensusBaseline()
 	require.False(t, ok, "a baseline older than TTL is not a valid sync reference")
 
-	// HasConsensusBaseline ignores TTL (telemetry view) and still reports the last value.
-	base, has := cs.HasConsensusBaseline()
+	// DebugSnapshot ignores TTL (telemetry view) and still reports the last value.
+	snap := cs.DebugSnapshot()
+	base, has := snap.ConsensusBaseline, snap.HasBaseline
 	require.True(t, has)
 	require.Equal(t, int64(1000), base)
 }
@@ -384,7 +386,7 @@ func TestRecompute_NoBaselineLeavesGuardOff(t *testing.T) {
 
 	// Single fresh endpoint → no baseline → guard stays off → big advance still accepted.
 	cs.Recompute([]BlockObservation{{URL: "a", Block: 1000, ObservedAt: clk.now()}})
-	_, ok := cs.HasConsensusBaseline()
+	ok := cs.DebugSnapshot().HasBaseline
 	require.False(t, ok)
 	_, _, advanced := cs.SetLatestBlock(1_000_000)
 	require.True(t, advanced, "no baseline → no outlier guard (single-endpoint pod)")
@@ -401,12 +403,12 @@ func TestRecompute_EmptySnapshotClearsBaseline(t *testing.T) {
 		{URL: "a", Block: 1000, ObservedAt: clk.now()},
 		{URL: "b", Block: 1000, ObservedAt: clk.now()},
 	})
-	_, ok := cs.HasConsensusBaseline()
+	ok := cs.DebugSnapshot().HasBaseline
 	require.True(t, ok, "a fresh majority establishes the baseline")
 
 	// All endpoints gone → empty snapshot must clear the baseline.
 	cs.Recompute(nil)
-	_, ok = cs.HasConsensusBaseline()
+	ok = cs.DebugSnapshot().HasBaseline
 	require.False(t, ok, "an empty snapshot clears the baseline rather than leaving it stale")
 
 	// With the guard now off, a single new endpoint at a wildly different height is accepted

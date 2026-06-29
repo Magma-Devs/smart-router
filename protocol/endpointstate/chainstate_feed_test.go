@@ -168,7 +168,8 @@ func TestEndToEnd_ObservationsFeedChainStateTipAndConsensus(t *testing.T) {
 		cs.Recompute(obs)
 	}
 	recompute()
-	base, hasBase := cs.HasConsensusBaseline()
+	snap := cs.DebugSnapshot()
+	base, hasBase := snap.ConsensusBaseline, snap.HasBaseline
 	require.True(t, hasBase, "3 agreeing endpoints establish a consensus baseline")
 	require.Equal(t, int64(1000), base)
 

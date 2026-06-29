@@ -99,13 +99,13 @@ func TestRecomputeChainStateConsensus_EmptySnapshotClearsBaseline(t *testing.T) 
 		{URL: "a", Block: 1000, ObservedAt: now},
 		{URL: "b", Block: 1000, ObservedAt: now},
 	})
-	_, ok := cs.HasConsensusBaseline()
+	ok := cs.DebugSnapshot().HasBaseline
 	require.True(t, ok, "two agreeing endpoints establish the baseline")
 
 	// The monitor holds NO observations → SnapshotObservations is empty. The production glue must
 	// still drive Recompute(empty), clearing the baseline rather than leaving it stale.
 	rpcss.recomputeChainStateConsensus()
-	_, ok = cs.HasConsensusBaseline()
+	ok = cs.DebugSnapshot().HasBaseline
 	require.False(t, ok, "Finding 5: an empty snapshot clears the stale baseline")
 }
 
@@ -146,7 +146,8 @@ func TestRecomputeChainStateConsensus_PopulatedSnapshotSetsBaseline(t *testing.T
 	}
 
 	rpcss.recomputeChainStateConsensus()
-	base, ok := cs.HasConsensusBaseline()
+	snap := cs.DebugSnapshot()
+	base, ok := snap.ConsensusBaseline, snap.HasBaseline
 	require.True(t, ok, "two agreeing relay-fed endpoints form a majority through the production glue")
 	require.Equal(t, int64(1500), base)
 }
