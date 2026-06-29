@@ -1,27 +1,29 @@
 # Smart Router Direct RPC Configuration — multi-chain + CROSS-VALIDATION
 # Mode: Direct connections to public endpoints (no Lava providers!)
 #
-# Same upstream layout as smartrouter_multichain.yml — every bundled chain on
-# its own port, with TWO distinct sources per chain<>interface (the Lava public
-# gateway, group-label: lava; and PublicNode, group-label: publicnode) — but
-# this variant ALSO enables per-method cross-validation so reads are corroborated
-# across both vendor groups before being returned.
+# Same upstream layout as smartrouter_multichain.yml — every bundled example
+# chain on its own port — but this variant ALSO enables per-method
+# cross-validation so reads are corroborated across two distinct vendor groups
+# before being returned. Only chains with TWO public vendor groups carry a
+# policy (BTC and HYPERLIQUID have a single public source here, so they're served
+# without corroboration).
 #
-#   3360  ETH1     jsonrpc        eth1.lava.build       + ethereum-rpc.publicnode.com
-#   3361  ARBITRUM jsonrpc        arbitrum.lava.build   + arbitrum-one-rpc.publicnode.com
-#   3362  BASE     jsonrpc        base.lava.build       + base-rpc.publicnode.com
-#   3363  SOLANA   jsonrpc        solana.lava.build     + solana-rpc.publicnode.com
-#   3364  LAVA     rest           lava.rest.lava.build  + lava-rest.publicnode.com
-#   3365  LAVA     tendermintrpc  lava.tendermintrpc…   + lava-rpc.publicnode.com
-#   3366  LAVA     grpc           lava.grpc.lava.build  + lava-grpc.publicnode.com
+#   3360  ETH1        jsonrpc        ethereum-rpc.publicnode.com + mainnet.gateway.tenderly.co
+#   3361  SOLANA      jsonrpc        solana-rpc.publicnode.com   + api.mainnet-beta.solana.com
+#   3362  BTC         jsonrpc        bitcoin-rpc.publicnode.com
+#   3363  HYPERLIQUID jsonrpc        rpc.hyperliquid.xyz/evm
+#   3364  COSMOSHUB   rest           cosmos-rest.publicnode.com  + cosmos-api.polkachu.com
+#   3365  COSMOSHUB   tendermintrpc  cosmos-rpc.publicnode.com   + cosmos-rpc.polkachu.com
+#   3366  COSMOSHUB   grpc           cosmos-grpc.publicnode.com  + cosmos-grpc.polkachu.com
+#   3367  APT1        rest           aptos-rest.publicnode.com   + fullnode.mainnet.aptoslabs.com
 #
-# The EVM chains (ETH1/ARBITRUM/BASE, which import ETH1) require a ws:// leg, so
-# each pairs an https url with a wss one. SOLANA is HTTP-only here, so start the
+# ETH1 requires a ws:// leg, so it pairs an https url with a wss one. SOLANA,
+# BTC, HYPERLIQUID (jsonrpc) and APT1 (rest) are HTTP-only here, so start the
 # router with --skip-websocket-verification (the docker-compose example does this).
 #
 # Specs resolve from the bundled specs/ (pass --use-static-spec specs/): ETH1,
-# ARBITRUM (imports ETH1), BASE (imports ETH1), SOLANA, and LAVA (imports
-# COSMOSSDK, which imports IBC + TENDERMINT) — all present in the repo.
+# SOLANA, BTC, HYPERLIQUID, APT1, and COSMOSHUB (imports COSMOSSDK50 + COSMOSWASM,
+# which pull in COSMOSSDK -> IBC + TENDERMINT) — all present in the repo.
 
 # Prometheus metrics (scrape at http://<host>:7779/metrics). Set to
 # "disabled" to turn off. Read via viper, so the --metrics-listen-address
@@ -35,49 +37,46 @@ endpoints:
     network-address: "0.0.0.0:3360"
 
   - listen-address: "0.0.0.0:3361"
-    chain-id: "ARBITRUM"
+    chain-id: "SOLANA"
     api-interface: "jsonrpc"
     network-address: "0.0.0.0:3361"
 
   - listen-address: "0.0.0.0:3362"
-    chain-id: "BASE"
+    chain-id: "BTC"
     api-interface: "jsonrpc"
     network-address: "0.0.0.0:3362"
 
   - listen-address: "0.0.0.0:3363"
-    chain-id: "SOLANA"
+    chain-id: "HYPERLIQUID"
     api-interface: "jsonrpc"
     network-address: "0.0.0.0:3363"
 
   - listen-address: "0.0.0.0:3364"
-    chain-id: "LAVA"
+    chain-id: "COSMOSHUB"
     api-interface: "rest"
     network-address: "0.0.0.0:3364"
 
   - listen-address: "0.0.0.0:3365"
-    chain-id: "LAVA"
+    chain-id: "COSMOSHUB"
     api-interface: "tendermintrpc"
     network-address: "0.0.0.0:3365"
 
   - listen-address: "0.0.0.0:3366"
-    chain-id: "LAVA"
+    chain-id: "COSMOSHUB"
     api-interface: "grpc"
     network-address: "0.0.0.0:3366"
 
+  - listen-address: "0.0.0.0:3367"
+    chain-id: "APT1"
+    api-interface: "rest"
+    network-address: "0.0.0.0:3367"
+
 direct-rpc:
-  # Two distinct sources per chain<>interface: the Lava public gateway
-  # (group-label: lava) and PublicNode (group-label: publicnode). The
-  # cross-validation block below requires both groups to corroborate reads.
+  # Two distinct sources per chain<>interface where a second public vendor
+  # exists. The cross-validation block below requires both groups to corroborate
+  # reads.
 
   # ---- Ethereum (ETH1, chainId 0x1) ----
-  - name: "eth-lava"
-    group-label: "lava"
-    chain-id: "ETH1"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://eth1.lava.build"
-      - url: "wss://eth1.lava.build/websocket"
-
   - name: "eth-publicnode"
     group-label: "publicnode"
     chain-id: "ETH1"
@@ -86,116 +85,135 @@ direct-rpc:
       - url: "https://ethereum-rpc.publicnode.com"
       - url: "wss://ethereum-rpc.publicnode.com"
 
-  # ---- Arbitrum One (ARBITRUM, chainId 0xa4b1) ----
-  - name: "arb-lava"
-    group-label: "lava"
-    chain-id: "ARBITRUM"
+  - name: "eth-tenderly"
+    group-label: "tenderly"
+    chain-id: "ETH1"
     api-interface: "jsonrpc"
     node-urls:
-      - url: "https://arbitrum.lava.build"
-      - url: "wss://arbitrum.lava.build/websocket"
+      - url: "https://mainnet.gateway.tenderly.co"
+      - url: "wss://mainnet.gateway.tenderly.co"
 
-  - name: "arb-publicnode"
-    group-label: "publicnode"
-    chain-id: "ARBITRUM"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://arbitrum-one-rpc.publicnode.com"
-      - url: "wss://arbitrum-one-rpc.publicnode.com"
-
-  # ---- Base (BASE, chainId 0x2105) ----
-  - name: "base-lava"
-    group-label: "lava"
-    chain-id: "BASE"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://base.lava.build"
-      - url: "wss://base.lava.build/websocket"
-
-  - name: "base-publicnode"
-    group-label: "publicnode"
-    chain-id: "BASE"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://base-rpc.publicnode.com"
-      - url: "wss://base-rpc.publicnode.com"
-
-  # ---- Solana (SOLANA) — HTTP-only; run with --skip-websocket-verification ----
-  - name: "sol-lava"
-    group-label: "lava"
-    chain-id: "SOLANA"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://solana.lava.build"
-
+  # ---- Solana (SOLANA) — HTTP-only ----
   - name: "sol-publicnode"
     group-label: "publicnode"
     chain-id: "SOLANA"
     api-interface: "jsonrpc"
     node-urls:
       - url: "https://solana-rpc.publicnode.com"
+        # PublicNode's free tier blocks getProgramAccounts (the spec's
+        # tokens-owner-indexed verification), so skip that startup check here.
+        skip-verifications:
+          - tokens-owner-indexed
 
-  # ---- Lava (LAVA) — REST + Tendermint RPC + gRPC, two sources each ----
-  - name: "lava-rest-lava"
-    group-label: "lava"
-    chain-id: "LAVA"
+  - name: "sol-solana-labs"
+    group-label: "solana-labs"
+    chain-id: "SOLANA"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://api.mainnet-beta.solana.com"
+
+  # ---- Bitcoin (BTC) — single public source; served without corroboration ----
+  - name: "btc-publicnode"
+    group-label: "publicnode"
+    chain-id: "BTC"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://bitcoin-rpc.publicnode.com"
+
+  # ---- Hyperliquid (HYPERLIQUID) — single public source; served without corroboration ----
+  - name: "hyperliquid-official"
+    group-label: "hyperliquid"
+    chain-id: "HYPERLIQUID"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://rpc.hyperliquid.xyz/evm"
+
+  # ---- Cosmos Hub (COSMOSHUB) — REST + Tendermint RPC + gRPC, two sources each ----
+  - name: "cosmos-rest-publicnode"
+    group-label: "publicnode"
+    chain-id: "COSMOSHUB"
     api-interface: "rest"
     node-urls:
-      - url: "https://lava.rest.lava.build"
+      - url: "https://cosmos-rest.publicnode.com"
         timeout: 10s
+        skip-verifications:
+          - pruning
 
-  - name: "lava-rest-publicnode"
-    group-label: "publicnode"
-    chain-id: "LAVA"
+  - name: "cosmos-rest-polkachu"
+    group-label: "polkachu"
+    chain-id: "COSMOSHUB"
     api-interface: "rest"
     node-urls:
-      - url: "https://lava-rest.publicnode.com:443"
+      - url: "https://cosmos-api.polkachu.com"
         timeout: 10s
         skip-verifications:
           - pruning
 
-  - name: "lava-tendermintrpc-lava"
-    group-label: "lava"
-    chain-id: "LAVA"
+  - name: "cosmos-tendermintrpc-publicnode"
+    group-label: "publicnode"
+    chain-id: "COSMOSHUB"
     api-interface: "tendermintrpc"
     node-urls:
-      - url: "https://lava.tendermintrpc.lava.build"
+      - url: "https://cosmos-rpc.publicnode.com:443"
         timeout: 10s
-      - url: "wss://lava.tendermintrpc.lava.build/websocket"
+        skip-verifications:
+          - pruning
+      - url: "wss://cosmos-rpc.publicnode.com:443/websocket"
+        skip-verifications:
+          - pruning
 
-  - name: "lava-tendermintrpc-publicnode"
-    group-label: "publicnode"
-    chain-id: "LAVA"
+  - name: "cosmos-tendermintrpc-polkachu"
+    group-label: "polkachu"
+    chain-id: "COSMOSHUB"
     api-interface: "tendermintrpc"
     node-urls:
-      - url: "https://lava-rpc.publicnode.com:443"
+      # Polkachu serves tendermint over HTTP only (no websocket leg).
+      - url: "https://cosmos-rpc.polkachu.com"
         timeout: 10s
         skip-verifications:
           - pruning
-      - url: "wss://lava-rpc.publicnode.com:443/websocket"
-        skip-verifications:
-          - pruning
 
-  - name: "lava-grpc-lava"
-    group-label: "lava"
-    chain-id: "LAVA"
-    api-interface: "grpc"
-    node-urls:
-      - url: "grpcs://lava.grpc.lava.build:443"
-        auth-config:
-          use-tls: true
-
-  - name: "lava-grpc-publicnode"
+  - name: "cosmos-grpc-publicnode"
     group-label: "publicnode"
-    chain-id: "LAVA"
+    chain-id: "COSMOSHUB"
     api-interface: "grpc"
     node-urls:
-      - url: "grpcs://lava-grpc.publicnode.com:443"
+      - url: "grpcs://cosmos-grpc.publicnode.com:443"
         auth-config:
           use-tls: true
         skip-verifications:
           - pruning
           - tx-indexing
+
+  - name: "cosmos-grpc-polkachu"
+    group-label: "polkachu"
+    chain-id: "COSMOSHUB"
+    api-interface: "grpc"
+    node-urls:
+      - url: "grpc://cosmos-grpc.polkachu.com:14990"
+        # Polkachu's gRPC is plaintext (no TLS), so explicitly allow it.
+        grpc-config:
+          allow-insecure: true
+        skip-verifications:
+          - pruning
+          - tx-indexing
+
+  # ---- Aptos (APT1) — REST, two sources; HTTP-only ----
+  - name: "aptos-publicnode"
+    group-label: "publicnode"
+    chain-id: "APT1"
+    api-interface: "rest"
+    node-urls:
+      - url: "https://aptos-rest.publicnode.com/v1"
+        timeout: 10s
+
+  - name: "aptos-labs"
+    group-label: "aptos-labs"
+    chain-id: "APT1"
+    api-interface: "rest"
+    node-urls:
+      - url: "https://fullnode.mainnet.aptoslabs.com/v1"
+        timeout: 10s
 
 # Per-method cross-validation. Each knob resolves as clamp(caller, floor, cap):
 # floor = operator minimum the caller may exceed, cap = operator maximum that
@@ -203,8 +221,9 @@ direct-rpc:
 # api-interface match case-insensitively; method exactly. Policies on stateful
 # (write) methods are rejected at startup.
 #
-# With exactly two group-labels per chain<>interface (lava + publicnode), the
-# meaningful diversity bar is min-groups: 2 — both vendors must corroborate.
+# Each policy below targets a chain<>interface served by two group-labels
+# (publicnode + a second vendor). The meaningful diversity bar is min-groups: 2 —
+# both vendors must corroborate.
 cross-validation:
   policies:
     # ETH1 — balance reads corroborated by both vendors before returning.
@@ -214,7 +233,7 @@ cross-validation:
       enabled: true
       agreement-threshold: 2          # both sources must return identical responses
       max-participants: 2             # fan out to both
-      min-groups: 2                   # spanning both distinct group-labels (lava + publicnode)
+      min-groups: 2                   # spanning both distinct group-labels (publicnode + tenderly)
 
     # ETH1 — receipts must be unanimous across both groups.
     - chain-id: ETH1
@@ -225,17 +244,17 @@ cross-validation:
       max-participants: 2
       min-groups: 2
 
-    # BASE — same balance corroboration on the Base port.
-    - chain-id: BASE
+    # SOLANA — epoch info corroborated across both groups.
+    - chain-id: SOLANA
       api-interface: jsonrpc
-      method: eth_getBalance
+      method: getEpochInfo
       enabled: true
       agreement-threshold: 2
       max-participants: 2
       min-groups: 2
 
-    # LAVA REST — corroborate a bank balance query across both vendors.
-    - chain-id: LAVA
+    # COSMOSHUB REST — corroborate a bank balance query across both vendors.
+    - chain-id: COSMOSHUB
       api-interface: rest
       method: cosmos.bank.v1beta1.Query/Balance
       enabled: true

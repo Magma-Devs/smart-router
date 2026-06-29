@@ -1,12 +1,14 @@
-# Smart Router Direct RPC Configuration
-# Mode: Direct connections to Ethereum JSON-RPC endpoints (no Lava providers!)
+# Smart Router Direct RPC Configuration — Ethereum (ETH1)
+# Mode: Direct connections to public Ethereum JSON-RPC endpoints (no Lava providers!)
 #
-# 3 upstreams, each HTTP + WebSocket (the ETH1 spec requires ws for
+# 2 upstreams, each HTTP + WebSocket (the ETH1 spec requires ws for
 # subscriptions; http-only providers are excluded at startup):
-#   1. Lava public gateway (eth1.lava.build, ws at /websocket)
-#   2. PublicNode
-#   3. Tenderly public gateway
+#   1. PublicNode          (ethereum-rpc.publicnode.com, ws on the same host)
+#   2. Tenderly public gateway (mainnet.gateway.tenderly.co)
 # All verified live (eth_chainId == 0x1, eth_blockNumber + ws handshake OK).
+#
+# Run it:
+#   smartrouter config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
 
 # Prometheus metrics (scrape at http://<host>:7779/metrics). Set to
 # "disabled" to turn off. Read via viper, so the --metrics-listen-address
@@ -24,16 +26,7 @@ direct-rpc:
   # group-diversity policies can require a quorum to span N distinct groups. Omit it and the
   # provider falls into the implicit "default" group (no effect unless a policy requires diversity).
 
-  # Endpoint 1 — Lava public gateway (HTTP + WS)
-  - name: "eth-lava"
-    group-label: "lava"
-    chain-id: "ETH1"
-    api-interface: "jsonrpc"
-    node-urls:
-      - url: "https://eth1.lava.build"
-      - url: "wss://eth1.lava.build/websocket"
-
-  # Endpoint 2 — PublicNode (HTTP + WS)
+  # Endpoint 1 — PublicNode (HTTP + WS)
   - name: "eth-publicnode"
     group-label: "publicnode"
     chain-id: "ETH1"
@@ -42,7 +35,7 @@ direct-rpc:
       - url: "https://ethereum-rpc.publicnode.com"
       - url: "wss://ethereum-rpc.publicnode.com"
 
-  # Endpoint 3 — Tenderly public gateway (HTTP + WS)
+  # Endpoint 2 — Tenderly public gateway (HTTP + WS)
   - name: "eth-tenderly"
     group-label: "tenderly"
     chain-id: "ETH1"

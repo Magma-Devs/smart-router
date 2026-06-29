@@ -1,0 +1,115 @@
+# Smart Router Direct RPC Configuration — Cosmos Hub (COSMOSHUB)
+# Mode: Direct connections to public Cosmos Hub endpoints (no Lava providers!)
+#
+# Each of the three Cosmos Hub interfaces (rest, grpc, tendermintrpc) is backed
+# by two DISTINCT upstream sources so cross-validation / group-diversity
+# policies have something real to span:
+#   1. PublicNode   (*.publicnode.com)     group-label: publicnode
+#   2. Polkachu     (*.polkachu.com)       group-label: polkachu
+#
+# Public community endpoints are rate-limited and best-effort — swap in your own
+# nodes for production. The COSMOSHUB spec imports COSMOSSDK50 + COSMOSWASM
+# (which pull in COSMOSSDK -> IBC + TENDERMINT); all of those ship in specs/.
+#
+# NOTE: the REST and Tendermint-RPC legs verify cleanly against these public
+# endpoints. The gRPC leg relies on server reflection for the startup spec
+# verification, which the public gRPC gateways throttle — so the gRPC startup
+# check is best-effort here. A real Cosmos Hub node (or a gateway that allows
+# full reflection) verifies gRPC cleanly; swap one in for production.
+#
+# Run it:
+#   smartrouter config/smartrouter_examples/smartrouter_cosmos.yml --use-static-spec specs/
+
+metrics-listen-address: "0.0.0.0:7779"
+
+endpoints:
+  - network-address: "0.0.0.0:3360"
+    chain-id: "COSMOSHUB"
+    api-interface: "rest"
+
+  - network-address: "0.0.0.0:3361"
+    chain-id: "COSMOSHUB"
+    api-interface: "grpc"
+
+  - network-address: "0.0.0.0:3362"
+    chain-id: "COSMOSHUB"
+    api-interface: "tendermintrpc"
+
+direct-rpc:
+  # group-label tags the provider's vendor/operator group so cross-validation
+  # group-diversity policies can require a quorum to span N distinct groups.
+
+  # ---- REST — 2 sources ----
+  - name: "cosmos-rest-publicnode"
+    group-label: "publicnode"
+    chain-id: "COSMOSHUB"
+    api-interface: "rest"
+    node-urls:
+      - url: "https://cosmos-rest.publicnode.com"
+        timeout: 10s
+        skip-verifications:
+          - pruning
+
+  - name: "cosmos-rest-polkachu"
+    group-label: "polkachu"
+    chain-id: "COSMOSHUB"
+    api-interface: "rest"
+    node-urls:
+      - url: "https://cosmos-api.polkachu.com"
+        timeout: 10s
+        skip-verifications:
+          - pruning
+
+  # ---- gRPC — 2 sources ----
+  # grpcs:// implies TLS (:443). The Polkachu endpoint is a plaintext gRPC port,
+  # so it uses grpc:// without auth-config.use-tls.
+  - name: "cosmos-grpc-publicnode"
+    group-label: "publicnode"
+    chain-id: "COSMOSHUB"
+    api-interface: "grpc"
+    node-urls:
+      - url: "grpcs://cosmos-grpc.publicnode.com:443"
+        auth-config:
+          use-tls: true
+        skip-verifications:
+          - pruning
+          - tx-indexing
+
+  - name: "cosmos-grpc-polkachu"
+    group-label: "polkachu"
+    chain-id: "COSMOSHUB"
+    api-interface: "grpc"
+    node-urls:
+      - url: "grpc://cosmos-grpc.polkachu.com:14990"
+        # Polkachu's gRPC is plaintext (no TLS), so explicitly allow it.
+        grpc-config:
+          allow-insecure: true
+        skip-verifications:
+          - pruning
+          - tx-indexing
+
+  # ---- TendermintRPC — 2 sources (HTTP + WS where the provider serves it).
+  # PublicNode serves a real tendermint websocket at /websocket; Polkachu serves
+  # tendermint over HTTP only, so it has no wss leg. ----
+  - name: "cosmos-tendermintrpc-publicnode"
+    group-label: "publicnode"
+    chain-id: "COSMOSHUB"
+    api-interface: "tendermintrpc"
+    node-urls:
+      - url: "https://cosmos-rpc.publicnode.com:443"
+        timeout: 10s
+        skip-verifications:
+          - pruning
+      - url: "wss://cosmos-rpc.publicnode.com:443/websocket"
+        skip-verifications:
+          - pruning
+
+  - name: "cosmos-tendermintrpc-polkachu"
+    group-label: "polkachu"
+    chain-id: "COSMOSHUB"
+    api-interface: "tendermintrpc"
+    node-urls:
+      - url: "https://cosmos-rpc.polkachu.com"
+        timeout: 10s
+        skip-verifications:
+          - pruning

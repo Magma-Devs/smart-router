@@ -1,0 +1,27 @@
+# Smart Router Direct RPC Configuration — Hyperliquid (HYPERLIQUID)
+# Mode: Direct connection to the public Hyperliquid EVM JSON-RPC endpoint (no Lava providers!)
+#
+# Upstream: the official Hyperliquid EVM RPC (rpc.hyperliquid.xyz/evm), HTTP.
+# It's a standard EVM JSON-RPC (eth_chainId == 0x3e7 / 999) but serves no
+# websocket leg, so start the router with --skip-websocket-verification.
+#
+# Run it:
+#   smartrouter config/smartrouter_examples/smartrouter_hyperliquid.yml \
+#     --use-static-spec specs/ --skip-websocket-verification
+
+# Prometheus metrics (scrape at http://<host>:7779/metrics). "disabled" turns it off.
+metrics-listen-address: "0.0.0.0:7779"
+
+endpoints:
+  - listen-address: "0.0.0.0:3360"
+    chain-id: "HYPERLIQUID"
+    api-interface: "jsonrpc"
+    network-address: "0.0.0.0:3360"
+
+direct-rpc:
+  - name: "hyperliquid-official"
+    group-label: "hyperliquid"
+    chain-id: "HYPERLIQUID"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://rpc.hyperliquid.xyz/evm"

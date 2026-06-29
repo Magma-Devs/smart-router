@@ -50,7 +50,7 @@ The fastest way to start: install the binary, point it at a YAML config, run.
 
 ```bash
 make install
-smartrouter config/smartrouter_examples/smartrouter_lava.yml --use-static-spec specs/
+smartrouter config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
 ```
 
 After running, you get:
@@ -88,7 +88,7 @@ when the spec supports subscriptions, a websocket check on `wss://` URLs).
 smartrouter health config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
 
 # Or probe an ad-hoc endpoint inline (address chain-id api-interface)
-smartrouter health https://eth1.lava.build ETH1 jsonrpc --use-static-spec specs/
+smartrouter health https://ethereum-rpc.publicnode.com ETH1 jsonrpc --use-static-spec specs/
 ```
 
 The report is the only thing on **stdout** (all logs go to stderr), so it pipes cleanly into `jq`
@@ -110,10 +110,10 @@ is printed first.
   "error": null,
   "results": [
     {
-      "name": "eth-lava",
+      "name": "eth-publicnode",
       "chainId": "ETH1",
       "apiInterface": "jsonrpc",
-      "url": "wss://eth1.lava.build/websocket",
+      "url": "wss://ethereum-rpc.publicnode.com",
       "transport": "ws",
       "addons": ["debug"],
       "extensions": ["archive"],
@@ -190,7 +190,7 @@ The compose sets `NEXT_PUBLIC_LOCAL_MODE=true`, so the dashboard's live-test pan
 
 ### Configuration
 
-Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_lava.yml` for an example targeting the Lava blockchain with three distinct sources per interface, and `config/smartrouter_examples/smartrouter_multichain_cross_validation.yml` for a multi-chain fleet with an active [cross-validation](docs/CROSS-VALIDATION.md) policy block.
+Provider endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_cosmos.yml` for an example targeting Cosmos Hub with two distinct public sources per interface (REST + gRPC + Tendermint RPC), and `config/smartrouter_examples/smartrouter_multichain_cross_validation.yml` for a multi-chain fleet with an active [cross-validation](docs/CROSS-VALIDATION.md) policy block. Every bundled example points at public RPC vendors (PublicNode and each chain's official/community endpoints) — no API key required.
 
 Setup scripts are available in `scripts/pre_setups/`:
 
@@ -487,9 +487,9 @@ For vulnerability reporting, see [SECURITY.md](SECURITY.md). Do **not** open pub
 
 ## License
 
-This repository is source-available under the terms described in [LICENSE.md](LICENSE.md). Noncommercial use is permitted subject to those terms, including personal, educational, research, evaluation, development, and testing use.
+Smart Router is **dual-licensed**. Noncommercial use is free under the [PolyForm Noncommercial License 1.0.0](LICENSE.md), including personal, educational, research, evaluation, development, and testing use. Commercial use requires a separate written Enterprise License from Magma Devs. See [LICENSING.md](LICENSING.md) for the dual-license summary and the full commercial terms.
 
-Any commercial use, production use by or for a commercial entity, hosted/SaaS or managed-service use offered to customers or other third parties as part of a commercial product or service, resale, redistribution as part of a commercial offering, use as part of a paid product, or use of premium/enterprise features requires a separate written Enterprise License from Magma Devs. Review [LICENSE.md](LICENSE.md) for the full terms. For Enterprise licensing, contact Magma Devs at [sales@magmadevs.com](mailto:sales@magmadevs.com).
+Any commercial use, production use by or for a commercial entity, hosted/SaaS or managed-service use offered to customers or other third parties as part of a commercial product or service, resale, redistribution as part of a commercial offering, use as part of a paid product, or use of premium/enterprise features requires a separate written Enterprise License from Magma Devs. For Enterprise licensing, contact Magma Devs at [sales@magmadevs.com](mailto:sales@magmadevs.com).
 
 ## Community
 

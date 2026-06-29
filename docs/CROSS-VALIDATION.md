@@ -32,18 +32,18 @@ Cross-validation only does something useful when both pieces are present:
 
 ```yaml
 direct-rpc:
-  - name: eth-lava
-    group-label: "lava"          # <-- group A
-    chain-id: ETH1
-    api-interface: jsonrpc
-    node-urls:
-      - url: https://eth1.lava.build
   - name: eth-publicnode
-    group-label: "publicnode"    # <-- group B
+    group-label: "publicnode"    # <-- group A
     chain-id: ETH1
     api-interface: jsonrpc
     node-urls:
       - url: https://ethereum-rpc.publicnode.com
+  - name: eth-tenderly
+    group-label: "tenderly"      # <-- group B
+    chain-id: ETH1
+    api-interface: jsonrpc
+    node-urls:
+      - url: https://mainnet.gateway.tenderly.co
 
 cross-validation:
   policies:
@@ -53,7 +53,7 @@ cross-validation:
       enabled: true              # mandate CV even with no caller headers
       agreement-threshold: 2     # 2 identical responses form the quorum
       max-participants: 2        # fan out to both
-      min-groups: 2              # the quorum must span both groups (lava + publicnode)
+      min-groups: 2              # the quorum must span both groups (publicnode + tenderly)
 ```
 
 ## Worked examples
@@ -62,8 +62,8 @@ Two bundled example configs demonstrate the full setup end to end:
 
 | Example config | What it shows |
 | --- | --- |
-| [`config/smartrouter_examples/smartrouter_lava.yml`](../config/smartrouter_examples/smartrouter_lava.yml) | **Three** distinct sources per LAVA interface (Lava gateway · PublicNode · F5 Nodes), each `group-label`'d — the *fleet* a diversity policy needs. No policy block, so it's caller-driven until you add one. |
-| [`config/smartrouter_examples/smartrouter_multichain_cross_validation.yml`](../config/smartrouter_examples/smartrouter_multichain_cross_validation.yml) | A full multi-chain fleet with **two** sources per `chain<>interface` (Lava gateway + PublicNode) **and an active `cross-validation:` policy block** mandating `min-groups: 2` corroboration on `eth_getBalance`, `eth_getTransactionReceipt`, and a LAVA REST bank balance. |
+| [`config/smartrouter_examples/smartrouter_cosmos.yml`](../config/smartrouter_examples/smartrouter_cosmos.yml) | **Two** distinct sources per Cosmos Hub interface (PublicNode · Polkachu), each `group-label`'d — the *fleet* a diversity policy needs. No policy block, so it's caller-driven until you add one. |
+| [`config/smartrouter_examples/smartrouter_multichain_cross_validation.yml`](../config/smartrouter_examples/smartrouter_multichain_cross_validation.yml) | A full multi-chain fleet with **two** sources per `chain<>interface` (PublicNode + a second public vendor) **and an active `cross-validation:` policy block** mandating `min-groups: 2` corroboration on `eth_getBalance`, `eth_getTransactionReceipt`, Solana `getEpochInfo`, and a Cosmos Hub REST bank balance. |
 
 Its plain (no-policy) sibling, [`smartrouter_multichain.yml`](../config/smartrouter_examples/smartrouter_multichain.yml), has the same two-source-per-interface fleet but leaves cross-validation off — diff the two to see exactly what the `cross-validation:` block adds.
 
