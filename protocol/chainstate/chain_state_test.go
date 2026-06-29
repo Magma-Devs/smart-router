@@ -283,6 +283,24 @@ func TestComputeMajorityBaseline_BucketBoundary(t *testing.T) {
 	})
 }
 
+// TestComputeMajorityBaseline_OverlappingTiePrefersHighest covers the staircase case where two
+// equal-size majority windows overlap: [1000,1002,1004] with BucketWidth 2 has both [1000,1002]
+// and [1002,1004] as strict 2-of-3 majorities (sharing 1002). The tie must resolve to the
+// most-advanced window so the baseline is not understated (PR #143 P2). Without the highest-max
+// tie-break this returns 1002.
+func TestComputeMajorityBaseline_OverlappingTiePrefersHighest(t *testing.T) {
+	cfg := Config{BucketWidth: 2, OutlierThreshold: 100, StalenessWindow: 10 * time.Second}
+	now := time.Unix(1_700_000_000, 0)
+
+	base, ok := computeMajorityBaseline([]BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: now},
+		{URL: "b", Block: 1002, ObservedAt: now},
+		{URL: "c", Block: 1004, ObservedAt: now},
+	}, now, cfg)
+	require.True(t, ok, "two overlapping 2-of-3 windows still form a strict majority")
+	require.Equal(t, int64(1004), base, "a tie between equal-size windows must pick the most-advanced, not understate the baseline")
+}
+
 func TestComputeMajorityBaseline_FreshnessAndDedup(t *testing.T) {
 	cfg := Config{BucketWidth: 2, OutlierThreshold: 100, StalenessWindow: 10 * time.Second}
 	now := time.Unix(1_700_000_000, 0)

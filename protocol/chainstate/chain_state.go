@@ -369,9 +369,12 @@ func (cs *ChainState) DebugSnapshot() ChainStateSnapshot {
 //   - strict majority > 50%: find the widest cluster of votes that all lie within BucketWidth of
 //     each other (distance-aware sliding window over sorted blocks, NOT fixed bucket boundaries —
 //     so two endpoints one block apart still agree, Finding 3). A cluster wins only if it holds
-//     more than half the votes AND at least 2; its most-advanced block is the baseline. A strict
-//     majority cluster is unique (two >50% clusters cannot be disjoint), so the result is
-//     deterministic regardless of map-iteration order.
+//     more than half the votes AND at least 2; its most-advanced block is the baseline. Equal-size
+//     majority windows CAN coexist when they overlap (e.g. a staircase [1000,1002,1004] with
+//     BucketWidth 2 has two 2-of-3 windows sharing 1002) — they are not disjoint, so the
+//     ">50% clusters are unique" property only rules out DISJOINT rivals. Ties are broken toward
+//     the most-advanced window so the baseline is never understated; combined with the block sort
+//     this makes the result deterministic regardless of map-iteration order.
 //
 // Returns (baseline, true) only when a cluster wins; otherwise (0, false).
 func computeMajorityBaseline(obs []BlockObservation, now time.Time, cfg Config) (int64, bool) {
@@ -402,14 +405,15 @@ func computeMajorityBaseline(obs []BlockObservation, now time.Time, cfg Config) 
 	// Distance-aware clustering: slide a window [i..j] over the sorted blocks, keeping it no
 	// wider than BucketWidth. The widest such window is the largest set of endpoints that agree
 	// on the tip within tolerance. blocks[j] is the window max (sorted), so it is the candidate
-	// baseline for that window.
+	// baseline for that window. On a TIE in window size, prefer the most-advanced window (higher
+	// blocks[j]) so an overlapping equal-size cluster never understates the baseline.
 	bestCount, bestMax := 0, int64(0)
 	i := 0
 	for j := 0; j < len(blocks); j++ {
 		for blocks[j]-blocks[i] > cfg.BucketWidth {
 			i++
 		}
-		if count := j - i + 1; count > bestCount {
+		if count := j - i + 1; count > bestCount || (count == bestCount && blocks[j] > bestMax) {
 			bestCount = count
 			bestMax = blocks[j]
 		}
