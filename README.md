@@ -189,6 +189,12 @@ The compose sets `NEXT_PUBLIC_LOCAL_MODE=true`, so the dashboard's live-test pan
 
 > The `admin` / `password` default is for local use only — set `DASHBOARD_PASSWORD` to a real secret for any non-local deployment.
 
+## AI / Codex setup
+
+Using Codex or another AI coding agent to run Smart Router locally?
+
+See [AGENTS.md](./AGENTS.md).
+
 ### Configuration
 
 Upstream endpoints are configured in a YAML file. See `config/smartrouter_examples/smartrouter_cosmos.yml` for an example targeting Cosmos Hub with two distinct public sources per interface (REST + gRPC + Tendermint RPC), and `config/smartrouter_examples/smartrouter_multichain_cross_validation.yml` for a multi-chain fleet with an active [cross-validation](docs/CROSS-VALIDATION.md) policy block. Every bundled example points at public RPC vendors (PublicNode and each chain's official/community endpoints) — no API key required.
