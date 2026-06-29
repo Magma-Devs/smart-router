@@ -261,6 +261,15 @@ func (cs *ChainState) GetConsensusBaselineWithTime() (block int64, at time.Time,
 	return cs.baseline, cs.baselineSince, true
 }
 
+// ConsensusBucketWidth returns the clustering tolerance (in blocks) used to form the consensus
+// baseline. The winning cluster spans at most this many blocks, so an endpoint within
+// BucketWidth of the baseline is by definition inside the agreeing cluster — sync-gap consumers
+// use this to avoid charging an in-consensus endpoint a (bounded) gap when the baseline is the
+// cluster's most-advanced block (PR #143). It is an immutable config value, so no lock is taken.
+func (cs *ChainState) ConsensusBucketWidth() int64 {
+	return cs.cfg.BucketWidth
+}
+
 // Initialized reports whether ChainState has ever accepted a positive observation. It is sticky
 // — once true it never reverts — so callers can distinguish a genuine cold start (allow a
 // bootstrap fallback) from a tip that has merely gone stale by TTL (do NOT revive a frozen

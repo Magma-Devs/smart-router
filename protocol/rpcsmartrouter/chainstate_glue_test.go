@@ -259,3 +259,32 @@ func TestSiteC_SyncReferenceIsConsensusBaseline(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int64(1000), baseline, "Site C scores against the majority baseline, not the lone optimistic tip")
 }
+
+// TestSiteC_InClusterEndpointChargedNoSyncGap covers PR #143: the baseline is the winning
+// cluster's MOST-ADVANCED block, so a majority that sits one cluster-step below it would be
+// charged a (bounded) sync-gap against a tip only the fastest cluster member reported. Site C
+// zeroes the gap for any endpoint within ConsensusBucketWidth of the baseline (the cluster spans
+// at most BucketWidth, so such an endpoint is inside the agreeing majority). This test pins the
+// arithmetic the inline clamp at rpcsmartrouter_server.go relies on.
+func TestSiteC_InClusterEndpointChargedNoSyncGap(t *testing.T) {
+	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
+	now := time.Now()
+
+	// Two endpoints at 1000 (the mode) and one fast node at 1002, all within BucketWidth=2, so they
+	// form ONE 3-of-3 cluster whose most-advanced block (the baseline) is the lone fast node's 1002.
+	cs.Recompute([]chainstate.BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: now},
+		{URL: "b", Block: 1000, ObservedAt: now},
+		{URL: "c", Block: 1002, ObservedAt: now},
+	})
+	baseline, ok := cs.GetConsensusBaseline()
+	require.True(t, ok)
+	require.Equal(t, int64(1002), baseline, "baseline is the cluster's most-advanced block (P2 fix), not the mode")
+
+	// A majority endpoint at 1000 has a RAW gap of baseline-1000 = 2, equal to BucketWidth — it is
+	// inside the agreeing cluster, so the inline clamp (syncGap <= ConsensusBucketWidth) zeroes it.
+	width := cs.ConsensusBucketWidth()
+	require.Equal(t, int64(2), width)
+	require.LessOrEqual(t, baseline-int64(1000), width,
+		"an endpoint within BucketWidth of the baseline must not be charged a sync-gap")
+}

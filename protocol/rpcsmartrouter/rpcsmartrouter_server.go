@@ -1523,8 +1523,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						endpointLatest := rpcss.endpointTipBlock(targetEndpoint.NetworkAddress)
 						if endpointLatest > 0 {
 							syncGap = baseline - endpointLatest
-							if syncGap < 0 {
-								syncGap = 0 // Endpoint ahead of the baseline is fine
+							// The baseline is the winning cluster's MOST-ADVANCED block, but every
+							// endpoint within BucketWidth of it is inside that same agreeing cluster
+							// (the cluster spans at most BucketWidth). Charging such an endpoint a gap
+							// would penalize the consensus majority against a tip only the fastest
+							// cluster member reported (e.g. baseline 1002 from a lone fast node vs the
+							// 1000-majority). Treat in-cluster endpoints as fully synced (PR #143).
+							if syncGap <= rpcss.chainState.ConsensusBucketWidth() {
+								syncGap = 0
 							}
 							utils.LavaFormatDebug("calculated sync gap",
 								utils.LogAttr("endpoint", endpointAddress),
