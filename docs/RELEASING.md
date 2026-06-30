@@ -1,10 +1,22 @@
 # Releasing smart-router
 
-Releasing is automatic on tag push. The workflow generates the
-`CHANGELOG.md` entry via Gemini Flash, commits it back to `main`, builds
-binaries + multi-arch Docker image + cosign-signed checksums, and
-publishes a **draft** GitHub release. Your only manual step is reviewing
-the draft and clicking **Publish**.
+Releasing is **two-stage**:
+
+1. **Tag push** (`.github/workflows/release.yml`) generates the
+   `CHANGELOG.md` entry via Gemini Flash, commits it back to `main`, builds
+   binaries + multi-arch Docker image + cosign-signed checksums, and
+   publishes a **draft pre-release**. The Docker build pushes **only** the
+   per-version image (`ghcr.io/magma-devs/smart-router:vX.Y.Z`) — it never
+   touches `:latest`.
+2. **Graduation** (manual, on github.com): you review the draft, publish it
+   (still a pre-release), and when you're ready to make it the production
+   version you flip its label from **Pre-release** to **Latest**. That
+   transition fires `.github/workflows/graduate-latest.yml`, which moves the
+   Docker `:latest` tag onto that version and bumps the README badge.
+
+So `ghcr.io/magma-devs/smart-router:latest` always resolves to the most
+recently **graduated** version — never to a freshly-tagged pre-release.
+There is exactly one Latest at a time.
 
 ## Cutting a release
 
@@ -33,17 +45,33 @@ the draft and clicking **Publish**.
    - Runs GoReleaser: builds 4 static binaries, multi-arch Docker image
      (pushed to GHCR), `sha256sum.txt`, and cosign-keyless signs the
      checksum file via GitHub Actions OIDC.
-   - Publishes a **draft** GitHub release with the extracted section as
-     the body.
+   - Publishes a **draft pre-release** with the extracted section as the
+     body. The README badge is **not** bumped at this stage — that happens
+     on graduation.
 
 4. Open the draft on github.com. Read the Highlights paragraph. If it
-   reads well, click **Publish**. If not, edit the body in the GitHub
-   UI before publishing.
+   reads well, click **Publish** (it stays a **pre-release**). If not, edit
+   the body in the GitHub UI before publishing.
 
    **Edits to the body on github.com do NOT sync back to `CHANGELOG.md`
    in `main`.** If you make significant edits, open a follow-up PR to
    update `CHANGELOG.md`, or accept that the file and the release page
    may diverge slightly for that version.
+
+5. **Graduate to Latest** when you're ready to make this the production
+   version. On the release page, click **Edit**, set the **Release label**
+   radio from **Pre-release** to **Latest**, and save. This fires
+   `.github/workflows/graduate-latest.yml`, which:
+
+   - Re-points `ghcr.io/magma-devs/smart-router:latest` at this version's
+     existing multi-arch manifest via `docker buildx imagetools create`
+     (registry-side re-tag — no rebuild). `docker pull …:latest` now
+     returns this version.
+   - Bumps the static README `release-vX.Y.Z` badge to this version and
+     pushes the change to `main`.
+
+   Graduating a different (e.g. older) release later just moves `:latest`
+   again — only one release is Latest at a time, and `:latest` follows it.
 
 ## Required setup
 
