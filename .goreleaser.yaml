@@ -62,9 +62,14 @@ archives:
 # resolves the right one via $TARGETPLATFORM. The multi-arch manifest is
 # created automatically from the platforms list.
 #
-# :latest is guarded on `not .Prerelease` so RC / alpha / beta tags
-# publish their per-version image but do not overwrite the stable
-# :latest pointer (requires release.prerelease: auto, set below).
+# Build-time NEVER pushes :latest. Every release is born a prerelease
+# (release.prerelease: true below), so the tag-push build only ever
+# publishes the per-version image (ghcr.io/...:vX.Y.Z). The :latest
+# pointer is moved exactly once, later, when a release is manually
+# graduated out of prerelease on GitHub — .github/workflows/graduate-latest.yml
+# fires on the `released` event and re-points :latest to the graduated
+# tag via `docker buildx imagetools create`. One :latest at a time,
+# decided by graduation, not by tag push.
 dockers_v2:
   - id: smartrouter
     ids:
@@ -73,7 +78,6 @@ dockers_v2:
       - ghcr.io/magma-devs/smart-router
     tags:
       - "{{ .Tag }}"
-      - "{{ if not .Prerelease }}latest{{ end }}"
     dockerfile: docker/Dockerfile.release
     platforms:
       - linux/amd64
@@ -141,11 +145,14 @@ release:
   name_template: "{{.Tag}}"
   mode: replace
   draft: true
-  # `auto` derives prerelease from the tag: vX.Y.Z is a final, vX.Y.Z-*
-  # (e.g. v1.0.0-rc1, v1.0.0-beta.2) is a prerelease. The :latest Docker
-  # tag in the dockers_v2 block is guarded on `not .Prerelease`, so RC
-  # and beta tags don't overwrite the stable :latest pointer.
-  prerelease: auto
+  # Every release is born a PRERELEASE, regardless of tag shape. The flow
+  # is two-stage: tag push publishes a draft prerelease (per-version Docker
+  # image only, no :latest); a human then graduates it on GitHub by flipping
+  # the "Latest" label (prerelease → full release). That graduation fires the
+  # GitHub `released` event, which .github/workflows/graduate-latest.yml uses
+  # to move the Docker :latest tag onto the graduated version. So neither this
+  # build nor the tag string ever decides :latest — graduation does.
+  prerelease: true
   # The release body is the matching `## <tag>` section of CHANGELOG.md.
   # The release workflow extracts it with scripts/extract-changelog.sh
   # and passes the result to goreleaser via `--release-notes`. Combined
