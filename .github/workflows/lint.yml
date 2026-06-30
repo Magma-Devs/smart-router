@@ -70,14 +70,20 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      # repo-checkout: false is required. Left on its default (true), the
-      # action runs its own pinned actions/checkout@v4.1.1, whose bundled
-      # git auth collides with the credentials our actions/checkout@v7 step
-      # already set up — `remote: Duplicate header: "Authorization"` → HTTP
-      # 400. We do checkout + Go setup with the repo-standard v7/v6 actions
-      # above and let this step only run govulncheck.
+      # Invoke govulncheck directly rather than via golang/govulncheck-action.
+      # The wrapper action manages its own checkout + Go install with pinned
+      # sub-actions (actions/checkout@v4.1.1, actions/setup-go@v5), which here
+      # caused two problems on top of the version it actually ran under:
+      #   - its bundled checkout auth collided with our actions/checkout@v7
+      #     (`Duplicate header: "Authorization"` → HTTP 400), and
+      #   - it carries a default `go-version: stable`, so passing go-version-file
+      #     produced a "both specified, only go-version used" warning and would
+      #     have scanned under `stable` instead of the go.mod toolchain.
+      # Since the checkout + setup-go steps above already put the go.mod Go on
+      # PATH, running the tool directly is simpler and removes the version
+      # ambiguity — govulncheck's stdlib advisories are toolchain-version
+      # specific, so scanning under the version we actually ship matters.
       - name: Run govulncheck
-        uses: golang/govulncheck-action@v1
-        with:
-          go-version-file: go.mod
-          repo-checkout: false
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
