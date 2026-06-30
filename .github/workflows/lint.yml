@@ -83,7 +83,15 @@ jobs:
       # PATH, running the tool directly is simpler and removes the version
       # ambiguity — govulncheck's stdlib advisories are toolchain-version
       # specific, so scanning under the version we actually ship matters.
+      # govulncheck is version-pinned (not @latest) so a new tool release
+      # can't flip CI red on an unrelated day — reproducible CI needs pinned
+      # tooling. Dependabot's gomod updates don't cover this `go install`, so
+      # bump the tag here deliberately. The job is a hard gate: govulncheck
+      # exits non-zero when a vulnerable symbol is actually reachable, which
+      # fails the step. Findings are stdlib/dep CVEs that are reachable from
+      # our code; the usual fix is a Go toolchain bump (the patched stdlib
+      # versions ride a Go point release), not a code change.
       - name: Run govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
           govulncheck ./...
