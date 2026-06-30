@@ -64,7 +64,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # repo-checkout: false is required. Left on its default (true), the
+      # action runs its own pinned actions/checkout@v4.1.1, whose bundled
+      # git auth collides with the credentials our actions/checkout@v7 step
+      # already set up — `remote: Duplicate header: "Authorization"` → HTTP
+      # 400. We do checkout + Go setup with the repo-standard v7/v6 actions
+      # above and let this step only run govulncheck.
       - name: Run govulncheck
         uses: golang/govulncheck-action@v1
         with:
           go-version-file: go.mod
+          repo-checkout: false
