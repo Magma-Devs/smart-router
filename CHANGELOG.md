@@ -8,6 +8,74 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.0.6 — 2026-06-30
+
+### Highlights
+
+Smart Router v1.0.6 expands operational visibility and control by introducing `GET /debug/runtime-config` to inspect the active configuration, alongside a new `/debug/reset-endpoint-health` endpoint to manually clear degraded health scores. Routing logic now ensures that requests correctly fail over from a pinned provider during retries, preventing stalled request paths. For WebSocket clients, the gateway resolves a parsing issue by accepting subscription payloads that entirely omit the `params` array. Finally, the bundled example configurations have been overhauled to demonstrate multi-source cross-validation and retargeted to provide baseline setups for ETH, SOL, BTC, Hyperliquid, Cosmos, and Aptos upstreams.
+
+### Changes
+
+#### New Features
+- feat(smart-router/debug): recover endpoint health in /debug/reset-all + add /debug/reset-endpoint-health ([#144]) [`e01b492`]
+- feat(examples): multi-source CV examples + cross-validation doc ([#171]) [`69d3f44`]
+- feat(examples): retarget example chains to ETH/SOL/BTC/Hyperliquid/Cosmos/Aptos, drop Lava endpoints ([#173]) [`5f72982`]
+- feat(smart-router/debug): add GET /debug/runtime-config ([#139]) [`177b408`]
+- feat(release): two-stage release flow — born prerelease, graduate to move :latest ([#180]) [`523b4ec`]
+
+#### Bug fixes
+- fix(smart-router): fail over from a pinned provider on retry (MAG-2228) ([#170]) [`2f5a784`]
+- fix(examples): allow plaintext gRPC for Polkachu Cosmos upstream ([#173]) [`cb5e7d8`]
+- fix(examples): drop Polkachu's non-existent tendermint websocket leg ([#173]) [`9a0930b`]
+- fix(chaintracker): guard nil oldBlockCallback in notUpdated (MAG-2219) ([#177]) [`ab65426`]
+- fix(smart-router): accept WS subscriptions with omitted params (MAG-2246) ([#176]) [`7b7fe87`]
+
+#### Documentation updates
+- docs(license): fix inverted defined term for Enterprise uses ([#174]) [`c08200d`]
+- docs(contributing): grant commercial relicensing rights on contributions ([#174]) [`86b2d82`]
+- docs: fill empty contact placeholders ([#174]) [`5ceb840`]
+- docs(contributing): drop empty "Join The Project Team" stub ([#174]) [`7bb078e`]
+- docs(license): add SPDX LicenseRef identifier ([#174]) [`4b98860`]
+- docs(license): split commercial terms into LICENSING.md so GitHub detects PolyForm ([#175]) [`bdc4864`]
+- docs(readme): align messaging with docs site ([#178]) [`3725826`]
+- docs(readme): add license note + update banner alt text ([#178]) [`374e4a3`]
+- docs(readme): remove license note from top (keep alt text update) ([#178]) [`74d0ed7`]
+
+#### Build process updates
+- ci: move internal cluster host to a repo variable ([#174]) [`7b559d7`]
+
+[#139]: https://github.com/magma-Devs/smart-router/pull/139
+[#144]: https://github.com/magma-Devs/smart-router/pull/144
+[#170]: https://github.com/magma-Devs/smart-router/pull/170
+[#171]: https://github.com/magma-Devs/smart-router/pull/171
+[#173]: https://github.com/magma-Devs/smart-router/pull/173
+[#174]: https://github.com/magma-Devs/smart-router/pull/174
+[#175]: https://github.com/magma-Devs/smart-router/pull/175
+[#176]: https://github.com/magma-Devs/smart-router/pull/176
+[#177]: https://github.com/magma-Devs/smart-router/pull/177
+[#178]: https://github.com/magma-Devs/smart-router/pull/178
+[#180]: https://github.com/magma-Devs/smart-router/pull/180
+[`177b408`]: https://github.com/magma-Devs/smart-router/commit/177b4084b7061deae6f079cee6dacdd7e872115d
+[`2f5a784`]: https://github.com/magma-Devs/smart-router/commit/2f5a784451913a1e81a3901f9ff67178ba1bd8e9
+[`3725826`]: https://github.com/magma-Devs/smart-router/commit/37258266959c17a267cb2f77aa3c359ac1f447c7
+[`374e4a3`]: https://github.com/magma-Devs/smart-router/commit/374e4a329b52e197b61603d7bf723406d853fbb3
+[`4b98860`]: https://github.com/magma-Devs/smart-router/commit/4b988603d247a528de983da9441db7fcf3d86190
+[`523b4ec`]: https://github.com/magma-Devs/smart-router/commit/523b4ecdf5617ee3a7c6c00dc0a2568ffffa9bdc
+[`5ceb840`]: https://github.com/magma-Devs/smart-router/commit/5ceb84053b48aea33b68992595ea9506d6cf695b
+[`5f72982`]: https://github.com/magma-Devs/smart-router/commit/5f729827a5cb79c904f8d617023c8cc591d0f96b
+[`69d3f44`]: https://github.com/magma-Devs/smart-router/commit/69d3f44c3b012997f6cc8bb5e0d97af5536e4d4c
+[`74d0ed7`]: https://github.com/magma-Devs/smart-router/commit/74d0ed7f11857ca56b61ede2752ae11aa6e2d605
+[`7b559d7`]: https://github.com/magma-Devs/smart-router/commit/7b559d7317aaf57f1912ec1d3bd20c247563a2cb
+[`7b7fe87`]: https://github.com/magma-Devs/smart-router/commit/7b7fe8778666508e93f444e6302913a18444bc7c
+[`7bb078e`]: https://github.com/magma-Devs/smart-router/commit/7bb078e843b6f4c68bc7742fe72f35247d01f1a4
+[`86b2d82`]: https://github.com/magma-Devs/smart-router/commit/86b2d82695fca23bffe1ce7c3693885c1ac45afc
+[`9a0930b`]: https://github.com/magma-Devs/smart-router/commit/9a0930b5eddb4271a23b8c00d4da8156a63b917c
+[`ab65426`]: https://github.com/magma-Devs/smart-router/commit/ab654266498e2b18e321f6babca2042bfd3418f9
+[`bdc4864`]: https://github.com/magma-Devs/smart-router/commit/bdc4864b77548738e07e3cb0cac72434963366eb
+[`c08200d`]: https://github.com/magma-Devs/smart-router/commit/c08200d94b80d02878aae0d4cceff6ae281614dd
+[`cb5e7d8`]: https://github.com/magma-Devs/smart-router/commit/cb5e7d8d09cecc391ce2b0d82d05791cad3e54af
+[`e01b492`]: https://github.com/magma-Devs/smart-router/commit/e01b492b6d1bb5ec1f8d3d7e8d7f4b0b8132a2eb
+
 ## v1.0.5 — 2026-06-28
 
 ### Highlights
