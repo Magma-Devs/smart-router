@@ -20,8 +20,6 @@
 
 The reliability and security layer for blockchain RPC. Smart Router monitors and orchestrates multiple RPC upstreams in real-time, providing failover, cross-validation, caching, observability & more — across EVM and non-EVM networks.
 
-> **Free for non-commercial use.** Commercial use requires an Enterprise License from Magma Devs — full details under [License](#license).
-
 <div align="center">
 
 [Docs](https://docs.magmadevs.com) · [Quick Start](#quick-start) · [How it works](#how-it-works) · [Supported Chains](#supported-chains) · [Releases](#releases) · [License](#license) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
