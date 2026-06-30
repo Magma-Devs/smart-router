@@ -51,3 +51,20 @@ jobs:
         with:
           version: latest
           args: --config .golangci.yml -v
+
+  # Supply-chain vuln scan. Unlike golangci-lint above (advisory while the
+  # Go 1.26 toolchain outpaces stable linter releases), this job GATES: a
+  # known-vulnerable dependency or stdlib version should block the merge.
+  # govulncheck is call-graph aware — it only flags advisories whose
+  # vulnerable symbols are actually reachable from this codebase, so it
+  # stays quiet on unreachable transitive CVEs.
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: go.mod

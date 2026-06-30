@@ -1,0 +1,26 @@
+# Code owners for smart-router.
+#
+# GitHub auto-requests a review from the matching owner on every PR that
+# touches a path below, and (when "Require review from Code Owners" is on
+# in branch protection) that review is required to satisfy the PR gate in
+# .github/workflows/pr-gate-on-approval.yml.
+#
+# Order matters: the LAST matching pattern wins. The catch-all comes first
+# so more specific rules below can override it.
+
+# Default owner for everything in the repo.
+*                       @Magma-Devs/r-d
+
+# Release & supply-chain surface — the security-sensitive plumbing called
+# out in SECURITY.md (release pipeline is explicitly in scope). Changes
+# here move the :latest pointer, sign artifacts, and build the published
+# image, so they get the same owner as the rest but are pinned out
+# explicitly to make the blast radius obvious in review.
+/.goreleaser.yaml       @Magma-Devs/r-d
+/.github/workflows/     @Magma-Devs/r-d
+/docker/                @Magma-Devs/r-d
+
+# Licensing & legal text — keep dual-license wording under review so a
+# stray edit can't quietly change the commercial terms.
+/LICENSE.md             @Magma-Devs/r-d
+/LICENSING.md           @Magma-Devs/r-d
