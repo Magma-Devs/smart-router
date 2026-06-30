@@ -195,9 +195,21 @@ type Endpoint struct {
 	// so a probe cadence faster than the poll cadence cannot count one successful poll twice — only a
 	// strictly newer successful poll advances the streak (F1: "distinct post-disable polls").
 	lastRecoveryPoll time.Time
-	Addons           map[string]struct{}
-	Extensions       map[string]struct{}
-	mu               sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll
+	// probeReenabled is true while the endpoint's current Enabled state was granted by the probe's
+	// proactive re-enable (RecordProbeVerdict) and has NOT yet been validated by a successful relay.
+	// It distinguishes a genuine recovery (a real relay then succeeded → cleared in ResetHealth) from
+	// a FLAP: an endpoint that answers cheap polls (re-enabling it) but fails real relays (re-disabling
+	// it) gets re-disabled while this is still set, which escalates reenableProbeFlaps.
+	probeReenabled bool
+	// reenableProbeFlaps counts consecutive probe-grant→re-disable flaps, capped at maxReenableProbeFlaps.
+	// It escalates the re-enable hysteresis (reEnableAfterK << reenableProbeFlaps) so a poll-healthy /
+	// relay-failing endpoint is re-enabled progressively less often instead of tightly oscillating; a
+	// successful relay (ResetHealth) decays it back to 0. The cap keeps a flapping endpoint re-probed
+	// within a bounded window rather than parked until the epoch transition.
+	reenableProbeFlaps uint64
+	Addons             map[string]struct{}
+	Extensions         map[string]struct{}
+	mu                 sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
 	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
@@ -309,6 +321,13 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 		e.Enabled = false
 		e.disabledAt = at
 		e.clearRecoveryStreakLocked()
+		// If this disable follows a probe re-enable that no successful relay ever validated, the probe's
+		// grant was wasted (the endpoint answers cheap polls but fails real relays). Escalate the next
+		// re-enable's hysteresis to dampen the flap; the cap bounds how long it stays disabled.
+		if e.probeReenabled && e.reenableProbeFlaps < maxReenableProbeFlaps {
+			e.reenableProbeFlaps++
+		}
+		e.probeReenabled = false
 		transitioned = true
 	}
 	addr, refusals, isDirect := e.NetworkAddress, e.ConnectionRefusals, e.IsDirectRPC()
@@ -335,6 +354,12 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 //   - On a DISABLED endpoint, the probe re-enables only after reEnableAfterK consecutive healthy
 //     verdicts (hysteresis). This threshold is deliberately distinct from the relay disable threshold
 //     so the two actors don't oscillate. A single unhealthy verdict resets the streak.
+//   - The disable trigger (real-relay failures) and the re-enable signal (cheap polls) measure
+//     different things, so distinct thresholds alone don't stop an endpoint that passes polls but
+//     fails relays from flapping. Each re-enable→re-disable flap escalates the effective K by a power
+//     of two (reEnableAfterK << reenableProbeFlaps), capped at maxReenableProbeFlaps; a successful
+//     relay decays it. The cap keeps a perpetual flapper re-probed within a bounded window, never
+//     parked until the epoch.
 //   - Re-enabling gives the endpoint a clean slate (ConnectionRefusals = 0): it was already disabled
 //     (refusals >= threshold), and it earned the reset by proving K healthy cycles.
 //
@@ -373,17 +398,25 @@ func (e *Endpoint) RecordProbeVerdict(recoveryPoll time.Time, recoveryHealthy bo
 	}
 	e.lastRecoveryPoll = recoveryPoll
 	e.consecutiveHealthyProbes++
-	if e.consecutiveHealthyProbes < reEnableAfterK {
+	// Escalate the threshold by the recent flap count (capped): an endpoint that keeps passing cheap
+	// polls but failing real relays must earn re-enable with progressively more evidence, not oscillate.
+	effectiveK := reEnableAfterK << e.reenableProbeFlaps
+	if e.consecutiveHealthyProbes < effectiveK {
 		return false
 	}
 
 	e.Enabled = true
 	e.ConnectionRefusals = 0
+	// Mark the re-enable as probe-granted: a subsequent disable with this still set is a flap (above),
+	// a successful relay clears it (ResetHealth). clearRecoveryTrackingLocked deliberately does NOT
+	// touch reenableProbeFlaps — the escalation must persist across re-enables to dampen the flap.
+	e.probeReenabled = true
 	e.clearRecoveryTrackingLocked()
 	utils.LavaFormatInfo("probe re-enabled recovered endpoint",
 		utils.LogAttr("endpoint", e.NetworkAddress),
 		utils.LogAttr("is_direct_rpc", e.IsDirectRPC()),
-		utils.LogAttr("re_enable_after_k", reEnableAfterK),
+		utils.LogAttr("re_enable_after_k", effectiveK),
+		utils.LogAttr("reenable_probe_flaps", e.reenableProbeFlaps),
 	)
 	return true
 }
@@ -393,6 +426,11 @@ func (e *Endpoint) RecordProbeVerdict(recoveryPoll time.Time, recoveryHealthy bo
 // No-ops silently when the endpoint is already healthy to avoid log spam.
 func (e *Endpoint) ResetHealth() bool {
 	e.mu.Lock()
+	// A successful relay proves the endpoint healthy for REAL traffic (not just cheap polls), so it
+	// decays the flap escalation and clears the probe-grant flag — even on the already-healthy fast
+	// path below, where a clean success still counts as validation.
+	e.probeReenabled = false
+	e.reenableProbeFlaps = 0
 	if e.ConnectionRefusals == 0 && e.Enabled {
 		e.mu.Unlock()
 		return false

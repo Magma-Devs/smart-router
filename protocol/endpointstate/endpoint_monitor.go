@@ -17,6 +17,12 @@ const (
 	// DefaultBlocksToSave is the number of finalized blocks to keep in memory for fork detection
 	DefaultBlocksToSave = 10
 
+	// DefaultAverageBlockTime is the fallback block time when a chain spec omits average_block_time.
+	// It is the single source of truth for that default: the poll cadence here AND any peer component
+	// that must agree with this cadence (e.g. chainstate's freshness window) must floor through it, or
+	// the consensus window can end up shorter than the poll interval and drop every observation.
+	DefaultAverageBlockTime = 12 * time.Second // Ethereum-like timing
+
 	defaultTrackerStartRetryMin = time.Second
 	defaultTrackerStartRetryMax = 30 * time.Second
 	trackerStartRetryJitterDiv  = 5
@@ -153,7 +159,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 
 	avgBlockTime := config.AverageBlockTime
 	if avgBlockTime == 0 {
-		avgBlockTime = 12 * time.Second // Default to Ethereum-like timing
+		avgBlockTime = DefaultAverageBlockTime
 	}
 
 	ctxWithCancel, cancel := context.WithCancel(ctx)

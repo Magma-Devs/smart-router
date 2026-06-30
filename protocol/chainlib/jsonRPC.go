@@ -33,6 +33,9 @@ import (
 
 const (
 	SEP = "&"
+	// ethCallArchiveBlockDepth: an eth_call targeting a block deeper than this many blocks
+	// behind the head is routed to archive (most full nodes prune state past ~128 blocks).
+	ethCallArchiveBlockDepth = 126
 )
 
 var MaximumNumberOfParallelWebsocketConnectionsPerIp int64 = 0
@@ -180,7 +183,14 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 
 		parsedBlock := parsedInput.GetBlock()
 
-		if msg.Method == "eth_call" && uint64(parsedBlock) < extensionInfo.LatestBlock-126 {
+		// Route eth_call requests for blocks deeper than ethCallArchiveBlockDepth behind the head to
+		// archive. Guard the subtraction: when the head is unknown (LatestBlock == 0) or the chain is
+		// younger than the depth, LatestBlock-ethCallArchiveBlockDepth would underflow (uint64) and force
+		// archive for EVERY eth_call. Negative parsedBlock values are latest/pending sentinels, never
+		// historical, so they are excluded too.
+		if msg.Method == "eth_call" && parsedBlock >= 0 &&
+			extensionInfo.LatestBlock > ethCallArchiveBlockDepth &&
+			uint64(parsedBlock) < extensionInfo.LatestBlock-ethCallArchiveBlockDepth {
 			utils.LavaFormatInfo("adding extension requirement to archive since block is 127 before lastest block")
 			// change to archive
 			extensionInfo.AdditionalExtensions = append(extensionInfo.AdditionalExtensions, extensionslib.ArchiveExtension)

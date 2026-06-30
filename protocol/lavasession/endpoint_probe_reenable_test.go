@@ -204,3 +204,81 @@ func TestRecordProbeVerdict_KBelowOneTreatedAsOne(t *testing.T) {
 	require.True(t, e.RecordProbeVerdict(probeBase.Add(time.Second), true, 0), "K<1 is treated as 1 — a single post-disable poll re-enables")
 	require.True(t, e.Enabled)
 }
+
+// TestRecordProbeVerdict_FlapEscalatesHysteresisAndDecays reproduces the poll-healthy / relay-failing
+// flap: the disable trigger (real-relay failures) and the re-enable signal (cheap polls) measure
+// different things, so an endpoint that answers polls but fails relays would oscillate at the bare
+// distinct thresholds. Each probe-grant→re-disable flap must escalate the effective K (capped), and a
+// successful relay must decay it back to the base.
+func TestRecordProbeVerdict_FlapEscalatesHysteresisAndDecays(t *testing.T) {
+	const k = 3
+	e := &Endpoint{NetworkAddress: "http://ep:8545", Enabled: true}
+
+	// A monotonic clock so every disable instant and every poll strictly advances: each poll is
+	// trivially after the latest disabledAt (F1) and counts as a DISTINCT post-disable poll.
+	var tick int64
+	now := func() time.Time { tick++; return probeBase.Add(time.Duration(tick) * time.Second) }
+	disableNow := func() { disableAt(t, e, now()) }
+	pollNow := func() bool { return e.RecordProbeVerdict(now(), true, k) }
+	flaps := func() uint64 { e.mu.RLock(); defer e.mu.RUnlock(); return e.reenableProbeFlaps }
+
+	reEnableExpectingK := func(expectedK int) {
+		for i := 0; i < expectedK-1; i++ {
+			require.False(t, pollNow(), "must not re-enable before the escalated K=%d", expectedK)
+		}
+		require.True(t, pollNow(), "the K=%d distinct poll re-enables", expectedK)
+		require.True(t, e.Enabled)
+	}
+
+	// Cycle 0 — first disable: base K=3, no flap (this disable did not follow a probe grant).
+	disableNow()
+	reEnableExpectingK(k)
+	require.Equal(t, uint64(0), flaps())
+
+	// Cycle 1 — re-disabled before any successful relay validated the probe grant → flap → K escalates to 6.
+	disableNow()
+	require.Equal(t, uint64(1), flaps(), "a probe-granted re-enable that re-disabled is a flap")
+	reEnableExpectingK(k << 1)
+
+	// Cycle 2 — flap again → K escalates to 12.
+	disableNow()
+	require.Equal(t, uint64(2), flaps())
+	reEnableExpectingK(k << 2)
+
+	// Cycle 3 — flap once more, but the escalation is CAPPED (never grows into the epoch-wait).
+	disableNow()
+	require.Equal(t, maxReenableProbeFlaps, flaps(), "flap escalation is capped at maxReenableProbeFlaps")
+
+	// Decay — a successful relay proves real-traffic health: flaps reset, probe-grant flag cleared.
+	require.True(t, e.ResetHealth(), "a relay success on the disabled endpoint resets it")
+	require.Equal(t, uint64(0), flaps(), "a successful relay decays the flap escalation")
+	e.mu.RLock()
+	require.False(t, e.probeReenabled, "a successful relay clears the probe-grant flag")
+	e.mu.RUnlock()
+
+	// After decay, recovery is back to the base K=3.
+	disableNow()
+	reEnableExpectingK(k)
+	require.Equal(t, uint64(0), flaps())
+}
+
+// TestResetHealth_GenuineRecoveryDoesNotEscalate guards the false-positive direction: a probe re-enable
+// VALIDATED by a successful relay before the next disable is a genuine recovery, not a flap, so the
+// next disable must NOT escalate the hysteresis.
+func TestResetHealth_GenuineRecoveryDoesNotEscalate(t *testing.T) {
+	const k = 2
+	e := &Endpoint{NetworkAddress: "http://ep:8545", Enabled: true}
+	disableAt(t, e, probeBase)
+	require.False(t, healthyPoll(e, probeBase.Add(1*time.Second), k))
+	require.True(t, healthyPoll(e, probeBase.Add(2*time.Second), k), "re-enabled by the probe")
+
+	// A real relay succeeds, validating the recovery (clears the probe-grant flag).
+	e.markUnhealthyAt(probeBase.Add(3 * time.Second)) // a partial failure raises refusals so ResetHealth acts
+	require.True(t, e.ResetHealth())
+
+	// A later disable is a fresh first offense, not a flap — no escalation.
+	disableAt(t, e, probeBase.Add(10*time.Second))
+	e.mu.RLock()
+	require.Equal(t, uint64(0), e.reenableProbeFlaps, "a relay-validated recovery is not a flap")
+	e.mu.RUnlock()
+}

@@ -91,6 +91,16 @@ type RPCSmartRouterServer struct {
 	// probeStats holds the most-recent runProbeLoop cycle telemetry for /debug/probe-loop
 	// (MAG-2202 endpoint 4). Written off the data plane by runProbeCycle; read by the debug handler.
 	probeStats probeLoopStats
+
+	// Cached API names of the two tip-defining spec methods (GET_BLOCKNUM / GET_BLOCK_BY_NUM), resolved
+	// once on the first relay via tipApiNamesOnce. tipBlockFromRelay runs on every successful relay;
+	// resolving the tag→ApiName mapping per call took the shared chainParser RWLock twice
+	// (GetParsingByTag) on the hot path. The mapping is immutable after parser construction, so the
+	// first relay resolves it and the rest do lock-free string compares. Empty string = tag not
+	// configured for this chain (never a tip).
+	tipApiNamesOnce      sync.Once
+	getBlockNumApiName   string
+	getBlockByNumApiName string
 }
 
 func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
@@ -165,11 +175,22 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// initializeChainTrackers always observe the field on their first callback.
 	rpcss.smartRouterEndpointMetrics = smartRouterEndpointMetrics
 
+	// Floor the spec block time to the monitor's default ONCE, here, and feed the SAME value to both
+	// ChainState and the EndpointMonitor below. They must agree: ChainState derives its freshness/TTL
+	// window from this (DefaultConfig), the monitor derives its poll cadence from it. If ChainState saw
+	// the raw 0 (→ 2s window) while the monitor floored to 12s (→ ~6s poll cadence), the consensus
+	// window would be shorter than the poll interval and drop every observation as stale (sync scoring
+	// disabled + getLatestBlock==0) on any chain whose spec omits average_block_time.
+	effectiveBlockTime := averageBlockTime
+	if effectiveBlockTime == 0 {
+		effectiveBlockTime = endpointstate.DefaultAverageBlockTime
+	}
+
 	// Per-chain ChainState tip (MAG-2160 / Topic C). Constructed BEFORE the monitor so the
 	// monitor's OnTipObservation hook can feed it. Phase 2 wires the writes (relay+poll
 	// observations → SetLatestBlock) and the internal consensus recompute tick; the read sites
 	// still use the legacy sources until phase 3.
-	rpcss.chainState = chainstate.New(listenEndpoint.ChainID, chainstate.DefaultConfig(averageBlockTime))
+	rpcss.chainState = chainstate.New(listenEndpoint.ChainID, chainstate.DefaultConfig(effectiveBlockTime))
 
 	// Topic E (MAG-2160 Finding 2 / F4): point the relay sync dimension at THIS chain+interface's
 	// consensus baseline, so relay sync lag is measured against the agreed tip rather than
@@ -193,7 +214,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		ChainParser:      chainParser,
 		ChainID:          listenEndpoint.ChainID,
 		ApiInterface:     listenEndpoint.ApiInterface,
-		AverageBlockTime: averageBlockTime,
+		AverageBlockTime: effectiveBlockTime,
 		BlocksToSave:     endpointstate.DefaultBlocksToSave,
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write).
 		OnTipObservation: func(block int64) {
@@ -804,6 +825,22 @@ func (rpcss *RPCSmartRouterServer) getLatestBlock() uint64 {
 	}
 
 	return 0
+}
+
+// getLatestBlockBestEffort returns the strict ChainState tip when fresh, otherwise the
+// last-known monotonic atomic tip (seeded by the init relay + tip-eligible relay harvest).
+// It deliberately diverges from getLatestBlock's strict-0-on-stale contract (see the comment
+// there): archive ROUTING only needs a recent-enough head to decide old-vs-recent, and a
+// slightly-stale head mis-classifies at worst a handful of near-head blocks — whereas the
+// strict 0 forces EVERY concrete-block request to the archive pool (archive_parser_rule.go:33).
+// Cache FINALIZATION must keep the strict getLatestBlock (a stale tip there can falsely finalize),
+// so this accessor is for archive routing only. Returns 0 only at genuine cold-start, preserving
+// the conservative force-archive fallback before any tip has ever been observed.
+func (rpcss *RPCSmartRouterServer) getLatestBlockBestEffort() uint64 {
+	if block := rpcss.getLatestBlock(); block > 0 {
+		return block
+	}
+	return rpcss.latestBlockHeight.Load()
 }
 
 func (rpcss *RPCSmartRouterServer) updateLatestBlockHeight(blockHeight uint64, providerAddress string) {
@@ -2134,28 +2171,37 @@ func (rpcss *RPCSmartRouterServer) tipBlockFromRelay(chainMessage chainlib.Chain
 	return 0, false
 }
 
-// isMethodTagged reports whether the message's API is the method the spec marks with the given tag.
-func (rpcss *RPCSmartRouterServer) isMethodTagged(chainMessage chainlib.ChainMessage, tag spectypes.FUNCTION_TAG) bool {
-	if rpcss.chainParser == nil {
-		return false
-	}
-	parsing, _, ok := rpcss.chainParser.GetParsingByTag(tag)
-	if !ok || parsing == nil {
-		return false
-	}
-	api := chainMessage.GetApi()
-	return api != nil && api.Name == parsing.ApiName
+// resolveTipApiNames caches, once, the API names of the two tip-defining spec methods so the
+// per-relay tip classification needs no parser lock. The tag→ApiName mapping is immutable after
+// parser construction; sync.Once gives the read of the cached fields a happens-after on the write.
+// Lazy (not done in ServeRPCRequests) so it also covers servers built directly (e.g. in tests).
+func (rpcss *RPCSmartRouterServer) resolveTipApiNames() {
+	rpcss.tipApiNamesOnce.Do(func() {
+		if rpcss.chainParser == nil {
+			return
+		}
+		if parsing, _, ok := rpcss.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM); ok && parsing != nil {
+			rpcss.getBlockNumApiName = parsing.ApiName
+		}
+		if parsing, _, ok := rpcss.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM); ok && parsing != nil {
+			rpcss.getBlockByNumApiName = parsing.ApiName
+		}
+	})
 }
 
 // isGetBlockNumMethod: the "current block number" call (e.g. eth_blockNumber) — result IS the tip.
 func (rpcss *RPCSmartRouterServer) isGetBlockNumMethod(chainMessage chainlib.ChainMessage) bool {
-	return rpcss.isMethodTagged(chainMessage, spectypes.FUNCTION_TAG_GET_BLOCKNUM)
+	rpcss.resolveTipApiNames()
+	api := chainMessage.GetApi()
+	return api != nil && rpcss.getBlockNumApiName != "" && api.Name == rpcss.getBlockNumApiName
 }
 
 // isGetBlockByNumMethod: the "get block by number" call (e.g. eth_getBlockByNumber) — a tip only when
 // it requested LATEST.
 func (rpcss *RPCSmartRouterServer) isGetBlockByNumMethod(chainMessage chainlib.ChainMessage) bool {
-	return rpcss.isMethodTagged(chainMessage, spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
+	rpcss.resolveTipApiNames()
+	api := chainMessage.GetApi()
+	return api != nil && rpcss.getBlockByNumApiName != "" && api.Name == rpcss.getBlockByNumApiName
 }
 
 func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
@@ -2265,6 +2311,18 @@ func (rpcss *RPCSmartRouterServer) initializeChainTrackers(ctx context.Context) 
 // router's tracked tip (the per-chain ChainState consensus tip, with the
 // bootstrap atomic latestBlockHeight as cold-start fallback, surfaced via
 // getLatestBlock()) wins when it is higher.
+//
+// IMPORTANT — finalization MUST be passed the STRICT getLatestBlock(), which
+// returns 0 when the consensus tip is stale/uninitialized. Do NOT switch this to
+// getLatestBlockBestEffort() the way archive routing (#1) does. A higher "latest"
+// here can FALSELY finalize (write a not-yet-final block to the long-TTL store),
+// so the source must be trustworthy: the consensus tip is strict-majority and
+// realigns DOWNWARD on a poisoned/reverted tip. The bootstrap atomic is
+// monotonic-max with no downward correction, so one lying-high observation would
+// false-finalize EVERY provider's responses persistently until the real head
+// catches up — globally and durably, far worse than replyLatestBlock (which is
+// self-scoped to one provider's reply). A stale-but-honest 0 only under-finalizes
+// (finalized data lands in the short-TTL store), which is the safe direction.
 func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlock, finalizationDistance int64) bool {
 	latest := replyLatestBlock
 	if trackedLatestBlock > latest {
@@ -3084,15 +3142,15 @@ func (rpcss *RPCSmartRouterServer) getExtensionsFromDirectiveHeaders(directiveHe
 		utils.LavaFormatTrace("[Archive Debug] Processed extensions", utils.LogAttr("extensions", extensions))
 		if len(extensions) == 1 && extensions[0] == "none" {
 			// none eliminates existing extensions
-			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlock(), ExtensionOverride: []string{}}
+			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockBestEffort(), ExtensionOverride: []string{}}
 		} else if len(extensions) > 0 {
 			// All extensions from headers use AdditionalExtensions (consistent behavior)
 			utils.LavaFormatTrace("[Archive Debug] Using AdditionalExtensions for all header extensions", utils.LogAttr("extensions", extensions))
-			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlock(), AdditionalExtensions: extensions}
+			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockBestEffort(), AdditionalExtensions: extensions}
 		}
 	}
 	utils.LavaFormatTrace("[Archive Debug] No extension override header found")
-	return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlock()}
+	return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockBestEffort()}
 }
 
 func (rpcss *RPCSmartRouterServer) HandleDirectiveHeadersForMessage(chainMessage chainlib.ChainMessage, directiveHeaders map[string]string) {

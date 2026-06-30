@@ -6,31 +6,22 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 )
 
-// ObservationSource identifies where a block observation came from.
-type ObservationSource int
+// ObservationSource identifies where a block observation came from. It is a type ALIAS for the leaf
+// store's endpointtip.Source (an identical enum) so the two can never drift — the enum, its String(),
+// and the constants below all resolve to that single definition. (The duplicate enum + String() +
+// converter that used to live here are gone; endpointstate already imports endpointtip.)
+type ObservationSource = endpointtip.Source
 
 const (
-	// ObservationSourceUnknown is the zero value: no block has been observed yet. Making
-	// it the zero value means a freshly-created record — or one that has only ever seen
-	// failed polls — reports Source = Unknown rather than masquerading as a poll-sourced
-	// block.
-	ObservationSourceUnknown ObservationSource = iota
+	// ObservationSourceUnknown is the zero value: no block has been observed yet — a freshly-created
+	// record, or one that has only ever seen failed polls, reports Unknown rather than masquerading
+	// as a poll-sourced block.
+	ObservationSourceUnknown = endpointtip.SourceUnknown
 	// ObservationSourcePoll is a block observed by the dedicated ChainTracker poll.
-	ObservationSourcePoll
+	ObservationSourcePoll = endpointtip.SourcePoll
 	// ObservationSourceRelay is a block harvested from a served relay response.
-	ObservationSourceRelay
+	ObservationSourceRelay = endpointtip.SourceRelay
 )
-
-func (s ObservationSource) String() string {
-	switch s {
-	case ObservationSourcePoll:
-		return "poll"
-	case ObservationSourceRelay:
-		return "relay"
-	default:
-		return "unknown"
-	}
-}
 
 // EndpointObservation is the per-endpoint observation contract (Topic A / MAG-2158).
 //
@@ -232,7 +223,7 @@ func (m *EndpointMonitor) GetObservation(endpointURL string) (EndpointObservatio
 	if tipOK {
 		o.LatestBlock = tip.Block
 		o.ObservedAt = tip.ObservedAt
-		o.Source = observationSourceFromTip(tip.Source)
+		o.Source = tip.Source
 	}
 	return o, ok || tipOK
 }
@@ -251,7 +242,7 @@ func (m *EndpointMonitor) SnapshotObservations() map[string]EndpointObservation 
 		if tip, ok := endpointtip.Default().Get(m.tipKey(url)); ok {
 			o.LatestBlock = tip.Block
 			o.ObservedAt = tip.ObservedAt
-			o.Source = observationSourceFromTip(tip.Source)
+			o.Source = tip.Source
 		}
 		out[url] = o
 	}
@@ -294,17 +285,4 @@ func (m *EndpointMonitor) freshRelayTip(endpointURL string, now time.Time) (int6
 // chains (or interfaces) reuse a url string.
 func (m *EndpointMonitor) tipKey(endpointURL string) string {
 	return endpointtip.Key(m.chainID, m.apiInterface, endpointURL)
-}
-
-// observationSourceFromTip maps the leaf store's Source back to the endpointstate enum
-// for the EndpointObservation DTO.
-func observationSourceFromTip(s endpointtip.Source) ObservationSource {
-	switch s {
-	case endpointtip.SourcePoll:
-		return ObservationSourcePoll
-	case endpointtip.SourceRelay:
-		return ObservationSourceRelay
-	default:
-		return ObservationSourceUnknown
-	}
 }
