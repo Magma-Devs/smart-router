@@ -25,6 +25,11 @@
 #   VERSION         required  - e.g. v1.0.0
 #   AI              optional  - 0 to skip Gemini draft (default 1)
 #   EDIT            optional  - 0 to skip $EDITOR (default 1)
+#   FORCE           optional  - 1 to REPLACE an existing '## <version>'
+#                               section instead of refusing (default 0).
+#                               Use when a tag was deleted + recreated from
+#                               scratch and the stale section must be
+#                               regenerated from the new commit range.
 #   EDITOR          optional  - defaults to vim
 #   GEMINI_API_KEY  optional  - passed through to changelog-ai.sh
 #   REPO_URL        optional  - default: https://github.com/magma-Devs/smart-router
@@ -53,14 +58,39 @@ fi
 cd "$(git rev-parse --show-toplevel)"
 script_dir="$(dirname "$(readlink -f "$0")")"
 
-# Refuse to clobber an existing section. The release workflow detects
-# this and skips the bumper entirely on re-runs; if the user is hitting
-# this locally, they should either bump VERSION or hand-edit CHANGELOG.md.
+# An existing '## <version>' section normally means a re-run: refuse to
+# add a duplicate. FORCE=1 overrides this — it strips the old section so
+# the fresh one (built below) replaces it. That's the path for a tag that
+# was deleted and recreated from scratch: the CHANGELOG.md on main still
+# carries the stale section, and we want it regenerated from the new
+# commit range, not preserved.
 v_re_escaped="$(printf '%s' "$VERSION" | sed -e 's/[][().*+?^$\|/]/\\&/g')"
 if [ -f CHANGELOG.md ] && grep -qE "^## ${v_re_escaped}( |\$)" CHANGELOG.md; then
-  echo "changelog-bump: CHANGELOG.md already has a '## ${VERSION}' section - refusing to add a duplicate" >&2
-  echo "changelog-bump: edit the existing section by hand, or remove it first" >&2
-  exit 1
+  if [ "${FORCE:-0}" = "1" ]; then
+    echo "changelog-bump: FORCE=1 - replacing existing '## ${VERSION}' section" >&2
+    # Delete the old section: from its '## <version>' heading up to (but
+    # not including) the next '## ' heading, or EOF if it's the last one.
+    # We match the heading by exact string, not regex, so a version whose
+    # name is a prefix of another (v1.1.0 vs v1.1.0-rc1) can't cross-match:
+    # the line must be exactly "## <version>" OR "## <version> " (space +
+    # date suffix). awk `index()`/substr on the raw literal avoids any
+    # regex-escaping and the `\.`/`\$` warnings that came with it.
+    awk -v hdr="## ${VERSION}" '
+      # Start skipping at the EXACT target heading (bare, or "## <ver> <date>").
+      # The exact/space-prefixed test means a longer version that merely
+      # starts with this one (v1.1.0 vs v1.1.0-rc1) is not matched here.
+      $0 == hdr || substr($0, 1, length(hdr) + 1) == hdr " " { skip = 1; next }
+      # Any subsequent "## " heading is, by definition, a different section
+      # (the target already consumed itself via next), so it ends the skip.
+      skip && /^## / { skip = 0 }
+      !skip { print }
+    ' CHANGELOG.md > CHANGELOG.md.tmp
+    mv CHANGELOG.md.tmp CHANGELOG.md
+  else
+    echo "changelog-bump: CHANGELOG.md already has a '## ${VERSION}' section - refusing to add a duplicate" >&2
+    echo "changelog-bump: edit the existing section by hand, remove it first, or re-run with FORCE=1" >&2
+    exit 1
+  fi
 fi
 
 # --exclude "$VERSION" is critical when the release workflow runs on a
