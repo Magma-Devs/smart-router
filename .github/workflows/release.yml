@@ -9,6 +9,10 @@ on:
       release_tag:
         description: "The desired tag for the release (e.g. v1.1.0)."
         required: true
+      regenerate_changelog:
+        description: "Force-regenerate the CHANGELOG.md section for this version, replacing any existing one. Use when a tag was deleted and recreated from scratch so the stale section must be rebuilt from the new commit range."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -110,9 +114,22 @@ jobs:
           # commit via `GET /commits/{sha}/pulls`. Default GITHUB_TOKEN
           # has the required read access and isn't rate-limited (5000/hr).
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # When the regenerate_changelog input is set (workflow_dispatch
+          # only; empty on tag-push), force the bumper to replace an
+          # existing section instead of skipping it. Threads through as
+          # FORCE=1 to scripts/changelog-bump.sh.
+          REGENERATE_CHANGELOG: ${{ github.event.inputs.regenerate_changelog }}
         run: |
           v_re=$(printf '%s' "$RELEASE_VERSION" | sed -e 's/[][().*+?^$\|/]/\\&/g')
-          if grep -qE "^## ${v_re}( |\$)" CHANGELOG.md 2>/dev/null; then
+          if [ "${REGENERATE_CHANGELOG}" = "true" ]; then
+            # Override path: a deleted+recreated tag leaves a stale section
+            # on main. Rebuild it from the new commit range, replacing the
+            # old one (FORCE=1). Always regenerates, even if the section
+            # exists — that's the whole point of the override.
+            echo "regenerate_changelog=true — force-rebuilding the ${RELEASE_VERSION} section"
+            VERSION="$RELEASE_VERSION" AI=1 EDIT=0 FORCE=1 scripts/changelog-bump.sh
+            echo "did_generate=true" >> "$GITHUB_OUTPUT"
+          elif grep -qE "^## ${v_re}( |\$)" CHANGELOG.md 2>/dev/null; then
             echo "CHANGELOG.md already has a section for ${RELEASE_VERSION} — skipping bumper"
             echo "did_generate=false" >> "$GITHUB_OUTPUT"
           else
