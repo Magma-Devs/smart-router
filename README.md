@@ -254,7 +254,7 @@ The hot path for a single request:
 
 ## Supported Chains
 
-Smart Router ships with specs for **120 chain networks** — EVM L1s and L2s, Cosmos SDK chains, non-EVM L1s (Solana, Sui, TON, Starknet, NEAR, Aptos, Move, …), Bitcoin-family chains, Ethereum Beacon, and more. The **Index** column is the value to reference in your YAML config or `--chain-id`.
+Smart Router ships with specs for **120+ chain networks** — EVM L1s and L2s, Cosmos SDK chains, non-EVM L1s (Solana, Sui, TON, Starknet, NEAR, Aptos, Move, …), Bitcoin-family chains, Ethereum Beacon, and more. The **Index** column is the value to reference in your YAML config or `--chain-id`.
 
 <details>
 <summary>Full list (click to expand)</summary>
