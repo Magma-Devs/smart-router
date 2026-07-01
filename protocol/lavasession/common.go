@@ -38,11 +38,19 @@ const (
 	// symptom until an epoch/successful relay re-enables it. A successful relay resets
 	// the counter (see Endpoint.ResetHealth), so this is a consecutive-failure budget.
 	// Shared by the provider-relay path and blockProvider — this threshold gates both.
-	MaxConsecutiveConnectionAttempts                 = 50
-	TimeoutForEstablishingAConnection                = 1500 * time.Millisecond // 1.5 seconds
-	MaximumNumberOfFailuresAllowedPerConsumerSession = 15
-	RelayNumberIncrement                             = 1
-	unixPrefix                                       = "unix:"
+	MaxConsecutiveConnectionAttempts = 50
+	// maxReenableProbeFlaps caps how far the probe's re-enable hysteresis escalates when an endpoint
+	// keeps passing cheap polls (which drive re-enable) but failing real relays (which drive the
+	// disable above). Each such re-enable→re-disable flap escalates the next re-enable's K by a power
+	// of two (reEnableAfterK << flaps); with the default K=3 that is 3 → 6 → 12 cycles. Capped at 2 so
+	// even a perpetually-flapping endpoint is re-probed within a bounded window (~60s at a 5s cadence)
+	// — deliberately far below the ~15-minute epoch re-probe, so the dampening never parks a node that
+	// is genuinely healthy for cheap traffic. A successful relay (Endpoint.ResetHealth) decays it to 0.
+	maxReenableProbeFlaps                            uint64 = 2
+	TimeoutForEstablishingAConnection                       = 1500 * time.Millisecond // 1.5 seconds
+	MaximumNumberOfFailuresAllowedPerConsumerSession        = 15
+	RelayNumberIncrement                                    = 1
+	unixPrefix                                              = "unix:"
 )
 
 func IsSessionSyncLoss(err error) bool {

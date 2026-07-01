@@ -31,9 +31,19 @@ type mockSubscriptionServer struct {
 	upgrader        websocket.Upgrader
 	subscriptions   map[string]chan struct{} // subscription ID -> close channel
 	lock            sync.RWMutex
+	writeMu         sync.Mutex // serializes conn.WriteMessage — gorilla requires a single concurrent writer
 	onSubscribe     func(method string, params interface{}) (string, error)
 	onUnsubscribe   func(subID string) error
 	messageInterval time.Duration
+}
+
+// safeWriteMessage serializes WS writes: handleWS (response) and the spawned sendSubscriptionMessages
+// goroutine both write the same conn, and gorilla/websocket forbids concurrent writers (data race
+// under -race). All writes go through this.
+func (ms *mockSubscriptionServer) safeWriteMessage(conn *websocket.Conn, messageType int, data []byte) error {
+	ms.writeMu.Lock()
+	defer ms.writeMu.Unlock()
+	return conn.WriteMessage(messageType, data)
 }
 
 func newMockSubscriptionServer() *mockSubscriptionServer {
@@ -81,7 +91,7 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 				"result":  subID,
 			}
 			respBytes, _ := json.Marshal(response)
-			conn.WriteMessage(websocket.TextMessage, respBytes)
+			ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)
 
 			// Start sending subscription messages
 			go ms.sendSubscriptionMessages(conn, subID)
@@ -100,7 +110,7 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 				"result":  true,
 			}
 			respBytes, _ := json.Marshal(response)
-			conn.WriteMessage(websocket.TextMessage, respBytes)
+			ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)
 		}
 	}
 }
@@ -154,7 +164,7 @@ func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn,
 				},
 			}
 			msgBytes, _ := json.Marshal(notification)
-			if err := conn.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
+			if err := ms.safeWriteMessage(conn, websocket.TextMessage, msgBytes); err != nil {
 				return
 			}
 		}

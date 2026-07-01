@@ -7,6 +7,7 @@ import (
 	"math/big"
 	mathrand "math/rand"
 	"sync"
+	"sync/atomic"
 )
 
 func generateSeed(data []byte) int64 {
@@ -113,16 +114,18 @@ func (t *threadSafeRand) Int63n(n int64) int64 {
 	return result.Int64()
 }
 
-var protocolRand *threadSafeRand
+// protocolRand is an atomic pointer so InitRandomSeed/SetSpecificSeed (called from test setup, and
+// once at process start) cannot race the Initialized()/PanicIf.../Intn... readers under -race.
+var protocolRand atomic.Pointer[threadSafeRand]
 
 func Initialized() bool {
-	return protocolRand != nil
+	return protocolRand.Load() != nil
 }
 
 func InitRandomSeed() {
 	// Seed is no longer needed as crypto/rand is self-seeding
 	// This function is kept for API compatibility
-	protocolRand = &threadSafeRand{}
+	protocolRand.Store(&threadSafeRand{})
 }
 
 func SetSpecificSeed(seed int64) {
@@ -130,41 +133,41 @@ func SetSpecificSeed(seed int64) {
 	// This function is kept for API compatibility but has no effect
 	// For deterministic randomness, use New(data) instead
 	_ = seed
-	protocolRand = &threadSafeRand{}
+	protocolRand.Store(&threadSafeRand{})
 }
 
 func PanicIfProtocolRandNotInitialized() {
-	if protocolRand == nil {
+	if protocolRand.Load() == nil {
 		panic("rand.InitRandomSeed() must be called before using the rand package")
 	}
 }
 
 func Intn(n int) int {
 	PanicIfProtocolRandNotInitialized()
-	return protocolRand.Intn(n)
+	return protocolRand.Load().Intn(n)
 }
 
 func Float64() float64 {
 	PanicIfProtocolRandNotInitialized()
-	return protocolRand.Float64()
+	return protocolRand.Load().Float64()
 }
 
 func Uint32() uint32 {
 	PanicIfProtocolRandNotInitialized()
-	return protocolRand.Uint32()
+	return protocolRand.Load().Uint32()
 }
 
 func Uint64() uint64 {
 	PanicIfProtocolRandNotInitialized()
-	return protocolRand.Uint64()
+	return protocolRand.Load().Uint64()
 }
 
 func Int63() int64 {
 	PanicIfProtocolRandNotInitialized()
-	return protocolRand.Int63()
+	return protocolRand.Load().Int63()
 }
 
 func Int63n(n int64) int64 {
 	PanicIfProtocolRandNotInitialized()
-	return protocolRand.Int63n(n)
+	return protocolRand.Load().Int63n(n)
 }

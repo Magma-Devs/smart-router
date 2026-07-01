@@ -9,18 +9,23 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/chaintracker"
+	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointstate"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/performance"
+	"github.com/magma-Devs/smart-router/protocol/probing"
+	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
@@ -51,7 +56,7 @@ const (
 // implements Relay Sender interfaced and uses an ChainListener to get it called
 type RPCSmartRouterServer struct {
 	chainParser            chainlib.ChainParser
-	chainTracker           chaintracker.IChainTracker
+	chainState             *chainstate.ChainState // MAG-2160 (Topic C): per-chain consensus tip — replaces the global ChainTracker, the estimator, and the atomic
 	sessionManager         *lavasession.ConsumerSessionManager
 	listenEndpoint         *lavasession.RPCEndpoint
 	rpcSmartRouterLogs     *metrics.RPCConsumerLogs
@@ -64,12 +69,11 @@ type RPCSmartRouterServer struct {
 	chainListener          chainlib.ChainListener
 	relayRetriesManager    *lavaprotocol.RelayRetriesManager
 	initialized            atomic.Bool
-	latestBlockHeight      atomic.Uint64
-	latestBlockEstimator   *relaycore.LatestBlockEstimator
-	enableSelectionStats   bool // feature flag to enable selection stats header
+	latestBlockHeight      atomic.Uint64 // MAG-2160: retained only as the cold-start fallback for getLatestBlock (the estimator is retired)
+	enableSelectionStats   bool          // feature flag to enable selection stats header
 
 	// Per-endpoint ChainTracker manager for continuous block polling
-	endpointChainTrackerManager *EndpointChainTrackerManager
+	endpointChainTrackerManager *endpointstate.EndpointMonitor
 
 	// Direct WS subscription manager (nil if not configured); retained so
 	// graceful shutdown can call Close() to drain upstream WS pools.
@@ -83,13 +87,26 @@ type RPCSmartRouterServer struct {
 
 	// Per-method cross-validation policy resolver (nil/empty => header-driven CV only).
 	crossValidationResolver *CrossValidationPolicyResolver
+
+	// probeStats holds the most-recent runProbeLoop cycle telemetry for /debug/probe-loop
+	// (MAG-2202 endpoint 4). Written off the data plane by runProbeCycle; read by the debug handler.
+	probeStats probeLoopStats
+
+	// Cached API names of the two tip-defining spec methods (GET_BLOCKNUM / GET_BLOCK_BY_NUM), resolved
+	// once on the first relay via tipApiNamesOnce. tipBlockFromRelay runs on every successful relay;
+	// resolving the tag→ApiName mapping per call took the shared chainParser RWLock twice
+	// (GetParsingByTag) on the hot path. The mapping is immutable after parser construction, so the
+	// first relay resolves it and the rest do lock-free string compares. Empty string = tag not
+	// configured for this chain (never a tip).
+	tipApiNamesOnce      sync.Once
+	getBlockNumApiName   string
+	getBlockByNumApiName string
 }
 
 func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	ctx context.Context,
 	listenEndpoint *lavasession.RPCEndpoint,
 	chainParser chainlib.ChainParser,
-	chainTracker chaintracker.IChainTracker,
 	sessionManager *lavasession.ConsumerSessionManager,
 	cache *performance.Cache,
 	rpcSmartRouterLogs *metrics.RPCConsumerLogs,
@@ -103,7 +120,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.sessionManager = sessionManager
 	rpcss.listenEndpoint = listenEndpoint
 	rpcss.cache = cache
-	rpcss.chainTracker = chainTracker
 	rpcss.rpcSmartRouterLogs = rpcSmartRouterLogs
 	rpcss.chainParser = chainParser
 	rpcss.smartRouterConsistency = smartRouterConsistency
@@ -112,7 +128,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.debugRelays = cmdFlags.DebugRelays
 	rpcss.enableSelectionStats = cmdFlags.EnableSelectionStats
 	rpcss.relayRetriesManager = lavaprotocol.NewRelayRetriesManager()
-	rpcss.latestBlockEstimator = relaycore.NewLatestBlockEstimator()
 
 	// Load optional per-method cross-validation policies (empty => header-driven CV only, fully
 	// backwards compatible). Fail fast on invalid config.
@@ -160,13 +175,51 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// initializeChainTrackers always observe the field on their first callback.
 	rpcss.smartRouterEndpointMetrics = smartRouterEndpointMetrics
 
+	// Floor the spec block time to the monitor's default ONCE, here, and feed the SAME value to both
+	// ChainState and the EndpointMonitor below. They must agree: ChainState derives its freshness/TTL
+	// window from this (DefaultConfig), the monitor derives its poll cadence from it. If ChainState saw
+	// the raw 0 (→ 2s window) while the monitor floored to 12s (→ ~6s poll cadence), the consensus
+	// window would be shorter than the poll interval and drop every observation as stale (sync scoring
+	// disabled + getLatestBlock==0) on any chain whose spec omits average_block_time.
+	effectiveBlockTime := averageBlockTime
+	if effectiveBlockTime == 0 {
+		effectiveBlockTime = endpointstate.DefaultAverageBlockTime
+	}
+
+	// Per-chain ChainState tip (MAG-2160 / Topic C). Constructed BEFORE the monitor so the
+	// monitor's OnTipObservation hook can feed it. Phase 2 wires the writes (relay+poll
+	// observations → SetLatestBlock) and the internal consensus recompute tick; the read sites
+	// still use the legacy sources until phase 3.
+	rpcss.chainState = chainstate.New(listenEndpoint.ChainID, chainstate.DefaultConfig(effectiveBlockTime))
+
+	// Topic E (MAG-2160 Finding 2 / F4): point the relay sync dimension at THIS chain+interface's
+	// consensus baseline, so relay sync lag is measured against the agreed tip rather than
+	// max-block-across-providers (which one fast/lying reporter could inflate, dinging the whole pod).
+	// The getter is installed on the per-interface CSM (NOT the shared per-chain optimizer, whose
+	// single getter slot the last interface to start would overwrite — the F4 bug). It is read-only
+	// toward the data plane (reads ChainState.GetConsensusBaselineWithTime). When there is no fresh
+	// majority the relay omits the sync update rather than falling back to the legacy reference (F5).
+	if rpcss.sessionManager != nil {
+		rpcss.sessionManager.SetConsensusBaselineGetter(func() (uint64, time.Time, bool) {
+			block, at, fresh := rpcss.chainState.GetConsensusBaselineWithTime()
+			if !fresh || block <= 0 {
+				return 0, time.Time{}, false
+			}
+			return uint64(block), at, true
+		})
+	}
+
 	// Initialize per-endpoint ChainTracker manager for continuous block polling
-	rpcss.endpointChainTrackerManager = NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
+	rpcss.endpointChainTrackerManager = endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
 		ChainParser:      chainParser,
 		ChainID:          listenEndpoint.ChainID,
 		ApiInterface:     listenEndpoint.ApiInterface,
-		AverageBlockTime: averageBlockTime,
-		BlocksToSave:     DefaultBlocksToSave,
+		AverageBlockTime: effectiveBlockTime,
+		BlocksToSave:     endpointstate.DefaultBlocksToSave,
+		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write).
+		OnTipObservation: func(block int64) {
+			rpcss.chainState.SetLatestBlock(block)
+		},
 		OnNewBlock: func(endpointURL string, fromBlock, toBlock int64) {
 			utils.LavaFormatTrace("endpoint ChainTracker detected new block",
 				utils.LogAttr("endpoint", endpointURL),
@@ -186,6 +239,19 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 			rpcss.smartRouterEndpointMetrics.RecordBlockFetch(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, true, false)
 		},
 	})
+
+	// Consensus recompute tick (MAG-2160 / Topic C): periodically pull all per-endpoint
+	// observation snapshots and let ChainState recompute its strict-majority baseline +
+	// realign down. Off the hot path (relays/polls only do the cheap SetLatestBlock write via
+	// OnTipObservation). The snapshot is taken under the monitor lock and released before
+	// Recompute touches the ChainState lock — the two locks never nest.
+	go rpcss.runChainStateConsensusLoop(ctx, averageBlockTime)
+
+	// Proactive health prober (MAG-2160 / Topic D): on its own cadence, score EVERY direct-RPC
+	// endpoint from stored telemetry + the consensus baseline (zero upstream calls), proactively
+	// re-enable recovered endpoints, and feed one QoS sample per provider. Replaces the synthetic
+	// direct-RPC probe (the legacy AppendProbeRelayData feed is gated off for static providers).
+	go rpcss.runProbeLoop(ctx, validatedProbeCadence(lavasession.ProbeLoopInterval), probing.DefaultVerdictConfig(averageBlockTime))
 
 	// NewChainListener now accepts WSSubscriptionManager interface, which is implemented
 	// by both ConsumerWSSubscriptionManager (provider-relay mode) and
@@ -734,25 +800,47 @@ func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays 
 }
 
 func (rpcss *RPCSmartRouterServer) getLatestBlock() uint64 {
-	// Return latest block from chain tracker (for archive extension routing)
-	if rpcss.chainTracker != nil && !rpcss.chainTracker.IsDummy() {
-		if block, _ := rpcss.chainTracker.GetLatestBlockNum(); block > 0 {
+	// Site A (MAG-2160): the router-wide tip (archive routing + cache-finalization) is the
+	// per-chain ChainState consensus tip — TTL-fresh, monotonic, outlier-guarded — replacing the
+	// global-tracker → estimator → atomic ladder.
+	if rpcss.chainState != nil {
+		if block, ok := rpcss.chainState.GetLatestBlock(); ok && block > 0 {
 			return uint64(block)
 		}
-	}
-
-	if rpcss.latestBlockEstimator != nil {
-		latestKnownBlock, numProviders := rpcss.latestBlockEstimator.Estimate(rpcss.chainParser)
-		if numProviders > 0 && latestKnownBlock > 0 {
-			return uint64(latestKnownBlock)
+		// ChainState is the authority once it has EVER observed a tip. If it is Initialized but
+		// not fresh, the tip has aged past TTL — we must NOT revive a frozen atomic value
+		// (Finding 1). Report unknown (0); a stale-but-real tip is worse than an honest "unknown",
+		// and the atomic's last write could itself be the stale value we just rejected.
+		if rpcss.chainState.Initialized() {
+			return 0
 		}
 	}
 
+	// Genuine cold-start ONLY (ChainState never initialized): in the bootstrap window before the
+	// first observation, fall back to the monotonic atomic — seeded by the tip-eligible init
+	// relay — so getLatestBlock isn't 0 during startup. Once ChainState initializes, this branch
+	// is never taken again, so a post-TTL gap cannot resurrect a frozen atomic.
 	if latest := rpcss.latestBlockHeight.Load(); latest > 0 {
 		return latest
 	}
 
 	return 0
+}
+
+// getLatestBlockBestEffort returns the strict ChainState tip when fresh, otherwise the
+// last-known monotonic atomic tip (seeded by the init relay + tip-eligible relay harvest).
+// It deliberately diverges from getLatestBlock's strict-0-on-stale contract (see the comment
+// there): archive ROUTING only needs a recent-enough head to decide old-vs-recent, and a
+// slightly-stale head mis-classifies at worst a handful of near-head blocks — whereas the
+// strict 0 forces EVERY concrete-block request to the archive pool (archive_parser_rule.go:33).
+// Cache FINALIZATION must keep the strict getLatestBlock (a stale tip there can falsely finalize),
+// so this accessor is for archive routing only. Returns 0 only at genuine cold-start, preserving
+// the conservative force-archive fallback before any tip has ever been observed.
+func (rpcss *RPCSmartRouterServer) getLatestBlockBestEffort() uint64 {
+	if block := rpcss.getLatestBlock(); block > 0 {
+		return block
+	}
+	return rpcss.latestBlockHeight.Load()
 }
 
 func (rpcss *RPCSmartRouterServer) updateLatestBlockHeight(blockHeight uint64, providerAddress string) {
@@ -772,10 +860,6 @@ func (rpcss *RPCSmartRouterServer) updateLatestBlockHeight(blockHeight uint64, p
 			}
 			break
 		}
-	}
-
-	if providerAddress != "" && rpcss.latestBlockEstimator != nil {
-		rpcss.latestBlockEstimator.Record(providerAddress, int64(blockHeight))
 	}
 }
 
@@ -1345,6 +1429,26 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				)
 			}
 
+			// Resolve the endpoint + its direct connection, ensure the per-endpoint ChainTracker,
+			// and capture its observation generation BEFORE dispatching the relay (MAG-2159
+			// finding 5). Capturing pre-dispatch is the safety property: a relay that completes
+			// after this URL's tracker is removed and recreated (a new incarnation, new
+			// generation) carries the OLD generation, so RecordRelayObservation's gate rejects
+			// it — instead of misattributing it to the new tracker, which is exactly what
+			// re-reading the live generation post-relay would do. Resolved here once and reused
+			// in the success path below.
+			var targetEndpoint *lavasession.Endpoint
+			var directConn lavasession.DirectRPCConnection
+			if drsc, ok := singleConsumerSession.Connection.(*lavasession.DirectRPCSessionConnection); ok {
+				targetEndpoint = drsc.Endpoint
+				directConn = drsc.DirectConnection
+			}
+			var harvestGen uint64
+			if targetEndpoint != nil && directConn != nil {
+				rpcss.ensureEndpointChainTracker(goroutineCtx, targetEndpoint, directConn)
+				harvestGen = rpcss.endpointObservationGeneration(targetEndpoint.NetworkAddress)
+			}
+
 			relayLatency, err, _ := rpcss.relayInnerDirect(
 				spanCtx,
 				singleConsumerSession,
@@ -1402,83 +1506,77 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			shouldFailSession := err != nil || statusCode >= 500 || statusCode == 429
 
 			if !shouldFailSession {
-				// Success or client error (4xx except 429) - update session as success
-				// Get endpoint reference for per-endpoint tracking
-				var targetEndpoint *lavasession.Endpoint
-				var directConn lavasession.DirectRPCConnection
-				if drsc, ok := singleConsumerSession.Connection.(*lavasession.DirectRPCSessionConnection); ok {
-					targetEndpoint = drsc.Endpoint     // Use stored reference (robust)
-					directConn = drsc.DirectConnection // Get direct connection for ChainTracker
-				}
+				// Success or client error (4xx except 429) - update session as success.
+				// targetEndpoint / directConn were resolved and the tracker ensured before
+				// dispatch (above), so harvestGen is the generation captured pre-relay.
 
-				// Ensure ChainTracker exists for this endpoint (lazily initialized)
-				if targetEndpoint != nil && directConn != nil {
-					rpcss.ensureEndpointChainTracker(goroutineCtx, targetEndpoint, directConn)
-				}
+				// MAG-2159 (Topic B) tip harvest + tip-state update — gated on tip-eligibility so
+				// historical responses cannot poison the endpoint tip / estimator / metric
+				// (finding 4). harvestGen was captured before dispatch (finding 5).
+				rpcss.harvestAndUpdateTipFromRelay(targetEndpoint, chainMessage, localRelayResult.Reply, harvestGen, endpointAddress)
 
-				// Get latest block: prefer response extraction, fallback to ChainTracker
+				// latestServicedBlock: the block this response actually serviced (may be
+				// historical), used for OnSessionDone and propagated to downstream consumers
+				// (consistency, caching). This is intentionally NOT gated on tip-eligibility — it
+				// is "the block returned by this response", a separate concept from "the current
+				// tip" updated above. Site B (MAG-2160): when the response carried no block, fall
+				// back to THIS endpoint's own observed latest — never another node's tip. The old
+				// global-tracker fallback stamped provider[0]'s value onto this endpoint's
+				// QoS/seenBlock (cross-attribution S6); the per-endpoint value is the honest one.
 				latestBlock := int64(0)
 				if localRelayResult.Reply != nil && localRelayResult.Reply.LatestBlock > 0 {
-					// Block extracted from response (eth_blockNumber, eth_getBlockByNumber, etc.)
 					latestBlock = localRelayResult.Reply.LatestBlock
-
-					// Update endpoint's latest block (per-endpoint tracking)
-					if targetEndpoint != nil {
-						targetEndpoint.LatestBlock.Store(latestBlock)
-						targetEndpoint.LastBlockUpdate = time.Now()
-						utils.LavaFormatTrace("updated endpoint latest block",
-							utils.LogAttr("endpoint", endpointAddress),
-							utils.LogAttr("latest_block", latestBlock),
-							utils.LogAttr("GUID", goroutineCtx),
-						)
+				} else if targetEndpoint != nil && rpcss.endpointChainTrackerManager != nil {
+					// MAG-2160 Finding 6: read this endpoint's freshest OBSERVATION record, not the
+					// dedicated tracker's atomic (GetLatestBlockNum). Under the MAG-2159 traffic gate
+					// the tracker's poll cycle is skipped while served relays keep the tip current, so
+					// the tracker atomic can lag the latest relay-harvested block (or still be 0 on a
+					// purely relay-fed endpoint). The observation store is updated on every harvest, so
+					// it is the honest, freshest per-endpoint value.
+					if obsv, ok := rpcss.endpointChainTrackerManager.GetObservation(targetEndpoint.NetworkAddress); ok {
+						latestBlock = obsv.LatestBlock
 					}
-
-					// Update global latest block height and estimator (for getLatestBlock fallback)
-					rpcss.updateLatestBlockHeight(uint64(latestBlock), endpointAddress)
-
-					// Update Prometheus endpoint latest-block metric.
-					// endpointAddress is the provider name (session map key), so resolveProviderName
-					// returns it unchanged — giving endpoint_id = provider name in the metric.
-					rpcss.smartRouterEndpointMetrics.SetEndpointLatestBlock(
-						rpcss.listenEndpoint.ChainID,
-						rpcss.listenEndpoint.ApiInterface,
-						endpointAddress,
-						latestBlock,
-					)
-				} else if rpcss.chainTracker != nil && !rpcss.chainTracker.IsDummy() {
-					// Fallback to ChainTracker (global) -- propagate to relay result
-					// so downstream consumers (consistency, caching) see the actual latest block
-					latestBlock, _ = rpcss.chainTracker.GetLatestBlockNum()
 					if latestBlock > 0 && localRelayResult.Reply != nil {
 						localRelayResult.Reply.LatestBlock = latestBlock
 					}
-					utils.LavaFormatTrace("using latest block from chain tracker",
+					utils.LavaFormatTrace("using this endpoint's own latest block (site B)",
+						utils.LogAttr("endpoint", endpointAddress),
 						utils.LogAttr("latest_block", latestBlock),
-						utils.LogAttr("GUID", goroutineCtx),
-					)
-				} else {
-					utils.LavaFormatDebug("no latest block available",
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
 
-				// Calculate syncGap (detect lagging endpoints)
+				// Calculate syncGap (detect lagging endpoints). Site C (MAG-2160 Finding 2): an
+				// endpoint is judged against the strict-majority CONSENSUS baseline, NOT the
+				// optimistic observed tip. Measuring against the observed tip would penalize the
+				// whole pod whenever a single endpoint races ahead (baseline 1000, one node reports
+				// 1099 → everyone at 1000 gets a bogus syncGap of 99). When there is no fresh
+				// consensus baseline (single-endpoint pod, or a baseline aged past TTL) we DO NOT
+				// substitute the observed tip — syncGap stays 0, so no endpoint is penalized against
+				// a reference the pod has not actually agreed on.
 				syncGap := int64(0)
-				if targetEndpoint != nil && rpcss.chainTracker != nil && !rpcss.chainTracker.IsDummy() {
-					globalLatest, _ := rpcss.chainTracker.GetLatestBlockNum()
-					endpointLatest := targetEndpoint.LatestBlock.Load()
-					if globalLatest > 0 && endpointLatest > 0 {
-						syncGap = globalLatest - endpointLatest
-						if syncGap < 0 {
-							syncGap = 0 // Endpoint ahead is fine
+				if targetEndpoint != nil && rpcss.chainState != nil {
+					if baseline, ok := rpcss.chainState.GetConsensusBaseline(); ok && baseline > 0 {
+						endpointLatest := rpcss.endpointTipBlock(targetEndpoint.NetworkAddress)
+						if endpointLatest > 0 {
+							syncGap = baseline - endpointLatest
+							// The baseline is the winning cluster's MOST-ADVANCED block, but every
+							// endpoint within BucketWidth of it is inside that same agreeing cluster
+							// (the cluster spans at most BucketWidth). Charging such an endpoint a gap
+							// would penalize the consensus majority against a tip only the fastest
+							// cluster member reported (e.g. baseline 1002 from a lone fast node vs the
+							// 1000-majority). Treat in-cluster endpoints as fully synced (PR #143).
+							if syncGap <= rpcss.chainState.ConsensusBucketWidth() {
+								syncGap = 0
+							}
+							utils.LavaFormatDebug("calculated sync gap",
+								utils.LogAttr("endpoint", endpointAddress),
+								utils.LogAttr("consensus_baseline", baseline),
+								utils.LogAttr("endpoint_latest", endpointLatest),
+								utils.LogAttr("sync_gap", syncGap),
+								utils.LogAttr("GUID", goroutineCtx),
+							)
 						}
-						utils.LavaFormatDebug("calculated sync gap",
-							utils.LogAttr("endpoint", endpointAddress),
-							utils.LogAttr("global_latest", globalLatest),
-							utils.LogAttr("endpoint_latest", endpointLatest),
-							utils.LogAttr("sync_gap", syncGap),
-							utils.LogAttr("GUID", goroutineCtx),
-						)
 					}
 				}
 
@@ -1588,16 +1686,15 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 			endpointLatest = rpcss.endpointChainTrackerManager.GetLatestBlockNum(endpointURL)
 		}
 
-		// Fallback: if ChainTracker has no data yet, use the endpoint's reactive LatestBlock
+		// Fallback: if the ChainTracker has no data yet, use the shared endpointtip store
+		// (single source of truth, fed by the gated poll/relay observers).
 		if endpointLatest == 0 {
-			if drsc, ok := sessionInfo.Session.Connection.(*lavasession.DirectRPCSessionConnection); ok && drsc.Endpoint != nil {
-				endpointLatest = drsc.Endpoint.LatestBlock.Load()
-			}
+			endpointLatest = rpcss.endpointTipBlock(endpointURL)
 		}
 
 		// If we still have no block data, skip validation for this endpoint (allow first relay)
 		if endpointLatest == 0 {
-			trackerState := EndpointChainTrackerMissing
+			trackerState := endpointstate.EndpointChainTrackerMissing
 			trackerLastError := ""
 			if rpcss.endpointChainTrackerManager != nil && endpointURL != "" {
 				trackerState, trackerLastError, _ = rpcss.endpointChainTrackerManager.GetTrackerState(endpointURL)
@@ -1677,6 +1774,436 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 // If not, it creates one lazily. This enables continuous block polling for accurate
 // consistency pre-validation.
 // This is called the first time we successfully communicate with an endpoint.
+// recordRelayBlockObservation harvests a reliable current-tip block (see tipBlockFromRelay)
+// into the per-endpoint observation store (MAG-2159 / Topic B), tagged Source=Relay. It is
+// keyed on endpoint.NetworkAddress — the same key the dedicated poll path uses
+// (EndpointMonitor.GetOrCreateTracker) — so relay and poll observations land on one
+// record. gen is the observation generation captured for this endpoint (after ensuring its
+// tracker); RecordRelayObservation rejects the write if gen no longer matches the live
+// generation, so a relay from a removed/replaced tracker cannot corrupt the record
+// (finding 5). Side-effect-free: it never touches QoS or endpoint.Enabled. No-op when no
+// monitor is wired, the endpoint is nil, or block is non-positive.
+//
+// Returns whether the observation was accepted (passed the generation + monotonic guards).
+// The caller gates the remaining ungated tip-state writes on this so a relay this method
+// drops cannot still poison them.
+func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavasession.Endpoint, gen uint64, block int64) bool {
+	if rpcss.endpointChainTrackerManager == nil || endpoint == nil || block <= 0 {
+		return false
+	}
+	return rpcss.endpointChainTrackerManager.RecordRelayObservation(endpoint.NetworkAddress, gen, block, time.Now())
+}
+
+// endpointTipBlock reads an endpoint's observed tip from the shared single-source-of-truth
+// endpointtip store, keyed by this server's chain + apiInterface + the endpoint URL. It
+// returns 0 (the "unknown tip" sentinel) when the listen endpoint is unset or the URL is
+// empty, so callers never need to nil-check listenEndpoint.
+func (rpcss *RPCSmartRouterServer) endpointTipBlock(endpointURL string) int64 {
+	if rpcss.listenEndpoint == nil || endpointURL == "" {
+		return 0
+	}
+	return endpointtip.Default().Block(
+		endpointtip.Key(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL),
+	)
+}
+
+// minChainStateRecomputeInterval floors the consensus recompute cadence so very fast chains
+// don't recompute the strict-majority baseline excessively (it's a windowed, off-hot-path step).
+const minChainStateRecomputeInterval = time.Second
+
+// runChainStateConsensusLoop periodically recomputes the per-chain ChainState consensus
+// baseline (MAG-2160 / Topic C) until ctx is cancelled. The cadence is the chain's average
+// block time, floored at minChainStateRecomputeInterval.
+func (rpcss *RPCSmartRouterServer) runChainStateConsensusLoop(ctx context.Context, averageBlockTime time.Duration) {
+	interval := averageBlockTime
+	if interval < minChainStateRecomputeInterval {
+		interval = minChainStateRecomputeInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rpcss.recomputeChainStateConsensus()
+		}
+	}
+}
+
+// recomputeChainStateConsensus pulls one snapshot of all per-endpoint observations (single
+// monitor lock, released before touching ChainState) and hands them to ChainState.Recompute,
+// which computes the strict-majority baseline and realigns the tip downward if needed.
+func (rpcss *RPCSmartRouterServer) recomputeChainStateConsensus() {
+	if rpcss.chainState == nil || rpcss.endpointChainTrackerManager == nil {
+		return
+	}
+	// MAG-2160 Finding 5: do NOT early-return on an empty snapshot. An empty (or sub-majority)
+	// snapshot must still reach ChainState.Recompute so it CLEARS any previously-set baseline —
+	// otherwise a pod that has lost all its endpoints keeps anti-lie-guarding against a baseline
+	// no live endpoint still supports. Recompute(empty) is the explicit "no consensus" signal.
+	snap := rpcss.endpointChainTrackerManager.SnapshotObservations()
+	obs := make([]chainstate.BlockObservation, 0, len(snap))
+	for url, o := range snap {
+		if o.LatestBlock <= 0 {
+			continue
+		}
+		obs = append(obs, chainstate.BlockObservation{URL: url, Block: o.LatestBlock, ObservedAt: o.ObservedAt})
+	}
+	rpcss.chainState.Recompute(obs)
+}
+
+// probeQoSAppender is the narrow optimizer capability the prober uses to feed QoS (Topic E's
+// AppendProbeData). The concrete *provideroptimizer.ProviderOptimizer satisfies it; an inline
+// assertion keeps the lavasession optimizer interface unchanged.
+type probeQoSAppender interface {
+	AppendProbeData(provider string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool, syncRef provideroptimizer.SyncReference)
+}
+
+// Compile-time guard: the concrete optimizer must satisfy probeQoSAppender. Without this, the
+// inline type assertion in runProbeLoop would silently degrade to a nil appender (re-enable-only,
+// no QoS feed) if AppendProbeData's signature ever drifts — a regression no test would catch.
+var _ probeQoSAppender = (*provideroptimizer.ProviderOptimizer)(nil)
+
+// defaultProbeCadence is the prober's own polling period — distinct from the legacy synthetic
+// probe's PeriodicProbeProvidersInterval. It floors runProbeLoop's cadence so time.NewTicker can
+// never be handed a non-positive duration (which panics).
+const defaultProbeCadence = 5 * time.Second
+
+// validatedProbeCadence validates the operator-configured probe cadence (MAG-2161 D5): a non-positive
+// value (which would panic time.NewTicker and is never a sane config) is rejected back to the default
+// with a warning, so a misconfiguration degrades loudly to the default rather than crashing the loop.
+func validatedProbeCadence(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		utils.LavaFormatWarning("invalid probe-loop-interval, falling back to default", nil,
+			utils.LogAttr("configured", configured),
+			utils.LogAttr("default", defaultProbeCadence),
+		)
+		return defaultProbeCadence
+	}
+	return configured
+}
+
+// probeLoopStats holds the most-recent runProbeLoop cycle telemetry for /debug/probe-loop (MAG-2202
+// endpoint 4): the configured cadence plus a snapshot of the LAST completed cycle. Written once per
+// cycle by runProbeCycle (off the data plane) and read by the debug handler, under its own mutex so
+// a debug read never contends with relay/probe state. One per RPCSmartRouterServer, like the chain
+// it probes. The zero value is a valid "no cycle run yet" state.
+type probeLoopStats struct {
+	mu               sync.Mutex
+	cycleIntervalMs  int64     // configured --probe-loop-interval; set once when the loop starts
+	cyclesCompleted  uint64    // monotonic count of completed cycles (F6 liveness)
+	lastCycleStarted time.Time // wall-clock the last cycle began (zero before the first cycle)
+	lastCycleDurMs   int64     // wall-clock duration of the last cycle
+	endpointsScored  int       // endpoints scored in the last cycle
+	reEnabledCount   int       // endpoints the probe re-enabled in the last cycle (F1)
+	syncOmittedCount int       // providers whose last-cycle QoS sample fed no sync evidence (F5)
+}
+
+// setInterval publishes the effective probe cadence. Called once at loop start.
+func (s *probeLoopStats) setInterval(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cycleIntervalMs = d.Milliseconds()
+}
+
+// recordCycle overwrites the last-cycle snapshot and bumps the completed-cycle counter.
+func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, scored, reEnabled, syncOmitted int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cyclesCompleted++
+	s.lastCycleStarted = startedAt
+	s.lastCycleDurMs = dur.Milliseconds()
+	s.endpointsScored = scored
+	s.reEnabledCount = reEnabled
+	s.syncOmittedCount = syncOmitted
+}
+
+// probeLoopSnapshot is the read-only view the /debug/probe-loop handler emits per chain.
+type probeLoopSnapshot struct {
+	CycleIntervalMs     int64
+	CyclesCompleted     uint64
+	LastCycleStartedAt  time.Time
+	LastCycleDurationMs int64
+	EndpointsScored     int
+	ReEnabledCount      int
+	SyncOmittedCount    int
+}
+
+// snapshot returns a consistent copy of the stats under the lock (no mutex in the returned value).
+func (s *probeLoopStats) snapshot() probeLoopSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return probeLoopSnapshot{
+		CycleIntervalMs:     s.cycleIntervalMs,
+		CyclesCompleted:     s.cyclesCompleted,
+		LastCycleStartedAt:  s.lastCycleStarted,
+		LastCycleDurationMs: s.lastCycleDurMs,
+		EndpointsScored:     s.endpointsScored,
+		ReEnabledCount:      s.reEnabledCount,
+		SyncOmittedCount:    s.syncOmittedCount,
+	}
+}
+
+// runProbeLoop is the Topic D proactive health prober (MAG-2161). On its own cadence it reads stored
+// per-endpoint telemetry (Topic A) + the consensus baseline (Topic C) — making NO upstream call —
+// renders a health verdict for EVERY direct-RPC endpoint (regular AND backup), proactively
+// re-enables recovered endpoints (the O1 win), and feeds ONE aggregated QoS sample per provider
+// (Topic E contract). It is read-only toward the data plane: it never writes block/consensus state.
+func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence time.Duration, cfg probing.VerdictConfig) {
+	if rpcss.sessionManager == nil || rpcss.endpointChainTrackerManager == nil {
+		return
+	}
+	if cadence <= 0 {
+		cadence = defaultProbeCadence
+	}
+	// Publish the effective cadence for /debug/probe-loop (CycleIntervalMs) before the first tick,
+	// so the endpoint reports the interval even before a cycle has completed.
+	rpcss.probeStats.setInterval(cadence)
+	// The optimizer's AppendProbeData is optional (inline assertion) so the loop degrades to
+	// re-enable-only if a future optimizer lacks it, rather than failing to start.
+	appender, _ := rpcss.sessionManager.GetProviderOptimizer().(probeQoSAppender)
+
+	ticker := time.NewTicker(cadence)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rpcss.runProbeCycle(appender, cfg)
+		}
+	}
+}
+
+// runProbeCycle pulls this server's live dependencies and runs one probe cycle. It resolves THIS
+// interface's consensus baseline once — feeding both the verdict (keeping-up check) and the QoS
+// sync reference (F4: scoped to this interface; F5: sync fed only when a fresh majority exists).
+func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg probing.VerdictConfig) {
+	var baseline int64
+	var hasBaseline bool
+	syncRef := provideroptimizer.SyncReference{ConsensusConfigured: true}
+	if rpcss.chainState != nil {
+		if block, at, ok := rpcss.chainState.GetConsensusBaselineWithTime(); ok && block > 0 {
+			baseline, hasBaseline = block, true
+			syncRef.Block, syncRef.Time, syncRef.Fresh = uint64(block), at, true
+		}
+	}
+	startedAt := time.Now()
+	scored, reEnabled, syncOmitted := runProbeCycleCore(
+		rpcss.sessionManager.GetAllDirectRPCEndpoints(),
+		rpcss.endpointChainTrackerManager.GetObservation,
+		baseline, hasBaseline, syncRef, startedAt, cfg, appender,
+		rpcss.sessionManager.RestoreRecoveredProvider,
+	)
+	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted)
+}
+
+// runProbeCycleCore is the pure probe-cycle body (no rpcss fields), so it is testable with
+// constructed endpoints + a fake observation getter + a fake appender. For every endpoint it renders
+// a verdict, applies the proactive re-enable, then feeds ONE aggregated QoS sample per provider
+// (rule E2). A nil appender still performs the re-enable (QoS feed simply skipped).
+//
+// Returns the per-cycle telemetry for /debug/probe-loop (MAG-2202 endpoint 4): scored = endpoints
+// that received a verdict; reEnabled = endpoints the probe re-enabled this cycle (F1); syncOmitted =
+// providers whose QoS sample fed NO sync evidence (F5: no fresh consensus baseline, or no block in
+// the sample). syncOmitted is 0 when appender is nil (no QoS feed happens, so nothing is omitted).
+func runProbeCycleCore(
+	endpoints []*lavasession.EndpointWithDirectConnection,
+	getObservation func(url string) (endpointstate.EndpointObservation, bool),
+	baseline int64,
+	hasBaseline bool,
+	syncRef provideroptimizer.SyncReference,
+	now time.Time,
+	cfg probing.VerdictConfig,
+	appender probeQoSAppender,
+	onRecover func(provider string),
+) (scored, reEnabled, syncOmitted int) {
+	// One verdict per endpoint (regular + backup), grouped by provider for the single-sample rule.
+	verdictsByProvider := make(map[string][]probing.EndpointVerdict)
+	for _, ep := range endpoints {
+		if ep == nil || ep.Endpoint == nil {
+			continue
+		}
+		scored++
+		obs, _ := getObservation(ep.Endpoint.NetworkAddress)
+		verdict := probing.RenderEndpointVerdict(obs, baseline, hasBaseline, now, cfg)
+		// Proactive re-enable from POST-DISABLE successful-poll evidence only (F1). RecordProbeVerdict
+		// releases the endpoint mutex before returning, so onRecover (which takes csm.lock) cannot
+		// nest under endpoint.mu — no lock-order inversion (F2).
+		if ep.Endpoint.RecordProbeVerdict(verdict.Recovery.LastSuccessfulPoll, verdict.Recovery.PollHealthy, cfg.ReEnableHysteresis) {
+			reEnabled++
+			if onRecover != nil {
+				onRecover(ep.ProviderAddress)
+			}
+		}
+		verdictsByProvider[ep.ProviderAddress] = append(verdictsByProvider[ep.ProviderAddress], verdict)
+	}
+
+	if appender == nil {
+		return scored, reEnabled, syncOmitted // re-enable still happened above; QoS feed unavailable
+	}
+	for provider, verdicts := range verdictsByProvider {
+		sample, ok := probing.AggregateProviderSample(verdicts)
+		if !ok {
+			continue
+		}
+		// hasSync only when an accepted consensus baseline exists (F5): no baseline → no sync evidence,
+		// never the legacy max-across-providers reference. syncRef carries the same baseline.
+		hasSync := sample.HasBlock && hasBaseline
+		if !hasSync {
+			syncOmitted++ // F5: this provider's QoS sample carries no sync evidence this cycle
+		}
+		appender.AppendProbeData(provider, sample.Availability, sample.Latency, sample.HasLatency, sample.Block, hasSync, syncRef)
+	}
+	return scored, reEnabled, syncOmitted
+}
+
+// harvestAndUpdateTipFromRelay applies a served relay's block to TIP state — but only when the
+// response is tip-eligible (MAG-2159 finding 4). tipBlockFromRelay distinguishes a "block
+// associated with a response" (historical: eth_getBlockByNumber(N), getBlockByHash,
+// getTransactionReceipt, getLogs — all carry a positive Reply.LatestBlock) from a "current-tip
+// observation" (eth_blockNumber / eth_getBlockByNumber("latest") / Solana result.context.slot).
+// ONLY the latter may move tip state: the per-endpoint observation store, the endpoint's
+// reactive LatestBlock (read by consistency pre-validation), the bootstrap atomic (latestBlockHeight,
+// the cold-start fallback for getLatestBlock), and the latest-block metric. A historical response
+// updates NONE of these, so it can no longer poison
+// the endpoint tip. "The block this response serviced" (latestServicedBlock) is a separate
+// concept the caller handles ungated. No-op when targetEndpoint is nil or the response is not
+// tip-eligible. harvestGen is the generation captured before dispatch (finding 5).
+func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
+	targetEndpoint *lavasession.Endpoint,
+	chainMessage chainlib.ChainMessage,
+	reply *pairingtypes.RelayReply,
+	harvestGen uint64,
+	endpointAddress string,
+) {
+	if targetEndpoint == nil {
+		return
+	}
+	tip, ok := rpcss.tipBlockFromRelay(chainMessage, reply)
+	if !ok {
+		return
+	}
+	// recordRelayBlockObservation funnels through the gated RecordRelayObservation into the
+	// single-source-of-truth endpointtip store. The previous unconditional second write to
+	// targetEndpoint.LatestBlock is gone — it bypassed the generation/monotonic gate and was
+	// the source of tip divergence. The remaining tip-state writes below (router bootstrap
+	// atomic, per-endpoint metric) are gated on acceptance so a stale relay the store drops
+	// (replaced/removed tracker, or older-than-stored observation) cannot still poison them.
+	if !rpcss.recordRelayBlockObservation(targetEndpoint, harvestGen, tip) {
+		return
+	}
+	rpcss.updateLatestBlockHeight(uint64(tip), endpointAddress)
+	if rpcss.smartRouterEndpointMetrics != nil {
+		// endpointAddress is the provider name (session map key), so resolveProviderName
+		// returns it unchanged — endpoint_id = provider name in the metric.
+		rpcss.smartRouterEndpointMetrics.SetEndpointLatestBlock(
+			rpcss.listenEndpoint.ChainID,
+			rpcss.listenEndpoint.ApiInterface,
+			endpointAddress,
+			tip,
+		)
+	}
+}
+
+// endpointObservationGeneration returns the live observation generation for an endpoint
+// URL (0 if no monitor or no active tracker). The relay-harvest path captures it after
+// ensuring the tracker and passes it to recordRelayBlockObservation.
+func (rpcss *RPCSmartRouterServer) endpointObservationGeneration(endpointURL string) uint64 {
+	if rpcss.endpointChainTrackerManager == nil {
+		return 0
+	}
+	gen, _ := rpcss.endpointChainTrackerManager.ObservationGeneration(endpointURL)
+	return gen
+}
+
+// tipBlockFromRelay returns a reliable current-tip block observed from a served relay
+// response, and whether one is available — distinguishing a "block associated with a
+// response" (historical) from a "current-tip observation" (MAG-2159 findings 1 & 2).
+//
+// Tip sources, by transport/chain:
+//   - Solana family (JSON-RPC): result.context.slot — the slot the query was processed at,
+//     i.e. the node's current tip — present on most successful Solana responses
+//     (getBalance, getAccountInfo, getLatestBlockhash, ...). Chain-aware; never applied to
+//     other chains. See extractSolanaContextSlot.
+//   - Otherwise (EVM/gRPC): Reply.LatestBlock is the tip ONLY for a method whose semantics make the
+//     reply's block the node's current tip, identified by SPEC TAG (not by RequestedBlock alone):
+//     1. GET_BLOCKNUM (eth_blockNumber-equivalent): the result IS the tip.
+//     2. GET_BLOCK_BY_NUM (eth_getBlockByNumber-equivalent) AND RequestedBlock == LATEST_BLOCK.
+//     Methods with no parseable block param (eth_getTransactionReceipt, eth_getBlockByHash, ...)
+//     fall back to a DEFAULT parser that ALSO reports RequestedBlock == LATEST_BLOCK, while
+//     Reply.LatestBlock is the HISTORICAL block of the tx/block — so RequestedBlock == LATEST_BLOCK
+//     cannot discriminate, and neither can GetUsedDefaultValue() (non-deterministic for
+//     eth_blockNumber across runs). The spec tag is the only reliable discriminator. A concrete
+//     eth_getBlockByNumber(N) requests N (not LATEST) and is historical.
+//     Reply.LatestBlock is populated for JSON-RPC and gRPC; REST harvests nothing.
+//
+// Note: RequestedBlock() is not concretized during the relay flow (the
+// UpdateLatestBlockInMessage call in relaycore/results_manager.go is disabled), so it still
+// reads LATEST_BLOCK here for latest-requesting methods.
+func (rpcss *RPCSmartRouterServer) tipBlockFromRelay(chainMessage chainlib.ChainMessage, reply *pairingtypes.RelayReply) (int64, bool) {
+	if reply == nil {
+		return 0, false
+	}
+	if common.IsSolanaFamily(rpcss.listenEndpoint.ChainID) {
+		return extractSolanaContextSlot(reply.Data)
+	}
+	if reply.LatestBlock <= 0 {
+		return 0, false
+	}
+	// A response is a CURRENT-TIP observation in exactly two method-defined cases (NOT by RequestedBlock
+	// alone — receipt/by-hash also default to LATEST_BLOCK but carry a HISTORICAL Reply.LatestBlock):
+	//   1. The GET_BLOCKNUM method (eth_blockNumber-equivalent): its result IS the node's tip. (It has
+	//      no block param, so it parses to LATEST via the default — indistinguishable from a receipt by
+	//      RequestedBlock/UsedDefaultValue — and must be matched by its spec tag.)
+	//   2. The GET_BLOCK_BY_NUM method (eth_getBlockByNumber-equivalent) when it requested the LATEST
+	//      block. A concrete eth_getBlockByNumber(N) requests N (not LATEST) and is historical.
+	// Everything else — receipt, by-hash, logs — is neither tagged method and is dropped.
+	// Deliberately does NOT consult GetUsedDefaultValue (which is unreliable for eth_blockNumber).
+	if rpcss.isGetBlockNumMethod(chainMessage) {
+		return reply.LatestBlock, true
+	}
+	requestedLatest, _ := chainMessage.RequestedBlock()
+	if requestedLatest == spectypes.LATEST_BLOCK && rpcss.isGetBlockByNumMethod(chainMessage) {
+		return reply.LatestBlock, true
+	}
+	return 0, false
+}
+
+// resolveTipApiNames caches, once, the API names of the two tip-defining spec methods so the
+// per-relay tip classification needs no parser lock. The tag→ApiName mapping is immutable after
+// parser construction; sync.Once gives the read of the cached fields a happens-after on the write.
+// Lazy (not done in ServeRPCRequests) so it also covers servers built directly (e.g. in tests).
+func (rpcss *RPCSmartRouterServer) resolveTipApiNames() {
+	rpcss.tipApiNamesOnce.Do(func() {
+		if rpcss.chainParser == nil {
+			return
+		}
+		if parsing, _, ok := rpcss.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM); ok && parsing != nil {
+			rpcss.getBlockNumApiName = parsing.ApiName
+		}
+		if parsing, _, ok := rpcss.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM); ok && parsing != nil {
+			rpcss.getBlockByNumApiName = parsing.ApiName
+		}
+	})
+}
+
+// isGetBlockNumMethod: the "current block number" call (e.g. eth_blockNumber) — result IS the tip.
+func (rpcss *RPCSmartRouterServer) isGetBlockNumMethod(chainMessage chainlib.ChainMessage) bool {
+	rpcss.resolveTipApiNames()
+	api := chainMessage.GetApi()
+	return api != nil && rpcss.getBlockNumApiName != "" && api.Name == rpcss.getBlockNumApiName
+}
+
+// isGetBlockByNumMethod: the "get block by number" call (e.g. eth_getBlockByNumber) — a tip only when
+// it requested LATEST.
+func (rpcss *RPCSmartRouterServer) isGetBlockByNumMethod(chainMessage chainlib.ChainMessage) bool {
+	rpcss.resolveTipApiNames()
+	api := chainMessage.GetApi()
+	return api != nil && rpcss.getBlockByNumApiName != "" && api.Name == rpcss.getBlockByNumApiName
+}
+
 func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 	ctx context.Context,
 	endpoint *lavasession.Endpoint,
@@ -1692,15 +2219,19 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 		return
 	}
 
-	// Create ChainTracker lazily (in a goroutine to avoid blocking relay)
-	go func() {
-		_, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(endpoint, directConnection)
-		if err != nil {
-			utils.LavaFormatWarning("failed to create ChainTracker for endpoint", err,
-				utils.LogAttr("endpoint", endpointURL),
-			)
-		}
-	}()
+	// Create the ChainTracker SYNCHRONOUSLY (Finding 4). GetOrCreateTracker registers the tracker
+	// and allocates its observation generation under the manager lock with NO network I/O — the
+	// blocking poll loop is started internally via `go startTrackerWithRetry`. Running it inline
+	// (not in a goroutine) guarantees the generation EXISTS before this relay's dispatch captures
+	// it via endpointObservationGeneration: an async creation let an early relay capture generation
+	// 0 (no tracker yet), so its harvested tip was recorded against a generation that the real
+	// tracker would never match — silently dropping the first relay's tip. The poll loop stays
+	// async, so dispatch is not blocked on the network.
+	if _, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(endpoint, directConnection); err != nil {
+		utils.LavaFormatWarning("failed to create ChainTracker for endpoint", err,
+			utils.LogAttr("endpoint", endpointURL),
+		)
+	}
 }
 
 // initializeChainTrackers creates ChainTrackers for all direct RPC endpoints on startup.
@@ -1777,8 +2308,21 @@ func (rpcss *RPCSmartRouterServer) initializeChainTrackers(ctx context.Context) 
 // cache-write goes to the long-TTL finalized store or the short-TTL temp
 // store. Reply.LatestBlock is unreliable for methods that echo the requested
 // block (eth_getBlockByNumber returns result.number = requested), so the
-// router's tracked tip (chainTracker / latestBlockEstimator / atomic
-// latestBlockHeight, surfaced via getLatestBlock()) wins when it is higher.
+// router's tracked tip (the per-chain ChainState consensus tip, with the
+// bootstrap atomic latestBlockHeight as cold-start fallback, surfaced via
+// getLatestBlock()) wins when it is higher.
+//
+// IMPORTANT — finalization MUST be passed the STRICT getLatestBlock(), which
+// returns 0 when the consensus tip is stale/uninitialized. Do NOT switch this to
+// getLatestBlockBestEffort() the way archive routing (#1) does. A higher "latest"
+// here can FALSELY finalize (write a not-yet-final block to the long-TTL store),
+// so the source must be trustworthy: the consensus tip is strict-majority and
+// realigns DOWNWARD on a poisoned/reverted tip. The bootstrap atomic is
+// monotonic-max with no downward correction, so one lying-high observation would
+// false-finalize EVERY provider's responses persistently until the real head
+// catches up — globally and durably, far worse than replyLatestBlock (which is
+// self-scoped to one provider's reply). A stale-but-honest 0 only under-finalizes
+// (finalized data lands in the short-TTL store), which is the safe direction.
 func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlock, finalizationDistance int64) bool {
 	latest := replyLatestBlock
 	if trackedLatestBlock > latest {
@@ -2186,9 +2730,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							StatusCode:   200,
 							ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
 						}
-						if reply.LatestBlock > 0 {
-							rpcss.updateLatestBlockHeight(uint64(reply.LatestBlock), "")
-						}
+						// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was
+						// current when the response was CACHED — it is not a fresh observation of the
+						// chain head and is not gated on tip-eligibility, so it must NOT feed the
+						// bootstrap atomic (it would freeze a stale value during cold start). Tip state
+						// is advanced only by tip-eligible live relays (harvestAndUpdateTipFromRelay)
+						// and the per-endpoint observation store, never by cache replays.
 						relayProcessor.SetResponse(&relaycore.RelayResponse{
 							RelayResult: relayResult,
 							Err:         nil,
@@ -2595,15 +3142,15 @@ func (rpcss *RPCSmartRouterServer) getExtensionsFromDirectiveHeaders(directiveHe
 		utils.LavaFormatTrace("[Archive Debug] Processed extensions", utils.LogAttr("extensions", extensions))
 		if len(extensions) == 1 && extensions[0] == "none" {
 			// none eliminates existing extensions
-			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlock(), ExtensionOverride: []string{}}
+			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockBestEffort(), ExtensionOverride: []string{}}
 		} else if len(extensions) > 0 {
 			// All extensions from headers use AdditionalExtensions (consistent behavior)
 			utils.LavaFormatTrace("[Archive Debug] Using AdditionalExtensions for all header extensions", utils.LogAttr("extensions", extensions))
-			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlock(), AdditionalExtensions: extensions}
+			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockBestEffort(), AdditionalExtensions: extensions}
 		}
 	}
 	utils.LavaFormatTrace("[Archive Debug] No extension override header found")
-	return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlock()}
+	return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockBestEffort()}
 }
 
 func (rpcss *RPCSmartRouterServer) HandleDirectiveHeadersForMessage(chainMessage chainlib.ChainMessage, directiveHeaders map[string]string) {

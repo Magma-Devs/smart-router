@@ -12,6 +12,7 @@ import (
 	"errors"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	metrics "github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
@@ -28,11 +29,27 @@ const (
 	BlockedProviderSessionUnusedStatus = uint32(0)
 )
 
+// debugProbes is an atomic toggle: it is read by probe goroutines (probeProviders) while the CLI
+// layer sets it from the parsed --debug-probes flag. A plain bool here raced the flag write against
+// those reads under -race (a leaked probe goroutine from one test vs another test building the cobra
+// command). Use SetDebugProbes/DebugProbesEnabled rather than touching it directly.
+var debugProbes atomic.Bool
+
+// SetDebugProbes applies the --debug-probes flag value (called once at startup from the CLI layer).
+func SetDebugProbes(enabled bool) { debugProbes.Store(enabled) }
+
+// DebugProbesEnabled reports whether verbose probe logging is on.
+func DebugProbesEnabled() bool { return debugProbes.Load() }
+
 var (
 	retrySecondChanceAfter         = time.Minute * 3
-	DebugProbes                    = false
 	PeriodicProbeProviders         = false
 	PeriodicProbeProvidersInterval = 5 * time.Second
+	// ProbeLoopInterval is the configurable cadence (MAG-2161 D5) of the real proactive health prober
+	// (rpcsmartrouter.runProbeLoop). Default 5s; validated at startup (a non-positive value is rejected
+	// back to the default). Distinct from PeriodicProbeProvidersInterval, which clocks the legacy
+	// synthetic probe loop — the prober does NOT use that knob.
+	ProbeLoopInterval = 5 * time.Second
 )
 
 // created with NewConsumerSessionManager
@@ -88,10 +105,79 @@ type ConsumerSessionManager struct {
 	// getLavaBlockHeight returns the current Lava blockchain block height
 	// This is NOT used for RelaySession.Epoch (which must be the pairing epoch start block)
 	getLavaBlockHeight func() int64
+
+	// consensusBaselineGetter resolves THIS interface's consensus baseline (block, the time it was
+	// computed, and whether a fresh majority exists) for the relay sync dimension (Topic E / F4). It
+	// is per-CSM (one CSM per chain+interface) so the relay path measures sync lag against its own
+	// interface's ChainState — never another interface's, the bug of the former shared-optimizer
+	// getter. nil means no consensus integration is wired (legacy max-across-providers reference).
+	consensusBaselineGetterLock sync.RWMutex
+	consensusBaselineGetter     func() (block uint64, at time.Time, fresh bool)
+}
+
+// SetConsensusBaselineGetter installs the per-interface consensus baseline source the relay sync
+// dimension measures lag against (Topic E / F4). Read-only toward the data plane (reads ChainState).
+func (csm *ConsumerSessionManager) SetConsensusBaselineGetter(getter func() (block uint64, at time.Time, fresh bool)) {
+	csm.consensusBaselineGetterLock.Lock()
+	defer csm.consensusBaselineGetterLock.Unlock()
+	csm.consensusBaselineGetter = getter
+}
+
+// resolveSyncReference builds the SyncReference for a relay sample from this interface's consensus
+// getter. No getter → ConsensusConfigured=false (legacy reference); getter present but no fresh
+// majority → ConsensusConfigured=true, Fresh=false (the optimizer then OMITS the sync update rather
+// than poisoning it with max-across-providers, F5).
+func (csm *ConsumerSessionManager) resolveSyncReference() provideroptimizer.SyncReference {
+	csm.consensusBaselineGetterLock.RLock()
+	getter := csm.consensusBaselineGetter
+	csm.consensusBaselineGetterLock.RUnlock()
+	if getter == nil {
+		return provideroptimizer.SyncReference{}
+	}
+	ref := provideroptimizer.SyncReference{ConsensusConfigured: true}
+	if block, at, fresh := getter(); fresh && block > 0 {
+		ref.Block, ref.Time, ref.Fresh = block, at, true
+	}
+	return ref
 }
 
 func (csm *ConsumerSessionManager) GetQoSManager() *qos.QoSManager {
 	return csm.qosManager
+}
+
+// GetProviderOptimizer exposes the provider optimizer so callers can wire optional capabilities
+// onto it — e.g. installing the Topic E sync-reference getter (the consensus baseline the QoS sync
+// dimension measures lag against). Returns the interface; callers type-assert for the capability.
+func (csm *ConsumerSessionManager) GetProviderOptimizer() ProviderOptimizer {
+	return csm.providerOptimizer
+}
+
+// ProviderRoutingSnapshot is a consistent copy of the CSM's routing-pool state for read-only debug
+// introspection (MAG-2202 /debug/provider-routing): the addresses currently eligible to route, the
+// primary providers blocked this epoch, and the blocked backup providers. Every slice is a copy, so
+// the caller never aliases CSM-internal state; backup providers are sorted for deterministic output.
+// All slices are non-nil (empty rather than nil) so the JSON encodes as [] rather than null.
+type ProviderRoutingSnapshot struct {
+	ValidAddresses                    []string
+	CurrentlyBlockedProviderAddresses []string
+	BlockedBackupProviders            []string
+}
+
+// ProviderRoutingSnapshot returns a copy of this CSM's valid / blocked / blocked-backup provider
+// addresses under csm.lock. Read-only — it never mutates routing state.
+func (csm *ConsumerSessionManager) ProviderRoutingSnapshot() ProviderRoutingSnapshot {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	backups := make([]string, 0, len(csm.blockedBackupProviders))
+	for addr := range csm.blockedBackupProviders {
+		backups = append(backups, addr)
+	}
+	sort.Strings(backups)
+	return ProviderRoutingSnapshot{
+		ValidAddresses:                    append([]string{}, csm.validAddresses...),
+		CurrentlyBlockedProviderAddresses: append([]string{}, csm.currentlyBlockedProviderAddresses...),
+		BlockedBackupProviders:            backups,
+	}
 }
 
 func (csm *ConsumerSessionManager) GetNumberOfValidProviders() int {
@@ -539,7 +625,7 @@ func (csm *ConsumerSessionManager) PeriodicProbeProviders(ctx context.Context, i
 func (csm *ConsumerSessionManager) probeProviders(ctx context.Context, pairingList map[uint64]*ConsumerSessionsWithProvider, epoch uint64) error {
 	guid := utils.GenerateUniqueIdentifier()
 	ctx = utils.AppendUniqueIdentifier(ctx, guid)
-	if DebugProbes {
+	if DebugProbesEnabled() {
 		utils.LavaFormatInfo("providers probe initiated", utils.Attribute{Key: "endpoint", Value: csm.rpcEndpoint}, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: "epoch", Value: epoch})
 	}
 	// Create a wait group to synchronize the goroutines
@@ -550,9 +636,18 @@ func (csm *ConsumerSessionManager) probeProviders(ctx context.Context, pairingLi
 		go func(consumerSessionsWithProvider *ConsumerSessionsWithProvider) {
 			// Call the probeProvider function and defer the WaitGroup Done call
 			defer wg.Done()
+			// MAG-2161 (Topic D / F3+F7): direct-RPC (static) providers are owned end-to-end by the
+			// real telemetry-driven prober (runProbeLoop): it scores their liveness/latency/sync from
+			// real observations (AppendProbeData) and proactively re-enables recovered endpoints. The
+			// legacy SYNTHETIC probe here only reads the Enabled bit and reports a nominal 1ms success —
+			// a fake liveness signal (SetProviderLiveness) and a fake QoS feed. Skip it entirely for
+			// static providers so the prober is the single source of truth for direct-RPC health.
+			if consumerSessionsWithProvider.StaticProvider {
+				return
+			}
 			latency, providerAddress, err := csm.probeProvider(ctx, consumerSessionsWithProvider, epoch, false)
 			success := err == nil // if failure then regard it in availability
-			csm.consumerMetricsManager.SetProviderLiveness(csm.rpcEndpoint.ChainID, providerAddress, consumerSessionWithProvider.Endpoints[0].NetworkAddress, success)
+			csm.consumerMetricsManager.SetProviderLiveness(csm.rpcEndpoint.ChainID, providerAddress, consumerSessionsWithProvider.Endpoints[0].NetworkAddress, success)
 			csm.providerOptimizer.AppendProbeRelayData(providerAddress, latency, success)
 		}(consumerSessionWithProvider)
 	}
@@ -565,7 +660,7 @@ func (csm *ConsumerSessionManager) probeProviders(ctx context.Context, pairingLi
 	select {
 	case <-done:
 		// all probes finished in time
-		if DebugProbes {
+		if DebugProbesEnabled() {
 			utils.LavaFormatDebug("providers probe done", utils.Attribute{Key: "endpoint", Value: csm.rpcEndpoint}, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: "epoch", Value: epoch})
 		}
 		return nil
@@ -644,7 +739,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 				Endpoint: endpointAndConnection.endpoint,
 			})
 			// public lava address is a value that is not changing, so it's thread safe
-			if DebugProbes {
+			if DebugProbesEnabled() {
 				utils.LavaFormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicLavaAddress})
 			}
 			return nil
@@ -694,7 +789,11 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 		// consecutive refusals stays backed off and must not be optimistically
 		// unblocked at epoch transition. Active
 		// per-endpoint probing/recovery is handled by the chain tracker (Step 3).
-		if !endpoint.Enabled {
+		// Read Enabled through the synchronized accessor: the real prober (Topic D) writes this bit
+		// under e.mu (RecordProbeVerdict), and an unsynchronized read here raced with it (F3). This
+		// path no longer emits liveness metrics or QoS — it is only a race-free routability gate for
+		// the epoch-transition unblock/reconnect callers; the prober owns direct-RPC liveness.
+		if !endpoint.IsEnabled() {
 			utils.LavaFormatDebug("Direct RPC endpoint is disabled, skipping probe",
 				utils.LogAttr("provider", providerAddress),
 				utils.LogAttr("endpoint", endpoint.NetworkAddress),
@@ -709,7 +808,7 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 
 			usableEndpoints++
 
-			if DebugProbes {
+			if DebugProbesEnabled() {
 				utils.LavaFormatDebug("Direct RPC endpoint probe (no health gate)",
 					utils.LogAttr("provider", providerAddress),
 					utils.LogAttr("url", conn.GetURL()),
@@ -871,7 +970,9 @@ func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions 
 func (csm *ConsumerSessionManager) validatePairingListNotEmpty(addon string, extensions []string, ctx context.Context) uint64 {
 	numberOfResets := csm.atomicReadNumberOfResets()
 	validAddresses := csm.cacheAddonAddresses(addon, extensions, ctx)
-	utils.LavaFormatInfo("VALIDATING PROVIDERS", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("validAddressesCount", len(validAddresses)), utils.LogAttr("validAddresses", validAddresses), utils.LogAttr("currentlyBlockedCount", len(csm.currentlyBlockedProviderAddresses)), utils.LogAttr("GUID", ctx))
+	// currentlyBlockedProviderAddresses is intentionally not read here: this method holds no csm.lock,
+	// so reading the shared slice for a log attr races a concurrent writer (blockProvider / restore).
+	utils.LavaFormatInfo("VALIDATING PROVIDERS", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("validAddressesCount", len(validAddresses)), utils.LogAttr("validAddresses", validAddresses), utils.LogAttr("GUID", ctx))
 	if len(validAddresses) == 0 {
 		utils.LavaFormatWarning("NO VALID PROVIDERS - TRIGGERING RESET", nil, utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("GUID", ctx))
 		numberOfResets = csm.resetValidAddresses(addon, extensions)
@@ -1750,7 +1851,10 @@ func (csm *ConsumerSessionManager) removeAddressFromValidAddresses(address strin
 // Blocks a provider making him unavailable for pick this epoch, will also report him as unavailable if reportProvider is set to true.
 // Validates that the sessionEpoch is equal to cs.currentEpoch otherwise doesn't take effect.
 func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address string, reportProvider bool, sessionEpoch uint64, disconnections uint64, consecutiveErrors uint64, allowSecondChance bool, reconnectCallback func() error) error {
-	utils.LavaFormatInfo("🔒 BLOCKING PROVIDER", utils.LogAttr("address", address), utils.LogAttr("currentBlockedCount", len(csm.currentlyBlockedProviderAddresses)), utils.LogAttr("GUID", ctx))
+	// NOTE: the blocked-list count is intentionally NOT logged here — this runs before csm.lock is
+	// taken (below), so reading the slice would race a concurrent holder's append. It is logged under
+	// the lock at "ADDED TO BLOCKED LIST".
+	utils.LavaFormatInfo("🔒 BLOCKING PROVIDER", utils.LogAttr("address", address), utils.LogAttr("GUID", ctx))
 
 	// find Index of the address
 	if sessionEpoch != csm.atomicReadCurrentEpoch() { // we read here atomically so cs.currentEpoch cant change in the middle, so we can save time if epochs mismatch
@@ -1933,8 +2037,11 @@ func (csm *ConsumerSessionManager) validateAndReturnBlockedProviderToValidAddres
 		if addr == providerAddress {
 			// Remove it from the csm.currentlyBlockedProviderAddresses
 			csm.currentlyBlockedProviderAddresses = append(csm.currentlyBlockedProviderAddresses[:idx], csm.currentlyBlockedProviderAddresses[idx+1:]...)
-			// Reapply it to the valid addresses.
-			csm.validAddresses = append(csm.validAddresses, addr)
+			// Reapply it to the valid addresses — but never duplicate (an address blocked once is
+			// absent from validAddresses, yet a concurrent restore path makes the guard cheap insurance).
+			if !slices.Contains(csm.validAddresses, addr) {
+				csm.validAddresses = append(csm.validAddresses, addr)
+			}
 			// Purge the current addon addresses so it will be created again next time get session is called.
 			csm.RemoveAddonAddresses("", nil)
 			// Reset redemption status
@@ -1959,6 +2066,35 @@ func (csm *ConsumerSessionManager) forgetSecondChanceGiven(providerAddress strin
 	csm.lock.Lock()
 	defer csm.lock.Unlock()
 	delete(csm.secondChanceGivenToAddresses, providerAddress)
+}
+
+// RestoreRecoveredProvider returns a probe-recovered provider to normal routing (F2). The prober
+// (Topic D) re-enables an endpoint's transport bit (Endpoint.Enabled) when it proves recovery, but
+// the endpoint can still be unroutable because its PROVIDER is blocked at the session-manager level:
+// a regular provider in currentlyBlockedProviderAddresses (absent from validAddresses), or a backup
+// in blockedBackupProviders. This restores both so selection can reach it again without waiting for
+// the next epoch — the whole point of proactive recovery.
+//
+// It is idempotent (safe to call once per recovered endpoint even when several endpoints of one
+// provider recover in the same cycle) and handles a provider that sits in BOTH pools. The prober
+// calls this AFTER Endpoint.RecordProbeVerdict has returned (the endpoint mutex is already released),
+// so taking csm.lock here introduces no endpoint.mu→csm.lock nesting.
+func (csm *ConsumerSessionManager) RestoreRecoveredProvider(providerAddress string) {
+	csm.lock.Lock()
+	// Regular provider: move it back from the blocked list to validAddresses (also clears redemption
+	// status + blocked metric). A no-op if it isn't in the blocked list.
+	csm.validateAndReturnBlockedProviderToValidAddressesListLocked(providerAddress)
+	// Backup provider: drop it from the blocked-backup set (a no-op if absent). Independent of the
+	// regular pool — a provider overlapping both is restored in both.
+	if _, blocked := csm.blockedBackupProviders[providerAddress]; blocked {
+		delete(csm.blockedBackupProviders, providerAddress)
+		utils.LavaFormatInfo("probe restored recovered backup provider to routing", utils.LogAttr("address", providerAddress))
+	}
+	csm.lock.Unlock()
+
+	// Clear any standing report so a re-blocked provider isn't immediately re-blocked at epoch flip.
+	// RemoveReport takes its own lock; call it outside csm.lock to avoid any lock-order coupling.
+	csm.reportedProviders.RemoveReport(providerAddress)
 }
 
 // On a successful session this function will update all necessary fields in the consumerSession. and unlock it when it finishes
@@ -2007,20 +2143,31 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 	// calculate QoS - syncGap is the difference between expected and actual block height (0 if not tracked)
 	csm.qosManager.CalculateQoS(csm.atomicReadCurrentEpoch(), consumerSession.SessionId, consumerSession.Parent.PublicLavaAddress, currentLatency, expectedLatency, syncGap, numOfProviders, int64(providersCount))
 	if !isHangingApi {
-		// MAG-1748: latestServicedBlock is the GLOBAL chain-tracker head for methods whose
-		// response body carries no block height (eth_getBalance/eth_call/eth_estimateGas) —
-		// it is identical for every provider, so feeding it here leaves the optimizer's
-		// per-provider sync-score blind to a stale provider. Prefer the per-endpoint
-		// ChainTracker block (endpoint_chain_tracker_manager keeps Endpoint.LatestBlock
-		// current regardless of method), so a lagging provider is actually demoted.
+		// Append relay data only for non-hanging apis. Two composed fixes:
+		//
+		// MAG-1748: latestServicedBlock is the GLOBAL chain-tracker head for methods whose response
+		// body carries no block height (eth_getBalance/eth_call/eth_estimateGas) — identical for every
+		// provider, so feeding it would leave the per-provider sync-score blind to a stale provider.
+		// Prefer the per-endpoint ChainTracker block (Endpoint.LatestBlock, kept current regardless of
+		// method) so a lagging provider is actually demoted.
 		syncBlock := uint64(latestServicedBlock)
 		if drsc, ok := consumerSession.Connection.(*DirectRPCSessionConnection); ok && drsc.Endpoint != nil {
-			if endpointBlock := drsc.Endpoint.LatestBlock.Load(); endpointBlock > 0 {
+			// Read the per-endpoint tip from the shared single-source-of-truth store (keyed
+			// by chain+apiInterface+url). This used to read drsc.Endpoint.LatestBlock, a
+			// second copy written ungated; the store is fed only through the gated poll/relay
+			// observers, so a lagging provider is demoted against a consistent tip.
+			info := csm.RPCEndpoint()
+			tipKey := endpointtip.Key(info.ChainID, info.ApiInterface, drsc.Endpoint.NetworkAddress)
+			if endpointBlock := endpointtip.Default().Block(tipKey); endpointBlock > 0 {
 				syncBlock = uint64(endpointBlock)
 			}
 		}
-		// append relay data only for non hanging apis
-		go csm.providerOptimizer.AppendRelayData(consumerSession.Parent.PublicLavaAddress, currentLatency, specComputeUnits, syncBlock)
+		// F4/F5: resolve THIS interface's consensus baseline so the optimizer measures sync lag
+		// against the agreed tip — or omits sync when there is no fresh majority — instead of the
+		// shared-getter/max-across-providers behavior. The per-endpoint block above is the provider's
+		// observed position; syncRef is the reference it is compared against.
+		syncRef := csm.resolveSyncReference()
+		go csm.providerOptimizer.AppendRelayDataConsensus(consumerSession.Parent.PublicLavaAddress, currentLatency, specComputeUnits, syncBlock, syncRef)
 	}
 
 	csm.updateMetricsManager(consumerSession, currentLatency, !isHangingApi) // apply latency only for non hanging apis
@@ -2052,9 +2199,15 @@ func (csm *ConsumerSessionManager) updateMetricsManager(consumerSession *SingleC
 	}
 	publicProviderAddress := consumerSession.Parent.PublicLavaAddress
 	publicProviderEndpoint := consumerSession.Parent.Endpoints[0].NetworkAddress
+	// Capture the session-owned fields while the caller still holds the session lock (this method is
+	// documented as called under it). The goroutine below outlives OnSessionDone's `defer Free`, so a
+	// concurrent relay can re-acquire the session and mutate LatestBlock/RelayNum (SetUsageForSession)
+	// — reading them inside the goroutine was a data race. Snapshot, then read only locals.
+	latestBlock := consumerSession.LatestBlock
+	relayNum := consumerSession.RelayNum
 
 	go func() {
-		csm.consumerMetricsManager.SetQOSMetrics(chainId, apiInterface, publicProviderAddress, publicProviderEndpoint, lastQos, lastReputation, consumerSession.LatestBlock, consumerSession.RelayNum, relayLatency, sessionSuccessful)
+		csm.consumerMetricsManager.SetQOSMetrics(chainId, apiInterface, publicProviderAddress, publicProviderEndpoint, lastQos, lastReputation, latestBlock, relayNum, relayLatency, sessionSuccessful)
 	}()
 }
 

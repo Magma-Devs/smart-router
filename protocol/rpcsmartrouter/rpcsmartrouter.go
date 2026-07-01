@@ -23,6 +23,7 @@ import (
 	"math"
 	"net/http"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -486,7 +487,7 @@ type consistencyResetter interface {
 	ResetState()
 }
 
-// resetAllChainTrackers walks the router's per-server EndpointChainTrackerManagers
+// resetAllChainTrackers walks the router's per-server EndpointMonitors
 // and zeroes every cached latest-block, so consistency pre-validation skips the
 // lag check until the next poll repopulates the value. Returns the total number
 // of trackers reset across all servers. Nil-safe at every level so test fixtures
@@ -630,9 +631,7 @@ type routerConfigResponse struct {
 	// timing assumption actually depends on. Extension beyond the ticket's listed
 	// symbols; bare Go identifiers, no package prefix.
 	MostFrequentPollingMultiplier int
-	MinPollingTimeMultiplier      int
 	PollingUpdateLength           int
-	EffectivePollingMultiplier    int
 
 	// optimizer selection weights from DefaultWeightedSelectorConfig(), as flat
 	// top-level keys (the ticket's Phase 2 shape rule).
@@ -989,6 +988,159 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		fmt.Fprint(w, `{"cleared":true}`)
 	})
 
+	// GET /debug/endpoint-state — per-endpoint poll-health + enable/recovery state (MAG-2202 endpoint 1).
+	// Returns a flat array of self-describing records (ChainID + ApiInterface + NetworkAddress identify
+	// each row; no object nesting), joining the per-endpoint observation record
+	// (EndpointMonitor.SnapshotObservations: LatestBlock/ObservedAt/Source + poll-health) with the
+	// endpoint's enable/recovery state (Endpoint.HealthSnapshot: Enabled/DisabledAt/
+	// ConsecutiveHealthyProbes). Lets the automation suite verify F1 re-enable, recovery latency, the
+	// relay-vs-poll Source gate, and failure-streak reset from the wire. Read-only; nil-router safe.
+	mux.HandleFunc("/debug/endpoint-state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			deps.router.mu.Lock()
+			for chainKey, server := range deps.router.rpcServers {
+				if server == nil || server.endpointChainTrackerManager == nil || server.listenEndpoint == nil {
+					continue
+				}
+				csm := deps.router.sessionManagers[chainKey]
+				if csm == nil {
+					continue
+				}
+				observations := server.endpointChainTrackerManager.SnapshotObservations()
+				for _, ep := range csm.GetAllDirectRPCEndpoints() {
+					if ep == nil || ep.Endpoint == nil {
+						continue
+					}
+					url := ep.Endpoint.NetworkAddress
+					health := ep.Endpoint.HealthSnapshot()
+					obs := observations[url] // zero value when no observation recorded yet
+					rows = append(rows, map[string]any{
+						"ChainID":                  server.listenEndpoint.ChainID,
+						"ApiInterface":             server.listenEndpoint.ApiInterface,
+						"NetworkAddress":           url,
+						"Enabled":                  health.Enabled,
+						"DisabledAt":               debugTimeRFC3339(health.DisabledAt),
+						"ConsecutiveHealthyProbes": health.ConsecutiveHealthyProbes,
+						"ConsecutivePollFailures":  obs.ConsecutivePollFailures,
+						"LastSuccessfulPoll":       debugTimeRFC3339(obs.LastSuccessfulPoll),
+						"LatestBlock":              obs.LatestBlock,
+						"ObservedAt":               debugTimeRFC3339(obs.ObservedAt),
+						"Source":                   obs.Source.String(),
+					})
+				}
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
+	// GET /debug/chain-state — per-chain consensus/tip state (MAG-2202 endpoint 2). Flat array of
+	// self-describing records (ChainID + ApiInterface). Raw, NON-TTL-gated snapshot
+	// (ChainState.DebugSnapshot) so the suite can assert anti-lie outlier rejection, downward
+	// realignment, TTL expiry, empty-snapshot baseline clearing, and cold-start bootstrap from the raw
+	// (block, timestamp) pairs — a TTL-gated getter would hide exactly those transitions. Read-only;
+	// nil-router safe.
+	mux.HandleFunc("/debug/chain-state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			deps.router.mu.Lock()
+			for _, server := range deps.router.rpcServers {
+				if server == nil || server.chainState == nil || server.listenEndpoint == nil {
+					continue
+				}
+				s := server.chainState.DebugSnapshot()
+				rows = append(rows, map[string]any{
+					"ChainID":           server.listenEndpoint.ChainID,
+					"ApiInterface":      server.listenEndpoint.ApiInterface,
+					"ObservedTip":       s.ObservedTip,
+					"LastObservedAt":    debugTimeRFC3339(s.LastObservedAt),
+					"ConsensusBaseline": s.ConsensusBaseline,
+					"HasBaseline":       s.HasBaseline,
+					"BaselineSince":     debugTimeRFC3339(s.BaselineSince),
+					"Initialized":       s.Initialized,
+				})
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
+	// GET /debug/provider-routing — per-CSM routing-pool state (MAG-2202 endpoint 3). Flat array of
+	// self-describing records (ChainID + ApiInterface): ValidAddresses / CurrentlyBlockedProviderAddresses
+	// / BlockedBackupProviders, so the suite can confirm a re-enabled provider is actually back in the
+	// routing pool rather than enabled-but-unroutable (F2). Read-only; nil-router safe.
+	mux.HandleFunc("/debug/provider-routing", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			deps.router.mu.Lock()
+			for _, csm := range deps.router.sessionManagers {
+				if csm == nil {
+					continue
+				}
+				ep := csm.RPCEndpoint()
+				s := csm.ProviderRoutingSnapshot()
+				rows = append(rows, map[string]any{
+					"ChainID":                           ep.ChainID,
+					"ApiInterface":                      ep.ApiInterface,
+					"ValidAddresses":                    s.ValidAddresses,
+					"CurrentlyBlockedProviderAddresses": s.CurrentlyBlockedProviderAddresses,
+					"BlockedBackupProviders":            s.BlockedBackupProviders,
+				})
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
+	// GET /debug/probe-loop — per-chain proactive-prober cycle telemetry (MAG-2202 endpoint 4). Flat
+	// array of self-describing records (ChainID + ApiInterface): the configured --probe-loop-interval
+	// cadence (CycleIntervalMs) plus a snapshot of the last completed runProbeCycle — start/duration,
+	// endpoints scored, endpoints re-enabled (F1), and providers whose QoS sample fed no sync evidence
+	// (F5). CyclesCompleted is the monotonic liveness counter for verifying the prober ticks on its own
+	// cadence (F6). Read-only; nil-router safe. Timestamps/durations: RFC3339 + integer milliseconds.
+	mux.HandleFunc("/debug/probe-loop", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			deps.router.mu.Lock()
+			for _, server := range deps.router.rpcServers {
+				if server == nil || server.listenEndpoint == nil {
+					continue
+				}
+				s := server.probeStats.snapshot()
+				rows = append(rows, map[string]any{
+					"ChainID":             server.listenEndpoint.ChainID,
+					"ApiInterface":        server.listenEndpoint.ApiInterface,
+					"CycleIntervalMs":     s.CycleIntervalMs,
+					"CyclesCompleted":     s.CyclesCompleted,
+					"LastCycleStartedAt":  debugTimeRFC3339(s.LastCycleStartedAt),
+					"LastCycleDurationMs": s.LastCycleDurationMs,
+					"EndpointsScored":     s.EndpointsScored,
+					"ReEnabledCount":      s.ReEnabledCount,
+					"SyncOmittedCount":    s.SyncOmittedCount,
+				})
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
 	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):
 	// re-enable every provider endpoint disabled by MaxConsecutiveConnectionAttempts
 	// (Endpoint.Enabled=false) and mirror the reset onto the Prometheus health gauge,
@@ -1070,9 +1222,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			MidCuThreshold:            scoreutils.MidCuThreshold,
 
 			MostFrequentPollingMultiplier: chaintracker.MostFrequentPollingMultiplier,
-			MinPollingTimeMultiplier:      chaintracker.MinPollingTimeMultiplier,
 			PollingUpdateLength:           chaintracker.PollingUpdateLength,
-			EffectivePollingMultiplier:    chaintracker.EffectivePollingMultiplier(),
 
 			AvailabilityWeight: optimizerDefaults.AvailabilityWeight,
 			LatencyWeight:      optimizerDefaults.LatencyWeight,
@@ -1095,6 +1245,37 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	})
 
 	return mux
+}
+
+// debugTimeRFC3339 formats a timestamp for the read-only /debug/* state endpoints, matching the
+// /debug/time convention (UTC RFC3339). A zero time renders as the empty string rather than the
+// Go zero-date ("0001-01-01T00:00:00Z"), so a test can cheaply distinguish "never happened"
+// (e.g. DisabledAt on an enabled endpoint) from a real instant.
+func debugTimeRFC3339(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// debugRowKey is the deterministic sort key for a /debug/* state row: ChainID, then ApiInterface,
+// then NetworkAddress (absent on chain/CSM rows → ""). comma-ok avoids a panic on the missing key.
+func debugRowKey(m map[string]any) string {
+	cid, _ := m["ChainID"].(string)
+	api, _ := m["ApiInterface"].(string)
+	na, _ := m["NetworkAddress"].(string)
+	return cid + "\x00" + api + "\x00" + na
+}
+
+// writeDebugRows sorts the records deterministically (so Go map-iteration order never leaks into the
+// response, keeping output stable for test fixtures and humans) and encodes them as a JSON array.
+// rows is always non-nil, so an empty result encodes as [] rather than null.
+func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
+	sort.Slice(rows, func(i, j int) bool { return debugRowKey(rows[i]) < debugRowKey(rows[j]) })
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(rows); err != nil {
+		utils.LavaFormatWarning("failed encoding debug response", err)
+	}
 }
 
 func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
@@ -1822,90 +2003,14 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		)
 	}
 
-	// ============================================================================
-	// PHASE 2: Chain Tracker Setup
-	// ============================================================================
-	// Create ChainTracker for latest block tracking using first healthy provider.
-	// ChainTracker polls for latest block and maintains block history for sync verification.
-	// Uses healthyStaticProviders (not the unfiltered list) to avoid polling a dead node.
-	var chainTracker chaintracker.IChainTracker
-	if len(healthyStaticProviders) > 0 {
-		firstProvider := healthyStaticProviders[0]
-
-		// Minimal endpoint for ChainTracker (no addons needed, only polls latest block)
-		chainTrackerEndpoint := &lavasession.RPCProviderEndpoint{
-			NetworkAddress: firstProvider.NetworkAddress,
-			ChainID:        firstProvider.ChainID,
-			ApiInterface:   firstProvider.ApiInterface,
-			NodeUrls: []common.NodeUrl{
-				{
-					Url:        firstProvider.NodeUrls[0].Url,
-					AuthConfig: firstProvider.NodeUrls[0].AuthConfig,
-					Addons:     []string{},
-				},
-			},
-		}
-
-		parallelConnections := uint(lavasession.MaximumStreamsOverASingleConnection)
-		chainRouter, err := chainlib.GetChainRouter(ctx, parallelConnections, chainTrackerEndpoint, chainParser)
-		if err != nil {
-			utils.LavaFormatWarning("Failed to create chain router for chain tracker", err,
-				utils.LogAttr("chain", rpcEndpoint.ChainID),
-			)
-		} else {
-			// Full ChainFetcher for chain tracker (matches provider behavior)
-			chainFetcher := chainlib.NewChainFetcher(ctx, &chainlib.ChainFetcherOptions{
-				ChainRouter: chainRouter,
-				ChainParser: chainParser,
-				Endpoint:    chainTrackerEndpoint,
-				Cache:       options.cache,
-			})
-
-			_, averageBlockTime, blocksToFinalization, blocksInFinalizationData := chainParser.ChainBlockStats()
-			blocksToSaveChainTracker := uint64(blocksToFinalization + blocksInFinalizationData)
-
-			chainTrackerConfig := chaintracker.ChainTrackerConfig{
-				BlocksToSave:          blocksToSaveChainTracker,
-				AverageBlockTime:      averageBlockTime,
-				ServerBlockMemory:     chaintracker.ChainTrackerDefaultMemory + blocksToSaveChainTracker,
-				ChainId:               rpcEndpoint.ChainID,
-				ParseDirectiveEnabled: chainParser.ParseDirectiveEnabled(),
-			}
-
-			chainTracker, err = chaintracker.NewChainTracker(ctx, chainFetcher, chainTrackerConfig)
-			if err != nil {
-				utils.LavaFormatWarning("Failed to create chain tracker, sync tracking disabled", err,
-					utils.LogAttr("chain", rpcEndpoint.ChainID),
-				)
-				chainTracker = nil
-			} else {
-				go func() {
-					err := chainTracker.StartAndServe(ctx)
-					if err != nil {
-						utils.LavaFormatError("Chain tracker failed", err,
-							utils.LogAttr("chain", rpcEndpoint.ChainID),
-						)
-					}
-				}()
-
-				utils.LavaFormatInfo("Chain tracker started",
-					utils.LogAttr("chain", rpcEndpoint.ChainID),
-					utils.LogAttr("pollingInterval", averageBlockTime/time.Duration(chaintracker.EffectivePollingMultiplier())),
-					utils.LogAttr("blocksToSave", blocksToSaveChainTracker),
-				)
-			}
-		}
-	}
-
-	if chainTracker == nil {
-		utils.LavaFormatInfo("Starting without chain tracker (sync tracking disabled)",
-			utils.LogAttr("chain", rpcEndpoint.ChainID),
-		)
-	}
+	// The redundant global ChainTracker (bound to healthyStaticProviders[0]) was removed in
+	// MAG-2160 / Topic C: the per-chain tip now comes from ChainState (fed by per-endpoint
+	// relay + poll observations, with strict-majority consensus), constructed inside
+	// ServeRPCRequests. No single-node tip, no fire-and-forget poller per pod.
 
 	utils.LavaFormatInfo("RPCSmartRouter Listening", utils.Attribute{Key: "endpoints", Value: rpcEndpoint.String()})
 	// Convert smartRouterIdentifier string to empty sdk.AccAddress for smart router
-	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, chainTracker, sessionManager, options.cache, rpcSmartRouterMetrics, smartRouterConsistency, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
+	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, rpcSmartRouterMetrics, smartRouterConsistency, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
 	if err != nil {
 		err = utils.LavaFormatError("failed serving rpc requests", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err
@@ -1989,6 +2094,9 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				return err
 			}
 
+			// Apply the probe debug toggle to its atomic global once, at startup (after flag parse).
+			lavasession.SetDebugProbes(viper.GetBool(DebugProbesFlagName))
+
 			// set log format
 			logFormat := viper.GetString("log-format")
 			utils.JsonFormat = logFormat == "json"
@@ -2037,18 +2145,15 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				utils.LavaFormatInfo("read config file successfully", utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
 			}
 
-			// polling-relief: set the process-wide cadence/consistency overrides AFTER the
-			// config file is merged into viper (above), so the flags resolve from CLI *or*
-			// config.yml (viper precedence: CLI-if-passed > config file > default). Still set
-			// before any chain tracker or consistency config is built. Zero = no relief;
-			// out-of-range values warn-and-revert to the built-in default (not silent clamp).
-			if m := viper.GetInt(chaintracker.ChainTrackerPollingMultiplierFlagName); m != 0 {
-				if m < chaintracker.MinPollingTimeMultiplier || m > chaintracker.MostFrequentPollingMultiplier {
-					utils.LavaFormatWarning("--"+chaintracker.ChainTrackerPollingMultiplierFlagName+" out of allowed range [4,16]; reverting to default", nil, utils.LogAttr("provided", m))
-				} else {
-					chaintracker.PollingTimeMultiplierOverride = m
-				}
-			}
+			// consistency-relief: set the process-wide consistency override AFTER the config
+			// file is merged into viper (above), so the flag resolves from CLI *or* config.yml
+			// (viper precedence: CLI-if-passed > config file > default). Still set before any
+			// consistency config is built. Zero = no relief; out-of-range values warn-and-revert
+			// to the built-in default (not silent clamp).
+			//
+			// MAG-2160: the former --chain-tracker-polling-multiplier flag was removed here — it
+			// only ever tuned the global tracker's adaptive cadence, and the global tracker is
+			// gone. Per-endpoint trackers run a fixed avgBlockTime/2 cadence with no runtime knob.
 			if f := viper.GetInt(relaycore.ConsistencyBlockGapFactorFlagName); f != 0 {
 				if f < 2 || f > 8 {
 					utils.LavaFormatWarning("--"+relaycore.ConsistencyBlockGapFactorFlagName+" out of allowed range [2,8]; reverting to default", nil, utils.LogAttr("provided", f))
@@ -2056,9 +2161,8 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 					relaycore.ConsistencyBlockGapFactorOverride = int64(f)
 				}
 			}
-			if chaintracker.PollingTimeMultiplierOverride != 0 || relaycore.ConsistencyBlockGapFactorOverride != 0 {
-				utils.LavaFormatInfo("polling-relief active",
-					utils.LogAttr("chainTrackerPollingMultiplier", chaintracker.EffectivePollingMultiplier()),
+			if relaycore.ConsistencyBlockGapFactorOverride != 0 {
+				utils.LavaFormatInfo("consistency-relief active",
 					utils.LogAttr("consistencyBlockGapFactor", relaycore.ConsistencyBlockGapFactorOverride))
 			}
 
@@ -2318,8 +2422,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeBlockProfileRateFlagName, performance.DefaultBlockProfileRate, "block profile rate in nanoseconds (1 records all blocking events)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
-	cmdRPCSmartRouter.Flags().Int(chaintracker.ChainTrackerPollingMultiplierFlagName, 0, "polling-relief: override the chain-tracker polling multiplier (default 16). Allowed [4,16]; out-of-range reverts to default. Smaller = slower polling = fewer upstream calls.")
-	cmdRPCSmartRouter.Flags().Int(relaycore.ConsistencyBlockGapFactorFlagName, 0, "polling-relief: widen the consistency endpoint-lag gate (blockLagForQosSync x factor; default 2). Allowed [2,8]; out-of-range reverts to default. Companion to the polling multiplier.")
+	cmdRPCSmartRouter.Flags().Int(relaycore.ConsistencyBlockGapFactorFlagName, 0, "consistency-relief: widen the consistency endpoint-lag gate (blockLagForQosSync x factor; default 2). Allowed [2,8]; out-of-range reverts to default.")
 	cmdRPCSmartRouter.Flags().Var(&strategyFlag, "strategy", fmt.Sprintf("the strategy to use to pick providers (%s)", strings.Join(strategyNames, "|")))
 	defaultWeightedConfig := provideroptimizer.DefaultWeightedSelectorConfig()
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerAvailabilityWeight, defaultWeightedConfig.AvailabilityWeight, "weight assigned to provider availability when computing selection scores")
@@ -2367,7 +2470,10 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")
-	cmdRPCSmartRouter.Flags().BoolVar(&lavasession.DebugProbes, DebugProbesFlagName, false, "adding information to probes")
+	// Registered as a flagset-owned Bool (NOT BoolVar bound to the lavasession global): BoolVar writes
+	// the bound global at registration time, which raced probe goroutines reading it. Applied to the
+	// atomic global in RunE via lavasession.SetDebugProbes.
+	cmdRPCSmartRouter.Flags().Bool(DebugProbesFlagName, false, "adding information to probes")
 	cmdRPCSmartRouter.Flags().StringArray(common.UseStaticSpecFlag, nil, "load specs from file, directory, or remote URL (GitHub/GitLab). Can be specified multiple times; later sources override earlier ones for same chain ID")
 	cmdRPCSmartRouter.Flags().String(common.GitHubTokenFlag, "", "GitHub personal access token for accessing private repositories and higher API rate limits (5,000 requests/hour vs 60 for unauthenticated)")
 	cmdRPCSmartRouter.Flags().String(common.GitLabTokenFlag, "", "GitLab personal access token for accessing private repositories (supports gitlab.com and self-hosted instances)")
@@ -2388,6 +2494,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 
 	cmdRPCSmartRouter.Flags().BoolVar(&lavasession.PeriodicProbeProviders, common.PeriodicProbeProvidersFlagName, lavasession.PeriodicProbeProviders, "enable periodic probing of providers")
 	cmdRPCSmartRouter.Flags().DurationVar(&lavasession.PeriodicProbeProvidersInterval, common.PeriodicProbeProvidersIntervalFlagName, lavasession.PeriodicProbeProvidersInterval, "interval for periodic probing of providers")
+	cmdRPCSmartRouter.Flags().DurationVar(&lavasession.ProbeLoopInterval, common.ProbeLoopIntervalFlagName, lavasession.ProbeLoopInterval, "cadence of the proactive health prober (MAG-2161 Topic D); must be > 0, default 5s")
 	cmdRPCSmartRouter.Flags().Float64(common.ProbeUpdateWeightFlagName, scoreutils.DefaultProbeUpdateWeight, "weight multiplier for provider-optimizer probe updates (liveness/latency); must be > 0")
 	if err := viper.BindPFlag(common.ProbeUpdateWeightFlagName, cmdRPCSmartRouter.Flags().Lookup(common.ProbeUpdateWeightFlagName)); err != nil {
 		utils.LavaFormatFatal("failed binding probe update weight flag", err)

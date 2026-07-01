@@ -19,6 +19,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestHydrateGrpcResponseParsing_Guards pins the contract of the gRPC poll-support helper (MAG:
+// per-endpoint gRPC ChainTracker). A gRPC response is binary protobuf and the per-endpoint poller
+// crafts a chain message with NO method descriptor (reflection happens inside the DirectRPCConnection,
+// not in CraftChainMessage); HydrateGrpcResponseParsing wires the connection's cached descriptor in so
+// the response can be decoded. The happy path (descriptor → decodable response) is proven end-to-end by
+// the live gRPC poll, whose per-endpoint ChainTracker fetches a height matching the relay-harvested one.
+func TestHydrateGrpcResponseParsing_Guards(t *testing.T) {
+	// A nil descriptor is rejected up front, before the message is mutated — otherwise the gRPC chain
+	// message would be left un-parseable with the cause swallowed.
+	require.Error(t, HydrateGrpcResponseParsing(nil, nil), "nil method descriptor must be rejected")
+
+	// Sanity: a real crafted gRPC message exposes a *GrpcMessage via GetRPCMessage — the concrete type
+	// the helper type-asserts to attach the descriptor (the relay path asserts the same type).
+	grpcParser := &GrpcChainParser{
+		BaseChainParser: BaseChainParser{
+			serverApis: map[ApiKey]ApiContainer{
+				{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}},
+			},
+			apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGrpc}}},
+		},
+	}
+	grpcMsg, err := grpcParser.ParseMsg("API1", []byte("x"), connectionType_test, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	_, ok := grpcMsg.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
+	require.True(t, ok, "crafted gRPC message must expose a *GrpcMessage for the helper to hydrate")
+}
+
 const (
 	connectionType_test = "test"
 )

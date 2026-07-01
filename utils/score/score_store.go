@@ -268,19 +268,30 @@ func (ss *ScoreStore) GetName() string {
 	return ss.Name
 }
 
+// The getters below read fields that Update/UpdateConfig mutate under ss.lock, so they must read
+// under RLock — without it, a concurrent Update (e.g. a relay sample) races a score read (selection
+// / metrics). The lock already existed on the type; these readers simply weren't taking it.
 func (ss *ScoreStore) GetNum() float64 {
+	ss.lock.RLock()
+	defer ss.lock.RUnlock()
 	return ss.Num
 }
 
 func (ss *ScoreStore) GetDenom() float64 {
+	ss.lock.RLock()
+	defer ss.lock.RUnlock()
 	return ss.Denom
 }
 
 func (ss *ScoreStore) GetLastUpdateTime() time.Time {
+	ss.lock.RLock()
+	defer ss.lock.RUnlock()
 	return ss.Time
 }
 
 func (ss *ScoreStore) GetConfig() Config {
+	ss.lock.RLock()
+	defer ss.lock.RUnlock()
 	return ss.Config
 }
 
@@ -484,13 +495,16 @@ type AvailabilityScoreStore struct {
 }
 
 // Update updates the availability ScoreStore's numerator and denominator with a new sample.
-// The new sample must be 0 or 1.
+// The sample must lie in [0,1]: the relay path feeds the binary endpoints 0 (failure) and 1
+// (success), while the Topic E probe path feeds a fractional "fraction of the provider's endpoints
+// healthy this cycle" sample so partial degradation decays the score. The decaying weighted average
+// is well-defined for any value in [0,1] (it already resolves to a fractional score).
 func (as *AvailabilityScoreStore) Update(sample float64, sampleTime time.Time) error {
 	if as == nil {
 		return fmt.Errorf("AvailabilityScoreStore is nil")
 	}
-	if sample != float64(0) && sample != float64(1) {
-		return fmt.Errorf("availability must be 0 (false) or 1 (true), got %f", sample)
+	if sample < 0 || sample > 1 {
+		return fmt.Errorf("availability must be in [0,1], got %f", sample)
 	}
 	return as.ScoreStore.Update(sample, sampleTime)
 }

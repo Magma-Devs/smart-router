@@ -3,6 +3,7 @@ package provideroptimizer
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"math"
 	"strings"
 	"sync"
@@ -61,6 +62,51 @@ type ProviderOptimizer struct {
 	globalSyncCalculator            *score.AdaptiveMaxCalculator // Global T-Digest for all providers' sync samples
 	adaptiveLock                    sync.RWMutex                 // Lock for accessing adaptive calculators
 	NowFunc                         func() time.Time             // NowFunc overrides the clock used for score updates nil = use real time.Now()
+	// providerStripes serializes each provider's QoS read-modify-write and holds the authoritative
+	// SyncBlock floor (Finding 5). A value array: the mutexes are usable zero-valued and the floor
+	// maps lazily created, so direct struct construction (tests) works without a constructor change.
+	providerStripes [providerLockStripes]providerSyncFloor
+}
+
+// providerStripe returns the stripe serializing this provider's read-modify-write. Stable hash, so a
+// provider always maps to the same stripe for the optimizer's lifetime.
+func (po *ProviderOptimizer) providerStripe(provider string) *providerSyncFloor {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(provider))
+	return &po.providerStripes[h.Sum32()%providerLockStripes]
+}
+
+// clearSyncFloors resets every stripe's floor map. Called by ResetState alongside the cache Clear so
+// a debug clock reset does not leave a floor that pins SyncBlock high over an emptied cache. Locks
+// each stripe independently (no nesting), strictly before ResetState takes any other lock.
+func (po *ProviderOptimizer) clearSyncFloors() {
+	for i := range po.providerStripes {
+		s := &po.providerStripes[i]
+		s.mu.Lock()
+		s.floor = nil
+		s.mu.Unlock()
+	}
+}
+
+// SyncReference is the per-sample consensus baseline a relay/probe sync-lag is measured against
+// (Topic E / MAG-2160-Finding-2). It is resolved by the PER-INTERFACE caller (the CSM for relays,
+// the prober for probes) from that interface's own ChainState and passed in with the sample —
+// replacing the former single mutable getter on the shared per-chain optimizer, which let the last
+// API interface to start overwrite the reference for every interface of the chain (the F4 bug).
+//
+// The two booleans encode the three cases the optimizer must distinguish:
+//   - ConsensusConfigured == false: no consensus integration is wired for this interface → the
+//     optimizer keeps its LEGACY max-block-across-providers reference (back-compat).
+//   - ConsensusConfigured == true && Fresh && Block > 0: an accepted consensus baseline exists →
+//     measure lag against it.
+//   - ConsensusConfigured == true && !Fresh: consensus is wired but has no fresh majority right now
+//     (cold start / split / stale) → the sample's sync dimension is OMITTED, never falling back to
+//     max-across-providers (which one fast/lying reporter could inflate — the F5 poisoning).
+type SyncReference struct {
+	ConsensusConfigured bool
+	Block               uint64
+	Time                time.Time
+	Fresh               bool
 }
 
 type ProviderData struct {
@@ -68,6 +114,45 @@ type ProviderData struct {
 	Latency      score.ScoreStorer // will be used to calculate the latency score
 	Sync         score.ScoreStorer // will be used to calculate the sync score for spectypes.LATEST_BLOCK/spectypes.NOT_APPLICABLE requests
 	SyncBlock    uint64            // will be used to calculate the probability of block error
+}
+
+// providerLockStripes is the number of stripes serializing per-provider QoS read-modify-write.
+// Bounded (not one lock per provider) so memory is O(stripes), not O(providers); collisions only
+// add benign cross-provider contention, never a correctness issue.
+const providerLockStripes = 256
+
+// providerSyncFloor is one stripe: it serializes the score read-modify-write for every provider
+// hashing to it AND holds the authoritative monotonic SyncBlock floor for those providers.
+//
+// Why a floor at all (Finding 5): the three writers (appendRelayData, AppendProbeData, the legacy
+// AppendProbeRelayData) each do getProviderData → mutate → providersStorage.Set. ristretto's Set is
+// ASYNC — a subsequent Get can miss a just-written value (the package's own tests sleep to let it
+// settle) — so the cache cannot be the source of truth for "SyncBlock never decreases": a serialized
+// writer could still read a stale cached block and write a lower one back (probe@150 clobbering
+// relay@200). The floor map, read directly under the stripe lock, is that source of truth.
+type providerSyncFloor struct {
+	mu    sync.Mutex
+	floor map[string]uint64 // provider → highest SyncBlock ever accepted (lazily created)
+}
+
+// applyLocked stamps providerData.SyncBlock to the authoritative monotonic floor — the max of the
+// persisted floor, any block already on providerData (cached progress), and the freshly observed
+// block. It NEVER lets SyncBlock decrease, regardless of cache staleness. The caller MUST hold s.mu.
+// observed == 0 is a pure preserve (the legacy/failure/no-block paths): it restores the floor over a
+// possibly-stale cached read without advancing it.
+func (s *providerSyncFloor) applyLocked(provider string, observed uint64, providerData *ProviderData) {
+	if s.floor == nil {
+		s.floor = make(map[string]uint64)
+	}
+	f := s.floor[provider]
+	if providerData.SyncBlock > f {
+		f = providerData.SyncBlock
+	}
+	if observed > f {
+		f = observed
+	}
+	s.floor[provider] = f
+	providerData.SyncBlock = f
 }
 
 // Strategy defines the pairing strategy. Using different
@@ -221,6 +306,11 @@ func (po *ProviderOptimizer) ResetState() {
 	// Future-dated relay times would produce negative or wildly inflated durations.
 	po.providerRelayStats.Clear()
 
+	// Discard the authoritative SyncBlock floors (Finding 5): they must follow the emptied cache, or
+	// a stale floor would keep pinning SyncBlock high after the reset. Done before the locks below so
+	// the stripe lock is never nested under latestSyncData.Lock / adaptiveLock.
+	po.clearSyncFloors()
+
 	// Reset the latest-sync block record.  Its Time field was set during the shifted
 	// period; a stale future timestamp here causes negative sync-lag when real time
 	// reverts to the pre-warp value.
@@ -245,18 +335,65 @@ func (po *ProviderOptimizer) ResetState() {
 
 // AppendRelayFailure updates a provider's QoS metrics for a failed relay
 func (po *ProviderOptimizer) AppendRelayFailure(provider string) {
-	po.appendRelayData(provider, 0, false, 0, 0, po.now())
+	po.appendRelayData(provider, 0, false, 0, 0, SyncReference{}, po.now())
 }
 
 // AppendRelayData updates a provider's QoS metrics for a successful relay
+// AppendRelayData is the legacy / no-consensus relay entrypoint: it measures sync lag against the
+// max-block-across-providers reference. Used by paths that carry no consensus baseline (the direct
+// subscription managers, which pass syncBlock=0 anyway) and by tests. The consensus-aware relay
+// path (the CSM's OnSessionDone) uses AppendRelayDataConsensus.
 func (po *ProviderOptimizer) AppendRelayData(provider string, latency time.Duration, cu, syncBlock uint64) {
-	po.appendRelayData(provider, latency, true, cu, syncBlock, po.now())
+	po.appendRelayData(provider, latency, true, cu, syncBlock, SyncReference{}, po.now())
+}
+
+// AppendRelayDataConsensus is the per-interface consensus-aware relay entrypoint (Topic E / F4): the
+// caller resolves THIS interface's consensus baseline (from its own ChainState) into syncRef and
+// passes it with the sample, so sync lag is measured against the agreed tip — never another
+// interface's baseline (the shared-getter F4 bug) and never the max-across-providers poisoning when
+// consensus has no fresh majority (F5).
+func (po *ProviderOptimizer) AppendRelayDataConsensus(provider string, latency time.Duration, cu, syncBlock uint64, syncRef SyncReference) {
+	po.appendRelayData(provider, latency, true, cu, syncBlock, syncRef, po.now())
+}
+
+// resolveSyncReference turns a per-sample SyncReference into the concrete (referenceBlock,
+// referenceTime, ok) the sync-lag is measured against. ok=false means "no usable reference this
+// sample" — the caller must then OMIT the sync update rather than invent one (F5: never fall back
+// to max-across-providers when consensus is configured but currently has no majority).
+//
+//   - consensus configured + fresh majority → that baseline (the agreed tip).
+//   - consensus configured + no fresh majority → ok=false (omit; no poisoning).
+//   - consensus NOT configured → legacy max-across-providers, kept warm via updateLatestSyncData
+//     (back-compat for deployments without the Topic C integration).
+//
+// providerBlock is the block this sample reports; it only feeds the legacy warm store.
+func (po *ProviderOptimizer) resolveSyncReference(ref SyncReference, providerBlock uint64, sampleTime time.Time) (block uint64, at time.Time, ok bool) {
+	if ref.ConsensusConfigured {
+		if ref.Fresh && ref.Block > 0 {
+			return ref.Block, ref.Time, true
+		}
+		return 0, time.Time{}, false
+	}
+	fallbackBlock, fallbackTime := po.updateLatestSyncData(providerBlock, sampleTime)
+	return fallbackBlock, fallbackTime, true
 }
 
 // appendRelayData gets three new QoS metrics samples and updates the provider's metrics using a decaying weighted average
-func (po *ProviderOptimizer) appendRelayData(provider string, latency time.Duration, success bool, cu, syncBlock uint64, sampleTime time.Time) {
-	latestSync, timeSync := po.updateLatestSyncData(syncBlock, sampleTime)
+func (po *ProviderOptimizer) appendRelayData(provider string, latency time.Duration, success bool, cu, syncBlock uint64, syncRef SyncReference, sampleTime time.Time) {
+	// Serialize this provider's whole read-modify-write so a concurrent probe/relay cannot
+	// interleave their getProviderData/Set, and stamp the authoritative SyncBlock floor before any
+	// Set so a stale cache read can never regress the block (Finding 5). Stripe lock is outermost —
+	// updateDecayingWeightedAverage (adaptiveLock) and resolveSyncReference (latestSyncData.Lock)
+	// nest under it, never the reverse.
+	stripe := po.providerStripe(provider)
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+
 	providerData, _ := po.getProviderData(provider)
+	// Floor SyncBlock now: maxes the persisted floor, cached progress, and this sample's block (0 on
+	// failure/no-block → pure preserve). Every code path below Sets providerData, so this single
+	// stamp also protects the failure and no-block branches from a stale-read regression.
+	stripe.applyLocked(provider, syncBlock, &providerData)
 	halfTime := po.calculateHalfTime(provider, sampleTime)
 	weight := score.RelayUpdateWeight
 	var updateErr error
@@ -270,14 +407,20 @@ func (po *ProviderOptimizer) appendRelayData(provider string, latency time.Durat
 		if updateErr != nil {
 			return
 		}
-		if syncBlock > providerData.SyncBlock {
-			// do not allow providers to go back
-			providerData.SyncBlock = syncBlock
-		}
-		syncLag := po.calculateSyncLag(latestSync, timeSync, providerData.SyncBlock, sampleTime)
-		providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.SyncScoreType, syncLag.Seconds(), weight, halfTime, cu, sampleTime)
-		if updateErr != nil {
-			return
+		// Sync dimension only when this sample actually reports a block (syncBlock > 0): a no-block
+		// relay (e.g. a subscription open) carries no sync evidence, so it must not re-score sync
+		// against a stale persisted SyncBlock — and crucially must not drag in the legacy
+		// max-across-providers reference (F5/dwsm). The reference itself is resolved per-interface
+		// (F4); ok=false (consensus configured but no fresh majority) likewise omits the update.
+		if syncBlock > 0 {
+			// SyncBlock is already floored (monotonic, never goes back) by applyLocked above.
+			if latestSync, timeSync, ok := po.resolveSyncReference(syncRef, syncBlock, sampleTime); ok {
+				syncLag := po.calculateSyncLag(latestSync, timeSync, providerData.SyncBlock, sampleTime)
+				providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.SyncScoreType, syncLag.Seconds(), weight, halfTime, cu, sampleTime)
+				if updateErr != nil {
+					return
+				}
+			}
 		}
 	} else {
 		// on a failed relay, update the availability metric with a failure score
@@ -302,7 +445,16 @@ func (po *ProviderOptimizer) appendRelayData(provider string, latency time.Durat
 
 // AppendProbeRelayData updates a provider's QoS metrics for a probe relay message
 func (po *ProviderOptimizer) AppendProbeRelayData(providerAddress string, latency time.Duration, success bool) {
+	// Legacy path (Finding 5): this writer only mutates availability/latency, but it Sets the WHOLE
+	// providerData back — including the SyncBlock it read. A stale cache read would therefore silently
+	// regress SyncBlock. Take the stripe lock and stamp the floor (observed=0 → pure preserve) so this
+	// writer can never undo a higher block recorded by a concurrent relay/probe.
+	stripe := po.providerStripe(providerAddress)
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+
 	providerData, _ := po.getProviderData(providerAddress)
+	stripe.applyLocked(providerAddress, 0, &providerData)
 	sampleTime := po.now()
 	halfTime := po.calculateHalfTime(providerAddress, sampleTime)
 	weight := score.ProbeUpdateWeight
@@ -329,6 +481,76 @@ func (po *ProviderOptimizer) AppendProbeRelayData(providerAddress string, latenc
 		utils.LogAttr("providerAddress", providerAddress),
 		utils.LogAttr("latency", latency),
 		utils.LogAttr("success", success),
+	)
+}
+
+// AppendProbeData feeds one provider-aggregated probe sample — the Topic E contract's probe path,
+// the proactive baseline that scores providers between (or without) real relays. Unlike the legacy
+// AppendProbeRelayData (availability + latency only), it feeds all three dimensions:
+//   - availability is a FRACTION in [0,1] (the share of the provider's endpoints healthy this cycle,
+//     per the fraction-healthy aggregation rule) and is ALWAYS fed, including 0 when the provider is
+//     fully down — so partial degradation decays the score;
+//   - latency is fed only when hasLatency; sync only when hasSync. Sync lag uses the SAME reference
+//     as relays (syncReference → consensus baseline when fresh), so probe and relay measure lag
+//     identically (rule E5). syncBlock is the provider's freshest observed block.
+//
+// Samples use ProbeUpdateWeight, 4x lighter than relays (RelayUpdateWeight), so high traffic adapts
+// fast while probes keep idle providers scored. One call per provider per cycle (rule E2) — the
+// caller (the prober) aggregates per-endpoint verdicts before calling.
+// Each quality dimension is gated by its own "has" flag so a dimension no endpoint could measure
+// this cycle (latency-unknown on a relay-fed endpoint; no block yet) is OMITTED, not fed as a 0 —
+// a fake 0 would falsely improve the score and clobber a busy endpoint's real relay-fed latency.
+func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool, syncRef SyncReference) {
+	stripe := po.providerStripe(providerAddress)
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+
+	providerData, _ := po.getProviderData(providerAddress)
+	// Floor SyncBlock before any Set (Finding 5). Advance the floor only when this sample is real
+	// sync evidence (hasSync && syncBlock > 0), matching the existing advance condition; otherwise
+	// observed=0 is a pure preserve so the unconditional Set below cannot regress a stale read.
+	observed := uint64(0)
+	if hasSync && syncBlock > 0 {
+		observed = syncBlock
+	}
+	stripe.applyLocked(providerAddress, observed, &providerData)
+	sampleTime := po.now()
+	halfTime := po.calculateHalfTime(providerAddress, sampleTime)
+	weight := score.ProbeUpdateWeight
+
+	providerData, updateErr := po.updateDecayingWeightedAverage(providerData, score.AvailabilityScoreType, availability, weight, halfTime, 0, sampleTime)
+	if updateErr != nil {
+		return
+	}
+	if hasLatency {
+		providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.LatencyScoreType, latency.Seconds(), weight, halfTime, 0, sampleTime)
+		if updateErr != nil {
+			return
+		}
+	}
+	// Sync only when the caller asserts a usable block AND an accepted consensus reference resolves
+	// (F5): hasSync is set by the prober only when a consensus baseline exists, and resolveSyncReference
+	// double-guards against a baseline that expired between the prober's read and here. No fallback to
+	// max-across-providers — an absent baseline means no sync evidence, not a poisoned one.
+	if hasSync && syncBlock > 0 {
+		// SyncBlock is already floored (monotonic) by applyLocked above.
+		if latestSync, timeSync, ok := po.resolveSyncReference(syncRef, syncBlock, sampleTime); ok {
+			syncLag := po.calculateSyncLag(latestSync, timeSync, providerData.SyncBlock, sampleTime)
+			providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.SyncScoreType, syncLag.Seconds(), weight, halfTime, 0, sampleTime)
+			if updateErr != nil {
+				return
+			}
+		}
+	}
+	po.providersStorage.Set(providerAddress, providerData, 1)
+
+	utils.LavaFormatTrace("[Optimizer] probe data update",
+		utils.LogAttr("providerAddress", providerAddress),
+		utils.LogAttr("availability", availability),
+		utils.LogAttr("latency", latency),
+		utils.LogAttr("hasLatency", hasLatency),
+		utils.LogAttr("syncBlock", syncBlock),
+		utils.LogAttr("hasSync", hasSync),
 	)
 }
 

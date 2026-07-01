@@ -66,7 +66,10 @@ func feedRounds(po *ProviderOptimizer, lagging string, providers []string, head,
 			if p == lagging {
 				block = head - lag
 			}
-			po.appendRelayData(p, latency, true, cu, block, st)
+			// Legacy reference (SyncReference{}, ConsensusConfigured=false) → the max-across-providers
+			// path this MAG-1748 characterization was written against (healthy providers fed first set
+			// the global latest-sync to `head`). The chaintracker-redesign added the SyncReference param.
+			po.appendRelayData(p, latency, true, cu, block, SyncReference{}, st)
 		}
 		time.Sleep(syncDemotionVisibility)
 	}

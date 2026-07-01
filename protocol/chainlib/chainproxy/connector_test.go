@@ -57,7 +57,9 @@ func (s *testQueryServerImpl) ShowChainInfo(ctx context.Context, _ *testRequest)
 	return &testResponse{ChainID: "Test"}, nil
 }
 
-const testServiceMethod = "lavanet.lava.spec.Query/ShowChainInfo"
+// Leading slash is required by grpc.Invoke ("/pkg.Service/Method"); without it newer gRPC returns an
+// empty response with an "Unimplemented: malformed method name" error.
+const testServiceMethod = "/lavanet.lava.spec.Query/ShowChainInfo"
 
 func registerTestQueryServer(s *grpc.Server, srv testQueryServer) {
 	s.RegisterService(&grpc.ServiceDesc{
@@ -74,7 +76,7 @@ func registerTestQueryServer(s *grpc.Server, srv testQueryServer) {
 					if interceptor == nil {
 						return srvIface.(testQueryServer).ShowChainInfo(ctx, in)
 					}
-					info := &grpc.UnaryServerInfo{Server: srvIface, FullMethod: "/" + testServiceMethod}
+					info := &grpc.UnaryServerInfo{Server: srvIface, FullMethod: testServiceMethod}
 					return interceptor(ctx, in, info, func(ctx context.Context, req interface{}) (interface{}, error) {
 						return srvIface.(testQueryServer).ShowChainInfo(ctx, req.(*testRequest))
 					})
@@ -211,11 +213,11 @@ func TestConnectorGrpc(t *testing.T) {
 	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
 	require.NoError(t, err)
 	for { // wait for the routine to finish connecting
-		if len(conn.freeClients) == numberOfClients {
+		if conn.numberOfFreeClients() == numberOfClients {
 			break
 		}
 	}
-	require.Equal(t, len(conn.freeClients), numberOfClients)
+	require.Equal(t, conn.numberOfFreeClients(), numberOfClients)
 	increasedClients := numberOfClients * 2 // increase to double the number of clients
 	rpcList := make([]*grpc.ClientConn, increasedClients)
 	for i := 0; i < increasedClients; i++ {
@@ -223,12 +225,12 @@ func TestConnectorGrpc(t *testing.T) {
 		require.NoError(t, err)
 		rpcList[i] = rpc
 	}
-	require.Equal(t, increasedClients, int(conn.usedClients)) // checking we have used clients
+	require.Equal(t, increasedClients, conn.numberOfUsedClients()) // checking we have used clients
 	for i := 0; i < increasedClients; i++ {
 		conn.ReturnRpc(rpcList[i])
 	}
-	require.Equal(t, int(conn.usedClients), 0)                // checking we dont have clients used
-	require.Equal(t, increasedClients, len(conn.freeClients)) // checking we cleaned clients
+	require.Equal(t, conn.numberOfUsedClients(), 0)                // checking we dont have clients used
+	require.Equal(t, increasedClients, conn.numberOfFreeClients()) // checking we cleaned clients
 }
 
 func TestConnectorGrpcAndInvoke(t *testing.T) {
@@ -238,11 +240,11 @@ func TestConnectorGrpcAndInvoke(t *testing.T) {
 	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
 	require.NoError(t, err)
 	for { // wait for the routine to finish connecting
-		if len(conn.freeClients) == numberOfClients {
+		if conn.numberOfFreeClients() == numberOfClients {
 			break
 		}
 	}
-	// require.Equal(t, len(conn.freeClients), numberOfClients)
+	// require.Equal(t, conn.numberOfFreeClients(), numberOfClients)
 	increasedClients := numberOfClients * 2 // increase to double the number of clients
 	rpcList := make([]*grpc.ClientConn, increasedClients)
 	for i := 0; i < increasedClients; i++ {
@@ -254,11 +256,11 @@ func TestConnectorGrpcAndInvoke(t *testing.T) {
 		require.Equal(t, "Test", response.ChainID)
 		require.NoError(t, err)
 	}
-	require.Equal(t, increasedClients, int(conn.usedClients)) // checking we have used clients
+	require.Equal(t, increasedClients, conn.numberOfUsedClients()) // checking we have used clients
 	for i := 0; i < increasedClients; i++ {
 		conn.ReturnRpc(rpcList[i])
 	}
-	require.Equal(t, int(conn.usedClients), 0) // checking we dont have clients used
+	require.Equal(t, conn.numberOfUsedClients(), 0) // checking we dont have clients used
 }
 
 func TestHashing(t *testing.T) {

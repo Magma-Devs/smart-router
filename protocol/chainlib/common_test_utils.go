@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -240,6 +241,9 @@ func CreateMockSpec() spectypes.Spec {
 
 // generates a chain parser, a chain fetcher messages based on it
 // apiInterface can either be an ApiInterface string as in spectypes.ApiInterfaceXXX or a number for an index in the apiCollections
+// setMockLogLevelOnce guards the one-time global log-level set in CreateChainLibMocks (see there).
+var setMockLogLevelOnce sync.Once
+
 func CreateChainLibMocks(
 	ctx context.Context,
 	specIndex string,
@@ -249,7 +253,12 @@ func CreateChainLibMocks(
 	getToTopMostPath string,
 	services []string,
 ) (cpar ChainParser, crout ChainRouter, cfetc chaintracker.ChainFetcher, closeServer func(), endpointRet *lavasession.RPCProviderEndpoint, errRet error) {
-	utils.SetGlobalLoggingLevel("debug")
+	// SetGlobalLoggingLevel reassigns process-global logger state (defaultGlobalLogLevel,
+	// zerologlog.Logger). Production sets it once at startup; this mock was calling it on EVERY
+	// invocation, so a later test's setup wrote those globals while an earlier test's leaked goroutine
+	// still read them in LavaFormatLog — a data race under -race. It is always "debug", so once is
+	// enough: the sole write happens before any test goroutine exists.
+	setMockLogLevelOnce.Do(func() { utils.SetGlobalLoggingLevel("debug") })
 	// Create a cancellable context for the connector to prevent leaks
 	connectorCtx, cancelConnector := context.WithCancel(ctx)
 

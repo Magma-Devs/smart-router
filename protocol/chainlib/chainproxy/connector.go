@@ -366,7 +366,9 @@ func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector,
 			)
 		}
 	}
-	utils.LavaFormatInfo("Finished adding clients asynchronously", utils.LogAttr("count", len(connector.freeClients)))
+	// Read the count through the locked accessor: addClient / GetRpc mutate freeClients under the lock
+	// concurrently, so a bare len(connector.freeClients) here is a data race.
+	utils.LavaFormatInfo("Finished adding clients asynchronously", utils.LogAttr("count", connector.numberOfFreeClients()))
 	go connector.connectorLoop(ctx)
 }
 
@@ -383,7 +385,13 @@ func (connector *GRPCConnector) numberOfFreeClients() int {
 }
 
 func (connector *GRPCConnector) numberOfUsedClients() int {
-	return int(atomic.LoadInt64(&connector.usedClients))
+	// Read under the lock, NOT via atomic: every other access to usedClients (GetRpc/ReturnRpc/Close)
+	// is a plain read/write under connector.lock. A lone atomic.Load here doesn't synchronize with
+	// those mutex-protected writes (atomic and mutex are different happens-before domains), so it
+	// raced GetRpc's usedClients++ under -race. Match numberOfFreeClients().
+	connector.lock.RLock()
+	defer connector.lock.RUnlock()
+	return int(connector.usedClients)
 }
 
 func (connector *GRPCConnector) createConnection(ctx context.Context, nodeUrl common.NodeUrl, currentNumberOfConnections int) (*grpc.ClientConn, error) {

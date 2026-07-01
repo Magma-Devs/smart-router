@@ -42,6 +42,10 @@ func (r RelayerRemote) sendReq(req *grpc_reflection_v1alpha.ServerReflectionRequ
 		return nil, err
 	}
 
+	// The method is passed SLASH-LESS ("service.Method/RPC") because r.relay is the relay/parser
+	// callback (production: sendRelayCallback → SendRelay → ParseMsg), and spec API keys are slash-less
+	// — a leading slash here breaks that lookup. The leading slash that grpc.ClientConn.Invoke requires
+	// is added at the Invoke boundary (the actual gRPC dial site), not here.
 	respBytes, _, err := r.relay(context.Background(), "grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo", reqBytes)
 	if err != nil {
 		return nil, err

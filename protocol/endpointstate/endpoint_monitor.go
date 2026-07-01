@@ -1,4 +1,4 @@
-package rpcsmartrouter
+package endpointstate
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -16,8 +17,11 @@ const (
 	// DefaultBlocksToSave is the number of finalized blocks to keep in memory for fork detection
 	DefaultBlocksToSave = 10
 
-	// MinPollingInterval prevents too aggressive polling for fast chains
-	MinPollingInterval = 100 * time.Millisecond
+	// DefaultAverageBlockTime is the fallback block time when a chain spec omits average_block_time.
+	// It is the single source of truth for that default: the poll cadence here AND any peer component
+	// that must agree with this cadence (e.g. chainstate's freshness window) must floor through it, or
+	// the consensus window can end up shorter than the poll interval and drop every observation.
+	DefaultAverageBlockTime = 12 * time.Second // Ethereum-like timing
 
 	defaultTrackerStartRetryMin = time.Second
 	defaultTrackerStartRetryMax = 30 * time.Second
@@ -35,17 +39,17 @@ const (
 	EndpointChainTrackerStopped       EndpointChainTrackerState = "stopped"
 )
 
-// EndpointChainTrackerManager manages per-endpoint ChainTrackers for the Smart Router.
+// EndpointMonitor manages per-endpoint ChainTrackers for the Smart Router.
 // Each endpoint gets its own ChainTracker that continuously polls for block data,
 // enabling accurate pre-request consistency validation and sync scoring.
-type EndpointChainTrackerManager struct {
+type EndpointMonitor struct {
 	mu sync.RWMutex
 
 	// Map from endpoint URL to ChainTracker
 	trackers map[string]chaintracker.IChainTracker
 
 	// Map from endpoint URL to ChainFetcher (needed to access fetcher methods)
-	fetchers map[string]*EndpointChainFetcher
+	fetchers map[string]*EndpointPoller
 
 	// Map from endpoint URL to cancel function for per-tracker context cancellation
 	// This enables stopping individual trackers without affecting others
@@ -54,6 +58,27 @@ type EndpointChainTrackerManager struct {
 	// Map from endpoint URL to ChainTracker lifecycle state and last startup error.
 	trackerStates     map[string]EndpointChainTrackerState
 	trackerLastErrors map[string]string
+
+	// Per-endpoint observation records (MAG-2158 / Topic A): the side-effect-free
+	// telemetry the probing layer (Topic D) and the per-chain ChainState (Topic C)
+	// read. Written by the poll path (RecordPollObservation) and the relay-harvest
+	// path (RecordRelayObservation, call site wired by Topic B); read as a consistent
+	// snapshot via GetObservation. Guarded by its own mutex so the hot observation
+	// path does not contend on mu (which serializes tracker lifecycle). Lock ordering:
+	// never acquire mu while holding obsMu.
+	obsMu        sync.RWMutex
+	observations map[string]EndpointObservation
+	// generations tracks the live observation generation per endpoint URL. Each tracker
+	// created by GetOrCreateTracker is stamped with a fresh generation (nextObsGen), and
+	// its poll callback captures that generation. recordPollObservation accepts a write
+	// only if the callback's generation still matches the live one, so a late poll from a
+	// removed or replaced tracker cannot recreate a deleted record or clobber a new
+	// tracker's record for the same URL. Guarded by obsMu alongside observations.
+	generations map[string]uint64
+	nextObsGen  uint64
+	// stopped is set by Stop. Once set, no further observation writes are accepted, so a
+	// late in-flight poll cannot resurrect an observation after shutdown.
+	stopped bool
 
 	// Shared configuration
 	chainParser  chainlib.ChainParser
@@ -66,11 +91,25 @@ type EndpointChainTrackerManager struct {
 	retryMinDelay    time.Duration
 	retryMaxDelay    time.Duration
 
+	// relayGateFreshness is the maximum age of a relay-harvested tip that still suppresses
+	// a dedicated poll (MAG-2159 Topic B / Pass 2 — the "gate freshness threshold"). A
+	// relay observation younger than this means served traffic kept the tip at most ~one
+	// block stale, so this tick's dedicated poll is redundant and is borrowed instead of
+	// sent upstream (see freshRelayTip / EndpointPoller.relayGate). Defaults to
+	// averageBlockTime: ~1 block of staleness, conveniently 2x the flat poll interval
+	// (avgBlockTime/2), enough margin to suppress consecutive ticks without flapping.
+	relayGateFreshness time.Duration
+
 	// Callbacks for events (optional)
 	onFork        func(endpointURL string, blockNum int64)
 	onNewBlock    func(endpointURL string, fromBlock, toBlock int64)
 	onConsistency func(endpointURL string, oldBlock, newBlock int64)
 	onFetchError  func(endpointURL string)
+	// onTipObservation, if set, is invoked with every positive block observed by EITHER the
+	// poll path or the relay-harvest path (MAG-2160 / Topic C): it feeds the cheap monotonic
+	// per-chain ChainState tip (SetLatestBlock). Fired AFTER obsMu is released so the tip lock
+	// is never taken while holding the observation lock. Set once at construction; immutable.
+	onTipObservation func(block int64)
 
 	// Context for managing goroutines (parent context for all trackers)
 	ctx    context.Context
@@ -90,10 +129,13 @@ type EndpointChainTrackerConfig struct {
 	OnNewBlock    func(endpointURL string, fromBlock, toBlock int64)
 	OnConsistency func(endpointURL string, oldBlock, newBlock int64)
 	OnFetchError  func(endpointURL string)
+	// OnTipObservation, if set, feeds every positive poll/relay block into the per-chain
+	// ChainState tip (MAG-2160). See EndpointMonitor.onTipObservation.
+	OnTipObservation func(block int64)
 }
 
-// NewEndpointChainTrackerManager creates a new manager for per-endpoint ChainTrackers.
-func NewEndpointChainTrackerManager(ctx context.Context, config EndpointChainTrackerConfig) *EndpointChainTrackerManager {
+// NewEndpointMonitor creates a new manager for per-endpoint ChainTrackers.
+func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) *EndpointMonitor {
 	blocksToSave := config.BlocksToSave
 	if blocksToSave == 0 {
 		blocksToSave = DefaultBlocksToSave
@@ -117,17 +159,19 @@ func NewEndpointChainTrackerManager(ctx context.Context, config EndpointChainTra
 
 	avgBlockTime := config.AverageBlockTime
 	if avgBlockTime == 0 {
-		avgBlockTime = 12 * time.Second // Default to Ethereum-like timing
+		avgBlockTime = DefaultAverageBlockTime
 	}
 
 	ctxWithCancel, cancel := context.WithCancel(ctx)
 
-	manager := &EndpointChainTrackerManager{
+	manager := &EndpointMonitor{
 		trackers:          make(map[string]chaintracker.IChainTracker),
-		fetchers:          make(map[string]*EndpointChainFetcher),
+		fetchers:          make(map[string]*EndpointPoller),
 		cancelFuncs:       make(map[string]context.CancelFunc),
 		trackerStates:     make(map[string]EndpointChainTrackerState),
 		trackerLastErrors: make(map[string]string),
+		observations:      make(map[string]EndpointObservation),
+		generations:       make(map[string]uint64),
 		chainParser:       config.ChainParser,
 		chainID:           config.ChainID,
 		apiInterface:      config.ApiInterface,
@@ -135,12 +179,15 @@ func NewEndpointChainTrackerManager(ctx context.Context, config EndpointChainTra
 		blocksToSave:      blocksToSave,
 		retryMinDelay:     defaultTrackerStartRetryMin,
 		retryMaxDelay:     defaultTrackerStartRetryMax,
-		onFork:            config.OnFork,
-		onNewBlock:        config.OnNewBlock,
-		onConsistency:     config.OnConsistency,
-		onFetchError:      config.OnFetchError,
-		ctx:               ctxWithCancel,
-		cancel:            cancel,
+		// One block of tip staleness suppresses a redundant poll (see field doc).
+		relayGateFreshness: avgBlockTime,
+		onFork:             config.OnFork,
+		onNewBlock:         config.OnNewBlock,
+		onConsistency:      config.OnConsistency,
+		onFetchError:       config.OnFetchError,
+		onTipObservation:   config.OnTipObservation,
+		ctx:                ctxWithCancel,
+		cancel:             cancel,
 	}
 
 	return manager
@@ -148,7 +195,7 @@ func NewEndpointChainTrackerManager(ctx context.Context, config EndpointChainTra
 
 // GetOrCreateTracker returns an existing ChainTracker for the endpoint or creates a new one.
 // Thread-safe - uses lazy initialization to avoid creating trackers for unused endpoints.
-func (m *EndpointChainTrackerManager) GetOrCreateTracker(
+func (m *EndpointMonitor) GetOrCreateTracker(
 	endpoint *lavasession.Endpoint,
 	directConnection lavasession.DirectRPCConnection,
 ) (chaintracker.IChainTracker, error) {
@@ -172,13 +219,33 @@ func (m *EndpointChainTrackerManager) GetOrCreateTracker(
 	}
 
 	// Create the chain fetcher
-	fetcher := NewEndpointChainFetcher(
+	fetcher := NewEndpointPoller(
 		endpoint,
 		directConnection,
 		m.chainParser,
 		m.chainID,
 		m.apiInterface,
 	)
+
+	// Assign a fresh observation generation for this tracker instance and wire the poll
+	// callback to it. The callback captures gen by value, so recordPollObservation can
+	// reject a late poll from this instance once it has been removed or replaced (the
+	// live generation for the URL will no longer match). We already hold m.mu here; take
+	// obsMu only for the generation write, preserving the m.mu → obsMu lock order.
+	m.obsMu.Lock()
+	m.nextObsGen++
+	gen := m.nextObsGen
+	m.generations[endpointURL] = gen
+	m.obsMu.Unlock()
+
+	// Record a per-endpoint observation on every poll (Topic A). This fires on every
+	// latest-block poll round-trip — success or failure, block-changed or not — and is
+	// side-effect-free (it only writes the observation record, never QoS/Enabled). Both
+	// the default path (EndpointPoller.FetchLatestBlockNum) and the SVM path
+	// (SVMChainTracker.FetchLatestBlockNum via the PollObserver hook) funnel through here.
+	fetcher.onPollObservation = func(block int64, latency time.Duration, pollErr error, at time.Time) {
+		m.recordPollObservation(endpointURL, gen, block, latency, pollErr, at)
+	}
 
 	// Configure the ChainTracker
 	config := chaintracker.ChainTrackerConfig{
@@ -188,6 +255,22 @@ func (m *EndpointChainTrackerManager) GetOrCreateTracker(
 		BlocksCheckpointDistance: chaintracker.DefaultBlockCheckpointDistance,
 		ChainId:                  m.chainID,
 		ParseDirectiveEnabled:    true, // Always enabled for direct RPC
+		// MAG-2159 (Topic B): per-endpoint trackers use a FIXED flat cadence — the
+		// dedicated poll runs at exactly avgBlockTime/2 (slowed only by failure backoff),
+		// because relay harvest is the primary block signal and the poll is a sparse
+		// fallback. (The global tracker leaves this 0 and keeps its legacy adaptive
+		// cadence until Topic C.)
+		FlatPollInterval: m.averageBlockTime / 2,
+		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
+		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
+		// (above the generic/SVM wrapper split) so it suppresses Solana polls too — the old
+		// per-poller hook could only ever see the generic path. The gate fires only on a fresh
+		// RELAY observation (freshRelayTip), so an idle endpoint with no fresh relays still
+		// polls; a bounded number of consecutive skips then forces a verifying real poll.
+		RelayTipFresh: func(now time.Time) bool {
+			_, ok := m.freshRelayTip(endpointURL, now)
+			return ok
+		},
 	}
 
 	// Set up callbacks with endpoint context
@@ -200,16 +283,14 @@ func (m *EndpointChainTrackerManager) GetOrCreateTracker(
 	if m.onNewBlock != nil {
 		config.NewLatestCallback = func(fromBlock, toBlock int64, hash string) {
 			m.onNewBlock(endpointURL, fromBlock, toBlock)
-			// Also update the endpoint's LatestBlock atomically
-			endpoint.LatestBlock.Store(toBlock)
-			endpoint.LastBlockUpdate = time.Now()
+			// The endpoint tip is owned by the endpointtip store and written through the
+			// gated recordPollObservation (which fires on every poll) — this callback no
+			// longer writes a second, ungated copy. It only advances the tracker state.
 			m.setTrackerState(endpointURL, EndpointChainTrackerPolling, nil)
 		}
 	} else {
-		// Default: just update the endpoint's block data
+		// Default: just advance the tracker state (tip is written via recordPollObservation).
 		config.NewLatestCallback = func(fromBlock, toBlock int64, hash string) {
-			endpoint.LatestBlock.Store(toBlock)
-			endpoint.LastBlockUpdate = time.Now()
 			m.setTrackerState(endpointURL, EndpointChainTrackerPolling, nil)
 		}
 	}
@@ -234,6 +315,12 @@ func (m *EndpointChainTrackerManager) GetOrCreateTracker(
 	tracker, err := chaintracker.NewChainTracker(trackerCtx, fetcher, config)
 	if err != nil {
 		trackerCancel() // Clean up on failure
+		// No tracker was created, so drop the generation we just registered to keep the
+		// map tidy. (Leaving it is harmless — nothing can write through it — but a clean
+		// failure path is easier to reason about.)
+		m.obsMu.Lock()
+		delete(m.generations, endpointURL)
+		m.obsMu.Unlock()
 		return nil, utils.LavaFormatError("failed to create ChainTracker for endpoint", err,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
@@ -260,7 +347,7 @@ func (m *EndpointChainTrackerManager) GetOrCreateTracker(
 	return tracker, nil
 }
 
-func (m *EndpointChainTrackerManager) startTrackerWithRetry(tracker chaintracker.IChainTracker, trackerCtx context.Context, endpointURL string) {
+func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTracker, trackerCtx context.Context, endpointURL string) {
 	for attempt := 0; ; attempt++ {
 		m.setTrackerState(endpointURL, EndpointChainTrackerStarting, nil)
 
@@ -297,7 +384,7 @@ func (m *EndpointChainTrackerManager) startTrackerWithRetry(tracker chaintracker
 	}
 }
 
-func (m *EndpointChainTrackerManager) trackerStartRetryDelay(attempt int) time.Duration {
+func (m *EndpointMonitor) trackerStartRetryDelay(attempt int) time.Duration {
 	delay := m.averageBlockTime
 	if delay < m.retryMinDelay {
 		delay = m.retryMinDelay
@@ -320,7 +407,7 @@ func (m *EndpointChainTrackerManager) trackerStartRetryDelay(attempt int) time.D
 	return delay + time.Duration(time.Now().UnixNano()%int64(jitterRange))
 }
 
-func (m *EndpointChainTrackerManager) setTrackerState(endpointURL string, state EndpointChainTrackerState, err error) {
+func (m *EndpointMonitor) setTrackerState(endpointURL string, state EndpointChainTrackerState, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -343,14 +430,14 @@ func (m *EndpointChainTrackerManager) setTrackerState(endpointURL string, state 
 }
 
 // GetTracker returns the ChainTracker for an endpoint if it exists.
-func (m *EndpointChainTrackerManager) GetTracker(endpointURL string) (chaintracker.IChainTracker, bool) {
+func (m *EndpointMonitor) GetTracker(endpointURL string) (chaintracker.IChainTracker, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	tracker, exists := m.trackers[endpointURL]
 	return tracker, exists
 }
 
-func (m *EndpointChainTrackerManager) GetTrackerState(endpointURL string) (state EndpointChainTrackerState, lastError string, exists bool) {
+func (m *EndpointMonitor) GetTrackerState(endpointURL string) (state EndpointChainTrackerState, lastError string, exists bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -369,7 +456,7 @@ func (m *EndpointChainTrackerManager) GetTrackerState(endpointURL string) (state
 
 // GetLatestBlockNum returns the latest block number for an endpoint.
 // Returns 0 if no tracker exists for the endpoint.
-func (m *EndpointChainTrackerManager) GetLatestBlockNum(endpointURL string) int64 {
+func (m *EndpointMonitor) GetLatestBlockNum(endpointURL string) int64 {
 	m.mu.RLock()
 	tracker, exists := m.trackers[endpointURL]
 	m.mu.RUnlock()
@@ -383,7 +470,7 @@ func (m *EndpointChainTrackerManager) GetLatestBlockNum(endpointURL string) int6
 
 // GetLatestBlockData returns detailed block data for an endpoint.
 // Returns latest block number, change time, and whether data exists.
-func (m *EndpointChainTrackerManager) GetLatestBlockData(endpointURL string) (latestBlock int64, changeTime time.Time, exists bool) {
+func (m *EndpointMonitor) GetLatestBlockData(endpointURL string) (latestBlock int64, changeTime time.Time, exists bool) {
 	m.mu.RLock()
 	tracker, trackerExists := m.trackers[endpointURL]
 	m.mu.RUnlock()
@@ -401,7 +488,7 @@ func (m *EndpointChainTrackerManager) GetLatestBlockData(endpointURL string) (la
 // repopulates the cached value. Used by /debug/reset-scores to clear per-
 // endpoint chain-tracker pollution without restarting the tracker goroutines.
 // Returns the number of trackers that were reset.
-func (m *EndpointChainTrackerManager) ResetAllLatestBlocks() int {
+func (m *EndpointMonitor) ResetAllLatestBlocks() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	count := 0
@@ -414,7 +501,7 @@ func (m *EndpointChainTrackerManager) ResetAllLatestBlocks() int {
 
 // RemoveTracker removes and stops a ChainTracker for an endpoint.
 // It cancels the tracker's context first, which signals the goroutine to exit cleanly.
-func (m *EndpointChainTrackerManager) RemoveTracker(endpointURL string) {
+func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -433,14 +520,38 @@ func (m *EndpointChainTrackerManager) RemoveTracker(endpointURL string) {
 	delete(m.trackerLastErrors, endpointURL)
 	delete(m.trackerStates, endpointURL)
 
+	// Drop the observation record too, so it stays bounded as endpoints churn. Clearing
+	// the generation also disarms any in-flight poll callback from this instance: the URL
+	// now has no live generation, so a late recordPollObservation cannot recreate the
+	// record we just deleted.
+	m.obsMu.Lock()
+	delete(m.observations, endpointURL)
+	delete(m.generations, endpointURL)
+	m.obsMu.Unlock()
+
+	// Drop this endpoint's tip from the shared store too, so a removed endpoint leaves no
+	// stale entry in the process-global map.
+	endpointtip.Default().Remove(m.tipKey(endpointURL))
+
 	utils.LavaFormatInfo("stopped and removed ChainTracker for endpoint",
 		utils.LogAttr("endpoint", endpointURL),
 		utils.LogAttr("chainID", m.chainID),
 	)
 }
 
+// ObservationGeneration returns the live observation generation for an endpoint URL and
+// whether one is active. The relay-harvest path (MAG-2159) captures this after ensuring
+// the tracker and passes it to RecordRelayObservation, so a relay from a removed/replaced
+// tracker is rejected by the generation gate. Returns (0, false) for an unknown URL.
+func (m *EndpointMonitor) ObservationGeneration(endpointURL string) (uint64, bool) {
+	m.obsMu.RLock()
+	defer m.obsMu.RUnlock()
+	gen, ok := m.generations[endpointURL]
+	return gen, ok
+}
+
 // GetAllEndpoints returns all endpoint URLs with active ChainTrackers.
-func (m *EndpointChainTrackerManager) GetAllEndpoints() []string {
+func (m *EndpointMonitor) GetAllEndpoints() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -452,7 +563,7 @@ func (m *EndpointChainTrackerManager) GetAllEndpoints() []string {
 }
 
 // GetEndpointCount returns the number of active ChainTrackers.
-func (m *EndpointChainTrackerManager) GetEndpointCount() int {
+func (m *EndpointMonitor) GetEndpointCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.trackers)
@@ -460,7 +571,7 @@ func (m *EndpointChainTrackerManager) GetEndpointCount() int {
 
 // Stop stops all ChainTrackers and cleans up resources.
 // It cancels all individual tracker contexts first, then the parent context.
-func (m *EndpointChainTrackerManager) Stop() {
+func (m *EndpointMonitor) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -477,41 +588,32 @@ func (m *EndpointChainTrackerManager) Stop() {
 
 	// Clear maps
 	m.trackers = make(map[string]chaintracker.IChainTracker)
-	m.fetchers = make(map[string]*EndpointChainFetcher)
+	m.fetchers = make(map[string]*EndpointPoller)
 	m.cancelFuncs = make(map[string]context.CancelFunc)
 	m.trackerStates = make(map[string]EndpointChainTrackerState)
 	m.trackerLastErrors = make(map[string]string)
 
-	utils.LavaFormatInfo("stopped EndpointChainTrackerManager",
+	// Mark stopped and clear observation state. stopped is sticky: recordPollObservation
+	// and RecordRelayObservation both bail when it is set, so an in-flight poll that
+	// completes after Stop cannot resurrect an observation.
+	m.obsMu.Lock()
+	m.stopped = true
+	// Drop this chain's tips from the shared store before clearing the local maps, so a
+	// stopped monitor leaves no stale entries behind in the process-global store.
+	for url := range m.observations {
+		endpointtip.Default().Remove(m.tipKey(url))
+	}
+	m.observations = make(map[string]EndpointObservation)
+	m.generations = make(map[string]uint64)
+	m.obsMu.Unlock()
+
+	utils.LavaFormatInfo("stopped EndpointMonitor",
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("trackersStopped", trackerCount),
 	)
 }
 
-// ValidateEndpointSync checks if an endpoint is synced within the given threshold.
-// Returns true if the endpoint's latest block is within threshold of the reference block.
-func (m *EndpointChainTrackerManager) ValidateEndpointSync(endpointURL string, referenceBlock int64, threshold int64) bool {
-	latestBlock := m.GetLatestBlockNum(endpointURL)
-	if latestBlock == 0 {
-		// No data yet - don't filter
-		return true
-	}
-
-	gap := referenceBlock - latestBlock
-	return gap <= threshold
-}
-
-// GetSyncGap returns the sync gap between an endpoint and a reference block.
-// Returns 0 if endpoint is ahead or no data exists.
-func (m *EndpointChainTrackerManager) GetSyncGap(endpointURL string, referenceBlock int64) int64 {
-	latestBlock := m.GetLatestBlockNum(endpointURL)
-	if latestBlock == 0 || latestBlock >= referenceBlock {
-		return 0
-	}
-	return referenceBlock - latestBlock
-}
-
 // IsDummy returns false - this is a real manager.
-func (m *EndpointChainTrackerManager) IsDummy() bool {
+func (m *EndpointMonitor) IsDummy() bool {
 	return false
 }

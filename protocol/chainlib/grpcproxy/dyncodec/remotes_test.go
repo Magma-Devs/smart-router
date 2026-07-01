@@ -2,6 +2,7 @@ package dyncodec
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
@@ -75,11 +76,20 @@ func TestRemotes(t *testing.T) {
 	})
 
 	t.Run("test relayer remote", func(t *testing.T) {
+		// Regression (P1-#1): the relayer callback receives the method SLASH-LESS
+		// ("service.Method/RPC"), the form the production parser/spec lookup needs. The leading slash
+		// that grpc.ClientConn.Invoke requires is added HERE, at the Invoke boundary — not by the
+		// caller (RelayerRemote.sendReq). Assert both halves so a regression in either is caught.
+		var sawSlashlessCallback bool
 		remote := NewRelayerRemote(func(ctx context.Context, method string, req []byte) ([]byte, metadata.MD, error) {
+			require.False(t, strings.HasPrefix(method, "/"), "callback/parser path must be slash-less, got %q", method)
+			sawSlashlessCallback = true
 			var resp []byte
-			err := conn.Invoke(ctx, method, req, &resp, grpc.CustomCodecCallOption{Codec: grpcproxy.RawBytesCodec{}})
+			// Add the leading slash at the actual gRPC invoke boundary.
+			err := conn.Invoke(ctx, "/"+method, req, &resp, grpc.CustomCodecCallOption{Codec: grpcproxy.RawBytesCodec{}})
 			return resp, make(metadata.MD), err
 		})
 		testRemote(remote)
+		require.True(t, sawSlashlessCallback, "relayer callback must have been exercised")
 	})
 }
