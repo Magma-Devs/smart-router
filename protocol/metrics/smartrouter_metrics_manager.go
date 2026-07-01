@@ -633,7 +633,12 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		csmReportedProvidersCount:      csmReportedProvidersCount,
 
 		// Internal state
-		endpointsHealthChecksOk: 1,
+		// Start fail-closed (0 = not-ready) so /readyz reports 503 until the
+		// RelaysMonitorAggregator's first health check confirms at least one
+		// chain can serve relays and flips this to 1 via UpdateHealthCheckStatus.
+		// This keeps a freshly-booted pod out of the k8s Service load-balancer
+		// until it has actually verified a provider.
+		endpointsHealthChecksOk: 0,
 		endpointMetrics:         make(map[string]*EndpointMetrics),
 		urlToProviderNames:      make(map[string][]string),
 		optimizerQoSClient:      options.OptimizerQoSClient,
@@ -645,20 +650,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	if options.NetworkAddress != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.Handler())
-
-		overallHealthHandler := func(w http.ResponseWriter, r *http.Request) {
-			statusCode := http.StatusOK
-			message := "Health status OK"
-			if atomic.LoadUint64(&manager.endpointsHealthChecksOk) == 0 {
-				statusCode = http.StatusServiceUnavailable
-				message = "Unhealthy"
-			}
-			w.WriteHeader(statusCode)
-			w.Write([]byte(message))
-		}
-
-		mux.HandleFunc("/metrics/overall-health", overallHealthHandler)
-		mux.HandleFunc("/metrics/health-overall", overallHealthHandler)
+		manager.registerHTTPHandlers(mux)
 
 		go func() {
 			utils.LavaFormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
@@ -669,6 +661,44 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}
 
 	return manager
+}
+
+// registerHTTPHandlers wires the health/readiness routes onto the given mux.
+// Split out from the constructor so tests can exercise the handlers against a
+// real manager without binding a socket or touching the Prometheus default
+// registerer.
+func (m *SmartRouterMetricsManager) registerHTTPHandlers(mux *http.ServeMux) {
+	// Overall-health / readiness: 200 when at least one chain can serve relays
+	// (endpointsHealthChecksOk == 1, maintained by the RelaysMonitorAggregator),
+	// else 503.
+	overallHealthHandler := func(w http.ResponseWriter, r *http.Request) {
+		statusCode := http.StatusOK
+		message := "Health status OK"
+		if atomic.LoadUint64(&m.endpointsHealthChecksOk) == 0 {
+			statusCode = http.StatusServiceUnavailable
+			message = "Unhealthy"
+		}
+		w.WriteHeader(statusCode)
+		w.Write([]byte(message))
+	}
+
+	mux.HandleFunc("/metrics/overall-health", overallHealthHandler)
+	mux.HandleFunc("/metrics/health-overall", overallHealthHandler)
+
+	// Kubernetes liveness probe. Deliberately dumb: a static 200 that only
+	// proves the process is up and the mux is serving. No dependency checks —
+	// a failing liveness probe restarts the pod, and a restart can't fix
+	// "no healthy providers", so provider health belongs in /readyz, not here.
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	// Kubernetes readiness probe. Reflects real serving capacity: 200 only when
+	// at least one chain can serve relays, else 503 so k8s pulls the pod out of
+	// the Service load-balancer without restarting it. Shares the flag with
+	// /metrics/health-overall; this is the k8s-idiomatic alias.
+	mux.HandleFunc("/readyz", overallHealthHandler)
 }
 
 // =============================================================================
