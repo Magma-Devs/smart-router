@@ -60,7 +60,7 @@ import (
 const TraceBodyFlag = "otel-trace-body"
 
 // defaultServiceName is used when OTEL_SERVICE_NAME is not set.
-const defaultServiceName = "lava-smartrouter"
+const defaultServiceName = "smartrouter"
 
 const shutdownTimeout = 5 * time.Second
 

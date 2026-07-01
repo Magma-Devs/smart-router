@@ -57,11 +57,11 @@ func (s *testQueryServerImpl) ShowChainInfo(ctx context.Context, _ *testRequest)
 	return &testResponse{ChainID: "Test"}, nil
 }
 
-const testServiceMethod = "lavanet.lava.spec.Query/ShowChainInfo"
+const testServiceMethod = "smartrouter.spec.Query/ShowChainInfo"
 
 func registerTestQueryServer(s *grpc.Server, srv testQueryServer) {
 	s.RegisterService(&grpc.ServiceDesc{
-		ServiceName: "lavanet.lava.spec.Query",
+		ServiceName: "smartrouter.spec.Query",
 		HandlerType: (*testQueryServer)(nil),
 		Methods: []grpc.MethodDesc{
 			{
