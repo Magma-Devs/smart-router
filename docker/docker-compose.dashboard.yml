@@ -5,12 +5,12 @@
 #   router      — the smart-router itself (included from docker-compose.yml),
 #                 exposing Prometheus metrics on :7779
 #   prometheus  — scrapes router:7779 (config: docker/prometheus.yml)
-#   backend     — dashboard API (FastAPI), runs PromQL against Prometheus
-#   frontend    — dashboard UI (Next.js), talks to the backend
+#   api         — dashboard API (Fastify/TypeScript), runs PromQL against Prometheus
+#   web         — dashboard UI (Next.js), talks to the api
 #
-# The dashboard backend/frontend run from the pre-built images published to
-# GHCR by the smart-router-dashboard repo — no dashboard source checkout
-# needed. Override the tag with DASHBOARD_TAG (default: latest).
+# The dashboard api/web run from the v2 images published to GHCR by the
+# smart-router-dashboard repo — no dashboard source checkout needed.
+# Override the tag with DASHBOARD_TAG (default: latest).
 #
 #   # Default (Ethereum router):
 #   docker compose -f docker/docker-compose.dashboard.yml up
@@ -24,7 +24,7 @@
 #     docker compose -f docker/docker-compose.dashboard.yml up
 #
 # Endpoints once up:
-#   http://localhost:3000   dashboard UI (login: admin / password)
+#   http://localhost:3000   dashboard UI (no login — self-hosted)
 #   http://localhost:8000   dashboard API  (/docs for the OpenAPI UI)
 #   http://localhost:9090   Prometheus
 #   http://localhost:3360   router ETH1 jsonrpc
@@ -54,24 +54,22 @@ services:
     depends_on:
       - router
 
-  backend:
-    image: ghcr.io/magma-devs/smart-router-dashboard/backend:${DASHBOARD_TAG:-latest}
+  api:
+    image: ghcr.io/magma-devs/smart-router-dashboard/api:${DASHBOARD_TAG:-latest}
     pull_policy: always
     environment:
-      - DEBUG=true
-      - LOG_LEVEL=DEBUG
-      # Dashboard backend queries Prometheus (not the router) for its panels.
+      # Dashboard api queries Prometheus (not the router) for its panels.
       - PROMETHEUS_URL=http://prometheus:9090
-      - TENANT_ID=default
-      - AUTH_USERNAME=${DASHBOARD_USERNAME:-admin}
-      - AUTH_PASSWORD=${DASHBOARD_PASSWORD:-password}
-      - CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000","http://0.0.0.0:3000"]
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://0.0.0.0:3000
+      - HELM_VALUES_DIR=/app/helm-values
+      - LOG_LEVEL=${DASHBOARD_LOG_LEVEL:-info}
     volumes:
-      # The backend reads the live router config — the exact same SR_CONFIG the
+      # The api reads the live router config — the exact same SR_CONFIG the
       # router runs — and parses its endpoints/direct-rpc format natively, so
-      # the dashboard's component view always reflects the running topology
-      # with no duplicated config file. Mounted at <helm_values_dir>/core/values.yml,
-      # the path the backend's ConfigurationService reads.
+      # the dashboard's topology views always reflect the running router with
+      # no duplicated config file. Mounted at <HELM_VALUES_DIR>/core/values.yml,
+      # the path the api's ConfigurationService reads. Helm-chart values files
+      # are understood at the same path too.
       - ../${SR_CONFIG:-config/smartrouter_examples/smartrouter_eth.yml}:/app/helm-values/core/values.yml:ro
     ports:
       - "8000:8000"
@@ -79,14 +77,11 @@ services:
     depends_on:
       - prometheus
 
-  frontend:
-    image: ghcr.io/magma-devs/smart-router-dashboard/frontend:${DASHBOARD_TAG:-latest}
+  web:
+    image: ghcr.io/magma-devs/smart-router-dashboard/web:${DASHBOARD_TAG:-latest}
     pull_policy: always
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
-      - NEXT_PUBLIC_DOMAIN=localhost
-      - NEXT_PUBLIC_PORT=8000
-      - NEXT_PUBLIC_PROMETHEUS_URL=http://localhost:9090
       # Local mode: the live-test panel reaches each chain directly at
       # localhost:<port> (port from the router config) instead of the
       # production <chain>-<interface>.<domain> gateway subdomain shape.
@@ -95,7 +90,7 @@ services:
       - "3000:3000"
     restart: unless-stopped
     depends_on:
-      - backend
+      - api
 
 volumes:
   prometheus-data:
