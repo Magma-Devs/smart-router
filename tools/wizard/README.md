@@ -9,6 +9,31 @@ make wizard          # from the repo root (builds the router, then launches)
 cd tools/wizard && go run . --repo /path/to/smart-router
 ```
 
+## Prerequisites
+
+On launch the wizard runs an **OS-adaptive tool check** (step 0) before the
+flow, so a missing dependency surfaces up front instead of when the run step
+fails. Check it standalone anytime:
+
+```bash
+make wizard-preflight     # or: cd tools/wizard && go run . --preflight
+go run . --skip-preflight # advanced: bypass the gate
+```
+
+| Tool | Tier | Used for | Install |
+| --- | --- | --- | --- |
+| `bash` | required | the render + up steps run via `bash -c`; `run.sh` is a bash script | macOS/Linux built-in |
+| `envsubst` | required | expands `${VAR}` secrets from `.env` into the rendered config | GNU **gettext** — `brew install gettext` (mac) · `apt install gettext-base` (Debian) · `dnf install gettext` (Fedora) |
+| `docker` + `docker compose` (v2 plugin) | required | builds and runs the stack (`docker compose … up`, **not** legacy `docker-compose`) | Docker Desktop (mac/Win) · Docker Engine + `docker-compose-plugin` (Linux) |
+| `go` | optional | builds the `smartrouter` binary for health checks (skipped if `build/` has one; `make wizard` builds it first) | https://go.dev/dl/ |
+| `gh` | optional | fetches chain specs via the GitHub API — falls back to a plain HTTPS download when absent | https://cli.github.com/ |
+
+**Windows:** the run step needs `bash` + `envsubst`, which native cmd/PowerShell
+don't provide. Preflight detects native Windows without a POSIX shell and steers
+you to **WSL2** or **Git Bash** (Docker Desktop's WSL2 backend still powers
+`docker compose`). A hard stop, not a warning — the bash-based run step can't
+work otherwise.
+
 ## Flow
 
 1. **Chains** — a family-tabbed, fuzzy-searchable multi-select over the live
