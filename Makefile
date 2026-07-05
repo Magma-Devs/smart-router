@@ -29,10 +29,21 @@ build:
 
 # Interactive config wizard (separate go module under tools/wizard). Builds the
 # router first so the wizard's spec-driven `health` checks have a binary, then
-# launches the TUI. The wizard fetches chain specs + icons from the docs at
-# runtime; nothing is vendored.
-wizard: build
-	@cd tools/wizard && go run . --repo $(CURDIR)
+# launches the TUI. On launch the wizard runs an OS-adaptive prerequisite check
+# (docker + compose v2, envsubst, bash) and hard-stops if a required tool is
+# missing — native-Windows users are steered to WSL2/Git Bash. The wizard
+# fetches chain specs + icons from the docs at runtime; nothing is vendored.
+#
+# Preflight runs BEFORE `make build` so a missing docker/envsubst hard-stops
+# up front instead of after a full router compile. The launch still re-runs the
+# gate (step 0) — this just fails fast.
+wizard: wizard-preflight build
+	@cd tools/wizard && go run . --repo $(CURDIR) --skip-preflight
+
+# Check the wizard's external tool prerequisites for this OS and exit (no build,
+# no TUI). Run this first if `make wizard` bails on a missing tool.
+wizard-preflight:
+	@cd tools/wizard && go run . --preflight
 
 # Reprint the run command from the most recent wizard run (no router build, no
 # TUI — just reads the saved record under ~/.config/smartrouter-wizard).
@@ -132,4 +143,4 @@ lint:
 clean:
 	rm -rf build/ dist/
 
-.PHONY: install build wizard wizard-last wizard-build wizard-test setup snapshot changelog test test-short tidy lint clean
+.PHONY: install build wizard wizard-preflight wizard-last wizard-build wizard-test setup snapshot changelog test test-short tidy lint clean
