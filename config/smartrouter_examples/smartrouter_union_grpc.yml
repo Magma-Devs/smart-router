@@ -1,59 +1,41 @@
-# Smart Router gRPC Configuration — Union Testnet (UNIONT)
-# Mode: Direct connections to Union testnet endpoints on the Lava public gateway
+# Smart Router gRPC Configuration — Union Mainnet (UNION)
+# Mode: Direct gRPC connection to Union mainnet on the Lava public gateway
 #
-# Union is a Cosmos SDK chain (imports COSMOSSDK) and exposes three interfaces:
-#   - REST API          (/tokenfactory endpoints)
-#   - gRPC API          (tokenfactory.v1beta1.Query methods)
-#   - Tendermint RPC    (consensus / block queries, event subscriptions)
+# Union is a Cosmos SDK chain (UNION imports COSMOSSDK). This example serves the
+# gRPC interface, pointed at the real Lava-hosted endpoint:
+#   union.grpc.lava.build:443  (network: union-1, uniond v1.2.3)
 #
-# This example focuses on the gRPC leg, pointed at the real Lava-hosted
-# endpoint (union.grpc.lava.build:443). The REST and Tendermint legs follow
-# the same lava.build gateway naming convention.
-#
-# NOTE: Union is a testnet. A single upstream is enough to demonstrate serving
-# gRPC; add a second, DISTINCT source per interface (different group-label) if
-# you want cross-validation / group-diversity policies to have a quorum to span.
+# The UNIONT testnet spec inherits from UNION (imports: ["UNION"]) and only
+# overrides the chain-id verification, so both networks share one api catalog.
+# This config targets mainnet (chain-id: "UNION") because that is what the
+# public gateway serves.
 #
 # Run it:
 #   smartrouter config/smartrouter_examples/smartrouter_union_grpc.yml --use-static-spec specs/
 #
-# Then query the gRPC leg (reflection is on, so grpcurl needs no local protos):
+# Smoke test (built-in health probe — boots, connects, runs spec verifications):
+#   smartrouter health config/smartrouter_examples/smartrouter_union_grpc.yml --use-static-spec specs/ 2>/dev/null | jq
+#
+# Or serve traffic and query via grpcurl (reflection is on, no local protos needed):
 #   grpcurl -plaintext localhost:3361 list
 #   grpcurl -plaintext -d '{}' localhost:3361 cosmos.staking.v1beta1.Query/Params
-#
-# Heads-up: the UNIONT spec declares a tokenfactory.v1beta1.Query gRPC
-# collection, but the live union.grpc.lava.build endpoint currently serves the
-# standard Cosmos SDK / IBC / CosmWasm set (no tokenfactory). Those spec methods
-# won't verify against this upstream — hence skip-verifications below. Point at a
-# node that serves tokenfactory if you need those specific methods.
 
 metrics-listen-address: "0.0.0.0:7779"
 
 endpoints:
-  # REST endpoint for Union — serves the tokenfactory API
-  - network-address: "0.0.0.0:3360"
-    chain-id: "UNIONT"
-    api-interface: "rest"
-
-  # gRPC endpoint for Union — serves tokenfactory.v1beta1.Query methods
+  # gRPC endpoint for Union mainnet — serves the Cosmos SDK / tokenfactory query set
   - network-address: "0.0.0.0:3361"
-    chain-id: "UNIONT"
+    chain-id: "UNION"
     api-interface: "grpc"
-
-  # Tendermint RPC endpoint for Union — block queries + event subscriptions
-  - network-address: "0.0.0.0:3362"
-    chain-id: "UNIONT"
-    api-interface: "tendermintrpc"
 
 direct-rpc:
   # ---- gRPC — Lava public gateway ----
   # grpcs:// implies TLS on :443. The smart router uses server reflection to
-  # auto-discover the tokenfactory.v1beta1.Query proto definitions at startup,
-  # then pools connections (1-5 conns, ~100 streams each) and multiplexes
-  # subscriptions across clients.
+  # auto-discover the proto definitions at startup, then pools connections
+  # (1-5 conns, ~100 streams each) and multiplexes subscriptions across clients.
   - name: "union-grpc-lava"
     group-label: "lava-gateway"
-    chain-id: "UNIONT"
+    chain-id: "UNION"
     api-interface: "grpc"
     node-urls:
       - url: "grpcs://union.grpc.lava.build:443"
@@ -64,27 +46,6 @@ direct-rpc:
           descriptor-source: "reflection"
           reflection-timeout: "5s"
         skip-verifications:
-          - pruning
+          # The gateway serves the standard Cosmos SDK set; the spec's tokenfactory
+          # tx-indexing/pruning checks are best-effort against this public upstream.
           - tx-indexing
-
-  # ---- REST — Lava public gateway ----
-  - name: "union-rest-lava"
-    group-label: "lava-gateway"
-    chain-id: "UNIONT"
-    api-interface: "rest"
-    node-urls:
-      - url: "https://union.rest.lava.build"
-        timeout: 10s
-        skip-verifications:
-          - pruning
-
-  # ---- TendermintRPC — Lava public gateway ----
-  - name: "union-tendermintrpc-lava"
-    group-label: "lava-gateway"
-    chain-id: "UNIONT"
-    api-interface: "tendermintrpc"
-    node-urls:
-      - url: "https://union.tendermintrpc.lava.build"
-        timeout: 10s
-        skip-verifications:
-          - pruning
