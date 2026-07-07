@@ -37,7 +37,7 @@ RPC proxies have been built in-house thousands of times — along with the failo
 - **Block-aware caching** — serves repeat reads without hitting an upstream and without serving stale data; shareable across replicas.
 - **Transaction broadcasting** — sends writes (`eth_sendRawTransaction` and equivalents) to all eligible upstreams in parallel to raise success rate and speed.
 - **Multi-chain, multi-protocol** — JSON-RPC, REST, gRPC, Tendermint RPC, and WebSocket across EVM chains, Solana, UTXO chains, Cosmos chains, and more; chains are defined by JSON specs.
-- **Built-in observability** — Prometheus metrics, OpenTelemetry traces, structured logs, and a typed error taxonomy, with a prebuilt dashboard.
+- **Built-in observability** — Prometheus metrics, OpenTelemetry traces, structured logs, and a typed error taxonomy, with a companion [Smart Router Dashboard](https://github.com/Magma-Devs/smart-router-dashboard).
 
 ## Quick Start
 
@@ -163,31 +163,21 @@ A single parameterized stack serves every example config (`SR_CONFIG=…`), with
 
 #### With the monitoring dashboard
 
-To bring up the router together with Prometheus and the [Smart Router Dashboard](https://github.com/Magma-Devs/smart-router-dashboard) (pre-built GHCR images), use the dashboard compose file:
+The **[Smart Router Dashboard](https://github.com/Magma-Devs/smart-router-dashboard)** is a
+Prometheus-driven observability UI for the router (chain/upstream health,
+RPS, latency, errors, a live request console, and more). It lives in its own
+repo and ships a self-contained stack — router + Prometheus + dashboard — from
+one command, so there's nothing to run from here.
 
 ```bash
-docker compose -f docker/docker-compose.dashboard.yml up
+git clone https://github.com/Magma-Devs/smart-router-dashboard
+cd smart-router-dashboard/v2
+make up          # router + Prometheus + api (:8000) + web (:3000)
 ```
 
-This starts the router, a Prometheus that scrapes its `:7779` metrics, and the dashboard backend + frontend — fully self-contained, no dashboard source checkout needed. The UI is at http://localhost:3000 and Prometheus at http://localhost:9090.
-
-The dashboard is protected by HTTP basic auth. The **default credentials are `admin` / `password`** — override them (and the image tag / router config) via environment variables:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `DASHBOARD_USERNAME` | `admin` | Dashboard login username |
-| `DASHBOARD_PASSWORD` | `password` | Dashboard login password |
-| `DASHBOARD_TAG` | `latest` | Dashboard backend/frontend image tag |
-| `SR_CONFIG` | `config/smartrouter_examples/smartrouter_eth.yml` | Router config (mounted into the dashboard too) |
-
-```bash
-DASHBOARD_USERNAME=ops DASHBOARD_PASSWORD='change-me' \
-  docker compose -f docker/docker-compose.dashboard.yml up
-```
-
-The compose sets `NEXT_PUBLIC_LOCAL_MODE=true`, so the dashboard's live-test panel targets each chain directly at `http://localhost:<port>` (the port from `SR_CONFIG`) instead of the production gateway's `<chain>-<interface>.<domain>` URLs. The generated `curl` commands work as-is against the local stack — e.g. `curl -X POST -H "Content-Type: application/json" http://localhost:3360 -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'`.
-
-> The `admin` / `password` default is for local use only — set `DASHBOARD_PASSWORD` to a real secret for any non-local deployment.
+See the [dashboard README](https://github.com/Magma-Devs/smart-router-dashboard/blob/main/v2/README.md)
+for configuration (auth, the values file, logs profile, pointing it at an
+existing router on `:7779`, etc.).
 
 ## AI / Codex setup
 
