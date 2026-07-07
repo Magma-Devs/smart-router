@@ -171,11 +171,11 @@ one command, so there's nothing to run from here.
 
 ```bash
 git clone https://github.com/Magma-Devs/smart-router-dashboard
-cd smart-router-dashboard/v2
-make up          # router + Prometheus + api (:8000) + web (:3000)
+cd smart-router-dashboard
+make up          # router + Prometheus + api (:8000) + web (:3000) + logs (Grafana :3001)
 ```
 
-See the [dashboard README](https://github.com/Magma-Devs/smart-router-dashboard/blob/main/v2/README.md)
+See the [dashboard README](https://github.com/Magma-Devs/smart-router-dashboard/blob/main/README.md)
 for configuration (auth, the values file, logs profile, pointing it at an
 existing router on `:7779`, etc.).
 
