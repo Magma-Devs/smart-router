@@ -1,0 +1,15 @@
+# Grafana dashboard provider — loads any JSON dashboards dropped in the mounted
+# dashboards dir on boot, so "Smart Router Logs" is present with no manual import.
+apiVersion: 1
+
+providers:
+  - name: smart-router-logs
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,103 @@
+# Logs overlay — Loki + Promtail + Grafana for the local smart-router stack.
+#
+# Layers on top of the base router compose. Promtail tails the router's
+# container stdout/stderr (no change to the router service — it already logs
+# JSON via SR_LOG_FORMAT=json), ships to Loki, and Grafana shows the logs with
+# a pre-provisioned "Smart Router Logs" dashboard.
+#
+#   # Router + logs stack:
+#   docker compose -f docker/docker-compose.yml \
+#                  -f docker/docker-compose.logs.yml up --build
+#
+#   # A different example config, still with logs:
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_multichain.yml \
+#     docker compose -f docker/docker-compose.yml \
+#                    -f docker/docker-compose.logs.yml up --build
+#
+# Endpoints once up:
+#   http://localhost:3001   Grafana  (login: admin / admin) → dashboard "Smart Router Logs"
+#   http://localhost:3100   Loki API (e.g. /ready, /loki/api/v1/labels)
+#   http://localhost:3360   router ETH1 jsonrpc
+#
+# `include` pulls in the router service so a single `-f docker-compose.logs.yml`
+# also works; both files set `name: smart-router` so everything shares one
+# project network and Promtail's compose-project label filter matches.
+#
+# Grafana is published on host :3001 (NOT :3000) so this overlay composes
+# side-by-side with the dashboard overlay (docker-compose.dashboard.yml), whose
+# frontend owns :3000. All overlays — cache, dashboard, logs — publish disjoint
+# host ports and can layer together in one `docker compose` invocation. See the
+# "Everything at once" recipe in docs/LOCAL-COMPOSE.md.
+
+name: smart-router
+
+include:
+  - docker-compose.yml
+
+services:
+  loki:
+    image: grafana/loki:3.4.2
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    volumes:
+      - ./loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+    healthcheck:
+      # The loki image is distroless with a wget-less busybox absent; use the
+      # bundled loki binary's own readiness endpoint via its built-in probe.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  promtail:
+    image: grafana/promtail:3.4.2
+    command: ["-config.file=/etc/promtail/promtail-config.yml"]
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      # Read-only Docker socket for container discovery + log tailing. Promtail
+      # only reads; it never issues write calls to the daemon.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-positions:/tmp
+    restart: unless-stopped
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USERNAME:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      # Local dev: skip the forced first-login password change and let anonymous
+      # viewers read the boards. Drop these for anything shared.
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      # Open the logs dashboard straight away instead of the empty home page.
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/smart-router-logs.json
+      # Grafana still listens on :3000 inside the container; only the HOST port
+      # is remapped to :3001 (see ports below) so it doesn't clash with the
+      # dashboard overlay's frontend on :3000. Tell Grafana its browser-facing
+      # root so redirects (e.g. the login → home bounce) land on :3001, and
+      # serve assets from a relative path so it works regardless of host port.
+      - GF_SERVER_ROOT_URL=http://localhost:3001/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=false
+    volumes:
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      # host :3001 → container :3000. Disjoint from the dashboard frontend (:3000).
+      - "3001:3000"
+    restart: unless-stopped
+    depends_on:
+      - loki
+
+volumes:
+  loki-data:
+  promtail-positions:
+  grafana-data:

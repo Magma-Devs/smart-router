@@ -167,3 +167,87 @@ curl -s http://localhost:7779/metrics | head
 
 Set `metrics-listen-address: disabled` in the config to turn it off, or
 override with the `--metrics-listen-address` flag.
+
+## Logs (Loki + Grafana)
+
+An optional overlay (`docker/docker-compose.logs.yml`) adds a **Loki + Promtail
++ Grafana** stack that captures the router's logs and shows them in a Grafana
+board — no change to the router service, it keeps logging JSON to stdout as it
+does today. Layer it on the base compose like the cache overlay:
+
+```bash
+docker compose -f docker/docker-compose.yml \
+               -f docker/docker-compose.logs.yml up --build
+```
+
+Then open Grafana and it lands on the **Smart Router Logs** dashboard:
+
+| URL                     | What                                              |
+|-------------------------|---------------------------------------------------|
+| http://localhost:3001   | Grafana (`admin` / `admin`) → "Smart Router Logs" |
+| http://localhost:3100   | Loki API (`/ready`, `/loki/api/v1/labels`)        |
+
+Grafana is on **:3001** (not the usual :3000) on purpose — the dashboard
+overlay's frontend owns :3000, and this overlay is designed to run *alongside*
+it (see [Everything at once](#everything-at-once) below).
+
+How it fits together:
+
+- **Promtail** tails the Docker socket, keeps only containers in this compose
+  project (`com.docker.compose.project=smart-router`), parses the router's
+  zerolog JSON, and pushes to **Loki**. Parsing promotes the log `level` to a
+  Loki label and uses the router's own nanosecond `time` field as the entry
+  timestamp.
+- **Grafana** auto-provisions the Loki datasource and the logs dashboard — a
+  log-volume-by-level graph, a live log panel, and `Service` / `Search (regex)`
+  variables. It works whether you run just the router or the full multichain
+  fleet.
+
+Query logs directly with LogQL, e.g. only errors from the router:
+
+```bash
+curl -s -G http://localhost:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={service="router", level="error"}' | head -c 400
+```
+
+Tune verbosity with the same `SR_LOG_LEVEL` env var above (e.g.
+`SR_LOG_LEVEL=debug`); `SR_LOG_FORMAT` must stay `json` (the default) for the
+level/timestamp parsing to apply — plain-text lines still ship, just without the
+`level` label.
+
+Override credentials with `GRAFANA_USERNAME` / `GRAFANA_PASSWORD`. Tear down and
+drop the stored logs with `down -v` (the `loki-data` / `grafana-data` volumes).
+
+## Everything at once
+
+The base router + all three overlays (cache, dashboard, logs) publish **disjoint
+host ports**, so they compose into a single stack in one command — a multichain
+router with the cache in path, Prometheus + the dashboard UI, and the Loki/Grafana
+log pipeline, all together:
+
+```bash
+SR_CONFIG=config/smartrouter_examples/smartrouter_multichain_cached.yml \
+  docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.cache.yml \
+    -f docker/docker-compose.dashboard.yml \
+    -f docker/docker-compose.logs.yml \
+    up --build
+```
+
+The full port map (all unique):
+
+| Port        | Service                                   | Overlay    |
+|-------------|-------------------------------------------|------------|
+| `3360`–`3367` | router RPC listeners (per chain)        | base       |
+| `7779`      | router Prometheus metrics                 | base       |
+| `5555`      | cache Prometheus metrics                  | cache      |
+| `9090`      | Prometheus                                | dashboard  |
+| `8000`      | dashboard backend (FastAPI)               | dashboard  |
+| `3000`      | dashboard frontend (Next.js)              | dashboard  |
+| `3100`      | Loki API                                  | logs       |
+| `3001`      | Grafana → "Smart Router Logs"             | logs       |
+
+Drop any overlay you don't want (e.g. omit `-f docker-compose.dashboard.yml` for
+router + cache + logs only). The cache still needs a `*_cached.yml` config that
+declares `cache-be:` — see [Enabling the cache](#enabling-the-cache).

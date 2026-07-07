@@ -1,0 +1,79 @@
+# Promtail config for the local logs stack (docker/docker-compose.logs.yml).
+#
+# Promtail runs as a sidecar, reads the Docker daemon socket, and tails the
+# stdout/stderr of every container in THIS compose project (label filter below).
+# It parses the router's zerolog JSON so `level` becomes a queryable label and
+# the log line carries the router's own timestamp, then pushes to Loki.
+#
+# No change to the router service is needed — it keeps logging JSON to stderr as
+# it does today (SR_LOG_FORMAT=json). Promtail discovers it via Docker labels.
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  # Where Promtail remembers how far it has read, so a restart doesn't re-ship
+  # the whole backlog. Lives on the promtail-positions named volume.
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: smart-router-containers
+    docker_sd_configs:
+      # Discover containers via the mounted Docker socket. refresh_interval picks
+      # up containers that start after Promtail (e.g. `up` ordering, restarts).
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+
+    relabel_configs:
+      # Only tail containers from this compose project. Docker Compose stamps
+      # every container it creates with com.docker.compose.project=<name>; our
+      # base compose sets `name: smart-router`, so this scopes Promtail to the
+      # router (and cache/dashboard if those overlays are also running) and
+      # ignores unrelated containers on the same host.
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_project"]
+        regex: smart-router
+        action: keep
+
+      # Turn Docker metadata into Loki labels. Keep the label set SMALL — every
+      # distinct label combination is a separate Loki stream, and high-cardinality
+      # labels blow up the index. container + compose service are low-cardinality
+      # and are what you actually filter on.
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        target_label: service
+      - source_labels: ["__meta_docker_container_name"]
+        # strip the leading slash Docker puts on container names
+        regex: "/(.*)"
+        target_label: container
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_project"]
+        target_label: compose_project
+
+    pipeline_stages:
+      # The router logs JSON (zerolog). Try to parse it; if a line isn't JSON
+      # (the first few bootstrap lines print as text before --log-format applies,
+      # and non-router containers may log plain text), the json stage is a no-op
+      # and the raw line is shipped as-is.
+      - json:
+          expressions:
+            level: level
+            # zerolog writes the event timestamp under "time" as a Unix-nanosecond
+            # number (the router sets zerolog.TimeFieldFormat = TimeFormatUnixNano).
+            ts: time
+            msg: message
+
+      # Promote the parsed log level to a label so `{service="router"} | level="error"`
+      # works and Grafana's level colouring lights up. Low cardinality (5 values).
+      - labels:
+          level:
+
+      # Use the router's own timestamp for the log entry instead of Promtail's
+      # ingest time. UnixNs matches zerolog's TimeFormatUnixNano. If `ts` is empty
+      # (non-JSON line), this stage is skipped and ingest time is used.
+      - timestamp:
+          source: ts
+          format: UnixNs
+          action_on_failure: skip

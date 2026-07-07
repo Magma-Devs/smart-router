@@ -1,0 +1,19 @@
+# Grafana datasource provisioning for the local logs stack.
+# Auto-wires Loki so Grafana shows logs with zero manual setup on first boot.
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    # Pinned uid so the provisioned "Smart Router Logs" dashboard (which
+    # references datasource uid "loki") resolves without manual re-selection.
+    uid: loki
+    access: proxy
+    # Service name from docker-compose.logs.yml; both share the smart-router
+    # project network so this DNS name resolves.
+    url: http://loki:3100
+    isDefault: true
+    jsonData:
+      # Surface the router's log level as a coloured field in the log panel.
+      derivedFields: []
+    editable: true
