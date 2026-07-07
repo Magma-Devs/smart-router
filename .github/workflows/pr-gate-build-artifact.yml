@@ -157,6 +157,50 @@ jobs:
             echo "- Image digest: \`${IMAGE_DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Check Helm chart checkout token
+        env:
+          SMART_ROUTER_HELM_CHART_READ_TOKEN: ${{ secrets.SMART_ROUTER_HELM_CHART_READ_TOKEN }}
+          SMART_ROUTER_AUTOMATION_READ_TOKEN: ${{ secrets.SMART_ROUTER_AUTOMATION_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SMART_ROUTER_HELM_CHART_READ_TOKEN:-}" ] && [ -z "${SMART_ROUTER_AUTOMATION_READ_TOKEN:-}" ]; then
+            echo "::error::Checking out Magma-Devs/smart-router-helm-chart requires SMART_ROUTER_HELM_CHART_READ_TOKEN or an existing read token with access, such as SMART_ROUTER_AUTOMATION_READ_TOKEN"
+            exit 1
+          fi
+
+      - name: Checkout latest Smart Router Helm chart
+        uses: actions/checkout@v7
+        with:
+          repository: Magma-Devs/smart-router-helm-chart
+          ref: main
+          token: ${{ secrets.SMART_ROUTER_HELM_CHART_READ_TOKEN || secrets.SMART_ROUTER_AUTOMATION_READ_TOKEN }}
+          path: smart-router-helm-chart
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve Helm chart metadata
+        id: helm_chart
+        working-directory: smart-router-helm-chart
+        run: |
+          set -euo pipefail
+          chart_sha="$(git rev-parse HEAD)"
+          chart_short_sha="${chart_sha:0:7}"
+          chart_path="."
+          if [ -f "charts/smart-router/Chart.yaml" ]; then
+            chart_path="charts/smart-router"
+          elif [ ! -f "Chart.yaml" ]; then
+            echo "::error::Could not find Smart Router Helm chart at repository root or charts/smart-router"
+            exit 1
+          fi
+          chart_version="$(awk -F ': *' '$1 == "version" {print $2; exit}' "${chart_path}/Chart.yaml")"
+          {
+            echo "sha=${chart_sha}"
+            echo "short_sha=${chart_short_sha}"
+            echo "path=${chart_path}"
+            echo "version=${chart_version}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Checked out smart-router-helm-chart main at ${chart_sha} (${chart_path}, chart ${chart_version})"
+
       - name: Check dev-sim-prtests access
         env:
           SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
@@ -575,6 +619,597 @@ jobs:
             echo "- Smoke endpoint: \`${smoke_endpoint}\`"
             echo "- Validation result: \`passed\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy and validate latest Helm chart with PR image
+        env:
+          SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
+          SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
+          PR_NUMBER: ${{ needs.metadata.outputs.pr_number }}
+          PR_IMAGE_TAG: ${{ needs.metadata.outputs.image_tag }}
+          PR_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.image_tag }}
+          CHART_BRANCH: main
+          CHART_SHA: ${{ steps.helm_chart.outputs.sha }}
+          CHART_CHECKOUT: smart-router-helm-chart
+          CHART_SOURCE: Magma-Devs/smart-router-helm-chart
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_HOST:-}" ]; then
+            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_HOST"
+            exit 1
+          fi
+          if [ -z "${SSH_KEY:-}" ]; then
+            echo "::error::Missing required repository secret DEV_SIM_PRTESTS_SSH_KEY"
+            exit 1
+          fi
+          case "$PR_NUMBER" in
+            ''|*[!0-9]*)
+              echo "::error::PR number must contain digits only, got '${PR_NUMBER}'"
+              exit 1
+              ;;
+          esac
+          if [ "$PR_IMAGE_TAG" = "latest" ] || [[ "$PR_IMAGE" == *":latest" ]]; then
+            echo "::error::Helm compatibility gate requires an exact PR image tag, not latest"
+            exit 1
+          fi
+          if [ ! -d "$CHART_CHECKOUT" ]; then
+            echo "::error::Helm chart checkout path not found: ${CHART_CHECKOUT}"
+            exit 1
+          fi
+
+          RELEASE="smart-router-pr-${PR_NUMBER}"
+          NAMESPACE="pr-gate-${PR_NUMBER}"
+          key_file="$(mktemp)"
+          chart_archive="$(mktemp)"
+          helm_output="$(mktemp)"
+          remote_tmp=""
+          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RemoteCommand=none -o RequestTTY=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20)
+
+          cleanup_local() {
+            status="$?"
+            set +e
+            if [ -n "${remote_tmp:-}" ]; then
+              # shellcheck disable=SC2029
+              ssh "${ssh_opts[@]}" "$SSH_HOST" "rm -rf -- '${remote_tmp}'" >/dev/null 2>&1 || true
+            fi
+            rm -f "$key_file" "$chart_archive" "$helm_output"
+            exit "$status"
+          }
+          trap cleanup_local EXIT
+
+          printf '%s\n' "$SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          if ! ssh-keygen -y -f "$key_file" >/dev/null; then
+            echo "SSH key validation failed"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          tar -czf "$chart_archive" --exclude='.git' -C "$CHART_CHECKOUT" .
+          remote_tmp="$(ssh "${ssh_opts[@]}" "$SSH_HOST" 'mktemp -d /tmp/smart-router-pr-gate.XXXXXX')"
+          scp -i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RequestTTY=no "$chart_archive" "$SSH_HOST:${remote_tmp}/smart-router-helm-chart.tgz"
+
+          append_summary() {
+            result="$1"
+            chart_path_summary="$(awk -F ': ' '/^Chart path: / {value=$2} END {print value}' "$helm_output")"
+            image_values_key="$(awk -F ': ' '/^Image values key: / {value=$2} END {print value}' "$helm_output")"
+            image_values_prefix="$(awk -F ': ' '/^Image values prefix: / {value=$2} END {print value}' "$helm_output")"
+            values_file_summary="$(awk -F ': ' '/^Values file: / {value=$2} END {print value}' "$helm_output")"
+            gateway_mode="$(awk -F ': ' '/^Gateway resources: / {value=$2} END {print value}' "$helm_output")"
+            health_endpoint="$(awk -F ': ' '/^Health endpoint: / {value=$2} END {print value}' "$helm_output")"
+            smoke_result="$(awk -F ': ' '/^Smoke result: / {value=$2} END {print value}' "$helm_output")"
+            helm_test_result="$(awk -F ': ' '/^Helm test result: / {value=$2} END {print value}' "$helm_output")"
+            {
+              echo "### Smart Router Helm compatibility"
+              echo ""
+              echo "- PR image: \`${PR_IMAGE}\`"
+              echo "- Namespace: \`${NAMESPACE}\`"
+              echo "- Release: \`${RELEASE}\`"
+              echo "- Chart source: \`${CHART_SOURCE}@${CHART_BRANCH}\`"
+              echo "- Chart commit: \`${CHART_SHA}\`"
+              echo "- Chart path: \`${chart_path_summary:-unresolved}\`"
+              echo "- Values file: \`${values_file_summary:-unresolved}\`"
+              echo "- Image values key: \`${image_values_key:-unresolved}\`"
+              echo "- Image values path: \`${image_values_prefix:-unresolved}\`"
+              echo "- Gateway resources: \`${gateway_mode:-not detected}\`"
+              echo "- Helm command: \`helm upgrade --install ${RELEASE} ${chart_path_summary:-<chart-path>} -n ${NAMESPACE} --create-namespace -f <dev-pr-gate-values-file> --set ${image_values_prefix:-<image-values-prefix>}.url=ghcr.io/magma-devs/smart-router --set ${image_values_prefix:-<image-values-prefix>}.version=${PR_IMAGE_TAG} --set ${image_values_prefix:-<image-values-prefix>}.pullPolicy=Always --wait --atomic --timeout 10m\`"
+              echo "- Helm test: \`${helm_test_result:-not completed}\`"
+              echo "- Health endpoint: \`${health_endpoint:-not completed}\`"
+              echo "- Smoke result: \`${smoke_result:-not completed}\`"
+              echo "- Cleanup: \`helm uninstall ${RELEASE} -n ${NAMESPACE} || true; kubectl delete namespace ${NAMESPACE} --wait=false || true\`"
+              echo "- Validation result: \`${result}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          cleanup_remote() {
+            # shellcheck disable=SC2029
+            ssh "${ssh_opts[@]}" "$SSH_HOST" \
+              "REMOTE_TMP='${remote_tmp}' RELEASE='${RELEASE}' NAMESPACE='${NAMESPACE}' bash -s" <<'REMOTE_CLEANUP'
+          set +e
+          if [ -n "${RELEASE:-}" ] && [ -n "${NAMESPACE:-}" ]; then
+            helm uninstall "$RELEASE" -n "$NAMESPACE" || true
+            kubectl delete namespace "$NAMESPACE" --wait=false || true
+          fi
+          if [ -n "${REMOTE_TMP:-}" ]; then
+            rm -rf "$REMOTE_TMP" || true
+          fi
+          REMOTE_CLEANUP
+          }
+
+          # shellcheck disable=SC2029
+          if ! ssh "${ssh_opts[@]}" "$SSH_HOST" \
+            "REMOTE_TMP='${remote_tmp}' PR_NUMBER='${PR_NUMBER}' PR_IMAGE='${PR_IMAGE}' PR_IMAGE_TAG='${PR_IMAGE_TAG}' RELEASE='${RELEASE}' NAMESPACE='${NAMESPACE}' CHART_BRANCH='${CHART_BRANCH}' CHART_SHA='${CHART_SHA}' bash -s" 2>&1 <<'REMOTE_HELM' | tee "$helm_output"
+          set -euo pipefail
+
+          CHART_SOURCE="Magma-Devs/smart-router-helm-chart"
+          CHART_ARCHIVE="${REMOTE_TMP}/smart-router-helm-chart.tgz"
+          CHART_REPO_DIR="${REMOTE_TMP}/smart-router-helm-chart"
+          VALUES_FILE="${REMOTE_TMP}/dev-pr-gate-values.yaml"
+          PULL_SECRET_NAME="ghcr-secret"
+          PULL_SECRET_SOURCE_NAMESPACE="lava-infra"
+          ROUTER_ID="eth"
+          ROUTER_SERVICE="${ROUTER_ID}-router"
+          SERVICE_PORT="3000"
+          HEALTH_PATH="/lava/health"
+          cleanup_started=false
+
+          cleanup() {
+            status="$?"
+            set +e
+            if [ "$cleanup_started" != "true" ]; then
+              cleanup_started=true
+              echo "Cleanup command: helm uninstall ${RELEASE} -n ${NAMESPACE} || true"
+              helm uninstall "$RELEASE" -n "$NAMESPACE" || true
+              echo "Cleanup command: kubectl delete namespace ${NAMESPACE} --wait=false || true"
+              kubectl delete namespace "$NAMESPACE" --wait=false || true
+            fi
+            rm -rf "$REMOTE_TMP" || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          redact_sensitive_output() {
+            sed -E 's/((token|secret|password|apikey|api_key|authorization)[=: ]+)[^ &"]+/\1[REDACTED]/Ig'
+          }
+
+          print_helm_diagnostics() {
+            echo "Helm diagnostics:"
+            helm status "$RELEASE" -n "$NAMESPACE" || true
+            echo "Kubernetes resources:"
+            kubectl -n "$NAMESPACE" get all,hpa,configmap,job -o wide || true
+            echo "Pods:"
+            kubectl -n "$NAMESPACE" get pods -o wide || true
+            echo "Pod container states:"
+            kubectl -n "$NAMESPACE" get pods -o jsonpath='{range .items[*]}{.metadata.name}{" phase="}{.status.phase}{" containers="}{range .status.containerStatuses[*]}{.name}{":ready="}{.ready}{":restarts="}{.restartCount}{":waiting="}{.state.waiting.reason}{":terminated="}{.state.terminated.reason}{";"}{end}{"\n"}{end}' || true
+            echo "Recent namespace events:"
+            kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -50 || true
+            echo "Router logs:"
+            kubectl -n "$NAMESPACE" logs -l "app.lavanet.io/router=${ROUTER_ID}" -c router --all-containers=false --tail=120 2>&1 | redact_sensitive_output || true
+            echo "Cache logs:"
+            kubectl -n "$NAMESPACE" logs deployment/router-cache -c cache --tail=120 2>&1 | redact_sensitive_output || true
+            echo "Helm test pod logs:"
+            kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/component=test -o name 2>/dev/null \
+              | while IFS= read -r pod; do
+                  [ -z "$pod" ] && continue
+                  echo "Logs for ${pod}:"
+                  kubectl -n "$NAMESPACE" logs "$pod" --all-containers=true --tail=120 2>&1 | redact_sensitive_output || true
+                done
+          }
+
+          detect_chart_path() {
+            if [ -f "${CHART_REPO_DIR}/Chart.yaml" ]; then
+              echo "./smart-router-helm-chart"
+            elif [ -f "${CHART_REPO_DIR}/charts/smart-router/Chart.yaml" ]; then
+              echo "./smart-router-helm-chart/charts/smart-router"
+            else
+              echo "Could not find Chart.yaml in checked-out Helm chart repository" >&2
+              return 1
+            fi
+          }
+
+          detect_image_value_key() {
+            chart_path="$1"
+            if grep -Eq '^[[:space:]]+smartrouter:' "${chart_path}/values.yaml" 2>/dev/null || grep -q '"smartrouter"' "${chart_path}/values.schema.json" 2>/dev/null; then
+              echo "smartrouter"
+            elif grep -Eq '^[[:space:]]+smart-router:' "${chart_path}/values.yaml" 2>/dev/null || grep -q '"smart-router"' "${chart_path}/values.schema.json" 2>/dev/null; then
+              echo "smart-router"
+            else
+              echo "Could not detect Smart Router image values key in chart values" >&2
+              return 1
+            fi
+          }
+
+          detect_gateway_settings() {
+            gateway_enabled="false"
+            gateway_class=""
+            if kubectl api-resources --api-group gateway.networking.k8s.io --no-headers 2>/dev/null | awk '{print $1}' | grep -qx 'gateways'; then
+              gateway_class="$(kubectl get gatewayclass -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+              if [ -n "$gateway_class" ]; then
+                gateway_enabled="true"
+              fi
+            fi
+            printf '%s\t%s\n' "$gateway_enabled" "$gateway_class"
+          }
+
+          copy_pull_secret() {
+            kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+            kubectl -n lava-infra get secret ghcr-secret -o yaml \
+              | sed "s/namespace: lava-infra/namespace: ${NAMESPACE}/" \
+              | kubectl apply -f -
+            kubectl -n "$NAMESPACE" get secret "$PULL_SECRET_NAME" >/dev/null
+            echo "Copied image pull secret ${PULL_SECRET_NAME} into ${NAMESPACE}"
+          }
+
+          write_values_file() {
+            image_value_key="$1"
+            gateway_enabled="$2"
+            gateway_class="$3"
+
+            cat > "$VALUES_FILE" <<YAML
+          base_domain: "pr-gate.local"
+          replicaCount: 1
+
+          debug:
+            enabled: false
+
+          routers:
+            - id: "${ROUTER_ID}"
+              network: "eth1"
+              custom_url_prefix: "eth"
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 512Mi
+                limits: {}
+              autoscaling:
+                enabled: true
+                minReplicas: 1
+                maxReplicas: 2
+                targetCPUUtilizationPercentage: 75
+                targetMemoryUtilizationPercentage: 75
+                metrics: []
+                behavior: {}
+              nodes:
+                - name: "PublicNode"
+                  endpoints:
+                    - url: "https://ethereum-rpc.publicnode.com/"
+                      interface: "jsonrpc"
+                      addons: []
+
+          miscellaneous:
+            imagePullSecrets:
+              - name: "${PULL_SECRET_NAME}"
+            log:
+              level: warn
+              format: json
+            images:
+              ${image_value_key}:
+                url: "ghcr.io/magma-devs/smart-router"
+                version: "placeholder-overridden-by-pr-gate"
+                pullPolicy: Always
+              configProcessor:
+                url: "alpine"
+                version: "3.20"
+                pullPolicy: IfNotPresent
+              validation:
+                url: "alpine"
+                version: "3.20"
+                pullPolicy: IfNotPresent
+              tests:
+                configuration:
+                  url: "alpine"
+                  version: "3.20"
+                  pullPolicy: IfNotPresent
+                connectivity:
+                  url: "curlimages/curl"
+                  version: "8.10.1"
+                  pullPolicy: IfNotPresent
+                connection:
+                  url: "busybox"
+                  version: "1.36"
+                  pullPolicy: IfNotPresent
+            routers:
+              cache:
+                enabled: true
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 512Mi
+                limits: {}
+              gc:
+                gogc: ""
+                gomemlimit: ""
+              profiling:
+                pyroscope:
+                  enabled: false
+              autoscaling:
+                enabled: true
+                minReplicas: 1
+                maxReplicas: 2
+                targetCPUUtilizationPercentage: 75
+                targetMemoryUtilizationPercentage: 75
+                metrics: []
+                behavior: {}
+              enableGrpcCompression: false
+              setRelayRetryLimit: 2
+              maxSessionsPerProvider: 10000
+              maximumStreamsPerConnection: 1000
+              defaultProcessingTimeout: "30s"
+              minRelayTimeout: "10s"
+              maxBatchRequestSize: 0
+              chainTrackerPollingMultiplier: 0
+              consistencyBlockGapFactor: 0
+              providerOptimizerAvailabilityWeight: 0.3
+              providerOptimizerLatencyWeight: 0.3
+              providerOptimizerSyncWeight: 0.2
+              providerOptimizerStakeWeight: 0.2
+              providerOptimizerMinSelectionChance: 0.01
+              probeUpdateWeight: 0.25
+              enableSelectionStats: false
+              additionalFlags: []
+            staticSpecs:
+              enabled: true
+              url: "https://github.com/magma-devs/lava-specs/tree/main/"
+              token: ""
+            gateway:
+              enabled: ${gateway_enabled}
+              gatewayClassName: "${gateway_class}"
+              name: "${RELEASE}-gateway"
+              namespace: "${NAMESPACE}"
+              labels: {}
+              annotations: {}
+              listeners:
+                - name: http
+                  protocol: HTTP
+                  port: 80
+                  hostname: ""
+                  allowedRoutes:
+                    namespaces:
+                      from: Same
+              hostStructure: "chain.interface"
+              pathBased:
+                enabled: false
+              cors:
+                enabled: true
+                allowOrigins:
+                  - "*"
+                allowMethods:
+                  - GET
+                  - POST
+                  - OPTIONS
+                allowHeaders:
+                  - Authorization
+                  - Content-Type
+                  - Accept
+                  - Origin
+                  - lava-extension
+                  - lava-force-cache-refresh
+                  - lava-relay-timeout
+                allowCredentials: false
+                exposeHeaders:
+                  - "*"
+                maxAge: 86400
+            service:
+              labels: {}
+              annotations: {}
+            commonLabels:
+              app.kubernetes.io/part-of: smart-router-pr-gate
+            commonAnnotations: {}
+            cache:
+              replicas: 1
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits: {}
+              gc:
+                gogc: ""
+                gomemlimit: ""
+              expiration_multiplier: 1.5
+              expiration_non_finalized_multiplier: 1.25
+              max_items: 2147483647
+              log_level: error
+              profiling:
+                pyroscope:
+                  enabled: false
+            metrics:
+              serviceMonitor:
+                enabled: false
+            podAnnotations: {}
+            podSecurityContext: {}
+            containerSecurityContext:
+              readOnlyRootFilesystem: true
+            nodeSelector: {}
+            tolerations: []
+            affinity: {}
+            devMode:
+              enabled: false
+              localBinaryPath: "/root/smart-router"
+
+          authGateway:
+            enabled: false
+
+          dashboard:
+            enabled: false
+          YAML
+          }
+
+          verify_pr_image_deployed() {
+            mismatches="$(kubectl -n "$NAMESPACE" get deployments -o json | jq -r --arg image "$PR_IMAGE" '
+              .items[]
+              | .metadata.name as $deployment
+              | .spec.template.spec.containers[]
+              | select((.name == "router" or .name == "cache") and .image != $image)
+              | "\($deployment)/\(.name)=\(.image)"
+            ')"
+            if [ -n "$mismatches" ]; then
+              echo "Deployment image mismatch; expected ${PR_IMAGE}:"
+              printf '%s\n' "$mismatches"
+              exit 1
+            fi
+
+            latest_images="$(kubectl -n "$NAMESPACE" get deployments -o json | jq -r '
+              .items[]
+              | .metadata.name as $deployment
+              | .spec.template.spec.containers[]
+              | select((.name == "router" or .name == "cache") and (.image | endswith(":latest")))
+              | "\($deployment)/\(.name)=\(.image)"
+            ')"
+            if [ -n "$latest_images" ]; then
+              echo "Smart Router deployment must not use latest image tags:"
+              printf '%s\n' "$latest_images"
+              exit 1
+            fi
+          }
+
+          fail_if_pr_pods_crashed() {
+            crash_reasons="$(kubectl -n "$NAMESPACE" get pods -o json | jq -r --arg image "$PR_IMAGE" '
+              .items[] as $pod
+              | ($pod.spec.containers[] | select(.image == $image) | .name) as $container
+              | ($pod.status.containerStatuses[]? | select(.name == $container)) as $status
+              | select(
+                  ($status.state.waiting.reason // "" | test("CrashLoopBackOff|Error|RunContainerError|CreateContainerConfigError|ImagePullBackOff|ErrImagePull")) or
+                  (($status.lastState.terminated.exitCode // 0) != 0)
+                )
+              | "\($pod.metadata.name)/\($container) waiting=\($status.state.waiting.reason // "") lastReason=\($status.lastState.terminated.reason // "") lastExit=\($status.lastState.terminated.exitCode // "")"
+            ')"
+            if [ -n "$crash_reasons" ]; then
+              echo "PR image pod exited or entered a waiting failure state:"
+              printf '%s\n' "$crash_reasons"
+              print_helm_diagnostics
+              exit 1
+            fi
+          }
+
+          run_health_and_smoke() {
+            service_ip="$(kubectl -n "$NAMESPACE" get service "$ROUTER_SERVICE" -o jsonpath='{.spec.clusterIP}')"
+            if [ -z "$service_ip" ] || [ "$service_ip" = "None" ]; then
+              echo "Service ${NAMESPACE}/${ROUTER_SERVICE} has no ClusterIP"
+              exit 1
+            fi
+            smoke_endpoint="http://${service_ip}:${SERVICE_PORT}"
+            health_endpoint="${smoke_endpoint}${HEALTH_PATH}"
+            echo "Health endpoint: ${health_endpoint}"
+
+            health_ok=false
+            for _ in $(seq 1 60); do
+              fail_if_pr_pods_crashed
+              if curl -fsS "$health_endpoint" >/dev/null; then
+                health_ok=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$health_ok" != "true" ]; then
+              echo "Health check failed: ${health_endpoint}"
+              print_helm_diagnostics
+              exit 1
+            fi
+
+            rpc_response="$(curl -fsS \
+              -X POST "$smoke_endpoint" \
+              -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}')"
+            rpc_result="$(printf '%s\n' "$rpc_response" | jq -r '.result // empty')"
+            if grep -q '"error"' <<< "$rpc_response" || [ -z "$rpc_result" ]; then
+              echo "RPC smoke failed"
+              printf '%s\n' "$rpc_response"
+              print_helm_diagnostics
+              exit 1
+            fi
+            echo "Smoke result: eth_chainId=${rpc_result}"
+          }
+
+          if [ "$PR_IMAGE_TAG" = "latest" ] || [ "$PR_IMAGE" = "ghcr.io/magma-devs/smart-router:latest" ]; then
+            echo "PR image tag must be exact and must not be latest"
+            exit 1
+          fi
+          command -v helm >/dev/null
+          command -v kubectl >/dev/null
+          command -v jq >/dev/null
+          command -v curl >/dev/null
+
+          mkdir -p "$CHART_REPO_DIR"
+          tar -xzf "$CHART_ARCHIVE" -C "$CHART_REPO_DIR"
+          cd "$REMOTE_TMP"
+          CHART_PATH="$(detect_chart_path)"
+          IMAGE_VALUE_KEY="$(detect_image_value_key "$CHART_PATH")"
+          IMAGE_VALUES_PREFIX="miscellaneous.images.${IMAGE_VALUE_KEY}"
+          gateway_settings="$(detect_gateway_settings)"
+          GATEWAY_ENABLED="$(printf '%s\n' "$gateway_settings" | awk -F '\t' '{print $1}')"
+          GATEWAY_CLASS="$(printf '%s\n' "$gateway_settings" | awk -F '\t' '{print $2}')"
+          if [ "$GATEWAY_ENABLED" = "true" ]; then
+            gateway_summary="enabled (${GATEWAY_CLASS})"
+          else
+            gateway_summary="disabled (Gateway API CRD or GatewayClass unavailable)"
+          fi
+
+          write_values_file "$IMAGE_VALUE_KEY" "$GATEWAY_ENABLED" "$GATEWAY_CLASS"
+
+          echo "PR image: ${PR_IMAGE}"
+          echo "Namespace: ${NAMESPACE}"
+          echo "Release: ${RELEASE}"
+          echo "Chart source: ${CHART_SOURCE}@${CHART_BRANCH}"
+          echo "Chart commit: ${CHART_SHA}"
+          echo "Chart path: ${CHART_PATH}"
+          echo "Values file: ${VALUES_FILE}"
+          echo "Image values key: ${IMAGE_VALUE_KEY}"
+          echo "Image values prefix: ${IMAGE_VALUES_PREFIX}"
+          echo "Gateway resources: ${gateway_summary}"
+          echo "Helm command: helm upgrade --install ${RELEASE} ${CHART_PATH} -n ${NAMESPACE} --create-namespace -f ${VALUES_FILE} --set ${IMAGE_VALUES_PREFIX}.url=ghcr.io/magma-devs/smart-router --set ${IMAGE_VALUES_PREFIX}.version=${PR_IMAGE_TAG} --set ${IMAGE_VALUES_PREFIX}.pullPolicy=Always --wait --atomic --timeout 10m"
+
+          helm dependency build "$CHART_PATH"
+
+          helm uninstall "$RELEASE" -n "$NAMESPACE" || true
+          kubectl delete namespace "$NAMESPACE" --wait=false || true
+          for _ in $(seq 1 60); do
+            if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+            echo "Namespace ${NAMESPACE} still exists after stale cleanup"
+            exit 1
+          fi
+          copy_pull_secret
+
+          if ! helm upgrade --install "$RELEASE" "$CHART_PATH" \
+            -n "$NAMESPACE" \
+            --create-namespace \
+            -f "$VALUES_FILE" \
+            --set "${IMAGE_VALUES_PREFIX}.url=ghcr.io/magma-devs/smart-router" \
+            --set "${IMAGE_VALUES_PREFIX}.version=${PR_IMAGE_TAG}" \
+            --set "${IMAGE_VALUES_PREFIX}.pullPolicy=Always" \
+            --wait \
+            --atomic \
+            --timeout 10m; then
+            print_helm_diagnostics
+            exit 1
+          fi
+
+          verify_pr_image_deployed
+          fail_if_pr_pods_crashed
+
+          if ! helm test "$RELEASE" -n "$NAMESPACE" --timeout 10m; then
+            echo "Helm test result: failed"
+            print_helm_diagnostics
+            exit 1
+          fi
+          echo "Helm test result: passed"
+
+          run_health_and_smoke
+
+          echo "Helm compatibility validation passed"
+          REMOTE_HELM
+          then
+            echo "::error::Smart Router Helm compatibility validation failed"
+            cleanup_remote || true
+            append_summary "failed"
+            exit 1
+          fi
+
+          append_summary "passed"
 
       - name: Checkout smart-router-automation
         uses: actions/checkout@v7
