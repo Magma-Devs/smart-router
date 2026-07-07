@@ -17,7 +17,6 @@ Use both sources:
   - `docs/LOCAL-COMPOSE.md`
   - `docs/METRICS.md`
   - `docker/docker-compose.yml`
-  - `docker/docker-compose.dashboard.yml`
   - `config/smartrouter_examples/`
 
 If public docs and the repository disagree, prefer the checked-in repository
@@ -171,41 +170,18 @@ config only binds the listeners it declares; unused published ports may sit idle
 
 ## Dashboard
 
-The dashboard stack is optional. It includes the router, Prometheus, dashboard
-backend, and dashboard frontend:
+The observability dashboard lives in its own repo,
+[Magma-Devs/smart-router-dashboard](https://github.com/Magma-Devs/smart-router-dashboard),
+and ships a self-contained stack (router + Prometheus + dashboard). It is **not**
+part of this repo — run it from there:
 
 ```bash
-docker compose -f docker/docker-compose.dashboard.yml up
+git clone https://github.com/Magma-Devs/smart-router-dashboard
+cd smart-router-dashboard/v2 && make up
 ```
 
-Expected local URLs:
-
-- Dashboard UI: http://localhost:3000
-- Dashboard API: http://localhost:8000
-- Prometheus: http://localhost:9090
-- Router JSON-RPC: http://localhost:3360
-- Router metrics: http://localhost:7779
-
-Default dashboard credentials are `admin` / `password`. They are for local use
-only. Override them for anything else:
-
-```bash
-DASHBOARD_USERNAME=ops DASHBOARD_PASSWORD='change-me' \
-  docker compose -f docker/docker-compose.dashboard.yml up
-```
-
-On Apple Silicon, dashboard images may fail with:
-
-```text
-no matching manifest for linux/arm64/v8
-```
-
-Use the amd64 image workaround:
-
-```bash
-DOCKER_DEFAULT_PLATFORM=linux/amd64 \
-  docker compose -f docker/docker-compose.dashboard.yml up
-```
+See that repo's README for configuration (auth, values file, logs, and pointing
+it at an already-running router on `:7779`).
 
 ## Cleanup
 
@@ -213,12 +189,6 @@ Router-only stack:
 
 ```bash
 docker compose -f docker/docker-compose.yml down
-```
-
-Dashboard stack:
-
-```bash
-docker compose -f docker/docker-compose.dashboard.yml down
 ```
 
 Router plus cache overlay:
@@ -231,7 +201,7 @@ docker compose -f docker/docker-compose.yml \
 To also remove compose-created volumes for the stack you are stopping:
 
 ```bash
-docker compose -f docker/docker-compose.dashboard.yml down --volumes --remove-orphans
+docker compose -f docker/docker-compose.yml down --volumes --remove-orphans
 ```
 
 Avoid broad cleanup commands such as `docker system prune` unless the user
