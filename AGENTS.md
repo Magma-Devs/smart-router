@@ -177,7 +177,7 @@ part of this repo — run it from there:
 
 ```bash
 git clone https://github.com/Magma-Devs/smart-router-dashboard
-cd smart-router-dashboard/v2 && make up
+cd smart-router-dashboard && make up
 ```
 
 See that repo's README for configuration (auth, values file, logs, and pointing
