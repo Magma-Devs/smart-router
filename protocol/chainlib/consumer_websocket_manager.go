@@ -161,11 +161,17 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				// Server-wide shutdown — send a CloseGoingAway (1001) frame so the
-				// client can distinguish an intentional shutdown from a crash, then
-				// close the underlying TCP conn so the read loop unblocks.
+				// Server-wide shutdown — send a CloseGoingAway (1001) frame so the client can
+				// distinguish an intentional shutdown from a crash, then unblock the read loop by
+				// setting an immediate read deadline rather than Close()-ing the conn here.
+				//
+				// Close() from this goroutine raced gofiber's handler cleanup: it unblocks ReadMessage,
+				// the handler returns, and gofiber recycles the Conn (fasthttp pooling) WHILE this
+				// goroutine is still inside Close() — a use-after-recycle data race. SetReadDeadline
+				// returns immediately (the read loop breaks on the resulting error) and lets the handler,
+				// the conn's sole owner, do the single Close on return.
 				_ = cwm.websocketConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
-				_ = cwm.websocketConn.Close()
+				_ = cwm.websocketConn.SetReadDeadline(time.Now())
 				return
 			case <-webSocketCtx.Done():
 				utils.LavaFormatTrace("websocket's context cancelled", utils.LogAttr("GUID", webSocketCtx))
@@ -202,7 +208,15 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					utils.LavaFormatDebug("checking idle time", utils.LogAttr("idleFor", idleFor.Load()), utils.LogAttr("maxIdleTime", MaxIdleTimeInSeconds), utils.LogAttr("now", time.Now().Unix()))
 					idleDuration := idleFor.Load() + MaxIdleTimeInSeconds
 					if time.Now().Unix() > idleDuration {
-						websocketConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, fmt.Sprintf("Connection idle for too long, closing connection. Idle time: %d", idleDuration)))
+						// Route the idle-close frame through the single writer goroutine (sendWS), NOT a
+						// direct WriteMessage: this goroutine is separate from the writer, and gofiber/
+						// gorilla forbids concurrent writers — a direct write here raced the writer
+						// goroutine's WriteMessage (data race). The client closing on this frame unblocks
+						// the read loop, which tears the connection down.
+						sendWS(webSocketMsgWithType{
+							messageType: websocket.CloseMessage,
+							msg:         websocket.FormatCloseMessage(websocket.CloseNormalClosure, fmt.Sprintf("Connection idle for too long, closing connection. Idle time: %d", idleDuration)),
+						})
 						return
 					}
 				}

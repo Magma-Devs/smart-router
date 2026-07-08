@@ -198,7 +198,10 @@ func TestScoreStoreUpdate(t *testing.T) {
 		{name: "invalid negative latency sample", scoreType: score.LatencyScoreType, sample: -sample, valid: false},
 		{name: "invalid negative sync sample", scoreType: score.SyncScoreType, sample: -sample, valid: false},
 		{name: "invalid negative availability sample", scoreType: score.AvailabilityScoreType, sample: -sample, valid: false},
-		{name: "invalid availability sample - not 0/1", scoreType: score.AvailabilityScoreType, sample: 0.5, valid: false},
+		// Topic E: availability now accepts any fraction in [0,1] (the probe's fraction-healthy
+		// sample); only values outside [0,1] are rejected. (Fractional ACCEPTANCE is covered by a
+		// dedicated test below — this table asserts exact num/denom for the shared `sample`.)
+		{name: "invalid availability sample - above 1", scoreType: score.AvailabilityScoreType, sample: 1.5, valid: false},
 	}
 
 	for _, tt := range template {
@@ -221,6 +224,54 @@ func TestScoreStoreUpdate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAvailabilityScoreStore_AcceptsFractionalSample covers the Topic E relaxation: the
+// availability store accepts any fraction in [0,1] (the probe's fraction-healthy sample) and
+// rejects values outside the range. A fractional sample lands strictly between the worst (0) and
+// best (1) resolved scores, so partial degradation decays the score rather than reading binary.
+func TestAvailabilityScoreStore_AcceptsFractionalSample(t *testing.T) {
+	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	mk := func(t *testing.T) score.ScoreStorer {
+		t.Helper()
+		s, err := score.NewCustomScoreStore(score.AvailabilityScoreType, 1, 1, now, score.WithWeight(1), score.WithDecayHalfLife(time.Second))
+		require.NoError(t, err)
+		return s
+	}
+
+	require.NoError(t, mk(t).Update(0.5, now.Add(time.Millisecond)), "a fractional [0,1] availability sample is accepted")
+	require.NoError(t, mk(t).Update(0, now.Add(time.Millisecond)))
+	require.NoError(t, mk(t).Update(1, now.Add(time.Millisecond)))
+	require.Error(t, mk(t).Update(-0.1, now.Add(time.Millisecond)), "below 0 is rejected")
+	require.Error(t, mk(t).Update(1.1, now.Add(time.Millisecond)), "above 1 is rejected")
+}
+
+// TestRelayVsProbeWeightRatio pins Topic E rule D1: a relay sample carries 4x the EWMA weight of a
+// probe sample (RelayUpdateWeight=1 vs DefaultProbeUpdateWeight=0.25), so high traffic adapts fast
+// while probes are the lighter proactive baseline. With identical stores updated at the same instant
+// (decay=1), the denominator's weight contribution is exactly the configured weight, so the ratio is
+// exactly 4:1.
+func TestRelayVsProbeWeightRatio(t *testing.T) {
+	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	const denom0 = float64(1)
+	mk := func(w float64) score.ScoreStorer {
+		s, err := score.NewCustomScoreStore(score.AvailabilityScoreType, 1, denom0, now, score.WithWeight(w), score.WithDecayHalfLife(time.Second))
+		require.NoError(t, err)
+		return s
+	}
+	relay := mk(score.RelayUpdateWeight)        // 1
+	probe := mk(score.DefaultProbeUpdateWeight) // 0.25
+
+	// Same availability sample at the same instant → identical decay (=1), so denom delta == weight.
+	require.NoError(t, relay.Update(0, now))
+	require.NoError(t, probe.Update(0, now))
+
+	relayDelta := relay.GetDenom() - denom0
+	probeDelta := probe.GetDenom() - denom0
+	require.InDelta(t, 1.0, relayDelta, 1e-9)
+	require.InDelta(t, 0.25, probeDelta, 1e-9)
+	require.InDelta(t, 4.0, relayDelta/probeDelta, 1e-9, "a relay sample weighs 4x a probe sample")
 }
 
 // TestScoreStoreUpdateIdenticalSamples verifies that updating the score with

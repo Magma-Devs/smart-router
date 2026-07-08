@@ -7,9 +7,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/utils"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 type updatableRPCInput interface {
@@ -33,7 +33,6 @@ type baseChainMessageContainer struct {
 	parseDirective         *spectypes.ParseDirective // setting the parse directive related to the api, can be nil
 	usedDefaultValue       bool
 
-	inputHashCache []byte
 	// resultErrorParsingMethod passed by each api interface message to parse the result of the message
 	// and validate it doesn't contain a node error
 	resultErrorParsingMethod func(data []byte, httpStatusCode int) (hasError bool, errorMessage string)
@@ -65,16 +64,13 @@ func (bcnc *baseChainMessageContainer) GetParseDirective() *spectypes.ParseDirec
 }
 
 func (pm *baseChainMessageContainer) GetRawRequestHash() ([]byte, error) {
-	if len(pm.inputHashCache) > 0 {
-		// Get the cached value
-		return pm.inputHashCache, nil
-	}
-	hash, err := pm.msg.GetRawRequestHash()
-	if err == nil {
-		// Now we have the hash cached so we call it only once.
-		pm.inputHashCache = hash
-	}
-	return hash, err
+	// Compute fresh each call rather than memoizing into a struct field: the relay processor runs
+	// CONCURRENT provider attempts on the same protocol message, so a lazy cache write here raced the
+	// other attempts' reads (data race under -race). A struct-level lock/Once is not an option — this
+	// type has value-receiver methods, so any sync field would trip `go vet copylocks`. The underlying
+	// msg.GetRawRequestHash() is a pure function of the message's immutable fields (method/params/
+	// headers → sha256), so recomputing it is cheap and inherently race-free.
+	return pm.msg.GetRawRequestHash()
 }
 
 // not necessary for base chain message.

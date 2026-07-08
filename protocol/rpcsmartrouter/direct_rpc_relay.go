@@ -1,11 +1,11 @@
 package rpcsmartrouter
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/fullstorydev/grpcurl"
@@ -82,6 +82,47 @@ func extractBlockHeightFromJSONResponse(
 
 	// Fallback to EVM-specific parsing for backwards compatibility
 	return extractBlockHeightFromEVMResponse(responseData, chainMessage.GetApi().Name)
+}
+
+// extractSolanaContextSlot returns result.context.slot from a SINGLE successful Solana
+// JSON-RPC response, and whether it was found. Solana stamps most successful responses
+// (getBalance, getAccountInfo, getLatestBlockhash, ...) with the slot the query was
+// processed at, which is the node's current tip — unlike an EVM historical block. It is
+// deliberately strict (MAG-2159 finding 2):
+//   - single response objects only; a JSON-RPC batch (top-level array) returns false,
+//     since per-call slots can't be attributed to one endpoint tip;
+//   - successful responses only (a present, non-null "error" member → false);
+//   - only the nested result.context.slot envelope — a bare numeric "slot" elsewhere is
+//     NOT interpreted, avoiding coincidental matches.
+//
+// The caller (tipBlockFromRelay) additionally gates on chain family so this is never
+// applied to non-Solana chains.
+func extractSolanaContextSlot(data []byte) (int64, bool) {
+	trimmed := bytes.TrimLeft(data, " \t\r\n")
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return 0, false // not a single JSON object (e.g. a batch array)
+	}
+	var resp struct {
+		Error  json.RawMessage `json:"error"`
+		Result *struct {
+			Context *struct {
+				Slot *int64 `json:"slot"`
+			} `json:"context"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(trimmed, &resp); err != nil {
+		return 0, false
+	}
+	if e := bytes.TrimSpace(resp.Error); len(e) > 0 && string(e) != "null" {
+		return 0, false // JSON-RPC error response
+	}
+	if resp.Result == nil || resp.Result.Context == nil || resp.Result.Context.Slot == nil {
+		return 0, false
+	}
+	if slot := *resp.Result.Context.Slot; slot > 0 {
+		return slot, true
+	}
+	return 0, false
 }
 
 // extractBlockHeightFromEVMResponse extracts block height from EVM JSON-RPC responses.
@@ -525,7 +566,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 
 	// Robust URL joining
 	baseURL := d.directConnection.GetURL()
-	fullURL, err := joinURLPath(baseURL, restPath)
+	fullURL, err := common.JoinURLPath(baseURL, restPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build REST URL: %w", err)
 	}
@@ -792,40 +833,6 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	}
 
 	return result, nil
-}
-
-// joinURLPath joins base URL and path robustly (handles slashes and query params correctly).
-// When path is absolute (starts with /), it is appended to the base URL's path so that
-// base paths like /gateway/lava/rest/KEY are preserved (ResolveReference would replace them).
-func joinURLPath(base, path string) (string, error) {
-	baseURL, err := url.Parse(base)
-	if err != nil {
-		return "", fmt.Errorf("invalid base URL: %w", err)
-	}
-
-	pathURL, err := url.Parse(path)
-	if err != nil {
-		return "", fmt.Errorf("invalid path: %w", err)
-	}
-
-	// If path is absolute, append it to base path instead of replacing (preserves e.g. /gateway/lava/rest/KEY).
-	if strings.HasPrefix(pathURL.Path, "/") {
-		basePath := strings.TrimSuffix(baseURL.Path, "/")
-		relPath := strings.TrimPrefix(pathURL.Path, "/")
-		if relPath != "" {
-			baseURL.Path = basePath + "/" + relPath
-		} else {
-			baseURL.Path = basePath
-		}
-		baseURL.RawPath = "" // let EscapedPath() derive from Path
-		if pathURL.RawQuery != "" {
-			baseURL.RawQuery = pathURL.RawQuery
-		}
-		return baseURL.String(), nil
-	}
-
-	// Relative path: use ResolveReference (handles ., .., query params)
-	return baseURL.ResolveReference(pathURL).String(), nil
 }
 
 // looksLikeJSONOpening returns true when the first non-whitespace byte of

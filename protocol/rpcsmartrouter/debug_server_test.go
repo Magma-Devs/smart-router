@@ -6,14 +6,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -155,67 +156,41 @@ func TestDebugResetScores_SmartRouter_DoesNotChangeOffset(t *testing.T) {
 	require.Contains(t, getRR.Body.String(), `"offset_seconds":3600`)
 }
 
-// recordingChainTracker is a fake IChainTracker that records ResetLatestBlock
-// calls. We embed *chaintracker.DummyChainTracker for all the methods we don't
-// care about and shadow ResetLatestBlock with our own counter. The atomic
-// counter is required because EndpointChainTrackerManager.ResetAllLatestBlocks
-// only takes RLock while iterating — multiple tracker resets could race in
-// principle (in practice they run sequentially in the loop, but make the test
-// fixture safe regardless).
-type recordingChainTracker struct {
-	*chaintracker.DummyChainTracker
-	resetCalls atomic.Int32
-}
-
-func (r *recordingChainTracker) ResetLatestBlock() {
-	r.resetCalls.Add(1)
-}
-
-// newRouterWithChainTrackers builds a minimal *RPCSmartRouter wired with
-// rpcServers, each holding an EndpointChainTrackerManager whose trackers map
-// is pre-populated with the supplied fakes. The router itself has no real
-// session managers or other state — just enough scaffolding for
-// resetAllChainTrackers to walk router→servers→manager and reach the fakes.
-func newRouterWithChainTrackers(t *testing.T, byServer map[string][]*recordingChainTracker) *RPCSmartRouter {
-	t.Helper()
-	router := &RPCSmartRouter{
-		rpcServers: make(map[string]*RPCSmartRouterServer),
-	}
-	for serverKey, fakes := range byServer {
-		manager := &EndpointChainTrackerManager{
-			trackers:          make(map[string]chaintracker.IChainTracker),
-			fetchers:          make(map[string]*EndpointChainFetcher),
-			cancelFuncs:       make(map[string]context.CancelFunc),
-			trackerStates:     make(map[string]EndpointChainTrackerState),
-			trackerLastErrors: make(map[string]string),
-		}
-		for i, f := range fakes {
-			endpointURL := serverKey + "-endpoint-" + strconv.Itoa(i)
-			manager.trackers[endpointURL] = f
-		}
-		router.rpcServers[serverKey] = &RPCSmartRouterServer{
-			endpointChainTrackerManager: manager,
-		}
-	}
-	return router
-}
-
-// TestDebugResetScores_SmartRouter_ResetsChainTrackers verifies the
-// chain-tracker reset branch added for BTC pollution recovery: every per-
-// endpoint ChainTracker across all rpcServers must have ResetLatestBlock
-// invoked, and the response body must report the total count via
-// trackers_reset so the test framework can assert it from the outside.
-func TestDebugResetScores_SmartRouter_ResetsChainTrackers(t *testing.T) {
+// TestDebugResetScores_SmartRouter_WalksChainTrackerManagers verifies the
+// router-walk branch of /debug/reset-scores: resetAllChainTrackers visits every
+// rpcServer, sums each EndpointMonitor's reset count into trackers_reset, and is
+// nil-safe when a server has no monitor wired.
+//
+// It exercises walk structure + nil-safety using only exported behavior — real
+// but traffic-empty EndpointMonitors built via NewEndpointMonitor (no registered
+// trackers, so each contributes 0). The per-tracker reset-count correctness (that
+// ResetAllLatestBlocks resets each of N registered trackers and returns N) is
+// covered in-package by endpointstate.TestEndpointMonitor_ResetAllLatestBlocks,
+// which can inject fake trackers without spinning real poll goroutines. Asserting
+// a non-zero cross-server total here would require either that fake injection
+// (now an unexported-map access across the package boundary) or real
+// ChainTracker poll goroutines — neither worth it for a nil-safe summing loop.
+func TestDebugResetScores_SmartRouter_WalksChainTrackerManagers(t *testing.T) {
 	var offsetNano atomic.Int64
 
-	// Two servers (e.g. eth/jsonrpc and btc/rest), one with 3 providers and
-	// one with 2 — total of 5 trackers across the router.
-	serverA := []*recordingChainTracker{{}, {}, {}}
-	serverB := []*recordingChainTracker{{}, {}}
-	router := newRouterWithChainTrackers(t, map[string][]*recordingChainTracker{
-		"chainA-jsonrpc": serverA,
-		"chainB-rest":    serverB,
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	managed := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainID:          "ETH",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 12 * time.Second,
+		BlocksToSave:     10,
 	})
+	defer managed.Stop()
+
+	router := &RPCSmartRouter{
+		rpcServers: map[string]*RPCSmartRouterServer{
+			"chainA-jsonrpc": {endpointChainTrackerManager: managed},
+			// nil-manager server must be skipped by the walk, not panic.
+			"chainB-rest": {endpointChainTrackerManager: nil},
+		},
+	}
 
 	mux := buildDebugMux(debugMuxDeps{
 		optimizers: newEmptyOptimizersRouter(),
@@ -226,14 +201,9 @@ func TestDebugResetScores_SmartRouter_ResetsChainTrackers(t *testing.T) {
 	rr := postResetScoresRouter(mux)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Contains(t, rr.Body.String(), `"reset":true`)
-	require.Contains(t, rr.Body.String(), `"trackers_reset":5`)
-
-	for _, fakes := range [][]*recordingChainTracker{serverA, serverB} {
-		for i, f := range fakes {
-			require.Equal(t, int32(1), f.resetCalls.Load(),
-				"tracker %d should have had ResetLatestBlock called exactly once", i)
-		}
-	}
+	// No registered trackers (no traffic) → zero reset; the nil-manager server
+	// contributes nothing rather than panicking.
+	require.Contains(t, rr.Body.String(), `"trackers_reset":0`)
 }
 
 func postResetAllRouter(mux http.Handler) *httptest.ResponseRecorder {
@@ -326,11 +296,180 @@ func TestDebugResetAll_SmartRouter_NilRouterIsSafe(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 }
 
+// --- MAG-2202 read-only state endpoints -------------------------------------------------
+
+func getDebugRouter(mux http.Handler, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
 func postResetEndpointHealthRouter(mux http.Handler) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/debug/reset-endpoint-health", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	return rr
+}
+
+// stateEndpointPaths are the read-only state endpoints added for MAG-2202.
+var stateEndpointPaths = []string{"/debug/endpoint-state", "/debug/chain-state", "/debug/provider-routing", "/debug/probe-loop"}
+
+// TestDebugStateEndpoints_MethodNotAllowed: all three are GET-only (the acceptance criterion that any
+// non-GET method returns 405).
+func TestDebugStateEndpoints_MethodNotAllowed(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+	for _, path := range stateEndpointPaths {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rr.Code, path)
+	}
+}
+
+// TestDebugStateEndpoints_NilRouterIsSafe: usable from a fixture that didn't wire a full router —
+// each returns 200 with an empty object rather than panicking, so the suite can probe unconditionally.
+func TestDebugStateEndpoints_NilRouterIsSafe(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: nil})
+	for _, path := range stateEndpointPaths {
+		rr := getDebugRouter(mux, path)
+		require.Equal(t, http.StatusOK, rr.Code, path)
+		require.JSONEq(t, `[]`, rr.Body.String(), path)
+	}
+}
+
+// TestDebugChainState_ReportsRawSnapshot wires a real per-chain ChainState and verifies the JSON
+// shape (flat Go-identifier keys, RFC3339 BaselineSince) and that a nil-chainState server is skipped.
+func TestDebugChainState_ReportsRawSnapshot(t *testing.T) {
+	var offsetNano atomic.Int64
+	cs := chainstate.New("ETH1", chainstate.Config{
+		BucketWidth: 2, OutlierThreshold: 100, StalenessWindow: 10 * time.Second, TTL: 10 * time.Second,
+	})
+	cs.SetLatestBlock(1000)
+	now := time.Now()
+	cs.Recompute([]chainstate.BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: now},
+		{URL: "b", Block: 1000, ObservedAt: now},
+		{URL: "c", Block: 1000, ObservedAt: now},
+	})
+
+	router := &RPCSmartRouter{
+		rpcServers: map[string]*RPCSmartRouterServer{
+			"ETH1-jsonrpc": {chainState: cs, listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
+			"NIL-rest":     {chainState: nil}, // skipped, not panic
+		},
+	}
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
+
+	rr := getDebugRouter(mux, "/debug/chain-state")
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	require.Len(t, rows, 1, "only the wired chainState contributes a row; the nil-chainState server is skipped")
+	row := rows[0]
+	require.Equal(t, "ETH1", row["ChainID"])
+	require.Equal(t, "jsonrpc", row["ApiInterface"])
+	require.Equal(t, float64(1000), row["ObservedTip"])
+	require.Equal(t, float64(1000), row["ConsensusBaseline"])
+	require.Equal(t, true, row["HasBaseline"])
+	require.Equal(t, true, row["Initialized"])
+	require.NotEmpty(t, row["BaselineSince"], "established baseline carries an RFC3339 timestamp")
+}
+
+// TestDebugProviderRouting_ReportsPerCSMShape verifies the handler keys output per session manager and
+// emits the three address fields as JSON arrays (non-null) even when empty, and skips a nil CSM.
+func TestDebugProviderRouting_ReportsPerCSMShape(t *testing.T) {
+	var offsetNano atomic.Int64
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "ETH1")
+	csm := lavasession.NewConsumerSessionManager(
+		&lavasession.RPCEndpoint{NetworkAddress: "stub", ChainID: "ETH1", ApiInterface: "jsonrpc", HealthCheckPath: "/"},
+		optimizer, nil, "lava@test", lavasession.NewActiveSubscriptionProvidersStorage(),
+	)
+	router := &RPCSmartRouter{
+		sessionManagers: map[string]*lavasession.ConsumerSessionManager{
+			"ETH1-jsonrpc": csm,
+			"NIL-rest":     nil, // skipped, not panic
+		},
+	}
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
+
+	rr := getDebugRouter(mux, "/debug/provider-routing")
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	require.Len(t, rows, 1, "nil CSM is skipped")
+	row := rows[0]
+	require.Equal(t, "ETH1", row["ChainID"])
+	require.Equal(t, "jsonrpc", row["ApiInterface"])
+	for _, k := range []string{"ValidAddresses", "CurrentlyBlockedProviderAddresses", "BlockedBackupProviders"} {
+		require.Contains(t, row, k)
+		require.IsType(t, []any{}, row[k], k+" must be a JSON array, not null")
+	}
+}
+
+// TestDebugEndpointState_WiringSafe verifies per-chain iteration, the nil-manager skip, and that a
+// chain whose session manager has no endpoints yields an empty (non-panicking) object. The full
+// observation↔health join is covered by the lavasession/endpointstate accessor tests.
+func TestDebugEndpointState_WiringSafe(t *testing.T) {
+	var offsetNano atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	monitor := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainID: "ETH1", ApiInterface: "jsonrpc", AverageBlockTime: 12 * time.Second, BlocksToSave: 10,
+	})
+	defer monitor.Stop()
+
+	router := &RPCSmartRouter{
+		rpcServers: map[string]*RPCSmartRouterServer{
+			"ETH1-jsonrpc": {endpointChainTrackerManager: monitor, listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
+			"NIL-rest":     {endpointChainTrackerManager: nil}, // skipped, not panic
+		},
+		sessionManagers: map[string]*lavasession.ConsumerSessionManager{}, // no CSM for the chain → no rows, no panic
+	}
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
+
+	rr := getDebugRouter(mux, "/debug/endpoint-state")
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.JSONEq(t, `[]`, rr.Body.String(), "no session manager wired for the chain → empty array, no panic")
+}
+
+// TestDebugProbeLoop_ReportsCycleStats verifies the per-chain probe-cycle record: interval +
+// last-cycle snapshot (durations as integer ms, start as RFC3339), and that a listenEndpoint-less
+// server is skipped.
+func TestDebugProbeLoop_ReportsCycleStats(t *testing.T) {
+	var offsetNano atomic.Int64
+	server := &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
+	server.probeStats.setInterval(5 * time.Second)
+	server.probeStats.recordCycle(time.Now(), 7*time.Millisecond, 4, 1, 2)
+
+	router := &RPCSmartRouter{
+		rpcServers: map[string]*RPCSmartRouterServer{
+			"ETH1-jsonrpc": server,
+			"NIL-rest":     {listenEndpoint: nil}, // skipped, not panic
+		},
+	}
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
+
+	rr := getDebugRouter(mux, "/debug/probe-loop")
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	require.Len(t, rows, 1, "the listenEndpoint-less server is skipped")
+	row := rows[0]
+	require.Equal(t, "ETH1", row["ChainID"])
+	require.Equal(t, "jsonrpc", row["ApiInterface"])
+	require.Equal(t, float64(5000), row["CycleIntervalMs"], "interval reported in milliseconds")
+	require.Equal(t, float64(1), row["CyclesCompleted"])
+	require.Equal(t, float64(7), row["LastCycleDurationMs"], "duration in milliseconds")
+	require.Equal(t, float64(4), row["EndpointsScored"])
+	require.Equal(t, float64(1), row["ReEnabledCount"])
+	require.Equal(t, float64(2), row["SyncOmittedCount"])
+	require.NotEmpty(t, row["LastCycleStartedAt"], "cycle start carries an RFC3339 timestamp")
 }
 
 // TestDebugResetEndpointHealth_SmartRouter_ReturnsJSON covers the focused MAG-2186
@@ -774,9 +913,7 @@ func TestDebugRuntimeConfig_SmartRouter_ReturnsValues(t *testing.T) {
 		"HighCuThreshold",
 		"MidCuThreshold",
 		"MostFrequentPollingMultiplier",
-		"MinPollingTimeMultiplier",
 		"PollingUpdateLength",
-		"EffectivePollingMultiplier",
 		"AvailabilityWeight",
 		"LatencyWeight",
 		"SyncWeight",
@@ -822,9 +959,7 @@ func TestDebugRuntimeConfig_SmartRouter_ReturnsValues(t *testing.T) {
 	require.Equal(t, scoreutils.MidCuThreshold, resp.MidCuThreshold)
 
 	require.Equal(t, chaintracker.MostFrequentPollingMultiplier, resp.MostFrequentPollingMultiplier)
-	require.Equal(t, chaintracker.MinPollingTimeMultiplier, resp.MinPollingTimeMultiplier)
 	require.Equal(t, chaintracker.PollingUpdateLength, resp.PollingUpdateLength)
-	require.Equal(t, chaintracker.EffectivePollingMultiplier(), resp.EffectivePollingMultiplier)
 
 	// Optimizer defaults are flat top-level keys (the ticket's Phase 2 shape rule),
 	// asserted against DefaultWeightedSelectorConfig().

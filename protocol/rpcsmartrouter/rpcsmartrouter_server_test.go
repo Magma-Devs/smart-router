@@ -16,6 +16,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -2322,104 +2323,6 @@ func TestSmartRouterSessionLeakPrevention_SingleProvider(t *testing.T) {
 }
 
 // ============================================================================
-// Tests for Epoch Cleanup Integration - EndpointChainTrackerManager Lifecycle
-// These tests validate that the EndpointChainTrackerManager properly cleans up
-// when trackers are removed (supporting epoch-based cleanup in RPCSmartRouter)
-// ============================================================================
-
-// TestEndpointChainTrackerManager_RemoveTrackerCallsCancel tests that RemoveTracker
-// properly invokes the cancel function for per-tracker context cancellation
-func TestEndpointChainTrackerManager_RemoveTrackerCallsCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	t.Run("RemoveTracker invokes cancel function", func(t *testing.T) {
-		trackerManager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
-			ChainID:          "ETH",
-			ApiInterface:     "jsonrpc",
-			AverageBlockTime: 12 * time.Second,
-			BlocksToSave:     10,
-		})
-		require.NotNil(t, trackerManager)
-		defer trackerManager.Stop()
-
-		// Manually add a cancel function to simulate a tracker
-		endpoint := "http://test:8545"
-		cancelCalled := false
-		trackerManager.cancelFuncs[endpoint] = func() { cancelCalled = true }
-
-		// Remove the tracker - should call cancel function
-		trackerManager.RemoveTracker(endpoint)
-
-		require.True(t, cancelCalled, "RemoveTracker should call the cancel function")
-		require.Empty(t, trackerManager.cancelFuncs)
-	})
-
-	t.Run("Stop invokes all cancel functions", func(t *testing.T) {
-		trackerManager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
-			ChainID:          "ETH",
-			ApiInterface:     "jsonrpc",
-			AverageBlockTime: 12 * time.Second,
-			BlocksToSave:     10,
-		})
-		require.NotNil(t, trackerManager)
-
-		// Add multiple cancel functions
-		cancelledEndpoints := make(map[string]bool)
-		endpoints := []string{"http://ep1:8545", "http://ep2:8545", "http://ep3:8545"}
-
-		for _, ep := range endpoints {
-			trackerManager.cancelFuncs[ep] = func() { cancelledEndpoints[ep] = true }
-		}
-
-		// Stop should cancel all
-		trackerManager.Stop()
-
-		for _, ep := range endpoints {
-			require.True(t, cancelledEndpoints[ep], "Stop should cancel %s", ep)
-		}
-		require.Empty(t, trackerManager.cancelFuncs)
-	})
-
-	t.Run("concurrent RemoveTracker and Stop are thread-safe", func(t *testing.T) {
-		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
-
-		trackerManager := NewEndpointChainTrackerManager(ctx, EndpointChainTrackerConfig{
-			ChainID:          "ETH",
-			ApiInterface:     "jsonrpc",
-			AverageBlockTime: 12 * time.Second,
-			BlocksToSave:     10,
-		})
-		require.NotNil(t, trackerManager)
-
-		var wg sync.WaitGroup
-		const numGoroutines = 50
-
-		// Add many cancel functions
-		for i := 0; i < numGoroutines; i++ {
-			endpoint := fmt.Sprintf("http://endpoint%d:8545", i)
-			trackerManager.cancelFuncs[endpoint] = func() {}
-		}
-
-		// Simulate concurrent removal operations
-		for i := 0; i < numGoroutines; i++ {
-			wg.Add(1)
-			go func(id int) {
-				defer wg.Done()
-				endpoint := fmt.Sprintf("http://endpoint%d:8545", id)
-				trackerManager.RemoveTracker(endpoint)
-			}(i)
-		}
-
-		wg.Wait()
-
-		// Cleanup
-		trackerManager.Stop()
-		// If we reach here without race detector error or panic, the test passes
-	})
-}
-
-// ============================================================================
 // Mock Consistency for filterEndpointsByConsistency tests
 // ============================================================================
 
@@ -2450,6 +2353,18 @@ func (mc *mockConsistency) Key(userData common.UserData) string {
 	return userData.DappId + "|" + userData.ConsumerIp
 }
 
+// seedEndpointTip writes a poll-sourced tip into the shared single-source-of-truth
+// endpointtip store so the consistency/syncGap readers (which now read that store instead
+// of a per-Endpoint atomic) observe the block under test. It keys exactly as production:
+// chain|apiInterface|url. ObservedAt = time.Now() keeps the time-monotonic guard happy for
+// successive seeds within a test.
+func seedEndpointTip(chainID, apiInterface, url string, block int64) {
+	endpointtip.Default().Set(
+		endpointtip.Key(chainID, apiInterface, url),
+		endpointtip.Tip{Block: block, ObservedAt: time.Now(), Source: endpointtip.SourcePoll},
+	)
+}
+
 // ============================================================================
 // Tests for Phase 3.1: Consistency Pre-Validation Retry with Different Providers
 // ============================================================================
@@ -2458,6 +2373,9 @@ func (mc *mockConsistency) Key(userData common.UserData) string {
 // filterEndpointsByConsistency returns failed sessions separately from valid ones.
 func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 	ctx := context.Background()
+	// The per-endpoint tip now lives in the process-global endpointtip store; reset it so
+	// leftover entries from other tests can't satisfy a stale endpoint's validation here.
+	endpointtip.Default().Reset()
 
 	t.Run("all sessions valid - no failed sessions", func(t *testing.T) {
 		consistency := newMockConsistency()
@@ -2468,7 +2386,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 
 		// Create endpoint at block 100 (synced)
 		endpoint := &lavasession.Endpoint{NetworkAddress: "http://ep1:8545"}
-		endpoint.LatestBlock.Store(100)
+		seedEndpointTip("ETH1", "jsonrpc", "http://ep1:8545", 100)
 
 		sessions := lavasession.ConsumerSessionsMap{
 			"http://ep1:8545": &lavasession.SessionInfo{
@@ -2481,6 +2399,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
+			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig:      config,
 			smartRouterConsistency: consistency,
 		}
@@ -2507,11 +2426,11 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 
 		// Create synced endpoint at block 195 (within threshold)
 		syncedEndpoint := &lavasession.Endpoint{NetworkAddress: "http://synced:8545"}
-		syncedEndpoint.LatestBlock.Store(195)
+		seedEndpointTip("ETH1", "jsonrpc", "http://synced:8545", 195)
 
 		// Create stale endpoint at block 100 (way behind, lag=100 > threshold=10)
 		staleEndpoint := &lavasession.Endpoint{NetworkAddress: "http://stale:8545"}
-		staleEndpoint.LatestBlock.Store(100)
+		seedEndpointTip("ETH1", "jsonrpc", "http://stale:8545", 100)
 
 		sessions := lavasession.ConsumerSessionsMap{
 			"http://synced:8545": &lavasession.SessionInfo{
@@ -2531,6 +2450,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
+			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig:      config,
 			smartRouterConsistency: consistency,
 		}
@@ -2558,10 +2478,10 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 
 		// Both endpoints are stale
 		staleEndpoint1 := &lavasession.Endpoint{NetworkAddress: "http://stale1:8545"}
-		staleEndpoint1.LatestBlock.Store(100)
+		seedEndpointTip("ETH1", "jsonrpc", "http://stale1:8545", 100)
 
 		staleEndpoint2 := &lavasession.Endpoint{NetworkAddress: "http://stale2:8545"}
-		staleEndpoint2.LatestBlock.Store(50)
+		seedEndpointTip("ETH1", "jsonrpc", "http://stale2:8545", 50)
 
 		sessions := lavasession.ConsumerSessionsMap{
 			"http://stale1:8545": &lavasession.SessionInfo{
@@ -2581,6 +2501,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
+			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig:      config,
 			smartRouterConsistency: consistency,
 		}
@@ -2605,7 +2526,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		config := relaycore.DefaultConsistencyValidationConfig()
 
 		endpoint := &lavasession.Endpoint{NetworkAddress: "http://ep1:8545"}
-		endpoint.LatestBlock.Store(100)
+		seedEndpointTip("ETH1", "jsonrpc", "http://ep1:8545", 100)
 
 		sessions := lavasession.ConsumerSessionsMap{
 			"http://ep1:8545": &lavasession.SessionInfo{
@@ -2618,6 +2539,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
+			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig:      config,
 			smartRouterConsistency: consistency,
 		}
@@ -2678,6 +2600,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
+			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig:      config,
 			smartRouterConsistency: consistency,
 		}
@@ -2703,7 +2626,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		config := relaycore.DefaultConsistencyValidationConfig()
 
 		staleEndpoint := &lavasession.Endpoint{NetworkAddress: "http://stale:8545"}
-		staleEndpoint.LatestBlock.Store(50) // very stale
+		seedEndpointTip("ETH1", "jsonrpc", "http://stale:8545", 50) // very stale
 
 		sessions := lavasession.ConsumerSessionsMap{
 			"http://stale:8545": &lavasession.SessionInfo{
@@ -2716,6 +2639,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
+			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig:      config,
 			smartRouterConsistency: consistency,
 		}
@@ -2818,12 +2742,15 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
 	consistency.SetSeenBlock(200, userData)
 
+	// Tips live in the shared endpointtip store, keyed LAVA|rest|url (matching the rpcss
+	// listenEndpoint below). Reset first so other tests' entries can't interfere.
+	endpointtip.Default().Reset()
 	syncedEp := &lavasession.Endpoint{NetworkAddress: "http://synced:8545"}
-	syncedEp.LatestBlock.Store(195)
+	seedEndpointTip("LAVA", "rest", "http://synced:8545", 195)
 	staleEp1 := &lavasession.Endpoint{NetworkAddress: "http://stale1:8545"}
-	staleEp1.LatestBlock.Store(50)
+	seedEndpointTip("LAVA", "rest", "http://stale1:8545", 50)
 	staleEp2 := &lavasession.Endpoint{NetworkAddress: "http://stale2:8545"}
-	staleEp2.LatestBlock.Store(50)
+	seedEndpointTip("LAVA", "rest", "http://stale2:8545", 50)
 
 	mkSession := func(addr string, ep *lavasession.Endpoint) *lavasession.SingleConsumerSession {
 		return &lavasession.SingleConsumerSession{
@@ -2876,6 +2803,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 		lavasession.NewActiveSubscriptionProvidersStorage())
 
 	rpcss := &RPCSmartRouterServer{
+		listenEndpoint:         rpcEndpoint,
 		chainParser:            chainParser,
 		consistencyConfig:      relaycore.DefaultConsistencyValidationConfig(),
 		smartRouterConsistency: consistency,
@@ -2918,10 +2846,10 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 // restart then drops every cached entry — the failure mode reported in
 // test_phase2_5_caching.py::test_cache_survives_router_pod_restart.
 //
-// The fix consults the router's tracked chain tip (chainTracker /
-// latestBlockEstimator / atomic latestBlockHeight, surfaced via
-// rpcss.getLatestBlock()) and prefers it when it is ahead of the reply's
-// per-response value.
+// The fix consults the router's tracked chain tip (the per-chain ChainState
+// consensus tip, with the bootstrap atomic latestBlockHeight as cold-start
+// fallback, surfaced via rpcss.getLatestBlock()) and prefers it when it is
+// ahead of the reply's per-response value.
 func TestIsFinalizedForCacheWrite(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -3002,8 +2930,13 @@ func TestIsFinalizedForCacheWrite(t *testing.T) {
 // seenBlock=424549212, block-height tip=403165980, gap=21383232.
 func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *testing.T) {
 	ctx := context.Background()
+	// The per-endpoint tip now lives in the process-global endpointtip store; reset it so
+	// leftover entries from other tests can't satisfy a stale endpoint's validation here.
+	endpointtip.Default().Reset()
 
 	const (
+		chainID          = "SOLANA"
+		apiInterface     = "jsonrpc"
 		seenSlot         = int64(424549212) // consumer's seen block — a Solana slot
 		slotTip          = int64(424549212) // a tracker that correctly reports context.slot
 		blockHeightTip   = int64(403165980) // the buggy tracker reporting value.lastValidBlockHeight
@@ -3022,11 +2955,17 @@ func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *tes
 	newServer := func() *RPCSmartRouterServer {
 		consistency := newMockConsistency()
 		consistency.SetSeenBlock(seenSlot, userData)
-		return &RPCSmartRouterServer{consistencyConfig: config, smartRouterConsistency: consistency}
+		return &RPCSmartRouterServer{
+			consistencyConfig:      config,
+			smartRouterConsistency: consistency,
+			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface},
+		}
 	}
 	endpointSession := func(addr string, latest int64) *lavasession.SessionInfo {
 		ep := &lavasession.Endpoint{NetworkAddress: addr}
-		ep.LatestBlock.Store(latest)
+		// Per-endpoint tip now lives in the shared endpointtip store (keyed chain|api|url),
+		// read by filterEndpointsByConsistency in place of the removed Endpoint.LatestBlock.
+		seedEndpointTip(chainID, apiInterface, addr, latest)
 		return &lavasession.SessionInfo{Session: &lavasession.SingleConsumerSession{
 			Connection: &lavasession.DirectRPCSessionConnection{Endpoint: ep},
 		}}
