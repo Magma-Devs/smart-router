@@ -73,7 +73,8 @@ func TestFetchAllPreviousBlocksIfNecessary_UpstreamTimeoutIsHandled(t *testing.T
 		}
 	}()
 
-	gotErr := cs.fetchAllPreviousBlocksIfNecessary(context.Background())
+	gotSkipped, gotErr := cs.fetchAllPreviousBlocksIfNecessary(context.Background())
+	require.False(t, gotSkipped, "an upstream timeout is a real poll attempt, not a gate skip")
 	require.Error(t, gotErr, "an upstream latest-block timeout should surface as an error, not crash the router")
 	require.True(t, errors.Is(gotErr, context.DeadlineExceeded), "the returned error should preserve the upstream deadline cause")
 }

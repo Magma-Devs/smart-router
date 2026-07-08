@@ -17,8 +17,12 @@ const (
 	// minProbeStaleness floors the alive horizon so it always spans several probe cycles even on
 	// very fast chains — a single skipped/slow poll must not flip a healthy endpoint to "dead".
 	minProbeStaleness = 5 * time.Second
-	// DefaultLagToleranceBlocks is how far below the consensus baseline an endpoint may sit and still
-	// count as "keeping up" (matches relaycore's EndpointLagThreshold default). Compile-time default.
+	// DefaultLagToleranceBlocks is how far below the consensus baseline an endpoint may sit and
+	// still count as "keeping up". It is only the FALLBACK: production wiring overrides
+	// VerdictConfig.LagToleranceBlocks with the per-chain relaycore.EndpointLagThreshold (the same
+	// tolerance consistency pre-validation uses), so the probe and the relay path agree on "lagging"
+	// on chains whose derived threshold exceeds this. Kept at 10 to match that threshold's own floor
+	// for the cold path (no consistency config wired). Compile-time default.
 	DefaultLagToleranceBlocks int64 = 10
 )
 

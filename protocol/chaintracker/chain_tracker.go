@@ -386,8 +386,15 @@ func (cs *ChainTracker) gotNewBlock(ctx context.Context, newLatestBlock int64) (
 }
 
 // this function is periodically called, it checks if there is a new block or a fork and fetches all necessary previous data in order to fill gaps if any.
-// if a new block or fork is not found, check the emergency mode
-func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (err error) {
+// if a new block or fork is not found, check the emergency mode.
+//
+// Returns skipped=true when the traffic gate suppressed the whole cycle (no upstream call, no
+// poll-health signal). The caller MUST treat a skip as distinct from a successful poll: a skip
+// proves nothing about poll health, so it must neither reset nor advance the consecutive-failure
+// backoff (MAG-2159 follow-up). Conflating the two (skip → err==nil → "success") let every gated
+// cycle cancel a broken poll path's backoff, so a doomed poll never backed off and its recovery
+// evidence never accrued.
+func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (skipped bool, err error) {
 	// Traffic gate (MAG-2159 / Topic B). When a fresh relay-harvested tip already covers this
 	// endpoint, the whole poll cycle is redundant — skip it: no FetchLatestBlockNum AND no
 	// fork-check FetchBlockHashByNum (forkChanged fetches a hash every tick, even when the block
@@ -400,7 +407,7 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 	// goroutine. The global tracker leaves relayTipFresh nil and never skips.
 	if cs.relayTipFresh != nil && cs.relaySkipsSinceRealPoll < cs.maxRelaySkipsBeforePoll && cs.relayTipFresh(time.Now()) {
 		cs.relaySkipsSinceRealPoll++
-		return nil
+		return true, nil
 	}
 	cs.relaySkipsSinceRealPoll = 0
 
@@ -418,18 +425,18 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 		if cs.fetchErrorCallback != nil {
 			cs.fetchErrorCallback()
 		}
-		return err
+		return false, err
 	}
 	gotNewBlock := cs.gotNewBlock(ctx, newLatestBlock)
 	forked, err := cs.forkChanged(ctx, newLatestBlock)
 	if err != nil {
-		return utils.LavaFormatDebug("could not fetchLatestBlock Hash in ChainTracker", utils.Attribute{Key: "error", Value: err}, utils.Attribute{Key: "block", Value: newLatestBlock}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
+		return false, utils.LavaFormatDebug("could not fetchLatestBlock Hash in ChainTracker", utils.Attribute{Key: "error", Value: err}, utils.Attribute{Key: "block", Value: newLatestBlock}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
 	}
 	prev_latest := cs.GetAtomicLatestBlockNum()
 	if gotNewBlock || forked {
 		latestHash, err := cs.fetchAllPreviousBlocks(ctx, newLatestBlock)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if gotNewBlock {
 			if cs.newLatestCallback != nil {
@@ -460,7 +467,7 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 		cs.notUpdated()
 	}
 
-	return err
+	return false, err
 }
 
 func (cs *ChainTracker) notUpdated() {
@@ -475,6 +482,28 @@ func (cs *ChainTracker) notUpdated() {
 		latestBlockTime = cs.startupTime
 	}
 	cs.oldBlockCallback(latestBlockTime)
+}
+
+// nextFetchFails returns the consecutive-poll-failure counter after one poll cycle. It is the ONE
+// place the skip-vs-success distinction is applied (MAG-2159 follow-up):
+//   - failed real poll → increment (deepens the exponential backoff and eventually escalates);
+//   - genuine successful poll → reset to 0 (backoff cleared, poll health proven);
+//   - traffic-gate skip → PRESERVE the current value. A skip made no upstream call and proves
+//     nothing about poll health, so it must neither reset the counter (the bug: a skip cancelled a
+//     broken poll path's backoff, so a doomed poll fired every cycle forever and its recovery
+//     evidence never accrued) nor deepen it (a skip is not a failure).
+//
+// failed takes precedence over skipped (a skip returns err==nil, so they are mutually exclusive in
+// practice; the ordering just makes the precedence explicit).
+func nextFetchFails(current uint64, skipped, failed bool) uint64 {
+	switch {
+	case failed:
+		return current + 1
+	case skipped:
+		return current
+	default:
+		return 0
+	}
 }
 
 // this function starts the fetching timer periodically checking by polling if updates are necessary
@@ -531,19 +560,20 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 			case <-cs.timer.C:
 				fetchTimeout := max(10*time.Second, common.MinimumTimePerRelayDelay)
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout) // protect this flow from hanging code
-				err := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx)
+				skipped, err := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx)
 				cancel()
+				// A gate skip PRESERVES fetchFails (see nextFetchFails): it proved nothing about poll
+				// health, so it must not cancel a broken poll path's backoff. The reschedule uses the
+				// resulting counter uniformly — a healthy endpoint (fetchFails==0) keeps the normal
+				// cadence; a failing one stays backed off between the bounded forced verification polls.
+				fetchFails = nextFetchFails(fetchFails, skipped, err != nil)
+				cs.updateTimer(pollingTime, fetchFails)
 				if err != nil {
-					fetchFails += 1
-					cs.updateTimer(pollingTime, fetchFails)
 					if fetchFails > maxFails {
 						utils.LavaFormatError("failed to fetch all previous blocks and was necessary", err, utils.Attribute{Key: "fetchFails", Value: fetchFails}, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 					} else {
 						utils.LavaFormatDebug("failed to fetch all previous blocks", utils.Attribute{Key: "error", Value: err}, utils.Attribute{Key: "fetchFails", Value: fetchFails}, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 					}
-				} else {
-					cs.updateTimer(pollingTime, 0)
-					fetchFails = 0
 				}
 			case <-blockGapTick:
 				// Only reachable for the global adaptive tracker (flat trackers leave blockGapTick

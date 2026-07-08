@@ -36,6 +36,33 @@ func TestComputePollInterval_FixedFlatCadence(t *testing.T) {
 		"failure backoff slows the flat interval (flat << 3)")
 }
 
+// TestNextFetchFails locks the skip-vs-success distinction that keeps a broken poll path in
+// backoff (MAG-2159 follow-up): a traffic-gate skip PRESERVES the consecutive-failure counter,
+// only a genuine successful poll resets it, and a real failure increments it. The regression this
+// guards: a skip used to look like a success (err==nil), resetting the counter every gated cycle
+// so a doomed poll never backed off and its recovery evidence never accrued.
+func TestNextFetchFails(t *testing.T) {
+	cases := []struct {
+		name    string
+		current uint64
+		skipped bool
+		failed  bool
+		want    uint64
+	}{
+		{"failure increments", 2, false, true, 3},
+		{"failure from zero", 0, false, true, 1},
+		{"successful poll resets", 5, false, false, 0},
+		{"skip preserves a clean counter", 0, true, false, 0},
+		{"skip preserves an accrued backoff (the fix)", 4, true, false, 4},
+		{"failure precedence over skip", 3, true, true, 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, nextFetchFails(tc.current, tc.skipped, tc.failed))
+		})
+	}
+}
+
 // TestComputePollInterval_LegacyCadenceWhenNoFlat guards that the global tracker
 // (flatPollInterval == 0) keeps its legacy adaptive cadence, untouched by MAG-2159.
 func TestComputePollInterval_LegacyCadenceWhenNoFlat(t *testing.T) {
