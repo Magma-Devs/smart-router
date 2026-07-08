@@ -1,0 +1,105 @@
+name: Graduate Release to Latest
+
+# Stage 2 of the two-stage release flow (stage 1 is release.yml on tag push,
+# which publishes a draft PRERELEASE and the per-version Docker image only).
+#
+# This workflow fires when a release is graduated out of prerelease on GitHub
+# — i.e. when a maintainer flips a prerelease to a full release (the "Latest"
+# label). GitHub emits the `released` event for that transition (it does NOT
+# emit it for prereleases or drafts). On that event we:
+#
+#   1. Re-point ghcr.io/magma-devs/smart-router:latest at the graduated tag's
+#      existing multi-arch manifest (no rebuild — `imagetools create` is a
+#      registry-side re-tag). A tag points at exactly one digest, so this
+#      gives us "one :latest at a time" for free.
+#   2. Bump the static README "release-vX.Y.Z" badge to the graduated version,
+#      since the badge is meant to track the latest PRODUCTION version — which
+#      is now defined by graduation, not by tag push.
+#
+# Pulling ghcr.io/magma-devs/smart-router:latest after this returns the
+# graduated version.
+
+on:
+  release:
+    types: [released]
+
+permissions:
+  contents: read
+
+jobs:
+  graduate:
+    name: graduate
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write   # re-tag the GHCR image
+      contents: write   # push the README badge bump back to main
+    env:
+      # The graduated release's git tag, e.g. v1.2.0.
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      IMAGE: ghcr.io/magma-devs/smart-router
+
+    steps:
+      # Defensive: the `released` event should never carry a prerelease, but
+      # guard anyway so a future trigger change can't silently move :latest
+      # onto an RC.
+      - name: Guard against prerelease
+        if: ${{ github.event.release.prerelease == true }}
+        run: |
+          echo "::error::Release ${RELEASE_TAG} is still a prerelease — refusing to move :latest."
+          exit 1
+
+      - name: Log into GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Re-point :latest at the per-version manifest published by release.yml.
+      # `imagetools create` reads the source manifest and writes a new tag
+      # pointing at the same digest — preserves the multi-arch (amd64/arm64)
+      # manifest list, no pull/rebuild/push of layers.
+      - name: Move :latest to ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          echo "Re-pointing ${IMAGE}:latest -> ${IMAGE}:${RELEASE_TAG}"
+          docker buildx imagetools create \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}:${RELEASE_TAG}"
+          echo "--- ${IMAGE}:latest now resolves to ---"
+          docker buildx imagetools inspect "${IMAGE}:latest" --format '{{json .Manifest.Digest}}'
+
+      # Bump the static README badge to the graduated version. Only for clean
+      # vX.Y.Z tags (graduating a hypothetical -rc shouldn't move the badge).
+      - name: Checkout main
+        if: ${{ startsWith(github.event.release.tag_name, 'v') }}
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          # Same PAT as release.yml — main's PR-required branch protection
+          # rejects the default GITHUB_TOKEN. See docs/RELEASING.md.
+          token: ${{ secrets.RELEASE_BOT_PAT }}
+
+      - name: Update README release badge
+        if: ${{ startsWith(github.event.release.tag_name, 'v') }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag ${RELEASE_TAG} is not a clean vX.Y.Z — skipping badge bump"
+            exit 0
+          fi
+          sed -i -E "s|release-v[0-9]+\.[0-9]+\.[0-9]+-brightgreen|release-${RELEASE_TAG}-brightgreen|" README.md
+          if git diff --quiet README.md; then
+            echo "Badge already at ${RELEASE_TAG} (or pattern not found) — nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "chore(release): bump README badge to ${RELEASE_TAG} [skip ci]"
+          # Fast-forward-only; fails loudly if main moved (manual fixup).
+          git push origin HEAD:main

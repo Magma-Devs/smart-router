@@ -9,6 +9,10 @@ on:
       release_tag:
         description: "The desired tag for the release (e.g. v1.1.0)."
         required: true
+      regenerate_changelog:
+        description: "Force-regenerate the CHANGELOG.md section for this version, replacing any existing one. Use when a tag was deleted and recreated from scratch so the stale section must be rebuilt from the new commit range."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -78,6 +82,12 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      # syft generates the per-binary SBOMs declared in `sboms:` in
+      # .goreleaser.yaml. goreleaser shells out to the `syft` binary on
+      # PATH, so it must be installed before the release step.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
       - name: Log into GHCR
         uses: docker/login-action@v4
         with:
@@ -104,9 +114,22 @@ jobs:
           # commit via `GET /commits/{sha}/pulls`. Default GITHUB_TOKEN
           # has the required read access and isn't rate-limited (5000/hr).
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # When the regenerate_changelog input is set (workflow_dispatch
+          # only; empty on tag-push), force the bumper to replace an
+          # existing section instead of skipping it. Threads through as
+          # FORCE=1 to scripts/changelog-bump.sh.
+          REGENERATE_CHANGELOG: ${{ github.event.inputs.regenerate_changelog }}
         run: |
           v_re=$(printf '%s' "$RELEASE_VERSION" | sed -e 's/[][().*+?^$\|/]/\\&/g')
-          if grep -qE "^## ${v_re}( |\$)" CHANGELOG.md 2>/dev/null; then
+          if [ "${REGENERATE_CHANGELOG}" = "true" ]; then
+            # Override path: a deleted+recreated tag leaves a stale section
+            # on main. Rebuild it from the new commit range, replacing the
+            # old one (FORCE=1). Always regenerates, even if the section
+            # exists — that's the whole point of the override.
+            echo "regenerate_changelog=true — force-rebuilding the ${RELEASE_VERSION} section"
+            VERSION="$RELEASE_VERSION" AI=1 EDIT=0 FORCE=1 scripts/changelog-bump.sh
+            echo "did_generate=true" >> "$GITHUB_OUTPUT"
+          elif grep -qE "^## ${v_re}( |\$)" CHANGELOG.md 2>/dev/null; then
             echo "CHANGELOG.md already has a section for ${RELEASE_VERSION} — skipping bumper"
             echo "did_generate=false" >> "$GITHUB_OUTPUT"
           else
@@ -116,31 +139,12 @@ jobs:
           echo "--- CHANGELOG.md head ---"
           head -40 CHANGELOG.md
 
-      # Bump the static "release-vX.Y.Z" badge in README.md to the new
-      # version. Static (not the shields.io GitHub-release endpoint)
-      # because that endpoint reads /releases/latest unauthenticated,
-      # which fails on private repos. So we maintain the version in
-      # the URL ourselves and resync it from the release workflow.
-      #
-      # Only runs for FINAL releases (vX.Y.Z with no -rc/-beta/etc
-      # suffix). Prereleases shouldn't move the "release" badge in
-      # README — it's meant to indicate the latest production version.
-      - name: Update README release badge (final releases only)
-        id: badge
-        run: |
-          if [[ "${RELEASE_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            sed -i -E "s|release-v[0-9]+\.[0-9]+\.[0-9]+-brightgreen|release-${RELEASE_VERSION}-brightgreen|" README.md
-            if git diff --quiet README.md; then
-              echo "Badge already at ${RELEASE_VERSION} (or pattern not found)"
-              echo "did_update=false" >> "$GITHUB_OUTPUT"
-            else
-              echo "Bumped release badge to ${RELEASE_VERSION}"
-              echo "did_update=true" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "Prerelease tag (${RELEASE_VERSION}) — skipping badge update"
-            echo "did_update=false" >> "$GITHUB_OUTPUT"
-          fi
+      # NOTE: the README "release-vX.Y.Z" badge is NOT bumped here. Under the
+      # two-stage flow this workflow only publishes a draft PRERELEASE, and
+      # the badge tracks the latest PRODUCTION version — which is defined by
+      # graduation, not tag push. The badge bump now lives in
+      # .github/workflows/graduate-latest.yml, which runs when a release is
+      # graduated out of prerelease.
 
       # Extract the matching `## <tag>` section from CHANGELOG.md into
       # a standalone file BEFORE the commit-to-main step. That step
@@ -160,10 +164,10 @@ jobs:
           echo "--- extracted release body ---"
           head -20 .release-notes/body.md
 
-      # Push the release-time bookkeeping changes (CHANGELOG section,
-      # README release badge) back to `main` as a single commit, then
-      # return HEAD to the tag so goreleaser builds at the exact tagged
-      # commit (not at main+1).
+      # Push the auto-generated CHANGELOG.md section back to `main` as a
+      # single commit, then return HEAD to the tag so goreleaser builds at
+      # the exact tagged commit (not at main+1). (The README badge bump is
+      # NOT here anymore — it moved to graduate-latest.yml.)
       #
       # Runs after extract on purpose — see the comment on the extract
       # step. The `git checkout ${tag_commit}` at the end resets the
@@ -183,14 +187,14 @@ jobs:
       #
       # Branch protection caveat: see docs/RELEASING.md (`RELEASE_BOT_PAT`).
       - name: Commit release-time updates to main
-        if: ${{ steps.generate.outputs.did_generate == 'true' || steps.badge.outputs.did_update == 'true' }}
+        if: ${{ steps.generate.outputs.did_generate == 'true' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           tag_commit=$(git rev-parse HEAD)
           git checkout -b release-update
-          git add CHANGELOG.md README.md
-          git commit -m "chore(release): bump artifacts for ${RELEASE_VERSION}
+          git add CHANGELOG.md
+          git commit -m "chore(release): add changelog for ${RELEASE_VERSION}
 
           Auto-generated by .github/workflows/release.yml on tag push."
           # Fast-forward push only — fails if main has new commits.
@@ -211,3 +215,27 @@ jobs:
           args: release --clean --timeout 90m --release-notes .release-notes/body.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Guard the SBOM integrity chain. GoReleaser 2.x folds sbom artifacts
+      # into sha256sum.txt automatically, and cosign signs that file — so an
+      # SBOM's integrity is verifiable through the signed checksum. That
+      # auto-inclusion is undocumented default behavior, though: a future
+      # GoReleaser could silently drop it, shipping SBOMs that nothing signs.
+      # Fail the release loudly if any generated .sbom.json is absent from
+      # the checksum file. Runs after goreleaser has written dist/.
+      - name: Assert SBOMs are checksummed
+        run: |
+          sum="dist/sha256sum.txt"
+          [ -f "$sum" ] || { echo "::error::$sum not found — did goreleaser run?"; exit 1; }
+          missing=0
+          for sbom in dist/*.sbom.json; do
+            [ -e "$sbom" ] || { echo "::error::no .sbom.json files in dist/ — SBOM generation broke"; exit 1; }
+            base=$(basename "$sbom")
+            if grep -qF "  ${base}" "$sum"; then
+              echo "ok: ${base} is in ${sum}"
+            else
+              echo "::error::${base} is NOT listed in ${sum} — SBOM would ship unsigned"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || { echo "::error::one or more SBOMs are not covered by the signed checksums"; exit 1; }

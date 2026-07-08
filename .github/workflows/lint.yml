@@ -51,3 +51,47 @@ jobs:
         with:
           version: latest
           args: --config .golangci.yml -v
+
+  # Supply-chain vuln scan. Unlike golangci-lint above (advisory while the
+  # Go 1.26 toolchain outpaces stable linter releases), this job GATES: a
+  # known-vulnerable dependency or stdlib version should block the merge.
+  # govulncheck is call-graph aware — it only flags advisories whose
+  # vulnerable symbols are actually reachable from this codebase, so it
+  # stays quiet on unreachable transitive CVEs.
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # Invoke govulncheck directly rather than via golang/govulncheck-action.
+      # The wrapper action manages its own checkout + Go install with pinned
+      # sub-actions (actions/checkout@v4.1.1, actions/setup-go@v5), which here
+      # caused two problems on top of the version it actually ran under:
+      #   - its bundled checkout auth collided with our actions/checkout@v7
+      #     (`Duplicate header: "Authorization"` → HTTP 400), and
+      #   - it carries a default `go-version: stable`, so passing go-version-file
+      #     produced a "both specified, only go-version used" warning and would
+      #     have scanned under `stable` instead of the go.mod toolchain.
+      # Since the checkout + setup-go steps above already put the go.mod Go on
+      # PATH, running the tool directly is simpler and removes the version
+      # ambiguity — govulncheck's stdlib advisories are toolchain-version
+      # specific, so scanning under the version we actually ship matters.
+      # govulncheck is version-pinned (not @latest) so a new tool release
+      # can't flip CI red on an unrelated day — reproducible CI needs pinned
+      # tooling. Dependabot's gomod updates don't cover this `go install`, so
+      # bump the tag here deliberately. The job is a hard gate: govulncheck
+      # exits non-zero when a vulnerable symbol is actually reachable, which
+      # fails the step. Findings are stdlib/dep CVEs that are reachable from
+      # our code; the usual fix is a Go toolchain bump (the patched stdlib
+      # versions ride a Go point release), not a code change.
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+          govulncheck ./...

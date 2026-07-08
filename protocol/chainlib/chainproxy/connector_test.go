@@ -59,11 +59,11 @@ func (s *testQueryServerImpl) ShowChainInfo(ctx context.Context, _ *testRequest)
 
 // Leading slash is required by grpc.Invoke ("/pkg.Service/Method"); without it newer gRPC returns an
 // empty response with an "Unimplemented: malformed method name" error.
-const testServiceMethod = "/lavanet.lava.spec.Query/ShowChainInfo"
+const testServiceMethod = "/smartrouter.spec.Query/ShowChainInfo"
 
 func registerTestQueryServer(s *grpc.Server, srv testQueryServer) {
 	s.RegisterService(&grpc.ServiceDesc{
-		ServiceName: "lavanet.lava.spec.Query",
+		ServiceName: "smartrouter.spec.Query",
 		HandlerType: (*testQueryServer)(nil),
 		Methods: []grpc.MethodDesc{
 			{

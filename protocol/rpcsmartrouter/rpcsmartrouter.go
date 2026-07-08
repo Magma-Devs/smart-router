@@ -2349,6 +2349,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				CredentialsFlag:          viper.GetString(common.CorsCredentialsFlag),
 				OriginFlag:               viper.GetString(common.CorsOriginFlag),
 				MethodsFlag:              viper.GetString(common.CorsMethodsFlag),
+				ExposeHeadersFlag:        viper.GetString(common.CorsExposeHeadersFlag),
 				CDNCacheDuration:         viper.GetString(common.CDNCacheDurationFlag),
 				RelaysHealthEnableFlag:   viper.GetBool(common.RelaysHealthEnableFlag),
 				RelaysHealthIntervalFlag: viper.GetDuration(common.RelayHealthIntervalFlag),
@@ -2465,6 +2466,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().String(common.CorsHeadersFlag, "", "Set up CORS allowed headers, * for all, default simple cors specification headers")
 	cmdRPCSmartRouter.Flags().String(common.CorsOriginFlag, "*", "Set up CORS allowed origin, enabled * by default")
 	cmdRPCSmartRouter.Flags().String(common.CorsMethodsFlag, "GET,POST,PUT,DELETE,OPTIONS", "set up Allowed OPTIONS methods, defaults to: \"GET,POST,PUT,DELETE,OPTIONS\"")
+	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Lava-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
 	cmdRPCSmartRouter.Flags().String(common.CDNCacheDurationFlag, "86400", "set up preflight options response cache duration, default 86400 (24h in seconds)")
 	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share the consumer consistency state with the cache service. this should be used with cache backend enabled if you want to state sync multiple rpc consumers")
 	// relays health check related flags

@@ -24,6 +24,7 @@ import (
 	"github.com/magma-Devs/smart-router/tools/wizard/internal/health"
 	"github.com/magma-Devs/smart-router/tools/wizard/internal/icons"
 	"github.com/magma-Devs/smart-router/tools/wizard/internal/laststate"
+	"github.com/magma-Devs/smart-router/tools/wizard/internal/preflight"
 	"github.com/magma-Devs/smart-router/tools/wizard/internal/ui"
 )
 
@@ -32,7 +33,16 @@ func main() {
 	specsSrc := flag.String("specs", "", "spec source: remote (github) | local (specs/ dir) | auto. Empty = ask.")
 	diagnose := flag.Bool("diagnose", false, "print terminal + icon capability and exit")
 	last := flag.Bool("last", false, "reprint the run command from the most recent wizard run and exit")
+	preflightOnly := flag.Bool("preflight", false, "check required tools (docker, envsubst, bash, …) and exit")
+	skipPreflight := flag.Bool("skip-preflight", false, "skip the prerequisite tool check (advanced)")
 	flag.Parse()
+
+	if *preflightOnly {
+		if !preflight.Render(preflight.Run()) {
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *diagnose {
 		icons.Diagnose(os.Stdout)
@@ -48,6 +58,17 @@ func main() {
 	specDir := filepath.Join(repoRoot, "specs")
 
 	fmt.Print(ui.Banner(100))
+
+	// Prerequisite gate: verify the external tools the run step shells out to
+	// (bash, envsubst, docker + compose v2) before walking the flow, so a
+	// missing tool surfaces here — not three screens in when the run fails. The
+	// check is OS-adaptive and steers native-Windows users to WSL. --skip-preflight
+	// is the advanced escape hatch.
+	if !*skipPreflight {
+		if !preflight.Render(preflight.Run()) {
+			os.Exit(1)
+		}
+	}
 
 	// Spec source defaults to AUTO (remote github, fall back to local specs/).
 	// An explicit --specs flag overrides; it can also be changed from inside the
