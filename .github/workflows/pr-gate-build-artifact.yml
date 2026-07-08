@@ -1097,8 +1097,13 @@ jobs:
           }
 
           print_failed_helm_test_logs() {
-            kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/component=test -o json \
-              | jq -r '.items[] | select(.status.phase == "Failed") | .metadata.name' \
+            kubectl -n "$NAMESPACE" get pods -o json \
+              | jq -r --arg release "$RELEASE" '
+                .items[]
+                | select(.status.phase == "Failed")
+                | select(.metadata.name | test("^" + $release + "-(config-test|connectivity-test|test-connection)$"))
+                | .metadata.name
+              ' \
               | while IFS= read -r pod; do
                   [ -z "$pod" ] && continue
                   echo "Failed Helm test pod logs for ${pod}:"
@@ -1117,8 +1122,13 @@ jobs:
             echo "Helm test result: failed"
             print_failed_helm_test_logs
 
-            failed_tests="$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/component=test -o json \
-              | jq -r '.items[] | select(.status.phase == "Failed") | .metadata.name')"
+            failed_tests="$(kubectl -n "$NAMESPACE" get pods -o json \
+              | jq -r --arg release "$RELEASE" '
+                .items[]
+                | select(.status.phase == "Failed")
+                | select(.metadata.name | test("^" + $release + "-(config-test|connectivity-test|test-connection)$"))
+                | .metadata.name
+              ')"
             if [ -z "$failed_tests" ]; then
               echo "Helm test failed but no failed test pod was found"
               return 1
