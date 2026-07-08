@@ -48,15 +48,11 @@ func TestSetLatestBlock_Monotonic(t *testing.T) {
 	require.Equal(t, int64(101), latest)
 }
 
-func TestSetLatestBlock_OutlierGuard_OnlyWithBaseline(t *testing.T) {
+func TestSetLatestBlock_OutlierGuard_WithBaseline(t *testing.T) {
 	cs, clk := newTestState(t)
 	cs.SetLatestBlock(1000)
 
-	// No baseline yet → even an implausible jump is accepted (can't anti-lie without peers).
-	_, _, advanced := cs.SetLatestBlock(1_000_000)
-	require.True(t, advanced, "without a consensus baseline there is no outlier guard")
-
-	// Establish a baseline at ~1000 from 3 agreeing endpoints, then the tip realigns down.
+	// Establish a baseline at ~1000 from 3 agreeing endpoints.
 	cs.Recompute([]BlockObservation{
 		{URL: "a", Block: 1000, ObservedAt: clk.now()},
 		{URL: "b", Block: 1001, ObservedAt: clk.now()},
@@ -67,7 +63,7 @@ func TestSetLatestBlock_OutlierGuard_OnlyWithBaseline(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int64(1001), base, "baseline is the most-advanced block in the agreeing cluster")
 
-	// Now a lying endpoint reporting far ahead is rejected.
+	// A lying endpoint reporting far ahead of consensus is rejected.
 	tip, _, advanced := cs.SetLatestBlock(base + 101)
 	require.False(t, advanced, "a block > baseline+OutlierThreshold is an anti-lie outlier")
 	require.LessOrEqual(t, tip, base+100)
@@ -75,6 +71,71 @@ func TestSetLatestBlock_OutlierGuard_OnlyWithBaseline(t *testing.T) {
 	// A plausible advance within the threshold is accepted.
 	_, _, advanced = cs.SetLatestBlock(base + 50)
 	require.True(t, advanced)
+}
+
+// TestSetLatestBlock_OutlierGuard_NoBaselineAnchorsOnFreshTip locks the no-baseline half of the
+// anti-lie guard: 1-2 endpoint pods never form a consensus baseline (min-2 rule), so the guard
+// anchors on the FRESH tip instead — within one TTL the chain cannot plausibly advance more than
+// OutlierThreshold blocks. Without this, one bogus high block poisons the monotonic tip and (as
+// the tip then expires with every honest block rejected below it) permanently bricks the chain
+// tip for the life of the process.
+func TestSetLatestBlock_OutlierGuard_NoBaselineAnchorsOnFreshTip(t *testing.T) {
+	cs, clk := newTestState(t)
+	cs.SetLatestBlock(1000)
+
+	// A jump of more than OutlierThreshold over the live tip is a lie/glitch, baseline or not.
+	tip, _, advanced := cs.SetLatestBlock(1_000_000)
+	require.False(t, advanced, "an implausible jump over a FRESH tip is rejected even without a baseline")
+	require.Equal(t, int64(1000), tip)
+
+	// A plausible advance (exactly tip+OutlierThreshold) is accepted.
+	tip, _, advanced = cs.SetLatestBlock(1100)
+	require.True(t, advanced, "an advance within OutlierThreshold of the fresh tip is plausible")
+	require.Equal(t, int64(1100), tip)
+
+	// A STALE tip does not anchor the guard: after an idle gap the real head may legitimately
+	// be far ahead, so the same jump is accepted once the tip has expired.
+	clk.advance(11 * time.Second) // past TTL (10s)
+	_, ok := cs.GetLatestBlock()
+	require.False(t, ok, "tip expired")
+	tip, _, advanced = cs.SetLatestBlock(1_000_000)
+	require.True(t, advanced, "a large advance over a STALE tip is accepted (idle-gap catch-up)")
+	require.Equal(t, int64(1_000_000), tip)
+}
+
+// TestSetLatestBlock_StaleTipReAdoptsDownward locks the self-heal half: a fresh observation
+// BELOW a TTL-stale tip re-adopts the tip downward. A stale tip already reports (0, false) to
+// every consumer, so adopting a live lower value strictly improves information — and it bounds
+// a successful poisoning (e.g. a cold-start lie, where no guard is possible) to ~one TTL
+// instead of the process lifetime.
+func TestSetLatestBlock_StaleTipReAdoptsDownward(t *testing.T) {
+	cs, clk := newTestState(t)
+
+	// Cold-start lie: the very first observation has no reference, so it is accepted.
+	_, _, advanced := cs.SetLatestBlock(1_000_000)
+	require.True(t, advanced)
+
+	// While the poisoned tip is fresh, honest lower blocks are still ignored (monotonic).
+	tip, _, advanced := cs.SetLatestBlock(5000)
+	require.False(t, advanced)
+	require.Equal(t, int64(1_000_000), tip)
+
+	// Once the lie expires (no confirmations), the next honest observation re-adopts the tip.
+	clk.advance(11 * time.Second) // past TTL (10s)
+	_, ok := cs.GetLatestBlock()
+	require.False(t, ok, "the poisoned tip expires once nothing re-confirms it")
+	tip, _, advanced = cs.SetLatestBlock(5000)
+	require.False(t, advanced, "a downward re-adoption is not an advance (monotonic consumers must not follow it)")
+	require.Equal(t, int64(5000), tip, "a fresh honest block below a STALE tip re-adopts the tip")
+	got, ok := cs.GetLatestBlock()
+	require.True(t, ok, "the re-adopted tip is live again")
+	require.Equal(t, int64(5000), got)
+
+	// Normal operation resumes: plausible advances are accepted, implausible ones rejected.
+	_, _, advanced = cs.SetLatestBlock(5001)
+	require.True(t, advanced)
+	_, _, advanced = cs.SetLatestBlock(1_000_000)
+	require.False(t, advanced, "the fresh-tip guard is active again after recovery")
 }
 
 // --- TTL freshness ----------------------------------------------------------------------
@@ -380,16 +441,22 @@ func TestRecompute_NoRealignmentWithinThreshold(t *testing.T) {
 	require.Equal(t, int64(1050), tip, "a tip within OutlierThreshold of the baseline is not realigned")
 }
 
-func TestRecompute_NoBaselineLeavesGuardOff(t *testing.T) {
+func TestRecompute_NoBaselineFallsBackToTipAnchoredGuard(t *testing.T) {
 	cs, clk := newTestState(t)
 	cs.SetLatestBlock(1000)
 
-	// Single fresh endpoint → no baseline → guard stays off → big advance still accepted.
+	// Single fresh endpoint → no baseline; the write guard falls back to anchoring on the
+	// fresh tip, so an implausible jump is still rejected (not by a stale baseline — there
+	// is none — but by the tip-anchored plausibility bound).
 	cs.Recompute([]BlockObservation{{URL: "a", Block: 1000, ObservedAt: clk.now()}})
 	ok := cs.DebugSnapshot().HasBaseline
 	require.False(t, ok)
 	_, _, advanced := cs.SetLatestBlock(1_000_000)
-	require.True(t, advanced, "no baseline → no outlier guard (single-endpoint pod)")
+	require.False(t, advanced, "no baseline → the guard anchors on the fresh tip instead of switching off")
+
+	// A plausible single-endpoint advance keeps flowing normally.
+	_, _, advanced = cs.SetLatestBlock(1050)
+	require.True(t, advanced)
 }
 
 // TestRecompute_EmptySnapshotClearsBaseline covers Finding 5: an empty (or sub-majority)
@@ -411,8 +478,11 @@ func TestRecompute_EmptySnapshotClearsBaseline(t *testing.T) {
 	ok = cs.DebugSnapshot().HasBaseline
 	require.False(t, ok, "an empty snapshot clears the baseline rather than leaving it stale")
 
-	// With the guard now off, a single new endpoint at a wildly different height is accepted
-	// (it would have been wrongly rejected had the old baseline lingered).
+	// Once the old tip expires (the endpoint swap takes real time), a single replacement
+	// endpoint at a wildly different height is accepted: neither the cleared baseline nor
+	// the now-stale tip anchors the guard (it would have been wrongly rejected had the old
+	// baseline lingered).
+	clk.advance(11 * time.Second) // past TTL (10s)
 	cs.SetLatestBlock(2_000_000)
 	tip, ok := cs.GetLatestBlock()
 	require.True(t, ok)

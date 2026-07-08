@@ -104,7 +104,7 @@ func TestTrafficGate_FullCycle_UpstreamCallCounts(t *testing.T) {
 					fetcher := &countingGateFetcher{}
 					ct := newGateTracker(t, chain.chainID, fetcher, sc.relayFresh, maxSkips)
 					for i := 0; i < cycles; i++ {
-						_ = ct.fetchAllPreviousBlocksIfNecessary(context.Background())
+						_, _ = ct.fetchAllPreviousBlocksIfNecessary(context.Background())
 					}
 					require.Equal(t, sc.wantUpstream, fetcher.upstreamCalls(),
 						"%s/%s: total upstream calls over %d cycles", chain.name, sc.name, cycles)
@@ -123,16 +123,20 @@ func TestTrafficGate_BoundedVerification(t *testing.T) {
 	fetcher := &countingGateFetcher{}
 	ct := newGateTracker(t, "ETH1", fetcher, func(time.Time) bool { return true }, maxSkips)
 
-	// First maxSkips cycles skip — zero upstream.
+	// First maxSkips cycles skip — zero upstream, and each reports skipped=true so the caller
+	// can preserve (not reset) the poll-failure backoff.
 	for i := 0; i < maxSkips; i++ {
-		require.NoError(t, ct.fetchAllPreviousBlocksIfNecessary(context.Background()))
+		skipped, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background())
+		require.NoError(t, err)
+		require.True(t, skipped, "cycle %d is a gate skip, reported as such (not a successful poll)", i)
 		require.Equal(t, int32(0), fetcher.upstreamCalls(), "cycle %d must skip (no upstream)", i)
 		require.Equal(t, i+1, ct.relaySkipsSinceRealPoll)
 	}
 
 	// The next cycle is forced to poll for real (the fetcher errors, proving it ran upstream).
-	require.Error(t, ct.fetchAllPreviousBlocksIfNecessary(context.Background()),
-		"after maxSkips skips the cycle must force a real poll")
+	skipped, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background())
+	require.False(t, skipped, "the forced verification cycle is a real poll, not a skip")
+	require.Error(t, err, "after maxSkips skips the cycle must force a real poll")
 	require.Equal(t, int32(1), fetcher.latestCalls.Load(), "exactly one real latest-block poll was forced")
 	require.Equal(t, 0, ct.relaySkipsSinceRealPoll, "the skip counter resets after a real poll")
 }
@@ -144,7 +148,8 @@ func TestTrafficGate_NilGate_GlobalTrackerAlwaysPolls(t *testing.T) {
 	fetcher := &countingGateFetcher{}
 	ct := newGateTracker(t, "ETH1", fetcher, nil, defaultMaxRelaySkipsBeforePoll)
 	for i := 0; i < 5; i++ {
-		_ = ct.fetchAllPreviousBlocksIfNecessary(context.Background())
+		skipped, _ := ct.fetchAllPreviousBlocksIfNecessary(context.Background())
+		require.False(t, skipped, "an ungated tracker never skips")
 	}
 	require.Equal(t, int32(5), fetcher.latestCalls.Load(), "an ungated tracker polls every cycle")
 }
@@ -194,10 +199,12 @@ func TestFlatTracker_SkipsBlockGapMachinery(t *testing.T) {
 	// Drive several real block advances through the poll path. The first advance has a zero
 	// prevChangeTime (no sample either way); the rest would each append a blockEventsGap sample
 	// on a NON-flat tracker. The flat tracker must append none.
-	require.NoError(t, ct.fetchAllPreviousBlocksIfNecessary(context.Background()))
+	_, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background())
+	require.NoError(t, err)
 	for i := 0; i < 5; i++ {
 		fetcher.block.Add(1)
-		require.NoError(t, ct.fetchAllPreviousBlocksIfNecessary(context.Background()))
+		_, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background())
+		require.NoError(t, err)
 	}
 	require.Empty(t, ct.blockEventsGap, "a flat tracker must not accumulate block-gap samples")
 }

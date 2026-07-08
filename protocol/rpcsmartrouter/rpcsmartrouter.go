@@ -59,6 +59,12 @@ const (
 	DebugRelaysFlagName           = "debug-relays"
 	DebugProbesFlagName           = "debug-probes"
 
+	// deprecatedChainTrackerPollingMultiplierFlagName is the polling-relief knob main advertised
+	// for the GLOBAL chain tracker, which MAG-2160 removed (per-endpoint trackers poll at a fixed
+	// avgBlockTime/2). It stays registered as a deprecated NO-OP so deployments passing it don't
+	// fail at process start; a RunE warning tells operators the behavior is gone.
+	deprecatedChainTrackerPollingMultiplierFlagName = "chain-tracker-polling-multiplier"
+
 	// lavaAppName is the application name, previously app.Name.
 	lavaAppName = "lava"
 	// lavaDefaultNodeHome is the default home directory, previously lavaDefaultNodeHome (~/.lava).
@@ -2151,9 +2157,14 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			// consistency config is built. Zero = no relief; out-of-range values warn-and-revert
 			// to the built-in default (not silent clamp).
 			//
-			// MAG-2160: the former --chain-tracker-polling-multiplier flag was removed here — it
-			// only ever tuned the global tracker's adaptive cadence, and the global tracker is
-			// gone. Per-endpoint trackers run a fixed avgBlockTime/2 cadence with no runtime knob.
+			// MAG-2160: --chain-tracker-polling-multiplier only ever tuned the global tracker's
+			// adaptive cadence, and the global tracker is gone (per-endpoint trackers run a fixed
+			// avgBlockTime/2 cadence with no runtime knob). The flag survives as a registered
+			// deprecated NO-OP so existing launch args don't fail process start; warn here — via
+			// viper, so a config.yml value is caught too — that the polling-relief behavior is gone.
+			if m := viper.GetInt(deprecatedChainTrackerPollingMultiplierFlagName); m != 0 {
+				utils.LavaFormatWarning("--"+deprecatedChainTrackerPollingMultiplierFlagName+" is deprecated and has NO EFFECT: the global chain tracker was removed (MAG-2160); per-endpoint trackers poll at a fixed avgBlockTime/2", nil, utils.LogAttr("provided", m))
+			}
 			if f := viper.GetInt(relaycore.ConsistencyBlockGapFactorFlagName); f != 0 {
 				if f < 2 || f > 8 {
 					utils.LavaFormatWarning("--"+relaycore.ConsistencyBlockGapFactorFlagName+" out of allowed range [2,8]; reverting to default", nil, utils.LogAttr("provided", f))
@@ -2424,6 +2435,16 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
 	cmdRPCSmartRouter.Flags().Int(relaycore.ConsistencyBlockGapFactorFlagName, 0, "consistency-relief: widen the consistency endpoint-lag gate (blockLagForQosSync x factor; default 2). Allowed [2,8]; out-of-range reverts to default.")
+	// MAG-2160 back-compat shim: the global chain tracker (and the adaptive cadence this knob
+	// tuned) is gone — per-endpoint trackers poll at a fixed avgBlockTime/2 — but existing launch
+	// args (systemd/compose/helm) still pass the flag, and an UNREGISTERED flag fails process
+	// start (full pod outage on upgrade). Keep it registered as a deprecated no-op; the RunE
+	// warning tells polling-relief operators the behavior is gone (covers config.yml too, which
+	// cobra's own deprecation notice would miss).
+	cmdRPCSmartRouter.Flags().Int(deprecatedChainTrackerPollingMultiplierFlagName, 0, "DEPRECATED (no-op): the global chain tracker and its polling multiplier were removed (MAG-2160); per-endpoint trackers poll at a fixed avgBlockTime/2.")
+	if err := cmdRPCSmartRouter.Flags().MarkDeprecated(deprecatedChainTrackerPollingMultiplierFlagName, "it is a no-op: the global chain tracker was removed (MAG-2160)"); err != nil {
+		utils.LavaFormatFatal("failed marking chain-tracker-polling-multiplier deprecated", err)
+	}
 	cmdRPCSmartRouter.Flags().Var(&strategyFlag, "strategy", fmt.Sprintf("the strategy to use to pick providers (%s)", strings.Join(strategyNames, "|")))
 	defaultWeightedConfig := provideroptimizer.DefaultWeightedSelectorConfig()
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerAvailabilityWeight, defaultWeightedConfig.AvailabilityWeight, "weight assigned to provider availability when computing selection scores")

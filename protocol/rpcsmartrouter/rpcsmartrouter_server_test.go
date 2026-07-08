@@ -2365,6 +2365,33 @@ func seedEndpointTip(chainID, apiInterface, url string, block int64) {
 	)
 }
 
+// TestFreshestEndpointTip locks the MAG-2160 Finding 6 fix: consistency pre-validation (and the
+// Site B fallback) must read the FRESHEST of the poll-tracker atomic and the endpointtip store,
+// not prefer the atomic and only fall back when it is exactly 0. Under the MAG-2159 traffic gate a
+// relay-fed endpoint's poll atomic freezes below (or at 0 beneath) a fresher store tip; the old
+// "atomic unless 0" logic then rejected a current endpoint. The store must win in that case, and
+// max() must never regress (atomic still wins before the store is populated).
+func TestFreshestEndpointTip(t *testing.T) {
+	cases := []struct {
+		name       string
+		pollAtomic int64
+		storeTip   int64
+		want       int64
+	}{
+		{"frozen atomic below fresh store → store wins (the bug)", 100, 195, 195},
+		{"purely relay-fed endpoint: atomic 0, store fresh", 0, 195, 195},
+		{"store not yet populated: atomic wins", 195, 0, 195},
+		{"both known, atomic fresher (poll just ran)", 195, 190, 195},
+		{"equal", 195, 195, 195},
+		{"both unknown", 0, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, freshestEndpointTip(tc.pollAtomic, tc.storeTip))
+		})
+	}
+}
+
 // ============================================================================
 // Tests for Phase 3.1: Consistency Pre-Validation Retry with Different Providers
 // ============================================================================

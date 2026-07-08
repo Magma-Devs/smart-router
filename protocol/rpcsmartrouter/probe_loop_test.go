@@ -8,8 +8,31 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/probing"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/stretchr/testify/require"
 )
+
+// TestProbeVerdictConfigFor_SourcesLagToleranceFromConsistency locks the fix that keeps the probe
+// and the relay path agreeing on "lagging": the verdict's LagToleranceBlocks is sourced from the
+// per-chain relaycore.EndpointLagThreshold, not the probing package's compile-time default of 10.
+func TestProbeVerdictConfigFor_SourcesLagToleranceFromConsistency(t *testing.T) {
+	const blockTime = time.Second
+
+	t.Run("per-chain threshold overrides the default", func(t *testing.T) {
+		// A wide finalization distance derives EndpointLagThreshold well above 10.
+		cc := relaycore.NewConsistencyValidationConfig(5 /*blockLagForQosSync*/, 64 /*finalization*/, blockTime, 0)
+		require.Greater(t, cc.EndpointLagThreshold, int64(10), "precondition: derived threshold exceeds the default")
+
+		cfg := probeVerdictConfigFor(blockTime, cc)
+		require.Equal(t, cc.EndpointLagThreshold, cfg.LagToleranceBlocks,
+			"the probe tolerance must match the per-chain consistency threshold, not the default 10")
+	})
+
+	t.Run("nil consistency config falls back to the compile-time default", func(t *testing.T) {
+		cfg := probeVerdictConfigFor(blockTime, nil)
+		require.Equal(t, probing.DefaultLagToleranceBlocks, cfg.LagToleranceBlocks)
+	})
+}
 
 // recordingAppender captures AppendProbeData calls so tests can assert the one-sample-per-provider
 // rule and the fed values.

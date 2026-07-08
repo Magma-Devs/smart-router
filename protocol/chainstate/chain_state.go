@@ -140,7 +140,7 @@ type ChainState struct {
 	now func() time.Time
 
 	mu          sync.RWMutex
-	latestBlock int64 // observed tip; only SetLatestBlock raises it, only Recompute lowers it
+	latestBlock int64 // observed tip; raised by SetLatestBlock, lowered only by Recompute's realign or SetLatestBlock's stale-tip re-adoption
 	// lastObservedAt is the wall-clock of the last ACCEPTED observation of the current tip,
 	// refreshed even when the block is unchanged (an equal-block confirmation re-proves the tip
 	// is live). TTL freshness is measured from this, so a stable-but-confirmed tip does not
@@ -192,16 +192,35 @@ func NewWithClock(chainID string, cfg Config, clock func() time.Time) *ChainStat
 
 // SetLatestBlock is the cheap per-observation write the relay-harvest and poll paths call. It
 // raises the tip monotonically and guards against an anti-lie outlier:
-//   - a block below the current tip is ignored (monotonic; the tip only goes DOWN via Recompute's
-//     downward realignment, never a write),
+//   - a block below a FRESH tip is ignored (monotonic; a live tip only goes DOWN via Recompute's
+//     downward realignment). Once the tip has gone STALE by TTL, a fresh lower observation
+//     re-adopts the tip downward: a stale tip already reports (0, false) to every consumer, so
+//     adopting a live lower value strictly improves information — without this, a no-baseline
+//     pod poisoned by one bogus high block could never recover (every honest block sits below
+//     the lie forever),
 //   - a block EQUAL to the current tip is not an advance but DOES refresh freshness — it re-proves
 //     the tip is live, so TTL is measured from the latest confirmation, not the first sighting
 //     (Finding 4),
 //   - when a consensus baseline exists, a block more than OutlierThreshold above it is rejected
-//     as implausible (a single lying/buggy endpoint cannot poison the tip on a 3+-endpoint pod).
+//     as implausible (a single lying/buggy endpoint cannot poison the tip on a 3+-endpoint pod),
+//   - without a baseline (1-2 endpoint pods never form one — min-2 rule), the same guard anchors
+//     on the FRESH tip instead: within one TTL (≈ DefaultStalenessMultiplier block times) the
+//     chain cannot plausibly advance more than OutlierThreshold (≥ outlierFloorBlocks) blocks,
+//     so a bigger jump over a live tip is a lie/glitch. A STALE tip does not anchor the guard —
+//     after an idle gap the real head may legitimately be far ahead. A PERSISTENT liar walking
+//     the tip up in sub-threshold steps remains undetectable without peers; the guard defends
+//     against transient lies/glitches, and the stale-tip re-adoption above bounds a successful
+//     poisoning of THIS tip to ~one TTL instead of the process lifetime.
+//
+// Caveat: the guard cannot fire on the VERY FIRST observation (no reference exists yet), so a
+// cold-start lie is accepted here. This tip self-heals after one TTL, but callers that ratchet a
+// separate monotonic-max store from accepted observations (the rpcsmartrouter bootstrap atomic)
+// do NOT self-heal — a cold-start lie persists there for the process lifetime. That store must add
+// its own bound if it needs one; this tip's self-heal does not cover it.
 //
 // Returns the resulting tip, the time it was last confirmed, and whether this call ADVANCED it
-// (equal-block confirmations return advanced=false even though they refresh freshness).
+// (equal-block confirmations and downward re-adoptions return advanced=false — consumers that
+// ratchet a monotonic maximum, e.g. the bootstrap atomic, must only follow advances).
 func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, advanced bool) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -209,21 +228,34 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 	if block <= 0 {
 		return cs.latestBlock, cs.lastObservedAt, false
 	}
+	now := cs.now()
+	_, tipFresh := cs.freshLatestLocked(now)
 	if cs.initialized {
 		if block < cs.latestBlock {
+			if tipFresh {
+				return cs.latestBlock, cs.lastObservedAt, false
+			}
+			// Stale-tip downward re-adoption (self-heal from a poisoned/frozen tip).
+			cs.latestBlock = block
+			cs.lastObservedAt = now
 			return cs.latestBlock, cs.lastObservedAt, false
 		}
 		if block == cs.latestBlock {
-			cs.lastObservedAt = cs.now() // equal-block confirmation refreshes freshness (Finding 4)
+			cs.lastObservedAt = now // equal-block confirmation refreshes freshness (Finding 4)
 			return cs.latestBlock, cs.lastObservedAt, false
 		}
 	}
 	// block > latestBlock, or the very first observation.
-	if cs.hasBaseline && block > cs.baseline+cs.cfg.OutlierThreshold {
+	if cs.hasBaseline {
+		if block > cs.baseline+cs.cfg.OutlierThreshold {
+			return cs.latestBlock, cs.lastObservedAt, false
+		}
+	} else if cs.initialized && tipFresh && block > cs.latestBlock+cs.cfg.OutlierThreshold {
+		// No-baseline anti-lie guard, anchored on the fresh tip (see doc block above).
 		return cs.latestBlock, cs.lastObservedAt, false
 	}
 	cs.latestBlock = block
-	cs.lastObservedAt = cs.now()
+	cs.lastObservedAt = now
 	cs.initialized = true
 	return cs.latestBlock, cs.lastObservedAt, true
 }
@@ -368,7 +400,8 @@ func (cs *ChainState) DebugSnapshot() ChainStateSnapshot {
 //   - fresh-only: drop observations older than StalenessWindow and non-positive blocks;
 //   - dedup by URL: each endpoint votes once, with its most recent observation;
 //   - min-2: fewer than 2 distinct fresh endpoints → no consensus (a sole endpoint cannot
-//     self-certify; its tip is still trusted monotonically + TTL, just without an anti-lie guard);
+//     self-certify; its tip is still trusted monotonically + TTL, with only the weaker
+//     fresh-tip-anchored anti-lie guard in SetLatestBlock instead of a consensus-anchored one);
 //   - strict majority > 50%: find the widest cluster of votes that all lie within BucketWidth of
 //     each other (distance-aware sliding window over sorted blocks, NOT fixed bucket boundaries —
 //     so two endpoints one block apart still agree, Finding 3). A cluster wins only if it holds

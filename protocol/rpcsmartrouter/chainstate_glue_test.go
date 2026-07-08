@@ -11,6 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 )
@@ -78,6 +79,50 @@ func TestGetLatestBlock_NilChainStateUsesAtomic(t *testing.T) {
 	require.Equal(t, uint64(0), rpcss.getLatestBlock(), "no chainState, no atomic → unknown")
 	rpcss.latestBlockHeight.Store(500)
 	require.Equal(t, uint64(500), rpcss.getLatestBlock(), "no chainState → atomic answers")
+}
+
+// TestGetLatestBlockForCacheFinalization_ConsensusOrZero locks the cache-finalization tip
+// contract (see isFinalizedForCacheWrite's doc block): the CONSENSUS baseline when fresh, else a
+// strict 0. It must never fall back to the optimistic observed tip (a lone fresh reporter — on
+// no-baseline pods a lying-high value would falsely finalize into the long-TTL store) nor to the
+// bootstrap atomic (monotonic-max, no downward correction).
+func TestGetLatestBlockForCacheFinalization_ConsensusOrZero(t *testing.T) {
+	clk := &manualClock{t: time.Unix(1_700_000_000, 0)}
+	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
+		BucketWidth:      2,
+		OutlierThreshold: 100,
+		StalenessWindow:  10 * time.Second,
+		TTL:              10 * time.Second,
+	}, clk.now)
+
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		chainState:     cs,
+	}
+
+	// A fresh optimistic tip and a seeded bootstrap atomic exist — but with no consensus
+	// baseline, finalization must see 0 (under-finalize, the safe direction), not either value.
+	rpcss.latestBlockHeight.Store(1000)
+	cs.SetLatestBlock(1050)
+	require.Equal(t, uint64(0), rpcss.getLatestBlockForCacheFinalization(),
+		"no consensus baseline → strict 0: neither the optimistic tip nor the atomic may finalize")
+
+	// A strict majority forms → finalization measures against the consensus baseline.
+	cs.Recompute([]chainstate.BlockObservation{
+		{URL: "a", Block: 1040, ObservedAt: clk.now()},
+		{URL: "b", Block: 1040, ObservedAt: clk.now()},
+	})
+	require.Equal(t, uint64(1040), rpcss.getLatestBlockForCacheFinalization(),
+		"a fresh strict-majority baseline is the finalization tip")
+
+	// The baseline ages past TTL → strict 0 again (never a frozen value).
+	clk.advance(11 * time.Second)
+	require.Equal(t, uint64(0), rpcss.getLatestBlockForCacheFinalization(),
+		"a TTL-expired baseline must report 0, not a frozen value")
+
+	// Defensive path: no ChainState wired at all → 0.
+	rpcss.chainState = nil
+	require.Equal(t, uint64(0), rpcss.getLatestBlockForCacheFinalization())
 }
 
 // TestRecomputeChainStateConsensus_EmptySnapshotClearsBaseline covers MAG-2160 Finding 5: the
@@ -231,10 +276,77 @@ func TestCacheServedReply_DoesNotPoisonBootstrapAtomic(t *testing.T) {
 		"Finding 1: a cache-served reply (no attributed endpoint) must not move the bootstrap atomic")
 }
 
+// TestHarvest_BootstrapAtomicGatedOnChainStateVerdict locks the chain-level gate on the
+// router-wide bootstrap atomic: a relay-harvested tip that ChainState REJECTS as an anti-lie
+// outlier must not ratchet latestBlockHeight (monotonic-max, no downward correction), even
+// though it passes its own per-endpoint store guard. Without the gate, one lying-high harvest
+// poisons getLatestBlockBestEffort → archive routing for the life of the process whenever
+// ChainState is TTL-stale.
+func TestHarvest_BootstrapAtomicGatedOnChainStateVerdict(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
+		BucketWidth:      2,
+		OutlierThreshold: 100,
+		StalenessWindow:  10 * time.Second,
+		TTL:              10 * time.Second,
+	}, (&manualClock{t: time.Unix(1_700_000_000, 0)}).now)
+
+	parser := newRealChainParserForHarvest(t, "ETH1")
+	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainParser:      parser,
+		ChainID:          "ETH1",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 200 * time.Millisecond,
+		BlocksToSave:     1,
+		// Production wiring (rpcsmartrouter_server.go OnTipObservation): every accepted
+		// poll/relay observation drives the per-chain ChainState tip.
+		OnTipObservation: func(block int64) { cs.SetLatestBlock(block) },
+	})
+	t.Cleanup(m.Stop)
+
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		chainParser:                 parser,
+		endpointChainTrackerManager: m,
+		chainState:                  cs,
+	}
+
+	url := "http://ep:8545"
+	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	_, err := m.GetOrCreateTracker(ep, nil)
+	require.NoError(t, err)
+	gen, ok := m.ObservationGeneration(url)
+	require.True(t, ok)
+
+	// GET_BLOCKNUM (eth_blockNumber): the tip-eligible method whose result IS the node's tip.
+	cm := &mockChainMessage{api: &spectypes.Api{Name: "eth_blockNumber"}, requestedBlock: spectypes.LATEST_BLOCK}
+
+	// An honest tip-eligible harvest ratchets the atomic (ChainState accepts it).
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1000}, gen, "provider1")
+	require.Equal(t, uint64(1000), rpcss.latestBlockHeight.Load(), "an accepted harvest seeds the bootstrap atomic")
+
+	// A lying-high harvest passes the per-endpoint store guard (higher + newer) but ChainState
+	// rejects it (fresh-tip anti-lie guard) → the atomic must NOT ratchet.
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1_000_000}, gen, "provider1")
+	require.Equal(t, uint64(1000), rpcss.latestBlockHeight.Load(),
+		"a harvest ChainState rejects as an outlier must not ratchet the monotonic atomic")
+
+	// A plausible advance flows normally again.
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1050}, gen, "provider1")
+	require.Equal(t, uint64(1050), rpcss.latestBlockHeight.Load(), "a plausible advance still ratchets the atomic")
+}
+
 // TestSiteC_SyncReferenceIsConsensusBaseline documents the MAG-2160 Finding 2 contract Site C
-// depends on: sync scoring reads GetConsensusBaseline (the strict-majority reference), and when
-// no fresh majority exists the call returns ok=false so the inline syncGap stays 0 — an endpoint
-// is never penalized against the optimistic observed tip of a lone reporter.
+// depends on: sync scoring prefers GetConsensusBaseline (the strict-majority reference); when no
+// fresh majority exists the call returns ok=false and Site C falls back to the outlier-guarded
+// OBSERVED tip (GetLatestBlock) — so a 2-endpoint pod whose laggard destroys the majority still
+// detects the lag (the laggard reads its real distance from the guarded tip), while a pod WITH a
+// fresh majority is never penalized against the optimistic tip of a lone racer (the baseline wins).
 func TestSiteC_SyncReferenceIsConsensusBaseline(t *testing.T) {
 	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
 
@@ -244,11 +356,13 @@ func TestSiteC_SyncReferenceIsConsensusBaseline(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int64(1099), observed)
 
-	// No majority yet → Site C reads no baseline → syncGap would be 0 (no penalty).
+	// No majority yet → GetConsensusBaseline reports none. Site C then falls back to the
+	// observed tip (the fallback is exercised in TestSyncGapAgainstReference / the no-baseline
+	// pod case); here we pin only that consensus is genuinely absent so the fallback path runs.
 	_, ok = cs.GetConsensusBaseline()
-	require.False(t, ok, "Site C must not fall back to the observed tip when there is no consensus")
+	require.False(t, ok, "no fresh majority yet → consensus baseline is absent")
 
-	// A strict majority sits at 1000. Site C now scores against 1000, NOT the observed 1099 — so a
+	// A strict majority sits at 1000. Site C now PREFERS 1000 over the observed 1099 — so a
 	// node sitting at 1000 has syncGap 0, not a bogus 99.
 	now := time.Now()
 	cs.Recompute([]chainstate.BlockObservation{
@@ -258,7 +372,91 @@ func TestSiteC_SyncReferenceIsConsensusBaseline(t *testing.T) {
 	})
 	baseline, ok := cs.GetConsensusBaseline()
 	require.True(t, ok)
-	require.Equal(t, int64(1000), baseline, "Site C scores against the majority baseline, not the lone optimistic tip")
+	require.Equal(t, int64(1000), baseline, "Site C prefers the majority baseline over the lone optimistic tip")
+}
+
+// TestSyncGapAgainstReference locks the pure gap math Site C relies on, including the no-baseline
+// fallback's shared clamp (MAG-2160 Finding 2 fix): reference − endpointLatest, zeroed when the
+// endpoint is within BucketWidth of the reference (in-cluster / keeping up), when either input is
+// unknown, or when the endpoint is ahead of the reference.
+func TestSyncGapAgainstReference(t *testing.T) {
+	const bucketWidth = int64(2)
+	cases := []struct {
+		name           string
+		reference      int64
+		endpointLatest int64
+		want           int64
+	}{
+		{"laggard charged real distance", 1000, 900, 100},
+		{"within bucket width keeps up", 1000, 998, 0},
+		{"exactly bucket width keeps up", 1000, 998, 0},
+		{"endpoint ahead clamps to zero", 1000, 1005, 0},
+		{"unknown reference → no penalty", 0, 900, 0},
+		{"unknown endpoint → no penalty", 1000, 0, 0},
+		{"just past bucket width is charged", 1000, 997, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, syncGapAgainstReference(tc.reference, tc.endpointLatest, bucketWidth))
+		})
+	}
+}
+
+// TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip is the Finding 2 regression: on a
+// 2-endpoint pod whose laggard destroys the strict majority, Site C must still charge the laggard
+// its lag against the outlier-guarded observed tip (not skip the check, leaving it forever synced).
+func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
+	parser := newRealChainParserForHarvest(t, "ETH1")
+	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainParser:      parser,
+		ChainID:          "ETH1",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 200 * time.Millisecond,
+		BlocksToSave:     1,
+		OnTipObservation: func(block int64) { cs.SetLatestBlock(block) },
+	})
+	t.Cleanup(m.Stop)
+
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		chainParser:                 parser,
+		endpointChainTrackerManager: m,
+		chainState:                  cs,
+	}
+
+	leaderURL, laggardURL := "http://leader:8545", "http://laggard:8545"
+	cm := &mockChainMessage{api: &spectypes.Api{Name: "eth_blockNumber"}, requestedBlock: spectypes.LATEST_BLOCK}
+	for _, url := range []string{leaderURL, laggardURL} {
+		ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+		_, err := m.GetOrCreateTracker(ep, nil)
+		require.NoError(t, err)
+		gen, ok := m.ObservationGeneration(url)
+		require.True(t, ok)
+		block := int64(1000)
+		if url == laggardURL {
+			block = 900 // 100 behind → beyond BucketWidth, destroys the 2-node majority by itself
+		}
+		rpcss.harvestAndUpdateTipFromRelay(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, cm, &pairingtypes.RelayReply{LatestBlock: block}, gen, url)
+	}
+
+	// The two nodes are 100 apart → no strict-majority cluster forms.
+	rpcss.recomputeChainStateConsensus()
+	_, hasBaseline := cs.GetConsensusBaseline()
+	require.False(t, hasBaseline, "a 2-node pod split by 100 blocks forms no consensus")
+
+	// Observed tip is the leader's 1000 (outlier-guarded). Site C falls back to it: the leader
+	// keeps up (gap 0), the laggard is charged its real distance — lag detection survives.
+	require.Equal(t, int64(0), rpcss.endpointSyncGap(leaderURL, "leader", ctx),
+		"the leader at the observed tip keeps up")
+	require.Equal(t, int64(100), rpcss.endpointSyncGap(laggardURL, "laggard", ctx),
+		"Finding 2: the laggard is charged its lag against the observed tip even with no baseline")
 }
 
 // TestSiteC_InClusterEndpointChargedNoSyncGap covers PR #143: the baseline is the winning
