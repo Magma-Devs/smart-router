@@ -765,9 +765,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 						utils.LogAttr("latestBlock", relayResult.Reply.LatestBlock),
 						utils.LogAttr("endpoint", relayResult.ProviderInfo.ProviderAddress),
 					)
-					if relayResult.Reply.LatestBlock > 0 {
-						rpcss.updateLatestBlockHeight(uint64(relayResult.Reply.LatestBlock), relayResult.ProviderInfo.ProviderAddress)
-					}
+					// Do NOT ratchet the bootstrap atomic here. This crafted GET_BLOCKNUM relay
+					// already flowed through sendRelayToEndpoint → sendRelayToDirectEndpoints →
+					// harvestAndUpdateTipFromRelay, which updates the atomic ONLY when ChainState
+					// accepts the block (the anti-lie gate). A direct updateLatestBlockHeight here
+					// bypassed that gate, so a lying-high health-relay response ChainState rejected
+					// still permanently ratcheted the monotonic atomic — and getLatestBlockBestEffort
+					// serves that poison to archive routing during any TTL-stale window. The gated
+					// harvest is the single atomic-update path; this call was a redundant bypass.
 					rpcss.relaysMonitor.LogRelay()
 					success = true
 					// If this is the first time we send relays, we want to send all of them, instead of break on first successful relay
@@ -1681,16 +1686,17 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 			endpointURL = drsc.Endpoint.NetworkAddress
 		}
 
-		// Use the FRESHEST of the two per-endpoint tips (MAG-2160 Finding 6, same rationale as
-		// Site B): see freshestEndpointTip. Preferring the poll atomic and only falling back when
-		// it is exactly 0 (the old logic) rejected a perfectly current, relay-fed endpoint whose
-		// poll atomic was frozen by the traffic gate — "all endpoints failed consistency
-		// pre-validation" on a pod that is actually fine.
+		// Prefer the endpointtip store (the single source of truth), falling back to the poll
+		// atomic only when the store is empty (MAG-2160 Finding 6 + follow-up): see
+		// endpointTipPreferStore. The old atomic-then-store-if-0 logic rejected a current relay-fed
+		// endpoint whose poll atomic was frozen by the traffic gate; a naive max() would instead
+		// keep a STALE-HIGH atomic winning over a newer lower store tip after a reorg.
 		pollAtomic := int64(0)
 		if rpcss.endpointChainTrackerManager != nil && endpointURL != "" {
 			pollAtomic = rpcss.endpointChainTrackerManager.GetLatestBlockNum(endpointURL)
 		}
-		endpointLatest = freshestEndpointTip(pollAtomic, rpcss.endpointTipBlock(endpointURL))
+		storeTip := rpcss.endpointTipBlock(endpointURL)
+		endpointLatest = endpointTipPreferStore(pollAtomic, storeTip)
 
 		// If we still have no block data, skip validation for this endpoint (allow first relay)
 		if endpointLatest == 0 {
@@ -1725,13 +1731,13 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("endpointLatest", endpointLatest),
 				utils.LogAttr("seenBlock", seenBlock),
-				// Report which source produced the winning (freshest) value, so a frozen poll
-				// atomic vs a relay-fed store tip is distinguishable in the logs.
+				// Report which source produced the value: the store wins whenever it holds a
+				// positive tip (prefer-store), else the poll atomic is the bootstrap fallback.
 				utils.LogAttr("source", func() string {
-					if pollAtomic >= endpointLatest {
-						return "poll_tracker"
+					if storeTip > 0 {
+						return "endpointtip_store"
 					}
-					return "endpointtip_store"
+					return "poll_tracker"
 				}()),
 				utils.LogAttr("GUID", ctx),
 			)
@@ -1796,16 +1802,25 @@ func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavases
 	return rpcss.endpointChainTrackerManager.RecordRelayObservation(endpoint.NetworkAddress, gen, block, time.Now())
 }
 
-// freshestEndpointTip returns the higher of an endpoint's poll-tracker atomic and its
-// endpointtip-store tip (MAG-2160 Finding 6). The store is a SUPERSET of the atomic's freshness
-// — it is fed by BOTH the poll observer AND relay harvest, monotonically, whereas the atomic
-// advances only on real polls. Under the MAG-2159 traffic gate a poll cycle is skipped while
-// served relays keep the endpoint current, so the atomic can freeze below (or sit at 0 beneath) a
-// relay-fed store tip; taking the max picks up the store value there and can never regress (before
-// the store is populated the atomic still wins). A 0 from either side is just "unknown" and loses
-// to any positive value.
-func freshestEndpointTip(pollAtomic, storeTip int64) int64 {
-	if storeTip > pollAtomic {
+// endpointTipPreferStore returns an endpoint's observed tip, PREFERRING the endpointtip store
+// (the documented single source of truth) and falling back to the poll-tracker atomic only when
+// the store has no positive value (MAG-2160 Finding 6 + follow-up review).
+//
+// The store is fed by BOTH the poll observer AND relay harvest under a TIME-monotonic guard, so it
+// always reflects the newest observation — including a newer LOWER block after a reorg/rollback or
+// a stale-tip self-heal. The poll atomic, by contrast, advances only on a real poll that saw a new
+// block (replaceBlocksQueue runs only when gotNewBlock || forked) and never regresses on a plain
+// rollback, so it can sit STALE-HIGH while the store already holds the correct lower tip. Taking
+// max() (the earlier implementation) would then pick the stale atomic and make consistency
+// pre-validation believe a rolled-back endpoint is still caught up. Preferring the store fixes both
+// that reorg case AND the original traffic-gate-frozen case (there the store is the fresher/higher
+// value, so it still wins). The atomic is only a bootstrap fallback for the window before the store
+// has ever been written; a non-positive store value means "unknown", so we defer to the atomic.
+//
+// Safe to return a lower block: the sole caller is consistency pre-validation, where a lower tip
+// means "more likely behind" → a conservative reject, never an over-optimistic pass.
+func endpointTipPreferStore(pollAtomic, storeTip int64) int64 {
+	if storeTip > 0 {
 		return storeTip
 	}
 	return pollAtomic

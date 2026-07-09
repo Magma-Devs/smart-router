@@ -2365,29 +2365,30 @@ func seedEndpointTip(chainID, apiInterface, url string, block int64) {
 	)
 }
 
-// TestFreshestEndpointTip locks the MAG-2160 Finding 6 fix: consistency pre-validation (and the
-// Site B fallback) must read the FRESHEST of the poll-tracker atomic and the endpointtip store,
-// not prefer the atomic and only fall back when it is exactly 0. Under the MAG-2159 traffic gate a
-// relay-fed endpoint's poll atomic freezes below (or at 0 beneath) a fresher store tip; the old
-// "atomic unless 0" logic then rejected a current endpoint. The store must win in that case, and
-// max() must never regress (atomic still wins before the store is populated).
-func TestFreshestEndpointTip(t *testing.T) {
+// TestEndpointTipPreferStore locks the MAG-2160 Finding 6 fix + follow-up review: consistency
+// pre-validation prefers the endpointtip store (the single source of truth) and falls back to the
+// poll-tracker atomic ONLY when the store is empty. The store is fed by both poll and relay under a
+// time-monotonic guard, so it reflects the newest observation — including a newer LOWER block after
+// a reorg. A naive max() would keep a STALE-HIGH atomic winning there, making a rolled-back endpoint
+// look caught up; prefer-store fixes that while still winning the traffic-gate-frozen case (where
+// the store is the fresher/higher value).
+func TestEndpointTipPreferStore(t *testing.T) {
 	cases := []struct {
 		name       string
 		pollAtomic int64
 		storeTip   int64
 		want       int64
 	}{
-		{"frozen atomic below fresh store → store wins (the bug)", 100, 195, 195},
+		{"frozen atomic below fresh store → store wins (traffic gate)", 100, 195, 195},
+		{"reorg: stale-high atomic, newer lower store → store wins (the follow-up bug)", 1000, 900, 900},
 		{"purely relay-fed endpoint: atomic 0, store fresh", 0, 195, 195},
-		{"store not yet populated: atomic wins", 195, 0, 195},
-		{"both known, atomic fresher (poll just ran)", 195, 190, 195},
+		{"store empty: atomic is the bootstrap fallback", 195, 0, 195},
 		{"equal", 195, 195, 195},
-		{"both unknown", 0, 0, 0},
+		{"both unknown (e.g. after a reset that cleared both)", 0, 0, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, freshestEndpointTip(tc.pollAtomic, tc.storeTip))
+			require.Equal(t, tc.want, endpointTipPreferStore(tc.pollAtomic, tc.storeTip))
 		})
 	}
 }

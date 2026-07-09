@@ -171,12 +171,12 @@ func TestEndpointMonitor_ResetAllLatestBlocks(t *testing.T) {
 
 // TestEndpointMonitor_ResetAllLatestBlocks_ClearsEndpointTipStore is the reset-contract
 // regression (10th review finding): ResetLatestBlock only zeroes the tracker's poll atomic,
-// but consistency pre-validation reads the FRESHEST of that atomic and the shared endpointtip
-// store (rpcsmartrouter.freshestEndpointTip). If the reset leaves the store populated, the
-// stale pre-reset block resurfaces via max() and the check keeps gating against exactly the
-// value the reset asked to discard — defeating ResetLatestBlock's documented "consistency sees
-// <= 0 and skips" contract until the next poll happens to overwrite it. ResetAllLatestBlocks
-// must clear the store entry too, so BOTH sources read 0 (unknown) after a reset.
+// but consistency pre-validation prefers the shared endpointtip store over that atomic
+// (rpcsmartrouter.endpointTipPreferStore). If the reset leaves the store populated, the stale
+// pre-reset block resurfaces and the check keeps gating against exactly the value the reset asked
+// to discard — defeating ResetLatestBlock's documented "consistency sees <= 0 and skips" contract
+// until the next poll happens to overwrite it. ResetAllLatestBlocks must clear the store entry
+// too, so BOTH sources read 0 (unknown) after a reset.
 func TestEndpointMonitor_ResetAllLatestBlocks_ClearsEndpointTipStore(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
