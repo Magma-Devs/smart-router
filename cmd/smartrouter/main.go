@@ -31,6 +31,8 @@ func main() {
 	rootCmd.AddCommand(cmdVersion)
 	rootCmd.AddCommand(cache.CreateCacheCobraCommand())
 	rootCmd.AddCommand(rpcsmartrouter.CreateHealthCobraCommand())
+	// streamer: real-time EVM event streaming over WebSocket/webhooks
+	rootCmd.AddCommand(CreateStreamerCommand())
 
 	testCmd := &cobra.Command{
 		Use:   "test",
