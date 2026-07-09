@@ -17,7 +17,7 @@ require (
 
 require (
 	github.com/caio/go-tdigest/v5 v5.0.0
-	github.com/dgraph-io/ristretto/v2 v2.4.0
+	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/fullstorydev/grpcurl v1.8.5
 	github.com/goccy/go-json v0.10.6
 	github.com/gogo/status v1.1.1
