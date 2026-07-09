@@ -489,7 +489,7 @@ func (m *EndpointMonitor) GetLatestBlockData(endpointURL string) (latestBlock in
 // the tracker goroutines. Returns the number of trackers that were reset.
 //
 // ResetLatestBlock alone only zeroes the tracker's poll atomic; the consistency reader
-// takes the FRESHEST of that atomic and the shared endpointtip store (freshestEndpointTip
+// prefers the shared endpointtip store over that atomic (endpointTipPreferStore
 // in rpcsmartrouter). Leaving the store populated would resurrect the pre-reset block —
 // a stale value the atomic's 0 was meant to override — so the check would keep gating
 // against exactly the value the reset asked to discard, defeating ResetLatestBlock's
