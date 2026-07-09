@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -166,4 +167,45 @@ func TestEndpointMonitor_ResetAllLatestBlocks(t *testing.T) {
 		require.Equal(t, int32(1), f.resetCalls.Load(),
 			"tracker %d should have had ResetLatestBlock called exactly once", i)
 	}
+}
+
+// TestEndpointMonitor_ResetAllLatestBlocks_ClearsEndpointTipStore is the reset-contract
+// regression (10th review finding): ResetLatestBlock only zeroes the tracker's poll atomic,
+// but consistency pre-validation reads the FRESHEST of that atomic and the shared endpointtip
+// store (rpcsmartrouter.freshestEndpointTip). If the reset leaves the store populated, the
+// stale pre-reset block resurfaces via max() and the check keeps gating against exactly the
+// value the reset asked to discard — defeating ResetLatestBlock's documented "consistency sees
+// <= 0 and skips" contract until the next poll happens to overwrite it. ResetAllLatestBlocks
+// must clear the store entry too, so BOTH sources read 0 (unknown) after a reset.
+func TestEndpointMonitor_ResetAllLatestBlocks_ClearsEndpointTipStore(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A dedicated chain/interface keeps this case isolated on the process-wide store singleton.
+	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
+		ChainID:          "ETH-reset-store",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 12 * time.Second,
+		BlocksToSave:     10,
+	})
+	require.NotNil(t, m)
+	defer m.Stop()
+
+	const url = "http://reset-store-endpoint:8545"
+	m.trackers[url] = &recordingChainTracker{}
+	key := m.tipKey(url)
+	t.Cleanup(func() { endpointtip.Default().Remove(key) }) // shared-singleton hygiene
+
+	// Seed a stale tip in the shared store, as a prior poll/relay observation would have.
+	require.True(t, endpointtip.Default().Set(key, endpointtip.Tip{
+		Block: 1000, ObservedAt: time.Now(), Source: endpointtip.SourcePoll,
+	}))
+	require.Equal(t, int64(1000), endpointtip.Default().Block(key),
+		"precondition: the store holds the pre-reset block")
+
+	m.ResetAllLatestBlocks()
+
+	require.Equal(t, int64(0), endpointtip.Default().Block(key),
+		"reset must clear the endpointtip store, not just the tracker atomic, so the freshest "+
+			"of the two sources is 0 and consistency pre-validation skips the lag check")
 }
