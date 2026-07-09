@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/cometbft/cometbft v0.38.21
-	github.com/ethereum/go-ethereum v1.17.0
+	github.com/ethereum/go-ethereum v1.17.4
 	github.com/gofiber/fiber/v2 v2.52.14
 	github.com/gofiber/websocket/v2 v2.0.22
 	github.com/gogo/protobuf v1.3.3
