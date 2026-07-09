@@ -483,17 +483,28 @@ func (m *EndpointMonitor) GetLatestBlockData(endpointURL string) (latestBlock in
 	return latestBlock, changeTime, true
 }
 
-// ResetAllLatestBlocks calls ResetLatestBlock on every registered tracker so the
-// next consistency pre-validation skips the lag check until the poll loop
-// repopulates the cached value. Used by /debug/reset-scores to clear per-
-// endpoint chain-tracker pollution without restarting the tracker goroutines.
-// Returns the number of trackers that were reset.
+// ResetAllLatestBlocks clears BOTH per-endpoint tip sources so the next consistency
+// pre-validation skips the lag check until the poll loop repopulates them. Used by
+// /debug/reset-scores to clear per-endpoint chain-tracker pollution without restarting
+// the tracker goroutines. Returns the number of trackers that were reset.
+//
+// ResetLatestBlock alone only zeroes the tracker's poll atomic; the consistency reader
+// takes the FRESHEST of that atomic and the shared endpointtip store (freshestEndpointTip
+// in rpcsmartrouter). Leaving the store populated would resurrect the pre-reset block —
+// a stale value the atomic's 0 was meant to override — so the check would keep gating
+// against exactly the value the reset asked to discard, defeating ResetLatestBlock's
+// "consistency sees <= 0 and skips" contract until the next poll happens to overwrite it.
+// We Remove the store entry (not Set 0): the store ignores non-positive writes and its
+// time-monotonic guard cannot represent "cleared", so removal is the only way to zero it.
+// endpointtip's lock is a leaf that never calls back into the monitor, so taking it under
+// m.mu (read) introduces no lock-order inversion — same idiom as RemoveTracker/Stop.
 func (m *EndpointMonitor) ResetAllLatestBlocks() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	count := 0
-	for _, t := range m.trackers {
+	for url, t := range m.trackers {
 		t.ResetLatestBlock()
+		endpointtip.Default().Remove(m.tipKey(url))
 		count++
 	}
 	return count
