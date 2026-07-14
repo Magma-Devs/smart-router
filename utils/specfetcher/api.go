@@ -9,7 +9,11 @@ import (
 // FetchSpecFromGitHub fetches a spec from a GitHub repository.
 // This is a convenience function that creates a new Fetcher with the provided token.
 //
-// URL format: https://github.com/{owner}/{repo}/tree/{branch}/{path}
+// URL formats:
+//   - https://github.com/{owner}/{repo}/tree/{branch}/{path}
+//   - https://github.com/{owner}/{repo} (default branch, repository root)
+//   - https://codeload.github.com/{owner}/{repo}/tar.gz/{ref}
+//
 // Example: https://github.com/magma-Devs/smart-router-specs/tree/main/specs
 func FetchSpecFromGitHub(ctx context.Context, repoURL, chainID, token string) (types.Spec, error) {
 	config := DefaultConfig()
@@ -21,7 +25,11 @@ func FetchSpecFromGitHub(ctx context.Context, repoURL, chainID, token string) (t
 // FetchSpecFromGitLab fetches a spec from a GitLab repository.
 // This is a convenience function that creates a new Fetcher with the provided token.
 //
-// URL format: https://gitlab.com/{owner}/{repo}/-/tree/{branch}/{path}
+// URL formats:
+//   - https://gitlab.com/{owner}/{repo}/-/tree/{branch}/{path}
+//   - https://gitlab.com/{owner}/{repo} (default branch, repository root; gitlab.com only)
+//   - https://gitlab.com/{owner}/{repo}/-/archive/{ref}/{name}.tar.gz
+//
 // Example: https://gitlab.com/myorg/specs/-/tree/main/specs
 //
 // Note: For private repositories, the token must have at least "Reporter" role
