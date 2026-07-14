@@ -43,7 +43,15 @@ const (
 	//   - Local file:      --use-static-spec ./specs/eth.json
 	//   - Local directory: --use-static-spec ./specs/
 	//   - GitHub URL:      --use-static-spec https://github.com/owner/repo/tree/branch/path/to/specs
+	//   - GitHub URL:      --use-static-spec https://github.com/owner/repo (default branch, repo root)
+	//   - GitHub tarball:  --use-static-spec https://codeload.github.com/owner/repo/tar.gz/refs/heads/main
 	//   - GitLab URL:      --use-static-spec https://gitlab.com/owner/repo/-/tree/branch/path/to/specs
+	//   - GitLab URL:      --use-static-spec https://gitlab.com/owner/repo (default branch, repo root)
+	//   - GitLab tarball:  --use-static-spec https://gitlab.com/owner/repo/-/archive/main/repo-main.tar.gz
+	//
+	// Public GitHub/GitLab repositories are fetched as a single tarball download
+	// (not metered by the REST API rate limits), so no token is needed. The
+	// listing-API flow remains as an automatic fallback.
 	//
 	// Multiple local files can be specified either as separate flags or comma-separated:
 	//   --use-static-spec file1.json --use-static-spec file2.json
@@ -58,9 +66,10 @@ const (
 	UseStaticSpecFlag = "use-static-spec"
 
 	// GitHubTokenFlag is a GitHub personal access token for accessing private repositories.
-	// Also provides higher API rate limits (5,000 requests/hour vs 60 for unauthenticated).
-	// Required URL format: https://github.com/{owner}/{repo}/tree/{branch}/{path}
-	// Example: --github-token ghp_xxxxxxxxxxxx
+	// Public repositories need no token: specs are fetched via a codeload tarball
+	// download, which is not metered by the REST API rate limit. The token only
+	// matters for private repositories and for the contents-API fallback path.
+	// Example: --github-token github_pat_xxxxxxxxxxxx
 	GitHubTokenFlag = "github-token"
 
 	// GitLabTokenFlag is a GitLab personal access token for accessing private repositories.
