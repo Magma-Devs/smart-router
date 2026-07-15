@@ -13,7 +13,45 @@ import (
 )
 
 // fetchFromGitHub fetches all specs from a GitHub repository.
+//
+// It first downloads the repository tarball from codeload.github.com — a
+// single request that is not metered by the REST API rate limit (60 req/hour
+// unauthenticated per IP) — and falls back to the contents-API listing flow
+// if the tarball fetch fails.
 func (f *Fetcher) fetchFromGitHub(ctx context.Context, info *RepoInfo) (map[string]types.Spec, error) {
+	specs, tarballErr := f.fetchFromGitHubTarball(ctx, info)
+	if tarballErr == nil {
+		return specs, nil
+	}
+
+	utils.LavaFormatWarning("GitHub tarball fetch failed, falling back to contents API", tarballErr,
+		utils.LogAttr("repo", info.ProjectPath))
+
+	specs, apiErr := f.fetchFromGitHubAPI(ctx, info)
+	if apiErr != nil {
+		return nil, fmt.Errorf("GitHub fetch failed (tarball: %v): %w", tarballErr, apiErr)
+	}
+	return specs, nil
+}
+
+// fetchFromGitHubTarball downloads the repository tarball and parses every
+// .json spec file directly under the configured path.
+func (f *Fetcher) fetchFromGitHubTarball(ctx context.Context, info *RepoInfo) (map[string]types.Spec, error) {
+	return f.fetchTarball(ctx, f.buildGitHubTarballURL(info), info.Path, f.setGitHubHeaders)
+}
+
+// buildGitHubTarballURL constructs the codeload.github.com tarball URL for the repository ref.
+func (f *Fetcher) buildGitHubTarballURL(info *RepoInfo) string {
+	ref := info.Branch
+	if ref == "" {
+		ref = "HEAD"
+	}
+	return fmt.Sprintf("https://codeload.github.com/%s/tar.gz/%s", info.ProjectPath, ref)
+}
+
+// fetchFromGitHubAPI fetches all specs via the GitHub contents API — one
+// rate-limited listing call plus a raw.githubusercontent.com download per file.
+func (f *Fetcher) fetchFromGitHubAPI(ctx context.Context, info *RepoInfo) (map[string]types.Spec, error) {
 	// Build the API URL for listing directory contents
 	apiURL := f.buildGitHubAPIURL(info)
 
@@ -66,8 +104,13 @@ func (f *Fetcher) buildGitHubAPIURL(info *RepoInfo) string {
 	parts := strings.SplitN(info.ProjectPath, "/", 2)
 	owner, repo := parts[0], parts[1]
 
-	return fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s",
-		owner, repo, info.Path, info.Branch)
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s",
+		owner, repo, info.Path)
+	// An empty branch means the default branch, which the API uses when ref is omitted.
+	if info.Branch != "" {
+		apiURL += "?ref=" + info.Branch
+	}
+	return apiURL
 }
 
 // buildGitHubRawURL constructs a raw.githubusercontent.com URL for file content.
@@ -75,12 +118,17 @@ func (f *Fetcher) buildGitHubRawURL(info *RepoInfo, filename string) string {
 	parts := strings.SplitN(info.ProjectPath, "/", 2)
 	owner, repo := parts[0], parts[1]
 
+	ref := info.Branch
+	if ref == "" {
+		ref = "HEAD" // raw.githubusercontent.com resolves HEAD to the default branch
+	}
+
 	if info.Path != "" {
 		return fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s/%s",
-			owner, repo, info.Branch, info.Path, filename)
+			owner, repo, ref, info.Path, filename)
 	}
 	return fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s",
-		owner, repo, info.Branch, filename)
+		owner, repo, ref, filename)
 }
 
 // setGitHubHeaders sets the appropriate headers for GitHub API requests.

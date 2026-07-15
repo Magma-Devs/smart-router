@@ -247,9 +247,21 @@ func (ws *WeightedSelector) CalculateScore(
 	syncContribution := syncScore * ws.syncWeight
 	stakeContribution := stakeScore * ws.stakeWeight
 
-	// Ensure minimum selection chance
+	// MAG-2237: collapse a provider whose availability has fallen BELOW the acceptable minimum
+	// (raw availability < score.MinAcceptableAvailability) to the starvation floor. Latency and sync
+	// move ONLY on a successful relay/probe (see provider_optimizer.appendRelayData), so a provider
+	// failing every relay freezes them at its last-healthy values — which otherwise leaves a
+	// fully-dead endpoint scoring ~2/3 of a healthy peer and still drawing substantial organic
+	// traffic. We must not reward stale latency/sync once availability has collapsed; recovery is
+	// driven by the proactive prober (cheap polls), not by continuing to route real traffic to a
+	// dead node. The bound is strict: a provider AT exactly the minimum-acceptable availability is
+	// degraded-but-serving (it still succeeds that fraction of relays), not dead, so it keeps a real
+	// composite — only genuine failure (availability decaying well below the floor) collapses.
+	availabilityDead := availability < score.MinAcceptableAvailability
+
+	// Ensure minimum selection chance (and apply the availability-dead collapse above).
 	wasAdjusted := false
-	if composite < ws.minSelectionChance {
+	if availabilityDead || composite < ws.minSelectionChance {
 		wasAdjusted = true
 		composite = ws.minSelectionChance
 	}
@@ -280,6 +292,7 @@ func (ws *WeightedSelector) CalculateScore(
 		utils.LogAttr("stake_contribution", stakeContribution),
 		utils.LogAttr("composite_score", composite),
 		utils.LogAttr("min_chance_adjusted", wasAdjusted),
+		utils.LogAttr("availability_dead", availabilityDead),
 	)
 
 	return composite
