@@ -623,7 +623,14 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 	counterFor := func(t *testing.T, name, method, labelName, labelValue string) float64 {
 		t.Helper()
 		mfs, gerr := prometheus.DefaultGatherer.Gather()
-		require.NoError(t, gerr)
+		if gerr != nil {
+			// No require/FailNow here: this helper runs inside require.Eventually condition
+			// closures, which testify executes on a separate goroutine — FailNow from a non-test
+			// goroutine is undefined (the go-require pitfall). Errorf is goroutine-safe and the
+			// sentinel keeps the condition false so the failure surfaces with the real cause.
+			t.Errorf("prometheus gather failed: %v", gerr)
+			return -1
+		}
 		var total float64
 		for _, mf := range mfs {
 			if mf.GetName() != name {
@@ -702,7 +709,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		stragglerBefore := stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed)
 		mismatchBefore := mismatchCount(t, method, "g3")
 		rp, consensusHash := newCVProcessorWithConsensus(t)
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"})
 		pushSuccess(rp, "p3", "g3", dissentBody)
 		// Synchronize on the mismatch counter — the LATER of record()'s two increments — so the
 		// straggler assertion below cannot land in the window between them.
@@ -717,8 +724,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		stragglerBefore := stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed)
 		mismatchBefore := mismatchCount(t, method, "g3")
 		rp, consensusHash := newCVProcessorWithConsensus(t)
-		rp.SetCrossValidationQueriedProviders([]string{"p1", "p2", "p3", "p4"})
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3", "p4"})
 		pushSuccess(rp, "p3", "g3", dissentBody)
 		pushSuccess(rp, "p4", "g3", dissentBody)
 		require.Eventually(t, func() bool {
@@ -736,8 +742,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		// appendHeadersToRelayResult would have counted on the mismatch metric.
 		pushSuccess(rp, "p0", "g3", dissentBody)
 		require.Len(t, rp.NodeResults(), 3)
-		rp.SetCrossValidationQueriedProviders([]string{"p0", "p1", "p2", "p3"})
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"})
 		// The same group's LATE dissent must not increment mismatch again (the launcher seeds the
 		// dedup set from the received outliers), while its straggler outcome is still recorded.
 		pushSuccess(rp, "p3", "g3", dissentBody)
@@ -752,7 +757,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		stragglerBefore := stragglerCount(t, method, common.CrossValidationStragglerOutcomeAgreed)
 		mismatchBefore := mismatchCount(t, method, "g3")
 		rp, consensusHash := newCVProcessorWithConsensus(t)
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"})
 		pushSuccess(rp, "p3", "g3", consensusBody)
 		require.Eventually(t, func() bool {
 			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeAgreed) == stragglerBefore+1
@@ -766,7 +771,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		mismatchBefore := mismatchCount(t, method, "g3")
 		rp, consensusHash := newCVProcessorWithConsensus(t)
 		nonDeterministicAPI := &spectypes.Api{Name: method, Category: spectypes.SpecCategory{Deterministic: false}}
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: nonDeterministicAPI, requestedBlock: 100}, method)
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: nonDeterministicAPI, requestedBlock: 100}, method, []string{"p3"})
 		pushSuccess(rp, "p3", "g3", dissentBody)
 		require.Eventually(t, func() bool {
 			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed) == stragglerBefore+1
@@ -779,11 +784,33 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		stragglerBefore := stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed)
 		rp, consensusHash := newCVProcessorWithConsensus(t)
 		// CrossValidation 1 < threshold 2 => no consensus, nothing to compare stragglers against.
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 1), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 1), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"})
 		pushSuccess(rp, "p3", "g3", dissentBody)
 		time.Sleep(100 * time.Millisecond)
 		require.Equal(t, stragglerBefore, stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed), "no watcher on failed cross-validation")
 	})
+}
+
+// TestDetachedRelayBudget pins the per-provider cap on concurrent detached CV relays (MAG-2187
+// review finding 8): reservations succeed up to the cap, fail beyond it, and releases free slots;
+// the tracking map drops providers at zero outstanding so it never grows unbounded.
+func TestDetachedRelayBudget(t *testing.T) {
+	budget := detachedRelayBudget{}
+	const budgetCap = 3
+	for i := 0; i < budgetCap; i++ {
+		require.True(t, budget.tryReserve("p1", budgetCap), "reservation %d within the cap must succeed", i+1)
+	}
+	require.False(t, budget.tryReserve("p1", budgetCap), "reservation beyond the cap must fail")
+	require.True(t, budget.tryReserve("p2", budgetCap), "the cap is per provider")
+
+	budget.release("p1")
+	require.True(t, budget.tryReserve("p1", budgetCap), "a released slot is reusable")
+
+	for i := 0; i < budgetCap; i++ {
+		budget.release("p1")
+	}
+	budget.release("p2")
+	require.Empty(t, budget.outstanding, "providers with no outstanding detached relays are dropped from the map")
 }
 
 // cvRequestCounter sums a named cross-validation counter over its `method` label across the default

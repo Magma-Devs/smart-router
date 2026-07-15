@@ -575,6 +575,18 @@ func canonicalResponseHash(data []byte) [32]byte {
 	return sha256.Sum256(canonical)
 }
 
+// responseContentHash is the single content-hash rule for every cross-validation comparison:
+// the canonical hash for non-empty data, the zero sentinel for empty/nil (so an empty reply only
+// ever matches the nil-fallback consensus). handleResponse, the responsesCrossValidation
+// recompute fallback, and the straggler classifier all go through here — one rule, no manual
+// mirroring to drift (a canonicalization change like MAG-2062 lands everywhere at once).
+func responseContentHash(data []byte) [32]byte {
+	if len(data) == 0 {
+		return [32]byte{}
+	}
+	return canonicalResponseHash(data)
+}
+
 func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	// Cache the SHA256 of the reply data BEFORE storing it. ResultsManager keeps RelayResult BY VALUE, so
 	// if we hashed after SetResponse the stored copy in successResults would keep the zero hash and the
@@ -586,10 +598,10 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	// The winner path in responsesCrossValidation recomputes on a zero hash, so a missed cache stays correct.
 	if rp.selection == CrossValidation && response != nil && response.RelayResult.GetReply() != nil && len(response.RelayResult.GetReply().GetData()) > 0 {
 		// Canonicalize before hashing so semantically-identical responses that
-		// differ only in JSON key order share a quorum bucket (MAG-2062). Must
-		// match the fallback hashing in responsesCrossValidation, or the cached
-		// and recomputed hashes would disagree.
-		response.RelayResult.ResponseHash = canonicalResponseHash(response.RelayResult.GetReply().GetData())
+		// differ only in JSON key order share a quorum bucket (MAG-2062).
+		// responseContentHash is the shared rule with the responsesCrossValidation
+		// fallback and the straggler classifier.
+		response.RelayResult.ResponseHash = responseContentHash(response.RelayResult.GetReply().GetData())
 	}
 
 	nodeError := rp.ResultsManager.SetResponse(response, rp.RelayStateMachine.GetProtocolMessage())
@@ -707,17 +719,77 @@ func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pe
 			Delay:           time.Since(start),
 		})
 	}
+	// resolveFromRecorded resolves pending providers whose response never reaches this watcher's
+	// channel reads because another reader consumed it: a state-machine reader still blocked on
+	// rp.responses when processing timed out drains responses while dying (select prefers ready
+	// channels over its cancelled ctx pseudo-randomly). Whatever it consumed went through
+	// handleResponse and is recorded in the ResultsManager, so classify from the stored result
+	// instead of misreporting the provider as not-received. Checked at watcher start (theft happens
+	// at reply time) and again at give-up as the final word before declaring not-received.
+	resolveFromRecorded := func() {
+		if len(pending) == 0 {
+			return
+		}
+		successResults, nodeErrorResults, protocolErrorResults := rp.GetResultsData()
+		for _, result := range successResults {
+			addr := result.ProviderInfo.ProviderAddress
+			if _, watched := pending[addr]; !watched {
+				continue
+			}
+			delete(pending, addr)
+			// handleResponse cached ResponseHash via responseContentHash (zero for empty replies),
+			// so this is the same comparison classifyStragglerResponse would have made.
+			outcome := common.CrossValidationStragglerOutcomeDisagreed
+			if result.ResponseHash == consensusHash {
+				outcome = common.CrossValidationStragglerOutcomeAgreed
+			}
+			record(CrossValidationStragglerResult{
+				ProviderAddress: addr,
+				ProviderGroup:   result.ProviderInfo.ProviderGroup,
+				Outcome:         outcome,
+				Delay:           time.Since(start),
+			})
+		}
+		for _, result := range nodeErrorResults {
+			addr := result.ProviderInfo.ProviderAddress
+			if _, watched := pending[addr]; !watched {
+				continue
+			}
+			delete(pending, addr)
+			record(CrossValidationStragglerResult{
+				ProviderAddress: addr,
+				ProviderGroup:   result.ProviderInfo.ProviderGroup,
+				Outcome:         common.CrossValidationStragglerOutcomeNodeError,
+				Delay:           time.Since(start),
+			})
+		}
+		for _, relayError := range protocolErrorResults {
+			addr := relayError.ProviderInfo.ProviderAddress
+			if _, watched := pending[addr]; !watched {
+				continue
+			}
+			delete(pending, addr)
+			record(CrossValidationStragglerResult{
+				ProviderAddress: addr,
+				ProviderGroup:   relayError.ProviderInfo.ProviderGroup,
+				Outcome:         common.CrossValidationStragglerOutcomeProtocolError,
+				Delay:           time.Since(start),
+			})
+		}
+	}
 	// giveUp runs on deadline/cancel. It first drains responses already sitting in the buffered
 	// channel: select picks among ready cases pseudo-randomly, so the timer can win a round even
 	// though a response arrived in time (and record()'s log+metric I/O can push the loop past the
 	// deadline while later responses sit buffered) — those must be classified by content, not
-	// misreported as not-received. Only providers with genuinely no response are reported missing.
+	// misreported as not-received. Then it consults the recorded results (responses another reader
+	// consumed). Only providers with genuinely no response are reported missing.
 	giveUp := func() {
 		for len(pending) > 0 {
 			select {
 			case response := <-rp.responses:
 				resolve(response)
 			default:
+				resolveFromRecorded()
 				for addr := range pending {
 					record(CrossValidationStragglerResult{
 						ProviderAddress: addr,
@@ -729,6 +801,7 @@ func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pe
 			}
 		}
 	}
+	resolveFromRecorded()
 	for len(pending) > 0 {
 		select {
 		case response := <-rp.responses:
@@ -743,9 +816,9 @@ func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pe
 	}
 }
 
-// classifyStragglerResponse maps a late cross-validation response to its straggler outcome. Hashing must
-// mirror handleResponse: canonicalResponseHash for non-empty data, the zero sentinel for empty/nil — so a
-// late empty reply only "agrees" with a nil-fallback consensus, exactly as it would have at quorum time.
+// classifyStragglerResponse maps a late cross-validation response to its straggler outcome. Hashing
+// goes through responseContentHash — the same rule as handleResponse — so a late empty reply only
+// "agrees" with a nil-fallback consensus, exactly as it would have at quorum time.
 func classifyStragglerResponse(response *RelayResponse, consensusHash [32]byte, protocolMessage chainlib.ProtocolMessage) string {
 	if response.Err != nil {
 		return common.CrossValidationStragglerOutcomeProtocolError
@@ -759,11 +832,7 @@ func classifyStragglerResponse(response *RelayResponse, consensusHash [32]byte, 
 			return common.CrossValidationStragglerOutcomeNodeError
 		}
 	}
-	var hash [32]byte
-	if len(reply.Data) > 0 {
-		hash = canonicalResponseHash(reply.Data)
-	}
-	if hash == consensusHash {
+	if responseContentHash(reply.Data) == consensusHash {
 		return common.CrossValidationStragglerOutcomeAgreed
 	}
 	return common.CrossValidationStragglerOutcomeDisagreed
@@ -926,10 +995,10 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 			// This eliminates redundant SHA256 computation for responses already hashed
 			hash := result.ResponseHash
 			if hash == [32]byte{} {
-				// Fallback: hash not cached (e.g., for old code paths or error
-				// cases). Must use the same canonicalization as handleResponse so
-				// the cached and recomputed hashes agree (MAG-2062).
-				hash = canonicalResponseHash(result.Reply.Data)
+				// Fallback: hash not cached (e.g., for old code paths or error cases).
+				// responseContentHash is the shared rule with handleResponse, so the
+				// cached and recomputed hashes agree (MAG-2062).
+				hash = responseContentHash(result.Reply.Data)
 			}
 
 			if count, exists := countMap[hash]; exists {

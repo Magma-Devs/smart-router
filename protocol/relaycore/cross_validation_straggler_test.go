@@ -164,6 +164,20 @@ func TestWatchCrossValidationStragglers(t *testing.T) {
 		require.Equal(t, common.CrossValidationStragglerOutcomeAgreed, results[0].Outcome)
 	})
 
+	t.Run("response consumed by another reader is resolved from recorded results", func(t *testing.T) {
+		rp := newCVProcessor()
+		// Simulate the dying state-machine reader (sole-reader race): it consumed the straggler's
+		// response off the channel and recorded it via handleResponse before the watcher started.
+		rp.SetResponse(successResponse("p3", "g3", []byte(`{"jsonrpc":"2.0","id":1,"result":"0xBBBB"}`)))
+		require.Len(t, rp.NodeResults(), 1) // drains the channel into the results manager
+		// The channel is now empty, but the watcher must classify p3 from the recorded result —
+		// immediately, not after burning maxWait — instead of reporting not-received.
+		results := collect(rp, []string{"p3"}, time.Minute)
+		require.Len(t, results, 1)
+		require.Equal(t, "p3", results[0].ProviderAddress)
+		require.Equal(t, common.CrossValidationStragglerOutcomeDisagreed, results[0].Outcome)
+	})
+
 	t.Run("multiple stragglers each resolve once", func(t *testing.T) {
 		rp := newCVProcessor()
 		rp.SetResponse(successResponse("p2", "g2", []byte(`{"jsonrpc":"2.0","id":1,"result":"0xBBBB"}`)))

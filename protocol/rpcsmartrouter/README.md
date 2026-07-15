@@ -264,6 +264,13 @@ relay timeout) and an async watcher compares its late response against the reach
 The watcher only runs when a consensus was reached; on a failed cross-validation there is nothing
 to compare a late response against.
 
+A detached straggler holds its provider session until its relay resolves (bounded by the relay
+timeout + the endpoint's `timeout` override), so concurrent detached relays are **capped per
+provider**: beyond the cap — realistically only a black-holing provider under sustained CV load —
+additional relays stay on the batch context, are cancelled at quorum exit exactly as before this
+feature, and resolve in the watcher as `protocol-error` (never silently dropped). This keeps a dead
+provider from accumulating held sessions toward the per-provider session limit.
+
 ## Usage
 
 ```bash

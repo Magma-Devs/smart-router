@@ -101,6 +101,52 @@ type RPCSmartRouterServer struct {
 	tipApiNamesOnce      sync.Once
 	getBlockNumApiName   string
 	getBlockByNumApiName string
+
+	// cvDetachedBudget bounds concurrent detached CV straggler relays per provider (MAG-2187): a
+	// detached relay holds its session for the full relay bound instead of freeing at quorum exit,
+	// so without a cap a black-holing provider under sustained CV load accumulates held sessions
+	// toward MaxSessionsAllowedPerProvider and starves cross-validation batches. Over-budget relays
+	// fall back to the batch-cancel context (the pre-detachment behavior) and resolve as
+	// protocol-error in the straggler watcher — never silently dropped.
+	cvDetachedBudget detachedRelayBudget
+}
+
+// crossValidationMaxDetachedPerProvider caps concurrent detached straggler relays per provider.
+// Worst case a dead provider holds this many extra sessions for one relay bound — well under
+// MaxSessionsAllowedPerProvider (1000) — while healthy CV traffic (stragglers resolve in ms-s)
+// never approaches it.
+const crossValidationMaxDetachedPerProvider = 64
+
+// detachedRelayBudget tracks the number of in-flight detached CV relays per provider address.
+type detachedRelayBudget struct {
+	lock        sync.Mutex
+	outstanding map[string]int
+}
+
+// tryReserve reserves a detached-relay slot for provider, returning false when the cap is reached.
+func (b *detachedRelayBudget) tryReserve(provider string, budgetCap int) bool {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	if b.outstanding == nil {
+		b.outstanding = map[string]int{}
+	}
+	if b.outstanding[provider] >= budgetCap {
+		return false
+	}
+	b.outstanding[provider]++
+	return true
+}
+
+// release returns a reserved slot; the per-provider entry is dropped at zero so the map only holds
+// providers with live detached relays.
+func (b *detachedRelayBudget) release(provider string) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	if b.outstanding[provider] <= 1 {
+		delete(b.outstanding, provider)
+		return
+	}
+	b.outstanding[provider]--
 }
 
 func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
@@ -505,15 +551,19 @@ func groupsBelowThreshold(groupSizes map[string]int, threshold int) []string {
 // (cvSuccess) and the method is deterministic; node/protocol errors and quorum failures are not content
 // outliers, and non-deterministic methods legitimately differ. A response with no provider address is
 // skipped.
+// crossValidationMismatchEligible is the single admission rule for the mismatch alerting surface,
+// shared by the reply-time outlier path (crossValidationSuccessOutliers) and the async straggler
+// path so the two cannot drift: a content dissent only qualifies on a DETERMINISTIC method
+// (non-deterministic methods legitimately differ) and against a REAL consensus — the nil/empty-reply
+// fallback keeps the zero-hash sentinel, and there is no real content consensus to diverge FROM
+// (comparing substantive responses against it would flag every real responder as an outlier when
+// the empty-reply majority is the anomaly).
+func crossValidationMismatchEligible(deterministic bool, consensusHash [32]byte) bool {
+	return deterministic && consensusHash != ([32]byte{})
+}
+
 func crossValidationSuccessOutliers(successResults []common.RelayResult, consensusHash [32]byte, cvSuccess, deterministic bool) []common.RelayResult {
-	if !cvSuccess || !deterministic {
-		return nil
-	}
-	// When the reached consensus is the nil/empty-reply fallback, consensusHash is left as the zero
-	// sentinel: there is no real content consensus to diverge FROM. Comparing real responses against the
-	// zero hash would flag every substantive responder as a content outlier and inflate mismatch alerts —
-	// yet in that case the empty-reply majority is the anomaly, not the lone real responder. Emit nothing.
-	if consensusHash == ([32]byte{}) {
+	if !cvSuccess || !crossValidationMismatchEligible(deterministic, consensusHash) {
 		return nil
 	}
 	var outliers []common.RelayResult
@@ -1083,12 +1133,12 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		utils.LogAttr("GUID", ctx),
 	)
 
-	rpcss.appendHeadersToRelayResult(ctx, returnedResult, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, err == nil)
+	pendingProviders := rpcss.appendHeadersToRelayResult(ctx, returnedResult, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, err == nil)
 
 	// Start the async straggler watcher AFTER the headers snapshot (MAG-2187): it becomes the responses
-	// channel's sole reader and resolves the pending-providers set against the consensus. No-op when
+	// channel's sole reader and resolves the exact pending set the header just reported. No-op when
 	// nothing is pending or no consensus was reached.
-	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName())
+	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName(), pendingProviders)
 
 	// Cross-validation cache write: per-response writes are skipped in the relay goroutines (a
 	// detached dissenting straggler would land last and overwrite the cache with the data the
@@ -1474,9 +1524,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// are preserved by WithoutCancel. Non-CV selections keep the batch cancel: aborting the hedged
 	// losers on first success is a deliberate resource-saver there. Trade-off: in CV mode a client
 	// disconnect no longer aborts in-flight relays; they run out their bounded timeout.
-	relayParentCtx := ctx
+	detachedParentCtx := ctx
 	if selection == relaycore.CrossValidation {
-		relayParentCtx = context.WithoutCancel(ctx)
+		detachedParentCtx = context.WithoutCancel(ctx)
 
 		// Re-snapshot the queried-providers set to the post-filter survivors. The pre-filter
 		// snapshot in sendRelayToEndpoint includes consistency-filtered endpoints that were
@@ -1511,7 +1561,21 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 
 	// Launch goroutines for each direct RPC endpoint (parallel relay pattern)
 	for endpointAddress, sessionInfo := range sessions {
-		go func(endpointAddress string, sessionInfo *lavasession.SessionInfo) {
+		// Per-endpoint detachment decision: a CV relay detaches only within the provider's budget.
+		// Over budget (the provider is already hoarding detached relays — e.g. black-holing under
+		// sustained CV load), the relay stays on the batch context and is cancelled at quorum exit
+		// like before MAG-2187, freeing its session immediately; the watcher then records it as
+		// protocol-error rather than silently dropping it.
+		relayParentCtx := ctx
+		detached := false
+		if selection == relaycore.CrossValidation && rpcss.cvDetachedBudget.tryReserve(endpointAddress, crossValidationMaxDetachedPerProvider) {
+			relayParentCtx = detachedParentCtx
+			detached = true
+		}
+		go func(endpointAddress string, sessionInfo *lavasession.SessionInfo, relayParentCtx context.Context, detached bool) {
+			if detached {
+				defer rpcss.cvDetachedBudget.release(endpointAddress)
+			}
 			// Derive from relayParentCtx so IP forwarding metadata (and other values) are preserved.
 			goroutineCtx, goroutineCtxCancel := context.WithCancel(relayParentCtx)
 
@@ -1718,7 +1782,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			}
 
 			// NOTE: Don't call Free() here - OnSessionDone/OnSessionFailure already do it!
-		}(endpointAddress, sessionInfo)
+		}(endpointAddress, sessionInfo, relayParentCtx, detached)
 	}
 
 	// NOTE: Don't call WaitForResults here!
@@ -3435,26 +3499,24 @@ const crossValidationStragglerGrace = 2 * time.Second
 
 // watchCrossValidationStragglers starts the async post-reply compare path for cross-validation
 // stragglers (MAG-2187): providers whose relays were still in flight when the quorum early-exit built
-// the reply (the pending-providers header). Their goroutines keep running — CV relays are detached from
-// the batch cancel in sendRelayToDirectEndpoints — and always push a response, which the watcher
-// consumes, classifies against the reached consensus, and records (log + bounded straggler metric; a
-// late confirmed content dissent on a deterministic method also feeds the mismatch alerting surface,
-// which the reply-time path could never see for a provider that lost the race to quorum). No-op unless
-// a consensus was reached and a provider is actually pending; on a failed cross-validation there is no
-// consensus to compare against.
-func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Context, relayProcessor *relaycore.RelayProcessor, relayResult *common.RelayResult, protocolMessage chainlib.ProtocolMessage, apiName string) {
-	if relayProcessor == nil || relayResult == nil || relayProcessor.GetSelection() != relaycore.CrossValidation {
+// the reply. pendingProviders is the exact set appendHeadersToRelayResult put in the
+// pending-providers header (single source of truth — the client-visible header and the watched set
+// cannot diverge). Their goroutines keep running — CV relays are detached from the batch cancel in
+// sendRelayToDirectEndpoints — and always push a response, which the watcher consumes, classifies
+// against the reached consensus, and records (log + bounded straggler metric; a late confirmed
+// content dissent on a deterministic method also feeds the mismatch alerting surface, which the
+// reply-time path could never see for a provider that lost the race to quorum). No-op unless a
+// consensus was reached and a provider is actually pending; on a failed cross-validation there is
+// no consensus to compare against.
+func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Context, relayProcessor *relaycore.RelayProcessor, relayResult *common.RelayResult, protocolMessage chainlib.ProtocolMessage, apiName string, pendingProviders []string) {
+	if relayProcessor == nil || relayResult == nil || relayProcessor.GetSelection() != relaycore.CrossValidation || len(pendingProviders) == 0 {
 		return
 	}
 	cvParams := relayProcessor.GetCrossValidationParams()
 	if cvParams == nil || relayResult.CrossValidation < cvParams.AgreementThreshold {
 		return
 	}
-	successResults, nodeErrorResults, protocolErrorResults := relayProcessor.GetResultsData()
-	pendingProviders := crossValidationPendingProviders(relayProcessor.GetCrossValidationQueriedProviders(), successResults, nodeErrorResults, protocolErrorResults)
-	if len(pendingProviders) == 0 {
-		return
-	}
+	successResults, _, _ := relayProcessor.GetResultsData()
 
 	consensusHash := relayResult.ResponseHash
 	deterministic := protocolMessage.GetApi() != nil && protocolMessage.GetApi().Category.Deterministic
@@ -3507,11 +3569,8 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			return
 		}
 		rpcss.smartRouterEndpointMetrics.SetCrossValidationStragglerMetric(chainId, apiInterface, apiName, straggler.Outcome)
-		// Same gates as the reply-time outlier path (crossValidationSuccessOutliers): only a confirmed
-		// content dissent, on a deterministic method, against a REAL consensus (a nil-fallback consensus
-		// keeps the zero sentinel and is excluded — a substantive late reply diverging from an
-		// empty-reply majority is not the anomaly).
-		if straggler.Outcome == common.CrossValidationStragglerOutcomeDisagreed && deterministic && consensusHash != ([32]byte{}) {
+		// Shared admission rule with the reply-time outlier path — see crossValidationMismatchEligible.
+		if straggler.Outcome == common.CrossValidationStragglerOutcomeDisagreed && crossValidationMismatchEligible(deterministic, consensusHash) {
 			group := straggler.ProviderGroup
 			if group == "" {
 				group = common.DefaultProviderGroup
@@ -3539,7 +3598,11 @@ type RelayProcessorForHeaders interface {
 	NodeErrors() (ret []common.RelayResult)
 }
 
-func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Context, relayResult *common.RelayResult, protocolErrors uint64, relayProcessor RelayProcessorForHeaders, protocolMessage chainlib.ProtocolMessage, apiName string, analytics *metrics.RelayMetrics, success bool) {
+// appendHeadersToRelayResult returns the cross-validation pending-providers list it computed for
+// the header (nil outside CV mode), so SendParsedRelay can hand the SAME set to the straggler
+// watcher — a single call site defines "pending", keeping the client-visible header and the
+// watched set structurally in sync.
+func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Context, relayResult *common.RelayResult, protocolErrors uint64, relayProcessor RelayProcessorForHeaders, protocolMessage chainlib.ProtocolMessage, apiName string, analytics *metrics.RelayMetrics, success bool) (pendingProviders []string) {
 	metadataReply := []pairingtypes.Metadata{}
 
 	// Check if cross-validation is enabled via Selection type
@@ -3683,11 +3746,12 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// disagreeing-providers — the router only reports dissent it actually received, so an empty
 		// disagreeing header means "everyone we heard from agreed", never "we didn't hear everyone"
 		// (MAG-2187). Always appended (empty means every queried provider responded); the async
-		// straggler watcher resolves these against the consensus after the reply.
-		pendingProvidersList := crossValidationPendingProviders(allProvidersList, successResults, nodeErrorResults, protocolErrorResults)
+		// straggler watcher resolves this exact set (the named return) against the consensus after
+		// the reply.
+		pendingProviders = crossValidationPendingProviders(allProvidersList, successResults, nodeErrorResults, protocolErrorResults)
 		metadataReply = append(metadataReply, pairingtypes.Metadata{
 			Name:  common.CROSS_VALIDATION_PENDING_PROVIDERS_HEADER,
-			Value: strings.Join(pendingProvidersList, ","),
+			Value: strings.Join(pendingProviders, ","),
 		})
 
 		// On failure, surface WHY (no-agreement / diversity-unmet / insufficient-responses) so clients
@@ -3966,6 +4030,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	}
 
 	relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, metadataReply...)
+	return pendingProviders
 }
 
 func (rpcss *RPCSmartRouterServer) IsHealthy() bool {
