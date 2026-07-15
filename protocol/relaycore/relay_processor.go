@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -628,6 +629,106 @@ func (rp *RelayProcessor) readExistingResponses() {
 			return
 		}
 	}
+}
+
+// CrossValidationStragglerResult describes how a cross-validation straggler resolved (MAG-2187): a
+// provider that was queried but whose response had not arrived when the quorum early-exit built the
+// reply (surfaced to the client in the pending-providers header).
+type CrossValidationStragglerResult struct {
+	ProviderAddress string
+	ProviderGroup   string        // "" folds to common.DefaultProviderGroup at the metric layer
+	Outcome         string        // one of common.CrossValidationStragglerOutcome*
+	Delay           time.Duration // how long after the reply the straggler resolved (watch duration for not-received)
+}
+
+// WatchCrossValidationStragglers consumes responses that arrive on the processor's channel AFTER the
+// early-exit reply, classifies each against the reached consensus, and reports it via record. It returns
+// once every pending provider is accounted for, maxWait elapses, or ctx is done; providers still missing
+// at that point are reported once with the not-received outcome. Responses from providers outside
+// pendingProviders (e.g. an earlier retry batch's straggler, which the pending header does not cover)
+// are consumed and dropped.
+//
+// Concurrency contract: start this only after the reply headers are built. WaitForResults has returned
+// by then and nothing else reads rp.responses post-reply (readExistingResponses only runs inside
+// NodeResults, which has no post-reply caller), so the watcher is the channel's sole reader. It never
+// touches ResultsManager/quorumMap — classification is pure — so it cannot race the header path's reads.
+func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pendingProviders []string, consensusHash [32]byte, maxWait time.Duration, record func(CrossValidationStragglerResult)) {
+	if rp == nil || record == nil {
+		return
+	}
+	pending := make(map[string]struct{}, len(pendingProviders))
+	for _, addr := range pendingProviders {
+		if addr != "" {
+			pending[addr] = struct{}{}
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+	protocolMessage := rp.RelayStateMachine.GetProtocolMessage()
+	start := time.Now()
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+	reportNotReceived := func() {
+		for addr := range pending {
+			record(CrossValidationStragglerResult{
+				ProviderAddress: addr,
+				Outcome:         common.CrossValidationStragglerOutcomeNotReceived,
+				Delay:           time.Since(start),
+			})
+		}
+	}
+	for len(pending) > 0 {
+		select {
+		case response := <-rp.responses:
+			if response == nil {
+				continue
+			}
+			addr := response.RelayResult.ProviderInfo.ProviderAddress
+			if _, watched := pending[addr]; !watched {
+				continue
+			}
+			delete(pending, addr)
+			record(CrossValidationStragglerResult{
+				ProviderAddress: addr,
+				ProviderGroup:   response.RelayResult.ProviderInfo.ProviderGroup,
+				Outcome:         classifyStragglerResponse(response, consensusHash, protocolMessage),
+				Delay:           time.Since(start),
+			})
+		case <-timer.C:
+			reportNotReceived()
+			return
+		case <-ctx.Done():
+			reportNotReceived()
+			return
+		}
+	}
+}
+
+// classifyStragglerResponse maps a late cross-validation response to its straggler outcome. Hashing must
+// mirror handleResponse: canonicalResponseHash for non-empty data, the zero sentinel for empty/nil — so a
+// late empty reply only "agrees" with a nil-fallback consensus, exactly as it would have at quorum time.
+func classifyStragglerResponse(response *RelayResponse, consensusHash [32]byte, protocolMessage chainlib.ProtocolMessage) string {
+	if response.Err != nil {
+		return common.CrossValidationStragglerOutcomeProtocolError
+	}
+	reply := response.RelayResult.GetReply()
+	if reply == nil {
+		return common.CrossValidationStragglerOutcomeProtocolError
+	}
+	if protocolMessage != nil {
+		if foundError, _ := protocolMessage.CheckResponseError(reply.Data, response.RelayResult.StatusCode); foundError {
+			return common.CrossValidationStragglerOutcomeNodeError
+		}
+	}
+	var hash [32]byte
+	if len(reply.Data) > 0 {
+		hash = canonicalResponseHash(reply.Data)
+	}
+	if hash == consensusHash {
+		return common.CrossValidationStragglerOutcomeAgreed
+	}
+	return common.CrossValidationStragglerOutcomeDisagreed
 }
 
 // this function waits for the processing results, they are written by multiple go routines and read by this go routine

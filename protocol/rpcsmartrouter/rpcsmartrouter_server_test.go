@@ -23,6 +23,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/prometheus/client_golang/prometheus"
@@ -150,11 +151,11 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		// Call the function
 		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, true)
 
-		// Verify the result - should have status, all-providers, agreeing-providers, disagreeing-providers, and user request type headers
-		require.Len(t, relayResult.Reply.Metadata, 5)
+		// Verify the result - should have status, all-providers, agreeing-providers, disagreeing-providers, pending-providers, and user request type headers
+		require.Len(t, relayResult.Reply.Metadata, 6)
 
 		// Find and verify headers
-		var statusHeader, allProvidersHeader, agreeingProvidersHeader *pairingtypes.Metadata
+		var statusHeader, allProvidersHeader, agreeingProvidersHeader, pendingProvidersHeader *pairingtypes.Metadata
 		for i := range relayResult.Reply.Metadata {
 			meta := &relayResult.Reply.Metadata[i]
 			switch meta.Name {
@@ -164,6 +165,8 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 				allProvidersHeader = meta
 			case common.CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER:
 				agreeingProvidersHeader = meta
+			case common.CROSS_VALIDATION_PENDING_PROVIDERS_HEADER:
+				pendingProvidersHeader = meta
 			}
 		}
 		require.NotNil(t, statusHeader)
@@ -172,6 +175,8 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		require.Equal(t, "lava@provider1", allProvidersHeader.Value) // Comma-separated format
 		require.NotNil(t, agreeingProvidersHeader)
 		require.Equal(t, "", agreeingProvidersHeader.Value) // Empty on failure
+		require.NotNil(t, pendingProvidersHeader)
+		require.Equal(t, "", pendingProvidersHeader.Value) // The only queried provider responded
 	})
 
 	t.Run("cross-validation enabled - multiple providers with mixed results (success case)", func(t *testing.T) {
@@ -213,11 +218,11 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		// Call the function
 		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, true)
 
-		// Verify the result - should have 5 headers: status, all-providers, agreeing-providers, disagreeing-providers, user-request-type
-		require.Len(t, relayResult.Reply.Metadata, 5)
+		// Verify the result - should have 6 headers: status, all-providers, agreeing-providers, disagreeing-providers, pending-providers, user-request-type
+		require.Len(t, relayResult.Reply.Metadata, 6)
 
 		// Find all CV headers
-		var statusHeader, allProvidersHeader, agreeingProvidersHeader, disagreeingProvidersHeader *pairingtypes.Metadata
+		var statusHeader, allProvidersHeader, agreeingProvidersHeader, disagreeingProvidersHeader, pendingProvidersHeader *pairingtypes.Metadata
 		for i := range relayResult.Reply.Metadata {
 			meta := &relayResult.Reply.Metadata[i]
 			switch meta.Name {
@@ -229,6 +234,8 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 				agreeingProvidersHeader = meta
 			case common.CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER:
 				disagreeingProvidersHeader = meta
+			case common.CROSS_VALIDATION_PENDING_PROVIDERS_HEADER:
+				pendingProvidersHeader = meta
 			}
 		}
 
@@ -253,6 +260,10 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		require.Contains(t, agreeingProvidersHeader.Value, "lava@provider1")
 		require.Contains(t, agreeingProvidersHeader.Value, "lava@provider2")
 		require.NotContains(t, agreeingProvidersHeader.Value, "lava@provider3")
+
+		// Verify pending providers header: every queried provider responded (success or node error)
+		require.NotNil(t, pendingProvidersHeader)
+		require.Equal(t, "", pendingProvidersHeader.Value)
 	})
 
 	t.Run("cross-validation enabled - no providers (failure case)", func(t *testing.T) {
@@ -284,8 +295,8 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		// Call the function
 		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, true)
 
-		// Verify the result - should have 5 headers (status, all-providers, agreeing-providers, disagreeing-providers, user-request-type)
-		require.Len(t, relayResult.Reply.Metadata, 5)
+		// Verify the result - should have 6 headers (status, all-providers, agreeing-providers, disagreeing-providers, pending-providers, user-request-type)
+		require.Len(t, relayResult.Reply.Metadata, 6)
 
 		// Find and verify headers
 		var statusHeader, allProvidersHeader, agreeingProvidersHeader *pairingtypes.Metadata
@@ -382,6 +393,61 @@ func TestAppendHeadersToRelayResult_DisagreeingOnQuorumFailure(t *testing.T) {
 	require.Contains(t, disagreeingHeader.Value, "lava@provider1")
 	require.Contains(t, disagreeingHeader.Value, "lava@provider2")
 	require.Contains(t, disagreeingHeader.Value, "lava@provider3")
+}
+
+// TestAppendHeadersToRelayResult_PendingProvidersOnEarlyExit pins the MAG-2187 header contract at reply
+// time: with threshold=2 met by the first two responders and the third provider's response still in
+// flight, the straggler must appear in lava-cross-validation-pending-providers — NOT silently vanish —
+// while disagreeing-providers stays confirmed-dissent-only (empty here: nobody the router heard from
+// dissented).
+func TestAppendHeadersToRelayResult_PendingProvidersOnEarlyExit(t *testing.T) {
+	ctx := context.Background()
+	winningHash := [32]byte{1, 2, 3}
+	relayProcessor := &MockRelayProcessorForHeaders{
+		crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 3},
+		selection:                       relaycore.CrossValidation,
+		crossValidationQueriedProviders: []string{"lava@provider1", "lava@provider2", "lava@provider3"},
+		// Early exit at quorum: only the two agreeing responses were received; provider3 is in flight.
+		successResults: []common.RelayResult{
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}, ResponseHash: winningHash},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}, ResponseHash: winningHash},
+		},
+		nodeErrors: []common.RelayResult{},
+	}
+	relayResult := &common.RelayResult{
+		ProviderInfo:    common.ProviderInfo{ProviderAddress: "lava@provider1"},
+		CrossValidation: 2, // meets threshold
+		ResponseHash:    winningHash,
+		Reply:           &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+	}
+	mockProtocolMessage := &MockProtocolMessage{api: &spectypes.Api{Name: "test-api"}}
+	rpcSmartRouterServer := &RPCSmartRouterServer{}
+
+	rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, true)
+
+	var statusHeader, agreeingHeader, disagreeingHeader, pendingHeader *pairingtypes.Metadata
+	for i := range relayResult.Reply.Metadata {
+		switch relayResult.Reply.Metadata[i].Name {
+		case common.CROSS_VALIDATION_STATUS_HEADER_NAME:
+			statusHeader = &relayResult.Reply.Metadata[i]
+		case common.CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER:
+			agreeingHeader = &relayResult.Reply.Metadata[i]
+		case common.CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER:
+			disagreeingHeader = &relayResult.Reply.Metadata[i]
+		case common.CROSS_VALIDATION_PENDING_PROVIDERS_HEADER:
+			pendingHeader = &relayResult.Reply.Metadata[i]
+		}
+	}
+	require.NotNil(t, statusHeader)
+	require.Equal(t, "success", statusHeader.Value)
+	require.NotNil(t, agreeingHeader)
+	require.Equal(t, "lava@provider1,lava@provider2", agreeingHeader.Value)
+	// Confirmed dissent only: the router never received provider3's response, so it must not be accused.
+	require.NotNil(t, disagreeingHeader)
+	require.Equal(t, "", disagreeingHeader.Value)
+	// ...but it must not be silently dropped either: it is explicitly pending.
+	require.NotNil(t, pendingHeader)
+	require.Equal(t, "lava@provider3", pendingHeader.Value)
 }
 
 // TestAppendHeadersToRelayResult_FailureReasonHeader verifies that a cross-validation failure surfaces a
@@ -526,6 +592,151 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 		newServer().appendHeadersToRelayResult(ctx, relayResult, 0, rp, &MockProtocolMessage{api: deterministicAPI, requestedBlock: 100}, method, nil, false)
 		require.Equal(t, float64(0), mismatchCount(t, method, "g1"), "quorum failure does not increment mismatch")
 		require.Equal(t, float64(0), mismatchCount(t, method, "g2"), "quorum failure does not increment mismatch")
+	})
+}
+
+// TestWatchCrossValidationStragglers_LauncherGlue covers the MAG-2187 server glue end-to-end: after a
+// cross-validation early-exit reply, the pending provider's late response is consumed by the watcher
+// goroutine, its outcome lands on smartrouter_cross_validation_straggler_total, and a late confirmed
+// dissent on a deterministic method also feeds smartrouter_cross_validation_mismatch_total — while a
+// late agreement, a non-deterministic method, or a failed cross-validation do not touch the mismatch
+// alerting surface.
+func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
+	ctx := context.Background()
+	// Empty NetworkAddress => metrics registered on the default registry, no HTTP server started.
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	srv := &RPCSmartRouterServer{
+		smartRouterEndpointMetrics: mm,
+		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		chainParser:                chainParser,
+	}
+	srv.latestBlockHeight.Store(1_000_000) // so finality resolves (not "unknown")
+
+	counterFor := func(t *testing.T, name, method, labelName, labelValue string) float64 {
+		t.Helper()
+		mfs, gerr := prometheus.DefaultGatherer.Gather()
+		require.NoError(t, gerr)
+		var total float64
+		for _, mf := range mfs {
+			if mf.GetName() != name {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				lm := map[string]string{}
+				for _, lp := range m.GetLabel() {
+					lm[lp.GetName()] = lp.GetValue()
+				}
+				if lm["method"] == method && lm[labelName] == labelValue {
+					total += m.GetCounter().GetValue()
+				}
+			}
+		}
+		return total
+	}
+	stragglerCount := func(t *testing.T, method, outcome string) float64 {
+		return counterFor(t, "smartrouter_cross_validation_straggler_total", method, "outcome", outcome)
+	}
+	mismatchCount := func(t *testing.T, method, group string) float64 {
+		return counterFor(t, "smartrouter_cross_validation_mismatch_total", method, "group", group)
+	}
+
+	consensusBody := []byte(`{"jsonrpc":"2.0","id":1,"result":"0xAAAA"}`)
+	dissentBody := []byte(`{"jsonrpc":"2.0","id":1,"result":"0xBBBB"}`)
+	pushSuccess := func(rp *relaycore.RelayProcessor, provider, group string, body []byte) {
+		rp.SetResponse(&relaycore.RelayResponse{
+			RelayResult: common.RelayResult{
+				Reply:        &pairingtypes.RelayReply{Data: body},
+				ProviderInfo: common.ProviderInfo{ProviderAddress: provider, ProviderGroup: group},
+				StatusCode:   200,
+			},
+		})
+	}
+
+	// newCVProcessorWithConsensus builds a REAL cross-validation processor (caller CV headers -> real
+	// state machine) that has received the two agreeing responses, with p3 queried but still in flight —
+	// the exact reply-time state of the MAG-2187 scenario. Returns the processor and the consensus hash
+	// as cached by handleResponse.
+	newCVProcessorWithConsensus := func(t *testing.T) (*relaycore.RelayProcessor, [32]byte) {
+		cm, perr := chainParser.ParseMsg("", []byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xDEAD","latest"],"id":1}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, perr)
+		pm := chainlib.NewProtocolMessage(cm, map[string]string{
+			common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
+			common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+		}, nil, "dapp", "1.2.3.4")
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
+		require.NoError(t, smErr)
+		require.Equal(t, relaycore.CrossValidation, sm.GetSelection(), "caller CV headers must enable cross-validation")
+		rp := relaycore.NewRelayProcessor(ctx, sm.GetCrossValidationParams(), relaycore.NewConsistency("ETH1"), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, sm)
+		rp.SetCrossValidationQueriedProviders([]string{"p1", "p2", "p3"})
+		pushSuccess(rp, "p1", "g1", consensusBody)
+		pushSuccess(rp, "p2", "g2", consensusBody)
+		require.Len(t, rp.NodeResults(), 2) // drains the two received responses into the results manager
+		successResults, _, _ := rp.GetResultsData()
+		require.Len(t, successResults, 2)
+		return rp, successResults[0].ResponseHash
+	}
+	mkRelayResult := func(consensusHash [32]byte, crossValidation int) *common.RelayResult {
+		return &common.RelayResult{
+			ProviderInfo:    common.ProviderInfo{ProviderAddress: "p1"},
+			CrossValidation: crossValidation,
+			ResponseHash:    consensusHash,
+			Reply:           &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+	}
+	deterministicAPI := func(method string) *spectypes.Api {
+		return &spectypes.Api{Name: method, Category: spectypes.SpecCategory{Deterministic: true}}
+	}
+
+	t.Run("late dissent increments straggler and mismatch metrics", func(t *testing.T) {
+		method := "cv_straggler_disagreed"
+		rp, consensusHash := newCVProcessorWithConsensus(t)
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
+		pushSuccess(rp, "p3", "g3", dissentBody)
+		require.Eventually(t, func() bool {
+			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed) == 1
+		}, 5*time.Second, 10*time.Millisecond, "late dissent must be recorded on the straggler metric")
+		require.Equal(t, float64(1), mismatchCount(t, method, "g3"), "late confirmed dissent must feed the mismatch alerting surface")
+	})
+
+	t.Run("late agreement increments straggler only", func(t *testing.T) {
+		method := "cv_straggler_agreed"
+		rp, consensusHash := newCVProcessorWithConsensus(t)
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
+		pushSuccess(rp, "p3", "g3", consensusBody)
+		require.Eventually(t, func() bool {
+			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeAgreed) == 1
+		}, 5*time.Second, 10*time.Millisecond, "late agreement must be recorded on the straggler metric")
+		require.Equal(t, float64(0), mismatchCount(t, method, "g3"), "late agreement must not feed the mismatch surface")
+	})
+
+	t.Run("late dissent on non-deterministic method does not feed mismatch", func(t *testing.T) {
+		method := "cv_straggler_nondeterministic"
+		rp, consensusHash := newCVProcessorWithConsensus(t)
+		nonDeterministicAPI := &spectypes.Api{Name: method, Category: spectypes.SpecCategory{Deterministic: false}}
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: nonDeterministicAPI, requestedBlock: 100}, method)
+		pushSuccess(rp, "p3", "g3", dissentBody)
+		require.Eventually(t, func() bool {
+			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed) == 1
+		}, 5*time.Second, 10*time.Millisecond)
+		require.Equal(t, float64(0), mismatchCount(t, method, "g3"), "non-deterministic methods legitimately differ — no mismatch")
+	})
+
+	t.Run("failed cross-validation starts no watcher", func(t *testing.T) {
+		method := "cv_straggler_no_consensus"
+		rp, consensusHash := newCVProcessorWithConsensus(t)
+		// CrossValidation 1 < threshold 2 => no consensus, nothing to compare stragglers against.
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 1), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
+		pushSuccess(rp, "p3", "g3", dissentBody)
+		time.Sleep(100 * time.Millisecond)
+		require.Equal(t, float64(0), stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed), "no watcher on failed cross-validation")
 	})
 }
 
