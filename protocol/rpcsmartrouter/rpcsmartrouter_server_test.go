@@ -3000,6 +3000,152 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 	})
 }
 
+func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
+	t.Run("all stale exhausts normal selection then serves one fallback pass", func(t *testing.T) {
+		state := newConsistencyFallbackState()
+		usedProviders := lavasession.NewUsedProviders(nil)
+		routerKey := lavasession.NewRouterKey(nil)
+		usedProviders.AddUnwantedAddresses("transport-failure", routerKey)
+
+		reject := func(provider string) {
+			state.recordRejected(lavasession.ConsumerSessionsMap{
+				provider: &lavasession.SessionInfo{},
+			})
+			usedProviders.AddUnwantedAddresses(provider, routerKey)
+		}
+
+		attempts := 0
+		err := sendRelayTaskWithConsistencyFallback(
+			context.Background(),
+			relaycore.Stateless,
+			state,
+			usedProviders,
+			func() error {
+				attempts++
+				switch attempts {
+				case 1:
+					reject("stale-1")
+					return lavasession.ConsistencyPreValidationError
+				case 2:
+					reject("stale-2")
+					return fmt.Errorf("second stale candidate: %w", lavasession.ConsistencyPreValidationError)
+				case 3:
+					return lavasession.PairingListEmptyError
+				case 4:
+					require.True(t, state.allows("stale-1"))
+					require.True(t, state.allows("stale-2"))
+					unwanted := usedProviders.GetUnwantedProvidersToSend(routerKey)
+					require.NotContains(t, unwanted, "stale-1")
+					require.NotContains(t, unwanted, "stale-2")
+					require.Contains(t, unwanted, "transport-failure",
+						"fallback must not reopen providers excluded for other failures")
+					return nil
+				default:
+					t.Fatalf("unexpected extra attempt %d", attempts)
+					return nil
+				}
+			},
+		)
+
+		require.NoError(t, err)
+		require.Equal(t, 4, attempts)
+	})
+
+	t.Run("fresh alternative wins without activating stale fallback", func(t *testing.T) {
+		state := newConsistencyFallbackState()
+		usedProviders := lavasession.NewUsedProviders(nil)
+		routerKey := lavasession.NewRouterKey(nil)
+		attempts := 0
+
+		err := sendRelayTaskWithConsistencyFallback(
+			context.Background(), relaycore.Stateless, state, usedProviders,
+			func() error {
+				attempts++
+				if attempts == 1 {
+					state.recordRejected(lavasession.ConsumerSessionsMap{"stale": &lavasession.SessionInfo{}})
+					usedProviders.AddUnwantedAddresses("stale", routerKey)
+					return lavasession.ConsistencyPreValidationError
+				}
+				return nil
+			},
+		)
+
+		require.NoError(t, err)
+		require.Equal(t, 2, attempts)
+		require.False(t, state.allows("stale"), "fallback must stay inactive when a fresh provider is available")
+		require.Contains(t, usedProviders.GetUnwantedProvidersToSend(routerKey), "stale")
+	})
+
+	t.Run("fallback activation is one shot", func(t *testing.T) {
+		state := newConsistencyFallbackState()
+		usedProviders := lavasession.NewUsedProviders(nil)
+		routerKey := lavasession.NewRouterKey(nil)
+		attempts := 0
+
+		err := sendRelayTaskWithConsistencyFallback(
+			context.Background(), relaycore.Stateless, state, usedProviders,
+			func() error {
+				attempts++
+				if attempts == 1 {
+					state.recordRejected(lavasession.ConsumerSessionsMap{"stale": &lavasession.SessionInfo{}})
+					usedProviders.AddUnwantedAddresses("stale", routerKey)
+					return lavasession.ConsistencyPreValidationError
+				}
+				return lavasession.PairingListEmptyError
+			},
+		)
+
+		require.ErrorIs(t, err, lavasession.PairingListEmptyError)
+		require.Equal(t, 3, attempts, "a failed fallback pass must not reopen providers indefinitely")
+	})
+
+	t.Run("cross-validation remains strict", func(t *testing.T) {
+		state := newConsistencyFallbackState()
+		usedProviders := lavasession.NewUsedProviders(nil)
+		attempts := 0
+
+		err := sendRelayTaskWithConsistencyFallback(
+			context.Background(), relaycore.CrossValidation, state, usedProviders,
+			func() error {
+				attempts++
+				return lavasession.ConsistencyPreValidationError
+			},
+		)
+
+		require.ErrorIs(t, err, lavasession.ConsistencyPreValidationError)
+		require.Equal(t, 1, attempts)
+	})
+}
+
+func TestPromoteConsistencyFallback(t *testing.T) {
+	state := newConsistencyFallbackState()
+	usedProviders := lavasession.NewUsedProviders(nil)
+	state.recordRejected(lavasession.ConsumerSessionsMap{
+		"previously-rejected": &lavasession.SessionInfo{},
+	})
+	usedProviders.AddUnwantedAddresses("previously-rejected", lavasession.NewRouterKey(nil))
+	_, activated := state.activate(usedProviders)
+	require.True(t, activated)
+
+	failed := lavasession.ConsumerSessionsMap{
+		"previously-rejected": &lavasession.SessionInfo{},
+		"new-stale-provider":  &lavasession.SessionInfo{},
+	}
+	valid, remainingFailed, err, promoted := promoteConsistencyFallback(
+		nil,
+		failed,
+		lavasession.ConsistencyPreValidationError,
+		state,
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, 1, promoted)
+	require.Contains(t, valid, "previously-rejected")
+	require.NotContains(t, valid, "new-stale-provider")
+	require.Contains(t, remainingFailed, "new-stale-provider",
+		"an endpoint first encountered after activation must not grant itself fallback eligibility")
+}
+
 // TestConsistencyPreValidationError_NotRetryable verifies that ConsistencyPreValidationError
 // is NOT treated as a retryable sync loss error (unlike SessionOutOfSyncError).
 // This ensures immediate blocking via unwantedProviders rather than "allow one retry".
@@ -3161,7 +3307,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	defer cancel()
 
 	start := time.Now()
-	sendErr := rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, protocolMsg, relayProcessor, nil)
+	sendErr := rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, protocolMsg, relayProcessor, nil, nil)
 	elapsed := time.Since(start)
 
 	require.Less(t, elapsed, time.Second,

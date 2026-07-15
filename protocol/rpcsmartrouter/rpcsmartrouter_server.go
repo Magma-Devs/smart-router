@@ -775,11 +775,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 			usedEndpointsResets++
 			relayProcessor.GetUsedProviders().ClearUnwanted()
 		}
-		err = rpcss.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(ctx, protocolMessage), relayProcessor, nil)
+		err = rpcss.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(ctx, protocolMessage), relayProcessor, nil, nil)
 		if errors.Is(err, lavasession.PairingListEmptyError) {
 			// we don't have pairings anymore, could be related to unwanted endpoints
 			relayProcessor.GetUsedProviders().ClearUnwanted()
-			err = rpcss.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(ctx, protocolMessage), relayProcessor, nil)
+			err = rpcss.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(ctx, protocolMessage), relayProcessor, nil, nil)
 		}
 		if err != nil {
 			utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
@@ -1180,6 +1180,14 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		rpcss.relayRetriesManager,
 		stateMachine,
 	)
+	// Cross-validation remains strict: accepting stale participants would change
+	// the caller's requested validation contract. Stateless/stateful requests get
+	// a request-local fallback that is activated only after normal selection has
+	// exhausted every non-rejected candidate.
+	var consistencyFallback *consistencyFallbackState
+	if stateMachine.GetSelection() != relaycore.CrossValidation {
+		consistencyFallback = newConsistencyFallbackState()
+	}
 
 	if reason, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
 		if reason != "" {
@@ -1220,7 +1228,15 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 			return relayProcessor, task.Err
 		}
 		utils.LavaFormatTrace("[RPCSmartRouterServer] ProcessRelaySend - task", utils.LogAttr("GUID", ctx), utils.LogAttr("numOfEndpoints", task.NumOfProviders))
-		err := rpcss.sendRelayToEndpoint(ctx, task.NumOfProviders, task.RelayState, relayProcessor, task.Analytics)
+		err := sendRelayTaskWithConsistencyFallback(
+			ctx,
+			stateMachine.GetSelection(),
+			consistencyFallback,
+			relayProcessor.GetUsedProviders(),
+			func() error {
+				return rpcss.sendRelayToEndpoint(ctx, task.NumOfProviders, task.RelayState, relayProcessor, consistencyFallback, task.Analytics)
+			},
+		)
 
 		utils.LavaFormatInfo("UPDATING BATCH",
 			utils.LogAttr("error", err),
@@ -1324,12 +1340,149 @@ func deepCopyRelayPrivateData(original *pairingtypes.RelayPrivateData) *pairingt
 	}
 }
 
+// consistencyFallbackState tracks the providers rejected by pre-dispatch
+// consistency validation during one client request. The normal path keeps
+// those providers excluded while the router searches for a fresh alternative.
+// Once selection reports PairingListEmpty, activate re-enables exactly this set
+// for a single all-stale fallback pass.
+type consistencyFallbackState struct {
+	mu                sync.RWMutex
+	rejectedProviders map[string]struct{}
+	active            bool
+	attempted         bool
+}
+
+func newConsistencyFallbackState() *consistencyFallbackState {
+	return &consistencyFallbackState{rejectedProviders: make(map[string]struct{})}
+}
+
+func (state *consistencyFallbackState) recordRejected(sessions lavasession.ConsumerSessionsMap) {
+	if state == nil || len(sessions) == 0 {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	for providerAddress := range sessions {
+		state.rejectedProviders[providerAddress] = struct{}{}
+	}
+}
+
+func (state *consistencyFallbackState) allows(providerAddress string) bool {
+	if state == nil {
+		return false
+	}
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	if !state.active {
+		return false
+	}
+	_, rejected := state.rejectedProviders[providerAddress]
+	return rejected
+}
+
+func (state *consistencyFallbackState) activate(usedProviders *lavasession.UsedProviders) ([]string, bool) {
+	if state == nil || usedProviders == nil {
+		return nil, false
+	}
+
+	state.mu.Lock()
+	if state.attempted || len(state.rejectedProviders) == 0 {
+		state.mu.Unlock()
+		return nil, false
+	}
+	state.attempted = true
+	state.active = true
+	providers := make([]string, 0, len(state.rejectedProviders))
+	for providerAddress := range state.rejectedProviders {
+		providers = append(providers, providerAddress)
+	}
+	state.mu.Unlock()
+
+	sort.Strings(providers)
+	usedProviders.RemoveUnwantedAddresses(providers)
+	return providers, true
+}
+
+// sendRelayTaskWithConsistencyFallback consumes consistency-only
+// pre-dispatch failures inside one state-machine task. These checks make no
+// network request, so they should not consume the generic three-send error
+// budget. A PairingListEmpty result proves normal selection is exhausted; at
+// that point the helper reopens only the consistency-rejected providers and
+// makes one fallback pass that may serve stale data instead of returning 500.
+func sendRelayTaskWithConsistencyFallback(
+	ctx context.Context,
+	selection relaycore.Selection,
+	state *consistencyFallbackState,
+	usedProviders *lavasession.UsedProviders,
+	attempt func() error,
+) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		err := attempt()
+		if state == nil || selection == relaycore.CrossValidation {
+			return err
+		}
+		if errors.Is(err, lavasession.ConsistencyPreValidationError) {
+			// The selected batch was stale and has been excluded. Keep selecting
+			// within this task so larger fleets are not cut off by the generic
+			// consecutive-send-error limit.
+			continue
+		}
+		if errors.Is(err, lavasession.PairingListEmptyError) {
+			if providers, activated := state.activate(usedProviders); activated {
+				utils.LavaFormatWarning("all selectable providers failed consistency validation; serving from stale fallback",
+					nil,
+					utils.LogAttr("fallbackProviders", providers),
+					utils.LogAttr("GUID", ctx),
+				)
+				continue
+			}
+		}
+		return err
+	}
+}
+
+// promoteConsistencyFallback moves previously consistency-rejected sessions
+// back into the valid set only while the one-shot fallback is active. Unknown
+// stale providers remain failed, so activation cannot broaden eligibility past
+// the exact providers whose exclusions were reopened.
+func promoteConsistencyFallback(
+	validSessions lavasession.ConsumerSessionsMap,
+	failedSessions lavasession.ConsumerSessionsMap,
+	filterErr error,
+	state *consistencyFallbackState,
+) (lavasession.ConsumerSessionsMap, lavasession.ConsumerSessionsMap, error, int) {
+	if state == nil || !errors.Is(filterErr, lavasession.ConsistencyPreValidationError) {
+		return validSessions, failedSessions, filterErr, 0
+	}
+
+	if validSessions == nil {
+		validSessions = make(lavasession.ConsumerSessionsMap)
+	}
+	promoted := 0
+	for providerAddress, sessionInfo := range failedSessions {
+		if state.allows(providerAddress) {
+			validSessions[providerAddress] = sessionInfo
+			delete(failedSessions, providerAddress)
+			promoted++
+		}
+	}
+	if promoted > 0 {
+		filterErr = nil
+	}
+	return validSessions, failedSessions, filterErr, promoted
+}
+
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
 func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	ctx context.Context,
 	sessions lavasession.ConsumerSessionsMap,
 	protocolMessage chainlib.ProtocolMessage,
 	relayProcessor *relaycore.RelayProcessor,
+	consistencyFallback *consistencyFallbackState,
 	analytics *metrics.RelayMetrics,
 ) error {
 	chainMessage := protocolMessage
@@ -1350,25 +1503,50 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 
 	// Pre-request consistency validation: filter out endpoints that are too far behind
 	validSessions, failedSessions, filterErr := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMessage)
+	validSessions, failedSessions, filterErr, promotedFallbacks := promoteConsistencyFallback(
+		validSessions,
+		failedSessions,
+		filterErr,
+		consistencyFallback,
+	)
+	if promotedFallbacks > 0 {
+		utils.LavaFormatWarning("consistency fallback accepted stale endpoint batch",
+			nil,
+			utils.LogAttr("promotedEndpoints", promotedFallbacks),
+			utils.LogAttr("GUID", ctx),
+		)
+	}
+	// Record only sessions that remain rejected. During the active fallback,
+	// promotion runs first so a newly encountered stale provider cannot grant
+	// itself fallback eligibility.
+	if consistencyFallback != nil {
+		consistencyFallback.recordRejected(failedSessions)
+	}
 
 	// Release failed sessions:
 	// - ReleaseFromLatestBatch decrements UsedProviders.sessionsLatestBatch so
 	//   RelayProcessor.checkEndProcessing matches the goroutines we will
 	//   actually launch. Without this the CV path can wait the full
 	//   processingTimeout (~30s) for responses that never arrive.
-	// - OnSessionFailure provides QoS punishment, unlocks the session, and
-	//   marks the provider unwanted for retry exclusion.
+	// - OnSessionDiscarded returns reserved CU and unlocks the session without
+	//   QoS punishment. No request reached the upstream, so this is a routing
+	//   exclusion rather than an availability failure.
 	usedProviders := relayProcessor.GetUsedProviders()
 	releaseRouterKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
 	for endpointAddress, sessionInfo := range failedSessions {
 		if sessionInfo != nil && sessionInfo.Session != nil {
-			utils.LavaFormatDebug("releasing stale session via OnSessionFailure",
+			utils.LavaFormatDebug("discarding stale session before relay dispatch",
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("error", lavasession.ConsistencyPreValidationError),
 				utils.LogAttr("GUID", ctx),
 			)
 			usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, lavasession.ConsistencyPreValidationError)
-			rpcss.sessionManager.OnSessionFailure(sessionInfo.Session, lavasession.ConsistencyPreValidationError)
+			if err := rpcss.sessionManager.OnSessionDiscarded(sessionInfo.Session, lavasession.ConsistencyPreValidationError); err != nil {
+				utils.LavaFormatError("failed discarding consistency-rejected session", err,
+					utils.LogAttr("endpoint", endpointAddress),
+					utils.LogAttr("GUID", ctx),
+				)
+			}
 		}
 	}
 
@@ -2807,6 +2985,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	numOfEndpoints int,
 	relayState *relaycore.RelayState,
 	relayProcessor *relaycore.RelayProcessor,
+	consistencyFallback *consistencyFallbackState,
 	analytics *metrics.RelayMetrics,
 ) (errRet error) {
 	// Send relay to direct RPC endpoints:
@@ -3167,7 +3346,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		utils.LogAttr("num_sessions", len(sessions)),
 		utils.LogAttr("GUID", ctx),
 	)
-	return rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMessage, relayProcessor, analytics)
+	return rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMessage, relayProcessor, consistencyFallback, analytics)
 }
 
 // relayInnerDirect handles relay requests using direct RPC connections (smart router mode)
