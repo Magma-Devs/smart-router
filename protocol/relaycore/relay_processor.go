@@ -951,7 +951,7 @@ func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult
 		return rp.processCrossValidationResult(successResults, successResultsCount, nodeErrorCount, rp.getAgreementThreshold())
 
 	case Stateful:
-		return rp.processStatefulResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, allProvidersAddresses)
+		return rp.processStatefulResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, protocolErrorCount, allProvidersAddresses)
 
 	case Stateless:
 		return rp.processStatelessResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, protocolErrorCount, allProvidersAddresses)
@@ -1012,7 +1012,7 @@ func (rp *RelayProcessor) processCrossValidationResult(
 // No cross-validation/consensus - just return the first available result.
 func (rp *RelayProcessor) processStatefulResult(
 	successResults, nodeErrors []common.RelayResult,
-	successResultsCount, nodeErrorCount int,
+	successResultsCount, nodeErrorCount, protocolErrorCount int,
 	allProvidersAddresses []string,
 ) (*common.RelayResult, error) {
 	// Return first success if available
@@ -1027,8 +1027,10 @@ func (rp *RelayProcessor) processStatefulResult(
 		return &result, nil
 	}
 
-	// No results at all
-	return rp.buildFailureResult(nodeErrorCount, 0, allProvidersAddresses)
+	// No node responses at all — pass the real protocol-error count so the failure result carries the
+	// best protocol error (message + its single provider) instead of a bare 500 with no provider
+	// attribution (MAG-2351).
+	return rp.buildFailureResult(nodeErrorCount, protocolErrorCount, allProvidersAddresses)
 }
 
 // processStatelessResult handles result processing for Stateless mode.
@@ -1072,6 +1074,9 @@ func (rp *RelayProcessor) buildFailureResult(
 		if nodeErr.Response != nil {
 			returnedResult = &nodeErr.Response.RelayResult
 		}
+		if returnedResult.ProviderInfo.ProviderAddress == "" {
+			returnedResult.ProviderInfo = nodeErr.ProviderInfo
+		}
 	} else if protocolErrorCount > 0 {
 		protocolErr := rp.GetBestProtocolErrorMessageForUser()
 		processingError = protocolErr.Err
@@ -1079,9 +1084,16 @@ func (rp *RelayProcessor) buildFailureResult(
 		if protocolErr.Response != nil {
 			returnedResult = &protocolErr.Response.RelayResult
 		}
+		if returnedResult.ProviderInfo.ProviderAddress == "" {
+			returnedResult.ProviderInfo = protocolErr.ProviderInfo
+		}
 	}
 
-	returnedResult.ProviderInfo.ProviderAddress = strings.Join(allProvidersAddresses, ",")
+	// ProviderInfo.ProviderAddress must stay a SINGLE provider — the source of the error body being
+	// returned (set above from the best error). Packing the comma-joined attempted list here made
+	// appendHeadersToRelayResult treat the whole blob as the resolver name and append it after the
+	// per-attempt names, so on the all-transport-errors path Lava-Provider-Address listed ~2x the
+	// providers and disagreed with Lava-Retries (MAG-2351). The attempted list is only logged.
 
 	// Log with classified error code for metrics/observability
 	if bestLavaError != nil {
@@ -1090,5 +1102,8 @@ func (rp *RelayProcessor) buildFailureResult(
 			chainID, 0, "", utils.LogAttr("GUID", rp.guid))
 	}
 
-	return returnedResult, utils.LavaFormatError("failed relay, insufficient results", processingError, utils.LogAttr("GUID", rp.guid))
+	return returnedResult, utils.LavaFormatError("failed relay, insufficient results", processingError,
+		utils.LogAttr("GUID", rp.guid),
+		utils.LogAttr("attemptedProviders", allProvidersAddresses),
+	)
 }
