@@ -916,9 +916,6 @@ func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult
 		return nil, utils.LavaFormatError("RelayProcessor.ProcessingResult is nil, misuse detected", nil)
 	}
 
-	// this must be here before the lock because this function locks
-	allProvidersAddresses := rp.GetUsedProviders().AllUnwantedAddresses()
-
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 
@@ -950,11 +947,10 @@ func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult
 	case CrossValidation:
 		return rp.processCrossValidationResult(successResults, successResultsCount, nodeErrorCount, rp.getAgreementThreshold())
 
-	case Stateful:
-		return rp.processStatefulResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, protocolErrorCount, allProvidersAddresses)
-
-	case Stateless:
-		return rp.processStatelessResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, protocolErrorCount, allProvidersAddresses)
+	case Stateful, Stateless:
+		// Stateful (fan-out, no retries) and Stateless (sequential retries) differ only in the state
+		// machine; result selection here is identical for both.
+		return rp.processNonCrossValidationResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, protocolErrorCount)
 
 	default:
 		return nil, utils.LavaFormatError("unknown selection mode", nil, utils.LogAttr("selection", rp.selection))
@@ -1007,13 +1003,13 @@ func (rp *RelayProcessor) processCrossValidationResult(
 		)
 }
 
-// processStatefulResult handles result processing for Stateful mode.
-// Returns first success, or first node error if no successes.
-// No cross-validation/consensus - just return the first available result.
-func (rp *RelayProcessor) processStatefulResult(
+// processNonCrossValidationResult handles Stateful and Stateless modes, which share the same result
+// selection: first success, else first node error, else a failure result built from the best
+// node/protocol error. (Stateful fans out without retries and Stateless retries sequentially, but that
+// difference lives in the state machine, not here.)
+func (rp *RelayProcessor) processNonCrossValidationResult(
 	successResults, nodeErrors []common.RelayResult,
 	successResultsCount, nodeErrorCount, protocolErrorCount int,
-	allProvidersAddresses []string,
 ) (*common.RelayResult, error) {
 	// Return first success if available
 	if successResultsCount > 0 {
@@ -1027,40 +1023,18 @@ func (rp *RelayProcessor) processStatefulResult(
 		return &result, nil
 	}
 
-	// No node responses at all — pass the real protocol-error count so the failure result carries the
-	// best protocol error (message + its single provider) instead of a bare 500 with no provider
-	// attribution (MAG-2351).
-	return rp.buildFailureResult(nodeErrorCount, protocolErrorCount, allProvidersAddresses)
+	// No node responses at all - build a failure result from the best node/protocol error.
+	return rp.buildFailureResult(nodeErrorCount, protocolErrorCount)
 }
 
-// processStatelessResult handles result processing for Stateless mode.
-// Returns first success, or first node error if no successes.
-// No cross-validation/consensus - retries handle getting a valid response.
-func (rp *RelayProcessor) processStatelessResult(
-	successResults, nodeErrors []common.RelayResult,
-	successResultsCount, nodeErrorCount, protocolErrorCount int,
-	allProvidersAddresses []string,
-) (*common.RelayResult, error) {
-	// Return first success if available
-	if successResultsCount > 0 {
-		result := successResults[0]
-		return &result, nil
-	}
-
-	// No successes, return first node error if available
-	if nodeErrorCount > 0 {
-		result := nodeErrors[0]
-		return &result, nil
-	}
-
-	// No results at all - return failure
-	return rp.buildFailureResult(nodeErrorCount, protocolErrorCount, allProvidersAddresses)
-}
-
-// buildFailureResult constructs an error result when no consensus can be reached.
+// buildFailureResult constructs an error result when no consensus can be reached. It returns the best
+// node/protocol error's own RelayResult, whose ProviderInfo.ProviderAddress is a SINGLE provider — the
+// source of the error body being returned. It must never be a comma-joined list: packing the whole
+// attempted set here made appendHeadersToRelayResult treat the joined blob as the resolver name and
+// append it after the per-attempt names, so on the all-transport-errors path Lava-Provider-Address
+// listed ~2x the providers and disagreed with Lava-Retries (MAG-2351).
 func (rp *RelayProcessor) buildFailureResult(
 	nodeErrorCount, protocolErrorCount int,
-	allProvidersAddresses []string,
 ) (*common.RelayResult, error) {
 	returnedResult := &common.RelayResult{StatusCode: http.StatusInternalServerError}
 	var processingError error
@@ -1074,9 +1048,6 @@ func (rp *RelayProcessor) buildFailureResult(
 		if nodeErr.Response != nil {
 			returnedResult = &nodeErr.Response.RelayResult
 		}
-		if returnedResult.ProviderInfo.ProviderAddress == "" {
-			returnedResult.ProviderInfo = nodeErr.ProviderInfo
-		}
 	} else if protocolErrorCount > 0 {
 		protocolErr := rp.GetBestProtocolErrorMessageForUser()
 		processingError = protocolErr.Err
@@ -1084,16 +1055,7 @@ func (rp *RelayProcessor) buildFailureResult(
 		if protocolErr.Response != nil {
 			returnedResult = &protocolErr.Response.RelayResult
 		}
-		if returnedResult.ProviderInfo.ProviderAddress == "" {
-			returnedResult.ProviderInfo = protocolErr.ProviderInfo
-		}
 	}
-
-	// ProviderInfo.ProviderAddress must stay a SINGLE provider — the source of the error body being
-	// returned (set above from the best error). Packing the comma-joined attempted list here made
-	// appendHeadersToRelayResult treat the whole blob as the resolver name and append it after the
-	// per-attempt names, so on the all-transport-errors path Lava-Provider-Address listed ~2x the
-	// providers and disagreed with Lava-Retries (MAG-2351). The attempted list is only logged.
 
 	// Log with classified error code for metrics/observability
 	if bestLavaError != nil {
@@ -1102,8 +1064,5 @@ func (rp *RelayProcessor) buildFailureResult(
 			chainID, 0, "", utils.LogAttr("GUID", rp.guid))
 	}
 
-	return returnedResult, utils.LavaFormatError("failed relay, insufficient results", processingError,
-		utils.LogAttr("GUID", rp.guid),
-		utils.LogAttr("attemptedProviders", allProvidersAddresses),
-	)
+	return returnedResult, utils.LavaFormatError("failed relay, insufficient results", processingError, utils.LogAttr("GUID", rp.guid))
 }
