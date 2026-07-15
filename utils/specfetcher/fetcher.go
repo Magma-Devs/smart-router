@@ -36,7 +36,7 @@ type RepoInfo struct {
 	Provider    ProviderType
 	Host        string // e.g., "https://github.com" or "https://gitlab.example.com"
 	ProjectPath string // e.g., "owner/repo" or "group/subgroup/repo"
-	Branch      string
+	Branch      string // branch, tag, or commit; empty means the repository's default branch (HEAD)
 	Path        string // path within the repository
 }
 
@@ -123,8 +123,14 @@ func (f *Fetcher) FetchAllSpecs(ctx context.Context, repoURL string) (map[string
 //
 // Supported URL formats:
 //   - GitHub: https://github.com/{owner}/{repo}/tree/{branch}/{path}
+//   - GitHub (default branch): https://github.com/{owner}/{repo}
+//   - GitHub (tarball): https://codeload.github.com/{owner}/{repo}/tar.gz/{ref}
+//     where {ref} is refs/heads/{branch}, refs/tags/{tag}, HEAD, or a bare ref
 //   - GitLab: https://gitlab.com/{owner}/{repo}/-/tree/{branch}/{path}
 //   - GitLab (self-hosted): https://gitlab.example.com/{group}/{repo}/-/tree/{branch}/{path}
+//   - GitLab (default branch): https://gitlab.com/{owner}/{repo} — gitlab.com only,
+//     bare self-hosted URLs carry no marker identifying them as GitLab
+//   - GitLab (tarball): https://gitlab.com/{owner}/{repo}/-/archive/{ref}/{name}.tar.gz
 func ParseRepoURL(rawURL string) (*RepoInfo, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -139,19 +145,43 @@ func ParseRepoURL(rawURL string) (*RepoInfo, error) {
 		return parseGitHubURL(host, parts)
 	}
 
+	if parsed.Host == "codeload.github.com" {
+		return parseCodeloadURL(parts)
+	}
+
 	// GitLab URLs contain "/-/" separator
 	if containsGitLabSeparator(parts) {
 		return parseGitLabURL(host, parts)
+	}
+
+	// Bare gitlab.com project URL (default branch, repository root). Self-hosted
+	// hosts can't be auto-detected without the "/-/" separator.
+	if parsed.Host == "gitlab.com" && len(parts) >= 2 && !containsReservedGitLabSegment(parts) {
+		return &RepoInfo{
+			Provider:    ProviderGitLab,
+			Host:        host,
+			ProjectPath: strings.Join(parts, "/"),
+		}, nil
 	}
 
 	return nil, fmt.Errorf("unrecognized repository URL format: %s", rawURL)
 }
 
 // parseGitHubURL parses a GitHub repository URL.
-// Expected format: owner/repo/tree/branch/path...
+// Accepted formats:
+//   - owner/repo (default branch, repository root)
+//   - owner/repo/tree/branch/path...
 func parseGitHubURL(host string, parts []string) (*RepoInfo, error) {
+	if len(parts) == 2 {
+		return &RepoInfo{
+			Provider:    ProviderGitHub,
+			Host:        host,
+			ProjectPath: parts[0] + "/" + parts[1],
+		}, nil
+	}
+
 	if len(parts) < 4 || parts[2] != "tree" {
-		return nil, fmt.Errorf("invalid GitHub URL: expected format https://github.com/owner/repo/tree/branch/path")
+		return nil, fmt.Errorf("invalid GitHub URL: expected format https://github.com/owner/repo or https://github.com/owner/repo/tree/branch/path")
 	}
 
 	return &RepoInfo{
@@ -163,8 +193,33 @@ func parseGitHubURL(host string, parts []string) (*RepoInfo, error) {
 	}, nil
 }
 
+// parseCodeloadURL parses a codeload.github.com tarball URL.
+// Expected format: owner/repo/tar.gz/{ref} where {ref} is refs/heads/{branch},
+// refs/tags/{tag}, HEAD, or a bare branch/tag/commit.
+func parseCodeloadURL(parts []string) (*RepoInfo, error) {
+	if len(parts) < 4 || parts[2] != "tar.gz" {
+		return nil, fmt.Errorf("invalid codeload URL: expected format https://codeload.github.com/owner/repo/tar.gz/{ref}")
+	}
+
+	ref := strings.Join(parts[3:], "/")
+	ref = strings.TrimPrefix(ref, "refs/heads/")
+	ref = strings.TrimPrefix(ref, "refs/tags/")
+	if ref == "HEAD" {
+		ref = ""
+	}
+
+	return &RepoInfo{
+		Provider:    ProviderGitHub,
+		Host:        "https://github.com",
+		ProjectPath: parts[0] + "/" + parts[1],
+		Branch:      ref,
+	}, nil
+}
+
 // parseGitLabURL parses a GitLab repository URL.
-// Expected format: owner/repo/-/tree/branch/path... or group/subgroup/repo/-/tree/branch/path...
+// Expected formats:
+//   - owner/repo/-/tree/branch/path... (or group/subgroup/repo/-/tree/branch/path...)
+//   - owner/repo/-/archive/ref.../name.tar.gz
 func parseGitLabURL(host string, parts []string) (*RepoInfo, error) {
 	// Find the position of "-" which separates project path from tree/branch info
 	dashIdx := -1
@@ -173,6 +228,10 @@ func parseGitLabURL(host string, parts []string) (*RepoInfo, error) {
 			dashIdx = i
 			break
 		}
+	}
+
+	if dashIdx >= 1 && dashIdx+2 < len(parts) && parts[dashIdx+1] == "archive" {
+		return parseGitLabArchiveURL(host, parts, dashIdx)
 	}
 
 	if dashIdx < 1 || dashIdx+2 >= len(parts) || parts[dashIdx+1] != "tree" {
@@ -191,6 +250,44 @@ func parseGitLabURL(host string, parts []string) (*RepoInfo, error) {
 		Branch:      parts[dashIdx+2],
 		Path:        path,
 	}, nil
+}
+
+// parseGitLabArchiveURL parses a GitLab /-/archive/ tarball URL.
+// Expected format: owner/repo/-/archive/{ref...}/{name}.tar.gz — the ref may
+// span multiple segments (slashed branch names); the final segment is the
+// archive filename.
+func parseGitLabArchiveURL(host string, parts []string, dashIdx int) (*RepoInfo, error) {
+	last := parts[len(parts)-1]
+	refParts := parts[dashIdx+2 : len(parts)-1]
+
+	if !strings.HasSuffix(last, ".tar.gz") || len(refParts) == 0 {
+		return nil, fmt.Errorf("invalid GitLab archive URL: expected format https://gitlab.com/owner/repo/-/archive/{ref}/{name}.tar.gz")
+	}
+
+	ref := strings.Join(refParts, "/")
+	if ref == "HEAD" {
+		ref = ""
+	}
+
+	return &RepoInfo{
+		Provider:    ProviderGitLab,
+		Host:        host,
+		ProjectPath: strings.Join(parts[:dashIdx], "/"),
+		Branch:      ref,
+	}, nil
+}
+
+// containsReservedGitLabSegment guards the bare-URL form against web-UI paths
+// (e.g. gitlab.com/owner/repo/tree/main without the "/-/" separator) being
+// misread as a nested-group project path.
+func containsReservedGitLabSegment(parts []string) bool {
+	for _, part := range parts {
+		switch part {
+		case "tree", "blob", "archive", "raw", "tags", "commits":
+			return true
+		}
+	}
+	return false
 }
 
 // splitPath splits a URL path into non-empty components.
@@ -270,16 +367,14 @@ func (f *Fetcher) fetchFilesParallel(ctx context.Context, fileURLs []string, set
 				return
 			}
 
-			var proposal types.SpecAddProposalJSON
-			if err := json.Unmarshal(content, &proposal); err != nil {
+			fileSpecs, err := parseSpecProposal(content)
+			if err != nil {
 				result.errors = append(result.errors, fmt.Sprintf("%s: failed to parse JSON: %v", url, err))
 				resultChan <- result
 				return
 			}
 
-			for _, spec := range proposal.Proposal.Specs {
-				result.specs[spec.Index] = spec
-			}
+			result.specs = fileSpecs
 			resultChan <- result
 		}(fileURL)
 	}
@@ -310,7 +405,27 @@ func (f *Fetcher) fetchFilesParallel(ctx context.Context, fileURLs []string, set
 			utils.LogAttr("errors", strings.Join(fetchErrors, "; ")))
 	}
 
-	// Log loaded specs
+	logLoadedSpecs(specs)
+
+	return specs, nil
+}
+
+// parseSpecProposal parses a spec-proposal JSON document into specs keyed by chain ID (Index).
+func parseSpecProposal(content []byte) (map[string]types.Spec, error) {
+	var proposal types.SpecAddProposalJSON
+	if err := json.Unmarshal(content, &proposal); err != nil {
+		return nil, err
+	}
+
+	specs := make(map[string]types.Spec, len(proposal.Proposal.Specs))
+	for _, spec := range proposal.Proposal.Specs {
+		specs[spec.Index] = spec
+	}
+	return specs, nil
+}
+
+// logLoadedSpecs logs the chain IDs loaded from a remote repository.
+func logLoadedSpecs(specs map[string]types.Spec) {
 	specIDs := make([]string, 0, len(specs))
 	for id := range specs {
 		specIDs = append(specIDs, id)
@@ -318,6 +433,4 @@ func (f *Fetcher) fetchFilesParallel(ctx context.Context, fileURLs []string, set
 	utils.LavaFormatInfo("Loaded specs from remote repository",
 		utils.LogAttr("spec_count", len(specs)),
 		utils.LogAttr("spec_ids", strings.Join(specIDs, ", ")))
-
-	return specs, nil
 }

@@ -8,6 +8,51 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.2.0 — 2026-07-14
+
+### Highlights
+
+Smart Router v1.2.0 introduces a major redesign to its ChainTracker and probing subsystems, shifting from isolated per-endpoint observations to a ChainState consensus model driven by a proactive prober. This architectural update is paired with routing fixes that actively starve dead providers from organic selection and ensure the endpoint tip store is properly cleared during state resets. For configuration management, the spec fetcher now downloads API specifications as a single compressed tarball, eliminating the requirement for operators to supply a GitHub token when accessing public repositories. Integrators serving browser-based clients can now use the newly added `--cors-expose-headers` flag to explicitly expose specific HTTP response headers through the gateway. Finally, the interactive setup wizard has been updated to perform OS-adaptive prerequisite checks before initiating the configuration flow.
+
+### Changes
+
+#### New Features
+- feat(wizard): add OS-adaptive prerequisite check before the flow ([#194]) [`7f845c3`]
+- feat(cors): add --cors-expose-headers to expose response headers to browsers ([#199]) [`cbbed33`]
+- feat: ChainTracker & Probing redesign (MAG-2157): per-endpoint observations → ChainState consensus → proactive prober ([#143]) [`6a8ec51`]
+- feat(specfetcher): fetch specs as one tarball, no GitHub token needed for public repos ([#211]) [`a60806f`]
+
+#### Bug fixes
+- fix(chaintracker-redesign): address code-review findings ([#209]) [`6c870c2`]
+- fix(endpointstate): clear the endpointtip store on reset (10th review finding) ([#209]) [`d4018ab`]
+- fix(rpcsmartrouter): close bootstrap-atomic bypass + prefer store over stale poll atomic ([#209]) [`a4816ac`]
+- fix(provideroptimizer): starve dead providers from organic selection (MAG-2237) ([#210]) [`75e01c3`]
+
+#### Documentation updates
+- docs: dashboard v2 promoted to repo root (drop cd v2) ([#201]) [`2fbe813`]
+
+#### Build process updates
+- ci: add Helm compatibility validation to PR gate ([#202]) [`447ead6`]
+
+[#143]: https://github.com/magma-Devs/smart-router/pull/143
+[#194]: https://github.com/magma-Devs/smart-router/pull/194
+[#199]: https://github.com/magma-Devs/smart-router/pull/199
+[#201]: https://github.com/magma-Devs/smart-router/pull/201
+[#202]: https://github.com/magma-Devs/smart-router/pull/202
+[#209]: https://github.com/magma-Devs/smart-router/pull/209
+[#210]: https://github.com/magma-Devs/smart-router/pull/210
+[#211]: https://github.com/magma-Devs/smart-router/pull/211
+[`2fbe813`]: https://github.com/magma-Devs/smart-router/commit/2fbe813c518cc0f8ae77a39ffe4d0f5d46fc25f0
+[`447ead6`]: https://github.com/magma-Devs/smart-router/commit/447ead67cc4aea5a5229266150abacf2428f2ff7
+[`6a8ec51`]: https://github.com/magma-Devs/smart-router/commit/6a8ec5197c571287319e02dc826cfa9f20073bdb
+[`6c870c2`]: https://github.com/magma-Devs/smart-router/commit/6c870c223ac3a30ec5128c3bfe293dbb95814ac4
+[`75e01c3`]: https://github.com/magma-Devs/smart-router/commit/75e01c3aef2be1b0b5c61586698bb2a163483e5a
+[`7f845c3`]: https://github.com/magma-Devs/smart-router/commit/7f845c3187442ff7642d75c5d4c09c94182f3ef9
+[`a4816ac`]: https://github.com/magma-Devs/smart-router/commit/a4816ac2d82028e641335ab1b8f357166b90a1e7
+[`a60806f`]: https://github.com/magma-Devs/smart-router/commit/a60806f3821033e6acc0f308674e9b3f2902c892
+[`cbbed33`]: https://github.com/magma-Devs/smart-router/commit/cbbed33952fb81abc8a13f95d3216b97e0117474
+[`d4018ab`]: https://github.com/magma-Devs/smart-router/commit/d4018ab1f6342a9b76b861e63551f2538105db84
+
 ## v1.1.0 — 2026-07-02
 
 ### Highlights
