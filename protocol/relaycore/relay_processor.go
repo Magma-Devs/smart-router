@@ -730,51 +730,35 @@ func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pe
 		if len(pending) == 0 {
 			return
 		}
-		successResults, nodeErrorResults, protocolErrorResults := rp.GetResultsData()
-		for _, result := range successResults {
-			addr := result.ProviderInfo.ProviderAddress
+		// resolveOne records a watched provider from its stored result and drops it from pending;
+		// a no-op for providers not in the pending set (already resolved, or never watched).
+		resolveOne := func(addr, group, outcome string) {
 			if _, watched := pending[addr]; !watched {
-				continue
+				return
 			}
 			delete(pending, addr)
+			record(CrossValidationStragglerResult{
+				ProviderAddress: addr,
+				ProviderGroup:   group,
+				Outcome:         outcome,
+				Delay:           time.Since(start),
+			})
+		}
+		successResults, nodeErrorResults, protocolErrorResults := rp.GetResultsData()
+		for _, result := range successResults {
 			// handleResponse cached ResponseHash via responseContentHash (zero for empty replies),
 			// so this is the same comparison classifyStragglerResponse would have made.
 			outcome := common.CrossValidationStragglerOutcomeDisagreed
 			if result.ResponseHash == consensusHash {
 				outcome = common.CrossValidationStragglerOutcomeAgreed
 			}
-			record(CrossValidationStragglerResult{
-				ProviderAddress: addr,
-				ProviderGroup:   result.ProviderInfo.ProviderGroup,
-				Outcome:         outcome,
-				Delay:           time.Since(start),
-			})
+			resolveOne(result.ProviderInfo.ProviderAddress, result.ProviderInfo.ProviderGroup, outcome)
 		}
 		for _, result := range nodeErrorResults {
-			addr := result.ProviderInfo.ProviderAddress
-			if _, watched := pending[addr]; !watched {
-				continue
-			}
-			delete(pending, addr)
-			record(CrossValidationStragglerResult{
-				ProviderAddress: addr,
-				ProviderGroup:   result.ProviderInfo.ProviderGroup,
-				Outcome:         common.CrossValidationStragglerOutcomeNodeError,
-				Delay:           time.Since(start),
-			})
+			resolveOne(result.ProviderInfo.ProviderAddress, result.ProviderInfo.ProviderGroup, common.CrossValidationStragglerOutcomeNodeError)
 		}
 		for _, relayError := range protocolErrorResults {
-			addr := relayError.ProviderInfo.ProviderAddress
-			if _, watched := pending[addr]; !watched {
-				continue
-			}
-			delete(pending, addr)
-			record(CrossValidationStragglerResult{
-				ProviderAddress: addr,
-				ProviderGroup:   relayError.ProviderInfo.ProviderGroup,
-				Outcome:         common.CrossValidationStragglerOutcomeProtocolError,
-				Delay:           time.Since(start),
-			})
+			resolveOne(relayError.ProviderInfo.ProviderAddress, relayError.ProviderInfo.ProviderGroup, common.CrossValidationStragglerOutcomeProtocolError)
 		}
 	}
 	// giveUp runs on deadline/cancel. It first drains responses already sitting in the buffered

@@ -264,12 +264,14 @@ relay timeout) and an async watcher compares its late response against the reach
 The watcher only runs when a consensus was reached; on a failed cross-validation there is nothing
 to compare a late response against.
 
-A detached straggler holds its provider session until its relay resolves (bounded by the relay
-timeout + the endpoint's `timeout` override), so concurrent detached relays are **capped per
-provider**: beyond the cap — realistically only a black-holing provider under sustained CV load —
-additional relays stay on the batch context, are cancelled at quorum exit exactly as before this
-feature, and resolve in the watcher as `protocol-error` (never silently dropped). This keeps a dead
-provider from accumulating held sessions toward the per-provider session limit.
+A detached straggler holds its provider session until its relay resolves (bounded by the reflection
+pre-check plus the relay timeout + the endpoint's `timeout` override), rather than freeing it at
+quorum exit. There is no separate CV-specific cap on this: the session manager already bounds
+outstanding sessions per provider (`MaxSessionsAllowedPerProvider`), so a dead provider self-limits —
+it stops being granted new sessions and is excluded from selection — without a second cap to keep in
+sync. The watcher's deadline is anchored at batch launch and sized generously (it dominates the sum
+of the individually-bounded relay phases), so a `not-received` outcome means the goroutine genuinely
+leaked; in the normal case the watcher exits as soon as the last straggler pushes its response.
 
 ## Usage
 

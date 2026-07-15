@@ -101,52 +101,6 @@ type RPCSmartRouterServer struct {
 	tipApiNamesOnce      sync.Once
 	getBlockNumApiName   string
 	getBlockByNumApiName string
-
-	// cvDetachedBudget bounds concurrent detached CV straggler relays per provider (MAG-2187): a
-	// detached relay holds its session for the full relay bound instead of freeing at quorum exit,
-	// so without a cap a black-holing provider under sustained CV load accumulates held sessions
-	// toward MaxSessionsAllowedPerProvider and starves cross-validation batches. Over-budget relays
-	// fall back to the batch-cancel context (the pre-detachment behavior) and resolve as
-	// protocol-error in the straggler watcher — never silently dropped.
-	cvDetachedBudget detachedRelayBudget
-}
-
-// crossValidationMaxDetachedPerProvider caps concurrent detached straggler relays per provider.
-// Worst case a dead provider holds this many extra sessions for one relay bound — well under
-// MaxSessionsAllowedPerProvider (1000) — while healthy CV traffic (stragglers resolve in ms-s)
-// never approaches it.
-const crossValidationMaxDetachedPerProvider = 64
-
-// detachedRelayBudget tracks the number of in-flight detached CV relays per provider address.
-type detachedRelayBudget struct {
-	lock        sync.Mutex
-	outstanding map[string]int
-}
-
-// tryReserve reserves a detached-relay slot for provider, returning false when the cap is reached.
-func (b *detachedRelayBudget) tryReserve(provider string, budgetCap int) bool {
-	b.lock.Lock()
-	defer b.lock.Unlock()
-	if b.outstanding == nil {
-		b.outstanding = map[string]int{}
-	}
-	if b.outstanding[provider] >= budgetCap {
-		return false
-	}
-	b.outstanding[provider]++
-	return true
-}
-
-// release returns a reserved slot; the per-provider entry is dropped at zero so the map only holds
-// providers with live detached relays.
-func (b *detachedRelayBudget) release(provider string) {
-	b.lock.Lock()
-	defer b.lock.Unlock()
-	if b.outstanding[provider] <= 1 {
-		delete(b.outstanding, provider)
-		return
-	}
-	b.outstanding[provider]--
 }
 
 func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
@@ -1133,20 +1087,30 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		utils.LogAttr("GUID", ctx),
 	)
 
+	// Set the request-level Success once, on the request goroutine (both the success and failure
+	// paths below flow through here). relayInnerDirect no longer writes analytics.Success, so a
+	// detached CV straggler cannot race this or the downstream consumer (MAG-2187).
+	if analytics != nil {
+		analytics.Success = err == nil
+	}
+
+	// Cross-validation cache write: per-response writes are skipped in the relay goroutines (a
+	// detached dissenting straggler would land last and overwrite the cache with the data the
+	// quorum just outvoted). The consensus WINNER is written exactly once, here — and BEFORE
+	// appendHeadersToRelayResult appends this request's cross-validation response headers to
+	// returnedResult.Reply.Metadata, so the cached entry (a deep copy of the whole reply, metadata
+	// included) does not carry per-request CV/GUID headers that would then be replayed verbatim to
+	// unrelated stateless requests on a cache hit.
+	if err == nil && relayProcessor.GetSelection() == relaycore.CrossValidation && returnedResult != nil && returnedResult.Reply != nil {
+		rpcss.tryCacheWrite(ctx, protocolMessage, returnedResult)
+	}
+
 	pendingProviders := rpcss.appendHeadersToRelayResult(ctx, returnedResult, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, err == nil)
 
 	// Start the async straggler watcher AFTER the headers snapshot (MAG-2187): it becomes the responses
 	// channel's sole reader and resolves the exact pending set the header just reported. No-op when
 	// nothing is pending or no consensus was reached.
 	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName(), pendingProviders)
-
-	// Cross-validation cache write: per-response writes are skipped in the relay goroutines (a
-	// detached dissenting straggler would land last and overwrite the cache with the data the
-	// quorum just outvoted). Instead the consensus WINNER is written exactly once, here, after the
-	// quorum validated it — the only CV response other (stateless) requests may safely be served.
-	if err == nil && relayProcessor.GetSelection() == relaycore.CrossValidation && returnedResult != nil && returnedResult.Reply != nil {
-		rpcss.tryCacheWrite(ctx, protocolMessage, returnedResult)
-	}
 
 	if err != nil {
 		return returnedResult, utils.LavaFormatError("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
@@ -1506,8 +1470,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// Request-classification analytics flags are pure functions of the chain message, so set them
 	// once here on the request path, BEFORE launching goroutines. They used to be written inside
 	// each relay goroutine; with CV stragglers now outliving the reply, a post-reply write raced
-	// the analytics consumer (and SendParsedRelay's own writes). The goroutines only read analytics
-	// (RecordDirectRelayEnd) from here on.
+	// the analytics consumer (AddMetricForHttp). The goroutines only READ analytics from here on
+	// (RecordDirectRelayEnd), and the request-level Success is set once in SendParsedRelay.
 	if analytics != nil {
 		analytics.IsWrite = chainlib.GetStateful(chainMessage) != common.NO_STATE
 		analytics.IsArchive = chainqueries.IsArchiveRequest(chainMessage)
@@ -1518,15 +1482,33 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// Cross-validation relays are detached from the batch cancel (MAG-2187): ProcessRelaySend cancels
 	// its context as soon as the quorum early-exits, which used to kill straggler relays mid-flight —
 	// their responses were silently dropped and never compared against the consensus. Detached
-	// stragglers run to completion (SendDirectRelay still bounds them with relayTimeout plus the
-	// per-endpoint url.Timeout override) and always push their response via the deferred
-	// SetResponse, feeding the post-reply straggler watcher. Values (GUID, IP forwarding metadata)
-	// are preserved by WithoutCancel. Non-CV selections keep the batch cancel: aborting the hedged
-	// losers on first success is a deliberate resource-saver there. Trade-off: in CV mode a client
-	// disconnect no longer aborts in-flight relays; they run out their bounded timeout.
-	detachedParentCtx := ctx
+	// stragglers run to completion (bounded by the reflection pre-check + SendDirectRelay's
+	// relayTimeout+url.Timeout window) and always push their response via the deferred SetResponse,
+	// feeding the post-reply straggler watcher. Values (GUID, IP forwarding metadata) are preserved
+	// by WithoutCancel. Non-CV selections keep the batch cancel: aborting the hedged losers on first
+	// success is a deliberate resource-saver there. Trade-off: in CV mode a client disconnect no
+	// longer aborts in-flight relays; they run out their bounded timeout.
+	//
+	// Post-reply side-effect audit (the detachment reintroduces every post-relay side effect the
+	// batch cancel used to suppress, so each is classified here rather than one review round at a
+	// time). A detached straggler's success path runs, AFTER the reply: (1) the deferred SetResponse
+	// — ESSENTIAL, feeds the watcher; (2) OnSessionDone/OnSessionFailure — frees the session
+	// (essential) and records the straggler's real latency/QoS (honest slow-provider signal), all
+	// under the session manager's own locks; (3) harvestAndUpdateTipFromRelay — per-endpoint tip
+	// state, generation-gated (harvestGen captured pre-dispatch), internally synchronized; (4)
+	// RecordDirectRelayEnd — per-endpoint metrics, reads only the pre-launch analytics flags
+	// (disjoint from the consumer's Success/Origin writes); (5) provSpan.End() — safe anytime. None
+	// of these touch request-shared state unsafely. The two that DID were gated: the response cache
+	// write (skipped for CV in the goroutine; the consensus winner is cached once in SendParsedRelay)
+	// and analytics.Success (removed from relayInnerDirect; set once on the request goroutine).
+	//
+	// No explicit per-provider detachment cap: a detached relay holds its session until it resolves,
+	// but the session manager already bounds outstanding sessions at MaxSessionsAllowedPerProvider,
+	// so a dead provider self-limits (it stops being granted new sessions and is excluded) without a
+	// second CV-specific cap to keep in sync.
+	relayParentCtx := ctx
 	if selection == relaycore.CrossValidation {
-		detachedParentCtx = context.WithoutCancel(ctx)
+		relayParentCtx = context.WithoutCancel(ctx)
 
 		// Re-snapshot the queried-providers set to the post-filter survivors. The pre-filter
 		// snapshot in sendRelayToEndpoint includes consistency-filtered endpoints that were
@@ -1540,42 +1522,32 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		}
 		relayProcessor.SetCrossValidationQueriedProviders(queriedProviders)
 
-		// Stamp the batch's true relay upper bound for the straggler watcher: each detached relay
-		// is bounded by relayTimeout + its endpoint's url.Timeout override (see
-		// LowerContextTimeoutWithDuration), NOT relayTimeout alone — a watcher deadline that
-		// ignores the override would misreport a slow-RPC endpoint's legitimate late response as
-		// not-received. Anchoring at launch also keeps the watcher from outliving the bound.
+		// Stamp a deliberately GENEROUS upper bound for the straggler watcher, anchored at launch.
+		// A detached goroutine's lifetime is the sum of individually-bounded phases — the gRPC
+		// reflection pre-check (≤ relayTimeout, see relayInnerDirect) THEN SendDirectRelay's
+		// relayTimeout+url.Timeout window THEN post-relay bookkeeping — so rather than track each
+		// phase precisely (they keep hiding), bound it at 2*relayTimeout + max url.Timeout + grace,
+		// which dominates any real relay-phase sum. The watcher normally exits early when the last
+		// straggler pushes, so this bound only bites when a goroutine genuinely leaks; then
+		// "not-received" is the honest outcome. Overshoot cost is holding the processor a little
+		// longer in that rare case.
 		maxNodeTimeout := time.Duration(0)
 		for _, sessionInfo := range sessions {
 			if sessionInfo == nil || sessionInfo.Session == nil {
 				continue
 			}
-			if drsc, ok := sessionInfo.Session.Connection.(*lavasession.DirectRPCSessionConnection); ok && drsc.DirectConnection != nil {
-				if nodeUrl := drsc.DirectConnection.GetNodeUrl(); nodeUrl != nil && nodeUrl.Timeout > maxNodeTimeout {
+			if directConn, ok := sessionInfo.Session.GetDirectConnection(); ok && directConn != nil {
+				if nodeUrl := directConn.GetNodeUrl(); nodeUrl != nil && nodeUrl.Timeout > maxNodeTimeout {
 					maxNodeTimeout = nodeUrl.Timeout
 				}
 			}
 		}
-		relayProcessor.SetCrossValidationRelayDeadline(time.Now().Add(relayTimeout + maxNodeTimeout))
+		relayProcessor.SetCrossValidationRelayDeadline(time.Now().Add(2*relayTimeout + maxNodeTimeout + crossValidationStragglerGrace))
 	}
 
 	// Launch goroutines for each direct RPC endpoint (parallel relay pattern)
 	for endpointAddress, sessionInfo := range sessions {
-		// Per-endpoint detachment decision: a CV relay detaches only within the provider's budget.
-		// Over budget (the provider is already hoarding detached relays — e.g. black-holing under
-		// sustained CV load), the relay stays on the batch context and is cancelled at quorum exit
-		// like before MAG-2187, freeing its session immediately; the watcher then records it as
-		// protocol-error rather than silently dropping it.
-		relayParentCtx := ctx
-		detached := false
-		if selection == relaycore.CrossValidation && rpcss.cvDetachedBudget.tryReserve(endpointAddress, crossValidationMaxDetachedPerProvider) {
-			relayParentCtx = detachedParentCtx
-			detached = true
-		}
-		go func(endpointAddress string, sessionInfo *lavasession.SessionInfo, relayParentCtx context.Context, detached bool) {
-			if detached {
-				defer rpcss.cvDetachedBudget.release(endpointAddress)
-			}
+		go func(endpointAddress string, sessionInfo *lavasession.SessionInfo, relayParentCtx context.Context) {
 			// Derive from relayParentCtx so IP forwarding metadata (and other values) are preserved.
 			goroutineCtx, goroutineCtxCancel := context.WithCancel(relayParentCtx)
 
@@ -1655,9 +1627,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			)
 
 			if rpcss.smartRouterEndpointMetrics != nil {
-				// analytics is read-only here: the classification flags were set once on the
-				// request path before launch (a detached CV straggler writing them post-reply
-				// raced the analytics consumer).
+				// analytics is read-only here (classification flags set once pre-launch, Success set
+				// once in SendParsedRelay), so this per-endpoint metric is safe from a detached
+				// straggler goroutine; per-relay success is passed explicitly (err == nil).
 				rpcss.smartRouterEndpointMetrics.RecordDirectRelayEnd(
 					rpcss.listenEndpoint.ChainID,
 					rpcss.listenEndpoint.ApiInterface,
@@ -1782,7 +1754,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			}
 
 			// NOTE: Don't call Free() here - OnSessionDone/OnSessionFailure already do it!
-		}(endpointAddress, sessionInfo, relayParentCtx, detached)
+		}(endpointAddress, sessionInfo, relayParentCtx)
 	}
 
 	// NOTE: Don't call WaitForResults here!
@@ -3405,10 +3377,11 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		})
 	}
 
-	// Update analytics
-	if analytics != nil {
-		analytics.Success = true
-	}
+	// NOTE: analytics.Success is intentionally NOT written here. It is a request-level field owned
+	// by the consumer (AddMetricForHttp sets Success = err==nil) and set once on the request
+	// goroutine in SendParsedRelay; a per-relay write from a detached CV straggler would race that
+	// consumer post-reply (MAG-2187). RecordDirectRelayEnd already receives per-relay success as an
+	// explicit argument, so nothing here depends on this field.
 
 	utils.LavaFormatTrace("direct RPC relay succeeded",
 		utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
@@ -3491,11 +3464,13 @@ func (rpcss *RPCSmartRouterServer) getMetadataFromRelayTrailer(metadataHeaders [
 	}
 }
 
-// crossValidationStragglerGrace pads the straggler watcher's deadline beyond the relays' stamped
-// upper bound (launch + relayTimeout + max per-endpoint url.Timeout): a straggler goroutine whose
-// relay just hit that bound still does post-relay bookkeeping (tip harvest, session accounting)
-// before the deferred SetResponse pushes its response.
-const crossValidationStragglerGrace = 2 * time.Second
+// crossValidationStragglerGrace pads the straggler watcher's launch-anchored deadline to absorb the
+// overhead outside the bounded relay phases — goroutine scheduling before the relay clock starts, and
+// post-relay bookkeeping (tip harvest, OnSessionDone under session-manager locks) before the deferred
+// SetResponse pushes the response. Sized comfortably because it only matters in the rare case a
+// straggler resolves right at the relay-phase bound; the watcher otherwise exits when the last
+// straggler pushes.
+const crossValidationStragglerGrace = 5 * time.Second
 
 // watchCrossValidationStragglers starts the async post-reply compare path for cross-validation
 // stragglers (MAG-2187): providers whose relays were still in flight when the quorum early-exit built
@@ -3525,18 +3500,17 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 	if rpcss.listenEndpoint != nil {
 		chainId, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 	}
-	// Deadline: prefer the per-batch relay bound stamped at launch (launch + relayTimeout + the
-	// largest per-endpoint url.Timeout override — the detached relays' TRUE bound, see
-	// LowerContextTimeoutWithDuration). A relayTimeout-from-now deadline both undershoots slow-RPC
-	// endpoints with a timeout override (their legitimate late dissent would be misreported as
-	// not-received and never reach the mismatch alert) and overshoots by re-anchoring at reply
-	// time. Fallback for callers that never launched a batch through sendRelayToDirectEndpoints.
+	// Deadline: the generous per-batch bound stamped at launch (see sendRelayToDirectEndpoints —
+	// 2*relayTimeout + max url.Timeout + grace, anchored at launch, dominating any real relay-phase
+	// sum). The watcher normally returns early when the last straggler pushes, so this only bounds a
+	// genuinely leaked goroutine. Fallback (callers that never launched a batch through
+	// sendRelayToDirectEndpoints) uses the same generous shape from now.
 	var maxWait time.Duration
 	if deadline := relayProcessor.GetCrossValidationRelayDeadline(); !deadline.IsZero() {
-		maxWait = time.Until(deadline) + crossValidationStragglerGrace
+		maxWait = time.Until(deadline)
 	} else {
 		_, averageBlockTime, _, _ := rpcss.chainParser.ChainBlockStats()
-		maxWait = chainlib.GetRelayTimeout(protocolMessage, averageBlockTime) + crossValidationStragglerGrace
+		maxWait = 2*chainlib.GetRelayTimeout(protocolMessage, averageBlockTime) + crossValidationStragglerGrace
 	}
 	if maxWait < crossValidationStragglerGrace {
 		maxWait = crossValidationStragglerGrace
@@ -3568,7 +3542,9 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 		if rpcss.smartRouterEndpointMetrics == nil {
 			return
 		}
-		rpcss.smartRouterEndpointMetrics.SetCrossValidationStragglerMetric(chainId, apiInterface, apiName, straggler.Outcome)
+		// Emit the mismatch metric BEFORE the straggler metric so the straggler counter is the LAST
+		// side effect of record(): a caller (or test) that observes the straggler count reaching N
+		// is then guaranteed record()'s mismatch decision for those N has already completed.
 		// Shared admission rule with the reply-time outlier path — see crossValidationMismatchEligible.
 		if straggler.Outcome == common.CrossValidationStragglerOutcomeDisagreed && crossValidationMismatchEligible(deterministic, consensusHash) {
 			group := straggler.ProviderGroup
@@ -3580,6 +3556,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 				rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
 			}
 		}
+		rpcss.smartRouterEndpointMetrics.SetCrossValidationStragglerMetric(chainId, apiInterface, apiName, straggler.Outcome)
 	}
 
 	// WithoutCancel: the reply has already been sent, so the watcher must outlive the request context;

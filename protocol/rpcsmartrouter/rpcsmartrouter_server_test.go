@@ -541,8 +541,12 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 		return total
 	}
 
+	// The default registry accumulates across tests and -count reruns, so assert before/after deltas
+	// rather than absolute counter values.
 	t.Run("deterministic successful outlier increments for its group", func(t *testing.T) {
 		method := "cv_mismatch_outlier"
+		g3Before := mismatchCount(t, method, "g3")
+		g1Before := mismatchCount(t, method, "g1")
 		rp := &MockRelayProcessorForHeaders{
 			crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5},
 			selection:                       relaycore.CrossValidation,
@@ -555,12 +559,13 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 		}
 		relayResult := &common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1"}, CrossValidation: 2, ResponseHash: hashA, Reply: mkReply()}
 		newServer().appendHeadersToRelayResult(ctx, relayResult, 0, rp, &MockProtocolMessage{api: deterministicAPI, requestedBlock: 100}, method, nil, true)
-		require.Equal(t, float64(1), mismatchCount(t, method, "g3"), "outlier group g3 increments once")
-		require.Equal(t, float64(0), mismatchCount(t, method, "g1"), "agreeing group g1 does not increment")
+		require.Equal(t, g3Before+1, mismatchCount(t, method, "g3"), "outlier group g3 increments once")
+		require.Equal(t, g1Before, mismatchCount(t, method, "g1"), "agreeing group g1 does not increment")
 	})
 
 	t.Run("node error does not increment", func(t *testing.T) {
 		method := "cv_mismatch_nodeerr"
+		g3Before := mismatchCount(t, method, "g3")
 		rp := &MockRelayProcessorForHeaders{
 			crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5},
 			selection:             relaycore.CrossValidation,
@@ -574,11 +579,13 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 		}
 		relayResult := &common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1"}, CrossValidation: 2, ResponseHash: hashA, Reply: mkReply()}
 		newServer().appendHeadersToRelayResult(ctx, relayResult, 0, rp, &MockProtocolMessage{api: deterministicAPI, requestedBlock: 100}, method, nil, true)
-		require.Equal(t, float64(0), mismatchCount(t, method, "g3"), "node error is not a content outlier")
+		require.Equal(t, g3Before, mismatchCount(t, method, "g3"), "node error is not a content outlier")
 	})
 
 	t.Run("quorum failure does not increment", func(t *testing.T) {
 		method := "cv_mismatch_failure"
+		g1Before := mismatchCount(t, method, "g1")
+		g2Before := mismatchCount(t, method, "g2")
 		rp := &MockRelayProcessorForHeaders{
 			crossValidationParams: &common.CrossValidationParams{AgreementThreshold: 3, MaxParticipants: 5},
 			selection:             relaycore.CrossValidation,
@@ -590,8 +597,8 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 		// CrossValidation 1 < threshold 3 => failed
 		relayResult := &common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1"}, CrossValidation: 1, ResponseHash: hashA, Reply: mkReply()}
 		newServer().appendHeadersToRelayResult(ctx, relayResult, 0, rp, &MockProtocolMessage{api: deterministicAPI, requestedBlock: 100}, method, nil, false)
-		require.Equal(t, float64(0), mismatchCount(t, method, "g1"), "quorum failure does not increment mismatch")
-		require.Equal(t, float64(0), mismatchCount(t, method, "g2"), "quorum failure does not increment mismatch")
+		require.Equal(t, g1Before, mismatchCount(t, method, "g1"), "quorum failure does not increment mismatch")
+		require.Equal(t, g2Before, mismatchCount(t, method, "g2"), "quorum failure does not increment mismatch")
 	})
 }
 
@@ -711,12 +718,13 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		rp, consensusHash := newCVProcessorWithConsensus(t)
 		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"})
 		pushSuccess(rp, "p3", "g3", dissentBody)
-		// Synchronize on the mismatch counter — the LATER of record()'s two increments — so the
-		// straggler assertion below cannot land in the window between them.
+		// Synchronize on the straggler counter — record() emits the mismatch metric FIRST and the
+		// straggler metric LAST, so observing the straggler increment guarantees the mismatch
+		// increment already happened; the assertion below cannot land between them.
 		require.Eventually(t, func() bool {
-			return mismatchCount(t, method, "g3") == mismatchBefore+1
-		}, 5*time.Second, 10*time.Millisecond, "late confirmed dissent must feed the mismatch alerting surface")
-		require.Equal(t, stragglerBefore+1, stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed), "late dissent must be recorded on the straggler metric")
+			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed) == stragglerBefore+1
+		}, 5*time.Second, 10*time.Millisecond, "late dissent must be recorded on the straggler metric")
+		require.Equal(t, mismatchBefore+1, mismatchCount(t, method, "g3"), "late confirmed dissent must feed the mismatch alerting surface")
 	})
 
 	t.Run("two same-group late dissents increment mismatch once", func(t *testing.T) {
@@ -789,28 +797,6 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		require.Equal(t, stragglerBefore, stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed), "no watcher on failed cross-validation")
 	})
-}
-
-// TestDetachedRelayBudget pins the per-provider cap on concurrent detached CV relays (MAG-2187
-// review finding 8): reservations succeed up to the cap, fail beyond it, and releases free slots;
-// the tracking map drops providers at zero outstanding so it never grows unbounded.
-func TestDetachedRelayBudget(t *testing.T) {
-	budget := detachedRelayBudget{}
-	const budgetCap = 3
-	for i := 0; i < budgetCap; i++ {
-		require.True(t, budget.tryReserve("p1", budgetCap), "reservation %d within the cap must succeed", i+1)
-	}
-	require.False(t, budget.tryReserve("p1", budgetCap), "reservation beyond the cap must fail")
-	require.True(t, budget.tryReserve("p2", budgetCap), "the cap is per provider")
-
-	budget.release("p1")
-	require.True(t, budget.tryReserve("p1", budgetCap), "a released slot is reusable")
-
-	for i := 0; i < budgetCap; i++ {
-		budget.release("p1")
-	}
-	budget.release("p2")
-	require.Empty(t, budget.outstanding, "providers with no outstanding detached relays are dropped from the map")
 }
 
 // cvRequestCounter sums a named cross-validation counter over its `method` label across the default
