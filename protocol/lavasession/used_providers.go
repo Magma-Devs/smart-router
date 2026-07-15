@@ -155,9 +155,17 @@ func (up *UsedProviders) AllUnwantedAddresses() []string {
 	}
 	up.lock.RLock()
 	defer up.lock.RUnlock()
+	// Dedup across router keys: the same provider is routinely unwanted under several keys (each key
+	// is seeded from the original blocklist, and MigrateUnwantedProviders copies between keys), and
+	// callers treat this as the set of distinct providers (MAG-2351).
+	seen := map[string]struct{}{}
 	addresses := []string{}
 	for _, uniqueUsedProviders := range up.uniqueUsedProviders {
 		for addr := range uniqueUsedProviders.unwantedProviders {
+			if _, ok := seen[addr]; ok {
+				continue
+			}
+			seen[addr] = struct{}{}
 			addresses = append(addresses, addr)
 		}
 	}
@@ -171,9 +179,17 @@ func (up *UsedProviders) createOrUseUniqueUsedProvidersForKey(key RouterKey) *Un
 	keyString := key.String()
 	uniqueUsedProviders, ok := up.uniqueUsedProviders[keyString]
 	if !ok {
+		// Seed from a COPY of the user's original blocklist. Handing out the map reference itself
+		// meant AddUnwantedAddresses/MigrateUnwantedProviders under one router key mutated
+		// originalUnwantedProviders and leaked into every key created afterwards, double-counting
+		// providers in AllUnwantedAddresses (MAG-2351).
+		unwantedProviders := make(map[string]struct{}, len(up.originalUnwantedProviders))
+		for addr := range up.originalUnwantedProviders {
+			unwantedProviders[addr] = struct{}{}
+		}
 		uniqueUsedProviders = &UniqueUsedProviders{
 			providers:         map[string]struct{}{},
-			unwantedProviders: up.originalUnwantedProviders,
+			unwantedProviders: unwantedProviders,
 			blockOnSyncLoss:   map[string]struct{}{},
 			erroredProviders:  map[string]struct{}{},
 		}

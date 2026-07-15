@@ -247,6 +247,55 @@ func TestRelayProcessorRetry(t *testing.T) {
 	})
 }
 
+// TestRelayProcessorExhaustedTransportErrors covers MAG-2351: when EVERY attempt fails at the
+// transport level, the failure result must carry the single provider whose error body is returned —
+// not the comma-joined attempted list, which the Lava-Provider-Address chain builder would append
+// wholesale as its resolver entry (doubling the header and disagreeing with Lava-Retries).
+func TestRelayProcessorExhaustedTransportErrors(t *testing.T) {
+	run := func(t *testing.T, selection Selection) {
+		ctx := context.Background()
+		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		specId := "LAVA"
+		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+		if closeServer != nil {
+			defer closeServer()
+		}
+		require.NoError(t, err)
+		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, err)
+		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
+		usedProviders := lavasession.NewUsedProviders(nil)
+		relayProcessor := NewRelayProcessor(ctx, nil, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, selection))
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
+		defer cancel()
+		canUse := usedProviders.TryLockSelection(ctx)
+		require.NoError(t, ctx.Err())
+		require.Nil(t, canUse)
+		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}, "lava@test2": &lavasession.SessionInfo{}}
+		usedProviders.AddUsed(consumerSessionsMap, nil)
+
+		go SendProtocolError(relayProcessor, "lava@test", time.Millisecond*5, fmt.Errorf("bad"))
+		go SendProtocolError(relayProcessor, "lava@test2", time.Millisecond*5, fmt.Errorf("bad"))
+		ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond*200)
+		defer cancel()
+		err = relayProcessor.WaitForResults(ctx)
+		require.NoError(t, err)
+		require.Equal(t, uint64(2), relayProcessor.ProtocolErrors())
+
+		returnedResult, err := relayProcessor.ProcessingResult()
+		require.Error(t, err)
+		require.NotNil(t, returnedResult)
+		// A single provider — the source of the returned error body — never a joined list.
+		require.NotContains(t, returnedResult.ProviderInfo.ProviderAddress, ",")
+		require.Contains(t, []string{"lava@test", "lava@test2"}, returnedResult.ProviderInfo.ProviderAddress)
+	}
+	t.Run("stateless", func(t *testing.T) { run(t, Stateless) })
+	t.Run("stateful", func(t *testing.T) { run(t, Stateful) })
+}
+
 func TestRelayProcessorRetryNodeError(t *testing.T) {
 	t.Run("retry", func(t *testing.T) {
 		ctx := context.Background()
