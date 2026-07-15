@@ -1090,6 +1090,14 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// nothing is pending or no consensus was reached.
 	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName())
 
+	// Cross-validation cache write: per-response writes are skipped in the relay goroutines (a
+	// detached dissenting straggler would land last and overwrite the cache with the data the
+	// quorum just outvoted). Instead the consensus WINNER is written exactly once, here, after the
+	// quorum validated it — the only CV response other (stateless) requests may safely be served.
+	if err == nil && relayProcessor.GetSelection() == relaycore.CrossValidation && returnedResult != nil && returnedResult.Reply != nil {
+		rpcss.tryCacheWrite(ctx, protocolMessage, returnedResult)
+	}
+
 	if err != nil {
 		return returnedResult, utils.LavaFormatError("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
 	}
@@ -1445,18 +1453,60 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// retry batch from the state machine may have already incremented BatchNumber.
 	relayAttempt := relayProcessor.GetUsedProviders().BatchNumber()
 
+	// Request-classification analytics flags are pure functions of the chain message, so set them
+	// once here on the request path, BEFORE launching goroutines. They used to be written inside
+	// each relay goroutine; with CV stragglers now outliving the reply, a post-reply write raced
+	// the analytics consumer (and SendParsedRelay's own writes). The goroutines only read analytics
+	// (RecordDirectRelayEnd) from here on.
+	if analytics != nil {
+		analytics.IsWrite = chainlib.GetStateful(chainMessage) != common.NO_STATE
+		analytics.IsArchive = chainqueries.IsArchiveRequest(chainMessage)
+		analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(chainMessage)
+		analytics.IsBatch = chainqueries.IsBatchRequest(chainMessage)
+	}
+
 	// Cross-validation relays are detached from the batch cancel (MAG-2187): ProcessRelaySend cancels
 	// its context as soon as the quorum early-exits, which used to kill straggler relays mid-flight —
 	// their responses were silently dropped and never compared against the consensus. Detached
-	// stragglers run to completion (SendDirectRelay still bounds them with relayTimeout) and always
-	// push their response via the deferred SetResponse, feeding the post-reply straggler watcher.
-	// Values (GUID, IP forwarding metadata) are preserved by WithoutCancel. Non-CV selections keep the
-	// batch cancel: aborting the hedged losers on first success is a deliberate resource-saver there.
-	// Trade-off: in CV mode a client disconnect no longer aborts in-flight relays; they run out their
-	// bounded timeout.
+	// stragglers run to completion (SendDirectRelay still bounds them with relayTimeout plus the
+	// per-endpoint url.Timeout override) and always push their response via the deferred
+	// SetResponse, feeding the post-reply straggler watcher. Values (GUID, IP forwarding metadata)
+	// are preserved by WithoutCancel. Non-CV selections keep the batch cancel: aborting the hedged
+	// losers on first success is a deliberate resource-saver there. Trade-off: in CV mode a client
+	// disconnect no longer aborts in-flight relays; they run out their bounded timeout.
 	relayParentCtx := ctx
 	if selection == relaycore.CrossValidation {
 		relayParentCtx = context.WithoutCancel(ctx)
+
+		// Re-snapshot the queried-providers set to the post-filter survivors. The pre-filter
+		// snapshot in sendRelayToEndpoint includes consistency-filtered endpoints that were
+		// released above without ever being dispatched a relay (no SetResponse), so they would be
+		// misreported to the client as pending in-flight stragglers — and the watcher would burn a
+		// goroutine waiting for, then falsely counting not-received, a provider that was never
+		// queried. This set is exactly the goroutines launched below.
+		queriedProviders := make([]string, 0, len(sessions))
+		for providerPublicAddress := range sessions {
+			queriedProviders = append(queriedProviders, providerPublicAddress)
+		}
+		relayProcessor.SetCrossValidationQueriedProviders(queriedProviders)
+
+		// Stamp the batch's true relay upper bound for the straggler watcher: each detached relay
+		// is bounded by relayTimeout + its endpoint's url.Timeout override (see
+		// LowerContextTimeoutWithDuration), NOT relayTimeout alone — a watcher deadline that
+		// ignores the override would misreport a slow-RPC endpoint's legitimate late response as
+		// not-received. Anchoring at launch also keeps the watcher from outliving the bound.
+		maxNodeTimeout := time.Duration(0)
+		for _, sessionInfo := range sessions {
+			if sessionInfo == nil || sessionInfo.Session == nil {
+				continue
+			}
+			if drsc, ok := sessionInfo.Session.Connection.(*lavasession.DirectRPCSessionConnection); ok && drsc.DirectConnection != nil {
+				if nodeUrl := drsc.DirectConnection.GetNodeUrl(); nodeUrl != nil && nodeUrl.Timeout > maxNodeTimeout {
+					maxNodeTimeout = nodeUrl.Timeout
+				}
+			}
+		}
+		relayProcessor.SetCrossValidationRelayDeadline(time.Now().Add(relayTimeout + maxNodeTimeout))
 	}
 
 	// Launch goroutines for each direct RPC endpoint (parallel relay pattern)
@@ -1541,12 +1591,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			)
 
 			if rpcss.smartRouterEndpointMetrics != nil {
-				if analytics != nil {
-					analytics.IsWrite = chainlib.GetStateful(chainMessage) != common.NO_STATE
-					analytics.IsArchive = chainqueries.IsArchiveRequest(chainMessage)
-					analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(chainMessage)
-					analytics.IsBatch = chainqueries.IsBatchRequest(chainMessage)
-				}
+				// analytics is read-only here: the classification flags were set once on the
+				// request path before launch (a detached CV straggler writing them post-reply
+				// raced the analytics consumer).
 				rpcss.smartRouterEndpointMetrics.RecordDirectRelayEnd(
 					rpcss.listenEndpoint.ChainID,
 					rpcss.listenEndpoint.ApiInterface,
@@ -1575,8 +1622,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					utils.LogAttr("GUID", goroutineCtx),
 				)
 
-				// Cache write for successful responses (non-blocking)
-				rpcss.tryCacheWrite(goroutineCtx, protocolMessage, localRelayResult)
+				// Cache write for successful responses (non-blocking). Skipped in cross-validation
+				// mode: a per-response write is not consensus-validated, and with detached
+				// stragglers a dissenter's late response would land LAST, overwriting the cache
+				// with the exact data the quorum just outvoted — served to subsequent stateless
+				// requests until TTL (CV requests themselves never read the cache). The consensus
+				// winner is cache-written once, post-quorum, in SendParsedRelay.
+				if selection != relaycore.CrossValidation {
+					rpcss.tryCacheWrite(goroutineCtx, protocolMessage, localRelayResult)
+				}
 			}
 			provSpan.End()
 
@@ -3112,7 +3166,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// to avoid resource leaks (upstream subscriptions left running without consumers).
 	if rpcss.grpcSubscriptionManager != nil && directConnection.GetProtocol() == "grpc" {
 		methodPath := chainMessage.GetApi().Name
-		isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(ctx, methodPath)
+		// Bound the reflection lookup explicitly: it dials + queries the upstream's reflection
+		// service, and detached CV relay contexts carry no deadline — an upstream that accepts the
+		// connection but never answers would otherwise block this goroutine (and leak its session)
+		// forever, since the relay-timeout bound is only applied later inside SendDirectRelay.
+		streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
+		isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
+		streamCheckCancel()
 		if streamErr == nil && isStreaming {
 			utils.LavaFormatWarning("gRPC streaming methods not yet supported in Direct RPC mode",
 				nil,
@@ -3367,9 +3427,10 @@ func (rpcss *RPCSmartRouterServer) getMetadataFromRelayTrailer(metadataHeaders [
 	}
 }
 
-// crossValidationStragglerGrace pads the straggler watcher's deadline beyond the relay timeout: a
-// detached straggler goroutine finishes its relay within relayTimeout, then still does post-relay
-// bookkeeping (tip harvest, session accounting) before the deferred SetResponse pushes its response.
+// crossValidationStragglerGrace pads the straggler watcher's deadline beyond the relays' stamped
+// upper bound (launch + relayTimeout + max per-endpoint url.Timeout): a straggler goroutine whose
+// relay just hit that bound still does post-relay bookkeeping (tip harvest, session accounting)
+// before the deferred SetResponse pushes its response.
 const crossValidationStragglerGrace = 2 * time.Second
 
 // watchCrossValidationStragglers starts the async post-reply compare path for cross-validation
@@ -3402,8 +3463,36 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 	if rpcss.listenEndpoint != nil {
 		chainId, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 	}
-	_, averageBlockTime, _, _ := rpcss.chainParser.ChainBlockStats()
-	maxWait := chainlib.GetRelayTimeout(protocolMessage, averageBlockTime) + crossValidationStragglerGrace
+	// Deadline: prefer the per-batch relay bound stamped at launch (launch + relayTimeout + the
+	// largest per-endpoint url.Timeout override — the detached relays' TRUE bound, see
+	// LowerContextTimeoutWithDuration). A relayTimeout-from-now deadline both undershoots slow-RPC
+	// endpoints with a timeout override (their legitimate late dissent would be misreported as
+	// not-received and never reach the mismatch alert) and overshoots by re-anchoring at reply
+	// time. Fallback for callers that never launched a batch through sendRelayToDirectEndpoints.
+	var maxWait time.Duration
+	if deadline := relayProcessor.GetCrossValidationRelayDeadline(); !deadline.IsZero() {
+		maxWait = time.Until(deadline) + crossValidationStragglerGrace
+	} else {
+		_, averageBlockTime, _, _ := rpcss.chainParser.ChainBlockStats()
+		maxWait = chainlib.GetRelayTimeout(protocolMessage, averageBlockTime) + crossValidationStragglerGrace
+	}
+	if maxWait < crossValidationStragglerGrace {
+		maxWait = crossValidationStragglerGrace
+	}
+
+	// Mismatch alerting contract: ONE increment per distinct outlier group per request. Seed with
+	// the groups the reply-time path already counted (crossValidationSuccessOutliers over the
+	// received results) so a straggler dissent from an already-counted group is not double-counted,
+	// and dedup across stragglers. Written on this goroutine before the watcher starts, then read
+	// only from the single watcher goroutine (record runs there) — no lock needed.
+	emittedMismatchGroups := map[string]struct{}{}
+	for _, outlier := range crossValidationSuccessOutliers(successResults, consensusHash, true, deterministic) {
+		group := outlier.ProviderInfo.ProviderGroup
+		if group == "" {
+			group = common.DefaultProviderGroup
+		}
+		emittedMismatchGroups[group] = struct{}{}
+	}
 
 	record := func(straggler relaycore.CrossValidationStragglerResult) {
 		utils.LavaFormatInfo("cross-validation straggler resolved",
@@ -3423,7 +3512,14 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 		// keeps the zero sentinel and is excluded — a substantive late reply diverging from an
 		// empty-reply majority is not the anomaly).
 		if straggler.Outcome == common.CrossValidationStragglerOutcomeDisagreed && deterministic && consensusHash != ([32]byte{}) {
-			rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, straggler.ProviderGroup, finality)
+			group := straggler.ProviderGroup
+			if group == "" {
+				group = common.DefaultProviderGroup
+			}
+			if _, counted := emittedMismatchGroups[group]; !counted {
+				emittedMismatchGroups[group] = struct{}{}
+				rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
+			}
 		}
 	}
 

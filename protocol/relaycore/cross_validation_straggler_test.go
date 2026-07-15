@@ -123,6 +123,36 @@ func TestWatchCrossValidationStragglers(t *testing.T) {
 		require.Equal(t, common.CrossValidationStragglerOutcomeNotReceived, results[0].Outcome)
 	})
 
+	t.Run("response buffered at the deadline is classified, not dropped", func(t *testing.T) {
+		rp := newCVProcessor()
+		rp.SetResponse(successResponse("p3", "g3", consensusBody))
+		// maxWait 0 means the timer is (effectively) already expired: even when select takes the
+		// timer case over the ready channel, the give-up path must first drain the buffered
+		// response and classify it by content — never misreport an arrived response as
+		// not-received (select picks among ready cases pseudo-randomly).
+		results := collect(rp, []string{"p3"}, 0)
+		require.Len(t, results, 1)
+		require.Equal(t, common.CrossValidationStragglerOutcomeAgreed, results[0].Outcome)
+	})
+
+	t.Run("cancelled context still classifies buffered responses", func(t *testing.T) {
+		rp := newCVProcessor()
+		rp.SetResponse(successResponse("p2", "g2", []byte(`{"jsonrpc":"2.0","id":1,"result":"0xBBBB"}`)))
+		cancelledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		results := []CrossValidationStragglerResult{}
+		rp.WatchCrossValidationStragglers(cancelledCtx, []string{"p2", "p3"}, consensusHash, time.Minute, func(result CrossValidationStragglerResult) {
+			results = append(results, result)
+		})
+		require.Len(t, results, 2)
+		outcomes := map[string]string{}
+		for _, result := range results {
+			outcomes[result.ProviderAddress] = result.Outcome
+		}
+		require.Equal(t, common.CrossValidationStragglerOutcomeDisagreed, outcomes["p2"], "buffered dissent must be classified even on cancel")
+		require.Equal(t, common.CrossValidationStragglerOutcomeNotReceived, outcomes["p3"], "only the provider with no response is not-received")
+	})
+
 	t.Run("non-pending responses are consumed and dropped", func(t *testing.T) {
 		rp := newCVProcessor()
 		// An earlier-batch straggler not covered by the pending header must not produce a record.

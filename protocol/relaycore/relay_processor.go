@@ -43,6 +43,12 @@ type RelayProcessor struct {
 	currentQuorumEqualResults       int      // max count across hashes — kept for logging only, not for decisions
 	statefulRelayTargets            []string // stores all providers that received a stateful relay
 	crossValidationQueriedProviders []string // stores all providers that were queried for cross-validation (even if response not received)
+	// crossValidationRelayDeadline is the latest batch's relay upper bound, stamped at launch:
+	// launch time + relayTimeout + the largest per-endpoint url.Timeout override (mirroring
+	// LowerContextTimeoutWithDuration, the actual bound on each detached relay). The straggler
+	// watcher uses it so its deadline neither undershoots a slow-RPC endpoint's legitimate late
+	// response nor outlives the true bound (MAG-2187). Guarded by rp.lock.
+	crossValidationRelayDeadline time.Time
 	// crossValidationFailFastReason carries the structured reason for a request-time cross-validation
 	// fail-fast (capacity/diversity checks that abort before any relay completes, so no RelayResult is
 	// produced). It rides on the shared processor back to the caller, which synthesizes the
@@ -265,6 +271,22 @@ func (rp *RelayProcessor) GetCrossValidationQueriedProviders() []string {
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 	return rp.crossValidationQueriedProviders
+}
+
+// SetCrossValidationRelayDeadline stamps the latest batch's relay upper bound at launch time
+// (launch + relayTimeout + max per-endpoint url.Timeout). See the field comment.
+func (rp *RelayProcessor) SetCrossValidationRelayDeadline(deadline time.Time) {
+	rp.lock.Lock()
+	defer rp.lock.Unlock()
+	rp.crossValidationRelayDeadline = deadline
+}
+
+// GetCrossValidationRelayDeadline returns the stamped relay upper bound, or the zero time if no
+// batch was launched (callers fall back to a relayTimeout-based bound).
+func (rp *RelayProcessor) GetCrossValidationRelayDeadline() time.Time {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return rp.crossValidationRelayDeadline
 }
 
 // SetCrossValidationFailFastReason records why a cross-validation request was aborted before any relay
@@ -669,37 +691,53 @@ func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pe
 	start := time.Now()
 	timer := time.NewTimer(maxWait)
 	defer timer.Stop()
-	reportNotReceived := func() {
-		for addr := range pending {
-			record(CrossValidationStragglerResult{
-				ProviderAddress: addr,
-				Outcome:         common.CrossValidationStragglerOutcomeNotReceived,
-				Delay:           time.Since(start),
-			})
+	resolve := func(response *RelayResponse) {
+		if response == nil {
+			return
+		}
+		addr := response.RelayResult.ProviderInfo.ProviderAddress
+		if _, watched := pending[addr]; !watched {
+			return
+		}
+		delete(pending, addr)
+		record(CrossValidationStragglerResult{
+			ProviderAddress: addr,
+			ProviderGroup:   response.RelayResult.ProviderInfo.ProviderGroup,
+			Outcome:         classifyStragglerResponse(response, consensusHash, protocolMessage),
+			Delay:           time.Since(start),
+		})
+	}
+	// giveUp runs on deadline/cancel. It first drains responses already sitting in the buffered
+	// channel: select picks among ready cases pseudo-randomly, so the timer can win a round even
+	// though a response arrived in time (and record()'s log+metric I/O can push the loop past the
+	// deadline while later responses sit buffered) — those must be classified by content, not
+	// misreported as not-received. Only providers with genuinely no response are reported missing.
+	giveUp := func() {
+		for len(pending) > 0 {
+			select {
+			case response := <-rp.responses:
+				resolve(response)
+			default:
+				for addr := range pending {
+					record(CrossValidationStragglerResult{
+						ProviderAddress: addr,
+						Outcome:         common.CrossValidationStragglerOutcomeNotReceived,
+						Delay:           time.Since(start),
+					})
+				}
+				return
+			}
 		}
 	}
 	for len(pending) > 0 {
 		select {
 		case response := <-rp.responses:
-			if response == nil {
-				continue
-			}
-			addr := response.RelayResult.ProviderInfo.ProviderAddress
-			if _, watched := pending[addr]; !watched {
-				continue
-			}
-			delete(pending, addr)
-			record(CrossValidationStragglerResult{
-				ProviderAddress: addr,
-				ProviderGroup:   response.RelayResult.ProviderInfo.ProviderGroup,
-				Outcome:         classifyStragglerResponse(response, consensusHash, protocolMessage),
-				Delay:           time.Since(start),
-			})
+			resolve(response)
 		case <-timer.C:
-			reportNotReceived()
+			giveUp()
 			return
 		case <-ctx.Done():
-			reportNotReceived()
+			giveUp()
 			return
 		}
 	}

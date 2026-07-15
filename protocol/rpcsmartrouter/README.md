@@ -257,6 +257,8 @@ relay timeout) and an async watcher compares its late response against the reach
 - A late **confirmed content dissent** on a deterministic method also increments
   `smartrouter_cross_validation_mismatch_total` for the straggler's group — so a dissenter that
   answered *after* the quorum closed still reaches the alerting surface instead of vanishing.
+  Deduped per group across the request: a group already counted at reply time (or by an earlier
+  straggler) is not counted again, preserving the metric's once-per-distinct-group contract.
 - Each resolution is logged (`cross-validation straggler resolved`, with provider/outcome/delay).
 
 The watcher only runs when a consensus was reached; on a failed cross-validation there is nothing

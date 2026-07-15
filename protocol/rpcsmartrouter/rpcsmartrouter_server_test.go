@@ -695,48 +695,94 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		return &spectypes.Api{Name: method, Category: spectypes.SpecCategory{Deterministic: true}}
 	}
 
+	// The default registry accumulates across tests and -count reruns, so every subtest asserts
+	// before/after deltas rather than absolute counter values.
 	t.Run("late dissent increments straggler and mismatch metrics", func(t *testing.T) {
 		method := "cv_straggler_disagreed"
+		stragglerBefore := stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed)
+		mismatchBefore := mismatchCount(t, method, "g3")
 		rp, consensusHash := newCVProcessorWithConsensus(t)
 		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
 		pushSuccess(rp, "p3", "g3", dissentBody)
+		// Synchronize on the mismatch counter — the LATER of record()'s two increments — so the
+		// straggler assertion below cannot land in the window between them.
 		require.Eventually(t, func() bool {
-			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed) == 1
-		}, 5*time.Second, 10*time.Millisecond, "late dissent must be recorded on the straggler metric")
-		require.Equal(t, float64(1), mismatchCount(t, method, "g3"), "late confirmed dissent must feed the mismatch alerting surface")
+			return mismatchCount(t, method, "g3") == mismatchBefore+1
+		}, 5*time.Second, 10*time.Millisecond, "late confirmed dissent must feed the mismatch alerting surface")
+		require.Equal(t, stragglerBefore+1, stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed), "late dissent must be recorded on the straggler metric")
+	})
+
+	t.Run("two same-group late dissents increment mismatch once", func(t *testing.T) {
+		method := "cv_straggler_group_dedup"
+		stragglerBefore := stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed)
+		mismatchBefore := mismatchCount(t, method, "g3")
+		rp, consensusHash := newCVProcessorWithConsensus(t)
+		rp.SetCrossValidationQueriedProviders([]string{"p1", "p2", "p3", "p4"})
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
+		pushSuccess(rp, "p3", "g3", dissentBody)
+		pushSuccess(rp, "p4", "g3", dissentBody)
+		require.Eventually(t, func() bool {
+			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed) == stragglerBefore+2
+		}, 5*time.Second, 10*time.Millisecond, "both same-group late dissents must be recorded on the straggler metric")
+		require.Equal(t, mismatchBefore+1, mismatchCount(t, method, "g3"), "mismatch counts once per distinct outlier group per request")
+	})
+
+	t.Run("straggler dissent from a group already counted at reply time is not re-counted", func(t *testing.T) {
+		method := "cv_straggler_seeded_group"
+		stragglerBefore := stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed)
+		mismatchBefore := mismatchCount(t, method, "g3")
+		rp, consensusHash := newCVProcessorWithConsensus(t)
+		// A dissenting response RECEIVED before the reply — a reply-time outlier in group g3 that
+		// appendHeadersToRelayResult would have counted on the mismatch metric.
+		pushSuccess(rp, "p0", "g3", dissentBody)
+		require.Len(t, rp.NodeResults(), 3)
+		rp.SetCrossValidationQueriedProviders([]string{"p0", "p1", "p2", "p3"})
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
+		// The same group's LATE dissent must not increment mismatch again (the launcher seeds the
+		// dedup set from the received outliers), while its straggler outcome is still recorded.
+		pushSuccess(rp, "p3", "g3", dissentBody)
+		require.Eventually(t, func() bool {
+			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed) == stragglerBefore+1
+		}, 5*time.Second, 10*time.Millisecond)
+		require.Equal(t, mismatchBefore, mismatchCount(t, method, "g3"), "a group counted by the reply-time outlier path must not be re-counted by the straggler path")
 	})
 
 	t.Run("late agreement increments straggler only", func(t *testing.T) {
 		method := "cv_straggler_agreed"
+		stragglerBefore := stragglerCount(t, method, common.CrossValidationStragglerOutcomeAgreed)
+		mismatchBefore := mismatchCount(t, method, "g3")
 		rp, consensusHash := newCVProcessorWithConsensus(t)
 		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
 		pushSuccess(rp, "p3", "g3", consensusBody)
 		require.Eventually(t, func() bool {
-			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeAgreed) == 1
+			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeAgreed) == stragglerBefore+1
 		}, 5*time.Second, 10*time.Millisecond, "late agreement must be recorded on the straggler metric")
-		require.Equal(t, float64(0), mismatchCount(t, method, "g3"), "late agreement must not feed the mismatch surface")
+		require.Equal(t, mismatchBefore, mismatchCount(t, method, "g3"), "late agreement must not feed the mismatch surface")
 	})
 
 	t.Run("late dissent on non-deterministic method does not feed mismatch", func(t *testing.T) {
 		method := "cv_straggler_nondeterministic"
+		stragglerBefore := stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed)
+		mismatchBefore := mismatchCount(t, method, "g3")
 		rp, consensusHash := newCVProcessorWithConsensus(t)
 		nonDeterministicAPI := &spectypes.Api{Name: method, Category: spectypes.SpecCategory{Deterministic: false}}
 		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 2), &MockProtocolMessage{api: nonDeterministicAPI, requestedBlock: 100}, method)
 		pushSuccess(rp, "p3", "g3", dissentBody)
 		require.Eventually(t, func() bool {
-			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed) == 1
+			return stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed) == stragglerBefore+1
 		}, 5*time.Second, 10*time.Millisecond)
-		require.Equal(t, float64(0), mismatchCount(t, method, "g3"), "non-deterministic methods legitimately differ — no mismatch")
+		require.Equal(t, mismatchBefore, mismatchCount(t, method, "g3"), "non-deterministic methods legitimately differ — no mismatch")
 	})
 
 	t.Run("failed cross-validation starts no watcher", func(t *testing.T) {
 		method := "cv_straggler_no_consensus"
+		stragglerBefore := stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed)
 		rp, consensusHash := newCVProcessorWithConsensus(t)
 		// CrossValidation 1 < threshold 2 => no consensus, nothing to compare stragglers against.
 		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash, 1), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method)
 		pushSuccess(rp, "p3", "g3", dissentBody)
 		time.Sleep(100 * time.Millisecond)
-		require.Equal(t, float64(0), stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed), "no watcher on failed cross-validation")
+		require.Equal(t, stragglerBefore, stragglerCount(t, method, common.CrossValidationStragglerOutcomeDisagreed), "no watcher on failed cross-validation")
 	})
 }
 
