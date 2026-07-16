@@ -64,7 +64,6 @@ func TestJSONChainParser_Spec(t *testing.T) {
 	// set the spec
 	spec := spectypes.Spec{
 		Enabled:                       true,
-		ReliabilityThreshold:          10,
 		AllowedBlockLagForQosSync:     11,
 		AverageBlockTime:              12000,
 		BlockDistanceForFinalizedData: 13,
@@ -498,7 +497,6 @@ func TestJsonRPC_SpecUpdateWithAddons(t *testing.T) {
 	// set the spec
 	spec := spectypes.Spec{
 		Enabled:                       true,
-		ReliabilityThreshold:          10,
 		AllowedBlockLagForQosSync:     11,
 		AverageBlockTime:              12000,
 		BlockDistanceForFinalizedData: 13,
@@ -571,7 +569,6 @@ func TestJsonRPC_SpecUpdateWithExtensions(t *testing.T) {
 	// set the spec
 	spec := spectypes.Spec{
 		Enabled:                       true,
-		ReliabilityThreshold:          10,
 		AllowedBlockLagForQosSync:     11,
 		AverageBlockTime:              12000,
 		BlockDistanceForFinalizedData: 13,

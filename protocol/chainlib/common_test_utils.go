@@ -216,9 +216,7 @@ func CreateMockSpec() spectypes.Spec {
 	spec.Name = specName
 	spec.Index = specName
 	spec.Enabled = true
-	spec.ReliabilityThreshold = 4294967295
 	spec.BlockDistanceForFinalizedData = 0
-	spec.DataReliabilityEnabled = true
 	spec.ApiCollections = []*spectypes.ApiCollection{
 		{
 			Enabled: true,
@@ -235,7 +233,6 @@ func CreateMockSpec() spectypes.Spec {
 			},
 		},
 	}
-	spec.Shares = 1
 	return spec
 }
 

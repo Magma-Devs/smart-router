@@ -39,14 +39,13 @@ func (cd CollectionData) String() string {
 
 // Api describes a single RPC method or REST endpoint exposed by a provider.
 type Api struct {
-	Enabled           bool          `json:"enabled,omitempty"            mapstructure:"enabled"`
-	Name              string        `json:"name"                         mapstructure:"name"`
-	ComputeUnits      uint64        `json:"compute_units,omitempty"`
-	ExtraComputeUnits uint64        `json:"extra_compute_units,omitempty"`
-	Category          SpecCategory  `json:"category"`
-	BlockParsing      BlockParser   `json:"block_parsing"`
-	TimeoutMs         uint64        `json:"timeout_ms,omitempty"`
-	Parsers           []GenericParser `json:"parsers,omitempty"`
+	Enabled      bool            `json:"enabled,omitempty"            mapstructure:"enabled"`
+	Name         string          `json:"name"                         mapstructure:"name"`
+	ComputeUnits uint64          `json:"compute_units,omitempty"`
+	Category     SpecCategory    `json:"category"`
+	BlockParsing BlockParser     `json:"block_parsing"`
+	TimeoutMs    uint64          `json:"timeout_ms,omitempty"`
+	Parsers      []GenericParser `json:"parsers,omitempty"`
 }
 
 // Header describes an HTTP header that should be forwarded, rewritten, or
@@ -103,8 +102,6 @@ type BlockParser struct {
 // is used to select appropriate providers and routing strategies.
 type SpecCategory struct {
 	Deterministic bool   `json:"deterministic,omitempty"`
-	Local         bool   `json:"local,omitempty"`
-	Subscription  bool   `json:"subscription,omitempty"`
 	Stateful      uint32 `json:"stateful,omitempty"`
 	HangingApi    bool   `json:"hanging_api,omitempty"`
 }
@@ -239,13 +236,6 @@ func (m *Api) GetName() string {
 func (m *Api) GetComputeUnits() uint64 {
 	if m != nil {
 		return m.ComputeUnits
-	}
-	return 0
-}
-
-func (m *Api) GetExtraComputeUnits() uint64 {
-	if m != nil {
-		return m.ExtraComputeUnits
 	}
 	return 0
 }
@@ -460,20 +450,6 @@ func (m *SpecCategory) GetDeterministic() bool {
 	return false
 }
 
-func (m *SpecCategory) GetLocal() bool {
-	if m != nil {
-		return m.Local
-	}
-	return false
-}
-
-func (m *SpecCategory) GetSubscription() bool {
-	if m != nil {
-		return m.Subscription
-	}
-	return false
-}
-
 func (m *SpecCategory) GetStateful() uint32 {
 	if m != nil {
 		return m.Stateful
@@ -494,8 +470,6 @@ func (m *SpecCategory) GetHangingApi() bool {
 func (sc SpecCategory) Combine(other SpecCategory) SpecCategory {
 	return SpecCategory{
 		Deterministic: sc.Deterministic && other.Deterministic,
-		Local:         sc.Local || other.Local,
-		Subscription:  sc.Subscription || other.Subscription,
 		Stateful:      max(sc.Stateful, other.Stateful),
 		HangingApi:    sc.HangingApi || other.HangingApi,
 	}
