@@ -445,7 +445,6 @@ func TestSpecAggregation_FullReplacement(t *testing.T) {
 	require.Equal(t, "eth_blockNumber", specs1["ETH1"].ApiCollections[0].Apis[0].Name)
 	require.Equal(t, "Ethereum Mainnet Original", specs1["ETH1"].Name)
 	require.True(t, specs1["ETH1"].Enabled)
-	require.Equal(t, int64(5000000000), specs1["ETH1"].MinStakeProvider.Amount)
 
 	// Verify source2 has only 1 API
 	require.Len(t, specs2["ETH1"].ApiCollections, 1)
@@ -471,13 +470,10 @@ func TestSpecAggregation_FullReplacement(t *testing.T) {
 	require.False(t, finalSpec.Enabled)
 
 	// min_stake_provider should be from source2 (lower amount)
-	require.Equal(t, int64(1000000), finalSpec.MinStakeProvider.Amount)
 
 	// reliability_threshold should be from source2
-	require.Equal(t, uint32(100), finalSpec.ReliabilityThreshold)
 
 	// shares should be from source2
-	require.Equal(t, uint64(5), finalSpec.Shares)
 
 	// average_block_time should be from source2
 	require.Equal(t, int64(12000), finalSpec.AverageBlockTime)
@@ -636,7 +632,6 @@ func TestSpecAggregation_MultipleLocalFiles(t *testing.T) {
 	eth := aggregated["ETH1"]
 	require.Equal(t, "Ethereum from file2 (override)", eth.Name)
 	require.False(t, eth.Enabled)
-	require.Equal(t, uint64(100), eth.Shares)
 	require.Len(t, eth.ApiCollections, 1)
 	require.Len(t, eth.ApiCollections[0].Apis, 2) // Only file2's 2 APIs, not merged with file1's 1 API
 	require.Equal(t, "eth_chainId", eth.ApiCollections[0].Apis[0].Name)
@@ -646,13 +641,11 @@ func TestSpecAggregation_MultipleLocalFiles(t *testing.T) {
 	cosmos := aggregated["COSMOS"]
 	require.Equal(t, "Cosmos Hub from file1", cosmos.Name)
 	require.True(t, cosmos.Enabled)
-	require.Equal(t, uint64(5), cosmos.Shares)
 
 	// Verify SOL is from file3
 	sol := aggregated["SOL"]
 	require.Equal(t, "Solana from file3", sol.Name)
 	require.True(t, sol.Enabled)
-	require.Equal(t, uint64(20), sol.Shares)
 }
 
 // TestSpecAggregation_RemoteAndLocalFile tests aggregation between a simulated remote source
@@ -691,7 +684,6 @@ func TestSpecAggregation_RemoteAndLocalFile(t *testing.T) {
 			Index:   "ETH1",
 			Name:    "Ethereum from Remote GitHub",
 			Enabled: true,
-			Shares:  50,
 			ApiCollections: []*types.ApiCollection{
 				{
 					Enabled:        true,
@@ -707,7 +699,6 @@ func TestSpecAggregation_RemoteAndLocalFile(t *testing.T) {
 			Index:   "AVAX",
 			Name:    "Avalanche from Remote",
 			Enabled: true,
-			Shares:  30,
 		},
 	}
 
@@ -732,7 +723,6 @@ func TestSpecAggregation_RemoteAndLocalFile(t *testing.T) {
 	eth := aggregated["ETH1"]
 	require.Equal(t, "Ethereum from Local Override", eth.Name)
 	require.False(t, eth.Enabled)
-	require.Equal(t, uint64(999), eth.Shares)
 	require.Len(t, eth.ApiCollections, 1)
 	require.Len(t, eth.ApiCollections[0].Apis, 1)
 	require.Equal(t, "eth_localOnly", eth.ApiCollections[0].Apis[0].Name)
@@ -741,7 +731,6 @@ func TestSpecAggregation_RemoteAndLocalFile(t *testing.T) {
 	avax := aggregated["AVAX"]
 	require.Equal(t, "Avalanche from Remote", avax.Name)
 	require.True(t, avax.Enabled)
-	require.Equal(t, uint64(30), avax.Shares)
 }
 
 // TestSpecAggregation_RemoteAndLocalDirectory tests aggregation between a mocked remote source
@@ -753,7 +742,6 @@ func TestSpecAggregation_RemoteAndLocalDirectory(t *testing.T) {
 			Index:   "ETH1",
 			Name:    "Ethereum from Remote",
 			Enabled: true,
-			Shares:  50,
 			ApiCollections: []*types.ApiCollection{
 				{
 					Enabled:        true,
@@ -770,13 +758,11 @@ func TestSpecAggregation_RemoteAndLocalDirectory(t *testing.T) {
 			Index:   "AVAX",
 			Name:    "Avalanche from Remote",
 			Enabled: true,
-			Shares:  30,
 		},
 		"SOL": {
 			Index:   "SOL",
 			Name:    "Solana from Remote",
 			Enabled: true,
-			Shares:  25,
 		},
 	}
 
@@ -856,7 +842,6 @@ func TestSpecAggregation_RemoteAndLocalDirectory(t *testing.T) {
 	eth := aggregated["ETH1"]
 	require.Equal(t, "Ethereum Local Override", eth.Name)
 	require.False(t, eth.Enabled)
-	require.Equal(t, uint64(1000), eth.Shares)
 	require.Len(t, eth.ApiCollections, 1)
 	require.Len(t, eth.ApiCollections[0].Apis, 1)
 	require.Equal(t, "eth_custom", eth.ApiCollections[0].Apis[0].Name)
@@ -865,19 +850,16 @@ func TestSpecAggregation_RemoteAndLocalDirectory(t *testing.T) {
 	avax := aggregated["AVAX"]
 	require.Equal(t, "Avalanche from Remote", avax.Name)
 	require.True(t, avax.Enabled)
-	require.Equal(t, uint64(30), avax.Shares)
 
 	// SOL: fully replaced by local
 	sol := aggregated["SOL"]
 	require.Equal(t, "Solana Local Override", sol.Name)
 	require.False(t, sol.Enabled)
-	require.Equal(t, uint64(500), sol.Shares)
 
 	// MATIC: new chain from local only
 	matic := aggregated["MATIC"]
 	require.Equal(t, "Polygon from Local", matic.Name)
 	require.True(t, matic.Enabled)
-	require.Equal(t, uint64(75), matic.Shares)
 }
 
 // TestSpecAggregation_MultipleRemoteSources tests aggregation between multiple remote sources
@@ -889,13 +871,11 @@ func TestSpecAggregation_MultipleRemoteSources(t *testing.T) {
 			Index:   "ETH1",
 			Name:    "Ethereum from GitHub",
 			Enabled: true,
-			Shares:  100,
 		},
 		"AVAX": {
 			Index:   "AVAX",
 			Name:    "Avalanche from GitHub",
 			Enabled: true,
-			Shares:  50,
 		},
 	}
 
@@ -905,13 +885,11 @@ func TestSpecAggregation_MultipleRemoteSources(t *testing.T) {
 			Index:   "ETH1",
 			Name:    "Ethereum from GitLab (override)",
 			Enabled: false,
-			Shares:  200,
 		},
 		"COSMOS": {
 			Index:   "COSMOS",
 			Name:    "Cosmos from GitLab",
 			Enabled: true,
-			Shares:  75,
 		},
 	}
 
@@ -965,19 +943,16 @@ func TestSpecAggregation_MultipleRemoteSources(t *testing.T) {
 	eth := aggregated["ETH1"]
 	require.Equal(t, "Ethereum from Local (final override)", eth.Name)
 	require.True(t, eth.Enabled)
-	require.Equal(t, uint64(9999), eth.Shares)
 
 	// AVAX: only from GitHub, not overridden
 	avax := aggregated["AVAX"]
 	require.Equal(t, "Avalanche from GitHub", avax.Name)
 	require.True(t, avax.Enabled)
-	require.Equal(t, uint64(50), avax.Shares)
 
 	// COSMOS: only from GitLab, not overridden
 	cosmos := aggregated["COSMOS"]
 	require.Equal(t, "Cosmos from GitLab", cosmos.Name)
 	require.True(t, cosmos.Enabled)
-	require.Equal(t, uint64(75), cosmos.Shares)
 }
 
 // TestSpecAggregation_OrderMatters verifies that the order of sources determines
@@ -1003,19 +978,16 @@ func TestSpecAggregation_OrderMatters(t *testing.T) {
 	t.Run("order A-B-C results in C winning", func(t *testing.T) {
 		aggregated := aggregateSpecsInOrder(t, []string{specA, specB, specC})
 		require.Equal(t, "From C", aggregated["TEST"].Name)
-		require.Equal(t, uint64(3), aggregated["TEST"].Shares)
 	})
 
 	t.Run("order C-B-A results in A winning", func(t *testing.T) {
 		aggregated := aggregateSpecsInOrder(t, []string{specC, specB, specA})
 		require.Equal(t, "From A", aggregated["TEST"].Name)
-		require.Equal(t, uint64(1), aggregated["TEST"].Shares)
 	})
 
 	t.Run("order A-C-B results in B winning", func(t *testing.T) {
 		aggregated := aggregateSpecsInOrder(t, []string{specA, specC, specB})
 		require.Equal(t, "From B", aggregated["TEST"].Name)
-		require.Equal(t, uint64(2), aggregated["TEST"].Shares)
 	})
 }
 
@@ -1098,11 +1070,9 @@ func TestSpecAggregation_CommaSeparatedPaths(t *testing.T) {
 
 		// ETH1 should be from file3 (last wins)
 		require.Equal(t, "From spec3", aggregated["ETH1"].Name)
-		require.Equal(t, uint64(3), aggregated["ETH1"].Shares)
 
 		// AVAX should be from file2 (only source)
 		require.Equal(t, "Avax from spec2", aggregated["AVAX"].Name)
-		require.Equal(t, uint64(10), aggregated["AVAX"].Shares)
 	})
 
 	t.Run("mixed separate flags and comma-separated", func(t *testing.T) {
@@ -1128,7 +1098,6 @@ func TestSpecAggregation_CommaSeparatedPaths(t *testing.T) {
 
 		// ETH1 should be from file3 (last wins)
 		require.Equal(t, "From spec3", aggregated["ETH1"].Name)
-		require.Equal(t, uint64(3), aggregated["ETH1"].Shares)
 	})
 }
 

@@ -55,10 +55,10 @@ func (v *Verification) Differeniator() string { return v.Name }
 // GetEnabled implementations (Api already has one as a getter)
 // ---------------------------------------------------------------------------
 
-func (h *Header) GetEnabled() bool       { return true }
+func (h *Header) GetEnabled() bool         { return true }
 func (p *ParseDirective) GetEnabled() bool { return true }
-func (e *Extension) GetEnabled() bool    { return true }
-func (v *Verification) GetEnabled() bool { return true }
+func (e *Extension) GetEnabled() bool      { return true }
+func (v *Verification) GetEnabled() bool   { return true }
 
 // ---------------------------------------------------------------------------
 // Overwrite implementations
@@ -121,8 +121,7 @@ func (api *Api) Equal(that interface{}) bool {
 	}
 	return api.Enabled == other.Enabled &&
 		api.Name == other.Name &&
-		api.ComputeUnits == other.ComputeUnits &&
-		api.ExtraComputeUnits == other.ExtraComputeUnits
+		api.ComputeUnits == other.ComputeUnits
 }
 
 func (h *Header) Equal(that interface{}) bool {

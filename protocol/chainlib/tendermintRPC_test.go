@@ -32,7 +32,6 @@ func TestTendermintChainParser_Spec(t *testing.T) {
 	// set the spec
 	spec := spectypes.Spec{
 		Enabled:                       true,
-		ReliabilityThreshold:          10,
 		AllowedBlockLagForQosSync:     11,
 		AverageBlockTime:              12000,
 		BlockDistanceForFinalizedData: 13,
