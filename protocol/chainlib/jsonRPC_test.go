@@ -349,6 +349,21 @@ func TestJsonRpcBatchCall(t *testing.T) {
 	chainMessage, err := chainParser.ParseMsg("", []byte(batchCallData), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 
+	// A batch's compute units must be the sum of its member methods' compute_units.
+	// extra_compute_units is being removed from the spec model; this guards that
+	// batch CU accounting stays driven solely by compute_units.
+	sumCU := uint64(0)
+	for _, single := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}`,
+		`{"jsonrpc":"2.0","id":2,"method":"eth_accounts","params":[]}`,
+		`{"jsonrpc":"2.0","id":3,"method":"eth_blockNumber","params":[]}`,
+	} {
+		singleMsg, errSingle := chainParser.ParseMsg("", []byte(single), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, errSingle)
+		sumCU += singleMsg.GetApi().ComputeUnits
+	}
+	require.Equal(t, sumCU, chainMessage.GetApi().ComputeUnits, "batch CU must equal the sum of member compute_units")
+
 	requestedBlock, _ := chainMessage.RequestedBlock()
 	require.Equal(t, spectypes.LATEST_BLOCK, requestedBlock)
 
