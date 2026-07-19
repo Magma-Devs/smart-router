@@ -450,6 +450,50 @@ func TestAppendHeadersToRelayResult_PendingProvidersOnEarlyExit(t *testing.T) {
 	require.Equal(t, "lava@provider3", pendingHeader.Value)
 }
 
+// TestAppendHeadersToRelayResult_ExhaustedTransportErrors covers the Lava-Provider-Address contract on
+// the all-transport-errors path (MAG-2351): every attempt failed at the protocol level, the returned
+// error body comes from the best protocol error, and the header must list each attempted provider
+// exactly once with the response-source provider last — entry count == Lava-Retries + 1. Before the
+// fix, buildFailureResult packed the comma-joined unwanted list into ProviderInfo.ProviderAddress and
+// the chain builder appended that whole blob as the resolver, roughly doubling the header.
+func TestAppendHeadersToRelayResult_ExhaustedTransportErrors(t *testing.T) {
+	ctx := context.Background()
+	relayProcessor := &MockRelayProcessorForHeaders{
+		selection: relaycore.Stateless,
+		protocolErrors: []relaycore.RelayError{
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"}},
+		},
+	}
+	// The failure result carries the SINGLE provider whose error body is returned (provider3 chosen as
+	// the best protocol error) — never a comma-joined list.
+	relayResult := &common.RelayResult{
+		ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"},
+		StatusCode:   http.StatusInternalServerError,
+		Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+	}
+	mockProtocolMessage := &MockProtocolMessage{api: &spectypes.Api{Name: "test-api"}}
+	rpcSmartRouterServer := &RPCSmartRouterServer{}
+
+	rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 3, relayProcessor, mockProtocolMessage, "test-api", nil, false)
+
+	var providerHeader, retriesHeader *pairingtypes.Metadata
+	for i := range relayResult.Reply.Metadata {
+		switch relayResult.Reply.Metadata[i].Name {
+		case common.PROVIDER_ADDRESS_HEADER_NAME:
+			providerHeader = &relayResult.Reply.Metadata[i]
+		case common.RETRY_COUNT_HEADER_NAME:
+			retriesHeader = &relayResult.Reply.Metadata[i]
+		}
+	}
+	// 3 attempts -> 2 retries; one entry per attempted provider, resolver (provider3) last.
+	require.NotNil(t, retriesHeader)
+	require.Equal(t, "2", retriesHeader.Value)
+	require.NotNil(t, providerHeader)
+	require.Equal(t, "lava@provider1,lava@provider2,lava@provider3", providerHeader.Value)
+}
+
 // TestAppendHeadersToRelayResult_FailureReasonHeader verifies that a cross-validation failure surfaces a
 // distinguishable lava-cross-validation-failure-reason header (so clients can tell diversity-unmet from
 // an ordinary no-agreement).
