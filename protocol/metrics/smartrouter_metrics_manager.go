@@ -84,6 +84,7 @@ type SmartRouterMetricsManager struct {
 	crossValidationProviderDisagreementsTotalMetric *prometheus.CounterVec // smartrouter_cross_validation_provider_disagreements_total {spec, apiInterface, method, provider_address}
 	crossValidationMismatchTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_mismatch_total {spec, apiInterface, method, group, finality} — bounded alerting surface
 	crossValidationFailuresTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_failures_total {spec, apiInterface, method, reason} — bounded by the CrossValidationReason* enum
+	crossValidationStragglerTotalMetric             *prometheus.CounterVec // smartrouter_cross_validation_straggler_total {spec, apiInterface, method, outcome} — bounded by the CrossValidationStragglerOutcome* enum
 
 	// Incident group metrics
 	incidentNodeErrorsTotalMetric     *prometheus.CounterVec   // smartrouter_node_errors_total         {spec, apiInterface, provider_address, method}
@@ -360,6 +361,14 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_cross_validation_failures_total",
 		Help: "Cross-validation failures by reason (CrossValidationReason* enum: insufficient-responses, no-agreement, diversity-unmet, group-quorum-unmet, insufficient-capacity, insufficient-groups). Bounded — the reason set is a closed enum.",
 	}, []string{"spec", "apiInterface", "method", "reason"})
+	// Straggler outcomes (MAG-2187): providers that were still in flight at the quorum early-exit reply
+	// (surfaced in the pending-providers header) and how their late response resolved against the reached
+	// consensus. Bounded — outcome is the closed CrossValidationStragglerOutcome* enum. A late confirmed
+	// content dissent additionally feeds crossValidationMismatchTotalMetric (the alerting surface).
+	crossValidationStragglerTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_cross_validation_straggler_total",
+		Help: "Cross-validation straggler resolutions (responses that arrived after the quorum early-exit reply), by outcome (agreed, disagreed, node-error, protocol-error, not-received). Bounded — the outcome set is a closed enum.",
+	}, []string{"spec", "apiInterface", "method", "outcome"})
 
 	// =========================================================================
 	// Incident group metrics
@@ -522,6 +531,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	crossValidationProviderDisagreementsTotalMetric = registerOrReuse(crossValidationProviderDisagreementsTotalMetric)
 	crossValidationMismatchTotalMetric = registerOrReuse(crossValidationMismatchTotalMetric)
 	crossValidationFailuresTotalMetric = registerOrReuse(crossValidationFailuresTotalMetric)
+	crossValidationStragglerTotalMetric = registerOrReuse(crossValidationStragglerTotalMetric)
 	incidentNodeErrorsTotalMetric = registerOrReuse(incidentNodeErrorsTotalMetric)
 	incidentProtocolErrorsTotalMetric = registerOrReuse(incidentProtocolErrorsTotalMetric)
 	incidentRetriesTotalMetric = registerOrReuse(incidentRetriesTotalMetric)
@@ -594,6 +604,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		crossValidationProviderDisagreementsTotalMetric: crossValidationProviderDisagreementsTotalMetric,
 		crossValidationMismatchTotalMetric:              crossValidationMismatchTotalMetric,
 		crossValidationFailuresTotalMetric:              crossValidationFailuresTotalMetric,
+		crossValidationStragglerTotalMetric:             crossValidationStragglerTotalMetric,
 
 		// Incident group
 		incidentNodeErrorsTotalMetric:     incidentNodeErrorsTotalMetric,
@@ -1204,6 +1215,19 @@ func (m *SmartRouterMetricsManager) SetCrossValidationFailureMetric(chainId, api
 		return
 	}
 	m.crossValidationFailuresTotalMetric.WithLabelValues(chainId, apiInterface, method, reason).Inc()
+}
+
+// SetCrossValidationStragglerMetric records how a cross-validation straggler resolved (MAG-2187): a
+// provider that was still in flight when the quorum early-exit reply was built, whose late response was
+// compared against the reached consensus by the async watcher. outcome is one of the closed
+// CrossValidationStragglerOutcome* enum (agreed, disagreed, node-error, protocol-error, not-received),
+// so the series stays bounded. A caller with no outcome (outcome == "") is skipped rather than emitting
+// an empty label value.
+func (m *SmartRouterMetricsManager) SetCrossValidationStragglerMetric(chainId, apiInterface, method, outcome string) {
+	if m == nil || outcome == "" {
+		return
+	}
+	m.crossValidationStragglerTotalMetric.WithLabelValues(chainId, apiInterface, method, outcome).Inc()
 }
 
 func (m *SmartRouterMetricsManager) UpdateHealthCheckStatus(status bool) {

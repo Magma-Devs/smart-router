@@ -48,7 +48,13 @@ const (
 	CROSS_VALIDATION_STATUS_HEADER_NAME           = "lava-cross-validation-status"
 	CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER    = "lava-cross-validation-agreeing-providers"
 	CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER = "lava-cross-validation-disagreeing-providers"
-	CROSS_VALIDATION_FAILURE_REASON_HEADER        = "lava-cross-validation-failure-reason"
+	// Providers that were queried but whose response had not arrived when the quorum early-exit built the
+	// reply (MAG-2187). Disagreeing-providers lists only dissent the router actually received; an empty
+	// disagreeing header must mean "everyone we heard from agreed", never "we didn't hear everyone" — this
+	// header carries the "didn't hear" part explicitly. Their late responses are compared against the
+	// consensus asynchronously (straggler watcher) and recorded via log + metric.
+	CROSS_VALIDATION_PENDING_PROVIDERS_HEADER = "lava-cross-validation-pending-providers"
+	CROSS_VALIDATION_FAILURE_REASON_HEADER    = "lava-cross-validation-failure-reason"
 	// send http request to /lava/health to see if the process is up - (ret code 200)
 	DEFAULT_HEALTH_PATH                                       = "/lava/health"
 	MAXIMUM_ALLOWED_TIMEOUT_EXTEND_MULTIPLIER_BY_THE_CONSUMER = 4
@@ -75,6 +81,17 @@ const (
 	// per-group winners disagreed across groups. Distinct from diversity-unmet (which is about one
 	// cross-group consensus spanning groups).
 	CrossValidationReasonGroupQuorumUnmet = "group-quorum-unmet"
+)
+
+// Cross-validation straggler outcomes (MAG-2187): how a provider that was still in flight at the quorum
+// early-exit reply (listed in CROSS_VALIDATION_PENDING_PROVIDERS_HEADER) eventually resolved. A closed
+// enum — it labels the straggler metric, so the series stays bounded.
+const (
+	CrossValidationStragglerOutcomeAgreed        = "agreed"         // late response matched the reached consensus
+	CrossValidationStragglerOutcomeDisagreed     = "disagreed"      // late response conflicted with the reached consensus
+	CrossValidationStragglerOutcomeNodeError     = "node-error"     // late response was a node error
+	CrossValidationStragglerOutcomeProtocolError = "protocol-error" // relay failed (transport error / relay timeout)
+	CrossValidationStragglerOutcomeNotReceived   = "not-received"   // nothing arrived before the watcher deadline
 )
 
 var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
