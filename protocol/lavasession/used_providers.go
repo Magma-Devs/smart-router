@@ -276,6 +276,31 @@ func (up *UsedProviders) ClearUnwanted() {
 	}
 }
 
+// RemoveUnwantedAddresses makes only the supplied providers eligible for
+// selection again, across every router key used by this request. Unlike
+// ClearUnwanted, it preserves exclusions for providers that failed for other
+// reasons. This is used by the smart router's all-stale consistency fallback:
+// once every selectable provider has failed pre-dispatch consistency
+// validation, only those consistency-rejected providers may be retried.
+func (up *UsedProviders) RemoveUnwantedAddresses(addresses []string) {
+	if up == nil || len(addresses) == 0 {
+		return
+	}
+
+	addressesToRemove := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		addressesToRemove[address] = struct{}{}
+	}
+
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	for _, uniqueUsedProviders := range up.uniqueUsedProviders {
+		for address := range addressesToRemove {
+			delete(uniqueUsedProviders.unwantedProviders, address)
+		}
+	}
+}
+
 func (up *UsedProviders) AddUsed(sessions ConsumerSessionsMap, err error) {
 	if up == nil {
 		return

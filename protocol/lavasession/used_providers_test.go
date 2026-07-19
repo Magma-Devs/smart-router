@@ -113,6 +113,28 @@ func TestReleaseFromLatestBatch(t *testing.T) {
 	})
 }
 
+func TestRemoveUnwantedAddresses(t *testing.T) {
+	usedProviders := NewUsedProviders(nil)
+	emptyKey := NewRouterKey(nil)
+	archiveKey := NewRouterKey([]string{"archive"})
+
+	for _, key := range []RouterKey{emptyKey, archiveKey} {
+		usedProviders.AddUnwantedAddresses("stale-1", key)
+		usedProviders.AddUnwantedAddresses("stale-2", key)
+		usedProviders.AddUnwantedAddresses("transport-failure", key)
+	}
+
+	usedProviders.RemoveUnwantedAddresses([]string{"stale-1", "stale-2"})
+
+	for _, key := range []RouterKey{emptyKey, archiveKey} {
+		unwanted := usedProviders.GetUnwantedProvidersToSend(key)
+		require.NotContains(t, unwanted, "stale-1")
+		require.NotContains(t, unwanted, "stale-2")
+		require.Contains(t, unwanted, "transport-failure",
+			"the consistency fallback must preserve providers excluded for other reasons")
+	}
+}
+
 func TestUsedProvidersAsync(t *testing.T) {
 	t.Run("concurrency", func(t *testing.T) {
 		usedProviders := NewUsedProviders(nil)
