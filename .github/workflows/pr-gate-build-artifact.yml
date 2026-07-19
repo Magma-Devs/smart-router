@@ -745,8 +745,6 @@ jobs:
           CHART_ARCHIVE="${REMOTE_TMP}/smart-router-helm-chart.tgz"
           CHART_REPO_DIR="${REMOTE_TMP}/smart-router-helm-chart"
           VALUES_FILE="${REMOTE_TMP}/dev-pr-gate-values.yaml"
-          PULL_SECRET_NAME="ghcr-secret"
-          PULL_SECRET_SOURCE_NAMESPACE="lava-infra"
           ROUTER_ID="eth"
           ROUTER_SERVICE="${ROUTER_ID}-router"
           SERVICE_PORT="3000"
@@ -831,13 +829,8 @@ jobs:
             printf '%s\t%s\n' "$gateway_enabled" "$gateway_class"
           }
 
-          copy_pull_secret() {
+          ensure_namespace() {
             kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-            kubectl -n lava-infra get secret ghcr-secret -o yaml \
-              | sed "s/namespace: lava-infra/namespace: ${NAMESPACE}/" \
-              | kubectl apply -f -
-            kubectl -n "$NAMESPACE" get secret "$PULL_SECRET_NAME" >/dev/null
-            echo "Copied image pull secret ${PULL_SECRET_NAME} into ${NAMESPACE}"
           }
 
           write_values_file() {
@@ -877,8 +870,7 @@ jobs:
                       addons: []
 
           miscellaneous:
-            imagePullSecrets:
-              - name: "${PULL_SECRET_NAME}"
+            imagePullSecrets: []
             log:
               level: warn
               format: json
@@ -1239,7 +1231,7 @@ jobs:
             echo "Namespace ${NAMESPACE} still exists after stale cleanup"
             exit 1
           fi
-          copy_pull_secret
+          ensure_namespace
 
           if ! helm upgrade --install "$RELEASE" "$CHART_PATH" \
             -n "$NAMESPACE" \
