@@ -247,6 +247,7 @@ func TestTendermintRpcBatchCall(t *testing.T) {
 		require.NoError(t, errSingle)
 		sumCU += singleMsg.GetApi().ComputeUnits
 	}
+	require.Greater(t, sumCU, uint64(0), "member compute_units must sum to > 0, else the equality below is vacuous")
 	require.Equal(t, sumCU, chainMessage.GetApi().ComputeUnits, "batch CU must equal the sum of member compute_units")
 
 	requestedBlock, earliestReqBlock := chainMessage.RequestedBlock()
@@ -331,6 +332,7 @@ func TestTendermintRpcBatchCallWithSameID(t *testing.T) {
 		require.NoError(t, errSingle)
 		sumCU += singleMsg.GetApi().ComputeUnits
 	}
+	require.Greater(t, sumCU, uint64(0), "member compute_units must sum to > 0, else the equality below is vacuous")
 	require.Equal(t, sumCU, chainMessage.GetApi().ComputeUnits, "batch CU must equal the sum of member compute_units")
 
 	requestedBlock, earliestReqBlock := chainMessage.RequestedBlock()

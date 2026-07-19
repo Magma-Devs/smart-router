@@ -469,12 +469,6 @@ func TestSpecAggregation_FullReplacement(t *testing.T) {
 	// Enabled should be from source2 (false)
 	require.False(t, finalSpec.Enabled)
 
-	// min_stake_provider should be from source2 (lower amount)
-
-	// reliability_threshold should be from source2
-
-	// shares should be from source2
-
 	// average_block_time should be from source2
 	require.Equal(t, int64(12000), finalSpec.AverageBlockTime)
 
