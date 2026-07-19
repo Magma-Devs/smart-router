@@ -1,24 +1,14 @@
 {
   "proposal": {
-    "title": "Add Specs: Cosmos Wasm",
-    "description": "Adding default Cosmos Wasm specification",
     "specs": [
       {
         "index": "COSMOSWASM",
         "name": "cosmos wasm",
         "enabled": false,
-        "reliability_threshold": 268435455,
-        "data_reliability_enabled": true,
         "block_distance_for_finalized_data": 0,
         "blocks_in_finalization_proof": 1,
         "average_block_time": 6500,
         "allowed_block_lag_for_qos_sync": 2,
-        "block_last_updated": 910837,
-        "min_stake_provider": {
-          "denom": "ulava",
-          "amount": "5000000000"
-        },
-        "providers_types": 0,
         "api_collections": [
           {
             "enabled": true,
@@ -41,11 +31,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": true,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/code/{code_id}",
@@ -59,11 +46,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/code/{code_id}/contracts",
@@ -77,11 +61,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/codes/params",
@@ -95,11 +76,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": true,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/codes/pinned",
@@ -113,11 +91,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": true,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/contract/{address}",
@@ -131,11 +106,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/contract/{address}/history",
@@ -149,11 +121,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/contract/{address}/raw/{query_data}",
@@ -167,11 +136,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/contract/{address}/smart/{query_data}",
@@ -185,11 +151,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/contract/{address}/state",
@@ -203,11 +166,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/contracts/creator/{creator_address}",
@@ -221,11 +181,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "/cosmwasm/wasm/v1/contract/build_address",
@@ -239,11 +196,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               }
             ],
             "headers": [],
@@ -271,11 +225,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/Code",
@@ -289,11 +240,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/Codes",
@@ -307,11 +255,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": true,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/ContractHistory",
@@ -325,11 +270,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/ContractInfo",
@@ -343,11 +285,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/ContractsByCode",
@@ -361,11 +300,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/Params",
@@ -379,11 +315,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": true,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/PinnedCodes",
@@ -397,11 +330,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": true,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/RawContractState",
@@ -415,11 +345,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/SmartContractState",
@@ -433,11 +360,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/BuildAddress",
@@ -451,11 +375,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               },
               {
                 "name": "cosmwasm.wasm.v1.Query/ContractsByCreator",
@@ -469,11 +390,8 @@
                 "enabled": true,
                 "category": {
                   "deterministic": false,
-                  "local": false,
-                  "subscription": false,
                   "stateful": 0
-                },
-                "extra_compute_units": 0
+                }
               }
             ],
             "headers": [],
@@ -483,6 +401,5 @@
         ]
       }
     ]
-  },
-  "deposit": "7000000000ulava"
+  }
 }
