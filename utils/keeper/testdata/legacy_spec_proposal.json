@@ -1,0 +1,61 @@
+{
+  "proposal": {
+    "title": "Legacy governance proposal title (removed field, must stay loadable)",
+    "description": "Smart-router never reads proposal.description; kept here to prove it is ignored",
+    "specs": [
+      {
+        "index": "LEGACYBASE",
+        "name": "Legacy Base Chain",
+        "enabled": true,
+        "reliability_threshold": 268435455,
+        "data_reliability_enabled": true,
+        "block_distance_for_finalized_data": 8,
+        "blocks_in_finalization_proof": 3,
+        "average_block_time": 13000,
+        "allowed_block_lag_for_qos_sync": 2,
+        "block_last_updated": 123456,
+        "min_stake_provider": { "denom": "ulava", "amount": "5000000000" },
+        "providers_types": null,
+        "contributor": ["lava@contributor1", "lava@contributor2"],
+        "contributor_percentage": "0.015",
+        "shares": 1,
+        "identity": "legacy-identity-hash",
+        "api_collections": [
+          {
+            "enabled": true,
+            "collection_data": { "api_interface": "jsonrpc", "internal_path": "", "type": "POST", "add_on": "" },
+            "apis": [
+              {
+                "name": "base_method",
+                "compute_units": 10,
+                "extra_compute_units": 99,
+                "enabled": true,
+                "category": { "deterministic": true, "local": true, "subscription": true, "stateful": 1, "hanging_api": false },
+                "block_parsing": { "parser_arg": ["latest"], "parser_func": "DEFAULT" }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "index": "LEGACYNUM",
+        "name": "Legacy Numeric ProvidersTypes",
+        "enabled": true,
+        "average_block_time": 6000,
+        "min_stake_provider": { "denom": "ulava", "amount": "1000000" },
+        "providers_types": 1,
+        "contributor_percentage": "0.5",
+        "shares": 7
+      },
+      {
+        "index": "LEGACYCHILD",
+        "name": "Legacy Child Imports Base",
+        "enabled": true,
+        "imports": ["LEGACYBASE"],
+        "providers_types": "static",
+        "shares": 2
+      }
+    ]
+  },
+  "deposit": "10000000ulava"
+}

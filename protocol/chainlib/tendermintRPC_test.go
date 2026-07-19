@@ -32,7 +32,6 @@ func TestTendermintChainParser_Spec(t *testing.T) {
 	// set the spec
 	spec := spectypes.Spec{
 		Enabled:                       true,
-		ReliabilityThreshold:          10,
 		AllowedBlockLagForQosSync:     11,
 		AverageBlockTime:              12000,
 		BlockDistanceForFinalizedData: 13,
@@ -235,6 +234,22 @@ func TestTendermintRpcBatchCall(t *testing.T) {
 
 	chainMessage, err := chainParser.ParseMsg("", []byte(batchCallData), "", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
+
+	// A batch's compute units must be the sum of its member methods' compute_units.
+	// Guards that batch CU accounting stays driven solely by compute_units after
+	// extra_compute_units is removed from the spec model.
+	sumCU := uint64(0)
+	for _, single := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"block","params":{"height":"99"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"block","params":{"height":"100"}}`,
+	} {
+		singleMsg, errSingle := chainParser.ParseMsg("", []byte(single), "", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, errSingle)
+		sumCU += singleMsg.GetApi().ComputeUnits
+	}
+	require.Greater(t, sumCU, uint64(0), "member compute_units must sum to > 0, else the equality below is vacuous")
+	require.Equal(t, sumCU, chainMessage.GetApi().ComputeUnits, "batch CU must equal the sum of member compute_units")
+
 	requestedBlock, earliestReqBlock := chainMessage.RequestedBlock()
 	require.Equal(t, int64(100), requestedBlock)
 	require.Equal(t, int64(99), earliestReqBlock)
@@ -304,6 +319,22 @@ func TestTendermintRpcBatchCallWithSameID(t *testing.T) {
 
 	chainMessage, err := chainParser.ParseMsg("", []byte(batchCallData), "", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
+
+	// A batch's compute units must be the sum of its member methods' compute_units.
+	// Guards that batch CU accounting stays driven solely by compute_units after
+	// extra_compute_units is removed from the spec model.
+	sumCU := uint64(0)
+	for _, single := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"block","params":{"height":"99"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"block","params":{"height":"100"}}`,
+	} {
+		singleMsg, errSingle := chainParser.ParseMsg("", []byte(single), "", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, errSingle)
+		sumCU += singleMsg.GetApi().ComputeUnits
+	}
+	require.Greater(t, sumCU, uint64(0), "member compute_units must sum to > 0, else the equality below is vacuous")
+	require.Equal(t, sumCU, chainMessage.GetApi().ComputeUnits, "batch CU must equal the sum of member compute_units")
+
 	requestedBlock, earliestReqBlock := chainMessage.RequestedBlock()
 	require.Equal(t, int64(100), requestedBlock)
 	require.Equal(t, int64(99), earliestReqBlock)
