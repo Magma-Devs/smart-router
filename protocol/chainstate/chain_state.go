@@ -32,7 +32,7 @@ const (
 	// DefaultBucketWidth is the consensus clustering tolerance: observations whose blocks are
 	// within this many blocks of each other are treated as agreeing on the tip. Compile-time
 	// default (no per-chain runtime plumbing yet), not locked.
-	DefaultBucketWidth int64 = 2
+	DefaultBucketWidth int64 = 5
 	// DefaultOutlierThreshold is the FALLBACK anti-lie / realignment distance, in blocks, used
 	// only when a chain's average block time is unknown (avgBlockTime <= 0, e.g. a spec without
 	// average_block_time) or a caller supplies a non-positive OutlierThreshold. With a known
