@@ -81,12 +81,17 @@ func TestGetLatestBlock_NilChainStateUsesAtomic(t *testing.T) {
 	require.Equal(t, uint64(500), rpcss.getLatestBlock(), "no chainState → atomic answers")
 }
 
-// TestGetLatestBlockForCacheFinalization_ConsensusOrZero locks the cache-finalization tip
-// contract (see isFinalizedForCacheWrite's doc block): the CONSENSUS baseline when fresh, else a
-// strict 0. It must never fall back to the optimistic observed tip (a lone fresh reporter — on
-// no-baseline pods a lying-high value would falsely finalize into the long-TTL store) nor to the
-// bootstrap atomic (monotonic-max, no downward correction).
-func TestGetLatestBlockForCacheFinalization_ConsensusOrZero(t *testing.T) {
+// TestGetLatestBlockForCacheFinalization_TipOrZero locks the cache-finalization tip contract
+// AFTER Topic C T1/D4 (single reader): the ChainState TIP when fresh, else a strict 0. It must
+// still never fall back to the bootstrap atomic (monotonic-max, no downward correction).
+//
+// BEHAVIOR CHANGE: this read the strict-majority CONSENSUS baseline until T1, so a pod with no
+// majority finalized nothing (strict 0, the safe under-finalizing direction). It now finalizes
+// against the tip, which Recompute bounds to baseline+OutlierThreshold — but on a pod that never
+// forms a majority (1-2 endpoints) there is no baseline to bound against, so a sub-threshold
+// lying-high value can reach finalization and only heals after TTL. That is a deliberate,
+// documented loosening of a safety property, accepted as the cost of the single-reader model.
+func TestGetLatestBlockForCacheFinalization_TipOrZero(t *testing.T) {
 	clk := &manualClock{t: time.Unix(1_700_000_000, 0)}
 	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
 		BucketWidth:      2,
@@ -100,25 +105,37 @@ func TestGetLatestBlockForCacheFinalization_ConsensusOrZero(t *testing.T) {
 		chainState:     cs,
 	}
 
-	// A fresh optimistic tip and a seeded bootstrap atomic exist — but with no consensus
-	// baseline, finalization must see 0 (under-finalize, the safe direction), not either value.
+	// A fresh tip and a seeded bootstrap atomic both exist. Finalization reads the TIP (1050) —
+	// never the atomic, which is monotonic-max with no downward correction.
 	rpcss.latestBlockHeight.Store(1000)
 	cs.SetLatestBlock(1050)
-	require.Equal(t, uint64(0), rpcss.getLatestBlockForCacheFinalization(),
-		"no consensus baseline → strict 0: neither the optimistic tip nor the atomic may finalize")
+	require.Equal(t, uint64(1050), rpcss.getLatestBlockForCacheFinalization(),
+		"T1/D4: finalization measures against the one tip, not the atomic")
 
-	// A strict majority forms → finalization measures against the consensus baseline.
+	// A strict majority at 1040 forms. The tip's 10-block lead is within OutlierThreshold (100),
+	// so the edge correction leaves it alone and finalization keeps reading 1050. Under the old
+	// baseline-preferring contract this returned 1040.
 	cs.Recompute([]chainstate.BlockObservation{
 		{URL: "a", Block: 1040, ObservedAt: clk.now()},
 		{URL: "b", Block: 1040, ObservedAt: clk.now()},
 	})
-	require.Equal(t, uint64(1040), rpcss.getLatestBlockForCacheFinalization(),
-		"a fresh strict-majority baseline is the finalization tip")
+	require.Equal(t, uint64(1050), rpcss.getLatestBlockForCacheFinalization(),
+		"a within-threshold optimistic lead survives the edge correction and is what finalization sees")
 
-	// The baseline ages past TTL → strict 0 again (never a frozen value).
+	// An implausible tip IS corrected: a majority far below it snaps the tip down to the baseline,
+	// which is what bounds how far finalization can be led astray on a pod that forms consensus.
+	cs.SetLatestBlock(1200)
+	cs.Recompute([]chainstate.BlockObservation{
+		{URL: "a", Block: 1060, ObservedAt: clk.now()},
+		{URL: "b", Block: 1060, ObservedAt: clk.now()},
+	})
+	require.Equal(t, uint64(1060), rpcss.getLatestBlockForCacheFinalization(),
+		"a tip leading consensus by more than OutlierThreshold is snapped down before finalization reads it")
+
+	// The tip ages past TTL → strict 0 (never a frozen value).
 	clk.advance(11 * time.Second)
 	require.Equal(t, uint64(0), rpcss.getLatestBlockForCacheFinalization(),
-		"a TTL-expired baseline must report 0, not a frozen value")
+		"a TTL-expired tip must report 0, not a frozen value")
 
 	// Defensive path: no ChainState wired at all → 0.
 	rpcss.chainState = nil
@@ -341,38 +358,62 @@ func TestHarvest_BootstrapAtomicGatedOnChainStateVerdict(t *testing.T) {
 	require.Equal(t, uint64(1050), rpcss.latestBlockHeight.Load(), "a plausible advance still ratchets the atomic")
 }
 
-// TestSiteC_SyncReferenceIsConsensusBaseline documents the MAG-2160 Finding 2 contract Site C
-// depends on: sync scoring prefers GetConsensusBaseline (the strict-majority reference); when no
-// fresh majority exists the call returns ok=false and Site C falls back to the outlier-guarded
-// OBSERVED tip (GetLatestBlock) — so a 2-endpoint pod whose laggard destroys the majority still
-// detects the lag (the laggard reads its real distance from the guarded tip), while a pod WITH a
-// fresh majority is never penalized against the optimistic tip of a lone racer (the baseline wins).
-func TestSiteC_SyncReferenceIsConsensusBaseline(t *testing.T) {
+// TestSiteC_SyncReferenceIsChainTip documents the Topic C T1/D4 contract that REPLACED the
+// MAG-2160 Finding 2 two-source ladder: sync scoring reads the ONE tip (GetLatestBlock), never the
+// consensus baseline, which is now internal machinery. The baseline still constrains the tip — it
+// just does so inside ChainState (Recompute's edge correction) instead of at the read site.
+//
+// KNOWN BEHAVIOR CHANGE vs the old contract: while the tip holds a legitimate within-threshold
+// lead over a lagging majority, endpoints AT the majority are now charged that difference as sync
+// gap, where the old baseline-preferring read charged them 0. This is the deliberate cost of the
+// single-reader decision; the gap is bounded by OutlierThreshold because Recompute snaps any
+// larger lead back down.
+func TestSiteC_SyncReferenceIsChainTip(t *testing.T) {
 	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
 
-	// A single optimistic reporter pushes the OBSERVED tip to 1099.
+	// A single optimistic reporter pushes the tip to 1099.
 	cs.SetLatestBlock(1099)
 	observed, ok := cs.GetLatestBlock()
 	require.True(t, ok)
 	require.Equal(t, int64(1099), observed)
 
-	// No majority yet → GetConsensusBaseline reports none. Site C then falls back to the
-	// observed tip (the fallback is exercised in TestSyncGapAgainstReference / the no-baseline
-	// pod case); here we pin only that consensus is genuinely absent so the fallback path runs.
-	_, ok = cs.GetConsensusBaseline()
-	require.False(t, ok, "no fresh majority yet → consensus baseline is absent")
-
-	// A strict majority sits at 1000. Site C now PREFERS 1000 over the observed 1099 — so a
-	// node sitting at 1000 has syncGap 0, not a bogus 99.
+	// A strict majority sits at 1000, within OutlierThreshold of the tip — so the edge correction
+	// does NOT fire and the optimistic lead survives. Site C reads the tip, so 1099 stays the
+	// reference; the baseline is not consulted at the read site at all.
 	now := time.Now()
 	cs.Recompute([]chainstate.BlockObservation{
 		{URL: "a", Block: 1000, ObservedAt: now},
 		{URL: "b", Block: 1000, ObservedAt: now},
 		{URL: "c", Block: 1099, ObservedAt: now},
 	})
-	baseline, ok := cs.GetConsensusBaseline()
+	tip, ok := cs.GetLatestBlock()
 	require.True(t, ok)
-	require.Equal(t, int64(1000), baseline, "Site C prefers the majority baseline over the lone optimistic tip")
+	require.Equal(t, int64(1099), tip, "a within-threshold optimistic lead is preserved (D3), and it is what Site C reads")
+	require.Equal(t, int64(1000), cs.DebugSnapshot().ConsensusBaseline,
+		"the baseline is still computed — it just constrains the tip internally instead of being read")
+}
+
+// TestSiteC_TipPulledUpToMajority is the other half of the T1 edge-correction rule (D3): a tip
+// that TRAILS the majority is pulled up to it. Without this a tip could sit below the real head
+// indefinitely, and since every consumer now reads the tip, that under-reports the head to archive
+// routing, cache finalization, sync scoring and consistency alike.
+func TestSiteC_TipPulledUpToMajority(t *testing.T) {
+	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
+
+	cs.SetLatestBlock(900)
+	tip, ok := cs.GetLatestBlock()
+	require.True(t, ok)
+	require.Equal(t, int64(900), tip)
+
+	now := time.Now()
+	cs.Recompute([]chainstate.BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: now},
+		{URL: "b", Block: 1000, ObservedAt: now},
+	})
+
+	tip, ok = cs.GetLatestBlock()
+	require.True(t, ok)
+	require.Equal(t, int64(1000), tip, "a tip trailing the majority is pulled up to it")
 }
 
 // TestSyncGapAgainstReference locks the pure gap math Site C relies on, including the no-baseline
@@ -448,8 +489,7 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 
 	// The two nodes are 100 apart → no strict-majority cluster forms.
 	rpcss.recomputeChainStateConsensus()
-	_, hasBaseline := cs.GetConsensusBaseline()
-	require.False(t, hasBaseline, "a 2-node pod split by 100 blocks forms no consensus")
+	require.False(t, cs.DebugSnapshot().HasBaseline, "a 2-node pod split by 100 blocks forms no consensus")
 
 	// Observed tip is the leader's 1000 (outlier-guarded). Site C falls back to it: the leader
 	// keeps up (gap 0), the laggard is charged its real distance — lag detection survives.
@@ -462,28 +502,47 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 // TestSiteC_InClusterEndpointChargedNoSyncGap covers PR #143: the baseline is the winning
 // cluster's MOST-ADVANCED block, so a majority that sits one cluster-step below it would be
 // charged a (bounded) sync-gap against a tip only the fastest cluster member reported. Site C
-// zeroes the gap for any endpoint within ConsensusBucketWidth of the baseline (the cluster spans
+// zeroes the gap for any endpoint within ConsensusBucketWidth of the reference (the cluster spans
 // at most BucketWidth, so such an endpoint is inside the agreeing majority). This test pins the
-// arithmetic the inline clamp at rpcsmartrouter_server.go relies on.
+// clamp that syncGapAgainstReference implements.
+//
+// The blocks are DERIVED from the configured BucketWidth rather than hardcoded. The previous
+// version pinned literal 1002/2 and broke when DefaultBucketWidth was retuned 2 -> 5 (a more
+// lenient clustering tolerance); deriving them keeps the test aimed at the BOUNDARY — which is the
+// property worth locking — instead of at one particular constant.
 func TestSiteC_InClusterEndpointChargedNoSyncGap(t *testing.T) {
 	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
 	now := time.Now()
 
-	// Two endpoints at 1000 (the mode) and one fast node at 1002, all within BucketWidth=2, so they
-	// form ONE 3-of-3 cluster whose most-advanced block (the baseline) is the lone fast node's 1002.
-	cs.Recompute([]chainstate.BlockObservation{
-		{URL: "a", Block: 1000, ObservedAt: now},
-		{URL: "b", Block: 1000, ObservedAt: now},
-		{URL: "c", Block: 1002, ObservedAt: now},
-	})
-	baseline, ok := cs.GetConsensusBaseline()
-	require.True(t, ok)
-	require.Equal(t, int64(1002), baseline, "baseline is the cluster's most-advanced block (P2 fix), not the mode")
-
-	// A majority endpoint at 1000 has a RAW gap of baseline-1000 = 2, equal to BucketWidth — it is
-	// inside the agreeing cluster, so the inline clamp (syncGap <= ConsensusBucketWidth) zeroes it.
 	width := cs.ConsensusBucketWidth()
-	require.Equal(t, int64(2), width)
-	require.LessOrEqual(t, baseline-int64(1000), width,
-		"an endpoint within BucketWidth of the baseline must not be charged a sync-gap")
+	require.Positive(t, width, "the clustering tolerance must be a positive block count")
+
+	// Two endpoints at the mode and one fast node EXACTLY BucketWidth ahead. That is the widest
+	// spread that still clusters — computeMajorityBaseline shrinks a window only when the spread
+	// EXCEEDS BucketWidth — so this is the boundary case, and all three form ONE 3-of-3 cluster.
+	const mode = int64(1000)
+	fast := mode + width
+	cs.Recompute([]chainstate.BlockObservation{
+		{URL: "a", Block: mode, ObservedAt: now},
+		{URL: "b", Block: mode, ObservedAt: now},
+		{URL: "c", Block: fast, ObservedAt: now},
+	})
+
+	// The baseline is internal now (T1/D4), so read it via the debug snapshot; the tip is what
+	// Site C actually measures against, and the up-pull leaves it equal to the baseline here.
+	require.Equal(t, fast, cs.DebugSnapshot().ConsensusBaseline,
+		"baseline is the cluster's most-advanced block (P2 fix), not the mode")
+	tip, ok := cs.GetLatestBlock()
+	require.True(t, ok)
+	require.Equal(t, fast, tip, "the tip is pulled up to the majority, so Site C measures against it")
+
+	// An endpoint at the mode sits exactly BucketWidth behind the reference — inside the agreeing
+	// cluster, so the clamp zeroes its gap instead of charging it for the fast node's lead.
+	require.Equal(t, int64(0), syncGapAgainstReference(tip, mode, width),
+		"an endpoint within BucketWidth of the reference must not be charged a sync-gap")
+
+	// One block further out is outside the cluster and IS charged its real distance — without this
+	// the clamp would silently disable lag detection instead of merely tolerating the cluster.
+	require.Equal(t, width+1, syncGapAgainstReference(tip, mode-1, width),
+		"just past BucketWidth the endpoint is charged its real distance")
 }

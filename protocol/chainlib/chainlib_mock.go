@@ -888,20 +888,6 @@ func (mr *MockRelaySenderMockRecorder) CancelSubscriptionContext(subscriptionKey
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CancelSubscriptionContext", reflect.TypeOf((*MockRelaySender)(nil).CancelSubscriptionContext), subscriptionKey)
 }
 
-// CreateDappKey mocks base method.
-func (m *MockRelaySender) CreateDappKey(userData common.UserData) string {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "CreateDappKey", userData)
-	ret0, _ := ret[0].(string)
-	return ret0
-}
-
-// CreateDappKey indicates an expected call of CreateDappKey.
-func (mr *MockRelaySenderMockRecorder) CreateDappKey(userData interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateDappKey", reflect.TypeOf((*MockRelaySender)(nil).CreateDappKey), userData)
-}
-
 // ParseRelay mocks base method.
 func (m *MockRelaySender) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []relay.Metadata) (ProtocolMessage, error) {
 	m.ctrl.T.Helper()
@@ -945,18 +931,6 @@ func (m *MockRelaySender) SendRelay(ctx context.Context, url, req, connectionTyp
 func (mr *MockRelaySenderMockRecorder) SendRelay(ctx, url, req, connectionType, dappID, consumerIp, analytics, metadataValues interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendRelay", reflect.TypeOf((*MockRelaySender)(nil).SendRelay), ctx, url, req, connectionType, dappID, consumerIp, analytics, metadataValues)
-}
-
-// SetConsistencySeenBlock mocks base method.
-func (m *MockRelaySender) SetConsistencySeenBlock(blockSeen int64, key string) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SetConsistencySeenBlock", blockSeen, key)
-}
-
-// SetConsistencySeenBlock indicates an expected call of SetConsistencySeenBlock.
-func (mr *MockRelaySenderMockRecorder) SetConsistencySeenBlock(blockSeen, key interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetConsistencySeenBlock", reflect.TypeOf((*MockRelaySender)(nil).SetConsistencySeenBlock), blockSeen, key)
 }
 
 // MockChainListener is a mock of ChainListener interface.

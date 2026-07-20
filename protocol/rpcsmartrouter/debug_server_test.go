@@ -231,10 +231,11 @@ func TestDebugResetAll_SmartRouter_ReturnsCapabilityAdvertisement(t *testing.T) 
 	require.Contains(t, body, `"session-manager"`)
 	require.Contains(t, body, `"reported-providers"`)
 	require.Contains(t, body, `"sticky-sessions"`)
-	// seen-block was added so callers know reset-all also flushes the
-	// per-chain consistency cache (where the corrupted seenBlock actually
-	// lives). The simulator framework can probe this key to verify it doesn't
-	// need to fall back to a process restart.
+	// seen-block: STALE capability. It signalled the per-chain consistency-cache
+	// flush, but Topic C C-G retired that store and reset-all does not reset the
+	// ChainState tip that replaced it — nothing backs this key today. The assertion
+	// is kept so the advertised contract cannot change silently while external
+	// probers may still require it; see task T11 in the topic-C action plan.
 	require.Contains(t, body, `"seen-block"`)
 	// blocked-providers (MAG-1810): in direct-rpc mode there are no epoch
 	// transitions, so currentlyBlockedProviderAddresses can only grow as
@@ -557,130 +558,18 @@ func TestDebugResetEndpointHealth_SmartRouter_MethodNotAllowed(t *testing.T) {
 	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
 
-// corruptedMsTimestampBlock is the exact value reported in the 2026-05-14
-// MAG-1748 incident — a millisecond timestamp that a test accidentally passed
-// as a block parameter, poisoning the seen-block cache. Keeping this value
-// hard-coded in tests anchors the regression to the original symptom.
-const corruptedMsTimestampBlock int64 = 1778751245068
-
-// newPoisonedConsistencies returns a per-chain consistency map seeded with
-// `corruptedMsTimestampBlock` for every chainID in chainIDs. The poisoned
-// value is verified visible before the helper returns — ristretto buffers
-// writes, so a test that calls reset before the corruption lands would
-// trivially pass.
-func newPoisonedConsistencies(t *testing.T, chainIDs ...string) (*common.SafeSyncMap[string, relaycore.Consistency], map[string]relaycore.Consistency) {
-	t.Helper()
-	m := &common.SafeSyncMap[string, relaycore.Consistency]{}
-	byChain := make(map[string]relaycore.Consistency, len(chainIDs))
-	for _, chainID := range chainIDs {
-		c := relaycore.NewConsistency(chainID)
-		c.SetSeenBlockFromKey(corruptedMsTimestampBlock, "dapp|ip")
-		_, _, err := m.LoadOrStore(chainID, c)
-		require.NoError(t, err)
-		byChain[chainID] = c
-	}
-	for _, chainID := range chainIDs {
-		c := byChain[chainID]
-		require.Eventuallyf(t, func() bool {
-			v, found := c.(*relaycore.ConsistencyImpl).GetLatestBlock("dapp|ip")
-			return found && v == corruptedMsTimestampBlock
-		}, time.Second, 10*time.Millisecond,
-			"corrupted seenBlock for %q should be visible before recovery (ristretto buffers writes)", chainID)
-	}
-	return m, byChain
-}
-
-// requireConsistenciesCleared asserts that every per-chain cache in byChain
-// has dropped its "dapp|ip" entry. Uses Eventually because ristretto's Clear
-// drains buffered writes asynchronously.
-func requireConsistenciesCleared(t *testing.T, byChain map[string]relaycore.Consistency) {
-	t.Helper()
-	for chainID, c := range byChain {
-		require.Eventuallyf(t, func() bool {
-			_, found := c.(*relaycore.ConsistencyImpl).GetLatestBlock("dapp|ip")
-			return !found
-		}, time.Second, 10*time.Millisecond,
-			"%q seenBlock should be cleared after recovery", chainID)
-	}
-}
-
-// TestDebugMoveClock_ClearsCorruptedSeenBlock is the regression test for the
-// 2026-05-14 incident: a test sent hex(int(time.time()*1000)) (~1.7T) as a
-// block parameter and poisoned the consistency cache. Before this fix, both
-// the legacy 4-step move-clock and /debug/reset-all returned HTTP 200 on
-// every step but the corrupted seenBlock survived because the reset paths
-// only touched the optimizer, not the per-chain Consistency cache where
-// seenBlock is actually read from.
+// TestDebugResetEndpoints_MinimalDepsAreSafe makes sure every reset endpoint is usable from a
+// test fixture wiring only the optimizer map and offset — no router, no cache — including when
+// the time-warp handler actually takes the needsReset branch.
 //
-// The monotonic guard in ConsistencyImpl.SetSeenBlockFromKey makes the
-// corruption sticky: no legitimate ~20M block can overwrite a stored ~1.7T
-// value, and ongoing traffic keeps refreshing the 5-min TTL — so the only
-// prior recovery was a process restart.
+// Originally this guarded resetAllConsistencies(nil) specifically; that function and the
+// per-chain seen-block map it walked are gone (Topic C C-G retired the store). The endpoint
+// nil-safety coverage is worth keeping on its own, so the test is repurposed rather than deleted.
 //
-// We assert *both* per-chain caches (ETH1 and LAVA) are cleared so the test
-// proves the Range loop actually reaches every chain, not just the first.
-func TestDebugMoveClock_ClearsCorruptedSeenBlock(t *testing.T) {
-	cases := []struct {
-		name string
-		// run drives the recovery procedure end-to-end against the given mux.
-		run func(t *testing.T, mux http.Handler)
-	}{
-		{
-			name: "legacy_four_step_move_clock",
-			run: func(t *testing.T, mux http.Handler) {
-				rr := postTimeWarpRouter(mux, `{"offset_seconds":3600}`)
-				require.Equal(t, http.StatusOK, rr.Code)
-				rr = postTimeWarpRouter(mux, `{"offset_seconds":0}`)
-				require.Equal(t, http.StatusOK, rr.Code)
-				rr = postResetScoresRouter(mux)
-				require.Equal(t, http.StatusOK, rr.Code)
-			},
-		},
-		{
-			name: "reset_scores_alone",
-			run: func(t *testing.T, mux http.Handler) {
-				rr := postResetScoresRouter(mux)
-				require.Equal(t, http.StatusOK, rr.Code)
-			},
-		},
-		{
-			name: "reset_all_single_call",
-			run: func(t *testing.T, mux http.Handler) {
-				rr := postResetAllRouter(mux)
-				require.Equal(t, http.StatusOK, rr.Code)
-			},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var offsetNano atomic.Int64
-			consistencies, byChain := newPoisonedConsistencies(t, "ETH1", "LAVA")
-			mux := buildDebugMux(debugMuxDeps{
-				optimizers:    newEmptyOptimizersRouter(),
-				offsetNano:    &offsetNano,
-				consistencies: consistencies,
-			})
-
-			tc.run(t, mux)
-
-			requireConsistenciesCleared(t, byChain)
-		})
-	}
-}
-
-// TestDebugConsistencyReset_NilMapIsSafe makes sure every reset endpoint is
-// usable from a test fixture that didn't wire a consistencies map — including
-// when the time-warp handler actually takes the needsReset branch (which is
-// where resetAllConsistencies(nil) gets exercised).
-//
-// Important: the time-warp subtest pre-seeds offsetNano to +1h so the posted
-// offset_seconds:0 represents a *decrease* (newNano < prevNano). Without that
-// seed, both nano values are 0, needsReset stays false, and the reset branch
-// is skipped — so the test would cover the handler reaching its 200 OK reply
-// but NOT the resetAllConsistencies(nil) call path. The whole point of this
-// test is the latter.
-func TestDebugConsistencyReset_NilMapIsSafe(t *testing.T) {
+// Important: the time-warp subtest pre-seeds offsetNano to +1h so the posted offset_seconds:0
+// represents a *decrease* (newNano < prevNano). Without that seed, both nano values are 0,
+// needsReset stays false, and the reset branch is skipped entirely.
+func TestDebugResetEndpoints_MinimalDepsAreSafe(t *testing.T) {
 	endpoints := []struct {
 		name string
 		// seed runs before the request so we can put offsetNano in a state
@@ -709,9 +598,8 @@ func TestDebugConsistencyReset_NilMapIsSafe(t *testing.T) {
 		t.Run(ep.name, func(t *testing.T) {
 			var offsetNano atomic.Int64
 			mux := buildDebugMux(debugMuxDeps{
-				optimizers:    newEmptyOptimizersRouter(),
-				offsetNano:    &offsetNano,
-				consistencies: nil,
+				optimizers: newEmptyOptimizersRouter(),
+				offsetNano: &offsetNano,
 			})
 			if ep.seed != nil {
 				ep.seed(t, &offsetNano, mux)

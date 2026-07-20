@@ -304,7 +304,6 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	}
 
 	optimizers := &common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]{}
-	smartRouterConsistencies := &common.SafeSyncMap[string, relaycore.Consistency]{}
 
 	var wg sync.WaitGroup
 	parallelJobs := len(options.rpcEndpoints)
@@ -320,7 +319,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 		go func(rpcEndpoint *lavasession.RPCEndpoint) error {
 			defer wg.Done()
 			err := rpsr.CreateSmartRouterEndpoint(ctx, rpcEndpoint, errCh,
-				optimizers, smartRouterConsistencies, chainMutexes,
+				optimizers, chainMutexes,
 				options, smartRouterIdentifier, rpcSmartRouterMetrics, smartRouterOptimizerQoSClient,
 				smartRouterMetricsManager, relaysMonitorAggregator)
 			return err
@@ -376,11 +375,10 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 		utils.EnableDebugLogBuffer(50000)
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
-			optimizers:    optimizers,
-			offsetNano:    &currentOffsetNano,
-			consistencies: smartRouterConsistencies,
-			router:        rpsr,
-			cache:         options.cache,
+			optimizers: optimizers,
+			offsetNano: &currentOffsetNano,
+			router:     rpsr,
+			cache:      options.cache,
 		})
 		srv := &http.Server{Addr: options.cmdFlags.DebugAddress, Handler: debugMux}
 		// Watcher goroutine: shuts the server down gracefully when ctx is cancelled
@@ -459,11 +457,6 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 type debugMuxDeps struct {
 	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]
 	offsetNano *atomic.Int64
-	// consistencies is the per-chain seen-block cache map. Optional: nil-safe.
-	// Flushed only from the /debug/* recovery endpoints, never from the relay
-	// hot path — see consistencyResetter below for why this is reached via a
-	// type assertion rather than a public interface method.
-	consistencies *common.SafeSyncMap[string, relaycore.Consistency]
 	// router is optional. When provided, /debug/reset-all also flushes
 	// per-server RelayRetriesManagers and per-CSM transient failure state.
 	router *RPCSmartRouter
@@ -482,15 +475,6 @@ type debugMuxDeps struct {
 type cacheFlusher interface {
 	CacheActive() bool
 	Flush(ctx context.Context) error
-}
-
-// consistencyResetter is the debug-only contract for flushing a Consistency
-// cache. It is *intentionally* not exposed on the public relaycore.Consistency
-// interface so production relay code paths cannot call ResetState by accident.
-// The /debug/* handlers type-assert to reach it; implementations that don't
-// satisfy the assertion (test fakes, future variants) are silently skipped.
-type consistencyResetter interface {
-	ResetState()
 }
 
 // resetAllChainTrackers walks the router's per-server EndpointMonitors
@@ -611,25 +595,6 @@ func setAllChainStateDebugOffset(deps debugMuxDeps, offset time.Duration) {
 		}
 		server.chainState.SetDebugClockOffset(offset)
 	}
-}
-
-// resetAllConsistencies flushes every per-chain seen-block cache that
-// implements consistencyResetter. Why this is necessary: SetSeenBlockFromKey
-// only writes monotonically (consistency.go: `block >= blockSeen → return`),
-// so a poisoned value (e.g. a ms-timestamp accidentally passed as a block
-// number) blocks every legitimate smaller update, and ongoing traffic keeps
-// refreshing the TTL — without an explicit flush, the only recovery is a
-// process restart.
-func resetAllConsistencies(m *common.SafeSyncMap[string, relaycore.Consistency]) {
-	if m == nil {
-		return
-	}
-	m.Range(func(chainID string, c relaycore.Consistency) bool {
-		if r, ok := c.(consistencyResetter); ok {
-			r.ResetState()
-		}
-		return true
-	})
 }
 
 // resetEndpointHealthAndGauge re-enables every endpoint across all session managers
@@ -828,13 +793,6 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// stay on real time, so a warp reliably ages state when endpoints are quiesced without
 		// skewing the live relay-gate freshness path.
 		setAllChainStateDebugOffset(deps, offset)
-		// Gated on needsReset (same as opt.ResetState above) because the
-		// documented move-clock recovery sets offset_seconds back to 0 — that's
-		// the moment we also want to flush the per-chain seen-block cache. See
-		// resetAllConsistencies for the sticky-corruption reasoning.
-		if needsReset {
-			resetAllConsistencies(deps.consistencies)
-		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"offset_seconds":%v,"applied_to_chains":true}`, body.OffsetSeconds)
 	})
@@ -852,8 +810,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	})
 
 	// POST /debug/reset-scores — clears optimizer score state without changing
-	// current time offset or NowFunc. Also flushes per-chain seen-block caches and
-	// zeroes per-endpoint chain-tracker latest-block values. Gives a recovery path
+	// current time offset or NowFunc. Also zeroes per-endpoint chain-tracker
+	// latest-block values. (It used to flush the per-chain seen-block caches too;
+	// that store was retired by Topic C C-G.) Gives a recovery path
 	// that does not touch session-manager state — which trips a separate BTC-router
 	// regression on /debug/reset-all.
 	mux.HandleFunc("/debug/reset-scores", func(w http.ResponseWriter, r *http.Request) {
@@ -867,7 +826,6 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			count++
 			return true
 		})
-		resetAllConsistencies(deps.consistencies)
 		trackersReset := resetAllChainTrackers(deps)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d,"trackers_reset":%d}`,
@@ -876,7 +834,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-all — flush every state store the test framework
 	// cares about in a single call: in-process Ristretto, optimizer scores,
-	// per-chain seen-block consistency caches, relay retry bans, sticky
+	// relay retry bans, sticky
 	// sessions, reported providers, cross-epoch blocked-provider memory,
 	// and — when --cache-be is configured — the external cache-be pod
 	// (MAG-1764). Equivalent to the legacy time-warp(+3600) → time-warp(0)
@@ -907,13 +865,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// Clear any ChainState warp too, mirroring opt.NowFunc = nil above (MAG-2307).
 		setAllChainStateDebugOffset(deps, 0)
 
-		// 2. Per-chain seen-block consistency caches. Must be flushed here too,
-		//    not just in /debug/reset-scores: a poisoned huge seenBlock value
-		//    survives the legacy 4-call dance because the monotonic guard in
-		//    SetSeenBlockFromKey refuses smaller writes and ongoing traffic
-		//    keeps refreshing the TTL.
-		resetAllConsistencies(deps.consistencies)
-
+		// 2. (Removed) The per-chain seen-block consistency caches were flushed here.
+		//    Topic C C-G retired that store entirely — consistency now measures against the
+		//    anti-lie-guarded chain tip, which self-heals, so there is no sticky per-user value
+		//    left for an operator to flush. The chain tip itself is reset via the tracker reset
+		//    below.
+		//
 		// 3. Per-server RelayRetriesManagers (6h hash ban cache), 4. per-CSM
 		//    transient failure state, and 4b. per-CSM blocked-providers list.
 		//    All require the router to be present; test fixtures without a
@@ -993,8 +950,13 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// Capability advertisement — hardcoded for in-process stores, plus a
 		// conditional "cache-be" key when the external pod was actually
 		// flushed. The test framework probes this body to decide between this
-		// endpoint and the legacy 4-call dance; "seen-block" was added to
-		// signal the per-chain consistency-cache flush, "cache-be" signals
+		// endpoint and the legacy 4-call dance. NOTE: "seen-block" is now stale —
+		// it signalled the per-chain consistency-cache flush, but Topic C C-G
+		// retired that store and reset-all does not reset the ChainState tip that
+		// replaced it, so nothing backs this key. Left in place because external
+		// probers may require it; see task T11 in
+		// agent_docs/bug-reports/chainTracker-architecture/topic-C-action-plan.md.
+		// "cache-be" signals
 		// MAG-1764 end-to-end coverage, "blocked-providers" signals MAG-1810,
 		// and "endpoint-health" + "pairing" signal the MAG-2186 endpoint-health
 		// reset and cold pairing rebuild added above.
@@ -1435,7 +1397,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	rpcEndpoint *lavasession.RPCEndpoint,
 	errCh chan error,
 	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer],
-	smartRouterConsistencies *common.SafeSyncMap[string, relaycore.Consistency],
 	chainMutexes map[string]*sync.Mutex,
 	options *rpcSmartRouterStartOptions,
 	smartRouterIdentifier string,
@@ -1569,7 +1530,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 	_, averageBlockTime, _, _ := chainParser.ChainBlockStats()
 	var optimizer *provideroptimizer.ProviderOptimizer
-	var smartRouterConsistency relaycore.Consistency
 
 	// Create chain assets with mutex protection
 	chainMutexes[chainID].Lock()
@@ -1590,14 +1550,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	if !loaded && smartRouterOptimizerQoSClient != nil {
 		// if this is a new optimizer, register it in the smartRouterOptimizerQoSClient
 		smartRouterOptimizerQoSClient.RegisterOptimizer(optimizer, chainID)
-	}
-
-	// Create / Use existing Consistency
-	newSmartRouterConsistency := relaycore.NewConsistency(chainID)
-	smartRouterConsistency, _, err = smartRouterConsistencies.LoadOrStore(chainID, newSmartRouterConsistency)
-	if err != nil {
-		errCh <- err
-		return utils.LavaFormatError("failed loading consumer consistency", err, utils.LogAttr("endpoint", rpcEndpoint.Key()))
 	}
 
 	// Create active subscription provider storage for each unique chain
@@ -2162,7 +2114,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 	utils.LavaFormatInfo("RPCSmartRouter Listening", utils.Attribute{Key: "endpoints", Value: rpcEndpoint.String()})
 	// Convert smartRouterIdentifier string to empty sdk.AccAddress for smart router
-	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, rpcSmartRouterMetrics, smartRouterConsistency, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
+	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, rpcSmartRouterMetrics, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
 	if err != nil {
 		err = utils.LavaFormatError("failed serving rpc requests", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err

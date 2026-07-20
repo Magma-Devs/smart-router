@@ -9,12 +9,16 @@
 // touches QoS or endpoint.Enabled, and nothing external writes its consensus — there is no
 // SetMajorityBaseline API (T2, inverted: ChainState owns consensus; the probe is read-only).
 //
-// It exposes TWO distinct read APIs that callers must not conflate:
-//   - GetLatestBlock   — the OPTIMISTIC observed tip (highest accepted observation, fresh by
-//     TTL). Use for "what is the chain head right now" display/bootstrap.
-//   - GetConsensusBaseline — the strict-majority CONSENSUS baseline (fresh by TTL). Use for
-//     sync scoring, where measuring an endpoint against a single optimistic reporter's tip
-//     would unfairly penalize the whole pod (MAG-2160 Finding 2).
+// It exposes ONE read API for "what block is the chain at" (Topic C governing decision, D1/D4):
+//   - GetLatestBlock / GetLatestBlockWithTime — the tip. Every consumer reads this: archive
+//     routing, cache finalization, sync scoring, and consistency.
+//
+// Consensus is NOT a readable value — it is background machinery that corrects the tip at the
+// band edges only (see Recompute): snap DOWN when the tip leads consensus by more than
+// OutlierThreshold (an outlier/liar), pull UP when the tip trails consensus, otherwise leave the
+// optimistic lead alone. The baseline therefore stays internal (consensusBaseline*); it was
+// previously exported and read directly by sync scoring and cache finalization, which produced
+// five disagreeing "latest block" ladders (Topic C F5).
 package chainstate
 
 import (
@@ -89,8 +93,8 @@ type Config struct {
 	// StalenessWindow: an observation participates in consensus only if now-ObservedAt <= this.
 	// A zero value is replaced with minStalenessWindow at construction (expiry is never disabled).
 	StalenessWindow time.Duration
-	// TTL: GetLatestBlock / GetConsensusBaseline report not-found once the value is older than
-	// this (freshness, T4). Defaults to StalenessWindow when zero.
+	// TTL: GetLatestBlock (and the internal consensus baseline) report not-found once the value
+	// is older than this (freshness, T4). Defaults to StalenessWindow when zero.
 	TTL time.Duration
 }
 
@@ -154,6 +158,13 @@ type ChainState struct {
 	// is live). TTL freshness is measured from this, so a stable-but-confirmed tip does not
 	// expire while endpoints keep reporting it (Finding 4).
 	lastObservedAt time.Time
+	// latestSince is the ESTABLISHMENT timestamp for the tip, mirroring baselineSince for the
+	// baseline: when the current tip BLOCK first became the tip. It is preserved across
+	// equal-block confirmations and reset whenever the block VALUE changes (advance, stale-tip
+	// downward re-adoption, or either direction of Recompute's edge correction). Sync scoring
+	// measures "how long ago did this become the tip" from here — using lastObservedAt instead
+	// would report ~0 lag forever, since every confirming observation refreshes it.
+	latestSince time.Time
 	// initialized is a STICKY flag: true once any positive observation has ever been accepted.
 	// It distinguishes a genuine cold start (no observation yet → bootstrap fallback is allowed)
 	// from a tip that has merely gone stale by TTL (Finding 1). It never resets to false.
@@ -264,6 +275,7 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 			// Stale-tip downward re-adoption (self-heal from a poisoned/frozen tip).
 			cs.latestBlock = block
 			cs.lastObservedAt = now
+			cs.latestSince = now // the tip block CHANGED — re-establish its age
 			return cs.latestBlock, cs.lastObservedAt, false
 		}
 		if block == cs.latestBlock {
@@ -282,35 +294,58 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 	}
 	cs.latestBlock = block
 	cs.lastObservedAt = now
+	cs.latestSince = now // advance (or first observation) — the tip block CHANGED
 	cs.initialized = true
 	return cs.latestBlock, cs.lastObservedAt, true
 }
 
-// GetLatestBlock returns the OPTIMISTIC observed tip and whether it is known AND fresh (TTL). A
-// stale tip (no accepted observation within TTL) reports (0, false) rather than freezing a dead
-// value (T4). This is NOT the consensus baseline — for sync scoring use GetConsensusBaseline.
+// GetLatestBlock returns THE tip — the one answer to "what block is the chain at" — and whether
+// it is known AND fresh (TTL). A stale tip (no accepted observation within TTL) reports (0, false)
+// rather than freezing a dead value (T4). It grows optimistically from accepted observations and
+// is corrected at the band edges by Recompute, so it is anti-lie-guarded on both sides: a liar
+// cannot push it more than OutlierThreshold above consensus, and it cannot lag consensus.
 func (cs *ChainState) GetLatestBlock() (int64, bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.freshLatestLocked(cs.effectiveNow())
 }
 
-// GetConsensusBaseline returns the strict-majority CONSENSUS baseline and whether it is known
-// AND fresh (TTL). It reports (0, false) when no fresh majority existed at the last Recompute,
-// or when that baseline has since aged past TTL — callers must treat "no baseline" explicitly
-// (e.g. sync gap 0) rather than silently substituting the optimistic observed tip (Finding 2).
-func (cs *ChainState) GetConsensusBaseline() (int64, bool) {
-	block, _, ok := cs.GetConsensusBaselineWithTime()
+// GetLatestBlockWithTime is GetLatestBlock plus the wall-clock at which the current tip BLOCK was
+// ESTABLISHED (latestSince), returned atomically under one lock. Consumers that compute a
+// time-based sync lag (the provider optimizer's sync dimension, the probe cycle) measure "how long
+// ago did this become the tip" from this timestamp, so it must reflect the tip's true age rather
+// than the last confirming observation. Freshness (TTL) is still measured from lastObservedAt,
+// which every confirmation refreshes; the two are deliberately distinct (mirrors Finding 3's
+// baselineAt/baselineSince split, which this replaces for sync scoring).
+func (cs *ChainState) GetLatestBlockWithTime() (block int64, at time.Time, ok bool) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	// effectiveNow (not now) so a /debug/time-warp ages this getter's freshness like every other
+	// TTL read (MAG-2307); production offset is 0, so this is the base clock on the hot path.
+	block, ok = cs.freshLatestLocked(cs.effectiveNow())
+	if !ok {
+		return 0, time.Time{}, false
+	}
+	return block, cs.latestSince, true
+}
+
+// consensusBaseline returns the strict-majority CONSENSUS baseline and whether it is known AND
+// fresh (TTL). It reports (0, false) when no fresh majority existed at the last Recompute, or when
+// that baseline has since aged past TTL.
+//
+// INTERNAL (D4): the baseline is machinery for correcting the tip, not a value consumers read.
+// It was exported until Topic C T1; every former reader (sync scoring, cache finalization, the
+// probe cycle) now reads the tip, which Recompute keeps inside the consensus band.
+func (cs *ChainState) consensusBaseline() (int64, bool) {
+	block, _, ok := cs.consensusBaselineWithTime()
 	return block, ok
 }
 
-// GetConsensusBaselineWithTime is GetConsensusBaseline plus the wall-clock at which the current
-// baseline BLOCK was ESTABLISHED (baselineSince), returned atomically under one lock. Consumers
-// that compute a time-based sync lag (e.g. the provider optimizer's sync dimension, Topic E)
-// measure "how long ago did this become the tip" from this timestamp — so it must reflect the
-// baseline's true age, not the last Recompute. Freshness (TTL) is still measured from baselineAt,
-// which every confirming Recompute refreshes; the two are deliberately distinct (Finding 3).
-func (cs *ChainState) GetConsensusBaselineWithTime() (block int64, at time.Time, ok bool) {
+// consensusBaselineWithTime is consensusBaseline plus the wall-clock at which the current
+// baseline BLOCK was ESTABLISHED (baselineSince), returned atomically under one lock. Freshness
+// (TTL) is measured from baselineAt, which every confirming Recompute refreshes; the two are
+// deliberately distinct (Finding 3).
+func (cs *ChainState) consensusBaselineWithTime() (block int64, at time.Time, ok bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.freshBaselineLocked(cs.effectiveNow())
@@ -360,8 +395,9 @@ func (cs *ChainState) freshLatestLocked(now time.Time) (int64, bool) {
 }
 
 // Recompute pulls a snapshot of per-endpoint observations, recomputes the strict-majority
-// consensus baseline, and realigns the tip DOWNWARD when a fresh majority sits more than
-// OutlierThreshold below it (a poisoned tip, or a chain revert). This is the windowed,
+// consensus baseline, and applies the EDGE CORRECTION to the tip (D3): snap it down when it leads
+// the majority by more than OutlierThreshold (a poisoned tip, or a chain revert), pull it up when
+// it trails the majority, and otherwise leave the optimistic lead untouched. This is the windowed,
 // off-hot-path consensus step (T2): the caller (Topic B/C wiring) provides the snapshots by
 // pulling EndpointMonitor.SnapshotObservations; ChainState computes consensus itself — nothing
 // external sets the baseline.
@@ -393,15 +429,38 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 		if !prevHasBaseline || prevBaseline != baseline {
 			cs.baselineSince = now
 		}
-		if cs.latestBlock > baseline+cs.cfg.OutlierThreshold {
+		// Edge correction (D3). Consensus does NOT set the tip every recompute — that would
+		// destroy read-your-writes for a legitimate lead (a fresh reporter genuinely ahead of a
+		// lagging majority). It corrects only at the two band edges, leaving the tip free to lead
+		// optimistically anywhere inside [baseline, baseline+OutlierThreshold]:
+		switch {
+		case cs.latestBlock > baseline+cs.cfg.OutlierThreshold:
+			// Snap DOWN: the tip leads consensus implausibly far — an outlier or a liar that got
+			// in before a baseline existed (SetLatestBlock's guard cannot fire on the very first
+			// observation). This is the tip's self-heal from poisoning.
 			cs.latestBlock = baseline
 			cs.lastObservedAt = now
+			cs.latestSince = now
+			cs.initialized = true
+		case cs.latestBlock < baseline:
+			// Pull UP: the majority is ahead of the tip. Without this the tip could sit below
+			// consensus indefinitely — every consumer now reads the tip (D1/D4), so a trailing
+			// tip would under-report the head to archive routing, cache finalization, sync
+			// scoring, and consistency alike. Consistency is the sharp case: a tip stuck below
+			// the real head is what let a poisoned reference outlive its cause (F14).
+			cs.latestBlock = baseline
+			cs.lastObservedAt = now
+			cs.latestSince = now
+			// A consensus-established tip counts as initialized: it preserves the invariant
+			// "latestBlock > 0 ⟹ initialized", so SetLatestBlock's guards and the cold-start
+			// fallbacks cannot mistake a consensus-seeded tip for "never observed anything".
+			cs.initialized = true
 		}
 	}
 }
 
 // ChainStateSnapshot is the RAW, NON-TTL-gated view of ChainState for read-only debug introspection
-// (MAG-2202 /debug/chain-state). Unlike GetLatestBlock / GetConsensusBaseline it never applies the
+// (MAG-2202 /debug/chain-state). Unlike GetLatestBlock it never applies the
 // TTL freshness gate: black-box tests assert TTL expiry, downward realignment, and empty-snapshot
 // baseline clearing from the raw (block, timestamp) pairs — a gated getter would hide exactly those
 // transitions by collapsing to (0, false). BaselineSince is the establishment time (distinct from
