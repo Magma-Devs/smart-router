@@ -592,6 +592,27 @@ func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
 	return ensured, created
 }
 
+// setAllChainStateDebugOffset shifts every per-server ChainState's effective clock by offset,
+// mirroring how /debug/time-warp sets each optimizer's NowFunc. A forward offset ages the per-chain
+// TTL/staleness/consensus windows; offset 0 clears the warp. Nil-safe at every level so test
+// fixtures without a fully-wired router are a no-op. Only the ChainState READ clock is warped —
+// observation write timestamps (relay/poll) stay on real time — so this reliably ages state when
+// endpoints are quiesced (the debug age-out use case) without perturbing the live relay-gate
+// freshness path (MAG-2307).
+func setAllChainStateDebugOffset(deps debugMuxDeps, offset time.Duration) {
+	if deps.router == nil {
+		return
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	for _, server := range deps.router.rpcServers {
+		if server == nil || server.chainState == nil {
+			continue
+		}
+		server.chainState.SetDebugClockOffset(offset)
+	}
+}
+
 // resetAllConsistencies flushes every per-chain seen-block cache that
 // implements consistencyResetter. Why this is necessary: SetSeenBlockFromKey
 // only writes monotonically (consistency.go: `block >= blockSeen → return`),
@@ -801,6 +822,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 			return true
 		})
+		// Mirror the warp onto every per-chain ChainState clock so a forward shift ages its
+		// TTL/staleness/consensus windows exactly as it ages the optimizer above (MAG-2307).
+		// offset==0 clears it. Only the READ clock is warped: observation write-stamps (relay/poll)
+		// stay on real time, so a warp reliably ages state when endpoints are quiesced without
+		// skewing the live relay-gate freshness path.
+		setAllChainStateDebugOffset(deps, offset)
 		// Gated on needsReset (same as opt.ResetState above) because the
 		// documented move-clock recovery sets offset_seconds back to 0 — that's
 		// the moment we also want to flush the per-chain seen-block cache. See
@@ -877,6 +904,8 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			opt.ResetState()
 			return true
 		})
+		// Clear any ChainState warp too, mirroring opt.NowFunc = nil above (MAG-2307).
+		setAllChainStateDebugOffset(deps, 0)
 
 		// 2. Per-chain seen-block consistency caches. Must be flushed here too,
 		//    not just in /debug/reset-scores: a poisoned huge seenBlock value
@@ -1156,6 +1185,8 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"HasBaseline":       s.HasBaseline,
 					"BaselineSince":     debugTimeRFC3339(s.BaselineSince),
 					"Initialized":       s.Initialized,
+					"TipFresh":          s.TipFresh,
+					"BaselineFresh":     s.BaselineFresh,
 				})
 			}
 			deps.router.mu.Unlock()
@@ -2539,7 +2570,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Uint64Var(&lavasession.MaximumStreamsOverASingleConnection, lavasession.MaximumStreamsOverASingleConnectionFlag, lavasession.DefaultMaximumStreamsOverASingleConnection, "maximum number of parallel streams over a single provider connection")
 	cmdRPCSmartRouter.Flags().Bool(common.TestModeFlagName, false, "test mode sends dummy data and prints all metadata in listeners")
 	cmdRPCSmartRouter.Flags().String(performance.PprofAddressFlagName, "", "pprof server address, used for code profiling")
-	cmdRPCSmartRouter.Flags().String("debug-address", "", "debug HTTP server for integration tests, e.g. :9999 — exposes /debug/time-warp to shift QoS clock")
+	cmdRPCSmartRouter.Flags().String("debug-address", "", "debug HTTP server for integration tests, e.g. :9999 — exposes /debug/time-warp to shift the QoS clock and age per-chain ChainState TTL/staleness")
 	if err := viper.BindPFlag("debug-address", cmdRPCSmartRouter.Flags().Lookup("debug-address")); err != nil {
 		utils.LavaFormatFatal("failed binding debug-address flag", err)
 	}
