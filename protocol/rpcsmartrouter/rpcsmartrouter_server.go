@@ -61,7 +61,6 @@ type RPCSmartRouterServer struct {
 	listenEndpoint         *lavasession.RPCEndpoint
 	rpcSmartRouterLogs     *metrics.RPCConsumerLogs
 	cache                  *performance.Cache
-	smartRouterConsistency relaycore.Consistency
 	consistencyConfig      *relaycore.ConsistencyValidationConfig // Configuration for consistency validation
 	sharedState            bool                                   // using the cache backend to sync the latest seen block
 	relaysMonitor          *metrics.RelaysMonitor
@@ -110,7 +109,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	sessionManager *lavasession.ConsumerSessionManager,
 	cache *performance.Cache,
 	rpcSmartRouterLogs *metrics.RPCConsumerLogs,
-	smartRouterConsistency relaycore.Consistency,
 	relaysMonitor *metrics.RelaysMonitor,
 	cmdFlags common.ConsumerCmdFlags,
 	sharedState bool,
@@ -122,7 +120,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.cache = cache
 	rpcss.rpcSmartRouterLogs = rpcSmartRouterLogs
 	rpcss.chainParser = chainParser
-	rpcss.smartRouterConsistency = smartRouterConsistency
 	rpcss.sharedState = sharedState
 	rpcss.wsSubscriptionManager = wsSubscriptionManager
 	rpcss.debugRelays = cmdFlags.DebugRelays
@@ -193,15 +190,20 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.chainState = chainstate.New(listenEndpoint.ChainID, chainstate.DefaultConfig(effectiveBlockTime))
 
 	// Topic E (MAG-2160 Finding 2 / F4): point the relay sync dimension at THIS chain+interface's
-	// consensus baseline, so relay sync lag is measured against the agreed tip rather than
+	// tip, so relay sync lag is measured against the agreed head rather than
 	// max-block-across-providers (which one fast/lying reporter could inflate, dinging the whole pod).
 	// The getter is installed on the per-interface CSM (NOT the shared per-chain optimizer, whose
 	// single getter slot the last interface to start would overwrite — the F4 bug). It is read-only
-	// toward the data plane (reads ChainState.GetConsensusBaselineWithTime). When there is no fresh
-	// majority the relay omits the sync update rather than falling back to the legacy reference (F5).
+	// toward the data plane.
+	//
+	// Topic C T1/D4: this read the CONSENSUS BASELINE until the single-reader decision. It now reads
+	// the tip, which Recompute keeps inside [baseline, baseline+OutlierThreshold] — so a lone
+	// reporter still cannot inflate it, but sync no longer goes blind on pods that never form a
+	// majority (1-2 endpoints). The F5 "omit rather than fall back" contract is preserved against
+	// the tip: no fresh tip → no sync update.
 	if rpcss.sessionManager != nil {
 		rpcss.sessionManager.SetConsensusBaselineGetter(func() (uint64, time.Time, bool) {
-			block, at, fresh := rpcss.chainState.GetConsensusBaselineWithTime()
+			block, at, fresh := rpcss.chainState.GetLatestBlockWithTime()
 			if !fresh || block <= 0 {
 				return 0, time.Time{}, false
 			}
@@ -290,10 +292,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	go rpcss.initializeChainTrackers(ctx)
 
 	return nil
-}
-
-func (rpcss *RPCSmartRouterServer) SetConsistencySeenBlock(blockSeen int64, key string) {
-	rpcss.smartRouterConsistency.SetSeenBlockFromKey(blockSeen, key)
 }
 
 func (rpcss *RPCSmartRouterServer) GetListeningAddress() string {
@@ -760,7 +758,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx,
 		crossValidationParams,
-		rpcss.smartRouterConsistency,
 		rpcss.rpcSmartRouterLogs,
 		rpcss,
 		rpcss.relayRetriesManager,
@@ -890,18 +887,24 @@ func (rpcss *RPCSmartRouterServer) getLatestBlockBestEffort() uint64 {
 }
 
 // getLatestBlockForCacheFinalization returns the tip cache finalization measures against: the
-// strict-majority CONSENSUS baseline when fresh, else 0. It must NOT fall back to the optimistic
-// observed tip, the bootstrap atomic, or any best-effort source (see isFinalizedForCacheWrite's
-// doc block): a too-high tip here FALSELY finalizes — it writes still-mutable blocks into the
-// long-TTL finalized store, globally and durably — and the optimistic tip trusts a single fresh
-// reporter (on 1-endpoint pods, which never form a baseline, it is unguarded by consensus and a
-// sub-threshold lie only heals after TTL). A 0 merely under-finalizes: isFinalizedForCacheWrite
+// ChainState tip when fresh, else 0. It must NOT fall back to the bootstrap atomic or any
+// best-effort source (see isFinalizedForCacheWrite's doc block): a too-high value here FALSELY
+// finalizes — it writes still-mutable blocks into the long-TTL finalized store, globally and
+// durably.
+//
+// Topic C T1/D4: this read the strict-majority CONSENSUS baseline until the single-reader
+// decision. Reading the tip is a deliberate, bounded loosening — Recompute now caps the tip at
+// baseline+OutlierThreshold and pulls it up to the baseline, so the tip can lead consensus by at
+// most the outlier threshold rather than being unbounded. The residual risk is real and worth
+// naming: on a pod that never forms a majority (1-2 endpoints) there is nothing to cap against,
+// so a sub-threshold lie still only heals after TTL, and finalization is measured against a value
+// that can lead the true head. A 0 merely under-finalizes: isFinalizedForCacheWrite
 // then falls back to Reply.LatestBlock, which is self-scoped to the reporting provider, so a
 // no-baseline pod degrades to per-reply finalization (echo-block methods land in the short-TTL
 // temp store) rather than trusting an unvetted global value — the safe direction.
 func (rpcss *RPCSmartRouterServer) getLatestBlockForCacheFinalization() uint64 {
 	if rpcss.chainState != nil {
-		if block, ok := rpcss.chainState.GetConsensusBaseline(); ok && block > 0 {
+		if block, ok := rpcss.chainState.GetLatestBlock(); ok && block > 0 {
 			return uint64(block)
 		}
 	}
@@ -1010,10 +1013,14 @@ func (rpcss *RPCSmartRouterServer) ParseRelay(
 
 	// do this in a loop with retry attempts, configurable via a flag, limited by the number of endpoints
 	reqBlock, _ := chainMessage.RequestedBlock()
-	seenBlock, _ := rpcss.smartRouterConsistency.GetSeenBlock(common.UserData{DappId: dappID, ConsumerIp: consumerIp})
-	if seenBlock < 0 {
-		seenBlock = 0
-	}
+	// RelayPrivateData.SeenBlock is the "highest block known to have existed" carried with the
+	// request. It is the SINGLE producer of that field on this path, and every downstream consumer
+	// reads it from there: LATEST_BLOCK resolution (resolveRequestedBlock), the cache key /
+	// requested-block-for-cache, and the extension/archive rules. Topic C C-G repoints it from the
+	// per-user consistency seenBlock to the one chain tip, which migrates all of those readers at
+	// the source. getLatestBlock reports 0 when no fresh tip is known, which downstream treats
+	// exactly as the absent-seenBlock case did.
+	seenBlock := int64(rpcss.getLatestBlock())
 
 	relayRequestData := lavaprotocol.NewRelayData(ctx, connectionType, url, []byte(req), seenBlock, reqBlock, rpcss.listenEndpoint.ApiInterface, chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
 	protocolMessage = chainlib.NewProtocolMessage(chainMessage, directiveHeaders, relayRequestData, dappID, consumerIp)
@@ -1174,7 +1181,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx,
 		crossValidationParams,
-		rpcss.smartRouterConsistency,
 		rpcss.rpcSmartRouterLogs,
 		rpcss,
 		rpcss.relayRetriesManager,
@@ -1255,10 +1261,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		utils.LogAttr("GUID", ctx),
 	)
 	return relayProcessor, utils.LavaFormatError("ProcessRelaySend channel closed unexpectedly", nil)
-}
-
-func (rpcss *RPCSmartRouterServer) CreateDappKey(userData common.UserData) string {
-	return rpcss.smartRouterConsistency.Key(userData)
 }
 
 func (rpcss *RPCSmartRouterServer) CancelSubscriptionContext(subscriptionKey string) {
@@ -1966,7 +1968,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 	}()
 
 	// Skip if consistency config is not set
-	if rpcss.consistencyConfig == nil || rpcss.smartRouterConsistency == nil {
+	if rpcss.consistencyConfig == nil {
 		return sessions, nil, nil
 	}
 
@@ -1976,11 +1978,18 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		return sessions, nil, nil
 	}
 
-	// Get user's seen block
-	userData := protocolMessage.GetUserData()
-	seenBlock, found := rpcss.smartRouterConsistency.GetSeenBlock(userData)
-	if !found || seenBlock <= 0 {
-		// No prior seen block - skip validation
+	// The consistency reference is the global chain tip (Topic C C-G), NOT a per-user seen block.
+	// The tip is anti-lie-guarded (SetLatestBlock's outlier guard + Recompute's edge correction);
+	// the per-user seenBlock this replaced was not, which is what let one lying-high provider
+	// filter out every honest endpoint here (F14). See ValidateEndpointCapability's doc block.
+	chainTip := int64(0)
+	if rpcss.chainState != nil {
+		if tip, ok := rpcss.chainState.GetLatestBlock(); ok {
+			chainTip = tip
+		}
+	}
+	if chainTip <= 0 {
+		// No fresh tip to measure against - skip validation rather than guess.
 		return sessions, nil, nil
 	}
 
@@ -2024,7 +2033,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 			utils.LavaFormatDebug("skipping consistency validation because endpoint latest block is unknown",
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("endpointURL", endpointURL),
-				utils.LogAttr("seenBlock", seenBlock),
+				utils.LogAttr("chainTip", chainTip),
 				utils.LogAttr("requestedBlock", reqBlock),
 				utils.LogAttr("trackerState", trackerState),
 				utils.LogAttr("trackerLastError", trackerLastError),
@@ -2037,7 +2046,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		// Validate endpoint capability
 		err := relaycore.ValidateEndpointCapability(
 			endpointLatest,
-			seenBlock,
+			chainTip,
 			reqBlock,
 			rpcss.consistencyConfig,
 		)
@@ -2046,7 +2055,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 			utils.LavaFormatDebug("skipping endpoint due to consistency check",
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("endpointLatest", endpointLatest),
-				utils.LogAttr("seenBlock", seenBlock),
+				utils.LogAttr("chainTip", chainTip),
 				// Report which source produced the value: the store wins whenever it holds a
 				// positive tip (prefer-store), else the poll atomic is the bootstrap fallback.
 				utils.LogAttr("source", func() string {
@@ -2071,13 +2080,13 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		utils.LavaFormatDebug("all endpoints failed consistency pre-validation, triggering retry",
 			utils.LogAttr("totalEndpoints", len(sessions)),
 			utils.LogAttr("skippedCount", skippedCount),
-			utils.LogAttr("seenBlock", seenBlock),
+			utils.LogAttr("chainTip", chainTip),
 			utils.LogAttr("GUID", ctx),
 		)
 		return nil, failedSessions, utils.LavaFormatError("all endpoints failed consistency pre-validation",
 			lavasession.ConsistencyPreValidationError,
 			utils.LogAttr("totalEndpoints", len(sessions)),
-			utils.LogAttr("seenBlock", seenBlock),
+			utils.LogAttr("chainTip", chainTip),
 		)
 	}
 
@@ -2086,7 +2095,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 			utils.LogAttr("totalEndpoints", len(sessions)),
 			utils.LogAttr("validEndpoints", len(validSessions)),
 			utils.LogAttr("skippedCount", skippedCount),
-			utils.LogAttr("seenBlock", seenBlock),
+			utils.LogAttr("chainTip", chainTip),
 			utils.LogAttr("GUID", ctx),
 		)
 	}
@@ -2174,12 +2183,12 @@ func (rpcss *RPCSmartRouterServer) endpointSyncGap(endpointURL, endpointAddress 
 	if rpcss.chainState == nil {
 		return 0
 	}
-	reference, referenceIsConsensus := rpcss.chainState.GetConsensusBaseline()
-	if !(referenceIsConsensus && reference > 0) {
-		reference, referenceIsConsensus = 0, false
-		if tip, ok := rpcss.chainState.GetLatestBlock(); ok {
-			reference = tip
-		}
+	// Topic C T1/D4: one reference — the tip. This used to prefer the consensus baseline and fall
+	// back to the tip; the two-source ladder is gone (F5) now that Recompute keeps the tip inside
+	// the consensus band.
+	reference := int64(0)
+	if tip, ok := rpcss.chainState.GetLatestBlock(); ok {
+		reference = tip
 	}
 	endpointLatest := rpcss.endpointTipBlock(endpointURL)
 	syncGap := syncGapAgainstReference(reference, endpointLatest, rpcss.chainState.ConsensusBucketWidth())
@@ -2187,7 +2196,7 @@ func (rpcss *RPCSmartRouterServer) endpointSyncGap(endpointURL, endpointAddress 
 		utils.LavaFormatDebug("calculated sync gap",
 			utils.LogAttr("endpoint", endpointAddress),
 			utils.LogAttr("reference_tip", reference),
-			utils.LogAttr("reference_is_consensus", referenceIsConsensus),
+			utils.LogAttr("reference_source", "chain_tip"),
 			utils.LogAttr("endpoint_latest", endpointLatest),
 			utils.LogAttr("sync_gap", syncGap),
 			utils.LogAttr("GUID", guid),
@@ -2406,14 +2415,18 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 }
 
 // runProbeCycle pulls this server's live dependencies and runs one probe cycle. It resolves THIS
-// interface's consensus baseline once — feeding both the verdict (keeping-up check) and the QoS
-// sync reference (F4: scoped to this interface; F5: sync fed only when a fresh majority exists).
+// interface's tip once — feeding both the verdict (keeping-up check) and the QoS sync reference
+// (F4: scoped to this interface; F5: sync fed only when a fresh reference exists).
+//
+// Topic C T1/D4: the reference was the consensus baseline until the single-reader decision; it is
+// now the tip (Recompute keeps it inside the consensus band). The local variable stays named
+// `baseline` because runProbeCycleCore's signature is shared with tests.
 func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg probing.VerdictConfig) {
 	var baseline int64
 	var hasBaseline bool
 	syncRef := provideroptimizer.SyncReference{ConsensusConfigured: true}
 	if rpcss.chainState != nil {
-		if block, at, ok := rpcss.chainState.GetConsensusBaselineWithTime(); ok && block > 0 {
+		if block, at, ok := rpcss.chainState.GetLatestBlockWithTime(); ok && block > 0 {
 			baseline, hasBaseline = block, true
 			syncRef.Block, syncRef.Time, syncRef.Fresh = uint64(block), at, true
 		}
@@ -2758,24 +2771,32 @@ func (rpcss *RPCSmartRouterServer) initializeChainTrackers(ctx context.Context) 
 // cache-write goes to the long-TTL finalized store or the short-TTL temp
 // store. Reply.LatestBlock is unreliable for methods that echo the requested
 // block (eth_getBlockByNumber returns result.number = requested), so the
-// router's tracked tip (the per-chain ChainState strict-majority consensus
-// baseline, surfaced via getLatestBlockForCacheFinalization()) wins when it
-// is higher.
+// router's tracked tip (surfaced via getLatestBlockForCacheFinalization())
+// wins when it is higher.
 //
 // IMPORTANT — finalization MUST be passed getLatestBlockForCacheFinalization(),
-// which returns the CONSENSUS baseline or a strict 0. Do NOT switch this to
-// getLatestBlock() (the OPTIMISTIC observed tip) or getLatestBlockBestEffort()
-// the way archive routing (#1) does. A higher "latest" here can FALSELY finalize
-// (write a not-yet-final block to the long-TTL store), so the source must be
-// trustworthy: the consensus baseline is strict-majority and realigns DOWNWARD
-// on a poisoned/reverted tip. The optimistic tip trusts a single fresh reporter
-// (unguarded by consensus on no-baseline pods), and the bootstrap atomic is
-// monotonic-max with no downward correction — with either, one lying-high
-// observation would false-finalize EVERY provider's responses persistently
-// until the real head catches up — globally and durably, far worse than
-// replyLatestBlock (which is self-scoped to one provider's reply). A
-// stale-but-honest 0 only under-finalizes (finalized data lands in the
-// short-TTL store), which is the safe direction.
+// never getLatestBlockBestEffort() the way archive routing (#1) does. A higher
+// "latest" here FALSELY finalizes (writes a not-yet-final block to the long-TTL
+// store, globally and durably — far worse than replyLatestBlock, which is
+// self-scoped to one provider's reply), so the source must never be a value with
+// no downward correction. The bootstrap atomic is monotonic-max and disqualified
+// for exactly that reason.
+//
+// Topic C T1/D4: getLatestBlockForCacheFinalization returned the strict-majority
+// CONSENSUS baseline (or 0) until the single-reader decision; it now returns the
+// TIP. The tip DOES have a downward path — Recompute snaps it to the baseline
+// when it leads by more than OutlierThreshold, and TTL expiry allows downward
+// re-adoption — but it is a looser bound than the baseline was:
+//   - it may lead consensus by up to OutlierThreshold, so slightly-not-yet-final
+//     blocks can be finalized at the margin;
+//   - on a pod that never forms a majority (1-2 endpoints) there is no baseline
+//     to snap to, so a sub-threshold lying-high value heals only after TTL —
+//     where the old code returned a strict 0 and simply under-finalized.
+//
+// Under-finalizing (finalized data landing in the short-TTL store) is the safe
+// direction; over-finalizing is not. If this margin ever proves too loose in
+// production, restoring the baseline HERE — as a documented exception to the
+// single-reader rule — is the intended remedy.
 func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlock, finalizationDistance int64) bool {
 	latest := replyLatestBlock
 	if trackedLatestBlock > latest {
@@ -3006,7 +3027,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	userData := protocolMessage.GetUserData()
 	var sharedStateId string // defaults to "", if shared state is disabled then no shared state will be used.
 	if rpcss.sharedState {
-		sharedStateId = rpcss.smartRouterConsistency.Key(userData) // use same key as we use for consistency, (for better consistency :-D)
+		// Per-caller shared-state id. The retired consistency store used to own this key
+		// derivation; it is now a plain function, byte-identical so entries written by an older
+		// build still resolve. Moving shared state to a chain-level key is T10.
+		sharedStateId = relaycore.UserDataKey(userData)
 	}
 
 	chainId, apiInterface := rpcss.GetChainIdAndApiInterface()
@@ -3074,13 +3098,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 					// The cache server doesn't accept negative blocks
 					requestedBlockForCache := reqBlock
 					if reqBlock == spectypes.LATEST_BLOCK {
-						// For LATEST_BLOCK queries, use the latest known block from smartRouterConsistency
-						// This ensures methods like eth_blockNumber use the actual current block for caching,
-						// not the potentially stale seenBlock from when this request started.
-						// The consistency cache is updated immediately after each successful response,
-						// so it reflects the most recent block across all requests for this user.
-						latestKnownBlock, found := rpcss.smartRouterConsistency.GetSeenBlock(userData)
-						if found && latestKnownBlock > 0 {
+						// For LATEST_BLOCK queries, use the current chain tip rather than the value
+						// stamped when this request started, so methods like eth_blockNumber cache
+						// against the actual current block. The tip advances continuously from every
+						// accepted observation, so it is at least as fresh as the per-user seenBlock
+						// this replaced (Topic C C-G) and is anti-lie-guarded besides.
+						latestKnownBlock := int64(rpcss.getLatestBlock())
+						if latestKnownBlock > 0 {
 							requestedBlockForCache = latestKnownBlock
 						} else if localRelayData.SeenBlock != 0 {
 							// Fallback to seen block from the protocol message
@@ -3142,16 +3166,31 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 					)
 					reply := cacheReply.GetReply()
 
-					// read seen block from cache even if we had a miss we still want to get the seen block so we can use it to get the right endpoint.
-					cacheSeenBlock := cacheReply.GetSeenBlock()
-					// check if the cache seen block is greater than my local seen block, this means the user requested this
-					// request spoke with another consumer instance and use that block for inter consumer consistency.
-					if rpcss.sharedState && cacheSeenBlock > localRelayData.SeenBlock {
-						utils.LavaFormatDebug("shared state seen block is newer", utils.LogAttr("cache_seen_block", cacheSeenBlock), utils.LogAttr("local_seen_block", localRelayData.SeenBlock), utils.LogAttr("GUID", ctx))
-						localRelayData.SeenBlock = cacheSeenBlock
-						// setting the fetched seen block from the cache server to our local cache as well.
-						rpcss.smartRouterConsistency.SetSeenBlock(cacheSeenBlock, userData)
-					}
+					// BEHAVIOR DROPPED (Topic C C-G, consciously accepted): inter-consumer-instance
+					// consistency via the cache server's seen block. This used to raise this
+					// request's SeenBlock (and the per-user consistency cache) to a seen block
+					// reported by ANOTHER router instance, so a user whose requests were balanced
+					// across instances kept a shared read-your-writes floor.
+					//
+					// It is removed rather than repointed because there is nothing to repoint it
+					// to: the tip is per-router-instance, and adopting a cross-instance value here
+					// would reintroduce exactly the vector C-G closes — an ungated block from
+					// outside this instance's anti-lie guards flowing into request resolution and
+					// the cache key.
+					//
+					// Cost: none in practice — this path was already dead. The write and read used
+					// DIFFERENT SharedStateIds (write: listenEndpoint.Key() = chainID+apiInterface,
+					// below in tryCacheWrite; read: relaycore.UserDataKey(userData) =
+					// dappId__consumerIp), and the cache server keys the value as
+					// chainID + "_" + sharedStateId (ecosystem/cache/handlers.go:556). The two keys
+					// can never collide, so getSeenBlockForSharedStateMode missed every time and
+					// returned 0. Both lines date to the initial smart-router commit (22cbf32).
+					//
+					// The PUBLISH side is deliberately left intact (tryCacheWrite still sends
+					// SeenBlock + SharedStateId), and what it now publishes is the guarded tip.
+					// Rebuilding the adopt side properly — chain-level key, value fed through
+					// ChainState.SetLatestBlock so it passes the anti-lie guards — is task T10 in
+					// topic-C-action-plan.md.
 
 					// handle cache reply
 					if cacheError == nil && reply != nil {

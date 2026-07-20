@@ -191,9 +191,7 @@ type RelaySender interface {
 		analytics *metrics.RelayMetrics,
 		protocolMessage ProtocolMessage,
 	) (relayResult *common.RelayResult, errRet error)
-	CreateDappKey(userData common.UserData) string
 	CancelSubscriptionContext(subscriptionKey string)
-	SetConsistencySeenBlock(blockSeen int64, key string)
 }
 
 type ChainListener interface {
