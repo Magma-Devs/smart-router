@@ -262,6 +262,61 @@ func TestGetConsensusBaseline_HonorsTTL(t *testing.T) {
 	base, has := snap.ConsensusBaseline, snap.HasBaseline
 	require.True(t, has)
 	require.Equal(t, int64(1000), base)
+	// ...but the gated BaselineFresh verdict DOES reflect the TTL lapse (MAG-2307): this is the field
+	// /debug/chain-state exposes so a warp-driven expiry is observable without a Recompute.
+	require.False(t, snap.BaselineFresh, "BaselineFresh is the TTL-gated verdict, false once past TTL")
+}
+
+// TestSetDebugClockOffset_AgesTTLLikeRealTime is the MAG-2307 fix: a debug clock offset ages the
+// TTL/staleness/consensus windows exactly as advancing real time would, WITHOUT touching the base
+// clock — this is what lets /debug/time-warp expire ChainState. It also pins the raw-vs-gated
+// snapshot split (TipFresh/BaselineFresh flip immediately; the raw ObservedTip/HasBaseline stay put
+// until a Recompute) and that clearing the offset restores freshness.
+func TestSetDebugClockOffset_AgesTTLLikeRealTime(t *testing.T) {
+	cs, clk := newTestState(t) // TTL = StalenessWindow = 10s; base clock stays frozen at clk
+	cs.SetLatestBlock(1000)
+	cs.Recompute([]BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: clk.now()},
+		{URL: "b", Block: 1000, ObservedAt: clk.now()},
+	})
+
+	// Baseline established, everything fresh.
+	_, ok := cs.GetLatestBlock()
+	require.True(t, ok)
+	_, ok = cs.GetConsensusBaseline()
+	require.True(t, ok)
+	snap := cs.DebugSnapshot()
+	require.True(t, snap.TipFresh)
+	require.True(t, snap.BaselineFresh)
+
+	// Warp the effective clock past TTL without advancing the base clock — the fix under test.
+	cs.SetDebugClockOffset(20 * time.Second) // > 10s TTL
+	_, ok = cs.GetLatestBlock()
+	require.False(t, ok, "a forward warp expires the observed tip just like real time")
+	_, ok = cs.GetConsensusBaseline()
+	require.False(t, ok, "a forward warp expires the consensus baseline just like real time")
+	snap = cs.DebugSnapshot()
+	require.False(t, snap.TipFresh, "TipFresh (gated) flips immediately under the warp")
+	require.False(t, snap.BaselineFresh, "BaselineFresh (gated) flips immediately under the warp")
+	// Raw fields are unchanged until a Recompute runs — the /debug/chain-state suite must assert on
+	// the *Fresh verdicts, not these, to see a warp take effect.
+	require.Equal(t, int64(1000), snap.ObservedTip, "raw observed tip is untouched by the warp")
+	require.True(t, snap.HasBaseline, "raw HasBaseline is untouched until the next Recompute")
+
+	// A Recompute under the warp sees the (real-time-stamped) observations as stale and clears the
+	// raw baseline — mirroring what the live recompute tick does after a real-time TTL lapse.
+	cs.Recompute([]BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: clk.now()},
+		{URL: "b", Block: 1000, ObservedAt: clk.now()},
+	})
+	require.False(t, cs.DebugSnapshot().HasBaseline, "stale-under-warp observations clear the raw baseline")
+
+	// Clearing the offset restores real-time behavior: the tip's lastObservedAt is still within TTL
+	// of the un-warped base clock, so it is fresh again.
+	cs.SetDebugClockOffset(0)
+	_, ok = cs.GetLatestBlock()
+	require.True(t, ok, "clearing the warp restores the un-aged tip")
+	require.True(t, cs.DebugSnapshot().TipFresh)
 }
 
 // --- Consensus cardinality (computeMajorityBaseline) ------------------------------------
