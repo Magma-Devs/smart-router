@@ -108,7 +108,7 @@ func TestRelayProcessor_CrossValidationOutlierRealPath(t *testing.T) {
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
 	usedProviders := lavasession.NewUsedProviders(nil)
 	sm := newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation) // threshold 2, minGroups 1
-	rp := NewRelayProcessor(ctx, sm.crossValidationParams, NewConsistency("LAVA"), RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
+	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
 
 	mkResp := func(provider, group, data string) *RelayResponse {
 		return &RelayResponse{
@@ -244,7 +244,7 @@ func TestRelayProcessor_CrossValidationFailureRealPath(t *testing.T) {
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
 	usedProviders := lavasession.NewUsedProviders(nil)
 	sm := newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation) // threshold 2, minGroups 1
-	rp := NewRelayProcessor(ctx, sm.crossValidationParams, NewConsistency("LAVA"), RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
+	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
 
 	mkResp := func(provider, group, data string) *RelayResponse {
 		return &RelayResponse{
@@ -502,7 +502,7 @@ func TestRelayProcessor_PerGroupNilReplyRealPath(t *testing.T) {
 		selection:             CrossValidation,
 		crossValidationParams: &common.CrossValidationParams{MaxParticipants: 8, AgreementThreshold: 2, MinGroups: 2, PerGroupQuorum: true},
 	}
-	rp := NewRelayProcessor(ctx, sm.crossValidationParams, NewConsistency("LAVA"), RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
+	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
 
 	mkResp := func(provider, group, data string) *RelayResponse {
 		return &RelayResponse{

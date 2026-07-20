@@ -47,13 +47,22 @@ func ShouldSkipConsistencyValidation(requestedBlock int64) bool {
 	}
 }
 
-// ValidateEndpointCapability checks if an endpoint can serve a request
-// based on its current latest block compared to the user's seen block.
-// This is the pre-request validation used for endpoint selection/prioritization.
+// ValidateEndpointCapability checks if an endpoint can serve a request by comparing the endpoint's
+// own latest block against the global chain tip. This is the pre-request validation used for
+// endpoint selection/prioritization.
+//
+// The reference is the CHAIN TIP (chainstate.ChainState.GetLatestBlock), not a per-user seen block
+// (Topic C C-G). The per-user seenBlock it replaced was fed straight from the served provider's
+// Reply.LatestBlock with only a monotonic-increase guard and no anti-lie cross-check, so a provider
+// reporting a fake-high block poisoned the reference: honest endpoints then measured as "behind"
+// and were filtered out here, handing the liar all traffic on a multi-provider pod and driving a
+// single-provider pod to No pairings until manual reset (F14, confirmed in production). The tip is
+// anti-lie-guarded on both sides — SetLatestBlock rejects implausible jumps and Recompute snaps it
+// back into the consensus band — so a rejected block can no longer poison consistency.
 //
 // Parameters:
-//   - endpointLatestBlock: The endpoint's tracked latest block
-//   - seenBlock: The previously seen block for this user
+//   - endpointLatestBlock: The endpoint's own tracked latest block (per-endpoint operand)
+//   - chainTip: The global chain tip to measure against
 //   - requestedBlock: The block requested in the original request
 //   - config: Validation configuration with thresholds
 //
@@ -62,7 +71,7 @@ func ShouldSkipConsistencyValidation(requestedBlock int64) bool {
 //   - ConsistencyError if the endpoint is too far behind
 func ValidateEndpointCapability(
 	endpointLatestBlock int64,
-	seenBlock int64,
+	chainTip int64,
 	requestedBlock int64,
 	config *ConsistencyValidationConfig,
 ) error {
@@ -71,8 +80,8 @@ func ValidateEndpointCapability(
 		return nil
 	}
 
-	// Skip if no prior seen block (no requirement)
-	if seenBlock <= 0 {
+	// Skip if the tip is unknown (no reference to measure against)
+	if chainTip <= 0 {
 		return nil
 	}
 
@@ -88,31 +97,31 @@ func ValidateEndpointCapability(
 		return nil
 	}
 
-	// If endpoint is at or ahead of seen block, it's capable
-	if endpointLatestBlock >= seenBlock {
+	// If endpoint is at or ahead of the tip, it's capable
+	if endpointLatestBlock >= chainTip {
 		return nil
 	}
 
-	// Calculate lag: how many blocks behind is the endpoint?
-	lag := seenBlock - endpointLatestBlock
+	// Calculate lag: how many blocks behind the tip is the endpoint?
+	lag := chainTip - endpointLatestBlock
 
 	// Check if lag exceeds threshold
 	if config.IsEndpointTooFarBehind(lag) {
 		utils.LavaFormatDebug("endpoint failed capability validation: too far behind",
 			utils.LogAttr("endpointLatestBlock", endpointLatestBlock),
-			utils.LogAttr("seenBlock", seenBlock),
+			utils.LogAttr("chainTip", chainTip),
 			utils.LogAttr("lag", lag),
 			utils.LogAttr("threshold", config.EndpointLagThreshold),
 			utils.LogAttr("requestedBlock", requestedBlock),
 		)
-		return fmt.Errorf("endpoint block %d is too far behind (seen block: %d, lag: %d blocks, threshold: %d): %w",
-			endpointLatestBlock, seenBlock, lag, config.EndpointLagThreshold, protocolerrors.ConsistencyError)
+		return fmt.Errorf("endpoint block %d is too far behind (chain tip: %d, lag: %d blocks, threshold: %d): %w",
+			endpointLatestBlock, chainTip, lag, config.EndpointLagThreshold, protocolerrors.ConsistencyError)
 	}
 
 	// Lag is within acceptable threshold
 	utils.LavaFormatDebug("endpoint within lag threshold",
 		utils.LogAttr("endpointLatestBlock", endpointLatestBlock),
-		utils.LogAttr("seenBlock", seenBlock),
+		utils.LogAttr("chainTip", chainTip),
 		utils.LogAttr("lag", lag),
 		utils.LogAttr("threshold", config.EndpointLagThreshold),
 	)
