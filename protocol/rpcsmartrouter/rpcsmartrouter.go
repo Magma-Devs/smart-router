@@ -544,6 +544,11 @@ func resetAllProbeBackoff(deps debugMuxDeps) int {
 // restored while a genuinely config-removed one is correctly left out. GetOrCreateTracker is
 // idempotent (no-op for a live row) and non-blocking (it registers synchronously and starts the poll
 // goroutine via startTrackerWithRetry), so the handler never blocks on a down endpoint's init fetch.
+//
+// Holding router.mu does NOT exclude the epoch cleanup: cleanupStaleTrackers deliberately runs
+// outside that lock, so a cleanup pass that already built its keep-set can delete a row this handler
+// just recreated. Acceptable for a recovery tool — the operator re-POSTs, and MAG-2445 is the root
+// fix — but do not assume the lock provides that exclusion.
 // Returns (ensured, created): endpoints processed, and rows that did not previously exist.
 func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
 	if deps.router == nil {
@@ -559,7 +564,13 @@ func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
 		if csm == nil {
 			continue
 		}
-		before := server.endpointChainTrackerManager.GetEndpointCount()
+		// Count creations against a snapshot of the pre-existing rows rather than a
+		// GetEndpointCount before/after delta: a concurrent cleanupStaleTrackers removal between
+		// the two reads would skew the delta (even negative).
+		existing := make(map[string]bool)
+		for _, url := range server.endpointChainTrackerManager.GetAllEndpoints() {
+			existing[url] = true
+		}
 		for _, ep := range csm.GetAllDirectRPCEndpoints() {
 			if ep == nil || ep.Endpoint == nil {
 				continue
@@ -570,9 +581,13 @@ func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
 					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
 					utils.LogAttr("chainKey", chainKey),
 				)
+				continue
+			}
+			if !existing[ep.Endpoint.NetworkAddress] {
+				created++
+				existing[ep.Endpoint.NetworkAddress] = true
 			}
 		}
-		created += server.endpointChainTrackerManager.GetEndpointCount() - before
 	}
 	return ensured, created
 }
