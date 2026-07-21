@@ -198,20 +198,30 @@ func NewWithClock(chainID string, cfg Config, clock func() time.Time) *ChainStat
 	return &ChainState{chainID: chainID, cfg: cfg, now: clock}
 }
 
-// effectiveNow is the clock every TTL/staleness/consensus read uses: the base clock plus the
+// warpOffsetDuration is the current debug warp offset as a Duration (0 in production). Split out so
+// effectiveNow and the "store real / compare warped" split in SetLatestBlock and Recompute read the
+// same lock-free value.
+func (cs *ChainState) warpOffsetDuration() time.Duration {
+	return time.Duration(cs.warpOffset.Load())
+}
+
+// effectiveNow is the clock every TTL/staleness/consensus COMPARISON uses: the base clock plus the
 // debug warp offset. In production the offset is always zero, so this is exactly the base clock;
-// under /debug/time-warp it shifts forward so a warp ages this chain's windows just like it ages
-// the provider-optimizer clock (MAG-2307). The atomic load is lock-free, matching the base clock's
-// no-lock read contract.
+// under the debug ChainState time-warp it shifts forward so a warp ages this chain's windows without
+// waiting real time (MAG-2307). It is used ONLY to EVALUATE freshness — stored timestamps
+// (lastObservedAt / baselineAt / baselineSince) always use the real base clock cs.now(), so clearing
+// the warp can never leave a future-dated timestamp that reads as artificially fresh (MAG-2307
+// review). The atomic load is lock-free, matching the base clock's no-lock read contract.
 func (cs *ChainState) effectiveNow() time.Time {
-	return cs.now().Add(time.Duration(cs.warpOffset.Load()))
+	return cs.now().Add(cs.warpOffsetDuration())
 }
 
 // SetDebugClockOffset shifts this chain's effective clock forward by d, aging its TTL/staleness/
-// consensus windows without waiting real time. Debug-only: the /debug/time-warp and /debug/reset-all
-// handlers call it (with d and 0 respectively), mirroring how they set/clear the optimizer's NowFunc.
-// It is NOT reachable from any relay path. The write is atomic and takes no lock, so it is safe to
-// call concurrently with live reads.
+// consensus windows without waiting real time. Debug-only: driven by the dedicated
+// /debug/chain-state-time-warp endpoint, which is INDEPENDENT of /debug/time-warp (the optimizer/QoS
+// clock) so a routine QoS warp-then-reset never disturbs ChainState. It changes only freshness
+// EVALUATION (effectiveNow), never a stored timestamp. Not reachable from any relay path. The write
+// is atomic and takes no lock, so it is safe to call concurrently with live reads.
 func (cs *ChainState) SetDebugClockOffset(d time.Duration) {
 	cs.warpOffset.Store(int64(d))
 }
@@ -254,8 +264,11 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 	if block <= 0 {
 		return cs.latestBlock, cs.lastObservedAt, false
 	}
-	now := cs.effectiveNow()
-	_, tipFresh := cs.freshLatestLocked(now)
+	// Freshness is EVALUATED against the warped clock, but the stored lastObservedAt uses the real
+	// base clock — a debug warp must never write a future-dated timestamp that reads as artificially
+	// fresh once the warp is cleared (real - future = negative age; MAG-2307 review).
+	nowReal := cs.now()
+	_, tipFresh := cs.freshLatestLocked(nowReal.Add(cs.warpOffsetDuration()))
 	if cs.initialized {
 		if block < cs.latestBlock {
 			if tipFresh {
@@ -263,11 +276,11 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 			}
 			// Stale-tip downward re-adoption (self-heal from a poisoned/frozen tip).
 			cs.latestBlock = block
-			cs.lastObservedAt = now
+			cs.lastObservedAt = nowReal
 			return cs.latestBlock, cs.lastObservedAt, false
 		}
 		if block == cs.latestBlock {
-			cs.lastObservedAt = now // equal-block confirmation refreshes freshness (Finding 4)
+			cs.lastObservedAt = nowReal // equal-block confirmation refreshes freshness (Finding 4)
 			return cs.latestBlock, cs.lastObservedAt, false
 		}
 	}
@@ -281,7 +294,7 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 		return cs.latestBlock, cs.lastObservedAt, false
 	}
 	cs.latestBlock = block
-	cs.lastObservedAt = now
+	cs.lastObservedAt = nowReal
 	cs.initialized = true
 	return cs.latestBlock, cs.lastObservedAt, true
 }
@@ -373,8 +386,12 @@ func (cs *ChainState) freshLatestLocked(now time.Time) (int64, bool) {
 // snapshots (no lock), and only the final tip/baseline update takes the ChainState lock — so
 // the monitor lock (released before this call) and the ChainState lock never nest.
 func (cs *ChainState) Recompute(snapshots []BlockObservation) {
-	now := cs.effectiveNow()
-	baseline, ok := computeMajorityBaseline(snapshots, now, cs.cfg)
+	// Staleness is EVALUATED against the warped clock (so a debug warp ages observations out of the
+	// consensus window), but the stored baseline/tip timestamps use the real base clock — never a
+	// warped, possibly-future value that would distort freshness / sync-lag once the warp is cleared
+	// (MAG-2307 review).
+	nowReal := cs.now()
+	baseline, ok := computeMajorityBaseline(snapshots, nowReal.Add(cs.warpOffsetDuration()), cs.cfg)
 
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -385,17 +402,17 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 	if ok {
 		// TTL freshness: every confirming Recompute re-proves consensus is live (mirrors
 		// lastObservedAt for the optimistic tip), so a stable-but-reconfirmed baseline never expires.
-		cs.baselineAt = now
+		cs.baselineAt = nowReal
 		// Establishment time: reset ONLY when the baseline block changes — a forward advance, a
 		// downward reorg/realign, or re-establishment after a consensus gap (prevHasBaseline false).
 		// When the block is unchanged we PRESERVE baselineSince so sync-lag reflects the baseline's
 		// true age (Finding 3); resetting it here is the bug that made an old baseline look new.
 		if !prevHasBaseline || prevBaseline != baseline {
-			cs.baselineSince = now
+			cs.baselineSince = nowReal
 		}
 		if cs.latestBlock > baseline+cs.cfg.OutlierThreshold {
 			cs.latestBlock = baseline
-			cs.lastObservedAt = now
+			cs.lastObservedAt = nowReal
 		}
 	}
 }
@@ -404,14 +421,15 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 // (MAG-2202 /debug/chain-state). Unlike GetLatestBlock / GetConsensusBaseline it never applies the
 // TTL freshness gate: black-box tests assert TTL expiry, downward realignment, and empty-snapshot
 // baseline clearing from the raw (block, timestamp) pairs — a gated getter would hide exactly those
-// transitions by collapsing to (0, false). BaselineSince is the establishment time (distinct from
-// the TTL-freshness baselineAt that GetConsensusBaselineWithTime exposes).
+// transitions by collapsing to (0, false). BaselineSince is the establishment time — the same value
+// GetConsensusBaselineWithTime returns — distinct from the internal TTL-freshness timestamp baselineAt
+// (which drives the freshness gate but is never exposed).
 //
 // TipFresh / BaselineFresh are the ONE computed exception: the TTL-gated verdicts (what
 // GetLatestBlock / GetConsensusBaseline would report) evaluated against the effective clock. They
-// exist so a /debug/time-warp forward shift is observable IMMEDIATELY — the raw ObservedTip /
-// HasBaseline fields only change on the next Recompute tick, and never at all in a fixture with no
-// recompute loop running (MAG-2307). Assert on these, not the raw fields, to see warp-driven expiry.
+// exist so a debug ChainState warp is observable IMMEDIATELY — the raw ObservedTip / HasBaseline
+// fields only change on the next Recompute tick, and never at all in a fixture with no recompute loop
+// running (MAG-2307). Assert on these, not the raw fields, to see warp-driven expiry.
 type ChainStateSnapshot struct {
 	ObservedTip       int64
 	LastObservedAt    time.Time

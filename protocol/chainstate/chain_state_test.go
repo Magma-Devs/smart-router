@@ -319,6 +319,57 @@ func TestSetDebugClockOffset_AgesTTLLikeRealTime(t *testing.T) {
 	require.True(t, cs.DebugSnapshot().TipFresh)
 }
 
+// TestSetLatestBlock_TimestampStaysOnRealClockUnderWarp pins the MAG-2307-review fix: SetLatestBlock
+// evaluates freshness against the warped clock but STORES lastObservedAt on the REAL clock. A block
+// accepted while a warp is active must not get a future-dated timestamp — otherwise clearing the warp
+// leaves real - future = negative age, which reads as "fresh forever" until real time catches up.
+func TestSetLatestBlock_TimestampStaysOnRealClockUnderWarp(t *testing.T) {
+	cs, clk := newTestState(t) // TTL = 10s; base clock frozen at clk
+	realWriteTime := clk.now()
+
+	cs.SetDebugClockOffset(200 * time.Second) // warp forward, THEN accept a block
+	cs.SetLatestBlock(1000)
+
+	require.Equal(t, realWriteTime, cs.DebugSnapshot().LastObservedAt,
+		"lastObservedAt must be stamped on the real clock, not the warped +200s future")
+
+	cs.SetDebugClockOffset(0) // clear the warp
+	_, ok := cs.GetLatestBlock()
+	require.True(t, ok, "a block just written is legitimately fresh")
+
+	clk.advance(11 * time.Second) // real time crosses the 10s TTL
+	_, ok = cs.GetLatestBlock()
+	require.False(t, ok,
+		"a tip written under a warp must still expire on real time once the warp is cleared (no negative-age freshness)")
+}
+
+// TestRecompute_TimestampsStayOnRealClockUnderWarp is the Recompute companion: baselineAt/baselineSince
+// are stored on the real clock. A SMALL warp (< TTL) keeps observations fresh under the warped clock,
+// so a baseline forms and its timestamps are written while the warp is active — those must be real.
+func TestRecompute_TimestampsStayOnRealClockUnderWarp(t *testing.T) {
+	cs, clk := newTestState(t) // TTL = staleness = 10s
+	realWriteTime := clk.now()
+
+	cs.SetDebugClockOffset(5 * time.Second) // < TTL, so the observations still count as fresh
+	cs.SetLatestBlock(1000)
+	cs.Recompute([]BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: realWriteTime},
+		{URL: "b", Block: 1000, ObservedAt: realWriteTime},
+	})
+
+	require.Equal(t, realWriteTime, cs.DebugSnapshot().BaselineSince,
+		"baselineSince must be the real write time, not the warped future (MAG-2307 review)")
+
+	cs.SetDebugClockOffset(0)
+	_, ok := cs.GetConsensusBaseline()
+	require.True(t, ok, "a baseline just established is fresh")
+
+	clk.advance(11 * time.Second) // real time crosses the TTL
+	_, ok = cs.GetConsensusBaseline()
+	require.False(t, ok,
+		"a baseline established under a warp must still expire on real time once the warp is cleared")
+}
+
 // --- Consensus cardinality (computeMajorityBaseline) ------------------------------------
 
 func TestComputeMajorityBaseline_Cardinality(t *testing.T) {
