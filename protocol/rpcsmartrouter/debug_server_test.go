@@ -434,7 +434,7 @@ func TestDebugChainStateTimeWarp_AgesChainState(t *testing.T) {
 	// Warp +200s (>> 10s TTL) via the dedicated endpoint → both verdicts flip to false.
 	rr := postChainStateTimeWarp(mux, `{"offset_seconds":200}`)
 	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), `"applied_to_chains":1`, "the one wired ChainState was warped")
+	require.Contains(t, rr.Body.String(), `"chain_states_warped":1`, "the one wired ChainState was warped")
 
 	row = chainStateRow()
 	require.Equal(t, false, row["TipFresh"], "a forward warp ages the tip out of its TTL window")
@@ -469,6 +469,31 @@ func TestDebugTimeWarp_DoesNotTouchChainState(t *testing.T) {
 	rr = postTimeWarpRouter(mux, `{"offset_seconds":0}`)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Equal(t, true, chainStateRow()["TipFresh"], "resetting the QoS warp must not touch ChainState")
+}
+
+// TestDebugResetAll_DoesNotTouchChainStateWarp pins the other half of the MAG-2307-review decoupling:
+// /debug/reset-all resets optimizer/QoS + related state but must NOT clear ChainState's debug warp —
+// that is exclusively the /debug/chain-state-time-warp endpoint's job. A regression re-adding the
+// removed setAllChainStateDebugOffset(deps, 0) call inside reset-all would fail this test.
+func TestDebugResetAll_DoesNotTouchChainStateWarp(t *testing.T) {
+	mux, chainStateRow := newAgedChainStateRouter(t)
+
+	// Warp ChainState past its TTL via the dedicated endpoint.
+	rr := postChainStateTimeWarp(mux, `{"offset_seconds":200}`)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, false, chainStateRow()["TipFresh"], "the ChainState warp is active")
+
+	// A full /debug/reset-all must leave that warp intact.
+	req := httptest.NewRequest(http.MethodPost, "/debug/reset-all", nil)
+	resetRR := httptest.NewRecorder()
+	mux.ServeHTTP(resetRR, req)
+	require.Equal(t, http.StatusOK, resetRR.Code, "body=%q", resetRR.Body.String())
+	require.Equal(t, false, chainStateRow()["TipFresh"], "/debug/reset-all must NOT clear the ChainState warp")
+
+	// The warp is still cleared only via its own endpoint.
+	rr = postChainStateTimeWarp(mux, `{"offset_seconds":0}`)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, true, chainStateRow()["TipFresh"], "clearing via the dedicated endpoint restores freshness")
 }
 
 // TestDebugProviderRouting_ReportsPerCSMShape verifies the handler keys output per session manager and

@@ -845,7 +845,15 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// Deliberately SEPARATE from /debug/time-warp (the optimizer/QoS clock): a routine QoS
 	// warp-then-reset must never disturb ChainState (MAG-2307 review). offset_seconds is relative to
 	// real time; 0 returns ChainState to real time. Same validation as /debug/time-warp (finite, >= 0,
-	// <= 24 h). The effect is observable via TipFresh / BaselineFresh in /debug/chain-state.
+	// <= 24 h). Responds with chain_states_warped (a count) — a distinct key from /debug/time-warp's
+	// boolean applied_to_chains, so the two responses never collide on JSON type. The effect is
+	// observable via TipFresh / BaselineFresh in /debug/chain-state.
+	//
+	// Semantic note: because stored observation timestamps use the real clock while freshness is
+	// evaluated against the warp (see ChainState.effectiveNow), a block/consensus write that arrives
+	// DURING an active >TTL warp reads as already aged — live traffic cannot refresh TipFresh while the
+	// warp is held. That is the intended "age out state while endpoints are quiesced" behavior; for a
+	// clean result, warp with the target endpoints quiesced.
 	mux.HandleFunc("/debug/chain-state-time-warp", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -874,7 +882,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		offset := time.Duration(int64(body.OffsetSeconds * float64(time.Second)))
 		applied := setAllChainStateDebugOffset(deps, offset)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"offset_seconds":%v,"applied_to_chains":%d}`, body.OffsetSeconds, applied)
+		fmt.Fprintf(w, `{"offset_seconds":%v,"chain_states_warped":%d}`, body.OffsetSeconds, applied)
 	})
 
 	// GET /debug/time — returns real and effective time so callers can verify the clock moved.
