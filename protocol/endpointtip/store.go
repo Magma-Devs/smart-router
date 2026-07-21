@@ -1,23 +1,15 @@
 // Package endpointtip holds the single, process-wide source of truth for the
 // per-endpoint observed block tip.
 //
-// Why a standalone leaf package: the tip is written by the high layer
-// (endpointstate's poll + relay-harvest observers) but also read by the low layer
-// (lavasession's per-endpoint QoS sync-block). endpointstate already imports
-// lavasession, so lavasession cannot import endpointstate to reach the observation
-// store — that would be an import cycle. A leaf package that imports only the
-// standard library can be imported by BOTH layers, so they share ONE store instead
-// of each keeping its own copy (the divergence that this package exists to remove).
+// It is a standard-library-only leaf so both the high layer (endpointstate's poll +
+// relay observers, which write it) and the low layer (lavasession's QoS sync-block,
+// which reads it) can import it without a cycle — sharing ONE store rather than each
+// keeping a divergent copy. It stores the whole {Block, ObservedAt, Source} triple so
+// the guard and the relay-freshness gate see a consistent value.
 //
-// The store holds the whole atomic tip triple {Block, ObservedAt, Source} — never a
-// bare block — because the monotonic guard needs Block and ObservedAt together and
-// the relay-freshness gate reads Source. Splitting the triple across two stores would
-// reintroduce exactly the divergence this consolidation removes.
-//
-// Generation gating (rejecting writes from a removed/replaced tracker) is NOT done
-// here: this leaf cannot know about tracker lifecycles. Callers in endpointstate
-// gate on generation FIRST and only then call Set, which applies the time-monotonic
-// guard.
+// Generation gating (rejecting writes from a removed tracker) is done by the
+// endpointstate callers before Set; this leaf only applies the block-monotonic guard
+// with a staleness backstop (T4/C-D — see Set).
 package endpointtip
 
 import (
@@ -54,9 +46,13 @@ func (s Source) String() string {
 // either advances all three or none.
 type Tip struct {
 	Block      int64     // most recent observed block (always > 0 once set)
-	ObservedAt time.Time // wall-clock of the observation that set Block (monotonic)
+	ObservedAt time.Time // wall-clock of the observation that set Block (freshness stamp)
 	Source     Source    // origin of this observation
 }
+
+// The staleness horizon is NOT defined here — this leaf is pure mechanism. The caller
+// (endpointstate's monitor) derives it from chainstate.StalenessWindow, the one source of
+// truth for the fresh/alive horizon, and passes it to Set as staleAfter.
 
 // Store is the per-endpoint tip store, keyed by the composite Key. It is safe for
 // concurrent use. The exported instance type (rather than only package globals) lets
@@ -78,27 +74,37 @@ func Key(chainID, apiInterface, url string) string {
 	return chainID + "|" + apiInterface + "|" + url
 }
 
-// Set applies a tip observation under the time-monotonic guard: a write whose
-// ObservedAt predates the stored ObservedAt is dropped wholesale so no field
-// regresses. Equal timestamps apply (last-writer-wins, the documented deterministic
-// tie-break, matching the prior observation-record semantics). A non-positive block is
-// ignored. Returns true iff the write was applied (the caller uses this to decide
-// whether to feed the per-chain consensus tip).
+// Set applies a tip observation, block-monotonic with a staleness backstop (T4/C-D):
+// higher wins, equal refreshes the stamp, lower is rejected while fresh (a late
+// straggler must not regress the tip — F2) and accepted once stale (a real reorg down).
 //
-// The guard is time-monotonic, NOT block-monotonic — it relocates the exact semantics
-// the observation record used before consolidation; it is deliberately not "improved"
-// to max-block.
-func (s *Store) Set(key string, t Tip) bool {
+// Staleness is the gap between the stored and incoming observation stamps (> staleAfter),
+// not wall-clock — deterministic, no clock. A rejected write must not refresh the stamp,
+// else a repeated straggler keeps the tip forever fresh. staleAfter<=0 is up-only.
+// Returns true iff the stored tip now reflects this block (gates the consensus feed).
+func (s *Store) Set(key string, t Tip, staleAfter time.Duration) bool {
 	if t.Block <= 0 {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cur, ok := s.tips[key]; ok && t.ObservedAt.Before(cur.ObservedAt) {
-		return false
+	cur, ok := s.tips[key]
+	switch {
+	case !ok || t.Block > cur.Block:
+		s.tips[key] = t
+		return true
+	case t.Block == cur.Block:
+		if t.ObservedAt.After(cur.ObservedAt) {
+			s.tips[key] = t // advance the freshness stamp, never backwards
+		}
+		return true
+	default: // lower block
+		if staleAfter > 0 && t.ObservedAt.Sub(cur.ObservedAt) > staleAfter {
+			s.tips[key] = t // stored tip went stale → accept the reorg
+			return true
+		}
+		return false // still fresh → reject the straggler (F2)
 	}
-	s.tips[key] = t
-	return true
 }
 
 // Get returns the stored tip and whether one exists. The returned Tip is a value copy,
