@@ -86,38 +86,38 @@ func TestValidateEndpointCapability_Pass(t *testing.T) {
 	tests := []struct {
 		name                string
 		endpointLatestBlock int64
-		seenBlock           int64
+		chainTip            int64
 		requestedBlock      int64
 	}{
 		{
 			name:                "endpoint ahead of seen block",
 			endpointLatestBlock: 1100,
-			seenBlock:           1000,
+			chainTip:            1000,
 			requestedBlock:      spectypes.LATEST_BLOCK,
 		},
 		{
 			name:                "endpoint equal to seen block",
 			endpointLatestBlock: 1000,
-			seenBlock:           1000,
+			chainTip:            1000,
 			requestedBlock:      spectypes.LATEST_BLOCK,
 		},
 		{
 			name:                "endpoint lag within threshold",
 			endpointLatestBlock: 995,
-			seenBlock:           1000,
+			chainTip:            1000,
 			requestedBlock:      spectypes.LATEST_BLOCK,
 		},
 		{
 			name:                "endpoint lag exactly at threshold",
 			endpointLatestBlock: 990,
-			seenBlock:           1000,
+			chainTip:            1000,
 			requestedBlock:      spectypes.LATEST_BLOCK,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateEndpointCapability(tt.endpointLatestBlock, tt.seenBlock, tt.requestedBlock, config)
+			err := ValidateEndpointCapability(tt.endpointLatestBlock, tt.chainTip, tt.requestedBlock, config)
 			require.NoError(t, err)
 		})
 	}
@@ -132,32 +132,32 @@ func TestValidateEndpointCapability_TooFarBehind(t *testing.T) {
 	tests := []struct {
 		name                string
 		endpointLatestBlock int64
-		seenBlock           int64
+		chainTip            int64
 		requestedBlock      int64
 	}{
 		{
 			name:                "lag exceeds threshold by 1",
 			endpointLatestBlock: 989,
-			seenBlock:           1000,
+			chainTip:            1000,
 			requestedBlock:      spectypes.LATEST_BLOCK,
 		},
 		{
 			name:                "lag significantly exceeds threshold",
 			endpointLatestBlock: 500,
-			seenBlock:           1000,
+			chainTip:            1000,
 			requestedBlock:      spectypes.LATEST_BLOCK,
 		},
 		{
 			name:                "very large lag",
 			endpointLatestBlock: 100,
-			seenBlock:           10000,
+			chainTip:            10000,
 			requestedBlock:      spectypes.LATEST_BLOCK,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateEndpointCapability(tt.endpointLatestBlock, tt.seenBlock, tt.requestedBlock, config)
+			err := ValidateEndpointCapability(tt.endpointLatestBlock, tt.chainTip, tt.requestedBlock, config)
 			require.Error(t, err)
 			require.True(t, errors.Is(err, protocolerrors.ConsistencyError), "error should be ConsistencyError")
 		})
@@ -173,35 +173,35 @@ func TestValidateEndpointCapability_Skip(t *testing.T) {
 	tests := []struct {
 		name                string
 		endpointLatestBlock int64
-		seenBlock           int64
+		chainTip            int64
 		requestedBlock      int64
 		reason              string
 	}{
 		{
 			name:                "no seen block requirement",
 			endpointLatestBlock: 500,
-			seenBlock:           0,
+			chainTip:            0,
 			requestedBlock:      spectypes.LATEST_BLOCK,
-			reason:              "seenBlock is 0",
+			reason:              "chain tip is 0",
 		},
 		{
 			name:                "endpoint block unknown",
 			endpointLatestBlock: 0,
-			seenBlock:           1000,
+			chainTip:            1000,
 			requestedBlock:      spectypes.LATEST_BLOCK,
 			reason:              "endpointLatestBlock is 0",
 		},
 		{
 			name:                "historical block request",
 			endpointLatestBlock: 500,
-			seenBlock:           1000,
+			chainTip:            1000,
 			requestedBlock:      12345,
 			reason:              "historical block request",
 		},
 		{
 			name:                "NOT_APPLICABLE request",
 			endpointLatestBlock: 500,
-			seenBlock:           1000,
+			chainTip:            1000,
 			requestedBlock:      spectypes.NOT_APPLICABLE,
 			reason:              "NOT_APPLICABLE request",
 		},
@@ -209,7 +209,7 @@ func TestValidateEndpointCapability_Skip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateEndpointCapability(tt.endpointLatestBlock, tt.seenBlock, tt.requestedBlock, config)
+			err := ValidateEndpointCapability(tt.endpointLatestBlock, tt.chainTip, tt.requestedBlock, config)
 			require.NoError(t, err, "validation should be skipped for: %s", tt.reason)
 		})
 	}

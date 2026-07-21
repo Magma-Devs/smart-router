@@ -59,7 +59,7 @@ type IChainTracker interface {
 
 const (
 	initRetriesCount       = 4
-	BACKOFF_MAX_TIME       = 10 * time.Minute
+	BACKOFF_MAX_TIME       = 1 * time.Minute
 	maxFails               = 10
 	GoodStabilityThreshold = 0.3
 	PollingUpdateLength    = 10

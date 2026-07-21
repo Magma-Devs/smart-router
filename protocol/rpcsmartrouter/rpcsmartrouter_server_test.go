@@ -15,6 +15,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
@@ -732,7 +733,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
 		require.NoError(t, smErr)
 		require.Equal(t, relaycore.CrossValidation, sm.GetSelection(), "caller CV headers must enable cross-validation")
-		rp := relaycore.NewRelayProcessor(ctx, sm.GetCrossValidationParams(), relaycore.NewConsistency("ETH1"), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, sm)
+		rp := relaycore.NewRelayProcessor(ctx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, sm)
 		rp.SetCrossValidationQueriedProviders([]string{"p1", "p2", "p3"})
 		pushSuccess(rp, "p1", "g1", consensusBody)
 		pushSuccess(rp, "p2", "g2", consensusBody)
@@ -2636,37 +2637,6 @@ func TestSmartRouterSessionLeakPrevention_SingleProvider(t *testing.T) {
 	})
 }
 
-// ============================================================================
-// Mock Consistency for filterEndpointsByConsistency tests
-// ============================================================================
-
-type mockConsistency struct {
-	seenBlocks map[string]int64
-}
-
-func newMockConsistency() *mockConsistency {
-	return &mockConsistency{seenBlocks: make(map[string]int64)}
-}
-
-func (mc *mockConsistency) SetSeenBlock(blockSeen int64, userData common.UserData) {
-	key := mc.Key(userData)
-	mc.seenBlocks[key] = blockSeen
-}
-
-func (mc *mockConsistency) GetSeenBlock(userData common.UserData) (int64, bool) {
-	key := mc.Key(userData)
-	block, found := mc.seenBlocks[key]
-	return block, found
-}
-
-func (mc *mockConsistency) SetSeenBlockFromKey(blockSeen int64, key string) {
-	mc.seenBlocks[key] = blockSeen
-}
-
-func (mc *mockConsistency) Key(userData common.UserData) string {
-	return userData.DappId + "|" + userData.ConsumerIp
-}
-
 // seedEndpointTip writes a poll-sourced tip into the shared single-source-of-truth
 // endpointtip store so the consistency/syncGap readers (which now read that store instead
 // of a per-Endpoint atomic) observe the block under test. It keys exactly as production:
@@ -2677,6 +2647,16 @@ func seedEndpointTip(chainID, apiInterface, url string, block int64) {
 		endpointtip.Key(chainID, apiInterface, url),
 		endpointtip.Tip{Block: block, ObservedAt: time.Now(), Source: endpointtip.SourcePoll},
 	)
+}
+
+// seedChainTip builds a ChainState whose tip is `block`, for tests exercising
+// filterEndpointsByConsistency. Topic C C-G: the consistency reference is the global chain tip,
+// not the per-user seenBlock these tests used to seed on the mock consistency. The tip is what a
+// liar cannot poison, which is the whole point of the change.
+func seedChainTip(block int64) *chainstate.ChainState {
+	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
+	cs.SetLatestBlock(block)
+	return cs
 }
 
 // TestEndpointTipPreferStore locks the MAG-2160 Finding 6 fix + follow-up review: consistency
@@ -2720,9 +2700,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 	endpointtip.Default().Reset()
 
 	t.Run("all sessions valid - no failed sessions", func(t *testing.T) {
-		consistency := newMockConsistency()
 		userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
-		consistency.SetSeenBlock(100, userData)
+		// Topic C C-G: the consistency reference is the chain tip, not a per-user seenBlock.
+		chainTip := seedChainTip(100)
 
 		config := relaycore.DefaultConsistencyValidationConfig()
 
@@ -2741,9 +2721,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
-			consistencyConfig:      config,
-			smartRouterConsistency: consistency,
+			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			consistencyConfig: config,
+			chainState:        chainTip,
 		}
 
 		protocolMsg := &MockProtocolMessage{
@@ -2759,9 +2739,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 	})
 
 	t.Run("some sessions fail - split into valid and failed", func(t *testing.T) {
-		consistency := newMockConsistency()
 		userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
-		consistency.SetSeenBlock(200, userData)
+		// Topic C C-G: the consistency reference is the chain tip, not a per-user seenBlock.
+		chainTip := seedChainTip(200)
 
 		// EndpointLagThreshold defaults to 10
 		config := relaycore.DefaultConsistencyValidationConfig()
@@ -2792,9 +2772,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
-			consistencyConfig:      config,
-			smartRouterConsistency: consistency,
+			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			consistencyConfig: config,
+			chainState:        chainTip,
 		}
 
 		protocolMsg := &MockProtocolMessage{
@@ -2812,9 +2792,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 	})
 
 	t.Run("all sessions fail - returns error and all failed", func(t *testing.T) {
-		consistency := newMockConsistency()
 		userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
-		consistency.SetSeenBlock(200, userData)
+		// Topic C C-G: the consistency reference is the chain tip, not a per-user seenBlock.
+		chainTip := seedChainTip(200)
 
 		config := relaycore.DefaultConsistencyValidationConfig()
 
@@ -2843,9 +2823,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
-			consistencyConfig:      config,
-			smartRouterConsistency: consistency,
+			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			consistencyConfig: config,
+			chainState:        chainTip,
 		}
 
 		protocolMsg := &MockProtocolMessage{
@@ -2861,9 +2841,10 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		require.Len(t, failed, 2)
 	})
 
-	t.Run("no seen block - skip validation, return all as valid", func(t *testing.T) {
-		consistency := newMockConsistency()
-		// No seenBlock set for this user
+	t.Run("no chain tip - skip validation, return all as valid", func(t *testing.T) {
+		// No ChainState wired at all → no tip to measure against. Topic C C-G: with no reference
+		// the filter must pass every endpoint through rather than guess, exactly as the absent
+		// per-user seenBlock case did before.
 
 		config := relaycore.DefaultConsistencyValidationConfig()
 
@@ -2881,9 +2862,8 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
-			consistencyConfig:      config,
-			smartRouterConsistency: consistency,
+			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			consistencyConfig: config,
 		}
 
 		protocolMsg := &MockProtocolMessage{
@@ -2906,8 +2886,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			consistencyConfig:      nil,
-			smartRouterConsistency: nil,
+			consistencyConfig: nil,
 		}
 
 		protocolMsg := &MockProtocolMessage{
@@ -2922,9 +2901,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 	})
 
 	t.Run("endpoint with no block data - allowed through (first relay)", func(t *testing.T) {
-		consistency := newMockConsistency()
 		userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
-		consistency.SetSeenBlock(200, userData)
+		// Topic C C-G: the consistency reference is the chain tip, not a per-user seenBlock.
+		chainTip := seedChainTip(200)
 
 		config := relaycore.DefaultConsistencyValidationConfig()
 
@@ -2942,9 +2921,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
-			consistencyConfig:      config,
-			smartRouterConsistency: consistency,
+			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			consistencyConfig: config,
+			chainState:        chainTip,
 		}
 
 		protocolMsg := &MockProtocolMessage{
@@ -2961,9 +2940,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 	})
 
 	t.Run("historical block request - skip validation", func(t *testing.T) {
-		consistency := newMockConsistency()
 		userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
-		consistency.SetSeenBlock(200, userData)
+		// Topic C C-G: the consistency reference is the chain tip, not a per-user seenBlock.
+		chainTip := seedChainTip(200)
 
 		config := relaycore.DefaultConsistencyValidationConfig()
 
@@ -2981,9 +2960,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
-			consistencyConfig:      config,
-			smartRouterConsistency: consistency,
+			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			consistencyConfig: config,
+			chainState:        chainTip,
 		}
 
 		// Historical block request (block 42) - should skip validation
@@ -3225,10 +3204,12 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	}
 	require.NoError(t, err)
 
-	// seenBlock=200, EndpointLagThreshold=10 (default). Endpoints below 190 are dropped.
-	consistency := newMockConsistency()
+	// chainTip=200, EndpointLagThreshold=10 (default). Endpoints below 190 are dropped.
+	// Topic C C-G: the reference is the chain tip, so this test MUST wire a ChainState (below) —
+	// without one the tip is 0, consistency skips validation entirely, all 3 sessions survive, and
+	// the cross-validation guard this test exists to exercise never fires.
 	userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
-	consistency.SetSeenBlock(200, userData)
+	chainTip := seedChainTip(200)
 
 	// Tips live in the shared endpointtip store, keyed LAVA|rest|url (matching the rpcss
 	// listenEndpoint below). Reset first so other tests' entries can't interfere.
@@ -3280,7 +3261,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
 	metricsStub := cvGuardMetrics{}
 	relayProcessor := relaycore.NewRelayProcessor(
-		ctx, cvParams, consistency, metricsStub, metricsStub,
+		ctx, cvParams, metricsStub, metricsStub,
 		lavaprotocol.NewRelayRetriesManager(), sm)
 
 	// Real session manager — OnSessionFailure runs against it for the 2 dropped sessions.
@@ -3291,11 +3272,11 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 		lavasession.NewActiveSubscriptionProvidersStorage())
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:         rpcEndpoint,
-		chainParser:            chainParser,
-		consistencyConfig:      relaycore.DefaultConsistencyValidationConfig(),
-		smartRouterConsistency: consistency,
-		sessionManager:         sessionManager,
+		listenEndpoint:    rpcEndpoint,
+		chainParser:       chainParser,
+		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
+		chainState:        chainTip,
+		sessionManager:    sessionManager,
 	}
 	protocolMsg := &MockProtocolMessage{
 		api:            &spectypes.Api{Name: "/cosmos/base/tendermint/v1beta1/blocks/latest"},
@@ -3441,12 +3422,16 @@ func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *tes
 	}
 
 	newServer := func() *RPCSmartRouterServer {
-		consistency := newMockConsistency()
-		consistency.SetSeenBlock(seenSlot, userData)
+		// Topic C C-G: the reference is the chain tip, not the per-user seenBlock. The incident
+		// magnitudes are unchanged — on a Solana pod the tip is fed by slot observations, so a
+		// tracker reporting value.lastValidBlockHeight still measures ~21M behind it. What the
+		// change removes is the per-user latch, not the unit-mismatch detection this test locks.
+		cs := chainstate.New(chainID, chainstate.DefaultConfig(400*time.Millisecond))
+		cs.SetLatestBlock(seenSlot)
 		return &RPCSmartRouterServer{
-			consistencyConfig:      config,
-			smartRouterConsistency: consistency,
-			listenEndpoint:         &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface},
+			consistencyConfig: config,
+			chainState:        cs,
+			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface},
 		}
 	}
 	endpointSession := func(addr string, latest int64) *lavasession.SessionInfo {

@@ -28,7 +28,6 @@ type RelayProcessor struct {
 	lock                         sync.RWMutex
 	guid                         uint64
 	selection                    Selection
-	consistency                  Consistency
 	debugRelay                   bool
 	allowSessionDegradation      uint32 // used in the scenario where extension was previously used.
 	metricsInf                   MetricsInterface
@@ -69,7 +68,6 @@ type quorumStat struct {
 func NewRelayProcessor(
 	ctx context.Context,
 	crossValidationParams *common.CrossValidationParams, // nil for Stateless/Stateful
-	consistency Consistency,
 	metricsInf MetricsInterface,
 	chainIdAndApiInterfaceGetter ChainIdAndApiInterfaceGetter,
 	relayRetriesManager *lavaprotocol.RelayRetriesManager,
@@ -106,7 +104,6 @@ func NewRelayProcessor(
 		responses:                    make(chan *RelayResponse, MaxCallsPerRelay), // buffered to prevent blocking
 		ResultsManager:               NewResultsManager(guid, chainID),
 		guid:                         guid,
-		consistency:                  consistency,
 		debugRelay:                   relayStateMachine.GetDebugState(),
 		metricsInf:                   metricsInf,
 		chainIdAndApiInterfaceGetter: chainIdAndApiInterfaceGetter,
@@ -632,25 +629,14 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 		}
 	}
 
-	// Update consistency cache only for successful responses (not stale/error responses)
-	if response != nil && response.Err == nil && response.RelayResult.Reply != nil {
-		if rp.consistency != nil && response.RelayResult.Reply.LatestBlock > 0 {
-			// set consistency when possible
-			blockSeen := response.RelayResult.Reply.LatestBlock
-			userData := rp.RelayStateMachine.GetProtocolMessage().GetUserData()
-			utils.LavaFormatDebug("updating consistency seenBlock",
-				utils.LogAttr("blockSeen", blockSeen),
-				utils.LogAttr("dappID", userData.DappId),
-				utils.LogAttr("consumerIP", userData.ConsumerIp),
-			)
-			rp.consistency.SetSeenBlock(blockSeen, userData)
-		} else {
-			utils.LavaFormatTrace("consistency update skipped",
-				utils.LogAttr("consistency_nil", rp.consistency == nil),
-				utils.LogAttr("latestBlock", response.RelayResult.Reply.LatestBlock),
-			)
-		}
-	}
+	// The per-user consistency seenBlock feed used to live here (Topic C F15): it wrote the served
+	// provider's Reply.LatestBlock straight into the consistency reference with only a
+	// monotonic-increase guard and no anti-lie cross-check. That made it the write-side root cause
+	// of the confirmed F14 production bug — a provider reporting a fake-high block poisoned the
+	// reference, honest providers then read as "behind" and were filtered out, and the value never
+	// descended (monotonic-max, TTL kept alive by ongoing traffic) so the pod stayed broken until a
+	// manual reset. Consistency now measures each endpoint against the anti-lie-guarded chain tip
+	// (C-G), so this write has no reader and is deliberately gone rather than left live-but-unread.
 }
 
 func (rp *RelayProcessor) readExistingResponses() {

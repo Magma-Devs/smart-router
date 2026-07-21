@@ -222,7 +222,7 @@ func TestGetConsensusBaseline_DistinctFromObservedTip(t *testing.T) {
 
 	// Before any majority, there is NO consensus baseline — callers must not fall back to the
 	// optimistic tip for sync scoring.
-	_, ok = cs.GetConsensusBaseline()
+	_, ok = cs.consensusBaseline()
 	require.False(t, ok, "no fresh majority yet → no consensus baseline")
 
 	// A strict majority sits at 1000; the consensus baseline is 1000, NOT the observed tip 1099.
@@ -231,7 +231,7 @@ func TestGetConsensusBaseline_DistinctFromObservedTip(t *testing.T) {
 		{URL: "b", Block: 1000, ObservedAt: clk.now()},
 		{URL: "c", Block: 1099, ObservedAt: clk.now()},
 	})
-	base, ok := cs.GetConsensusBaseline()
+	base, ok := cs.consensusBaseline()
 	require.True(t, ok)
 	require.Equal(t, int64(1000), base, "the consensus baseline is the majority, not the lone optimistic reporter")
 
@@ -246,15 +246,15 @@ func TestGetConsensusBaseline_HonorsTTL(t *testing.T) {
 		{URL: "a", Block: 1000, ObservedAt: clk.now()},
 		{URL: "b", Block: 1000, ObservedAt: clk.now()},
 	})
-	_, ok := cs.GetConsensusBaseline()
+	_, ok := cs.consensusBaseline()
 	require.True(t, ok)
 
 	// At exactly TTL the baseline is still fresh; one tick past, it is stale.
 	clk.advance(10 * time.Second)
-	_, ok = cs.GetConsensusBaseline()
+	_, ok = cs.consensusBaseline()
 	require.True(t, ok, "at exactly TTL the baseline is still fresh")
 	clk.advance(time.Nanosecond)
-	_, ok = cs.GetConsensusBaseline()
+	_, ok = cs.consensusBaseline()
 	require.False(t, ok, "a baseline older than TTL is not a valid sync reference")
 
 	// DebugSnapshot ignores TTL (telemetry view) and still reports the last value.
@@ -283,7 +283,7 @@ func TestSetDebugClockOffset_AgesTTLLikeRealTime(t *testing.T) {
 	// Baseline established, everything fresh.
 	_, ok := cs.GetLatestBlock()
 	require.True(t, ok)
-	_, ok = cs.GetConsensusBaseline()
+	_, ok = cs.consensusBaseline()
 	require.True(t, ok)
 	snap := cs.DebugSnapshot()
 	require.True(t, snap.TipFresh)
@@ -293,7 +293,7 @@ func TestSetDebugClockOffset_AgesTTLLikeRealTime(t *testing.T) {
 	cs.SetDebugClockOffset(20 * time.Second) // > 10s TTL
 	_, ok = cs.GetLatestBlock()
 	require.False(t, ok, "a forward warp expires the observed tip just like real time")
-	_, ok = cs.GetConsensusBaseline()
+	_, ok = cs.consensusBaseline()
 	require.False(t, ok, "a forward warp expires the consensus baseline just like real time")
 	snap = cs.DebugSnapshot()
 	require.False(t, snap.TipFresh, "TipFresh (gated) flips immediately under the warp")
@@ -564,7 +564,7 @@ func TestRecompute_BaselineSincePreservedWhileBlockUnchanged(t *testing.T) {
 
 	// Establish the baseline at 1000.
 	cs.Recompute(majorityAt(1000))
-	block, since, ok := cs.GetConsensusBaselineWithTime()
+	block, since, ok := cs.consensusBaselineWithTime()
 	require.True(t, ok)
 	require.Equal(t, int64(1000), block)
 	require.Equal(t, establishedAt, since, "establishment time is when the block first became consensus")
@@ -573,7 +573,7 @@ func TestRecompute_BaselineSincePreservedWhileBlockUnchanged(t *testing.T) {
 	// establishment time must be PRESERVED so age keeps growing.
 	clk.advance(5 * time.Second)
 	cs.Recompute(majorityAt(1000))
-	block, since, ok = cs.GetConsensusBaselineWithTime()
+	block, since, ok = cs.consensusBaselineWithTime()
 	require.True(t, ok, "a reconfirmed baseline is still fresh (TTL measured from baselineAt, refreshed)")
 	require.Equal(t, int64(1000), block)
 	require.Equal(t, establishedAt, since, "an unchanged baseline block must PRESERVE its establishment time")
@@ -583,7 +583,7 @@ func TestRecompute_BaselineSincePreservedWhileBlockUnchanged(t *testing.T) {
 	// now being 11s old, because each Recompute refreshed baselineAt.
 	clk.advance(6 * time.Second)
 	cs.Recompute(majorityAt(1000))
-	block, since, ok = cs.GetConsensusBaselineWithTime()
+	block, since, ok = cs.consensusBaselineWithTime()
 	require.True(t, ok, "a continuously reconfirmed baseline never expires, even past TTL-from-establishment")
 	require.Equal(t, establishedAt, since, "establishment time is still preserved across the TTL boundary")
 
@@ -591,7 +591,7 @@ func TestRecompute_BaselineSincePreservedWhileBlockUnchanged(t *testing.T) {
 	clk.advance(2 * time.Second)
 	advancedAt := clk.now()
 	cs.Recompute(majorityAt(1002))
-	block, since, ok = cs.GetConsensusBaselineWithTime()
+	block, since, ok = cs.consensusBaselineWithTime()
 	require.True(t, ok)
 	require.Equal(t, int64(1002), block)
 	require.Equal(t, advancedAt, since, "a forward baseline advance resets the establishment time")
@@ -600,7 +600,7 @@ func TestRecompute_BaselineSincePreservedWhileBlockUnchanged(t *testing.T) {
 	clk.advance(2 * time.Second)
 	reorgAt := clk.now()
 	cs.Recompute(majorityAt(1001))
-	block, since, ok = cs.GetConsensusBaselineWithTime()
+	block, since, ok = cs.consensusBaselineWithTime()
 	require.True(t, ok)
 	require.Equal(t, int64(1001), block)
 	require.Equal(t, reorgAt, since, "a downward baseline reorg resets the establishment time")
@@ -616,13 +616,13 @@ func TestRecompute_BaselineSinceResetsAfterConsensusGap(t *testing.T) {
 		{URL: "a", Block: 1000, ObservedAt: clk.now()},
 		{URL: "b", Block: 1000, ObservedAt: clk.now()},
 	})
-	_, firstSince, ok := cs.GetConsensusBaselineWithTime()
+	_, firstSince, ok := cs.consensusBaselineWithTime()
 	require.True(t, ok)
 
 	// Consensus lost (single endpoint → no majority): baseline cleared.
 	clk.advance(3 * time.Second)
 	cs.Recompute([]BlockObservation{{URL: "a", Block: 1000, ObservedAt: clk.now()}})
-	_, _, ok = cs.GetConsensusBaselineWithTime()
+	_, _, ok = cs.consensusBaselineWithTime()
 	require.False(t, ok, "a sub-majority snapshot clears the baseline")
 
 	// Regained at the same block later: establishment time is the re-establishment instant.
@@ -632,7 +632,7 @@ func TestRecompute_BaselineSinceResetsAfterConsensusGap(t *testing.T) {
 		{URL: "a", Block: 1000, ObservedAt: clk.now()},
 		{URL: "b", Block: 1000, ObservedAt: clk.now()},
 	})
-	_, since, ok := cs.GetConsensusBaselineWithTime()
+	_, since, ok := cs.consensusBaselineWithTime()
 	require.True(t, ok)
 	require.Equal(t, reestablishedAt, since, "re-establishment after a consensus gap restarts the age clock")
 	require.NotEqual(t, firstSince, since, "the prior establishment time is not carried across the gap")

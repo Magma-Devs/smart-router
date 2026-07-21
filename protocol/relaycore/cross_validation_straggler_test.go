@@ -38,7 +38,7 @@ func TestWatchCrossValidationStragglers(t *testing.T) {
 
 	newCVProcessor := func() *RelayProcessor {
 		usedProviders := lavasession.NewUsedProviders(nil)
-		return NewRelayProcessor(ctx, &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2}, NewConsistency("ETH1"), RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation))
+		return NewRelayProcessor(ctx, &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2}, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation))
 	}
 	successResponse := func(provider, group string, body []byte) *RelayResponse {
 		return &RelayResponse{
