@@ -31,6 +31,12 @@ func (dct *DummyChainTracker) GetAtomicLatestBlockNum() int64 {
 // ResetLatestBlock is a no-op for the dummy tracker; it has no cached state to clear.
 func (dct *DummyChainTracker) ResetLatestBlock() {}
 
+// ResetBackoff is a no-op for the dummy tracker; it has no poll loop or backoff to clear.
+func (dct *DummyChainTracker) ResetBackoff() {}
+
+// CurrentPollInterval is 0 for the dummy tracker; it schedules no polls.
+func (dct *DummyChainTracker) CurrentPollInterval() time.Duration { return 0 }
+
 // StartAndServe starts the chain tracker and serves gRPC if configured
 func (dct *DummyChainTracker) StartAndServe(ctx context.Context) error {
 	return nil

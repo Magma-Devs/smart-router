@@ -510,6 +510,35 @@ func (m *EndpointMonitor) ResetAllLatestBlocks() int {
 	return count
 }
 
+// ResetAllBackoff clears the failure backoff on every registered tracker so each endpoint returns
+// to its base poll cadence, without restarting the poll goroutines. Debug recovery for
+// /debug/reset-probe-backoff (MAG-2395): probe back-off is otherwise unreachable by any reset, so a
+// provider that failed before a reset keeps its stretched schedule (up to BACKOFF_MAX_TIME) after
+// it. Returns the number of trackers signalled. Same RLock idiom as ResetAllLatestBlocks.
+func (m *EndpointMonitor) ResetAllBackoff() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, t := range m.trackers {
+		t.ResetBackoff()
+		count++
+	}
+	return count
+}
+
+// BackoffSnapshot returns the current dedicated-poll interval per endpoint URL, so
+// /debug/endpoint-state can surface the live backoff as PollIntervalMs — base cadence when healthy,
+// exponentialBackoff-stretched when failing (MAG-2395). Read-only telemetry.
+func (m *EndpointMonitor) BackoffSnapshot() map[string]time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]time.Duration, len(m.trackers))
+	for url, t := range m.trackers {
+		out[url] = t.CurrentPollInterval()
+	}
+	return out
+}
+
 // RemoveTracker removes and stops a ChainTracker for an endpoint.
 // It cancels the tracker's context first, which signals the goroutine to exit cleanly.
 func (m *EndpointMonitor) RemoveTracker(endpointURL string) {

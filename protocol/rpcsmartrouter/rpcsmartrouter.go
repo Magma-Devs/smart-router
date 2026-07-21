@@ -514,6 +514,69 @@ func resetAllChainTrackers(deps debugMuxDeps) int {
 	return count
 }
 
+// resetAllProbeBackoff walks every server's EndpointMonitor and clears the per-endpoint poll
+// back-off so each provider returns to its base poll cadence (MAG-2395). Probe back-off (the
+// fetchFails streak) is otherwise unreachable by any reset endpoint, so a provider that failed
+// before a reset keeps its stretched schedule (up to BACKOFF_MAX_TIME) after it. Nil-safe at every
+// level; returns the total number of trackers signalled across all servers.
+func resetAllProbeBackoff(deps debugMuxDeps) int {
+	if deps.router == nil {
+		return 0
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	count := 0
+	for _, server := range deps.router.rpcServers {
+		if server == nil || server.endpointChainTrackerManager == nil {
+			continue
+		}
+		count += server.endpointChainTrackerManager.ResetAllBackoff()
+	}
+	return count
+}
+
+// reregisterChainTrackerRows re-registers every currently-configured direct-RPC endpoint that lost
+// its ChainTracker row — the recovery tool for MAG-2445, where the epoch cleanup (cleanupStaleTrackers)
+// can delete the row of a provider that was only briefly unhealthy, after which no reset recreates it
+// and the provider returns only on a later ~15-minute rebuild. The source is the config/pairing set
+// (GetAllDirectRPCEndpoints, the same source initializeChainTrackers uses at startup), NOT the live
+// health-filtered set cleanupStaleTrackers deletes from — so a temporarily-disabled provider is
+// restored while a genuinely config-removed one is correctly left out. GetOrCreateTracker is
+// idempotent (no-op for a live row) and non-blocking (it registers synchronously and starts the poll
+// goroutine via startTrackerWithRetry), so the handler never blocks on a down endpoint's init fetch.
+// Returns (ensured, created): endpoints processed, and rows that did not previously exist.
+func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
+	if deps.router == nil {
+		return 0, 0
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	for chainKey, server := range deps.router.rpcServers {
+		if server == nil || server.endpointChainTrackerManager == nil {
+			continue
+		}
+		csm := deps.router.sessionManagers[chainKey]
+		if csm == nil {
+			continue
+		}
+		before := server.endpointChainTrackerManager.GetEndpointCount()
+		for _, ep := range csm.GetAllDirectRPCEndpoints() {
+			if ep == nil || ep.Endpoint == nil {
+				continue
+			}
+			ensured++
+			if _, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.Endpoint, ep.DirectConnection); err != nil {
+				utils.LavaFormatWarning("reset-chaintracker-rows: failed to re-register endpoint", err,
+					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
+					utils.LogAttr("chainKey", chainKey),
+				)
+			}
+		}
+		created += server.endpointChainTrackerManager.GetEndpointCount() - before
+	}
+	return ensured, created
+}
+
 // resetAllConsistencies flushes every per-chain seen-block cache that
 // implements consistencyResetter. Why this is necessary: SetSeenBlockFromKey
 // only writes monotonically (consistency.go: `block >= blockSeen → return`),
@@ -1018,6 +1081,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					continue
 				}
 				observations := server.endpointChainTrackerManager.SnapshotObservations()
+				backoffByURL := server.endpointChainTrackerManager.BackoffSnapshot()
 				for _, ep := range csm.GetAllDirectRPCEndpoints() {
 					if ep == nil || ep.Endpoint == nil {
 						continue
@@ -1037,6 +1101,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 						"LatestBlock":              obs.LatestBlock,
 						"ObservedAt":               debugTimeRFC3339(obs.ObservedAt),
 						"Source":                   obs.Source.String(),
+						// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
+						// exponentialBackoff-stretched when the endpoint has been failing. This is the
+						// observable /debug/reset-probe-backoff returns to base (MAG-2395).
+						"PollIntervalMs": backoffByURL[url].Milliseconds(),
 					})
 				}
 			}
@@ -1159,6 +1227,38 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		reenabled := resetEndpointHealthAndGauge(deps)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
+	})
+
+	// POST /debug/reset-probe-backoff — clear the ChainTracker probe back-off on every endpoint so
+	// each provider's poll schedule returns to base cadence (MAG-2395). The back-off (fetchFails
+	// streak) is unreachable by reset-all / reset-scores / reset-endpoint-health / reset-pairing, so
+	// a provider that failed before a reset otherwise keeps its stretched schedule (up to
+	// BACKOFF_MAX_TIME = 10m) after it. Cadence only — nothing else is touched. The effect is
+	// observable as PollIntervalMs returning to base in /debug/endpoint-state.
+	mux.HandleFunc("/debug/reset-probe-backoff", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		reset := resetAllProbeBackoff(deps)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"reset":true,"endpoints_reset":%d}`, reset)
+	})
+
+	// POST /debug/reset-chaintracker-rows — re-register every configured endpoint that lost its
+	// ChainTracker row (MAG-2395). The epoch cleanup can delete a briefly-unhealthy provider's row
+	// (MAG-2445); no other reset recreates it, so it returns only on a later ~15-minute rebuild or a
+	// pod restart. This re-adds any missing row from the config/pairing set and is a no-op for rows
+	// that already exist. "rows_ensured" is the number of configured endpoints checked;
+	// "rows_created" is how many rows were actually (re)created.
+	mux.HandleFunc("/debug/reset-chaintracker-rows", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		ensured, created := reregisterChainTrackerRows(deps)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"reset":true,"rows_ensured":%d,"rows_created":%d}`, ensured, created)
 	})
 
 	// GET /debug/runtime-config — expose the router's live tuning values as JSON so the

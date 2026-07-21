@@ -38,6 +38,15 @@ type IChainTracker interface {
 	// repopulates the value on its next successful fetch.
 	ResetLatestBlock()
 
+	// ResetBackoff clears the failure backoff so the next dedicated poll fires at base cadence
+	// (debug recovery for /debug/reset-probe-backoff, MAG-2395).
+	ResetBackoff()
+
+	// CurrentPollInterval returns the poll interval most recently scheduled — base cadence when
+	// healthy, exponentialBackoff-stretched when the endpoint has been failing. Debug telemetry
+	// only (MAG-2395).
+	CurrentPollInterval() time.Duration
+
 	// StartAndServe starts the chain tracker and serves gRPC if configured
 	StartAndServe(ctx context.Context) error
 
@@ -137,6 +146,17 @@ type ChainTracker struct {
 
 	// allows us to mock the chain fetcher for different use cases for example: Solana needs slot to block number
 	iChainFetcherWrapper IChainFetcherWrapper
+
+	// currentPollIntervalNanos publishes the interval updateTimer most recently scheduled: base
+	// cadence when healthy, stretched by exponentialBackoff when fetchFails > 0. fetchFails is
+	// goroutine-local, so this atomic is the only lock-free window into the live backoff state,
+	// surfaced by /debug/endpoint-state as PollIntervalMs (MAG-2395). Written only by the poll
+	// goroutine (updateTimer), read by any goroutine.
+	currentPollIntervalNanos atomic.Int64
+	// resetBackoffCh signals the poll goroutine to clear the failure backoff — zero fetchFails and
+	// reschedule the next poll at base cadence. Buffered(1) with a non-blocking send in
+	// ResetBackoff, so /debug/reset-probe-backoff never blocks on the poll goroutine (MAG-2395).
+	resetBackoffCh chan struct{}
 }
 
 func (cs *ChainTracker) IsDummy() bool {
@@ -583,6 +603,16 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 				if enoughSamples {
 					blockGapTicker.Reset(pollingTime * 10)
 				}
+			case <-cs.resetBackoffCh:
+				// /debug/reset-probe-backoff (MAG-2395): clear the failure backoff and reschedule the
+				// next poll at base cadence. Cadence only — block data, observations, and the
+				// traffic-gate skip counter (relaySkipsSinceRealPoll) are untouched. Stop the old
+				// (possibly minutes-out) timer before updateTimer reassigns cs.timer so it does not leak.
+				fetchFails = 0
+				if cs.timer != nil {
+					cs.timer.Stop()
+				}
+				cs.updateTimer(pollingTime, fetchFails)
 			case <-ctx.Done():
 				cs.timer.Stop()
 				return
@@ -593,7 +623,30 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 }
 
 func (cs *ChainTracker) updateTimer(tickerBaseTime time.Duration, fetchFails uint64) {
-	cs.timer = time.NewTimer(cs.computePollInterval(tickerBaseTime, fetchFails))
+	interval := cs.computePollInterval(tickerBaseTime, fetchFails)
+	cs.currentPollIntervalNanos.Store(int64(interval)) // publish live cadence for /debug/endpoint-state (MAG-2395)
+	cs.timer = time.NewTimer(interval)
+}
+
+// ResetBackoff clears the failure backoff so the next dedicated poll fires at base cadence. It is
+// the debug recovery for /debug/reset-probe-backoff (MAG-2395): a provider that failed before a
+// reset otherwise keeps its stretched poll schedule (up to BACKOFF_MAX_TIME) afterwards. The send
+// is non-blocking on a buffered(1) channel, so the caller never waits on the poll goroutine and a
+// second request coalesces harmlessly with a pending one. Cadence only — block data, observations,
+// and the traffic-gate skip counter (relaySkipsSinceRealPoll) are untouched. A no-op until the poll
+// goroutine is running (the buffered slot is drained on the first loop iteration).
+func (cs *ChainTracker) ResetBackoff() {
+	select {
+	case cs.resetBackoffCh <- struct{}{}:
+	default:
+	}
+}
+
+// CurrentPollInterval returns the dedicated-poll interval most recently scheduled: base cadence when
+// healthy, exponentialBackoff-stretched when the endpoint has been failing. Debug telemetry only
+// (surfaced by /debug/endpoint-state as PollIntervalMs, MAG-2395) — never a decision-plane signal.
+func (cs *ChainTracker) CurrentPollInterval() time.Duration {
+	return time.Duration(cs.currentPollIntervalNanos.Load())
 }
 
 // computePollInterval returns the next dedicated-poll interval.
@@ -779,7 +832,12 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		relayTipFresh:           config.RelayTipFresh,
 		maxRelaySkipsBeforePoll: maxRelaySkips,
 		endpoint:                endpoint,
+		resetBackoffCh:          make(chan struct{}, 1),
 	}
+	// Publish the base cadence up front so /debug/endpoint-state reports a sensible PollIntervalMs
+	// before the first poll reschedules it (0 for the legacy global tracker, which is not a
+	// per-endpoint row). See CurrentPollInterval / updateTimer (MAG-2395).
+	chainTracker.currentPollIntervalNanos.Store(int64(config.FlatPollInterval))
 
 	switch config.ChainId {
 	// TODO: we can do it better by creating a spec fields for custom trackers.
