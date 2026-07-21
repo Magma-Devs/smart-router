@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
@@ -87,9 +88,13 @@ type EndpointMonitor struct {
 
 	// Chain-specific timing
 	averageBlockTime time.Duration
-	blocksToSave     uint64
-	retryMinDelay    time.Duration
-	retryMaxDelay    time.Duration
+	// tipStaleAfter is the per-endpoint tip staleness horizon (T4/C-D): the shared
+	// chainstate.StalenessWindow, derived once and passed to every endpointtip.Store.Set to
+	// gate downward (reorg) moves.
+	tipStaleAfter time.Duration
+	blocksToSave  uint64
+	retryMinDelay time.Duration
+	retryMaxDelay time.Duration
 
 	// relayGateFreshness is the maximum age of a relay-harvested tip that still suppresses
 	// a dedicated poll (MAG-2159 Topic B / Pass 2 — the "gate freshness threshold"). A
@@ -176,6 +181,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		chainID:           config.ChainID,
 		apiInterface:      config.ApiInterface,
 		averageBlockTime:  avgBlockTime,
+		tipStaleAfter:     chainstate.StalenessWindow(avgBlockTime),
 		blocksToSave:      blocksToSave,
 		retryMinDelay:     defaultTrackerStartRetryMin,
 		retryMaxDelay:     defaultTrackerStartRetryMax,
