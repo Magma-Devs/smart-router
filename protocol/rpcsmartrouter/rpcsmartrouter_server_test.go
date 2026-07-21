@@ -2643,9 +2643,14 @@ func TestSmartRouterSessionLeakPrevention_SingleProvider(t *testing.T) {
 // chain|apiInterface|url. ObservedAt = time.Now() keeps the time-monotonic guard happy for
 // successive seeds within a test.
 func seedEndpointTip(chainID, apiInterface, url string, block int64) {
+	key := endpointtip.Key(chainID, apiInterface, url)
+	// T4: the store is block-monotonic, so a re-seed to a lower block would be rejected.
+	// Tests want an exact value, so drop any prior entry first (staleAfter=0 = up-only).
+	endpointtip.Default().Remove(key)
 	endpointtip.Default().Set(
-		endpointtip.Key(chainID, apiInterface, url),
+		key,
 		endpointtip.Tip{Block: block, ObservedAt: time.Now(), Source: endpointtip.SourcePoll},
+		0,
 	)
 }
 

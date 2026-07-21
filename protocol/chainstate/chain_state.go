@@ -122,12 +122,22 @@ func outlierThresholdForBlockTime(averageBlockTime time.Duration) int64 {
 	return blocks
 }
 
+// StalenessWindow is the ONE derivation of the "fresh/alive horizon" from a chain's average
+// block time: max(DefaultStalenessMultiplier × avgBlockTime, minStalenessWindow). It is the
+// single source of truth for the concept — the consensus window / tip TTL (DefaultConfig), the
+// probe's liveness horizon, and the per-endpoint tip's staleness backstop (endpointtip, fed via
+// the monitor) all read it, so tuning DefaultStalenessMultiplier moves every one in lockstep. A
+// non-positive block time falls back to the floor.
+func StalenessWindow(averageBlockTime time.Duration) time.Duration {
+	return max(time.Duration(DefaultStalenessMultiplier)*averageBlockTime, minStalenessWindow)
+}
+
 // DefaultConfig derives the freshness/consensus window AND the outlier threshold from a chain's
-// average block time (D6): StalenessWindow = TTL = max(DefaultStalenessMultiplier × avgBlockTime,
-// floor); OutlierThreshold = clamp(OutlierTimeBudget / avgBlockTime, floor, ceiling). BucketWidth
-// stays a block-count constant (clustering tolerance is intrinsically in blocks, not time).
+// average block time (D6): StalenessWindow = TTL = StalenessWindow(avgBlockTime); OutlierThreshold
+// = clamp(OutlierTimeBudget / avgBlockTime, floor, ceiling). BucketWidth stays a block-count
+// constant (clustering tolerance is intrinsically in blocks, not time).
 func DefaultConfig(averageBlockTime time.Duration) Config {
-	window := max(time.Duration(DefaultStalenessMultiplier)*averageBlockTime, minStalenessWindow)
+	window := StalenessWindow(averageBlockTime)
 	return Config{
 		BucketWidth:      DefaultBucketWidth,
 		OutlierThreshold: outlierThresholdForBlockTime(averageBlockTime),
