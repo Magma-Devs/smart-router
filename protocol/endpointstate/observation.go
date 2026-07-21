@@ -117,16 +117,15 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		o.LastPollError = ""
 		o.ConsecutivePollFailures = 0
 		// The block triple lives in the single-source-of-truth endpointtip store, not on
-		// this record. Set applies the same time-monotonic guard the record used to (a
-		// poll older than the stored observation is dropped wholesale) and reports whether
-		// it advanced the tip — only then do we feed the per-chain consensus tip. Called
-		// under obsMu: lock order is obsMu → store lock everywhere (the store has no
-		// callbacks, so this cannot deadlock).
+		// this record. Set applies the block-monotonic guard (T4) and reports whether it
+		// advanced the tip — only then do we feed the per-chain consensus tip. Called under
+		// obsMu: lock order is obsMu → store lock everywhere (the store has no callbacks, so
+		// this cannot deadlock).
 		if endpointtip.Default().Set(m.tipKey(endpointURL), endpointtip.Tip{
 			Block:      block,
 			ObservedAt: at,
 			Source:     endpointtip.SourcePoll,
-		}) {
+		}, m.tipStaleAfter) {
 			tipBlock = block // feed the per-chain tip after unlock
 		}
 	} else {
@@ -196,13 +195,13 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 		m.observations[endpointURL] = EndpointObservation{}
 	}
 
-	// Set applies the time-monotonic guard (a relay older than the stored observation is
-	// dropped) and reports whether it advanced the tip. Lock order obsMu → store lock.
+	// Set applies the block-monotonic guard (T4) and reports whether it advanced the tip.
+	// Lock order obsMu → store lock.
 	if endpointtip.Default().Set(m.tipKey(endpointURL), endpointtip.Tip{
 		Block:      block,
 		ObservedAt: at,
 		Source:     endpointtip.SourceRelay,
-	}) {
+	}, m.tipStaleAfter) {
 		tipBlock = block // feed the per-chain tip after unlock
 		return true
 	}

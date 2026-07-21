@@ -347,15 +347,25 @@ func TestHarvest_BootstrapAtomicGatedOnChainStateVerdict(t *testing.T) {
 	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1000}, gen, "provider1")
 	require.Equal(t, uint64(1000), rpcss.latestBlockHeight.Load(), "an accepted harvest seeds the bootstrap atomic")
 
-	// A lying-high harvest passes the per-endpoint store guard (higher + newer) but ChainState
-	// rejects it (fresh-tip anti-lie guard) → the atomic must NOT ratchet.
+	// A plausible advance ratchets the atomic (ChainState accepts; the store accepts a higher
+	// block). Ordered BEFORE the lie so the block-monotonic store does not retain a higher value
+	// that would reject it — see the T4 note below.
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1050}, gen, "provider1")
+	require.Equal(t, uint64(1050), rpcss.latestBlockHeight.Load(), "a plausible advance ratchets the atomic")
+
+	// A lying-high harvest passes the per-endpoint store guard (higher block, no anti-lie at that
+	// layer) but ChainState rejects it (fresh-tip anti-lie guard) → the atomic must NOT ratchet.
 	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1_000_000}, gen, "provider1")
-	require.Equal(t, uint64(1000), rpcss.latestBlockHeight.Load(),
+	require.Equal(t, uint64(1050), rpcss.latestBlockHeight.Load(),
 		"a harvest ChainState rejects as an outlier must not ratchet the monotonic atomic")
 
-	// A plausible advance flows normally again.
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1050}, gen, "provider1")
-	require.Equal(t, uint64(1050), rpcss.latestBlockHeight.Load(), "a plausible advance still ratchets the atomic")
+	// T4 consequence: the block-monotonic store RETAINS the lying-high 1_000_000 until it goes
+	// stale, so a subsequent honest-but-lower harvest is rejected and the harvest bails before the
+	// atomic. This is the conscious trade for fixing F2 — only a liar's own tip is inflated (F19,
+	// accepted); the global tip stays protected by ChainState's guard.
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1051}, gen, "provider1")
+	require.Equal(t, uint64(1050), rpcss.latestBlockHeight.Load(),
+		"a lower harvest is rejected while the higher lie is still fresh")
 }
 
 // TestSiteC_SyncReferenceIsChainTip documents the Topic C T1/D4 contract that REPLACED the

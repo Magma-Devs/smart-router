@@ -211,7 +211,7 @@ func TestEndpointMonitor_ResetAllLatestBlocks_ClearsEndpointTipStore(t *testing.
 	// Seed a stale tip in the shared store, as a prior poll/relay observation would have.
 	require.True(t, endpointtip.Default().Set(key, endpointtip.Tip{
 		Block: 1000, ObservedAt: time.Now(), Source: endpointtip.SourcePoll,
-	}))
+	}, 0))
 	require.Equal(t, int64(1000), endpointtip.Default().Block(key),
 		"precondition: the store holds the pre-reset block")
 
