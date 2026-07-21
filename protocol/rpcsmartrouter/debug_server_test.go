@@ -379,12 +379,20 @@ func TestDebugChainState_ReportsRawSnapshot(t *testing.T) {
 	require.NotEmpty(t, row["BaselineSince"], "established baseline carries an RFC3339 timestamp")
 }
 
-// TestDebugTimeWarp_AgesChainState is the MAG-2307 end-to-end check at the HTTP layer: POST
-// /debug/time-warp forward past the TTL must age every per-chain ChainState so /debug/chain-state
-// reports the tip/baseline as no longer fresh, and resetting the offset to 0 must restore them.
-// Before the fix the warp only moved the optimizer clock, so these verdicts never changed.
-func TestDebugTimeWarp_AgesChainState(t *testing.T) {
-	var offsetNano atomic.Int64
+// postChainStateTimeWarp POSTs an offset to the dedicated ChainState time-warp endpoint.
+func postChainStateTimeWarp(mux http.Handler, rawBody string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/debug/chain-state-time-warp", strings.NewReader(rawBody))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// newAgedChainStateRouter wires one ETH1 ChainState with a just-established baseline (10s TTL) into a
+// router + debug mux, and returns the mux plus a helper reading the single /debug/chain-state row.
+func newAgedChainStateRouter(t *testing.T) (http.Handler, func() map[string]any) {
+	t.Helper()
+	offsetNano := new(atomic.Int64)
 	cs := chainstate.New("ETH1", chainstate.Config{
 		BucketWidth: 2, OutlierThreshold: 100, StalenessWindow: 10 * time.Second, TTL: 10 * time.Second,
 	})
@@ -399,8 +407,7 @@ func TestDebugTimeWarp_AgesChainState(t *testing.T) {
 			"ETH1-jsonrpc": {chainState: cs, listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
 		},
 	}
-	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
-
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: offsetNano, router: router})
 	chainStateRow := func() map[string]any {
 		t.Helper()
 		rr := getDebugRouter(mux, "/debug/chain-state")
@@ -410,31 +417,58 @@ func TestDebugTimeWarp_AgesChainState(t *testing.T) {
 		require.Len(t, rows, 1)
 		return rows[0]
 	}
+	return mux, chainStateRow
+}
+
+// TestDebugChainStateTimeWarp_AgesChainState is the MAG-2307 end-to-end check at the HTTP layer: the
+// dedicated /debug/chain-state-time-warp endpoint ages every per-chain ChainState so /debug/chain-state
+// reports the tip/baseline as no longer fresh, and resetting the offset to 0 restores them.
+func TestDebugChainStateTimeWarp_AgesChainState(t *testing.T) {
+	mux, chainStateRow := newAgedChainStateRouter(t)
 
 	// Freshly established → both gated verdicts true.
 	row := chainStateRow()
 	require.Equal(t, true, row["TipFresh"], "tip is fresh right after establishment")
 	require.Equal(t, true, row["BaselineFresh"], "baseline is fresh right after establishment")
 
-	// Warp +200s (>> 10s TTL). Before MAG-2307 this reached only the optimizer clock.
-	rr := postTimeWarpRouter(mux, `{"offset_seconds":200}`)
+	// Warp +200s (>> 10s TTL) via the dedicated endpoint → both verdicts flip to false.
+	rr := postChainStateTimeWarp(mux, `{"offset_seconds":200}`)
 	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), `"applied_to_chains":true`)
+	require.Contains(t, rr.Body.String(), `"applied_to_chains":1`, "the one wired ChainState was warped")
 
 	row = chainStateRow()
 	require.Equal(t, false, row["TipFresh"], "a forward warp ages the tip out of its TTL window")
 	require.Equal(t, false, row["BaselineFresh"], "a forward warp ages the baseline out of its TTL window")
-	// The raw fields are intentionally untouched by the warp (no Recompute ran): the suite asserts
-	// on the *Fresh verdicts, not these.
+	// Raw fields are intentionally untouched by the warp (no Recompute ran): assert on the *Fresh verdicts.
 	require.Equal(t, float64(1000), row["ObservedTip"], "raw observed tip is unchanged by the warp")
 	require.Equal(t, true, row["HasBaseline"], "raw HasBaseline is unchanged until a Recompute")
 
-	// Reset the warp → verdicts fresh again (observations are still within TTL of real time).
-	rr = postTimeWarpRouter(mux, `{"offset_seconds":0}`)
+	// Reset the warp → verdicts fresh again.
+	rr = postChainStateTimeWarp(mux, `{"offset_seconds":0}`)
 	require.Equal(t, http.StatusOK, rr.Code)
 	row = chainStateRow()
 	require.Equal(t, true, row["TipFresh"], "clearing the warp restores tip freshness")
 	require.Equal(t, true, row["BaselineFresh"], "clearing the warp restores baseline freshness")
+}
+
+// TestDebugTimeWarp_DoesNotTouchChainState pins the MAG-2307-review decoupling: /debug/time-warp is
+// the optimizer/QoS clock ONLY. Both a forward warp and the reset-to-0 there must leave ChainState
+// untouched, so the routine QoS warp-then-reset can never accidentally disturb ChainState.
+func TestDebugTimeWarp_DoesNotTouchChainState(t *testing.T) {
+	mux, chainStateRow := newAgedChainStateRouter(t)
+	require.Equal(t, true, chainStateRow()["TipFresh"])
+
+	// A QoS time-warp forward past ChainState's TTL must NOT age ChainState.
+	rr := postTimeWarpRouter(mux, `{"offset_seconds":200}`)
+	require.Equal(t, http.StatusOK, rr.Code)
+	row := chainStateRow()
+	require.Equal(t, true, row["TipFresh"], "/debug/time-warp must not age the ChainState tip")
+	require.Equal(t, true, row["BaselineFresh"], "/debug/time-warp must not age the ChainState baseline")
+
+	// The QoS reset-to-0 must also leave ChainState untouched.
+	rr = postTimeWarpRouter(mux, `{"offset_seconds":0}`)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, true, chainStateRow()["TipFresh"], "resetting the QoS warp must not touch ChainState")
 }
 
 // TestDebugProviderRouting_ReportsPerCSMShape verifies the handler keys output per session manager and

@@ -592,25 +592,29 @@ func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
 	return ensured, created
 }
 
-// setAllChainStateDebugOffset shifts every per-server ChainState's effective clock by offset,
-// mirroring how /debug/time-warp sets each optimizer's NowFunc. A forward offset ages the per-chain
-// TTL/staleness/consensus windows; offset 0 clears the warp. Nil-safe at every level so test
-// fixtures without a fully-wired router are a no-op. Only the ChainState READ clock is warped —
-// observation write timestamps (relay/poll) stay on real time — so this reliably ages state when
-// endpoints are quiesced (the debug age-out use case) without perturbing the live relay-gate
-// freshness path (MAG-2307).
-func setAllChainStateDebugOffset(deps debugMuxDeps, offset time.Duration) {
+// setAllChainStateDebugOffset shifts every per-server ChainState's effective clock by offset, aging
+// its TTL/staleness/consensus windows without waiting real time; offset 0 clears the warp. It backs
+// /debug/chain-state-time-warp — deliberately SEPARATE from /debug/time-warp (the optimizer/QoS
+// clock) so a routine QoS warp-then-reset never disturbs ChainState (MAG-2307 review). Only freshness
+// EVALUATION is warped; stored observation timestamps stay on the real clock (see
+// ChainState.effectiveNow), so the warp ages state without leaving future-dated timestamps. Nil-safe
+// at every level (test fixtures without a wired router are a no-op). Returns the number of
+// ChainStates the offset was applied to.
+func setAllChainStateDebugOffset(deps debugMuxDeps, offset time.Duration) int {
 	if deps.router == nil {
-		return
+		return 0
 	}
 	deps.router.mu.Lock()
 	defer deps.router.mu.Unlock()
+	count := 0
 	for _, server := range deps.router.rpcServers {
 		if server == nil || server.chainState == nil {
 			continue
 		}
 		server.chainState.SetDebugClockOffset(offset)
+		count++
 	}
+	return count
 }
 
 // resetAllConsistencies flushes every per-chain seen-block cache that
@@ -822,12 +826,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 			return true
 		})
-		// Mirror the warp onto every per-chain ChainState clock so a forward shift ages its
-		// TTL/staleness/consensus windows exactly as it ages the optimizer above (MAG-2307).
-		// offset==0 clears it. Only the READ clock is warped: observation write-stamps (relay/poll)
-		// stay on real time, so a warp reliably ages state when endpoints are quiesced without
-		// skewing the live relay-gate freshness path.
-		setAllChainStateDebugOffset(deps, offset)
+		// /debug/time-warp is the optimizer/QoS clock ONLY. ChainState's TTL/staleness clock is driven
+		// by the separate /debug/chain-state-time-warp endpoint, so a routine QoS warp-then-reset here
+		// never disturbs ChainState (MAG-2307 review).
 		// Gated on needsReset (same as opt.ResetState above) because the
 		// documented move-clock recovery sets offset_seconds back to 0 — that's
 		// the moment we also want to flush the per-chain seen-block cache. See
@@ -837,6 +838,43 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"offset_seconds":%v,"applied_to_chains":true}`, body.OffsetSeconds)
+	})
+
+	// POST /debug/chain-state-time-warp — ages the per-chain ChainState TTL/staleness/consensus clock
+	// WITHOUT waiting real time, so black-box tests can cross a ~130 s ETH staleness window in seconds.
+	// Deliberately SEPARATE from /debug/time-warp (the optimizer/QoS clock): a routine QoS
+	// warp-then-reset must never disturb ChainState (MAG-2307 review). offset_seconds is relative to
+	// real time; 0 returns ChainState to real time. Same validation as /debug/time-warp (finite, >= 0,
+	// <= 24 h). The effect is observable via TipFresh / BaselineFresh in /debug/chain-state.
+	mux.HandleFunc("/debug/chain-state-time-warp", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1024)
+		var body struct {
+			OffsetSeconds float64 `json:"offset_seconds"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if math.IsNaN(body.OffsetSeconds) || math.IsInf(body.OffsetSeconds, 0) {
+			http.Error(w, "offset_seconds must be a finite number", http.StatusBadRequest)
+			return
+		}
+		if body.OffsetSeconds < 0 {
+			http.Error(w, "offset_seconds must be >= 0 (no travel to the past)", http.StatusBadRequest)
+			return
+		}
+		if body.OffsetSeconds > maxDebugOffsetSeconds {
+			http.Error(w, fmt.Sprintf("offset_seconds must be <= %g (24h)", maxDebugOffsetSeconds), http.StatusBadRequest)
+			return
+		}
+		offset := time.Duration(int64(body.OffsetSeconds * float64(time.Second)))
+		applied := setAllChainStateDebugOffset(deps, offset)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"offset_seconds":%v,"applied_to_chains":%d}`, body.OffsetSeconds, applied)
 	})
 
 	// GET /debug/time — returns real and effective time so callers can verify the clock moved.
@@ -904,8 +942,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			opt.ResetState()
 			return true
 		})
-		// Clear any ChainState warp too, mirroring opt.NowFunc = nil above (MAG-2307).
-		setAllChainStateDebugOffset(deps, 0)
+		// ChainState's debug warp is intentionally NOT cleared here: it is independent of the
+		// optimizer/QoS state this endpoint resets, and is cleared only via its own
+		// /debug/chain-state-time-warp endpoint (offset 0), so a QoS reset never disturbs ChainState
+		// (MAG-2307 review).
 
 		// 2. Per-chain seen-block consistency caches. Must be flushed here too,
 		//    not just in /debug/reset-scores: a poisoned huge seenBlock value
@@ -2570,7 +2610,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Uint64Var(&lavasession.MaximumStreamsOverASingleConnection, lavasession.MaximumStreamsOverASingleConnectionFlag, lavasession.DefaultMaximumStreamsOverASingleConnection, "maximum number of parallel streams over a single provider connection")
 	cmdRPCSmartRouter.Flags().Bool(common.TestModeFlagName, false, "test mode sends dummy data and prints all metadata in listeners")
 	cmdRPCSmartRouter.Flags().String(performance.PprofAddressFlagName, "", "pprof server address, used for code profiling")
-	cmdRPCSmartRouter.Flags().String("debug-address", "", "debug HTTP server for integration tests, e.g. :9999 — exposes /debug/time-warp to shift the QoS clock and age per-chain ChainState TTL/staleness")
+	cmdRPCSmartRouter.Flags().String("debug-address", "", "debug HTTP server for integration tests, e.g. :9999 — exposes /debug/time-warp (QoS clock) and /debug/chain-state-time-warp (per-chain ChainState TTL/staleness)")
 	if err := viper.BindPFlag("debug-address", cmdRPCSmartRouter.Flags().Lookup("debug-address")); err != nil {
 		utils.LavaFormatFatal("failed binding debug-address flag", err)
 	}
