@@ -1,7 +1,5 @@
 {
     "proposal": {
-        "title": "Add Specs: Arbitrum",
-        "description": "Adding new specification support for relaying Arbitrum data on Lava",
         "specs": [
             {
                 "index": "ARBITRUM",
@@ -10,17 +8,10 @@
                 "imports": [
                     "ETH1"
                 ],
-                "reliability_threshold": 268435455,
-                "data_reliability_enabled": true,
                 "block_distance_for_finalized_data": 1,
                 "blocks_in_finalization_proof": 3,
                 "average_block_time": 250,
                 "allowed_block_lag_for_qos_sync": 20,
-                "shares": 1,
-                "min_stake_provider": {
-                    "denom": "ulava",
-                    "amount": "5000000000"
-                },
                 "api_collections": [
                     {
                         "enabled": true,
@@ -66,11 +57,8 @@
                                 "enabled": true,
                                 "category": {
                                     "deterministic": true,
-                                    "local": false,
-                                    "subscription": false,
                                     "stateful": 0
-                                },
-                                "extra_compute_units": 0
+                                }
                             },
                             {
                                 "name": "arbtrace_call",
@@ -84,11 +72,8 @@
                                 "enabled": true,
                                 "category": {
                                     "deterministic": false,
-                                    "local": true,
-                                    "subscription": false,
                                     "stateful": 0
-                                },
-                                "extra_compute_units": 0
+                                }
                             },
                             {
                                 "name": "arbtrace_callMany",
@@ -102,11 +87,8 @@
                                 "enabled": true,
                                 "category": {
                                     "deterministic": false,
-                                    "local": true,
-                                    "subscription": false,
                                     "stateful": 0
-                                },
-                                "extra_compute_units": 0
+                                }
                             },
                             {
                                 "name": "arbtrace_filter",
@@ -120,11 +102,8 @@
                                 "enabled": true,
                                 "category": {
                                     "deterministic": false,
-                                    "local": true,
-                                    "subscription": false,
                                     "stateful": 0
-                                },
-                                "extra_compute_units": 0
+                                }
                             },
                             {
                                 "name": "arbtrace_replayBlockTransactions",
@@ -138,11 +117,8 @@
                                 "enabled": true,
                                 "category": {
                                     "deterministic": false,
-                                    "local": true,
-                                    "subscription": false,
                                     "stateful": 0
-                                },
-                                "extra_compute_units": 0
+                                }
                             },
                             {
                                 "name": "arbtrace_replayTransaction",
@@ -156,11 +132,8 @@
                                 "enabled": true,
                                 "category": {
                                     "deterministic": false,
-                                    "local": true,
-                                    "subscription": false,
                                     "stateful": 0
-                                },
-                                "extra_compute_units": 0
+                                }
                             },
                             {
                                 "name": "arbtrace_transaction",
@@ -174,11 +147,8 @@
                                 "enabled": true,
                                 "category": {
                                     "deterministic": false,
-                                    "local": true,
-                                    "subscription": false,
                                     "stateful": 0
-                                },
-                                "extra_compute_units": 0
+                                }
                             }
                         ],
                         "verifications": [
@@ -223,17 +193,10 @@
                 "imports": [
                     "ARBITRUM"
                 ],
-                "reliability_threshold": 268435455,
-                "data_reliability_enabled": true,
                 "block_distance_for_finalized_data": 1,
                 "blocks_in_finalization_proof": 3,
                 "average_block_time": 250,
                 "allowed_block_lag_for_qos_sync": 20,
-                "shares": 1,
-                "min_stake_provider": {
-                    "denom": "ulava",
-                    "amount": "5000000000"
-                },
                 "api_collections": [
                     {
                         "enabled": true,
@@ -267,16 +230,10 @@
                 "imports": [
                     "ARBITRUM"
                 ],
-                "reliability_threshold": 268435455,
-                "data_reliability_enabled": true,
                 "block_distance_for_finalized_data": 1,
                 "blocks_in_finalization_proof": 3,
                 "average_block_time": 250,
                 "allowed_block_lag_for_qos_sync": 20,
-                "min_stake_provider": {
-                    "denom": "ulava",
-                    "amount": "5000000000"
-                },
                 "api_collections": [
                     {
                         "enabled": true,
@@ -304,6 +261,5 @@
                 ]
             }
         ]
-    },
-    "deposit": "10001000ulava"
+    }
 }

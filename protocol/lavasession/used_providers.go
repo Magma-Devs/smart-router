@@ -2,6 +2,7 @@ package lavasession
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"time"
 
@@ -16,27 +17,20 @@ type BlockedProvidersInf interface {
 }
 
 func NewUsedProviders(blockedProviders BlockedProvidersInf) *UsedProviders {
-	unwantedProviders := map[string]struct{}{}
-	originalUnwantedProviders := map[string]struct{}{} // we need a new map as map changes are changed by pointer
+	// originalUnwantedProviders holds ONLY the user's blocklist. Each router key is seeded from a
+	// COPY of it (see newSeededUniqueUsedProviders), never a reference — sharing one reference let a
+	// write under one key mutate the user's blocklist and every other key seeded from it (MAG-2442).
+	originalUnwantedProviders := map[string]struct{}{}
 	if blockedProviders != nil {
-		providerAddressesToBlock := blockedProviders.GetBlockedProviders()
-		if len(providerAddressesToBlock) > 0 {
-			for _, providerAddress := range providerAddressesToBlock {
-				unwantedProviders[providerAddress] = struct{}{}
-				originalUnwantedProviders[providerAddress] = struct{}{}
-			}
+		for _, providerAddress := range blockedProviders.GetBlockedProviders() {
+			originalUnwantedProviders[providerAddress] = struct{}{}
 		}
 	}
 
 	return &UsedProviders{
-		uniqueUsedProviders: map[string]*UniqueUsedProviders{GetEmptyRouterKey().String(): {
-			providers:         map[string]struct{}{},
-			unwantedProviders: unwantedProviders,
-			blockOnSyncLoss:   map[string]struct{}{},
-			erroredProviders:  map[string]struct{}{},
-		}},
-		// we keep the original unwanted providers so when we create more unique used providers
-		// we can reuse it as its the user's instructions.
+		uniqueUsedProviders: map[string]*UniqueUsedProviders{
+			GetEmptyRouterKey().String(): newSeededUniqueUsedProviders(originalUnwantedProviders),
+		},
 		originalUnwantedProviders: originalUnwantedProviders,
 		eligibilityFunc:           common.DecideEligibility, // default; overridden via SetEligibilityFunc
 	}
@@ -155,13 +149,38 @@ func (up *UsedProviders) AllUnwantedAddresses() []string {
 	}
 	up.lock.RLock()
 	defer up.lock.RUnlock()
-	addresses := []string{}
+	// Dedup across router keys: the same provider is commonly unwanted under several keys
+	// (every key is seeded from the user blocklist), and callers expect a set, not a bag.
+	unwantedSet := map[string]struct{}{}
 	for _, uniqueUsedProviders := range up.uniqueUsedProviders {
 		for addr := range uniqueUsedProviders.unwantedProviders {
-			addresses = append(addresses, addr)
+			unwantedSet[addr] = struct{}{}
 		}
 	}
+	addresses := make([]string, 0, len(unwantedSet))
+	for addr := range unwantedSet {
+		addresses = append(addresses, addr)
+	}
 	return addresses
+}
+
+// newSeededUniqueUsedProviders builds a fresh per-router-key exclusion set whose unwanted map is a
+// COPY of the user's original blocklist. Each router key must own its unwanted map: seeding it with a
+// reference to originalUnwantedProviders (as this code once did) let a write under one key
+// (AddUnwantedAddresses, setUnwanted via RemoveUsed/ReleaseFromLatestBatch, MigrateUnwantedProviders)
+// mutate the user's blocklist and, through it, every other key seeded from the same reference
+// (MAG-2442). maps.Clone(nil) returns nil, so fall back to an empty map to keep writes safe.
+func newSeededUniqueUsedProviders(originalUnwantedProviders map[string]struct{}) *UniqueUsedProviders {
+	seededUnwanted := maps.Clone(originalUnwantedProviders)
+	if seededUnwanted == nil {
+		seededUnwanted = map[string]struct{}{}
+	}
+	return &UniqueUsedProviders{
+		providers:         map[string]struct{}{},
+		unwantedProviders: seededUnwanted,
+		blockOnSyncLoss:   map[string]struct{}{},
+		erroredProviders:  map[string]struct{}{},
+	}
 }
 
 // Use when locked. Checking wether a router key exists in unique used providers,
@@ -171,12 +190,8 @@ func (up *UsedProviders) createOrUseUniqueUsedProvidersForKey(key RouterKey) *Un
 	keyString := key.String()
 	uniqueUsedProviders, ok := up.uniqueUsedProviders[keyString]
 	if !ok {
-		uniqueUsedProviders = &UniqueUsedProviders{
-			providers:         map[string]struct{}{},
-			unwantedProviders: up.originalUnwantedProviders,
-			blockOnSyncLoss:   map[string]struct{}{},
-			erroredProviders:  map[string]struct{}{},
-		}
+		// Seed from a COPY of the user blocklist so this key's writes stay local to it (MAG-2442).
+		uniqueUsedProviders = newSeededUniqueUsedProviders(up.originalUnwantedProviders)
 		up.uniqueUsedProviders[keyString] = uniqueUsedProviders
 	}
 	return uniqueUsedProviders
@@ -273,6 +288,31 @@ func (up *UsedProviders) ClearUnwanted() {
 	// this is nil safe
 	for _, uniqueUsedProviders := range up.uniqueUsedProviders {
 		uniqueUsedProviders.unwantedProviders = map[string]struct{}{}
+	}
+}
+
+// RemoveUnwantedAddresses makes only the supplied providers eligible for
+// selection again, across every router key used by this request. Unlike
+// ClearUnwanted, it preserves exclusions for providers that failed for other
+// reasons. This is used by the smart router's all-stale consistency fallback:
+// once every selectable provider has failed pre-dispatch consistency
+// validation, only those consistency-rejected providers may be retried.
+func (up *UsedProviders) RemoveUnwantedAddresses(addresses []string) {
+	if up == nil || len(addresses) == 0 {
+		return
+	}
+
+	addressesToRemove := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		addressesToRemove[address] = struct{}{}
+	}
+
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	for _, uniqueUsedProviders := range up.uniqueUsedProviders {
+		for address := range addressesToRemove {
+			delete(uniqueUsedProviders.unwantedProviders, address)
+		}
 	}
 }
 

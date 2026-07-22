@@ -887,6 +887,41 @@ func runOnSessionFailureForConsumerSessionMap(t *testing.T, css ConsumerSessions
 	}
 }
 
+func TestOnSessionDiscardedReleasesReservationWithoutProviderFailure(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	usedProviders := NewUsedProviders(nil)
+	parent := &ConsumerSessionsWithProvider{
+		PublicLavaAddress: "provider-stale",
+		MaxComputeUnits:   100,
+		UsedComputeUnits:  10,
+	}
+	session := &SingleConsumerSession{Parent: parent}
+	blocked, ok := session.TryUseSession()
+	require.False(t, blocked)
+	require.True(t, ok)
+
+	routerKey := NewRouterKey(nil)
+	require.NoError(t, session.SetUsageForSession(10, nil, usedProviders, routerKey))
+	usedProviders.AddUsed(ConsumerSessionsMap{
+		"provider-stale": &SessionInfo{Session: session},
+	}, nil)
+	usedProviders.ReleaseFromLatestBatch("provider-stale", routerKey, ConsistencyPreValidationError)
+
+	require.NoError(t, csm.OnSessionDiscarded(session, ConsistencyPreValidationError))
+	require.Zero(t, parent.atomicReadUsedComputeUnits(), "reserved CU must be returned")
+	require.Zero(t, session.LatestRelayCu)
+	require.Empty(t, session.ConsecutiveErrors, "a request that was never sent must not count as a provider failure")
+	require.Zero(t, usedProviders.CurrentlyUsed())
+	require.Zero(t, usedProviders.SessionsLatestBatch())
+	require.Contains(t, usedProviders.GetUnwantedProvidersToSend(routerKey), "provider-stale")
+
+	// The discard must unlock the session without blocklisting it.
+	blocked, ok = session.TryUseSession()
+	require.False(t, blocked)
+	require.True(t, ok)
+	session.Free(nil)
+}
+
 func TestHappyFlowVirtualEpoch(t *testing.T) {
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()

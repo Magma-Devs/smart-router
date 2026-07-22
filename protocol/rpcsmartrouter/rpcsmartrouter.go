@@ -514,6 +514,109 @@ func resetAllChainTrackers(deps debugMuxDeps) int {
 	return count
 }
 
+// resetAllProbeBackoff walks every server's EndpointMonitor and clears the per-endpoint poll
+// back-off so each provider returns to its base poll cadence (MAG-2395). Probe back-off (the
+// fetchFails streak) is otherwise unreachable by any reset endpoint, so a provider that failed
+// before a reset keeps its stretched schedule (up to BACKOFF_MAX_TIME) after it. Nil-safe at every
+// level; returns the total number of trackers signalled across all servers.
+func resetAllProbeBackoff(deps debugMuxDeps) int {
+	if deps.router == nil {
+		return 0
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	count := 0
+	for _, server := range deps.router.rpcServers {
+		if server == nil || server.endpointChainTrackerManager == nil {
+			continue
+		}
+		count += server.endpointChainTrackerManager.ResetAllBackoff()
+	}
+	return count
+}
+
+// reregisterChainTrackerRows re-registers every currently-configured direct-RPC endpoint that lost
+// its ChainTracker row — the recovery tool for MAG-2445, where the epoch cleanup (cleanupStaleTrackers)
+// can delete the row of a provider that was only briefly unhealthy, after which no reset recreates it
+// and the provider returns only on a later ~15-minute rebuild. The source is the config/pairing set
+// (GetAllDirectRPCEndpoints, the same source initializeChainTrackers uses at startup), NOT the live
+// health-filtered set cleanupStaleTrackers deletes from — so a temporarily-disabled provider is
+// restored while a genuinely config-removed one is correctly left out. GetOrCreateTracker is
+// idempotent (no-op for a live row) and non-blocking (it registers synchronously and starts the poll
+// goroutine via startTrackerWithRetry), so the handler never blocks on a down endpoint's init fetch.
+//
+// Holding router.mu does NOT exclude the epoch cleanup: cleanupStaleTrackers deliberately runs
+// outside that lock, so a cleanup pass that already built its keep-set can delete a row this handler
+// just recreated. Acceptable for a recovery tool — the operator re-POSTs, and MAG-2445 is the root
+// fix — but do not assume the lock provides that exclusion.
+// Returns (ensured, created): endpoints processed, and rows that did not previously exist.
+func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
+	if deps.router == nil {
+		return 0, 0
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	for chainKey, server := range deps.router.rpcServers {
+		if server == nil || server.endpointChainTrackerManager == nil {
+			continue
+		}
+		csm := deps.router.sessionManagers[chainKey]
+		if csm == nil {
+			continue
+		}
+		// Count creations against a snapshot of the pre-existing rows rather than a
+		// GetEndpointCount before/after delta: a concurrent cleanupStaleTrackers removal between
+		// the two reads would skew the delta (even negative).
+		existing := make(map[string]bool)
+		for _, url := range server.endpointChainTrackerManager.GetAllEndpoints() {
+			existing[url] = true
+		}
+		for _, ep := range csm.GetAllDirectRPCEndpoints() {
+			if ep == nil || ep.Endpoint == nil {
+				continue
+			}
+			ensured++
+			if _, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.Endpoint, ep.DirectConnection); err != nil {
+				utils.LavaFormatWarning("reset-chaintracker-rows: failed to re-register endpoint", err,
+					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
+					utils.LogAttr("chainKey", chainKey),
+				)
+				continue
+			}
+			if !existing[ep.Endpoint.NetworkAddress] {
+				created++
+				existing[ep.Endpoint.NetworkAddress] = true
+			}
+		}
+	}
+	return ensured, created
+}
+
+// setAllChainStateDebugOffset shifts every per-server ChainState's effective clock by offset, aging
+// its TTL/staleness/consensus windows without waiting real time; offset 0 clears the warp. It backs
+// /debug/chain-state-time-warp — deliberately SEPARATE from /debug/time-warp (the optimizer/QoS
+// clock) so a routine QoS warp-then-reset never disturbs ChainState (MAG-2307 review). Only freshness
+// EVALUATION is warped; stored observation timestamps stay on the real clock (see
+// ChainState.effectiveNow), so the warp ages state without leaving future-dated timestamps. Nil-safe
+// at every level (test fixtures without a wired router are a no-op). Returns the number of
+// ChainStates the offset was applied to.
+func setAllChainStateDebugOffset(deps debugMuxDeps, offset time.Duration) int {
+	if deps.router == nil {
+		return 0
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	count := 0
+	for _, server := range deps.router.rpcServers {
+		if server == nil || server.chainState == nil {
+			continue
+		}
+		server.chainState.SetDebugClockOffset(offset)
+		count++
+	}
+	return count
+}
+
 // resetAllConsistencies flushes every per-chain seen-block cache that
 // implements consistencyResetter. Why this is necessary: SetSeenBlockFromKey
 // only writes monotonically (consistency.go: `block >= blockSeen → return`),
@@ -723,6 +826,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 			return true
 		})
+		// /debug/time-warp is the optimizer/QoS clock ONLY. ChainState's TTL/staleness clock is driven
+		// by the separate /debug/chain-state-time-warp endpoint, so a routine QoS warp-then-reset here
+		// never disturbs ChainState (MAG-2307 review).
 		// Gated on needsReset (same as opt.ResetState above) because the
 		// documented move-clock recovery sets offset_seconds back to 0 — that's
 		// the moment we also want to flush the per-chain seen-block cache. See
@@ -732,6 +838,51 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"offset_seconds":%v,"applied_to_chains":true}`, body.OffsetSeconds)
+	})
+
+	// POST /debug/chain-state-time-warp — ages the per-chain ChainState TTL/staleness/consensus clock
+	// WITHOUT waiting real time, so black-box tests can cross a ~130 s ETH staleness window in seconds.
+	// Deliberately SEPARATE from /debug/time-warp (the optimizer/QoS clock): a routine QoS
+	// warp-then-reset must never disturb ChainState (MAG-2307 review). offset_seconds is relative to
+	// real time; 0 returns ChainState to real time. Same validation as /debug/time-warp (finite, >= 0,
+	// <= 24 h). Responds with chain_states_warped (a count) — a distinct key from /debug/time-warp's
+	// boolean applied_to_chains, so the two responses never collide on JSON type. The effect is
+	// observable via TipFresh / BaselineFresh in /debug/chain-state.
+	//
+	// Semantic note: because stored observation timestamps use the real clock while freshness is
+	// evaluated against the warp (see ChainState.effectiveNow), a block/consensus write that arrives
+	// DURING an active >TTL warp reads as already aged — live traffic cannot refresh TipFresh while the
+	// warp is held. That is the intended "age out state while endpoints are quiesced" behavior; for a
+	// clean result, warp with the target endpoints quiesced.
+	mux.HandleFunc("/debug/chain-state-time-warp", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1024)
+		var body struct {
+			OffsetSeconds float64 `json:"offset_seconds"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if math.IsNaN(body.OffsetSeconds) || math.IsInf(body.OffsetSeconds, 0) {
+			http.Error(w, "offset_seconds must be a finite number", http.StatusBadRequest)
+			return
+		}
+		if body.OffsetSeconds < 0 {
+			http.Error(w, "offset_seconds must be >= 0 (no travel to the past)", http.StatusBadRequest)
+			return
+		}
+		if body.OffsetSeconds > maxDebugOffsetSeconds {
+			http.Error(w, fmt.Sprintf("offset_seconds must be <= %g (24h)", maxDebugOffsetSeconds), http.StatusBadRequest)
+			return
+		}
+		offset := time.Duration(int64(body.OffsetSeconds * float64(time.Second)))
+		applied := setAllChainStateDebugOffset(deps, offset)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"offset_seconds":%v,"chain_states_warped":%d}`, body.OffsetSeconds, applied)
 	})
 
 	// GET /debug/time — returns real and effective time so callers can verify the clock moved.
@@ -799,6 +950,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			opt.ResetState()
 			return true
 		})
+		// ChainState's debug warp is intentionally NOT cleared here: it is independent of the
+		// optimizer/QoS state this endpoint resets, and is cleared only via its own
+		// /debug/chain-state-time-warp endpoint (offset 0), so a QoS reset never disturbs ChainState
+		// (MAG-2307 review).
 
 		// 2. Per-chain seen-block consistency caches. Must be flushed here too,
 		//    not just in /debug/reset-scores: a poisoned huge seenBlock value
@@ -1018,6 +1173,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					continue
 				}
 				observations := server.endpointChainTrackerManager.SnapshotObservations()
+				backoffByURL := server.endpointChainTrackerManager.BackoffSnapshot()
 				for _, ep := range csm.GetAllDirectRPCEndpoints() {
 					if ep == nil || ep.Endpoint == nil {
 						continue
@@ -1037,6 +1193,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 						"LatestBlock":              obs.LatestBlock,
 						"ObservedAt":               debugTimeRFC3339(obs.ObservedAt),
 						"Source":                   obs.Source.String(),
+						// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
+						// exponentialBackoff-stretched when the endpoint has been failing. This is the
+						// observable /debug/reset-probe-backoff returns to base (MAG-2395).
+						"PollIntervalMs": backoffByURL[url].Milliseconds(),
 					})
 				}
 			}
@@ -1073,6 +1233,8 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"HasBaseline":       s.HasBaseline,
 					"BaselineSince":     debugTimeRFC3339(s.BaselineSince),
 					"Initialized":       s.Initialized,
+					"TipFresh":          s.TipFresh,
+					"BaselineFresh":     s.BaselineFresh,
 				})
 			}
 			deps.router.mu.Unlock()
@@ -1159,6 +1321,38 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		reenabled := resetEndpointHealthAndGauge(deps)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
+	})
+
+	// POST /debug/reset-probe-backoff — clear the ChainTracker probe back-off on every endpoint so
+	// each provider's poll schedule returns to base cadence (MAG-2395). The back-off (fetchFails
+	// streak) is unreachable by reset-all / reset-scores / reset-endpoint-health / reset-pairing, so
+	// a provider that failed before a reset otherwise keeps its stretched schedule (up to
+	// BACKOFF_MAX_TIME = 10m) after it. Cadence only — nothing else is touched. The effect is
+	// observable as PollIntervalMs returning to base in /debug/endpoint-state.
+	mux.HandleFunc("/debug/reset-probe-backoff", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		reset := resetAllProbeBackoff(deps)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"reset":true,"endpoints_reset":%d}`, reset)
+	})
+
+	// POST /debug/reset-chaintracker-rows — re-register every configured endpoint that lost its
+	// ChainTracker row (MAG-2395). The epoch cleanup can delete a briefly-unhealthy provider's row
+	// (MAG-2445); no other reset recreates it, so it returns only on a later ~15-minute rebuild or a
+	// pod restart. This re-adds any missing row from the config/pairing set and is a no-op for rows
+	// that already exist. "rows_ensured" is the number of configured endpoints checked;
+	// "rows_created" is how many rows were actually (re)created.
+	mux.HandleFunc("/debug/reset-chaintracker-rows", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		ensured, created := reregisterChainTrackerRows(deps)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"reset":true,"rows_ensured":%d,"rows_created":%d}`, ensured, created)
 	})
 
 	// GET /debug/runtime-config — expose the router's live tuning values as JSON so the
@@ -2424,7 +2618,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Uint64Var(&lavasession.MaximumStreamsOverASingleConnection, lavasession.MaximumStreamsOverASingleConnectionFlag, lavasession.DefaultMaximumStreamsOverASingleConnection, "maximum number of parallel streams over a single provider connection")
 	cmdRPCSmartRouter.Flags().Bool(common.TestModeFlagName, false, "test mode sends dummy data and prints all metadata in listeners")
 	cmdRPCSmartRouter.Flags().String(performance.PprofAddressFlagName, "", "pprof server address, used for code profiling")
-	cmdRPCSmartRouter.Flags().String("debug-address", "", "debug HTTP server for integration tests, e.g. :9999 — exposes /debug/time-warp to shift QoS clock")
+	cmdRPCSmartRouter.Flags().String("debug-address", "", "debug HTTP server for integration tests, e.g. :9999 — exposes /debug/time-warp (QoS clock) and /debug/chain-state-time-warp (per-chain ChainState TTL/staleness)")
 	if err := viper.BindPFlag("debug-address", cmdRPCSmartRouter.Flags().Lookup("debug-address")); err != nil {
 		utils.LavaFormatFatal("failed binding debug-address flag", err)
 	}

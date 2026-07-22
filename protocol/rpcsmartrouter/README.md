@@ -174,7 +174,8 @@ without debug mode:
 | `lava-cross-validation-status` | `success` or `failed`. |
 | `lava-cross-validation-all-providers` | All providers queried (comma-separated). |
 | `lava-cross-validation-agreeing-providers` | Providers whose response matched the consensus. |
-| `lava-cross-validation-disagreeing-providers` | Providers that dissented (node/protocol errors and hash-divergent responses; on a quorum failure, every successful provider, since there is no consensus to agree with). |
+| `lava-cross-validation-disagreeing-providers` | Providers whose **received** response dissented (node/protocol errors and hash-divergent responses; on a quorum failure, every successful provider, since there is no consensus to agree with). Empty means "everyone we heard from agreed" — a provider the router did not hear from is listed as *pending*, never silently dropped (MAG-2187). |
+| `lava-cross-validation-pending-providers` | Providers queried but whose response had not arrived when the reply was built (the quorum early-exit does not wait for stragglers). Their late responses are still compared against the consensus asynchronously — see [Straggler behavior](#straggler-behavior). |
 | `lava-cross-validation-failure-reason` | On failure only — a stable enum (below). |
 
 A **request-time structural fail-fast** (a capacity/diversity check that aborts *before any
@@ -238,6 +239,39 @@ actually reached on a deterministic method:
 
 So a single divergent provider is observed and outvoted **when enough providers still agree**;
 under a strict (unanimous) policy it instead causes a quorum failure.
+
+### Straggler behavior
+
+The quorum **early-exits** as soon as the agreement threshold (and any diversity requirement) is
+met — it does not wait for the remaining in-flight providers. A provider that loses that race is a
+**straggler**: it appears in `lava-cross-validation-pending-providers` (never silently dropped, and
+never *accused* in `disagreeing-providers`, which lists only dissent the router actually received —
+MAG-2187).
+
+The straggler's relay is **not cancelled** at reply time. It runs to completion (bounded by the
+relay timeout) and an async watcher compares its late response against the reached consensus:
+
+- `smartrouter_cross_validation_straggler_total{spec, apiInterface, method, outcome}` counts each
+  resolution, with `outcome` one of `agreed` / `disagreed` / `node-error` / `protocol-error` /
+  `not-received` (nothing arrived before the watcher deadline).
+- A late **confirmed content dissent** on a deterministic method also increments
+  `smartrouter_cross_validation_mismatch_total` for the straggler's group — so a dissenter that
+  answered *after* the quorum closed still reaches the alerting surface instead of vanishing.
+  Deduped per group across the request: a group already counted at reply time (or by an earlier
+  straggler) is not counted again, preserving the metric's once-per-distinct-group contract.
+- Each resolution is logged (`cross-validation straggler resolved`, with provider/outcome/delay).
+
+The watcher only runs when a consensus was reached; on a failed cross-validation there is nothing
+to compare a late response against.
+
+A detached straggler holds its provider session until its relay resolves (bounded by the reflection
+pre-check plus the relay timeout + the endpoint's `timeout` override), rather than freeing it at
+quorum exit. There is no separate CV-specific cap on this: the session manager already bounds
+outstanding sessions per provider (`MaxSessionsAllowedPerProvider`), so a dead provider self-limits —
+it stops being granted new sessions and is excluded from selection — without a second cap to keep in
+sync. The watcher's deadline is anchored at batch launch and sized generously (it dominates the sum
+of the individually-bounded relay phases), so a `not-received` outcome means the goroutine genuinely
+leaked; in the normal case the watcher exits as soon as the last straggler pushes its response.
 
 ## Usage
 

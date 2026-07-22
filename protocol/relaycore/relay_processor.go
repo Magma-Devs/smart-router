@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -42,6 +43,12 @@ type RelayProcessor struct {
 	currentQuorumEqualResults       int      // max count across hashes — kept for logging only, not for decisions
 	statefulRelayTargets            []string // stores all providers that received a stateful relay
 	crossValidationQueriedProviders []string // stores all providers that were queried for cross-validation (even if response not received)
+	// crossValidationRelayDeadline is the latest batch's relay upper bound, stamped at launch:
+	// launch time + relayTimeout + the largest per-endpoint url.Timeout override (mirroring
+	// LowerContextTimeoutWithDuration, the actual bound on each detached relay). The straggler
+	// watcher uses it so its deadline neither undershoots a slow-RPC endpoint's legitimate late
+	// response nor outlives the true bound (MAG-2187). Guarded by rp.lock.
+	crossValidationRelayDeadline time.Time
 	// crossValidationFailFastReason carries the structured reason for a request-time cross-validation
 	// fail-fast (capacity/diversity checks that abort before any relay completes, so no RelayResult is
 	// produced). It rides on the shared processor back to the caller, which synthesizes the
@@ -264,6 +271,22 @@ func (rp *RelayProcessor) GetCrossValidationQueriedProviders() []string {
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 	return rp.crossValidationQueriedProviders
+}
+
+// SetCrossValidationRelayDeadline stamps the latest batch's relay upper bound at launch time
+// (launch + relayTimeout + max per-endpoint url.Timeout). See the field comment.
+func (rp *RelayProcessor) SetCrossValidationRelayDeadline(deadline time.Time) {
+	rp.lock.Lock()
+	defer rp.lock.Unlock()
+	rp.crossValidationRelayDeadline = deadline
+}
+
+// GetCrossValidationRelayDeadline returns the stamped relay upper bound, or the zero time if no
+// batch was launched (callers fall back to a relayTimeout-based bound).
+func (rp *RelayProcessor) GetCrossValidationRelayDeadline() time.Time {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return rp.crossValidationRelayDeadline
 }
 
 // SetCrossValidationFailFastReason records why a cross-validation request was aborted before any relay
@@ -552,6 +575,18 @@ func canonicalResponseHash(data []byte) [32]byte {
 	return sha256.Sum256(canonical)
 }
 
+// responseContentHash is the single content-hash rule for every cross-validation comparison:
+// the canonical hash for non-empty data, the zero sentinel for empty/nil (so an empty reply only
+// ever matches the nil-fallback consensus). handleResponse, the responsesCrossValidation
+// recompute fallback, and the straggler classifier all go through here — one rule, no manual
+// mirroring to drift (a canonicalization change like MAG-2062 lands everywhere at once).
+func responseContentHash(data []byte) [32]byte {
+	if len(data) == 0 {
+		return [32]byte{}
+	}
+	return canonicalResponseHash(data)
+}
+
 func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	// Cache the SHA256 of the reply data BEFORE storing it. ResultsManager keeps RelayResult BY VALUE, so
 	// if we hashed after SetResponse the stored copy in successResults would keep the zero hash and the
@@ -563,10 +598,10 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	// The winner path in responsesCrossValidation recomputes on a zero hash, so a missed cache stays correct.
 	if rp.selection == CrossValidation && response != nil && response.RelayResult.GetReply() != nil && len(response.RelayResult.GetReply().GetData()) > 0 {
 		// Canonicalize before hashing so semantically-identical responses that
-		// differ only in JSON key order share a quorum bucket (MAG-2062). Must
-		// match the fallback hashing in responsesCrossValidation, or the cached
-		// and recomputed hashes would disagree.
-		response.RelayResult.ResponseHash = canonicalResponseHash(response.RelayResult.GetReply().GetData())
+		// differ only in JSON key order share a quorum bucket (MAG-2062).
+		// responseContentHash is the shared rule with the responsesCrossValidation
+		// fallback and the straggler classifier.
+		response.RelayResult.ResponseHash = responseContentHash(response.RelayResult.GetReply().GetData())
 	}
 
 	nodeError := rp.ResultsManager.SetResponse(response, rp.RelayStateMachine.GetProtocolMessage())
@@ -628,6 +663,163 @@ func (rp *RelayProcessor) readExistingResponses() {
 			return
 		}
 	}
+}
+
+// CrossValidationStragglerResult describes how a cross-validation straggler resolved (MAG-2187): a
+// provider that was queried but whose response had not arrived when the quorum early-exit built the
+// reply (surfaced to the client in the pending-providers header).
+type CrossValidationStragglerResult struct {
+	ProviderAddress string
+	ProviderGroup   string        // "" folds to common.DefaultProviderGroup at the metric layer
+	Outcome         string        // one of common.CrossValidationStragglerOutcome*
+	Delay           time.Duration // how long after the reply the straggler resolved (watch duration for not-received)
+}
+
+// WatchCrossValidationStragglers consumes responses that arrive on the processor's channel AFTER the
+// early-exit reply, classifies each against the reached consensus, and reports it via record. It returns
+// once every pending provider is accounted for, maxWait elapses, or ctx is done; providers still missing
+// at that point are reported once with the not-received outcome. Responses from providers outside
+// pendingProviders (e.g. an earlier retry batch's straggler, which the pending header does not cover)
+// are consumed and dropped.
+//
+// Concurrency contract: start this only after the reply headers are built. WaitForResults has returned
+// by then and nothing else reads rp.responses post-reply (readExistingResponses only runs inside
+// NodeResults, which has no post-reply caller), so the watcher is the channel's sole reader. It never
+// touches ResultsManager/quorumMap — classification is pure — so it cannot race the header path's reads.
+func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pendingProviders []string, consensusHash [32]byte, maxWait time.Duration, record func(CrossValidationStragglerResult)) {
+	if rp == nil || record == nil {
+		return
+	}
+	pending := make(map[string]struct{}, len(pendingProviders))
+	for _, addr := range pendingProviders {
+		if addr != "" {
+			pending[addr] = struct{}{}
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+	protocolMessage := rp.RelayStateMachine.GetProtocolMessage()
+	start := time.Now()
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+	resolve := func(response *RelayResponse) {
+		if response == nil {
+			return
+		}
+		addr := response.RelayResult.ProviderInfo.ProviderAddress
+		if _, watched := pending[addr]; !watched {
+			return
+		}
+		delete(pending, addr)
+		record(CrossValidationStragglerResult{
+			ProviderAddress: addr,
+			ProviderGroup:   response.RelayResult.ProviderInfo.ProviderGroup,
+			Outcome:         classifyStragglerResponse(response, consensusHash, protocolMessage),
+			Delay:           time.Since(start),
+		})
+	}
+	// resolveFromRecorded resolves pending providers whose response never reaches this watcher's
+	// channel reads because another reader consumed it: a state-machine reader still blocked on
+	// rp.responses when processing timed out drains responses while dying (select prefers ready
+	// channels over its cancelled ctx pseudo-randomly). Whatever it consumed went through
+	// handleResponse and is recorded in the ResultsManager, so classify from the stored result
+	// instead of misreporting the provider as not-received. Checked at watcher start (theft happens
+	// at reply time) and again at give-up as the final word before declaring not-received.
+	resolveFromRecorded := func() {
+		if len(pending) == 0 {
+			return
+		}
+		// resolveOne records a watched provider from its stored result and drops it from pending;
+		// a no-op for providers not in the pending set (already resolved, or never watched).
+		resolveOne := func(addr, group, outcome string) {
+			if _, watched := pending[addr]; !watched {
+				return
+			}
+			delete(pending, addr)
+			record(CrossValidationStragglerResult{
+				ProviderAddress: addr,
+				ProviderGroup:   group,
+				Outcome:         outcome,
+				Delay:           time.Since(start),
+			})
+		}
+		successResults, nodeErrorResults, protocolErrorResults := rp.GetResultsData()
+		for _, result := range successResults {
+			// handleResponse cached ResponseHash via responseContentHash (zero for empty replies),
+			// so this is the same comparison classifyStragglerResponse would have made.
+			outcome := common.CrossValidationStragglerOutcomeDisagreed
+			if result.ResponseHash == consensusHash {
+				outcome = common.CrossValidationStragglerOutcomeAgreed
+			}
+			resolveOne(result.ProviderInfo.ProviderAddress, result.ProviderInfo.ProviderGroup, outcome)
+		}
+		for _, result := range nodeErrorResults {
+			resolveOne(result.ProviderInfo.ProviderAddress, result.ProviderInfo.ProviderGroup, common.CrossValidationStragglerOutcomeNodeError)
+		}
+		for _, relayError := range protocolErrorResults {
+			resolveOne(relayError.ProviderInfo.ProviderAddress, relayError.ProviderInfo.ProviderGroup, common.CrossValidationStragglerOutcomeProtocolError)
+		}
+	}
+	// giveUp runs on deadline/cancel. It first drains responses already sitting in the buffered
+	// channel: select picks among ready cases pseudo-randomly, so the timer can win a round even
+	// though a response arrived in time (and record()'s log+metric I/O can push the loop past the
+	// deadline while later responses sit buffered) — those must be classified by content, not
+	// misreported as not-received. Then it consults the recorded results (responses another reader
+	// consumed). Only providers with genuinely no response are reported missing.
+	giveUp := func() {
+		for len(pending) > 0 {
+			select {
+			case response := <-rp.responses:
+				resolve(response)
+			default:
+				resolveFromRecorded()
+				for addr := range pending {
+					record(CrossValidationStragglerResult{
+						ProviderAddress: addr,
+						Outcome:         common.CrossValidationStragglerOutcomeNotReceived,
+						Delay:           time.Since(start),
+					})
+				}
+				return
+			}
+		}
+	}
+	resolveFromRecorded()
+	for len(pending) > 0 {
+		select {
+		case response := <-rp.responses:
+			resolve(response)
+		case <-timer.C:
+			giveUp()
+			return
+		case <-ctx.Done():
+			giveUp()
+			return
+		}
+	}
+}
+
+// classifyStragglerResponse maps a late cross-validation response to its straggler outcome. Hashing
+// goes through responseContentHash — the same rule as handleResponse — so a late empty reply only
+// "agrees" with a nil-fallback consensus, exactly as it would have at quorum time.
+func classifyStragglerResponse(response *RelayResponse, consensusHash [32]byte, protocolMessage chainlib.ProtocolMessage) string {
+	if response.Err != nil {
+		return common.CrossValidationStragglerOutcomeProtocolError
+	}
+	reply := response.RelayResult.GetReply()
+	if reply == nil {
+		return common.CrossValidationStragglerOutcomeProtocolError
+	}
+	if protocolMessage != nil {
+		if foundError, _ := protocolMessage.CheckResponseError(reply.Data, response.RelayResult.StatusCode); foundError {
+			return common.CrossValidationStragglerOutcomeNodeError
+		}
+	}
+	if responseContentHash(reply.Data) == consensusHash {
+		return common.CrossValidationStragglerOutcomeAgreed
+	}
+	return common.CrossValidationStragglerOutcomeDisagreed
 }
 
 // this function waits for the processing results, they are written by multiple go routines and read by this go routine
@@ -787,10 +979,10 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 			// This eliminates redundant SHA256 computation for responses already hashed
 			hash := result.ResponseHash
 			if hash == [32]byte{} {
-				// Fallback: hash not cached (e.g., for old code paths or error
-				// cases). Must use the same canonicalization as handleResponse so
-				// the cached and recomputed hashes agree (MAG-2062).
-				hash = canonicalResponseHash(result.Reply.Data)
+				// Fallback: hash not cached (e.g., for old code paths or error cases).
+				// responseContentHash is the shared rule with handleResponse, so the
+				// cached and recomputed hashes agree (MAG-2062).
+				hash = responseContentHash(result.Reply.Data)
 			}
 
 			if count, exists := countMap[hash]; exists {
@@ -916,9 +1108,6 @@ func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult
 		return nil, utils.LavaFormatError("RelayProcessor.ProcessingResult is nil, misuse detected", nil)
 	}
 
-	// this must be here before the lock because this function locks
-	allProvidersAddresses := rp.GetUsedProviders().AllUnwantedAddresses()
-
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 
@@ -950,11 +1139,10 @@ func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult
 	case CrossValidation:
 		return rp.processCrossValidationResult(successResults, successResultsCount, nodeErrorCount, rp.getAgreementThreshold())
 
-	case Stateful:
-		return rp.processStatefulResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, allProvidersAddresses)
-
-	case Stateless:
-		return rp.processStatelessResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, protocolErrorCount, allProvidersAddresses)
+	case Stateful, Stateless:
+		// Stateful (fan-out, no retries) and Stateless (sequential retries) differ only in the state
+		// machine; result selection here is identical for both.
+		return rp.processNonCrossValidationResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, protocolErrorCount)
 
 	default:
 		return nil, utils.LavaFormatError("unknown selection mode", nil, utils.LogAttr("selection", rp.selection))
@@ -1007,37 +1195,13 @@ func (rp *RelayProcessor) processCrossValidationResult(
 		)
 }
 
-// processStatefulResult handles result processing for Stateful mode.
-// Returns first success, or first node error if no successes.
-// No cross-validation/consensus - just return the first available result.
-func (rp *RelayProcessor) processStatefulResult(
-	successResults, nodeErrors []common.RelayResult,
-	successResultsCount, nodeErrorCount int,
-	allProvidersAddresses []string,
-) (*common.RelayResult, error) {
-	// Return first success if available
-	if successResultsCount > 0 {
-		result := successResults[0]
-		return &result, nil
-	}
-
-	// No successes, return first node error if available
-	if nodeErrorCount > 0 {
-		result := nodeErrors[0]
-		return &result, nil
-	}
-
-	// No results at all
-	return rp.buildFailureResult(nodeErrorCount, 0, allProvidersAddresses)
-}
-
-// processStatelessResult handles result processing for Stateless mode.
-// Returns first success, or first node error if no successes.
-// No cross-validation/consensus - retries handle getting a valid response.
-func (rp *RelayProcessor) processStatelessResult(
+// processNonCrossValidationResult handles Stateful and Stateless modes, which share the same result
+// selection: first success, else first node error, else a failure result built from the best
+// node/protocol error. (Stateful fans out without retries and Stateless retries sequentially, but that
+// difference lives in the state machine, not here.)
+func (rp *RelayProcessor) processNonCrossValidationResult(
 	successResults, nodeErrors []common.RelayResult,
 	successResultsCount, nodeErrorCount, protocolErrorCount int,
-	allProvidersAddresses []string,
 ) (*common.RelayResult, error) {
 	// Return first success if available
 	if successResultsCount > 0 {
@@ -1051,14 +1215,18 @@ func (rp *RelayProcessor) processStatelessResult(
 		return &result, nil
 	}
 
-	// No results at all - return failure
-	return rp.buildFailureResult(nodeErrorCount, protocolErrorCount, allProvidersAddresses)
+	// No node responses at all - build a failure result from the best node/protocol error.
+	return rp.buildFailureResult(nodeErrorCount, protocolErrorCount)
 }
 
-// buildFailureResult constructs an error result when no consensus can be reached.
+// buildFailureResult constructs an error result when no consensus can be reached. It returns the best
+// node/protocol error's own RelayResult, whose ProviderInfo.ProviderAddress is a SINGLE provider — the
+// source of the error body being returned. It must never be a comma-joined list: packing the whole
+// attempted set here made appendHeadersToRelayResult treat the joined blob as the resolver name and
+// append it after the per-attempt names, so on the all-transport-errors path Lava-Provider-Address
+// listed ~2x the providers and disagreed with Lava-Retries (MAG-2351).
 func (rp *RelayProcessor) buildFailureResult(
 	nodeErrorCount, protocolErrorCount int,
-	allProvidersAddresses []string,
 ) (*common.RelayResult, error) {
 	returnedResult := &common.RelayResult{StatusCode: http.StatusInternalServerError}
 	var processingError error
@@ -1080,8 +1248,6 @@ func (rp *RelayProcessor) buildFailureResult(
 			returnedResult = &protocolErr.Response.RelayResult
 		}
 	}
-
-	returnedResult.ProviderInfo.ProviderAddress = strings.Join(allProvidersAddresses, ",")
 
 	// Log with classified error code for metrics/observability
 	if bestLavaError != nil {
