@@ -23,7 +23,7 @@ require (
 	github.com/gogo/status v1.1.1
 	github.com/golang/mock v1.6.0
 	github.com/golang/protobuf v1.5.4
-	github.com/grafana/pyroscope-go v1.3.1
+	github.com/grafana/pyroscope-go v1.4.1
 	github.com/itchyny/gojq v0.12.19
 	github.com/jhump/protoreflect v1.18.0
 	github.com/joho/godotenv v1.5.1
