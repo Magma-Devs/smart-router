@@ -32,6 +32,12 @@ const (
 	ExpirationNodeErrorsOnFinalizedFlagName      = "expiration-finalized-node-errors"
 	FlagCacheSizeName                            = "max-items"
 	DefaultExpirationForNonFinalized             = 500 * time.Millisecond
+	// SharedStateTipBlockMultiplier bounds how long a pod's published chain tip lives in the
+	// shared cache: SharedStateTipBlockMultiplier * averageBlockTime. It mirrors the smart
+	// router's own tip-staleness horizon (chainstate.StalenessWindow) so a dead pod's tip
+	// evaporates on roughly the same timescale the router considers a tip stale, rather than
+	// lingering for the full finalized (~1h) TTL.
+	SharedStateTipBlockMultiplier                = 10
 	DefaultExpirationTimeFinalizedMultiplier     = 1.0
 	DefaultExpirationTimeNonFinalizedMultiplier  = 1.0
 	DefaultExpirationBlocksHashesToHeights       = 48 * time.Hour
@@ -201,6 +207,15 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 func (cs *CacheServer) ExpirationForChain(averageBlockTimeForChain time.Duration) time.Duration {
 	eighthBlock := averageBlockTimeForChain / 8
 	return lavaslices.Max([]time.Duration{eighthBlock, cs.ExpirationNonFinalized})
+}
+
+// SharedStateTipExpiration returns the TTL for a pod's published chain tip in shared-state
+// mode: SharedStateTipBlockMultiplier * averageBlockTime, floored at ExpirationNonFinalized so
+// a chain whose spec omits the average block time still gets a sane, non-zero TTL (a zero TTL
+// would never expire).
+func (cs *CacheServer) SharedStateTipExpiration(averageBlockTimeForChain time.Duration) time.Duration {
+	ttl := averageBlockTimeForChain * SharedStateTipBlockMultiplier
+	return lavaslices.Max([]time.Duration{ttl, cs.ExpirationNonFinalized})
 }
 
 func (cs *CacheServer) GetTotalCacheSize() int64 {

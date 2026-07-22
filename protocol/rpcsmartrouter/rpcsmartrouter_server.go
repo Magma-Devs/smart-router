@@ -2805,6 +2805,23 @@ func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlo
 	return spectypes.IsFinalizedBlock(requestedBlock, latest, finalizationDistance)
 }
 
+// adoptSharedStateTip feeds a peer pod's chain tip — read from the shared cache under the
+// chain-level key, so it is the fleet-max of every pod's guarded tip — into this pod's
+// ChainState, but only when it is ahead of our local view. SetLatestBlock applies the same
+// outlier/Recompute guards as a local observation, so a poisoned peer value is snapped down
+// rather than trusted (T10). No-op when shared state is off or ChainState is not yet wired.
+func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peerTip, localSeenBlock int64) {
+	if !rpcss.sharedState || rpcss.chainState == nil || peerTip <= localSeenBlock {
+		return
+	}
+	utils.LavaFormatDebug("shared-state tip is newer, feeding to chain state",
+		utils.LogAttr("peer_tip", peerTip),
+		utils.LogAttr("local_seen_block", localSeenBlock),
+		utils.LogAttr("GUID", ctx),
+	)
+	rpcss.chainState.SetLatestBlock(peerTip)
+}
+
 // tryCacheWrite attempts to write a successful relay response to the cache.
 // It runs in a separate goroutine to avoid blocking the relay response.
 // Cache writes are skipped when:
@@ -3027,10 +3044,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	userData := protocolMessage.GetUserData()
 	var sharedStateId string // defaults to "", if shared state is disabled then no shared state will be used.
 	if rpcss.sharedState {
-		// Per-caller shared-state id. The retired consistency store used to own this key
-		// derivation; it is now a plain function, byte-identical so entries written by an older
-		// build still resolve. Moving shared state to a chain-level key is T10.
-		sharedStateId = relaycore.UserDataKey(userData)
+		// Chain-level shared-state id (T10): matches the write key in tryCacheWrite, so the
+		// value each pod publishes (its guarded chain tip) round-trips. Must equal the write
+		// key or the read never resolves it.
+		sharedStateId = rpcss.listenEndpoint.Key()
 	}
 
 	chainId, apiInterface := rpcss.GetChainIdAndApiInterface()
@@ -3166,31 +3183,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 					)
 					reply := cacheReply.GetReply()
 
-					// BEHAVIOR DROPPED (Topic C C-G, consciously accepted): inter-consumer-instance
-					// consistency via the cache server's seen block. This used to raise this
-					// request's SeenBlock (and the per-user consistency cache) to a seen block
-					// reported by ANOTHER router instance, so a user whose requests were balanced
-					// across instances kept a shared read-your-writes floor.
-					//
-					// It is removed rather than repointed because there is nothing to repoint it
-					// to: the tip is per-router-instance, and adopting a cross-instance value here
-					// would reintroduce exactly the vector C-G closes — an ungated block from
-					// outside this instance's anti-lie guards flowing into request resolution and
-					// the cache key.
-					//
-					// Cost: none in practice — this path was already dead. The write and read used
-					// DIFFERENT SharedStateIds (write: listenEndpoint.Key() = chainID+apiInterface,
-					// below in tryCacheWrite; read: relaycore.UserDataKey(userData) =
-					// dappId__consumerIp), and the cache server keys the value as
-					// chainID + "_" + sharedStateId (ecosystem/cache/handlers.go:556). The two keys
-					// can never collide, so getSeenBlockForSharedStateMode missed every time and
-					// returned 0. Both lines date to the initial smart-router commit (22cbf32).
-					//
-					// The PUBLISH side is deliberately left intact (tryCacheWrite still sends
-					// SeenBlock + SharedStateId), and what it now publishes is the guarded tip.
-					// Rebuilding the adopt side properly — chain-level key, value fed through
-					// ChainState.SetLatestBlock so it passes the anti-lie guards — is task T10 in
-					// topic-C-action-plan.md.
+					// Cross-pod consistency (T10): peer pods publish their guarded chain tip under
+					// the shared chain-level key; the server returns the fleet-max. Adopt it through
+					// the same anti-lie guards as a local observation.
+					rpcss.adoptSharedStateTip(ctx, cacheReply.GetSeenBlock(), localRelayData.SeenBlock)
 
 					// handle cache reply
 					if cacheError == nil && reply != nil {

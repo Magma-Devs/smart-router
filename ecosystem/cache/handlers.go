@@ -320,13 +320,13 @@ func (s *RelayerCacheServer) performInt64WriteWithValidationAndRetry(
 	}
 }
 
-func (s *RelayerCacheServer) setSeenBlockOnSharedStateMode(chainId, sharedStateId string, seenBlock int64) {
+func (s *RelayerCacheServer) setSeenBlockOnSharedStateMode(chainId, sharedStateId string, seenBlock int64, ttl time.Duration) {
 	if sharedStateId == "" {
 		return
 	}
 	key := latestBlockKey(chainId, sharedStateId)
 	set := func() {
-		s.CacheServer.finalizedCache.SetWithTTL(key, seenBlock, 0, s.CacheServer.ExpirationFinalized)
+		s.CacheServer.finalizedCache.SetWithTTL(key, seenBlock, 0, ttl)
 	}
 	get := func() int64 {
 		return s.getSeenBlockForSharedStateMode(chainId, sharedStateId)
@@ -375,7 +375,7 @@ func (s *RelayerCacheServer) SetRelay(ctx context.Context, relayCacheSet *relayt
 		cache.SetWithTTL(string(cacheKey), cacheValue, cacheValue.Cost(), s.getExpirationForChain(time.Duration(relayCacheSet.AverageBlockTime), relayCacheSet.BlockHash))
 	}
 
-	s.setSeenBlockOnSharedStateMode(relayCacheSet.ChainId, relayCacheSet.SharedStateId, latestKnownBlock)
+	s.setSeenBlockOnSharedStateMode(relayCacheSet.ChainId, relayCacheSet.SharedStateId, latestKnownBlock, s.CacheServer.SharedStateTipExpiration(time.Duration(relayCacheSet.AverageBlockTime)))
 	s.setLatestBlock(latestBlockKey(relayCacheSet.ChainId, ""), latestKnownBlock)
 	s.setBlocksHashesToHeights(relayCacheSet.ChainId, relayCacheSet.BlocksHashesToHeights)
 	return &emptypb.Empty{}, nil
