@@ -81,10 +81,14 @@ misconfiguration fails fast rather than silently degrading.
 ## What the caller sees
 
 A cross-validated response carries headers describing the quorum
-(`lava-cross-validation-status`, `…-agreeing-providers`, `…-disagreeing-providers`, and on
-failure `…-failure-reason`). The router does **not** auto-retry on a quorum failure — the
-structured signal lets the client decide whether to retry (quorum-time reasons) or fall back
-(structural reasons). Header names, the closed failure-reason enum, and the gRPC-trailer
+(`lava-cross-validation-status`, `…-agreeing-providers`, `…-disagreeing-providers`,
+`…-pending-providers`, and on failure `…-failure-reason`). The quorum early-exits once the
+threshold is met, so a provider that answers too late is reported as **pending** rather than
+silently dropped — `disagreeing-providers` only ever lists dissent the router actually received,
+and the straggler's late answer is still compared against the consensus asynchronously (log +
+`smartrouter_cross_validation_straggler_total`). The router does **not** auto-retry on a quorum
+failure — the structured signal lets the client decide whether to retry (quorum-time reasons) or
+fall back (structural reasons). Header names, the closed failure-reason enum, and the gRPC-trailer
 caveat are tabulated in the [in-package reference](../protocol/rpcsmartrouter/README.md#response-headers).
 
 ## Caveats

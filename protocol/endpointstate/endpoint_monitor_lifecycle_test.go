@@ -130,11 +130,23 @@ func TestEndpointMonitor_RemoveTrackerCallsCancel(t *testing.T) {
 // RLock while iterating.
 type recordingChainTracker struct {
 	*chaintracker.DummyChainTracker
-	resetCalls atomic.Int32
+	resetCalls        atomic.Int32
+	resetBackoffCalls atomic.Int32
+	pollInterval      time.Duration
 }
 
 func (r *recordingChainTracker) ResetLatestBlock() {
 	r.resetCalls.Add(1)
+}
+
+// ResetBackoff / CurrentPollInterval shadow the embedded dummy so ResetAllBackoff and
+// BackoffSnapshot can be exercised without spinning real ChainTracker poll goroutines (MAG-2395).
+func (r *recordingChainTracker) ResetBackoff() {
+	r.resetBackoffCalls.Add(1)
+}
+
+func (r *recordingChainTracker) CurrentPollInterval() time.Duration {
+	return r.pollInterval
 }
 
 // TestEndpointMonitor_ResetAllLatestBlocks verifies that ResetAllLatestBlocks

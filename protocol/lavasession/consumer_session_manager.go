@@ -1928,6 +1928,24 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 	return nil
 }
 
+// OnSessionDiscarded releases a session that was selected but intentionally
+// dropped before any relay was dispatched. It returns the reserved compute
+// units and unlocks the session without recording a QoS failure or adding a
+// consecutive provider error: no upstream request was made, so availability
+// was not actually tested.
+func (csm *ConsumerSessionManager) OnSessionDiscarded(consumerSession *SingleConsumerSession, reason error) error {
+	if err := consumerSession.VerifyLock(); err != nil {
+		return fmt.Errorf("OnSessionDiscarded, consumerSession.lock must be locked before accessing this method: %w", err)
+	}
+
+	cuToDecrease := consumerSession.LatestRelayCu
+	parentConsumerSessionsWithProvider := consumerSession.Parent
+	consumerSession.LatestRelayCu = 0
+	consumerSession.Free(reason)
+
+	return parentConsumerSessionsWithProvider.decreaseUsedComputeUnits(cuToDecrease)
+}
+
 // Report session failure, mark it as blocked from future usages, report if timeout happened.
 func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsumerSession, errorReceived error) error {
 	// consumerSession must be locked when getting here.
