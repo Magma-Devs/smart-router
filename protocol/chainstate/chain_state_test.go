@@ -28,6 +28,28 @@ func newTestState(t *testing.T) (*ChainState, *fakeClock) {
 	return cs, clk
 }
 
+// TestGetLatestBlockAllowStale covers the raw (TTL-ignoring) getter T3's archive routing relies on: it
+// returns the current tip value regardless of freshness (0 before any observation) and reflects the
+// tip's downward self-heal once stale — the property the retired bootstrap atomic lacked.
+func TestGetLatestBlockAllowStale(t *testing.T) {
+	cs, clk := newTestState(t)
+
+	require.Equal(t, int64(0), cs.GetLatestBlockAllowStale(), "no tip yet → 0")
+
+	cs.SetLatestBlock(1000)
+	require.Equal(t, int64(1000), cs.GetLatestBlockAllowStale(), "fresh tip returned raw")
+
+	// Past TTL: GetLatestBlock reports unknown, but GetLatestBlockAllowStale still returns the last value.
+	clk.advance(11 * time.Second)
+	_, fresh := cs.GetLatestBlock()
+	require.False(t, fresh, "tip is stale past TTL")
+	require.Equal(t, int64(1000), cs.GetLatestBlockAllowStale(), "stale tip still returned raw (last-known)")
+
+	// Self-heal: once stale, a LOWER observation is re-adopted (the atomic could never move down).
+	cs.SetLatestBlock(900)
+	require.Equal(t, int64(900), cs.GetLatestBlockAllowStale(), "stale tip heals DOWN to a lower observation")
+}
+
 // --- SetLatestBlock: monotonic + outlier guard -----------------------------------------
 
 func TestSetLatestBlock_Monotonic(t *testing.T) {
