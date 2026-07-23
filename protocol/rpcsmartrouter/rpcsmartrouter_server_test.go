@@ -550,12 +550,14 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 	require.NoError(t, err)
 
 	newServer := func() *RPCSmartRouterServer {
+		cs := chainstate.New("ETH1", chainstate.DefaultConfig(12*time.Second))
+		cs.SetLatestBlock(1_000_000) // so finality resolves (not "unknown")
 		s := &RPCSmartRouterServer{
 			smartRouterEndpointMetrics: mm,
 			listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			chainParser:                chainParser,
+			chainState:                 cs,
 		}
-		s.latestBlockHeight.Store(1_000_000) // so finality resolves (not "unknown")
 		return s
 	}
 
@@ -665,12 +667,14 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 	}
 	require.NoError(t, err)
 
+	cs := chainstate.New("ETH1", chainstate.DefaultConfig(12*time.Second))
+	cs.SetLatestBlock(1_000_000) // so finality resolves (not "unknown")
 	srv := &RPCSmartRouterServer{
 		smartRouterEndpointMetrics: mm,
 		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainParser:                chainParser,
+		chainState:                 cs,
 	}
-	srv.latestBlockHeight.Store(1_000_000) // so finality resolves (not "unknown")
 
 	counterFor := func(t *testing.T, name, method, labelName, labelValue string) float64 {
 		t.Helper()
@@ -3321,8 +3325,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 // test_phase2_5_caching.py::test_cache_survives_router_pod_restart.
 //
 // The fix consults the router's tracked chain tip (the per-chain ChainState
-// consensus tip, with the bootstrap atomic latestBlockHeight as cold-start
-// fallback, surfaced via rpcss.getLatestBlock()) and prefers it when it is
+// consensus tip, surfaced via rpcss.getLatestBlock()) and prefers it when it is
 // ahead of the reply's per-response value.
 func TestIsFinalizedForCacheWrite(t *testing.T) {
 	tests := []struct {

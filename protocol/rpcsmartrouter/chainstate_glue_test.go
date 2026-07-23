@@ -35,10 +35,11 @@ func (c *manualClock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// TestGetLatestBlock_BootstrapOnlyFallback covers MAG-2160 Finding 1: the monotonic atomic is a
-// COLD-START fallback only. Once ChainState has ever observed a tip, a TTL-expired tip must
-// report "unknown" rather than being revived from a frozen atomic value.
-func TestGetLatestBlock_BootstrapOnlyFallback(t *testing.T) {
+// TestGetLatestBlock_ColdStartAndStale covers MAG-2160 Finding 1 after the bootstrap atomic is
+// retired (T3): getLatestBlock reports "unknown" (0) at cold-start (no tip yet) and again once a
+// tip has aged past TTL — never a frozen value. The tip is seeded by the first observation, so no
+// atomic fallback is needed.
+func TestGetLatestBlock_ColdStartAndStale(t *testing.T) {
 	clk := &manualClock{t: time.Unix(1_700_000_000, 0)}
 	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
 		BucketWidth:      2,
@@ -52,38 +53,66 @@ func TestGetLatestBlock_BootstrapOnlyFallback(t *testing.T) {
 		chainState:     cs,
 	}
 
-	// Cold start: ChainState has never observed a tip (Initialized()==false). The init-relay-seeded
-	// atomic is the legitimate bootstrap fallback.
-	rpcss.latestBlockHeight.Store(1000)
-	require.Equal(t, uint64(1000), rpcss.getLatestBlock(), "cold start falls back to the bootstrap atomic")
+	// Cold start: ChainState has never observed a tip → unknown (0). No atomic to revive.
+	require.Equal(t, uint64(0), rpcss.getLatestBlock(), "cold start with no tip → 0")
 
 	// First observation initializes ChainState; from now on it is the authority.
 	cs.SetLatestBlock(2000)
-	require.Equal(t, uint64(2000), rpcss.getLatestBlock(), "once initialized, ChainState's fresh tip wins over the atomic")
+	require.Equal(t, uint64(2000), rpcss.getLatestBlock(), "a fresh tip answers")
 
-	// Age the ChainState tip past TTL. The atomic still holds 1000 (monotonic, never expires), but
-	// an initialized-but-stale ChainState must report unknown — NOT revive the frozen atomic.
+	// Age the ChainState tip past TTL. An initialized-but-stale tip must report unknown.
 	clk.advance(11 * time.Second)
 	require.Equal(t, uint64(0), rpcss.getLatestBlock(),
-		"Finding 1: a TTL-expired tip must report unknown, never be revived from the stale atomic")
+		"Finding 1: a TTL-expired tip must report unknown, never a frozen value")
 
-	// A fresh observation revives the tip through ChainState (the atomic is never consulted again).
+	// A fresh observation revives the tip.
 	cs.SetLatestBlock(2001)
-	require.Equal(t, uint64(2001), rpcss.getLatestBlock(), "a fresh observation revives the tip via ChainState")
+	require.Equal(t, uint64(2001), rpcss.getLatestBlock(), "a fresh observation revives the tip")
 }
 
-// TestGetLatestBlock_NilChainStateUsesAtomic is the defensive path: before ChainState is wired
-// (or in components that never construct it) getLatestBlock still answers from the atomic.
-func TestGetLatestBlock_NilChainStateUsesAtomic(t *testing.T) {
+// TestGetLatestBlock_NilChainState is the defensive path: with no ChainState wired, getLatestBlock
+// reports unknown (0). The bootstrap atomic that used to answer here is retired (T3).
+func TestGetLatestBlock_NilChainState(t *testing.T) {
 	rpcss := &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
-	require.Equal(t, uint64(0), rpcss.getLatestBlock(), "no chainState, no atomic → unknown")
-	rpcss.latestBlockHeight.Store(500)
-	require.Equal(t, uint64(500), rpcss.getLatestBlock(), "no chainState → atomic answers")
+	require.Equal(t, uint64(0), rpcss.getLatestBlock(), "no chainState → unknown")
 }
 
-// TestGetLatestBlockForCacheFinalization_TipOrZero locks the cache-finalization tip contract
-// AFTER Topic C T1/D4 (single reader): the ChainState TIP when fresh, else a strict 0. It must
-// still never fall back to the bootstrap atomic (monotonic-max, no downward correction).
+// TestGetLatestBlockAllowStale_ServesStaleAndHeals locks the T3 archive-routing contract:
+// getLatestBlockAllowStale serves the last-known tip even when stale (0 before any tip), and — the
+// whole point of retiring the monotonic atomic — it HEALS DOWN when the stale tip re-adopts a lower
+// block, where the atomic would have stayed stuck on the high value for the life of the process.
+func TestGetLatestBlockAllowStale_ServesStaleAndHeals(t *testing.T) {
+	clk := &manualClock{t: time.Unix(1_700_000_000, 0)}
+	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
+		BucketWidth:      2,
+		OutlierThreshold: 100,
+		StalenessWindow:  10 * time.Second,
+		TTL:              10 * time.Second,
+	}, clk.now)
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		chainState:     cs,
+	}
+
+	// Before any tip: 0 (conservative force-archive fallback).
+	require.Equal(t, uint64(0), rpcss.getLatestBlockAllowStale(), "no tip → 0")
+
+	// A tip is served whether fresh or stale (lenient, unlike strict getLatestBlock).
+	cs.SetLatestBlock(1000)
+	require.Equal(t, uint64(1000), rpcss.getLatestBlockAllowStale(), "fresh tip served")
+	clk.advance(11 * time.Second)
+	require.Equal(t, uint64(1000), rpcss.getLatestBlockAllowStale(), "stale tip still served")
+
+	// Heal down: a lower observation after staleness is re-adopted — the retired atomic could not.
+	cs.SetLatestBlock(900)
+	require.Equal(t, uint64(900), rpcss.getLatestBlockAllowStale(),
+		"archive routing heals DOWN; no stuck-high poison the atomic would have kept")
+}
+
+// TestGetLatestBlock_GatedTipForFinalization locks the cache-finalization tip contract AFTER Topic
+// C T1/D4 (single reader) and T3 (getter consolidation): finalization reads the GATED getLatestBlock
+// — the ChainState TIP when fresh, else a strict 0. It never serves a stale value (the retired
+// bootstrap atomic, monotonic-max with no downward correction, was disqualified for exactly that).
 //
 // BEHAVIOR CHANGE: this read the strict-majority CONSENSUS baseline until T1, so a pod with no
 // majority finalized nothing (strict 0, the safe under-finalizing direction). It now finalizes
@@ -91,7 +120,7 @@ func TestGetLatestBlock_NilChainStateUsesAtomic(t *testing.T) {
 // forms a majority (1-2 endpoints) there is no baseline to bound against, so a sub-threshold
 // lying-high value can reach finalization and only heals after TTL. That is a deliberate,
 // documented loosening of a safety property, accepted as the cost of the single-reader model.
-func TestGetLatestBlockForCacheFinalization_TipOrZero(t *testing.T) {
+func TestGetLatestBlock_GatedTipForFinalization(t *testing.T) {
 	clk := &manualClock{t: time.Unix(1_700_000_000, 0)}
 	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
 		BucketWidth:      2,
@@ -105,12 +134,10 @@ func TestGetLatestBlockForCacheFinalization_TipOrZero(t *testing.T) {
 		chainState:     cs,
 	}
 
-	// A fresh tip and a seeded bootstrap atomic both exist. Finalization reads the TIP (1050) —
-	// never the atomic, which is monotonic-max with no downward correction.
-	rpcss.latestBlockHeight.Store(1000)
+	// Finalization reads the TIP (1050).
 	cs.SetLatestBlock(1050)
-	require.Equal(t, uint64(1050), rpcss.getLatestBlockForCacheFinalization(),
-		"T1/D4: finalization measures against the one tip, not the atomic")
+	require.Equal(t, uint64(1050), rpcss.getLatestBlock(),
+		"T1/D4: finalization measures against the one tip")
 
 	// A strict majority at 1040 forms. The tip's 10-block lead is within OutlierThreshold (100),
 	// so the edge correction leaves it alone and finalization keeps reading 1050. Under the old
@@ -119,7 +146,7 @@ func TestGetLatestBlockForCacheFinalization_TipOrZero(t *testing.T) {
 		{URL: "a", Block: 1040, ObservedAt: clk.now()},
 		{URL: "b", Block: 1040, ObservedAt: clk.now()},
 	})
-	require.Equal(t, uint64(1050), rpcss.getLatestBlockForCacheFinalization(),
+	require.Equal(t, uint64(1050), rpcss.getLatestBlock(),
 		"a within-threshold optimistic lead survives the edge correction and is what finalization sees")
 
 	// An implausible tip IS corrected: a majority far below it snaps the tip down to the baseline,
@@ -129,17 +156,17 @@ func TestGetLatestBlockForCacheFinalization_TipOrZero(t *testing.T) {
 		{URL: "a", Block: 1060, ObservedAt: clk.now()},
 		{URL: "b", Block: 1060, ObservedAt: clk.now()},
 	})
-	require.Equal(t, uint64(1060), rpcss.getLatestBlockForCacheFinalization(),
+	require.Equal(t, uint64(1060), rpcss.getLatestBlock(),
 		"a tip leading consensus by more than OutlierThreshold is snapped down before finalization reads it")
 
 	// The tip ages past TTL → strict 0 (never a frozen value).
 	clk.advance(11 * time.Second)
-	require.Equal(t, uint64(0), rpcss.getLatestBlockForCacheFinalization(),
+	require.Equal(t, uint64(0), rpcss.getLatestBlock(),
 		"a TTL-expired tip must report 0, not a frozen value")
 
 	// Defensive path: no ChainState wired at all → 0.
 	rpcss.chainState = nil
-	require.Equal(t, uint64(0), rpcss.getLatestBlockForCacheFinalization())
+	require.Equal(t, uint64(0), rpcss.getLatestBlock())
 }
 
 // TestRecomputeChainStateConsensus_EmptySnapshotClearsBaseline covers MAG-2160 Finding 5: the
@@ -271,7 +298,7 @@ func TestSiteB_ObservationFresherThanTrackerAtomic(t *testing.T) {
 // + full protocolMessage to drive end-to-end; that behavioral path is not reconstructed here. This
 // test pins the structural invariant the deletion relies on (cache shape ⇒ no tip write) at the
 // reachable tip-harvest seam.
-func TestCacheServedReply_DoesNotPoisonBootstrapAtomic(t *testing.T) {
+func TestCacheServedReply_DoesNotMoveTip(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -280,26 +307,30 @@ func TestCacheServedReply_DoesNotPoisonBootstrapAtomic(t *testing.T) {
 	cm, perr := chainParser.ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), "POST", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, perr)
 
-	rpcss := &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
-	require.Equal(t, uint64(0), rpcss.latestBlockHeight.Load(), "fresh atomic starts at 0")
+	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		chainState:     cs,
+	}
+	require.Equal(t, int64(0), cs.GetLatestBlockAllowStale(), "fresh tip starts at 0")
 
 	// The cache-served shape: a reply carrying a (historical) block, but NOT attributed to any
-	// dispatched endpoint (targetEndpoint == nil, as a cache hit is). Even a tip-eligible method
-	// name cannot move the tip without an endpoint to harvest from.
+	// dispatched endpoint (targetEndpoint == nil, as a cache hit is). harvestAndUpdateTipFromRelay
+	// returns early on a nil endpoint, so the tip must not move.
 	cacheReply := &pairingtypes.RelayReply{LatestBlock: 17_460_400}
 	rpcss.harvestAndUpdateTipFromRelay(nil, cm, cacheReply, 1, "")
 
-	require.Equal(t, uint64(0), rpcss.latestBlockHeight.Load(),
-		"Finding 1: a cache-served reply (no attributed endpoint) must not move the bootstrap atomic")
+	require.Equal(t, int64(0), cs.GetLatestBlockAllowStale(),
+		"Finding 1: a cache-served reply (no attributed endpoint) must not move the tip")
 }
 
-// TestHarvest_BootstrapAtomicGatedOnChainStateVerdict locks the chain-level gate on the
-// router-wide bootstrap atomic: a relay-harvested tip that ChainState REJECTS as an anti-lie
-// outlier must not ratchet latestBlockHeight (monotonic-max, no downward correction), even
-// though it passes its own per-endpoint store guard. Without the gate, one lying-high harvest
-// poisons getLatestBlockBestEffort → archive routing for the life of the process whenever
-// ChainState is TTL-stale.
-func TestHarvest_BootstrapAtomicGatedOnChainStateVerdict(t *testing.T) {
+// TestHarvest_ArchiveRoutingTipGuardedByChainState locks the T3 property: archive routing's
+// last-known tip (getLatestBlockAllowStale → ChainState.GetLatestBlockAllowStale) follows only blocks the
+// CHAIN-level anti-lie guard accepted. A relay-harvested tip that ChainState REJECTS as an outlier
+// must NOT move it, even though it passes the per-endpoint store guard. This is what the retired
+// bootstrap atomic's chain-accepted gate used to protect — now it falls out of reading the guarded
+// self-healing tip directly.
+func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -343,28 +374,28 @@ func TestHarvest_BootstrapAtomicGatedOnChainStateVerdict(t *testing.T) {
 	// GET_BLOCKNUM (eth_blockNumber): the tip-eligible method whose result IS the node's tip.
 	cm := &mockChainMessage{api: &spectypes.Api{Name: "eth_blockNumber"}, requestedBlock: spectypes.LATEST_BLOCK}
 
-	// An honest tip-eligible harvest ratchets the atomic (ChainState accepts it).
+	// An honest tip-eligible harvest moves the tip (ChainState accepts it).
 	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1000}, gen, "provider1")
-	require.Equal(t, uint64(1000), rpcss.latestBlockHeight.Load(), "an accepted harvest seeds the bootstrap atomic")
+	require.Equal(t, uint64(1000), rpcss.getLatestBlockAllowStale(), "an accepted harvest moves the last-known tip")
 
-	// A plausible advance ratchets the atomic (ChainState accepts; the store accepts a higher
-	// block). Ordered BEFORE the lie so the block-monotonic store does not retain a higher value
-	// that would reject it — see the T4 note below.
+	// A plausible advance moves the tip (ChainState accepts; the store accepts a higher block).
+	// Ordered BEFORE the lie so the block-monotonic store does not retain a higher value that would
+	// reject it — see the T4 note below.
 	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1050}, gen, "provider1")
-	require.Equal(t, uint64(1050), rpcss.latestBlockHeight.Load(), "a plausible advance ratchets the atomic")
+	require.Equal(t, uint64(1050), rpcss.getLatestBlockAllowStale(), "a plausible advance moves the last-known tip")
 
 	// A lying-high harvest passes the per-endpoint store guard (higher block, no anti-lie at that
-	// layer) but ChainState rejects it (fresh-tip anti-lie guard) → the atomic must NOT ratchet.
+	// layer) but ChainState rejects it (fresh-tip anti-lie guard) → the archive-routing tip must NOT move.
 	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1_000_000}, gen, "provider1")
-	require.Equal(t, uint64(1050), rpcss.latestBlockHeight.Load(),
-		"a harvest ChainState rejects as an outlier must not ratchet the monotonic atomic")
+	require.Equal(t, uint64(1050), rpcss.getLatestBlockAllowStale(),
+		"a harvest ChainState rejects as an outlier must not move the last-known tip archive routing serves")
 
 	// T4 consequence: the block-monotonic store RETAINS the lying-high 1_000_000 until it goes
-	// stale, so a subsequent honest-but-lower harvest is rejected and the harvest bails before the
-	// atomic. This is the conscious trade for fixing F2 — only a liar's own tip is inflated (F19,
-	// accepted); the global tip stays protected by ChainState's guard.
+	// stale, so a subsequent honest-but-lower harvest is rejected and the harvest bails. This is the
+	// conscious trade for fixing F2 — only a liar's own tip is inflated (F19, accepted); the global
+	// tip stays protected by ChainState's guard.
 	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1051}, gen, "provider1")
-	require.Equal(t, uint64(1050), rpcss.latestBlockHeight.Load(),
+	require.Equal(t, uint64(1050), rpcss.getLatestBlockAllowStale(),
 		"a lower harvest is rejected while the higher lie is still fresh")
 }
 
