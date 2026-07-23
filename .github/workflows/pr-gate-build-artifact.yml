@@ -89,7 +89,7 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $v"
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
