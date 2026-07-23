@@ -369,7 +369,6 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 
 	require.Equal(t, int64(0), endpointtip.Default().Block(endpointtip.Key("ETH1", "jsonrpc", url)),
 		"a historical response must NOT move the endpoint tip")
-	require.Equal(t, uint64(0), rpcss.latestBlockHeight.Load(), "a historical response must NOT move the bootstrap atomic")
 	// The store may hold a failed-poll record from the nil-connection background poll; what must
 	// NOT exist is a Relay-sourced write of the historical block.
 	if o, exists := m.GetObservation(url); exists {
@@ -383,7 +382,6 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 
 	require.Equal(t, int64(20_000_000), endpointtip.Default().Block(endpointtip.Key("ETH1", "jsonrpc", url)),
 		"a tip-eligible response moves the endpoint tip")
-	require.Equal(t, uint64(20_000_000), rpcss.latestBlockHeight.Load(), "a tip-eligible response moves the bootstrap atomic")
 	o, obsExists := m.GetObservation(url)
 	require.True(t, obsExists)
 	require.Equal(t, int64(20_000_000), o.LatestBlock)
@@ -460,11 +458,9 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 		require.NotEqual(t, int64(20_000_000), o.LatestBlock,
 			"a relay that captured the OLD generation must be rejected after same-URL replacement")
 	}
-	// The generation gate must also block the downstream ungated tip-state writes: a stale relay
-	// dropped from the store must NOT still bump the router bootstrap atomic (the poisoning the
-	// harvest gate exists to prevent).
-	require.Equal(t, uint64(0), rpcss.latestBlockHeight.Load(),
-		"a stale-generation relay must not move the bootstrap atomic after the store rejects it")
+	// The store rejection above is the gate: recordRelayBlockObservation returns false, so the
+	// harvest bails before the downstream tip-state write (OnTipObservation → SetLatestBlock) ever
+	// runs — a stale-generation relay cannot move the tip.
 
 	// Sanity: harvesting with the live generation (genB) IS accepted — proving the rejection
 	// above was the generation gate, not a broken store.

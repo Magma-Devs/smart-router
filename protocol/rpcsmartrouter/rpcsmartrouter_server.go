@@ -68,8 +68,7 @@ type RPCSmartRouterServer struct {
 	chainListener          chainlib.ChainListener
 	relayRetriesManager    *lavaprotocol.RelayRetriesManager
 	initialized            atomic.Bool
-	latestBlockHeight      atomic.Uint64 // MAG-2160: retained only as the cold-start fallback for getLatestBlock (the estimator is retired)
-	enableSelectionStats   bool          // feature flag to enable selection stats header
+	enableSelectionStats   bool // feature flag to enable selection stats header
 
 	// Per-endpoint ChainTracker manager for continuous block polling
 	endpointChainTrackerManager *endpointstate.EndpointMonitor
@@ -794,14 +793,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 						utils.LogAttr("latestBlock", relayResult.Reply.LatestBlock),
 						utils.LogAttr("endpoint", relayResult.ProviderInfo.ProviderAddress),
 					)
-					// Do NOT ratchet the bootstrap atomic here. This crafted GET_BLOCKNUM relay
-					// already flowed through sendRelayToEndpoint → sendRelayToDirectEndpoints →
-					// harvestAndUpdateTipFromRelay, which updates the atomic ONLY when ChainState
-					// accepts the block (the anti-lie gate). A direct updateLatestBlockHeight here
-					// bypassed that gate, so a lying-high health-relay response ChainState rejected
-					// still permanently ratcheted the monotonic atomic — and getLatestBlockBestEffort
-					// serves that poison to archive routing during any TTL-stale window. The gated
-					// harvest is the single atomic-update path; this call was a redundant bypass.
+					// Do NOT write tip state here. This crafted GET_BLOCKNUM relay already flowed
+					// through sendRelayToEndpoint → sendRelayToDirectEndpoints →
+					// harvestAndUpdateTipFromRelay, which drives ChainState.SetLatestBlock through the
+					// anti-lie guard. A direct tip write here would bypass that guard, letting a
+					// lying-high health-relay response ChainState rejected still move the router-wide
+					// tip. The gated harvest is the single tip-update path.
 					rpcss.relaysMonitor.LogRelay()
 					success = true
 					// If this is the first time we send relays, we want to send all of them, instead of break on first successful relay
@@ -838,71 +835,22 @@ func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays 
 	return rpcss.sendRelayWithRetries(ctx, retries, initialRelays, protocolMessage)
 }
 
-func (rpcss *RPCSmartRouterServer) getLatestBlock() uint64 {
-	// Site A (MAG-2160): the router-wide tip (archive routing, finality labels) is the per-chain
-	// ChainState OBSERVED tip — TTL-fresh, monotonic, outlier-guarded — replacing the
-	// global-tracker → estimator → atomic ladder. Cache FINALIZATION does not read this: it
-	// needs the strict-majority consensus baseline (getLatestBlockForCacheFinalization), because
-	// the optimistic tip trusts a single fresh reporter and only heals a sub-threshold lie after
-	// TTL, which is not good enough when a too-high value falsely finalizes.
-	if rpcss.chainState != nil {
-		if block, ok := rpcss.chainState.GetLatestBlock(); ok && block > 0 {
-			return uint64(block)
-		}
-		// ChainState is the authority once it has EVER observed a tip. If it is Initialized but
-		// not fresh, the tip has aged past TTL — we must NOT revive a frozen atomic value
-		// (Finding 1). Report unknown (0); a stale-but-real tip is worse than an honest "unknown",
-		// and the atomic's last write could itself be the stale value we just rejected.
-		if rpcss.chainState.Initialized() {
-			return 0
-		}
-	}
-
-	// Genuine cold-start ONLY (ChainState never initialized): in the bootstrap window before the
-	// first observation, fall back to the monotonic atomic — seeded by the tip-eligible init
-	// relay — so getLatestBlock isn't 0 during startup. Once ChainState initializes, this branch
-	// is never taken again, so a post-TTL gap cannot resurrect a frozen atomic.
-	if latest := rpcss.latestBlockHeight.Load(); latest > 0 {
-		return latest
-	}
-
-	return 0
-}
-
-// getLatestBlockBestEffort returns the strict ChainState tip when fresh, otherwise the
-// last-known monotonic atomic tip (seeded by the init relay + tip-eligible relay harvest).
-// It deliberately diverges from getLatestBlock's strict-0-on-stale contract (see the comment
-// there): archive ROUTING only needs a recent-enough head to decide old-vs-recent, and a
-// slightly-stale head mis-classifies at worst a handful of near-head blocks — whereas the
-// strict 0 forces EVERY concrete-block request to the archive pool (archive_parser_rule.go:33).
-// Cache FINALIZATION must keep the strict consensus source (getLatestBlockForCacheFinalization —
-// a stale or optimistic tip there can falsely finalize), so this accessor is for archive routing
-// only. Returns 0 only at genuine cold-start, preserving the conservative force-archive fallback
-// before any tip has ever been observed.
-func (rpcss *RPCSmartRouterServer) getLatestBlockBestEffort() uint64 {
-	if block := rpcss.getLatestBlock(); block > 0 {
-		return block
-	}
-	return rpcss.latestBlockHeight.Load()
-}
-
-// getLatestBlockForCacheFinalization returns the tip cache finalization measures against: the
-// ChainState tip when fresh, else 0. It must NOT fall back to the bootstrap atomic or any
-// best-effort source (see isFinalizedForCacheWrite's doc block): a too-high value here FALSELY
-// finalizes — it writes still-mutable blocks into the long-TTL finalized store, globally and
-// durably.
+// getLatestBlock is the GATED router-wide tip read: the per-chain ChainState OBSERVED tip when
+// TTL-fresh, else 0 (never a stale value). It is shared by the request seenBlock / cache key,
+// finality labels, AND cache finalization — a stale or too-high value must not reach finalization,
+// which would falsely finalize a still-mutable block into the long-TTL store, globally and durably.
 //
-// Topic C T1/D4: this read the strict-majority CONSENSUS baseline until the single-reader
-// decision. Reading the tip is a deliberate, bounded loosening — Recompute now caps the tip at
-// baseline+OutlierThreshold and pulls it up to the baseline, so the tip can lead consensus by at
-// most the outlier threshold rather than being unbounded. The residual risk is real and worth
-// naming: on a pod that never forms a majority (1-2 endpoints) there is nothing to cap against,
-// so a sub-threshold lie still only heals after TTL, and finalization is measured against a value
-// that can lead the true head. A 0 merely under-finalizes: isFinalizedForCacheWrite
-// then falls back to Reply.LatestBlock, which is self-scoped to the reporting provider, so a
-// no-baseline pod degrades to per-reply finalization (echo-block methods land in the short-TTL
-// temp store) rather than trusting an unvetted global value — the safe direction.
-func (rpcss *RPCSmartRouterServer) getLatestBlockForCacheFinalization() uint64 {
+// It reads the guarded tip, not the strict consensus baseline (Topic C T1/D4): Recompute caps the
+// tip at baseline+OutlierThreshold, a deliberate bounded loosening. The named residual is a 1-2
+// endpoint pod with no majority to cap against, where a sub-threshold lie heals only after TTL. A 0
+// merely UNDER-finalizes — the safe direction: isFinalizedForCacheWrite then falls back to the
+// provider's own Reply.LatestBlock (self-scoped), so a no-tip pod degrades to per-reply finalization
+// rather than trusting an unvetted global value.
+//
+// Archive ROUTING instead uses getLatestBlockAllowStale, which tolerates a slightly-stale tip.
+// Cold-start (ChainState never initialized, or aged past TTL) returns 0 — the retired bootstrap
+// atomic (T3) could never heal; the tip is re-seeded by the next observation.
+func (rpcss *RPCSmartRouterServer) getLatestBlock() uint64 {
 	if rpcss.chainState != nil {
 		if block, ok := rpcss.chainState.GetLatestBlock(); ok && block > 0 {
 			return uint64(block)
@@ -911,24 +859,23 @@ func (rpcss *RPCSmartRouterServer) getLatestBlockForCacheFinalization() uint64 {
 	return 0
 }
 
-func (rpcss *RPCSmartRouterServer) updateLatestBlockHeight(blockHeight uint64, providerAddress string) {
-	for {
-		current := rpcss.latestBlockHeight.Load()
-		if blockHeight <= current {
-			break
-		}
-		if rpcss.latestBlockHeight.CompareAndSwap(current, blockHeight) {
-			// Update router-level latest block metric
-			if rpcss.smartRouterEndpointMetrics != nil {
-				rpcss.smartRouterEndpointMetrics.SetRouterLatestBlock(
-					rpcss.listenEndpoint.ChainID,
-					rpcss.listenEndpoint.ApiInterface,
-					int64(blockHeight),
-				)
-			}
-			break
+// getLatestBlockAllowStale returns the last-known ChainState tip for archive ROUTING — the raw
+// self-healing value (TTL-ignored, via GetLatestBlockAllowStale), 0 only before any tip has ever been
+// observed. It deliberately diverges from getLatestBlock's strict-0-on-stale contract: archive
+// routing only needs a recent-enough head to decide old-vs-recent, and a slightly-stale head
+// mis-classifies at worst a handful of near-head blocks — whereas a strict 0 forces EVERY
+// concrete-block request to the archive pool (archive_parser_rule.go:33). The tip self-heals both
+// directions (SetLatestBlock grows it under the outlier guard and re-adopts a lower block once
+// stale), so a stale value here cannot stay stuck on a lie the way the retired bootstrap atomic
+// could. Cache FINALIZATION must NOT use this — it keeps the gated getLatestBlock (a stale or
+// optimistic-high value there can falsely finalize).
+func (rpcss *RPCSmartRouterServer) getLatestBlockAllowStale() uint64 {
+	if rpcss.chainState != nil {
+		if raw := rpcss.chainState.GetLatestBlockAllowStale(); raw > 0 {
+			return uint64(raw)
 		}
 	}
+	return 0
 }
 
 func (rpcss *RPCSmartRouterServer) SendRelay(
@@ -2507,12 +2454,11 @@ func runProbeCycleCore(
 // getTransactionReceipt, getLogs — all carry a positive Reply.LatestBlock) from a "current-tip
 // observation" (eth_blockNumber / eth_getBlockByNumber("latest") / Solana result.context.slot).
 // ONLY the latter may move tip state: the per-endpoint observation store, the endpoint's
-// reactive LatestBlock (read by consistency pre-validation), the bootstrap atomic (latestBlockHeight,
-// the cold-start fallback for getLatestBlock), and the latest-block metric. A historical response
-// updates NONE of these, so it can no longer poison
-// the endpoint tip. The bootstrap atomic is additionally gated on the CHAIN-level ChainState
-// verdict (see the inline comment below) — per-endpoint acceptance alone must not ratchet a
-// router-wide monotonic value. "The block this response serviced" (latestServicedBlock) is a separate
+// reactive LatestBlock (read by consistency pre-validation), and the latest-block metric. A
+// historical response updates NONE of these, so it can no longer poison the endpoint tip. The
+// router-wide latest-block metric is sourced from the guarded ChainState tip (see the inline comment
+// below) — per-endpoint acceptance alone must not move a router-wide value. "The block this response
+// serviced" (latestServicedBlock) is a separate
 // concept the caller handles ungated. No-op when targetEndpoint is nil or the response is not
 // tip-eligible. harvestGen is the generation captured before dispatch (finding 5).
 func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
@@ -2538,25 +2484,22 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 	if !rpcss.recordRelayBlockObservation(targetEndpoint, harvestGen, tip) {
 		return
 	}
-	// The router-wide bootstrap atomic is monotonic-max with NO downward correction, so it may
-	// only follow blocks the CHAIN-level anti-lie guard accepted — the per-endpoint store's
-	// time-monotonic acceptance above is the wrong scope (a lying-high endpoint passes its own
-	// per-endpoint guard). By the time recordRelayBlockObservation returns, the monitor's
-	// OnTipObservation hook has already driven ChainState.SetLatestBlock with this very block
-	// (synchronously, after obsMu release — see RecordRelayObservation's deferred callback), so
-	// the ChainState tip reflects the verdict: an accepted block reads back as tip >= block, a
-	// rejected outlier reads back lower (or stale). Without this gate, one bogus high harvest
-	// (e.g. a lying Solana context slot) permanently ratchets the atomic, and whenever ChainState
-	// is TTL-stale, getLatestBlockBestEffort serves the lie to archive routing for the life of
-	// the process. The per-endpoint metric below deliberately stays gated on the store only: it
-	// reports THIS endpoint's own view, so the per-endpoint guard is the right scope for it.
-	chainAccepted := true
-	if rpcss.chainState != nil {
-		accepted, ok := rpcss.chainState.GetLatestBlock()
-		chainAccepted = ok && tip <= accepted
-	}
-	if chainAccepted {
-		rpcss.updateLatestBlockHeight(uint64(tip), endpointAddress)
+	// Router-wide latest-block metric, sourced from the guarded tip (the bootstrap atomic is retired,
+	// T3). By the time recordRelayBlockObservation returns, the monitor's OnTipObservation hook has
+	// driven ChainState.SetLatestBlock with this block (synchronously, after obsMu release — see
+	// RecordRelayObservation's deferred callback), so the tip already reflects the verdict: an accepted
+	// block reads back as tip >= block, a rejected outlier reads back lower (or stale). Reporting the
+	// guarded tip (not the raw harvested `tip`) keeps a lying-high endpoint out of the router-wide
+	// metric, the scope the old chain-accepted gate protected. The per-endpoint metric below stays
+	// gated on the store only: it reports THIS endpoint's own view.
+	if rpcss.chainState != nil && rpcss.smartRouterEndpointMetrics != nil {
+		if accepted, ok := rpcss.chainState.GetLatestBlock(); ok {
+			rpcss.smartRouterEndpointMetrics.SetRouterLatestBlock(
+				rpcss.listenEndpoint.ChainID,
+				rpcss.listenEndpoint.ApiInterface,
+				accepted,
+			)
+		}
 	}
 	if rpcss.smartRouterEndpointMetrics != nil {
 		// endpointAddress is the provider name (session map key), so resolveProviderName
@@ -2771,19 +2714,21 @@ func (rpcss *RPCSmartRouterServer) initializeChainTrackers(ctx context.Context) 
 // cache-write goes to the long-TTL finalized store or the short-TTL temp
 // store. Reply.LatestBlock is unreliable for methods that echo the requested
 // block (eth_getBlockByNumber returns result.number = requested), so the
-// router's tracked tip (surfaced via getLatestBlockForCacheFinalization())
-// wins when it is higher.
+// router's tracked tip (surfaced via the GATED getLatestBlock()) wins when it is
+// higher.
 //
-// IMPORTANT — finalization MUST be passed getLatestBlockForCacheFinalization(),
-// never getLatestBlockBestEffort() the way archive routing (#1) does. A higher
+// IMPORTANT — finalization MUST be passed the GATED getLatestBlock() (fresh tip or
+// 0), never getLatestBlockAllowStale() the way archive routing (#1) does. A higher
 // "latest" here FALSELY finalizes (writes a not-yet-final block to the long-TTL
 // store, globally and durably — far worse than replyLatestBlock, which is
 // self-scoped to one provider's reply), so the source must never be a value with
-// no downward correction. The bootstrap atomic is monotonic-max and disqualified
-// for exactly that reason.
+// no downward correction. getLatestBlockAllowStale serves a slightly-stale tip and
+// is disqualified for exactly that reason; the gated getLatestBlock returns 0 when
+// stale (the retired bootstrap atomic never healed — the original reason it too was
+// disqualified).
 //
-// Topic C T1/D4: getLatestBlockForCacheFinalization returned the strict-majority
-// CONSENSUS baseline (or 0) until the single-reader decision; it now returns the
+// Topic C T1/D4: getLatestBlock (the gated read) returned the strict-majority
+// CONSENSUS baseline (or 0) for finalization until the single-reader decision; it now returns the
 // TIP. The tip DOES have a downward path — Recompute snaps it to the baseline
 // when it leads by more than OutlierThreshold, and TTL expiry allows downward
 // re-adoption — but it is a looser bound than the baseline was:
@@ -2918,7 +2863,9 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	// reads result.number), so the naive check never marks any historical
 	// block finalized and every entry takes the ~625 ms non-finalized TTL.
 	latestBlock := relayResult.Reply.LatestBlock
-	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlockForCacheFinalization()), int64(blockDistanceForFinalizedData))
+	// Finalization uses the GATED getLatestBlock (fresh tip or 0), never getLatestBlockAllowStale:
+	// a stale or too-high head here would falsely finalize a mutable block into the long-TTL store.
+	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
 
 	// Convert LATEST_BLOCK to actual block number for cache key
 	// This must match the logic in cache lookup (sendRelayToEndpoint) to ensure cache hits
@@ -3638,15 +3585,15 @@ func (rpcss *RPCSmartRouterServer) getExtensionsFromDirectiveHeaders(directiveHe
 		utils.LavaFormatTrace("[Archive Debug] Processed extensions", utils.LogAttr("extensions", extensions))
 		if len(extensions) == 1 && extensions[0] == "none" {
 			// none eliminates existing extensions
-			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockBestEffort(), ExtensionOverride: []string{}}
+			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockAllowStale(), ExtensionOverride: []string{}}
 		} else if len(extensions) > 0 {
 			// All extensions from headers use AdditionalExtensions (consistent behavior)
 			utils.LavaFormatTrace("[Archive Debug] Using AdditionalExtensions for all header extensions", utils.LogAttr("extensions", extensions))
-			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockBestEffort(), AdditionalExtensions: extensions}
+			return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockAllowStale(), AdditionalExtensions: extensions}
 		}
 	}
 	utils.LavaFormatTrace("[Archive Debug] No extension override header found")
-	return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockBestEffort()}
+	return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockAllowStale()}
 }
 
 func (rpcss *RPCSmartRouterServer) HandleDirectiveHeadersForMessage(chainMessage chainlib.ChainMessage, directiveHeaders map[string]string) {

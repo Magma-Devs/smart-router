@@ -9,9 +9,13 @@
 // touches QoS or endpoint.Enabled, and nothing external writes its consensus — there is no
 // SetMajorityBaseline API (T2, inverted: ChainState owns consensus; the probe is read-only).
 //
-// It exposes ONE read API for "what block is the chain at" (Topic C governing decision, D1/D4):
-//   - GetLatestBlock / GetLatestBlockWithTime — the tip. Every consumer reads this: archive
-//     routing, cache finalization, sync scoring, and consistency.
+// It exposes the read API for "what block is the chain at" (Topic C governing decision, D1/D4):
+//   - GetLatestBlock / GetLatestBlockWithTime — the tip when TTL-fresh, else not-found (never a
+//     stale value). Cache finalization, sync scoring, consistency, and the request seenBlock read this.
+//   - GetLatestBlockAllowStale — the same tip but TTL-ignored (0 only if never observed), for archive
+//     routing, which prefers a slightly-stale head to "unknown". Both self-heal via SetLatestBlock /
+//     Recompute (grow under the outlier guard, re-adopt a lower block once stale), so neither can stay
+//     stuck on a lie the way the retired bootstrap atomic could.
 //
 // Consensus is NOT a readable value — it is background machinery that corrects the tip at the
 // band edges only (see Recompute): snap DOWN when the tip leads consensus by more than
@@ -318,6 +322,18 @@ func (cs *ChainState) GetLatestBlock() (int64, bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.freshLatestLocked(cs.effectiveNow())
+}
+
+// GetLatestBlockAllowStale returns the current tip value IGNORING TTL freshness — the last accepted,
+// self-healing observation (0 if none yet). It is for lenient readers (archive routing) that
+// prefer a slightly-stale head over an "unknown" that would force every request to the archive
+// pool. The tip still self-heals: SetLatestBlock grows it under the outlier guard and re-adopts a
+// lower block once stale, so this can lag but cannot stay stuck on a lie (unlike the retired
+// bootstrap atomic). Freshness-sensitive readers (cache finalization) use GetLatestBlock instead.
+func (cs *ChainState) GetLatestBlockAllowStale() int64 {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.latestBlock
 }
 
 // GetLatestBlockWithTime is GetLatestBlock plus the wall-clock at which the current tip BLOCK was
