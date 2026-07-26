@@ -122,14 +122,13 @@ func outlierThresholdForBlockTime(averageBlockTime time.Duration) int64 {
 	return blocks
 }
 
-// StalenessWindow derives the "fresh/alive horizon" from a chain's average block time:
-// max(DefaultStalenessMultiplier × avgBlockTime, minStalenessWindow). The consensus window / tip
-// TTL (DefaultConfig) and the per-endpoint tip's staleness backstop (endpointtip, fed via the
-// monitor) both call it, so they move in lockstep. The shared knob across the codebase is the
-// MULTIPLIER, not this function: the probe's liveness horizon (probing.DefaultVerdictConfig)
-// re-derives with DefaultStalenessMultiplier but a deliberately different floor (minProbeStaleness),
-// so it tracks the multiplier without reading this function. A non-positive block time falls back
-// to the floor.
+// StalenessWindow is the ONE derivation of the "fresh/alive horizon" from a chain's average block
+// time: max(DefaultStalenessMultiplier × avgBlockTime, minStalenessWindow). Every consumer of the
+// concept reads it — the consensus window / tip TTL (DefaultConfig) and the per-endpoint tip's
+// staleness backstop (endpointtip, fed via the monitor) use it directly, and the probe's liveness
+// horizon (probing.DefaultVerdictConfig) composes it with its own wider floor (max(StalenessWindow,
+// minProbeStaleness)) — so tuning the derivation here moves all of them in lockstep. A non-positive
+// block time falls back to the floor.
 func StalenessWindow(averageBlockTime time.Duration) time.Duration {
 	return max(time.Duration(DefaultStalenessMultiplier)*averageBlockTime, minStalenessWindow)
 }
