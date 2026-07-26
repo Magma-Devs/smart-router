@@ -76,6 +76,43 @@ func TestAdoptSharedStateTip(t *testing.T) {
 		}
 		require.NotPanics(t, func() { rpcss.adoptSharedStateTip(ctx, 5000, 1) })
 	})
+
+	// The one case where a peer value is NOT snapped down: a COLD (uninitialized) ChainState has no
+	// reference, so SetLatestBlock's anti-lie guard cannot fire on the first observation and the peer
+	// tip is accepted RAW — the same cold-start hole as a local first-observation lie (F1/F11),
+	// reachable via a peer. Documented here as a bounded residual: it self-heals within one TTL.
+	t.Run("cold-start adopt is accepted raw, then self-heals within one TTL", func(t *testing.T) {
+		// A cold ChainState with a fixed base clock (warped via SetDebugClockOffset for the TTL step).
+		clock := func() time.Time { return time.Unix(1700000000, 0) }
+		cs := chainstate.NewWithClock("ETH1", chainstate.Config{
+			BucketWidth:      2,
+			OutlierThreshold: 100,
+			StalenessWindow:  10 * time.Second,
+			TTL:              10 * time.Second,
+		}, clock)
+		rpcss := &RPCSmartRouterServer{
+			listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			chainState:     cs,
+			sharedState:    true,
+		}
+
+		// localSeenBlock is 0 on a cold pod, so the not-ahead guard passes; with no reference yet,
+		// the lie is accepted raw.
+		rpcss.adoptSharedStateTip(ctx, liarClaim, 0)
+		got, ok := cs.GetLatestBlock()
+		require.True(t, ok)
+		require.Equal(t, liarClaim, got,
+			"cold-start adopt has no reference to reject against — accepted raw (documented residual)")
+
+		// Bounded: once the poisoned tip goes TTL-stale, the next honest local observation re-adopts
+		// it downward. No manual reset — the lie lives ~one TTL, not the process lifetime.
+		cs.SetDebugClockOffset(11 * time.Second) // past TTL (10s)
+		cs.SetLatestBlock(honestBlock)
+		got, ok = cs.GetLatestBlock()
+		require.True(t, ok)
+		require.Equal(t, honestBlock, got,
+			"the cold-start adopt lie self-heals within one TTL — bounded, not permanent")
+	})
 }
 
 // TestAdoptSharedStateTip_StaleTipTakesLowerPeerValue pins why the adopt log reports
