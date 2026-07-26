@@ -601,6 +601,29 @@ func setAllChainStateDebugOffset(deps debugMuxDeps, offset time.Duration) int {
 	return count
 }
 
+// resetAllChainStates clears every server's ChainState tip and consensus baseline back to cold
+// start. This is the operator recovery for a poisoned tip that cannot self-heal — a within-band
+// lie kept fresh by the liar's own traffic, or a cold-start lie before any peer baseline forms.
+// Recompute and stale-tip re-adoption bound most poisoning to ~one TTL, but neither can drop a
+// within-band value while the liar keeps reporting it, so /debug/reset-* is the only immediate
+// path down. Returns the number of ChainStates reset. Nil-safe at every level.
+func resetAllChainStates(deps debugMuxDeps) int {
+	if deps.router == nil {
+		return 0
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	count := 0
+	for _, server := range deps.router.rpcServers {
+		if server == nil || server.chainState == nil {
+			continue
+		}
+		server.chainState.Reset()
+		count++
+	}
+	return count
+}
+
 // resetEndpointHealthAndGauge re-enables every endpoint across all session managers
 // (ConsumerSessionManager.ResetEndpointHealth — clears ConnectionRefusals, sets
 // Enabled=true) and mirrors the reset onto the per-endpoint Prometheus health gauge for
@@ -859,10 +882,11 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-scores — clears optimizer score state without changing
 	// current time offset or NowFunc. Also zeroes per-endpoint chain-tracker
-	// latest-block values. (It used to flush the per-chain seen-block caches too;
-	// that store was retired by Topic C C-G.) Gives a recovery path
-	// that does not touch session-manager state — which trips a separate BTC-router
-	// regression on /debug/reset-all.
+	// latest-block values and resets the per-chain ChainState tip/baseline. (It
+	// used to flush the per-chain seen-block caches too; that store was retired by
+	// Topic C C-G, and the ChainState tip that replaced it is what the reset below
+	// now clears.) Gives a recovery path that does not touch session-manager state
+	// — which trips a separate BTC-router regression on /debug/reset-all.
 	mux.HandleFunc("/debug/reset-scores", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -875,9 +899,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			return true
 		})
 		trackersReset := resetAllChainTrackers(deps)
+		chainStatesReset := resetAllChainStates(deps)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d,"trackers_reset":%d}`,
-			count, trackersReset)
+		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d,"trackers_reset":%d,"chainstates_reset":%d}`,
+			count, trackersReset, chainStatesReset)
 	})
 
 	// POST /debug/reset-all — flush every state store the test framework
@@ -915,11 +940,15 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// /debug/chain-state-time-warp endpoint (offset 0), so a QoS reset never disturbs ChainState
 		// (MAG-2307 review).
 
-		// 2. (Removed) The per-chain seen-block consistency caches were flushed here.
-		//    Topic C C-G retired that store entirely — consistency now measures against the
-		//    anti-lie-guarded chain tip, which self-heals, so there is no sticky per-user value
-		//    left for an operator to flush. The chain tip itself is reset via the tracker reset
-		//    below.
+		// 2. The per-chain seen-block consistency caches used to be flushed here. Topic C C-G
+		//    retired that store entirely — consistency now measures against the anti-lie-guarded
+		//    chain tip. The tip self-heals from most poisoning (Recompute snaps an out-of-band tip
+		//    down; stale-tip re-adoption drops a frozen one within a TTL), but a WITHIN-BAND lie
+		//    kept fresh by the liar's own traffic, and a cold-start lie before any peer baseline
+		//    forms, have no automatic downward path. So the tip that replaced the seen-block store
+		//    IS reset here explicitly — this is the operator big-hammer that self-heal can't cover.
+		//    Surfaced in the response body as the "chain-state" capability below.
+		resetAllChainStates(deps)
 		//
 		// 3. Per-server RelayRetriesManagers (6h hash ban cache), 4. per-CSM
 		//    transient failure state, and 4b. per-CSM blocked-providers list.
@@ -1000,21 +1029,19 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// Capability advertisement — hardcoded for in-process stores, plus a
 		// conditional "cache-be" key when the external pod was actually
 		// flushed. The test framework probes this body to decide between this
-		// endpoint and the legacy 4-call dance. NOTE: "seen-block" is now stale —
-		// it signalled the per-chain consistency-cache flush, but Topic C C-G
-		// retired that store and reset-all does not reset the ChainState tip that
-		// replaced it, so nothing backs this key. Left in place because external
-		// probers may require it; see task T11 in
-		// agent_docs/bug-reports/chainTracker-architecture/topic-C-action-plan.md.
-		// "cache-be" signals
-		// MAG-1764 end-to-end coverage, "blocked-providers" signals MAG-1810,
-		// and "endpoint-health" + "pairing" signal the MAG-2186 endpoint-health
-		// reset and cold pairing rebuild added above.
+		// endpoint and the legacy 4-call dance. "seen-block" is retained for
+		// external probers that still require the key: the per-user store it
+		// named was retired by Topic C C-G, but reset-all now clears the
+		// ChainState tip that replaced it (also advertised as "chain-state"), so
+		// the key is honest again — a reset genuinely drops the tip. "cache-be"
+		// signals MAG-1764 end-to-end coverage, "blocked-providers" signals
+		// MAG-1810, and "endpoint-health" + "pairing" signal the MAG-2186
+		// endpoint-health reset and cold pairing rebuild added above.
 		w.Header().Set("Content-Type", "application/json")
 		if cacheBeFlushed {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","endpoint-health","pairing","cache-be"]}`)
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","cache-be"]}`)
 		} else {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","blocked-providers","endpoint-health","pairing"]}`)
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing"]}`)
 		}
 	})
 
@@ -1291,7 +1318,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// each provider's poll schedule returns to base cadence (MAG-2395). The back-off (fetchFails
 	// streak) is unreachable by reset-all / reset-scores / reset-endpoint-health / reset-pairing, so
 	// a provider that failed before a reset otherwise keeps its stretched schedule (up to
-	// BACKOFF_MAX_TIME = 10m) after it. Cadence only — nothing else is touched. The effect is
+	// BACKOFF_MAX_TIME = 1m) after it. Cadence only — nothing else is touched. The effect is
 	// observable as PollIntervalMs returning to base in /debug/endpoint-state.
 	mux.HandleFunc("/debug/reset-probe-backoff", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

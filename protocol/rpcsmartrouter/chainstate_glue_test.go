@@ -122,14 +122,32 @@ func TestGetLatestBlockForCacheFinalization_TipOrZero(t *testing.T) {
 	require.Equal(t, uint64(1050), rpcss.getLatestBlockForCacheFinalization(),
 		"a within-threshold optimistic lead survives the edge correction and is what finalization sees")
 
-	// An implausible tip IS corrected: a majority far below it snaps the tip down to the baseline,
-	// which is what bounds how far finalization can be led astray on a pod that forms consensus.
-	cs.SetLatestBlock(1200)
-	cs.Recompute([]chainstate.BlockObservation{
-		{URL: "a", Block: 1060, ObservedAt: clk.now()},
-		{URL: "b", Block: 1060, ObservedAt: clk.now()},
+	// An over-band tip IS corrected down to the baseline, which bounds how far finalization can be
+	// led astray on a pod that forms consensus. This needs a FRESH cold state: once a baseline
+	// exists, SetLatestBlock's outlier guard rejects an over-band write, so the only way a tip can
+	// sit more than OutlierThreshold above a majority is a cold-start lie accepted before any peer
+	// baseline formed. (Writing cs.SetLatestBlock(1200) on the state above would be REJECTED
+	// against baseline 1040+100, leaving the tip at 1050 — the subsequent Recompute would then
+	// exercise pull-up, not the snap-down this phase means to lock.)
+	clkSnap := &manualClock{t: time.Unix(1_700_000_000, 0)}
+	csSnap := chainstate.NewWithClock("ETH1", chainstate.Config{
+		BucketWidth:      2,
+		OutlierThreshold: 100,
+		StalenessWindow:  10 * time.Second,
+		TTL:              10 * time.Second,
+	}, clkSnap.now)
+	rpcssSnap := &RPCSmartRouterServer{
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		chainState:     csSnap,
+	}
+	csSnap.SetLatestBlock(1200) // accepted raw: first observation, no reference to reject against
+	require.Equal(t, uint64(1200), rpcssSnap.getLatestBlockForCacheFinalization(),
+		"a cold-start over-band tip is accepted raw and finalization sees it — the documented residual")
+	csSnap.Recompute([]chainstate.BlockObservation{
+		{URL: "a", Block: 1060, ObservedAt: clkSnap.now()},
+		{URL: "b", Block: 1060, ObservedAt: clkSnap.now()},
 	})
-	require.Equal(t, uint64(1060), rpcss.getLatestBlockForCacheFinalization(),
+	require.Equal(t, uint64(1060), rpcssSnap.getLatestBlockForCacheFinalization(),
 		"a tip leading consensus by more than OutlierThreshold is snapped down before finalization reads it")
 
 	// The tip ages past TTL → strict 0 (never a frozen value).

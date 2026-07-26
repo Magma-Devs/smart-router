@@ -231,12 +231,16 @@ func TestDebugResetAll_SmartRouter_ReturnsCapabilityAdvertisement(t *testing.T) 
 	require.Contains(t, body, `"session-manager"`)
 	require.Contains(t, body, `"reported-providers"`)
 	require.Contains(t, body, `"sticky-sessions"`)
-	// seen-block: STALE capability. It signalled the per-chain consistency-cache
-	// flush, but Topic C C-G retired that store and reset-all does not reset the
-	// ChainState tip that replaced it — nothing backs this key today. The assertion
-	// is kept so the advertised contract cannot change silently while external
-	// probers may still require it; see task T11 in the topic-C action plan.
+	// seen-block: retained capability. It named the per-chain consistency-cache
+	// flush, which Topic C C-G retired — but reset-all now resets the ChainState
+	// tip that replaced that store (advertised as "chain-state" below), so the key
+	// is honest again. The assertion is kept so the advertised contract cannot
+	// change silently while external probers may still require it.
 	require.Contains(t, body, `"seen-block"`)
+	// chain-state: reset-all clears every per-chain ChainState tip/baseline. This is
+	// the operator recovery for a poisoned tip that cannot self-heal (a within-band
+	// lie kept fresh by the liar's own traffic).
+	require.Contains(t, body, `"chain-state"`)
 	// blocked-providers (MAG-1810): in direct-rpc mode there are no epoch
 	// transitions, so currentlyBlockedProviderAddresses can only grow as
 	// tests trigger blockProvider. reset-all must restore the list to
@@ -391,7 +395,7 @@ func postChainStateTimeWarp(mux http.Handler, rawBody string) *httptest.Response
 
 // newAgedChainStateRouter wires one ETH1 ChainState with a just-established baseline (10s TTL) into a
 // router + debug mux, and returns the mux plus a helper reading the single /debug/chain-state row.
-func newAgedChainStateRouter(t *testing.T) (http.Handler, func() map[string]any) {
+func newAgedChainStateRouter(t *testing.T) (http.Handler, *chainstate.ChainState, func() map[string]any) {
 	t.Helper()
 	offsetNano := new(atomic.Int64)
 	cs := chainstate.New("ETH1", chainstate.Config{
@@ -418,14 +422,14 @@ func newAgedChainStateRouter(t *testing.T) (http.Handler, func() map[string]any)
 		require.Len(t, rows, 1)
 		return rows[0]
 	}
-	return mux, chainStateRow
+	return mux, cs, chainStateRow
 }
 
 // TestDebugChainStateTimeWarp_AgesChainState is the MAG-2307 end-to-end check at the HTTP layer: the
 // dedicated /debug/chain-state-time-warp endpoint ages every per-chain ChainState so /debug/chain-state
 // reports the tip/baseline as no longer fresh, and resetting the offset to 0 restores them.
 func TestDebugChainStateTimeWarp_AgesChainState(t *testing.T) {
-	mux, chainStateRow := newAgedChainStateRouter(t)
+	mux, _, chainStateRow := newAgedChainStateRouter(t)
 
 	// Freshly established → both gated verdicts true.
 	row := chainStateRow()
@@ -456,7 +460,7 @@ func TestDebugChainStateTimeWarp_AgesChainState(t *testing.T) {
 // the optimizer/QoS clock ONLY. Both a forward warp and the reset-to-0 there must leave ChainState
 // untouched, so the routine QoS warp-then-reset can never accidentally disturb ChainState.
 func TestDebugTimeWarp_DoesNotTouchChainState(t *testing.T) {
-	mux, chainStateRow := newAgedChainStateRouter(t)
+	mux, _, chainStateRow := newAgedChainStateRouter(t)
 	require.Equal(t, true, chainStateRow()["TipFresh"])
 
 	// A QoS time-warp forward past ChainState's TTL must NOT age ChainState.
@@ -477,18 +481,25 @@ func TestDebugTimeWarp_DoesNotTouchChainState(t *testing.T) {
 // that is exclusively the /debug/chain-state-time-warp endpoint's job. A regression re-adding the
 // removed setAllChainStateDebugOffset(deps, 0) call inside reset-all would fail this test.
 func TestDebugResetAll_DoesNotTouchChainStateWarp(t *testing.T) {
-	mux, chainStateRow := newAgedChainStateRouter(t)
+	mux, cs, chainStateRow := newAgedChainStateRouter(t)
 
 	// Warp ChainState past its TTL via the dedicated endpoint.
 	rr := postChainStateTimeWarp(mux, `{"offset_seconds":200}`)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Equal(t, false, chainStateRow()["TipFresh"], "the ChainState warp is active")
 
-	// A full /debug/reset-all must leave that warp intact.
+	// A full /debug/reset-all clears the ChainState tip (T11) but must NOT clear its debug warp
+	// offset — that offset is exclusively the /debug/chain-state-time-warp endpoint's job.
 	req := httptest.NewRequest(http.MethodPost, "/debug/reset-all", nil)
 	resetRR := httptest.NewRecorder()
 	mux.ServeHTTP(resetRR, req)
 	require.Equal(t, http.StatusOK, resetRR.Code, "body=%q", resetRR.Body.String())
+
+	// reset-all zeroed the tip, so it reads not-fresh regardless of the warp. To prove the warp
+	// offset SURVIVED reset-all, re-seed a tip: with the +200s warp still active it must read stale
+	// immediately. A regression re-adding setAllChainStateDebugOffset(deps, 0) inside reset-all would
+	// have cleared the warp, and this freshly-seeded tip would then read fresh — failing here.
+	cs.SetLatestBlock(2000)
 	require.Equal(t, false, chainStateRow()["TipFresh"], "/debug/reset-all must NOT clear the ChainState warp")
 
 	// The warp is still cleared only via its own endpoint.

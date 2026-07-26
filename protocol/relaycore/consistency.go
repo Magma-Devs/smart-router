@@ -21,9 +21,8 @@ import (
 // (chainstate.ChainState.GetLatestBlock) — see ValidateEndpointCapability.
 //
 // Only the key derivation survives, because the shared-state cache path still identifies a caller
-// by dapp+IP. Rebuilding that path on a chain-level key is task T10 in
-// agent_docs/bug-reports/chainTracker-architecture/topic-C-action-plan.md; once it lands, this
-// function has no callers either.
+// by dapp+IP. Rebuilding that path on a chain-level key is tracked as follow-up task T10; once it
+// lands, this function has no callers either.
 
 // UserDataKey derives the per-caller identity string used as the shared-state cache id. It is the
 // same dappId__consumerIp form the retired consistency cache used for its keys, kept byte-identical
