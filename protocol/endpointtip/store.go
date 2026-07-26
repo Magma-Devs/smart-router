@@ -80,8 +80,11 @@ func Key(chainID, apiInterface, url string) string {
 //
 // Staleness is the gap between the stored and incoming observation stamps (> staleAfter),
 // not wall-clock — deterministic, no clock. A rejected write must not refresh the stamp,
-// else a repeated straggler keeps the tip forever fresh. staleAfter<=0 is up-only.
-// Returns true iff the stored tip now reflects this block (gates the consensus feed).
+// else a repeated straggler keeps the tip forever fresh. The freshness stamp only ever
+// advances (an accepted write never carries it backwards, even when the block jumps up on
+// an earlier-stamped cross-source observation), so the staleness gap can't be widened by a
+// stamp regression. staleAfter<=0 is up-only. Returns true iff the stored tip now reflects
+// this block (gates the consensus feed).
 func (s *Store) Set(key string, t Tip, staleAfter time.Duration) bool {
 	if t.Block <= 0 {
 		return false
@@ -91,6 +94,9 @@ func (s *Store) Set(key string, t Tip, staleAfter time.Duration) bool {
 	cur, ok := s.tips[key]
 	switch {
 	case !ok || t.Block > cur.Block:
+		if ok && cur.ObservedAt.After(t.ObservedAt) {
+			t.ObservedAt = cur.ObservedAt // freshness stamp only advances, never regresses
+		}
 		s.tips[key] = t
 		return true
 	case t.Block == cur.Block:
