@@ -2640,8 +2640,8 @@ func TestSmartRouterSessionLeakPrevention_SingleProvider(t *testing.T) {
 // seedEndpointTip writes a poll-sourced tip into the shared single-source-of-truth
 // endpointtip store so the consistency/syncGap readers (which now read that store instead
 // of a per-Endpoint atomic) observe the block under test. It keys exactly as production:
-// chain|apiInterface|url. ObservedAt = time.Now() keeps the time-monotonic guard happy for
-// successive seeds within a test.
+// chain|apiInterface|url. The store is block-monotonic (T4), so a re-seed to a lower block
+// would be rejected; the helper drops any prior entry first and seeds up-only (staleAfter=0).
 func seedEndpointTip(chainID, apiInterface, url string, block int64) {
 	key := endpointtip.Key(chainID, apiInterface, url)
 	// T4: the store is block-monotonic, so a re-seed to a lower block would be rejected.

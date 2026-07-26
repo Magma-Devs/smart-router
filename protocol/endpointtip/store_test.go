@@ -22,9 +22,12 @@ func TestStore_Set_BlockMonotonic(t *testing.T) {
 	require.Equal(t, int64(100), s.Block(k))
 
 	// Higher block wins — even carrying an EARLIER arrival stamp (block, not time, is the
-	// comparator now; the inverse of the old guard).
+	// comparator now; the inverse of the old guard). The freshness stamp is anchored forward,
+	// though: it stays at the stored (later) base, never regressing to the earlier one.
 	require.True(t, s.Set(k, Tip{Block: 200, ObservedAt: base.Add(-time.Second), Source: SourceRelay}, ttl))
 	require.Equal(t, int64(200), s.Block(k))
+	gotHigh, _ := s.Get(k)
+	require.Equal(t, base, gotHigh.ObservedAt, "higher block accepts but the stamp only advances")
 
 	// The F2 straggler: a LOWER block observed only slightly later is rejected (< ttl since
 	// the stored tip's observation, so the stored tip is still fresh).
@@ -33,7 +36,7 @@ func TestStore_Set_BlockMonotonic(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int64(200), got.Block, "a newer-but-lower straggler must not regress the tip")
 	require.Equal(t, SourceRelay, got.Source, "rejected write must not move the source")
-	require.Equal(t, base.Add(-time.Second), got.ObservedAt, "rejected write must not refresh the stamp")
+	require.Equal(t, base, got.ObservedAt, "rejected write must not refresh the stamp")
 }
 
 // TestStore_Set_EqualBlockRefreshesFreshness pins that an equal block re-proves liveness:
@@ -61,6 +64,35 @@ func TestStore_Set_EqualBlockRefreshesFreshness(t *testing.T) {
 	require.True(t, s.Set(k, Tip{Block: 100, ObservedAt: base, Source: SourceRelay}, ttl))
 	got, _ = s.Get(k)
 	require.Equal(t, base.Add(9*time.Second), got.ObservedAt, "stamp only advances, never regresses")
+}
+
+// TestStore_Set_HigherBlockDoesNotRegressStamp pins that the higher-block branch anchors the
+// freshness stamp forward too: a higher block carrying an EARLIER observation stamp (reachable
+// cross-source — a relay skips the poll's arrival gate) is accepted for its block but keeps the
+// stored (later) stamp, so the staleness gap can't be widened by a stamp regression. Without the
+// anchor, a subsequent lower straggler would cross the horizon sooner than intended and wrongly
+// regress the tip (a residual F2).
+func TestStore_Set_HigherBlockDoesNotRegressStamp(t *testing.T) {
+	s := NewStore()
+	k := Key("ETH1", "jsonrpc", "u")
+	base := time.Unix(1_000, 0)
+	const ttl = 100 * time.Second
+
+	// Stored: block 200 observed at base+50s (e.g. a fresh poll).
+	require.True(t, s.Set(k, Tip{Block: 200, ObservedAt: base.Add(50 * time.Second), Source: SourcePoll}, ttl))
+
+	// A higher block 201 arrives carrying an EARLIER stamp (base+0s). Block wins, but the stamp
+	// must stay at the later base+50s.
+	require.True(t, s.Set(k, Tip{Block: 201, ObservedAt: base, Source: SourceRelay}, ttl))
+	got, _ := s.Get(k)
+	require.Equal(t, int64(201), got.Block, "higher block wins")
+	require.Equal(t, base.Add(50*time.Second), got.ObservedAt, "stamp must not regress below the stored one")
+	require.Equal(t, SourceRelay, got.Source, "the accepted higher block carries its own source")
+
+	// A lower block 200 observed at base+120s is 70s past the anchored stamp (< ttl) → still fresh
+	// → rejected. Had the stamp regressed to base+0s, this would be 120s > ttl and wrongly accepted.
+	require.False(t, s.Set(k, Tip{Block: 200, ObservedAt: base.Add(120 * time.Second), Source: SourcePoll}, ttl))
+	require.Equal(t, int64(201), s.Block(k), "anchored stamp keeps the tip fresh; straggler rejected")
 }
 
 // TestStore_Set_StaleBackstopAcceptsReorg is the reorg half of C-D: while the stored tip
