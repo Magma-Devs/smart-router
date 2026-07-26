@@ -2816,12 +2816,17 @@ func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peer
 	if !rpcss.sharedState || rpcss.chainState == nil || peerTip <= localSeenBlock {
 		return
 	}
-	utils.LavaFormatDebug("shared-state tip is newer, feeding to chain state",
+	// SetLatestBlock re-guards: advanced=false means the anti-lie guard rejected/snapped down the
+	// peer tip (e.g. a lying-high value). Log the outcome so a rejected peer tip is visible rather
+	// than silent — a stream of adopted=false is the signature of a poisoned shared tip.
+	tip, _, advanced := rpcss.chainState.SetLatestBlock(peerTip)
+	utils.LavaFormatDebug("shared-state tip fed to chain state",
 		utils.LogAttr("peer_tip", peerTip),
 		utils.LogAttr("local_seen_block", localSeenBlock),
+		utils.LogAttr("adopted", advanced),
+		utils.LogAttr("chain_state_tip", tip),
 		utils.LogAttr("GUID", ctx),
 	)
-	rpcss.chainState.SetLatestBlock(peerTip)
 }
 
 // tryCacheWrite attempts to write a successful relay response to the cache.
