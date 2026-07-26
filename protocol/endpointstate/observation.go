@@ -32,9 +32,11 @@ const (
 //   - The block triple (LatestBlock / ObservedAt / Source) is the single-source-of-truth
 //     tip owned by the endpointtip store, NOT stored on this record. GetObservation and
 //     SnapshotObservations populate the triple from that store at read time, so callers
-//     see a consistent value while the tip lives in exactly one place. ObservedAt is
-//     monotonic — a later write never moves it backward, and a stale observation (older
-//     than the current ObservedAt) is ignored — enforced in endpointtip.Store.Set.
+//     see a consistent value while the tip lives in exactly one place. ObservedAt only
+//     advances (a write never carries it backward), but the store's guard is
+//     block-monotonic (T4), not time-monotonic: a higher-or-equal block always applies,
+//     while a lower block is dropped as a late straggler while the stored tip is fresh and
+//     accepted only once it goes stale (a real reorg down) — enforced in endpointtip.Store.Set.
 //   - The poll-health fields (LastPollAttempt, LastSuccessfulPoll, LastPollLatency,
 //     LastPollError, ConsecutivePollFailures) are written *only* by the poll path and
 //     are the only fields physically stored in the monitor's observation map.
@@ -43,7 +45,7 @@ const (
 type EndpointObservation struct {
 	// Block observation (delegated to the endpointtip store; filled on read, never stored here):
 	LatestBlock int64             // most recent observed block for this endpoint
-	ObservedAt  time.Time         // wall-clock of the observation that set LatestBlock (monotonic)
+	ObservedAt  time.Time         // freshness stamp of the latest block observation; only advances
 	Source      ObservationSource // origin of the latest block observation
 
 	// Poll-health fields (written only by the poll path):
@@ -142,7 +144,9 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 
 // RecordRelayObservation records a block harvested from a served relay response. It
 // updates only the block triple (Source = Relay) — never the poll-health fields — and
-// honors the monotonic ObservedAt guard.
+// goes through the store's block-monotonic guard (T4): the harvested block is kept only
+// when it is higher than or equal to the stored tip; a lower one is treated as a late
+// straggler and dropped until the stored tip goes stale.
 //
 // gen is the observation generation the caller captured for this endpoint (see
 // ObservationGeneration / GetOrCreateTracker). Like recordPollObservation, the write is
