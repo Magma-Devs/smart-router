@@ -161,8 +161,10 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 //
 // Returns true iff the write was accepted (passed the generation + monotonic guards and
 // advanced the stored tip). The caller uses this to gate the remaining ungated tip-state
-// writes (router bootstrap atomic, per-endpoint metric) so a stale/replaced-tracker relay
-// that this method correctly drops cannot still poison them.
+// writes (the router-wide and per-endpoint latest-block metrics) so a stale/replaced-tracker
+// relay that this method correctly drops cannot still poison them. The router bootstrap atomic
+// used to be gated here too; it is retired (T3) and the router-wide value is now the guarded
+// ChainState tip.
 func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64, block int64, at time.Time) bool {
 	if block <= 0 {
 		return false

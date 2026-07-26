@@ -181,8 +181,11 @@ type ChainState struct {
 	// would report ~0 lag forever, since every confirming observation refreshes it.
 	latestSince time.Time
 	// initialized is a STICKY flag: true once any positive observation has ever been accepted.
-	// It distinguishes a genuine cold start (no observation yet → bootstrap fallback is allowed)
-	// from a tip that has merely gone stale by TTL (Finding 1). It never resets to false.
+	// SetLatestBlock reads it to know whether a REFERENCE exists to guard the next observation
+	// against — the very first observation has none, which is why no anti-lie check can fire on it.
+	// It also separates a genuine cold start from a tip that has merely gone stale by TTL (Finding
+	// 1): both report (0, false) to readers, but only the latter has a value worth healing. Ordinary
+	// staleness never reverts it; only Reset() clears it back to false.
 	initialized bool
 	baseline    int64 // last computed strict-majority consensus baseline (valid iff hasBaseline)
 	hasBaseline bool  // whether a fresh majority existed at the last Recompute
@@ -264,6 +267,11 @@ func (cs *ChainState) SetDebugClockOffset(d time.Duration) {
 // any peer forms a baseline. Reset is the only way to drop such a value immediately rather than
 // waiting for the liar to stop and a TTL to expire. Debug-only: reached from /debug/reset-all and
 // /debug/reset-scores, never from a relay path.
+//
+// Know one consequence before pulling it: clearing the tip also blanks GetLatestBlockAllowStale, so
+// archive routing loses its last-known head and force-archives EVERY concrete-block request (the
+// conservative answer to an unknown head, archive_parser_rule.go) until the next observation lands —
+// roughly half a block time on a polling pod. Correct, but briefly expensive on the archive pool.
 func (cs *ChainState) Reset() {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -300,14 +308,17 @@ func (cs *ChainState) Reset() {
 //     poisoning of THIS tip to ~one TTL instead of the process lifetime.
 //
 // Caveat: the guard cannot fire on the VERY FIRST observation (no reference exists yet), so a
-// cold-start lie is accepted here. This tip self-heals after one TTL, but callers that ratchet a
-// separate monotonic-max store from accepted observations (the rpcsmartrouter bootstrap atomic)
-// do NOT self-heal — a cold-start lie persists there for the process lifetime. That store must add
-// its own bound if it needs one; this tip's self-heal does not cover it.
+// cold-start lie is accepted here. It is bounded, not permanent: the stale-tip re-adoption above
+// drops it within one TTL, and on a pod that forms a baseline Recompute snaps it back sooner. That
+// self-heal is now the WHOLE bound, and it suffices — no consumer keeps a separate monotonic-max
+// copy of this value any more. The rpcsmartrouter bootstrap atomic, which was the one such copy and
+// turned a cold-start lie into a process-lifetime one, is retired (T3); every reader goes through
+// this tip. Do not reintroduce a ratcheting mirror of it without its own downward path.
 //
 // Returns the resulting tip, the time it was last confirmed, and whether this call ADVANCED it
-// (equal-block confirmations and downward re-adoptions return advanced=false — consumers that
-// ratchet a monotonic maximum, e.g. the bootstrap atomic, must only follow advances).
+// (equal-block confirmations and downward re-adoptions return advanced=false). advanced is the
+// accept/reject signal for a caller that needs to know whether its observation actually moved the
+// tip; the production hooks discard it, and the package tests assert guard behaviour through it.
 func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, advanced bool) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -440,9 +451,14 @@ func (cs *ChainState) ConsensusBucketWidth() int64 {
 }
 
 // Initialized reports whether ChainState has ever accepted a positive observation. It is sticky
-// — once true it never reverts — so callers can distinguish a genuine cold start (allow a
-// bootstrap fallback) from a tip that has merely gone stale by TTL (do NOT revive a frozen
-// value, Finding 1).
+// within a lifetime — ordinary staleness never reverts it, only Reset() clears it — so a caller can
+// distinguish a genuine cold start (no value has ever existed) from a tip that has merely gone stale
+// by TTL (a real value exists but must not be served frozen, Finding 1).
+//
+// NOTE: no production reader consults this any more. It existed so getLatestBlock could allow a
+// bootstrap fallback on cold start while refusing to revive a frozen value once stale; that fallback
+// (the bootstrap atomic) is retired (T3) and every reader now takes the tip or 0. Retained for tests
+// and diagnostics — delete it if no future consumer appears.
 func (cs *ChainState) Initialized() bool {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()

@@ -304,13 +304,13 @@ func TestSiteB_ObservationFresherThanTrackerAtomic(t *testing.T) {
 		"Finding 6: the gated tracker atomic does not see relay-harvested tips")
 }
 
-// TestCacheServedReply_DoesNotPoisonBootstrapAtomic covers the second half of MAG-2160 Finding 1
-// ("cached historical responses cannot poison fallback"). A cache hit's reply.LatestBlock is the
-// block that was current when the response was CACHED — possibly long-historical. The direct
-// cache→atomic write was DELETED; this guards the regression by asserting that the cache-served
-// result shape (no attributed endpoint — cache hits carry ProviderAddress="" and are not a
-// dispatched endpoint's observation) reaches no remaining tip-writer, so a historical cached block
-// cannot move the bootstrap atomic that getLatestBlock falls back to on cold start.
+// TestCacheServedReply_DoesNotMoveTip covers the second half of MAG-2160 Finding 1 ("cached
+// historical responses cannot poison fallback"). A cache hit's reply.LatestBlock is the block that
+// was current when the response was CACHED — possibly long-historical. The direct cache→tip-state
+// write was DELETED; this guards the regression by asserting that the cache-served result shape (no
+// attributed endpoint — cache hits carry ProviderAddress="" and are not a dispatched endpoint's
+// observation) reaches no remaining tip-writer, so a historical cached block cannot move the
+// ChainState tip that every router-wide reader now depends on.
 //
 // NOTE: the cache-READ branch lives inside sendRelayToEndpoint and needs a connected cache backend
 // + full protocolMessage to drive end-to-end; that behavioral path is not reconstructed here. This

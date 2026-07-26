@@ -572,8 +572,9 @@ func preferStructuralFailureReason(result *common.RelayResult, failFastReason st
 // not-applicable) and the case where the latest block is not yet known.
 func (rpcss *RPCSmartRouterServer) crossValidationFinalityLabel(protocolMessage chainlib.ProtocolMessage) string {
 	requestedBlock, _ := protocolMessage.RequestedBlock()
-	// Use the router's chain-tracker/estimator-aware latest block, not just the cached counter, so the
-	// finality label is correct whenever any latest-block source is available.
+	// The GATED tip (fresh ChainState tip, else 0) — deliberately the same read cache finalization
+	// uses, so this label agrees with the finalized/temp cache split rather than describing a
+	// different "latest". A 0 yields the "unknown" label instead of a guess.
 	latestBlock := int64(rpcss.getLatestBlock())
 	_, _, blockDistanceForFinalizedData, _ := rpcss.chainParser.ChainBlockStats()
 	return crossValidationFinality(requestedBlock, latestBlock, int64(blockDistanceForFinalizedData))
@@ -3180,8 +3181,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 						}
 						// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was
 						// current when the response was CACHED — it is not a fresh observation of the
-						// chain head and is not gated on tip-eligibility, so it must NOT feed the
-						// bootstrap atomic (it would freeze a stale value during cold start). Tip state
+						// chain head and is not gated on tip-eligibility, so it must NOT feed tip
+						// state (it would plant a long-historical block as the chain head). Tip state
 						// is advanced only by tip-eligible live relays (harvestAndUpdateTipFromRelay)
 						// and the per-endpoint observation store, never by cache replays.
 						relayProcessor.SetResponse(&relaycore.RelayResponse{
