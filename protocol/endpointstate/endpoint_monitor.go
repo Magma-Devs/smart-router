@@ -501,7 +501,7 @@ func (m *EndpointMonitor) GetLatestBlockData(endpointURL string) (latestBlock in
 // against exactly the value the reset asked to discard, defeating ResetLatestBlock's
 // "consistency sees <= 0 and skips" contract until the next poll happens to overwrite it.
 // We Remove the store entry (not Set 0): the store ignores non-positive writes and its
-// time-monotonic guard cannot represent "cleared", so removal is the only way to zero it.
+// block-monotonic guard cannot represent "cleared", so removal is the only way to zero it.
 // endpointtip's lock is a leaf that never calls back into the monitor, so taking it under
 // m.mu (read) introduces no lock-order inversion — same idiom as RemoveTracker/Stop.
 func (m *EndpointMonitor) ResetAllLatestBlocks() int {
