@@ -173,7 +173,7 @@ type ChainState struct {
 	hasBaseline bool  // whether a fresh majority existed at the last Recompute
 	// baselineAt is the TTL-freshness timestamp: refreshed on EVERY Recompute that confirms a
 	// majority (even at an unchanged block), exactly like lastObservedAt refreshes the tip. It
-	// answers "is consensus still being actively computed" and gates GetConsensusBaseline's TTL.
+	// answers "is consensus still being actively computed" and gates consensusBaseline's TTL.
 	baselineAt time.Time
 	// baselineSince is the ESTABLISHMENT timestamp: when the current baseline BLOCK first became
 	// the consensus, preserved across confirming Recomputes while the block is unchanged and reset
@@ -235,6 +235,31 @@ func (cs *ChainState) effectiveNow() time.Time {
 // is atomic and takes no lock, so it is safe to call concurrently with live reads.
 func (cs *ChainState) SetDebugClockOffset(d time.Duration) {
 	cs.warpOffset.Store(int64(d))
+}
+
+// Reset clears all observed state — the tip, the consensus baseline, the sticky initialized flag,
+// and every establishment/freshness timestamp — returning the ChainState to its genuine cold-start
+// condition (as if freshly constructed). The config, base clock, and debug warp offset are left
+// untouched (the warp is cleared separately via SetDebugClockOffset(0)).
+//
+// This is the operator big-hammer for a poisoned tip. The tip self-heals on its own — Recompute
+// snaps an out-of-band tip down and stale-tip re-adoption pulls a frozen one down within one TTL —
+// but a WITHIN-BAND lie (a reporter walking the tip up in sub-OutlierThreshold steps, kept fresh by
+// its own traffic) has no automatic downward path, and neither does a genuine cold-start lie before
+// any peer forms a baseline. Reset is the only way to drop such a value immediately rather than
+// waiting for the liar to stop and a TTL to expire. Debug-only: reached from /debug/reset-all and
+// /debug/reset-scores, never from a relay path.
+func (cs *ChainState) Reset() {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.latestBlock = 0
+	cs.lastObservedAt = time.Time{}
+	cs.latestSince = time.Time{}
+	cs.initialized = false
+	cs.baseline = 0
+	cs.hasBaseline = false
+	cs.baselineAt = time.Time{}
+	cs.baselineSince = time.Time{}
 }
 
 // SetLatestBlock is the cheap per-observation write the relay-harvest and poll paths call. It
@@ -367,7 +392,7 @@ func (cs *ChainState) consensusBaselineWithTime() (block int64, at time.Time, ok
 // freshBaselineLocked returns the consensus baseline, its establishment time (baselineSince), and
 // whether a fresh (TTL) strict-majority baseline currently exists, evaluated against the supplied
 // clock. It mirrors freshLatestLocked for the consensus baseline; the caller holds cs.mu. Sharing
-// it keeps GetConsensusBaselineWithTime and DebugSnapshot's BaselineFresh from drifting apart.
+// it keeps consensusBaselineWithTime and DebugSnapshot's BaselineFresh from drifting apart.
 func (cs *ChainState) freshBaselineLocked(now time.Time) (int64, time.Time, bool) {
 	if !cs.hasBaseline || cs.baseline <= 0 {
 		return 0, time.Time{}, false
@@ -480,12 +505,11 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 // (MAG-2202 /debug/chain-state). Unlike GetLatestBlock it never applies the
 // TTL freshness gate: black-box tests assert TTL expiry, downward realignment, and empty-snapshot
 // baseline clearing from the raw (block, timestamp) pairs — a gated getter would hide exactly those
-// transitions by collapsing to (0, false). BaselineSince is the establishment time — the same value
-// GetConsensusBaselineWithTime returns — distinct from the internal TTL-freshness timestamp baselineAt
-// (which drives the freshness gate but is never exposed).
+// transitions by collapsing to (0, false). BaselineSince is the establishment time (distinct from
+// the TTL-freshness baselineAt that consensusBaselineWithTime exposes).
 //
 // TipFresh / BaselineFresh are the ONE computed exception: the TTL-gated verdicts (what
-// GetLatestBlock / GetConsensusBaseline would report) evaluated against the effective clock. They
+// GetLatestBlock / consensusBaseline would report) evaluated against the effective clock. They
 // exist so a debug ChainState warp is observable IMMEDIATELY — the raw ObservedTip / HasBaseline
 // fields only change on the next Recompute tick, and never at all in a fixture with no recompute loop
 // running (MAG-2307). Assert on these, not the raw fields, to see warp-driven expiry.
@@ -497,7 +521,7 @@ type ChainStateSnapshot struct {
 	BaselineSince     time.Time
 	Initialized       bool
 	TipFresh          bool // GetLatestBlock would return (ObservedTip, true) right now
-	BaselineFresh     bool // GetConsensusBaseline would return (ConsensusBaseline, true) right now
+	BaselineFresh     bool // consensusBaseline would return (ConsensusBaseline, true) right now
 }
 
 // DebugSnapshot returns the raw ChainState fields under one read lock, without the TTL gate the

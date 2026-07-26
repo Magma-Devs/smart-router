@@ -55,21 +55,21 @@ const (
 
 // implements Relay Sender interfaced and uses an ChainListener to get it called
 type RPCSmartRouterServer struct {
-	chainParser            chainlib.ChainParser
-	chainState             *chainstate.ChainState // MAG-2160 (Topic C): per-chain consensus tip — replaces the global ChainTracker, the estimator, and the atomic
-	sessionManager         *lavasession.ConsumerSessionManager
-	listenEndpoint         *lavasession.RPCEndpoint
-	rpcSmartRouterLogs     *metrics.RPCConsumerLogs
-	cache                  *performance.Cache
-	consistencyConfig      *relaycore.ConsistencyValidationConfig // Configuration for consistency validation
-	sharedState            bool                                   // using the cache backend to sync the latest seen block
-	relaysMonitor          *metrics.RelaysMonitor
-	debugRelays            bool
-	chainListener          chainlib.ChainListener
-	relayRetriesManager    *lavaprotocol.RelayRetriesManager
-	initialized            atomic.Bool
-	latestBlockHeight      atomic.Uint64 // MAG-2160: retained only as the cold-start fallback for getLatestBlock (the estimator is retired)
-	enableSelectionStats   bool          // feature flag to enable selection stats header
+	chainParser          chainlib.ChainParser
+	chainState           *chainstate.ChainState // MAG-2160 (Topic C): per-chain consensus tip — replaces the global ChainTracker, the estimator, and the atomic
+	sessionManager       *lavasession.ConsumerSessionManager
+	listenEndpoint       *lavasession.RPCEndpoint
+	rpcSmartRouterLogs   *metrics.RPCConsumerLogs
+	cache                *performance.Cache
+	consistencyConfig    *relaycore.ConsistencyValidationConfig // Configuration for consistency validation
+	sharedState          bool                                   // using the cache backend to sync the latest seen block
+	relaysMonitor        *metrics.RelaysMonitor
+	debugRelays          bool
+	chainListener        chainlib.ChainListener
+	relayRetriesManager  *lavaprotocol.RelayRetriesManager
+	initialized          atomic.Bool
+	latestBlockHeight    atomic.Uint64 // MAG-2160: retained only as the cold-start fallback for getLatestBlock (the estimator is retired)
+	enableSelectionStats bool          // feature flag to enable selection stats header
 
 	// Per-endpoint ChainTracker manager for continuous block polling
 	endpointChainTrackerManager *endpointstate.EndpointMonitor
@@ -841,10 +841,11 @@ func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays 
 func (rpcss *RPCSmartRouterServer) getLatestBlock() uint64 {
 	// Site A (MAG-2160): the router-wide tip (archive routing, finality labels) is the per-chain
 	// ChainState OBSERVED tip — TTL-fresh, monotonic, outlier-guarded — replacing the
-	// global-tracker → estimator → atomic ladder. Cache FINALIZATION does not read this: it
-	// needs the strict-majority consensus baseline (getLatestBlockForCacheFinalization), because
-	// the optimistic tip trusts a single fresh reporter and only heals a sub-threshold lie after
-	// TTL, which is not good enough when a too-high value falsely finalizes.
+	// global-tracker → estimator → atomic ladder. Cache FINALIZATION reads the SAME tip via
+	// getLatestBlockForCacheFinalization (Topic C T1/D4: one reader), which returns the tip-or-0;
+	// it deliberately does NOT fall back to the bootstrap atomic the way this getter does, because
+	// a monotonic-max value with no downward correction can falsely finalize. See that function's
+	// doc block for the bounded residual the tip (vs the old strict baseline) accepts there.
 	if rpcss.chainState != nil {
 		if block, ok := rpcss.chainState.GetLatestBlock(); ok && block > 0 {
 			return uint64(block)
@@ -3189,8 +3190,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 					// The PUBLISH side is deliberately left intact (tryCacheWrite still sends
 					// SeenBlock + SharedStateId), and what it now publishes is the guarded tip.
 					// Rebuilding the adopt side properly — chain-level key, value fed through
-					// ChainState.SetLatestBlock so it passes the anti-lie guards — is task T10 in
-					// topic-C-action-plan.md.
+					// ChainState.SetLatestBlock so it passes the anti-lie guards — is tracked as
+					// follow-up task T10.
 
 					// handle cache reply
 					if cacheError == nil && reply != nil {

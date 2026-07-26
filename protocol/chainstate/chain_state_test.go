@@ -361,11 +361,11 @@ func TestRecompute_TimestampsStayOnRealClockUnderWarp(t *testing.T) {
 		"baselineSince must be the real write time, not the warped future (MAG-2307 review)")
 
 	cs.SetDebugClockOffset(0)
-	_, ok := cs.GetConsensusBaseline()
+	_, ok := cs.consensusBaseline()
 	require.True(t, ok, "a baseline just established is fresh")
 
 	clk.advance(11 * time.Second) // real time crosses the TTL
-	_, ok = cs.GetConsensusBaseline()
+	_, ok = cs.consensusBaseline()
 	require.False(t, ok,
 		"a baseline established under a warp must still expire on real time once the warp is cleared")
 }
@@ -655,6 +655,132 @@ func TestRecompute_BaselineSincePreservedWhileBlockUnchanged(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int64(1001), block)
 	require.Equal(t, reorgAt, since, "a downward baseline reorg resets the establishment time")
+}
+
+// TestReset is the operator big-hammer for a poisoned tip that cannot self-heal (a within-band lie
+// kept fresh by the liar's own traffic, or a cold-start lie before a peer baseline forms). Reset
+// returns the ChainState to its genuine cold-start condition: tip, baseline, initialized flag, and
+// all timestamps cleared, config/clock untouched.
+func TestReset(t *testing.T) {
+	cs, clk := newTestState(t)
+
+	// Establish a tip and a fresh consensus baseline.
+	cs.SetLatestBlock(1050)
+	cs.Recompute([]BlockObservation{
+		{URL: "a", Block: 1050, ObservedAt: clk.now()},
+		{URL: "b", Block: 1050, ObservedAt: clk.now()},
+	})
+	if _, ok := cs.GetLatestBlock(); !ok {
+		t.Fatal("precondition: tip should be established before reset")
+	}
+	require.True(t, cs.Initialized(), "precondition: initialized before reset")
+
+	cs.Reset()
+
+	block, ok := cs.GetLatestBlock()
+	require.False(t, ok, "the tip is gone after reset")
+	require.Zero(t, block)
+	require.False(t, cs.Initialized(), "reset clears the sticky initialized flag back to cold start")
+	base, ok := cs.consensusBaseline()
+	require.False(t, ok, "the consensus baseline is gone after reset")
+	require.Zero(t, base)
+
+	// A cold state accepts the next observation raw (first-observation semantics), proving reset
+	// really returned it to cold start rather than leaving a stale reference behind.
+	cs.SetLatestBlock(2000)
+	block, ok = cs.GetLatestBlock()
+	require.True(t, ok)
+	require.Equal(t, int64(2000), block, "post-reset the ChainState behaves like a fresh cold start")
+}
+
+// TestGetLatestBlockWithTime_EstablishmentAge is the tip's mirror of the Finding 3 baseline test:
+// GetLatestBlockWithTime must report latestSince (when the current tip BLOCK was ESTABLISHED),
+// preserved across equal-block confirmations and reset only when the block VALUE changes. Sync
+// scoring and the probe cycle measure "how long ago did this become the tip" from this timestamp;
+// the sharp regression it guards against is resetting latestSince on an equal-block confirmation,
+// which would make every endpoint's sync lag read ~0 forever (each confirming observation would
+// re-zero the age).
+func TestGetLatestBlockWithTime_EstablishmentAge(t *testing.T) {
+	cs, clk := newTestState(t)
+
+	// Establish the tip at 1000.
+	establishedAt := clk.now()
+	cs.SetLatestBlock(1000)
+	block, since, ok := cs.GetLatestBlockWithTime()
+	require.True(t, ok)
+	require.Equal(t, int64(1000), block)
+	require.Equal(t, establishedAt, since, "establishment time is when the block first became the tip")
+
+	// Equal-block confirmation 5s later: TTL freshness refreshes (tip stays fresh), but the
+	// establishment time must be PRESERVED so the tip's age keeps growing. This is the regression.
+	clk.advance(5 * time.Second)
+	cs.SetLatestBlock(1000)
+	block, since, ok = cs.GetLatestBlockWithTime()
+	require.True(t, ok, "an equal-block confirmation refreshes freshness, so the tip is still fresh")
+	require.Equal(t, int64(1000), block)
+	require.Equal(t, establishedAt, since, "an equal-block confirmation must PRESERVE the establishment time")
+
+	// Reconfirm again past the original TTL window (5+6 = 11s > 10s TTL): proves freshness (from
+	// lastObservedAt, refreshed each confirmation) is tracked separately from establishment.
+	clk.advance(6 * time.Second)
+	cs.SetLatestBlock(1000)
+	_, since, ok = cs.GetLatestBlockWithTime()
+	require.True(t, ok, "a continuously reconfirmed tip never expires, even past TTL-from-establishment")
+	require.Equal(t, establishedAt, since, "establishment time is still preserved across the TTL boundary")
+
+	// A FORWARD advance to a new block resets the establishment clock to now.
+	clk.advance(2 * time.Second)
+	advancedAt := clk.now()
+	cs.SetLatestBlock(1005)
+	block, since, ok = cs.GetLatestBlockWithTime()
+	require.True(t, ok)
+	require.Equal(t, int64(1005), block)
+	require.Equal(t, advancedAt, since, "a forward tip advance resets the establishment time")
+
+	// A stale value reports (0, zero-time, false): the getter is TTL-gated exactly like GetLatestBlock.
+	clk.advance(11 * time.Second) // past TTL with no confirmation
+	block, since, ok = cs.GetLatestBlockWithTime()
+	require.False(t, ok, "a TTL-expired tip reports not-found, never a frozen value")
+	require.Zero(t, block)
+	require.True(t, since.IsZero())
+}
+
+// TestGetLatestBlockWithTime_ResetByRecomputeEdgeCorrection locks that Recompute's edge correction
+// re-establishes the tip's age in BOTH directions — a pull-up (tip below the majority) and a
+// snap-down (tip implausibly above it). Sync scoring reads latestSince, so a correction that moved
+// the tip block but left the age stale would misreport lag.
+func TestGetLatestBlockWithTime_ResetByRecomputeEdgeCorrection(t *testing.T) {
+	cs, clk := newTestState(t)
+
+	// Tip established low at 1000.
+	cs.SetLatestBlock(1000)
+
+	// A majority forms ahead at 1010 → pull-up. The tip block changes to 1010, so its age resets.
+	clk.advance(3 * time.Second)
+	pullUpAt := clk.now()
+	cs.Recompute([]BlockObservation{
+		{URL: "a", Block: 1010, ObservedAt: clk.now()},
+		{URL: "b", Block: 1010, ObservedAt: clk.now()},
+	})
+	block, since, ok := cs.GetLatestBlockWithTime()
+	require.True(t, ok)
+	require.Equal(t, int64(1010), block)
+	require.Equal(t, pullUpAt, since, "a Recompute pull-up re-establishes the tip's age")
+
+	// Cold-start-style over-band lead can't be written once a baseline exists, so drive snap-down
+	// by re-establishing a fresh cold state, poisoning before any peer, then forming a low majority.
+	cs2, clk2 := newTestState(t)
+	cs2.SetLatestBlock(5000) // accepted raw: first observation, no reference yet
+	clk2.advance(3 * time.Second)
+	snapAt := clk2.now()
+	cs2.Recompute([]BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: clk2.now()},
+		{URL: "b", Block: 1000, ObservedAt: clk2.now()},
+	})
+	block, since, ok = cs2.GetLatestBlockWithTime()
+	require.True(t, ok)
+	require.Equal(t, int64(1000), block, "tip leading consensus by more than OutlierThreshold is snapped down")
+	require.Equal(t, snapAt, since, "a Recompute snap-down re-establishes the tip's age")
 }
 
 // TestRecompute_BaselineSinceResetsAfterConsensusGap covers re-establishment: if consensus is
