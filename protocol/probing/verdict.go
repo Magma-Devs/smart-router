@@ -39,14 +39,16 @@ type VerdictConfig struct {
 }
 
 // DefaultVerdictConfig derives the verdict thresholds from a chain's average block time. The
-// per-endpoint "alive" horizon (StalenessWindow) shares ONE multiplier with the chainstate
-// consensus window — chainstate.DefaultStalenessMultiplier — so the liveness horizon and the
-// consensus freshness window never silently diverge when that horizon is tuned. Only the floor
-// differs (minProbeStaleness here vs chainstate.minStalenessWindow), since a per-endpoint probe
-// tolerates a slightly wider floor than the per-chain consensus.
+// per-endpoint "alive" horizon is chainstate.StalenessWindow raised to this package's own floor:
+// StalenessWindow already applies the shared DefaultStalenessMultiplier (so the liveness horizon
+// and the consensus freshness window never silently diverge when that derivation is tuned), and
+// the outer max lifts it to minProbeStaleness, a slightly wider floor than the per-chain consensus
+// (chainstate.minStalenessWindow) because a per-endpoint probe must not flip to "dead" on one slow
+// poll. Since minProbeStaleness > chainstate.minStalenessWindow the result is identical to deriving
+// the multiplier term inline; calling StalenessWindow just keeps the derivation in one place.
 func DefaultVerdictConfig(averageBlockTime time.Duration) VerdictConfig {
 	return VerdictConfig{
-		StalenessWindow:    max(time.Duration(chainstate.DefaultStalenessMultiplier)*averageBlockTime, minProbeStaleness),
+		StalenessWindow:    max(chainstate.StalenessWindow(averageBlockTime), minProbeStaleness),
 		LagToleranceBlocks: DefaultLagToleranceBlocks,
 		ReEnableHysteresis: DefaultProbeReEnableHysteresis,
 	}
