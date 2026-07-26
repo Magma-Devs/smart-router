@@ -2541,8 +2541,9 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 	}
 	// The router-wide bootstrap atomic is monotonic-max with NO downward correction, so it may
 	// only follow blocks the CHAIN-level anti-lie guard accepted — the per-endpoint store's
-	// time-monotonic acceptance above is the wrong scope (a lying-high endpoint passes its own
-	// per-endpoint guard). By the time recordRelayBlockObservation returns, the monitor's
+	// block-monotonic acceptance above is the wrong scope: that guard has no anti-lie check, so a
+	// lying-high endpoint clears its own per-endpoint guard trivially (any higher block wins).
+	// By the time recordRelayBlockObservation returns, the monitor's
 	// OnTipObservation hook has already driven ChainState.SetLatestBlock with this very block
 	// (synchronously, after obsMu release — see RecordRelayObservation's deferred callback), so
 	// the ChainState tip reflects the verdict: an accepted block reads back as tip >= block, a

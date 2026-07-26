@@ -2666,11 +2666,13 @@ func seedChainTip(block int64) *chainstate.ChainState {
 
 // TestEndpointTipPreferStore locks the MAG-2160 Finding 6 fix + follow-up review: consistency
 // pre-validation prefers the endpointtip store (the single source of truth) and falls back to the
-// poll-tracker atomic ONLY when the store is empty. The store is fed by both poll and relay under a
-// time-monotonic guard, so it reflects the newest observation — including a newer LOWER block after
-// a reorg. A naive max() would keep a STALE-HIGH atomic winning there, making a rolled-back endpoint
-// look caught up; prefer-store fixes that while still winning the traffic-gate-frozen case (where
-// the store is the fresher/higher value).
+// poll-tracker atomic ONLY when the store is empty. The store is fed by both poll and relay; under
+// the T4 block-monotonic guard it self-heals a reorg DOWN — a newer lower block is held off while
+// the old higher tip is still fresh and adopted once that tip goes stale, so the downward correction
+// is delayed by up to the staleness window, not immediate. Either way the store eventually reflects
+// the true head, while the monotonic-max atomic never corrects downward at all — so a naive max()
+// would keep a STALE-HIGH atomic winning and make a rolled-back endpoint look caught up; prefer-store
+// fixes that while still winning the traffic-gate-frozen case (where the store is the fresher/higher value).
 func TestEndpointTipPreferStore(t *testing.T) {
 	cases := []struct {
 		name       string
