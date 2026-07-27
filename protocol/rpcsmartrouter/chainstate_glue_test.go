@@ -10,9 +10,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -342,18 +344,55 @@ func TestCacheServedReply_DoesNotMoveTip(t *testing.T) {
 		"Finding 1: a cache-served reply (no attributed endpoint) must not move the tip")
 }
 
-// TestHarvest_ArchiveRoutingTipGuardedByChainState locks the T3 property: archive routing's
-// last-known tip (getLatestBlockAllowStale → ChainState.GetLatestBlockAllowStale) follows only blocks the
-// CHAIN-level anti-lie guard accepted. A relay-harvested tip that ChainState REJECTS as an outlier
-// must NOT move it, even though it passes the per-endpoint store guard. This is what the retired
-// bootstrap atomic's chain-accepted gate used to protect — now it falls out of reading the guarded
-// self-healing tip directly.
+// TestHarvest_ArchiveRoutingTipGuardedByChainState locks the T3 property on BOTH readers that the
+// deleted chain-accepted gate used to protect:
+//
+//   - archive routing's last-known tip (getLatestBlockAllowStale → ChainState.GetLatestBlockAllowStale),
+//     and
+//   - the router-wide latest-block METRIC (smartrouter_latest_block), which after T3 is sourced from
+//     the guarded ChainState tip rather than from the raw harvested block.
+//
+// Both must follow only blocks the CHAIN-level anti-lie guard accepted. A relay-harvested tip that
+// ChainState REJECTS as an outlier must move neither, even though it passes the per-endpoint store
+// guard. Asserting the metric matters because after T3 it is the ONLY consumer of the gated
+// GetLatestBlock() read in harvestAndUpdateTipFromRelay — without this, a regression that reported
+// the raw `tip` would go unnoticed.
 func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Empty options => metrics registered on the default registry, no HTTP server started.
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
+
+	// routerLatestBlock reads the smartrouter_latest_block GAUGE for this chain/interface. Unlike the
+	// counters elsewhere in this package it is Set to an ABSOLUTE value, and these tests run
+	// sequentially (no t.Parallel), so the value read straight after a harvest is the one that
+	// harvest reported — no before/after delta needed.
+	routerLatestBlock := func(t *testing.T) float64 {
+		t.Helper()
+		mfs, err := prometheus.DefaultGatherer.Gather()
+		require.NoError(t, err)
+		for _, mf := range mfs {
+			if mf.GetName() != "smartrouter_latest_block" {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				lm := map[string]string{}
+				for _, lp := range m.GetLabel() {
+					lm[lp.GetName()] = lp.GetValue()
+				}
+				if lm["spec"] == "ETH1" && lm["apiInterface"] == "jsonrpc" {
+					return m.GetGauge().GetValue()
+				}
+			}
+		}
+		require.FailNow(t, "smartrouter_latest_block not reported for ETH1/jsonrpc")
+		return 0
+	}
 
 	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
 		BucketWidth:      2,
@@ -380,6 +419,7 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 		chainParser:                 parser,
 		endpointChainTrackerManager: m,
 		chainState:                  cs,
+		smartRouterEndpointMetrics:  mm,
 	}
 
 	url := "http://ep:8545"
@@ -395,18 +435,26 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 	// An honest tip-eligible harvest moves the tip (ChainState accepts it).
 	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1000}, gen, "provider1")
 	require.Equal(t, uint64(1000), rpcss.getLatestBlockAllowStale(), "an accepted harvest moves the last-known tip")
+	require.Equal(t, float64(1000), routerLatestBlock(t), "an accepted harvest reports the router-wide metric")
 
 	// A plausible advance moves the tip (ChainState accepts; the store accepts a higher block).
 	// Ordered BEFORE the lie so the block-monotonic store does not retain a higher value that would
 	// reject it — see the T4 note below.
 	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1050}, gen, "provider1")
 	require.Equal(t, uint64(1050), rpcss.getLatestBlockAllowStale(), "a plausible advance moves the last-known tip")
+	require.Equal(t, float64(1050), routerLatestBlock(t), "a plausible advance is reported to the metric")
 
 	// A lying-high harvest passes the per-endpoint store guard (higher block, no anti-lie at that
 	// layer) but ChainState rejects it (fresh-tip anti-lie guard) → the archive-routing tip must NOT move.
 	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1_000_000}, gen, "provider1")
 	require.Equal(t, uint64(1050), rpcss.getLatestBlockAllowStale(),
 		"a harvest ChainState rejects as an outlier must not move the last-known tip archive routing serves")
+	// The T3 metric contract: harvestAndUpdateTipFromRelay reports the GUARDED tip, not the raw
+	// harvested block. The lie reaches the metric write (the per-endpoint store accepted it, so the
+	// harvest does not bail) and is filtered only by the gated GetLatestBlock read — reporting `tip`
+	// here would publish 1_000_000 router-wide.
+	require.Equal(t, float64(1050), routerLatestBlock(t),
+		"the router-wide metric reports the guarded tip, never a lying-high harvest ChainState rejected")
 
 	// T4 consequence: the block-monotonic store RETAINS the lying-high 1_000_000 until it goes
 	// stale, so a subsequent honest-but-lower harvest is rejected and the harvest bails. This is the
@@ -415,6 +463,8 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1051}, gen, "provider1")
 	require.Equal(t, uint64(1050), rpcss.getLatestBlockAllowStale(),
 		"a lower harvest is rejected while the higher lie is still fresh")
+	require.Equal(t, float64(1050), routerLatestBlock(t),
+		"a store-rejected harvest bails before the metric write, leaving the last reported value")
 }
 
 // TestSiteC_SyncReferenceIsChainTip documents the Topic C T1/D4 contract that REPLACED the
