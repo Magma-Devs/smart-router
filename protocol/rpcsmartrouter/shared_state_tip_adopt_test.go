@@ -82,8 +82,11 @@ func TestAdoptSharedStateTip(t *testing.T) {
 	// tip is accepted RAW — the same cold-start hole as a local first-observation lie (F1/F11),
 	// reachable via a peer. Documented here as a bounded residual: it self-heals within one TTL.
 	t.Run("cold-start adopt is accepted raw, then self-heals within one TTL", func(t *testing.T) {
-		// A cold ChainState with a fixed base clock (warped via SetDebugClockOffset for the TTL step).
-		clock := func() time.Time { return time.Unix(1700000000, 0) }
+		// A cold ChainState with a mutable base clock we advance for the TTL step. (Real time is
+		// advanced rather than warped via SetDebugClockOffset: under the MAG-2307 clock model a warp
+		// ages only READS, while writes stamp real time, so a post-warp write would read stale.)
+		now := time.Unix(1700000000, 0)
+		clock := func() time.Time { return now }
 		cs := chainstate.NewWithClock("ETH1", chainstate.Config{
 			BucketWidth:      2,
 			OutlierThreshold: 100,
@@ -106,7 +109,7 @@ func TestAdoptSharedStateTip(t *testing.T) {
 
 		// Bounded: once the poisoned tip goes TTL-stale, the next honest local observation re-adopts
 		// it downward. No manual reset — the lie lives ~one TTL, not the process lifetime.
-		cs.SetDebugClockOffset(11 * time.Second) // past TTL (10s)
+		now = now.Add(11 * time.Second) // real time advances past TTL (10s)
 		cs.SetLatestBlock(honestBlock)
 		got, ok = cs.GetLatestBlock()
 		require.True(t, ok)
