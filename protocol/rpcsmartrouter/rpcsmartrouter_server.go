@@ -2481,8 +2481,8 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 	// recordRelayBlockObservation funnels through the gated RecordRelayObservation into the
 	// single-source-of-truth endpointtip store. The previous unconditional second write to
 	// targetEndpoint.LatestBlock is gone — it bypassed the generation/monotonic gate and was
-	// the source of tip divergence. The remaining tip-state writes below (router bootstrap
-	// atomic, per-endpoint metric) are gated on acceptance so a stale relay the store drops
+	// the source of tip divergence. The remaining tip-state writes below (the router-wide and
+	// per-endpoint latest-block metrics) are gated on acceptance so a stale relay the store drops
 	// (replaced/removed tracker, or older-than-stored observation) cannot still poison them.
 	if !rpcss.recordRelayBlockObservation(targetEndpoint, harvestGen, tip) {
 		return
