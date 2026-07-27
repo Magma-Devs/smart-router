@@ -9,7 +9,8 @@ import (
 
 // TestSharedStateTipExpiration locks the shared-state tip TTL contract (T10): a pod's published
 // tip lives for SharedStateTipBlockMultiplier * averageBlockTime, floored at ExpirationNonFinalized
-// so a chain with an unknown block time still gets a sane, non-zero TTL instead of never expiring.
+// and then at the hard MinSharedStateTipExpiration, so a chain with an unknown block time still
+// gets a usable, non-zero TTL instead of never expiring.
 func TestSharedStateTipExpiration(t *testing.T) {
 	cs := &CacheServer{ExpirationNonFinalized: 500 * time.Millisecond}
 
@@ -19,8 +20,27 @@ func TestSharedStateTipExpiration(t *testing.T) {
 	// Fast chain: 400ms block → 4s (still above the floor).
 	require.Equal(t, 4*time.Second, cs.SharedStateTipExpiration(400*time.Millisecond))
 
-	// Unknown block time (spec omits average_block_time): 0*10 = 0 → floored so it is not eternal.
-	require.Equal(t, cs.ExpirationNonFinalized, cs.SharedStateTipExpiration(0))
+	// Unknown block time (spec omits average_block_time): 0*10 = 0. The 500ms
+	// ExpirationNonFinalized would be non-zero but far too short for a chain tip — it would
+	// evaporate between relays — so the hard floor takes over.
+	require.Equal(t, MinSharedStateTipExpiration, cs.SharedStateTipExpiration(0))
+}
+
+// TestSharedStateTipExpiration_FloorSurvivesZeroedFlags is the guarantee ExpirationNonFinalized
+// cannot make on its own: it is flag * multiplier, both operator-settable, so either being 0
+// zeroes it. A zero TTL means "never expires" in ristretto, which would strand a dead pod's tip
+// in the shared cache forever — the exact failure the floor exists to prevent.
+func TestSharedStateTipExpiration_FloorSurvivesZeroedFlags(t *testing.T) {
+	cs := &CacheServer{ExpirationNonFinalized: 0}
+
+	require.Equal(t, MinSharedStateTipExpiration, cs.SharedStateTipExpiration(0),
+		"a zeroed non-finalized expiration must not produce an eternal tip")
+	require.Equal(t, MinSharedStateTipExpiration, cs.SharedStateTipExpiration(100*time.Millisecond),
+		"a sub-floor derived TTL is lifted to the floor, not left at 1s")
+	require.Positive(t, cs.SharedStateTipExpiration(0), "the TTL is never zero")
+
+	// A real block time still dominates both floors.
+	require.Equal(t, 120*time.Second, cs.SharedStateTipExpiration(12*time.Second))
 }
 
 // TestSharedStateTip_RoundTripAndKeyIsolation is the T10 fix: a tip written under one shared-state

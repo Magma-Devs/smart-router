@@ -37,14 +37,25 @@ const (
 	// router's own tip-staleness horizon (chainstate.StalenessWindow) so a dead pod's tip
 	// evaporates on roughly the same timescale the router considers a tip stale, rather than
 	// lingering for the full finalized (~1h) TTL.
-	SharedStateTipBlockMultiplier                = 10
-	DefaultExpirationTimeFinalizedMultiplier     = 1.0
-	DefaultExpirationTimeNonFinalizedMultiplier  = 1.0
-	DefaultExpirationBlocksHashesToHeights       = 48 * time.Hour
-	DefaultExpirationTimeFinalized               = time.Hour
-	DefaultExpirationNodeErrors                  = 250 * time.Millisecond
-	CacheNumCounters                             = 100000000 // expect 10M items
-	unixPrefix                                   = "unix:"
+	SharedStateTipBlockMultiplier = 10
+	// MinSharedStateTipExpiration is the absolute floor for that TTL, mirroring the router-side
+	// floor (chainstate.minStalenessWindow) rather than importing it — ecosystem/cache is a
+	// standalone binary and must not depend on protocol/. It is a hard-coded constant, NOT an
+	// operator-tunable duration, because it underwrites two guarantees the tunables cannot:
+	//   - non-zero: ristretto treats a zero TTL as "never expires", so a dead pod's tip would
+	//     linger forever. ExpirationNonFinalized alone cannot prevent this — it is
+	//     flag * multiplier, both operator-settable, and either being 0 makes it 0.
+	//   - long enough to be useful: a chain tip must outlive the gap between requests. At the
+	//     500ms ExpirationNonFinalized default a tip published for a spec with no
+	//     average_block_time would evaporate between relays, silently disabling shared state.
+	MinSharedStateTipExpiration                 = 2 * time.Second
+	DefaultExpirationTimeFinalizedMultiplier    = 1.0
+	DefaultExpirationTimeNonFinalizedMultiplier = 1.0
+	DefaultExpirationBlocksHashesToHeights      = 48 * time.Hour
+	DefaultExpirationTimeFinalized              = time.Hour
+	DefaultExpirationNodeErrors                 = 250 * time.Millisecond
+	CacheNumCounters                            = 100000000 // expect 10M items
+	unixPrefix                                  = "unix:"
 )
 
 type CacheServer struct {
@@ -210,12 +221,18 @@ func (cs *CacheServer) ExpirationForChain(averageBlockTimeForChain time.Duration
 }
 
 // SharedStateTipExpiration returns the TTL for a pod's published chain tip in shared-state
-// mode: SharedStateTipBlockMultiplier * averageBlockTime, floored at ExpirationNonFinalized so
-// a chain whose spec omits the average block time still gets a sane, non-zero TTL (a zero TTL
-// would never expire).
+// mode: SharedStateTipBlockMultiplier * averageBlockTime, floored at ExpirationNonFinalized and
+// then at the hard MinSharedStateTipExpiration.
+//
+// The second floor is the load-bearing one. ExpirationNonFinalized is derived from two operator
+// flags (duration * multiplier), so it is neither guaranteed non-zero — a zero TTL means "never
+// expires" in ristretto, so a dead pod's tip would linger forever — nor guaranteed long enough:
+// at its 500ms default a tip for a spec that omits average_block_time (0 * multiplier = 0) would
+// evaporate between relays and silently disable shared state. MinSharedStateTipExpiration is a
+// constant precisely so no flag combination can defeat either guarantee.
 func (cs *CacheServer) SharedStateTipExpiration(averageBlockTimeForChain time.Duration) time.Duration {
 	ttl := averageBlockTimeForChain * SharedStateTipBlockMultiplier
-	return lavaslices.Max([]time.Duration{ttl, cs.ExpirationNonFinalized})
+	return lavaslices.Max([]time.Duration{ttl, cs.ExpirationNonFinalized, MinSharedStateTipExpiration})
 }
 
 func (cs *CacheServer) GetTotalCacheSize() int64 {
