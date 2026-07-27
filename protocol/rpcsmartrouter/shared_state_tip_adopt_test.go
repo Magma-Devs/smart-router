@@ -77,3 +77,46 @@ func TestAdoptSharedStateTip(t *testing.T) {
 		require.NotPanics(t, func() { rpcss.adoptSharedStateTip(ctx, 5000, 1) })
 	})
 }
+
+// TestAdoptSharedStateTip_StaleTipTakesLowerPeerValue pins why the adopt log reports
+// peer_tip_taken (tip == peerTip) and not just SetLatestBlock's `advanced`: advanced means "the
+// tip moved UP", so it is false in TWO opposite situations — the guard rejected the peer value,
+// and a stale local tip was re-adopted DOWNWARD to it. Reading advanced alone would report this
+// adoption as a rejection, the exact conflation the adopt logging exists to avoid.
+//
+// Reachable whenever the local tip has gone stale and localSeenBlock < peerTip < local tip.
+func TestAdoptSharedStateTip_StaleTipTakesLowerPeerValue(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
+		BucketWidth:      2,
+		OutlierThreshold: 100,
+		StalenessWindow:  10 * time.Second,
+		TTL:              10 * time.Second,
+	}, func() time.Time { return now })
+	if _, _, ok := cs.SetLatestBlock(2000); !ok {
+		t.Fatal("seed SetLatestBlock(2000) did not take")
+	}
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		chainState:     cs,
+		sharedState:    true,
+	}
+
+	// While the local tip is fresh, a lower peer tip is refused outright.
+	rpcss.adoptSharedStateTip(context.Background(), 1500, 1000)
+	require.Equal(t, int64(2000), tip(t, rpcss), "a fresh local tip refuses a lower peer value")
+
+	// Let the local tip go stale (no accepted observation within TTL).
+	now = now.Add(30 * time.Second)
+
+	// The same lower peer tip is now re-adopted downward — SetLatestBlock reports advanced=false
+	// here, yet the peer value WAS taken. tip == peerTip is what separates this from a rejection.
+	tipBefore, _, advanced := cs.SetLatestBlock(1500)
+	require.False(t, advanced, "a downward re-adoption is not an advance")
+	require.Equal(t, int64(1500), tipBefore, "...but the stale tip did take the peer value")
+
+	// And through the adopt path itself, for the same reason.
+	now = now.Add(30 * time.Second)
+	rpcss.adoptSharedStateTip(context.Background(), 1400, 1000)
+	require.Equal(t, int64(1400), tip(t, rpcss), "a stale local tip self-heals down to the peer value")
+}

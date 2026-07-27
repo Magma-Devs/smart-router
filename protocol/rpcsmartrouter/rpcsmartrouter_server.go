@@ -2132,11 +2132,13 @@ func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavases
 // (the documented single source of truth) and falling back to the poll-tracker atomic only when
 // the store has no positive value (MAG-2160 Finding 6 + follow-up review).
 //
-// The store is fed by BOTH the poll observer AND relay harvest under a TIME-monotonic guard, so it
-// always reflects the newest observation — including a newer LOWER block after a reorg/rollback or
-// a stale-tip self-heal. The poll atomic, by contrast, advances only on a real poll that saw a new
-// block (replaceBlocksQueue runs only when gotNewBlock || forked) and never regresses on a plain
-// rollback, so it can sit STALE-HIGH while the store already holds the correct lower tip. Taking
+// The store is fed by BOTH the poll observer AND relay harvest under the T4 block-monotonic guard,
+// so it DOES eventually correct downward after a reorg/rollback — but not immediately: a newer
+// LOWER block is held off while the stored higher tip is still fresh and adopted once that tip goes
+// stale, so the downward correction lags by up to the staleness window. The poll atomic, by
+// contrast, advances only on a real poll that saw a new block (replaceBlocksQueue runs only when
+// gotNewBlock || forked) and never regresses on a plain rollback at all, so it can sit STALE-HIGH
+// indefinitely while the store already holds — or is about to adopt — the correct lower tip. Taking
 // max() (the earlier implementation) would then pick the stale atomic and make consistency
 // pre-validation believe a rolled-back endpoint is still caught up. Preferring the store fixes both
 // that reorg case AND the original traffic-gate-frozen case (there the store is the fresher/higher
@@ -2810,20 +2812,25 @@ func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlo
 // adoptSharedStateTip feeds a peer pod's chain tip — read from the shared cache under the
 // chain-level key, so it is the fleet-max of every pod's guarded tip — into this pod's
 // ChainState, but only when it is ahead of our local view. SetLatestBlock applies the same
-// outlier/Recompute guards as a local observation, so a poisoned peer value is snapped down
+// anti-lie guards as a local observation (outlier threshold against the clustered baseline, or
+// against the fresh tip before a baseline exists), so a poisoned peer value is snapped down
 // rather than trusted (T10). No-op when shared state is off or ChainState is not yet wired.
 func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peerTip, localSeenBlock int64) {
 	if !rpcss.sharedState || rpcss.chainState == nil || peerTip <= localSeenBlock {
 		return
 	}
-	// SetLatestBlock re-guards: advanced=false means the anti-lie guard rejected/snapped down the
-	// peer tip (e.g. a lying-high value). Log the outcome so a rejected peer tip is visible rather
-	// than silent — a stream of adopted=false is the signature of a poisoned shared tip.
+	// SetLatestBlock re-guards. Its `advanced` return means "the tip moved UP" — it is false both
+	// when the guard rejected the peer value AND when a stale local tip was re-adopted DOWNWARD to
+	// it, so it cannot on its own distinguish rejection from acceptance. Compare the resulting tip
+	// to the peer value for that: peer_tip_taken is true iff ChainState now holds the peer's block
+	// (accepted upward, already equal, or stale-tip downward self-heal), so peer_tip_taken=false is
+	// the unambiguous signature of a rejected/snapped-down — i.e. poisoned — shared tip.
 	tip, _, advanced := rpcss.chainState.SetLatestBlock(peerTip)
 	utils.LavaFormatDebug("shared-state tip fed to chain state",
 		utils.LogAttr("peer_tip", peerTip),
 		utils.LogAttr("local_seen_block", localSeenBlock),
-		utils.LogAttr("adopted", advanced),
+		utils.LogAttr("peer_tip_taken", tip == peerTip),
+		utils.LogAttr("tip_advanced", advanced),
 		utils.LogAttr("chain_state_tip", tip),
 		utils.LogAttr("GUID", ctx),
 	)
