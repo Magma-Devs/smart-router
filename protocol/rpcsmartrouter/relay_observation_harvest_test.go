@@ -12,10 +12,12 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -422,14 +424,43 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 	t.Cleanup(m.Stop)
 
 	const url = "http://ep:8545"
-	const addr = "lava@provider1"
+	const addr = "lava@harvestGenProvider"
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	// Empty options => metrics registered on the default registry, no HTTP server started.
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
+		smartRouterEndpointMetrics:  mm,
 		// Needed so the tip gate admits the eth_blockNumber harvest below; the focus here is the
 		// generation gate, but a nil parser would reject the relay before generation is even checked.
 		chainParser: newRealChainParserForHarvest(t, "ETH1"),
+	}
+
+	// endpointLatestBlock reads the rpc_endpoint_latest_block GAUGE for this endpoint (0 when it has
+	// never been published — `addr` is unique to this test, so no other test's value can appear
+	// here). Gauges are Set to an absolute value and this package's tests run sequentially, so the
+	// value read straight after a harvest is the one that harvest published.
+	endpointLatestBlock := func(t *testing.T) float64 {
+		t.Helper()
+		mfs, gerr := prometheus.DefaultGatherer.Gather()
+		require.NoError(t, gerr)
+		for _, mf := range mfs {
+			if mf.GetName() != "rpc_endpoint_latest_block" {
+				continue
+			}
+			for _, mtr := range mf.GetMetric() {
+				lm := map[string]string{}
+				for _, lp := range mtr.GetLabel() {
+					lm[lp.GetName()] = lp.GetValue()
+				}
+				if lm["spec"] == "ETH1" && lm["apiInterface"] == "jsonrpc" && lm["endpoint_id"] == addr {
+					return mtr.GetGauge().GetValue()
+				}
+			}
+		}
+		return 0
 	}
 
 	// Incarnation A: tracker created, generation captured "before dispatch" of relay A.
@@ -458,9 +489,20 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 		require.NotEqual(t, int64(20_000_000), o.LatestBlock,
 			"a relay that captured the OLD generation must be rejected after same-URL replacement")
 	}
-	// The store rejection above is the gate: recordRelayBlockObservation returns false, so the
-	// harvest bails before the downstream tip-state write (OnTipObservation → SetLatestBlock) ever
-	// runs — a stale-generation relay cannot move the tip.
+	// The TIP is not gated by the early return below — OnTipObservation → SetLatestBlock fires from
+	// a defer registered INSIDE RecordRelayObservation (endpointstate/observation.go), so a
+	// stale-generation relay never reaches it: the gate leaves tipBlock at 0 and the hook simply
+	// does not fire. That invariant is owned one layer down by
+	// endpointstate/chainstate_feed_test.go ("a rejected (stale-gen) relay feeds no tip"), which
+	// asserts it directly against a hook sink — re-asserting the tip here would be redundant, and
+	// would silently pass if this test's OnTipObservation wiring were ever dropped.
+	//
+	// What harvestAndUpdateTipFromRelay's early return DOES guard is the metric writes after it.
+	// That is the invariant worth pinning at this seam: hoisting the per-endpoint write above the
+	// gate would publish a stale-generation relay's block as an endpoint's latest, and nothing else
+	// in the suite catches it.
+	require.NotEqual(t, float64(20_000_000), endpointLatestBlock(t),
+		"a stale-generation relay must not publish rpc_endpoint_latest_block")
 
 	// Sanity: harvesting with the live generation (genB) IS accepted — proving the rejection
 	// above was the generation gate, not a broken store.
@@ -469,6 +511,11 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 	require.True(t, obsExists)
 	require.Equal(t, int64(20_000_000), o.LatestBlock)
 	require.Equal(t, endpointstate.ObservationSourceRelay, o.Source)
+	// Positive control for the metric assertion above — NOT optional. It proves the metrics manager
+	// is wired and that this harvest path publishes at all, so the earlier NotEqual is a real
+	// rejection rather than a vacuous pass against a metric nothing ever writes.
+	require.Equal(t, float64(20_000_000), endpointLatestBlock(t),
+		"a live-generation harvest DOES publish rpc_endpoint_latest_block")
 }
 
 // ---------------------------------------------------------------------------
