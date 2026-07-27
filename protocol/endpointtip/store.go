@@ -42,8 +42,19 @@ func (s Source) String() string {
 	}
 }
 
-// Tip is the atomic per-endpoint tip triple. The three fields move together — a write
-// either advances all three or none.
+// Tip is the atomic per-endpoint tip triple: a write either takes all three fields or none,
+// so no reader ever sees a Block from one observation beside a Source from another.
+//
+// ONE deliberate exception, in Set's higher-block branch: an accepted higher block keeps its own
+// Block and Source but may retain the STORED ObservedAt, because the freshness stamp must only
+// ever advance (see Set). The stored triple is then a hybrid — the incoming observation's block
+// and source, stamped with the later of the two observation times. Both stamps are genuine
+// observations of this endpoint, so the stamp still means "when we last saw this endpoint's
+// tip", which is what every reader wants it for; the one reader that also keys off Source
+// (freshRelayTip, the poll-suppression gate) can therefore see a relay tip stamped slightly
+// later than the relay actually arrived. The over-suppression is bounded by the gap between the
+// caller's time.Now() and this write — lock acquisition, i.e. sub-millisecond — so it is
+// accepted rather than paid for with a second stamp field.
 type Tip struct {
 	Block      int64     // most recent observed block (always > 0 once set)
 	ObservedAt time.Time // wall-clock of the observation that set Block (freshness stamp)
@@ -95,7 +106,9 @@ func (s *Store) Set(key string, t Tip, staleAfter time.Duration) bool {
 	switch {
 	case !ok || t.Block > cur.Block:
 		if ok && cur.ObservedAt.After(t.ObservedAt) {
-			t.ObservedAt = cur.ObservedAt // freshness stamp only advances, never regresses
+			// Freshness stamp only advances, never regresses — this is the one place the triple
+			// is stored as a hybrid (incoming Block+Source, stored ObservedAt); see Tip's doc.
+			t.ObservedAt = cur.ObservedAt
 		}
 		s.tips[key] = t
 		return true
