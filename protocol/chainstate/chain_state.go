@@ -318,7 +318,9 @@ func (cs *ChainState) Reset() {
 // Returns the resulting tip, the time it was last confirmed, and whether this call ADVANCED it
 // (equal-block confirmations and downward re-adoptions return advanced=false). advanced is the
 // accept/reject signal for a caller that needs to know whether its observation actually moved the
-// tip; the production hooks discard it, and the package tests assert guard behaviour through it.
+// tip: the OnTipObservation hook discards it, adoptSharedStateTip LOGS it (as `adopted`) so a
+// rejected peer tip is visible rather than silent, and the package tests assert guard behaviour
+// through it.
 func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, advanced bool) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
