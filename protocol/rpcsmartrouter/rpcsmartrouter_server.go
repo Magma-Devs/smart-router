@@ -2643,10 +2643,61 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 	}
 }
 
-// initializeChainTrackers creates ChainTrackers for all direct RPC endpoints on startup.
-// This runs in the background and ensures fresh block data is available from the start,
-// avoiding issues where endpoints have stale or no block data for consistency validation.
-// If initialization fails for an endpoint, lazy initialization (ensureEndpointChainTracker) serves as fallback.
+// chainTrackerReconcileInterval is how often initializeChainTrackers re-walks the live pairing
+// looking for direct-RPC endpoints that have no ChainTracker. It is deliberately short relative to
+// the paths that ADMIT an endpoint after startup (retryFailedStaticProviders' 3m ticker, the ~15m
+// epoch re-verify), because it is the only thing standing between a late-admitted endpoint and
+// permanent silence — a reconcile pass is a map lookup per endpoint when nothing is missing, so the
+// cost of running it often is nil. Package-level var, not a const, so tests can shorten it.
+var chainTrackerReconcileInterval = 15 * time.Second
+
+// initializeChainTrackers keeps a ChainTracker registered for every direct-RPC endpoint in the live
+// pairing, for the lifetime of the server. It runs one pass ~100ms after startup and then reconciles
+// on chainTrackerReconcileInterval.
+//
+// MAG-2622 — why this is a LOOP and not the one-shot it used to be. Endpoints enter the pairing at
+// three points AFTER this function's first pass, and none of them registered a tracker:
+//
+//	retryFailedStaticProviders   an upstream that failed boot verification recovers (3m ticker)
+//	applyReverification promote  a demoted provider passes re-verification (epoch tick)
+//	rebuildPairingFromConfig     /debug/reset-pairing re-admits cold
+//
+// All three build fresh DirectRPCConnections, so the endpoint is fully usable and shows up in
+// GetAllDirectRPCEndpoints — it just had no poll loop, forever. Its signature is PollIntervalMs=0
+// with ConsecutivePollFailures=0: not polling, and not even failing. The docstring used to name
+// ensureEndpointChainTracker as the fallback, but that only fires when a relay is ROUTED to the
+// endpoint, and an endpoint with no observations does not score well enough to attract one — a
+// chicken-and-egg that never resolves.
+//
+// The damage is not the missing telemetry. Below chainstate's min-2 rule no consensus baseline can
+// form, which switches OFF the consensus-anchored anti-lie guard in SetLatestBlock and Recompute's
+// snap-down correction, so a cold-start lie becomes permanent and effectively all traffic routes to
+// the one endpoint that does have data. On a 3-endpoint pod with 2 upstreams down at boot, that is
+// the whole pod.
+//
+// Registering for a DOWN endpoint is safe and is the point: GetOrCreateTracker does no network I/O
+// (it registers the row and its observation generation under the manager lock, then starts the poll
+// via `go startTrackerWithRetry`), and the poll-failure backoff already handles unreachability
+// correctly — an endpoint that goes down AFTER its tracker exists backs off and recovers cleanly.
+// This loop simply guarantees the tracker exists so that machinery can apply.
+//
+// Relationship to MAG-2445 (a brief outage across an epoch boundary costing ~15 minutes) — this
+// closes HALF of it, and it matters which half. That bug runs: epoch re-verify sees a 503 and
+// DEMOTES the endpoint out of the pairing (applyReverification) → cleanupStaleTrackers drops its
+// row → the endpoint heals → a later epoch's re-verify PROMOTES it back into the pairing.
+//
+//	exclusion (demote → promote, up to one epoch)   NOT fixed here, and must not be: this loop
+//	                                                reconciles against the LIVE PAIRING, so a
+//	                                                demoted endpoint is correctly invisible to it.
+//	                                                Polling an upstream the re-verifier deliberately
+//	                                                dropped would be wrong. Fix belongs in the demote
+//	                                                decision (spec_reverifier.go), not here.
+//	recovery (promote → polling again)              FIXED here. Nothing on the promote path called
+//	                                                GetOrCreateTracker, so a re-promoted endpoint sat
+//	                                                paired with no poll loop until a relay happened to
+//	                                                land on it via ensureEndpointChainTracker —
+//	                                                non-deterministic and possibly indefinite. It is
+//	                                                now deterministic, within one reconcile tick.
 func (rpcss *RPCSmartRouterServer) initializeChainTrackers(ctx context.Context) {
 	// Small delay to let startup complete and connections stabilize
 	select {
@@ -2659,29 +2710,78 @@ func (rpcss *RPCSmartRouterServer) initializeChainTrackers(ctx context.Context) 
 		return
 	}
 
-	endpoints := rpcss.sessionManager.GetAllDirectRPCEndpoints()
-	if len(endpoints) == 0 {
-		utils.LavaFormatDebug("no direct RPC endpoints to initialize ChainTrackers")
-		return
+	rpcss.reconcileChainTrackers(ctx, true)
+
+	ticker := time.NewTicker(chainTrackerReconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rpcss.reconcileChainTrackers(ctx, false)
+		}
+	}
+}
+
+// reconcileChainTrackers registers a ChainTracker for every direct-RPC endpoint in the live pairing
+// that does not already have one. Idempotent and cheap when nothing is missing (one RLock'd map
+// lookup per endpoint, no network I/O). Returns the counts so tests can assert on them directly.
+//
+// firstPass controls only logging volume: the startup pass keeps the original
+// "initializing…"/"…complete" Info pair operators grep for, while later passes stay silent unless
+// they actually create something — a creation after startup is a real signal (that endpoint was
+// unobserved until now) and is logged as a warning naming the endpoints, so the condition MAG-2622
+// describes can never again pass silently.
+func (rpcss *RPCSmartRouterServer) reconcileChainTrackers(ctx context.Context, firstPass bool) (created, alreadyPresent, failed int) {
+	if rpcss.endpointChainTrackerManager == nil || rpcss.sessionManager == nil {
+		return 0, 0, 0
 	}
 
-	utils.LavaFormatInfo("initializing ChainTrackers for direct RPC endpoints",
-		utils.LogAttr("count", len(endpoints)),
-		utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
-	)
+	chainID := ""
+	if rpcss.listenEndpoint != nil {
+		chainID = rpcss.listenEndpoint.ChainID
+	}
 
-	successCount := 0
-	failCount := 0
+	endpoints := rpcss.sessionManager.GetAllDirectRPCEndpoints()
+	if len(endpoints) == 0 {
+		if firstPass {
+			utils.LavaFormatDebug("no direct RPC endpoints to initialize ChainTrackers")
+		}
+		return 0, 0, 0
+	}
 
-	// Initialize ChainTrackers with staggered delays to avoid thundering herd
-	for i, ep := range endpoints {
+	// Partition first so the 50ms stagger below paces only endpoints that need a NEW tracker.
+	// Staggering the steady-state (all-present) case would make every reconcile pass sleep
+	// 50ms × len(endpoints) for nothing.
+	missing := make([]*lavasession.EndpointWithDirectConnection, 0, len(endpoints))
+	for _, ep := range endpoints {
+		if ep == nil || ep.Endpoint == nil {
+			continue
+		}
+		if _, exists := rpcss.endpointChainTrackerManager.GetTracker(ep.Endpoint.NetworkAddress); exists {
+			alreadyPresent++
+			continue
+		}
+		missing = append(missing, ep)
+	}
+
+	if firstPass {
+		utils.LavaFormatInfo("initializing ChainTrackers for direct RPC endpoints",
+			utils.LogAttr("count", len(endpoints)),
+			utils.LogAttr("chainID", chainID),
+		)
+	}
+
+	createdURLs := make([]string, 0, len(missing))
+	for i, ep := range missing {
 		select {
 		case <-ctx.Done():
 			utils.LavaFormatDebug("ChainTracker initialization cancelled",
 				utils.LogAttr("completed", i),
-				utils.LogAttr("total", len(endpoints)),
+				utils.LogAttr("total", len(missing)),
 			)
-			return
+			return created, alreadyPresent, failed
 		default:
 		}
 
@@ -2689,7 +2789,7 @@ func (rpcss *RPCSmartRouterServer) initializeChainTrackers(ctx context.Context) 
 		if i > 0 {
 			select {
 			case <-ctx.Done():
-				return
+				return created, alreadyPresent, failed
 			case <-time.After(50 * time.Millisecond):
 			}
 		}
@@ -2700,17 +2800,33 @@ func (rpcss *RPCSmartRouterServer) initializeChainTrackers(ctx context.Context) 
 				utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
 				utils.LogAttr("provider", ep.ProviderAddress),
 			)
-			failCount++
-		} else {
-			successCount++
+			failed++
+			continue
 		}
+		created++
+		createdURLs = append(createdURLs, ep.Endpoint.NetworkAddress)
 	}
 
-	utils.LavaFormatInfo("ChainTracker initialization complete",
-		utils.LogAttr("success", successCount),
-		utils.LogAttr("failed", failCount),
-		utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
-	)
+	switch {
+	case firstPass:
+		utils.LavaFormatInfo("ChainTracker initialization complete",
+			utils.LogAttr("success", created+alreadyPresent),
+			utils.LogAttr("failed", failed),
+			utils.LogAttr("chainID", chainID),
+		)
+	case created > 0 || failed > 0:
+		// Reaching here means an endpoint was in the pairing with no poll loop until this tick.
+		// Warn rather than Info: it is either a post-startup admission (expected, but the operator
+		// should know that endpoint contributed nothing before now) or a tracker that went missing.
+		utils.LavaFormatWarning("ChainTracker reconcile: registered endpoints that had no tracker", nil,
+			utils.LogAttr("created", created),
+			utils.LogAttr("failed", failed),
+			utils.LogAttr("endpoints", createdURLs),
+			utils.LogAttr("chainID", chainID),
+		)
+	}
+
+	return created, alreadyPresent, failed
 }
 
 // isFinalizedForCacheWrite picks the chain tip used to decide whether a

@@ -522,7 +522,22 @@ func resetAllProbeBackoff(deps debugMuxDeps) int {
 // reregisterChainTrackerRows re-registers every currently-configured direct-RPC endpoint that lost
 // its ChainTracker row — the recovery tool for MAG-2445, where the epoch cleanup (cleanupStaleTrackers)
 // can delete the row of a provider that was only briefly unhealthy, after which no reset recreates it
-// and the provider returns only on a later ~15-minute rebuild. The source is the config/pairing set
+// and the provider returns only on a later ~15-minute rebuild.
+//
+// Since MAG-2622 the server's own reconcile loop (initializeChainTrackers) re-registers a missing
+// row within chainTrackerReconcileInterval from this SAME source, so this handler is no longer the
+// only way back — its remaining value is being on-demand and auditable: an operator gets the row
+// back immediately (e.g. right after /debug/reset-pairing re-admits a demoted provider) instead of
+// waiting out a tick, and the action is explicit in the support record.
+//
+// Neither path shortens MAG-2445's EXCLUSION window, because both read the LIVE PAIRING: there the
+// epoch re-verify demotes the endpoint OUT of the pairing (applyReverification sees a 503) before
+// cleanupStaleTrackers drops its row, so until a later epoch promotes it back it is absent from
+// GetAllDirectRPCEndpoints entirely. Shortening that means keeping the endpoint paired, not
+// re-registering its tracker. What both paths DO fix is what happens after the promote: the row
+// comes back instead of waiting on a relay to trigger lazy creation.
+//
+// The source is the config/pairing set
 // (GetAllDirectRPCEndpoints, the same source initializeChainTrackers uses at startup), NOT the live
 // health-filtered set cleanupStaleTrackers deletes from — so a temporarily-disabled provider is
 // restored while a genuinely config-removed one is correctly left out. GetOrCreateTracker is
