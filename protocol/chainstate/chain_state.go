@@ -315,12 +315,12 @@ func (cs *ChainState) Reset() {
 // turned a cold-start lie into a process-lifetime one, is retired (T3); every reader goes through
 // this tip. Do not reintroduce a ratcheting mirror of it without its own downward path.
 //
-// Returns the resulting tip, the time it was last confirmed, and whether this call ADVANCED it
-// (equal-block confirmations and downward re-adoptions return advanced=false). advanced is the
-// accept/reject signal for a caller that needs to know whether its observation actually moved the
-// tip: the OnTipObservation hook discards it, adoptSharedStateTip LOGS it (as `adopted`) so a
-// rejected peer tip is visible rather than silent, and the package tests assert guard behaviour
-// through it.
+// Returns the resulting tip, the time it was last confirmed, and whether this call moved the tip
+// UP. advanced is not an accept/reject signal: equal-block confirmations, downward re-adoptions,
+// and rejected observations all return false. The OnTipObservation hook discards it;
+// adoptSharedStateTip logs it as `tip_advanced` and separately compares the resulting tip with the
+// positive peer input to determine whether that value was taken; package tests assert guard
+// behaviour through it.
 func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, advanced bool) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
