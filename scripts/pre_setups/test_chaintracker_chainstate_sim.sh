@@ -134,7 +134,35 @@ relay()     { curl -s --max-time 8 -X POST "http://127.0.0.1:$LISTEN_PORT" -H 'C
 # sim_calls : total upstream calls the eth-sim pool has served (probe-silence proof).
 sim_calls() { curl -s "http://$SIM_CONTROL/stats" | jq '[.providers | to_entries[] | select(.key|startswith("eth-sim:")) | .value.total_calls] | add // 0'; }
 
-stop_router() { pkill -f "$BIN" 2>/dev/null; sleep 2; }
+# stop_router : kill every smartrouter built into this repo's debugging/testbin.
+#
+# Matches on the "debugging/testbin/smartrouter" SUFFIX, not on "$BIN" (the absolute path):
+# pkill -f matches the literal command line, so a router someone launched by RELATIVE path
+# ("./debugging/testbin/smartrouter ...") survives an absolute-path pattern and keeps running
+# alongside the harness's own. Two routers polling the same simulator pool DOUBLE the upstream
+# call volume, which fails scenario 3 (probe silence) with a number that looks like a probe-loop
+# regression, and lets later scenarios read a router that never cold-started. The suffix pattern
+# catches both spellings; the post-check below catches anything else still holding our ports.
+stop_router() {
+	pkill -f "debugging/testbin/smartrouter" 2>/dev/null
+	sleep 2
+	local stray
+	stray=$(pgrep -f "debugging/testbin/smartrouter" | tr '\n' ' ')
+	if [ -n "${stray// /}" ]; then
+		echo "  ⚠️  stray smartrouter still running after stop (pids: $stray) — killing hard"
+		pkill -9 -f "debugging/testbin/smartrouter" 2>/dev/null
+		sleep 1
+	fi
+	# Belt and braces: whatever still holds the debug port would make the next router's
+	# readiness probe answer from the WRONG process, silently invalidating every assertion.
+	local holder
+	holder=$(lsof -ti:"$DEBUG_PORT" 2>/dev/null | tr '\n' ' ')
+	if [ -n "${holder// /}" ]; then
+		echo "  ⚠️  port $DEBUG_PORT still held by pid(s) $holder — killing so assertions read OUR router"
+		kill -9 $holder 2>/dev/null
+		sleep 1
+	fi
+}
 
 # start_router [log-suffix] : boot the router and block until it answers.
 # A restart is the ONLY way to get a genuine cold start: the endpointtip store is
