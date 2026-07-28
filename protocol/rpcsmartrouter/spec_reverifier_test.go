@@ -39,7 +39,23 @@ func collectNames(m map[uint64]*lavasession.ConsumerSessionsWithProvider) map[st
 	return out
 }
 
+// withImmediateDemote pins reverifyDemoteThreshold to 1 (demote on the first failed cycle) for
+// the duration of a test, restoring the production value on cleanup.
+//
+// The demote-orchestration tests predate the MAG-2445 hysteresis and are about what the
+// reconciliation DOES with a demote — which map it lands in, whether updateEpoch stores it,
+// whether the session manager sees it — not about how many failed cycles earn one. Driving two
+// cycles in each of them would add noise unrelated to their subject. The threshold itself is
+// pinned by TestApplyReverification_DemoteHysteresis.
+func withImmediateDemote(t *testing.T) {
+	t.Helper()
+	restore := reverifyDemoteThreshold
+	reverifyDemoteThreshold = 1
+	t.Cleanup(func() { reverifyDemoteThreshold = restore })
+}
+
 func TestApplyReverification(t *testing.T) {
+	withImmediateDemote(t)
 	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
 
 	tests := []struct {
@@ -258,4 +274,110 @@ func TestValidateProvider_SmokeWiring(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("validateProvider hung past its timeout argument — wiring regression")
 	}
+}
+
+// TestApplyReverification_DemoteHysteresis is the MAG-2445 pin: an active provider that fails a
+// single re-verify cycle keeps its place in the pairing, and only a failure that PERSISTS across
+// reverifyDemoteThreshold consecutive cycles demotes it.
+//
+// The bug this closes: epochs are wall-clock derived (floor((now-2024-01-01)/15m) in
+// common.EpochTimer), so boundaries land on :00/:15/:30/:45 regardless of process uptime. A blip
+// of a few tens of seconds that happened to overlap one tick demoted the provider outright, which
+// cost it a full epoch out of the pairing — and, before MAG-2622, its ChainTracker never came
+// back after the eventual promote either. Validate's own 3x retry does not help: those attempts
+// run back-to-back with no delay, so all three land inside the same outage.
+func TestApplyReverification_DemoteHysteresis(t *testing.T) {
+	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
+	configured := []*lavasession.RPCStaticProviderEndpoint{makeProvider("A"), makeProvider("B")}
+
+	// One inputs value reused across cycles — demoteFailStreak living there is exactly what
+	// carries the failure count from one epoch tick to the next.
+	failing := map[string]bool{}
+	inputs := &chainReverifyInputs{
+		rpcEndpoint:                rpc,
+		convertProvidersToSessions: fakeConvert,
+		configuredStatic:           configured,
+		validateFn: func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+			if failing[p.Name] {
+				return errors.New("mock outage")
+			}
+			return nil
+		},
+	}
+
+	// cycle runs one epoch tick over a pairing containing exactly `present`, and reports which
+	// providers survived and which were demoted.
+	cycle := func(epoch uint64, present ...string) (survived map[string]struct{}, demoted []string) {
+		fresh := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+		for i, n := range present {
+			fresh[uint64(i)] = makeSession(n)
+		}
+		got, demotedSessions := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
+		for _, s := range demotedSessions {
+			demoted = append(demoted, s.PublicLavaAddress)
+		}
+		return collectNames(got), demoted
+	}
+
+	require.Equal(t, 2, reverifyDemoteThreshold, "this test is written against the production threshold")
+
+	// Cycle 1 — B goes down mid-epoch. It must be KEPT: this is the blip.
+	failing["B"] = true
+	survived, demoted := cycle(1, "A", "B")
+	require.Contains(t, survived, "B", "a provider failing its FIRST re-verify cycle must stay paired (MAG-2445)")
+	require.Empty(t, demoted, "no demotion on the first failed cycle")
+
+	// Cycle 2 — still down. The failure has now persisted across two boundaries, so it goes.
+	survived, demoted = cycle(2, "A", "B")
+	require.NotContains(t, survived, "B", "a failure persisting across the threshold must demote")
+	require.Equal(t, []string{"B"}, demoted, "the demoted session must be surfaced for connection teardown")
+	require.Contains(t, survived, "A", "the healthy provider is untouched throughout")
+
+	// A recovered blip must not accumulate toward a later, unrelated one. B is re-promoted on
+	// recovery, then fails once more — that single failure starts a FRESH grace budget rather
+	// than tipping it straight back out.
+	delete(failing, "B")
+	survived, _ = cycle(3, "A")
+	require.Contains(t, survived, "B", "recovered provider is promoted back")
+
+	failing["B"] = true
+	survived, demoted = cycle(4, "A", "B")
+	require.Contains(t, survived, "B",
+		"the streak must reset on success — a later isolated failure gets the full grace budget, not a carried-over count")
+	require.Empty(t, demoted)
+}
+
+// A success between two failures resets the counter, so an endpoint that flaps every other cycle
+// is never demoted by accumulation. Separated from the walk above because it pins the reset rule
+// specifically: without the delete-on-success the two failures would sum to the threshold.
+func TestApplyReverification_SuccessResetsDemoteStreak(t *testing.T) {
+	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
+	configured := []*lavasession.RPCStaticProviderEndpoint{makeProvider("A")}
+
+	var fail bool
+	inputs := &chainReverifyInputs{
+		rpcEndpoint:                rpc,
+		convertProvidersToSessions: fakeConvert,
+		configuredStatic:           configured,
+		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+			if fail {
+				return errors.New("mock outage")
+			}
+			return nil
+		},
+	}
+
+	run := func(epoch uint64) map[string]struct{} {
+		fresh := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("A")}
+		got, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
+		return collectNames(got)
+	}
+
+	fail = true
+	require.Contains(t, run(1), "A", "first failure is grace")
+	fail = false
+	require.Contains(t, run(2), "A", "recovered")
+	fail = true
+	require.Contains(t, run(3), "A",
+		"the intervening success must have cleared the streak — otherwise this second failure demotes")
 }

@@ -947,6 +947,7 @@ func fakeConvertSessions(epoch uint64) func([]*lavasession.RPCStaticProviderEndp
 // covers the post-condition that lives only in updateEpoch (assignment of the
 // applyReverification result back into the router's map at rpcsmartrouter.go:1771).
 func TestUpdateEpoch_ReverifyDemotesFailingStatic(t *testing.T) {
+	withImmediateDemote(t)
 	rig := newReverifyTestRig(t, "LAVA_REVERIFY_DEMOTE", "127.0.0.1:3340")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
@@ -1027,6 +1028,7 @@ func TestUpdateEpoch_ReverifyPromotesRecoveredStatic(t *testing.T) {
 // promoted. Asserts on the resulting map composition by name — the survivor set
 // after one full orchestration cycle.
 func TestUpdateEpoch_ReverifyMixedDemoteAndPromote(t *testing.T) {
+	withImmediateDemote(t)
 	rig := newReverifyTestRig(t, "LAVA_REVERIFY_MIXED", "127.0.0.1:3342")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
@@ -1075,6 +1077,7 @@ func TestUpdateEpoch_ReverifyMixedDemoteAndPromote(t *testing.T) {
 // "has backups" to consumers iterating the outer map, so the delete branch is
 // load-bearing.
 func TestUpdateEpoch_ReverifyEmptyBackupTierDeletes(t *testing.T) {
+	withImmediateDemote(t)
 	rig := newReverifyTestRig(t, "LAVA_REVERIFY_BACKUP_DELETE", "127.0.0.1:3343")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
@@ -1105,6 +1108,7 @@ func TestUpdateEpoch_ReverifyEmptyBackupTierDeletes(t *testing.T) {
 // "backup tier produces a non-empty result post-reverify" case touches — the
 // empty-result delete path is covered separately above.
 func TestUpdateEpoch_ReverifyBackupPartialDemote(t *testing.T) {
+	withImmediateDemote(t)
 	rig := newReverifyTestRig(t, "LAVA_REVERIFY_BACKUP_PARTIAL", "127.0.0.1:3344")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
@@ -1204,6 +1208,7 @@ func TestUpdateEpoch_ReverifyPromotesRecoveredBackup(t *testing.T) {
 // outcome between epochs without rebuilding inputs (mirrors the real flow:
 // the same chainReverifyInputs is used across every epoch tick).
 func TestUpdateEpoch_ReverifyCrossEpochDemoteThenPromote(t *testing.T) {
+	withImmediateDemote(t)
 	rig := newReverifyTestRig(t, "LAVA_REVERIFY_CROSS_EPOCH", "127.0.0.1:3346")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 	sm := rpsr.sessionManagers[chainKey]

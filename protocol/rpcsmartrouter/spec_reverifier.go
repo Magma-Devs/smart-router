@@ -21,6 +21,26 @@ var SpecReVerifyConcurrency = 5
 // implementation detail rarely useful to operators. Exported for tests.
 var SpecReVerifyAttemptTimeout = 30 * time.Second
 
+// reverifyDemoteThreshold is how many CONSECUTIVE re-verify cycles a currently-active provider
+// must fail before it is demoted out of the pairing (MAG-2445). 1 restores the old
+// demote-on-first-failure behaviour.
+//
+// Validate is not a single probe — it already retries 3x per verification (chain_fetcher.go,
+// "we give several chances for starting up"). But those retries run back-to-back with NO delay,
+// so the entire budget is spent inside ~1s. Against an outage measured in seconds or minutes
+// they all fail identically, which is why a 40-second blip that happened to overlap an epoch
+// tick demoted the provider outright and cost it a full epoch (~15m) out of the pairing. Those
+// retries were written for a COLD path (a node still booting); applyReverification reuses
+// Validate on a HOT path where the failure mode is a transient outage, and there the only useful
+// hysteresis is across time.
+//
+// This adds the missing temporal hysteresis, matching how endpoint health already works
+// (MaxConsecutiveConnectionAttempts to disable, consecutiveHealthyProbes to re-enable): a blip
+// must persist across two epoch boundaries to demote. Keeping a genuinely dead provider paired
+// for one extra epoch is cheap — the endpoint-health path disables it within seconds and QoS
+// stops routing to it, so demotion is a coarse cleanup, not the liveness mechanism.
+var reverifyDemoteThreshold = 2
+
 // reverifyTier discriminates which configured list applyReverification operates
 // on. A typed enum prevents the silent miss-routing a stringly-typed tier could
 // cause if a caller ever typoed "back-up" or "primary".
@@ -54,14 +74,26 @@ type chainReverifyInputs struct {
 	// to validateProvider (real network probe). Tests inject a fake to exercise
 	// updateEpoch's orchestration without standing up upstreams.
 	validateFn func(context.Context, *lavasession.RPCStaticProviderEndpoint) error
+	// demoteFailStreak counts CONSECUTIVE failed re-verify cycles per active provider, keyed
+	// "<tier>|<name>" so a name configured in both tiers cannot share a counter. It is the only
+	// state that survives between epoch ticks, and it exists so a transient outage overlapping
+	// one tick cannot demote (MAG-2445 — see reverifyDemoteThreshold). Cleared on success, on
+	// demotion, and whenever the provider is not currently active, so a re-promoted provider
+	// always starts with a full grace budget.
+	//
+	// Guarded by RPCSmartRouter.mu: applyReverification is called only from updateEpoch, which
+	// holds that lock across both tier calls. Lazily allocated so test fixtures that build
+	// chainReverifyInputs by hand need not.
+	demoteFailStreak map[string]int
 }
 
 // applyReverification revalidates configured providers for one tier and
 // reconciles the result against the freshly-built active map. It does two
 // things, in order:
 //
-//   - Demote: drop entries from `fresh` whose provider failed validation
-//     (these were active last cycle but are no longer healthy). The demoted
+//   - Demote: drop entries from `fresh` whose provider has now failed validation on
+//     reverifyDemoteThreshold CONSECUTIVE cycles (a provider failing for the first time is kept,
+//     so a transient outage overlapping one epoch tick costs nothing — MAG-2445). The demoted
 //     sessions are returned so the caller can close their DirectRPCConnections
 //     after UpdateAllProviders has swung over to the new map — closing inline
 //     would race in-flight relays still holding a pointer to the prior map.
@@ -77,7 +109,10 @@ type chainReverifyInputs struct {
 // Validations run in parallel, capped by SpecReVerifyConcurrency, so a worst-
 // case cycle is bounded by ⌈N/conc⌉ × SpecReVerifyAttemptTimeout instead of
 // N × timeout. Pure with respect to RPCSmartRouter state — no field mutation,
-// no UpdateAllProviders, no tracker reconcile; updateEpoch owns those.
+// no UpdateAllProviders, no tracker reconcile; updateEpoch owns those. The ONE
+// exception is inputs.demoteFailStreak, the cross-cycle failure counter this
+// function both reads and advances; it is guarded by RPCSmartRouter.mu, which
+// updateEpoch holds across both tier calls.
 //
 // Configured lists are pre-filtered by chain+ApiInterface at startup (see
 // relevantStaticProviderList in rpcsmartrouter.go), so no further filter is
@@ -129,10 +164,15 @@ func applyReverification(
 	activeNames := byName(fresh)
 	healthyNames := make(map[string]struct{}, len(configured))
 	var toAdmit []*lavasession.RPCStaticProviderEndpoint
+	if inputs.demoteFailStreak == nil {
+		inputs.demoteFailStreak = make(map[string]int)
+	}
 	for i, p := range configured {
 		err := results[i]
 		_, wasActive := activeNames[p.Name]
+		streakKey := tier.String() + "|" + p.Name
 		if err == nil {
+			delete(inputs.demoteFailStreak, streakKey)
 			healthyNames[p.Name] = struct{}{}
 			if !wasActive {
 				toAdmit = append(toAdmit, p)
@@ -143,18 +183,38 @@ func applyReverification(
 			}
 			continue
 		}
-		if wasActive {
-			utils.LavaFormatWarning("re-verify: demoting active "+tier.String(), err,
-				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
-				utils.LogAttr("provider", p.Name),
-			)
-		} else {
+		if !wasActive {
+			// Already out of the pairing — nothing to demote, and the streak governs only the
+			// demote decision, so keep it clear (a later promote then gets a full grace budget).
+			delete(inputs.demoteFailStreak, streakKey)
 			utils.LavaFormatDebug("re-verify: failed-init "+tier.String()+" still failing",
 				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 				utils.LogAttr("provider", p.Name),
 				utils.LogAttr("err", err.Error()),
 			)
+			continue
 		}
+
+		// Active and failing: demote only once the failure has persisted across
+		// reverifyDemoteThreshold consecutive cycles (MAG-2445).
+		inputs.demoteFailStreak[streakKey]++
+		streak := inputs.demoteFailStreak[streakKey]
+		if streak < reverifyDemoteThreshold {
+			healthyNames[p.Name] = struct{}{} // grace: stays paired this cycle
+			utils.LavaFormatWarning("re-verify: active "+tier.String()+" failed but kept — under demote threshold", err,
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+				utils.LogAttr("consecutiveFailures", streak),
+				utils.LogAttr("demoteAfter", reverifyDemoteThreshold),
+			)
+			continue
+		}
+		delete(inputs.demoteFailStreak, streakKey)
+		utils.LavaFormatWarning("re-verify: demoting active "+tier.String(), err,
+			utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+			utils.LogAttr("provider", p.Name),
+			utils.LogAttr("consecutiveFailures", streak),
+		)
 	}
 
 	// Demote: drop fresh entries whose provider is unhealthy. Keep their

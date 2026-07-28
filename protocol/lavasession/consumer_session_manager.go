@@ -482,6 +482,13 @@ type EndpointWithDirectConnection struct {
 // tracker until a relay happened to hit them (rare, because backups are fallback-only),
 // which meant dedicated-URL backups like base.lava.build had no block data on the dashboard.
 // Returns empty slice if no direct RPC endpoints are configured.
+//
+// NOT a silent filter on reachability (MAG-2622 chased this as a suspect and it was not the
+// cause): IsDirectRPC() IS len(DirectConnections) > 0, and an endpoint only ever reaches the
+// pairing with a connection attached — convertProvidersToSessions drops a URL whose
+// NewDirectRPCConnection failed, and drops the whole provider when every URL failed. So the
+// set returned here is "every configured direct-RPC endpoint currently paired", reachable or
+// not; a DOWN endpoint is present and must be given a tracker (see initializeChainTrackers).
 func (csm *ConsumerSessionManager) GetAllDirectRPCEndpoints() []*EndpointWithDirectConnection {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
@@ -491,6 +498,9 @@ func (csm *ConsumerSessionManager) GetAllDirectRPCEndpoints() []*EndpointWithDir
 	collect := func(providers map[string]*ConsumerSessionsWithProvider) {
 		for providerAddr, cswp := range providers {
 			for _, endpoint := range cswp.Endpoints {
+				// The length check is redundant today (IsDirectRPC IS len(DirectConnections) > 0)
+				// but it is what makes the [0] index below safe, so it stays: a future change to
+				// IsDirectRPC must not silently turn this into a panic.
 				if endpoint.IsDirectRPC() && len(endpoint.DirectConnections) > 0 {
 					results = append(results, &EndpointWithDirectConnection{
 						Endpoint:         endpoint,
