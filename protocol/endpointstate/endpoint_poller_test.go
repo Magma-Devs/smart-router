@@ -2,8 +2,11 @@ package endpointstate
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"testing"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -127,4 +130,247 @@ func TestEndpointPoller_CustomMessage_PropagatesMissingConnection(t *testing.T) 
 
 	_, err := fetcher.CustomMessage(context.Background(), "", []byte(`{}`), "POST", "getLatestBlockhash")
 	require.Error(t, err, "CustomMessage must fail when there is no direct connection")
+}
+
+// recordingConnection captures exactly what the poller handed the transport, so a test can
+// assert WHICH url, method and body a given (apiInterface, connectionType) pair targets. It
+// implements both DirectRPCConnection (the jsonrpc / tendermintrpc / gRPC route) and
+// HTTPDirectRPCDoer (the REST route), so one mock can show that REST leaves through
+// DoHTTPRequest carrying a path while jsonrpc stays on SendRequest against the base URL.
+type recordingConnection struct {
+	url        string
+	statusCode int    // status returned by DoHTTPRequest; 0 means 200
+	respBody   []byte // body returned by both routes
+
+	httpCalls []lavasession.HTTPRequestParams
+	sendCalls []recordedSend
+}
+
+type recordedSend struct {
+	data    []byte
+	headers map[string]string
+}
+
+func (m *recordingConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*lavasession.DirectRPCResponse, error) {
+	m.sendCalls = append(m.sendCalls, recordedSend{data: data, headers: headers})
+	return &lavasession.DirectRPCResponse{Data: m.respBody, StatusCode: http.StatusOK}, nil
+}
+
+func (m *recordingConnection) DoHTTPRequest(ctx context.Context, params lavasession.HTTPRequestParams) (*lavasession.HTTPDirectRPCResponse, error) {
+	m.httpCalls = append(m.httpCalls, params)
+	status := m.statusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return &lavasession.HTTPDirectRPCResponse{StatusCode: status, Body: m.respBody}, nil
+}
+
+func (m *recordingConnection) GetProtocol() lavasession.DirectRPCProtocol {
+	return lavasession.DirectRPCProtocolHTTP
+}
+func (m *recordingConnection) Close() error                { return nil }
+func (m *recordingConnection) GetURL() string              { return m.url }
+func (m *recordingConnection) GetNodeUrl() *common.NodeUrl { return nil }
+
+// TestEndpointPoller_SendRawRequestRouting pins WHERE each (apiInterface, connectionType)
+// pair sends its poll — the one decision in this file that has now been wrong twice.
+//
+// REST POST used to hand the body to SendRequest, which POSTs to the bare base URL: Tron
+// answered 405 on every poll until endpoint availability hit zero and the interface stopped
+// serving ("No pairings available", MAG-2597). Because the fix keys on apiInterface rather
+// than on connectionType, the rows that matter most here are the NEGATIVE ones — jsonrpc,
+// tendermintrpc and gRPC all reach that branch with connectionType POST and must keep
+// targeting the base URL, gRPC with its method in a header. A REST fix that silently
+// redirected every jsonrpc chain would be a far worse bug than the one it fixed, and only a
+// test can hold that line in CI (the live probe that found the bug cannot).
+func TestEndpointPoller_SendRawRequestRouting(t *testing.T) {
+	const baseURL = "https://node.example.com/gateway/KEY"
+
+	for _, tc := range []struct {
+		name            string
+		apiInterface    string
+		connectionType  string
+		requestData     string
+		apiName         string
+		wantURL         string // non-empty: expect the REST route, targeting this full URL
+		wantMethod      string
+		wantBody        string
+		wantContentType string
+		wantGrpcHeader  string // non-empty: expect this x-grpc-method on the SendRequest route
+	}{
+		{
+			name:           "rest GET appends the template to the base URL and sends no body",
+			apiInterface:   spectypes.APIInterfaceRest,
+			connectionType: "GET",
+			requestData:    "/cosmos/base/tendermint/v1beta1/blocks/latest",
+			apiName:        "/cosmos/base/tendermint/v1beta1/blocks/latest",
+			wantURL:        baseURL + "/cosmos/base/tendermint/v1beta1/blocks/latest",
+			wantMethod:     "GET",
+		},
+		{
+			name:            "rest POST appends apiName to the base URL and sends the template as the body",
+			apiInterface:    spectypes.APIInterfaceRest,
+			connectionType:  "POST",
+			requestData:     `{"detail":false}`,
+			apiName:         "/wallet/getnowblock",
+			wantURL:         baseURL + "/wallet/getnowblock",
+			wantMethod:      "POST",
+			wantBody:        `{"detail":false}`,
+			wantContentType: "application/json",
+		},
+		{
+			name:           "jsonrpc POST keeps the base URL and names the method in the body",
+			apiInterface:   spectypes.APIInterfaceJsonRPC,
+			connectionType: "POST",
+			requestData:    `{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`,
+			apiName:        "eth_blockNumber",
+			wantBody:       `{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`,
+		},
+		{
+			name:           "tendermintrpc POST keeps the base URL",
+			apiInterface:   spectypes.APIInterfaceTendermintRPC,
+			connectionType: "POST",
+			requestData:    `{"jsonrpc":"2.0","id":1,"method":"status","params":[]}`,
+			apiName:        "status",
+			wantBody:       `{"jsonrpc":"2.0","id":1,"method":"status","params":[]}`,
+		},
+		{
+			name:           "grpc POST keeps the base URL and carries the method in a header",
+			apiInterface:   spectypes.APIInterfaceGrpc,
+			connectionType: "POST",
+			requestData:    "{}",
+			apiName:        "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock",
+			wantBody:       "{}",
+			wantGrpcHeader: "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &recordingConnection{url: baseURL, respBody: []byte(`{"ok":true}`)}
+			poller := NewEndpointPoller(
+				&lavasession.Endpoint{NetworkAddress: baseURL, Enabled: true},
+				conn,
+				nil, // chainParser unused: sendRawRequest does no parsing
+				"TRX",
+				tc.apiInterface,
+			)
+
+			got, err := poller.sendRawRequest(context.Background(), []byte(tc.requestData), tc.connectionType, tc.apiName)
+			require.NoError(t, err)
+			require.Equal(t, `{"ok":true}`, string(got), "the upstream body must be returned verbatim")
+
+			if tc.wantURL != "" {
+				require.Empty(t, conn.sendCalls, "REST must not fall through to the base-URL SendRequest route")
+				require.Len(t, conn.httpCalls, 1)
+				call := conn.httpCalls[0]
+				require.Equal(t, tc.wantURL, call.URL, "REST polls the method path, not the host root (MAG-2597)")
+				require.Equal(t, tc.wantMethod, call.Method)
+				require.Equal(t, tc.wantBody, string(call.Body))
+				require.Equal(t, tc.wantContentType, call.ContentType)
+				return
+			}
+
+			require.Empty(t, conn.httpCalls, "only REST may be rewritten onto a path — this interface must keep the base URL")
+			require.Len(t, conn.sendCalls, 1)
+			call := conn.sendCalls[0]
+			require.Equal(t, tc.wantBody, string(call.data))
+			require.Equal(t, "application/json", call.headers["Content-Type"])
+			require.Equal(t, tc.wantGrpcHeader, call.headers[lavasession.GRPCMethodHeader],
+				"gRPC dials the method from this header; every other interface must leave it unset")
+		})
+	}
+}
+
+// TestEndpointPoller_CustomMessage_PathArgument pins the contract of CustomMessage's `path`
+// argument. It used to be ignored outright, which was harmless only because REST non-GET had
+// no path of its own — every request went to the base URL. Now that REST non-GET routes on a
+// path, ignoring it would silently send a caller that passed "/wallet/getnowblock" to the
+// method name instead. The gRPC row is the other half of the contract: there apiName is the
+// dialed method, so a path must never displace it.
+func TestEndpointPoller_CustomMessage_PathArgument(t *testing.T) {
+	const baseURL = "https://node.example.com/gateway/KEY"
+
+	for _, tc := range []struct {
+		name           string
+		apiInterface   string
+		path           string
+		apiName        string
+		wantURL        string // non-empty: expect the REST route with this URL
+		wantGrpcHeader string
+	}{
+		{
+			name:         "rest POST prefers an explicit path over apiName",
+			apiInterface: spectypes.APIInterfaceRest,
+			path:         "/wallet/getnowblock",
+			apiName:      "getnowblock",
+			wantURL:      baseURL + "/wallet/getnowblock",
+		},
+		{
+			name:         "rest POST falls back to apiName when no path is given",
+			apiInterface: spectypes.APIInterfaceRest,
+			path:         "",
+			apiName:      "/wallet/getnowblock",
+			wantURL:      baseURL + "/wallet/getnowblock",
+		},
+		{
+			name:           "grpc POST ignores path so it cannot displace the method header",
+			apiInterface:   spectypes.APIInterfaceGrpc,
+			path:           "/some/http/path",
+			apiName:        "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock",
+			wantGrpcHeader: "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &recordingConnection{url: baseURL, respBody: []byte(`{"ok":true}`)}
+			poller := NewEndpointPoller(
+				&lavasession.Endpoint{NetworkAddress: baseURL, Enabled: true},
+				conn,
+				nil,
+				"TRX",
+				tc.apiInterface,
+			)
+
+			_, err := poller.CustomMessage(context.Background(), tc.path, []byte(`{}`), "POST", tc.apiName)
+			require.NoError(t, err)
+
+			if tc.wantURL != "" {
+				require.Len(t, conn.httpCalls, 1)
+				require.Equal(t, tc.wantURL, conn.httpCalls[0].URL)
+				return
+			}
+
+			require.Empty(t, conn.httpCalls)
+			require.Len(t, conn.sendCalls, 1)
+			require.Equal(t, tc.wantGrpcHeader, conn.sendCalls[0].headers[lavasession.GRPCMethodHeader])
+		})
+	}
+}
+
+// TestEndpointPoller_RESTRejectionSurfacesHTTPStatus pins the failure shape of the bug this
+// change fixes: an upstream rejection on the REST route must come back as a typed
+// *HTTPStatusError carrying the code, because that is what the relay path reads to classify
+// the error (rpcsmartrouter_server.go reads StatusCode off this type). A bare error would
+// classify a 405 as an unknown transport failure.
+func TestEndpointPoller_RESTRejectionSurfacesHTTPStatus(t *testing.T) {
+	const baseURL = "https://api.trongrid.io"
+
+	conn := &recordingConnection{
+		url:        baseURL,
+		statusCode: http.StatusMethodNotAllowed,
+		respBody:   []byte("405 Not Allowed"),
+	}
+	poller := NewEndpointPoller(
+		&lavasession.Endpoint{NetworkAddress: baseURL, Enabled: true},
+		conn,
+		nil,
+		"TRX",
+		spectypes.APIInterfaceRest,
+	)
+
+	_, err := poller.sendRawRequest(context.Background(), []byte(`{}`), "POST", "/wallet/getnowblock")
+	require.Error(t, err)
+
+	var statusErr *lavasession.HTTPStatusError
+	require.True(t, errors.As(err, &statusErr), "REST rejections must stay typed for error classification")
+	require.Equal(t, http.StatusMethodNotAllowed, statusErr.StatusCode)
+	require.Equal(t, "405 Not Allowed", string(statusErr.Body), "the upstream body must survive for diagnostics")
 }

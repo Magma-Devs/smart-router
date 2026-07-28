@@ -337,12 +337,17 @@ func (ecf *EndpointPoller) FetchEndpoint() lavasession.RPCProviderEndpoint {
 // endpoint ChainTracker on Solana, which in turn starves every per-endpoint
 // metric that depends on OnNewBlock (latest_block, fetch_latest_success, …).
 //
-// The `path` argument is accepted for interface compatibility with
-// chainlib.ChainFetcher.CustomMessage but is not needed here: POST callers
-// (like SVMChainTracker) pass the body in `data` with `path=""`, and GET
-// callers already encode the URL suffix in `data` per sendRawRequest's REST
-// convention (see connectionType == "GET" branch below).
+// `path` is meaningful on exactly one route: REST non-GET, the only route that puts a
+// caller-chosen path in the URL (see sendRawRequest). There an explicit path wins over
+// apiName, so a caller that supplies one is not silently redirected to the method name.
+// Every other route ignores it, deliberately: jsonrpc and tendermintrpc target the base
+// URL, gRPC carries apiName as a method header (a path must not hijack it), and REST GET
+// already encodes the URL suffix in `data`. SVM callers — the only callers today — pass
+// path="" and take the apiName fallback.
 func (ecf *EndpointPoller) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
+	if path != "" && connectionType != "GET" && ecf.apiInterface == spectypes.APIInterfaceRest {
+		apiName = path
+	}
 	return ecf.sendRawRequest(ctx, data, connectionType, apiName)
 }
 
