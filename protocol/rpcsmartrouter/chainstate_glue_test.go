@@ -368,31 +368,7 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	require.NotNil(t, mm)
 
-	// routerLatestBlock reads the smartrouter_latest_block GAUGE for this chain/interface. Unlike the
-	// counters elsewhere in this package it is Set to an ABSOLUTE value, and these tests run
-	// sequentially (no t.Parallel), so the value read straight after a harvest is the one that
-	// harvest reported — no before/after delta needed.
-	routerLatestBlock := func(t *testing.T) float64 {
-		t.Helper()
-		mfs, err := prometheus.DefaultGatherer.Gather()
-		require.NoError(t, err)
-		for _, mf := range mfs {
-			if mf.GetName() != "smartrouter_latest_block" {
-				continue
-			}
-			for _, m := range mf.GetMetric() {
-				lm := map[string]string{}
-				for _, lp := range m.GetLabel() {
-					lm[lp.GetName()] = lp.GetValue()
-				}
-				if lm["spec"] == "ETH1" && lm["apiInterface"] == "jsonrpc" {
-					return m.GetGauge().GetValue()
-				}
-			}
-		}
-		require.FailNow(t, "smartrouter_latest_block not reported for ETH1/jsonrpc")
-		return 0
-	}
+	routerLatestBlock := readRouterLatestBlockGauge
 
 	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
 		BucketWidth:      2,
@@ -654,4 +630,81 @@ func TestSiteC_InClusterEndpointChargedNoSyncGap(t *testing.T) {
 	// the clamp would silently disable lag detection instead of merely tolerating the cluster.
 	require.Equal(t, width+1, syncGapAgainstReference(tip, mode-1, width),
 		"just past BucketWidth the endpoint is charged its real distance")
+}
+
+// readRouterLatestBlockGauge reads the smartrouter_latest_block GAUGE for ETH1/jsonrpc off the
+// default registry. Unlike the counters elsewhere in this package it is Set to an ABSOLUTE value,
+// and these tests run sequentially (no t.Parallel), so the value read straight after a write is
+// the one that write reported — no before/after delta needed. Shared by the relay-harvest test
+// (TestHarvest_ArchiveRoutingTipGuardedByChainState) and the poll-path test below (MAG-2629).
+func readRouterLatestBlockGauge(t *testing.T) float64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "smartrouter_latest_block" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			lm := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				lm[lp.GetName()] = lp.GetValue()
+			}
+			if lm["spec"] == "ETH1" && lm["apiInterface"] == "jsonrpc" {
+				return m.GetGauge().GetValue()
+			}
+		}
+	}
+	require.FailNow(t, "smartrouter_latest_block not reported for ETH1/jsonrpc")
+	return 0
+}
+
+// MAG-2629 regression pin: the router-wide latest-block gauge must advance under POLL-ONLY
+// traffic. Before the fix, SetRouterLatestBlock had exactly one call site — the relay-harvest
+// path — so on a router serving no relays the gauge froze at the last relay's value while the
+// poll-fed ChainState tip (and the per-endpoint gauges next to it) kept advancing: dashboards
+// read "falling behind head" on an idle pod, indistinguishable from a genuinely stuck tip.
+//
+// onTipObservation is the EndpointMonitor's OnTipObservation hook — the exact function every
+// accepted poll observation drives in production — called here directly so the test needs no
+// tracker, upstream, or relay machinery: the point is that THIS path alone must keep the gauge
+// live. Verified to fail against the pre-fix wiring (hook = bare SetLatestBlock closure).
+func TestOnTipObservation_GaugeAdvancesUnderPollOnlyTraffic(t *testing.T) {
+	// Empty options => metrics registered on the default registry, no HTTP server started.
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
+
+	// Real clock + DefaultConfig, exactly as ServeRPCRequests wires it (TTL = 10×13s = 130s),
+	// so the fresh-path assertions run under production freshness semantics.
+	cs := chainstate.New("ETH1", chainstate.DefaultConfig(13*time.Second))
+
+	rpcss := &RPCSmartRouterServer{
+		chainState:                 cs,
+		smartRouterEndpointMetrics: mm,
+		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+	}
+
+	// Two consecutive poll observations — no relay anywhere in this test — must move the gauge.
+	rpcss.onTipObservation(25_638_537)
+	require.Equal(t, float64(25_638_537), readRouterLatestBlockGauge(t),
+		"first poll observation must seed the gauge — pre-fix, only a relay could")
+	rpcss.onTipObservation(25_638_545)
+	require.Equal(t, float64(25_638_545), readRouterLatestBlockGauge(t),
+		"the gauge must track the tip under poll-only traffic — the frozen-gauge case from MAG-2629")
+
+	// Only-when-fresh semantics, shared with the relay-path write: warp the ChainState clock past
+	// TTL (stamps stay on the real clock, evaluation is warped — the same mechanism harness
+	// scenario 4 pins), so the gated GetLatestBlock reports stale. A poll observation arriving in
+	// that state must leave the gauge UNTOUCHED: a stale tip must not advance it, and zeroing it
+	// would turn routine TTL expiry into a false "chain reset" on the graph.
+	cs.SetDebugClockOffset(200 * time.Second)
+	rpcss.onTipObservation(25_638_600)
+	require.Equal(t, float64(25_638_545), readRouterLatestBlockGauge(t),
+		"a stale gated read must leave the gauge at its last fresh value")
+	cs.SetDebugClockOffset(0)
+
+	// Nil-guards: fixtures build servers without metrics or ChainState wired — the hook fires
+	// from tracker callbacks and must never panic on such a server.
+	(&RPCSmartRouterServer{}).onTipObservation(1)
+	(&RPCSmartRouterServer{chainState: cs}).onTipObservation(1)
 }
