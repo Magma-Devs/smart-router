@@ -217,10 +217,9 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		ApiInterface:     listenEndpoint.ApiInterface,
 		AverageBlockTime: effectiveBlockTime,
 		BlocksToSave:     endpointstate.DefaultBlocksToSave,
-		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write).
-		OnTipObservation: func(block int64) {
-			rpcss.chainState.SetLatestBlock(block)
-		},
+		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
+		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
+		OnTipObservation: rpcss.onTipObservation,
 		OnNewBlock: func(endpointURL string, fromBlock, toBlock int64) {
 			utils.LavaFormatTrace("endpoint ChainTracker detected new block",
 				utils.LogAttr("endpoint", endpointURL),
@@ -2451,6 +2450,43 @@ func runProbeCycleCore(
 	return scored, reEnabled, syncOmitted
 }
 
+// onTipObservation is the EndpointMonitor's OnTipObservation hook: it feeds every positive
+// poll/relay block into the per-chain ChainState tip, then mirrors the resulting GUARDED tip into
+// the router-wide smartrouter_latest_block gauge.
+//
+// MAG-2629 — the gauge mirror lives HERE, on the hook that advances the tip, because the gauge
+// used to be written only in the relay-harvest path (harvestAndUpdateTipFromRelay below). The tip
+// itself has two feeders — polls and relay harvest — so on a router serving no relay traffic the
+// gauge froze at the last relay's value while polls kept the real tip fresh: dashboards read
+// "falling behind head" on an idle pod, indistinguishable from a genuinely stuck tip, and
+// contradicting the poll-fed rpc_endpoint_latest_block right next to it. Writing it where the tip
+// changes makes the metric a faithful mirror under poll-only traffic; the harvest-path write
+// remains (redundant, not wrong) as the relay-side immediacy guarantee.
+//
+// Only-when-fresh semantics, same as the harvest-path write: the gated GetLatestBlock returns
+// ok=false when the tip is stale, and the gauge is then left alone — a stale tip must not advance
+// it, and zeroing it would turn routine TTL expiry into a false "chain reset" on the graph. The
+// gauge always carries the guarded tip, never the raw observed block, so a lying-high endpoint
+// cannot inflate it through this path either.
+//
+// Nil-guards cover test fixtures that construct the server without metrics or ChainState wired.
+func (rpcss *RPCSmartRouterServer) onTipObservation(block int64) {
+	if rpcss.chainState == nil {
+		return
+	}
+	rpcss.chainState.SetLatestBlock(block)
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	if accepted, ok := rpcss.chainState.GetLatestBlock(); ok {
+		rpcss.smartRouterEndpointMetrics.SetRouterLatestBlock(
+			rpcss.listenEndpoint.ChainID,
+			rpcss.listenEndpoint.ApiInterface,
+			accepted,
+		)
+	}
+}
+
 // harvestAndUpdateTipFromRelay applies a served relay's block to TIP state — but only when the
 // response is tip-eligible (MAG-2159 finding 4). tipBlockFromRelay distinguishes a "block
 // associated with a response" (historical: eth_getBlockByNumber(N), getBlockByHash,
@@ -2495,6 +2531,11 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 	// guarded tip (not the raw harvested `tip`) keeps a lying-high endpoint out of the router-wide
 	// metric, the scope the old chain-accepted gate protected. The per-endpoint metric below stays
 	// gated on the store only: it reports THIS endpoint's own view.
+	//
+	// Since MAG-2629 this is no longer the gauge's only writer: onTipObservation (the hook above)
+	// refreshes it on every accepted poll observation too, so the gauge no longer freezes on a
+	// router serving no relay traffic. This write is now redundant on the relay path (the hook has
+	// already fired by this point) and is kept as the explicit relay-side guarantee.
 	if rpcss.chainState != nil && rpcss.smartRouterEndpointMetrics != nil {
 		if accepted, ok := rpcss.chainState.GetLatestBlock(); ok {
 			rpcss.smartRouterEndpointMetrics.SetRouterLatestBlock(
