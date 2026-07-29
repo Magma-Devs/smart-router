@@ -10,6 +10,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/sigs"
 )
@@ -30,7 +31,41 @@ type RestMessage struct {
 	Msg      []byte
 	Path     string
 	SpecPath string
+	// Encoding mirrors CollectionData.Encoding — the wire format of this
+	// collection's bodies. Empty means JSON (every chain but IC-based ones).
+	// When it is CBOR, the body is transcoded to JSON before parsing; see
+	// NewParsableRPCInput.
+	Encoding string
 	chainproxy.BaseMessage
+}
+
+// IsCBOR reports whether this message's bodies are CBOR-encoded.
+func (rm RestMessage) IsCBOR() bool {
+	return rm.Encoding == spectypes.CollectionEncodingCBOR
+}
+
+// NewParsableRPCInput satisfies chainproxy.CustomParsingMessage. It is the hook
+// FormatResponseForParsing uses to let an apiInterface convert a non-JSON body
+// into something the JSON-typed spec parsers can read — the same seam gRPC uses
+// for protobuf.
+//
+// NOTE: declaring this method makes *every* RestMessage satisfy
+// CustomParsingMessage, so FormatResponseForParsing now routes all REST traffic
+// through here rather than straight to DefaultParsableRPCInput. That is
+// deliberate and behaviour-preserving: for non-CBOR collections this returns
+// exactly what the default branch would have returned, so existing JSON chains
+// are unaffected apart from one extra call.
+func (rm RestMessage) NewParsableRPCInput(input json.RawMessage) (parser.RPCInput, error) {
+	if !rm.IsCBOR() {
+		return chainproxy.DefaultParsableRPCInput(input), nil
+	}
+	transcoded, err := cborToJSON(input)
+	if err != nil {
+		return nil, utils.LavaFormatError("failed transcoding CBOR response to JSON", err,
+			utils.LogAttr("path", rm.Path),
+		)
+	}
+	return ParsableRPCInput{Result: transcoded}, nil
 }
 
 func (rm *RestMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
@@ -60,6 +95,13 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 
 	// Check Cosmos SDK transaction errors (HTTP 2xx with error code in JSON body)
 	if httpStatusCode >= 200 && httpStatusCode < 300 {
+		// A CBOR body is not JSON, so the Cosmos tx-error probe below cannot apply
+		// and would only ever produce a misleading unmarshal outcome. IC signals
+		// rejections in-band (a "rejected" status inside the CBOR envelope) rather
+		// than through a Cosmos-shaped error body, so a 2xx here is a success.
+		if jm.IsCBOR() {
+			return false, ""
+		}
 		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
 			return cosmosTxErr, errMsg
 		}

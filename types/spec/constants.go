@@ -17,8 +17,15 @@ const (
 
 	ParserArgLatest = "latest"
 
+	// EncodingBase64/EncodingHex belong to BlockParser.Encoding and describe how
+	// an extracted block HASH is represented — NOT the wire format of a body.
 	EncodingBase64 = "base64"
 	EncodingHex    = "hex"
+
+	// CollectionEncodingCBOR is a CollectionData.Encoding value declaring that
+	// this collection's bodies are CBOR, not JSON. An empty Encoding means JSON.
+	// Used by IC-based chains, whose HTTP interface is CBOR end to end.
+	CollectionEncodingCBOR = "cbor"
 )
 
 // IsFinalizedBlock returns true when the requested block is old enough to be

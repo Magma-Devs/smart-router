@@ -19,6 +19,7 @@ require (
 	github.com/caio/go-tdigest/v5 v5.0.0
 	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/fullstorydev/grpcurl v1.8.5
+	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/goccy/go-json v0.10.6
 	github.com/gogo/status v1.1.1
 	github.com/golang/mock v1.6.0
@@ -71,6 +72,7 @@ require (
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/bridges/prometheus v0.69.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.20.0 // indirect
