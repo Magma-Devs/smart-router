@@ -337,12 +337,17 @@ func (ecf *EndpointPoller) FetchEndpoint() lavasession.RPCProviderEndpoint {
 // endpoint ChainTracker on Solana, which in turn starves every per-endpoint
 // metric that depends on OnNewBlock (latest_block, fetch_latest_success, …).
 //
-// The `path` argument is accepted for interface compatibility with
-// chainlib.ChainFetcher.CustomMessage but is not needed here: POST callers
-// (like SVMChainTracker) pass the body in `data` with `path=""`, and GET
-// callers already encode the URL suffix in `data` per sendRawRequest's REST
-// convention (see connectionType == "GET" branch below).
+// `path` is meaningful on exactly one route: REST non-GET, the only route that puts a
+// caller-chosen path in the URL (see sendRawRequest). There an explicit path wins over
+// apiName, so a caller that supplies one is not silently redirected to the method name.
+// Every other route ignores it, deliberately: jsonrpc and tendermintrpc target the base
+// URL, gRPC carries apiName as a method header (a path must not hijack it), and REST GET
+// already encodes the URL suffix in `data`. SVM callers — the only callers today — pass
+// path="" and take the apiName fallback.
 func (ecf *EndpointPoller) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
+	if path != "" && connectionType != "GET" && ecf.apiInterface == spectypes.APIInterfaceRest {
+		apiName = path
+	}
 	return ecf.sendRawRequest(ctx, data, connectionType, apiName)
 }
 
@@ -365,6 +370,7 @@ func (ecf *EndpointPoller) ObserveLatestBlockPoll(block int64, transportLatency 
 
 // sendRawRequest sends a raw request to the endpoint and returns the response.
 // For REST/GET requests, requestData is a URL path that must be appended to the base URL.
+// For REST/POST requests, requestData is the JSON body and apiName is the URL path.
 // For JSON-RPC/POST requests, requestData is the JSON body.
 func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string) ([]byte, error) {
 	if ecf.directConnection == nil {
@@ -374,31 +380,16 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 	// REST GET: requestData is a URL path (e.g. "/cosmos/base/tendermint/v1beta1/blocks/latest")
 	// Must be appended to the base URL and sent as an HTTP GET.
 	if connectionType == "GET" {
-		httpDoer, ok := ecf.directConnection.(lavasession.HTTPDirectRPCDoer)
-		if !ok {
-			return nil, fmt.Errorf("connection does not support HTTP requests for endpoint %s", ecf.endpointURL)
-		}
+		return ecf.doRESTRequest(ctx, "GET", string(requestData), nil)
+	}
 
-		fullURL, err := common.JoinURLPath(ecf.directConnection.GetURL(), string(requestData))
-		if err != nil {
-			return nil, fmt.Errorf("failed to build REST URL: %w", err)
-		}
-
-		resp, err := httpDoer.DoHTTPRequest(ctx, lavasession.HTTPRequestParams{
-			Method: "GET",
-			URL:    fullURL,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if resp.StatusCode >= 400 {
-			return nil, &lavasession.HTTPStatusError{
-				StatusCode: resp.StatusCode,
-				Status:     fmt.Sprintf("%d", resp.StatusCode),
-				Body:       resp.Body,
-			}
-		}
-		return resp.Body, nil
+	// REST with a non-GET method (Tron's rest collection is POST-typed): the method lives
+	// in the URL path, not the body. Unlike JSON-RPC — where every call targets the base
+	// URL and the method is named in the body — a REST POST must be sent to its own path,
+	// so append apiName the way the GET branch appends the template. Without this the poll
+	// lands on the bare base URL and the upstream answers 405 (MAG-2597).
+	if ecf.apiInterface == spectypes.APIInterfaceRest {
+		return ecf.doRESTRequest(ctx, connectionType, apiName, requestData)
 	}
 
 	// JSON-RPC / Tendermint RPC / gRPC / POST: send requestData as the body.
@@ -416,6 +407,43 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 		return nil, err
 	}
 	return response.Data, nil
+}
+
+// doRESTRequest sends one REST call to path (appended to the endpoint's base URL) and
+// returns the response body. body is nil for GET. A >=400 status is returned as an
+// HTTPStatusError so callers can distinguish an upstream rejection from a transport error.
+func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	httpDoer, ok := ecf.directConnection.(lavasession.HTTPDirectRPCDoer)
+	if !ok {
+		return nil, fmt.Errorf("connection does not support HTTP requests for endpoint %s", ecf.endpointURL)
+	}
+
+	fullURL, err := common.JoinURLPath(ecf.directConnection.GetURL(), path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build REST URL: %w", err)
+	}
+
+	params := lavasession.HTTPRequestParams{
+		Method: method,
+		URL:    fullURL,
+		Body:   body,
+	}
+	if body != nil {
+		params.ContentType = "application/json"
+	}
+
+	resp, err := httpDoer.DoHTTPRequest(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, &lavasession.HTTPStatusError{
+			StatusCode: resp.StatusCode,
+			Status:     fmt.Sprintf("%d", resp.StatusCode),
+			Body:       resp.Body,
+		}
+	}
+	return resp.Body, nil
 }
 
 // chainFetcherMetadata returns metadata for constructing chain messages.
