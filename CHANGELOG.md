@@ -8,6 +8,105 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.3.0 — 2026-07-30
+
+### Highlights
+
+Smart Router v1.3.0 overhauls chain state consistency by replacing per-user block tracking with a block-monotonic, guarded chain tip that maintains cross-pod synchronization. This self-healing tip architecture is supported by routing adjustments that prevent providers from being demoted after a single failed cycle, alongside fixes that correctly route REST POST block polls to their specific method paths. For observability, the router now mirrors this guarded tip directly into the `smartrouter_latest_block` metric and prevents cardinality explosion by collapsing batch method labels into bounded signatures. Operators managing active deployments gain new administrative controls through the `/debug/reset-probe-backoff` and `/debug/reset-chaintracker-rows` endpoints to manually clear internal routing state. Additionally, a dedicated `/debug/time-warp` endpoint allows operators to manipulate ChainState TTL staleness, while asynchronous comparisons now correctly report cross-validation stragglers as pending rather than prematurely failing the request.
+
+### Changes
+
+#### New Features
+- feat(smart-router/debug): add /debug/reset-probe-backoff + /debug/reset-chaintracker-rows (MAG-2395) ([#223]) [`210f5ad`]
+- feat(metrics): collapse batch method labels into bounded signatures ([#242]) [`6fef8e0`]
+
+#### Bug fixes
+- fix(relaycore): single provider address on all-transport-errors failure result (MAG-2351) ([#213]) [`91aecab`]
+- fix(relaycore): address review — minimize to header fix, drop over-reach (MAG-2351) ([#213]) [`e2c6902`]
+- refactor(spec): remove 15 unused spec fields and their dead code ([#218]) [`e19a913`]
+- fix(rpcsmartrouter): report CV stragglers as pending + compare late responses async (MAG-2187) ([#212]) [`816efce`]
+- fix(smart-router/debug): review feedback on reset-chaintracker-rows (MAG-2395) ([#223]) [`499c728`]
+- fix(rpcsmartrouter): wire /debug/time-warp into ChainState TTL/staleness (MAG-2307) ([#222]) [`c011a80`]
+- fix(lavasession): give each router key its own unwanted set (MAG-2442) ([#221]) [`b73bd69`]
+- fix(rpcsmartrouter): dedicated ChainState time-warp endpoint + real-clock timestamps (MAG-2307 review) ([#224]) [`b75d68b`]
+- fix(rpcsmartrouter): address PR #224 review — distinct response field, reset-all test, doc note (MAG-2307) ([#224]) [`bf1edab`]
+- fix(consistency): measure endpoints against the guarded chain tip; retire per-user seenBlock ([#225]) [`969c076`]
+- fix(chainstate): address PR #225 review — reset-all clears the tip; docs + tests ([#225]) [`548c5fa`]
+- refactor(endpointtip): block-monotonic per-endpoint tip with a staleness backstop ([#235]) [`ee734d5`]
+- refactor(endpointtip): anchor freshness stamp forward; fix staleness-window docs ([#235]) [`aea96f5`]
+- refactor(probing): derive liveness horizon via chainstate.StalenessWindow ([#235]) [`18dec04`]
+- fix(shared-state): rebuild cross-pod consistency on the guarded chain tip (T10) ([#235]) [`901ac07`]
+- refactor(shared-state): log adopt outcome so a rejected peer tip is visible ([#235]) [`d13f601`]
+- fix(cache): floor the shared-state tip TTL at a hard minimum ([#235]) [`44e04e8`]
+- refactor(chainstate): delete the bootstrap atomic; readers take the self-healing tip (T3) ([#233]) [`364a269`]
+- fix(chainstate): clarify tip advancement logic in SetLatestBlock documentation ([#233]) [`ea05611`]
+- fix(endpointstate): send REST POST block polls to the method path (MAG-2597) ([#236]) [`6bb6c73`]
+- fix(endpointstate): honor CustomMessage path on REST non-GET, pin poll routing (MAG-2597) ([#236]) [`885af1c`]
+- fix(rpcsmartrouter): keep ChainTrackers reconciled; don't demote on one bad cycle ([#237]) [`e10961f`]
+- fix(metrics): mirror the guarded tip into smartrouter_latest_block on every poll observation ([#239]) [`075baef`]
+
+#### Documentation updates
+- docs(endpointtip): correct stale time-monotonic comments to block-monotonic (T4) ([#235]) [`f228207`]
+- docs(rpcsmartrouter): fix the T4 doc the sweep missed; separate adopt outcomes ([#235]) [`5c8f443`]
+- docs(endpointtip): document the one write that stores a hybrid tip triple ([#235]) [`16fc4d3`]
+- docs(chainstate): retire stale bootstrap-atomic references after T3 (review follow-up) ([#233]) [`629f647`]
+
+#### Build process updates
+- ci: make public readiness smoke non-blocking in PR gate ([#227]) [`0c9f441`]
+
+#### Other work
+- fix MAG-2392 stale provider fallback ([#214]) [`c7e1022`]
+- unit test ([#233]) [`a161ba5`]
+
+[#212]: https://github.com/magma-Devs/smart-router/pull/212
+[#213]: https://github.com/magma-Devs/smart-router/pull/213
+[#214]: https://github.com/magma-Devs/smart-router/pull/214
+[#218]: https://github.com/magma-Devs/smart-router/pull/218
+[#221]: https://github.com/magma-Devs/smart-router/pull/221
+[#222]: https://github.com/magma-Devs/smart-router/pull/222
+[#223]: https://github.com/magma-Devs/smart-router/pull/223
+[#224]: https://github.com/magma-Devs/smart-router/pull/224
+[#225]: https://github.com/magma-Devs/smart-router/pull/225
+[#227]: https://github.com/magma-Devs/smart-router/pull/227
+[#233]: https://github.com/magma-Devs/smart-router/pull/233
+[#235]: https://github.com/magma-Devs/smart-router/pull/235
+[#236]: https://github.com/magma-Devs/smart-router/pull/236
+[#237]: https://github.com/magma-Devs/smart-router/pull/237
+[#239]: https://github.com/magma-Devs/smart-router/pull/239
+[#242]: https://github.com/magma-Devs/smart-router/pull/242
+[`075baef`]: https://github.com/magma-Devs/smart-router/commit/075baefce5c2f8465dc92b27c5aae92c059e6125
+[`0c9f441`]: https://github.com/magma-Devs/smart-router/commit/0c9f441d45755aa5938a56d6ba03e6452b9b72ff
+[`16fc4d3`]: https://github.com/magma-Devs/smart-router/commit/16fc4d31b909171ec37737037b9fd0901fcc9db8
+[`18dec04`]: https://github.com/magma-Devs/smart-router/commit/18dec0449a17abb53c1c3a0668886bf37dea7f30
+[`210f5ad`]: https://github.com/magma-Devs/smart-router/commit/210f5ad7d018a98e5bf3d0e750a3e3c615a57d03
+[`364a269`]: https://github.com/magma-Devs/smart-router/commit/364a269e29b6469e2ce25098f3ee3b51311c4f2f
+[`44e04e8`]: https://github.com/magma-Devs/smart-router/commit/44e04e819cb892423cac9f2e50ac14d1e13e7c97
+[`499c728`]: https://github.com/magma-Devs/smart-router/commit/499c728f06e09886368ba05f636bf4fb6b9dca3b
+[`548c5fa`]: https://github.com/magma-Devs/smart-router/commit/548c5fa6e432a11aec9fc2a1f8f91428bfe7a226
+[`5c8f443`]: https://github.com/magma-Devs/smart-router/commit/5c8f44300f8b5bb94c48a5cbd646ba273ab743da
+[`629f647`]: https://github.com/magma-Devs/smart-router/commit/629f647b7595e5bd1c54662b29dbbca44a279d79
+[`6bb6c73`]: https://github.com/magma-Devs/smart-router/commit/6bb6c73bd217f0d13095ad9e3af83f5aa3dc9eec
+[`6fef8e0`]: https://github.com/magma-Devs/smart-router/commit/6fef8e0bfa7211b01811be23e61eea78673c424b
+[`816efce`]: https://github.com/magma-Devs/smart-router/commit/816efced02b365fef4abe5dfd618e04f9e477d15
+[`885af1c`]: https://github.com/magma-Devs/smart-router/commit/885af1c6e26c881ab6f85e2ddbbce4220009b2e6
+[`901ac07`]: https://github.com/magma-Devs/smart-router/commit/901ac078292766cc03a8e6b132738c4e5430b9fa
+[`91aecab`]: https://github.com/magma-Devs/smart-router/commit/91aecab8a037991016c95c3d64ef252021617d39
+[`969c076`]: https://github.com/magma-Devs/smart-router/commit/969c076fd876ce80cd0fb5040b523708083aa0b4
+[`a161ba5`]: https://github.com/magma-Devs/smart-router/commit/a161ba501b6f5b5136b136cd577410f9b0ed8b8c
+[`aea96f5`]: https://github.com/magma-Devs/smart-router/commit/aea96f55ec6417d5676b96e9adf0333b7379f8c4
+[`b73bd69`]: https://github.com/magma-Devs/smart-router/commit/b73bd69d42a65d81b06696cb81e822cd2c2c8575
+[`b75d68b`]: https://github.com/magma-Devs/smart-router/commit/b75d68b6801891d753e72b68ac840a726e68a348
+[`bf1edab`]: https://github.com/magma-Devs/smart-router/commit/bf1edab363127e5f96ba65e92effd12bfe11fe7c
+[`c011a80`]: https://github.com/magma-Devs/smart-router/commit/c011a8049aecefdc0b5acb1bd7b1f6eed0162632
+[`c7e1022`]: https://github.com/magma-Devs/smart-router/commit/c7e10222a6c1540281643ac7940f097920bd9a89
+[`d13f601`]: https://github.com/magma-Devs/smart-router/commit/d13f601ed6842a4e86ae37a84ae6f1cb9e9d8643
+[`e10961f`]: https://github.com/magma-Devs/smart-router/commit/e10961f82c12ab746d3d1667d75e4bac7825ff42
+[`e19a913`]: https://github.com/magma-Devs/smart-router/commit/e19a913387ff3d4a6c278480213c12e85dcd2468
+[`e2c6902`]: https://github.com/magma-Devs/smart-router/commit/e2c690243fa8d31e2d9c0a0b31dffa33ec9c2265
+[`ea05611`]: https://github.com/magma-Devs/smart-router/commit/ea05611f4a67373ef22a2eaaf63476bd66e773b7
+[`ee734d5`]: https://github.com/magma-Devs/smart-router/commit/ee734d5da59e56e1e7c96fcc9a18d8f8aca28e73
+[`f228207`]: https://github.com/magma-Devs/smart-router/commit/f2282072bd827af9b9b29e2d1d410709a42a116d
+
 ## v1.2.0 — 2026-07-14
 
 ### Highlights
