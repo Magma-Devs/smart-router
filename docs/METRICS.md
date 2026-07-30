@@ -130,6 +130,49 @@ with read/write.
 | `smartrouter_requests_archive_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Archive requests. |
 | `smartrouter_requests_batch_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Batch requests. |
 
+#### Batch requests and the `method` label
+
+For a batch request there is no single method, so the `method` label carries a
+**batch signature**: the sorted set of distinct sub-methods, prefixed with `batch:`.
+
+```
+[eth_call ×30, eth_getBalance]   →   method="batch:eth_call+eth_getBalance"
+[eth_call ×3]                    →   method="batch:eth_call"
+```
+
+Order and repetition are deliberately dropped. They are what a raw joined label would
+encode, and they make cardinality unbounded — order contributes permutations, repetition
+contributes one series per batch length. The set is the part that identifies the *type*
+of batch, and it is what client code actually determines. The magnitude that repetition
+used to encode moves to `smartrouter_batch_size`.
+
+Because the signature carries the method label on the whole request-breakdown family,
+per-batch-type success rate, latency, and provider breakdown all work:
+
+```promql
+# error rate per batch type
+sum by (method) (rate(smartrouter_requests_failed_total{method=~"batch:.*"}[5m]))
+  / sum by (method) (rate(smartrouter_requests_total{method=~"batch:.*"}[5m]))
+```
+
+Single-method requests are untouched — `method="eth_call"` means exactly what it always
+did, so a `method=~"batch:.*"` / `method!~"batch:.*"` pair cleanly splits batch from
+single traffic.
+
+Two bounds keep the label space finite. A spec may register at most **64** distinct
+signatures, and one signature may name at most **8** distinct methods; anything beyond
+either lands in `method="batch:other"`. Both are declared in
+[`batch_method_label.go`](../protocol/metrics/batch_method_label.go).
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_batch_size` | Histogram | `spec`, `apiInterface` | Sub-requests per batch. Single-element batches produce no separator in the api name, so they are indistinguishable from single requests here and are not observed. |
+| `smartrouter_batch_signature_overflow_total` | Counter | `spec`, `reason` | Normalizations that fell into `batch:other`. `reason="cap"`: the spec exhausted its 64-signature budget. `reason="wide"`: one batch spanned more than 8 distinct methods. |
+
+**Alert on the overflow counter.** While it is zero, batch-type breakdowns are complete.
+Once it is non-zero they are lossy — some batch types are being merged into `batch:other`
+— which is a signal to raise the cap, not to distrust the other series.
+
 #### Errors
 
 | Metric | Type | Labels | Description |

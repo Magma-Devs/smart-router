@@ -125,6 +125,14 @@ type SmartRouterMetricsManager struct {
 	routerRequestsArchive    *prometheus.CounterVec
 	routerRequestsBatch      *prometheus.CounterVec
 
+	// Batch-request shape metrics. The `method` label on every family above is collapsed
+	// for batches (see batch_method_label.go) — batchSize carries the element count the
+	// collapse drops, and batchSignatureOverflow reports when the signature cap binds.
+	batchSize              *prometheus.HistogramVec
+	batchSignatureOverflow *prometheus.CounterVec
+	// batchSignatures bounds how many distinct batch signatures may become label values.
+	batchSignatures *batchSignatureRegistry
+
 	// Internal state
 	lock                    sync.RWMutex
 	endpointsHealthChecksOk uint64
@@ -493,6 +501,18 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help: "Total number of batch requests on the smart router.",
 	}, routerRequestLabels)
 
+	batchSize := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "smartrouter_batch_size",
+		Help: "Number of sub-requests per batch request. This carries the magnitude that the collapsed method label intentionally drops. Single-element batches are indistinguishable from single requests at this layer and are not observed.",
+		// Batch sizes are small-and-clustered with a long tail; buckets start at 2
+		// because a 1-element batch never reaches this histogram.
+		Buckets: []float64{2, 3, 5, 10, 25, 50, 100, 250, 500},
+	}, []string{"spec", "apiInterface"})
+	batchSignatureOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_batch_signature_overflow_total",
+		Help: `Label normalizations that fell into method="batch:other". reason="cap": the spec exhausted its distinct-signature budget. reason="wide": one batch spanned more distinct methods than a signature may name. Non-zero means per-batch-type breakdowns are lossy — raise the cap or accept the aggregation.`,
+	}, []string{"spec", "reason"})
+
 	cacheLabels := []string{"spec", "apiInterface", "method"}
 	cacheRequestsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_requests_total",
@@ -553,6 +573,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerRequestsDebugTrace = registerOrReuse(routerRequestsDebugTrace)
 	routerRequestsArchive = registerOrReuse(routerRequestsArchive)
 	routerRequestsBatch = registerOrReuse(routerRequestsBatch)
+	batchSize = registerOrReuse(batchSize)
+	batchSignatureOverflow = registerOrReuse(batchSignatureOverflow)
 	cacheRequestsTotalMetric = registerOrReuse(cacheRequestsTotalMetric)
 	cacheSuccessTotalMetric = registerOrReuse(cacheSuccessTotalMetric)
 	cacheFailedTotalMetric = registerOrReuse(cacheFailedTotalMetric)
@@ -630,6 +652,11 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		routerRequestsDebugTrace: routerRequestsDebugTrace,
 		routerRequestsArchive:    routerRequestsArchive,
 		routerRequestsBatch:      routerRequestsBatch,
+
+		// Batch shape group
+		batchSize:              batchSize,
+		batchSignatureOverflow: batchSignatureOverflow,
+		batchSignatures:        newBatchSignatureRegistry(),
 
 		// Cache group
 		cacheRequestsTotalMetric: cacheRequestsTotalMetric,
@@ -760,6 +787,7 @@ func (m *SmartRouterMetricsManager) AddEndpointRelayServiced(spec, apiInterface,
 	if m == nil {
 		return
 	}
+	function = m.normalizeMethodLabel(spec, function)
 	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "function": function}
 	m.endpointTotalRelaysServiced.WithLabelValues(labels).Inc()
 }
@@ -769,6 +797,7 @@ func (m *SmartRouterMetricsManager) AddEndpointRelayErrored(spec, apiInterface, 
 	if m == nil {
 		return
 	}
+	function = m.normalizeMethodLabel(spec, function)
 	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "function": function}
 	m.endpointTotalErrored.WithLabelValues(labels).Inc()
 }
@@ -778,6 +807,7 @@ func (m *SmartRouterMetricsManager) SetEndpointEndToEndLatency(spec, apiInterfac
 	if m == nil {
 		return
 	}
+	function = m.normalizeMethodLabel(spec, function)
 	m.endpointEndToEndLatency.WithLabelValues(spec, apiInterface, endpointID, function).Observe(latencyMs)
 }
 
@@ -786,6 +816,7 @@ func (m *SmartRouterMetricsManager) AddEndpointInFlightRequest(spec, apiInterfac
 	if m == nil {
 		return
 	}
+	function = m.normalizeMethodLabel(spec, function)
 	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "function": function}
 	m.endpointInFlight.WithLabelValues(labels).Add(1)
 }
@@ -795,6 +826,7 @@ func (m *SmartRouterMetricsManager) SubEndpointInFlightRequest(spec, apiInterfac
 	if m == nil {
 		return
 	}
+	function = m.normalizeMethodLabel(spec, function)
 	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "function": function}
 	m.endpointInFlight.WithLabelValues(labels).Sub(1)
 }
@@ -954,6 +986,7 @@ func (m *SmartRouterMetricsManager) RecordRelaySuccess(spec, apiInterface, endpo
 	if m == nil {
 		return
 	}
+	function = m.normalizeMethodLabel(spec, function)
 	if m.routerTotalRelaysServiced != nil {
 		m.routerTotalRelaysServiced.WithLabelValues(spec, apiInterface, function).Inc()
 	}
@@ -968,6 +1001,7 @@ func (m *SmartRouterMetricsManager) RecordRouterEndToEndLatency(spec, apiInterfa
 	if m == nil {
 		return
 	}
+	function = m.normalizeMethodLabel(spec, function)
 	m.routerEndToEndLatency.WithLabelValues(spec, apiInterface, function).Observe(latencyMs)
 }
 
@@ -977,6 +1011,7 @@ func (m *SmartRouterMetricsManager) RecordRelayError(spec, apiInterface, endpoin
 	if m == nil {
 		return
 	}
+	function = m.normalizeMethodLabel(spec, function)
 	if m.routerTotalErrored != nil {
 		m.routerTotalErrored.WithLabelValues(spec, apiInterface, function).Inc()
 	}
@@ -1003,6 +1038,12 @@ func (m *SmartRouterMetricsManager) RecordDirectRelayEnd(spec, apiInterface, end
 	if m == nil {
 		return
 	}
+	// Observe the batch's element count BEFORE collapsing the label, and do it only
+	// here: this is the single once-per-completed-relay entry point, so the other
+	// recorders normalize without observing and a batch is counted exactly once.
+	m.observeBatchSize(spec, apiInterface, function)
+	function = m.normalizeMethodLabel(spec, function)
+
 	m.SubEndpointInFlightRequest(spec, apiInterface, endpointID, function)
 
 	if success {
@@ -1045,6 +1086,11 @@ func (m *SmartRouterMetricsManager) RecordCacheHitRequest(spec, apiInterface, fu
 	if m == nil {
 		return
 	}
+	// Cache hits bypass RecordDirectRelayEnd entirely, so this path observes the batch
+	// size itself — otherwise cached batch traffic would be missing from the histogram.
+	m.observeBatchSize(spec, apiInterface, function)
+	function = m.normalizeMethodLabel(spec, function)
+
 	routerLabels := []string{spec, apiInterface, "Cached", function}
 	m.routerRequestsTotal.WithLabelValues(routerLabels...).Inc()
 	m.routerRequestsSuccess.WithLabelValues(routerLabels...).Inc()
@@ -1106,6 +1152,7 @@ func (m *SmartRouterMetricsManager) SetRelayNodeErrorMetric(chainId string, apiI
 	if m == nil {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.incidentNodeErrorsTotalMetric.WithLabelValues(chainId, apiInterface, providerAddress, method).Inc()
 }
 
@@ -1113,6 +1160,7 @@ func (m *SmartRouterMetricsManager) RecordCacheResult(chainId, apiInterface, met
 	if m == nil {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.cacheRequestsTotalMetric.WithLabelValues(chainId, apiInterface, method).Inc()
 	if hit {
 		m.cacheSuccessTotalMetric.WithLabelValues(chainId, apiInterface, method).Inc()
@@ -1128,6 +1176,7 @@ func (m *SmartRouterMetricsManager) SetProtocolError(chainId string, apiInterfac
 	if m == nil {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.incidentProtocolErrorsTotalMetric.WithLabelValues(chainId, apiInterface, providerAddress, method).Inc()
 }
 
@@ -1135,6 +1184,7 @@ func (m *SmartRouterMetricsManager) RecordIncidentRetry(chainId string, apiInter
 	if m == nil {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.incidentRetriesTotalMetric.WithLabelValues(chainId, apiInterface, method).Inc()
 	m.incidentRetryAttemptsHistogram.WithLabelValues(chainId, apiInterface, method).Observe(float64(count))
 	if success {
@@ -1148,6 +1198,7 @@ func (m *SmartRouterMetricsManager) RecordIncidentConsistency(chainId string, ap
 	if m == nil {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.incidentConsistencyTotalMetric.WithLabelValues(chainId, apiInterface, method).Inc()
 	if success {
 		m.incidentConsistencySuccessMetric.WithLabelValues(chainId, apiInterface, method).Inc()
@@ -1160,6 +1211,7 @@ func (m *SmartRouterMetricsManager) RecordIncidentHedgeResult(chainId string, ap
 	if m == nil {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.incidentHedgeTotalMetric.WithLabelValues(chainId, apiInterface, method).Inc()
 	m.incidentHedgeAttemptsHistogram.WithLabelValues(chainId, apiInterface, method).Observe(float64(count))
 	if success {
@@ -1173,6 +1225,7 @@ func (m *SmartRouterMetricsManager) SetCrossValidationMetric(chainId, apiInterfa
 	if m == nil {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.crossValidationRequestsTotalMetric.WithLabelValues(chainId, apiInterface, method).Inc()
 	if success {
 		m.crossValidationSuccessTotalMetric.WithLabelValues(chainId, apiInterface, method).Inc()
@@ -1201,6 +1254,7 @@ func (m *SmartRouterMetricsManager) SetCrossValidationMismatchMetric(chainId, ap
 	if group == "" {
 		group = common.DefaultProviderGroup
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.crossValidationMismatchTotalMetric.WithLabelValues(chainId, apiInterface, method, group, finality).Inc()
 }
 
@@ -1214,6 +1268,7 @@ func (m *SmartRouterMetricsManager) SetCrossValidationFailureMetric(chainId, api
 	if m == nil || reason == "" {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.crossValidationFailuresTotalMetric.WithLabelValues(chainId, apiInterface, method, reason).Inc()
 }
 
