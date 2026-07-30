@@ -22,11 +22,30 @@ The Internet Computer (ICP) HTTP interface is **CBOR-encoded end to end**; `smar
 
 **Recommended MVP: L1 + L2a (relay pass-through) + thin L2b (one canister-scoped verification) + L3b (no block tracking).** Ships ORIGYN with the client's IC agent carrying the signing burden. Block-derived features (QoS sync, consistency, fork detection, archive routing, caching) go inert — none error; their preconditions don't exist on IC. The router still relays, scores availability and latency, and fails over.
 
-**Thin L2b is in the MVP for a correctness reason, not polish:** `root_key` proves only "this is IC mainnet" — it passes even for a provider that cannot reach a single ORIGYN canister. A canister-scoped check (`icrc1_symbol() → "OGY"`, ~1–2 dd, no Candid library needed) is the only boot-time proof the chain's canisters are actually reachable.
+**L1, L2a and L3b are implemented and verified live** (§0). **Thin L2b is not**, and it is in the MVP for a correctness reason rather than polish: `root_key` proves only "this is IC mainnet" — it passes even for a provider that cannot reach a single ORIGYN canister. A canister-scoped check (`icrc1_symbol() → "OGY"`) is the only boot-time proof the chain's canisters are reachable. It turns out this **cannot be a spec directive** (`ingress_expiry` is dynamic, the body is binary), so it needs a Go-side verification hook — **Route A, 3–5 dd**, pending approval (§5.2, §8 decision 9).
 
 **Conditional add-on, not default:** L3c (poll `icrc3_get_blocks(…).log_length` on a pinned anchor — live-verified at **1,380,764** on the OGY ledger) is worth building **only if OGY-ledger traffic dominates**, since the anchor watches one subnet out of seven. Certificate verification (former L3a) stays a deferred *integrity* upgrade; L2b stays demand-gated.
 
 **Prerequisite (checked ✓ — no escape hatch):** no decentralized JSON gateway fronts the IC canister RPC surface — the agent API is CBOR-only by spec and there is no Blockfrost-equivalent — so CBOR work is genuinely required. Narrow exception: the **OGY token** ledger is serveable as JSON today via self-hosted Rosetta (uncertified), a possible *separate* quick win but not a substitute for the NFT/canister surface. See [§9.1](#91-serve-origyn-via-a-json-gateway-the-cardano-pattern--prerequisite-check--answered-no-narrow-token-exception).
+
+---
+
+## 0. Implementation status
+
+| Layer | Status | Evidence |
+|---|---|---|
+| **L1** — CBOR decode + identity | ✅ **Implemented & verified live** | `health` against `icp-api.io` reports `ok: true`; previously failed at `rest.go:556` |
+| **L2a** — relay pass-through | ✅ **Implemented & verified live** | canister queries relayed through the router: `icrc1_symbol` → `"OGY"`, `icrc1_total_supply` → `1041447811516099738`, `icrc1_decimals` → `8`, all HTTP 200 / `status: replied` |
+| **L3b** — no block tracking | ✅ **Verified** | `latestBlock: 0`, pod healthy, nothing errors |
+| **thin L2b** — canister-scoped verification | ⛔ **Blocked** — needs a Go-side hook (§5.2, Route A) | cannot be a spec directive: `ingress_expiry` is dynamic and the body is binary |
+| L3c / L3c-certified / full L2b | Not started — conditional or deferred | see §5.3.2, §5.3.5 |
+
+**What shipped:** an explicit `CollectionData.Encoding` field (empty = JSON, so every existing chain is untouched), a CBOR→JSON transcoder on the message seam, the pre-parser guard bypass, and a content-type fix on the direct-relay path.
+
+**Two findings from implementation that the design above did not predict:**
+
+1. **There are two send paths, not one.** `protocol/rpcsmartrouter/direct_rpc_relay.go` handles actual client relays and hardcoded `ContentType: "application/json"`; only *verification probes* go through `chainlib/rest.go`. An IC boundary node rejects a CBOR body labelled as JSON with `Unexpected content-type, expected application/cbor`. §4 maps the chainlib seam only — the direct-relay path is a parallel surface that must be updated alongside it. *(Its response check is friendlier than `rest.go`'s: it only rejects bodies that **look** like JSON and aren't, so CBOR passes without a Surface-B bypass there.)*
+2. **The drafted `origyn.json` has a defect.** It duplicates the `chain-id` verification onto the **POST** collection, but `/api/v2/status` is GET-only — the router resolves it on a different connection type and the parse fails. It must be removed from the POST collection in lava-specs PR #78; no router change fixes it.
 
 ---
 
@@ -130,6 +149,8 @@ err = rcp.HandleJSONFormatError(reply.RelayReply.Data)   // gojq.Parse; rejects 
 ```
 
 `HandleJSONFormatError` is `protocol/chainlib/node_error_handler.go:337-343`. The same guard exists on Tendermint at `tendermintRPC.go:758`. REST error classification also `json.Unmarshal`s the raw body (`restMessage.go:75-108`). **A CBOR body dies here, long before the parser seam in §4.1.**
+
+> ⚠️ **This section maps the chainlib seam only — there is a second send path.** `protocol/rpcsmartrouter/direct_rpc_relay.go` (`sendRESTRelay`) carries actual client relays in direct-RPC mode; `chainlib/rest.go` carries only verification/probe traffic. Anything wire-format-sensitive must be applied to **both**. Discovered during implementation, when relays failed with `Unexpected content-type, expected application/cbor` while verifications passed — see §0. The direct path's own response check is friendlier (`looksLikeJSONOpening(body) && !json.Valid(body)`), so a CBOR body passes it without needing a bypass.
 
 ### 4.4 Chain-id verification path
 
@@ -303,6 +324,52 @@ These probes are **read-only → anonymous**. Per spec, if `sender = 0x04` (anon
 This is empirically validated: the ~40-line client used for §10.3 does exactly this against mainnet and returned `"OGY"` from `icrc1_symbol()` and `1041448338293709989` from `icrc1_total_supply()`.
 
 **Full L2b** — a real Candid codec — is only required when the router must encode or decode *arbitrary* types it did not know at build time. Nothing in the recommended MVP needs it; it stays demand-gated.
+
+##### ⚠️ Thin L2b cannot be expressed as a spec directive (found during implementation)
+
+The "~1–2 days, no Candid library" estimate above was **wrong about where the difficulty lies**. The codec was never the hard part; the missing *hook* is. A canister-scoped verification cannot be driven from a spec `parse_directive` at all:
+
+```go
+// protocol/chainlib/chain_fetcher.go:492 — the verification request body IS
+// the spec's function_template, cast to bytes. No substitution, no decoding.
+data := []byte(parsing.FunctionTemplate)
+```
+
+Against that, an IC canister query body needs:
+
+```
+CBOR{ "content": {
+    "request_type":   "query",              // static ✓
+    "sender":         0x04,                 // anonymous — static ✓
+    "canister_id":    <principal bytes>,    // static ✓
+    "method_name":    "icrc1_symbol",       // static ✓
+    "arg":            DIDL\x00\x00,         // static ✓
+    "ingress_expiry": <now + 240s, in ns>   // ← DYNAMIC ✗
+}}
+```
+
+Two independent blockers, either one fatal:
+
+1. **`ingress_expiry` must be computed per request.** The IC rejects any request whose expiry has passed and caps how far ahead it may be (~5 min) — it is the protocol's anti-replay mechanism. A value hardcoded in a spec file works for about five minutes, then fails permanently.
+2. **The body is binary.** `function_template` is a JSON string field and raw CBOR is not valid UTF-8. Hex-encoding it in the spec does not help: nothing in the craft path decodes it back.
+
+So the request **must be constructed in Go** — exactly what the SVM tracker does for its poll body via `CustomMessage` (§5.3.4). But that seam belongs to the chain *tracker*; the *verification* path builds requests from spec directives, and no equivalent Go-side hook exists today.
+
+##### The three routes, and the decision
+
+| Route | Approach | Blast radius | Cost |
+|---|---|---|---|
+| **A — Go-side verification hook** ✅ | A `CustomVerifier` extension point mirroring the custom-tracker seam; the IC verifier builds the envelope in Go and sends it via `CustomMessage` | **IC only** — nothing else changes | **3–5 dd** |
+| B — extend the spec template | Placeholder substitution (`{{ingress_expiry}}`) + a `template_encoding: "hex"` field, applied at `chain_fetcher.go:492` | **Every chain** — touches the shared craft path | 1–2 wk |
+| C — verify outside the framework | Probe at provider setup / first poll, reusing `CustomMessage` directly | Low | 2–3 dd |
+
+**Decision: Route A, in a hybrid shape.** Keep **`expected_value` in the spec's `verifications` block** and move only *request construction* into Go. The spec stays self-documenting and diffable, while Go supplies the two things a static template physically cannot — a fresh `ingress_expiry` and binary CBOR.
+
+**Refinement:** dispatch the hook off **`CollectionData.Encoding == "cbor"`** rather than a chain-ID `case`. The field already exists (§5.1), it generalizes to every IC chain automatically, and it avoids adding to the chain-ID switch the authors themselves flagged as debt (§5.3.4).
+
+*Why not B:* philosophically the most correct — declarative specs are this repo's ethos — but the cost and regression risk are disproportionate for one chain family, and hand-maintaining a hex-encoded CBOR envelope inside JSON is genuinely bad ergonomics. Revisit if IC support broadens; Route A does not preclude it.
+
+*Why not C:* saves a day or two and costs visibility in `health`, the one tool operators use to validate a spec — which defeats much of the point.
 
 #### What the relay model lets us AVOID
 - Ed25519/ECDSA **signing** + key management — only needed to originate *update* calls, which the router never does.
@@ -592,7 +659,7 @@ Deferred ─────  L3c-certified (icrc3_get_tip_certificate → hash tree
 |---|---|---|---|
 | **L1** | CBOR response decode, signal, identity check | **3–5 dd** | blob base64/hex reconciliation; missing Surface B (`rest.go:556`) |
 | **L2a** | relay pass-through + canister routing + async-call relay | **~1 wk** | stateless multi-round-trip `call`→`read_state` |
-| **thin L2b** ✅ | one anonymous router-originated query — hardcoded arg blob + primitive reply decode | **~1–2 dd** | none material; validated live (§10.3) |
+| **thin L2b** ⛔ | one anonymous router-originated query — **plus the Go-side verification hook it requires** (Route A, §5.2) | **3–5 dd** | *revised up from 1–2 dd:* the Candid codec was never the hard part — a spec directive cannot express a fresh `ingress_expiry` or a binary body, so a new extension point is needed |
 | **full L2b** | generic Candid codec for arbitrary types | **~1–2 wk** | Candid library port/quality — **not needed by the MVP** |
 | **L3b** ✅ | no block tracking — `EMPTY` parsing, no custom tracker | **zero** | sync dimension silently reports all providers perfectly synced; **caching disabled**; cannot detect stale-but-valid data (§5.3.3) |
 | **L3c** ⚠️ | canister tip index (`log_length`) via an `ICChainTracker` on the existing SVM seam | **days on top of L2** | **conditional** — anchor covers 1 of 7 subnets; build only if OGY traffic dominates (§5.3.2). Traps: `PollObserver` hook (silent zero telemetry), `average_block_time` on a bursty counter |
@@ -613,7 +680,7 @@ Deferred ─────  L3c-certified (icrc3_get_tip_certificate → hash tree
 6. ~~**Trustlessness of `/time`**~~ — **MOOT**: the `/time` approach is superseded (§5.3.2); it is per-subnet too, so it never solved the real constraint.
 7. **Build vs buy** — vendor a Go IC-agent SDK (`aviate-labs/agent-go`, which bundles CBOR + Candid + certificate verification) vs assemble discrete libraries. An L1-only MVP needs only `fxamacker/cbor`; L2/L3c shift the calculus toward the SDK — L3c needs Candid, which the SDK provides. *Engineering.*
 8. **OGY-via-Rosetta** — onboard the OGY token ledger as a separate JSON (Rosetta-backed) spec with zero router changes, independent of the ORIGYN canister-RPC work? *Product/scope (see §9.1).* Note the overlap with decision 2: OGY is both the recommended head anchor **and** the one surface serveable without CBOR at all.
-9. ~~**`chain-id` sufficiency**~~ — **RESOLVED: pair it, and do so in the MVP.** `root_key` proves only "this is IC mainnet." It is not merely unable to distinguish ORIGYN from a future ICP chain — **it passes for a provider that cannot reach a single ORIGYN canister**, since the key is network-wide and identical on every subnet. So a canister-scoped check (`icrc1_symbol() → "OGY"`) is the *only* boot-time proof that this chain's canisters are reachable at all. Cost is thin L2b (~1–2 dd, no Candid library — §5.2). Keep `root_key` too: it is free at L1 and covers network identity. *Correctness — was mis-scoped as a production nicety.*
+9. **`chain-id` sufficiency** — **agreed necessary, now blocked on a mechanism.** `root_key` proves only "this is IC mainnet." It is not merely unable to distinguish ORIGYN from a future ICP chain — **it passes for a provider that cannot reach a single ORIGYN canister**, since the key is network-wide and identical on every subnet. A canister-scoped check (`icrc1_symbol() → "OGY"`) is the *only* boot-time proof the chain's canisters are reachable. **Open part: approve Route A** (a Go-side verification hook, 3–5 dd — §5.2) as the way to build it; it cannot be a spec directive. Keep `root_key` too: free at L1, covers network identity. *Correctness + engineering.*
 10. **Anchor canister** — *only reachable if decision 1 selects L3c.* Which canister's counter is the head? Recommended: the **OGY ledger** (standard ICRC-3, 1.38M txns, `phash`). Note the coverage/quality inversion in §5.3.2 — the subnet with the traffic offers only a near-static counter. *Product/spec.*
 
 ---
@@ -700,7 +767,7 @@ After L1, the same `health` command must pass chain-id verification against `icp
 
 1. **L1 — CBOR response decode + identity** (3–5 dd): the two surfaces, the signal, blob reconciliation, passing `icp-api.io` chain-id check.
 2. **L2a — IC relay pass-through** (~1 wk): routing for `query`/`call`/`read_state`, the async `call`→`read_state` flow. Router forwards bytes; no Candid needed.
-3. **thin L2b — canister-scoped verification** (~1–2 dd): one anonymous router-originated query (`icrc1_symbol() → "OGY"`) with a hardcoded arg blob and a primitive reply decoder. **Closes §8 decision 9** — the only boot proof the canisters are reachable. No Candid library.
+3. **thin L2b — canister-scoped verification, via Route A** (3–5 dd): add a `CustomVerifier` hook dispatched off `CollectionData.Encoding == "cbor"`, build the CBOR envelope in Go (fresh `ingress_expiry`) and send it via `CustomMessage`, decode the Candid `text` reply, compare against the spec's `expected_value`. **Closes §8 decision 9** — the only boot proof the canisters are reachable. *Cannot be done as a spec directive (§5.2); the estimate covers the hook, not a Candid codec.*
 4. **L3b — document & verify the un-tracked posture** (days): confirm the spec's `EMPTY` parsing throughout, verify the pod boots and relays with no head, and record the operating profile (inert features, **caching disabled**, staleness exposure) per §5.3.3. *This is the default — no tracker is built.*
 5. **L3c — canister tip index** (days, after L2) — **CONDITIONAL, do not open until §8 decision 1 says OGY traffic dominates.** Poll `icrc3_get_blocks(…).log_length` on the anchor via an `ICChainTracker` (§5.3.4); requires the `PollObserver` hook and `average_block_time` calibration.
 6. **L3c-certified — head integrity** (2–3 wk, deferred): `icrc3_get_tip_certificate` → hash-tree walk + BLS/delegation verification (§5.3.5). Only meaningful if ticket 5 is built. *Supersedes the former "L3a `/time`" ticket — do not build the `/time` path.*
