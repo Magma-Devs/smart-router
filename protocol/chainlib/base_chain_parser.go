@@ -672,6 +672,7 @@ func getServiceApis(
 						LatestDistance:  parseValue.LatestDistance,
 						VerificationKey: verificationKey,
 						Severity:        parseValue.Severity,
+						Encoding:        apiCollection.CollectionData.Encoding,
 					}
 
 					internalPath := apiCollection.CollectionData.InternalPath

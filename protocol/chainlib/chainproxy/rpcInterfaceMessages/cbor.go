@@ -24,6 +24,7 @@ func cborToJSON(input []byte) ([]byte, error) {
 	if err := cbor.Unmarshal(input, &decoded); err != nil {
 		return nil, fmt.Errorf("failed decoding CBOR body: %w", err)
 	}
+	decoded = decodeICReplyArg(decoded)
 	normalized, err := normalizeCBORValue(decoded)
 	if err != nil {
 		return nil, err
@@ -33,6 +34,43 @@ func cborToJSON(input []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed re-encoding decoded CBOR as JSON: %w", err)
 	}
 	return encoded, nil
+}
+
+// decodeICReplyArg recognises the IC query-response envelope
+//
+//	{ "status": "replied", "reply": { "arg": <Candid blob> }, "signatures": [...] }
+//
+// and replaces the Candid-encoded arg with its decoded value, so a spec can
+// compare against a readable expected_value ("OGY") instead of the hex of a
+// Candid encoding. This is the same service the gRPC transcoder performs when it
+// renders protobuf as readable JSON rather than opaque bytes.
+//
+// It is deliberately narrow and non-destructive: it fires only on that exact
+// shape, only for a blob carrying the Candid magic, and only for single
+// primitive returns. Anything else is left untouched and still surfaces as hex,
+// so a body it does not understand degrades to the previous behaviour rather
+// than failing.
+func decodeICReplyArg(v interface{}) interface{} {
+	root, ok := v.(map[interface{}]interface{})
+	if !ok {
+		return v
+	}
+	reply, ok := root["reply"].(map[interface{}]interface{})
+	if !ok {
+		return v
+	}
+	arg, ok := reply["arg"].([]byte)
+	if !ok || len(arg) < 4 || string(arg[:4]) != "DIDL" {
+		return v
+	}
+	value, err := DecodeCandidPrimitive(arg)
+	if err != nil {
+		// Not a shape we decode (a record, a variant, multiple returns). Leave the
+		// raw bytes so the caller still sees the hex rather than losing the field.
+		return v
+	}
+	reply["arg"] = value
+	return root
 }
 
 // normalizeCBORValue rewrites a decoded CBOR value into a shape json.Marshal can

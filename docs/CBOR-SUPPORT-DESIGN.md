@@ -37,10 +37,29 @@ The Internet Computer (ICP) HTTP interface is **CBOR-encoded end to end**; `smar
 | **L1** — CBOR decode + identity | ✅ **Implemented & verified live** | `health` against `icp-api.io` reports `ok: true`; previously failed at `rest.go:556` |
 | **L2a** — relay pass-through | ✅ **Implemented & verified live** | canister queries relayed through the router: `icrc1_symbol` → `"OGY"`, `icrc1_total_supply` → `1041447811516099738`, `icrc1_decimals` → `8`, all HTTP 200 / `status: replied` |
 | **L3b** — no block tracking | ✅ **Verified** | `latestBlock: 0`, pod healthy, nothing errors |
-| **thin L2b** — canister-scoped verification | ⛔ **Blocked** — needs a Go-side hook (§5.2, Route A) | cannot be a spec directive: `ingress_expiry` is dynamic and the body is binary |
+| **thin L2b** — canister-scoped verification | ✅ **Implemented & verified live** (Route A) | `origyn-identity` verification passes: the router crafts the CBOR envelope in Go, queries `icrc1_symbol` on the OGY ledger, and matches `"OGY"`. Negative control with a wrong `expected_value` fails as it should. |
 | L3c / L3c-certified / full L2b | Not started — conditional or deferred | see §5.3.2, §5.3.5 |
 
-**What shipped:** an explicit `CollectionData.Encoding` field (empty = JSON, so every existing chain is untouched), a CBOR→JSON transcoder on the message seam, the pre-parser guard bypass, and a content-type fix on the direct-relay path.
+**What shipped:** an explicit `CollectionData.Encoding` field (empty = JSON, so every existing chain is untouched), a CBOR→JSON transcoder on the message seam, the pre-parser guard bypass, a content-type fix on the direct-relay path, and Route A's Go-side envelope construction for canister-scoped verifications.
+
+**How Route A landed (the hybrid shape).** The spec stays declarative — it pins the canister in the directive's `api_name`, names the method in `function_template`, and keeps `expected_value` in the verification block:
+
+```jsonc
+{ "name": "origyn-identity",
+  "parse_directive": {
+    "api_name":          "/api/v2/canister/lkwrt-vyaaa-aaaaq-aadhq-cai/query",  // canister pinned here
+    "function_template": "icrc1_symbol",                                        // method
+    "result_parsing":    { "parser_func": "PARSE_CANONICAL", "parser_arg": ["0","reply","arg"] }
+  },
+  "values": [{ "expected_value": "OGY" }] }
+```
+
+Go supplies only what a static template physically cannot: the CBOR envelope and a fresh `ingress_expiry`. Two design points worth keeping:
+
+- **Dispatch is on `CollectionData.Encoding`, not a chain-ID `case`** — so it generalises to any IC chain and adds nothing to the switch the codebase already flags as debt.
+- **The transcoder Candid-decodes `reply.arg`**, so `expected_value` stays readable (`"OGY"`) instead of being the hex of a Candid encoding. It is narrow and non-destructive: only that exact reply shape, only for single primitive returns, and anything it cannot decode degrades to hex rather than failing.
+
+A concrete `api_name` still matches the spec's `{effective_canister_id}` api entry the same way a client request does — no new spec field was needed.
 
 **Two findings from implementation that the design above did not predict:**
 

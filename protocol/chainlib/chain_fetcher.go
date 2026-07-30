@@ -10,6 +10,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/parser"
@@ -335,6 +336,29 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 				utils.LogAttr("expected_value", verification.Value),
 			)
 		}
+	}
+
+	// A CBOR collection cannot express its request body in the spec: the body is
+	// binary, and an IC canister query carries an ingress_expiry that must be
+	// recomputed every time (the protocol's replay protection). So for those
+	// collections the router builds the envelope here, taking the canister from
+	// the directive's path and the method from its function_template. Everything
+	// else about the verification — what to expect, how to compare — stays in the
+	// spec. See docs/CBOR-SUPPORT-DESIGN.md §5.2.
+	//
+	// Only canister-addressed paths need this. Bodyless endpoints such as
+	// /api/v2/status keep their (empty) template and are sent as-is.
+	if verification.IsCBOR() && rpcInterfaceMessages.IsICCanisterPath(path) {
+		craftedBody, craftErr := rpcInterfaceMessages.CraftICQueryBody(path, parsing.FunctionTemplate)
+		if craftErr != nil {
+			return utils.LavaFormatError("[-] verify failed crafting CBOR request body", craftErr,
+				utils.LogAttr("chainID", cf.endpoint.ChainID),
+				utils.LogAttr("path", path),
+				utils.LogAttr("method", parsing.FunctionTemplate),
+				utils.LogAttr("verification", verification.Name),
+			)
+		}
+		data = craftedBody
 	}
 
 	craftData := &CraftData{Path: path, Data: data, ConnectionType: collectionType, InternalPath: verification.InternalPath}
