@@ -3481,6 +3481,17 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 
 	// Get seen block
 	seenBlock := relayData.SeenBlock
+	if resolvedBlock != nil && *resolvedBlock > seenBlock {
+		// Exact-key backfill (§6): the cache server validates hits against the
+		// stored max(SeenBlock, Reply.LatestBlock) — a follow-up GET at key N with
+		// SeenBlock=N rejects an entry stored with SeenBlock=N-1 as "smaller than
+		// our expectations" (ecosystem/cache/handlers.go GetRelay), which would make
+		// the backfill invisible to the very lookup it was written for. The resolved
+		// block came from the LOCAL guarded tip at lookup time — never the foreign
+		// reply's SeenBlock — so lifting the SET's validity floor to it stays inside
+		// the local trust boundary.
+		seenBlock = *resolvedBlock
+	}
 
 	// Get shared state ID if enabled
 	sharedStateId := ""
@@ -3514,8 +3525,9 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 			OptionalMetadata:      nil,
 			SharedStateId:         sharedStateId,
 			AverageBlockTime:      int64(averageBlockTime),
-			IsNodeError:           false, // We only cache successful non-error responses
+			IsNodeError:           false, // node errors are rejected by the eligibility checks above
 			BlocksHashesToHeights: nil,   // Not available in direct RPC mode
+			StatusCode:            relayResult.StatusCode,
 		})
 
 		if err != nil {
