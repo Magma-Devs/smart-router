@@ -26,6 +26,12 @@ type CacheRelayReply struct {
 	OptionalMetadata      []Metadata           `json:"optional_metadata"`
 	SeenBlock             int64                `json:"seen_block"`
 	BlocksHashesToHeights []*BlockHashToHeight `json:"blocks_hashes_to_heights"`
+	// IsNodeError marks entries whose payload is a cached node error rather than a
+	// normal successful response. Absent on the wire from older cache servers, which
+	// decodes to false — consumers that must not treat a node error as a success
+	// (e.g. secondary-cache backfill) combine this with the legacy placeholder check
+	// (common.CachedErrorGUIDPlaceholder).
+	IsNodeError bool `json:"is_node_error"`
 }
 
 func (c *CacheRelayReply) GetReply() *RelayReply {
@@ -54,6 +60,13 @@ func (c *CacheRelayReply) GetBlocksHashesToHeights() []*BlockHashToHeight {
 		return c.BlocksHashesToHeights
 	}
 	return nil
+}
+
+func (c *CacheRelayReply) GetIsNodeError() bool {
+	if c != nil {
+		return c.IsNodeError
+	}
+	return false
 }
 
 // RelayCacheGet is the request message sent to the relay cache service.

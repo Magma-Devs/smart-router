@@ -3708,12 +3708,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 
 						// If this is a cached error response with placeholder GUID, replace it with current request GUID
 						replyDataStr := string(reply.Data)
-						if strings.Contains(replyDataStr, `"Error_GUID":"CACHED_ERROR"`) {
+						if strings.Contains(replyDataStr, common.CachedErrorGUIDPlaceholder) {
 							guid, guidOk := utils.GetUniqueIdentifier(ctx)
 							if guidOk {
 								guidStr := strconv.FormatUint(guid, 10)
 								// Replace the placeholder GUID with the actual request GUID
-								replyDataStr = strings.Replace(replyDataStr, `"Error_GUID":"CACHED_ERROR"`, `"Error_GUID":"`+guidStr+`"`, 1)
+								replyDataStr = strings.Replace(replyDataStr, common.CachedErrorGUIDPlaceholder, common.CachedErrorGUIDKeyPrefix+guidStr+`"`, 1)
 								reply.Data = []byte(replyDataStr)
 							}
 						}
