@@ -11,6 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -261,6 +262,10 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		BlocksCheckpointDistance: chaintracker.DefaultBlockCheckpointDistance,
 		ChainId:                  m.chainID,
 		ParseDirectiveEnabled:    true, // Always enabled for direct RPC
+		// MAG-2218: a spec with a head but no usable GET_BLOCK_BY_NUM runs head-only rather
+		// than failing every hash fetch forever. ParseDirectiveEnabled stays true — turning it
+		// off would swap in a DummyChainTracker, which polls nothing at all.
+		HeadOnlyTracking: m.headOnlyTracking(),
 		// MAG-2159 (Topic B): per-endpoint trackers use a FIXED flat cadence — the
 		// dedicated poll runs at exactly avgBlockTime/2 (slowed only by failure backoff),
 		// because relay harvest is the primary block signal and the poll is a sparse
@@ -388,6 +393,28 @@ func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTrack
 		case <-timer.C:
 		}
 	}
+}
+
+// headOnlyTracking reports whether this chain can be tracked by head alone: it exposes a
+// current block/offset (GET_BLOCKNUM) but has no usable "fetch block N" (GET_BLOCK_BY_NUM).
+// Canton is the case that forced this (MAG-2218) — its Ledger API reads are party-scoped and
+// not addressable by block number, so a generic per-block fetch cannot be expressed.
+//
+// Deliberately keyed on the directives the spec actually declares rather than on a chain
+// allowlist, and it mirrors the graceful degradation resolveTipApiNames already does for the
+// same tag. A chain declaring both tags is unaffected — as of MAG-2218 every shipped spec
+// declares both, so this returns false for all of them.
+func (m *EndpointMonitor) headOnlyTracking() bool {
+	if m.chainParser == nil {
+		return false
+	}
+	if _, _, hasLatest := m.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM); !hasLatest {
+		// No way to read the head either — not a head-only chain, just an unusable one.
+		// Leave the existing failure path to report it.
+		return false
+	}
+	_, _, hasByNum := m.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
+	return !hasByNum
 }
 
 func (m *EndpointMonitor) trackerStartRetryDelay(attempt int) time.Duration {

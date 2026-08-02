@@ -143,6 +143,9 @@ type ChainTracker struct {
 	relayTipFresh           func(now time.Time) bool
 	maxRelaySkipsBeforePoll int
 	relaySkipsSinceRealPoll int
+	// headOnly (MAG-2218) drops every block-hash fetch: no fork detection, no block queue.
+	// The head still advances from FetchLatestBlockNum. See ChainTrackerConfig.HeadOnlyTracking.
+	headOnly bool
 
 	// allows us to mock the chain fetcher for different use cases for example: Solana needs slot to block number
 	iChainFetcherWrapper IChainFetcherWrapper
@@ -172,6 +175,13 @@ func (cs *ChainTracker) GetLatestBlockData(fromBlock, toBlock, specificBlock int
 	defer cs.blockQueueMu.RUnlock()
 
 	latestBlock = cs.GetAtomicLatestBlockNum()
+	// Head-only (MAG-2218): an empty queue is the steady state here, not a fault. Answer with
+	// the head and no hashes, the way DummyChainTracker does, rather than returning an error
+	// and logging at ERROR on every call. Chains in this mode must run with data reliability
+	// and finalization proofs off, since neither can be satisfied without hashes.
+	if cs.headOnly {
+		return latestBlock, []*BlockStore{}, cs.latestChangeTime, nil
+	}
 	if len(cs.blocksQueue) == 0 {
 		return latestBlock, nil, time.Time{}, utils.LavaFormatError("ChainTracker GetLatestBlockData had no blocks", nil, utils.Attribute{Key: "latestBlock", Value: latestBlock})
 	}
@@ -244,6 +254,17 @@ func (cs *ChainTracker) GetServerBlockMemory() uint64 {
 
 func (cs *ChainTracker) setLatestBlockNum(value int64) {
 	atomic.StoreInt64(&cs.latestBlockNum, value)
+}
+
+// advanceHeadOnly publishes a new head in head-only mode (MAG-2218). It is the second and
+// only other writer of latestBlockNum: replaceBlocksQueue is the hashed path, and it holds
+// blockQueueMu while it swaps the queue and stores the head together. Head-only keeps no
+// queue, but it takes the same lock so a concurrent ResetLatestBlock or getLatestBlockUnsafe
+// cannot observe the head moving out from under it.
+func (cs *ChainTracker) advanceHeadOnly(latestBlock int64) {
+	cs.blockQueueMu.Lock()
+	defer cs.blockQueueMu.Unlock()
+	cs.setLatestBlockNum(latestBlock)
 }
 
 // ResetLatestBlock zeroes the cached latest block under blockQueueMu. After
@@ -447,6 +468,30 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 		}
 		return false, err
 	}
+	// Head-only (MAG-2218): the head is all we can learn from this chain, and we already have
+	// it. Everything below needs block hashes — forkChanged fetches one every tick even when the
+	// block is unchanged, and fetchAllPreviousBlocks fetches blocksToSave of them — so on a chain
+	// with no GET_BLOCK_BY_NUM mapping the rest of this cycle can only fail. Publish the head and
+	// return cleanly, which also keeps fetchFails at 0 so the poll cadence does not back off.
+	if cs.headOnly {
+		prevLatest := cs.GetAtomicLatestBlockNum()
+		if newLatestBlock > prevLatest {
+			cs.advanceHeadOnly(newLatestBlock)
+			if cs.newLatestCallback != nil {
+				// No hash to report: head-only keeps no block queue.
+				cs.newLatestCallback(prevLatest, newLatestBlock, "")
+			}
+			cs.setLatestChangeTime(time.Now())
+		} else if prevLatest > newLatestBlock && cs.consistencyCallback != nil {
+			cs.consistencyCallback(prevLatest, newLatestBlock)
+		} else if newLatestBlock == prevLatest {
+			// Same head as last cycle. Mirrors the hashed path's no-new-block branch, which is
+			// what feeds the not-updated/emergency detection.
+			cs.notUpdated()
+		}
+		return false, nil
+	}
+
 	gotNewBlock := cs.gotNewBlock(ctx, newLatestBlock)
 	forked, err := cs.forkChanged(ctx, newLatestBlock)
 	if err != nil {
@@ -704,6 +749,16 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 		}
 		return utils.LavaFormatError("critical -- failed fetching data from the node, chain tracker creation error", err, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
 	}
+	// Head-only (MAG-2218): there is no hash to seed a block queue with, and retrying
+	// fetchAllPreviousBlocks would exhaust its attempts and return the "chain tracker creation
+	// error" below — which start() propagates, leaving startTrackerWithRetry looping forever on a
+	// chain that is in fact healthy. Publish the head we just fetched and finish init.
+	if cs.headOnly {
+		cs.advanceHeadOnly(newLatestBlock)
+		cs.setLatestChangeTime(time.Now())
+		return nil
+	}
+
 	for idx := 0; idx < initRetriesCount; idx++ {
 		_, err = cs.fetchAllPreviousBlocks(ctx, newLatestBlock)
 		if err == nil {
@@ -829,6 +884,7 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		pollingTimeMultiplier:   time.Duration(pollingTime),
 		averageBlockTime:        config.AverageBlockTime,
 		flatPollInterval:        config.FlatPollInterval,
+		headOnly:                config.HeadOnlyTracking,
 		relayTipFresh:           config.RelayTipFresh,
 		maxRelaySkipsBeforePoll: maxRelaySkips,
 		endpoint:                endpoint,
