@@ -60,6 +60,18 @@ const (
 	MAXIMUM_ALLOWED_TIMEOUT_EXTEND_MULTIPLIER_BY_THE_CONSUMER = 4
 )
 
+// Legacy cached node-error marker. Upstream-lava cache writers embed this exact JSON
+// fragment as the Error_GUID value when storing a node-error payload; on a cache hit
+// the router substitutes the current request's GUID for the placeholder before
+// serving. No producer exists in this repository — the constants preserve byte-exact
+// compatibility with entries written by other lineages, and are the fallback signal
+// for entry kind when a cache backend predates CacheRelayReply.IsNodeError
+// (docs/SECONDARY-CACHE-DESIGN.md §7).
+const (
+	CachedErrorGUIDKeyPrefix   = `"Error_GUID":"`
+	CachedErrorGUIDPlaceholder = CachedErrorGUIDKeyPrefix + `CACHED_ERROR"`
+)
+
 // Cross-validation failure reasons, surfaced via CROSS_VALIDATION_FAILURE_REASON_HEADER so clients and
 // metrics can distinguish why cross-validation failed — both quorum-time (a quorum was not reached) and
 // request-time (the candidate set could not even be assembled).
