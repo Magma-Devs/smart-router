@@ -87,7 +87,8 @@ func (c *UpstreamGRPCStreamConnection) connect(ctx context.Context, timeout time
 	var dialOpts []grpc.DialOption
 	scheme := strings.ToLower(parsedURL.Scheme)
 
-	if scheme == "grpcs" || c.nodeUrl.AuthConfig.UseTLS {
+	transportIsSecure := scheme == "grpcs" || c.nodeUrl.AuthConfig.UseTLS
+	if transportIsSecure {
 		// Use TLS
 		tlsConfig := &tls.Config{}
 		if c.nodeUrl.AuthConfig.AllowInsecure {
@@ -106,6 +107,12 @@ func (c *UpstreamGRPCStreamConnection) connect(ctx context.Context, timeout time
 	dialOpts = append(dialOpts,
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(512*1024*1024)),
 	)
+
+	// MAG-2218: attach the endpoint's configured auth-headers. This pool backs
+	// GetReflectionConnection (live, via RPCSmartRouterServer.GetGRPCReflectionConnection)
+	// and the subscription manager's upstream streams, neither of which sent credentials.
+	c.nodeUrl.TokenOverInsecureWarning(transportIsSecure)
+	dialOpts = append(dialOpts, c.nodeUrl.GrpcAuthDialOptions()...)
 
 	// grpc.NewClient is lazy — it does not establish a connection here.
 	// We force a state transition under the configured timeout so the
