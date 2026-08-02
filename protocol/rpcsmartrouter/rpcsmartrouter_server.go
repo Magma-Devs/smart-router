@@ -70,6 +70,12 @@ type RPCSmartRouterServer struct {
 	initialized          atomic.Bool
 	enableSelectionStats bool // feature flag to enable selection stats header
 
+	// Optional read-only secondary cache tier (docs/SECONDARY-CACHE-DESIGN.md §9);
+	// nil when unconfigured. Typed as the narrow CacheReader so SetEntry/Flush are
+	// compile-time errors — read-only is structural, not conventional.
+	secondaryCache        performance.CacheReader
+	secondaryCacheTimeout time.Duration
+
 	// Per-endpoint ChainTracker manager for continuous block polling
 	endpointChainTrackerManager *endpointstate.EndpointMonitor
 
@@ -112,6 +118,8 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	chainParser chainlib.ChainParser,
 	sessionManager *lavasession.ConsumerSessionManager,
 	cache *performance.Cache,
+	secondaryCache performance.CacheReader,
+	secondaryCacheTimeout time.Duration,
 	rpcSmartRouterLogs *metrics.RPCConsumerLogs,
 	relaysMonitor *metrics.RelaysMonitor,
 	cmdFlags common.ConsumerCmdFlags,
@@ -122,6 +130,8 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.sessionManager = sessionManager
 	rpcss.listenEndpoint = listenEndpoint
 	rpcss.cache = cache
+	rpcss.secondaryCache = secondaryCache
+	rpcss.secondaryCacheTimeout = secondaryCacheTimeout
 	rpcss.rpcSmartRouterLogs = rpcSmartRouterLogs
 	rpcss.chainParser = chainParser
 	rpcss.sharedState = sharedState
@@ -3075,6 +3085,24 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	protocolMessage chainlib.ProtocolMessage,
 	relayResult *common.RelayResult,
 ) {
+	rpcss.tryCacheWriteResolved(ctx, protocolMessage, relayResult, nil)
+}
+
+// tryCacheWriteResolved is tryCacheWrite with an optional pre-resolved cache-key
+// block (docs/SECONDARY-CACHE-DESIGN.md §6). resolvedBlock == nil preserves the
+// legacy resolution (Reply.LatestBlock → SeenBlock → skip). A non-nil resolvedBlock
+// carries the exact block that produced a secondary-cache hit, so the backfill SET
+// lands on the identical server-side key (hash ‖ block) — re-deriving it here could
+// land on a different key (tip advance between parse and lookup) or skip the write
+// entirely (LATEST replies with no parsable height, e.g. eth_call). Only the KEY
+// resolution is overridden; finalization still uses the raw requested block and the
+// gated tip.
+func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
+	ctx context.Context,
+	protocolMessage chainlib.ProtocolMessage,
+	relayResult *common.RelayResult,
+	resolvedBlock *int64,
+) {
 	// Skip if cache is not active
 	if !rpcss.cache.CacheActive() {
 		return
@@ -3166,7 +3194,11 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	// Convert LATEST_BLOCK to actual block number for cache key
 	// This must match the logic in cache lookup (sendRelayToEndpoint) to ensure cache hits
 	requestedBlockForCache := requestedBlock
-	if requestedBlock == spectypes.LATEST_BLOCK {
+	if resolvedBlock != nil && *resolvedBlock >= 0 {
+		// Exact-key backfill (§6): the caller proved this block is the server-side
+		// key that hit — trust it over re-derivation.
+		requestedBlockForCache = *resolvedBlock
+	} else if requestedBlock == spectypes.LATEST_BLOCK {
 		// Use the latest block from the response (most accurate)
 		if latestBlock > 0 {
 			requestedBlockForCache = latestBlock
@@ -3305,9 +3337,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	selection := relayProcessor.GetSelection()
 	crossValidationParams := relayProcessor.GetCrossValidationParams()
 
-	// Cache lookup: only if cache is active, cross-validation is disabled, and request is not stateful
+	// Cache lookup: bypass rules are evaluated once for both tiers; each tier is then
+	// attempted iff it is itself active (docs/SECONDARY-CACHE-DESIGN.md §5) — a
+	// healthy secondary keeps serving while the primary is down or unconfigured.
 	crossValidationEnabled := selection == relaycore.CrossValidation && crossValidationParams != nil
-	if rpcss.cache.CacheActive() {
+	primaryCacheActive := rpcss.cache.CacheActive()
+	secondaryCacheActive := rpcss.secondaryCacheActive()
+	if primaryCacheActive || secondaryCacheActive {
 		if crossValidationEnabled {
 			// Cross-validation requires fresh endpoint validation - cache would defeat consensus verification
 			utils.LavaFormatDebug("Cache bypassed due to cross-validation requirements",
@@ -3378,115 +3414,129 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 					// The cache will search both tempCache and finalizedCache, finding data in either
 					lookupFinalized := false
 
-					cacheCtx, cancel := context.WithTimeout(ctx, common.CacheTimeout)
+					if primaryCacheActive {
+						cacheCtx, cancel := context.WithTimeout(ctx, common.CacheTimeout)
 
-					utils.LavaFormatDebug("Cache lookup configuration",
-						utils.LogAttr("GUID", ctx),
-						utils.LogAttr("reqBlock", reqBlock),
-						utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
-						utils.LogAttr("seenBlock", localRelayData.SeenBlock),
-						utils.LogAttr("lookupFinalized", lookupFinalized),
-					)
-
-					cacheLatencyMs := func() float64 {
-						_, cacheSpan := tracing.StartInternalSpan(ctx, tracing.SpanCacheLookup)
-						defer cacheSpan.End()
-						cacheStart := time.Now()
-						cacheReply, cacheError = rpcss.cache.GetEntry(cacheCtx, &pairingtypes.RelayCacheGet{
-							RequestHash:           hashKey,
-							RequestedBlock:        requestedBlockForCache,
-							ChainId:               chainId,
-							BlockHash:             nil,
-							Finalized:             lookupFinalized,
-							SharedStateId:         sharedStateId,
-							SeenBlock:             localRelayData.SeenBlock,
-							BlocksHashesToHeights: rpcss.newBlocksHashesToHeightsSliceFromRequestedBlockHashes(protocolMessage.GetRequestedBlocksHashes()),
-						}) // caching in the consumer doesn't care about hashes, and we don't have data on finalization yet
-						cancel()
-						latencyMs := float64(time.Since(cacheStart).Milliseconds())
-						cacheHit := cacheError == nil && cacheReply != nil && cacheReply.GetReply() != nil
-						tracing.RecordCacheResult(ctx, cacheSpan, cacheHit, latencyMs)
-						return latencyMs
-					}()
-
-					// Generate the actual cache key that will be used for lookup
-					actualLookupCacheKey := make([]byte, len(hashKey))
-					copy(actualLookupCacheKey, hashKey)
-					actualLookupCacheKey = binary.LittleEndian.AppendUint64(actualLookupCacheKey, uint64(requestedBlockForCache))
-
-					utils.LavaFormatDebug("Cache lookup result",
-						utils.LogAttr("GUID", ctx),
-						utils.LogAttr("hashKeyHex", fmt.Sprintf("%x", hashKey)),
-						utils.LogAttr("actualLookupCacheKeyHex", fmt.Sprintf("%x", actualLookupCacheKey)),
-						utils.LogAttr("reqBlock", reqBlock),
-						utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
-						utils.LogAttr("seenBlock", localRelayData.SeenBlock),
-						utils.LogAttr("cacheError", cacheError),
-						utils.LogAttr("replyFound", cacheReply != nil && cacheReply.GetReply() != nil),
-					)
-					reply := cacheReply.GetReply()
-
-					// Cross-pod consistency (T10): peer pods publish their guarded chain tip under
-					// the shared chain-level key; the server returns the fleet-max. Adopt it through
-					// the same anti-lie guards as a local observation.
-					rpcss.adoptSharedStateTip(ctx, cacheReply.GetSeenBlock(), localRelayData.SeenBlock)
-
-					// handle cache reply
-					if cacheError == nil && reply != nil {
-						// Cache hit - return cached response
-						utils.LavaFormatDebug("cache hit",
-							utils.LogAttr("chainId", chainId),
-							utils.LogAttr("requestedBlock", requestedBlockForCache),
+						utils.LavaFormatDebug("Cache lookup configuration",
 							utils.LogAttr("GUID", ctx),
+							utils.LogAttr("reqBlock", reqBlock),
+							utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
+							utils.LogAttr("seenBlock", localRelayData.SeenBlock),
+							utils.LogAttr("lookupFinalized", lookupFinalized),
 						)
-						reply.Data = outputFormatter(reply.Data)
 
-						// If this is a cached error response with placeholder GUID, replace it with current request GUID
-						replyDataStr := string(reply.Data)
-						if strings.Contains(replyDataStr, common.CachedErrorGUIDPlaceholder) {
-							guid, guidOk := utils.GetUniqueIdentifier(ctx)
-							if guidOk {
-								guidStr := strconv.FormatUint(guid, 10)
-								// Replace the placeholder GUID with the actual request GUID
-								replyDataStr = strings.Replace(replyDataStr, common.CachedErrorGUIDPlaceholder, common.CachedErrorGUIDKeyPrefix+guidStr+`"`, 1)
-								reply.Data = []byte(replyDataStr)
+						cacheLatencyMs := func() float64 {
+							_, cacheSpan := tracing.StartInternalSpan(ctx, tracing.SpanCacheLookup)
+							defer cacheSpan.End()
+							cacheStart := time.Now()
+							cacheReply, cacheError = rpcss.cache.GetEntry(cacheCtx, &pairingtypes.RelayCacheGet{
+								RequestHash:           hashKey,
+								RequestedBlock:        requestedBlockForCache,
+								ChainId:               chainId,
+								BlockHash:             nil,
+								Finalized:             lookupFinalized,
+								SharedStateId:         sharedStateId,
+								SeenBlock:             localRelayData.SeenBlock,
+								BlocksHashesToHeights: rpcss.newBlocksHashesToHeightsSliceFromRequestedBlockHashes(protocolMessage.GetRequestedBlocksHashes()),
+							}) // caching in the consumer doesn't care about hashes, and we don't have data on finalization yet
+							cancel()
+							latencyMs := float64(time.Since(cacheStart).Milliseconds())
+							cacheHit := cacheError == nil && cacheReply != nil && cacheReply.GetReply() != nil
+							tracing.RecordCacheResult(ctx, cacheSpan, cacheHit, latencyMs)
+							return latencyMs
+						}()
+
+						// Generate the actual cache key that will be used for lookup
+						actualLookupCacheKey := make([]byte, len(hashKey))
+						copy(actualLookupCacheKey, hashKey)
+						actualLookupCacheKey = binary.LittleEndian.AppendUint64(actualLookupCacheKey, uint64(requestedBlockForCache))
+
+						utils.LavaFormatDebug("Cache lookup result",
+							utils.LogAttr("GUID", ctx),
+							utils.LogAttr("hashKeyHex", fmt.Sprintf("%x", hashKey)),
+							utils.LogAttr("actualLookupCacheKeyHex", fmt.Sprintf("%x", actualLookupCacheKey)),
+							utils.LogAttr("reqBlock", reqBlock),
+							utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
+							utils.LogAttr("seenBlock", localRelayData.SeenBlock),
+							utils.LogAttr("cacheError", cacheError),
+							utils.LogAttr("replyFound", cacheReply != nil && cacheReply.GetReply() != nil),
+						)
+						reply := cacheReply.GetReply()
+
+						// Cross-pod consistency (T10): peer pods publish their guarded chain tip under
+						// the shared chain-level key; the server returns the fleet-max. Adopt it through
+						// the same anti-lie guards as a local observation.
+						rpcss.adoptSharedStateTip(ctx, cacheReply.GetSeenBlock(), localRelayData.SeenBlock)
+
+						// handle cache reply
+						if cacheError == nil && reply != nil {
+							// Cache hit - return cached response
+							utils.LavaFormatDebug("cache hit",
+								utils.LogAttr("chainId", chainId),
+								utils.LogAttr("requestedBlock", requestedBlockForCache),
+								utils.LogAttr("GUID", ctx),
+							)
+							reply.Data = outputFormatter(reply.Data)
+
+							// If this is a cached error response with placeholder GUID, replace it with current request GUID
+							replyDataStr := string(reply.Data)
+							if strings.Contains(replyDataStr, common.CachedErrorGUIDPlaceholder) {
+								guid, guidOk := utils.GetUniqueIdentifier(ctx)
+								if guidOk {
+									guidStr := strconv.FormatUint(guid, 10)
+									// Replace the placeholder GUID with the actual request GUID
+									replyDataStr = strings.Replace(replyDataStr, common.CachedErrorGUIDPlaceholder, common.CachedErrorGUIDKeyPrefix+guidStr+`"`, 1)
+									reply.Data = []byte(replyDataStr)
+								}
 							}
-						}
 
-						relayResult := common.RelayResult{
-							Reply: reply,
-							Request: &pairingtypes.RelayRequest{
-								RelayData: localRelayData,
-							},
-							Finalized:    false, // cache responses are not considered finalized
-							StatusCode:   200,
-							ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
+							relayResult := common.RelayResult{
+								Reply: reply,
+								Request: &pairingtypes.RelayRequest{
+									RelayData: localRelayData,
+								},
+								Finalized:    false, // cache responses are not considered finalized
+								StatusCode:   200,
+								ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
+							}
+							// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was
+							// current when the response was CACHED — it is not a fresh observation of the
+							// chain head and is not gated on tip-eligibility, so it must NOT feed tip
+							// state (it would plant a long-historical block as the chain head). Tip state
+							// is advanced only by tip-eligible live relays (harvestAndUpdateTipFromRelay)
+							// and the per-endpoint observation store, never by cache replays.
+							relayProcessor.SetResponse(&relaycore.RelayResponse{
+								RelayResult: relayResult,
+								Err:         nil,
+							})
+							if analytics == nil {
+								analytics = &metrics.RelayMetrics{}
+							}
+							analytics.IsWrite = chainlib.GetStateful(protocolMessage) != 0
+							analytics.IsArchive = chainqueries.IsArchiveRequest(protocolMessage)
+							analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
+							analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
+							go rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+							go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), true, cacheLatencyMs)
+							return nil
 						}
-						// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was
-						// current when the response was CACHED — it is not a fresh observation of the
-						// chain head and is not gated on tip-eligibility, so it must NOT feed tip
-						// state (it would plant a long-historical block as the chain head). Tip state
-						// is advanced only by tip-eligible live relays (harvestAndUpdateTipFromRelay)
-						// and the per-endpoint observation store, never by cache replays.
-						relayProcessor.SetResponse(&relaycore.RelayResponse{
-							RelayResult: relayResult,
-							Err:         nil,
-						})
-						if analytics == nil {
-							analytics = &metrics.RelayMetrics{}
-						}
-						analytics.IsWrite = chainlib.GetStateful(protocolMessage) != 0
-						analytics.IsArchive = chainqueries.IsArchiveRequest(protocolMessage)
-						analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
-						analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
-						go rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
-						go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), true, cacheLatencyMs)
-						return nil
+						go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), false, cacheLatencyMs)
+						// Cache miss - will relay to endpoint
+						latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
+						utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))
 					}
-					go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), false, cacheLatencyMs)
-					// Cache miss - will relay to endpoint
-					latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
-					utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))
+					// Secondary tier (design §5): consulted whenever the primary produced no
+					// hit — including primary inactive or unconfigured. A hit is sanitized,
+					// served, and backfilled through the populator; a miss still contributes
+					// block-hash→height data to the merge (§8).
+					if secondaryCacheActive {
+						served, secondaryCacheReply := rpcss.trySecondaryCacheLookup(ctx, protocolMessage, localRelayData, relayProcessor, analytics, hashKey, outputFormatter, requestedBlockForCache)
+						if served {
+							return nil
+						}
+						latestFromSecondary, earliestFromSecondary := rpcss.getEarliestBlockHashRequestedFromCacheReply(secondaryCacheReply)
+						latestBlockHashRequested, earliestBlockHashRequested = mergeBlockHashHeights(latestBlockHashRequested, earliestBlockHashRequested, latestFromSecondary, earliestFromSecondary)
+					}
 				}
 			} else {
 				utils.LavaFormatDebug("skipping cache due to requested block being NOT_APPLICABLE",
