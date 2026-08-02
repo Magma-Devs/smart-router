@@ -51,7 +51,10 @@ type CacheValue struct {
 	// IsNodeError persists RelayCacheSet.IsNodeError so GetRelay can report entry
 	// kind — before this the flag only selected the write TTL and was then lost,
 	// leaving readers unable to tell a cached node error from a success.
-	IsNodeError  bool
+	IsNodeError bool
+	// StatusCode persists the writer-recorded upstream HTTP status (zero = unknown,
+	// legacy writers) so readers can re-apply status-based eligibility rules.
+	StatusCode   int
 	IsCompressed bool
 }
 
@@ -70,6 +73,7 @@ func (cv *CacheValue) ToCacheReply() *relaytypes.CacheRelayReply {
 		OptionalMetadata: cv.OptionalMetadata,
 		SeenBlock:        cv.SeenBlock,
 		IsNodeError:      cv.IsNodeError,
+		StatusCode:       cv.StatusCode,
 	}
 }
 
@@ -355,7 +359,7 @@ func (s *RelayerCacheServer) SetRelay(ctx context.Context, relayCacheSet *relayt
 	latestKnownBlock := int64(math.Max(float64(relayCacheSet.Response.LatestBlock), float64(relayCacheSet.SeenBlock)))
 
 	cacheKey := s.formatHashKey(relayCacheSet.RequestHash, relayCacheSet.RequestedBlock)
-	cacheValue := formatCacheValue(relayCacheSet.Response, relayCacheSet.BlockHash, relayCacheSet.Finalized, relayCacheSet.OptionalMetadata, latestKnownBlock, relayCacheSet.IsNodeError)
+	cacheValue := formatCacheValue(relayCacheSet.Response, relayCacheSet.BlockHash, relayCacheSet.Finalized, relayCacheSet.OptionalMetadata, latestKnownBlock, relayCacheSet.IsNodeError, relayCacheSet.StatusCode)
 	utils.LavaFormatDebug("Got Cache Set",
 		utils.Attribute{Key: "cacheKey", Value: string(cacheKey)},
 		utils.Attribute{Key: "finalized", Value: fmt.Sprintf("%t", relayCacheSet.Finalized)},
@@ -533,7 +537,7 @@ func (s *RelayerCacheServer) findInAllCaches(finalized bool, cacheKey []byte) (r
 	return CacheValue{}, "", false
 }
 
-func formatCacheValue(response *relaytypes.RelayReply, hash []byte, finalized bool, optionalMetadata []relaytypes.Metadata, seenBlock int64, isNodeError bool) CacheValue {
+func formatCacheValue(response *relaytypes.RelayReply, hash []byte, finalized bool, optionalMetadata []relaytypes.Metadata, seenBlock int64, isNodeError bool, statusCode int) CacheValue {
 	response.Sig = []byte{}
 
 	compressed, isCompressed, err := compressData(response.Data)
@@ -550,6 +554,7 @@ func formatCacheValue(response *relaytypes.RelayReply, hash []byte, finalized bo
 			OptionalMetadata: optionalMetadata,
 			SeenBlock:        seenBlock,
 			IsNodeError:      isNodeError,
+			StatusCode:       statusCode,
 			IsCompressed:     isCompressed,
 		}
 	}
@@ -559,6 +564,7 @@ func formatCacheValue(response *relaytypes.RelayReply, hash []byte, finalized bo
 		OptionalMetadata: optionalMetadata,
 		SeenBlock:        seenBlock,
 		IsNodeError:      isNodeError,
+		StatusCode:       statusCode,
 		IsCompressed:     isCompressed,
 	}
 }

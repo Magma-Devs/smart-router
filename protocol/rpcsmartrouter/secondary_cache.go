@@ -114,25 +114,36 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		}
 	}
 
+	// Original upstream status, when the entry's writer recorded it (§7). Zero is the
+	// legacy "unknown" and keeps today's assume-success serving; a real stored status
+	// flows through RelayResult so the populator's own 429/504/non-2xx checks decide
+	// backfill eligibility instead of a hardcoded 200 making them unreachable.
+	statusCode := cacheReply.GetStatusCode()
+	if statusCode == 0 {
+		statusCode = 200
+	}
+
 	relayResult := common.RelayResult{
 		Reply: copyReply,
 		Request: &pairingtypes.RelayRequest{
 			RelayData: localRelayData,
 		},
-		Finalized:    false, // cache responses are not considered finalized
-		StatusCode:   200,
+		Finalized:  false, // cache responses are not considered finalized
+		StatusCode: statusCode,
+		// Served truthfully: a cached node error carries the
+		// lava-identified-node-error header (appendHeadersToRelayResult), and the
+		// populator's node-error check is what rejects its backfill.
+		IsNodeError:  isNodeError,
 		ProviderInfo: common.ProviderInfo{ProviderAddress: ""}, // rendered as "Cached", same as a primary hit
 	}
 
-	// Backfill (§6): populator-governed, keyed by the exact block that produced this
-	// hit. Runs BEFORE SetResponse so the populator's synchronous deep copy cannot
-	// race the response path's later header appends; the actual SET stays async
-	// inside the populator. Cached node errors are served but never re-written as
-	// successes (§7); when the primary is inactive the populator skips itself (§5
-	// secondary-only topology).
-	if !isNodeError {
-		rpcss.tryCacheWriteResolved(ctx, protocolMessage, &relayResult, &requestedBlockForCache)
-	}
+	// Backfill (§6): the populator owns ALL eligibility — node-error, status-code,
+	// stateful, NOT_APPLICABLE, finalization — so this call is unconditional and the
+	// checks see the entry's real state (§7). It runs BEFORE SetResponse so the
+	// populator's synchronous deep copy cannot race the response path's later header
+	// appends; the actual SET stays async inside the populator. When the primary is
+	// inactive the populator skips itself (§5 secondary-only topology).
+	rpcss.tryCacheWriteResolved(ctx, protocolMessage, &relayResult, &requestedBlockForCache)
 
 	// Same MAG-2160 rule as primary hits: a cached reply's LatestBlock is the block
 	// that was current when the entry was written, not a fresh chain-head
