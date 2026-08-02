@@ -89,62 +89,38 @@ Criteria"), mapped to design sections and tests (§14):
 
 ## 4. Trust boundary & sanitization (security)
 
-The secondary cache is a **different trust domain**. Its entries may have been written by other
-router versions, other software lineages (upstream lava writers), or a misconfigured/compromised
-writer — none of the write-path hygiene this repo implements can be assumed. Concretely, the
-current format *can* carry identity-bearing data: `RelayReply.Metadata` stores arbitrary
-upstream response headers (`direct_rpc_relay.go:464,645,766,821`), the cache server preserves
-`Metadata` while zeroing only `Sig` (`handlers.go:528-554`), and `SigBlocks` /
-`FinalizedBlocksHashes` round-trip untouched. The earlier draft's "confirmed no-op" claim held
-only for entries written by *this* router version; it is withdrawn. Sanitization is an
-**active requirement**.
+**Trust model (scoped precisely):** the secondary cache is *trusted for response and
+cache-control integrity but must not expose the originating provider's identity*. This is the
+Kraken topology's reality — the secondary is typically the *more* trusted zone's cache — and it
+is the model the implementation actually enforces. Concretely, foreign fields that steer
+behavior are used as-is, exactly as a primary entry's would be: `Reply.Data` is served,
+`Reply.LatestBlock` feeds the populator's finalization decision (TTL class), and
+`BlocksHashesToHeights` feeds archive-extension routing. This design does **not** claim
+tolerance of a compromised secondary writer; an operator who cannot trust the secondary's
+integrity must not configure it.
 
-**Rule: every secondary-cache reply is deep-copied and sanitized before any use — both the
-response served to the caller and the payload handed to primary backfill are the sanitized
-copy.** (Order: clone → sanitize → `outputFormatter` → serve; the same sanitized clone feeds
-§6.)
+What the router *does* enforce is the PRD's security requirement: no provider-identifying
+data from a foreign entry reaches the caller or the primary store. The threat here is real —
+`RelayReply.Metadata` carries arbitrary upstream HTTP/gRPC response headers copied wholesale
+(`direct_rpc_relay.go`), the cache server preserves `Metadata` while zeroing only `Sig`
+(`handlers.go`), and foreign writers may store headers this codebase has never heard of
+(`X-Provider-ID`, `X-Served-By`, `Via`, `Server`, ...). No denylist over such an open set can
+be proven complete, so the policy is **drop everything**:
 
-```go
-// protocol/performance/sanitize.go (new)
-func SanitizeForeignCacheReply(reply *pairingtypes.RelayReply) {
-    reply.Sig = nil       // provider signature over the response
-    reply.SigBlocks = nil // provider signature over finalization data
-    kept := reply.Metadata[:0]
-    for _, m := range reply.Metadata {
-        if !isIdentityHeader(m.Name) {
-            kept = append(kept, m)
-        }
-    }
-    reply.Metadata = kept
-}
-```
+**Rule: every secondary-cache reply is deep-copied and sanitized before any use — `Sig` and
+`SigBlocks` are zeroed and `Metadata` is removed wholesale; the sanitized clone is the only
+copy served to the caller and handed to primary backfill.** (Order: clone → sanitize →
+`outputFormatter` → serve; the same clone feeds §6.) `CacheRelayReply.OptionalMetadata` from
+the secondary is ignored entirely. Nothing in foreign metadata is load-bearing: the response
+body is `Data`, and every transport/protocol header the caller sees — including
+`Lava-Provider-Address: Cached` — is minted locally by `appendHeadersToRelayResult` *after*
+sanitization, exactly as for primary hits (T11 asserts both halves against a poisoned entry
+carrying arbitrary non-lava provider headers).
 
-`isIdentityHeader` (case-insensitive): name has prefix `lava-`, **or** name ∈
-{`provider-latest-block`, `smart-router-version`}. `CacheRelayReply.OptionalMetadata` from the
-secondary is dropped entirely (this router never writes it; foreign content has no consumer
-here). `FinalizedBlocksHashes` is kept: it is chain data, not identity, and nothing on the
-cache-hit path consumes it.
-
-**Why a bounded denylist is sufficient**: the identity surface of this protocol is enumerable.
-Every response header the router lineage mints is defined in `protocol/common/endpoints.go:19-48`
-and is `lava-`-prefixed — covering `Lava-Provider-Address`, `Lava-Retries`,
-`Lava-Errored-Providers`, `Lava-Node-Errors-providers`, `Lava-Reported-Providers`,
-`lava-providers-block`, `lava-fast-tx-participants`, all `lava-cross-validation-*` participant/
-status headers, `lava-selection-stats`, `Lava-Guid`, debug headers — with exactly two
-exceptions, `Provider-Latest-Block` and `Smart-Router-Version`, which the denylist names
-explicitly. Non-identity upstream node headers (e.g. `Content-Type`) are deliberately kept so a
-secondary hit serves the same header surface as a primary hit. A guard test (T11b) iterates the
-exported header constants in `protocol/common` and fails if any response-side constant is
-neither `lava-`-prefixed nor in the named-exception set — so the denylist cannot silently rot.
-An allowlist was considered and rejected: it would strip functional pass-through headers and
-diverge secondary-hit behavior from primary-hit behavior for no identity benefit.
-
-Locally minted headers are unaffected: `Lava-Provider-Address: Cached` is appended by
-`appendHeadersToRelayResult` *after* serving decisions, exactly as for primary hits (T11 asserts
-it survives).
-
-v1 applies sanitization to the **secondary tier only**; the primary stays same-zone-trusted
-(unchanged behavior). Extending it to the primary is listed as a hardening option (§16).
+The cost is accepted and small: a secondary hit serves no upstream pass-through headers, a
+deliberate divergence from primary hits confined to the foreign tier. v1 applies sanitization
+to the **secondary tier only**; the primary stays same-zone-trusted (unchanged behavior).
+Extending drop-all to the primary is listed as a hardening option (§16).
 
 ## 5. Lookup state machine
 
@@ -170,10 +146,11 @@ if !bypass && (primary.CacheActive() || secondary.CacheActive()):
                                 {hashKey, requestedBlockForCache, SharedStateId: "", SeenBlock, …})
         if hit(r2):
             reply = SanitizeForeignCacheReply(deepCopy(r2.Reply))          // §4
+            populator(reply, requestedBlockForCache)   // §6 — unconditional; the populator's own
+                                                       // node-error/status/stateful checks reject,
+                                                       // and it self-skips when primary is inactive
             serve(reply)                            // formatter, CACHED_ERROR GUID subst,
                                                     // ProviderAddress:"" ⇒ "Cached" — same as primary hit
-            if !nodeError(r2) && primary.CacheActive():
-                go backfill(reply, requestedBlockForCache)                 // §6
             return
 
     harvest = mergeBlockHashes(r1, r2)              // §8 — from miss replies of both tiers
@@ -191,7 +168,7 @@ both treated as a miss for control flow, distinguished only in metrics §12):
 | hit | (not attempted) | serve from primary — unchanged |
 | miss / error / timeout | unconfigured/inactive | providers (today's behavior) |
 | miss / error / timeout | hit (normal entry) | sanitize → serve → async backfill to primary |
-| miss / error / timeout | hit (node-error entry) | sanitize → serve (GUID substituted) → **no backfill** (§7) |
+| miss / error / timeout | hit (node-error entry) | sanitize → serve (GUID substituted, `lava-identified-node-error` header) → backfill **rejected by the populator's node-error check** (§7) |
 | miss / error / timeout | miss / error / timeout | merge block-hash info (§8) → providers |
 | unconfigured/inactive | hit | sanitize → serve; **backfill naturally skipped** (no active primary) |
 | unconfigured/inactive | miss / error / timeout | providers |
@@ -246,16 +223,28 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 - The secondary-hit path passes `&requestedBlockForCache` — the very value used in the
   successful GET — so the primary SET lands on the identical server-side key
   (`hash ‖ LittleEndian(block)`).
+- **The SET's validity `SeenBlock` is lifted to the resolved block.** The cache server
+  validates hits against the stored `max(SeenBlock, Reply.LatestBlock)` and rejects a reply
+  whose stored value is below `min(GET SeenBlock, GET RequestedBlock)` — so a backfill at key
+  N carrying the parse-time `SeenBlock = N−1` (with an unparsable `Reply.LatestBlock = 0`,
+  common for `eth_call`-style methods) would be **invisible to the very GET(N, N) it was
+  written for**. The lift uses `max(relayData.SeenBlock, resolvedBlock)`; the resolved block
+  came from the LOCAL guarded tip at lookup time — never the foreign reply's `SeenBlock` — so
+  it stays inside the local trust boundary. Locked by a regression test against the real cache
+  server's validation (T2).
 - **Everything else in the populator is retained**: stateful / node-error / status-code /
   `NOT_APPLICABLE` eligibility, hash recomputation via `HashCacheRequest` (deterministic for
   the same protocol message, so GET/SET hashes match by construction), finalization from the
-  raw requested-block sentinel and the gated tip (`:3038` — the hint replaces only the *key*
-  resolution, not the finalization input), local `relayData.SeenBlock` and local
-  `SharedStateId` in the SET payload (the foreign entry's `SeenBlock` never enters the
-  primary), deep copy, async goroutine, 5 s `CacheWriteTimeout`.
-- Input is the **sanitized** clone from §4; the populator's own deep copy (`:3069`) stays as
-  the race-safety barrier between serving and writing.
-- Backfill is invoked only when the entry is not a node error (§7) and the primary is active.
+  raw requested-block sentinel and the gated tip (the hint replaces only the *key* resolution
+  and the validity floor, not the finalization input), local `SharedStateId`, deep copy, async
+  goroutine, 5 s `CacheWriteTimeout`.
+- Input is the **sanitized** clone from §4; the populator's own deep copy stays as the
+  race-safety barrier between serving and writing.
+- **The populator is invoked unconditionally and owns all eligibility.** The `RelayResult`
+  handed to it carries the entry's real state — `IsNodeError` from the explicit flag or the
+  legacy placeholder, and `StatusCode` from the entry's stored status (§7) — so the populator's
+  node-error and 429/504/non-2xx checks genuinely decide, instead of being short-circuited by a
+  pre-filter and a hardcoded 200. When the primary is inactive it self-skips (§5).
 
 ## 7. Cached node errors: explicit entry-kind contract
 
@@ -269,9 +258,15 @@ rely on. Node-error entries in a foreign cache are therefore exactly the case we
 structs, so the change is additive and wire-compatible in both directions: unknown fields are
 ignored, missing fields decode to `false`):
 
-- `types/relay/cache.go`: add `IsNodeError bool` to `CacheRelayReply`.
+- `types/relay/cache.go`: add `IsNodeError bool` to `CacheRelayReply`, and `StatusCode int` to
+  both `RelayCacheSet` and `CacheRelayReply` — the original upstream HTTP status recorded at
+  write time. Zero means "unknown" (legacy writers, non-HTTP flows) and retains today's
+  assume-success semantics.
 - `ecosystem/cache/handlers.go`: persist `RelayCacheSet.IsNodeError` on `CacheValue` (today it
-  only selects the TTL, `:367`, and is lost) and return it in `ToCacheReply`.
+  only selects the TTL, `:367`, and is lost) and `RelayCacheSet.StatusCode`; return both in
+  `ToCacheReply`.
+- Router writes populate `StatusCode` from `RelayResult.StatusCode`; entries this router
+  writes are always 2xx-or-unknown because the populator's own eligibility rejects the rest.
 
 **Formalized fallback — placeholder contract**: the exact fragment
 `"Error_GUID":"CACHED_ERROR"` is promoted from an inline literal to an exported constant
@@ -279,10 +274,14 @@ ignored, missing fields decode to `false`):
 tests locking the byte-exact form the substitution path already depends on.
 
 **Decision rule**: `nodeError(entry) = entry.IsNodeError || bytes.Contains(reply.Data,
-placeholder)`. Node-error entries are **served** (with GUID substitution, identical to the
-primary hit path today) but **never backfilled** — a cached node error must not be re-written
-into the primary as a normal successful response, and writing it with `IsNodeError: false`
-would give it a success TTL.
+placeholder)`, decided *before* GUID substitution erases the placeholder. The result is carried
+on the served `RelayResult` itself — `IsNodeError` set truthfully (the caller sees the
+`lava-identified-node-error` header, as it would from a live node error) and `StatusCode` from
+the entry's stored status (`0 → 200`, the legacy assume-success). **Rejection of the backfill
+belongs to the populator, not a pre-filter**: the secondary path invokes it unconditionally,
+and the populator's existing node-error and 429/504/non-2xx checks — now fed real values
+instead of a hardcoded 200 — refuse to re-write a cached node error or error-status entry into
+the primary as a success.
 
 Compatibility matrix: new router + new backend → explicit flag (authoritative); new router +
 old backend → flag absent (`false`) + placeholder heuristic (matches today's serving behavior);
@@ -351,9 +350,12 @@ primary-no-hit path.
 | `secondary-cache-timeout` | duration | `50ms` | Per-lookup budget; on expiry the lookup is a miss |
 | `secondary-cache-mode` | string | `read-only` | v1 accepts only `read-only`; `read-write` reserved (§16) |
 
-All three registered next to `cache-be` and read via viper (`rpcsmartrouter.go:2500-2510`
-pattern), so flag / env / YAML all work with standard viper precedence (flag > env > config
-file) — locked by T8.
+All three registered next to `cache-be` and read via viper, which is bound to the command's
+flags at startup (`viper.BindPFlags`) and to the YAML config file. **Supported configuration
+mechanisms are flags and the YAML config file, with changed-flag-beats-YAML precedence — locked
+by T8 through the real cobra command's flags.** Environment variables are *not* supported: this
+repository never calls `viper.AutomaticEnv`/`BindEnv`, and this design deliberately does not
+add it (an intentional, separately reviewed change if ever wanted).
 
 **Startup validation** (fail fast with a clear error):
 
@@ -440,18 +442,17 @@ test-only `SetRelay` client.
 | # | Test | PRD link |
 |---|---|---|
 | T1 | Primary miss → secondary hit → response served, zero provider dispatch | M1, AC-Lookup |
-| T2 | **Exact-key backfill**: LATEST request, tip advances after `ParseRelay`, fake entry's `Reply.LatestBlock=0` → secondary hit at tip-block N → primary SET observed at key block N → identical follow-up lookup hits primary | M4, AC-ReadOnly |
-| T3 | Backfill is async and race-safe: served bytes never mutate after serve; populator deep-copy intact; backfill runs through real `tryCacheWriteResolved` eligibility (429/504/stateful entries rejected) | M4 |
+| T2 | **Exact-key backfill through REAL cache-server validation**: LATEST request, `SeenBlock` stamped N−1 at parse, tip-resolved lookup block N, entry's `Reply.LatestBlock=0` → secondary hit → backfill SET at key N with the validity floor lifted to N → a follow-up GET(RequestedBlock=N, SeenBlock=N) against the real server returns the backfilled reply (fails without the lift: the server rejects stored SeenBlock=N−1 as below expectations — companion server-level test pins that rejection) | M4, AC-ReadOnly |
+| T3 | Backfill is async and race-safe: served bytes never mutate after serve; populator deep-copy intact; eligibility is the populator's own — node-error and 429/504/non-2xx checks run against the entry's real stored `StatusCode`/`IsNodeError`, not a hardcoded 200 | M4 |
 | T4 | Both tiers miss → normal provider routing | AC-Lookup |
 | T5 | Secondary timeout (delayed fake) treated as miss within `secondary-cache-timeout`; non-timeout errors likewise; request unaffected | M5, M6, AC-Resilience |
 | T6 | Secondary transient failure → reconnect loop restores service (integration: kill/restart the cache process) | M6, AC-Resilience |
 | T7 | No secondary configured: relay behavior and response bytes unchanged; full existing suite green | M7, AC-Lookup |
-| T8 | Config: independent connection details; YAML vs flag vs env precedence; startup log line present | M2, AC-Config, N5 |
+| T8 | Config through the real cobra command's flags + viper: flag binding, YAML values, changed-flag-beats-YAML precedence, `IsSet` semantics for the dangling-option check; startup log line present. Env vars excluded — not bound anywhere in this repo (§11) | M2, AC-Config, N5 |
 | T9 | Startup validation: invalid mode, zero/negative timeout, dangling secondary options → clean startup error; secondary-only config boots successfully with the advisory warning logged | AC-Config |
 | T10 | No `SetRelay`/`FlushCache` ever reaches the secondary: full relay + `/debug/reset-all` flows against an RPC-recording fake; compile-time seam (`CacheReader`) in place | M3, AC-ReadOnly |
-| T11 | **Poisoned entry**: secondary seeded with `Metadata` containing `Lava-Provider-Address`, `lava-cross-validation-all-providers`, `Provider-Latest-Block`, non-empty `Sig`/`SigBlocks` → caller response contains none of them; primary backfill payload contains none of them; locally minted `Lava-Provider-Address: Cached` still present | M8, AC-Security |
-| T11b | Header-constant guard: every response-side header constant in `protocol/common` is `lava-`-prefixed or in the named-exception set | M8 |
-| T12 | Cached node error: entry with `IsNodeError=true` (and separately, legacy placeholder-only) → served with GUID substitution, **never backfilled**; normal entries backfill | M4, §7 |
+| T11 | **Full-path poisoned entry**: secondary seeded with non-empty `Sig`/`SigBlocks`, foreign `OptionalMetadata`, and `Metadata` mixing router-lineage headers with **arbitrary provider headers no denylist could enumerate** (`X-Provider-ID`, `X-Backend`, `X-Served-By`, `Via`, `Server`) → the served result carries zero metadata and no signatures, AND the primary backfill payload (read back from a real cache server) carries zero metadata and no signatures; locally minted `Lava-Provider-Address: Cached` still applies | M8, AC-Security |
+| T12 | Cached node error: entry with `IsNodeError=true` (and separately, legacy placeholder-only) → served with GUID substitution and `IsNodeError` on the result, **never backfilled** — with the rejection performed by the populator's own node-error check, not a pre-filter; normal entries backfill | M4, §7 |
 | T13 | Secondary reply's `SeenBlock` never reaches `adoptSharedStateTip`/ChainState; primary's still does | §5 |
 | T14 | Block-hash merge: primary-only, secondary-only, complementary, conflicting mappings → min/max fold; empty secondary erases nothing | §8 |
 | T15 | Metrics & tracing: per-tier series with correct `outcome`; skipped tiers emit nothing; latency observed on non-hits; span/parent-span attributes for miss-then-hit | N3, N4 |
