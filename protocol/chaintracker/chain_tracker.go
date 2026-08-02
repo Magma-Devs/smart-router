@@ -485,8 +485,10 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 		} else if prevLatest > newLatestBlock && cs.consistencyCallback != nil {
 			cs.consistencyCallback(prevLatest, newLatestBlock)
 		} else if newLatestBlock == prevLatest {
-			// Same head as last cycle. Mirrors the hashed path's no-new-block branch, which is
-			// what feeds the not-updated/emergency detection.
+			// Same head as last cycle — feed the not-updated/emergency detection. The hashed
+			// path reaches this via `else if cs.oldBlockCallback != nil`; the guard is redundant
+			// because notUpdated() returns early on a nil callback, so call it unconditionally
+			// rather than duplicate the check.
 			cs.notUpdated()
 		}
 		return false, nil
