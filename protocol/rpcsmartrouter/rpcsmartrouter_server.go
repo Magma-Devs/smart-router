@@ -158,11 +158,11 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 			utils.LogAttr("groupAssignments", groupAssignments))
 	}
 
-	// Initialize consistency validation config from chain spec values
-	blockLagForQosSync, averageBlockTime, blockDistanceForFinalizedData, _ := chainParser.ChainBlockStats()
+	// Initialize consistency validation config from chain spec values. The finalization distance
+	// bounds cache-write finalization, not endpoint staleness — see NewConsistencyValidationConfig.
+	blockLagForQosSync, averageBlockTime, _, _ := chainParser.ChainBlockStats()
 	rpcss.consistencyConfig = relaycore.NewConsistencyValidationConfig(
 		blockLagForQosSync,
-		blockDistanceForFinalizedData,
 		averageBlockTime,
 		relaycore.ConsistencyBlockGapFactorOverride, // polling-relief: 0 = default x2
 	)
@@ -2323,8 +2323,8 @@ func (s *probeLoopStats) snapshot() probeLoopSnapshot {
 //
 // The "keeping up" tolerance is sourced from the SAME per-chain threshold consistency pre-validation
 // uses (relaycore.EndpointLagThreshold), not the probing package's compile-time default of 10. On a
-// chain whose derived threshold exceeds 10 (large blockLagForQosSync, wide finalization distance, or
-// an operator's --consistency-block-gap-factor override) the relay path would otherwise serve an
+// chain whose derived threshold exceeds 10 (large blockLagForQosSync, or an operator's
+// --consistency-block-gap-factor override) the relay path would otherwise serve an
 // endpoint lagging 11..threshold blocks while every probe cycle marked it unhealthy — decaying its
 // QoS and, worse, blocking the F1 re-enable (RecoveryEvidence.PollHealthy requires keepingUp under
 // the same tolerance), so a disabled endpoint within the accepted lag could never recover until the
