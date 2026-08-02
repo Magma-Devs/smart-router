@@ -22,6 +22,27 @@ type ChainTrackerConfig struct {
 	ChainId                  string
 	ParseDirectiveEnabled    bool
 
+	// HeadOnlyTracking selects head-only mode (MAG-2218): track the chain head, keep no block
+	// hashes, do no fork detection. Set it for a spec that defines GET_BLOCKNUM but has no viable
+	// GET_BLOCK_BY_NUM mapping — Canton is the case that forced it, because its Ledger API reads
+	// are party-scoped and not addressable by block number, so a generic "get block N" cannot
+	// exist and every hash fetch returns PERMISSION_DENIED.
+	//
+	// Without it such a chain still "works", by accident and badly: start() fails on the hash
+	// step, startTrackerWithRetry retries forever (a warning per cycle, the endpoint parked in
+	// EndpointChainTrackerRetryingStart), and the only reason a tip reaches ChainState at all is
+	// that each retry's FetchLatestBlockNum fires its poll observation on the way past — at the
+	// start-retry backoff, capped at 30s, rather than the intended poll cadence.
+	//
+	// This is NOT ParseDirectiveEnabled=false: that yields a DummyChainTracker, which has no poll
+	// loop at all (StartAndServe returns nil, CurrentPollInterval 0) and reports the MaxInt64
+	// sentinel, so it never calls FetchLatestBlockNum and the tip feed dies with it. That mode is
+	// for chains with no block concept whatsoever; this one is for "has a head, has no hashes".
+	//
+	// GetLatestBlockData returns an empty hash slice in this mode, so data reliability and
+	// finalization proofs must be off for the chain.
+	HeadOnlyTracking bool
+
 	// FlatPollInterval, when > 0, switches this tracker to a FIXED flat cadence
 	// (MAG-2159 / Topic B): the dedicated poll runs at exactly this interval, slowed only
 	// by failure backoff. The adaptive /4, /2, /16 tiers AND the block-gap recalibration
