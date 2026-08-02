@@ -43,10 +43,11 @@ func (rpcss *RPCSmartRouterServer) secondaryCacheActive() bool {
 //     foreign-zone cache is not this router's fleet (§5, T13).
 //   - The lookup runs under the operator-configured secondary-cache-timeout rather
 //     than the primary's fixed budget.
-//   - Per-tier cache metrics land with the observability slice (design §12);
-//     recording this lookup into today's tier-less series would corrupt them. Router
-//     request counters (RecordCacheHitRequest, provider_address="Cached") fire for a
-//     hit on either tier, unchanged in shape.
+//   - Every attempted lookup is recorded with cache_tier=secondary and its outcome
+//     (hit|miss|error|timeout) in the smartrouter_cache_* series and on its own
+//     smartrouter.CacheLookup span (design §12). Router request counters
+//     (RecordCacheHitRequest, provider_address="Cached") fire for a hit on either
+//     tier, unchanged in shape.
 func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	ctx context.Context,
 	protocolMessage chainlib.ProtocolMessage,
@@ -75,8 +76,10 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	cancel()
 	latencyMs := float64(time.Since(cacheStart).Milliseconds())
 	hit := cacheError == nil && cacheReply.GetReply() != nil
-	tracing.RecordCacheResult(ctx, cacheSpan, hit, latencyMs)
+	outcome := metrics.ClassifyCacheLookupOutcome(cacheError, hit)
+	tracing.RecordCacheResult(ctx, cacheSpan, metrics.CacheTierSecondary, outcome, hit, latencyMs)
 	cacheSpan.End()
+	go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierSecondary, outcome, latencyMs)
 	if !hit {
 		// miss, error, and timeout all degrade to a miss (§5); the reply may still
 		// carry block-hash→height data worth merging (§8)

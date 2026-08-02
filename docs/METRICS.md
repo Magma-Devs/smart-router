@@ -269,10 +269,20 @@ Once it is non-zero they are lossy — some batch types are being merged into `b
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_cache_requests_total` | Counter | `spec`, `apiInterface`, `method` | Cache lookup attempts. |
-| `smartrouter_cache_success_total` | Counter | `spec`, `apiInterface`, `method` | Cache hits. |
-| `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method` | Cache misses. |
-| `smartrouter_cache_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `method` | Cache lookup latency. |
+| `smartrouter_cache_requests_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier` | Cache lookup attempts per tier (`primary` \| `secondary`). A tier that is unconfigured, disconnected, or bypassed emits nothing for that request. |
+| `smartrouter_cache_success_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier` | Cache hits per tier. |
+| `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier`, `outcome` | Non-hit lookups, split by the closed enum `outcome` = `miss` (clean not-found) \| `error` (transport/server error) \| `timeout` (per-lookup budget exceeded). |
+| `smartrouter_cache_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `method`, `cache_tier` | Cache lookup latency, observed on **every attempted lookup** (hits and non-hits). |
+
+> **Migration note (secondary-cache release).** These series previously had no
+> `cache_tier` label, `_failed_total` had no `outcome`, and the latency histogram
+> was observed on hits only. Aggregating queries (`sum by (spec, method)`) keep
+> working; exact label matchers must add `cache_tier="primary"`, and
+> latency-based alerts should expect non-hit observations (typically *lowering*
+> percentiles, since misses return faster than hits — while timeouts now appear
+> as a bounded tail instead of being invisible). The secondary tier
+> (`cache_tier="secondary"`) appears only when `secondary-cache-be` is
+> configured; see `docs/SECONDARY-CACHE-DESIGN.md` §12.
 
 #### CSM state-store sizes (diagnostics)
 
