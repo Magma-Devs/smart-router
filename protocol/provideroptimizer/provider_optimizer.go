@@ -122,9 +122,12 @@ type ProviderData struct {
 const providerLockStripes = 256
 
 // providerSyncFloor is one stripe: it serializes the score read-modify-write for every provider
-// hashing to it AND holds the authoritative monotonic SyncBlock floor for those providers.
+// hashing to it, and holds the per-provider state that must NOT live in the async cache — the
+// authoritative monotonic SyncBlock floor, and the sustained-health bookkeeping behind the recovery
+// rebase. Both exist for the same reason: they have to be readable and writable synchronously under
+// the stripe lock, which providersStorage cannot guarantee.
 //
-// Why a floor at all (Finding 5): the three writers (appendRelayData, AppendProbeData, the legacy
+// Why a floor at all: the three writers (appendRelayData, AppendProbeData, the legacy
 // AppendProbeRelayData) each do getProviderData → mutate → providersStorage.Set. ristretto's Set is
 // ASYNC — a subsequent Get can miss a just-written value (the package's own tests sleep to let it
 // settle) — so the cache cannot be the source of truth for "SyncBlock never decreases": a serialized
@@ -133,6 +136,58 @@ const providerLockStripes = 256
 type providerSyncFloor struct {
 	mu    sync.Mutex
 	floor map[string]uint64 // provider → highest SyncBlock ever accepted (lazily created)
+	// probeRecovery tracks each provider's consecutive fully-healthy probe samples and whether the
+	// current recovery episode has already been acted on. Guarded by the same mu as floor: every
+	// writer already holds the stripe lock. Lazily created.
+	probeRecovery map[string]*probeRecoveryState
+}
+
+// probeRecoveryState is one provider's sustained-health bookkeeping.
+type probeRecoveryState struct {
+	streak  uint64 // consecutive fully-healthy probe samples
+	rebased bool   // this recovery episode already triggered a rebase
+}
+
+// recordProbeHealthLocked advances a provider's consecutive fully-healthy probe streak and reports
+// whether it has JUST crossed into proven recovery — true at most once per recovery episode. Caller
+// MUST hold s.mu.
+//
+// "Fully healthy" is strict: AppendProbeData's availability is the FRACTION of the provider's
+// endpoints healthy this cycle, so anything below 1.0 means part of the provider is still down and
+// must not count toward proven recovery. Any imperfect sample resets the streak AND re-arms the
+// episode, which is what makes this safe against a flapping provider: alternating good/bad cycles
+// never reach the bar, and a provider that genuinely dips again can be rebased on its NEXT real
+// recovery.
+//
+// The once-per-episode latch lives HERE, in the stripe, rather than being inferred from the stored
+// availability score — because providersStorage is ristretto and its Set is async, so a caller
+// cannot reliably read back the value it just wrote (the same hazard the SyncBlock floor above
+// exists to solve). Deciding from cache state would make the rebase fire repeatedly under rapid
+// writes.
+func (s *providerSyncFloor) recordProbeHealthLocked(provider string, availability float64, bar uint64) bool {
+	if s.probeRecovery == nil {
+		s.probeRecovery = make(map[string]*probeRecoveryState)
+	}
+	st, ok := s.probeRecovery[provider]
+	if !ok {
+		st = &probeRecoveryState{}
+		s.probeRecovery[provider] = st
+	}
+
+	if availability < 1.0 {
+		st.streak = 0
+		st.rebased = false // re-arm: a later genuine recovery is allowed to rebase again
+		return false
+	}
+	if st.rebased {
+		return false // already acted on for this episode
+	}
+	st.streak++
+	if st.streak < bar {
+		return false
+	}
+	st.rebased = true
+	return true
 }
 
 // applyLocked stamps providerData.SyncBlock to the authoritative monotonic floor — the max of the
@@ -518,6 +573,25 @@ func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availabilit
 	halfTime := po.calculateHalfTime(providerAddress, sampleTime)
 	weight := score.ProbeUpdateWeight
 
+	// Sustained probe health overrules a collapsed availability average. Without this, a provider that
+	// has recovered keeps being scored off the availability=0 samples fed here during its outage:
+	// climbing back over score.MinAcceptableAvailability costs four units of success weight per unit of
+	// accumulated failure weight, so the composite stays pinned at MinSelectionChance for roughly four
+	// times the outage length even though every probe since has been perfect.
+	//
+	// RebaseAvailabilityOnRecovery covers only the endpoint disable→enable transition. A provider whose
+	// endpoints stayed nominally enabled throughout the outage never crosses that edge, so this is the
+	// path that handles the general case.
+	//
+	// The bar is CONSECUTIVE fully-healthy cycles, which is what makes it safe to apply: a flapping
+	// provider resets its streak on every imperfect sample and never qualifies, and a partially
+	// degraded provider reports the FRACTION of its healthy endpoints, so anything short of all of them
+	// fails the strict test. Rebasing BEFORE this cycle's own sample is applied lets that healthy
+	// sample land on top of the probation baseline rather than under it.
+	if stripe.recordProbeHealthLocked(providerAddress, availability, probeRecoveryStreakBar) {
+		po.rebaseAvailabilityLocked(providerAddress, &providerData, sampleTime, "sustained probe health")
+	}
+
 	providerData, updateErr := po.updateDecayingWeightedAverage(providerData, score.AvailabilityScoreType, availability, weight, halfTime, 0, sampleTime)
 	if updateErr != nil {
 		return
@@ -552,6 +626,129 @@ func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availabilit
 		utils.LogAttr("syncBlock", syncBlock),
 		utils.LogAttr("hasSync", hasSync),
 	)
+}
+
+// recoveryProbationDenom is the denominator a recovered provider's availability average is rebased
+// onto: one relay's worth of evidence (score.RelayUpdateWeight), i.e. four probe cycles.
+//
+// It is deliberately SMALL, because an oversized denominator is precisely what the rebase exists to
+// clear — the more accumulated weight an average carries, the less any subsequent sample moves it.
+// Starting small hands control back to the provider's actual post-recovery behaviour within a handful
+// of cycles, and it cuts both ways: a still-broken provider re-collapses on its next bad sample,
+// while a genuinely healthy one climbs past the threshold in about four good ones. Probation, not
+// amnesty.
+//
+// The value is exactly 1.0 rather than some other pair that also divides to the target, because
+// dividing by 1.0 is lossless in IEEE-754: the rebased Resolve() therefore returns EXACTLY
+// score.MinAcceptableAvailability. CalculateScore's dead-provider test is a strict
+// `availability < score.MinAcceptableAvailability`, so a result even one ULP low would re-trigger the
+// starvation collapse and leave the rebase with no observable effect. Changing this constant means
+// re-checking that exactness.
+const recoveryProbationDenom = score.RelayUpdateWeight
+
+// probeRecoveryStreakBar is how many CONSECUTIVE fully-healthy probe cycles count as proven recovery
+// for the availability rebase. It mirrors probing.DefaultProbeReEnableHysteresis (3) — the same bar
+// the prober uses to re-enable a disabled endpoint — deliberately duplicated as a local constant
+// rather than imported, to keep provideroptimizer free of a dependency on the probing package.
+// At the usual ~5s probe cadence this is ~15s of unbroken health before the score is lifted.
+const probeRecoveryStreakBar uint64 = 3
+
+// RebaseAvailabilityOnRecovery restarts a provider's availability average from a probationary
+// baseline once the prober has proven the provider recovered. Callers are the recovery paths:
+// the prober's endpoint re-enable, and the sustained-health check inside AppendProbeData.
+//
+// Why the optimizer needs telling at all: the prober reaches its own recovery verdict from K
+// consecutive healthy polls (Endpoint.RecordProbeVerdict) and returns the provider to routing via
+// ConsumerSessionManager.RestoreRecoveredProvider — but that only clears the SESSION-level block. The
+// stored score is untouched, and it collapsed from the availability=0 samples AppendProbeData fed
+// throughout the outage. Since climbing back over score.MinAcceptableAvailability requires success
+// weight >= (min*denom - num)/(1-min), every unit of failure weight costs four units of success weight
+// to cancel at the current 0.80 minimum. A provider therefore stays at the MinSelectionChance floor
+// for several times the length of its outage — long after the router has otherwise concluded it is
+// healthy. Rebasing closes that gap.
+//
+// The baseline is score.MinAcceptableAvailability exactly, NOT 1.0. A provider with seconds of proven
+// uptime has not earned parity with a peer that never failed, and a perfect score would swing real
+// traffic onto it immediately. Landing exactly AT the minimum clears the dead-provider collapse (the
+// test is a strict `<`) and returns the provider to normal weighted selection in the bottom tier: its
+// availability CONTRIBUTION is still zero, since normalizeAvailability rescales [min, 1.0] onto
+// [0.0, 1.0], but its latency, sync and stake contributions stop being discarded. That recovered
+// composite comes mostly from those three, not from availability.
+//
+// Latency and sync stores are left untouched: an availability outage does not invalidate them, and
+// they carry their own decay.
+//
+// No-op when availability already sits at or above the minimum, so this can never LOWER a score. That
+// also makes it idempotent, which matters because a provider with several endpoints recovering in one
+// probe cycle produces one call per endpoint.
+func (po *ProviderOptimizer) RebaseAvailabilityOnRecovery(providerAddress string) {
+	stripe := po.providerStripe(providerAddress)
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+
+	providerData, found := po.getProviderData(providerAddress)
+	if !found {
+		return // no accumulated history to rebase; the default store is already availability 1.0
+	}
+	// Restore the authoritative monotonic SyncBlock floor before the Set below, exactly as the other
+	// writers in this file do: observed=0 is a pure preserve, so a stale cached read cannot regress a
+	// block already recorded by a concurrent relay or probe.
+	stripe.applyLocked(providerAddress, 0, &providerData)
+
+	if po.rebaseAvailabilityLocked(providerAddress, &providerData, po.now(), "probe re-enable") {
+		po.providersStorage.Set(providerAddress, providerData, 1)
+	}
+}
+
+// rebaseAvailabilityLocked performs the rebase on an ALREADY-READ providerData and reports whether
+// it changed anything. It never takes a lock, so callers that already hold the provider's stripe
+// lock (AppendProbeData) can reuse it without re-entering a non-reentrant mutex. The caller is
+// responsible for persisting providerData afterwards.
+//
+// `at` MUST be the timestamp the caller will use for any sample it applies next, NOT a fresh
+// po.now(). ScoreStore.Update rejects a sample older than the store's own Time with
+// TimeConflictingScoresError; stamping the rebuilt store even microseconds ahead of the caller's
+// already-captured sampleTime makes that rejection fire, and AppendProbeData's error path returns
+// before persisting — silently discarding both the sample and the rebase.
+func (po *ProviderOptimizer) rebaseAvailabilityLocked(providerAddress string, providerData *ProviderData, at time.Time, trigger string) bool {
+	current, err := providerData.Availability.Resolve()
+	if err != nil {
+		utils.LavaFormatWarning("cannot rebase availability on recovery, unresolvable score", err,
+			utils.LogAttr("providerAddress", providerAddress),
+		)
+		return false
+	}
+	if current >= score.MinAcceptableAvailability {
+		return false // already acceptable by the optimizer's own bar — never downgrade
+	}
+
+	// Rebuild the availability store at the probation baseline, carrying the existing config forward so
+	// a tuned weight or half-life is not silently reset to package defaults by the rebase.
+	cfg := providerData.Availability.GetConfig()
+	rebased, err := score.NewCustomScoreStore(
+		score.AvailabilityScoreType,
+		score.MinAcceptableAvailability*recoveryProbationDenom,
+		recoveryProbationDenom,
+		at,
+		score.WithWeight(cfg.Weight),
+		score.WithDecayHalfLife(cfg.HalfLife),
+		score.WithLatencyCuFactor(cfg.LatencyCuFactor),
+	)
+	if err != nil {
+		utils.LavaFormatWarning("cannot rebase availability on recovery, store construction failed", err,
+			utils.LogAttr("providerAddress", providerAddress),
+		)
+		return false
+	}
+	providerData.Availability = rebased
+
+	utils.LavaFormatInfo("optimizer rebased availability after proven recovery",
+		utils.LogAttr("providerAddress", providerAddress),
+		utils.LogAttr("trigger", trigger),
+		utils.LogAttr("availability_before", current),
+		utils.LogAttr("availability_after", score.MinAcceptableAvailability),
+	)
+	return true
 }
 
 // CalculateQoSScoresForMetrics calculates QoS scores for all providers for metrics reporting

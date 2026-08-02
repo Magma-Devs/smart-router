@@ -2215,11 +2215,14 @@ func (rpcss *RPCSmartRouterServer) recomputeChainStateConsensus() {
 	rpcss.chainState.Recompute(obs)
 }
 
-// probeQoSAppender is the narrow optimizer capability the prober uses to feed QoS (Topic E's
-// AppendProbeData). The concrete *provideroptimizer.ProviderOptimizer satisfies it; an inline
-// assertion keeps the lavasession optimizer interface unchanged.
+// probeQoSAppender is the narrow optimizer capability the prober needs: feeding per-cycle QoS samples
+// (AppendProbeData) and reporting a proven-recovery verdict so the optimizer can lift a score that
+// collapsed during the outage (RebaseAvailabilityOnRecovery). The concrete
+// *provideroptimizer.ProviderOptimizer satisfies it; an inline assertion keeps the lavasession
+// optimizer interface unchanged.
 type probeQoSAppender interface {
 	AppendProbeData(provider string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool, syncRef provideroptimizer.SyncReference)
+	RebaseAvailabilityOnRecovery(provider string)
 }
 
 // Compile-time guard: the concrete optimizer must satisfy probeQoSAppender. Without this, the
@@ -2426,6 +2429,15 @@ func runProbeCycleCore(
 			reEnabled++
 			if onRecover != nil {
 				onRecover(ep.ProviderAddress)
+			}
+			// Returning the provider to routing is only half of "this provider is back": the optimizer
+			// still scores it off the availability=0 samples this same loop fed throughout the outage,
+			// which keeps its composite pinned at MinSelectionChance for several times the outage
+			// length. Tell the optimizer as well. Done BEFORE the AppendProbeData feed below so this
+			// cycle's own healthy sample lands on top of the probation baseline rather than under it,
+			// and idempotent, so several endpoints of one provider recovering together is harmless.
+			if appender != nil {
+				appender.RebaseAvailabilityOnRecovery(ep.ProviderAddress)
 			}
 		}
 		verdictsByProvider[ep.ProviderAddress] = append(verdictsByProvider[ep.ProviderAddress], verdict)
