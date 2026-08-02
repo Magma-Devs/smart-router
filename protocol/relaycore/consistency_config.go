@@ -50,29 +50,30 @@ func DefaultConsistencyValidationConfig() *ConsistencyValidationConfig {
 //
 // Parameters:
 //   - blockLagForQosSync: The block lag threshold used for QoS sync calculations
-//   - blockDistanceToFinalization: The number of blocks until finalization
 //   - averageBlockTime: The average time between blocks for this chain
 //   - blockGapFactor: polling-relief multiplier on blockLagForQosSync (0 = default 2)
 //
 // Derivation logic:
-//   - EndpointLagThreshold: max(blockLagForQosSync*blockGapFactor, blockDistanceToFinalization), minimum 10
+//   - EndpointLagThreshold: max(blockLagForQosSync*blockGapFactor, 10)
 //   - MaxWaitTime: averageBlockTime * 2 - wait up to 2 average block times
+//
+// EndpointLagThreshold bounds how stale an endpoint may be before we stop routing to it, so it
+// derives from blockLagForQosSync alone: this gate only ever sees LATEST_BLOCK requests, since
+// ShouldSkipConsistencyValidation skips concrete blocks and the finalized/safe/earliest/pending
+// tags. A chain's finality distance bounds something else — when data stops changing — and belongs
+// to cache-write finalization. Raise allowed_block_lag_for_qos_sync, or set
+// --consistency-block-gap-factor, when a chain needs more tolerance.
 func NewConsistencyValidationConfig(
 	blockLagForQosSync int64,
-	blockDistanceToFinalization uint32,
 	averageBlockTime time.Duration,
 	blockGapFactor int64,
 ) *ConsistencyValidationConfig {
-	// Calculate endpoint lag threshold: use the larger of double QoS sync lag
-	// or the finalization distance, to ensure endpoints can serve finalized blocks.
+	// Calculate endpoint lag threshold from the QoS sync lag.
 	gapFactor := int64(2)
 	if blockGapFactor != 0 {
 		gapFactor = blockGapFactor
 	}
 	endpointLagThreshold := blockLagForQosSync * gapFactor
-	if finalizationThreshold := int64(blockDistanceToFinalization); finalizationThreshold > endpointLagThreshold {
-		endpointLagThreshold = finalizationThreshold
-	}
 	// Apply a minimum of 10 blocks
 	if endpointLagThreshold < 10 {
 		endpointLagThreshold = 10
@@ -98,7 +99,7 @@ func NewConsistencyValidationConfig(
 		utils.LogAttr("endpointLagThreshold", config.EndpointLagThreshold),
 		utils.LogAttr("maxWaitTime", config.MaxWaitTime),
 		utils.LogAttr("blockLagForQosSync", blockLagForQosSync),
-		utils.LogAttr("blockDistanceToFinalization", blockDistanceToFinalization),
+		utils.LogAttr("blockGapFactor", gapFactor),
 		utils.LogAttr("averageBlockTime", averageBlockTime),
 	)
 

@@ -19,8 +19,8 @@ func TestProbeVerdictConfigFor_SourcesLagToleranceFromConsistency(t *testing.T) 
 	const blockTime = time.Second
 
 	t.Run("per-chain threshold overrides the default", func(t *testing.T) {
-		// A wide finalization distance derives EndpointLagThreshold well above 10.
-		cc := relaycore.NewConsistencyValidationConfig(5 /*blockLagForQosSync*/, 64 /*finalization*/, blockTime, 0)
+		// A large QoS-sync lag derives EndpointLagThreshold well above 10.
+		cc := relaycore.NewConsistencyValidationConfig(32 /*blockLagForQosSync*/, blockTime, 0)
 		require.Greater(t, cc.EndpointLagThreshold, int64(10), "precondition: derived threshold exceeds the default")
 
 		cfg := probeVerdictConfigFor(blockTime, cc)
