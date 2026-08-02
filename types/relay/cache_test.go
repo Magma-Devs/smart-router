@@ -30,6 +30,24 @@ func TestCacheRelayReplyUnknownFieldsIgnored(t *testing.T) {
 	require.True(t, reply.GetIsNodeError())
 }
 
+func TestCacheRelayReplyStatusCodeWireCompat(t *testing.T) {
+	// legacy payload without status_code decodes to zero = unknown
+	var legacy CacheRelayReply
+	require.NoError(t, json.Unmarshal([]byte(`{"seen_block":7}`), &legacy))
+	require.Equal(t, 0, legacy.GetStatusCode())
+
+	// recorded status round-trips
+	raw, err := json.Marshal(CacheRelayReply{StatusCode: 429})
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"status_code":429`)
+	var out CacheRelayReply
+	require.NoError(t, json.Unmarshal(raw, &out))
+	require.Equal(t, 429, out.GetStatusCode())
+
+	var nilReply *CacheRelayReply
+	require.Equal(t, 0, nilReply.GetStatusCode())
+}
+
 func TestCacheRelayReplyIsNodeErrorRoundTrip(t *testing.T) {
 	in := CacheRelayReply{SeenBlock: 9, IsNodeError: true}
 	raw, err := json.Marshal(in)
