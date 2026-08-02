@@ -408,13 +408,19 @@ func (m *EndpointMonitor) headOnlyTracking() bool {
 	if m.chainParser == nil {
 		return false
 	}
-	if _, _, hasLatest := m.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM); !hasLatest {
+	// GetParsingByTag returns (val.Parsing, _, true) straight from the map, so a tag present
+	// with a nil directive yields ok==true and an unusable parsing. Treat that as absent on
+	// both tags — the same `ok && parsing != nil` guard resolveTipApiNames uses. Checking only
+	// ok would let a malformed GET_BLOCK_BY_NUM entry keep a head-only chain in the hash-
+	// fetching path, which is the exact failure this mode exists to avoid.
+	latest, _, hasLatest := m.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
+	if !hasLatest || latest == nil {
 		// No way to read the head either — not a head-only chain, just an unusable one.
 		// Leave the existing failure path to report it.
 		return false
 	}
-	_, _, hasByNum := m.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
-	return !hasByNum
+	byNum, _, hasByNum := m.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
+	return !hasByNum || byNum == nil
 }
 
 func (m *EndpointMonitor) trackerStartRetryDelay(attempt int) time.Duration {
