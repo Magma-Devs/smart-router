@@ -3454,7 +3454,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							cancel()
 							latencyMs := float64(time.Since(cacheStart).Milliseconds())
 							cacheHit := cacheError == nil && cacheReply != nil && cacheReply.GetReply() != nil
-							tracing.RecordCacheResult(ctx, cacheSpan, cacheHit, latencyMs)
+							tracing.RecordCacheResult(ctx, cacheSpan, metrics.CacheTierPrimary, metrics.ClassifyCacheLookupOutcome(cacheError, cacheHit), cacheHit, latencyMs)
 							return latencyMs
 						}()
 
@@ -3529,10 +3529,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
 							analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
 							go rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
-							go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), true, cacheLatencyMs)
+							go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.CacheOutcomeHit, cacheLatencyMs)
 							return nil
 						}
-						go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), false, cacheLatencyMs)
+						go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.ClassifyCacheLookupOutcome(cacheError, false), cacheLatencyMs)
 						// Cache miss - will relay to endpoint
 						latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
 						utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))
