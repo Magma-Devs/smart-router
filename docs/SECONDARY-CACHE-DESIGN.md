@@ -435,9 +435,12 @@ plug in, but the adapter itself is out of scope here.
 
 ## 14. Verification plan
 
-Unit tests use the `CacheReader` fake (§9) plus the existing `cache_skip_paths_test.go`
-patterns; integration uses two real `smartrouter cache` instances, seeding the secondary via a
-test-only `SetRelay` client.
+Unit tests use the `CacheReader` fake (§9) plus in-process real cache servers
+(`secondary_cache_test.go`); the integration lane is the two-zone script
+`scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh` — two caches, two routers, with an
+internal-zone router seeding the shared cache and the external-zone router demonstrating
+secondary-hit → primary-backfill → primary-hit end to end (`RUN_DEMO=1` executes and verifies
+the flow, including the per-tier `cache_tier` metric series).
 
 | # | Test | PRD link |
 |---|---|---|
@@ -464,9 +467,12 @@ test-only `SetRelay` client.
   relay behavior unchanged (T7). Enabling/removing is config + restart. Observability changes
   ship even without a secondary (label additions, histogram semantics — §12) and are the one
   operator-visible delta; release notes must flag dashboard/alert updates.
-- **Documentation to update**: `docs/METRICS.md` (new labels, `outcome`, latency semantics,
-  "Cached" note), CLI flag help text, `docs/LOCAL-COMPOSE.md` (optional two-cache overlay
-  example), the public SmartRouter caching docs referenced by the PRD, and the release notes.
+- **Documentation**: done in-repo — `docs/METRICS.md` (labels, `outcome`, latency semantics +
+  migration note), CLI flag help text, `docs/LOCAL-COMPOSE.md` +
+  `docker/docker-compose.secondary-cache.yml` (two-tier overlay), and the two-zone lane
+  `scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh`. Still external: the public
+  SmartRouter caching docs referenced by the PRD, and the release notes (dashboard/alert
+  migration, §12).
 
 ## 16. Open decisions
 
