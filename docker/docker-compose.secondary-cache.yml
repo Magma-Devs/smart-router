@@ -1,0 +1,41 @@
+# Secondary-cache overlay — layer on top of docker-compose.yml AND the cache
+# overlay to add a SECOND cache service, read through the router's read-only
+# secondary tier (docs/SECONDARY-CACHE-DESIGN.md):
+#
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_eth_two_tier.yml \
+#     docker compose -f docker/docker-compose.yml \
+#                    -f docker/docker-compose.cache.yml \
+#                    -f docker/docker-compose.secondary-cache.yml up --build
+#
+# Like cache-be, the secondary addresses live in the CONFIG FILE, not in flags
+# (an explicitly-passed flag outranks the YAML value in viper):
+#
+#   cache-be: "cache:20100"
+#   secondary-cache-be: "cache-secondary:20100"
+#   secondary-cache-timeout: 100ms
+#
+# The router never writes this service — reads only. Locally both caches start
+# empty, so to see a secondary hit, seed this cache first (e.g. point a second
+# router's cache-be at it, as scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh
+# does outside compose).
+#
+# Secondary cache prometheus metrics: http://localhost:5556/metrics
+
+services:
+  cache-secondary:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: smart-router:dev
+    command: ["cache", "0.0.0.0:20100", "--metrics_address", "0.0.0.0:5556"]
+    expose:
+      - "20100"
+    ports:
+      - "5556:5556" # secondary cache prometheus metrics
+    healthcheck:
+      # distroless:debug ships busybox at /busybox
+      test: ["CMD", "/busybox/wget", "-qO-", "http://localhost:5556/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
