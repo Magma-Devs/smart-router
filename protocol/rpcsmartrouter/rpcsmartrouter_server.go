@@ -2386,6 +2386,7 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 		rpcss.endpointChainTrackerManager.GetObservation,
 		baseline, hasBaseline, syncRef, startedAt, cfg, appender,
 		rpcss.sessionManager.RestoreRecoveredProvider,
+		rpcss.replayFailingRelay,
 	)
 	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted)
 }
@@ -2409,6 +2410,7 @@ func runProbeCycleCore(
 	cfg probing.VerdictConfig,
 	appender probeQoSAppender,
 	onRecover func(provider string),
+	relayProbe relayProbeFunc,
 ) (scored, reEnabled, syncOmitted int) {
 	// One verdict per endpoint (regular + backup), grouped by provider for the single-sample rule.
 	verdictsByProvider := make(map[string][]probing.EndpointVerdict)
@@ -2426,6 +2428,23 @@ func runProbeCycleCore(
 			reEnabled++
 			if onRecover != nil {
 				onRecover(ep.ProviderAddress)
+			}
+		} else if method, payload, ok := ep.Endpoint.PendingRelayProbe(cfg.ReEnableHysteresis); ok {
+			// Two-step re-enable (MAG-2550): poll hysteresis is satisfied but this disable episode
+			// recorded a failing read-only relay, so RecordProbeVerdict held the re-enable. Replay
+			// the recorded request through the endpoint's own connection — outside any endpoint
+			// lock — and re-enable only when it no longer produces a health-affecting failure. A
+			// nil relayProbe (tests / degraded wiring) falls back to poll-only evidence rather
+			// than parking the endpoint forever.
+			if relayProbe == nil || relayProbe(ep, method, payload) {
+				if ep.Endpoint.ConfirmRelayRecovery() {
+					reEnabled++
+					if onRecover != nil {
+						onRecover(ep.ProviderAddress)
+					}
+				}
+			} else {
+				ep.Endpoint.RelayProbeFailed()
 			}
 		}
 		verdictsByProvider[ep.ProviderAddress] = append(verdictsByProvider[ep.ProviderAddress], verdict)
@@ -3645,8 +3664,11 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		var shouldMarkUnhealthy bool
 		shouldMarkUnhealthy, needsBackoff = classifyEndpointHealth(classified, isClientCancel)
 
-		// Apply health tracking based on error classification
+		// Apply health tracking based on error classification. The failing request is recorded
+		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,
+		// the disable episode carries its replayable recovery evidence (MAG-2550).
 		if shouldMarkUnhealthy && targetEndpoint != nil {
+			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData)
 			targetEndpoint.MarkUnhealthy()
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 		}
@@ -3670,6 +3692,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		needsBackoff = needsBackoffHTTP
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
+			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData)
 			targetEndpoint.MarkUnhealthy()
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.LavaFormatDebug("endpoint returned error status",

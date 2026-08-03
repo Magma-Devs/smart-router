@@ -46,7 +46,18 @@ const (
 	// even a perpetually-flapping endpoint is re-probed within a bounded window (~60s at a 5s cadence)
 	// — deliberately far below the ~15-minute epoch re-probe, so the dampening never parks a node that
 	// is genuinely healthy for cheap traffic. A successful relay (Endpoint.ResetHealth) decays it to 0.
-	maxReenableProbeFlaps                            uint64 = 2
+	maxReenableProbeFlaps uint64 = 2
+	// probeReenableTrialBudget is the consecutive-relay-failure budget granted by a PROBE re-enable
+	// (RecordProbeVerdict / ConfirmRelayRecovery), replacing the full MaxConsecutiveConnectionAttempts
+	// reset. A probe-granted re-enable rests on cheap-poll evidence (plus at most ONE replayed relay),
+	// not on real traffic, so a still-broken endpoint must fall back out of rotation after a handful of
+	// real failures — not after burning another 50 client requests (MAG-2550). A successful real relay
+	// (Endpoint.ResetHealth) upgrades the endpoint to the full budget.
+	probeReenableTrialBudget uint64 = 3
+	// maxRelayProbePayloadBytes caps the recorded failing-relay request (MAG-2550 recovery evidence).
+	// A read-only JSON-RPC call is normally well under 1KB; anything larger (giant batches, abusive
+	// payloads) is not worth holding per-endpoint for the prober and is simply not recorded.
+	maxRelayProbePayloadBytes                               = 8 * 1024
 	TimeoutForEstablishingAConnection                       = 1500 * time.Millisecond // 1.5 seconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession        = 15
 	RelayNumberIncrement                                    = 1

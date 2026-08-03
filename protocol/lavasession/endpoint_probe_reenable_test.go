@@ -49,7 +49,8 @@ func TestRecordProbeVerdict_ReEnablesAfterKDistinctPostDisablePolls(t *testing.T
 	require.True(t, e.Enabled)
 
 	e.mu.RLock()
-	require.Equal(t, uint64(0), e.ConnectionRefusals, "re-enable resets the relay refusal count")
+	require.Equal(t, uint64(MaxConsecutiveConnectionAttempts-probeReenableTrialBudget), e.ConnectionRefusals,
+		"a probe-granted re-enable carries only a TRIAL refusal budget, not the full threshold (MAG-2550)")
 	require.Equal(t, uint64(0), e.consecutiveHealthyProbes, "the hysteresis streak resets after re-enable")
 	require.True(t, e.disabledAt.IsZero(), "disabledAt cleared on re-enable")
 	e.mu.RUnlock()
@@ -153,10 +154,12 @@ func TestRecordProbeVerdict_NeverTouchesEnabledEndpoint(t *testing.T) {
 	require.False(t, e.Enabled, "the relay path can still disable despite intervening healthy probes")
 }
 
-// TestRecordProbeVerdict_DistinctFromRelayThreshold: the re-enable threshold (K) and the relay
-// disable threshold (50) are independent, so a freshly re-enabled endpoint takes the full relay
-// threshold to disable again (anti-flap).
-func TestRecordProbeVerdict_DistinctFromRelayThreshold(t *testing.T) {
+// TestRecordProbeVerdict_TrialBudgetOnProbeReEnable: a probe-granted re-enable is a TRIAL, not a
+// clean slate (MAG-2550) — the endpoint tolerates probeReenableTrialBudget consecutive relay
+// failures (so it isn't one blip from re-disabling) but falls back out of rotation after that,
+// instead of burning another full MaxConsecutiveConnectionAttempts of real client traffic. A
+// successful real relay (ResetHealth) is what restores the full budget.
+func TestRecordProbeVerdict_TrialBudgetOnProbeReEnable(t *testing.T) {
 	const k = 2
 	require.NotEqual(t, uint64(k), uint64(MaxConsecutiveConnectionAttempts),
 		"re-enable hysteresis and relay disable threshold must differ (anti-flap)")
@@ -166,11 +169,27 @@ func TestRecordProbeVerdict_DistinctFromRelayThreshold(t *testing.T) {
 	require.False(t, healthyPoll(e, probeBase.Add(1*time.Second), k))
 	require.True(t, healthyPoll(e, probeBase.Add(2*time.Second), k), "re-enabled after K distinct healthy polls")
 
-	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
+	// The trial tolerates budget-1 failures without re-disabling…
+	for i := uint64(0); i < probeReenableTrialBudget-1; i++ {
 		e.markUnhealthyAt(probeBase.Add(3 * time.Second))
 	}
-	require.True(t, e.Enabled, "a re-enabled endpoint isn't one failure from disabling — refusals were reset")
+	require.True(t, e.Enabled, "a re-enabled endpoint isn't one failure from disabling — the trial budget absorbs blips")
+	// …and the budget-th consecutive failure ends the trial.
 	e.markUnhealthyAt(probeBase.Add(3 * time.Second))
+	require.False(t, e.Enabled, "a still-broken endpoint re-disables after the trial budget, not after another full threshold")
+
+	// A successful real relay during a trial restores the FULL consecutive-failure budget. The
+	// failed trial was a probe-grant flap, so the second re-enable needs the escalated k<<1 polls.
+	for i := 0; i < 2*k-1; i++ {
+		require.False(t, healthyPoll(e, probeBase.Add(time.Duration(4+i)*time.Second), k))
+	}
+	require.True(t, healthyPoll(e, probeBase.Add(time.Duration(3+2*k)*time.Second), k))
+	require.True(t, e.ResetHealth(), "a successful relay validates the trial")
+	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
+		e.markUnhealthyAt(probeBase.Add(6 * time.Second))
+	}
+	require.True(t, e.Enabled, "after relay validation the endpoint has the full failure budget again")
+	e.markUnhealthyAt(probeBase.Add(6 * time.Second))
 	require.False(t, e.Enabled)
 }
 
