@@ -74,6 +74,21 @@ func classifyEndpointHealth(classified *common.LavaError, isClientCancellation b
 	if isClientCancellation {
 		return false, false
 	}
+	// Unsupported-method responses — the method is absent from the node's API surface
+	// (NODE_METHOD_NOT_FOUND / NODE_UNIMPLEMENTED / ...) or present but disabled on this
+	// specific node (NODE_METHOD_NOT_SUPPORTED) — are per-method capability gaps, not
+	// endpoint faults: the node answered, it just won't serve this method. They must not
+	// climb toward the disable threshold (clients hammering one unsupported method would
+	// otherwise disable an endpoint that is healthy for everything else, feeding the
+	// MAG-2550 disable/re-enable flap) and, being pre-MarkUnhealthy, they are never
+	// recorded as relay-probe recovery evidence either. The non-retryable variants already
+	// landed in the default arm below; this makes the rule explicit and extends it to the
+	// retryable NODE_METHOD_NOT_SUPPORTED, which previously marked unhealthy. No backoff:
+	// the endpoint is neither broken nor busy — steering THIS request to a different
+	// provider is the relay processor's job (Retryable=true), not backoff's.
+	if classified.SubCategory.IsUnsupportedMethod() || classified.Code == common.LavaErrorNodeMethodNotSupported.Code {
+		return false, false
+	}
 	switch {
 	case classified.Category == common.CategoryInternal:
 		return true, true

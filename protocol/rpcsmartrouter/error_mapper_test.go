@@ -291,6 +291,27 @@ func TestClassifyEndpointHealth_ExternalNonRetryable(t *testing.T) {
 	}
 }
 
+func TestClassifyEndpointHealth_UnsupportedMethodNeverPoisonsHealth(t *testing.T) {
+	// GIVEN any unsupported-method classification — the method is absent from the node's API
+	// surface, OR present but disabled on this specific node (NODE_METHOD_NOT_SUPPORTED, which is
+	// Retryable and previously fell into the unhealthy arm)
+	// WHEN the relay fails
+	// THEN the endpoint is neither marked unhealthy nor backed off: a per-method capability gap is
+	// not an endpoint fault, and it must not feed the MAG-2550 disable/re-enable flap.
+	unsupported := []*common.LavaError{
+		common.LavaErrorNodeMethodNotFound,
+		common.LavaErrorNodeMethodNotSupported, // Retryable=true — the regression this test pins
+		common.LavaErrorNodeUnimplemented,
+		common.LavaErrorNodeEndpointNotFound,
+		common.LavaErrorNodeMethodNotAllowed,
+	}
+	for _, le := range unsupported {
+		unhealthy, backoff := classifyEndpointHealth(le, false)
+		assert.False(t, unhealthy, "%s should NOT mark unhealthy (capability gap, not endpoint fault)", le.Name)
+		assert.False(t, backoff, "%s should NOT request backoff (endpoint is neither broken nor busy)", le.Name)
+	}
+}
+
 func TestClassifyEndpointHealth_Nil(t *testing.T) {
 	// GIVEN a nil classification
 	// WHEN health is evaluated
