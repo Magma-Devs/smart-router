@@ -470,9 +470,10 @@ the flow, including the per-tier `cache_tier` metric series).
 - **Documentation**: done in-repo — `docs/METRICS.md` (labels, `outcome`, latency semantics +
   migration note), CLI flag help text, `docs/LOCAL-COMPOSE.md` +
   `docker/docker-compose.secondary-cache.yml` (two-tier overlay), and the two-zone lane
-  `scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh`. Still external: the public
-  SmartRouter caching docs referenced by the PRD, and the release notes (dashboard/alert
-  migration, §12).
+  `scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh`, and the customer-facing
+  overview `docs/SECONDARY-CACHE.md` (how it works + configuration). Still external: syncing
+  the hosted SmartRouter docs site from `docs/SECONDARY-CACHE.md`, and the release notes
+  (dashboard/alert migration, §12).
 
 ## 16. Open decisions
 
