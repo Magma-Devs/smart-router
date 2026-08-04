@@ -1,0 +1,51 @@
+# Smart Router Direct RPC Configuration — Ethereum with a two-tier cache
+# Mode: Direct connections to Ethereum JSON-RPC endpoints (no Lava providers!)
+#
+# Same as smartrouter_eth_cached.yml, plus a read-only SECONDARY cache tier
+# (docs/SECONDARY-CACHE.md): consulted when the primary produces no hit, before
+# falling through to upstreams. Both addresses live in the config file — an
+# explicitly-passed flag outranks the YAML value in viper.
+#
+# Run it with BOTH cache overlays (which start the two cache services):
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_eth_two_tier.yml \
+#     docker compose -f docker/docker-compose.yml \
+#                    -f docker/docker-compose.cache.yml \
+#                    -f docker/docker-compose.secondary-cache.yml up --build
+#
+# Both caches start empty; to see a secondary hit, seed cache-secondary first
+# (see the docker/docker-compose.secondary-cache.yml header).
+
+# Primary cache (the `smart-router cache` sidecar from the cache overlay).
+cache-be: "cache:20100"
+
+# Read-only secondary tier (the cache-secondary service from the
+# secondary-cache overlay). The router never writes it.
+secondary-cache-be: "cache-secondary:20100"
+secondary-cache-timeout: 100ms # per-lookup budget; exceeded = miss
+
+# Prometheus metrics (scrape at http://<host>:7779/metrics). Set to
+# "disabled" to turn off.
+metrics-listen-address: "0.0.0.0:7779"
+
+endpoints:
+  - listen-address: "0.0.0.0:3360"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    network-address: "0.0.0.0:3360"
+
+direct-rpc:
+  # Endpoint 1 — PublicNode (HTTP + WS)
+  - name: "eth-publicnode"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://ethereum-rpc.publicnode.com"
+      - url: "wss://ethereum-rpc.publicnode.com"
+
+  # Endpoint 2 — Tenderly public gateway (HTTP + WS)
+  - name: "eth-tenderly"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://mainnet.gateway.tenderly.co"
+      - url: "wss://mainnet.gateway.tenderly.co"

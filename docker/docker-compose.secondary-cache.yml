@@ -1,6 +1,6 @@
 # Secondary-cache overlay — layer on top of docker-compose.yml AND the cache
 # overlay to add a SECOND cache service, read through the router's read-only
-# secondary tier (docs/SECONDARY-CACHE-DESIGN.md):
+# secondary tier (docs/SECONDARY-CACHE.md):
 #
 #   SR_CONFIG=config/smartrouter_examples/smartrouter_eth_two_tier.yml \
 #     docker compose -f docker/docker-compose.yml \

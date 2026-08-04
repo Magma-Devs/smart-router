@@ -214,7 +214,7 @@ type RPCSmartRouter struct {
 type rpcSmartRouterStartOptions struct {
 	rpcEndpoints             []*lavasession.RPCEndpoint
 	cache                    *performance.Cache
-	secondaryCache           performance.CacheReader // optional read-only fallback tier (docs/SECONDARY-CACHE-DESIGN.md); nil when unconfigured
+	secondaryCache           performance.CacheReader // optional read-only fallback tier (docs/SECONDARY-CACHE.md); nil when unconfigured
 	secondaryCacheTimeout    time.Duration
 	strategy                 provideroptimizer.Strategy
 	analyticsServerAddresses AnalyticsServerAddresses
@@ -2511,8 +2511,8 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				}
 			}
 
-			// Optional read-only secondary cache tier (docs/SECONDARY-CACHE-DESIGN.md §11).
-			// Deliberately independent of the primary (§5): valid with cache-be unset.
+			// Optional read-only secondary cache tier (docs/SECONDARY-CACHE.md).
+			// Deliberately independent of the primary: valid with cache-be unset.
 			secondaryCacheConfig := performance.SecondaryCacheConfig{
 				Address: viper.GetString(performance.SecondaryCacheFlagName),
 				Timeout: viper.GetDuration(performance.SecondaryCacheTimeoutFlagName),
@@ -2540,7 +2540,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 					utils.LavaFormatInfo("secondary cache service connected", utils.Attribute{Key: "address", Value: secondaryCacheConfig.Address})
 				}
 				secondaryCacheReader = secondaryCache
-				// Startup visibility (design §11 / PRD nice-to-have): one line with the
+				// Startup visibility (PRD nice-to-have): one line with the
 				// full secondary configuration.
 				utils.LavaFormatInfo("secondary cache configured",
 					utils.Attribute{Key: "address", Value: secondaryCacheConfig.Address},
@@ -2666,7 +2666,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeBlockProfileRateFlagName, performance.DefaultBlockProfileRate, "block profile rate in nanoseconds (1 records all blocking events)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
-	cmdRPCSmartRouter.Flags().String(performance.SecondaryCacheFlagName, "", "address for an optional read-only secondary cache, queried when the primary cache produces no hit (docs/SECONDARY-CACHE-DESIGN.md)")
+	cmdRPCSmartRouter.Flags().String(performance.SecondaryCacheFlagName, "", "address for an optional read-only secondary cache, queried when the primary cache produces no hit (docs/SECONDARY-CACHE.md)")
 	cmdRPCSmartRouter.Flags().Duration(performance.SecondaryCacheTimeoutFlagName, performance.DefaultSecondaryCacheTimeout, "per-lookup time budget for the secondary cache; an exceeded lookup is treated as a miss")
 	cmdRPCSmartRouter.Flags().String(performance.SecondaryCacheModeFlagName, performance.SecondaryCacheModeReadOnly, "secondary cache access mode; only read-only is supported")
 	cmdRPCSmartRouter.Flags().Int(relaycore.ConsistencyBlockGapFactorFlagName, 0, "consistency-relief: widen the consistency endpoint-lag gate (blockLagForQosSync x factor; default 2). Allowed [2,8]; out-of-range reverts to default.")
