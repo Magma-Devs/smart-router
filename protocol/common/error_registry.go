@@ -528,6 +528,13 @@ func isRetryable(code uint32) bool {
 type LavaWrappedError struct {
 	LavaErr *LavaError
 	Context string
+	// cause is the error this classification was derived from, retained so sentinel
+	// checks (errors.Is(err, context.Canceled), net.Error, syscall errnos) still work
+	// on the far side of classification. Constructing with NewLavaError leaves it nil
+	// and only the Context string survives — which is exactly how the relay-race
+	// cancellation carve-out silently died (MAG-2648). Prefer NewLavaErrorWrapping
+	// whenever the original error is in hand.
+	cause error
 }
 
 func (e *LavaWrappedError) Error() string {
@@ -544,14 +551,53 @@ func (e *LavaWrappedError) Is(target error) bool {
 	return false
 }
 
+// Unwrap returns the original cause when one was retained, else the classification.
+//
+// Returning e.LavaErr unconditionally was the MAG-2648 bug: the cause's sentinel
+// (context.Canceled) became unreachable, so the relay-race carve-out could never fire.
+//
+// The multi-error form (Unwrap() []error) looks like the tidier fix and is NOT used
+// here on purpose: errors.Unwrap — the singular one — is documented to return nil for
+// multi-unwrap types, which would silently break every caller walking a chain with it,
+// including the sentinel walker in utils/score/score_errors.go. Keeping the singular
+// form preserves that traversal; the LavaErr branch it displaces stays reachable
+// through Is and As below, so nothing loses a path.
 func (e *LavaWrappedError) Unwrap() error {
+	if e.cause != nil {
+		return e.cause
+	}
 	return e.LavaErr
+}
+
+// As keeps the *LavaError reachable via errors.As even when Unwrap yields the cause
+// instead. Without this, retaining a cause would quietly remove a resolution path that
+// worked before — the same species of silent reachability loss this fix exists to undo.
+func (e *LavaWrappedError) As(target any) bool {
+	if t, ok := target.(**LavaError); ok {
+		*t = e.LavaErr
+		return true
+	}
+	return false
 }
 
 // NewLavaError creates an error that wraps a LavaError with optional context.
 // Supports errors.Is(err, LavaErrorSomething) matching by code.
+//
+// This constructor keeps no cause, so sentinel checks against the underlying error
+// will NOT match. Use NewLavaErrorWrapping when the original error is available.
 func NewLavaError(lavaErr *LavaError, context string) error {
 	return &LavaWrappedError{LavaErr: lavaErr, Context: context}
+}
+
+// NewLavaErrorWrapping is NewLavaError that retains the original error, so both
+// errors.Is(err, LavaErrorSomething) and errors.Is(err, <sentinel of the cause>)
+// resolve. The Context string is derived from the cause, preserving the message
+// shape NewLavaError(classified, err.Error()) produced.
+func NewLavaErrorWrapping(lavaErr *LavaError, cause error) error {
+	if cause == nil {
+		return &LavaWrappedError{LavaErr: lavaErr}
+	}
+	return &LavaWrappedError{LavaErr: lavaErr, Context: cause.Error(), cause: cause}
 }
 
 func IsInternal(code uint32) bool {

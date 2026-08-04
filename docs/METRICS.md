@@ -73,13 +73,22 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `rpc_endpoint_total_relays_serviced` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays successfully served by this endpoint. |
-| `rpc_endpoint_total_errored` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Errored relays for this endpoint. |
+| `rpc_endpoint_total_errored` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Errored relays for this endpoint. Excludes relays the router cancelled — see `rpc_endpoint_total_cancelled`. |
+| `rpc_endpoint_total_cancelled` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays the router aborted before completion: relay-race losers on stateful broadcasts, and client disconnects. **Not an endpoint fault** — excluded from `rpc_endpoint_total_errored` and from QoS/availability scoring. |
 | `rpc_endpoint_requests_in_flight` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays currently in flight to this endpoint. |
 | `rpc_endpoint_end_to_end_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `endpoint_id`, `function` | End-to-end latency per function for this endpoint. |
 | `rpc_endpoint_overall_health` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Endpoint health (1 healthy / 0 unhealthy). |
 | `rpc_endpoint_overall_health_breakdown` | Gauge | `spec`, `apiInterface` | Aggregate health per chain/interface. |
 | `rpc_endpoint_selection_score` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `score_type` | Selection scores by `score_type` (availability / latency / sync / stake / composite). |
 | `rpc_endpoint_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Latest block reported by the endpoint. |
+
+> **Reading cancelled relays.** A write (`stateful: 1`, e.g. `eth_sendRawTransaction`) is
+> broadcast to every endpoint; the first response wins and the rest are cancelled. So a
+> healthy endpoint on write-heavy traffic will show a high `rpc_endpoint_total_cancelled`
+> rate by design — roughly `(N-1)/N` of broadcasts, for N endpoints. That is the number to
+> watch when tuning broadcast fan-out, not a fault signal. Cancelled relays still decrement
+> `rpc_endpoint_requests_in_flight`, and never move the `smartrouter_requests_*` group, so
+> `requests_total == requests_success + requests_failed` remains exact.
 | `rpc_endpoint_fetch_latest_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Failed latest-block fetches. |
 | `rpc_endpoint_fetch_block_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Failed specific-block fetches. |
 | `rpc_endpoint_fetch_latest_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | Successful latest-block fetches. |

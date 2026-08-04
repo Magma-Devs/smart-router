@@ -20,6 +20,7 @@ func newSmartRouterForRequestGroupTest() *SmartRouterMetricsManager {
 		endpointInFlight:            NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{Name: "t_sr_inflight", Labels: funcLabels}),
 		endpointTotalRelaysServiced: NewMappedLabelsCounterVec(MappedLabelsMetricOpts{Name: "t_sr_relays", Labels: funcLabels}),
 		endpointTotalErrored:        NewMappedLabelsCounterVec(MappedLabelsMetricOpts{Name: "t_sr_errored", Labels: funcLabels}),
+		endpointTotalCancelled:      NewMappedLabelsCounterVec(MappedLabelsMetricOpts{Name: "t_sr_cancelled", Labels: funcLabels}),
 		endpointEndToEndLatency:     prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "t_sr_latency"}, endpointLabels),
 		// Request-group counters under test
 		routerRequestsTotal:      prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_req_total"}, reqLabels),
@@ -55,7 +56,11 @@ func newSmartRouterRequestGroupRunner() *requestGroupRunner {
 	m := newSmartRouterForRequestGroupTest()
 	return &requestGroupRunner{
 		invoke: func(r RelayMetrics, e error) {
-			m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", r.ApiMethod, 10, e == nil, &r)
+			outcome := RelayOutcomeSuccess
+			if e != nil {
+				outcome = RelayOutcomeError
+			}
+			m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", r.ApiMethod, 10, outcome, &r)
 		},
 		labels:  func(method string) []string { return []string{"ETH1", "jsonrpc", "ep1", method} },
 		total:   m.routerRequestsTotal,
@@ -167,6 +172,6 @@ func TestSetRelayMetrics(t *testing.T) {
 func TestSmartRouterRecordDirectRelayEnd_NilManager(t *testing.T) {
 	var m *SmartRouterMetricsManager
 	require.NotPanics(t, func() {
-		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "method", 10, true, &RelayMetrics{})
+		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "method", 10, RelayOutcomeSuccess, &RelayMetrics{})
 	})
 }
