@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The drop-everything policy from docs/SECONDARY-CACHE-DESIGN.md §4: a foreign cache
+// The drop-everything policy: a foreign cache
 // entry's Metadata is arbitrary upstream response metadata and cannot be proven
 // identity-free by any denylist, so all of it goes — including names this router has
 // never heard of. Payload fields that carry the response itself survive untouched.

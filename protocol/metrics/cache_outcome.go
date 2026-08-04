@@ -8,7 +8,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Cache tier and lookup-outcome label values (docs/SECONDARY-CACHE-DESIGN.md §12).
+// Cache tier and lookup-outcome label values (docs/METRICS.md#cache).
 // Both are closed enums: cache_tier distinguishes the primary cache from the
 // optional read-only secondary, and outcome splits the former catch-all "failed"
 // classification so operators can tell a clean miss from a broken or slow tier.
