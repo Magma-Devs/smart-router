@@ -1,0 +1,260 @@
+name: Jira ticket gate
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
+  merge_group:
+    branches:
+      - main
+    types:
+      - checks_requested
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: jira-ticket-gate-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate Jira ticket
+    runs-on: ubuntu-latest
+    env:
+      GH_STATUS_TOKEN: ${{ github.token }}
+      JIRA_API_BASE: https://magmadevs.atlassian.net
+      JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+    steps:
+      - name: Validate Jira ticket and publish commit status
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          STATUS_CONTEXT='jira-ticket/validated'
+          TARGET_SHA=''
+          STATUS_PAYLOAD=''
+          JIRA_RESPONSE=''
+          FINAL_STATUS_PUBLISHED='false'
+          SUMMARY_WRITTEN='false'
+
+          publish_status() {
+            local state=$1
+            local description=$2
+            local status_http
+
+            jq -n \
+              --arg state "$state" \
+              --arg context "$STATUS_CONTEXT" \
+              --arg description "$description" \
+              --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              '{state: $state, context: $context, description: $description, target_url: $target_url}' \
+              > "$STATUS_PAYLOAD"
+
+            status_http=$(
+              printf '%s\n' \
+                "header = \"Authorization: Bearer ${GH_STATUS_TOKEN}\"" \
+                'header = "Accept: application/vnd.github+json"' \
+                'header = "X-GitHub-Api-Version: 2022-11-28"' |
+                curl --config - \
+                  --silent \
+                  --connect-timeout 10 \
+                  --max-time 30 \
+                  --request POST \
+                  --header 'Content-Type: application/json' \
+                  --data-binary "@${STATUS_PAYLOAD}" \
+                  --output /dev/null \
+                  --write-out '%{http_code}' \
+                  "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${TARGET_SHA}"
+            )
+
+            [[ "$status_http" == '201' ]]
+          }
+
+          write_summary() {
+            local result=$1
+            local detail=$2
+
+            {
+              printf '### Jira ticket gate\n\n'
+              printf -- '- Result: **%s**\n' "$result"
+              printf -- '- Detail: %s\n' "$detail"
+              printf -- '- Status context: %s\n' "$STATUS_CONTEXT"
+            } >> "$GITHUB_STEP_SUMMARY"
+            SUMMARY_WRITTEN='true'
+          }
+
+          fail_gate() {
+            local description=$1
+            local detail=$2
+
+            write_summary 'Failure' "$detail"
+            if publish_status 'failure' "$description"; then
+              FINAL_STATUS_PUBLISHED='true'
+            fi
+            exit 1
+          }
+
+          # shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+          on_exit() {
+            local exit_code=$?
+            trap - EXIT
+            set +e
+
+            if (( exit_code != 0 )) && [[ "$FINAL_STATUS_PUBLISHED" != 'true' ]] && [[ -n "$TARGET_SHA" ]]; then
+              publish_status 'failure' 'Unexpected validation error'
+              if [[ "$SUMMARY_WRITTEN" != 'true' ]]; then
+                write_summary 'Failure' 'Unexpected validation error'
+              fi
+            fi
+
+            if [[ -n "$STATUS_PAYLOAD" ]]; then
+              rm -f -- "$STATUS_PAYLOAD"
+            fi
+            if [[ -n "$JIRA_RESPONSE" ]]; then
+              rm -f -- "$JIRA_RESPONSE"
+            fi
+
+            exit "$exit_code"
+          }
+          trap on_exit EXIT
+
+          STATUS_PAYLOAD=$(mktemp "${RUNNER_TEMP}/jira-status.XXXXXX")
+
+          case "$GITHUB_EVENT_NAME" in
+            pull_request_target)
+              TARGET_SHA=$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH")
+              ;;
+            merge_group)
+              TARGET_SHA=$(jq -r '.merge_group.head_sha // empty' "$GITHUB_EVENT_PATH")
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            exit 1
+          fi
+
+          if ! publish_status 'pending' 'Validating Jira ticket'; then
+            exit 1
+          fi
+
+          if [[ "$GITHUB_EVENT_NAME" == 'merge_group' ]]; then
+            write_summary 'Success' 'The pull request Jira gate passed before merge queue entry.'
+            if publish_status 'success' 'Jira gate satisfied for merge group'; then
+              FINAL_STATUS_PUBLISHED='true'
+              exit 0
+            fi
+            exit 1
+          fi
+
+          JIRA_LINE_COUNT=$(jq '
+            [
+              ((.pull_request.body // "") | split("\n")[])
+              | sub("\r$"; "")
+              | select(test("^\\s*jira\\s+ticket\\s*:"; "i"))
+            ]
+            | length
+          ' "$GITHUB_EVENT_PATH")
+
+          if [[ "$JIRA_LINE_COUNT" -eq 0 ]]; then
+            fail_gate 'Missing Jira ticket line' 'Add exactly one dedicated Jira ticket line to the pull request description.'
+          fi
+          if [[ "$JIRA_LINE_COUNT" -gt 1 ]]; then
+            fail_gate 'Multiple Jira ticket lines' 'The pull request description contains more than one dedicated Jira ticket line.'
+          fi
+
+          JIRA_LINE=$(jq -r '
+            [
+              ((.pull_request.body // "") | split("\n")[])
+              | sub("\r$"; "")
+              | select(test("^\\s*jira\\s+ticket\\s*:"; "i"))
+            ][0]
+          ' "$GITHUB_EVENT_PATH")
+          NORMALIZED_LINE=$(printf '%s' "$JIRA_LINE" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+          VALID_LINE='^[[:space:]]*JIRA[[:space:]]+TICKET[[:space:]]*:[[:space:]]*(MAG-[0-9]+)[[:space:]]*$'
+
+          if [[ ! "$NORMALIZED_LINE" =~ $VALID_LINE ]]; then
+            fail_gate 'Malformed Jira ticket line' 'Use exactly one line in the format Jira ticket: MAG-123.'
+          fi
+          JIRA_KEY=${BASH_REMATCH[1]}
+
+          if [[ -z "$JIRA_EMAIL" || -z "$JIRA_API_TOKEN" ]]; then
+            fail_gate 'Jira credentials missing' 'Required Jira repository secrets are missing.'
+          fi
+
+          JIRA_RESPONSE=$(mktemp "${RUNNER_TEMP}/jira-response.XXXXXX")
+          if JIRA_HTTP_STATUS=$(
+            printf 'user = "%s:%s"\n' "$JIRA_EMAIL" "$JIRA_API_TOKEN" |
+              curl --config - \
+                --silent \
+                --connect-timeout 10 \
+                --max-time 30 \
+                --retry 2 \
+                --retry-delay 1 \
+                --retry-max-time 20 \
+                --retry-connrefused \
+                --header 'Accept: application/json' \
+                --output "$JIRA_RESPONSE" \
+                --write-out '%{http_code}' \
+                "${JIRA_API_BASE}/rest/api/3/issue/${JIRA_KEY}?fields=key,project"
+          ); then
+            JIRA_CURL_EXIT=0
+          else
+            JIRA_CURL_EXIT=$?
+          fi
+
+          if [[ "$JIRA_CURL_EXIT" -ne 0 ]]; then
+            fail_gate 'Jira is unavailable' 'Jira could not be reached before the validation timeout.'
+          fi
+
+          case "$JIRA_HTTP_STATUS" in
+            200)
+              ;;
+            401)
+              fail_gate 'Jira authentication failed' 'Jira rejected the configured repository credentials.'
+              ;;
+            403)
+              fail_gate 'Jira issue inaccessible' 'The Jira issue is inaccessible to the configured account.'
+              ;;
+            404)
+              fail_gate 'Jira issue does not exist' 'The requested Jira issue does not exist or is inaccessible.'
+              ;;
+            408|429|5??)
+              fail_gate 'Jira is unavailable' 'Jira was temporarily unavailable during validation.'
+              ;;
+            *)
+              fail_gate 'Jira validation failed' 'Jira returned an unexpected HTTP status.'
+              ;;
+          esac
+
+          if ! RESPONSE_KEY=$(jq -er '.key | strings' "$JIRA_RESPONSE" 2>/dev/null); then
+            fail_gate 'Invalid Jira response' 'Jira returned an invalid response.'
+          fi
+          if ! RESPONSE_PROJECT=$(jq -er '.fields.project.key | strings' "$JIRA_RESPONSE" 2>/dev/null); then
+            fail_gate 'Invalid Jira response' 'Jira returned an invalid response.'
+          fi
+
+          if [[ "$RESPONSE_KEY" != "$JIRA_KEY" ]]; then
+            fail_gate 'Jira ticket mismatch' 'Jira returned a different issue than requested.'
+          fi
+          if [[ "$RESPONSE_PROJECT" != 'MAG' ]]; then
+            fail_gate 'Wrong Jira project' 'The Jira issue does not belong to the MAG project.'
+          fi
+
+          write_summary 'Success' "Validated Jira ticket ${JIRA_KEY} in project MAG."
+          if publish_status 'success' "Validated ${JIRA_KEY}"; then
+            FINAL_STATUS_PUBLISHED='true'
+            exit 0
+          fi
+          exit 1
