@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Startup validation rules from docs/SECONDARY-CACHE-DESIGN.md §11 (T9).
+// Startup validation rules (docs/SECONDARY-CACHE.md).
 func TestSecondaryCacheConfigValidate(t *testing.T) {
 	valid := SecondaryCacheConfig{Address: "cache-shared:20100", Timeout: 75 * time.Millisecond, Mode: SecondaryCacheModeReadOnly}
 

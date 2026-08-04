@@ -48,7 +48,7 @@ const (
 	// Cache attributes.
 	attrCacheHit       = "cache.hit"
 	attrCacheLatencyMs = "cache.latency_ms"
-	attrCacheTier      = "cache.tier"    // primary | secondary (docs/SECONDARY-CACHE-DESIGN.md §12)
+	attrCacheTier      = "cache.tier"    // primary | secondary
 	attrCacheOutcome   = "cache.outcome" // hit | miss | error | timeout
 
 	// Session attributes.
