@@ -259,16 +259,17 @@ func TestProbeCycleCore_ReturnsCycleCounts(t *testing.T) {
 	}
 
 	// Fresh baseline → sync fed for both providers, nothing omitted.
-	scored, reEnabled, syncOmitted := runProbeCycleCore(
+	scored, reEnabled, syncOmitted, evidenceGated := runProbeCycleCore(
 		endpoints, healthy, 1000, true,
 		provideroptimizer.SyncReference{ConsensusConfigured: true, Block: 1000, Time: now, Fresh: true},
 		now, probeCfg(), &recordingAppender{}, nil, nil)
 	require.Equal(t, 2, scored, "both endpoints scored")
 	require.Equal(t, 0, reEnabled, "already-enabled endpoints are never re-enabled")
 	require.Equal(t, 0, syncOmitted, "fresh baseline → no sync omitted")
+	require.Equal(t, 0, evidenceGated, "no endpoint holds relay evidence")
 
 	// No baseline → F5: sync omitted for every provider sample.
-	_, _, syncOmitted = runProbeCycleCore(
+	_, _, syncOmitted, _ = runProbeCycleCore(
 		endpoints, healthy, 0, false,
 		provideroptimizer.SyncReference{ConsensusConfigured: true},
 		now, probeCfg(), &recordingAppender{}, nil, nil)
@@ -290,7 +291,7 @@ func TestProbeCycleCore_CountsReEnable(t *testing.T) {
 		getObs := func(string) (endpointstate.EndpointObservation, bool) {
 			return freshObs(1000, now.Add(-time.Second), pollTime, 20*time.Millisecond), true
 		}
-		_, reEnabled, _ := runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, nil, nil)
+		_, reEnabled, _, _ := runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, nil, nil)
 		lastReEnabled = reEnabled
 		if i < K {
 			require.Equal(t, 0, reEnabled, "no re-enable before the K-th distinct healthy poll")

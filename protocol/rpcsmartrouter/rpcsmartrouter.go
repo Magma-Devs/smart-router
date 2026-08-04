@@ -1199,6 +1199,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 						"LatestBlock":              obs.LatestBlock,
 						"ObservedAt":               debugTimeRFC3339(obs.ObservedAt),
 						"Source":                   obs.Source.String(),
+						// The MAG-2550 replay gate, made visible: a disabled endpoint with a
+						// RelayProbeMethod is held pending a successful replay of that method (or
+						// the attempt-budget fallback) — NOT merely earning its poll streak.
+						"RelayProbeMethod":   health.RelayProbeMethod,
+						"RelayProbeAttempts": health.RelayProbeAttempts,
+						"ReenableProbeFlaps": health.ReenableProbeFlaps,
 						// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
 						// exponentialBackoff-stretched when the endpoint has been failing. This is the
 						// observable /debug/reset-probe-backoff returns to base (MAG-2395).
@@ -1308,6 +1314,13 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"EndpointsScored":     s.EndpointsScored,
 					"ReEnabledCount":      s.ReEnabledCount,
 					"SyncOmittedCount":    s.SyncOmittedCount,
+					// MAG-2550 replay-gate telemetry: how many disabled endpoints are held on
+					// recorded relay evidence, and the cumulative replay outcomes.
+					"EvidenceGatedCount":  s.EvidenceGatedCount,
+					"ReplaysAttempted":    s.ReplaysAttempted,
+					"ReplaysRecovered":    s.ReplaysRecovered,
+					"ReplaysStillFailing": s.ReplaysStillFailing,
+					"ReplaysInconclusive": s.ReplaysInconclusive,
 				})
 			}
 			deps.router.mu.Unlock()

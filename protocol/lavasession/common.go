@@ -57,7 +57,16 @@ const (
 	// maxRelayProbePayloadBytes caps the recorded failing-relay request (MAG-2550 recovery evidence).
 	// A read-only JSON-RPC call is normally well under 1KB; anything larger (giant batches, abusive
 	// payloads) is not worth holding per-endpoint for the prober and is simply not recorded.
-	maxRelayProbePayloadBytes                               = 8 * 1024
+	maxRelayProbePayloadBytes = 8 * 1024
+	// maxRelayProbeAttempts bounds how many consecutive replays of ONE recorded failing relay may
+	// conclude non-recovered (still-failing or inconclusive) before the evidence is dropped and the
+	// episode falls back to the poll-only re-enable path with its trial budget. Without this bound,
+	// evidence whose replay can never pass (a request that is simply too expensive for this
+	// endpoint, pruned state, a permanently unclassifiable reply) would hold the endpoint out of
+	// rotation until the epoch reset even though it is healthy for everything else. The trial
+	// budget still caps client exposure after the fallback re-enable, so giving up on the evidence
+	// keeps the anti-flap protection while guaranteeing a bounded escape (MAG-2550 review).
+	maxRelayProbeAttempts                            uint64 = 3
 	TimeoutForEstablishingAConnection                       = 1500 * time.Millisecond // 1.5 seconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession        = 15
 	RelayNumberIncrement                                    = 1
