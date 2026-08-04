@@ -70,7 +70,7 @@ type RPCSmartRouterServer struct {
 	initialized          atomic.Bool
 	enableSelectionStats bool // feature flag to enable selection stats header
 
-	// Optional read-only secondary cache tier (docs/SECONDARY-CACHE-DESIGN.md §9);
+	// Optional read-only secondary cache tier (docs/SECONDARY-CACHE.md);
 	// nil when unconfigured. Typed as the narrow CacheReader so SetEntry/Flush are
 	// compile-time errors — read-only is structural, not conventional.
 	secondaryCache        performance.CacheReader
@@ -3089,7 +3089,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 }
 
 // tryCacheWriteResolved is tryCacheWrite with an optional pre-resolved cache-key
-// block (docs/SECONDARY-CACHE-DESIGN.md §6). resolvedBlock == nil preserves the
+// block. resolvedBlock == nil preserves the
 // legacy resolution (Reply.LatestBlock → SeenBlock → skip). A non-nil resolvedBlock
 // carries the exact block that produced a secondary-cache hit, so the backfill SET
 // lands on the identical server-side key (hash ‖ block) — re-deriving it here could
@@ -3195,7 +3195,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	// This must match the logic in cache lookup (sendRelayToEndpoint) to ensure cache hits
 	requestedBlockForCache := requestedBlock
 	if resolvedBlock != nil && *resolvedBlock >= 0 {
-		// Exact-key backfill (§6): the caller proved this block is the server-side
+		// Exact-key backfill: the caller proved this block is the server-side
 		// key that hit — trust it over re-derivation.
 		requestedBlockForCache = *resolvedBlock
 	} else if requestedBlock == spectypes.LATEST_BLOCK {
@@ -3217,7 +3217,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	// Get seen block
 	seenBlock := relayData.SeenBlock
 	if resolvedBlock != nil && *resolvedBlock > seenBlock {
-		// Exact-key backfill (§6): the cache server validates hits against the
+		// Exact-key backfill: the cache server validates hits against the
 		// stored max(SeenBlock, Reply.LatestBlock) — a follow-up GET at key N with
 		// SeenBlock=N rejects an entry stored with SeenBlock=N-1 as "smaller than
 		// our expectations" (ecosystem/cache/handlers.go GetRelay), which would make
@@ -3350,7 +3350,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	crossValidationParams := relayProcessor.GetCrossValidationParams()
 
 	// Cache lookup: bypass rules are evaluated once for both tiers; each tier is then
-	// attempted iff it is itself active (docs/SECONDARY-CACHE-DESIGN.md §5) — a
+	// attempted iff it is itself active — a
 	// healthy secondary keeps serving while the primary is down or unconfigured.
 	crossValidationEnabled := selection == relaycore.CrossValidation && crossValidationParams != nil
 	primaryCacheActive := rpcss.cache.CacheActive()
@@ -3537,10 +3537,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 						latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
 						utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))
 					}
-					// Secondary tier (design §5): consulted whenever the primary produced no
-					// hit — including primary inactive or unconfigured. A hit is sanitized,
-					// served, and backfilled through the populator; a miss still contributes
-					// block-hash→height data to the merge (§8).
+					// Secondary tier (docs/SECONDARY-CACHE.md): consulted whenever the primary
+					// produced no hit — including primary inactive or unconfigured. A hit is
+					// sanitized, served, and backfilled through the populator; a miss still
+					// contributes block-hash→height data to the merge.
 					if secondaryCacheActive {
 						served, secondaryCacheReply := rpcss.trySecondaryCacheLookup(ctx, protocolMessage, localRelayData, relayProcessor, analytics, hashKey, outputFormatter, requestedBlockForCache)
 						if served {

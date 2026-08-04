@@ -81,7 +81,7 @@ it (see `smartrouter_eth_cached.yml`) and run it with the overlay.
 
 ## Enabling a read-only secondary cache
 
-The optional secondary tier (docs/SECONDARY-CACHE-DESIGN.md) is a second cache
+The optional secondary tier (docs/SECONDARY-CACHE.md) is a second cache
 service the router only ever **reads**, consulted when the primary produces no
 hit, before falling through to upstreams. Layer the second overlay on top of
 the cache one and declare both addresses in the config — same

@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Pins the server-side validation the exact-key backfill fix depends on
-// (docs/SECONDARY-CACHE-DESIGN.md §6): GetRelay rejects a hit whose stored
+// Pins the server-side validation the exact-key backfill fix depends on:
+// GetRelay rejects a hit whose stored
 // SeenBlock (= max(Response.LatestBlock, SET SeenBlock)) is below
 // min(GET SeenBlock, GET RequestedBlock). A backfill SET at key N that carries
 // SeenBlock=N-1 with an unparsable Reply.LatestBlock=0 is therefore invisible to

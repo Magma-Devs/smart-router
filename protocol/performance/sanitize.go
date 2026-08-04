@@ -5,7 +5,7 @@ import (
 )
 
 // SanitizeForeignCacheReply strips identity-bearing data from a cache reply that
-// crossed a trust boundary — the secondary cache (docs/SECONDARY-CACHE-DESIGN.md §4).
+// crossed a trust boundary — the secondary cache (docs/SECONDARY-CACHE.md).
 // Entries in a foreign cache may have been written by other router versions or other
 // software lineages, and RelayReply.Metadata carries arbitrary upstream HTTP/gRPC
 // response headers (X-Provider-ID, Via, Server, ...) that no denylist can be proven

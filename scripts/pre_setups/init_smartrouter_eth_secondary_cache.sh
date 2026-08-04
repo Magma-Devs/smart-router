@@ -1,5 +1,5 @@
 #!/bin/bash
-# Two-zone secondary-cache integration lane (docs/SECONDARY-CACHE-DESIGN.md §14).
+# Two-zone secondary-cache integration lane (docs/SECONDARY-CACHE.md).
 #
 # Reproduces the PRD's Kraken topology on one machine:
 #

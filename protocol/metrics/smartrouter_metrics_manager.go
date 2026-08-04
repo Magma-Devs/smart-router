@@ -1203,7 +1203,7 @@ func (m *SmartRouterMetricsManager) RecordCacheResult(chainId, apiInterface, met
 		m.cacheFailedTotalMetric.WithLabelValues(chainId, apiInterface, method, cacheTier, outcome).Inc()
 	}
 	// Every attempted lookup is observed — hit-only latency hid exactly the tail
-	// that matters for a network-hop tier (docs/SECONDARY-CACHE-DESIGN.md §12).
+	// that matters for a network-hop tier.
 	m.cacheLatencyHistogram.WithLabelValues(chainId, apiInterface, method, cacheTier).Observe(latencyMs)
 }
 
