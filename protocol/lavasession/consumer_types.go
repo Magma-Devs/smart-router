@@ -209,7 +209,7 @@ type Endpoint struct {
 	reenableProbeFlaps uint64
 	// relayProbeMethod / relayProbePayload capture the most recent health-affecting relay failure
 	// attributable to a READ-ONLY method (recorded by the relay path via RecordFailingRelay just
-	// before MarkUnhealthy — never for writes/subscriptions/hanging APIs, and never for
+	// before MarkUnhealthy — never for writes/subscriptions/hanging APIs/batches, and never for
 	// unsupported-method responses, which don't reach MarkUnhealthy at all). While present on a
 	// DISABLED endpoint they GATE the probe re-enable: poll hysteresis alone is not enough, the
 	// prober must replay this exact request successfully first (MAG-2550 — the poll method and the
@@ -217,9 +217,20 @@ type Endpoint struct {
 	// recovered). Cleared on every re-enable so each disable episode records fresh evidence.
 	relayProbeMethod  string
 	relayProbePayload []byte
-	Addons            map[string]struct{}
-	Extensions        map[string]struct{}
-	mu                sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload
+	// relayProbeTimeout is the relay path's effective timeout for the recorded request (the spec's
+	// per-API/CU-derived budget it was actually given when it failed). The replay must judge the
+	// request under AT LEAST this budget: a flat probe timeout below the relay path's would fail
+	// every slow-but-recovered heavy method forever (MAG-2550 review).
+	relayProbeTimeout time.Duration
+	// relayProbeAttempts counts consecutive replays of the CURRENT evidence that concluded
+	// non-recovered (still-failing or inconclusive). At maxRelayProbeAttempts the evidence is
+	// dropped (dropRelayProbeEvidenceLocked) so the episode falls back to the poll-only re-enable
+	// path — the bounded escape hatch for evidence whose replay can never pass. Reset when fresh
+	// evidence is recorded.
+	relayProbeAttempts uint64
+	Addons             map[string]struct{}
+	Extensions         map[string]struct{}
+	mu                 sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload, relayProbeTimeout, relayProbeAttempts
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
 	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
@@ -252,8 +263,17 @@ type EndpointHealthSnapshot struct {
 	LastRecoveryPoll         time.Time
 	// RelayProbeMethod is the read-only method recorded as this disable episode's failing relay
 	// (MAG-2550) — the request the prober must replay successfully before re-enabling. Empty when
-	// no method-attributable evidence was recorded (transport-fault episodes, write methods).
+	// no replayable evidence was recorded (non-JSON-RPC interfaces, writes, subscriptions, hanging
+	// APIs, batches, oversized payloads) or when the evidence was dropped after
+	// maxRelayProbeAttempts non-recovered replays.
 	RelayProbeMethod string
+	// RelayProbeAttempts is how many consecutive replays of the current evidence concluded
+	// non-recovered; the evidence is dropped at maxRelayProbeAttempts (the poll-only fallback).
+	RelayProbeAttempts uint64
+	// ReenableProbeFlaps is the current flap-escalation level (effective re-enable hysteresis is
+	// reEnableAfterK << ReenableProbeFlaps) — on-call's answer to "why is this endpoint earning
+	// such a long streak".
+	ReenableProbeFlaps uint64
 }
 
 // HealthSnapshot returns the endpoint's enable/recovery state under e.mu. Read-only companion to
@@ -269,6 +289,8 @@ func (e *Endpoint) HealthSnapshot() EndpointHealthSnapshot {
 		ConsecutiveHealthyProbes: e.consecutiveHealthyProbes,
 		LastRecoveryPoll:         e.lastRecoveryPoll,
 		RelayProbeMethod:         e.relayProbeMethod,
+		RelayProbeAttempts:       e.relayProbeAttempts,
+		ReenableProbeFlaps:       e.reenableProbeFlaps,
 	}
 }
 
@@ -316,18 +338,29 @@ func (e *Endpoint) clearRecoveryStreakLocked() {
 func (e *Endpoint) clearRecoveryTrackingLocked() {
 	e.clearRecoveryStreakLocked()
 	e.disabledAt = time.Time{}
+	e.dropRelayProbeEvidenceLocked()
+}
+
+// dropRelayProbeEvidenceLocked forgets the episode's recorded failing relay — on re-enable (the
+// evidence belongs to the episode that just ended) or when maxRelayProbeAttempts consecutive
+// replays failed to prove recovery (the poll-only fallback). Caller must hold e.mu.
+func (e *Endpoint) dropRelayProbeEvidenceLocked() {
 	e.relayProbeMethod = ""
 	e.relayProbePayload = nil
+	e.relayProbeTimeout = 0
+	e.relayProbeAttempts = 0
 }
 
 // RecordFailingRelay stores one health-affecting relay failure as replayable recovery evidence for
 // this endpoint's next disable episode (MAG-2550). The caller (the relay path, just before
 // MarkUnhealthy) is responsible for eligibility: READ-ONLY methods only — never writes,
-// subscriptions, hanging APIs, or unsupported-method responses — and a self-contained payload
-// (JSON-RPC POST body). Oversized or empty payloads are dropped rather than truncated: a replay of
-// half a request proves nothing. Rolling: the newest eligible failure wins, so the evidence always
-// reflects what was failing when the disable threshold was finally crossed.
-func (e *Endpoint) RecordFailingRelay(method string, payload []byte) {
+// subscriptions, hanging APIs, batches, or unsupported-method responses — and a self-contained
+// payload (JSON-RPC POST body). Oversized or empty payloads are dropped rather than truncated: a
+// replay of half a request proves nothing. relayTimeout is the relay path's effective timeout for
+// this request, so the replay judges it under the same budget it failed with. Rolling: the newest
+// eligible failure wins (and restarts the replay-attempt budget), so the evidence always reflects
+// what was failing when the disable threshold was finally crossed.
+func (e *Endpoint) RecordFailingRelay(method string, payload []byte, relayTimeout time.Duration) {
 	if method == "" || len(payload) == 0 || len(payload) > maxRelayProbePayloadBytes {
 		return
 	}
@@ -337,6 +370,8 @@ func (e *Endpoint) RecordFailingRelay(method string, payload []byte) {
 	e.mu.Lock()
 	e.relayProbeMethod = method
 	e.relayProbePayload = stored
+	e.relayProbeTimeout = relayTimeout
+	e.relayProbeAttempts = 0
 	e.mu.Unlock()
 }
 
@@ -489,23 +524,25 @@ func (e *Endpoint) RecordProbeVerdict(recoveryPoll time.Time, recoveryHealthy bo
 // ConfirmRelayRecovery / RelayProbeFailed. The candidate state is derived (not a stored flag), so
 // a later failed poll automatically withdraws candidacy until the streak is re-earned.
 // reEnableAfterK must be the same K passed to RecordProbeVerdict; <1 is treated as 1.
-func (e *Endpoint) PendingRelayProbe(reEnableAfterK uint64) (method string, payload []byte, ok bool) {
+// The returned timeout is the relay path's recorded effective budget for the request (0 when the
+// recording predates the budget — the replayer applies its own floor either way).
+func (e *Endpoint) PendingRelayProbe(reEnableAfterK uint64) (method string, payload []byte, relayTimeout time.Duration, ok bool) {
 	if reEnableAfterK < 1 {
 		reEnableAfterK = 1
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.Enabled || len(e.relayProbePayload) == 0 {
-		return "", nil, false
+		return "", nil, 0, false
 	}
 	if e.consecutiveHealthyProbes < reEnableAfterK<<e.reenableProbeFlaps {
-		return "", nil, false
+		return "", nil, 0, false
 	}
 	// Copy so the caller can use the payload after the lock is released without racing a
 	// concurrent RecordFailingRelay from an in-flight relay straggler.
 	payload = make([]byte, len(e.relayProbePayload))
 	copy(payload, e.relayProbePayload)
-	return e.relayProbeMethod, payload, true
+	return e.relayProbeMethod, payload, e.relayProbeTimeout, true
 }
 
 // ConfirmRelayRecovery is the prober reporting that the recorded failing relay REPLAYED
@@ -540,6 +577,12 @@ func (e *Endpoint) ConfirmRelayRecovery() bool {
 // learn this, the replay proves poll-healthy/relay-broken without exposing a single client request.
 // lastRecoveryPoll is preserved (invalid-evidence convention) so an already-counted poll cannot be
 // re-counted toward the next streak.
+//
+// The replay-attempt budget advances too: after maxRelayProbeAttempts consecutive non-recovered
+// replays the evidence is DROPPED and the episode falls back to the poll-only re-enable path — a
+// replay that can never pass (too expensive for this endpoint, pruned state) must not park an
+// otherwise-recovered endpoint until the epoch reset. The trial refusal budget still bounds client
+// exposure after the fallback re-enable.
 func (e *Endpoint) RelayProbeFailed() {
 	e.mu.Lock()
 	if e.Enabled {
@@ -550,14 +593,73 @@ func (e *Endpoint) RelayProbeFailed() {
 	if e.reenableProbeFlaps < maxReenableProbeFlaps {
 		e.reenableProbeFlaps++
 	}
-	addr, method, flaps := e.NetworkAddress, e.relayProbeMethod, e.reenableProbeFlaps
+	evidenceDropped := e.advanceRelayProbeAttemptLocked()
+	addr, method, flaps, attempts := e.NetworkAddress, e.relayProbeMethod, e.reenableProbeFlaps, e.relayProbeAttempts
 	e.mu.Unlock()
 
+	if evidenceDropped {
+		utils.LavaFormatWarning("relay probe evidence dropped after repeated failed replays, falling back to poll-only re-enable", nil,
+			utils.LogAttr("endpoint", addr),
+			utils.LogAttr("max_replay_attempts", maxRelayProbeAttempts),
+			utils.LogAttr("reenable_probe_flaps", flaps),
+		)
+		return
+	}
 	utils.LavaFormatInfo("relay probe still failing, endpoint stays disabled",
 		utils.LogAttr("endpoint", addr),
 		utils.LogAttr("method", method),
+		utils.LogAttr("replay_attempts", attempts),
 		utils.LogAttr("reenable_probe_flaps", flaps),
 	)
+}
+
+// RelayProbeInconclusive is the prober reporting that the replay PROVED NOTHING either way: the
+// recorded failing handler was never exercised (rate-limited), or the reply was unclassifiable (a
+// proxy's HTML error page on 200, an unrecognized 4xx). Unlike RelayProbeFailed it must NOT
+// escalate the flap hysteresis — no relay-path failure was demonstrated — but it also must not
+// confirm recovery. The streak resets so the next replay is paced by a re-earned poll streak
+// rather than fired every probe cycle, and the replay-attempt budget advances so permanently
+// unjudgeable evidence (the gate silently degrading to "never confirm") is dropped after
+// maxRelayProbeAttempts, falling back to the poll-only path instead of parking the endpoint.
+func (e *Endpoint) RelayProbeInconclusive() {
+	e.mu.Lock()
+	if e.Enabled {
+		e.mu.Unlock()
+		return
+	}
+	e.consecutiveHealthyProbes = 0
+	evidenceDropped := e.advanceRelayProbeAttemptLocked()
+	addr, method, attempts := e.NetworkAddress, e.relayProbeMethod, e.relayProbeAttempts
+	e.mu.Unlock()
+
+	if evidenceDropped {
+		utils.LavaFormatWarning("relay probe evidence dropped after repeated inconclusive replays, falling back to poll-only re-enable", nil,
+			utils.LogAttr("endpoint", addr),
+			utils.LogAttr("max_replay_attempts", maxRelayProbeAttempts),
+		)
+		return
+	}
+	utils.LavaFormatInfo("relay probe inconclusive, endpoint stays disabled",
+		utils.LogAttr("endpoint", addr),
+		utils.LogAttr("method", method),
+		utils.LogAttr("replay_attempts", attempts),
+	)
+}
+
+// advanceRelayProbeAttemptLocked consumes one replay attempt of the current evidence and reports
+// whether that exhausted the budget (evidence dropped → poll-only fallback). No-op without
+// evidence: a stale verdict racing an already-dropped or re-recorded episode must not charge the
+// new episode's budget. Caller must hold e.mu.
+func (e *Endpoint) advanceRelayProbeAttemptLocked() (evidenceDropped bool) {
+	if len(e.relayProbePayload) == 0 {
+		return false
+	}
+	e.relayProbeAttempts++
+	if e.relayProbeAttempts < maxRelayProbeAttempts {
+		return false
+	}
+	e.dropRelayProbeEvidenceLocked()
+	return true
 }
 
 // ResetHealth resets connection refusals and re-enables endpoint.
