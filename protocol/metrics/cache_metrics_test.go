@@ -24,7 +24,7 @@ func newSmartRouterForCacheTest() *SmartRouterMetricsManager {
 	}
 }
 
-// ---- outcome-aware, per-tier recording (docs/SECONDARY-CACHE-DESIGN.md §12) ----
+// ---- outcome-aware, per-tier recording (docs/METRICS.md#cache) ----
 
 func TestSmartRouterRecordCacheResult_HitPerTier(t *testing.T) {
 	m := newSmartRouterForCacheTest()

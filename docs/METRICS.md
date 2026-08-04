@@ -282,7 +282,7 @@ Once it is non-zero they are lossy — some batch types are being merged into `b
 > percentiles, since misses return faster than hits — while timeouts now appear
 > as a bounded tail instead of being invisible). The secondary tier
 > (`cache_tier="secondary"`) appears only when `secondary-cache-be` is
-> configured; see `docs/SECONDARY-CACHE-DESIGN.md` §12.
+> configured; see `docs/SECONDARY-CACHE.md`.
 
 #### CSM state-store sizes (diagnostics)
 

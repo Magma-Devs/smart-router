@@ -30,7 +30,7 @@ import (
 // Harness
 // ---------------------------------------------------------------------------
 
-// fakeCacheReader is the CacheReader test seam (design §9): canned reply/error,
+// fakeCacheReader is the CacheReader test seam: canned reply/error,
 // optional context-respecting delay, and a recording of every GetEntry request so
 // tests can assert what crossed the trust boundary (SharedStateId, blocks, ...).
 type fakeCacheReader struct {
@@ -175,10 +175,10 @@ func directGet(rcs *ecocache.RelayerCacheServer, hashKey []byte, block, seenBloc
 }
 
 // ---------------------------------------------------------------------------
-// Behavioral tests (design §14)
+// Behavioral tests
 // ---------------------------------------------------------------------------
 
-// T1 + T16: a secondary hit serves the caller with no primary configured at all —
+// A secondary hit serves the caller with no primary configured at all —
 // and the request-side contract holds: exactly one lookup, SharedStateId empty
 // (never join a foreign fleet's shared state), Finalized=false, the resolved block.
 func TestSecondaryCacheHitServesWithoutPrimary(t *testing.T) {
@@ -202,12 +202,12 @@ func TestSecondaryCacheHitServesWithoutPrimary(t *testing.T) {
 
 	gets := fake.recorded()
 	require.Len(t, gets, 1)
-	require.Equal(t, "", gets[0].SharedStateId, "secondary GET must never carry SharedStateId (design §5)")
+	require.Equal(t, "", gets[0].SharedStateId, "secondary GET must never carry SharedStateId")
 	require.False(t, gets[0].Finalized)
 	require.Equal(t, int64(100), gets[0].RequestedBlock)
 }
 
-// T5: timeout and transport errors both degrade to a miss within the configured
+// Timeout and transport errors both degrade to a miss within the configured
 // budget — the tier can never fail or stall a request.
 func TestSecondaryCacheTimeoutAndErrorAreMisses(t *testing.T) {
 	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 100)
@@ -229,7 +229,7 @@ func TestSecondaryCacheTimeoutAndErrorAreMisses(t *testing.T) {
 	})
 }
 
-// T2 — the exact-key backfill blocker regression, through REAL cache-server
+// The exact-key backfill blocker regression, through REAL cache-server
 // validation. Scenario: ParseRelay stamped SeenBlock=99, the guarded tip advanced
 // to 100 by lookup time (requestedBlockForCache=100), and the cached entry has
 // Reply.LatestBlock=0 (an eth_call-style reply with no parsable height). The
@@ -268,7 +268,7 @@ func TestSecondaryHitBackfillsPrimaryWithExactKeyAndValidSeenBlock(t *testing.T)
 	require.False(t, reply.GetIsNodeError())
 }
 
-// T12: cached node errors — explicit flag and legacy placeholder — are served but
+// Cached node errors — explicit flag and legacy placeholder — are served but
 // NEVER backfilled, and the rejection is the populator's own node-error check (the
 // RelayResult carries IsNodeError; there is no pre-filter in the secondary path).
 func TestSecondaryCachedNodeErrorsServeButNeverBackfill(t *testing.T) {
@@ -314,9 +314,9 @@ func TestSecondaryCachedNodeErrorsServeButNeverBackfill(t *testing.T) {
 	}
 }
 
-// T11 — full-path poisoned-entry test: foreign signatures and ARBITRARY foreign
+// Full-path poisoned-entry test: foreign signatures and ARBITRARY foreign
 // metadata (names no denylist could enumerate) appear neither in the served result
-// nor in the primary backfill payload. Drop-all policy from design §4.
+// nor in the primary backfill payload — the drop-all sanitization policy.
 func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	primary, rcs := startCacheServerForTest(t)
 	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 100)
@@ -368,7 +368,7 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	require.Equal(t, payload, stored.GetReply().Data)
 }
 
-// T13: the secondary reply's SeenBlock is never adopted into ChainState, even with
+// The secondary reply's SeenBlock is never adopted into ChainState, even with
 // shared-state mode on — shared-state tip exchange is fleet-scoped and a foreign
 // cache is not this router's fleet.
 func TestSecondarySeenBlockNeverAdoptedIntoChainState(t *testing.T) {
@@ -388,14 +388,14 @@ func TestSecondarySeenBlockNeverAdoptedIntoChainState(t *testing.T) {
 	require.True(t, served)
 
 	_, ok := rpcss.chainState.GetLatestBlock()
-	require.False(t, ok, "foreign SeenBlock must never reach ChainState (design §5, T13)")
+	require.False(t, ok, "foreign SeenBlock must never reach ChainState")
 }
 
 // ---------------------------------------------------------------------------
-// Configuration wiring (design §11, T8) — through the real cobra command's flags
+// Configuration wiring — through the real cobra command's flags
 // and the same viper mechanics the RunE uses (BindPFlags + optional YAML config).
 // Environment variables are intentionally NOT bound anywhere in this repo, which is
-// why the design scopes configuration to flags and YAML.
+// why configuration is scoped to flags and YAML.
 // ---------------------------------------------------------------------------
 
 func TestSecondaryCacheFlagAndYamlWiring(t *testing.T) {
@@ -433,7 +433,7 @@ func TestSecondaryCacheFlagAndYamlWiring(t *testing.T) {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-// Block-hash→height merge semantics from docs/SECONDARY-CACHE-DESIGN.md §8 (T14):
+// Block-hash→height merge semantics:
 // merged, never overwritten — earliest is the minimum valid height, latest the
 // maximum, and a reply without mappings (NOT_APPLICABLE) cannot erase the other
 // tier's values.
@@ -463,7 +463,7 @@ func TestMergeBlockHashHeights(t *testing.T) {
 }
 
 // The secondary tier must be skipped cleanly in every unconfigured/disconnected
-// state (design §5): nil interface, and an interface wrapping a typed-nil concrete
+// state: nil interface, and an interface wrapping a typed-nil concrete
 // client (the wiring hands over a nil *performance.Cache when disabled).
 func TestSecondaryCacheActiveNilSafety(t *testing.T) {
 	rpcss := &RPCSmartRouterServer{}

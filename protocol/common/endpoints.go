@@ -65,8 +65,7 @@ const (
 // the router substitutes the current request's GUID for the placeholder before
 // serving. No producer exists in this repository — the constants preserve byte-exact
 // compatibility with entries written by other lineages, and are the fallback signal
-// for entry kind when a cache backend predates CacheRelayReply.IsNodeError
-// (docs/SECONDARY-CACHE-DESIGN.md §7).
+// for entry kind when a cache backend predates CacheRelayReply.IsNodeError.
 const (
 	CachedErrorGUIDKeyPrefix   = `"Error_GUID":"`
 	CachedErrorGUIDPlaceholder = CachedErrorGUIDKeyPrefix + `CACHED_ERROR"`

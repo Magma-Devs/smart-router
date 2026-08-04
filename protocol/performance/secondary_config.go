@@ -6,7 +6,7 @@ import (
 )
 
 // SecondaryCacheConfig carries the operator-provided secondary cache settings
-// (docs/SECONDARY-CACHE-DESIGN.md §11).
+// (docs/SECONDARY-CACHE.md).
 type SecondaryCacheConfig struct {
 	Address string
 	Timeout time.Duration
@@ -18,12 +18,12 @@ func (c SecondaryCacheConfig) Enabled() bool {
 	return c.Address != ""
 }
 
-// Validate applies the startup rules from docs/SECONDARY-CACHE-DESIGN.md §11.
+// Validate applies the secondary-cache startup rules (docs/SECONDARY-CACHE.md).
 // A hard error fails startup; warnings are logged and startup proceeds.
 // timeoutSet/modeSet distinguish an explicitly provided flag/YAML value from the
 // default — secondary options without an address are a deployment mistake, not a
 // configuration. primaryAddress feeds the two advisory warnings: secondary-only is
-// explicitly allowed (§5) but warned about (no backfill), and secondary == primary
+// explicitly allowed but warned about (no backfill), and secondary == primary
 // is legal but almost certainly unintended.
 func (c SecondaryCacheConfig) Validate(primaryAddress string, timeoutSet, modeSet bool) (warnings []string, err error) {
 	if !c.Enabled() {

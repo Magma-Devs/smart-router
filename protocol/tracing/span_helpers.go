@@ -168,7 +168,7 @@ func RecordCacheResult(ctx context.Context, span trace.Span, cacheTier, outcome 
 		// cache.hit mirrors every lookup (last write wins, so a primary miss
 		// followed by a secondary hit leaves true); cache.tier is stamped only by
 		// the tier that actually served, so the parent answers "which cache?"
-		// without a child-span walk (docs/SECONDARY-CACHE-DESIGN.md §12).
+		// without a child-span walk.
 		relaySpan.SetAttributes(attribute.Bool(attrCacheHit, hit))
 		if hit {
 			relaySpan.SetAttributes(attribute.String(attrCacheTier, cacheTier))

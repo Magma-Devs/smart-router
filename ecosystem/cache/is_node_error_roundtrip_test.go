@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These tests lock the entry-kind contract from docs/SECONDARY-CACHE-DESIGN.md §7:
+// These tests lock the entry-kind contract of the cache protocol:
 // RelayCacheSet.IsNodeError must survive storage and come back on GetRelay via
 // CacheRelayReply.IsNodeError. Before this, the flag only selected the write TTL and
 // was lost, so a reader (e.g. secondary-cache backfill) could not tell a cached node
