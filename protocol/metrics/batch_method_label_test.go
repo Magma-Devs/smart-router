@@ -229,7 +229,7 @@ func TestRecordDirectRelayEndCollapsesBatchLabel(t *testing.T) {
 
 	for size := 2; size <= 40; size++ {
 		apiName := joinedBatchName(append(repeatMethod("eth_call", size), "eth_getBalance")...)
-		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", apiName, 10, true, &RelayMetrics{IsBatch: true})
+		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", apiName, 10, RelayOutcomeSuccess, &RelayMetrics{IsBatch: true})
 	}
 
 	require.Equal(t, 1, testutil.CollectAndCount(m.routerRequestsTotal),
@@ -249,7 +249,7 @@ func TestRecordDirectRelayEndObservesBatchSizeOnce(t *testing.T) {
 	m := newSmartRouterForBatchLabelTest()
 	apiName := joinedBatchName(repeatMethod("eth_call", 5)...)
 
-	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", apiName, 10, true, &RelayMetrics{IsBatch: true})
+	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", apiName, 10, RelayOutcomeSuccess, &RelayMetrics{IsBatch: true})
 
 	count, sum := histogramTotals(t, m.batchSize)
 	require.Equal(t, uint64(1), count, "one relay must produce exactly one batch-size observation")
@@ -262,7 +262,7 @@ func TestRecordDirectRelayEndObservesBatchSizeOnce(t *testing.T) {
 func TestRecordDirectRelayEndSkipsBatchSizeForSingleMethods(t *testing.T) {
 	m := newSmartRouterForBatchLabelTest()
 
-	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_call", 10, true, &RelayMetrics{IsBatch: true})
+	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_call", 10, RelayOutcomeSuccess, &RelayMetrics{IsBatch: true})
 
 	count, _ := histogramTotals(t, m.batchSize)
 	require.Equal(t, uint64(0), count)
@@ -278,7 +278,7 @@ func TestInFlightGaugeReturnsToZeroForBatches(t *testing.T) {
 	apiName := joinedBatchName(append(repeatMethod("eth_call", 7), "eth_getLogs")...)
 
 	m.RecordDirectRelayStart("ETH1", "jsonrpc", "ep1", apiName)
-	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", apiName, 10, true, &RelayMetrics{IsBatch: true})
+	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", apiName, 10, RelayOutcomeSuccess, &RelayMetrics{IsBatch: true})
 
 	registry := prometheus.NewPedanticRegistry()
 	require.NoError(t, registry.Register(m.endpointInFlight))

@@ -1758,17 +1758,34 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				analytics,
 			)
 
+			// Did WE stop this relay? On a stateful broadcast every endpoint is queried and the
+			// first answer cancels the rest, so N-1 goroutines land here holding context.Canceled
+			// through no fault of their endpoint. Same for a client that hung up. Resolved once,
+			// here, and reused by both the metric outcome and the session release below so the two
+			// can never disagree about what happened (MAG-2648).
+			//
+			// goroutineCtx is the right context to ask: for cross-validation it is derived from a
+			// WithoutCancel parent, so a detached straggler is correctly NOT seen as cancelled.
+			isClientCancel := err != nil && common.IsClientCancellation(err, goroutineCtx)
+
 			if rpcss.smartRouterEndpointMetrics != nil {
 				// analytics is read-only here (classification flags set once pre-launch, Success set
 				// once in SendParsedRelay), so this per-endpoint metric is safe from a detached
-				// straggler goroutine; per-relay success is passed explicitly (err == nil).
+				// straggler goroutine; the per-relay outcome is passed explicitly.
+				outcome := metrics.RelayOutcomeSuccess
+				switch {
+				case isClientCancel:
+					outcome = metrics.RelayOutcomeCancelled
+				case err != nil:
+					outcome = metrics.RelayOutcomeError
+				}
 				rpcss.smartRouterEndpointMetrics.RecordDirectRelayEnd(
 					rpcss.listenEndpoint.ChainID,
 					rpcss.listenEndpoint.ApiInterface,
 					endpointAddress,
 					apiMethod,
 					float64(relayLatency.Milliseconds()),
-					err == nil,
+					outcome,
 					analytics,
 				)
 			}
@@ -1808,7 +1825,21 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			statusCode := localRelayResult.StatusCode
 			shouldFailSession := err != nil || statusCode >= 500 || statusCode == 429
 
-			if !shouldFailSession {
+			if isClientCancel {
+				// We cancelled it, so the endpoint's availability was never actually tested —
+				// release the session and return its CU without a QoS penalty (MAG-2648).
+				// Routing this through OnSessionFailure is the bug: it feeds AddFailedRelay and
+				// the optimizer an availability sample of 0, and on a broadcast that lands on
+				// every healthy node except the single fastest one.
+				//
+				// This branch precedes the shouldFailSession test on purpose — a cancelled relay
+				// always has err != nil, so it would otherwise be swallowed by the failure arm.
+				if errSession := rpcss.sessionManager.OnSessionCancelled(singleConsumerSession, err); errSession != nil {
+					utils.LavaFormatWarning("OnSessionCancelled failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if !shouldFailSession {
 				// Success or client error (4xx except 429) - update session as success.
 				// targetEndpoint / directConn were resolved and the tracker ensured before
 				// dispatch (above), so harvestGen is the generation captured pre-relay.

@@ -1938,14 +1938,14 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 	return nil
 }
 
-// OnSessionDiscarded releases a session that was selected but intentionally
-// dropped before any relay was dispatched. It returns the reserved compute
-// units and unlocks the session without recording a QoS failure or adding a
-// consecutive provider error: no upstream request was made, so availability
-// was not actually tested.
-func (csm *ConsumerSessionManager) OnSessionDiscarded(consumerSession *SingleConsumerSession, reason error) error {
+// releaseWithoutPenalty is the shared body of the two "this told us nothing about the
+// provider" release paths. It returns the reserved compute units and unlocks the session,
+// deliberately recording NO QoS failure, NO consecutive provider error, and NO optimizer
+// availability sample. caller names the entry point so a lock-order violation still
+// reports the site that caused it.
+func (csm *ConsumerSessionManager) releaseWithoutPenalty(consumerSession *SingleConsumerSession, reason error, caller string) error {
 	if err := consumerSession.VerifyLock(); err != nil {
-		return fmt.Errorf("OnSessionDiscarded, consumerSession.lock must be locked before accessing this method: %w", err)
+		return fmt.Errorf("%s, consumerSession.lock must be locked before accessing this method: %w", caller, err)
 	}
 
 	cuToDecrease := consumerSession.LatestRelayCu
@@ -1954,6 +1954,34 @@ func (csm *ConsumerSessionManager) OnSessionDiscarded(consumerSession *SingleCon
 	consumerSession.Free(reason)
 
 	return parentConsumerSessionsWithProvider.decreaseUsedComputeUnits(cuToDecrease)
+}
+
+// OnSessionDiscarded releases a session that was selected but intentionally
+// dropped before any relay was dispatched. It returns the reserved compute
+// units and unlocks the session without recording a QoS failure or adding a
+// consecutive provider error: no upstream request was made, so availability
+// was not actually tested.
+func (csm *ConsumerSessionManager) OnSessionDiscarded(consumerSession *SingleConsumerSession, reason error) error {
+	return csm.releaseWithoutPenalty(consumerSession, reason, "OnSessionDiscarded")
+}
+
+// OnSessionCancelled releases a session whose relay WAS dispatched but was then cancelled
+// by us — a relay-race loser on a stateful broadcast, or a client that hung up — rather
+// than answered or failed by the endpoint (MAG-2648).
+//
+// It shares OnSessionDiscarded's accounting, and for the same reason: the endpoint's
+// availability was never actually tested. It was mid-flight and we told it to stop. Routing
+// these through OnSessionFailure is the bug — that path calls AddFailedRelay (which lands
+// in the availability ratio), appends a consecutive error, and feeds the optimizer an
+// availability sample of 0, penalising a node that did nothing wrong. On a broadcast the
+// fastest node wins and EVERY other healthy node takes that hit, so the damage is
+// structural rather than correlated with node quality.
+//
+// It is a separate name from OnSessionDiscarded on purpose: "discarded" means never sent,
+// and a reader at the call site needs to be able to tell those apart even though the
+// bookkeeping is identical today.
+func (csm *ConsumerSessionManager) OnSessionCancelled(consumerSession *SingleConsumerSession, reason error) error {
+	return csm.releaseWithoutPenalty(consumerSession, reason, "OnSessionCancelled")
 }
 
 // Report session failure, mark it as blocked from future usages, report if timeout happened.

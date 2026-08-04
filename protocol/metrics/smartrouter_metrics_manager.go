@@ -46,6 +46,7 @@ type SmartRouterMetricsManager struct {
 	// Endpoint-scoped metrics (labels: spec, apiInterface, endpoint_id, function)
 	endpointTotalRelaysServiced *MappedLabelsCounterVec  // rpc_endpoint_total_relays_serviced
 	endpointTotalErrored        *MappedLabelsCounterVec  // rpc_endpoint_total_errored
+	endpointTotalCancelled      *MappedLabelsCounterVec  // rpc_endpoint_total_cancelled
 	endpointEndToEndLatency     *prometheus.HistogramVec // rpc_endpoint_end_to_end_latency_milliseconds
 	endpointInFlight            *MappedLabelsGaugeVec    // rpc_endpoint_requests_in_flight
 
@@ -192,6 +193,13 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	endpointTotalErrored := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
 		Name:       "rpc_endpoint_total_errored",
 		Help:       "Total errored relays for this RPC endpoint, by function.",
+		Labels:     endpointFunctionLabels,
+		Registerer: prometheus.DefaultRegisterer,
+	})
+
+	endpointTotalCancelled := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_total_cancelled",
+		Help:       "Relays cancelled by the router before completion, by function — relay-race losers on stateful broadcasts, and client disconnects. NOT an endpoint fault: these are deliberately excluded from rpc_endpoint_total_errored and from QoS/availability scoring. A high rate here is normal on write-heavy traffic (one winner, N-1 cancelled) and is the signal for tuning broadcast fan-out.",
 		Labels:     endpointFunctionLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
@@ -588,6 +596,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		// Endpoint-scoped (with function)
 		endpointTotalRelaysServiced: endpointTotalRelaysServiced,
 		endpointTotalErrored:        endpointTotalErrored,
+		endpointTotalCancelled:      endpointTotalCancelled,
 		endpointEndToEndLatency:     endpointEndToEndLatency,
 		endpointInFlight:            endpointInFlight,
 
@@ -790,6 +799,18 @@ func (m *SmartRouterMetricsManager) AddEndpointRelayServiced(spec, apiInterface,
 	function = m.normalizeMethodLabel(spec, function)
 	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "function": function}
 	m.endpointTotalRelaysServiced.WithLabelValues(labels).Inc()
+}
+
+// AddEndpointRelayCancelled increments the cancelled counter for an endpoint and function.
+// Cancelled means WE stopped the relay — a relay-race loser or a client disconnect — so it
+// is deliberately not an error (MAG-2648).
+func (m *SmartRouterMetricsManager) AddEndpointRelayCancelled(spec, apiInterface, endpointID, function string) {
+	if m == nil {
+		return
+	}
+	function = m.normalizeMethodLabel(spec, function)
+	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "function": function}
+	m.endpointTotalCancelled.WithLabelValues(labels).Inc()
 }
 
 // AddEndpointRelayErrored increments the error counter for an endpoint and function
@@ -1031,20 +1052,52 @@ func (m *SmartRouterMetricsManager) RecordDirectRelayStart(spec, apiInterface, e
 	m.AddEndpointInFlightRequest(spec, apiInterface, endpointID, function)
 }
 
+// RelayOutcome is how a direct relay ended. It is three-valued rather than a success
+// bool because "cancelled" is neither (MAG-2648): the router aborted the relay itself —
+// a relay-race loser on a stateful broadcast, or a client that hung up — so the endpoint
+// neither served nor failed it, and must not be scored either way.
+type RelayOutcome int
+
+const (
+	RelayOutcomeSuccess RelayOutcome = iota
+	RelayOutcomeError
+	// RelayOutcomeCancelled: we stopped it. Records the in-flight decrement and the
+	// cancelled counter, and nothing else.
+	RelayOutcomeCancelled
+)
+
 // RecordDirectRelayEnd records the end of an in-flight request and updates metrics.
 // relay carries the request classification (IsWrite/IsArchive/IsDebugTrace/IsBatch)
 // that the call site should populate on the shared RelayMetrics before calling here.
-func (m *SmartRouterMetricsManager) RecordDirectRelayEnd(spec, apiInterface, endpointID, function string, latencyMs float64, success bool, relay *RelayMetrics) {
+//
+// Every outcome — including cancelled — MUST reach the in-flight decrement below, which
+// pairs the increment from RecordDirectRelayStart. Returning early for cancelled relays
+// would leak rpc_endpoint_requests_in_flight upward forever, one per race loser.
+func (m *SmartRouterMetricsManager) RecordDirectRelayEnd(spec, apiInterface, endpointID, function string, latencyMs float64, outcome RelayOutcome, relay *RelayMetrics) {
 	if m == nil {
 		return
 	}
 	// Observe the batch's element count BEFORE collapsing the label, and do it only
 	// here: this is the single once-per-completed-relay entry point, so the other
 	// recorders normalize without observing and a batch is counted exactly once.
-	m.observeBatchSize(spec, apiInterface, function)
+	// A cancelled relay never completed, so it is not observed.
+	if outcome != RelayOutcomeCancelled {
+		m.observeBatchSize(spec, apiInterface, function)
+	}
 	function = m.normalizeMethodLabel(spec, function)
 
 	m.SubEndpointInFlightRequest(spec, apiInterface, endpointID, function)
+
+	// A cancelled relay stops here: the in-flight gauge is balanced and the cancellation
+	// is counted, but no latency is observed (the relay never finished, so the number is
+	// meaningless) and none of the router request-group counters move — that keeps
+	// requests_total == requests_success + requests_failed a true invariant.
+	if outcome == RelayOutcomeCancelled {
+		m.AddEndpointRelayCancelled(spec, apiInterface, endpointID, function)
+		return
+	}
+
+	success := outcome == RelayOutcomeSuccess
 
 	if success {
 		m.RecordRelaySuccess(spec, apiInterface, endpointID, function, latencyMs)
