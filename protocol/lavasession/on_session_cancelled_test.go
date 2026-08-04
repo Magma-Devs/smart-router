@@ -50,14 +50,11 @@ func TestOnSessionCancelledReturnsReservationWithoutPenalty(t *testing.T) {
 		require.Zero(t, session.LatestRelayCu)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 	})
-
 	t.Run("no blame recorded", func(t *testing.T) {
 		require.Empty(t, session.ConsecutiveErrors,
 			"a relay we cancelled ourselves must not count as a provider failure")
-		require.False(t, session.BlockListed,
-			"a race loser must never be blocklisted")
+		require.False(t, session.BlockListed, "a race loser must never be blocklisted")
 	})
-
 	t.Run("session is reusable", func(t *testing.T) {
 		blocked, ok := session.TryUseSession()
 		require.False(t, blocked)
@@ -66,9 +63,9 @@ func TestOnSessionCancelledReturnsReservationWithoutPenalty(t *testing.T) {
 	})
 }
 
-// The QoS report is what drives the availability ratio the customer saw collapse. A
-// cancelled relay must leave both the answered and the total counts untouched — counting
-// it as "total but not answered" is precisely what dragged availability toward zero.
+// The QoS report drives the availability ratio the customer saw collapse. A cancelled
+// relay must leave both counts untouched — counting it as "total but not answered" is
+// precisely what dragged availability toward zero.
 func TestOnSessionCancelledLeavesQoSUntouched(t *testing.T) {
 	csm, _, session, usedProviders, routerKey := newCancellableTestSession(t, "provider-qos")
 	usedProviders.ReleaseFromLatestBatch("provider-qos", routerKey, context.Canceled)
@@ -84,7 +81,7 @@ func TestOnSessionCancelledLeavesQoSUntouched(t *testing.T) {
 	require.Equal(t, answeredBefore, csm.qosManager.GetAnsweredRelays(epoch, session.SessionId))
 }
 
-// Contrast test: a genuine failure must still be penalised, so the carve-out cannot be
+// COLLATERAL GUARD: a genuine failure must still be penalised, so the carve-out cannot be
 // accused of hiding real faults.
 func TestOnSessionFailureStillRecordsPenalty(t *testing.T) {
 	csm, _, session, usedProviders, routerKey := newCancellableTestSession(t, "provider-real-fault")
@@ -99,4 +96,17 @@ func TestOnSessionFailureStillRecordsPenalty(t *testing.T) {
 		"a real failure must still count against availability")
 	require.NotEmpty(t, session.ConsecutiveErrors,
 		"a real failure must still accumulate consecutive errors")
+}
+
+// COLLATERAL GUARD: OnSessionDiscarded now delegates to the shared helper. Its original
+// contract — release without penalty for a never-dispatched relay — must be unchanged.
+func TestOnSessionDiscardedUnchangedAfterRefactor(t *testing.T) {
+	csm, parent, session, usedProviders, routerKey := newCancellableTestSession(t, "provider-discard")
+	usedProviders.ReleaseFromLatestBatch("provider-discard", routerKey, ConsistencyPreValidationError)
+
+	require.NoError(t, csm.OnSessionDiscarded(session, ConsistencyPreValidationError))
+	require.Zero(t, parent.atomicReadUsedComputeUnits())
+	require.Zero(t, session.LatestRelayCu)
+	require.Empty(t, session.ConsecutiveErrors)
+	require.Zero(t, usedProviders.CurrentlyUsed())
 }
