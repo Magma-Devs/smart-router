@@ -5,6 +5,14 @@ Closes: #XXXX
 <!-- Add a description of the changes that this PR introduces and the files that
 are the most critical to review. -->
 
+## Jira ticket
+
+<!-- Keep the PR title descriptive. Add exactly one line using the format
+`Jira ticket: MAG-123`. The pull request cannot be merged unless the ticket
+exists in Jira. -->
+
+Jira ticket:
+
 ---
 
 ## Author Checklist
