@@ -35,9 +35,11 @@ func TestProbeVerdictConfigFor_SourcesLagToleranceFromConsistency(t *testing.T) 
 }
 
 // recordingAppender captures AppendProbeData calls so tests can assert the one-sample-per-provider
-// rule and the fed values.
+// rule and the fed values, plus RebaseAvailabilityOnRecovery calls so tests can assert the prober
+// reports a proven recovery to the optimizer.
 type recordingAppender struct {
-	calls []probeCall
+	calls   []probeCall
+	rebased []string
 }
 
 type probeCall struct {
@@ -52,6 +54,10 @@ type probeCall struct {
 
 func (r *recordingAppender) AppendProbeData(provider string, availability float64, latency time.Duration, hasLatency bool, syncBlock uint64, hasSync bool, syncRef provideroptimizer.SyncReference) {
 	r.calls = append(r.calls, probeCall{provider, availability, latency, hasLatency, syncBlock, hasSync, syncRef})
+}
+
+func (r *recordingAppender) RebaseAvailabilityOnRecovery(provider string) {
+	r.rebased = append(r.rebased, provider)
 }
 
 func ep(url, provider string, enabled bool) *lavasession.EndpointWithDirectConnection {
@@ -110,6 +116,73 @@ func TestProbeCycle_ReEnablesRecoveredEndpoint(t *testing.T) {
 	cycle(int(probeCfg().ReEnableHysteresis))
 	require.True(t, dc.Endpoint.Enabled, "the probe re-enables a recovered endpoint after K distinct polls")
 	require.Equal(t, []string{"provider1"}, recovered, "recovery restores the provider's routing state (F2)")
+}
+
+// TestProbeCycle_RecoveryRebasesOptimizerAvailability pins the wiring that proving recovery reaches
+// the OPTIMIZER, not only the session manager. Returning a provider to routing while the optimizer
+// still scores it off the availability=0 samples this same loop fed during the outage leaves its
+// composite pinned at MinSelectionChance for several times the outage length. The rebase must fire
+// exactly on the re-enable cycle: not before it, and not again on every healthy cycle after.
+func TestProbeCycle_RecoveryRebasesOptimizerAvailability(t *testing.T) {
+	const url = "http://ep:8545"
+	base := time.Unix(1_700_000_000, 0)
+
+	dc := ep(url, "provider1", false) // starts disabled
+	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	appender := &recordingAppender{}
+
+	cycle := func(i int) {
+		pollTime := base.Add(time.Duration(i) * time.Second)
+		now := pollTime.Add(time.Millisecond)
+		getObs := func(string) (endpointstate.EndpointObservation, bool) {
+			return freshObs(1000, now.Add(-time.Second), pollTime, 20*time.Millisecond), true
+		}
+		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), appender, nil)
+	}
+
+	// Before the K-th healthy poll the endpoint has not proven recovery — no rebase may fire, or a
+	// still-broken provider would be handed the probation baseline every single cycle.
+	for i := 1; i < int(probeCfg().ReEnableHysteresis); i++ {
+		cycle(i)
+		require.Empty(t, appender.rebased, "no rebase before recovery is proven (cycle %d)", i)
+	}
+
+	// The re-enable cycle rebases exactly once.
+	cycle(int(probeCfg().ReEnableHysteresis))
+	require.True(t, dc.Endpoint.Enabled, "precondition: the endpoint re-enabled")
+	require.Equal(t, []string{"provider1"}, appender.rebased,
+		"proving recovery must rebase the provider's availability in the optimizer")
+
+	// Steady state afterwards: the endpoint is already enabled, so RecordProbeVerdict no longer
+	// reports a transition and the rebase must not repeat.
+	for i := int(probeCfg().ReEnableHysteresis) + 1; i <= int(probeCfg().ReEnableHysteresis)+3; i++ {
+		cycle(i)
+	}
+	require.Equal(t, []string{"provider1"}, appender.rebased,
+		"the rebase fires on the recovery transition only, not every healthy cycle")
+}
+
+// TestProbeCycle_NoRebaseWithoutRecovery — an endpoint that never proves recovery (failing polls) must
+// never have its optimizer availability rebased, however many cycles run.
+func TestProbeCycle_NoRebaseWithoutRecovery(t *testing.T) {
+	const url = "http://ep:8545"
+	now := time.Unix(1_700_000_000, 0)
+	dc := ep(url, "provider1", false)
+	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	appender := &recordingAppender{}
+	getObs := func(string) (endpointstate.EndpointObservation, bool) {
+		return endpointstate.EndpointObservation{
+			LatestBlock:             1000,
+			ObservedAt:              now.Add(-time.Second),
+			LastSuccessfulPoll:      now.Add(-2 * time.Second),
+			ConsecutivePollFailures: 3,
+		}, true
+	}
+	for i := 0; i < 10; i++ {
+		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), appender, nil)
+	}
+	require.False(t, dc.Endpoint.Enabled)
+	require.Empty(t, appender.rebased, "a provider that never recovers must never be rebased")
 }
 
 // TestProbeCycle_FailedPollDoesNotReEnable: a disabled endpoint whose last poll FAILED
