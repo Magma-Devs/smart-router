@@ -15,7 +15,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/itchyny/gojq"
@@ -160,16 +159,6 @@ func unwrapLavaError(err error) *common.LavaError {
 		return wrapped.LavaErr
 	}
 	return nil
-}
-
-// ExtractLavaError returns the *LavaError embedded in a LavaWrappedError, or LavaErrorUnknown.
-// Use this when an error has already been classified (e.g., returned from handleAndClassify)
-// and you need to retrieve its classification for structured logging.
-func ExtractLavaError(err error) *common.LavaError {
-	if le := unwrapLavaError(err); le != nil {
-		return le
-	}
-	return common.LavaErrorUnknown
 }
 
 // IsUnsupportedMethodErrorType checks if an error wraps a LavaError with unsupported method SubCategory.
@@ -317,17 +306,6 @@ func (geh *genericErrorHandler) handleGenericErrors(ctx context.Context, nodeErr
 		utils.LavaFormatProduction("Original Node Error", nodeError)
 	}
 	return retError
-}
-
-func (geh *genericErrorHandler) handleCodeErrors(code codes.Code) error {
-	if code == codes.DeadlineExceeded {
-		return utils.LavaFormatProduction("Provider Failed Sending Message", common.ContextDeadlineExceededError)
-	}
-	switch code {
-	case codes.PermissionDenied, codes.Canceled, codes.Aborted, codes.DataLoss, codes.Unauthenticated, codes.Unavailable:
-		return utils.LavaFormatProduction("Provider Side Failed Sending Message, Reason: "+code.String(), nil)
-	}
-	return nil
 }
 
 func (geh *genericErrorHandler) HandleStatusError(statusCode int, strict bool) error {

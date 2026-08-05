@@ -5,19 +5,10 @@ import (
 	"math"
 )
 
-// NewQualityOfServiceReport creates a QualityOfServiceReport with default zero values.
-func NewQualityOfServiceReport() *QualityOfServiceReport {
-	return &QualityOfServiceReport{
-		Latency:      0,
-		Availability: 0,
-		Sync:         0,
-	}
-}
-
 // QoS reputation computation configuration.
 var (
-	DefaultFailureCost   int64   = 3
-	DefaultSyncFactor    float64 = 0.3
+	DefaultFailureCost    int64   = 3
+	DefaultSyncFactor     float64 = 0.3
 	DefaultStrategyFactor float64 = 1.0 // balanced
 
 	// strategy factors (multipliers to the sync factor)
@@ -45,30 +36,6 @@ func defaultReputationConfig() reputationConfig {
 
 // Option configures a reputationConfig.
 type Option func(*reputationConfig)
-
-func WithSyncFactor(factor float64) Option {
-	return func(c *reputationConfig) {
-		c.syncFactor = factor
-	}
-}
-
-func WithFailureCost(cost int64) Option {
-	return func(c *reputationConfig) {
-		c.failureCost = cost
-	}
-}
-
-func WithStrategyFactor(factor float64) Option {
-	return func(c *reputationConfig) {
-		c.strategyFactor = factor
-	}
-}
-
-func WithBlockErrorProbability(probability float64) Option {
-	return func(c *reputationConfig) {
-		c.blockErrorProbability = probability
-	}
-}
 
 // Validate returns an error if the QualityOfServiceReport fields are invalid.
 func (q *QualityOfServiceReport) Validate() error {

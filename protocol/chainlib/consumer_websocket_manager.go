@@ -84,10 +84,6 @@ func NewConsumerWebsocketManager(options ConsumerWebsocketManagerOptions) *Consu
 	return cwm
 }
 
-func (cwm *ConsumerWebsocketManager) GetWebSocketConnectionUniqueId(dappId, userIp string) string {
-	return dappId + "__" + userIp + "__" + cwm.WebsocketConnectionUID
-}
-
 func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]byte, error) {
 	rateLimitError := common.JsonRpcRateLimitError
 	id := 0

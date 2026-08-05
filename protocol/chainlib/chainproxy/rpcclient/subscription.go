@@ -42,15 +42,8 @@ var (
 	ErrSubscriptionNotFound = errors.New("subscription not found")
 )
 
-var globalGen = randomIDGenerator()
-
 // ID defines a pseudo random number that is used to identify RPC subscriptions.
 type ID string
-
-// NewID returns a new, random ID.
-func NewID() ID {
-	return globalGen()
-}
 
 // randomIDGenerator returns a function generates a random IDs.
 func randomIDGenerator() func() ID {
@@ -85,12 +78,6 @@ func encodeID(b []byte) ID {
 }
 
 type notifierKey struct{}
-
-// NotifierFromContext returns the Notifier value stored in ctx, if any.
-func NotifierFromContext(ctx context.Context) (*Notifier, bool) {
-	n, ok := ctx.Value(notifierKey{}).(*Notifier)
-	return n, ok
-}
 
 // Notifier is tied to a RPC connection that supports subscriptions.
 // Server callbacks use the notifier to send notifications.

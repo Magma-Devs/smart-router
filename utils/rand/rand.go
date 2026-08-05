@@ -65,17 +65,6 @@ func (t *threadSafeRand) Float64() float64 {
 	return float64(n.Int64()) / float64(int64(1<<53))
 }
 
-func (t *threadSafeRand) Uint32() uint32 {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	maxVal := big.NewInt(1 << 32)
-	result, err := cryptorand.Int(cryptorand.Reader, maxVal)
-	if err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return uint32(result.Uint64())
-}
-
 func (t *threadSafeRand) Uint64() uint64 {
 	t.lock.Lock()
 	defer t.lock.Unlock()
@@ -93,20 +82,6 @@ func (t *threadSafeRand) Int63() int64 {
 	defer t.lock.Unlock()
 	// Int63 returns a non-negative int64, so max is 2^63
 	maxVal := new(big.Int).SetUint64(1 << 63)
-	result, err := cryptorand.Int(cryptorand.Reader, maxVal)
-	if err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return result.Int64()
-}
-
-func (t *threadSafeRand) Int63n(n int64) int64 {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	if n <= 0 {
-		panic("invalid argument to Int63n")
-	}
-	maxVal := big.NewInt(n)
 	result, err := cryptorand.Int(cryptorand.Reader, maxVal)
 	if err != nil {
 		panic("crypto/rand failed: " + err.Error())
@@ -152,11 +127,6 @@ func Float64() float64 {
 	return protocolRand.Load().Float64()
 }
 
-func Uint32() uint32 {
-	PanicIfProtocolRandNotInitialized()
-	return protocolRand.Load().Uint32()
-}
-
 func Uint64() uint64 {
 	PanicIfProtocolRandNotInitialized()
 	return protocolRand.Load().Uint64()
@@ -165,9 +135,4 @@ func Uint64() uint64 {
 func Int63() int64 {
 	PanicIfProtocolRandNotInitialized()
 	return protocolRand.Load().Int63()
-}
-
-func Int63n(n int64) int64 {
-	PanicIfProtocolRandNotInitialized()
-	return protocolRand.Load().Int63n(n)
 }

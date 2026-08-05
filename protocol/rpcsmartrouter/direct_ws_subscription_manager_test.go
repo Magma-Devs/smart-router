@@ -32,8 +32,6 @@ type mockSubscriptionServer struct {
 	subscriptions   map[string]chan struct{} // subscription ID -> close channel
 	lock            sync.RWMutex
 	writeMu         sync.Mutex // serializes conn.WriteMessage — gorilla requires a single concurrent writer
-	onSubscribe     func(method string, params interface{}) (string, error)
-	onUnsubscribe   func(subID string) error
 	messageInterval time.Duration
 }
 

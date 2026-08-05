@@ -9,9 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	utils "github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/specfetcher"
 	types "github.com/magma-Devs/smart-router/types/spec"
+	utils "github.com/magma-Devs/smart-router/utils"
 )
 
 func decodeProposal(path string) (types.SpecAddProposalJSON, error) {
@@ -25,30 +24,6 @@ func decodeProposal(path string) (types.SpecAddProposalJSON, error) {
 	// may contain fields (e.g. deprecated fields) that we don't model.
 	err = json.Unmarshal(contents, &proposal)
 	return proposal, err
-}
-
-// GetSpecFromGit fetches a spec from a GitHub repository (unauthenticated).
-// Deprecated: Use specfetcher.FetchSpecFromGitHub for new code.
-func GetSpecFromGit(repoURL string, index string) (types.Spec, error) {
-	return GetSpecFromGitWithToken(repoURL, index, "")
-}
-
-// GetSpecFromGitWithToken fetches a spec from a GitHub repository with optional authentication.
-// Deprecated: Use specfetcher.FetchSpecFromGitHub for new code.
-func GetSpecFromGitWithToken(repoURL string, index string, githubToken string) (types.Spec, error) {
-	return specfetcher.FetchSpecFromGitHub(context.Background(), repoURL, index, githubToken)
-}
-
-// GetSpecFromGitLab fetches a spec from a GitLab repository (unauthenticated).
-// Deprecated: Use specfetcher.FetchSpecFromGitLab for new code.
-func GetSpecFromGitLab(repoURL string, index string) (types.Spec, error) {
-	return GetSpecFromGitLabWithToken(repoURL, index, "")
-}
-
-// GetSpecFromGitLabWithToken fetches a spec from a GitLab repository with optional authentication.
-// Deprecated: Use specfetcher.FetchSpecFromGitLab for new code.
-func GetSpecFromGitLabWithToken(repoURL string, index string, gitlabToken string) (types.Spec, error) {
-	return specfetcher.FetchSpecFromGitLab(context.Background(), repoURL, index, gitlabToken)
 }
 
 // GetSpecFromLocalDirs loads specs from multiple directories, merging them into
@@ -75,61 +50,6 @@ func GetSpecFromLocalDirs(specPaths []string, index string) (types.Spec, error) 
 		return types.Spec{}, fmt.Errorf("no specs loaded from any of %v", specPaths)
 	}
 	spec, err := expandSpecWithDependencies(allSpecs, index)
-	if err != nil {
-		return types.Spec{}, err
-	}
-	return *spec, nil
-}
-
-func GetSpecFromLocalDir(specPath string, index string) (types.Spec, error) {
-	specs := map[string]types.Spec{}
-	var errs []error
-
-	// Walk through all files and subdirectories in the specPath
-	err := filepath.WalkDir(specPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			errs = append(errs, fmt.Errorf("error accessing path %s: %w", path, err))
-			return nil // Continue walking, but record the error
-		}
-
-		if d.IsDir() {
-			return nil // Skip directories
-		}
-
-		// Attempt to decode the proposal from the file
-		proposal, err := decodeProposal(path)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("error decoding proposal from %s: %w", path, err))
-			return nil // Continue walking, but record the error
-		}
-
-		// Extract specs from the proposal and add them to the map
-		for _, spec := range proposal.Proposal.Specs {
-			specs[spec.Index] = spec
-		}
-		return nil
-	})
-	if err != nil {
-		errs = append(errs, err)
-	}
-
-	if len(errs) > 0 {
-		return types.Spec{}, fmt.Errorf("multiple errors occurred: %v", errs)
-	}
-
-	// Log loaded specs for debugging
-	if len(specs) > 0 {
-		specIDs := make([]string, 0, len(specs))
-		for id := range specs {
-			specIDs = append(specIDs, id)
-		}
-		utils.LavaFormatInfo("Loaded specs from local directory",
-			utils.LogAttr("spec_count", len(specs)),
-			utils.LogAttr("directory", specPath),
-			utils.LogAttr("spec_ids", strings.Join(specIDs, ", ")))
-	}
-
-	spec, err := expandSpecWithDependencies(specs, index)
 	if err != nil {
 		return types.Spec{}, err
 	}

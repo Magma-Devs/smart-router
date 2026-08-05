@@ -10,11 +10,10 @@
 package sigs
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
 
 	tendermintcrypto "github.com/cometbft/cometbft/crypto"
-	"golang.org/x/crypto/ripemd160" //nolint:staticcheck // needed for Bitcoin-style address derivation
+	//nolint:staticcheck // needed for Bitcoin-style address derivation
 )
 
 // EncodeUint64 encodes a uint64 value to a byte array
@@ -27,13 +26,4 @@ func EncodeUint64(val uint64) []byte {
 // HashMsg hashes msgData using SHA-256
 func HashMsg(msgData []byte) []byte {
 	return tendermintcrypto.Sha256(msgData)
-}
-
-// pubKeyBytesToAddress computes RIPEMD160(SHA256(pubkeyBytes)), matching
-// the algorithm used by cosmos-sdk's secp256k1.PubKey.Address().
-func pubKeyBytesToAddress(pubkeyBytes []byte) []byte {
-	shaHash := sha256.Sum256(pubkeyBytes)
-	hasher := ripemd160.New()
-	hasher.Write(shaHash[:])
-	return hasher.Sum(nil)
 }

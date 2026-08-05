@@ -1,13 +1,8 @@
 package chainlib
 
 import (
-	"github.com/magma-Devs/smart-router/protocol/common"
 	types "github.com/magma-Devs/smart-router/types/spec"
 )
-
-func ShouldSendToAllProviders(chainMessage ChainMessage) bool {
-	return chainMessage.GetApi().Category.Stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS
-}
 
 func GetAddon(chainMessage ChainMessageForSend) string {
 	return chainMessage.GetApiCollection().CollectionData.AddOn
