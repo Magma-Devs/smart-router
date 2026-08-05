@@ -1,0 +1,47 @@
+# Smart Router Direct RPC Configuration — Ethereum with a RESP cache backend
+# Mode: Direct connections to Ethereum JSON-RPC endpoints (no Lava providers!)
+#
+# Same as smartrouter_eth.yml, but caching runs against a RESP-compatible
+# (Redis/Valkey) backend instead of the cache sidecar: the router executes the
+# cache engine in-process and stores entries in the backend declared below
+# (docs/RESP-CACHE.md). When both resp-cache: and cache-be: are configured,
+# resp-cache wins and cache-be is preserved as the rollback path.
+#
+# Run it with the RESP overlay (which starts the valkey service):
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_eth_resp_cache.yml \
+#     docker compose -f docker/docker-compose.yml \
+#                    -f docker/docker-compose.resp-cache.yml up --build
+
+# RESP cache backend ("valkey:6379" is the compose service name + port).
+# Full surface: topology (standalone|sentinel|cluster), read-addresses,
+# credentials (password-file rotates live), tls, timeouts — docs/RESP-CACHE.md.
+resp-cache:
+  addresses: ["valkey:6379"]
+  key-prefix: "sr" # [A-Za-z0-9._-]+ — used in SCAN MATCH globs; distinct prefixes isolate flushes on a shared backend
+
+# Prometheus metrics (scrape at http://<host>:7779/metrics). Set to
+# "disabled" to turn off. The resp backend adds smartrouter_resp_cache_*.
+metrics-listen-address: "0.0.0.0:7779"
+
+endpoints:
+  - listen-address: "0.0.0.0:3360"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    network-address: "0.0.0.0:3360"
+
+direct-rpc:
+  # Endpoint 1 — PublicNode (HTTP + WS)
+  - name: "eth-publicnode"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://ethereum-rpc.publicnode.com"
+      - url: "wss://ethereum-rpc.publicnode.com"
+
+  # Endpoint 2 — Tenderly public gateway (HTTP + WS)
+  - name: "eth-tenderly"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://mainnet.gateway.tenderly.co"
+      - url: "wss://mainnet.gateway.tenderly.co"

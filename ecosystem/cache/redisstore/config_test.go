@@ -63,10 +63,9 @@ func TestFailoverOptionsMapping(t *testing.T) {
 	}
 	require.NoError(t, cfg.Validate())
 
-	provider := NewStreamingProvider(cfg.credentialsSource())
 	sentinelPassword, err := cfg.sentinelPassword()
 	require.NoError(t, err)
-	opts := cfg.failoverOptions(cfg.Addresses, nil, provider, sentinelPassword)
+	opts := cfg.failoverOptions(cfg.Addresses, nil, cfg.credentialsSource(), sentinelPassword)
 
 	require.Equal(t, "mymaster", opts.MasterName)
 	require.Equal(t, cfg.Addresses, opts.SentinelAddrs)
@@ -74,9 +73,13 @@ func TestFailoverOptionsMapping(t *testing.T) {
 	require.Equal(t, "sentinel-secret", opts.SentinelPassword, "control-plane password comes from the file, trimmed")
 	require.Equal(t, 1, opts.DB)
 	require.Equal(t, 7, opts.PoolSize)
-	require.Same(t, provider, opts.StreamingCredentialsProvider.(*StreamingProvider), "data-node creds flow through the streaming provider")
 
-	user, pass, err := provider.source.Credentials()
+	// Sentinel data-node creds resolve per connection attempt (the streaming
+	// re-auth manager is not initialized by NewFailoverClient in go-redis
+	// v9.22 — see failoverOptions).
+	require.Nil(t, opts.StreamingCredentialsProvider)
+	require.NotNil(t, opts.CredentialsProviderContext)
+	user, pass, err := opts.CredentialsProviderContext(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "datauser", user)
 	require.Equal(t, "datapass", pass)
