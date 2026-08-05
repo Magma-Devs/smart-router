@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -22,6 +22,7 @@ type relayerCacheClientStore struct {
 	ctx          context.Context
 	address      string
 	reconnecting atomic.Bool
+	closed       atomic.Bool // set by close(); no reconnect may spawn afterwards
 }
 
 const (
@@ -45,7 +46,7 @@ func (r *relayerCacheClientStore) getClient() pairingtypes.RelayerCacheClient {
 	r.lock.RLock()
 	defer r.lock.RUnlock()
 
-	if r.client == nil {
+	if r.client == nil && !r.closed.Load() {
 		go r.reconnectClient()
 	}
 
@@ -72,6 +73,14 @@ func (r *relayerCacheClientStore) connectClient() error {
 		func() {
 			r.lock.Lock()
 			defer r.lock.Unlock()
+			// A dial that was in flight when close() ran must not resurrect the
+			// client — release the fresh connection instead of installing it.
+			if r.closed.Load() {
+				if closeErr := conn.Close(); closeErr != nil {
+					utils.LavaFormatWarning("failed closing cache gRPC connection dialed after close", closeErr, utils.LogAttr("address", r.address))
+				}
+				return
+			}
 			// Close the old connection before replacing it to prevent goroutine leaks.
 			// Each *grpc.ClientConn spawns internal goroutines (reader, writer, callback serializers)
 			// that only exit when conn.Close() is called.
@@ -108,6 +117,10 @@ func (r *relayerCacheClientStore) reconnectClient() {
 	utils.LavaFormatInfo("cache service reconnection loop started", utils.LogAttr("address", r.address))
 
 	for {
+		if r.closed.Load() {
+			utils.LavaFormatInfo("cache service reconnection loop exiting (client closed)", utils.LogAttr("address", r.address))
+			return
+		}
 		// Dial first, sleep only between failed attempts. Otherwise a caller
 		// that just discovered client == nil waits a full reconnectInterval
 		// before any retry happens, leaving the cache silently skipped.
@@ -122,6 +135,25 @@ func (r *relayerCacheClientStore) reconnectClient() {
 		case <-time.After(reconnectInterval):
 		}
 	}
+}
+
+// close permanently shuts the store: no further reconnect attempts spawn, and
+// the live gRPC connection (if any) is released. Safe to race an in-flight
+// reconnect — connectClient re-checks closed under the same lock before
+// installing a fresh connection. Idempotent and nil-safe.
+func (r *relayerCacheClientStore) close() error {
+	if r == nil || !r.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	var err error
+	if r.conn != nil {
+		err = r.conn.Close()
+	}
+	r.client = nil
+	r.conn = nil
+	return err
 }
 
 // resetOnConnectionError clears the client when a gRPC connection-level error is detected,
@@ -221,4 +253,15 @@ func (cache *Cache) Flush(ctx context.Context) error {
 		cache.clientStore.resetOnConnectionError(err)
 	}
 	return err
+}
+
+// Close permanently shuts the client down: the background reconnect loop stops,
+// the gRPC connection closes, and the cache reads as inactive (operations
+// return NotConnectedError). Nil-safe and idempotent; reached from the router's
+// graceful shutdown, never the relay hot path.
+func (cache *Cache) Close() error {
+	if cache == nil {
+		return nil
+	}
+	return cache.clientStore.close()
 }

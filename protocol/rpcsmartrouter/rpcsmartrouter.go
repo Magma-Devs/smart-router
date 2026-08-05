@@ -209,11 +209,17 @@ type RPCSmartRouter struct {
 	// deferred to Stop()'s drain phase, not to Start(). Closing it in Start
 	// would shut the BatchProcessor down while relays are still emitting.
 	usageSink metrics.UsageEventSink
+
+	// cacheBackend is the cache-be client handed to Start (typed-nil *Cache
+	// when --cache-be is unset). Held here so Stop can Close it after the
+	// client-facing drain — late async populator writes then fail fast
+	// instead of holding a connection open past shutdown.
+	cacheBackend performance.CacheBackend
 }
 
 type rpcSmartRouterStartOptions struct {
 	rpcEndpoints             []*lavasession.RPCEndpoint
-	cache                    *performance.Cache
+	cache                    performance.CacheBackend
 	strategy                 provideroptimizer.Strategy
 	analyticsServerAddresses AnalyticsServerAddresses
 	cmdFlags                 common.ConsumerCmdFlags
@@ -240,6 +246,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	rpsr.backupProviderSessions = make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider)
 	rpsr.failedStaticProviders = make(map[string][]*lavasession.RPCStaticProviderEndpoint)
 	rpsr.rpcServers = make(map[string]*RPCSmartRouterServer)
+	rpsr.cacheBackend = options.cache
 	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
 
 	// RPCSmartRouter always runs in standalone mode with time-based epochs
@@ -437,6 +444,16 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 		}
 		if server.grpcSubscriptionManager != nil {
 			server.grpcSubscriptionManager.Stop()
+		}
+	}
+
+	// Close the cache-be client after the client-facing drain: in-flight relays
+	// are done, so the only remaining callers are stray async populator writes,
+	// which now fail fast (NotConnectedError) instead of holding a connection
+	// open past shutdown. Nil-safe for routers started without a cache.
+	if rpsr.cacheBackend != nil {
+		if err := rpsr.cacheBackend.Close(); err != nil {
+			utils.LavaFormatWarning("cache backend close returned error", err)
 		}
 	}
 
@@ -2510,7 +2527,10 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version)
 			rand.InitRandomSeed()
 
-			var cache *performance.Cache = nil
+			// Typed-nil, never a nil interface: when --cache-be is unset, call
+			// sites still probe CacheActive() through the interface and rely on
+			// the nil-receiver-safe methods of *performance.Cache.
+			var cache performance.CacheBackend = (*performance.Cache)(nil)
 			// viper (not cmd.Flags) so --cache-be can also come from the config file.
 			if cacheAddr := viper.GetString(performance.CacheFlagName); cacheAddr != "" {
 				var err error

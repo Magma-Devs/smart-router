@@ -60,7 +60,7 @@ type RPCSmartRouterServer struct {
 	sessionManager       *lavasession.ConsumerSessionManager
 	listenEndpoint       *lavasession.RPCEndpoint
 	rpcSmartRouterLogs   *metrics.RPCConsumerLogs
-	cache                *performance.Cache
+	cache                performance.CacheBackend
 	consistencyConfig    *relaycore.ConsistencyValidationConfig // Configuration for consistency validation
 	sharedState          bool                                   // using the cache backend to sync the latest seen block
 	relaysMonitor        *metrics.RelaysMonitor
@@ -111,7 +111,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	listenEndpoint *lavasession.RPCEndpoint,
 	chainParser chainlib.ChainParser,
 	sessionManager *lavasession.ConsumerSessionManager,
-	cache *performance.Cache,
+	cache performance.CacheBackend,
 	rpcSmartRouterLogs *metrics.RPCConsumerLogs,
 	relaysMonitor *metrics.RelaysMonitor,
 	cmdFlags common.ConsumerCmdFlags,
@@ -3044,8 +3044,8 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	protocolMessage chainlib.ProtocolMessage,
 	relayResult *common.RelayResult,
 ) {
-	// Skip if cache is not active
-	if !rpcss.cache.CacheActive() {
+	// Skip if cache is not active (nil interface: server wired without a backend)
+	if rpcss.cache == nil || !rpcss.cache.CacheActive() {
 		return
 	}
 
@@ -3276,7 +3276,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 
 	// Cache lookup: only if cache is active, cross-validation is disabled, and request is not stateful
 	crossValidationEnabled := selection == relaycore.CrossValidation && crossValidationParams != nil
-	if rpcss.cache.CacheActive() {
+	if rpcss.cache != nil && rpcss.cache.CacheActive() {
 		if crossValidationEnabled {
 			// Cross-validation requires fresh endpoint validation - cache would defeat consensus verification
 			utils.LavaFormatDebug("Cache bypassed due to cross-validation requirements",
