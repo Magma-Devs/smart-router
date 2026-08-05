@@ -1,6 +1,7 @@
 package redisstore
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -207,19 +208,28 @@ func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider
 	}
 }
 
-func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, sentinelPassword string) *redis.FailoverOptions {
+// failoverOptions carries data-node credentials through
+// CredentialsProviderContext (fresh resolution on every connection attempt)
+// rather than the streaming provider: go-redis v9.22's NewFailoverClient
+// accepts StreamingCredentialsProvider in its options but never initializes
+// the streaming re-auth manager, so the first operation nil-panics. With the
+// context provider, rotated credentials apply on reconnects and failovers —
+// in-place re-auth of idle connections needs the upstream gap fixed first.
+func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source CredentialsSource, sentinelPassword string) *redis.FailoverOptions {
 	return &redis.FailoverOptions{
-		MasterName:                   cfg.MasterName,
-		SentinelAddrs:                addrs,
-		SentinelUsername:             cfg.SentinelUsername,
-		SentinelPassword:             sentinelPassword,
-		DB:                           cfg.DB,
-		StreamingCredentialsProvider: provider,
-		TLSConfig:                    tlsCfg,
-		DialTimeout:                  cfg.DialTimeout,
-		ReadTimeout:                  cfg.ReadTimeout,
-		WriteTimeout:                 cfg.WriteTimeout,
-		PoolSize:                     cfg.PoolSize,
+		MasterName:       cfg.MasterName,
+		SentinelAddrs:    addrs,
+		SentinelUsername: cfg.SentinelUsername,
+		SentinelPassword: sentinelPassword,
+		DB:               cfg.DB,
+		CredentialsProviderContext: func(ctx context.Context) (string, string, error) {
+			return source.Credentials()
+		},
+		TLSConfig:    tlsCfg,
+		DialTimeout:  cfg.DialTimeout,
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+		PoolSize:     cfg.PoolSize,
 	}
 }
 
@@ -243,7 +253,7 @@ func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, provider *Stre
 		if err != nil {
 			return nil, err
 		}
-		return redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, provider, sentinelPassword)), nil
+		return redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, cfg.credentialsSource(), sentinelPassword)), nil
 	case TopologyCluster:
 		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, provider)), nil
 	default:
