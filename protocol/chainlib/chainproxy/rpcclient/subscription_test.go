@@ -210,3 +210,34 @@ func TestClientSubscription_ErrChannelBehavior(t *testing.T) {
 	_, ok = <-sub.Err()
 	require.False(t, ok, "can read from closed error channel multiple times")
 }
+
+// TestClientSubscription_NilReceiverIsSafe is the rpcclient half of the MAG-2685 regression.
+//
+// Client.Subscribe returns (nil subscription, response, NIL error) when the upstream answers a
+// subscribe with a JSON-RPC error object. Callers park that nil in an interface, where a nil
+// check on the interface value cannot see it, and then call Err() — which dereferenced the nil
+// receiver and panicked, taking the router process down.
+//
+// Err() must yield a nil channel (a case that never fires, correct for a subscription that was
+// never established) and Unsubscribe() must be a no-op, rather than panicking.
+func TestClientSubscription_NilReceiverIsSafe(t *testing.T) {
+	var sub *ClientSubscription
+
+	require.NotPanics(t, func() {
+		ch := sub.Err()
+		require.Nil(t, ch, "Err() on a nil receiver must return a nil channel, not panic")
+
+		// Receiving from a nil channel blocks forever, so it must never be the only ready
+		// case. Prove it simply never fires rather than panicking or yielding a value.
+		select {
+		case <-ch:
+			t.Fatal("nil Err() channel must never become ready")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}, "Err() must tolerate a nil receiver")
+
+	require.NotPanics(t, func() {
+		sub.Unsubscribe()
+		sub.Unsubscribe() // idempotent, as on a real subscription
+	}, "Unsubscribe() must tolerate a nil receiver")
+}

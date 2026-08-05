@@ -256,13 +256,25 @@ func newClientSubscription(c *Client, namespace string, channel reflect.Value) *
 // error has occurred.
 //
 // The error channel is closed when Unsubscribe is called on the subscription.
+//
+// A nil receiver yields a nil channel rather than panicking. Subscribe can hand back a nil
+// subscription alongside a nil error when the upstream answers with a JSON-RPC error object,
+// and callers routinely park this in an interface — where a nil check on the interface value
+// cannot detect it. Receiving from the nil channel simply never fires, which is the correct
+// behaviour for a subscription that was never established. See MAG-2685.
 func (sub *ClientSubscription) Err() <-chan error {
+	if sub == nil {
+		return nil
+	}
 	return sub.err
 }
 
 // Unsubscribe unsubscribes the notification and closes the error channel.
-// It can safely be called more than once.
+// It can safely be called more than once, and is a no-op on a nil receiver (see Err).
 func (sub *ClientSubscription) Unsubscribe() {
+	if sub == nil {
+		return
+	}
 	sub.errOnce.Do(func() {
 		// IMPORTANT: must never block forever.
 		// If Unsubscribe is called before the subscription forwarding goroutine (sub.run) is started,

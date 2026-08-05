@@ -1148,6 +1148,20 @@ func (dwsm *DirectWSSubscriptionManager) createUpstreamSubscription(
 		return nil, nil, nil, fmt.Errorf("upstream subscribe failed: %w", err)
 	}
 
+	// Subscribe reports "upstream answered with a JSON-RPC error object" as (nil, resp, nil)
+	// — a nil subscription with a NIL error, so the check above does not catch it. That is a
+	// failed subscribe, not a successful one: returning it would hand a nil
+	// *rpcclient.ClientSubscription to listenForUpstreamMessages, which stores it in an
+	// upstreamErrSource interface (non-nil interface, nil pointer) and dereferences it on
+	// upstreamSub.Err() — panicking and taking the process down. Surface the node's error
+	// to the caller instead. See MAG-2685.
+	if sub == nil {
+		if firstMsg != nil && firstMsg.Error != nil {
+			return nil, nil, nil, fmt.Errorf("upstream rejected subscribe: %w", firstMsg.Error)
+		}
+		return nil, nil, nil, fmt.Errorf("upstream subscribe returned no subscription")
+	}
+
 	return sub, firstMsg, msgChan, nil
 }
 
