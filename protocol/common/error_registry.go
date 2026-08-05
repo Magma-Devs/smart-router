@@ -537,7 +537,18 @@ type LavaWrappedError struct {
 	cause error
 }
 
+// Every method below guards e.LavaErr. The constructors always set it today, so these are
+// latent — but a nil there fails in three different ways (Error panics inside a logging
+// call, Is silently mismatches, As hands back a nil AND halts the walk), and this type's
+// whole reason for existing is that a quietly unreachable resolution path is expensive.
+
 func (e *LavaWrappedError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.LavaErr == nil {
+		return e.Context
+	}
 	if e.Context != "" {
 		return fmt.Sprintf("%s: %s", e.Context, e.LavaErr.Description)
 	}
@@ -545,6 +556,9 @@ func (e *LavaWrappedError) Error() string {
 }
 
 func (e *LavaWrappedError) Is(target error) bool {
+	if e == nil || e.LavaErr == nil {
+		return false
+	}
 	if t, ok := target.(*LavaError); ok {
 		return e.LavaErr.Code == t.Code
 	}
@@ -563,8 +577,16 @@ func (e *LavaWrappedError) Is(target error) bool {
 // form preserves that traversal; the LavaErr branch it displaces stays reachable
 // through Is and As below, so nothing loses a path.
 func (e *LavaWrappedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
 	if e.cause != nil {
 		return e.cause
+	}
+	if e.LavaErr == nil {
+		// Returning a typed nil here would hand back a non-nil error interface holding a
+		// nil *LavaError, and the next errors.Is would call LavaError.Is on a nil receiver.
+		return nil
 	}
 	return e.LavaErr
 }
@@ -572,7 +594,13 @@ func (e *LavaWrappedError) Unwrap() error {
 // As keeps the *LavaError reachable via errors.As even when Unwrap yields the cause
 // instead. Without this, retaining a cause would quietly remove a resolution path that
 // worked before — the same species of silent reachability loss this fix exists to undo.
+// Guarding on nil is load-bearing, not defensive noise: returning true with a nil
+// *LavaError would both hand the caller a nil AND stop errors.As walking to a real one
+// deeper in the chain — strictly worse than never matching.
 func (e *LavaWrappedError) As(target any) bool {
+	if e == nil || e.LavaErr == nil {
+		return false
+	}
 	if t, ok := target.(**LavaError); ok {
 		*t = e.LavaErr
 		return true
