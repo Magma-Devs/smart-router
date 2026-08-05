@@ -22,19 +22,6 @@ const (
 	INTERNAL_ADDRESS = "internal-addr"
 )
 
-// ParseAndValidateMessage parses the message and validates it against the consumer's addon policy.
-// Use this in consumer/provider paths. Smart-router should call ParseMsg directly (no policy to enforce).
-func ParseAndValidateMessage(parser ChainParser, url string, data []byte, connectionType string, metadata []pairingtypes.Metadata, extensionInfo extensionslib.ExtensionInfo) (ChainMessage, error) {
-	msg, err := parser.ParseMsg(url, data, connectionType, metadata, extensionInfo)
-	if err != nil {
-		return nil, err
-	}
-	if err := parser.ValidateMessage(msg); err != nil {
-		return nil, err
-	}
-	return msg, nil
-}
-
 func NewChainParser(apiInterface string) (chainParser ChainParser, err error) {
 	switch apiInterface {
 	case spectypes.APIInterfaceJsonRPC:
@@ -209,20 +196,6 @@ type ChainRouter interface {
 // In test-mode, providers are expected to serve relays from predefined responses and
 // should not dial external nodes. Any routing attempt is treated as an error.
 type TestModeChainRouter struct{}
-
-func NewTestModeChainRouter() ChainRouter {
-	return &TestModeChainRouter{}
-}
-
-func (*TestModeChainRouter) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend, extensions []string) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, proxyUrl common.NodeUrl, chainId string, err error) {
-	return nil, "", nil, common.NodeUrl{}, "", utils.LavaFormatError("test mode chain router: node routing is disabled", nil)
-}
-
-func (*TestModeChainRouter) ExtensionsSupported(internalPath string, extensions []string) bool {
-	// In test mode, accept all extensions — there is no real node, so the
-	// test-response handler serves all requests regardless of extensions.
-	return true
-}
 
 type ChainProxy interface {
 	GetChainProxyInformation() (common.NodeUrl, string)

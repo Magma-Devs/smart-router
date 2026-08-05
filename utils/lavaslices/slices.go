@@ -161,15 +161,6 @@ func Remove[T comparable](slice []T, elem T) ([]T, bool) {
 	return slice, false
 }
 
-func AddUnique[T comparable](slice []T, elem T) []T {
-	for _, e := range slice {
-		if e == elem {
-			return slice
-		}
-	}
-	return append(slice, elem)
-}
-
 func IsSubset[T comparable](subset, superset []T) bool {
 	subsetMap := make(map[T]bool)
 	commonMap := make(map[T]bool)
@@ -344,20 +335,4 @@ func SplitGenericSliceIntoChunks[T any](arr []T, chunkSize int) [][]T {
 	}
 
 	return result
-}
-
-func SortStable[T cmp.Ordered](slice []T) {
-	slices.SortStableFunc(slice, func(i, j T) int { return cmp.Compare(i, j) })
-}
-
-// This function is used to check if the slice is consecutive.
-// It returns the index of the first non-consecutive element or 0 if all elements are consecutive.
-func IsSliceConsecutive[T ~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64](slice []T) (int, bool) {
-	for index := range slice {
-		if index != 0 && slice[index]-1 != slice[index-1] {
-			return index, false
-		}
-	}
-
-	return 0, true
 }

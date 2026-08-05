@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/http"
-	"sync"
 	"testing"
 	"time"
 
@@ -1428,22 +1427,6 @@ func TestIsValidResponse(t *testing.T) {
 			require.Equal(t, tt.expected, result, "isValidResponse(%q) = %v, want %v", string(tt.data), result, tt.expected)
 		})
 	}
-}
-
-// Mock metrics tracker for testing error recovery metrics
-type MockMetricsTracker struct {
-	mu sync.Mutex
-}
-
-func NewMockMetricsTracker() *MockMetricsTracker {
-	return &MockMetricsTracker{}
-}
-
-func (m *MockMetricsTracker) SetRelayNodeErrorMetric(providerAddress string, chainId string, apiInterface string, method string) {
-}
-
-func (m *MockMetricsTracker) GetChainIdAndApiInterface() (string, string) {
-	return "TEST_CHAIN", "rest"
 }
 
 // TestGetAgreementThreshold tests the getAgreementThreshold function behavior

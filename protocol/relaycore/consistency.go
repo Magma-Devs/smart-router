@@ -1,9 +1,5 @@
 package relaycore
 
-import (
-	"github.com/magma-Devs/smart-router/protocol/common"
-)
-
 // The per-user seen-block consistency store used to live here: a ristretto cache keyed by
 // dappId__consumerIp, holding a monotonic-max "highest block this user has seen", fed from the
 // served provider's Reply.LatestBlock, with a 5-minute TTL plus generation/tombstone machinery so
@@ -23,10 +19,3 @@ import (
 // Only the key derivation survives, because the shared-state cache path still identifies a caller
 // by dapp+IP. Rebuilding that path on a chain-level key is tracked as follow-up task T10; once it
 // lands, this function has no callers either.
-
-// UserDataKey derives the per-caller identity string used as the shared-state cache id. It is the
-// same dappId__consumerIp form the retired consistency cache used for its keys, kept byte-identical
-// so shared-state entries written by an older build still resolve.
-func UserDataKey(userData common.UserData) string {
-	return userData.DappId + "__" + userData.ConsumerIp
-}

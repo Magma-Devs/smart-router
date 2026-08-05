@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"slices"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -18,7 +20,6 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/sigs"
-	"slices"
 )
 
 const (
@@ -670,49 +671,6 @@ func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage Chain
 
 type DummyChainFetcher struct {
 	*ChainFetcher
-}
-
-func (cf *DummyChainFetcher) Validate(ctx context.Context) error {
-	for _, url := range cf.endpoint.NodeUrls {
-		addons := url.Addons
-		verifications, err := cf.chainParser.GetVerifications(addons, url.InternalPath, cf.endpoint.ApiInterface)
-		if err != nil {
-			return err
-		}
-		if len(verifications) == 0 {
-			utils.LavaFormatDebug("no verifications for NodeUrl", utils.Attribute{Key: "url", Value: url.String()})
-		}
-		for _, verification := range verifications {
-			// we give several chances for starting up
-			var err error
-			for attempts := 0; attempts < 3; attempts++ {
-				err = cf.Verify(ctx, verification, 0)
-				if err == nil {
-					break
-				}
-			}
-			if err != nil {
-				return utils.LavaFormatError("invalid Verification on provider startup", err, utils.Attribute{Key: "Addons", Value: addons}, utils.Attribute{Key: "verification", Value: verification.Name})
-			}
-		}
-	}
-	return nil
-}
-
-// overwrite this
-func (cf *DummyChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	return 0, nil
-}
-
-// overwrite this too
-func (cf *DummyChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
-	return "dummy", nil
-}
-
-func NewVerificationsOnlyChainFetcher(ctx context.Context, chainRouter ChainRouter, chainParser ChainParser, endpoint *lavasession.RPCProviderEndpoint) *DummyChainFetcher {
-	cfi := ChainFetcher{chainRouter: chainRouter, chainParser: chainParser, endpoint: endpoint}
-	cf := &DummyChainFetcher{ChainFetcher: &cfi}
-	return cf
 }
 
 // this method will calculate the request hash by changing the original object, and returning the data back to it after calculating the hash

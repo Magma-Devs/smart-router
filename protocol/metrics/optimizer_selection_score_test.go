@@ -10,14 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type stubOptimizerQoSClient struct {
-	reports []OptimizerQoSReportToSend
-}
-
-func (s *stubOptimizerQoSClient) GetReportsToSend() []OptimizerQoSReportToSend {
-	return s.reports
-}
-
 func newSmartRouterForOptimizerTest(client *ConsumerOptimizerQoSClient) *SmartRouterMetricsManager {
 	scoreLabels := []string{"spec", "apiInterface", "endpoint_id", "score_type"}
 	optimizerLabels := []string{"spec", "endpoint_id", "score_type"}

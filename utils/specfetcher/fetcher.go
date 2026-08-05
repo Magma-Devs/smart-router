@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
 	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // Default timeouts and concurrency settings
@@ -86,20 +86,6 @@ func New(config Config) *Fetcher {
 		config.HTTPClient = http.DefaultClient
 	}
 	return &Fetcher{config: config}
-}
-
-// FetchSpec fetches a single spec by chain ID from a remote repository.
-func (f *Fetcher) FetchSpec(ctx context.Context, repoURL, chainID string) (types.Spec, error) {
-	specs, err := f.FetchAllSpecs(ctx, repoURL)
-	if err != nil {
-		return types.Spec{}, err
-	}
-
-	spec, err := expandSpec(specs, chainID)
-	if err != nil {
-		return types.Spec{}, err
-	}
-	return *spec, nil
 }
 
 // FetchAllSpecs fetches all specs from a remote repository.

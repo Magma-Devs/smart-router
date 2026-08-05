@@ -3,8 +3,6 @@ package relaycore
 import (
 	"time"
 
-	"github.com/goccy/go-json"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -30,32 +28,6 @@ var (
 	RelayRetriesManagerInstance = lavaprotocol.NewRelayRetriesManager()
 	RelayProcessorMetrics       = &RelayProcessorMetricsMock{}
 )
-
-func SendSuccessRespJsonRpc(relayProcessor *RelayProcessor, provider string, delay time.Duration) {
-	time.Sleep(delay)
-	id, _ := json.Marshal(1)
-	resultBody, _ := json.Marshal(map[string]string{"result": "success"})
-	res := rpcclient.JsonrpcMessage{
-		Version: "2.0",
-		ID:      id,
-		Result:  resultBody,
-	}
-	resBytes, _ := json.Marshal(res)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
-	response := &RelayResponse{
-		RelayResult: common.RelayResult{
-			Request: &pairingtypes.RelayRequest{
-				RelaySession: &pairingtypes.RelaySession{},
-				RelayData:    &pairingtypes.RelayPrivateData{},
-			},
-			Reply:        &pairingtypes.RelayReply{Data: resBytes, LatestBlock: 1},
-			ProviderInfo: common.ProviderInfo{ProviderAddress: provider},
-			StatusCode:   200,
-		},
-		Err: nil,
-	}
-	relayProcessor.SetResponse(response)
-}
 
 func SendSuccessResp(relayProcessor *RelayProcessor, provider string, delay time.Duration) {
 	time.Sleep(delay)
@@ -128,32 +100,6 @@ func SendNodeErrorWithRetryable(relayProcessor *RelayProcessor, provider string,
 			StatusCode:     500,
 			IsNodeError:    true,
 			IsNonRetryable: nonRetryable,
-		},
-		Err: nil,
-	}
-	relayProcessor.SetResponse(response)
-}
-
-func SendNodeErrorJsonRpc(relayProcessor *RelayProcessor, provider string, delay time.Duration) {
-	time.Sleep(delay)
-	id, _ := json.Marshal(1)
-	res := rpcclient.JsonrpcMessage{
-		Version: "2.0",
-		ID:      id,
-		Error:   &rpcclient.JsonError{Code: 1, Message: "test"},
-	}
-	resBytes, _ := json.Marshal(res)
-
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
-	response := &RelayResponse{
-		RelayResult: common.RelayResult{
-			Request: &pairingtypes.RelayRequest{
-				RelaySession: &pairingtypes.RelaySession{},
-				RelayData:    &pairingtypes.RelayPrivateData{},
-			},
-			Reply:        &pairingtypes.RelayReply{Data: resBytes},
-			ProviderInfo: common.ProviderInfo{ProviderAddress: provider},
-			StatusCode:   500,
 		},
 		Err: nil,
 	}

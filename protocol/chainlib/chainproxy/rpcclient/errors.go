@@ -54,7 +54,6 @@ var (
 	_ Error = new(subscriptionNotFoundError)
 	_ Error = new(parseError)
 	_ Error = new(invalidRequestError)
-	_ Error = new(invalidMessageError)
 	_ Error = new(invalidParamsError)
 )
 
@@ -89,13 +88,6 @@ type invalidRequestError struct{ message string }
 func (e *invalidRequestError) ErrorCode() int { return -32600 }
 
 func (e *invalidRequestError) Error() string { return e.message }
-
-// received message is invalid
-type invalidMessageError struct{ message string }
-
-func (e *invalidMessageError) ErrorCode() int { return -32700 }
-
-func (e *invalidMessageError) Error() string { return e.message }
 
 // unable to decode supplied params, or an invalid number of parameters
 type invalidParamsError struct{ message string }

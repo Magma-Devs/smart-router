@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -239,15 +237,4 @@ func createLargeSolanaBatchResponse(numItems int) map[string]interface{} {
 			"value": results,
 		},
 	}
-}
-
-// Mock implementations for testing
-
-type mockChainMessage struct {
-	chainlib.ChainMessage
-	api *spectypes.Api
-}
-
-func (m *mockChainMessage) GetApi() *spectypes.Api {
-	return m.api
 }
