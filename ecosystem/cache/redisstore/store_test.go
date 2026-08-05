@@ -177,6 +177,39 @@ func TestPurgePrefixIsolation(t *testing.T) {
 	require.True(t, mr.Exists("sr2:lookalike"), "a longer prefix sharing our spelling must survive")
 }
 
+// The D8 split: writes go to the write endpoint, reads to the read endpoint —
+// proven with two live miniredis instances rather than spies.
+func TestReadWriteRouting(t *testing.T) {
+	mrWrite := miniredis.RunT(t)
+	mrRead := miniredis.RunT(t)
+	writeClient := redis.NewClient(&redis.Options{Addr: mrWrite.Addr()})
+	readClient := redis.NewClient(&redis.Options{Addr: mrRead.Addr()})
+	store, err := NewWithClients(writeClient, readClient, "sr")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+
+	key := core.HeightKey("ETH1", "0xrouted")
+	require.NoError(t, store.SetHeight(ctx, key, 42, time.Minute))
+	require.True(t, mrWrite.Exists("sr:"+key), "writes land on the write endpoint")
+	require.False(t, mrRead.Exists("sr:"+key), "writes never touch the read endpoint")
+
+	_, found, err := store.GetHeight(ctx, key)
+	require.NoError(t, err)
+	require.False(t, found, "reads come from the read endpoint — replication is the infrastructure's job")
+
+	require.NoError(t, mrRead.Set("sr:"+key, "77"))
+	v, found, err := store.GetHeight(ctx, key)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, int64(77), v, "a replicated entry on the read endpoint serves reads")
+
+	// Purge is a write-side operation: the read endpoint is out of scope.
+	require.NoError(t, store.Purge(ctx))
+	require.False(t, mrWrite.Exists("sr:"+key))
+	require.True(t, mrRead.Exists("sr:"+key))
+}
+
 func TestChainTipNotApplicableWhenMissing(t *testing.T) {
 	store, _ := newTestStore(t)
 	block, fresh, err := store.GetChainTip(context.Background(), core.ChainTipKey("NOWHERE"))

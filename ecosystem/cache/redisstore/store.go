@@ -46,67 +46,116 @@ const (
 // backend.
 var keyPrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// Config is the minimal standalone connection surface. Topology, TLS, and
-// credential-provider configuration construct the client externally and enter
-// through NewWithClient.
-type Config struct {
-	Address      string
-	Username     string
-	Password     string
-	DB           int
-	KeyPrefix    string
-	DialTimeout  time.Duration
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-}
-
-// Store implements core.KVStore over a RESP backend.
+// Store implements core.KVStore over a RESP backend. Reads and writes may be
+// routed to distinct clients (D8: replica/reader endpoints in multi-region
+// deployments); with no read addresses both fields hold the same client.
 type Store struct {
-	client redis.UniversalClient
+	write  redis.UniversalClient
+	read   redis.UniversalClient
 	prefix string
+
+	// stopWatcher terminates the credential poll loop (nil when the
+	// credentials are static).
+	stopWatcher chan struct{}
 }
 
 var _ core.KVStore = (*Store)(nil)
 
-// New connects a standalone client from Config.
+// New validates the config and builds the client(s): topology-appropriate
+// construction, TLS, streaming credentials (with a poll-driven rotation
+// watcher for file-backed passwords), and the optional read/write split.
 func New(cfg Config) (*Store, error) {
-	client := redis.NewClient(&redis.Options{
-		Addr:         cfg.Address,
-		Username:     cfg.Username,
-		Password:     cfg.Password,
-		DB:           cfg.DB,
-		DialTimeout:  cfg.DialTimeout,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
-	})
-	return NewWithClient(client, cfg.KeyPrefix)
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	tlsCfg, err := cfg.TLS.build()
+	if err != nil {
+		return nil, err
+	}
+	provider := NewStreamingProvider(cfg.credentialsSource())
+	// Fail fast on an unreadable credential source (e.g. missing file) before
+	// any client exists.
+	if _, _, err := cfg.credentialsSource().Credentials(); err != nil {
+		return nil, fmt.Errorf("resp-cache: reading credentials: %w", err)
+	}
+
+	writeClient, err := cfg.buildClient(cfg.Addresses, tlsCfg, provider)
+	if err != nil {
+		return nil, err
+	}
+	readClient := writeClient
+	if len(cfg.ReadAddresses) > 0 {
+		readClient, err = cfg.buildClient(cfg.ReadAddresses, tlsCfg, provider)
+		if err != nil {
+			_ = writeClient.Close()
+			return nil, err
+		}
+	}
+
+	store, err := newStore(writeClient, readClient, cfg.KeyPrefix)
+	if err != nil {
+		_ = writeClient.Close()
+		if readClient != writeClient {
+			_ = readClient.Close()
+		}
+		return nil, err
+	}
+	if cfg.PasswordFile != "" {
+		store.stopWatcher = make(chan struct{})
+		go watchCredentials(provider, cfg.refreshInterval(), store.stopWatcher)
+	}
+	return store, nil
 }
 
-// NewWithClient wraps an externally constructed client (any topology; tests
-// inject miniredis-backed clients here). An empty keyPrefix defaults to
-// DefaultKeyPrefix; a glob-unsafe prefix is rejected.
+// NewWithClient wraps an externally constructed client for both reads and
+// writes (any topology; tests inject miniredis-backed clients here).
 func NewWithClient(client redis.UniversalClient, keyPrefix string) (*Store, error) {
+	return newStore(client, client, keyPrefix)
+}
+
+// NewWithClients wraps externally constructed write and read clients.
+func NewWithClients(writeClient, readClient redis.UniversalClient, keyPrefix string) (*Store, error) {
+	return newStore(writeClient, readClient, keyPrefix)
+}
+
+func newStore(writeClient, readClient redis.UniversalClient, keyPrefix string) (*Store, error) {
 	if keyPrefix == "" {
 		keyPrefix = DefaultKeyPrefix
 	}
 	if !keyPrefixPattern.MatchString(keyPrefix) {
 		return nil, fmt.Errorf("invalid resp-cache key prefix %q: must match %s — SCAN MATCH patterns are globs, so glob characters could purge unrelated keys", keyPrefix, keyPrefixPattern.String())
 	}
-	return &Store{client: client, prefix: keyPrefix}, nil
+	return &Store{write: writeClient, read: readClient, prefix: keyPrefix}, nil
 }
 
 func (s *Store) key(k string) string {
 	return s.prefix + ":" + k
 }
 
-// Ping probes backend connectivity (the health loop's primitive).
+// Ping probes backend connectivity — both endpoints when reads are split.
 func (s *Store) Ping(ctx context.Context) error {
-	return s.client.Ping(ctx).Err()
+	if err := s.write.Ping(ctx).Err(); err != nil {
+		return err
+	}
+	if s.read != s.write {
+		return s.read.Ping(ctx).Err()
+	}
+	return nil
 }
 
-// Close releases the underlying client and its connection pool.
+// Close stops the credential watcher and releases both clients.
 func (s *Store) Close() error {
-	return s.client.Close()
+	if s.stopWatcher != nil {
+		close(s.stopWatcher)
+		s.stopWatcher = nil
+	}
+	err := s.write.Close()
+	if s.read != s.write {
+		if readErr := s.read.Close(); err == nil {
+			err = readErr
+		}
+	}
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +204,7 @@ func decodeEnvelope(data []byte) (*core.Envelope, error) {
 // as a miss — on a shared backend foreign writers can never crash lookups.
 func (s *Store) GetEntries(ctx context.Context, keys []string) ([]*core.Envelope, error) {
 	out := make([]*core.Envelope, len(keys))
-	pipe := s.client.Pipeline()
+	pipe := s.read.Pipeline()
 	cmds := make([]*redis.StringCmd, len(keys))
 	for i, k := range keys {
 		cmds[i] = pipe.Get(ctx, s.key(k))
@@ -191,7 +240,7 @@ func (s *Store) SetEntry(ctx context.Context, key string, env *core.Envelope, tt
 	if ttl < 0 {
 		ttl = 0
 	}
-	return s.client.Set(ctx, s.key(key), data, ttl).Err()
+	return s.write.Set(ctx, s.key(key), data, ttl).Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +264,7 @@ return 1
 `)
 
 func (s *Store) GetInt64(ctx context.Context, key string) (int64, bool, error) {
-	raw, err := s.client.Get(ctx, s.key(key)).Result()
+	raw, err := s.read.Get(ctx, s.key(key)).Result()
 	if err == redis.Nil {
 		return 0, false, nil
 	}
@@ -237,7 +286,7 @@ func (s *Store) SetInt64IfGreaterOrEqual(ctx context.Context, key string, value 
 	if ttl < 0 {
 		ttl = 0
 	}
-	return setInt64GEScript.Run(ctx, s.client, []string{s.key(key)}, value, ttl.Milliseconds()).Err()
+	return setInt64GEScript.Run(ctx, s.write, []string{s.key(key)}, value, ttl.Milliseconds()).Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +329,7 @@ func decodeChainTip(raw string) (block int64, deadlineUnixMs int64, ok bool) {
 }
 
 func (s *Store) GetChainTip(ctx context.Context, key string) (int64, bool, error) {
-	raw, err := s.client.Get(ctx, s.key(key)).Result()
+	raw, err := s.read.Get(ctx, s.key(key)).Result()
 	if err == redis.Nil {
 		return spectypes.NOT_APPLICABLE, false, nil
 	}
@@ -301,7 +350,7 @@ func (s *Store) GetChainTip(ctx context.Context, key string) (int64, bool, error
 func (s *Store) SetChainTipIfGreaterOrEqual(ctx context.Context, key string, block int64) error {
 	deadline := time.Now().Add(core.DefaultExpirationForNonFinalized).UnixMilli()
 	encoded := encodeChainTip(block, deadline)
-	return setChainTipGEScript.Run(ctx, s.client, []string{s.key(key)}, block, encoded, chainTipRetention.Milliseconds()).Err()
+	return setChainTipGEScript.Run(ctx, s.write, []string{s.key(key)}, block, encoded, chainTipRetention.Milliseconds()).Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +358,7 @@ func (s *Store) SetChainTipIfGreaterOrEqual(ctx context.Context, key string, blo
 // ---------------------------------------------------------------------------
 
 func (s *Store) GetHeight(ctx context.Context, key string) (int64, bool, error) {
-	raw, err := s.client.Get(ctx, s.key(key)).Result()
+	raw, err := s.read.Get(ctx, s.key(key)).Result()
 	if err == redis.Nil {
 		return 0, false, nil
 	}
@@ -327,7 +376,7 @@ func (s *Store) SetHeight(ctx context.Context, key string, height int64, ttl tim
 	if ttl < 0 {
 		ttl = 0
 	}
-	return s.client.Set(ctx, s.key(key), height, ttl).Err()
+	return s.write.Set(ctx, s.key(key), height, ttl).Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -341,12 +390,12 @@ func (s *Store) SetHeight(ctx context.Context, key string, height int64, ttl tim
 // mode each master is scanned individually.
 func (s *Store) Purge(ctx context.Context) error {
 	match := s.prefix + ":*"
-	if clusterClient, ok := s.client.(*redis.ClusterClient); ok {
+	if clusterClient, ok := s.write.(*redis.ClusterClient); ok {
 		return clusterClient.ForEachMaster(ctx, func(ctx context.Context, master *redis.Client) error {
 			return purgeByScan(ctx, master, match)
 		})
 	}
-	return purgeByScan(ctx, s.client, match)
+	return purgeByScan(ctx, s.write, match)
 }
 
 func purgeByScan(ctx context.Context, client redis.UniversalClient, match string) error {

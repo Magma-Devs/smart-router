@@ -1,0 +1,251 @@
+package redisstore
+
+import (
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// Topology selects how the client reaches the backend.
+type Topology string
+
+const (
+	// TopologyStandalone dials a single node (or a single endpoint fronting
+	// one, e.g. a Global Datastore primary/reader endpoint).
+	TopologyStandalone Topology = "standalone"
+	// TopologySentinel discovers the primary through a sentinel quorum and
+	// follows failovers transparently.
+	TopologySentinel Topology = "sentinel"
+	// TopologyCluster joins a sharded cluster through a configuration
+	// endpoint; the client discovers topology (nodes, slots, replicas) itself,
+	// so Addresses holds seed endpoint(s), never the full node list.
+	TopologyCluster Topology = "cluster"
+)
+
+const DefaultCredentialRefreshInterval = 10 * time.Second
+
+// Config is the full connection surface of the RESP backend.
+type Config struct {
+	// Topology defaults to standalone when empty.
+	Topology Topology
+	// Addresses: standalone = the node address; sentinel = the sentinel
+	// addresses; cluster = the configuration endpoint(s) used as discovery
+	// seeds. Never empty.
+	Addresses []string
+	// ReadAddresses optionally builds a SECOND client of the same topology for
+	// reads (replica/reader endpoints in multi-region deployments). Empty =
+	// reads and writes share one client.
+	ReadAddresses []string
+	// MasterName is the sentinel-monitored master set name (sentinel only).
+	MasterName string
+
+	// Data-node credentials. Password and PasswordFile are mutually
+	// exclusive; the file variant is watched and rotations are pushed to live
+	// connections through the streaming provider (see credentials.go). A file
+	// containing "username:password" also rotates the username.
+	Username     string
+	Password     string
+	PasswordFile string
+	// CredentialRefreshInterval is the PasswordFile poll cadence
+	// (DefaultCredentialRefreshInterval when zero).
+	CredentialRefreshInterval time.Duration
+
+	// Sentinel control-plane credentials — distinct from data-node
+	// credentials: sentinels authenticate independently, and hardened
+	// deployments fail discovery without them. Read at construction time.
+	SentinelUsername     string
+	SentinelPassword     string
+	SentinelPasswordFile string
+
+	// DB selects the logical database (standalone/sentinel only; cluster has
+	// exactly one).
+	DB int
+
+	KeyPrefix string
+	TLS       TLSConfig
+
+	DialTimeout  time.Duration
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	PoolSize     int
+}
+
+// TLSConfig is the file-based TLS surface (config-file friendly).
+type TLSConfig struct {
+	Enabled bool
+	// CAFile roots server verification; empty falls back to the system pool.
+	CAFile string
+	// CertFile/KeyFile enable mTLS; both or neither.
+	CertFile string
+	KeyFile  string
+	// ServerName overrides SNI/verification name (endpoints fronted by DNS
+	// that differs from the certificate).
+	ServerName         string
+	InsecureSkipVerify bool
+}
+
+// build materialises the tls.Config, nil when disabled. Files are read
+// eagerly so misconfiguration fails at startup, not first dial.
+func (c TLSConfig) build() (*tls.Config, error) {
+	if !c.Enabled {
+		return nil, nil
+	}
+	tlsCfg := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		ServerName:         c.ServerName,
+		InsecureSkipVerify: c.InsecureSkipVerify, //nolint:gosec // operator opt-in, validated config
+	}
+	if c.CAFile != "" {
+		pem, err := os.ReadFile(c.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("resp-cache tls: reading ca-file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("resp-cache tls: ca-file %q contains no valid certificates", c.CAFile)
+		}
+		tlsCfg.RootCAs = pool
+	}
+	if (c.CertFile == "") != (c.KeyFile == "") {
+		return nil, fmt.Errorf("resp-cache tls: cert-file and key-file must be set together")
+	}
+	if c.CertFile != "" {
+		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("resp-cache tls: loading client keypair: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+	return tlsCfg, nil
+}
+
+// Validate applies the fail-fast startup rules for the connection config.
+// (The key prefix has its own validation in NewWithClient.)
+func (cfg Config) Validate() error {
+	switch cfg.topology() {
+	case TopologyStandalone, TopologySentinel, TopologyCluster:
+	default:
+		return fmt.Errorf("resp-cache: unknown topology %q (want standalone, sentinel, or cluster)", cfg.Topology)
+	}
+	if len(cfg.Addresses) == 0 {
+		return fmt.Errorf("resp-cache: no addresses configured")
+	}
+	if cfg.topology() == TopologySentinel && cfg.MasterName == "" {
+		return fmt.Errorf("resp-cache: sentinel topology requires master-name")
+	}
+	if cfg.topology() != TopologySentinel && (cfg.SentinelUsername != "" || cfg.SentinelPassword != "" || cfg.SentinelPasswordFile != "") {
+		return fmt.Errorf("resp-cache: sentinel-* credentials are set but topology is %q — dangling configuration", cfg.topology())
+	}
+	if cfg.topology() == TopologyCluster && cfg.DB != 0 {
+		return fmt.Errorf("resp-cache: db selection is not available in cluster topology")
+	}
+	if cfg.Password != "" && cfg.PasswordFile != "" {
+		return fmt.Errorf("resp-cache: password and password-file are mutually exclusive")
+	}
+	if cfg.SentinelPassword != "" && cfg.SentinelPasswordFile != "" {
+		return fmt.Errorf("resp-cache: sentinel-password and sentinel-password-file are mutually exclusive")
+	}
+	return nil
+}
+
+func (cfg Config) topology() Topology {
+	if cfg.Topology == "" {
+		return TopologyStandalone
+	}
+	return cfg.Topology
+}
+
+func (cfg Config) refreshInterval() time.Duration {
+	if cfg.CredentialRefreshInterval <= 0 {
+		return DefaultCredentialRefreshInterval
+	}
+	return cfg.CredentialRefreshInterval
+}
+
+// credentialsSource picks the data-node credential source: file-backed when
+// PasswordFile is set (rotation-capable), static otherwise.
+func (cfg Config) credentialsSource() CredentialsSource {
+	if cfg.PasswordFile != "" {
+		return &FileCredentials{Username: cfg.Username, Path: cfg.PasswordFile}
+	}
+	return StaticCredentials{Username: cfg.Username, Password: cfg.Password}
+}
+
+// sentinelPassword resolves the control-plane password (file wins when set).
+// Read once at construction: sentinel connections are dialed per discovery
+// attempt, so a rotated file takes effect on the next discovery.
+func (cfg Config) sentinelPassword() (string, error) {
+	if cfg.SentinelPasswordFile == "" {
+		return cfg.SentinelPassword, nil
+	}
+	pw, err := os.ReadFile(cfg.SentinelPasswordFile)
+	if err != nil {
+		return "", fmt.Errorf("resp-cache: reading sentinel-password-file: %w", err)
+	}
+	return trimCredential(string(pw)), nil
+}
+
+// ---------------------------------------------------------------------------
+// Config → go-redis options mapping (pure, so tests assert it directly)
+// ---------------------------------------------------------------------------
+
+func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider) *redis.Options {
+	return &redis.Options{
+		Addr:                         addrs[0],
+		DB:                           cfg.DB,
+		StreamingCredentialsProvider: provider,
+		TLSConfig:                    tlsCfg,
+		DialTimeout:                  cfg.DialTimeout,
+		ReadTimeout:                  cfg.ReadTimeout,
+		WriteTimeout:                 cfg.WriteTimeout,
+		PoolSize:                     cfg.PoolSize,
+	}
+}
+
+func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, sentinelPassword string) *redis.FailoverOptions {
+	return &redis.FailoverOptions{
+		MasterName:                   cfg.MasterName,
+		SentinelAddrs:                addrs,
+		SentinelUsername:             cfg.SentinelUsername,
+		SentinelPassword:             sentinelPassword,
+		DB:                           cfg.DB,
+		StreamingCredentialsProvider: provider,
+		TLSConfig:                    tlsCfg,
+		DialTimeout:                  cfg.DialTimeout,
+		ReadTimeout:                  cfg.ReadTimeout,
+		WriteTimeout:                 cfg.WriteTimeout,
+		PoolSize:                     cfg.PoolSize,
+	}
+}
+
+func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider) *redis.ClusterOptions {
+	return &redis.ClusterOptions{
+		Addrs:                        addrs,
+		StreamingCredentialsProvider: provider,
+		TLSConfig:                    tlsCfg,
+		DialTimeout:                  cfg.DialTimeout,
+		ReadTimeout:                  cfg.ReadTimeout,
+		WriteTimeout:                 cfg.WriteTimeout,
+		PoolSize:                     cfg.PoolSize,
+	}
+}
+
+// buildClient constructs one client for the given address set.
+func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider) (redis.UniversalClient, error) {
+	switch cfg.topology() {
+	case TopologySentinel:
+		sentinelPassword, err := cfg.sentinelPassword()
+		if err != nil {
+			return nil, err
+		}
+		return redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, provider, sentinelPassword)), nil
+	case TopologyCluster:
+		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, provider)), nil
+	default:
+		return redis.NewClient(cfg.standaloneOptions(addrs, tlsCfg, provider)), nil
+	}
+}
