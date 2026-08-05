@@ -28,64 +28,65 @@ const (
 
 const DefaultCredentialRefreshInterval = 10 * time.Second
 
-// Config is the full connection surface of the RESP backend.
+// Config is the full connection surface of the RESP backend. The mapstructure
+// tags are the operator-facing YAML keys of the router's `resp-cache:` block.
 type Config struct {
 	// Topology defaults to standalone when empty.
-	Topology Topology
+	Topology Topology `mapstructure:"topology"`
 	// Addresses: standalone = the node address; sentinel = the sentinel
 	// addresses; cluster = the configuration endpoint(s) used as discovery
 	// seeds. Never empty.
-	Addresses []string
+	Addresses []string `mapstructure:"addresses"`
 	// ReadAddresses optionally builds a SECOND client of the same topology for
 	// reads (replica/reader endpoints in multi-region deployments). Empty =
 	// reads and writes share one client.
-	ReadAddresses []string
+	ReadAddresses []string `mapstructure:"read-addresses"`
 	// MasterName is the sentinel-monitored master set name (sentinel only).
-	MasterName string
+	MasterName string `mapstructure:"master-name"`
 
 	// Data-node credentials. Password and PasswordFile are mutually
 	// exclusive; the file variant is watched and rotations are pushed to live
 	// connections through the streaming provider (see credentials.go). A file
 	// containing "username:password" also rotates the username.
-	Username     string
-	Password     string
-	PasswordFile string
+	Username     string `mapstructure:"username"`
+	Password     string `mapstructure:"password"`
+	PasswordFile string `mapstructure:"password-file"`
 	// CredentialRefreshInterval is the PasswordFile poll cadence
 	// (DefaultCredentialRefreshInterval when zero).
-	CredentialRefreshInterval time.Duration
+	CredentialRefreshInterval time.Duration `mapstructure:"credential-refresh-interval"`
 
 	// Sentinel control-plane credentials — distinct from data-node
 	// credentials: sentinels authenticate independently, and hardened
 	// deployments fail discovery without them. Read at construction time.
-	SentinelUsername     string
-	SentinelPassword     string
-	SentinelPasswordFile string
+	SentinelUsername     string `mapstructure:"sentinel-username"`
+	SentinelPassword     string `mapstructure:"sentinel-password"`
+	SentinelPasswordFile string `mapstructure:"sentinel-password-file"`
 
 	// DB selects the logical database (standalone/sentinel only; cluster has
 	// exactly one).
-	DB int
+	DB int `mapstructure:"db"`
 
-	KeyPrefix string
-	TLS       TLSConfig
+	KeyPrefix string    `mapstructure:"key-prefix"`
+	TLS       TLSConfig `mapstructure:"tls"`
 
-	DialTimeout  time.Duration
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	PoolSize     int
+	DialTimeout  time.Duration `mapstructure:"dial-timeout"`
+	ReadTimeout  time.Duration `mapstructure:"read-timeout"`
+	WriteTimeout time.Duration `mapstructure:"write-timeout"`
+	PoolSize     int           `mapstructure:"pool-size"`
 }
 
 // TLSConfig is the file-based TLS surface (config-file friendly).
 type TLSConfig struct {
-	Enabled bool
+	Enabled bool `mapstructure:"enabled"`
 	// CAFile roots server verification; empty falls back to the system pool.
-	CAFile string
+	CAFile string `mapstructure:"ca-file"`
 	// CertFile/KeyFile enable mTLS; both or neither.
-	CertFile string
-	KeyFile  string
+	CertFile string `mapstructure:"cert-file"`
+	KeyFile  string `mapstructure:"key-file"`
 	// ServerName overrides SNI/verification name (endpoints fronted by DNS
 	// that differs from the certificate).
-	ServerName         string
-	InsecureSkipVerify bool
+	ServerName         string `mapstructure:"server-name"`
+	InsecureSkipVerify bool   `mapstructure:"insecure-skip-verify"`
 }
 
 // build materialises the tls.Config, nil when disabled. Files are read

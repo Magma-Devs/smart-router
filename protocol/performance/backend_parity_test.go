@@ -27,7 +27,9 @@ import (
 // and RespCache over miniredis. Feature parity is the PRD's core requirement;
 // these tests are its executable form.
 
-func newGRPCBackend(t *testing.T) performance.CacheBackend {
+// startLoopbackCacheServer spins a real ecosystem/cache server on a loopback
+// listener and returns its address.
+func startLoopbackCacheServer(t *testing.T) string {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -43,8 +45,12 @@ func newGRPCBackend(t *testing.T) performance.CacheBackend {
 	pairingtypes.RegisterRelayerCacheServer(grpcServer, &cache.RelayerCacheServer{CacheServer: cs})
 	go func() { _ = grpcServer.Serve(lis) }()
 	t.Cleanup(grpcServer.Stop)
+	return lis.Addr().String()
+}
 
-	client, err := performance.InitCache(ctx, lis.Addr().String())
+func newGRPCBackend(t *testing.T) performance.CacheBackend {
+	t.Helper()
+	client, err := performance.InitCache(context.Background(), startLoopbackCacheServer(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	return client

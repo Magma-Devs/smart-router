@@ -2527,19 +2527,14 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version)
 			rand.InitRandomSeed()
 
-			// Typed-nil, never a nil interface: when --cache-be is unset, call
-			// sites still probe CacheActive() through the interface and rely on
-			// the nil-receiver-safe methods of *performance.Cache.
-			var cache performance.CacheBackend = (*performance.Cache)(nil)
-			// viper (not cmd.Flags) so --cache-be can also come from the config file.
-			if cacheAddr := viper.GetString(performance.CacheFlagName); cacheAddr != "" {
-				var err error
-				cache, err = performance.InitCache(ctx, cacheAddr)
-				if err != nil {
-					utils.LavaFormatError("Failed To Connect to cache at address", err, utils.Attribute{Key: "address", Value: cacheAddr})
-				} else {
-					utils.LavaFormatInfo("cache service connected", utils.Attribute{Key: "address", Value: cacheAddr})
-				}
+			// Backend selection (viper, not cmd.Flags, so every knob can also
+			// come from the config file): the resp-cache block wins over
+			// cache-be, which stays preserved as the rollback path; neither
+			// yields an inert typed-nil backend. Configuration errors abort
+			// startup.
+			cache, err := performance.SelectCacheBackend(ctx, viper.GetViper())
+			if err != nil {
+				return utils.LavaFormatError("invalid cache backend configuration", err)
 			}
 			if strategyFlag.Strategy != provideroptimizer.StrategyBalanced {
 				utils.LavaFormatInfo("Working with selection strategy: " + strategyFlag.String())
@@ -2657,6 +2652,8 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeBlockProfileRateFlagName, performance.DefaultBlockProfileRate, "block profile rate in nanoseconds (1 records all blocking events)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
+	cmdRPCSmartRouter.Flags().String(performance.RespCacheAddressesFlagName, "", "RESP-compatible (Redis/Valkey) cache backend address(es), comma-separated — enables the RESP backend, which takes precedence over cache-be. Standalone: the node address; sentinel: the sentinel addresses; cluster: the configuration endpoint. The full surface (TLS, credentials, read/write split) lives in the resp-cache config block")
+	cmdRPCSmartRouter.Flags().String(performance.RespCacheTopologyFlagName, "", "RESP cache topology: standalone (default), sentinel, or cluster")
 	cmdRPCSmartRouter.Flags().Int(relaycore.ConsistencyBlockGapFactorFlagName, 0, "consistency-relief: widen the consistency endpoint-lag gate (blockLagForQosSync x factor; default 2). Allowed [2,8]; out-of-range reverts to default.")
 	// MAG-2160 back-compat shim: the global chain tracker (and the adaptive cadence this knob
 	// tuned) is gone — per-endpoint trackers poll at a fixed avgBlockTime/2 — but existing launch
