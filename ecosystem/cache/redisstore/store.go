@@ -132,6 +132,26 @@ func (s *Store) key(k string) string {
 	return s.prefix + ":" + k
 }
 
+// PoolStats is a client-neutral snapshot of the connection pool(s); when
+// reads are split the write and read pools are summed.
+type PoolStats struct {
+	TotalConns uint32
+	IdleConns  uint32
+	StaleConns uint32
+}
+
+func (s *Store) PoolStats() PoolStats {
+	stats := s.write.PoolStats()
+	out := PoolStats{TotalConns: stats.TotalConns, IdleConns: stats.IdleConns, StaleConns: stats.StaleConns}
+	if s.read != s.write {
+		readStats := s.read.PoolStats()
+		out.TotalConns += readStats.TotalConns
+		out.IdleConns += readStats.IdleConns
+		out.StaleConns += readStats.StaleConns
+	}
+	return out
+}
+
 // Ping probes backend connectivity — both endpoints when reads are split.
 func (s *Store) Ping(ctx context.Context) error {
 	if err := s.write.Ping(ctx).Err(); err != nil {

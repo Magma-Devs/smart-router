@@ -19,6 +19,11 @@ var (
 	NotFoundError     = errors.New("cache entry for specific block and request wasn't found")
 	HashMismatchError = errors.New("cache entry for specific block and request had a mismatching hash stored")
 	EntryTypeError    = errors.New("cache entry for specific block and request had a mismatching object stored")
+	// StoreError marks a failure of the underlying KVStore itself (backend
+	// unreachable, timeout), as opposed to the semantic miss reasons above.
+	// Joined with the raw cause so errors.Is sees both this sentinel and the
+	// original chain (e.g. context.DeadlineExceeded).
+	StoreError = errors.New("cache store operation failed")
 )
 
 // Engine implements the cache semantics — key derivation, finality-aware
@@ -115,7 +120,7 @@ func (e *Engine) getRelayInner(ctx context.Context, relayCacheGet *relaytypes.Re
 	keys := RelayLookupKeys(relayCacheGet.Finalized, relayCacheGet.ChainId, relayCacheGet.RequestHash, relayCacheGet.RequestedBlock)
 	entries, err := e.Store.GetEntries(ctx, keys[:])
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(StoreError, err)
 	}
 	var cacheVal *Envelope
 	var cacheSource string
@@ -263,16 +268,20 @@ func (e *Engine) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCa
 	)
 
 	ttl := e.Policy.ForRelayEntry(relayCacheSet.Finalized, relayCacheSet.IsNodeError, time.Duration(relayCacheSet.AverageBlockTime), relayCacheSet.BlockHash)
+	var storeErr error
 	if err := e.Store.SetEntry(ctx, cacheKey, &cacheValue, ttl); err != nil {
 		utils.LavaFormatWarning("failed storing cache entry", err, utils.LogAttr("cacheKey", cacheKey))
+		storeErr = errors.Join(StoreError, err)
 	}
 
+	// Tip and height bookkeeping stays best-effort even when the entry write
+	// failed — and its own failures don't fail the call.
 	e.SetSharedTip(ctx, relayCacheSet.ChainId, relayCacheSet.SharedStateId, latestKnownBlock, e.Policy.SharedStateTip(time.Duration(relayCacheSet.AverageBlockTime)))
 	if err := e.Store.SetChainTipIfGreaterOrEqual(ctx, ChainTipKey(relayCacheSet.ChainId), latestKnownBlock); err != nil {
 		utils.LavaFormatWarning("failed setting chain tip", err, utils.LogAttr("chainId", relayCacheSet.ChainId))
 	}
 	e.setBlocksHashesToHeights(ctx, relayCacheSet.ChainId, relayCacheSet.BlocksHashesToHeights)
-	return nil
+	return storeErr
 }
 
 // Purge drops every entry in the underlying store.
