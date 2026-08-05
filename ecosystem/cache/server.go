@@ -38,9 +38,9 @@ const (
 	MinSharedStateTipExpiration                 = core.MinSharedStateTipExpiration
 	DefaultExpirationTimeFinalizedMultiplier    = 1.0
 	DefaultExpirationTimeNonFinalizedMultiplier = 1.0
-	DefaultExpirationBlocksHashesToHeights      = 48 * time.Hour
-	DefaultExpirationTimeFinalized              = time.Hour
-	DefaultExpirationNodeErrors                 = 250 * time.Millisecond
+	DefaultExpirationBlocksHashesToHeights      = core.DefaultExpirationBlocksHashesToHeights
+	DefaultExpirationTimeFinalized              = core.DefaultExpirationTimeFinalized
+	DefaultExpirationNodeErrors                 = core.DefaultExpirationNodeErrors
 	CacheNumCounters                            = 100000000 // expect 10M items
 	unixPrefix                                  = "unix:"
 )

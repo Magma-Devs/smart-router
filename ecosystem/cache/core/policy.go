@@ -7,7 +7,10 @@ import (
 )
 
 const (
-	DefaultExpirationForNonFinalized = 500 * time.Millisecond
+	DefaultExpirationForNonFinalized       = 500 * time.Millisecond
+	DefaultExpirationTimeFinalized         = time.Hour
+	DefaultExpirationNodeErrors            = 250 * time.Millisecond
+	DefaultExpirationBlocksHashesToHeights = 48 * time.Hour
 	// SharedStateTipBlockMultiplier bounds how long a pod's published chain tip lives in the
 	// shared cache: SharedStateTipBlockMultiplier * averageBlockTime. It mirrors the smart
 	// router's own tip-staleness horizon (chainstate.StalenessWindow) so a dead pod's tip
@@ -26,6 +29,17 @@ const (
 	//     average_block_time would evaporate between relays, silently disabling shared state.
 	MinSharedStateTipExpiration = 2 * time.Second
 )
+
+// DefaultPolicy mirrors the cache server's flag defaults — the TTL table a
+// router-embedded backend uses unless configured otherwise.
+func DefaultPolicy() Policy {
+	return Policy{
+		Finalized:             DefaultExpirationTimeFinalized,
+		NonFinalized:          DefaultExpirationForNonFinalized,
+		NodeErrors:            DefaultExpirationNodeErrors,
+		BlocksHashesToHeights: DefaultExpirationBlocksHashesToHeights,
+	}
+}
 
 // Policy is the TTL table for every write the engine performs, carried as
 // plain values so a caller can rebuild it from live configuration per call.
