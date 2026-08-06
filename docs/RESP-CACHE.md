@@ -213,8 +213,16 @@ data migrates).
 - **Sentinel failover** (dockerized primary/replica/3 sentinels, kill the
   primary, the same store keeps serving through the promotion):
   `RESP_CACHE_TEST_SENTINEL_DOCKER=1 go test ./ecosystem/cache/redisstore -run TestSentinelFailover -v -timeout 5m`.
-- **Cluster**: run any RESP cluster (e.g. `valkey-server --cluster-enabled`
-  x6 + `valkey-cli --cluster create`), point `topology: cluster` at one
-  endpoint, and verify the purge safety property: seed keys under two
-  prefixes, `/debug/reset-all` the router, confirm the foreign prefix
-  survives (`valkey-cli --scan --pattern 'other:*'`).
+- **Real-server TLS/mTLS** (dockerized Valkey terminating TLS with
+  `--tls-auth-clients yes`; certificate-less clients rejected):
+  `RESP_CACHE_TEST_TLS_DOCKER=1 go test ./ecosystem/cache/redisstore -run TestTLSDockerValkey -v -timeout 3m`.
+- **Real cluster** (three dockerized masters joined via one configuration
+  endpoint; writes spread across slots, cross-slot pipelined lookups, and the
+  purge deletes one prefix on every master while a second prefix survives):
+  `RESP_CACHE_TEST_CLUSTER_DOCKER=1 go test ./ecosystem/cache/redisstore -run TestClusterDocker -v -timeout 5m`.
+
+Readiness timing note: `/metrics/overall-health` (and the container health
+that follows it) starts **fail-closed** and reports 503 until the first
+relays health-check cycle completes — `--relays-health-interval` defaults to
+5 minutes. A freshly started stack showing 503 while serving relays is
+warming up, not broken; pass a shorter interval for demos.

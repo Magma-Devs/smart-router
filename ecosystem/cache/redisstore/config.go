@@ -205,6 +205,11 @@ func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider
 		ReadTimeout:                  cfg.ReadTimeout,
 		WriteTimeout:                 cfg.WriteTimeout,
 		PoolSize:                     cfg.PoolSize,
+		// The caller's context deadline must bound socket I/O: the router
+		// gives cache lookups a tight per-relay budget, and without this
+		// go-redis uses only Read/WriteTimeout (seconds) for socket deadlines,
+		// letting a slow backend inject latency far past that budget.
+		ContextTimeoutEnabled: true,
 	}
 }
 
@@ -230,6 +235,8 @@ func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source Cre
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		PoolSize:     cfg.PoolSize,
+		// See standaloneOptions: the caller's deadline must bound socket I/O.
+		ContextTimeoutEnabled: true,
 	}
 }
 
@@ -242,6 +249,8 @@ func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *S
 		ReadTimeout:                  cfg.ReadTimeout,
 		WriteTimeout:                 cfg.WriteTimeout,
 		PoolSize:                     cfg.PoolSize,
+		// See standaloneOptions: the caller's deadline must bound socket I/O.
+		ContextTimeoutEnabled: true,
 	}
 }
 
