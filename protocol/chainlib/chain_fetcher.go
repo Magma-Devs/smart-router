@@ -669,10 +669,6 @@ func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage Chain
 	return parserInput, nil
 }
 
-type DummyChainFetcher struct {
-	*ChainFetcher
-}
-
 // this method will calculate the request hash by changing the original object, and returning the data back to it after calculating the hash
 // couldn't be used in parallel
 func HashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId string) ([]byte, func([]byte) []byte, error) {

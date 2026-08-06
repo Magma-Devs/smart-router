@@ -15,12 +15,15 @@
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
 /*
-package rpcclient implements bi-directional JSON-RPC 2.0 on multiple transports.
+package rpcclient is a fork of go-ethereum's rpc package, reduced to the client
+half: it dials a JSON-RPC 2.0 node over HTTP, WebSocket, or IPC and reads
+responses and subscription notifications from it.
 
-It provides access to the exported methods of an object across a network or other I/O
-connection. After creating a server or client instance, objects can be registered to make
-them visible as 'services'. Exported methods that follow specific conventions can be
-called remotely. It also has support for the publish/subscribe pattern.
+The server half (Server, ServeCodec/ServeHTTP/ServeListener, the WebSocket and
+IPC listeners, and the subscription Notifier) was removed — nothing in
+smart-router serves RPC from this package, it only consumes upstream nodes.
+Method-registration machinery (serviceRegistry, the handler, the codecs) is
+kept because the client uses it to dispatch server-to-client notifications.
 
 # RPC Methods
 
@@ -48,32 +51,6 @@ will be pointing to the given third argument. Since the optional argument is the
 argument the RPC package will also accept 2 integers as arguments. It will pass the mod
 argument as nil to the RPC method.
 
-The server offers the ServeCodec method which accepts a ServerCodec instance. It will read
-requests from the codec, process the request and sends the response back to the client
-using the codec. The server can execute requests concurrently. Responses can be sent back
-to the client out of order.
-
-An example server which uses the JSON codec:
-
-	 type CalculatorService struct {}
-
-	 func (s *CalculatorService) Add(a, b int) int {
-		return a + b
-	 }
-
-	 func (s *CalculatorService) Div(a, b int) (int, error) {
-		if b == 0 {
-			return 0, errors.New("divide by zero")
-		}
-		return a/b, nil
-	 }
-
-	 calculator := new(CalculatorService)
-	 server := NewServer()
-	 server.RegisterName("calculator", calculator)
-	 l, _ := net.ListenUnix("unix", &net.UnixAddr{Net: "unix", Name: "/tmp/calculator.sock"})
-	 server.ServeListener(l)
-
 # Subscriptions
 
 The package also supports the publish subscribe pattern through the use of subscriptions.
@@ -90,20 +67,13 @@ An example method:
 		...
 	}
 
-When the service containing the subscription method is registered to the server, for
-example under the "blockchain" namespace, a subscription is created by calling the
-"blockchain_subscribe" method.
+On the client side, Client.Subscribe issues such a call over a streaming
+transport (WebSocket or IPC) and returns a *ClientSubscription that delivers
+notifications on the supplied channel.
 
-Subscriptions are deleted when the user sends an unsubscribe request or when the
-connection which was used to create the subscription is closed. This can be initiated by
-the client and server. The server will close the connection for any write error.
+Subscriptions are deleted when the client sends an unsubscribe request or when the
+connection which was used to create the subscription is closed.
 
 For more information about subscriptions, see https://github.com/ethereum/go-ethereum/wiki/RPC-PUB-SUB.
-
-# Reverse Calls
-
-In any method handler, an instance of rpc.Client can be accessed through the
-ClientFromContext method. Using this client instance, server-to-client method calls can be
-performed on the RPC connection.
 */
 package rpcclient

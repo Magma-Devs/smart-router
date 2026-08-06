@@ -31,11 +31,6 @@ import (
 // defaultDialTimeout because named pipes are local and there is no need to wait so long.
 const defaultPipeDialTimeout = 2 * time.Second
 
-// ipcListen will create a named pipe on the given endpoint.
-func ipcListen(endpoint string) (net.Listener, error) {
-	return npipe.Listen(endpoint)
-}
-
 // newIPCConnection will connect to a named pipe with the given endpoint as name.
 func newIPCConnection(ctx context.Context, endpoint string) (net.Conn, error) {
 	timeout := defaultPipeDialTimeout
