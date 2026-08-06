@@ -105,6 +105,11 @@ When a config declares **both** `resp-cache:` and `cache-be:`, the RESP
 backend takes precedence (with a startup warning); the preserved `cache-be:`
 is the rollback path — delete the `resp-cache:` block to revert.
 
+Note: `/metrics/overall-health` (and the container health status) is
+fail-closed and reports 503 until the first relays health-check cycle —
+`--relays-health-interval` defaults to 5 minutes, so a freshly started stack
+is "unhealthy" while it warms up even though relays already serve.
+
 ## Example configs
 
 ### `smartrouter_eth.yml` — Ethereum (default)

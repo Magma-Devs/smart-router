@@ -38,10 +38,13 @@ direct-rpc:
       - url: "https://ethereum-rpc.publicnode.com"
       - url: "wss://ethereum-rpc.publicnode.com"
 
-  # Endpoint 2 — Tenderly public gateway (HTTP + WS)
-  - name: "eth-tenderly"
+  # Endpoint 2 — dRPC public endpoint (HTTP + WS). Tenderly's public WS
+  # gateway rejects the chain-tracker's subscription probes ("method not
+  # found"), and the ETH1 spec requires a websocket leg per provider — an
+  # HTTP-only provider is excluded at verification and fails overall-health.
+  - name: "eth-drpc"
     chain-id: "ETH1"
     api-interface: "jsonrpc"
     node-urls:
-      - url: "https://mainnet.gateway.tenderly.co"
-      - url: "wss://mainnet.gateway.tenderly.co"
+      - url: "https://eth.drpc.org"
+      - url: "wss://eth.drpc.org"

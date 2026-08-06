@@ -32,7 +32,14 @@ type testPKI struct {
 
 func newTestPKI(t *testing.T) testPKI {
 	t.Helper()
-	dir := t.TempDir()
+	return newTestPKIIn(t, t.TempDir())
+}
+
+// newTestPKIIn writes the PKI into a caller-chosen directory — the dockerized
+// TLS test needs a docker-mountable path (t.TempDir on macOS often is not)
+// and container-readable modes.
+func newTestPKIIn(t *testing.T, dir string) testPKI {
+	t.Helper()
 
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
@@ -49,7 +56,7 @@ func newTestPKI(t *testing.T) testPKI {
 	require.NoError(t, err)
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
 	caFile := filepath.Join(dir, "ca.pem")
-	require.NoError(t, os.WriteFile(caFile, caPEM, 0o600))
+	require.NoError(t, os.WriteFile(caFile, caPEM, 0o644)) // throwaway test PKI; container-readable for the dockerized TLS lane
 	caCert, err := x509.ParseCertificate(caDER)
 	require.NoError(t, err)
 	caPool := x509.NewCertPool()
@@ -74,8 +81,8 @@ func newTestPKI(t *testing.T) testPKI {
 		keyDER, err := x509.MarshalECPrivateKey(key)
 		require.NoError(t, err)
 		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-		require.NoError(t, os.WriteFile(certPath, certPEM, 0o600))
-		require.NoError(t, os.WriteFile(keyPath, keyPEM, 0o600))
+		require.NoError(t, os.WriteFile(certPath, certPEM, 0o644)) // throwaway test PKI; container-readable for the dockerized TLS lane
+		require.NoError(t, os.WriteFile(keyPath, keyPEM, 0o644))   // throwaway test PKI; container-readable for the dockerized TLS lane
 		pair, err := tls.X509KeyPair(certPEM, keyPEM)
 		require.NoError(t, err)
 		return pair

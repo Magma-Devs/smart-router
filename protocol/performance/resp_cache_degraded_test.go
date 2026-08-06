@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,6 +154,94 @@ func TestRespCacheSetFailureCountedAndReturned(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Zero(t, semanticDelta(), "semantic rejections never count as backend failures")
+}
+
+// freezableProxy forwards TCP to a target until frozen; while frozen it holds
+// all traffic, simulating a reachable-but-stalled backend on an ESTABLISHED
+// connection (the stall-listener test above only covers the cold handshake).
+type freezableProxy struct {
+	listener net.Listener
+	target   string
+	frozen   atomic.Bool
+}
+
+func newFreezableProxy(t *testing.T, target string) *freezableProxy {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	p := &freezableProxy{listener: lis, target: target}
+	t.Cleanup(func() { _ = lis.Close() })
+	go func() {
+		for {
+			client, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			upstream, dialErr := net.Dial("tcp", target)
+			if dialErr != nil {
+				_ = client.Close()
+				continue
+			}
+			pump := func(dst, src net.Conn) {
+				defer dst.Close()
+				buf := make([]byte, 4096)
+				for {
+					n, readErr := src.Read(buf)
+					if readErr != nil {
+						return
+					}
+					for p.frozen.Load() {
+						time.Sleep(10 * time.Millisecond)
+					}
+					if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
+						return
+					}
+				}
+			}
+			go pump(upstream, client)
+			go pump(client, upstream)
+		}
+	}()
+	return p
+}
+
+// The 50ms-budget guarantee, discriminated properly: client Read/WriteTimeout
+// are set LONG (5s), so only the caller's context can bound the stalled read.
+// Without ContextTimeoutEnabled on the client options, this lookup would take
+// the full ReadTimeout instead of the caller's deadline.
+func TestRespCacheCallerBudgetBoundsEstablishedConnections(t *testing.T) {
+	mr := miniredis.RunT(t)
+	proxy := newFreezableProxy(t, mr.Addr())
+
+	store, err := redisstore.New(redisstore.Config{
+		Addresses:    []string{proxy.listener.Addr().String()},
+		DialTimeout:  2 * time.Second,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	})
+	require.NoError(t, err)
+	cache := newRespCacheWithHealthInterval(store, core.DefaultPolicy(), time.Hour)
+	t.Cleanup(func() { _ = cache.Close() })
+
+	// Establish and prove the connection while the proxy flows.
+	warm := degradedGet(t, cache, context.Background())
+	require.NotNil(t, warm)
+
+	proxy.frozen.Store(true)
+	delta := failedDelta(respCacheOpGet, respCacheFailureKindTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	reply := degradedGet(t, cache, ctx)
+	elapsed := time.Since(start)
+	require.Nil(t, reply.GetReply())
+	require.Less(t, elapsed, time.Second,
+		"the caller's 150ms deadline must bound the stalled read — the 5s client ReadTimeout must not be the effective limit")
+	require.GreaterOrEqual(t, delta(), float64(1), "deadline exhaustion counts as a timeout")
+
+	proxy.frozen.Store(false)
+	reply = degradedGet(t, cache, context.Background())
+	require.NotNil(t, reply, "the backend serves again once the stall clears")
 }
 
 func TestRespCacheHealthLoopTracksReachability(t *testing.T) {
