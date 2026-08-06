@@ -137,21 +137,12 @@ type SmartRouterMetricsManager struct {
 	// Internal state
 	lock                    sync.RWMutex
 	endpointsHealthChecksOk uint64
-	endpointMetrics         map[string]*EndpointMetrics
 	// urlToProviderNames maps an endpoint URL to every provider name configured to use it.
 	// URL-keyed metric emissions (e.g. ChainTracker OnNewBlock callbacks) must fan out to
 	// ALL provider names sharing the URL — otherwise only the last-registered provider gets
 	// the metric label, leaving its peers stuck at the zero value on dashboards.
 	urlToProviderNames map[string][]string
 	optimizerQoSClient *ConsumerOptimizerQoSClient
-}
-
-// EndpointMetrics holds per-endpoint metrics state for function-level tracking
-type EndpointMetrics struct {
-	spec         string
-	apiInterface string
-	endpointID   string
-	lock         sync.Mutex
 }
 
 // SmartRouterMetricsManagerOptions contains configuration for the metrics manager.
@@ -686,7 +677,6 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		// This keeps a freshly-booted pod out of the k8s Service load-balancer
 		// until it has actually verified a provider.
 		endpointsHealthChecksOk: 0,
-		endpointMetrics:         make(map[string]*EndpointMetrics),
 		urlToProviderNames:      make(map[string][]string),
 		optimizerQoSClient:      options.OptimizerQoSClient,
 	}
@@ -940,14 +930,6 @@ func (m *SmartRouterMetricsManager) RegisterEndpoint(spec, apiInterface, endpoin
 	}
 
 	m.lock.Lock()
-	key := spec + "|" + apiInterface + "|" + endpointID
-	if _, exists := m.endpointMetrics[key]; !exists {
-		m.endpointMetrics[key] = &EndpointMetrics{
-			spec:         spec,
-			apiInterface: apiInterface,
-			endpointID:   endpointID,
-		}
-	}
 	// Append with dedup: multiple providers can share a URL, and the same (URL, provider)
 	// pair can be registered more than once (e.g. a provider with duplicate node-urls).
 	existing := m.urlToProviderNames[endpointID]
