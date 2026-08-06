@@ -8,6 +8,58 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.3.1 — 2026-08-06
+
+### Highlights
+
+Smart Router v1.3.1 introduces a head-only mode for the chain tracker, enabling support for chains that do not expose block-by-number queries while correctly handling absent parse directives. To improve failover accuracy and QoS scoring, the router now gates probe re-enables by replaying the specific failing relay and drops the finality distance calculation from the `EndpointLagThreshold`. Protocol routing receives targeted stability updates, ensuring that authentication headers are correctly forwarded during gRPC dials and that `nil` upstream subscriptions are safely rejected instead of triggering a panic. Finally, internal error handling is stabilized by nil-guarding all `LavaWrappedError` methods, alongside observability updates that add tracking for relay cancellations and remove unused write-only `EndpointMetrics` state to reduce overhead.
+
+### Changes
+
+#### New Features
+- feat(chaintracker): head-only mode for chains with no block-by-number (MAG-2218) ([#245]) [`5eccf8e`]
+
+#### Bug fixes
+- fix(grpc): forward auth-headers on gRPC dials (MAG-2218) ([#244]) [`b834713`]
+- fix(chaintracker): treat a nil parse directive as absent when selecting head-only ([#245]) [`265f0b5`]
+- fix(relaycore): drop the finality distance from EndpointLagThreshold ([#246]) [`a48ea47`]
+- fix(smart-router): gate probe re-enable on replaying the failing relay (MAG-2550) ([#247]) [`7d42b19`]
+- fix(smart-router): bound the relay-probe gate and judge honestly (MAG-2550 review) ([#247]) [`e77029b`]
+- fix(common): nil-guard every LavaWrappedError method that reads LavaErr ([#252]) [`ba45a3b`]
+- fix(rpcsmartrouter): reject a nil upstream subscription instead of panicking (MAG-2685) ([#253]) [`cfb3254`]
+- refactor(smart-router): remove dead code unreachable from all entry points (MAG-2690) ([#254]) [`79a5ce8`]
+- refactor(smart-router): remove test-only-reachable dead code (MAG-2691) ([#254]) [`84bbbd2`]
+- refactor(metrics): remove write-only EndpointMetrics tracking state (MAG-2691) ([#254]) [`0aa7e86`]
+- refactor(smart-router): clean up leftovers from the dead-code sweep (MAG-2690) ([#257]) [`dcbd11a`]
+
+#### Other work
+- MAG-2667 require valid Jira ticket for pull requests ([#249]) [`864f6e3`]
+- Enhance metrics and error handling for relay cancellations ([#252]) [`5982011`]
+
+[#244]: https://github.com/magma-Devs/smart-router/pull/244
+[#245]: https://github.com/magma-Devs/smart-router/pull/245
+[#246]: https://github.com/magma-Devs/smart-router/pull/246
+[#247]: https://github.com/magma-Devs/smart-router/pull/247
+[#249]: https://github.com/magma-Devs/smart-router/pull/249
+[#252]: https://github.com/magma-Devs/smart-router/pull/252
+[#253]: https://github.com/magma-Devs/smart-router/pull/253
+[#254]: https://github.com/magma-Devs/smart-router/pull/254
+[#257]: https://github.com/magma-Devs/smart-router/pull/257
+[`0aa7e86`]: https://github.com/magma-Devs/smart-router/commit/0aa7e864b8e3885a6d2bf4266174d4b2e199054a
+[`265f0b5`]: https://github.com/magma-Devs/smart-router/commit/265f0b59a1c43861aa3fea17fb02129a3bad67cb
+[`5982011`]: https://github.com/magma-Devs/smart-router/commit/59820119b1bc6a1e52708a3a4538e6000b704f01
+[`5eccf8e`]: https://github.com/magma-Devs/smart-router/commit/5eccf8eba875cc7700fafdbb85b27e8446c5a6da
+[`79a5ce8`]: https://github.com/magma-Devs/smart-router/commit/79a5ce8d3dda60dc5e87f1f544135ea41572cb56
+[`7d42b19`]: https://github.com/magma-Devs/smart-router/commit/7d42b19b43c104ce2c3ce70e3bbdbfe31ca1a92b
+[`84bbbd2`]: https://github.com/magma-Devs/smart-router/commit/84bbbd2f98674ee781c2902e374ecba3f79f2208
+[`864f6e3`]: https://github.com/magma-Devs/smart-router/commit/864f6e3b2d87ea39ffa9ffd7d5f71440f87bebd6
+[`a48ea47`]: https://github.com/magma-Devs/smart-router/commit/a48ea473bbace391c1bb44297e5ae2684da64adf
+[`b834713`]: https://github.com/magma-Devs/smart-router/commit/b8347134f2ac7695e14372c5ffb216c47c78957f
+[`ba45a3b`]: https://github.com/magma-Devs/smart-router/commit/ba45a3b67f2dd84c8397be48f7e68c8cf5dc2c4a
+[`cfb3254`]: https://github.com/magma-Devs/smart-router/commit/cfb3254e03b425b57d4e0ed3e77b7e13de5cd882
+[`dcbd11a`]: https://github.com/magma-Devs/smart-router/commit/dcbd11aeea8b786fc1b1e60fb56092d6a09fa732
+[`e77029b`]: https://github.com/magma-Devs/smart-router/commit/e77029bcd324db3dd10d1cccaf14efbc73e347b2
+
 ## v1.3.0 — 2026-07-30
 
 ### Highlights
