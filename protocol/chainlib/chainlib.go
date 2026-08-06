@@ -192,11 +192,6 @@ type ChainRouter interface {
 	ExtensionsSupported(internalPath string, extensions []string) bool
 }
 
-// TestModeChainRouter is a minimal ChainRouter implementation for provider test-mode.
-// In test-mode, providers are expected to serve relays from predefined responses and
-// should not dial external nodes. Any routing attempt is treated as an error.
-type TestModeChainRouter struct{}
-
 type ChainProxy interface {
 	GetChainProxyInformation() (common.NodeUrl, string)
 	SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) // has to be thread safe, reuse code within ParseMsg as common functionality

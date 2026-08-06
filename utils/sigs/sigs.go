@@ -1,11 +1,9 @@
-// Signable is an interface for objects that should be signed. For example, relay requests
-// are signed by the provider so it can prove that it's their relay.
+// Package sigs holds the encoding and hashing helpers used when building the
+// payloads that relay messages are signed over.
 //
-// To create an object that satisfies the Signable interface, use relay_exchange.go as a reference
-//
-// A Signable object can use the Sign() to be signed, ExtractSignerAddress() to get the object
-// that signed it, and RecoverPubKey() to get the public key that corresponds to the object's
-// private key
+// The Signable interface and the signing/recovery helpers that used to live
+// here were removed once nothing on the smart-router path signed or verified
+// relays locally.
 
 package sigs
 
@@ -13,7 +11,6 @@ import (
 	"encoding/binary"
 
 	tendermintcrypto "github.com/cometbft/cometbft/crypto"
-	//nolint:staticcheck // needed for Bitcoin-style address derivation
 )
 
 // EncodeUint64 encodes a uint64 value to a byte array
