@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -71,19 +72,22 @@ func TestAnalyzeWebSocketErrorAndWriteMessage(t *testing.T) {
 		c.WriteMessage(mt, formatterMsg)
 	}))
 
-	listenFunc := func() {
-		address := "127.0.0.1:3000"
-		err := app.Listen(address)
-		if err != nil {
-			utils.LavaFormatError("can't listen in unitests", err, utils.Attribute{Key: "address", Value: address})
-		}
+	// Bind before serving so the port is known and the bind error is not swallowed:
+	// a hardcoded port silently loses the race to anything else holding it, and the
+	// dial then fails or hangs against the wrong server.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Error listening: %s", err)
 	}
-	go listenFunc()
+	go func() {
+		if err := app.Listener(ln); err != nil {
+			utils.LavaFormatError("can't listen in unitests", err, utils.Attribute{Key: "address", Value: ln.Addr().String()})
+		}
+	}()
 	defer func() {
 		app.Shutdown()
 	}()
-	time.Sleep(time.Millisecond * 100)
-	url := "ws://127.0.0.1:3000/"
+	url := "ws://" + ln.Addr().String() + "/"
 	dialer := &websocket2.Dialer{}
 	conn, _, err := dialer.Dial(url, nil)
 	if err != nil {

@@ -172,19 +172,15 @@ func TestEndpointHealthRecovery(t *testing.T) {
 	require.NoError(t, getSessions(), "ResetEndpointHealth alone must recover: the next GetSessions self-heals the blocked list")
 }
 
-func getDelayedAddress() string {
-	delayedServerAddress := "127.0.0.1:3335"
-	// because grpcListener is random we might have overlap. in that case just change the port.
-	if grpcListener == delayedServerAddress {
-		delayedServerAddress = "127.0.0.1:3336"
-	}
-	utils.LavaFormatDebug("delayedAddress Chosen", utils.LogAttr("address", delayedServerAddress))
-	return delayedServerAddress
-}
-
 func TestEndpointSortingFlow(t *testing.T) {
-	delayedAddress := getDelayedAddress()
-	err := createGRPCServer(delayedAddress, 300*time.Millisecond)
+	// Bind on port 0 so the kernel picks a free port: a fixed one collides with
+	// whatever else holds it on the host and cannot collide with grpcListener.
+	delayedAddress, err := createGRPCServer("127.0.0.1:0", 300*time.Millisecond)
+	// Checked here rather than after the connect loops below: those spin without a
+	// backoff, so a bind failure would busy-wait to the package timeout instead of
+	// reporting itself.
+	require.NoError(t, err)
+	utils.LavaFormatDebug("delayedAddress Chosen", utils.LogAttr("address", delayedAddress))
 	csp := &ConsumerSessionsWithProvider{}
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -210,7 +206,6 @@ func TestEndpointSortingFlow(t *testing.T) {
 		break
 	}
 
-	require.NoError(t, err)
 	csm := CreateConsumerSessionManager()
 	pairingList := createPairingList("", true)
 	pairingList[0].Endpoints = append(pairingList[0].Endpoints, &Endpoint{NetworkAddress: delayedAddress, Enabled: true, Connections: []*EndpointConnection{}, ConnectionRefusals: 0})
@@ -253,7 +248,7 @@ func CreateConsumerSessionManager() *ConsumerSessionManager {
 
 func TestMain(m *testing.M) {
 	AllowInsecureConnectionToProviders = true
-	err := createGRPCServer("", time.Microsecond)
+	_, err := createGRPCServer("", time.Microsecond)
 	if err != nil {
 		fmt.Println("Failed create server", err)
 		os.Exit(-1)
@@ -276,14 +271,17 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func createGRPCServer(changeListener string, probeDelay time.Duration) error {
+// createGRPCServer binds a test relayer server and returns the address it is
+// actually listening on. Callers should pass a port-0 address (or "" to use the
+// shared grpcListener, itself port 0) so the kernel assigns a free port.
+func createGRPCServer(changeListener string, probeDelay time.Duration) (string, error) {
 	listenAddress := grpcListener
 	if changeListener != "" {
 		listenAddress = changeListener
 	}
 	lis, err := net.Listen("tcp", listenAddress)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// Update the grpcListener with the actual address
 	if changeListener == "" {
@@ -303,7 +301,7 @@ func createGRPCServer(changeListener string, probeDelay time.Duration) error {
 			os.Exit(-1)
 		}
 	}()
-	return nil
+	return lis.Addr().String(), nil
 }
 
 const providerStr = "provider"

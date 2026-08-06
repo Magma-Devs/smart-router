@@ -319,14 +319,18 @@ func TestExtractDappIDFromWebsocketConnection(t *testing.T) {
 
 	app.Get("/ws", constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, false))
 
-	go app.Listen("127.0.0.1:3000")
+	// Bind before serving so the port is known and the bind error is not swallowed:
+	// a hardcoded port silently loses the race to anything else holding it, and the
+	// dial then hangs against the wrong server until the package timeout.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = app.Listener(ln) }()
 	defer func() {
-		app.Shutdown()
+		_ = app.Shutdown()
 	}()
-	time.Sleep(time.Millisecond * 20) // let the server go up
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			url := "ws://127.0.0.1:3000" + testCase.route
+			url := "ws://" + ln.Addr().String() + testCase.route
 			dialer := &websocket2.Dialer{}
 			conn, _, err := dialer.Dial(url, testCase.headers)
 			if err != nil {
@@ -984,12 +988,13 @@ func TestConstructFiberCallback_StashesOriginInLocals(t *testing.T) {
 
 	app.Get("/ws", constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, true))
 
-	go func() { _ = app.Listen("127.0.0.1:3010") }()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = app.Listener(ln) }()
 	defer func() { _ = app.Shutdown() }()
-	time.Sleep(50 * time.Millisecond)
 
 	dialer := &websocket2.Dialer{}
-	conn, _, err := dialer.Dial("ws://127.0.0.1:3010/ws", http.Header{"Origin": {"https://test.example"}})
+	conn, _, err := dialer.Dial("ws://"+ln.Addr().String()+"/ws", http.Header{"Origin": {"https://test.example"}})
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -1017,12 +1022,13 @@ func TestConstructFiberCallback_NoOriginWhenMetricsDisabled(t *testing.T) {
 
 	app.Get("/ws", constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, false))
 
-	go func() { _ = app.Listen("127.0.0.1:3011") }()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = app.Listener(ln) }()
 	defer func() { _ = app.Shutdown() }()
-	time.Sleep(50 * time.Millisecond)
 
 	dialer := &websocket2.Dialer{}
-	conn, _, err := dialer.Dial("ws://127.0.0.1:3011/ws", http.Header{"Origin": {"https://test.example"}})
+	conn, _, err := dialer.Dial("ws://"+ln.Addr().String()+"/ws", http.Header{"Origin": {"https://test.example"}})
 	require.NoError(t, err)
 	defer conn.Close()
 
