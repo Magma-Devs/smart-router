@@ -38,7 +38,6 @@ func newSmartRouterForURLFanoutTest() *SmartRouterMetricsManager {
 			Name:   "t_sr_endpoint_overall_health",
 			Labels: endpointLabels,
 		}),
-		endpointMetrics:    make(map[string]*EndpointMetrics),
 		urlToProviderNames: make(map[string][]string),
 	}
 }
