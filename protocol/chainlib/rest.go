@@ -74,6 +74,9 @@ func (apip *RestChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 	if err != nil {
 		return nil, err
 	}
+	// Carry the collection's wire format onto the message so the response path
+	// knows whether to transcode CBOR before parsing.
+	restMessage.Encoding = apiCollection.CollectionData.Encoding
 	parsedInput := parser.NewParsedInput()
 	parsedInput.SetBlock(spectypes.NOT_APPLICABLE)
 	return apip.newChainMessage(apiCont.api, parsedInput, restMessage, apiCollection), nil
@@ -109,8 +112,11 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 	settingHeaderDirective, _, _ := apip.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
 	// Construct restMessage
 	restMessage := rpcInterfaceMessages.RestMessage{
-		Msg:         data,
-		Path:        urlPath,
+		Msg:  data,
+		Path: urlPath,
+		// Carry the collection's wire format onto the message so the response path
+		// knows whether to transcode CBOR before parsing.
+		Encoding:    apiCollection.CollectionData.Encoding,
 		BaseMessage: chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective},
 	}
 	// add spec path to rest message so we can extract the requested block.
@@ -492,8 +498,15 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{},
 	}
 
 	// setting the content-type to be application/json instead of Go's defult http.DefaultClient
+	// (or application/cbor for collections that declare a CBOR wire format — an IC
+	// boundary node rejects a CBOR body labelled as JSON). Spec headers are applied
+	// after this and still take precedence.
 	if connectionTypeSlected == http.MethodPost || connectionTypeSlected == http.MethodPut {
-		req.Header.Set("Content-Type", "application/json")
+		if chainMessage.GetApiCollection().CollectionData.IsCBOR() {
+			req.Header.Set("Content-Type", "application/cbor")
+		} else {
+			req.Header.Set("Content-Type", "application/json")
+		}
 	}
 
 	if len(nodeMessage.GetHeaders()) > 0 {
@@ -551,7 +564,12 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{},
 		},
 	}
 
-	if strings.Split(nodeMessage.Path, "?")[0] != "/" {
+	// This guard runs on the RAW body, before any parsing, and rejects anything
+	// gojq cannot read. It is therefore the first thing a non-JSON wire format
+	// hits — a CBOR body dies here long before the parser seam. Skip it for
+	// collections that declare a non-JSON encoding; their bodies are validated
+	// when they are transcoded for parsing instead.
+	if !chainMessage.GetApiCollection().CollectionData.IsCBOR() && strings.Split(nodeMessage.Path, "?")[0] != "/" {
 		// checking if rest reply data is in json format
 		err = rcp.HandleJSONFormatError(reply.RelayReply.Data)
 		if err != nil {

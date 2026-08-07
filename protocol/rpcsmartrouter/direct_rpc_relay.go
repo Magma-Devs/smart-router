@@ -561,6 +561,14 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		return nil, fmt.Errorf("HTTP method not set by REST parser")
 	}
 
+	// Content-Type must follow the collection's declared wire format. Labelling a
+	// CBOR body as JSON is not cosmetic: an IC boundary node rejects the request
+	// outright with "Unexpected content-type, expected application/cbor".
+	contentType := "application/json"
+	if apiCollection.CollectionData.IsCBOR() {
+		contentType = "application/cbor"
+	}
+
 	// Extract headers as Metadata (preserves delete semantics)
 	headers := restMessage.GetHeaders()
 
@@ -589,7 +597,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		URL:         fullURL,
 		Body:        restBody, // Send body as-is (for POST/PUT)
 		Headers:     headers,  // Use Metadata (preserves delete semantics)
-		ContentType: "application/json",
+		ContentType: contentType,
 	})
 	latency := time.Since(startTime)
 	tracing.RecordHTTPResponse(span, response)

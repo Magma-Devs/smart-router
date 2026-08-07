@@ -23,18 +23,31 @@ type ApiCollection struct {
 
 // CollectionData is the composite key that uniquely identifies an
 // ApiCollection within a Spec.
+//
+// Encoding declares the WIRE FORMAT of this collection's request/response
+// bodies. It is empty for every existing chain, which means JSON — the format
+// every apiInterface assumed before CBOR support was added. Do not confuse it
+// with BlockParser.Encoding (base64/hex), which describes how an extracted
+// block HASH is represented and says nothing about the body format.
 type CollectionData struct {
 	ApiInterface string `json:"api_interface" mapstructure:"api_interface"`
 	InternalPath string `json:"internal_path" mapstructure:"internal_path"`
 	Type         string `json:"type"          mapstructure:"type"`
 	AddOn        string `json:"add_on"        mapstructure:"add_on"`
+	Encoding     string `json:"encoding,omitempty" mapstructure:"encoding"`
+}
+
+// IsCBOR reports whether this collection's bodies are CBOR-encoded and must be
+// transcoded to JSON before the spec parsers run.
+func (cd CollectionData) IsCBOR() bool {
+	return cd.Encoding == CollectionEncodingCBOR
 }
 
 // String returns a human-readable representation used for sorting and
 // error messages.
 func (cd CollectionData) String() string {
-	return fmt.Sprintf("{apiInterface:%s internalPath:%s type:%s addOn:%s}",
-		cd.ApiInterface, cd.InternalPath, cd.Type, cd.AddOn)
+	return fmt.Sprintf("{apiInterface:%s internalPath:%s type:%s addOn:%s encoding:%s}",
+		cd.ApiInterface, cd.InternalPath, cd.Type, cd.AddOn, cd.Encoding)
 }
 
 // Api describes a single RPC method or REST endpoint exposed by a provider.

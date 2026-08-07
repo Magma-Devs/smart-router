@@ -66,7 +66,17 @@ type VerificationContainer struct {
 	Value          string
 	LatestDistance uint64
 	Severity       spectypes.ParseValue_VerificationSeverity
+	// Encoding mirrors the collection's CollectionData.Encoding. Empty means JSON.
+	// It is carried here because a verification request is crafted before any
+	// chain message exists, and a non-JSON wire format cannot be expressed by the
+	// spec's static function_template — see ChainFetcher.Verify.
+	Encoding string
 	VerificationKey
+}
+
+// IsCBOR reports whether this verification's collection speaks CBOR.
+func (vc *VerificationContainer) IsCBOR() bool {
+	return vc.Encoding == spectypes.CollectionEncodingCBOR
 }
 
 func (vc *VerificationContainer) IsActive() bool {
