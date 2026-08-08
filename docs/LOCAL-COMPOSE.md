@@ -79,6 +79,43 @@ intentionally does **not** pass `--cache-be` — an explicitly-passed flag (even
 YAML `cache-be:`. To make any config cached, add `cache-be: "cache:20100"` to
 it (see `smartrouter_eth_cached.yml`) and run it with the overlay.
 
+## Enabling a read-only secondary cache
+
+The optional secondary tier (docs/SECONDARY-CACHE.md) is a second cache
+service the router only ever **reads**, consulted when the primary produces no
+hit, before falling through to upstreams. Layer the second overlay on top of
+the cache one and declare both addresses in the config — same
+flag-vs-YAML rule as `cache-be:`:
+
+```yaml
+# in your *_two_tier.yml config
+cache-be: "cache:20100"
+secondary-cache-be: "cache-secondary:20100"
+secondary-cache-timeout: 100ms   # per-lookup budget; exceeded = miss
+```
+
+```bash
+SR_CONFIG=config/smartrouter_examples/smartrouter_eth_two_tier.yml \
+  docker compose -f docker/docker-compose.yml \
+                 -f docker/docker-compose.cache.yml \
+                 -f docker/docker-compose.secondary-cache.yml up --build
+```
+
+Per-tier hit/miss series on the router metrics (`:7779`):
+
+```bash
+curl -s http://localhost:7779/metrics | grep smartrouter_cache_success_total
+# … cache_tier="primary" …    — served from the router's own cache
+# … cache_tier="secondary" …  — rescued from the read-only tier
+```
+
+Both compose caches start empty, so a secondary hit needs the secondary seeded
+by another writer. The bare-metal two-zone lane
+(`scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh`) does exactly
+that: a second "internal-zone" router warms the shared cache, and the
+"external-zone" router demonstrates secondary-hit → primary-backfill →
+primary-hit end to end (`RUN_DEMO=1` runs and checks the flow).
+
 ## Example configs
 
 ### `smartrouter_eth.yml` — Ethereum (default)

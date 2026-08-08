@@ -155,15 +155,24 @@ func RecordConsistencyStats(span trace.Span, total, passed, rejected int) {
 // the inbound relay span (if one is on the context) so TraceQL filters on
 // the top-level trace (`{name="smartrouter.SendRelay" && cache.hit=true}`)
 // work as operators expect.
-func RecordCacheResult(ctx context.Context, span trace.Span, hit bool, latencyMs float64) {
+func RecordCacheResult(ctx context.Context, span trace.Span, cacheTier, outcome string, hit bool, latencyMs float64) {
 	if span.IsRecording() {
 		span.SetAttributes(
 			attribute.Bool(attrCacheHit, hit),
 			attribute.Float64(attrCacheLatencyMs, latencyMs),
+			attribute.String(attrCacheTier, cacheTier),
+			attribute.String(attrCacheOutcome, outcome),
 		)
 	}
 	if relaySpan := RelaySpanFromContext(ctx); relaySpan.IsRecording() {
+		// cache.hit mirrors every lookup (last write wins, so a primary miss
+		// followed by a secondary hit leaves true); cache.tier is stamped only by
+		// the tier that actually served, so the parent answers "which cache?"
+		// without a child-span walk.
 		relaySpan.SetAttributes(attribute.Bool(attrCacheHit, hit))
+		if hit {
+			relaySpan.SetAttributes(attribute.String(attrCacheTier, cacheTier))
+		}
 	}
 }
 
