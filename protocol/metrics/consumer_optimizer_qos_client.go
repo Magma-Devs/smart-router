@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -220,7 +221,16 @@ func (coqc *ConsumerOptimizerQoSClient) getLastRNGValue(chainId, providerAddress
 	return 0
 }
 
-func (coqc *ConsumerOptimizerQoSClient) appendOptimizerQoSReport(report *OptimizerQoSReport, chainId string, epoch uint64) OptimizerQoSReportToSend {
+// buildOptimizerQoSReport assembles the wire form of one provider's report. It is PURE: it reads
+// the counter maps (caller must hold at least the read lock) and writes nothing, emits nothing.
+//
+// Split out from appendOptimizerQoSReport (MAG-2707) so the read-only snapshot path can reuse the
+// exact same assembly — including sanitizeFloat on every float — without the usage-sink emit that
+// belongs to the periodic sampler alone. Two properties depend on going through here rather than
+// marshalling a raw OptimizerQoSReport: NaN/Inf are neutralised (encoding/json ERRORS on NaN, and a
+// debug handler that has already written its status line cannot take that back), and the enrichment
+// (stake, selection counters, node-error rate) is applied identically to both paths.
+func (coqc *ConsumerOptimizerQoSClient) buildOptimizerQoSReport(report *OptimizerQoSReport, chainId string, epoch uint64) OptimizerQoSReportToSend {
 	// must be called under read lock
 	// Use sanitizeFloat to prevent NaN/Inf values in JSON output
 	optimizerQoSReportToSend := OptimizerQoSReportToSend{
@@ -255,9 +265,19 @@ func (coqc *ConsumerOptimizerQoSClient) appendOptimizerQoSReport(report *Optimiz
 		StakeContribution:        sanitizeFloat(report.StakeContribution),
 	}
 
-	// Fire the report at the usage sink (OTel). Non-blocking; NoopUsageSink
-	// when OTel emission is disabled. The in-memory reportsToSend cache
-	// (built by the caller) still feeds the Prometheus /metrics endpoint.
+	return optimizerQoSReportToSend
+}
+
+// appendOptimizerQoSReport builds a report AND fires it at the usage sink (OTel). Non-blocking;
+// NoopUsageSink when OTel emission is disabled. The in-memory reportsToSend cache (built by the
+// caller) still feeds the Prometheus /metrics endpoint.
+//
+// The emit is why this wrapper exists separately from buildOptimizerQoSReport: it is the periodic
+// sampler's step, and a read-only caller (SnapshotReports) must not perform it — a debug read that
+// published usage events would double-count every dashboard fed by the sink.
+func (coqc *ConsumerOptimizerQoSClient) appendOptimizerQoSReport(report *OptimizerQoSReport, chainId string, epoch uint64) OptimizerQoSReportToSend {
+	// must be called under read lock
+	optimizerQoSReportToSend := coqc.buildOptimizerQoSReport(report, chainId, epoch)
 	coqc.usageSink.EmitOptimizerQoS(optimizerQoSReportToSend)
 	return optimizerQoSReportToSend
 }
@@ -284,6 +304,85 @@ func (coqc *ConsumerOptimizerQoSClient) getReportsFromOptimizers() []OptimizerQo
 		}
 	}
 	return reportsToSend
+}
+
+// OptimizerScoresSnapshot is one on-demand read of the per-provider quality scores (MAG-2707).
+//
+// It carries the facts a caller needs to tell "here are the scores" apart from "the scores could
+// not be obtained", without this package deciding what that means over HTTP:
+//   - Reports — one entry per (chain, provider) that produced scores. A provider that exists but
+//     has not been sampled yet is a legitimate entry with zero scores, NOT an omission.
+//   - ChainsRegistered — chains that have an optimizer registered (after the filter).
+//   - ChainsUnavailable — registered chains that produced NO rows because no providers are known
+//     for them yet (the stake map is empty). The periodic sampler skips these silently; a reader
+//     must not, or an unpopulated router is indistinguishable from a healthy one with no traffic.
+type OptimizerScoresSnapshot struct {
+	Reports           []OptimizerQoSReportToSend
+	ChainsRegistered  []string
+	ChainsUnavailable []string
+}
+
+// SnapshotReports computes the CURRENT per-provider quality scores on demand and returns them
+// without publishing anything (MAG-2707, behind /debug/provider-scores).
+//
+// It runs the same enumeration the periodic sampler runs — same optimizers, same provider set, same
+// CalculateQoSScoresForMetrics call, same report assembly — so a reader sees the very numbers
+// selection uses. Two deliberate differences from getReportsFromOptimizers:
+//
+//   - It does NOT emit to the usage sink, so reading changes nothing observable about the router.
+//   - It does NOT silently skip a chain with no known providers; that chain is named in
+//     ChainsUnavailable so the caller can fail loudly instead of returning an empty list that reads
+//     like "scored, all fine".
+//
+// It also deliberately does not serve the cached reportsToSend: that cache is empty until the first
+// sampling tick and after a score reset, and "empty because we have not sampled yet" would be
+// indistinguishable from "no providers". Computing here removes that ambiguity and lets one test
+// reset scores and read them back in sequence.
+//
+// chainIDFilter (optional, case-insensitive) narrows to a single chain. Nil-receiver safe: an
+// unwired client returns the zero snapshot, which the caller reports as "unavailable".
+func (coqc *ConsumerOptimizerQoSClient) SnapshotReports(chainIDFilter string) OptimizerScoresSnapshot {
+	snapshot := OptimizerScoresSnapshot{
+		Reports:           []OptimizerQoSReportToSend{},
+		ChainsRegistered:  []string{},
+		ChainsUnavailable: []string{},
+	}
+	if coqc == nil {
+		return snapshot
+	}
+
+	coqc.lock.RLock() // read-only throughout, like getReportsFromOptimizers
+	defer coqc.lock.RUnlock()
+
+	ignoredProviders := map[string]struct{}{}
+	cu := uint64(10)
+	requestedBlock := spectypes.LATEST_BLOCK
+	currentEpoch := coqc.currentEpoch.Load()
+
+	for chainId, optimizer := range coqc.optimizers {
+		if chainIDFilter != "" && !strings.EqualFold(chainIDFilter, chainId) {
+			continue
+		}
+		snapshot.ChainsRegistered = append(snapshot.ChainsRegistered, chainId)
+
+		providersMap, ok := coqc.chainIdToProviderToEpochToStake[chainId]
+		if !ok || len(providersMap) == 0 {
+			// No providers known for this chain yet: there is nothing to score, and saying so is the
+			// whole point (the sampler just drops this case).
+			snapshot.ChainsUnavailable = append(snapshot.ChainsUnavailable, chainId)
+			continue
+		}
+
+		reports := optimizer.CalculateQoSScoresForMetrics(slices.Collect(maps.Keys(providersMap)), ignoredProviders, cu, requestedBlock)
+		if len(reports) == 0 {
+			snapshot.ChainsUnavailable = append(snapshot.ChainsUnavailable, chainId)
+			continue
+		}
+		for _, report := range reports {
+			snapshot.Reports = append(snapshot.Reports, coqc.buildOptimizerQoSReport(report, chainId, currentEpoch))
+		}
+	}
+	return snapshot
 }
 
 func (coqc *ConsumerOptimizerQoSClient) SetReportsToSend(reports []OptimizerQoSReportToSend) {
