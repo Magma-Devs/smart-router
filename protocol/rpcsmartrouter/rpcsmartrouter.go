@@ -380,6 +380,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 			offsetNano: &currentOffsetNano,
 			router:     rpsr,
 			cache:      options.cache,
+			qosClient:  smartRouterOptimizerQoSClient,
 		})
 		srv := &http.Server{Addr: options.cmdFlags.DebugAddress, Handler: debugMux}
 		// Watcher goroutine: shuts the server down gracefully when ctx is cancelled
@@ -461,6 +462,11 @@ type debugMuxDeps struct {
 	// router is optional. When provided, /debug/reset-all also flushes
 	// per-server RelayRetriesManagers and per-CSM transient failure state.
 	router *RPCSmartRouter
+	// qosClient is the optional optimizer-QoS sampler. When provided,
+	// GET /debug/provider-scores reads the live per-provider quality scores
+	// through it (MAG-2707). Without it that endpoint reports the scores as
+	// unavailable rather than answering with an empty list.
+	qosClient *metrics.ConsumerOptimizerQoSClient
 	// cache is the optional external cache-be client. When non-nil and
 	// CacheActive(), /debug/reset-all also flushes the cache-be pod via
 	// RelayerCache.FlushCache — without it the in-process Ristretto reset is a
@@ -647,6 +653,40 @@ func resolvePollNowTargets(deps debugMuxDeps, networkAddress, chainID, apiInterf
 		})
 	}
 	return targets
+}
+
+// providerEndpointURLs maps each provider address to the direct-RPC endpoint URLs configured for it,
+// so a /debug/provider-scores row can be joined to /debug/endpoint-state (MAG-2707).
+//
+// The two views key on different identities and neither can be derived from the other: the optimizer
+// — and therefore every score — is keyed by provider address (PublicLavaAddress, the same identity
+// /debug/provider-routing reports), while per-endpoint health is keyed by NetworkAddress. Carrying
+// the URLs on the score row is what lets the automation ask "this provider's score moved, was its
+// endpoint healthy?" from two reads instead of needing a third mapping call.
+//
+// Nil-safe at every level; returns an empty map when no router or session managers are wired.
+func providerEndpointURLs(deps debugMuxDeps) map[string][]string {
+	urls := map[string][]string{}
+	if deps.router == nil {
+		return urls
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	for _, csm := range deps.router.sessionManagers {
+		if csm == nil {
+			continue
+		}
+		for _, ep := range csm.GetAllDirectRPCEndpoints() {
+			if ep == nil || ep.Endpoint == nil || ep.ProviderAddress == "" {
+				continue
+			}
+			urls[ep.ProviderAddress] = append(urls[ep.ProviderAddress], ep.Endpoint.NetworkAddress)
+		}
+	}
+	for _, list := range urls {
+		sort.Strings(list) // stable output; the map iteration above is unordered
+	}
+	return urls
 }
 
 // setAllChainStateDebugOffset shifts every per-server ChainState's effective clock by offset, aging
@@ -1523,6 +1563,99 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		writeDebugRows(w, rows)
 	})
 
+	// GET /debug/provider-scores — the per-provider quality scores the router is holding RIGHT NOW:
+	// the values it uses to decide where the next request goes (MAG-2707). Read-only.
+	//
+	// The router could already RESET these scores (/debug/reset-scores) but never read them: their
+	// only exposure was Prometheus gauges on the metrics port, which is not published, so reading
+	// them meant a hand-held tunnel — impossible from an automated run, and worse, when the tunnel
+	// was down the read came back empty and the test passed having measured nothing.
+	//
+	// That failure mode dictates the error design here, and it is why this endpoint deliberately
+	// breaks the convention of the other /debug state endpoints (which answer 200 [] when unwired):
+	//   200  scores follow. A provider that exists but has not been sampled yet IS included, with
+	//        zero scores — that is a real answer, not an omission.
+	//   404  chain_id was given and no optimizer is registered for it.
+	//   503  the scores could not be obtained at all: no QoS sampler wired, no optimizer registered,
+	//        or every matched chain has no providers known yet. The body names the chains, so a
+	//        failing test says WHY rather than just "empty".
+	// Never 200 with an empty array — that is precisely the silent pass this endpoint exists to end.
+	//
+	// Scores are computed ON DEMAND rather than served from the sampler's cache: that cache is empty
+	// until the first tick and after /debug/reset-scores, so "not sampled yet" would be
+	// indistinguishable from "no providers". Computing here also lets one test reset the scores, send
+	// traffic, and read the result back in sequence. It publishes nothing — the usage-sink emit
+	// belongs to the periodic sampler alone — so reading changes nothing about how the router behaves.
+	//
+	// Each row carries both score families, because they answer different questions: the RAW EWMA
+	// values (AvailabilityScore, LatencyScore in seconds, SyncScore as lag in seconds) are what a
+	// test asserting "this provider was not marked down" should read, while the Selection* values are
+	// those same signals after normalisation, with Composite the number selection actually ranks on.
+	// NetworkAddresses joins the row to /debug/endpoint-state (see providerEndpointURLs).
+	mux.HandleFunc("/debug/provider-scores", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		chainIDFilter := r.URL.Query().Get("chain_id")
+
+		snapshot := deps.qosClient.SnapshotReports(chainIDFilter) // nil-receiver safe
+		if len(snapshot.ChainsRegistered) == 0 {
+			if chainIDFilter != "" {
+				http.Error(w, fmt.Sprintf("no optimizer registered for chain_id %q", chainIDFilter), http.StatusNotFound)
+				return
+			}
+			http.Error(w, "provider scores unavailable: no optimizer registered (or no QoS sampler wired)", http.StatusServiceUnavailable)
+			return
+		}
+		if len(snapshot.Reports) == 0 {
+			http.Error(w, fmt.Sprintf("provider scores unavailable: no providers known yet for %v", snapshot.ChainsUnavailable), http.StatusServiceUnavailable)
+			return
+		}
+
+		urlsByProvider := providerEndpointURLs(deps)
+		rows := make([]map[string]any, 0, len(snapshot.Reports))
+		for _, report := range snapshot.Reports {
+			addresses := urlsByProvider[report.ProviderAddress]
+			if addresses == nil {
+				addresses = []string{} // marshal as [] rather than null
+			}
+			rows = append(rows, map[string]any{
+				"ChainID":          report.ChainId,
+				"ProviderAddress":  report.ProviderAddress,
+				"NetworkAddresses": addresses,
+				"Epoch":            report.Epoch,
+				"EntryIndex":       report.EntryIndex,
+				"Timestamp":        debugTimeRFC3339(report.Timestamp),
+				// Raw EWMA values, as stored: availability 0-1 (higher better), latency seconds and
+				// sync lag seconds (lower better).
+				"AvailabilityScore": report.AvailabilityScore,
+				"LatencyScore":      report.LatencyScore,
+				"SyncScore":         report.SyncScore,
+				// The same signals normalised for weighted random selection, and the composite the
+				// selection actually ranks on.
+				"SelectionAvailability": report.SelectionAvailability,
+				"SelectionLatency":      report.SelectionLatency,
+				"SelectionSync":         report.SelectionSync,
+				"SelectionStake":        report.SelectionStake,
+				"SelectionComposite":    report.SelectionComposite,
+				// How much each parameter contributed to the composite.
+				"AvailabilityContribution": report.AvailabilityContribution,
+				"LatencyContribution":      report.LatencyContribution,
+				"SyncContribution":         report.SyncContribution,
+				"StakeContribution":        report.StakeContribution,
+				// Traffic-side context for interpreting the scores above.
+				"ProviderStake":     report.ProviderStake,
+				"NodeErrorRate":     report.NodeErrorRate,
+				"SelectionCount":    report.SelectionCount,
+				"SelectionRate":     report.SelectionRate,
+				"SelectionQoSScore": report.SelectionQoSScore,
+				"SelectionRNGValue": report.SelectionRNGValue,
+			})
+		}
+		writeDebugRows(w, rows)
+	})
+
 	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):
 	// re-enable every provider endpoint disabled by MaxConsecutiveConnectionAttempts
 	// (Endpoint.Enabled=false) and mirror the reset onto the Prometheus health gauge,
@@ -1678,7 +1811,12 @@ func debugRowKey(m map[string]any) string {
 	cid, _ := m["ChainID"].(string)
 	api, _ := m["ApiInterface"].(string)
 	na, _ := m["NetworkAddress"].(string)
-	return cid + "\x00" + api + "\x00" + na
+	// ProviderAddress is the tiebreaker for rows keyed by provider rather than by endpoint
+	// (/debug/provider-scores, MAG-2707). Without it every row of one chain shares a key and
+	// sort.Slice — which is NOT stable — leaves their order to chance. Absent on every other row
+	// type, where comma-ok yields "" and the key is unchanged.
+	pa, _ := m["ProviderAddress"].(string)
+	return cid + "\x00" + api + "\x00" + na + "\x00" + pa
 }
 
 // writeDebugRows sorts the records deterministically (so Go map-iteration order never leaks into the
