@@ -10,6 +10,7 @@ import (
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -59,10 +60,14 @@ func newRespCacheWithHealthInterval(store *redisstore.Store, policy core.Policy,
 // connection-error series, and reachability TRANSITIONS are logged — steady
 // state stays quiet.
 func (cache *RespCache) healthLoop(interval time.Duration) {
-	probe := func() bool {
+	// The probe error is preserved (not reduced to a boolean) so an
+	// authentication rejection can be reported as such: "unreachable" sends an
+	// operator to check networking when the real fault is a credential.
+	probe := func() (bool, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), respCachePingTimeout)
 		defer cancel()
-		return cache.store.Ping(ctx) == nil
+		err := cache.store.Ping(ctx)
+		return err == nil, err
 	}
 
 	updateGauges := func(connected bool) {
@@ -78,10 +83,10 @@ func (cache *RespCache) healthLoop(interval time.Duration) {
 		cache.metrics.poolStaleConns.Set(float64(stats.StaleConns))
 	}
 
-	lastConnected := probe()
+	lastConnected, probeErr := probe()
 	updateGauges(lastConnected)
 	if !lastConnected {
-		utils.LavaFormatWarning("resp-cache backend unreachable at startup; relays degrade to cache misses until it recovers", nil)
+		logUnavailable("resp-cache backend unavailable at startup; relays degrade to cache misses until it recovers", probeErr)
 	}
 
 	ticker := time.NewTicker(interval)
@@ -91,18 +96,66 @@ func (cache *RespCache) healthLoop(interval time.Duration) {
 		case <-cache.healthStop:
 			return
 		case <-ticker.C:
-			connected := probe()
+			connected, err := probe()
+			// Logging is transition-only: a backend that stays down stays
+			// quiet after the first report, so a persistent auth failure
+			// cannot flood the log.
 			if connected != lastConnected {
 				if connected {
 					utils.LavaFormatInfo("resp-cache backend reachable again")
 				} else {
-					utils.LavaFormatWarning("resp-cache backend became unreachable; relays degrade to cache misses until it recovers", nil)
+					logUnavailable("resp-cache backend became unavailable; relays degrade to cache misses until it recovers", err)
 				}
 				lastConnected = connected
 			}
 			updateGauges(connected)
 		}
 	}
+}
+
+// probeFailureKind classifies a failed health probe. Authentication rejections
+// are called out separately because they need a different operator action
+// (fix the credential) than a network fault (fix connectivity).
+const (
+	probeFailureAuth       = "authentication"
+	probeFailureConnection = "connection"
+)
+
+// classifyProbeError separates an authentication rejection from any other
+// failure. go-redis reports AUTH/NOAUTH/WRONGPASS rejections as command errors,
+// which redis.IsAuthError recognises.
+func classifyProbeError(err error) string {
+	if err != nil && redis.IsAuthError(err) {
+		return probeFailureAuth
+	}
+	return probeFailureConnection
+}
+
+// safeProbeDetail renders a probe error for logs WITHOUT leaking secrets.
+// Authentication errors are reduced to a fixed phrase: the server's reply
+// ("WRONGPASS invalid username-password pair…") names the failing user and we
+// never want a credential, a token, or a connection string carrying one to
+// reach the log. Non-auth errors are network faults and are safe to surface.
+func safeProbeDetail(err error) string {
+	if err == nil {
+		return "no error reported"
+	}
+	if redis.IsAuthError(err) {
+		return "backend rejected the configured credentials"
+	}
+	return err.Error()
+}
+
+// logUnavailable emits a single structured line naming the failure class.
+func logUnavailable(message string, err error) {
+	kind := classifyProbeError(err)
+	if kind == probeFailureAuth {
+		message = "resp-cache backend rejected the configured credentials; relays degrade to cache misses until the credentials are corrected"
+	}
+	utils.LavaFormatWarning(message, nil,
+		utils.Attribute{Key: "failure", Value: kind},
+		utils.Attribute{Key: "detail", Value: safeProbeDetail(err)},
+	)
 }
 
 // CacheActive reports whether the backend is configured. Reachability is NOT
