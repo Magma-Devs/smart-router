@@ -53,8 +53,8 @@ func (po *ProviderOptimizer) readSyncFloor(provider string) uint64 {
 }
 
 // TestProviderOptimizer_SyncBlockNeverDecreasesUnderConcurrency is the Finding 5 regression: a
-// relay carrying block 200 and a probe carrying block 150 (plus the legacy availability-only
-// AppendProbeRelayData) race on ONE provider. Without serialized RMW + an authoritative floor, the
+// relay carrying block 200 and a probe carrying block 150 (plus a sync-less probe that still writes
+// the whole record back) race on ONE provider. Without serialized RMW + an authoritative floor, the
 // probe's stale-cache read could write 150 back AFTER the relay wrote 200, silently regressing the
 // block. The floor must guarantee SyncBlock settles at 200 and is NEVER observed below it. Run with
 // -race -count to actually hit the interleaving.
@@ -87,11 +87,12 @@ func TestProviderOptimizer_SyncBlockNeverDecreasesUnderConcurrency(t *testing.T)
 			po.AppendProbeData(provider, 1, TEST_BASE_WORLD_LATENCY, true, 150, true, freshRef(150))
 		}
 	}()
-	// Legacy availability-only writer: reads + writes back the whole providerData, incl. SyncBlock.
+	// Sync-less writer: carries no block evidence, but still reads + writes back the whole
+	// providerData, incl. SyncBlock — the shape that could regress the floor.
 	go func() {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
-			po.AppendProbeRelayData(provider, TEST_BASE_WORLD_LATENCY, true)
+			po.AppendProbeData(provider, 1, TEST_BASE_WORLD_LATENCY, true, 0, false, SyncReference{})
 		}
 	}()
 	wg.Wait()
@@ -140,20 +141,20 @@ func TestProviderOptimizerBasicProbeData(t *testing.T) {
 	cu := uint64(10)
 	requestBlock := spectypes.LATEST_BLOCK
 
-	// damage providers 5-7 scores with bad latency probes relays
+	// damage providers 5-7 scores with bad latency probes
 	// they should be selected less often due to lower weighted scores
 	badLatency := TEST_BASE_WORLD_LATENCY * 3
-	providerOptimizer.AppendProbeRelayData(providersGen.providersAddresses[5], badLatency, true)
-	providerOptimizer.AppendProbeRelayData(providersGen.providersAddresses[6], badLatency, true)
-	providerOptimizer.AppendProbeRelayData(providersGen.providersAddresses[7], badLatency, true)
+	providerOptimizer.AppendProbeData(providersGen.providersAddresses[5], 1, badLatency, true, 0, false, SyncReference{})
+	providerOptimizer.AppendProbeData(providersGen.providersAddresses[6], 1, badLatency, true, 0, false, SyncReference{})
+	providerOptimizer.AppendProbeData(providersGen.providersAddresses[7], 1, badLatency, true, 0, false, SyncReference{})
 	time.Sleep(4 * time.Millisecond)
 
-	// improve providers 0-2 scores with good latency probes relays
+	// improve providers 0-2 scores with good latency probes
 	// they should be selected by the optimizer more often
 	goodLatency := TEST_BASE_WORLD_LATENCY / 2
-	providerOptimizer.AppendProbeRelayData(providersGen.providersAddresses[0], goodLatency, true)
-	providerOptimizer.AppendProbeRelayData(providersGen.providersAddresses[1], goodLatency, true)
-	providerOptimizer.AppendProbeRelayData(providersGen.providersAddresses[2], goodLatency, true)
+	providerOptimizer.AppendProbeData(providersGen.providersAddresses[0], 1, goodLatency, true, 0, false, SyncReference{})
+	providerOptimizer.AppendProbeData(providersGen.providersAddresses[1], 1, goodLatency, true, 0, false, SyncReference{})
+	providerOptimizer.AppendProbeData(providersGen.providersAddresses[2], 1, goodLatency, true, 0, false, SyncReference{})
 	time.Sleep(4 * time.Millisecond)
 	results := runChooseManyTimesAndReturnResults(t, providerOptimizer, providersGen.providersAddresses, nil, 1000, cu, requestBlock)
 
@@ -371,11 +372,11 @@ func TestProviderOptimizerUpdatingLatency(t *testing.T) {
 	requestBlock := int64(1000)
 	syncBlock := uint64(requestBlock)
 
-	// add an average latency probe relay to determine average score
-	providerOptimizer.AppendProbeRelayData(providerAddress, TEST_BASE_WORLD_LATENCY, true)
+	// add an average latency probe to determine average score
+	providerOptimizer.AppendProbeData(providerAddress, 1, TEST_BASE_WORLD_LATENCY, true, 0, false, SyncReference{})
 	time.Sleep(4 * time.Millisecond)
 
-	// add good latency probe relays, score should improve
+	// add good latency probes, score should improve
 	for i := 0; i < 10; i++ {
 		// get current score
 		qos, _ := providerOptimizer.GetReputationReportForProvider(providerAddress)
@@ -384,7 +385,7 @@ func TestProviderOptimizerUpdatingLatency(t *testing.T) {
 		require.NoError(t, err)
 
 		// add good latency probe
-		providerOptimizer.AppendProbeRelayData(providerAddress, TEST_BASE_WORLD_LATENCY/10, true)
+		providerOptimizer.AppendProbeData(providerAddress, 1, TEST_BASE_WORLD_LATENCY/10, true, 0, false, SyncReference{})
 		time.Sleep(4 * time.Millisecond)
 
 		// check score again and compare to the last score
@@ -395,7 +396,7 @@ func TestProviderOptimizerUpdatingLatency(t *testing.T) {
 		require.True(t, newScore < score, fmt.Sprintf("newScore: %v, score: %v", newScore, score))
 	}
 
-	// add an average latency probe relay to determine average score
+	// add an average latency probe to determine average score
 	providerAddress = providersGen.providersAddresses[1]
 	providerOptimizer.AppendRelayData(providerAddress, TEST_BASE_WORLD_LATENCY, cu, syncBlock)
 	time.Sleep(4 * time.Millisecond)

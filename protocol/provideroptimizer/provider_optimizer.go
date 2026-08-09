@@ -124,8 +124,8 @@ const providerLockStripes = 256
 // providerSyncFloor is one stripe: it serializes the score read-modify-write for every provider
 // hashing to it AND holds the authoritative monotonic SyncBlock floor for those providers.
 //
-// Why a floor at all (Finding 5): the three writers (appendRelayData, AppendProbeData, the legacy
-// AppendProbeRelayData) each do getProviderData → mutate → providersStorage.Set. ristretto's Set is
+// Why a floor at all (Finding 5): the writers (appendRelayData, AppendProbeData) each do
+// getProviderData → mutate → providersStorage.Set. ristretto's Set is
 // ASYNC — a subsequent Get can miss a just-written value (the package's own tests sleep to let it
 // settle) — so the cache cannot be the source of truth for "SyncBlock never decreases": a serialized
 // writer could still read a stale cached block and write a lower one back (probe@150 clobbering
@@ -443,50 +443,9 @@ func (po *ProviderOptimizer) appendRelayData(provider string, latency time.Durat
 	)
 }
 
-// AppendProbeRelayData updates a provider's QoS metrics for a probe relay message
-func (po *ProviderOptimizer) AppendProbeRelayData(providerAddress string, latency time.Duration, success bool) {
-	// Legacy path (Finding 5): this writer only mutates availability/latency, but it Sets the WHOLE
-	// providerData back — including the SyncBlock it read. A stale cache read would therefore silently
-	// regress SyncBlock. Take the stripe lock and stamp the floor (observed=0 → pure preserve) so this
-	// writer can never undo a higher block recorded by a concurrent relay/probe.
-	stripe := po.providerStripe(providerAddress)
-	stripe.mu.Lock()
-	defer stripe.mu.Unlock()
-
-	providerData, _ := po.getProviderData(providerAddress)
-	stripe.applyLocked(providerAddress, 0, &providerData)
-	sampleTime := po.now()
-	halfTime := po.calculateHalfTime(providerAddress, sampleTime)
-	weight := score.ProbeUpdateWeight
-	var updateErr error
-	if success {
-		// update latency only on success
-		providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.AvailabilityScoreType, 1, weight, halfTime, 0, sampleTime)
-		if updateErr != nil {
-			return
-		}
-		providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.LatencyScoreType, latency.Seconds(), weight, halfTime, 0, sampleTime)
-		if updateErr != nil {
-			return
-		}
-	} else {
-		providerData, updateErr = po.updateDecayingWeightedAverage(providerData, score.AvailabilityScoreType, 0, weight, halfTime, 0, sampleTime)
-		if updateErr != nil {
-			return
-		}
-	}
-	po.providersStorage.Set(providerAddress, providerData, 1)
-
-	utils.LavaFormatTrace("[Optimizer] probe update",
-		utils.LogAttr("providerAddress", providerAddress),
-		utils.LogAttr("latency", latency),
-		utils.LogAttr("success", success),
-	)
-}
-
 // AppendProbeData feeds one provider-aggregated probe sample — the Topic E contract's probe path,
-// the proactive baseline that scores providers between (or without) real relays. Unlike the legacy
-// AppendProbeRelayData (availability + latency only), it feeds all three dimensions:
+// the proactive baseline that scores providers between (or without) real relays. It feeds all three
+// dimensions:
 //   - availability is a FRACTION in [0,1] (the share of the provider's endpoints healthy this cycle,
 //     per the fraction-healthy aggregation rule) and is ALWAYS fed, including 0 when the provider is
 //     fully down — so partial degradation decays the score;

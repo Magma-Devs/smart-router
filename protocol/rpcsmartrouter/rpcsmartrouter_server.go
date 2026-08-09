@@ -256,8 +256,8 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 
 	// Proactive health prober (MAG-2160 / Topic D): on its own cadence, score EVERY direct-RPC
 	// endpoint from stored telemetry + the consensus baseline (zero upstream calls), proactively
-	// re-enable recovered endpoints, and feed one QoS sample per provider. Replaces the synthetic
-	// direct-RPC probe (the legacy AppendProbeRelayData feed is gated off for static providers).
+	// re-enable recovered endpoints, and feed one QoS sample per provider. It is the single source of
+	// truth for direct-RPC endpoint health and probe-fed QoS.
 	// effectiveBlockTime, NOT the raw spec value (see probeVerdictConfigFor): the verdict's alive
 	// horizon must share the SAME staleness horizon as ChainState and the monitor's poll cadence,
 	// and the "keeping up" tolerance must match consistency pre-validation's per-chain threshold.
@@ -2334,9 +2334,8 @@ type probeQoSAppender interface {
 // no QoS feed) if AppendProbeData's signature ever drifts — a regression no test would catch.
 var _ probeQoSAppender = (*provideroptimizer.ProviderOptimizer)(nil)
 
-// defaultProbeCadence is the prober's own polling period — distinct from the legacy synthetic
-// probe's PeriodicProbeProvidersInterval. It floors runProbeLoop's cadence so time.NewTicker can
-// never be handed a non-positive duration (which panics).
+// defaultProbeCadence is the prober's polling period. It floors runProbeLoop's cadence so
+// time.NewTicker can never be handed a non-positive duration (which panics).
 const defaultProbeCadence = 5 * time.Second
 
 // validatedProbeCadence validates the operator-configured probe cadence (MAG-2161 D5): a non-positive

@@ -106,11 +106,9 @@ const (
 	LimitWebsocketIdleTimeFlag                   = "limit-websocket-connection-idle-time"
 	SkipWebsocketVerificationFlag                = "skip-websocket-verification"
 	// specification default flags
-	PeriodicProbeProvidersFlagName         = "enable-periodic-probe-providers"
-	PeriodicProbeProvidersIntervalFlagName = "periodic-probe-providers-interval"
-	ProbeUpdateWeightFlagName              = "probe-update-weight"
+	ProbeUpdateWeightFlagName = "probe-update-weight"
 	// ProbeLoopIntervalFlagName is the cadence of the MAG-2161 (Topic D) proactive health prober —
-	// the real telemetry-driven loop, distinct from the legacy synthetic periodic-probe loop above.
+	// the telemetry-driven loop that owns direct-RPC endpoint health and probe-fed QoS.
 	ProbeLoopIntervalFlagName = "probe-loop-interval"
 
 	// batch request size limit

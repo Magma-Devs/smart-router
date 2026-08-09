@@ -2156,10 +2156,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	rpsr.sessionManagers[sessionManagerKey] = sessionManager
 	rpsr.mu.Unlock()
 
-	if lavasession.PeriodicProbeProviders {
-		go sessionManager.PeriodicProbeProviders(ctx, lavasession.PeriodicProbeProvidersInterval)
-	}
-
 	// Helper function to convert provider endpoints to sessions
 	convertProvidersToSessions := func(providerList []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
 		sessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
@@ -3054,8 +3050,6 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerification, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerification, "skip websocket verification for chains that require ws/wss endpoints")
 
-	cmdRPCSmartRouter.Flags().BoolVar(&lavasession.PeriodicProbeProviders, common.PeriodicProbeProvidersFlagName, lavasession.PeriodicProbeProviders, "enable periodic probing of providers")
-	cmdRPCSmartRouter.Flags().DurationVar(&lavasession.PeriodicProbeProvidersInterval, common.PeriodicProbeProvidersIntervalFlagName, lavasession.PeriodicProbeProvidersInterval, "interval for periodic probing of providers")
 	cmdRPCSmartRouter.Flags().DurationVar(&lavasession.ProbeLoopInterval, common.ProbeLoopIntervalFlagName, lavasession.ProbeLoopInterval, "cadence of the proactive health prober (MAG-2161 Topic D); must be > 0, default 5s")
 	cmdRPCSmartRouter.Flags().Float64(common.ProbeUpdateWeightFlagName, scoreutils.DefaultProbeUpdateWeight, "weight multiplier for provider-optimizer probe updates (liveness/latency); must be > 0")
 	if err := viper.BindPFlag(common.ProbeUpdateWeightFlagName, cmdRPCSmartRouter.Flags().Lookup(common.ProbeUpdateWeightFlagName)); err != nil {
@@ -3546,7 +3540,7 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 // live pairing and pushes the result to the session manager in one call.
 //
 // The merge is copy-on-write: the old maps may still be referenced by goroutines
-// (probeProviders, cleanupStaleTrackers) that iterate them without the lock.
+// (cleanupStaleTrackers) that iterate them without the lock.
 // UpdateAllProviders stays under rpsr.mu so the (session-map write → csm push) pair
 // is atomic with updateEpoch's matching pair — otherwise a concurrent epoch tick can
 // push to the csm in the opposite order it wrote the session maps, silently dropping
@@ -3781,7 +3775,7 @@ func mergeAbsentProviders(
 		return current, nil
 	}
 
-	// Copy-on-write: probeProviders / cleanupStaleTrackers may iterate the old map
+	// Copy-on-write: cleanupStaleTrackers may iterate the old map
 	// without the lock, so never mutate it in place. Re-key appended sessions past
 	// the existing max — convert() keys by its own list index, which would collide.
 	merged := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(current)+len(absent))

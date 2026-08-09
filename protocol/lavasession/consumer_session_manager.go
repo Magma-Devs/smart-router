@@ -30,7 +30,7 @@ const (
 	BlockedProviderSessionUnusedStatus = uint32(0)
 )
 
-// debugProbes is an atomic toggle: it is read by probe goroutines (probeProviders) while the CLI
+// debugProbes is an atomic toggle: it is read by probe goroutines (probeProvider) while the CLI
 // layer sets it from the parsed --debug-probes flag. A plain bool here raced the flag write against
 // those reads under -race (a leaked probe goroutine from one test vs another test building the cobra
 // command). Use SetDebugProbes/DebugProbesEnabled rather than touching it directly.
@@ -43,13 +43,11 @@ func SetDebugProbes(enabled bool) { debugProbes.Store(enabled) }
 func DebugProbesEnabled() bool { return debugProbes.Load() }
 
 var (
-	retrySecondChanceAfter         = time.Minute * 3
-	PeriodicProbeProviders         = false
-	PeriodicProbeProvidersInterval = 5 * time.Second
-	// ProbeLoopInterval is the configurable cadence (MAG-2161 D5) of the real proactive health prober
-	// (rpcsmartrouter.runProbeLoop). Default 5s; validated at startup (a non-positive value is rejected
-	// back to the default). Distinct from PeriodicProbeProvidersInterval, which clocks the legacy
-	// synthetic probe loop — the prober does NOT use that knob.
+	retrySecondChanceAfter = time.Minute * 3
+	// ProbeLoopInterval is the configurable cadence (MAG-2161 D5) of the proactive health prober
+	// (rpcsmartrouter.runProbeLoop) — the single source of truth for direct-RPC endpoint health and
+	// probe-fed QoS. Default 5s; validated at startup (a non-positive value is rejected back to the
+	// default).
 	ProbeLoopInterval = 5 * time.Second
 )
 
@@ -322,9 +320,6 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 		time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond) // sleep up to 500ms in order to scatter different chains probe triggers
 		go func() {
 			ctx := context.Background()
-			// Probe all providers to eliminate offline ones from affecting relays
-			csm.probeProviders(ctx, pairingList, epoch) // pairingList is thread safe it's members are not (accessed through csm.pairing)
-
 			// Check re-blocked providers from previous epoch and unblock if healthy
 			csm.checkAndUnblockHealthyReBlockedProviders(ctx, epoch)
 		}()
@@ -614,71 +609,6 @@ func (csm *ConsumerSessionManager) closePurgedUnusedPairingsConnections(pairingP
 			continue
 		}
 		callbackPurge()
-	}
-}
-
-func (csm *ConsumerSessionManager) PeriodicProbeProviders(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if csm.rawPairing != nil {
-				csm.probeProviders(ctx, csm.rawPairing, csm.atomicReadCurrentEpoch())
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-func (csm *ConsumerSessionManager) probeProviders(ctx context.Context, pairingList map[uint64]*ConsumerSessionsWithProvider, epoch uint64) error {
-	guid := utils.GenerateUniqueIdentifier()
-	ctx = utils.AppendUniqueIdentifier(ctx, guid)
-	if DebugProbesEnabled() {
-		utils.LavaFormatInfo("providers probe initiated", utils.Attribute{Key: "endpoint", Value: csm.rpcEndpoint}, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: "epoch", Value: epoch})
-	}
-	// Create a wait group to synchronize the goroutines
-	wg := sync.WaitGroup{}
-	wg.Add(len(pairingList)) // increment by this and not by 1 for each go routine because we don;t want a race finishing the go routine before the next invocation
-	for _, consumerSessionWithProvider := range pairingList {
-		// Start a new goroutine for each provider
-		go func(consumerSessionsWithProvider *ConsumerSessionsWithProvider) {
-			// Call the probeProvider function and defer the WaitGroup Done call
-			defer wg.Done()
-			// MAG-2161 (Topic D / F3+F7): direct-RPC (static) providers are owned end-to-end by the
-			// real telemetry-driven prober (runProbeLoop): it scores their liveness/latency/sync from
-			// real observations (AppendProbeData) and proactively re-enables recovered endpoints. The
-			// legacy SYNTHETIC probe here only reads the Enabled bit and reports a nominal 1ms success —
-			// a fake liveness signal (SetProviderLiveness) and a fake QoS feed. Skip it entirely for
-			// static providers so the prober is the single source of truth for direct-RPC health.
-			if consumerSessionsWithProvider.StaticProvider {
-				return
-			}
-			latency, providerAddress, err := csm.probeProvider(ctx, consumerSessionsWithProvider, epoch, false)
-			success := err == nil // if failure then regard it in availability
-			csm.consumerMetricsManager.SetProviderLiveness(csm.rpcEndpoint.ChainID, providerAddress, consumerSessionsWithProvider.Endpoints[0].NetworkAddress, success)
-			csm.providerOptimizer.AppendProbeRelayData(providerAddress, latency, success)
-		}(consumerSessionWithProvider)
-	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		wg.Wait()
-	}()
-
-	select {
-	case <-done:
-		// all probes finished in time
-		if DebugProbesEnabled() {
-			utils.LavaFormatDebug("providers probe done", utils.Attribute{Key: "endpoint", Value: csm.rpcEndpoint}, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: "epoch", Value: epoch})
-		}
-		return nil
-	case <-ctx.Done():
-		utils.LavaFormatWarning("providers probe ran out of time", nil, utils.Attribute{Key: "endpoint", Value: csm.rpcEndpoint}, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: "epoch", Value: epoch})
-		// ran out of time
-		return ctx.Err()
 	}
 }
 
@@ -2465,11 +2395,11 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 			continue // Provider not in current pairing or backup list
 		}
 
-		// reportedProviders reflects probe outcomes only for pairingList providers —
-		// probeProviders only probes pairingList, so backup providers are never probed
-		// and will never appear in reportedProviders. Using !IsReported for a backup
-		// provider would incorrectly signal a successful probe and unblock it without
-		// any real health check. Always run an explicit probe for backup providers.
+		// reportedProviders is populated by relay-failure reporting (ReportProvider), which only
+		// ever fires for providers that actually served traffic. A backup provider that was never
+		// selected therefore never appears there, so using !IsReported for a backup would signal
+		// health it has not demonstrated and unblock it without any real check. Always run an
+		// explicit probe for backup providers.
 		if !isBackup && !csm.reportedProviders.IsReported(blockedAddr) {
 			// Non-backup provider whose probe succeeded (it wasn't added to reportedProviders).
 			// Unblock immediately.
@@ -2482,8 +2412,8 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 			csm.validateAndReturnBlockedProviderToValidAddressesListLocked(blockedAddr)
 			csm.reportedProviders.RemoveReport(blockedAddr)
 		} else {
-			// Either a backup provider (needs an actual probe since it was never probed
-			// by probeProviders), or a non-backup whose initial probe failed.
+			// Either a backup provider (needs an actual probe since it has no relay history),
+			// or a non-backup that was reported for relay failures.
 			// In both cases, run a comprehensive probe with tryReconnect=true.
 			providersNeedingComprehensiveProbe[blockedAddr] = reBlockedProviderInfo{cswp: cswp, isBackup: isBackup}
 			utils.LavaFormatDebug("Re-blocked provider needs explicit probe",
