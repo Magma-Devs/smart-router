@@ -55,6 +55,18 @@ func newScoresMux(t *testing.T) http.Handler {
 	})
 }
 
+// decodeScores unwraps the /debug/provider-scores envelope: the rows plus the names of any matched
+// chains that produced none.
+func decodeScores(t *testing.T, body []byte) ([]map[string]any, []string) {
+	t.Helper()
+	var response struct {
+		Rows              []map[string]any `json:"rows"`
+		ChainsUnavailable []string         `json:"chains_unavailable"`
+	}
+	require.NoError(t, json.Unmarshal(body, &response))
+	return response.Rows, response.ChainsUnavailable
+}
+
 func TestDebugProviderScores_MethodNotAllowed(t *testing.T) {
 	rr := postDebugRouter(newScoresMux(t), "/debug/provider-scores") // POST on a GET-only endpoint
 	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
@@ -68,8 +80,8 @@ func TestDebugProviderScores_ReturnsScores(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, "body=%q", rr.Body.String())
 	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
 
-	var rows []map[string]any
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	rows, unavailable := decodeScores(t, rr.Body.Bytes())
+	require.Empty(t, unavailable, "every registered chain produced rows")
 	require.Len(t, rows, 1)
 	row := rows[0]
 	require.Equal(t, "ETH1", row["ChainID"])
@@ -107,6 +119,37 @@ func TestDebugProviderScores_UnavailableIsNot200(t *testing.T) {
 	rr = getDebugRouter(empty, "/debug/provider-scores")
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
 	require.Contains(t, rr.Body.String(), "ETH1", "the failure names the chain that produced nothing")
+}
+
+// TestDebugProviderScores_PartlyPopulatedRouterNamesTheEmptyChain is the PR #259 review case: a
+// router serving two chains where only one has providers. The old shape answered 200 with the
+// populated chain's rows and said NOTHING about the other, so a test reading the empty chain saw a
+// success with no rows for its provider and would conclude "no score" instead of "nothing was
+// measured" — the silent pass this endpoint exists to end, narrowed from the whole router to one
+// chain. The answer must name the chain that produced nothing.
+func TestDebugProviderScores_PartlyPopulatedRouterNamesTheEmptyChain(t *testing.T) {
+	qosClient := metrics.NewConsumerOptimizerQoSClient("consumer", metrics.NoopUsageSink{})
+	// ETH1 is populated; SOLANA is registered but has no providers known yet.
+	qosClient.RegisterOptimizer(&fixedScoreOptimizer{composite: 0.85, availability: 0.99}, "ETH1")
+	qosClient.UpdatePairingListStake(map[string]int64{"lava@provider1": 1000}, "ETH1", 7)
+	qosClient.RegisterOptimizer(&fixedScoreOptimizer{}, "SOLANA")
+
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, qosClient: qosClient})
+
+	rr := getDebugRouter(mux, "/debug/provider-scores")
+	require.Equal(t, http.StatusOK, rr.Code, "the populated chain is still readable")
+
+	rows, unavailable := decodeScores(t, rr.Body.Bytes())
+	require.Len(t, rows, 1)
+	require.Equal(t, "ETH1", rows[0]["ChainID"])
+	require.Equal(t, []string{"SOLANA"}, unavailable,
+		"a chain that produced no rows is named, not silently omitted")
+
+	// Narrowing to the empty chain is still an outright failure: nothing to report at all.
+	rr = getDebugRouter(mux, "/debug/provider-scores?chain_id=SOLANA")
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	require.Contains(t, rr.Body.String(), "SOLANA")
 }
 
 // TestDebugProviderScores_CarriesEndpointURLsForJoin covers the field that makes the endpoint
@@ -161,8 +204,7 @@ func TestDebugProviderScores_CarriesEndpointURLsForJoin(t *testing.T) {
 	rr := getDebugRouter(mux, "/debug/provider-scores")
 	require.Equal(t, http.StatusOK, rr.Code, "body=%q", rr.Body.String())
 
-	var rows []map[string]any
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	rows, _ := decodeScores(t, rr.Body.Bytes())
 	require.Len(t, rows, 1)
 	require.Equal(t, providerAddr, rows[0]["ProviderAddress"])
 	require.Equal(t, []any{urlA, urlB}, rows[0]["NetworkAddresses"],
@@ -176,8 +218,7 @@ func TestDebugProviderScores_ChainFilter(t *testing.T) {
 
 	rr := getDebugRouter(mux, "/debug/provider-scores?chain_id=eth1")
 	require.Equal(t, http.StatusOK, rr.Code, "chain_id matches case-insensitively")
-	var rows []map[string]any
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	rows, _ := decodeScores(t, rr.Body.Bytes())
 	require.Len(t, rows, 1)
 
 	rr = getDebugRouter(mux, "/debug/provider-scores?chain_id=SOLANA")
