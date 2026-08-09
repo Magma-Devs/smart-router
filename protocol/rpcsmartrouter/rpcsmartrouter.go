@@ -655,6 +655,23 @@ func resolvePollNowTargets(deps debugMuxDeps, networkAddress, chainID, apiInterf
 	return targets
 }
 
+// providerScoresResponse is the body of GET /debug/provider-scores (MAG-2707).
+//
+// It is an ENVELOPE rather than the bare array the other /debug state endpoints return, because a
+// partial answer has to be able to say what is missing. On a router serving several chains, one
+// chain can have providers while another has none: the rows alone would then be a 200 that looks
+// complete, and a caller reading the empty chain would conclude "this provider has no score" rather
+// than "this chain produced nothing" — the same silent pass this endpoint exists to end, narrowed
+// from the whole router to a single chain.
+//
+// chains_unavailable names every matched chain that produced no rows; it is empty (never null) when
+// the answer is complete. Rows keep the bare Go-identifier keys the other debug rows use; the
+// envelope keys are snake_case like the other non-row debug responses.
+type providerScoresResponse struct {
+	Rows              []map[string]any `json:"rows"`
+	ChainsUnavailable []string         `json:"chains_unavailable"`
+}
+
 // providerEndpointURLs maps each provider address to the direct-RPC endpoint URLs configured for it,
 // so a /debug/provider-scores row can be joined to /debug/endpoint-state (MAG-2707).
 //
@@ -1573,13 +1590,17 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	//
 	// That failure mode dictates the error design here, and it is why this endpoint deliberately
 	// breaks the convention of the other /debug state endpoints (which answer 200 [] when unwired):
-	//   200  scores follow. A provider that exists but has not been sampled yet IS included, with
-	//        zero scores — that is a real answer, not an omission.
+	//   200  scores follow, in {"rows": [...], "chains_unavailable": [...]}. A provider that exists
+	//        but has not been sampled yet IS included, with zero scores — that is a real answer, not
+	//        an omission. chains_unavailable names any matched chain that produced NO rows, so a
+	//        partly-populated multi-chain router cannot answer 200 while quietly omitting a chain
+	//        (which would read as "that provider has no score" rather than "nothing was measured").
 	//   404  chain_id was given and no optimizer is registered for it.
-	//   503  the scores could not be obtained at all: no QoS sampler wired, no optimizer registered,
-	//        or every matched chain has no providers known yet. The body names the chains, so a
-	//        failing test says WHY rather than just "empty".
-	// Never 200 with an empty array — that is precisely the silent pass this endpoint exists to end.
+	//   503  NO scores could be obtained: no QoS sampler wired, no optimizer registered, or every
+	//        matched chain has no providers known yet. The body names the chains, so a failing test
+	//        says WHY rather than just "empty".
+	// Never 200 with an empty, unexplained result — that is precisely the silent pass this endpoint
+	// exists to end.
 	//
 	// Scores are computed ON DEMAND rather than served from the sampler's cache: that cache is empty
 	// until the first tick and after /debug/reset-scores, so "not sampled yet" would be
@@ -1653,7 +1674,15 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				"SelectionRNGValue": report.SelectionRNGValue,
 			})
 		}
-		writeDebugRows(w, rows)
+		sortDebugRows(rows)
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(providerScoresResponse{
+			Rows:              rows,
+			ChainsUnavailable: snapshot.ChainsUnavailable,
+		}); err != nil {
+			utils.LavaFormatWarning("failed encoding provider scores response", err)
+		}
 	})
 
 	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):
@@ -1822,8 +1851,15 @@ func debugRowKey(m map[string]any) string {
 // writeDebugRows sorts the records deterministically (so Go map-iteration order never leaks into the
 // response, keeping output stable for test fixtures and humans) and encodes them as a JSON array.
 // rows is always non-nil, so an empty result encodes as [] rather than null.
-func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
+// sortDebugRows orders rows by debugRowKey in place, so Go map-iteration order never leaks into a
+// response. Split out of writeDebugRows for the responses that wrap their rows in an envelope
+// (/debug/provider-scores) and so cannot go through it.
+func sortDebugRows(rows []map[string]any) {
 	sort.Slice(rows, func(i, j int) bool { return debugRowKey(rows[i]) < debugRowKey(rows[j]) })
+}
+
+func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
+	sortDebugRows(rows)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(rows); err != nil {
 		utils.LavaFormatWarning("failed encoding debug response", err)

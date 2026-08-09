@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -382,6 +383,10 @@ func (coqc *ConsumerOptimizerQoSClient) SnapshotReports(chainIDFilter string) Op
 			snapshot.Reports = append(snapshot.Reports, coqc.buildOptimizerQoSReport(report, chainId, currentEpoch))
 		}
 	}
+	// Both chain lists are built by ranging a map, so sort them: they are reported to callers (and
+	// asserted on by tests), and Go's map order would otherwise vary between identical reads.
+	sort.Strings(snapshot.ChainsRegistered)
+	sort.Strings(snapshot.ChainsUnavailable)
 	return snapshot
 }
 
