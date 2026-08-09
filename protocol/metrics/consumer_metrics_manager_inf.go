@@ -37,7 +37,6 @@ func (NoOpConsumerMetrics) SetCrossValidationMetric(string, string, string, bool
 func (NoOpConsumerMetrics) SetCrossValidationFailureMetric(string, string, string, string) {}
 func (NoOpConsumerMetrics) UpdateHealthCheckStatus(bool)                                   {}
 func (NoOpConsumerMetrics) UpdateHealthcheckStatusBreakdown(string, string, bool)          {}
-func (NoOpConsumerMetrics) SetProviderLiveness(string, string, string, bool)               {}
 func (NoOpConsumerMetrics) SetProviderSelected(string, string, string, []ProviderSelectionScores, float64) {
 }
 func (NoOpConsumerMetrics) SetBlockedProvider(string, string, string, string, bool) {}
@@ -97,7 +96,6 @@ type ConsumerMetricsManagerInf interface {
 	UpdateHealthcheckStatusBreakdown(chainId, apiInterface string, status bool)
 
 	// --- Provider state (ConsumerSessionManager) ---
-	SetProviderLiveness(chainId string, providerAddress string, providerEndpoint string, isAlive bool)
 	SetProviderSelected(chainId string, apiInterface string, providerAddress string, allProviderScores []ProviderSelectionScores, rngValue float64)
 	SetBlockedProvider(chainId, apiInterface, providerAddress, providerEndpoint string, isBlocked bool)
 	SetQOSMetrics(chainId string, apiInterface string, providerAddress string, providerEndpoint string, qos *pairingtypes.QualityOfServiceReport, reputation *pairingtypes.QualityOfServiceReport, latestBlock int64, relays uint64, relayLatency time.Duration, sessionSuccessful bool)

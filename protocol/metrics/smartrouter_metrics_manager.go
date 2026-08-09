@@ -1342,8 +1342,6 @@ func (m *SmartRouterMetricsManager) UpdateHealthcheckStatusBreakdown(chainId, ap
 	m.routerOverallHealthBreakdown.WithLabelValues(chainId, apiInterface).Set(value)
 }
 
-func (m *SmartRouterMetricsManager) SetProviderLiveness(string, string, string, bool) {}
-
 func (m *SmartRouterMetricsManager) SetProviderSelected(chainId string, apiInterface string, _ string, allProviderScores []ProviderSelectionScores, _ float64) {
 	if m == nil {
 		return
