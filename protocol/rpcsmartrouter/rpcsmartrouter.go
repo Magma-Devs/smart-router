@@ -35,6 +35,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/performance"
@@ -469,6 +470,13 @@ type debugMuxDeps struct {
 	cache cacheFlusher
 }
 
+// debugPollNowTimeout caps how long POST /debug/poll-now waits per request (MAG-2649). A single
+// poll is already bounded by the tracker's own fetch timeout (max(10s, MinimumTimePerRelayDelay)),
+// but a trigger arriving mid-cycle queues behind the in-flight poll first — so the ceiling is
+// roughly two fetch timeouts plus slack. Reaching it returns 504 rather than hanging the caller;
+// the poll itself, once started, still completes and records.
+const debugPollNowTimeout = 25 * time.Second
+
 // cacheFlusher is the minimal surface /debug/reset-all needs from the cache-be
 // client. *performance.Cache satisfies it; tests substitute a fake that
 // records the Flush call.
@@ -589,6 +597,55 @@ func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
 		}
 	}
 	return ensured, created
+}
+
+// pollNowTarget is one endpoint /debug/poll-now will poll: the EndpointMonitor that owns its
+// ChainTracker, plus the chain identity used to label the response row.
+type pollNowTarget struct {
+	chainID      string
+	apiInterface string
+	monitor      *endpointstate.EndpointMonitor
+}
+
+// resolvePollNowTargets finds every registered ChainTracker for networkAddress, optionally narrowed
+// by chainID / apiInterface (both optional; empty means "any", matched case-insensitively). The
+// same URL can legitimately be registered on more than one chain or interface — the endpointtip
+// store keys on all three — so this returns a slice rather than a single hit and the handler polls
+// each match.
+//
+// It resolves ONLY: the router lock is taken to walk the servers and released before any polling
+// happens. A poll can block for up to the tracker's fetch timeout, and holding router.mu across it
+// would stall epoch updates, relay bookkeeping and every other /debug endpoint for that long.
+// Nil-safe at every level so test fixtures without a wired router simply match nothing.
+func resolvePollNowTargets(deps debugMuxDeps, networkAddress, chainID, apiInterface string) []pollNowTarget {
+	if deps.router == nil || networkAddress == "" {
+		return nil
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	targets := []pollNowTarget{}
+	for _, server := range deps.router.rpcServers {
+		if server == nil || server.endpointChainTrackerManager == nil || server.listenEndpoint == nil {
+			continue
+		}
+		if chainID != "" && !strings.EqualFold(chainID, server.listenEndpoint.ChainID) {
+			continue
+		}
+		if apiInterface != "" && !strings.EqualFold(apiInterface, server.listenEndpoint.ApiInterface) {
+			continue
+		}
+		// Only servers that actually track this URL — otherwise a multi-chain router would answer
+		// with a row of "no tracker" noise per unrelated chain.
+		if _, ok := server.endpointChainTrackerManager.GetTracker(networkAddress); !ok {
+			continue
+		}
+		targets = append(targets, pollNowTarget{
+			chainID:      server.listenEndpoint.ChainID,
+			apiInterface: server.listenEndpoint.ApiInterface,
+			monitor:      server.endpointChainTrackerManager,
+		})
+	}
+	return targets
 }
 
 // setAllChainStateDebugOffset shifts every per-server ChainState's effective clock by offset, aging
@@ -1324,6 +1381,117 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				})
 			}
 			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
+	// POST /debug/poll-now — force ONE endpoint's ChainTracker to run its dedicated poll right now,
+	// and answer only once that poll's result has been recorded (MAG-2649). Without it a test that
+	// checks what a poll records has to sit out the per-endpoint cadence (avgBlockTime/2 — ~6 s on
+	// Ethereum) before it can look; with it the sequence becomes set up state → trigger → read.
+	//
+	// Fidelity is the whole point: this triggers the production poll cycle
+	// (chaintracker.ChainTracker.PollNow → fetchAllPreviousBlocksIfNecessary) on the tracker's own
+	// poll goroutine — the same function the cadence timer calls. Nothing about the poll is
+	// reimplemented here, so what the caller reads back is real router behavior with only the wait
+	// removed: same parse, same observation write (LatestBlock/Source, ConsecutivePollFailures,
+	// LastSuccessfulPoll), same endpoint-tip and per-chain tip updates, all completed before this
+	// handler responds.
+	//
+	// Body: {"network_address": "<url>"} — required; optional "chain_id" / "api_interface" narrow
+	// the match when the same URL is registered on more than one chain or interface. The response is
+	// a row per matched endpoint (see /debug/endpoint-state for the shared field vocabulary), plus:
+	//   Polled       — the poll cycle actually ran. False means nothing was polled (tracker still
+	//                  starting, retrying its init, or stopped) and the record below is stale.
+	//   PollError    — the poll ran and failed upstream. That is a legitimate outcome to assert on
+	//                  (it is what increments ConsecutivePollFailures), so it answers 200, not 5xx.
+	//   TriggerError — why no poll could be started, including the tracker's lifecycle state.
+	//
+	// Two deliberate limits, both to keep this from lying to a test:
+	//   - It bypasses the relay traffic gate, so a fresh relay tip cannot silently turn the trigger
+	//     into a no-op — but it therefore resets the gate's skip budget. Do not call it from a test
+	//     that measures poll cadence, the idle-poll ceiling, the gate's skip behaviour, or failure
+	//     backoff growth; those must measure real elapsed time (the poll's cadence state is
+	//     untouched here precisely so they stay measurable).
+	//   - It records ONE endpoint's poll. The per-chain consensus baseline is recomputed on its own
+	//     tick, so /debug/chain-state's ConsensusBaseline is NOT guaranteed to have moved when this
+	//     returns; the endpoint's own record and the chain's ObservedTip are.
+	//
+	// One consequence worth knowing before writing a test against it: a head moved BACKWARD is not
+	// visible here. The poll runs and is recorded, but the endpoint tip is block-monotonic — a lower
+	// block is held off as a late straggler until the stored tip goes stale (StalenessWindow, ~120 s
+	// on Ethereum) — and the tracker does not walk its own head down either. So a setup that rewinds
+	// a simulator's head and then triggers a poll reads back the previous, higher block. That is the
+	// production anti-flap rule faithfully applied, not a failed trigger.
+	mux.HandleFunc("/debug/poll-now", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		// Same 1 KiB cap as the other JSON debug handlers: the body is three short strings.
+		r.Body = http.MaxBytesReader(w, r.Body, 1024)
+		var body struct {
+			NetworkAddress string `json:"network_address"`
+			ChainID        string `json:"chain_id"`
+			ApiInterface   string `json:"api_interface"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.NetworkAddress == "" {
+			http.Error(w, "network_address is required", http.StatusBadRequest)
+			return
+		}
+
+		targets := resolvePollNowTargets(deps, body.NetworkAddress, body.ChainID, body.ApiInterface)
+		if len(targets) == 0 {
+			http.Error(w, "no ChainTracker registered for that endpoint", http.StatusNotFound)
+			return
+		}
+
+		// Ceiling on the whole handler: one poll is bounded by the tracker's own fetch timeout, but
+		// a request that arrives mid-cycle also waits for the in-flight poll first. Cap the sum so
+		// this can never hang a test harness; the poll itself is unaffected and still completes.
+		ctx, cancel := context.WithTimeout(r.Context(), debugPollNowTimeout)
+		defer cancel()
+
+		rows := []map[string]any{}
+		polledAny := false
+		for _, target := range targets {
+			start := time.Now()
+			obs, polled, err := target.monitor.PollNow(ctx, body.NetworkAddress)
+			row := map[string]any{
+				"ChainID":                 target.chainID,
+				"ApiInterface":            target.apiInterface,
+				"NetworkAddress":          body.NetworkAddress,
+				"Polled":                  polled,
+				"DurationMs":              time.Since(start).Milliseconds(),
+				"PollError":               "",
+				"TriggerError":            "",
+				"LatestBlock":             obs.LatestBlock,
+				"ObservedAt":              debugTimeRFC3339(obs.ObservedAt),
+				"Source":                  obs.Source.String(),
+				"ConsecutivePollFailures": obs.ConsecutivePollFailures,
+				"LastSuccessfulPoll":      debugTimeRFC3339(obs.LastSuccessfulPoll),
+			}
+			switch {
+			case polled:
+				polledAny = true
+				if err != nil {
+					row["PollError"] = err.Error()
+				}
+			case err != nil:
+				row["TriggerError"] = err.Error()
+			}
+			rows = append(rows, row)
+		}
+		// Every matched endpoint failed to even start a poll: say so in the status line as well as
+		// the rows, so a harness that only checks the code does not read "nothing happened" as
+		// success.
+		if !polledAny {
+			w.Header().Set("Content-Type", "application/json") // must precede WriteHeader
+			w.WriteHeader(http.StatusGatewayTimeout)
 		}
 		writeDebugRows(w, rows)
 	})

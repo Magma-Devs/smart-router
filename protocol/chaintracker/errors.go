@@ -12,4 +12,12 @@ var ( // Consumer Side Errors
 	RequestedBlocksOutOfRange       = errors.New("requested blocks are outside the supported range by the state tracker")
 	ErrorFailedToFetchTooEarlyBlock = errors.New("server memory protection triggered, requested block is too early")
 	InvalidRequestedSpecificBlock   = errors.New("provided requested specific blocks for function do not compose a stored entry")
+	// ErrorPollNowNotDelivered means a PollNow request was never taken by the poll goroutine before
+	// the caller's context expired — the tracker is still starting, is retrying its init, or has
+	// stopped. No poll ran and no observation was written (MAG-2649).
+	ErrorPollNowNotDelivered = errors.New("poll-now was not picked up by the poll loop")
+	// ErrorPollNowUnsupported means the tracker cannot poll at all (DummyChainTracker). Returned
+	// instead of a silent nil so a /debug/poll-now caller never mistakes "nothing polls here" for a
+	// completed poll and reads a stale record as fresh (MAG-2649).
+	ErrorPollNowUnsupported = errors.New("this chain tracker does not poll, poll-now is unsupported")
 )

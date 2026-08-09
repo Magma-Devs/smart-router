@@ -2,6 +2,7 @@ package endpointstate
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -28,6 +29,13 @@ const (
 	defaultTrackerStartRetryMin = time.Second
 	defaultTrackerStartRetryMax = 30 * time.Second
 	trackerStartRetryJitterDiv  = 5
+
+	// pollNowUnstartedGrace bounds how long PollNow waits on a tracker that is not yet Polling
+	// (MAG-2649). Such a tracker has no poll goroutine to receive the trigger, so waiting out the
+	// caller's full budget only delays a verdict that will not change. Comfortably longer than the
+	// microseconds a live goroutine needs to take the send, so it never cuts short a tracker whose
+	// state merely lagged.
+	pollNowUnstartedGrace = 2 * time.Second
 )
 
 type EndpointChainTrackerState string
@@ -576,6 +584,70 @@ func (m *EndpointMonitor) BackoffSnapshot() map[string]time.Duration {
 		out[url] = t.CurrentPollInterval()
 	}
 	return out
+}
+
+// PollNow forces ONE endpoint's ChainTracker to run its dedicated poll immediately and returns
+// that endpoint's observation record once the poll's result has been written (MAG-2649, behind
+// /debug/poll-now). It exists so a test can set a provider's state, trigger the poll, and read the
+// result — instead of waiting out the per-endpoint cadence (avgBlockTime/2).
+//
+// polled reports whether the poll CYCLE ACTUALLY RAN. It separates the two outcomes a caller must
+// never conflate:
+//   - polled=true with a non-nil err — a real poll reached (or tried to reach) upstream and
+//     failed. The observation records that failure, exactly as a timer-driven failure would:
+//     ConsecutivePollFailures incremented, LastSuccessfulPoll untouched.
+//   - polled=false — no poll happened at all (no tracker for this URL, the tracker is still
+//     starting/retrying its init, or it is a non-polling dummy). The returned observation is
+//     whatever was already on record and says nothing about now.
+//
+// The tracker's poll goroutine takes m.mu during a block-advancing cycle (newLatestCallback →
+// setTrackerState), so the lock is released BEFORE the trigger — holding it across the wait would
+// deadlock the monitor against its own poll loop the first time a poll observed a new block.
+func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (observation EndpointObservation, polled bool, err error) {
+	m.mu.RLock()
+	tracker, exists := m.trackers[endpointURL]
+	stateBefore := m.trackerStates[endpointURL]
+	m.mu.RUnlock()
+
+	if !exists {
+		return EndpointObservation{}, false, utils.LavaFormatError("poll-now: no ChainTracker for endpoint", nil,
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+		)
+	}
+
+	// A tracker that is not yet Polling has no poll goroutine to take the request — start() spawns
+	// it only after the init fetch succeeds — so an endpoint stuck retrying a dead upstream would
+	// otherwise burn the caller's whole budget waiting for a receiver that does not exist. Cap that
+	// wait instead. Deliberately a shorter DEADLINE and not a rejection: the state can lag the
+	// goroutine by a hair (it flips to Polling just after start returns), and in that window the
+	// send is taken instantly anyway, so nothing that could have succeeded is refused. A Polling
+	// tracker keeps the full budget — it may legitimately be mid-cycle on a slow upstream.
+	attemptCtx := ctx
+	if stateBefore != EndpointChainTrackerPolling {
+		var cancelAttempt context.CancelFunc
+		attemptCtx, cancelAttempt = context.WithTimeout(ctx, pollNowUnstartedGrace)
+		defer cancelAttempt()
+	}
+
+	pollErr := tracker.PollNow(attemptCtx)
+	// Report the record either way: on a failed poll it carries the failure the caller came to
+	// observe, and on a non-delivery it is the untouched prior state.
+	observation, _ = m.GetObservation(endpointURL)
+
+	// Undelivered/unsupported means no cycle ran. Name the tracker's lifecycle state in the error —
+	// "retrying_start" is a diagnosis, a bare timeout is not.
+	if errors.Is(pollErr, chaintracker.ErrorPollNowNotDelivered) || errors.Is(pollErr, chaintracker.ErrorPollNowUnsupported) {
+		// Read the state HERE, not before the attempt: what matters to whoever is diagnosing is the
+		// tracker's state at the moment it failed to take the request.
+		state, _, _ := m.GetTrackerState(endpointURL)
+		return observation, false, utils.LavaFormatError("poll-now: no poll ran", pollErr,
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+			utils.LogAttr("trackerState", string(state)),
+		)
+	}
+	return observation, true, pollErr
 }
 
 // RemoveTracker removes and stops a ChainTracker for an endpoint.
