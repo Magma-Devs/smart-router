@@ -22,12 +22,7 @@ import (
 //
 //	RESP_CACHE_TEST_TLS_DOCKER=1 go test ./ecosystem/cache/redisstore -run TestTLSDockerValkey -v -timeout 3m
 func TestTLSDockerValkey(t *testing.T) {
-	if os.Getenv("RESP_CACHE_TEST_TLS_DOCKER") != "1" {
-		t.Skip("set RESP_CACHE_TEST_TLS_DOCKER=1 (needs docker) to run the real-server TLS lane")
-	}
-	if err := exec.Command("docker", "info").Run(); err != nil {
-		t.Skip("docker unavailable")
-	}
+	requireDockerLane(t, "RESP_CACHE_TEST_TLS_DOCKER", "the real-server TLS lane")
 	const (
 		container = "sr-tls-valkey"
 		hostPort  = 63794

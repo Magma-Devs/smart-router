@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -27,12 +26,7 @@ import (
 // Addressing uses the same host.docker.internal announcements + test-only
 // port-preserving dialer as the sentinel drill.
 func TestClusterDocker(t *testing.T) {
-	if os.Getenv("RESP_CACHE_TEST_CLUSTER_DOCKER") != "1" {
-		t.Skip("set RESP_CACHE_TEST_CLUSTER_DOCKER=1 (needs docker) to run the real-cluster lane")
-	}
-	if err := exec.Command("docker", "info").Run(); err != nil {
-		t.Skip("docker unavailable")
-	}
+	requireDockerLane(t, "RESP_CACHE_TEST_CLUSTER_DOCKER", "the real-cluster lane")
 
 	const network = "sr-cluster-net"
 	ports := []int{7100, 7101, 7102}
