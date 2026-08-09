@@ -15,6 +15,17 @@
 # RESP cache backend ("valkey:6379" is the compose service name + port).
 # Full surface: topology (standalone|sentinel|cluster), read-addresses,
 # credentials (password-file rotates live), tls, timeouts — docs/RESP-CACHE.md.
+# Addresses here are resolved FROM THE ROUTER. Under compose the router is a
+# container, so it must use the service name "valkey:6379" — 127.0.0.1 is the
+# router container's own loopback and dials nothing. Use the host-published
+# 127.0.0.1:63790 only when the router runs on the host (e.g. the pre_setups
+# lane, which passes it as --resp-cache-addresses).
+#
+# cache-be is the preserved rollback path: with both set, resp-cache wins and
+# cache-be is never dialled — so it is intentionally fine that no cache
+# sidecar exists in this compose stack. Removing the resp-cache: block is what
+# exercises rollback, and that needs a reachable cache-be to be meaningful.
+cache-be: "127.0.0.1:20100"
 resp-cache:
   addresses: ["valkey:6379"]
   key-prefix: "sr" # [A-Za-z0-9._-]+ — used in SCAN MATCH globs; distinct prefixes isolate flushes on a shared backend

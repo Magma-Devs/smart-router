@@ -119,3 +119,87 @@ func TestLiveRotationAgainstRealValkey(t *testing.T) {
 		return dials.Load() == before
 	}, 10*time.Second, 100*time.Millisecond, "the pool must converge to dial-free serving after rotation")
 }
+
+// The same acceptance criterion through the PRODUCTION wiring. The test above
+// drives Refresh by hand over a hand-built client; here the Store is built by
+// New() from a PasswordFile config — exactly what SelectCacheBackend does for
+// a router started from YAML — so the poll watcher New() owns is the only
+// thing that can notice the rewritten file. Nothing in this test calls
+// Refresh: rewriting the secret is the whole operator action, and the live
+// connections must re-authenticate in place, with no restart.
+//
+//	RESP_CACHE_TEST_VALKEY_ADDR=127.0.0.1:63790 go test ./ecosystem/cache/redisstore -run TestLiveRotationThroughConfiguredStore -v
+func TestLiveRotationThroughConfiguredStore(t *testing.T) {
+	addr := os.Getenv("RESP_CACHE_TEST_VALKEY_ADDR")
+	if addr == "" {
+		t.Skip("set RESP_CACHE_TEST_VALKEY_ADDR to a real Valkey/Redis (docker run --rm -p 127.0.0.1:63790:6379 valkey/valkey) to run")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	admin := redis.NewClient(&redis.Options{Addr: addr})
+	t.Cleanup(func() { _ = admin.Close() })
+	require.NoError(t, admin.Ping(ctx).Err())
+
+	for _, user := range []string{"rotwatch1", "rotwatch2"} {
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", user, "on", ">"+user+"-pw", "~*", "+@all").Err())
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_ = admin.Do(cleanupCtx, "ACL", "DELUSER", "rotwatch1", "rotwatch2").Err()
+	})
+
+	credFile := writeTempFile(t, "cred-watched", "rotwatch1:rotwatch1-pw")
+	store, err := New(Config{
+		Addresses:                 []string{addr},
+		PasswordFile:              credFile,
+		CredentialRefreshInterval: 200 * time.Millisecond,
+		KeyPrefix:                 "rotwatch",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	op := func() error { return store.SetHeight(ctx, core.HeightKey("ETH1", "0xwatched"), 1, time.Minute) }
+	require.NoError(t, op(), "the store must serve under the initial credentials")
+
+	// New() owns the client, so the connection ids come from the server side.
+	established := connectionIDsForUser(ctx, t, admin, "rotwatch1")
+	require.NotEmpty(t, established, "the store must hold at least one authenticated connection before the rotation")
+
+	require.NoError(t, os.WriteFile(credFile, []byte("rotwatch2:rotwatch2-pw"), 0o600))
+
+	require.Eventually(t, func() bool {
+		if op() != nil {
+			return false
+		}
+		rotated := connectionIDsForUser(ctx, t, admin, "rotwatch2")
+		for id := range established {
+			if !rotated[id] {
+				return false
+			}
+		}
+		return true
+	}, 20*time.Second, 250*time.Millisecond,
+		"the Store's own credential watcher must re-authenticate every established connection as the new ACL user — no Refresh call, no reconnect, no restart")
+}
+
+// connectionIDsForUser reports the server-side connection ids currently
+// authenticated as user, read from CLIENT LIST.
+func connectionIDsForUser(ctx context.Context, t *testing.T, admin *redis.Client, user string) map[string]bool {
+	t.Helper()
+	list, err := admin.Do(ctx, "CLIENT", "LIST").Text()
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, line := range strings.Split(list, "\n") {
+		if !strings.Contains(line, " user="+user+" ") {
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			if id, found := strings.CutPrefix(field, "id="); found {
+				ids[id] = true
+			}
+		}
+	}
+	return ids
+}

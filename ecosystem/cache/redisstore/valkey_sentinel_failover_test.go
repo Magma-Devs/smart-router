@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -39,12 +38,7 @@ func waitFor(cond func() bool, timeout time.Duration) bool {
 // the port alone identifies the node, which sidesteps the classic
 // sentinel-behind-NAT hostname problem without touching production code.
 func TestSentinelFailover(t *testing.T) {
-	if os.Getenv("RESP_CACHE_TEST_SENTINEL_DOCKER") != "1" {
-		t.Skip("set RESP_CACHE_TEST_SENTINEL_DOCKER=1 (needs docker) to run the sentinel failover drill")
-	}
-	if err := exec.Command("docker", "info").Run(); err != nil {
-		t.Skip("docker unavailable")
-	}
+	requireDockerLane(t, "RESP_CACHE_TEST_SENTINEL_DOCKER", "the sentinel failover drill")
 
 	const (
 		network      = "sr-sentinel-net"
