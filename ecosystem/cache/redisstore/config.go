@@ -178,8 +178,13 @@ func (cfg Config) credentialsSource() CredentialsSource {
 }
 
 // sentinelPassword resolves the control-plane password (file wins when set).
-// Read once at construction: sentinel connections are dialed per discovery
-// attempt, so a rotated file takes effect on the next discovery.
+//
+// ROTATION REQUIRES A RESTART. The file is read once here and the resolved
+// string is captured in FailoverOptions.SentinelPassword, so go-redis reuses
+// that same value for every subsequent discovery — rewriting the file has no
+// effect on a running router. This differs from the DATA-node credentials,
+// which are resolved per connection attempt (sentinel) or refreshed in place
+// (standalone/cluster). Documented in docs/RESP-CACHE.md.
 func (cfg Config) sentinelPassword() (string, error) {
 	if cfg.SentinelPasswordFile == "" {
 		return cfg.SentinelPassword, nil

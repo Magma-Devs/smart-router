@@ -180,8 +180,18 @@ requirepass %s
 		return store.SetHeight(ctx, core.HeightKey("ETH1", "post-failover"), 2, time.Hour) == nil
 	}, 90*time.Second, time.Second, "the store must resume serving after the promotion, without being rebuilt")
 
-	require.Contains(t, masterAddr(), fmt.Sprint(replicaPort),
-		"sentinels must report the promoted replica as the new master")
+	// The client can resume writing through the promoted node BEFORE sentinel
+	// s0's own published view has converged — go-redis rediscovers on failure,
+	// while the sentinel updates its master record on its own cadence. Asserting
+	// the address immediately therefore races the control plane and can fail
+	// even though failover fully succeeded. Wait for the view to converge, then
+	// assert on it.
+	var lastSeen string
+	require.Eventually(t, func() bool {
+		lastSeen = masterAddr()
+		return strings.Contains(lastSeen, fmt.Sprint(replicaPort))
+	}, 60*time.Second, time.Second,
+		"sentinels must converge on the promoted replica as the new master (last view: %s)", lastSeen)
 	v, found, err = store.GetHeight(ctx, core.HeightKey("ETH1", "post-failover"))
 	require.NoError(t, err)
 	require.True(t, found)
