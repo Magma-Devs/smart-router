@@ -45,7 +45,16 @@ func SelectionModeNames() []string {
 // Unknown values are rejected rather than silently defaulted: the mode dispatch treats
 // anything that is not SelectionModeBest as weighted-random, so a typo'd flag would
 // otherwise leave an operator who asked for "best" quietly running the old policy.
+//
+// An empty string is the one exception — it means "not specified" and resolves to the
+// default. Rejecting it would tie startup to the flag being viper-bound: any call site
+// that has not bound the flag reads "" and would abort with a confusing "invalid
+// selection mode:" rather than simply using the default.
 func ParseSelectionMode(str string) (SelectionMode, error) {
+	if strings.TrimSpace(str) == "" {
+		return SelectionModeWeightedRandom, nil
+	}
+
 	normalized := strings.ReplaceAll(str, "-", "_")
 	for _, mode := range []SelectionMode{SelectionModeWeightedRandom, SelectionModeBest} {
 		if strings.EqualFold(normalized, mode.String()) {
