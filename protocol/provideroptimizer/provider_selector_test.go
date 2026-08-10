@@ -21,10 +21,10 @@ func createQoSReport(availability, latency, sync float64) *pairingtypes.QualityO
 	}
 }
 
-// TestNewWeightedSelector tests the creation of a new WeightedSelector
-func TestNewWeightedSelector(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+// TestNewProviderSelector tests the creation of a new ProviderSelector
+func TestNewProviderSelector(t *testing.T) {
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	require.NotNil(t, ws)
 	require.Equal(t, 0.3, ws.availabilityWeight)
@@ -36,7 +36,7 @@ func TestNewWeightedSelector(t *testing.T) {
 
 // TestWeightNormalization tests that weights are normalized if they don't sum to 1.0
 func TestWeightNormalization(t *testing.T) {
-	config := WeightedSelectorConfig{
+	config := ProviderSelectorConfig{
 		AvailabilityWeight: 0.5,
 		LatencyWeight:      0.5,
 		SyncWeight:         0.5,
@@ -45,7 +45,7 @@ func TestWeightNormalization(t *testing.T) {
 		Strategy:           StrategyBalanced,
 	}
 
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 
 	// Weights should be normalized to sum to 1.0
 	totalWeight := ws.availabilityWeight + ws.latencyWeight + ws.syncWeight + ws.stakeWeight
@@ -58,8 +58,8 @@ func TestWeightNormalization(t *testing.T) {
 	require.InDelta(t, 0.25, ws.stakeWeight, 0.001)
 }
 
-func TestNewWeightedSelectorZeroTotalWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
-	config := WeightedSelectorConfig{
+func TestNewProviderSelectorZeroTotalWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
+	config := ProviderSelectorConfig{
 		AvailabilityWeight: 0,
 		LatencyWeight:      0,
 		SyncWeight:         0,
@@ -68,7 +68,7 @@ func TestNewWeightedSelectorZeroTotalWeightFallsBackToDefaultWeightsButKeepsOthe
 		Strategy:           StrategyLatency,
 	}
 
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 
 	// Falls back to default weights
 	require.InDelta(t, 0.3, ws.availabilityWeight, 0.0001)
@@ -81,8 +81,8 @@ func TestNewWeightedSelectorZeroTotalWeightFallsBackToDefaultWeightsButKeepsOthe
 	require.Equal(t, StrategyLatency, ws.strategy)
 }
 
-func TestNewWeightedSelectorNegativeWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
-	config := WeightedSelectorConfig{
+func TestNewProviderSelectorNegativeWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
+	config := ProviderSelectorConfig{
 		AvailabilityWeight: -0.1,
 		LatencyWeight:      0.6,
 		SyncWeight:         0.3,
@@ -91,7 +91,7 @@ func TestNewWeightedSelectorNegativeWeightFallsBackToDefaultWeightsButKeepsOther
 		Strategy:           StrategySyncFreshness,
 	}
 
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 
 	// Falls back to default weights
 	require.InDelta(t, 0.3, ws.availabilityWeight, 0.0001)
@@ -104,8 +104,8 @@ func TestNewWeightedSelectorNegativeWeightFallsBackToDefaultWeightsButKeepsOther
 	require.Equal(t, StrategySyncFreshness, ws.strategy)
 }
 
-func TestNewWeightedSelectorNaNWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
-	config := WeightedSelectorConfig{
+func TestNewProviderSelectorNaNWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
+	config := ProviderSelectorConfig{
 		AvailabilityWeight: 0.3,
 		LatencyWeight:      0.3,
 		SyncWeight:         0.2,
@@ -115,7 +115,7 @@ func TestNewWeightedSelectorNaNWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 	}
 	config.LatencyWeight = stdmath.NaN()
 
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 
 	// Falls back to default weights
 	require.InDelta(t, 0.3, ws.availabilityWeight, 0.0001)
@@ -128,8 +128,8 @@ func TestNewWeightedSelectorNaNWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 	require.Equal(t, StrategyAccuracy, ws.strategy)
 }
 
-func TestNewWeightedSelectorInfWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
-	config := WeightedSelectorConfig{
+func TestNewProviderSelectorInfWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
+	config := ProviderSelectorConfig{
 		AvailabilityWeight: 0.3,
 		LatencyWeight:      0.3,
 		SyncWeight:         0.2,
@@ -139,7 +139,7 @@ func TestNewWeightedSelectorInfWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 	}
 	config.SyncWeight = stdmath.Inf(1)
 
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 
 	// Falls back to default weights
 	require.InDelta(t, 0.3, ws.availabilityWeight, 0.0001)
@@ -154,8 +154,8 @@ func TestNewWeightedSelectorInfWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 
 // TestCalculateScorePerfectProvider tests scoring for a perfect provider
 func TestCalculateScorePerfectProvider(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	qos := createQoSReport(1.0, 0.0, 0.0) // Perfect availability, latency, sync
 
@@ -172,8 +172,8 @@ func TestCalculateScorePerfectProvider(t *testing.T) {
 
 // TestCalculateScorePoorProvider tests scoring for a poor provider
 func TestCalculateScorePoorProvider(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	qos := createQoSReport(0.5, 30.0, 1200.0) // Poor availability, high latency, poor sync
 
@@ -190,8 +190,8 @@ func TestCalculateScorePoorProvider(t *testing.T) {
 
 // TestCalculateScoreMinimumChance ensures minimum selection chance is enforced
 func TestCalculateScoreMinimumChance(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	qos := createQoSReport(0.0, 10.0, 1000.0) // Terrible metrics
 
@@ -203,8 +203,8 @@ func TestCalculateScoreMinimumChance(t *testing.T) {
 
 // TestNormalizeLatency tests latency normalization
 func TestNormalizeLatency(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	testCases := []struct {
 		name     string
@@ -228,8 +228,8 @@ func TestNormalizeLatency(t *testing.T) {
 
 // TestNormalizeSync tests sync normalization
 func TestNormalizeSync(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	testCases := []struct {
 		name     string
@@ -253,8 +253,8 @@ func TestNormalizeSync(t *testing.T) {
 
 // TestNormalizeStake tests stake normalization
 func TestNormalizeStake(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	testCases := []struct {
 		name       string
@@ -282,8 +282,8 @@ func TestNormalizeStake(t *testing.T) {
 
 // TestSelectProviderSingleProvider tests selection with only one provider
 func TestSelectProviderSingleProvider(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	providers := []ProviderScore{
 		{Address: "provider1", CompositeScore: 0.8, SelectionWeight: 0.8},
@@ -295,8 +295,8 @@ func TestSelectProviderSingleProvider(t *testing.T) {
 
 // TestSelectProviderEmptyList tests selection with empty provider list
 func TestSelectProviderEmptyList(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	providers := []ProviderScore{}
 
@@ -306,8 +306,8 @@ func TestSelectProviderEmptyList(t *testing.T) {
 
 // TestSelectProviderDistribution tests that selection follows probability distribution
 func TestSelectProviderDistribution(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 	ws.SetDeterministicSeed(1234567) // Use fixed seed for deterministic test
 
 	// Create providers with different scores
@@ -350,9 +350,9 @@ func TestSelectProviderDistribution(t *testing.T) {
 // minSelectionChance is applied as a minimum *weight* (composite score floor), not a minimum *probability*.
 // Therefore, when there are other large weights, the effective probability can be < minSelectionChance.
 func TestMinSelectionChanceIsAWeightFloorNotAProbabilityGuarantee(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
+	config := DefaultProviderSelectorConfig()
 	config.MinSelectionChance = 0.01
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 	ws.SetDeterministicSeed(1234567)
 
 	// Simulate one "dominant" provider and one provider that only gets the minimum weight floor.
@@ -381,8 +381,8 @@ func TestMinSelectionChanceIsAWeightFloorNotAProbabilityGuarantee(t *testing.T) 
 }
 
 func TestNormalizeStakeMaxInt64DoesNotOverflowOrNaN(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	max := float64(stdmath.MaxInt64)
 	normalized := ws.normalizeStake(max, max)
@@ -392,8 +392,8 @@ func TestNormalizeStakeMaxInt64DoesNotOverflowOrNaN(t *testing.T) {
 }
 
 func TestSelectProviderConcurrentDoesNotPanicAndReturnsValidProvider(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 	ws.SetDeterministicSeed(1234567)
 
 	providers := []ProviderScore{
@@ -433,8 +433,8 @@ func TestSelectProviderConcurrentDoesNotPanicAndReturnsValidProvider(t *testing.
 
 // TestSelectProviderEqualScores tests selection when all providers have equal scores
 func TestSelectProviderEqualScores(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 	ws.SetDeterministicSeed(1234567) // Use fixed seed for deterministic test
 
 	providers := []ProviderScore{
@@ -460,8 +460,8 @@ func TestSelectProviderEqualScores(t *testing.T) {
 
 // TestSelectProviderZeroScores tests fallback when all scores are zero
 func TestSelectProviderZeroScores(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 	ws.SetDeterministicSeed(1234567) // Use fixed seed for deterministic test
 
 	providers := []ProviderScore{
@@ -478,9 +478,9 @@ func TestSelectProviderZeroScores(t *testing.T) {
 
 // TestStrategyLatencyAdjustment tests latency strategy score adjustments
 func TestStrategyLatencyAdjustment(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
+	config := DefaultProviderSelectorConfig()
 	config.Strategy = StrategyLatency
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 
 	// High latency score should be boosted by strategy
 	latency, sync := ws.applyStrategyAdjustments(0.8, 0.5)
@@ -492,9 +492,9 @@ func TestStrategyLatencyAdjustment(t *testing.T) {
 
 // TestStrategySyncAdjustment tests sync strategy score adjustments
 func TestStrategySyncAdjustment(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
+	config := DefaultProviderSelectorConfig()
 	config.Strategy = StrategySyncFreshness
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 
 	// High sync score should be boosted by strategy
 	latency, sync := ws.applyStrategyAdjustments(0.5, 0.8)
@@ -505,8 +505,8 @@ func TestStrategySyncAdjustment(t *testing.T) {
 
 // TestCalculateProviderScores tests the full score calculation pipeline
 func TestCalculateProviderScores(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	allAddresses := []string{"provider1", "provider2", "provider3"}
 	ignoredProviders := map[string]struct{}{}
@@ -550,8 +550,8 @@ func TestCalculateProviderScores(t *testing.T) {
 
 // TestCalculateProviderScoresWithIgnored tests that ignored providers are skipped
 func TestCalculateProviderScoresWithIgnored(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	allAddresses := []string{"provider1", "provider2", "provider3"}
 	ignoredProviders := map[string]struct{}{
@@ -595,7 +595,7 @@ func TestCalculateProviderScoresWithIgnored(t *testing.T) {
 
 // TestGetConfig tests retrieving the configuration
 func TestGetConfig(t *testing.T) {
-	originalConfig := WeightedSelectorConfig{
+	originalConfig := ProviderSelectorConfig{
 		AvailabilityWeight: 0.5,
 		LatencyWeight:      0.3,
 		SyncWeight:         0.15,
@@ -604,7 +604,7 @@ func TestGetConfig(t *testing.T) {
 		Strategy:           StrategyLatency,
 	}
 
-	ws := NewWeightedSelector(originalConfig)
+	ws := NewProviderSelector(originalConfig)
 	retrievedConfig := ws.GetConfig()
 
 	// Weights will be normalized, so check they sum to 1.0
@@ -619,8 +619,8 @@ func TestGetConfig(t *testing.T) {
 
 // TestUpdateStrategy tests changing the strategy
 func TestUpdateStrategy(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	require.Equal(t, StrategyBalanced, ws.strategy)
 
@@ -633,8 +633,8 @@ func TestUpdateStrategy(t *testing.T) {
 
 // BenchmarkCalculateScore benchmarks score calculation
 func BenchmarkCalculateScore(b *testing.B) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	qos := createQoSReport(0.95, 0.15, 2.5)
 
@@ -646,8 +646,8 @@ func BenchmarkCalculateScore(b *testing.B) {
 
 // BenchmarkSelectProvider benchmarks provider selection
 func BenchmarkSelectProvider(b *testing.B) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 	ws.SetDeterministicSeed(1234567) // Use fixed seed for deterministic benchmark
 
 	providers := make([]ProviderScore, 50)
@@ -667,8 +667,8 @@ func BenchmarkSelectProvider(b *testing.B) {
 
 // BenchmarkCalculateProviderScores benchmarks full score calculation pipeline
 func BenchmarkCalculateProviderScores(b *testing.B) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	allAddresses := make([]string, 50)
 	providerData := make(map[string]*pairingtypes.QualityOfServiceReport)
@@ -700,8 +700,8 @@ func BenchmarkCalculateProviderScores(b *testing.B) {
 
 // TestQoSReportGeneration tests that QoS reports are generated correctly
 func TestQoSReportGeneration(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 
 	allAddresses := []string{"provider1"}
 	ignoredProviders := map[string]struct{}{}
@@ -743,13 +743,13 @@ func TestQoSReportGeneration(t *testing.T) {
 
 // TestStrategyDistributedFlattening tests that distributed strategy flattens the score curve
 func TestStrategyDistributedFlattening(t *testing.T) {
-	balancedConfig := DefaultWeightedSelectorConfig()
+	balancedConfig := DefaultProviderSelectorConfig()
 	balancedConfig.Strategy = StrategyBalanced
-	balancedWS := NewWeightedSelector(balancedConfig)
+	balancedWS := NewProviderSelector(balancedConfig)
 
-	distributedConfig := DefaultWeightedSelectorConfig()
+	distributedConfig := DefaultProviderSelectorConfig()
 	distributedConfig.Strategy = StrategyDistributed
-	distributedWS := NewWeightedSelector(distributedConfig)
+	distributedWS := NewProviderSelector(distributedConfig)
 
 	// Apply strategy adjustments
 	balancedLatency, balancedSync := balancedWS.applyStrategyAdjustments(0.8, 0.8)
@@ -763,9 +763,9 @@ func TestStrategyDistributedFlattening(t *testing.T) {
 // TestSelectProviderBestMode verifies SelectionModeBest always returns the highest-scoring
 // provider, regardless of position in the candidate list.
 func TestSelectProviderBestMode(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
+	config := DefaultProviderSelectorConfig()
 	config.SelectionMode = SelectionModeBest
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 	ws.SetDeterministicSeed(1234567)
 
 	// Best score deliberately placed last so a first-wins scan would fail this test
@@ -785,9 +785,9 @@ func TestSelectProviderBestMode(t *testing.T) {
 // case: CalculateScore collapses every unhealthy provider to exactly minSelectionChance,
 // so a first-wins argmax would pin all traffic onto one address.
 func TestSelectProviderBestModeTieBreak(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
+	config := DefaultProviderSelectorConfig()
 	config.SelectionMode = SelectionModeBest
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 	ws.SetDeterministicSeed(1234567)
 
 	// All tied at the starvation floor, as CalculateScore would leave them
@@ -813,9 +813,9 @@ func TestSelectProviderBestModeTieBreak(t *testing.T) {
 // TestSelectProviderBestModeTracksLeader verifies Best mode follows the score, so a
 // provider that overtakes the incumbent immediately takes all traffic.
 func TestSelectProviderBestModeTracksLeader(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
+	config := DefaultProviderSelectorConfig()
 	config.SelectionMode = SelectionModeBest
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 	ws.SetDeterministicSeed(1234567)
 
 	providers := []ProviderScore{
@@ -832,8 +832,8 @@ func TestSelectProviderBestModeTracksLeader(t *testing.T) {
 // TestSelectProviderWeightedModeUnchanged pins the default: an unconfigured selector still
 // spreads traffic proportionally, so adding Best mode did not change existing behaviour.
 func TestSelectProviderWeightedModeUnchanged(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultProviderSelectorConfig()
+	ws := NewProviderSelector(config)
 	ws.SetDeterministicSeed(1234567)
 	require.Equal(t, SelectionModeWeightedRandom, ws.GetConfig().SelectionMode)
 
@@ -856,9 +856,9 @@ func TestSelectProviderWeightedModeUnchanged(t *testing.T) {
 // TestSelectProviderBestModeStats verifies the shared stats tail is populated identically
 // in Best mode, with RNGValue left at zero since no weighted draw took place.
 func TestSelectProviderBestModeStats(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
+	config := DefaultProviderSelectorConfig()
 	config.SelectionMode = SelectionModeBest
-	ws := NewWeightedSelector(config)
+	ws := NewProviderSelector(config)
 
 	providers := []ProviderScore{
 		{Address: "low_score", CompositeScore: 0.2, SelectionWeight: 0.2},
@@ -904,9 +904,9 @@ func TestSelectionStatsCarriesMode(t *testing.T) {
 		{"best/all_zero", SelectionModeBest, zeroScores},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			config := DefaultWeightedSelectorConfig()
+			config := DefaultProviderSelectorConfig()
 			config.SelectionMode = tc.mode
-			ws := NewWeightedSelector(config)
+			ws := NewProviderSelector(config)
 			ws.SetDeterministicSeed(1234567)
 
 			_, stats := ws.SelectProviderWithStats(context.Background(), tc.providers, nil)
