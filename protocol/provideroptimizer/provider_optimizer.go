@@ -618,56 +618,6 @@ func getProviderCompositeScore(address string, scores []ProviderScore) float64 {
 	return 0.0
 }
 
-// ChooseBestProvider selects a single high-quality provider using weighted selection
-// This is used for sticky sessions and other scenarios requiring consistent provider selection
-func (po *ProviderOptimizer) ChooseBestProvider(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string) {
-	addresses, _ = po.ChooseBestProviderWithStats(ctx, allAddresses, ignoredProviders, cu, requestedBlock)
-	return addresses
-}
-
-// ChooseBestProviderWithStats selects a single high-quality provider and returns detailed selection statistics
-func (po *ProviderOptimizer) ChooseBestProviderWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string, stats *SelectionStats) {
-	// Get provider data for weighted selection
-	providerDataGetter := func(addr string) (*pairingtypes.QualityOfServiceReport, time.Time, bool) {
-		qos, lastUpdate := po.GetReputationReportForProvider(addr)
-		if qos == nil {
-			return nil, time.Time{}, false
-		}
-		return qos, lastUpdate, true
-	}
-
-	stakeGetter := func(addr string) int64 {
-		return po.stakeCache.GetStake(addr)
-	}
-
-	// Calculate provider scores
-	providerScores, _, scoreDetails := po.weightedSelector.CalculateProviderScores(
-		allAddresses,
-		ignoredProviders,
-		providerDataGetter,
-		stakeGetter,
-	)
-
-	if len(providerScores) == 0 {
-		utils.LavaFormatWarning("[Optimizer] no providers available for selection", nil)
-		return []string{}, nil
-	}
-
-	// Select the single best provider using weighted random selection
-	// This gives higher probability to better providers while still allowing variety
-	selectedProvider, selectionStats := po.weightedSelector.SelectProviderWithStats(ctx, providerScores, scoreDetails)
-
-	utils.LavaFormatTrace("[Optimizer] returned provider",
-		utils.LogAttr("provider", selectedProvider),
-		utils.LogAttr("selectedWeight", getProviderSelectionWeight(selectedProvider, providerScores)),
-		utils.LogAttr("selectedCompositeScore", getProviderCompositeScore(selectedProvider, providerScores)),
-		utils.LogAttr("numCandidates", len(providerScores)),
-		utils.LogAttr("requestedBlock", requestedBlock),
-	)
-
-	return []string{selectedProvider}, selectionStats
-}
-
 // calculateBlockAvailability calculates the probability that a provider has synced
 // to the requested block height using a Poisson distribution model.
 //
