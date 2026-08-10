@@ -31,6 +31,27 @@ func NewRelaysMonitor(interval time.Duration, chainID, apiInterface string) *Rel
 	}
 }
 
+// SeedInitialHealth overrides the optimistic default before Start runs.
+//
+// The default assumes healthy because, for a normally-booting chain, nothing is
+// known until the first health relay completes and reporting 503 in that window
+// would fail readiness for every rollout. But when startup validation already
+// found zero usable providers, that optimism is a lie: the endpoint would answer
+// 200 on its health path while every relay 503s, until the first health relay
+// resolves an interval later. Since MAG-2525 a chain in that state boots instead
+// of exiting, so this is the difference between being pulled from rotation and
+// silently accepting traffic it cannot serve.
+//
+// Must be called before Start; Start's immediate probe overwrites this with the
+// real verdict, which is the intent — the seed only covers the boot window.
+func (sem *RelaysMonitor) SeedInitialHealth(healthy bool) {
+	if sem == nil {
+		return
+	}
+
+	sem.storeHealthStatus(healthy)
+}
+
 func (sem *RelaysMonitor) SetRelaySender(relaySender func() (bool, error)) {
 	if sem == nil {
 		return

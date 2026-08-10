@@ -296,6 +296,93 @@ func closeDemotedDirectConnections(demoted []*lavasession.ConsumerSessionsWithPr
 // It builds a fresh ChainRouter + ChainFetcher under a bounded attempt context
 // (so a hung upstream cannot stall a whole reconcile cycle), calls Validate,
 // and tears the temporary resources down regardless of outcome.
+// BootValidateTimeout bounds a single provider validation during startup.
+// Before MAG-2525 the two boot tiers disagreed: static providers got a 30s
+// timeout while backups got a bare context.WithCancel, so one blackholed backup
+// URL could hang bring-up indefinitely. Both tiers share this now.
+var BootValidateTimeout = 30 * time.Second
+
+// validateProviderTier validates one configured tier at startup, in parallel and
+// bounded by SpecReVerifyConcurrency. It is the boot-time counterpart to
+// applyReverification: same validateProvider primitive, same semaphore, but no
+// promote/demote bookkeeping — at boot there is no prior pairing to reconcile
+// against, only a pass/fail partition.
+//
+// Parallelism here is an availability property, not just a speed one. The tiers
+// validate in sequence, so a serial static tier of N dead providers delayed the
+// backup tier — and therefore bring-up on backups — by up to N × the timeout.
+// Three dead primaries cost 90s before a healthy backup was even dialled.
+//
+// Returns failures twice: as a set for filtering, and as a slice in configured
+// order. The slice seeds the retry loop, which must not vary with the order
+// goroutines happen to finish in.
+//
+// `providers` is pre-filtered by chain + api-interface at the call site (see
+// relevantStaticProviderList in rpcsmartrouter.go), so nothing is filtered here.
+//
+// `validate` is nil in production and falls back to the real network probe; tests
+// inject a fake to exercise the partitioning and ordering without upstreams, the
+// same seam chainReverifyInputs.validateFn provides for applyReverification.
+func validateProviderTier(
+	ctx context.Context,
+	providers []*lavasession.RPCStaticProviderEndpoint,
+	rpcEndpoint *lavasession.RPCEndpoint,
+	chainParser chainlib.ChainParser,
+	tier reverifyTier,
+	validate func(context.Context, *lavasession.RPCStaticProviderEndpoint) error,
+) (map[*lavasession.RPCStaticProviderEndpoint]struct{}, []*lavasession.RPCStaticProviderEndpoint) {
+	failedSet := make(map[*lavasession.RPCStaticProviderEndpoint]struct{})
+	if len(providers) == 0 {
+		return failedSet, nil
+	}
+	if validate == nil {
+		validate = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+			return validateProvider(c, p, chainParser, BootValidateTimeout)
+		}
+	}
+
+	utils.LavaFormatInfo("Validating providers",
+		utils.LogAttr("chain", rpcEndpoint.ChainID),
+		utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
+		utils.LogAttr("tier", tier.String()),
+		utils.LogAttr("providerCount", len(providers)),
+	)
+
+	results := make([]error, len(providers))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, SpecReVerifyConcurrency)
+	for i, p := range providers {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = validate(ctx, p)
+		}()
+	}
+	wg.Wait()
+
+	var failedOrdered []*lavasession.RPCStaticProviderEndpoint
+	for i, p := range providers {
+		if err := results[i]; err != nil {
+			failedSet[p] = struct{}{}
+			failedOrdered = append(failedOrdered, p)
+			utils.LavaFormatWarning("provider validation failed — excluding from provider list", err,
+				utils.LogAttr("chain", rpcEndpoint.ChainID),
+				utils.LogAttr("tier", tier.String()),
+				utils.LogAttr("provider", p.Name),
+			)
+			continue
+		}
+		utils.LavaFormatInfo("Provider validated successfully",
+			utils.LogAttr("chain", rpcEndpoint.ChainID),
+			utils.LogAttr("tier", tier.String()),
+			utils.LogAttr("provider", p.Name),
+		)
+	}
+	return failedSet, failedOrdered
+}
+
 func validateProvider(
 	ctx context.Context,
 	provider *lavasession.RPCStaticProviderEndpoint,
