@@ -56,7 +56,6 @@ type ConsumerSessionManager struct {
 	rpcEndpoint    *RPCEndpoint // used to filter out endpoints
 	lock           sync.RWMutex
 	pairing        map[string]*ConsumerSessionsWithProvider // key == provider address
-	rawPairing     map[uint64]*ConsumerSessionsWithProvider // key == provider index in pairing. Used for periodic probing of providers
 	stickySessions *StickySessionStore
 	currentEpoch   uint64
 	numberOfResets uint64
@@ -330,8 +329,6 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 
 	csm.lock.Lock()         // start by locking the class lock.
 	defer csm.lock.Unlock() // we defer here so in case we return an error it will unlock automatically.
-
-	csm.rawPairing = pairingList
 
 	if epoch < previousEpoch { // sentry shouldn't update an old epoch
 		return utils.LavaFormatError("trying to update provider list for older epoch", nil, utils.Attribute{Key: "epoch", Value: epoch}, utils.Attribute{Key: "currentEpoch", Value: csm.atomicReadCurrentEpoch()})
@@ -2395,11 +2392,16 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 			continue // Provider not in current pairing or backup list
 		}
 
-		// reportedProviders is populated by relay-failure reporting (ReportProvider), which only
-		// ever fires for providers that actually served traffic. A backup provider that was never
-		// selected therefore never appears there, so using !IsReported for a backup would signal
-		// health it has not demonstrated and unblock it without any real check. Always run an
-		// explicit probe for backup providers.
+		// A backup ALWAYS takes the comprehensive-probe branch: !isBackup short-circuits, so a
+		// backup's report state is never consulted at all. That is deliberate — report state is
+		// only meaningful as a health signal for a provider we actually have evidence about, and
+		// a backup that was never selected has none. Falling through to !IsReported for it would
+		// read "absent from reportedProviders" as "healthy" and unblock it with no real check.
+		//
+		// Note a backup CAN legitimately appear in reportedProviders: blockProvider's
+		// AddressIndexWasNotFoundError branch marks blockedBackupProviders and then falls through
+		// to the reportProvider block below it. That is irrelevant here precisely because the
+		// short-circuit means we never look.
 		if !isBackup && !csm.reportedProviders.IsReported(blockedAddr) {
 			// Non-backup provider whose probe succeeded (it wasn't added to reportedProviders).
 			// Unblock immediately.
@@ -2412,7 +2414,7 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 			csm.validateAndReturnBlockedProviderToValidAddressesListLocked(blockedAddr)
 			csm.reportedProviders.RemoveReport(blockedAddr)
 		} else {
-			// Either a backup provider (needs an actual probe since it has no relay history),
+			// Either a backup provider (always routed here by the short-circuit above),
 			// or a non-backup that was reported for relay failures.
 			// In both cases, run a comprehensive probe with tryReconnect=true.
 			providersNeedingComprehensiveProbe[blockedAddr] = reBlockedProviderInfo{cswp: cswp, isBackup: isBackup}
@@ -2494,7 +2496,7 @@ func (csm *ConsumerSessionManager) SetLavaBlockHeightCallback(getLavaBlockHeight
 }
 
 // ResetTransientFailureState clears every cross-epoch failure-tracking store
-// without forcing an epoch transition. The "live pairing" (pairing, rawPairing,
+// without forcing an epoch transition. The "live pairing" (pairing,
 // pairingAddresses, validAddresses, currentlyBlockedProviderAddresses,
 // backupProviders) is left intact so the very next relay can route normally.
 //
