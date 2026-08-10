@@ -1,8 +1,8 @@
 // Package performance_test (external) — see backend_parity_test.go for why.
 package performance_test
 
-// Plan line 174 requires the parameterized parity suite to cover node-error TTL
-// behavior and equal-tip observation refreshing TTL. Those behaviours previously
+// The parameterized parity suite must cover node-error TTL behavior and
+// equal-tip observation refreshing TTL. Those behaviours previously
 // existed only as component tests (the engine policy test and the Redis adapter's
 // TestSetInt64GreaterOrEqual), which do not prove the two backends agree.
 //
@@ -14,6 +14,7 @@ package performance_test
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -26,7 +27,6 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
-	"net"
 )
 
 // ttlBackend couples a backend with a way to advance time past a TTL.
