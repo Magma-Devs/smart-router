@@ -1,7 +1,7 @@
 package rpcsmartrouter_test
 
-// Phase-4 acceptance: "cobra/viper wiring test through the real cobra command's
-// flags and YAML" (RESP-CACHE-DEVELOPMENT-PLAN.md).
+// Acceptance: the cobra/viper wiring exercised through the REAL cobra command's
+// flags and YAML.
 //
 // The other RESP config tests build a synthetic pflag.FlagSet, which proves the
 // loader's precedence logic but not that the SHIPPED command registers these

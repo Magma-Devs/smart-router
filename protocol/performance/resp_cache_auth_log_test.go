@@ -1,7 +1,7 @@
 package performance
 
-// Phase 5 (plan line 188) and the risk mitigation at line 237 promise that an
-// authentication failure is reported AS an authentication failure. Before this,
+// An authentication failure must be reported AS an authentication failure —
+// both the behaviour and its risk mitigation. Before this,
 // the health probe reduced Ping to a boolean and every fault logged
 // "unreachable" — sending an operator to check networking when the real cause
 // was a credential.
