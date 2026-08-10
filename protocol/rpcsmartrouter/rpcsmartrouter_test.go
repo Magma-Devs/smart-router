@@ -51,6 +51,7 @@ func createTestRPCSmartRouter() *RPCSmartRouter {
 		providerSessions:       make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider),
 		backupProviderSessions: make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider),
 		failedStaticProviders:  make(map[string][]*lavasession.RPCStaticProviderEndpoint),
+		failedBackupProviders:  make(map[string][]*lavasession.RPCStaticProviderEndpoint),
 		rpcServers:             make(map[string]*RPCSmartRouterServer),
 	}
 }
@@ -674,7 +675,7 @@ func TestGracefulFailure_RetryGoroutineSelfTerminates(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		rpsr.retryFailedStaticProviders(ctx, chainKey, nil, rpcEndpoint, convertFn)
+		rpsr.retryFailedProviders(ctx, chainKey, nil, rpcEndpoint, convertFn)
 		close(done)
 	}()
 
@@ -759,7 +760,7 @@ func TestGracefulFailure_CopyOnWriteDoesNotMutateOldMap(t *testing.T) {
 	// Snapshot the original length
 	originalLen := len(oldSessions)
 
-	// Simulate the copy-on-write merge from retryFailedStaticProviders (lines 1719-1737)
+	// Simulate the copy-on-write merge from retryFailedProviders (lines 1719-1737)
 	recoveredSession := createTestProviderSession("providerB", 1)
 
 	mergedSessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(oldSessions)+1)

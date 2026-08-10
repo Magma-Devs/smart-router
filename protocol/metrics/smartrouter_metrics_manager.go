@@ -113,6 +113,7 @@ type SmartRouterMetricsManager struct {
 	// emptied each store. See MAG-1762.
 	csmBlockedProvidersCount       *prometheus.GaugeVec // smartrouter_csm_blocked_providers
 	csmBlockedBackupProvidersCount *prometheus.GaugeVec // smartrouter_csm_blocked_backup_providers
+	endpointServingTier            *prometheus.GaugeVec // smartrouter_endpoint_serving_tier
 	csmStickySessionsCount         *prometheus.GaugeVec // smartrouter_csm_sticky_sessions
 	csmReportedProvidersCount      *prometheus.GaugeVec // smartrouter_csm_reported_providers
 
@@ -461,6 +462,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_csm_reported_providers",
 		Help: "Number of providers currently in the ReportedProviders unresponsiveness register. Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels)
+	endpointServingTier := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_endpoint_serving_tier",
+		Help: "Which provider tier an endpoint is serving from: 2=primaries, 1=DEGRADED (backups only), 0=DARK (no healthy providers). Since MAG-2525 a dark chain no longer crash-loops, so this gauge — not pod restarts — is the signal that a chain cannot serve.",
+	}, csmStateLabels)
 
 	// =========================================================================
 	// Request group metrics
@@ -582,6 +587,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	csmBlockedBackupProvidersCount = registerOrReuse(csmBlockedBackupProvidersCount)
 	csmStickySessionsCount = registerOrReuse(csmStickySessionsCount)
 	csmReportedProvidersCount = registerOrReuse(csmReportedProvidersCount)
+	endpointServingTier = registerOrReuse(endpointServingTier)
 
 	manager := &SmartRouterMetricsManager{
 		// Endpoint-scoped (with function)
@@ -669,6 +675,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		csmBlockedBackupProvidersCount: csmBlockedBackupProvidersCount,
 		csmStickySessionsCount:         csmStickySessionsCount,
 		csmReportedProvidersCount:      csmReportedProvidersCount,
+		endpointServingTier:            endpointServingTier,
 
 		// Internal state
 		// Start fail-closed (0 = not-ready) so /readyz reports 503 until the
@@ -1376,6 +1383,37 @@ func (m *SmartRouterMetricsManager) SetCSMBlockedBackupProvidersCount(chainId, a
 		return
 	}
 	m.csmBlockedBackupProvidersCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
+}
+
+// Serving-tier gauge values. A chain that cannot serve no longer exits the
+// process (MAG-2525), so this gauge carries the signal that pod restarts used to.
+const (
+	ServingTierDark     = 0 // no healthy provider in either tier — endpoint reports unhealthy
+	ServingTierDegraded = 1 // no healthy primaries; serving from backups only
+	ServingTierPrimary  = 2 // serving from primaries
+)
+
+// ServingTier maps healthy per-tier provider counts onto the serving posture.
+// Backups count as serving: the router falls back to them on primary exhaustion,
+// so "all primaries down" is degraded rather than dark.
+func ServingTier(healthyStatic, healthyBackup int) int {
+	switch {
+	case healthyStatic > 0:
+		return ServingTierPrimary
+	case healthyBackup > 0:
+		return ServingTierDegraded
+	default:
+		return ServingTierDark
+	}
+}
+
+// SetEndpointServingTier publishes which provider tier an endpoint is serving
+// from. Alert on < 2 for degraded and == 0 for a chain that is dark.
+func (m *SmartRouterMetricsManager) SetEndpointServingTier(chainId, apiInterface string, healthyStatic, healthyBackup int) {
+	if m == nil {
+		return
+	}
+	m.endpointServingTier.WithLabelValues(chainId, apiInterface).Set(float64(ServingTier(healthyStatic, healthyBackup)))
 }
 
 // SetCSMStickySessionsCount publishes the number of live sticky-session affinities.
