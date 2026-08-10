@@ -1021,19 +1021,24 @@ func TestDebugRuntimeConfig_SmartRouter_PerChainOptimizer(t *testing.T) {
 		return opt
 	}
 
+	// The two chains also take DIFFERENT selection modes, so the mode is proven to travel
+	// per-chain rather than being reported from a single global default.
 	want := map[string]routerConfigOptimizerWeights{
-		"ETH1": {AvailabilityWeight: 0.4, LatencyWeight: 0.3, SyncWeight: 0.2, StakeWeight: 0.1, MinSelectionChance: 0.05},
-		"BTC1": {AvailabilityWeight: 0.1, LatencyWeight: 0.2, SyncWeight: 0.3, StakeWeight: 0.4, MinSelectionChance: 0.07},
+		"ETH1": {AvailabilityWeight: 0.4, LatencyWeight: 0.3, SyncWeight: 0.2, StakeWeight: 0.1, MinSelectionChance: 0.05, SelectionMode: "best"},
+		"BTC1": {AvailabilityWeight: 0.1, LatencyWeight: 0.2, SyncWeight: 0.3, StakeWeight: 0.4, MinSelectionChance: 0.07, SelectionMode: "weighted_random"},
 	}
 
 	optimizers := newEmptyOptimizersRouter()
 	for chainID, w := range want {
+		mode, err := provideroptimizer.ParseSelectionMode(w.SelectionMode)
+		require.NoError(t, err)
 		optimizers.Store(chainID, newConfiguredOptimizer(chainID, provideroptimizer.WeightedSelectorConfig{
 			AvailabilityWeight: w.AvailabilityWeight,
 			LatencyWeight:      w.LatencyWeight,
 			SyncWeight:         w.SyncWeight,
 			StakeWeight:        w.StakeWeight,
 			MinSelectionChance: w.MinSelectionChance,
+			SelectionMode:      mode,
 		}))
 	}
 
