@@ -2434,13 +2434,14 @@ func TestUpdateAllProviders_NormalProviderBlockedAsBackupInNextEpoch(t *testing.
 }
 
 // TestCheckAndUnblock_BackupRoutedToComprehensiveProbe verifies the `!isBackup && !IsReported`
-// guard in checkAndUnblockHealthyReBlockedProviders. reportedProviders is populated only by
-// relay-failure reporting, so a backup that never served traffic is never added — without the
-// guard, every backup would
-// match `!IsReported` and take the immediate-unblock branch, skipping any real health check.
-// This test confirms a backup lands in the comprehensive-probe branch instead: we assert the
-// backup is absent from reportedProviders (guard precondition) and that the immediate-unblock
-// path leaves blockedBackupProviders intact (since that path only touches validAddresses).
+// guard in checkAndUnblockHealthyReBlockedProviders. `!isBackup` short-circuits, so a backup
+// never has its report state consulted and always takes the comprehensive-probe branch. Without
+// the guard, a backup absent from reportedProviders — as this fixture's is, having never served
+// traffic — would match `!IsReported` and take the immediate-unblock branch, skipping any real
+// health check. This test confirms it lands in the comprehensive-probe branch instead: we assert
+// the backup is absent from reportedProviders (the fixture state the guard protects against) and
+// that the immediate-unblock path leaves blockedBackupProviders intact (since that path only
+// touches validAddresses).
 func TestCheckAndUnblock_BackupRoutedToComprehensiveProbe(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	// Point at an unreachable endpoint so the comprehensive probe's eventual outcome
@@ -2465,9 +2466,11 @@ func TestCheckAndUnblock_BackupRoutedToComprehensiveProbe(t *testing.T) {
 	csm.blockedBackupProviders[backupAddr] = struct{}{}
 	csm.lock.Unlock()
 
-	// Guard precondition: backups are never reported (no relay history).
+	// Fixture state the guard protects against: this backup never served traffic, so it was
+	// never reported. (A backup that DID fail a relay can be reported — blockProvider falls
+	// through to the reportProvider block — but then the guard is not what saves us.)
 	require.False(t, csm.reportedProviders.IsReported(backupAddr),
-		"backup provider should never appear in reportedProviders")
+		"this backup never served traffic, so it must not be in reportedProviders")
 
 	// The immediate-unblock branch calls validateAndReturnBlockedProviderToValidAddressesListLocked,
 	// which is a no-op for backups (they're not in validAddresses). So if the guard is missing and
