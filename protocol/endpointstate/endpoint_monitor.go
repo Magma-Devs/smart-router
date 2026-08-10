@@ -30,11 +30,16 @@ const (
 	defaultTrackerStartRetryMax = 30 * time.Second
 	trackerStartRetryJitterDiv  = 5
 
-	// pollNowUnstartedGrace bounds how long PollNow waits on a tracker that is not yet Polling
-	// (MAG-2649). Such a tracker has no poll goroutine to receive the trigger, so waiting out the
-	// caller's full budget only delays a verdict that will not change. Comfortably longer than the
-	// microseconds a live goroutine needs to take the send, so it never cuts short a tracker whose
-	// state merely lagged.
+	// pollNowUnstartedGrace bounds how long PollNow waits for a tracker that is not yet Polling to
+	// TAKE the trigger (MAG-2649). Such a tracker has no poll goroutine to receive it, so waiting out
+	// the caller's full budget only delays a verdict that will not change. Comfortably longer than
+	// the microseconds a live goroutine needs to take the send, so it never cuts short a tracker
+	// whose state merely lagged.
+	//
+	// Delivery only. It deliberately does NOT bound the poll cycle that follows: that is bounded by
+	// the tracker's own fetch timeout, max(10s, MinimumTimePerRelayDelay), which is several times
+	// this grace. Capping both with this value would abandon healthy polls mid-flight and leave the
+	// caller reading a pre-poll record.
 	pollNowUnstartedGrace = 2 * time.Second
 )
 
@@ -591,14 +596,21 @@ func (m *EndpointMonitor) BackoffSnapshot() map[string]time.Duration {
 // /debug/poll-now). It exists so a test can set a provider's state, trigger the poll, and read the
 // result — instead of waiting out the per-endpoint cadence (avgBlockTime/2).
 //
-// polled reports whether the poll CYCLE ACTUALLY RAN. It separates the two outcomes a caller must
-// never conflate:
+// polled reports whether THE RETURNED OBSERVATION IS THIS POLL'S. It is the caller's licence to
+// trust the record, and it separates outcomes that must never be conflated:
 //   - polled=true with a non-nil err — a real poll reached (or tried to reach) upstream and
 //     failed. The observation records that failure, exactly as a timer-driven failure would:
 //     ConsecutivePollFailures incremented, LastSuccessfulPoll untouched.
-//   - polled=false — no poll happened at all (no tracker for this URL, the tracker is still
-//     starting/retrying its init, or it is a non-polling dummy). The returned observation is
-//     whatever was already on record and says nothing about now.
+//   - polled=false — the observation predates this call and says nothing about now. Either no poll
+//     happened at all (no tracker for this URL, the tracker is still starting/retrying its init, or
+//     it is a non-polling dummy), or one was started and outlived the caller's budget. err
+//     distinguishes them; both mean the same thing about the record.
+//
+// That second case is why polled is phrased around the RECORD rather than around the cycle. A poll
+// whose result was not awaited did run — it finishes and writes on its own — but this call cannot
+// say what it wrote, and the record available now is the one from before it. Reporting that as
+// polled=true would hand a harness a pre-poll block and a pre-poll failure streak while telling it
+// both were fresh, which is precisely the confusion this endpoint exists to remove.
 //
 // The tracker's poll goroutine takes m.mu during a block-advancing cycle (newLatestCallback →
 // setTrackerState), so the lock is released BEFORE the trigger — holding it across the wait would
@@ -621,27 +633,42 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 	// otherwise burn the caller's whole budget waiting for a receiver that does not exist. Cap that
 	// wait instead. Deliberately a shorter DEADLINE and not a rejection: the state can lag the
 	// goroutine by a hair (it flips to Polling just after start returns), and in that window the
-	// send is taken instantly anyway, so nothing that could have succeeded is refused. A Polling
-	// tracker keeps the full budget — it may legitimately be mid-cycle on a slow upstream.
-	attemptCtx := ctx
+	// send is taken instantly anyway, so nothing that could have succeeded is refused.
+	//
+	// The grace bounds DELIVERY ONLY. Once the goroutine has the request, the cycle it runs is
+	// bounded by the tracker's own fetch timeout — several times this grace — and is awaited on the
+	// caller's full budget, exactly as for a tracker that was already Polling. Bounding both with
+	// the grace would turn the lagging-state window into the worst outcome of all: the send taken,
+	// the poll running, and the caller timing out on a healthy cycle with a pre-poll record in hand.
+	deliveryCtx := ctx
 	if stateBefore != EndpointChainTrackerPolling {
-		var cancelAttempt context.CancelFunc
-		attemptCtx, cancelAttempt = context.WithTimeout(ctx, pollNowUnstartedGrace)
-		defer cancelAttempt()
+		var cancelDelivery context.CancelFunc
+		deliveryCtx, cancelDelivery = context.WithTimeout(ctx, pollNowUnstartedGrace)
+		defer cancelDelivery()
 	}
 
-	pollErr := tracker.PollNow(attemptCtx)
+	pollErr := tracker.PollNowWithDeliveryDeadline(deliveryCtx, ctx)
 	// Report the record either way: on a failed poll it carries the failure the caller came to
-	// observe, and on a non-delivery it is the untouched prior state.
+	// observe, and otherwise it is the prior state, flagged as such by polled=false.
 	observation, _ = m.GetObservation(endpointURL)
 
-	// Undelivered/unsupported means no cycle ran. Name the tracker's lifecycle state in the error —
-	// "retrying_start" is a diagnosis, a bare timeout is not.
-	if errors.Is(pollErr, chaintracker.ErrorPollNowNotDelivered) || errors.Is(pollErr, chaintracker.ErrorPollNowUnsupported) {
+	// Three ways to end up holding a record this call cannot vouch for. Undelivered/unsupported mean
+	// no cycle ran; not-awaited means one is running but wrote after we read. All three must report
+	// polled=false — the caller's question is "may I trust this record", not "did a goroutine move".
+	// Name the tracker's lifecycle state in the error: "retrying_start" is a diagnosis, a bare
+	// timeout is not.
+	if errors.Is(pollErr, chaintracker.ErrorPollNowNotDelivered) || errors.Is(pollErr, chaintracker.ErrorPollNowUnsupported) ||
+		errors.Is(pollErr, chaintracker.ErrorPollNowResultNotAwaited) {
 		// Read the state HERE, not before the attempt: what matters to whoever is diagnosing is the
-		// tracker's state at the moment it failed to take the request.
+		// tracker's state at the moment the attempt gave out.
 		state, _, _ := m.GetTrackerState(endpointURL)
-		return observation, false, utils.LavaFormatError("poll-now: no poll ran", pollErr,
+		message := "poll-now: no poll ran"
+		if errors.Is(pollErr, chaintracker.ErrorPollNowResultNotAwaited) {
+			// Distinct message because the operator response is distinct: nothing is wrong with the
+			// tracker, the budget was too short for this upstream.
+			message = "poll-now: a poll is running but its result was not awaited; the record below predates it"
+		}
+		return observation, false, utils.LavaFormatError(message, pollErr,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 			utils.LogAttr("trackerState", string(state)),

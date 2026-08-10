@@ -8,6 +8,7 @@ package chaintracker
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -155,6 +156,128 @@ func TestChainTracker_PollNow_NoPollLoop_ReportsNotDelivered(t *testing.T) {
 // polls nothing must say so, never report a silent success.
 func TestDummyChainTracker_PollNow_Unsupported(t *testing.T) {
 	require.ErrorIs(t, (&DummyChainTracker{}).PollNow(context.Background()), ErrorPollNowUnsupported)
+	require.ErrorIs(t, (&DummyChainTracker{}).PollNowWithDeliveryDeadline(context.Background(), context.Background()),
+		ErrorPollNowUnsupported)
+}
+
+// TestChainTracker_PollNow_TakenButNotAwaited_IsItsOwnSentinel separates the two ways a poll-now can
+// time out. Here the request IS taken — the goroutine is at its select — and the cycle then outlives
+// the caller's budget. That must NOT surface as ErrorPollNowNotDelivered (nothing ran) and must not
+// surface as a bare error either: a bare error is indistinguishable from "the poll ran and failed
+// upstream", and the two license opposite things. Only the not-awaited sentinel tells a caller that
+// a record read now predates the poll.
+func TestChainTracker_PollNow_TakenButNotAwaited_IsItsOwnSentinel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	fetcher := newBlockingFetcher()
+	fetcher.block.Store(1000)
+	ct := newPollNowTracker(t, ctx, fetcher)
+
+	// Block the cycle mid-fetch so it cannot finish inside the caller's budget, then release it.
+	fetcher.hold.Store(true)
+	defer fetcher.release()
+
+	callerCtx, callerCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer callerCancel()
+
+	err := ct.PollNow(callerCtx)
+	require.ErrorIs(t, err, ErrorPollNowResultNotAwaited)
+	require.NotErrorIs(t, err, ErrorPollNowNotDelivered, "the request WAS taken; only the result was not awaited")
+	require.ErrorIs(t, err, context.DeadlineExceeded, "the cause is preserved for the operator")
+	require.Equal(t, int64(1000), ct.GetAtomicLatestBlockNum(),
+		"nothing is recorded yet — which is exactly why the caller must not be told a poll completed")
+
+	// The abandoned poll is not cancelled by the caller giving up — it is bounded by the TRACKER's
+	// context. It finishes and records, which is why the caller must be told not to trust the record
+	// it can read right now rather than being told nothing happened.
+	fetcher.block.Store(1007)
+	fetcher.release()
+	require.Eventually(t, func() bool { return ct.GetAtomicLatestBlockNum() == 1007 },
+		10*time.Second, 20*time.Millisecond, "the abandoned poll still completes on the tracker's own budget")
+}
+
+// TestChainTracker_PollNowWithDeliveryDeadline_BoundsDeliveryOnly is the MAG-2649 review fix: a
+// caller that suspects there is no poll goroutine may cap the wait for one to TAKE its request
+// without also capping the cycle. Before the split, one context bounded both, so a short delivery
+// deadline silently truncated healthy polls — and the caller, holding neither sentinel, reported the
+// pre-poll record as fresh. Here the delivery deadline is far shorter than the poll: delivery
+// succeeds, the cycle is awaited on the full budget, and the poll completes normally.
+func TestChainTracker_PollNowWithDeliveryDeadline_BoundsDeliveryOnly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	fetcher := &slowFetcher{delay: 300 * time.Millisecond}
+	fetcher.block.Store(1000)
+	ct := newPollNowTracker(t, ctx, fetcher)
+
+	fetcher.block.Store(1005)
+	deliveryCtx, cancelDelivery := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancelDelivery()
+
+	// 50 ms of delivery budget against a cycle that spends ~600 ms fetching.
+	require.NoError(t, ct.PollNowWithDeliveryDeadline(deliveryCtx, ctx),
+		"the delivery deadline must not reach the cycle it delivers")
+	require.Equal(t, int64(1005), ct.GetAtomicLatestBlockNum(), "the poll ran to completion and recorded")
+
+	// And it still reports non-delivery when there genuinely is no receiver.
+	unstarted := newCustomChainTracker(&advancingFetcher{}, ChainTrackerConfig{
+		BlocksToSave: 1, AverageBlockTime: time.Minute, ServerBlockMemory: 100,
+		ChainId: "ETH1", ParseDirectiveEnabled: true, FlatPollInterval: 30 * time.Second,
+	})
+	shortCtx, cancelShort := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancelShort()
+	require.ErrorIs(t, unstarted.PollNowWithDeliveryDeadline(shortCtx, ctx), ErrorPollNowNotDelivered)
+}
+
+// blockingFetcher holds FetchLatestBlockNum open until released, so a test can keep a poll cycle
+// in flight across the caller's deadline. Release is idempotent, so a test can both defer it and
+// call it explicitly.
+type blockingFetcher struct {
+	advancingFetcher
+	hold      atomic.Bool
+	releaseCh chan struct{}
+	once      sync.Once
+}
+
+func newBlockingFetcher() *blockingFetcher {
+	return &blockingFetcher{releaseCh: make(chan struct{})}
+}
+
+func (f *blockingFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
+	if f.hold.Load() {
+		select {
+		case <-f.releaseCh:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	return f.advancingFetcher.FetchLatestBlockNum(ctx)
+}
+
+func (f *blockingFetcher) release() {
+	f.once.Do(func() { f.hold.Store(false); close(f.releaseCh) })
+}
+
+// slowFetcher makes every fetch take a fixed, real amount of time, so a test can compare a poll
+// cycle's duration against a deadline that is supposed to bound only the delivery before it.
+type slowFetcher struct {
+	advancingFetcher
+	delay time.Duration
+}
+
+func (f *slowFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
+	if err := sleepCtx(ctx, f.delay); err != nil {
+		return 0, err
+	}
+	return f.advancingFetcher.FetchLatestBlockNum(ctx)
+}
+
+func (f *slowFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
+	if err := sleepCtx(ctx, f.delay); err != nil {
+		return "", err
+	}
+	return f.advancingFetcher.FetchBlockHashByNum(ctx, blockNum)
 }
 
 // TestChainTracker_PollNow_ConcurrentTriggersAllComplete pins the queueing behaviour the debug
