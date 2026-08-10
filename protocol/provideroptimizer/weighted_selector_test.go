@@ -759,3 +759,182 @@ func TestStrategyDistributedFlattening(t *testing.T) {
 	require.Less(t, distributedLatency, balancedLatency)
 	require.Less(t, distributedSync, balancedSync)
 }
+
+// TestSelectProviderBestMode verifies SelectionModeBest always returns the highest-scoring
+// provider, regardless of position in the candidate list.
+func TestSelectProviderBestMode(t *testing.T) {
+	config := DefaultWeightedSelectorConfig()
+	config.SelectionMode = SelectionModeBest
+	ws := NewWeightedSelector(config)
+	ws.SetDeterministicSeed(1234567)
+
+	// Best score deliberately placed last so a first-wins scan would fail this test
+	providers := []ProviderScore{
+		{Address: "low_score", CompositeScore: 0.2, SelectionWeight: 0.2},
+		{Address: "medium_score", CompositeScore: 0.4, SelectionWeight: 0.4},
+		{Address: "high_score", CompositeScore: 0.8, SelectionWeight: 0.8},
+	}
+
+	for i := 0; i < 1000; i++ {
+		require.Equal(t, "high_score", ws.SelectProvider(context.Background(), providers))
+	}
+}
+
+// TestSelectProviderBestModeTieBreak verifies that exact ties are broken uniformly at
+// random rather than always landing on the first candidate. This is the degraded-chain
+// case: CalculateScore collapses every unhealthy provider to exactly minSelectionChance,
+// so a first-wins argmax would pin all traffic onto one address.
+func TestSelectProviderBestModeTieBreak(t *testing.T) {
+	config := DefaultWeightedSelectorConfig()
+	config.SelectionMode = SelectionModeBest
+	ws := NewWeightedSelector(config)
+	ws.SetDeterministicSeed(1234567)
+
+	// All tied at the starvation floor, as CalculateScore would leave them
+	providers := []ProviderScore{
+		{Address: "dead1", CompositeScore: 0.01, SelectionWeight: 0.01},
+		{Address: "dead2", CompositeScore: 0.01, SelectionWeight: 0.01},
+		{Address: "dead3", CompositeScore: 0.01, SelectionWeight: 0.01},
+	}
+
+	selections := make(map[string]int)
+	iterations := 9000
+	for i := 0; i < iterations; i++ {
+		selections[ws.SelectProvider(context.Background(), providers)]++
+	}
+
+	// Uniform across the three maxima (~33.3% each)
+	for _, addr := range []string{"dead1", "dead2", "dead3"} {
+		share := float64(selections[addr]) / float64(iterations)
+		require.InDelta(t, 1.0/3.0, share, 0.03, "tie-break not uniform for %s", addr)
+	}
+}
+
+// TestSelectProviderBestModeTracksLeader verifies Best mode follows the score, so a
+// provider that overtakes the incumbent immediately takes all traffic.
+func TestSelectProviderBestModeTracksLeader(t *testing.T) {
+	config := DefaultWeightedSelectorConfig()
+	config.SelectionMode = SelectionModeBest
+	ws := NewWeightedSelector(config)
+	ws.SetDeterministicSeed(1234567)
+
+	providers := []ProviderScore{
+		{Address: "provider1", CompositeScore: 0.9, SelectionWeight: 0.9},
+		{Address: "provider2", CompositeScore: 0.5, SelectionWeight: 0.5},
+	}
+	require.Equal(t, "provider1", ws.SelectProvider(context.Background(), providers))
+
+	// provider2 overtakes
+	providers[1].SelectionWeight = 0.95
+	require.Equal(t, "provider2", ws.SelectProvider(context.Background(), providers))
+}
+
+// TestSelectProviderWeightedModeUnchanged pins the default: an unconfigured selector still
+// spreads traffic proportionally, so adding Best mode did not change existing behaviour.
+func TestSelectProviderWeightedModeUnchanged(t *testing.T) {
+	config := DefaultWeightedSelectorConfig()
+	ws := NewWeightedSelector(config)
+	ws.SetDeterministicSeed(1234567)
+	require.Equal(t, SelectionModeWeightedRandom, ws.GetConfig().SelectionMode)
+
+	providers := []ProviderScore{
+		{Address: "high_score", CompositeScore: 0.8, SelectionWeight: 0.8},
+		{Address: "low_score", CompositeScore: 0.2, SelectionWeight: 0.2},
+	}
+
+	selections := make(map[string]int)
+	iterations := 10000
+	for i := 0; i < iterations; i++ {
+		selections[ws.SelectProvider(context.Background(), providers)]++
+	}
+
+	// 0.8 / 1.0 = 80% vs 20% — the low scorer must still get real traffic
+	require.InDelta(t, 0.8, float64(selections["high_score"])/float64(iterations), 0.03)
+	require.InDelta(t, 0.2, float64(selections["low_score"])/float64(iterations), 0.03)
+}
+
+// TestSelectProviderBestModeStats verifies the shared stats tail is populated identically
+// in Best mode, with RNGValue left at zero since no weighted draw took place.
+func TestSelectProviderBestModeStats(t *testing.T) {
+	config := DefaultWeightedSelectorConfig()
+	config.SelectionMode = SelectionModeBest
+	ws := NewWeightedSelector(config)
+
+	providers := []ProviderScore{
+		{Address: "low_score", CompositeScore: 0.2, SelectionWeight: 0.2},
+		{Address: "high_score", CompositeScore: 0.8, SelectionWeight: 0.8},
+	}
+	details := []ProviderScoreDetails{
+		{Address: "low_score", Composite: 0.2},
+		{Address: "high_score", Composite: 0.8},
+	}
+
+	selected, stats := ws.SelectProviderWithStats(context.Background(), providers, details)
+	require.Equal(t, "high_score", selected)
+	require.NotNil(t, stats)
+	require.Equal(t, "high_score", stats.SelectedProvider)
+	require.Equal(t, 0.0, stats.RNGValue)
+	require.Len(t, stats.ProviderScores, 2)
+}
+
+// TestSelectionStatsCarriesMode verifies every selection path stamps the policy that
+// produced the pick, including the short-circuits where RNGValue is zero for reasons
+// unrelated to the mode.
+func TestSelectionStatsCarriesMode(t *testing.T) {
+	twoProviders := []ProviderScore{
+		{Address: "low_score", CompositeScore: 0.2, SelectionWeight: 0.2},
+		{Address: "high_score", CompositeScore: 0.8, SelectionWeight: 0.8},
+	}
+	oneProvider := []ProviderScore{{Address: "solo", CompositeScore: 0.5, SelectionWeight: 0.5}}
+	zeroScores := []ProviderScore{
+		{Address: "zero1", CompositeScore: 0, SelectionWeight: 0},
+		{Address: "zero2", CompositeScore: 0, SelectionWeight: 0},
+	}
+
+	for _, tc := range []struct {
+		name      string
+		mode      SelectionMode
+		providers []ProviderScore
+	}{
+		{"weighted/normal", SelectionModeWeightedRandom, twoProviders},
+		{"weighted/single", SelectionModeWeightedRandom, oneProvider},
+		{"weighted/all_zero", SelectionModeWeightedRandom, zeroScores},
+		{"best/normal", SelectionModeBest, twoProviders},
+		{"best/single", SelectionModeBest, oneProvider},
+		{"best/all_zero", SelectionModeBest, zeroScores},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := DefaultWeightedSelectorConfig()
+			config.SelectionMode = tc.mode
+			ws := NewWeightedSelector(config)
+			ws.SetDeterministicSeed(1234567)
+
+			_, stats := ws.SelectProviderWithStats(context.Background(), tc.providers, nil)
+			require.NotNil(t, stats)
+			require.Equal(t, tc.mode, stats.Mode)
+		})
+	}
+}
+
+// TestFormatSelectionStatsIncludesMode verifies the debugging header names the policy, so
+// an RNG of 0 can be read correctly rather than being mistaken for a weighted draw.
+func TestFormatSelectionStatsIncludesMode(t *testing.T) {
+	stats := &SelectionStats{
+		ProviderScores:   []ProviderScoreDetails{{Address: "provider1", Composite: 0.8}},
+		RNGValue:         0.0,
+		SelectedProvider: "provider1",
+		Mode:             SelectionModeBest,
+	}
+	require.Contains(t, stats.FormatSelectionStats(), "| Mode: best |")
+
+	stats.Mode = SelectionModeWeightedRandom
+	stats.RNGValue = 0.42
+	formatted := stats.FormatSelectionStats()
+	require.Contains(t, formatted, "| Mode: weighted_random |")
+	require.Contains(t, formatted, "| RNG: 0.420000 |")
+	require.Contains(t, formatted, "| Selected: provider1")
+
+	// nil receiver stays safe — the header is skipped when there are no stats
+	var nilStats *SelectionStats
+	require.Equal(t, "", nilStats.FormatSelectionStats())
+}

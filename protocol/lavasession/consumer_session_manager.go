@@ -1359,7 +1359,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		providers = csm.getTopTenProvidersForStatefulCalls(validAddresses, ignoredProvidersList)
 	} else if stickiness != "" {
 		var selectionStats *provideroptimizer.SelectionStats
-		providers, selectionStats = csm.providerOptimizer.ChooseBestProviderWithStats(ctx, validAddresses, ignoredProvidersList, cu, requestedBlock)
+		providers, selectionStats = csm.providerOptimizer.ChooseProviderWithStats(ctx, validAddresses, ignoredProvidersList, cu, requestedBlock)
 		if selectionStats != nil {
 			csm.setSelectionStats(selectionStats)
 		}
