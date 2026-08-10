@@ -57,7 +57,7 @@ type ProviderOptimizer struct {
 	stakeCache                      ProviderStakeCache // provider stake amounts used in weighted selection
 	consumerOptimizerQoSClient      consumerOptimizerQoSClientInf
 	chainId                         string
-	weightedSelector                *WeightedSelector            // Weighted random selection based on composite QoS scores
+	providerSelector                *ProviderSelector            // Weighted random selection based on composite QoS scores
 	globalLatencyCalculator         *score.AdaptiveMaxCalculator // Global T-Digest for all providers' latency samples
 	globalSyncCalculator            *score.AdaptiveMaxCalculator // Global T-Digest for all providers' sync samples
 	adaptiveLock                    sync.RWMutex                 // Lock for accessing adaptive calculators
@@ -195,10 +195,10 @@ func (po *ProviderOptimizer) Strategy() Strategy {
 	return po.strategy
 }
 
-// ConfigureWeightedSelector rebuilds the weighted selector using the supplied
+// ConfigureProviderSelector rebuilds the weighted selector using the supplied
 // configuration. Strategy is always enforced from the optimizer so callers only
 // provide weights and selection chance values.
-func (po *ProviderOptimizer) ConfigureWeightedSelector(config WeightedSelectorConfig) {
+func (po *ProviderOptimizer) ConfigureProviderSelector(config ProviderSelectorConfig) {
 	if po == nil {
 		return
 	}
@@ -211,7 +211,7 @@ func (po *ProviderOptimizer) ConfigureWeightedSelector(config WeightedSelectorCo
 	config.UseAdaptiveSyncMax = true
 	config.AdaptiveSyncGetter = po.getAdaptiveSyncBounds
 
-	po.weightedSelector = NewWeightedSelector(config)
+	po.providerSelector = NewProviderSelector(config)
 }
 
 // getAdaptiveLatencyBounds returns the current P10 and P90 bounds for latency normalization
@@ -570,7 +570,7 @@ func (po *ProviderOptimizer) CalculateQoSScoresForMetrics(allAddresses []string,
 	}
 
 	// Calculate provider scores using weighted selector
-	_, qosReports, _ := po.weightedSelector.CalculateProviderScores(
+	_, qosReports, _ := po.providerSelector.CalculateProviderScores(
 		allAddresses,
 		ignoredProviders,
 		providerDataGetter,
@@ -612,7 +612,7 @@ func (po *ProviderOptimizer) ChooseProviderWithStats(ctx context.Context, allAdd
 	}
 
 	// Calculate provider scores using weighted selector
-	providerScores, _, scoreDetails := po.weightedSelector.CalculateProviderScores(
+	providerScores, _, scoreDetails := po.providerSelector.CalculateProviderScores(
 		allAddresses,
 		ignoredProviders,
 		providerDataGetter,
@@ -626,7 +626,7 @@ func (po *ProviderOptimizer) ChooseProviderWithStats(ctx context.Context, allAdd
 	}
 
 	// Select provider using weighted random selection with stats
-	selectedProvider, selectionStats := po.weightedSelector.SelectProviderWithStats(ctx, providerScores, scoreDetails)
+	selectedProvider, selectionStats := po.providerSelector.SelectProviderWithStats(ctx, providerScores, scoreDetails)
 	returnedProviders := []string{selectedProvider}
 
 	utils.LavaFormatTrace("[Optimizer] returned providers",
@@ -987,9 +987,9 @@ func NewProviderOptimizer(strategy Strategy, averageBlockTIme time.Duration, wan
 	}
 
 	// Initialize weighted selector with default configuration
-	weightedConfig := DefaultWeightedSelectorConfig()
+	weightedConfig := DefaultProviderSelectorConfig()
 	weightedConfig.Strategy = strategy
-	weightedSelector := NewWeightedSelector(weightedConfig)
+	providerSelector := NewProviderSelector(weightedConfig)
 
 	// Initialize global adaptive calculators for Phase 2 (P10-P90 normalization)
 	globalLatencyCalculator := score.NewAdaptiveMaxCalculator(
@@ -1019,7 +1019,7 @@ func NewProviderOptimizer(strategy Strategy, averageBlockTIme time.Duration, wan
 		stakeCache:                      NewProviderStakeCache(),
 		consumerOptimizerQoSClient:      consumerOptimizerQoSClient,
 		chainId:                         chainId,
-		weightedSelector:                weightedSelector,
+		providerSelector:                providerSelector,
 		globalLatencyCalculator:         globalLatencyCalculator,
 		globalSyncCalculator:            globalSyncCalculator,
 	}
@@ -1075,29 +1075,29 @@ func (po *ProviderOptimizer) GetReputationReportForProvider(providerAddress stri
 	return report, providerData.Latency.GetLastUpdateTime()
 }
 
-// UpdateWeightedSelectorStrategy updates the weighted selector's strategy
+// UpdateProviderSelectorStrategy updates the weighted selector's strategy
 // This should be called when the optimizer's strategy changes
-func (po *ProviderOptimizer) UpdateWeightedSelectorStrategy(strategy Strategy) {
-	if po.weightedSelector != nil {
-		po.weightedSelector.UpdateStrategy(strategy)
+func (po *ProviderOptimizer) UpdateProviderSelectorStrategy(strategy Strategy) {
+	if po.providerSelector != nil {
+		po.providerSelector.UpdateStrategy(strategy)
 		utils.LavaFormatTrace("[Optimizer] weighted selector strategy updated",
 			utils.LogAttr("strategy", strategy.String()),
 		)
 	}
 }
 
-// GetWeightedSelectorConfig returns the current weighted selector configuration
-func (po *ProviderOptimizer) GetWeightedSelectorConfig() WeightedSelectorConfig {
-	if po.weightedSelector != nil {
-		return po.weightedSelector.GetConfig()
+// GetProviderSelectorConfig returns the current weighted selector configuration
+func (po *ProviderOptimizer) GetProviderSelectorConfig() ProviderSelectorConfig {
+	if po.providerSelector != nil {
+		return po.providerSelector.GetConfig()
 	}
-	return WeightedSelectorConfig{}
+	return ProviderSelectorConfig{}
 }
 
 // SetDeterministicSeed sets a deterministic seed for the weighted selector
 // This is used for testing purposes only to ensure reproducible provider selection
 func (po *ProviderOptimizer) SetDeterministicSeed(seed int64) {
-	if po.weightedSelector != nil {
-		po.weightedSelector.SetDeterministicSeed(seed)
+	if po.providerSelector != nil {
+		po.providerSelector.SetDeterministicSeed(seed)
 	}
 }
