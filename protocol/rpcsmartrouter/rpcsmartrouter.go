@@ -49,6 +49,7 @@ import (
 	scoreutils "github.com/magma-Devs/smart-router/utils/score"
 	"github.com/magma-Devs/smart-router/version"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -689,6 +690,57 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 // active selection weights, used for each per-chain entry in the PerChainOptimizer map
 // returned by GET /debug/runtime-config. Fields carry no json tags, so each key marshals
 // as the bare Go identifier — tests grep the same string in test code and router source.
+// resolveSelectionWeights turns --qos-selection-priority plus the individual
+// --qos-*-weight flags into the four QoS weights the provider selector scores on.
+//
+// Precedence: the priority preset sets the weights, then any weight the operator set by
+// hand overrides it — so the preset is a starting point, never a cage.
+//
+// "Set by hand" deliberately checks the config file as well as the command line.
+// Changed() only reports flags typed on the CLI, so a weight set in config.yml would
+// otherwise lose silently to the preset; viper.InConfig covers that half.
+//
+// Only the four weights are decided here. Every other field is left at its default for
+// the caller to fill in, so a priority can never move something it does not own.
+func resolveSelectionWeights(flags *pflag.FlagSet) (provideroptimizer.ProviderSelectorConfig, error) {
+	config := provideroptimizer.DefaultProviderSelectorConfig()
+
+	priority, err := provideroptimizer.ParseSelectionPriority(viper.GetString(common.ProviderOptimizerSelectionPriority))
+	if err != nil {
+		return config, err
+	}
+	config = priority.ApplyTo(config)
+
+	overridden := []string{}
+	for _, w := range []struct {
+		flagName string
+		target   *float64
+	}{
+		{common.ProviderOptimizerAvailabilityWeight, &config.AvailabilityWeight},
+		{common.ProviderOptimizerLatencyWeight, &config.LatencyWeight},
+		{common.ProviderOptimizerSyncWeight, &config.SyncWeight},
+		{common.ProviderOptimizerStakeWeight, &config.StakeWeight},
+	} {
+		if (flags != nil && flags.Changed(w.flagName)) || viper.InConfig(w.flagName) {
+			*w.target = viper.GetFloat64(w.flagName)
+			overridden = append(overridden, w.flagName)
+		}
+	}
+
+	// Stay quiet on the default path so an untouched deployment logs nothing new.
+	if priority != provideroptimizer.SelectionPriorityBalanced || len(overridden) > 0 {
+		utils.LavaFormatInfo("Working with provider selection priority: "+priority.String(),
+			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
+			utils.LogAttr("latencyWeight", config.LatencyWeight),
+			utils.LogAttr("syncWeight", config.SyncWeight),
+			utils.LogAttr("stakeWeight", config.StakeWeight),
+			utils.LogAttr("manuallyOverridden", strings.Join(overridden, ",")),
+		)
+	}
+
+	return config, nil
+}
+
 type routerConfigOptimizerWeights struct {
 	AvailabilityWeight float64
 	LatencyWeight      float64
@@ -2543,11 +2595,10 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			if err := scoreutils.SetProbeUpdateWeight(viper.GetFloat64(common.ProbeUpdateWeightFlagName)); err != nil {
 				return err
 			}
-			providerSelectorConfig := provideroptimizer.DefaultProviderSelectorConfig()
-			providerSelectorConfig.AvailabilityWeight = viper.GetFloat64(common.ProviderOptimizerAvailabilityWeight)
-			providerSelectorConfig.LatencyWeight = viper.GetFloat64(common.ProviderOptimizerLatencyWeight)
-			providerSelectorConfig.SyncWeight = viper.GetFloat64(common.ProviderOptimizerSyncWeight)
-			providerSelectorConfig.StakeWeight = viper.GetFloat64(common.ProviderOptimizerStakeWeight)
+			providerSelectorConfig, err := resolveSelectionWeights(cmd.Flags())
+			if err != nil {
+				return err
+			}
 			providerSelectorConfig.MinSelectionChance = viper.GetFloat64(common.ProviderOptimizerMinSelectionChance)
 			providerSelectorConfig.Strategy = strategyFlag.Strategy
 
@@ -2667,6 +2718,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerStakeWeight, defaultSelectorConfig.StakeWeight, "weight assigned to provider stake when computing selection scores")
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerMinSelectionChance, defaultSelectorConfig.MinSelectionChance, "minimum selection probability for any provider regardless of score")
 	cmdRPCSmartRouter.Flags().String(common.ProviderOptimizerSelectionMode, defaultSelectorConfig.SelectionMode.String(), fmt.Sprintf("how the winner is picked from the scored providers (%s): weighted_random draws proportionally to score, best always takes the highest scorer", strings.Join(provideroptimizer.SelectionModeNames(), "|")))
+	cmdRPCSmartRouter.Flags().String(common.ProviderOptimizerSelectionPriority, provideroptimizer.SelectionPriorityBalanced.String(), fmt.Sprintf("what to optimise for (%s) — a preset over the four qos-*-weight flags above; any weight set by hand overrides the preset", strings.Join(provideroptimizer.SelectionPriorityNames(), "|")))
 	if err := viper.BindPFlag(common.ProviderOptimizerAvailabilityWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerAvailabilityWeight)); err != nil {
 		utils.LavaFormatFatal("failed binding availability weight flag", err)
 	}
@@ -2684,6 +2736,9 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerSelectionMode, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSelectionMode)); err != nil {
 		utils.LavaFormatFatal("failed binding selection mode flag", err)
+	}
+	if err := viper.BindPFlag(common.ProviderOptimizerSelectionPriority, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSelectionPriority)); err != nil {
+		utils.LavaFormatFatal("failed binding selection priority flag", err)
 	}
 	cmdRPCSmartRouter.Flags().String(metrics.MetricsListenFlagName, metrics.DisabledFlagOption, "the address to expose prometheus metrics (such as localhost:7779)")
 	// Usage telemetry (OTel) — off by default. When enabled, per-relay and
