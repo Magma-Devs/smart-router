@@ -474,7 +474,8 @@ type debugMuxDeps struct {
 // poll is already bounded by the tracker's own fetch timeout (max(10s, MinimumTimePerRelayDelay)),
 // but a trigger arriving mid-cycle queues behind the in-flight poll first — so the ceiling is
 // roughly two fetch timeouts plus slack. Reaching it returns 504 rather than hanging the caller;
-// the poll itself, once started, still completes and records.
+// the poll itself, once started, still completes and records — the response simply cannot report
+// what it recorded, which is why that case answers Polled=false rather than claiming the poll.
 const debugPollNowTimeout = 25 * time.Second
 
 // cacheFlusher is the minimal surface /debug/reset-all needs from the cache-be
@@ -1423,12 +1424,19 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	//     tick, so /debug/chain-state's ConsensusBaseline is NOT guaranteed to have moved when this
 	//     returns; the endpoint's own record and the chain's ObservedTip are.
 	//
-	// One consequence worth knowing before writing a test against it: a head moved BACKWARD is not
-	// visible here. The poll runs and is recorded, but the endpoint tip is block-monotonic — a lower
-	// block is held off as a late straggler until the stored tip goes stale (StalenessWindow, ~120 s
-	// on Ethereum) — and the tracker does not walk its own head down either. So a setup that rewinds
-	// a simulator's head and then triggers a poll reads back the previous, higher block. That is the
-	// production anti-flap rule faithfully applied, not a failed trigger.
+	// Two consequences worth knowing before writing a test against it.
+	//
+	// Assert Polled before reading any other field in a row. A false Polled with a "not awaited"
+	// TriggerError is not a broken tracker: the poll is running and will record, this response just
+	// could not wait for it. Retry, or narrow the match with chain_id / api_interface so fewer
+	// endpoints share the budget — do not treat it as an endpoint fault.
+	//
+	// A head moved BACKWARD is not visible here. The poll runs and is recorded, but the endpoint tip
+	// is block-monotonic — a lower block is held off as a late straggler until the stored tip goes
+	// stale (StalenessWindow, ~120 s on Ethereum) — and the tracker does not walk its own head down
+	// either. So a setup that rewinds a simulator's head and then triggers a poll reads back the
+	// previous, higher block. That is the production anti-flap rule faithfully applied, not a failed
+	// trigger.
 	mux.HandleFunc("/debug/poll-now", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -1499,9 +1507,15 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 			rows = append(rows, row)
 		}
-		// Every matched endpoint failed to even start a poll: say so in the status line as well as
-		// the rows, so a harness that only checks the code does not read "nothing happened" as
-		// success.
+		// No matched endpoint produced a record this response can vouch for: say so in the status
+		// line as well as the rows, so a harness that only checks the code does not read "nothing
+		// usable happened" as success.
+		//
+		// 504 covers two causes, and TriggerError is what separates them — the code alone must not be
+		// read as "the tracker is broken". Either no poll could be STARTED (still starting, retrying
+		// its init, stopped — the lifecycle state is named), or one was started and outlived the
+		// budget above, which says nothing about the tracker and everything about the upstream's
+		// latency or the budget being shared across matched targets.
 		if !polledAny {
 			w.Header().Set("Content-Type", "application/json") // must precede WriteHeader
 			w.WriteHeader(http.StatusGatewayTimeout)
