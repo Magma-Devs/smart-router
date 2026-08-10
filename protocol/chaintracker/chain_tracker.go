@@ -52,6 +52,11 @@ type IChainTracker interface {
 	// Cadence is untouched: it neither consumes nor advances the failure backoff.
 	PollNow(ctx context.Context) error
 
+	// PollNowWithDeliveryDeadline is PollNow with a separate, usually shorter, bound on the wait for
+	// the poll goroutine to take the request — for a caller that suspects there is no goroutine to
+	// take it. resultCtx still bounds the cycle itself (MAG-2649).
+	PollNowWithDeliveryDeadline(deliveryCtx, resultCtx context.Context) error
+
 	// StartAndServe starts the chain tracker and serves gRPC if configured
 	StartAndServe(ctx context.Context) error
 
@@ -751,29 +756,54 @@ func (cs *ChainTracker) ResetBackoff() {
 // sent, which is what makes "poll now, then read the result" race-free for the caller.
 //
 // The returned error is the poll's own error (a failed poll is a legitimate, recorded outcome —
-// callers that need to tell "the poll failed" from "no poll ran" should test the two sentinels
-// below with errors.Is):
+// callers that need to tell "the poll failed" from "no poll ran" should test the sentinels below
+// with errors.Is). Each sentinel says something different about whether the caller may trust a
+// record it reads afterwards:
 //   - ErrorPollNowNotDelivered — the poll goroutine never took the request before ctx expired:
 //     the tracker has not finished starting, is retrying its init, or has been stopped. NOTHING
 //     was polled and no observation was written.
 //   - ErrorPollNowUnsupported — this tracker cannot poll at all (DummyChainTracker).
+//   - ErrorPollNowResultNotAwaited — the request WAS taken and the cycle is running, but ctx
+//     expired before it recorded. The poll completes and writes regardless; this caller simply did
+//     not witness it, so anything it reads back is the PRE-poll record. Never report this as a
+//     completed poll.
 //
 // Deliberately NOT for cadence tests: it neither resets nor deepens the failure backoff and never
 // reschedules the timer. It does reset the traffic gate's skip budget, because it performs a real
 // poll — so it must not be called inside a test measuring the skip ceiling (MAG-2159).
 func (cs *ChainTracker) PollNow(ctx context.Context) error {
+	return cs.pollNow(ctx, ctx)
+}
+
+// PollNowWithDeliveryDeadline is PollNow with the two waits bounded separately: deliveryCtx caps
+// only how long we wait for the poll goroutine to TAKE the request, and resultCtx caps the wait
+// for the cycle it then runs.
+//
+// The split exists because those two waits have unrelated natural lengths. Delivery either happens
+// in microseconds (the goroutine is at its select) or never (there is no goroutine yet), so a
+// caller that suspects the latter wants a short deadline. The cycle itself is bounded by the
+// tracker's own fetch timeout — max(10s, MinimumTimePerRelayDelay) — so applying that same short
+// deadline to the result would routinely abandon a poll that was proceeding normally, and the
+// caller would then read a pre-poll record. See EndpointMonitor.PollNow, the one caller.
+func (cs *ChainTracker) PollNowWithDeliveryDeadline(deliveryCtx, resultCtx context.Context) error {
+	return cs.pollNow(deliveryCtx, resultCtx)
+}
+
+func (cs *ChainTracker) pollNow(deliveryCtx, resultCtx context.Context) error {
 	req := pollNowRequest{resp: make(chan error, 1)}
 	select {
 	case cs.pollNowCh <- req:
-	case <-ctx.Done():
-		return fmt.Errorf("%w: %w", ErrorPollNowNotDelivered, ctx.Err())
+	case <-deliveryCtx.Done():
+		return fmt.Errorf("%w: %w", ErrorPollNowNotDelivered, deliveryCtx.Err())
 	}
 	select {
 	case err := <-req.resp:
 		return err
-	case <-ctx.Done():
-		// The poll was accepted and is still running; it will finish and record on its own.
-		return fmt.Errorf("poll started but its result was not awaited: %w", ctx.Err())
+	case <-resultCtx.Done():
+		// The poll was accepted and is still running; it will finish and record on its own. Sentinel,
+		// not a bare error: the caller has to be able to tell this from a poll that ran and failed,
+		// because the observation it can read right now is the one from BEFORE this poll.
+		return fmt.Errorf("%w: %w", ErrorPollNowResultNotAwaited, resultCtx.Err())
 	}
 }
 

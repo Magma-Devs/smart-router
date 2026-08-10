@@ -1401,11 +1401,17 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// Body: {"network_address": "<url>"} — required; optional "chain_id" / "api_interface" narrow
 	// the match when the same URL is registered on more than one chain or interface. The response is
 	// a row per matched endpoint (see /debug/endpoint-state for the shared field vocabulary), plus:
-	//   Polled       — the poll cycle actually ran. False means nothing was polled (tracker still
-	//                  starting, retrying its init, or stopped) and the record below is stale.
+	//   Polled       — the record in this row IS this poll's, and may be trusted as fresh. False
+	//                  means the record predates the call and says nothing about now: either nothing
+	//                  was polled (tracker still starting, retrying its init, or stopped), or a poll
+	//                  was started and did not finish inside the handler's budget. Assert on this
+	//                  before reading any other field.
 	//   PollError    — the poll ran and failed upstream. That is a legitimate outcome to assert on
 	//                  (it is what increments ConsecutivePollFailures), so it answers 200, not 5xx.
-	//   TriggerError — why no poll could be started, including the tracker's lifecycle state.
+	//                  Only ever set alongside Polled=true, so the pair cannot describe a failure
+	//                  streak that was never recorded.
+	//   TriggerError — why this row carries no trustworthy record, including the tracker's lifecycle
+	//                  state. Set whenever Polled is false.
 	//
 	// Two deliberate limits, both to keep this from lying to a test:
 	//   - It bypasses the relay traffic gate, so a fresh relay tip cannot silently turn the trigger
@@ -1453,6 +1459,13 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// Ceiling on the whole handler: one poll is bounded by the tracker's own fetch timeout, but
 		// a request that arrives mid-cycle also waits for the in-flight poll first. Cap the sum so
 		// this can never hang a test harness; the poll itself is unaffected and still completes.
+		//
+		// Deliberately ONE budget for all matched targets rather than one each, so a multi-target
+		// address cannot multiply the worst-case hang by the number of matches. The cost is that a
+		// late target can inherit a nearly-spent budget and report Polled=false with TriggerError set
+		// — honest, and the reason PollNow reports the not-awaited case that way instead of claiming
+		// a poll it did not witness. Narrow with chain_id / api_interface when a test needs every
+		// matched endpoint to get a full budget.
 		ctx, cancel := context.WithTimeout(r.Context(), debugPollNowTimeout)
 		defer cancel()
 

@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -33,13 +34,25 @@ import (
 // live block counter, so a test can move the chain forward between polls. Hashes are derived from
 // the REQUESTED block, not the current head, so re-reading an older block returns the same hash it
 // had (a head-derived hash would look like a fork on every advance). fail breaks the transport.
+// delayNanos, when set, makes every request take that long — the knob the deadline-split tests use
+// to build a poll cycle that outlives a short deadline.
 type pollNowConn struct {
-	url   string
-	block atomic.Int64
-	fail  atomic.Bool
+	url        string
+	block      atomic.Int64
+	fail       atomic.Bool
+	delayNanos atomic.Int64
 }
 
 func (c *pollNowConn) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*lavasession.DirectRPCResponse, error) {
+	if delay := time.Duration(c.delayNanos.Load()); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if c.fail.Load() {
 		return nil, errors.New("pollNowConn: upstream unreachable")
 	}
@@ -260,5 +273,90 @@ func TestEndpointMonitor_PollNow_TrackerNotPolling_NamesTheState(t *testing.T) {
 	_, polled, err := m.PollNow(triggerCtx, url)
 	require.False(t, polled, "no poll can run while the tracker is still trying to start")
 	require.Error(t, err)
+	require.ErrorIs(t, err, chaintracker.ErrorPollNowNotDelivered, "nothing was taken, so nothing ran")
 	require.Contains(t, err.Error(), "trackerState", "the error names the tracker's lifecycle state")
+}
+
+// TestEndpointMonitor_PollNow_LaggingTrackerStateDoesNotTruncateThePoll is the MAG-2649 review
+// regression, and it covers precisely the window the unstarted-grace comment claims is safe.
+//
+// The grace fires whenever trackerStates says anything but Polling. That includes the moment right
+// after StartAndServe returns, when the poll goroutine is already at its select but the state write
+// has not landed — so the send is taken instantly and a full poll cycle then runs under the grace.
+// While one context bounded both waits, that cycle was abandoned at 2 s even though nothing was
+// wrong with it, the error carried no sentinel, and PollNow reported polled=true over the PRE-poll
+// record: a stale block and a stale failure streak, both labelled fresh. Worse than the refusal the
+// grace exists to avoid.
+//
+// The fixture forces the lagging state deliberately rather than trying to hit the real race, which
+// is microseconds wide. What it reproduces is the same code path with the same inputs.
+func TestEndpointMonitor_PollNow_LaggingTrackerStateDoesNotTruncateThePoll(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const url = "http://eth-pollnow-lagging:8545"
+	m, conn := newPollNowMonitor(t, ctx, url, 7000)
+	defer m.Stop()
+
+	// A cycle that comfortably outlives the 2 s grace: two fetches at 1.5 s each.
+	conn.delayNanos.Store(int64(1500 * time.Millisecond))
+	require.Greater(t, 2*1500*time.Millisecond, pollNowUnstartedGrace,
+		"the fixture only proves anything while the poll outlasts the grace")
+
+	// The lagging window: the goroutine is polling, the recorded state has not caught up.
+	m.mu.Lock()
+	m.trackerStates[url] = EndpointChainTrackerStarting
+	m.mu.Unlock()
+
+	conn.block.Store(7042)
+
+	obs, polled, err := m.PollNow(ctx, url)
+	require.NoError(t, err, "a healthy poll must not be cut short by a deadline meant for delivery")
+	require.True(t, polled)
+	require.Equal(t, int64(7042), obs.LatestBlock,
+		"polled=true must mean the returned record is THIS poll's, never the one from before it")
+	require.Equal(t, ObservationSourcePoll, obs.Source)
+}
+
+// TestEndpointMonitor_PollNow_ResultNotAwaited_ReportsNotPolled covers the outcome that survives the
+// deadline split: the caller's own budget really is too short for the cycle. The poll is under way
+// and will record, but this call cannot say what it recorded — so it must report polled=false.
+//
+// The alternative is the bug this pair of tests exists to prevent. polled=true alongside a PollError
+// means, per the handler's documented vocabulary, "a poll reached upstream and failed, and
+// ConsecutivePollFailures went up". A harness reading that asserts on a failure streak that was
+// never recorded, off a record that predates the call entirely.
+func TestEndpointMonitor_PollNow_ResultNotAwaited_ReportsNotPolled(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const url = "http://eth-pollnow-slow:8545"
+	m, conn := newPollNowMonitor(t, ctx, url, 8000)
+	defer m.Stop()
+
+	before, ok := m.GetObservation(url)
+	require.True(t, ok)
+
+	conn.delayNanos.Store(int64(2 * time.Second))
+	conn.block.Store(8080)
+
+	// Delivery is instant (the tracker is Polling); it is the cycle that outlives this budget.
+	shortCtx, shortCancel := context.WithTimeout(ctx, 400*time.Millisecond)
+	defer shortCancel()
+
+	obs, polled, err := m.PollNow(shortCtx, url)
+	require.False(t, polled, "an unwitnessed poll must never be reported as a completed one")
+	require.ErrorIs(t, err, chaintracker.ErrorPollNowResultNotAwaited)
+	require.NotErrorIs(t, err, chaintracker.ErrorPollNowNotDelivered, "the trigger WAS delivered")
+	require.Equal(t, before.LatestBlock, obs.LatestBlock, "the record handed back is the pre-poll one")
+	require.Equal(t, before.ConsecutivePollFailures, obs.ConsecutivePollFailures,
+		"and its failure streak is the pre-poll one too — the field a harness would have misread")
+
+	// The abandoned poll is bounded by the tracker, not the caller: it finishes and records. Proving
+	// that is what makes polled=false the honest answer rather than an under-report.
+	conn.delayNanos.Store(0)
+	require.Eventually(t, func() bool {
+		latest, found := m.GetObservation(url)
+		return found && latest.LatestBlock == 8080
+	}, 15*time.Second, 20*time.Millisecond, "the poll the caller stopped waiting for still completed")
 }

@@ -42,6 +42,12 @@ func (dct *DummyChainTracker) CurrentPollInterval() time.Duration { return 0 }
 // test that a poll completed when none can ever run here (MAG-2649).
 func (dct *DummyChainTracker) PollNow(ctx context.Context) error { return ErrorPollNowUnsupported }
 
+// PollNowWithDeliveryDeadline is unsupported for the same reason as PollNow: neither deadline can
+// matter when there is no poll loop to deliver to.
+func (dct *DummyChainTracker) PollNowWithDeliveryDeadline(deliveryCtx, resultCtx context.Context) error {
+	return ErrorPollNowUnsupported
+}
+
 // StartAndServe starts the chain tracker and serves gRPC if configured
 func (dct *DummyChainTracker) StartAndServe(ctx context.Context) error {
 	return nil
