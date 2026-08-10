@@ -978,8 +978,8 @@ func TestDebugRuntimeConfig_SmartRouter_ReturnsValues(t *testing.T) {
 	require.Equal(t, chaintracker.PollingUpdateLength, resp.PollingUpdateLength)
 
 	// Optimizer defaults are flat top-level keys (the ticket's Phase 2 shape rule),
-	// asserted against DefaultWeightedSelectorConfig().
-	def := provideroptimizer.DefaultWeightedSelectorConfig()
+	// asserted against DefaultProviderSelectorConfig().
+	def := provideroptimizer.DefaultProviderSelectorConfig()
 	require.Equal(t, def.AvailabilityWeight, resp.AvailabilityWeight)
 	require.Equal(t, def.LatencyWeight, resp.LatencyWeight)
 	require.Equal(t, def.SyncWeight, resp.SyncWeight)
@@ -1011,13 +1011,13 @@ func TestDebugRuntimeConfig_SmartRouter_MethodNotAllowed(t *testing.T) {
 // Each chain uses four DISTINCT weights that already sum to 1.0. Distinct so a
 // field-swap in toWeights (e.g. Sync<->Stake) can't pass — the default weights would
 // mask it, since they are pairwise equal (0.3/0.3, 0.2/0.2). Summing to 1.0 so
-// NewWeightedSelector's normalizer leaves them untouched and the assertions stay exact.
+// NewProviderSelector's normalizer leaves them untouched and the assertions stay exact.
 // Two chains with non-overlapping weight sets prove the map is keyed per chainID rather
 // than collapsing or cross-wiring entries.
 func TestDebugRuntimeConfig_SmartRouter_PerChainOptimizer(t *testing.T) {
-	newConfiguredOptimizer := func(chainID string, cfg provideroptimizer.WeightedSelectorConfig) *provideroptimizer.ProviderOptimizer {
+	newConfiguredOptimizer := func(chainID string, cfg provideroptimizer.ProviderSelectorConfig) *provideroptimizer.ProviderOptimizer {
 		opt := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
-		opt.ConfigureWeightedSelector(cfg)
+		opt.ConfigureProviderSelector(cfg)
 		return opt
 	}
 
@@ -1032,7 +1032,7 @@ func TestDebugRuntimeConfig_SmartRouter_PerChainOptimizer(t *testing.T) {
 	for chainID, w := range want {
 		mode, err := provideroptimizer.ParseSelectionMode(w.SelectionMode)
 		require.NoError(t, err)
-		optimizers.Store(chainID, newConfiguredOptimizer(chainID, provideroptimizer.WeightedSelectorConfig{
+		optimizers.Store(chainID, newConfiguredOptimizer(chainID, provideroptimizer.ProviderSelectorConfig{
 			AvailabilityWeight: w.AvailabilityWeight,
 			LatencyWeight:      w.LatencyWeight,
 			SyncWeight:         w.SyncWeight,
