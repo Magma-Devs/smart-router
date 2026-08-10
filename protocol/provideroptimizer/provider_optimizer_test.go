@@ -421,19 +421,19 @@ func TestProviderOptimizerUpdatingLatency(t *testing.T) {
 	}
 }
 
-func TestProviderOptimizerUpdateWeightedSelectorStrategyPropagatesToSelector(t *testing.T) {
+func TestProviderOptimizerUpdateEndpointSelectorStrategyPropagatesToSelector(t *testing.T) {
 	providerOptimizer := setupProviderOptimizer(1)
 
-	// Sanity: default strategy is balanced, and ConfigureWeightedSelector enforces optimizer strategy.
-	cfg := providerOptimizer.GetWeightedSelectorConfig()
+	// Sanity: default strategy is balanced, and ConfigureEndpointSelector enforces optimizer strategy.
+	cfg := providerOptimizer.GetEndpointSelectorConfig()
 	require.Equal(t, StrategyBalanced, cfg.Strategy)
 
 	// Change optimizer strategy and explicitly propagate to selector.
 	// (This is required because tests sometimes mutate providerOptimizer.strategy directly.)
 	providerOptimizer.strategy = StrategyLatency
-	providerOptimizer.UpdateWeightedSelectorStrategy(providerOptimizer.strategy)
+	providerOptimizer.UpdateEndpointSelectorStrategy(providerOptimizer.strategy)
 
-	cfg2 := providerOptimizer.GetWeightedSelectorConfig()
+	cfg2 := providerOptimizer.GetEndpointSelectorConfig()
 	require.Equal(t, StrategyLatency, cfg2.Strategy)
 }
 
@@ -732,7 +732,7 @@ func TestProviderOptimizerRetriesWithReducedProvidersSet(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		for j, address := range providersGen.providersAddresses {
 			// Exponential latency degradation on a scale that matches the selector normalization.
-			// WeightedSelector normalizes latency against score.WorstLatencyScore (=30s), so we need
+			// EndpointSelector normalizes latency against score.WorstLatencyScore (=30s), so we need
 			// the "bad" providers to approach that range; otherwise 1ms vs 800ms is nearly identical.
 			//
 			// Exponential degradation: 10ms, 100ms, 1s, 5s, 15s, 30s

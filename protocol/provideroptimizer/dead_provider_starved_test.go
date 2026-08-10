@@ -18,7 +18,7 @@ import (
 // endpoint therefore kept a composite of ~2/3 of a healthy peer and was still selected ~7–18% of
 // the time (measured), instead of being starved to the MinSelectionChance floor.
 //
-// Fix (weighted_selector.CalculateScore): once availability falls below the acceptable minimum
+// Fix (endpoint_selector.CalculateScore): once availability falls below the acceptable minimum
 // (availabilityScore == 0, i.e. raw availability < score.MinAcceptableAvailability), collapse the
 // composite to the starvation floor — frozen latency/sync must not prop up a dead node. Recovery is
 // driven by the proactive prober (cheap polls), not by continuing to route real traffic.
@@ -27,8 +27,8 @@ import (
 // availability below the minimum but latency/sync/stake all pristine, the composite must be exactly
 // the floor — not the ~0.6 the frozen latency/sync would otherwise yield.
 func TestCalculateScore_DeadAvailabilityCollapsesToFloor(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultEndpointSelectorConfig()
+	ws := NewEndpointSelector(config)
 
 	// Dead availability, but perfect (frozen-healthy) latency + sync, and a large stake — none of
 	// which may rescue the score once availability has collapsed.
@@ -51,8 +51,8 @@ func TestCalculateScore_DeadAvailabilityCollapsesToFloor(t *testing.T) {
 // is merely degraded (availability above the minimum) must keep a real composite and NOT be slammed
 // to the floor — the fix targets dead nodes only.
 func TestCalculateScore_AcceptableAvailabilityNotCollapsed(t *testing.T) {
-	config := DefaultWeightedSelectorConfig()
-	ws := NewWeightedSelector(config)
+	config := DefaultEndpointSelectorConfig()
+	ws := NewEndpointSelector(config)
 
 	// availability 0.90 → normalized 0.5 (above the 0.80 cutoff), perfect latency/sync.
 	degraded := createQoSReport(0.90, 0.0, 0.0)

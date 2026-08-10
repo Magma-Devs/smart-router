@@ -44,7 +44,7 @@ func TestSelectionModeString(t *testing.T) {
 	require.Equal(t, "best", SelectionModeBest.String())
 	require.Equal(t, []string{"weighted_random", "best"}, SelectionModeNames())
 
-	// The zero value must be the historical policy: a WeightedSelectorConfig built
+	// The zero value must be the historical policy: a EndpointSelectorConfig built
 	// without an explicit mode keeps doing weighted random selection.
 	var unset SelectionMode
 	require.Equal(t, SelectionModeWeightedRandom, unset)

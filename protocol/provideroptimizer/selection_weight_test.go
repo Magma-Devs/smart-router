@@ -36,4 +36,4 @@ func TestGetStake(t *testing.T) {
 }
 
 // Note: WeightedChoice method was part of tier-based selection and has been removed.
-// Weighted selection is now handled by WeightedSelector in weighted_selector.go
+// Weighted selection is now handled by EndpointSelector in endpoint_selector.go
