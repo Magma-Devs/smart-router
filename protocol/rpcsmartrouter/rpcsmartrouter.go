@@ -824,6 +824,7 @@ type routerConfigOptimizerWeights struct {
 	SyncWeight         float64
 	StakeWeight        float64
 	MinSelectionChance float64
+	SelectionMode      string
 }
 
 // routerConfigResponse is the JSON body of GET /debug/runtime-config. It exposes the
@@ -1859,6 +1860,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				SyncWeight:         c.SyncWeight,
 				StakeWeight:        c.StakeWeight,
 				MinSelectionChance: c.MinSelectionChance,
+				SelectionMode:      c.SelectionMode.String(),
 			}
 		}
 
@@ -3049,6 +3051,15 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			weightedSelectorConfig.MinSelectionChance = viper.GetFloat64(common.ProviderOptimizerMinSelectionChance)
 			weightedSelectorConfig.Strategy = strategyFlag.Strategy
 
+			selectionMode, err := provideroptimizer.ParseSelectionMode(viper.GetString(common.ProviderOptimizerSelectionMode))
+			if err != nil {
+				return err
+			}
+			weightedSelectorConfig.SelectionMode = selectionMode
+			if selectionMode != provideroptimizer.SelectionModeWeightedRandom {
+				utils.LavaFormatInfo("Working with provider selection mode: " + selectionMode.String())
+			}
+
 			// RPCSmartRouter always runs in standalone mode
 			epochDuration := viper.GetDuration(common.EpochDurationFlag)
 			if epochDuration == 0 {
@@ -3155,6 +3166,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerSyncWeight, defaultWeightedConfig.SyncWeight, "weight assigned to provider sync freshness when computing selection scores")
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerStakeWeight, defaultWeightedConfig.StakeWeight, "weight assigned to provider stake when computing selection scores")
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerMinSelectionChance, defaultWeightedConfig.MinSelectionChance, "minimum selection probability for any provider regardless of score")
+	cmdRPCSmartRouter.Flags().String(common.ProviderOptimizerSelectionMode, defaultWeightedConfig.SelectionMode.String(), fmt.Sprintf("how the winner is picked from the scored providers (%s): weighted_random draws proportionally to score, best always takes the highest scorer", strings.Join(provideroptimizer.SelectionModeNames(), "|")))
 	if err := viper.BindPFlag(common.ProviderOptimizerAvailabilityWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerAvailabilityWeight)); err != nil {
 		utils.LavaFormatFatal("failed binding availability weight flag", err)
 	}
@@ -3169,6 +3181,9 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerMinSelectionChance, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerMinSelectionChance)); err != nil {
 		utils.LavaFormatFatal("failed binding min selection chance flag", err)
+	}
+	if err := viper.BindPFlag(common.ProviderOptimizerSelectionMode, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSelectionMode)); err != nil {
+		utils.LavaFormatFatal("failed binding selection mode flag", err)
 	}
 	cmdRPCSmartRouter.Flags().String(metrics.MetricsListenFlagName, metrics.DisabledFlagOption, "the address to expose prometheus metrics (such as localhost:7779)")
 	// Usage telemetry (OTel) — off by default. When enabled, per-relay and
