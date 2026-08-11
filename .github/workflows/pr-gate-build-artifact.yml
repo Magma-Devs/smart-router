@@ -496,12 +496,16 @@ jobs:
               ($arg == "--show-provider-address-in-metrics") or
               ($arg == "--geolocation") or
               ($arg == "--concurrent-providers") or
+              ($arg == "--enable-periodic-probe-providers") or
+              ($arg == "--periodic-probe-providers-interval") or
               (($arg | startswith("--provider-optimizer-")) and (($arg | contains("=")) | not));
             def retired_flag_assignment($arg):
               ($arg | startswith("--optimizer-qos-listen=")) or
               ($arg | startswith("--show-provider-address-in-metrics=")) or
               ($arg | startswith("--geolocation=")) or
               ($arg | startswith("--concurrent-providers=")) or
+              ($arg | startswith("--enable-periodic-probe-providers=")) or
+              ($arg | startswith("--periodic-probe-providers-interval=")) or
               (($arg | startswith("--provider-optimizer-")) and ($arg | contains("=")));
             def sanitize_arg($arg):
               if retired_flag_name($arg) then
