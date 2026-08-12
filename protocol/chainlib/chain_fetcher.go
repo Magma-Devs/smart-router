@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	ChainFetcherHeaderName = "X-LAVA-Provider"
+	ChainFetcherHeaderName = "X-Smart-Router-Provider"
 )
 
 type IChainFetcher interface {
@@ -743,7 +743,7 @@ func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explici
 	// Fold an explicit smartrouter-extension directive into the key so explicitly-requested extensions
 	// get a dedicated cache lane, separate from requests auto-promoted to the same Extensions.
 	if explicitExtensionDirective != "" {
-		cashHashBytes = append(cashHashBytes, []byte("\x00lava-extension="+explicitExtensionDirective)...)
+		cashHashBytes = append(cashHashBytes, []byte("\x00smartrouter-extension="+explicitExtensionDirective)...)
 	}
 
 	// return the value

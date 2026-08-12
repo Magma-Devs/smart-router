@@ -360,12 +360,12 @@ func TestRelayProcessorStatefulApi(t *testing.T) {
 		require.Nil(t, canUse)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
-		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava4@test": &routersession.SessionInfo{}, "lava3@test": &routersession.SessionInfo{}, "provider@test": &routersession.SessionInfo{}, "lava2@test": &routersession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider4@test": &routersession.SessionInfo{}, "provider3@test": &routersession.SessionInfo{}, "provider@test": &routersession.SessionInfo{}, "provider2@test": &routersession.SessionInfo{}}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 		go SendProtocolError(relayProcessor, "provider@test", time.Millisecond*5, fmt.Errorf("bad"))
-		go SendNodeError(relayProcessor, "lava2@test", time.Millisecond*20)
-		go SendNodeError(relayProcessor, "lava3@test", time.Millisecond*25)
-		go SendSuccessResp(relayProcessor, "lava4@test", time.Millisecond*100)
+		go SendNodeError(relayProcessor, "provider2@test", time.Millisecond*20)
+		go SendNodeError(relayProcessor, "provider3@test", time.Millisecond*25)
+		go SendSuccessResp(relayProcessor, "provider4@test", time.Millisecond*100)
 		ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond*300)
 		defer cancel()
 		for i := 0; i < 10; i++ {
@@ -415,11 +415,11 @@ func TestRelayProcessorStatefulApiErr(t *testing.T) {
 		require.Nil(t, canUse)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
-		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava4@test": &routersession.SessionInfo{}, "lava3@test": &routersession.SessionInfo{}, "provider@test": &routersession.SessionInfo{}, "lava2@test": &routersession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider4@test": &routersession.SessionInfo{}, "provider3@test": &routersession.SessionInfo{}, "provider@test": &routersession.SessionInfo{}, "provider2@test": &routersession.SessionInfo{}}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 		go SendProtocolError(relayProcessor, "provider@test", time.Millisecond*5, fmt.Errorf("bad"))
-		go SendNodeError(relayProcessor, "lava2@test", time.Millisecond*20)
-		go SendNodeError(relayProcessor, "lava3@test", time.Millisecond*25)
+		go SendNodeError(relayProcessor, "provider2@test", time.Millisecond*20)
+		go SendNodeError(relayProcessor, "provider3@test", time.Millisecond*25)
 		ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond*50)
 		defer cancel()
 		for i := 0; i < 2; i++ {

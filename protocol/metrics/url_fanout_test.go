@@ -49,11 +49,11 @@ func TestResolveProviderNames_FansOutAcrossSharedURL(t *testing.T) {
 	m := newSmartRouterForURLFanoutTest()
 	const sharedURL = "https://base.lava.build:443/"
 
-	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "lava1")
-	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "lava2")
+	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "endpoint1")
+	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "endpoint2")
 
 	names := m.resolveProviderNames(sharedURL)
-	require.ElementsMatch(t, []string{"lava1", "lava2"}, names,
+	require.ElementsMatch(t, []string{"endpoint1", "endpoint2"}, names,
 		"both providers on a shared URL must resolve together")
 }
 
@@ -97,19 +97,19 @@ func TestSetEndpointLatestBlock_FansOutAcrossSharedURL(t *testing.T) {
 	const sharedURL = "https://base.lava.build:443/"
 	const block int64 = 44615090
 
-	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "lava1")
-	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "lava2")
+	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "endpoint1")
+	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "endpoint2")
 
 	m.SetEndpointLatestBlock("BASE", "jsonrpc", sharedURL, block)
 
-	lava1 := testutil.ToFloat64(m.endpointLatestBlock.WithLabelValues(map[string]string{
-		"spec": "BASE", "apiInterface": "jsonrpc", "endpoint_id": "lava1",
+	endpoint1 := testutil.ToFloat64(m.endpointLatestBlock.WithLabelValues(map[string]string{
+		"spec": "BASE", "apiInterface": "jsonrpc", "endpoint_id": "endpoint1",
 	}))
-	lava2 := testutil.ToFloat64(m.endpointLatestBlock.WithLabelValues(map[string]string{
-		"spec": "BASE", "apiInterface": "jsonrpc", "endpoint_id": "lava2",
+	endpoint2 := testutil.ToFloat64(m.endpointLatestBlock.WithLabelValues(map[string]string{
+		"spec": "BASE", "apiInterface": "jsonrpc", "endpoint_id": "endpoint2",
 	}))
-	require.Equal(t, float64(block), lava1, "lava1 must receive the block update from the shared URL")
-	require.Equal(t, float64(block), lava2, "lava2 must receive the block update from the shared URL")
+	require.Equal(t, float64(block), endpoint1, "endpoint1 must receive the block update from the shared URL")
+	require.Equal(t, float64(block), endpoint2, "endpoint2 must receive the block update from the shared URL")
 }
 
 // TestRecordBlockFetch_FansOutAcrossSharedURL covers the other URL-keyed emitter

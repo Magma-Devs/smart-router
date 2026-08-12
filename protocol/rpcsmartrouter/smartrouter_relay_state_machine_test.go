@@ -154,17 +154,17 @@ func TestConsumerStateMachineHappyFlow(t *testing.T) {
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendNodeError(relayProcessor, "lava2@test", time.Millisecond*1)
+				relaycoretest.SendNodeError(relayProcessor, "provider2@test", time.Millisecond*1)
 			case 2:
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendNodeError(relayProcessor, "lava2@test", time.Millisecond*1)
+				relaycoretest.SendNodeError(relayProcessor, "provider2@test", time.Millisecond*1)
 			case 3:
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendSuccessResp(relayProcessor, "lava4@test", time.Millisecond*1)
+				relaycoretest.SendSuccessResp(relayProcessor, "provider4@test", time.Millisecond*1)
 			case 4:
 				require.True(t, task.IsDone())
 				results, _ := relayProcessor.HasRequiredNodeResults(1)
@@ -304,7 +304,7 @@ func TestConsumerStateMachineArchiveRetry(t *testing.T) {
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendNodeErrorJsonRpc(relayProcessor, "lava2@test", time.Millisecond*1)
+				relaycoretest.SendNodeErrorJsonRpc(relayProcessor, "provider2@test", time.Millisecond*1)
 			case 1:
 				require.False(t, task.IsDone())
 				require.True(t,
@@ -314,7 +314,7 @@ func TestConsumerStateMachineArchiveRetry(t *testing.T) {
 				)
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendSuccessRespJsonRpc(relayProcessor, "lava4@test", time.Millisecond*1)
+				relaycoretest.SendSuccessRespJsonRpc(relayProcessor, "provider4@test", time.Millisecond*1)
 			case 2:
 				require.True(t, task.IsDone())
 				results, _ := relayProcessor.HasRequiredNodeResults(1)
