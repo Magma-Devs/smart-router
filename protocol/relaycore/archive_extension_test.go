@@ -35,7 +35,7 @@ func (p *passthroughRelayParser) ParseRelay(
 	directiveHeaders := map[string]string{}
 	filtered := make([]pairingtypes.Metadata, 0, len(metadata))
 	for _, m := range metadata {
-		if _, ok := common.SPECIAL_LAVA_DIRECTIVE_HEADERS[m.Name]; ok {
+		if _, ok := common.SPECIAL_DIRECTIVE_HEADERS[m.Name]; ok {
 			directiveHeaders[m.Name] = m.Value
 		} else {
 			filtered = append(filtered, m)
@@ -184,13 +184,13 @@ func TestArchiveAddDoesNotInventRelayTimeout(t *testing.T) {
 // headers (rpcsmartrouter_server.go:2339).
 func TestArchiveAddPreservesDebugRelay(t *testing.T) {
 	pm, parser := newTestProtocolMessage(t, testProtocolMessageOpts{
-		directiveHeaders: map[string]string{common.LAVA_DEBUG_RELAY: "true"},
+		directiveHeaders: map[string]string{common.DEBUG_RELAY: "true"},
 	})
 	relayParser := &passthroughRelayParser{chainParser: parser}
 
 	upgraded := addArchiveExtension(context.Background(), pm, &ArchiveStatus{}, relayParser)
 
-	require.Contains(t, upgraded.GetDirectiveHeaders(), common.LAVA_DEBUG_RELAY,
+	require.Contains(t, upgraded.GetDirectiveHeaders(), common.DEBUG_RELAY,
 		"smartrouter-debug-relay must be preserved through archive add")
 }
 

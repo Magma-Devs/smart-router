@@ -3981,7 +3981,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	relayResult.ProviderInfo = result.ProviderInfo
 	if relayResult.Reply != nil {
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{
-			Name:  common.LAVA_RELAY_PROTOCOL_HEADER_NAME,
+			Name:  common.RELAY_PROTOCOL_HEADER_NAME,
 			Value: string(directConnection.GetProtocol()),
 		})
 	}
@@ -4015,7 +4015,7 @@ func (rpcss *RPCSmartRouterServer) LavaDirectiveHeaders(metadata []pairingtypes.
 	headerDirectives := map[string]string{}
 	for _, metaElement := range metadata {
 		name := strings.ToLower(metaElement.Name)
-		if _, found := common.SPECIAL_LAVA_DIRECTIVE_HEADERS[name]; found {
+		if _, found := common.SPECIAL_DIRECTIVE_HEADERS[name]; found {
 			headerDirectives[name] = metaElement.Value
 		} else {
 			metadataRet = append(metadataRet, metaElement)
@@ -4587,7 +4587,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	if relayResult.IsNodeError {
 		metadataReply = append(metadataReply,
 			pairingtypes.Metadata{
-				Name:  common.LAVA_IDENTIFIED_NODE_ERROR_HEADER,
+				Name:  common.IDENTIFIED_NODE_ERROR_HEADER,
 				Value: "true",
 			})
 	}
@@ -4600,7 +4600,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	if analytics != nil && analytics.HedgeCount > 0 {
 		metadataReply = append(metadataReply,
 			pairingtypes.Metadata{
-				Name:  common.LAVA_HEDGE_TRIGGERED_HEADER,
+				Name:  common.HEDGE_TRIGGERED_HEADER,
 				Value: "true",
 			})
 	}
@@ -4609,7 +4609,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	rpcss.getMetadataFromRelayTrailer(chainlib.TrailersToAddToHeaderResponse, relayResult)
 
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
-	_, debugRelays := directiveHeaders[common.LAVA_DEBUG_RELAY]
+	_, debugRelays := directiveHeaders[common.DEBUG_RELAY]
 	if debugRelays {
 		metadataReply = append(metadataReply,
 			pairingtypes.Metadata{

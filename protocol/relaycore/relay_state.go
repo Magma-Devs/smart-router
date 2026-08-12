@@ -282,12 +282,12 @@ func preserveDebugRelay(src, dst chainlib.ProtocolMessage) {
 	if srcHdrs == nil {
 		return
 	}
-	v, ok := srcHdrs[common.LAVA_DEBUG_RELAY]
+	v, ok := srcHdrs[common.DEBUG_RELAY]
 	if !ok {
 		return
 	}
 	if hdrs := dst.GetDirectiveHeaders(); hdrs != nil {
-		hdrs[common.LAVA_DEBUG_RELAY] = v
+		hdrs[common.DEBUG_RELAY] = v
 	}
 }
 
@@ -330,4 +330,3 @@ func UpgradeToArchiveIfNeeded(ctx context.Context, protocolMessage chainlib.Prot
 	}
 	return protocolMessage
 }
-

@@ -273,7 +273,7 @@ func TestUpdateEpoch_ResetsHealthMetric(t *testing.T) {
 	// Use unique chain/apiInterface labels per test run so we don't collide with
 	// metric values set by other tests sharing the process-global Prometheus registry.
 	const (
-		testChainID      = "LAVA_METRIC_RESET_TEST"
+		testChainID      = "SMARTROUTER_METRIC_RESET_TEST"
 		testApiInterface = "tendermintrpc"
 		primaryProvider  = "lava@primary-metric-test"
 		backupProvider   = "lava@backup-metric-test"
@@ -949,7 +949,7 @@ func fakeConvertSessions(epoch uint64) func([]*lavasession.RPCStaticProviderEndp
 // applyReverification result back into the router's map at rpcsmartrouter.go:1771).
 func TestUpdateEpoch_ReverifyDemotesFailingStatic(t *testing.T) {
 	withImmediateDemote(t)
-	rig := newReverifyTestRig(t, "LAVA_REVERIFY_DEMOTE", "127.0.0.1:3340")
+	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_DEMOTE", "127.0.0.1:3340")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
 	const providerName = "lava@A"
@@ -984,7 +984,7 @@ func TestUpdateEpoch_ReverifyDemotesFailingStatic(t *testing.T) {
 // of the per-session check in TestApplyReverification — here we verify the value
 // survives the updateEpoch storage round-trip.
 func TestUpdateEpoch_ReverifyPromotesRecoveredStatic(t *testing.T) {
-	rig := newReverifyTestRig(t, "LAVA_REVERIFY_PROMOTE", "127.0.0.1:3341")
+	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_PROMOTE", "127.0.0.1:3341")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
 	const providerName = "lava@A"
@@ -1030,7 +1030,7 @@ func TestUpdateEpoch_ReverifyPromotesRecoveredStatic(t *testing.T) {
 // after one full orchestration cycle.
 func TestUpdateEpoch_ReverifyMixedDemoteAndPromote(t *testing.T) {
 	withImmediateDemote(t)
-	rig := newReverifyTestRig(t, "LAVA_REVERIFY_MIXED", "127.0.0.1:3342")
+	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_MIXED", "127.0.0.1:3342")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
 	const (
@@ -1079,7 +1079,7 @@ func TestUpdateEpoch_ReverifyMixedDemoteAndPromote(t *testing.T) {
 // load-bearing.
 func TestUpdateEpoch_ReverifyEmptyBackupTierDeletes(t *testing.T) {
 	withImmediateDemote(t)
-	rig := newReverifyTestRig(t, "LAVA_REVERIFY_BACKUP_DELETE", "127.0.0.1:3343")
+	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_BACKUP_DELETE", "127.0.0.1:3343")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
 	const providerName = "lava@backup-A"
@@ -1110,7 +1110,7 @@ func TestUpdateEpoch_ReverifyEmptyBackupTierDeletes(t *testing.T) {
 // empty-result delete path is covered separately above.
 func TestUpdateEpoch_ReverifyBackupPartialDemote(t *testing.T) {
 	withImmediateDemote(t)
-	rig := newReverifyTestRig(t, "LAVA_REVERIFY_BACKUP_PARTIAL", "127.0.0.1:3344")
+	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_BACKUP_PARTIAL", "127.0.0.1:3344")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
 	const (
@@ -1157,7 +1157,7 @@ func TestUpdateEpoch_ReverifyBackupPartialDemote(t *testing.T) {
 // the static path (the delete-empty-map branch differs), so a dedicated test
 // guards against copy-paste drift in the promote half.
 func TestUpdateEpoch_ReverifyPromotesRecoveredBackup(t *testing.T) {
-	rig := newReverifyTestRig(t, "LAVA_REVERIFY_BACKUP_PROMOTE", "127.0.0.1:3345")
+	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_BACKUP_PROMOTE", "127.0.0.1:3345")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
 	const providerName = "lava@backup-A"
@@ -1210,7 +1210,7 @@ func TestUpdateEpoch_ReverifyPromotesRecoveredBackup(t *testing.T) {
 // the same chainReverifyInputs is used across every epoch tick).
 func TestUpdateEpoch_ReverifyCrossEpochDemoteThenPromote(t *testing.T) {
 	withImmediateDemote(t)
-	rig := newReverifyTestRig(t, "LAVA_REVERIFY_CROSS_EPOCH", "127.0.0.1:3346")
+	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_CROSS_EPOCH", "127.0.0.1:3346")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 	sm := rpsr.sessionManagers[chainKey]
 

@@ -25,21 +25,21 @@ const (
 	ERRORED_PROVIDERS_HEADER_NAME                   = "Smart-Router-Errored-Providers"
 	NODE_ERRORS_PROVIDERS_HEADER_NAME               = "Smart-Router-Node-Errors-Providers"
 	REPORTED_PROVIDERS_HEADER_NAME                  = "Smart-Router-Reported-Providers"
-	LAVA_RELAY_PROTOCOL_HEADER_NAME                 = "Smart-Router-Relay-Protocol"
+	RELAY_PROTOCOL_HEADER_NAME                      = "Smart-Router-Relay-Protocol"
 	USER_REQUEST_TYPE                               = "smartrouter-user-request-type"
 	STATEFUL_API_HEADER                             = "smartrouter-stateful-api"
 	STATEFUL_ALL_PROVIDERS_HEADER_NAME              = "smartrouter-fast-tx-participants"
 	REQUESTED_BLOCK_HEADER_NAME                     = "smartrouter-parsed-requested-block"
-	LAVA_IDENTIFIED_NODE_ERROR_HEADER               = "smartrouter-identified-node-error"
-	LAVA_HEDGE_TRIGGERED_HEADER                     = "smartrouter-hedge-triggered"
+	IDENTIFIED_NODE_ERROR_HEADER                    = "smartrouter-identified-node-error"
+	HEDGE_TRIGGERED_HEADER                          = "smartrouter-hedge-triggered"
 	SMART_ROUTER_VERSION_HEADER_NAME                = "Smart-Router-Version"
 	// these headers need to be lowercase
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME         = "smartrouter-providers-block"
 	RELAY_TIMEOUT_HEADER_NAME                     = "smartrouter-relay-timeout"
 	EXTENSION_OVERRIDE_HEADER_NAME                = "smartrouter-extension"
 	FORCE_CACHE_REFRESH_HEADER_NAME               = "smartrouter-force-cache-refresh"
-	LAVA_DEBUG_RELAY                              = "smartrouter-debug-relay"
-	LAVA_LB_UNIQUE_ID_HEADER                      = "smartrouter-lb-unique-id"
+	DEBUG_RELAY                                   = "smartrouter-debug-relay"
+	LB_UNIQUE_ID_HEADER                           = "smartrouter-lb-unique-id"
 	SELECTION_STATS_HEADER_NAME                   = "smartrouter-selection-stats"
 	STICKINESS_HEADER_NAME                        = "smartrouter-stickiness"
 	SELECT_PROVIDER_HEADER_NAME                   = "smartrouter-select-provider"
@@ -95,12 +95,12 @@ const (
 	CrossValidationStragglerOutcomeNotReceived   = "not-received"   // nothing arrived before the watcher deadline
 )
 
-var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
+var SPECIAL_DIRECTIVE_HEADERS = map[string]struct{}{
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME:       {},
 	RELAY_TIMEOUT_HEADER_NAME:                   {},
 	EXTENSION_OVERRIDE_HEADER_NAME:              {},
 	FORCE_CACHE_REFRESH_HEADER_NAME:             {},
-	LAVA_DEBUG_RELAY:                            {},
+	DEBUG_RELAY:                                 {},
 	STICKINESS_HEADER_NAME:                      {},
 	SELECT_PROVIDER_HEADER_NAME:                 {},
 	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    {},

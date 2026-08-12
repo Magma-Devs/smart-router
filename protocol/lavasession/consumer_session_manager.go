@@ -657,7 +657,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 			}
 			var trailer metadata.MD
 			relaySentTime := time.Now()
-			metadataAdd := metadata.New(map[string]string{common.LAVA_LB_UNIQUE_ID_HEADER: endpointAndConnection.chosenEndpointConnection.GetLbUniqueId()})
+			metadataAdd := metadata.New(map[string]string{common.LB_UNIQUE_ID_HEADER: endpointAndConnection.chosenEndpointConnection.GetLbUniqueId()})
 			connectCtx = metadata.NewOutgoingContext(connectCtx, metadataAdd)
 
 			probeResp, err := client.Probe(connectCtx, probeReq, grpc.Trailer(&trailer))

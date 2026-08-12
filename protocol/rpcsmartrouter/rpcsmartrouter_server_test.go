@@ -1361,7 +1361,7 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 			api: &spectypes.Api{Name: "eth_blockNumber"},
 		}, "eth_blockNumber", analytics, true)
 
-		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.LAVA_HEDGE_TRIGGERED_HEADER)
+		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.HEDGE_TRIGGERED_HEADER)
 		require.NotNil(t, hedgeHeader, "hedge header must be set when HedgeCount > 0")
 		require.Equal(t, "true", hedgeHeader.Value)
 	})
@@ -1375,7 +1375,7 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 			api: &spectypes.Api{Name: "eth_blockNumber"},
 		}, "eth_blockNumber", analytics, true)
 
-		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.LAVA_HEDGE_TRIGGERED_HEADER)
+		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.HEDGE_TRIGGERED_HEADER)
 		require.Nil(t, hedgeHeader, "hedge header must be omitted when HedgeCount == 0 (no \"false\" value ever emitted)")
 	})
 
@@ -1387,7 +1387,7 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 			api: &spectypes.Api{Name: "eth_blockNumber"},
 		}, "eth_blockNumber", nil, true)
 
-		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.LAVA_HEDGE_TRIGGERED_HEADER)
+		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.HEDGE_TRIGGERED_HEADER)
 		require.Nil(t, hedgeHeader, "hedge header must be omitted when analytics is nil")
 	})
 }
