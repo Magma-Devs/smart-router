@@ -18,7 +18,7 @@ func makeRelayError(err error, routerErr *common.RouterError, stake int64, reput
 		ProviderInfo: common.ProviderInfo{
 			ProviderStake:             stake,
 			ProviderReputationSummary: rep,
-			ProviderAddress:           "lava@test",
+			ProviderAddress:           "provider@test",
 		},
 		RouterError: routerErr,
 	}

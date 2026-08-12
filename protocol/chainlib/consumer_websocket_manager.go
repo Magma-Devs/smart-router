@@ -27,8 +27,8 @@ var (
 )
 
 const (
-	WebSocketRateLimitHeader            = "x-lava-websocket-rate-limit"
-	WebSocketOpenConnectionsLimitHeader = "x-lava-websocket-open-connections-limit"
+	WebSocketRateLimitHeader            = "x-smartrouter-websocket-rate-limit"
+	WebSocketOpenConnectionsLimitHeader = "x-smartrouter-websocket-open-connections-limit"
 
 	SubscriptionDeliveryMethod           = "subscription_delivery"
 	DefaultSubscriptionDeliveryCU uint64 = 10

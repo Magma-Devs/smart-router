@@ -66,7 +66,7 @@ func (mcf *MockChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum i
 }
 
 func (mcf *MockChainFetcher) FetchChainID(ctx context.Context) (string, string, error) {
-	return "", "", utils.FormatError("FetchChainID not supported for lava chain fetcher", nil)
+	return "", "", utils.FormatError("FetchChainID not supported for the test chain fetcher", nil)
 }
 
 func (mcf *MockChainFetcher) hashKey(latestBlock int64) string {

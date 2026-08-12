@@ -50,7 +50,7 @@ func NewUnifiedRelayStateMachine(
 	// must not import it). nil => the legacy header-driven decision below, unchanged.
 	cvOverride *common.CrossValidationParams,
 	// forbidCallerCrossValidation, when true, suppresses the caller-header-driven CrossValidation decision
-	// for this method: the request's lava-cross-validation-* headers are ignored entirely (not even
+	// for this method: the request's smartrouter-cross-validation-* headers are ignored entirely (not even
 	// validated) and the method routes by its normal stateful/stateless category. The rpcsmartrouter layer
 	// sets it from a per-method `forbid-caller-cv` policy. It is moot when cvOverride != nil (an operator
 	// that mandates CV cannot also forbid it — Validate rejects that combination upstream).

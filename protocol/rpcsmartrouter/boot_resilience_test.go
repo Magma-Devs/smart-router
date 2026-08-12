@@ -477,7 +477,7 @@ func shortenRetryIntervals(t *testing.T) {
 // The epoch re-verifier promotes a provider back into the pairing, but until this fix
 // it left that provider sitting in the failed list. retryFailedProviders would then
 // revalidate it, succeed, and merge a SECOND session for the same name —
-// mergeRecoveredSessions keys by index and does not dedupe by PublicLavaAddress. The
+// mergeRecoveredSessions keys by index and does not dedupe by PublicAddress. The
 // consumer session manager's pairing map collapses the duplicate but validAddresses
 // does not, so the provider ends up with double its selection weight.
 func TestUpdateEpoch_PromotedProviderLeavesTheFailedList(t *testing.T) {

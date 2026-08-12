@@ -50,7 +50,7 @@ func newReconcileFixture(t *testing.T, ctx context.Context) *reconcileFixture {
 	csm := routersession.NewConsumerSessionManager(
 		rpcEndpoint,
 		provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID),
-		nil, "lava@test", routersession.NewActiveSubscriptionProvidersStorage(),
+		nil, "provider@test", routersession.NewActiveSubscriptionProvidersStorage(),
 	)
 
 	return &reconcileFixture{

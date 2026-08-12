@@ -46,7 +46,7 @@ func newScoresMux(t *testing.T) http.Handler {
 	t.Helper()
 	qosClient := metrics.NewConsumerOptimizerQoSClient("consumer", metrics.NoopUsageSink{})
 	qosClient.RegisterOptimizer(&fixedScoreOptimizer{composite: 0.85, availability: 0.99}, "ETH1")
-	qosClient.UpdatePairingListStake(map[string]int64{"lava@provider1": 1000}, "ETH1", 7)
+	qosClient.UpdatePairingListStake(map[string]int64{"provider@provider1": 1000}, "ETH1", 7)
 
 	var offsetNano atomic.Int64
 	return buildDebugMux(debugMuxDeps{
@@ -86,7 +86,7 @@ func TestDebugProviderScores_ReturnsScores(t *testing.T) {
 	require.Len(t, rows, 1)
 	row := rows[0]
 	require.Equal(t, "ETH1", row["ChainID"])
-	require.Equal(t, "lava@provider1", row["ProviderAddress"])
+	require.Equal(t, "provider@provider1", row["ProviderAddress"])
 	require.Equal(t, 0.99, row["AvailabilityScore"], "the raw EWMA availability is exposed")
 	require.Equal(t, 0.85, row["SelectionComposite"], "the composite selection ranks on is exposed")
 	require.Equal(t, float64(1000), row["ProviderStake"])
@@ -134,7 +134,7 @@ func TestDebugProviderScores_PartlyPopulatedRouterNamesTheEmptyChain(t *testing.
 	qosClient := metrics.NewConsumerOptimizerQoSClient("consumer", metrics.NoopUsageSink{})
 	// ETH1 is populated; SOLANA is registered but has no providers known yet.
 	qosClient.RegisterOptimizer(&fixedScoreOptimizer{composite: 0.85, availability: 0.99}, "ETH1")
-	qosClient.UpdatePairingListStake(map[string]int64{"lava@provider1": 1000}, "ETH1", 7)
+	qosClient.UpdatePairingListStake(map[string]int64{"provider@provider1": 1000}, "ETH1", 7)
 	qosClient.RegisterOptimizer(&fixedScoreOptimizer{}, "SOLANA")
 
 	var offsetNano atomic.Int64
@@ -175,7 +175,7 @@ func TestDebugProviderScores_CarriesEndpointURLsForJoin(t *testing.T) {
 	csm := routersession.NewConsumerSessionManager(
 		&routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: chainID, ApiInterface: apiInterface, HealthCheckPath: "/"},
 		provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID),
-		nil, "lava@test", routersession.NewActiveSubscriptionProvidersStorage(),
+		nil, "provider@test", routersession.NewActiveSubscriptionProvidersStorage(),
 	)
 	endpoints := make([]*routersession.Endpoint, 0, 2)
 	for _, url := range []string{urlB, urlA} { // declared B first, expected back A first

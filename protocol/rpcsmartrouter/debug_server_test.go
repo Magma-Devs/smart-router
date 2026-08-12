@@ -516,7 +516,7 @@ func TestDebugProviderRouting_ReportsPerCSMShape(t *testing.T) {
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "ETH1")
 	csm := routersession.NewConsumerSessionManager(
 		&routersession.RPCEndpoint{NetworkAddress: "stub", ChainID: "ETH1", ApiInterface: "jsonrpc", HealthCheckPath: "/"},
-		optimizer, nil, "lava@test", routersession.NewActiveSubscriptionProvidersStorage(),
+		optimizer, nil, "provider@test", routersession.NewActiveSubscriptionProvidersStorage(),
 	)
 	router := &RPCSmartRouter{
 		sessionManagers: map[string]*routersession.ConsumerSessionManager{

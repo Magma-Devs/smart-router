@@ -127,7 +127,7 @@ func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
 		if err != nil {
 			// On error the handler returns no message, so gRPC sends a trailers-only response — SetHeader
 			// metadata is unreliable there, but trailers are always flushed with the status. Attach the
-			// reply metadata (e.g. lava-cross-validation-* failure headers) as trailers so error responses
+			// reply metadata (e.g. smartrouter-cross-validation-* failure headers) as trailers so error responses
 			// still carry it, matching the success path's SetHeader. Skipped when empty, so non-CV errors
 			// are unchanged.
 			if len(md) > 0 {
@@ -163,7 +163,7 @@ func (RawBytesCodec) Unmarshal(data []byte, v interface{}) error {
 }
 
 func (RawBytesCodec) Name() string {
-	return "lava/grpc-proxy-codec"
+	return "smartrouter/grpc-proxy-codec"
 }
 
 func (RawBytesCodec) String() string {

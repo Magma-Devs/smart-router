@@ -288,10 +288,10 @@ func TestGetConsumerSessionInstanceFromEndpoint_Integration(t *testing.T) {
 
 	// Create a ConsumerSessionsWithProvider
 	cswp := &ConsumerSessionsWithProvider{
-		Sessions:          make(map[int64]*SingleConsumerSession),
-		PairingEpoch:      100,
-		StaticProvider:    false,
-		PublicLavaAddress: "lava@test123",
+		Sessions:       make(map[int64]*SingleConsumerSession),
+		PairingEpoch:   100,
+		StaticProvider: false,
+		PublicAddress:  "provider@test123",
 	}
 
 	// Create a mock endpoint connection

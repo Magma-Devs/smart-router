@@ -19,9 +19,9 @@ func newCancellableTestSession(t *testing.T, address string) (*ConsumerSessionMa
 	csm := CreateConsumerSessionManager()
 	usedProviders := NewUsedProviders(nil)
 	parent := &ConsumerSessionsWithProvider{
-		PublicLavaAddress: address,
-		MaxComputeUnits:   100,
-		UsedComputeUnits:  10,
+		PublicAddress:    address,
+		MaxComputeUnits:  100,
+		UsedComputeUnits: 10,
 		// OnSessionFailure's metrics publish reads Endpoints[0]; OnSessionCancelled never
 		// reaches it, but the contrast test below exercises the failure path too.
 		Endpoints: []*Endpoint{{NetworkAddress: "http://" + address + ":8545"}},

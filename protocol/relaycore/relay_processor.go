@@ -51,7 +51,7 @@ type RelayProcessor struct {
 	// crossValidationFailFastReason carries the structured reason for a request-time cross-validation
 	// fail-fast (capacity/diversity checks that abort before any relay completes, so no RelayResult is
 	// produced). It rides on the shared processor back to the caller, which synthesizes the
-	// lava-cross-validation-failure-reason header from it — the error returns are left byte-for-byte
+	// smartrouter-cross-validation-failure-reason header from it — the error returns are left byte-for-byte
 	// unchanged so the state machine's PairingListEmptyError stop logic is unaffected. Guarded by rp.lock.
 	crossValidationFailFastReason string
 }
@@ -1224,8 +1224,8 @@ func (rp *RelayProcessor) processNonCrossValidationResult(
 // node/protocol error's own RelayResult, whose ProviderInfo.ProviderAddress is a SINGLE provider — the
 // source of the error body being returned. It must never be a comma-joined list: packing the whole
 // attempted set here made appendHeadersToRelayResult treat the joined blob as the resolver name and
-// append it after the per-attempt names, so on the all-transport-errors path Lava-Provider-Address
-// listed ~2x the providers and disagreed with Lava-Retries (MAG-2351).
+// append it after the per-attempt names, so on the all-transport-errors path Smart-Router-Provider-Address
+// listed ~2x the providers and disagreed with Smart-Router-Retries (MAG-2351).
 func (rp *RelayProcessor) buildFailureResult(
 	nodeErrorCount, protocolErrorCount int,
 ) (*common.RelayResult, error) {

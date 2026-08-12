@@ -262,7 +262,7 @@ func (e *Envelope) FailingRows() []string {
 	return out
 }
 
-// WSDefault guesses a wss:// pairing for an http(s) url. Lava gateways serve ws
+// WSDefault guesses a wss:// pairing for an http(s) url. Gateways serve ws
 // at /websocket; otherwise same origin/path.
 func WSDefault(url string) string {
 	ws := url

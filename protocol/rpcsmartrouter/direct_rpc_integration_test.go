@@ -590,8 +590,8 @@ func TestDirectRPCSession_IsDirectRPC(t *testing.T) {
 
 	// Create parent ConsumerSessionsWithProvider with endpoint
 	cswp := &routersession.ConsumerSessionsWithProvider{
-		PublicLavaAddress: "test-direct-endpoint",
-		PairingEpoch:      100,
+		PublicAddress: "test-direct-endpoint",
+		PairingEpoch:  100,
 		Endpoints: []*routersession.Endpoint{
 			{
 				NetworkAddress:    mockServer.URL,

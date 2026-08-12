@@ -38,7 +38,7 @@ var (
 )
 
 type serviceRegistry struct {
-	mu       utils.LavaMutex
+	mu       utils.Mutex
 	services map[string]service
 }
 

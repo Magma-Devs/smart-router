@@ -43,8 +43,8 @@ func TestCalcWeightsByStake_StaticProviders_ZeroValueStakeDoesNotPanic(t *testin
 	// This mirrors the integration test setup where ConsumerSessionsWithProvider is constructed via a struct literal
 	// and stakeSize is left at its zero value (0), no longer a nil-backed math.Int.
 	p := &ConsumerSessionsWithProvider{
-		PublicLavaAddress: "p",
-		StaticProvider:    true,
+		PublicAddress:  "p",
+		StaticProvider: true,
 	}
 	providers := map[uint64]*ConsumerSessionsWithProvider{0: p}
 

@@ -774,7 +774,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		return false, err
 	}
 
-	// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
+	// Direct RPC flow: pass nil for availabilityDegrader since there are no relay-protocol sessions.
 	// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx,
@@ -965,8 +965,8 @@ func (rpcss *RPCSmartRouterServer) ParseRelay(
 	ctx, span := tracing.StartInternalSpan(ctx, tracing.SpanParseRelay)
 	defer span.End()
 
-	// remove lava directive headers
-	metadata, directiveHeaders := rpcss.LavaDirectiveHeaders(metadata)
+	// remove smartrouter directive headers
+	metadata, directiveHeaders := rpcss.DirectiveHeaders(metadata)
 	extensions := rpcss.getExtensionsFromDirectiveHeaders(directiveHeaders)
 	utils.FormatTrace("[Archive Debug] ParseRelay extensions",
 		utils.LogAttr("extensions", extensions),
@@ -1143,7 +1143,7 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	// Get cross-validation parameters from the state machine (nil for Stateless/Stateful)
 	crossValidationParams := stateMachine.GetCrossValidationParams()
 
-	// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
+	// Direct RPC flow: pass nil for availabilityDegrader since there are no relay-protocol sessions.
 	// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
 	// Created before the capacity check so a request-time fail-fast can carry its structured reason back on
 	// the shared processor (the check aborts before any RelayResult exists).
@@ -3259,7 +3259,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	}
 
 	// Compute cache key via the protocol message so the SET key matches the GET key,
-	// including any explicit lava-extension directive folded in by HashCacheRequest.
+	// including any explicit smartrouter-extension directive folded in by HashCacheRequest.
 	chainId := rpcss.listenEndpoint.ChainID
 	hashKey, _, hashErr := protocolMessage.HashCacheRequest(chainId)
 	if hashErr != nil {
@@ -3371,7 +3371,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	}()
 }
 
-// resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,
+// resolvePinDirectives returns the smartrouter-select-provider and smartrouter-stickiness directives,
 // honored only on the first attempt. On a retry (firstAttempt == false) both are returned
 // empty so the relay falls through to a different provider instead of re-pinning the one
 // that just failed — otherwise a pinned provider that returned a retryable node error gets
@@ -3646,7 +3646,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	usedProviders := relayProcessor.GetUsedProviders()
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 
-	// MAG-2228: honor lava-select-provider / lava-stickiness only on the FIRST attempt.
+	// MAG-2228: honor smartrouter-select-provider / smartrouter-stickiness only on the FIRST attempt.
 	// On a retry (a provider batch has already been dispatched, so BatchNumber > 0) the
 	// relay must be free to fall through to a different provider. See resolvePinDirectives.
 	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
@@ -3788,7 +3788,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		utils.FormatDebug("Sending direct RPC relay",
 			utils.LogAttr("timeout", relayTimeout),
 			utils.LogAttr("method", chainMessage.GetApi().Name),
-			utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+			utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 			utils.LogAttr("protocol", directConnection.GetProtocol()),
 			utils.LogAttr("GUID", ctx),
 		)
@@ -3811,7 +3811,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			utils.FormatWarning("gRPC streaming methods not yet supported in Direct RPC mode",
 				nil,
 				utils.LogAttr("method", methodPath),
-				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 			)
 			return 0, fmt.Errorf("gRPC streaming method %q not supported in Direct RPC mode; use provider-based relay for streaming", methodPath), false
 		}
@@ -3819,7 +3819,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 	// Create direct RPC relay sender
 	// Use provider name (configured name) instead of raw URL to avoid leaking API keys
-	endpointName := singleConsumerSession.Parent.PublicLavaAddress
+	endpointName := singleConsumerSession.Parent.PublicAddress
 	// Resolve chain family for Tier 2 error classification
 	senderChainFamily := common.ChainFamily(-1)
 	if family, ok := common.GetChainFamily(rpcss.listenEndpoint.ChainID); ok {
@@ -3846,7 +3846,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 	if err != nil {
 		utils.FormatDebug("direct RPC relay failed",
-			utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+			utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 			utils.LogAttr("error", err.Error()),
 			utils.LogAttr("latency", relayLatency),
 			utils.LogAttr("GUID", ctx),
@@ -3897,14 +3897,14 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		isClientCancel := common.IsClientCancellation(err, ctx)
 		if isClientCancel {
 			utils.FormatDebug("direct RPC relay cancelled by client (race loser or client disconnect)",
-				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 				utils.LogAttr("ctx_err", ctx.Err()),
 				utils.LogAttr("GUID", ctx),
 			)
 		} else {
 			common.LogCodedError("direct RPC relay error", err, classified,
 				rpcss.listenEndpoint.ChainID, 0, err.Error(),
-				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 			)
 		}
 
@@ -3945,12 +3945,12 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.FormatDebug("endpoint returned error status",
 				utils.LogAttr("status", statusCode),
-				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 			)
 		} else if statusCode == 429 {
 			utils.FormatDebug("endpoint rate limited",
 				utils.LogAttr("status", statusCode),
-				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 			)
 		}
 
@@ -3994,7 +3994,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// explicit argument, so nothing here depends on this field.
 
 	utils.FormatTrace("direct RPC relay succeeded",
-		utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+		utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 		utils.LogAttr("latency", relayLatency),
 		utils.LogAttr("status_code", result.StatusCode),
 		utils.LogAttr("response_size", len(result.Reply.Data)),
@@ -4011,7 +4011,7 @@ func (rpcss *RPCSmartRouterServer) GetProcessingTimeout(chainMessage chainlib.Ch
 	return processingTimeout, relayTimeout
 }
 
-func (rpcss *RPCSmartRouterServer) LavaDirectiveHeaders(metadata []pairingtypes.Metadata) ([]pairingtypes.Metadata, map[string]string) {
+func (rpcss *RPCSmartRouterServer) DirectiveHeaders(metadata []pairingtypes.Metadata) ([]pairingtypes.Metadata, map[string]string) {
 	metadataRet := []pairingtypes.Metadata{}
 	headerDirectives := map[string]string{}
 	for _, metaElement := range metadata {
@@ -4421,7 +4421,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// Stateful selection fans out to all top providers in a single batch and
 		// never retries (relaypolicy.Decide returns Stop for Stateful). Failures
 		// inside that fan-out are expected — only one provider needs to win —
-		// so they must not inflate Lava-Retries. Without this absorption,
+		// so they must not inflate Smart-Router-Retries. Without this absorption,
 		// healthy stateful traffic shows non-zero retry rates whenever any
 		// parallel attempt loses the race or returns an error.
 		totalRetries := uint64(0)
@@ -4444,7 +4444,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			// When there are retries, show all attempted providers in
 			// chronological-ish order (failures before the resolver, the resolver
 			// last). "Cached" stays in the list so the entry count matches
-			// Lava-Retries — without it, retries=N and a single provider name
+			// Smart-Router-Retries — without it, retries=N and a single provider name
 			// disagree on how many actors participated (MAG-1653 Bug #2).
 			//
 			// Ordering rule: walk protocol errors → node errors → successes,
@@ -4594,10 +4594,10 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	}
 
 	// MAG-1818: signal that the hedge ticker dispatched at least one speculative
-	// batch on this request. Independent of Lava-Retries, which inclusively counts
+	// batch on this request. Independent of Smart-Router-Retries, which inclusively counts
 	// canceled hedge primaries — tests need this orthogonal flag to distinguish
 	// "hedge fired" from "classical retry." Omit-when-false convention (no "false"
-	// emitted), mirroring lava-identified-node-error above.
+	// emitted), mirroring smartrouter-identified-node-error above.
 	if analytics != nil && analytics.HedgeCount > 0 {
 		metadataReply = append(metadataReply,
 			pairingtypes.Metadata{
@@ -4737,7 +4737,7 @@ func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestD
 		relayState.SetIsEarliestUsed()
 		relayRequestData := protocolMessage.RelayPrivateData()
 		userData := protocolMessage.GetUserData()
-		// Preserve the client's directive headers (e.g. lava-extension, force-cache-refresh) across
+		// Preserve the client's directive headers (e.g. smartrouter-extension, force-cache-refresh) across
 		// the re-parse. Passing nil drops them, which on the archive/earliest-block path would make
 		// the rebuilt message's cache key disagree with the original message's key (and silently
 		// discards the directive the client sent).

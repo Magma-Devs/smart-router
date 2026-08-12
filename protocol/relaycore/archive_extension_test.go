@@ -202,7 +202,7 @@ func TestArchiveAddPreservesDebugRelay(t *testing.T) {
 // regress test_2_1_one_provider_down_retry_to_next.
 func TestArchiveAddDoesNotPreserveSelectProvider(t *testing.T) {
 	pm, parser := newTestProtocolMessage(t, testProtocolMessageOpts{
-		directiveHeaders: map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "lava@p1"},
+		directiveHeaders: map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "provider@p1"},
 	})
 	relayParser := &passthroughRelayParser{chainParser: parser}
 

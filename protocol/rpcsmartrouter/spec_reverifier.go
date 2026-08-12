@@ -229,7 +229,7 @@ func applyReverification(
 	next := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(fresh))
 	var demoted []*routersession.ConsumerSessionsWithProvider
 	for idx, s := range fresh {
-		if _, ok := healthyNames[s.PublicLavaAddress]; !ok {
+		if _, ok := healthyNames[s.PublicAddress]; !ok {
 			demoted = append(demoted, s)
 			continue
 		}
@@ -267,7 +267,7 @@ func applyReverification(
 func byName(sessions map[uint64]*routersession.ConsumerSessionsWithProvider) map[string]*routersession.ConsumerSessionsWithProvider {
 	out := make(map[string]*routersession.ConsumerSessionsWithProvider, len(sessions))
 	for _, s := range sessions {
-		out[s.PublicLavaAddress] = s
+		out[s.PublicAddress] = s
 	}
 	return out
 }
@@ -291,7 +291,7 @@ func closeDemotedDirectConnections(demoted []*routersession.ConsumerSessionsWith
 				}
 				if err := dc.Close(); err != nil {
 					utils.FormatDebug("re-verify: error closing demoted direct connection",
-						utils.LogAttr("provider", s.PublicLavaAddress),
+						utils.LogAttr("provider", s.PublicAddress),
 						utils.LogAttr("url", dc.GetURL()),
 						utils.LogAttr("err", err.Error()),
 					)

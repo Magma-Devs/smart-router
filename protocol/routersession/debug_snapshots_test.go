@@ -58,18 +58,18 @@ func TestProviderRoutingSnapshot_CopiesAndSortsNonNil(t *testing.T) {
 
 	// Populate routing state directly (in-package).
 	csm.lock.Lock()
-	csm.validAddresses = []string{"lava@valid1", "lava@valid2"}
-	csm.currentlyBlockedProviderAddresses = []string{"lava@blocked1"}
-	csm.blockedBackupProviders = map[string]struct{}{"lava@b2": {}, "lava@b1": {}}
+	csm.validAddresses = []string{"provider@valid1", "provider@valid2"}
+	csm.currentlyBlockedProviderAddresses = []string{"provider@blocked1"}
+	csm.blockedBackupProviders = map[string]struct{}{"provider@b2": {}, "provider@b1": {}}
 	csm.lock.Unlock()
 
 	s = csm.ProviderRoutingSnapshot()
-	require.Equal(t, []string{"lava@valid1", "lava@valid2"}, s.ValidAddresses)
-	require.Equal(t, []string{"lava@blocked1"}, s.CurrentlyBlockedProviderAddresses)
-	require.Equal(t, []string{"lava@b1", "lava@b2"}, s.BlockedBackupProviders, "backups sorted deterministically")
+	require.Equal(t, []string{"provider@valid1", "provider@valid2"}, s.ValidAddresses)
+	require.Equal(t, []string{"provider@blocked1"}, s.CurrentlyBlockedProviderAddresses)
+	require.Equal(t, []string{"provider@b1", "provider@b2"}, s.BlockedBackupProviders, "backups sorted deterministically")
 
 	// The returned slices are copies: mutating one must not corrupt CSM-internal state.
 	s.ValidAddresses[0] = "MUTATED"
 	again := csm.ProviderRoutingSnapshot()
-	require.Equal(t, "lava@valid1", again.ValidAddresses[0], "snapshot must copy, not alias")
+	require.Equal(t, "provider@valid1", again.ValidAddresses[0], "snapshot must copy, not alias")
 }

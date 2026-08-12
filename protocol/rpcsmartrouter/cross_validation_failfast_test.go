@@ -24,18 +24,18 @@ func newCapacityTestServer(t *testing.T, groupByAddr map[string]string) *RPCSmar
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
 	csm := routersession.NewConsumerSessionManager(
 		&routersession.RPCEndpoint{NetworkAddress: "stub", ChainID: "LAVA", ApiInterface: "rest"},
-		optimizer, nil, "lava@test", routersession.NewActiveSubscriptionProvidersStorage())
+		optimizer, nil, "provider@test", routersession.NewActiveSubscriptionProvidersStorage())
 
 	pairingList := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(groupByAddr))
 	var i uint64
 	for addr, group := range groupByAddr {
 		pairingList[i] = &routersession.ConsumerSessionsWithProvider{
-			PublicLavaAddress: addr,
-			Endpoints:         []*routersession.Endpoint{{NetworkAddress: "127.0.0.1:0", Enabled: true, Connections: []*routersession.EndpointConnection{}}},
-			Sessions:          map[int64]*routersession.SingleConsumerSession{},
-			MaxComputeUnits:   200,
-			PairingEpoch:      1,
-			GroupLabel:        group,
+			PublicAddress:   addr,
+			Endpoints:       []*routersession.Endpoint{{NetworkAddress: "127.0.0.1:0", Enabled: true, Connections: []*routersession.EndpointConnection{}}},
+			Sessions:        map[int64]*routersession.SingleConsumerSession{},
+			MaxComputeUnits: 200,
+			PairingEpoch:    1,
+			GroupLabel:      group,
 		}
 		i++
 	}
@@ -50,7 +50,7 @@ func newCapacityTestServer(t *testing.T, groupByAddr map[string]string) *RPCSmar
 // unsatisfiable policy to the correct structured reason (distinct from the quorum-time reasons), and
 // returns no error when the candidate set can satisfy the policy. Two primary providers span two groups.
 func TestValidateCrossValidationCapacity_Reasons(t *testing.T) {
-	srv := newCapacityTestServer(t, map[string]string{"lava@p0": "g1", "lava@p1": "g2"})
+	srv := newCapacityTestServer(t, map[string]string{"provider@p0": "g1", "provider@p1": "g2"})
 	ctx := context.Background()
 
 	t.Run("min-groups exceeds candidate groups -> insufficient-groups", func(t *testing.T) {
@@ -92,7 +92,7 @@ func TestValidateCrossValidationCapacity_PerGroup(t *testing.T) {
 	t.Run("caller-induced impossible: minGroups 2 * threshold 3 > maxParticipants 4 -> insufficient-capacity", func(t *testing.T) {
 		// Fleet has 4 providers across 2 groups, so the provider/group checks pass and the self-consistency
 		// check is what fires. This is the case config-time Validate cannot catch (the caller raised the threshold).
-		srv := newCapacityTestServer(t, map[string]string{"lava@a0": "A", "lava@a1": "A", "lava@b0": "B", "lava@b1": "B"})
+		srv := newCapacityTestServer(t, map[string]string{"provider@a0": "A", "provider@a1": "A", "provider@b0": "B", "provider@b1": "B"})
 		params := &common.CrossValidationParams{AgreementThreshold: 3, MaxParticipants: 4, MinGroups: 2, PerGroupQuorum: true}
 		reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
 		require.Error(t, err)
@@ -102,7 +102,7 @@ func TestValidateCrossValidationCapacity_PerGroup(t *testing.T) {
 	t.Run("two groups but only one has >= threshold providers -> insufficient-groups", func(t *testing.T) {
 		// A=2, B=1, C=1: 4 candidates across 3 groups (passes provider/group/self-consistency checks for
 		// minGroups 2, threshold 2, max 4), but only group A can reach an internal quorum of 2.
-		srv := newCapacityTestServer(t, map[string]string{"lava@a0": "A", "lava@a1": "A", "lava@b0": "B", "lava@c0": "C"})
+		srv := newCapacityTestServer(t, map[string]string{"provider@a0": "A", "provider@a1": "A", "provider@b0": "B", "provider@c0": "C"})
 		params := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 4, MinGroups: 2, PerGroupQuorum: true}
 		reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
 		require.Error(t, err)
@@ -110,7 +110,7 @@ func TestValidateCrossValidationCapacity_PerGroup(t *testing.T) {
 	})
 
 	t.Run("two adequately-staffed groups -> ok", func(t *testing.T) {
-		srv := newCapacityTestServer(t, map[string]string{"lava@a0": "A", "lava@a1": "A", "lava@b0": "B", "lava@b1": "B"})
+		srv := newCapacityTestServer(t, map[string]string{"provider@a0": "A", "provider@a1": "A", "provider@b0": "B", "provider@b1": "B"})
 		params := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 4, MinGroups: 2, PerGroupQuorum: true}
 		reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
 		require.NoError(t, err)

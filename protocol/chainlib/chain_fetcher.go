@@ -692,7 +692,7 @@ func HashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId string) 
 }
 
 // hashCacheRequest derives the cache key for a relay. explicitExtensionDirective carries the
-// normalized value of the client's lava-extension directive header (empty when absent). When
+// normalized value of the client's smartrouter-extension directive header (empty when absent). When
 // present it is folded into the hash so an explicitly requested extension (e.g. "archive") lands
 // in its own cache lane and cannot collide with a request that was only auto-promoted to the same
 // resolved Extensions. Passing "" reproduces the historical hash, keeping existing entries valid.
@@ -740,7 +740,7 @@ func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explici
 		return nil, outputFormatter, utils.FormatError("Failed marshalling cash hash in HashCacheRequest", err)
 	}
 
-	// Fold an explicit lava-extension directive into the key so explicitly-requested extensions
+	// Fold an explicit smartrouter-extension directive into the key so explicitly-requested extensions
 	// get a dedicated cache lane, separate from requests auto-promoted to the same Extensions.
 	if explicitExtensionDirective != "" {
 		cashHashBytes = append(cashHashBytes, []byte("\x00lava-extension="+explicitExtensionDirective)...)

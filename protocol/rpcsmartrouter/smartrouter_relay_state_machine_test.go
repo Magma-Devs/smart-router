@@ -138,7 +138,7 @@ func TestConsumerStateMachineHappyFlow(t *testing.T) {
 		require.Nil(t, canUse)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
-		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}, "lava@test2": &routersession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}, "provider@test2": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -149,7 +149,7 @@ func TestConsumerStateMachineHappyFlow(t *testing.T) {
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendProtocolError(relayProcessor, "lava@test", time.Millisecond*1, fmt.Errorf("bad"))
+				relaycoretest.SendProtocolError(relayProcessor, "provider@test", time.Millisecond*1, fmt.Errorf("bad"))
 			case 1:
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
@@ -294,7 +294,7 @@ func TestConsumerStateMachineArchiveRetry(t *testing.T) {
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
 
-		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}, "lava@test2": &routersession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}, "provider@test2": &routersession.SessionInfo{}}
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
 		taskNumber := 0
@@ -408,7 +408,7 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnSuccess(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -424,7 +424,7 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnSuccess(t *testing.T) {
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendSuccessResp(relayProcessor, "lava@test", time.Millisecond*1)
+				relaycoretest.SendSuccessResp(relayProcessor, "provider@test", time.Millisecond*1)
 			case 2:
 				// Done with success
 				require.True(t, task.IsDone())
@@ -529,7 +529,7 @@ func TestProcessingContextTimeoutEnforcement(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -552,9 +552,9 @@ func TestProcessingContextTimeoutEnforcement(t *testing.T) {
 
 			// Simulate various errors to trigger retries
 			if taskNumber%2 == 0 {
-				relaycoretest.SendProtocolError(relayProcessor, "lava@test", time.Millisecond*1, fmt.Errorf("simulated protocol error"))
+				relaycoretest.SendProtocolError(relayProcessor, "provider@test", time.Millisecond*1, fmt.Errorf("simulated protocol error"))
 			} else {
-				relaycoretest.SendNodeError(relayProcessor, "lava@test", time.Millisecond*1)
+				relaycoretest.SendNodeError(relayProcessor, "provider@test", time.Millisecond*1)
 			}
 
 			// Sleep slightly to allow WaitForResults to detect the error and return
@@ -621,7 +621,7 @@ func TestProcessingContextStillValidAllowsRetries(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -635,7 +635,7 @@ func TestProcessingContextStillValidAllowsRetries(t *testing.T) {
 				// After 5 retries, send success to end the test
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendSuccessResp(relayProcessor, "lava@test", time.Millisecond*1)
+				relaycoretest.SendSuccessResp(relayProcessor, "provider@test", time.Millisecond*1)
 				time.Sleep(20 * time.Millisecond)
 
 				if task.IsDone() {
@@ -654,7 +654,7 @@ func TestProcessingContextStillValidAllowsRetries(t *testing.T) {
 			// Simulate failure to trigger retry
 			usedProviders.AddUsed(consumerSessionsMap, nil)
 			relayProcessor.UpdateBatch(nil)
-			relaycoretest.SendNodeError(relayProcessor, "lava@test", time.Millisecond*1)
+			relaycoretest.SendNodeError(relayProcessor, "provider@test", time.Millisecond*1)
 			time.Sleep(10 * time.Millisecond)
 
 			taskNumber++
@@ -703,7 +703,7 @@ func TestProcessingContextRaceCondition(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -733,7 +733,7 @@ func TestProcessingContextRaceCondition(t *testing.T) {
 			// Rapidly fail to create the race condition
 			usedProviders.AddUsed(consumerSessionsMap, nil)
 			relayProcessor.UpdateBatch(nil)
-			relaycoretest.SendNodeError(relayProcessor, "lava@test", time.Millisecond*1)
+			relaycoretest.SendNodeError(relayProcessor, "provider@test", time.Millisecond*1)
 			// Small sleep to let WaitForResults return
 			time.Sleep(5 * time.Millisecond)
 		}
@@ -989,7 +989,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			retryLimit:       0,
 			expectedMaxTasks: 1,
 			sendError: func(rp *relaycore.RelayProcessor) {
-				relaycoretest.SendNodeError(rp, "lava@test", time.Millisecond*1)
+				relaycoretest.SendNodeError(rp, "provider@test", time.Millisecond*1)
 			},
 			description: "With limit=0, should stop after initial node error",
 		},
@@ -998,7 +998,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			retryLimit:       2,
 			expectedMaxTasks: 4,
 			sendError: func(rp *relaycore.RelayProcessor) {
-				relaycoretest.SendNodeError(rp, "lava@test", time.Millisecond*1)
+				relaycoretest.SendNodeError(rp, "provider@test", time.Millisecond*1)
 			},
 			description: "With limit=2, should stop within a few node error retries",
 		},
@@ -1007,7 +1007,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			retryLimit:       0,
 			expectedMaxTasks: 1,
 			sendError: func(rp *relaycore.RelayProcessor) {
-				relaycoretest.SendProtocolError(rp, "lava@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
+				relaycoretest.SendProtocolError(rp, "provider@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
 			},
 			description: "With limit=0, should stop after initial protocol error",
 		},
@@ -1016,7 +1016,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			retryLimit:       2,
 			expectedMaxTasks: 4,
 			sendError: func(rp *relaycore.RelayProcessor) {
-				relaycoretest.SendProtocolError(rp, "lava@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
+				relaycoretest.SendProtocolError(rp, "provider@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
 			},
 			description: "With limit=2, should stop within a few protocol error retries",
 		},
@@ -1029,9 +1029,9 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 				return func(rp *relaycore.RelayProcessor) {
 					callCount++
 					if callCount%2 == 1 {
-						relaycoretest.SendNodeError(rp, "lava@test", time.Millisecond*1)
+						relaycoretest.SendNodeError(rp, "provider@test", time.Millisecond*1)
 					} else {
-						relaycoretest.SendProtocolError(rp, "lava@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
+						relaycoretest.SendProtocolError(rp, "provider@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
 					}
 				}
 			}(),
@@ -1064,7 +1064,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			require.NoError(t, err)
 			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, stateMachine)
 
-			consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}}
+			consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 			relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 			require.NoError(t, err)

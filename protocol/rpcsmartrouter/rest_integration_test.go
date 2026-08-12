@@ -411,7 +411,7 @@ func TestRESTRelay_501_NotImplemented_relayInnerDirect(t *testing.T) {
 	// relayInnerDirect's MarkUnhealthy/metrics blocks (guarded by
 	// `targetEndpoint != nil`) are skipped — smartRouterEndpointMetrics is never
 	// dereferenced, keeping the harness self-contained.
-	cswp := &routersession.ConsumerSessionsWithProvider{PublicLavaAddress: "test-cosmos-lcd"}
+	cswp := &routersession.ConsumerSessionsWithProvider{PublicAddress: "test-cosmos-lcd"}
 	session := &routersession.SingleConsumerSession{
 		Parent: cswp,
 		Connection: &routersession.DirectRPCSessionConnection{

@@ -346,7 +346,7 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	const url = "http://ep:8545"
-	const addr = "lava@provider1"
+	const addr = "provider@provider1"
 	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	_, err := m.GetOrCreateTracker(ep, nil)
 	require.NoError(t, err)
@@ -425,7 +425,7 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 	t.Cleanup(m.Stop)
 
 	const url = "http://ep:8545"
-	const addr = "lava@harvestGenProvider"
+	const addr = "provider@harvestGenProvider"
 	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	// Empty options => metrics registered on the default registry, no HTTP server started.
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
@@ -571,7 +571,7 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 	tipMsg := newRealChainParserForHarvest(t, "ETH1")
 	cm, perr := tipMsg.ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, perr)
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 21_000_000}, gen, "lava@provider1")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 21_000_000}, gen, "provider@provider1")
 	o, ok := m.GetObservation(url)
 	require.True(t, ok)
 	require.Equal(t, int64(21_000_000), o.LatestBlock, "the early relay's tip is recorded under the synchronous generation")
@@ -581,7 +581,7 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 	// generation is rejected (a removed URL has no live generation to match).
 	m.RemoveTracker(url)
 	require.Zero(t, rpcss.endpointObservationGeneration(url), "a removed tracker has no live generation")
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 22_000_000}, gen, "lava@provider1")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 22_000_000}, gen, "provider@provider1")
 	if o, exists := m.GetObservation(url); exists {
 		require.NotEqual(t, int64(22_000_000), o.LatestBlock, "a harvest with a removed tracker's generation must be rejected")
 	}

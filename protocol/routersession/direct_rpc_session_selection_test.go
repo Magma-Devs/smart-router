@@ -35,11 +35,11 @@ func TestGetConsumerSessionInstanceFromEndpoint_DirectRPC(t *testing.T) {
 
 	// Create ConsumerSessionsWithProvider with direct RPC endpoint
 	cswp := &ConsumerSessionsWithProvider{
-		Sessions:          make(map[int64]*SingleConsumerSession),
-		PairingEpoch:      100,
-		StaticProvider:    true,
-		PublicLavaAddress: "ethereum-alchemy",
-		Endpoints:         []*Endpoint{endpoint},
+		Sessions:       make(map[int64]*SingleConsumerSession),
+		PairingEpoch:   100,
+		StaticProvider: true,
+		PublicAddress:  "ethereum-alchemy",
+		Endpoints:      []*Endpoint{endpoint},
 	}
 
 	qosManager := &qos.QoSManager{}
@@ -97,11 +97,11 @@ func TestGetConsumerSessionInstanceFromEndpoint_ProviderRelay(t *testing.T) {
 
 	// Create ConsumerSessionsWithProvider with provider-relay endpoint
 	cswp := &ConsumerSessionsWithProvider{
-		Sessions:          make(map[int64]*SingleConsumerSession),
-		PairingEpoch:      100,
-		StaticProvider:    false,
-		PublicLavaAddress: "lava@provider123",
-		Endpoints:         []*Endpoint{endpoint},
+		Sessions:       make(map[int64]*SingleConsumerSession),
+		PairingEpoch:   100,
+		StaticProvider: false,
+		PublicAddress:  "provider@provider123",
+		Endpoints:      []*Endpoint{endpoint},
 	}
 
 	qosManager := &qos.QoSManager{}
@@ -157,10 +157,10 @@ func TestFetchEndpointConnection_DirectRPC(t *testing.T) {
 
 	// Create ConsumerSessionsWithProvider
 	cswp := &ConsumerSessionsWithProvider{
-		Sessions:          make(map[int64]*SingleConsumerSession),
-		PairingEpoch:      100,
-		PublicLavaAddress: "test-provider",
-		Endpoints:         []*Endpoint{endpoint},
+		Sessions:      make(map[int64]*SingleConsumerSession),
+		PairingEpoch:  100,
+		PublicAddress: "test-provider",
+		Endpoints:     []*Endpoint{endpoint},
 	}
 
 	// Call fetchEndpointConnectionFromConsumerSessionWithProvider
@@ -216,11 +216,11 @@ func TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal(t *testing.T) {
 		DirectConnections: []DirectRPCConnection{directConn},
 	}
 	cswp := &ConsumerSessionsWithProvider{
-		Sessions:          make(map[int64]*SingleConsumerSession),
-		PairingEpoch:      100,
-		StaticProvider:    true,
-		PublicLavaAddress: "direct-rpc-provider",
-		Endpoints:         []*Endpoint{endpoint},
+		Sessions:       make(map[int64]*SingleConsumerSession),
+		PairingEpoch:   100,
+		StaticProvider: true,
+		PublicAddress:  "direct-rpc-provider",
+		Endpoints:      []*Endpoint{endpoint},
 	}
 
 	fetch := func() (bool, []*EndpointAndChosenConnection, error) {
@@ -280,11 +280,11 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 	}
 	newProvider := func(endpoints ...*Endpoint) *ConsumerSessionsWithProvider {
 		return &ConsumerSessionsWithProvider{
-			Sessions:          make(map[int64]*SingleConsumerSession),
-			PairingEpoch:      100,
-			StaticProvider:    true,
-			PublicLavaAddress: "ton-provider",
-			Endpoints:         endpoints,
+			Sessions:       make(map[int64]*SingleConsumerSession),
+			PairingEpoch:   100,
+			StaticProvider: true,
+			PublicAddress:  "ton-provider",
+			Endpoints:      endpoints,
 		}
 	}
 	fetchAll := func(cswp *ConsumerSessionsWithProvider, internalPath *string) []*EndpointAndChosenConnection {

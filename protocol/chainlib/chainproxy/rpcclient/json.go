@@ -229,7 +229,7 @@ type jsonCodec struct {
 	closer  sync.Once                 // close closed channel once
 	closeCh chan interface{}          // closed on Close
 	decode  func(v interface{}) error // decoder to allow multiple transports
-	encMu   utils.LavaMutex           // guards the encoder
+	encMu   utils.Mutex               // guards the encoder
 	encode  func(v interface{}) error // encoder to allow multiple transports
 	conn    deadlineCloser
 }

@@ -238,13 +238,13 @@ func removeArchiveExtension(ctx context.Context, protocolMessage chainlib.Protoc
 //
 // Both the chainMessage state (runtime source of truth for force-cache-refresh
 // and timeout-override) and the directiveHeaders map (parse-time input surface,
-// where lava-debug-relay lives) are updated so the two stay consistent —
+// where smartrouter-debug-relay lives) are updated so the two stay consistent —
 // otherwise a future caller reaching for the map would silently see the wrong
 // answer.
 //
-// Provider-selection directives (lava-select-provider, lava-stickiness) are
+// Provider-selection directives (smartrouter-select-provider, smartrouter-stickiness) are
 // deliberately NOT copied: the failover path may need to fall through to a
-// different provider on retry. The block-list (lava-providers-block) is also
+// different provider on retry. The block-list (smartrouter-providers-block) is also
 // not handled here because it's already preserved via usedProviders, captured
 // once at the top of ProcessRelaySend from the original protocolMessage.
 func preserveRetrySafeDirectives(src, dst chainlib.ProtocolMessage) {

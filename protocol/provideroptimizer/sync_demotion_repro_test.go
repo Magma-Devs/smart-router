@@ -82,7 +82,7 @@ func feedRounds(po *ProviderOptimizer, lagging string, providers []string, head,
 // peers — exactly what MAG-1748 Scenario 3 expects.
 func TestSyncDemotion_PerEndpointBlock_DemotesLaggingProvider(t *testing.T) {
 	po := setupProviderOptimizer(1)
-	const stale, p2, p3 = "lava@stale", "lava@P2", "lava@P3"
+	const stale, p2, p3 = "provider@stale", "provider@P2", "provider@P3"
 	providers := []string{stale, p2, p3}
 	const head, lag = uint64(20_000_000), uint64(100)
 
@@ -114,7 +114,7 @@ func TestSyncDemotion_PerEndpointBlock_DemotesLaggingProvider(t *testing.T) {
 // and the first-pick distribution stays ~even. This is the bug MAG-1748 Scenario 3 caught.
 func TestSyncDemotion_GlobalHeadForAll_LeavesLaggingProviderUndetected(t *testing.T) {
 	po := setupProviderOptimizer(1)
-	const stale, p2, p3 = "lava@stale", "lava@P2", "lava@P3"
+	const stale, p2, p3 = "provider@stale", "provider@P2", "provider@P3"
 	providers := []string{stale, p2, p3}
 	const head = uint64(20_000_000)
 

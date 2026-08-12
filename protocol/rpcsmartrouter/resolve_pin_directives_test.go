@@ -7,7 +7,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
-// TestResolvePinDirectives covers MAG-2228 Fix 1: lava-select-provider / lava-stickiness
+// TestResolvePinDirectives covers MAG-2228 Fix 1: smartrouter-select-provider / smartrouter-stickiness
 // are honored on the FIRST attempt but dropped on retries so the relay can fall through to
 // a different provider instead of re-pinning the one that just failed.
 func TestResolvePinDirectives(t *testing.T) {

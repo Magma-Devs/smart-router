@@ -529,7 +529,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{},
 		if parsedError := rcp.HandleNodeError(ctx, err); parsedError != nil {
 			return nil, "", nil, parsedError
 		}
-		// always return a lava error in this case
+		// always return a router error in this case
 		return nil, "", nil, err
 	}
 	// here we received a response that can be an error response with Code >300 or code < 200

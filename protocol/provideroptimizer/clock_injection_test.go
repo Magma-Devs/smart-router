@@ -75,7 +75,7 @@ func TestProviderOptimizer_NowFuncReset(t *testing.T) {
 // /debug/time-warp in integration tests.
 func TestProviderOptimizer_ClockInjectionScoreDecay(t *testing.T) {
 	po := setupProviderOptimizer(10)
-	provider := "lava@test_provider"
+	provider := "provider@test_provider"
 
 	// record a relay success at real time
 	po.AppendRelayData(provider, 10*time.Millisecond, 100, 100)
@@ -113,7 +113,7 @@ func TestProviderOptimizer_ClockInjectionScoreDecay(t *testing.T) {
 //	values after the warp match the formula to within 0.1 % relative error.
 func TestProviderOptimizer_ScoreDecayAfterClockForward(t *testing.T) {
 	const (
-		provider   = "lava@decay_test"
+		provider   = "provider@decay_test"
 		cu         = uint64(10)
 		syncBlock  = uint64(1000)
 		numRelays  = 5 // enough to build a stable pre-warp score

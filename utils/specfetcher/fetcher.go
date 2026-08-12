@@ -1,4 +1,4 @@
-// Package specfetcher provides functionality to fetch Lava specs from remote Git repositories.
+// Package specfetcher provides functionality to fetch chain specs from remote Git repositories.
 // It supports both GitHub and GitLab (including self-hosted instances) with optional authentication.
 package specfetcher
 

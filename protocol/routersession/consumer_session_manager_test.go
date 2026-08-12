@@ -109,17 +109,17 @@ func TestEndpointHealthRecovery(t *testing.T) {
 
 	mkProvider := func(addr string) *ConsumerSessionsWithProvider {
 		return &ConsumerSessionsWithProvider{
-			PublicLavaAddress: addr,
-			Endpoints:         []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
-			Sessions:          map[int64]*SingleConsumerSession{},
-			MaxComputeUnits:   200,
-			PairingEpoch:      firstEpochHeight,
+			PublicAddress:   addr,
+			Endpoints:       []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
+			Sessions:        map[int64]*SingleConsumerSession{},
+			MaxComputeUnits: 200,
+			PairingEpoch:    firstEpochHeight,
 		}
 	}
 	pairingList := map[uint64]*ConsumerSessionsWithProvider{
-		0: mkProvider("lava@prov0"),
-		1: mkProvider("lava@prov1"),
-		2: mkProvider("lava@prov2"),
+		0: mkProvider("provider@prov0"),
+		1: mkProvider("provider@prov1"),
+		2: mkProvider("provider@prov2"),
 	}
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
 
@@ -177,7 +177,7 @@ func CreateConsumerSessionManager() *ConsumerSessionManager {
 	rand.InitRandomSeed()
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
 	optimizer.SetDeterministicSeed(1234567)
-	return NewConsumerSessionManager(&RPCEndpoint{"stub", "stub", "stub", false, "/"}, optimizer, nil, "lava@test", NewActiveSubscriptionProvidersStorage())
+	return NewConsumerSessionManager(&RPCEndpoint{"stub", "stub", "stub", false, "/"}, optimizer, nil, "provider@test", NewActiveSubscriptionProvidersStorage())
 }
 
 func TestMain(m *testing.M) {
@@ -280,11 +280,11 @@ func createPairingList(providerPrefixAddress string, enabled bool) map[uint64]*C
 		}
 
 		cswpList[uint64(p)] = &ConsumerSessionsWithProvider{
-			PublicLavaAddress: providerStr + providerPrefixAddress + strconv.Itoa(p),
-			Endpoints:         endpoints,
-			Sessions:          map[int64]*SingleConsumerSession{},
-			MaxComputeUnits:   200,
-			PairingEpoch:      firstEpochHeight,
+			PublicAddress:   providerStr + providerPrefixAddress + strconv.Itoa(p),
+			Endpoints:       endpoints,
+			Sessions:        map[int64]*SingleConsumerSession{},
+			MaxComputeUnits: 200,
+			PairingEpoch:    firstEpochHeight,
 		}
 	}
 	return cswpList
@@ -296,11 +296,11 @@ func createNamedPairingList(names ...string) map[uint64]*ConsumerSessionsWithPro
 	cswpList := make(map[uint64]*ConsumerSessionsWithProvider, len(names))
 	for i, name := range names {
 		cswpList[uint64(i)] = &ConsumerSessionsWithProvider{
-			PublicLavaAddress: name,
-			Endpoints:         []*Endpoint{{Connections: []*EndpointConnection{}, NetworkAddress: grpcListener, Enabled: true, ConnectionRefusals: 0}},
-			Sessions:          map[int64]*SingleConsumerSession{},
-			MaxComputeUnits:   200,
-			PairingEpoch:      firstEpochHeight,
+			PublicAddress:   name,
+			Endpoints:       []*Endpoint{{Connections: []*EndpointConnection{}, NetworkAddress: grpcListener, Enabled: true, ConnectionRefusals: 0}},
+			Sessions:        map[int64]*SingleConsumerSession{},
+			MaxComputeUnits: 200,
+			PairingEpoch:    firstEpochHeight,
 		}
 	}
 	return cswpList
@@ -312,19 +312,19 @@ func TestNumberOfValidProviderGroups(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	mk := func(addr, group string) *ConsumerSessionsWithProvider {
 		return &ConsumerSessionsWithProvider{
-			PublicLavaAddress: addr,
-			Endpoints:         []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
-			Sessions:          map[int64]*SingleConsumerSession{},
-			MaxComputeUnits:   200,
-			PairingEpoch:      firstEpochHeight,
-			GroupLabel:        group,
+			PublicAddress:   addr,
+			Endpoints:       []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
+			Sessions:        map[int64]*SingleConsumerSession{},
+			MaxComputeUnits: 200,
+			PairingEpoch:    firstEpochHeight,
+			GroupLabel:      group,
 		}
 	}
 	pairingList := map[uint64]*ConsumerSessionsWithProvider{
-		0: mk("lava@p0", "tier-1"),
-		1: mk("lava@p1", "tier-1"), // shares tier-1
-		2: mk("lava@p2", "external"),
-		3: mk("lava@p3", ""), // empty -> implicit "default"
+		0: mk("provider@p0", "tier-1"),
+		1: mk("provider@p1", "tier-1"), // shares tier-1
+		2: mk("provider@p2", "external"),
+		3: mk("provider@p3", ""), // empty -> implicit "default"
 	}
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
 
@@ -347,20 +347,20 @@ func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	mk := func(addr, group string) *ConsumerSessionsWithProvider {
 		return &ConsumerSessionsWithProvider{
-			PublicLavaAddress: addr,
-			Endpoints:         []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
-			Sessions:          map[int64]*SingleConsumerSession{},
-			MaxComputeUnits:   200,
-			PairingEpoch:      firstEpochHeight,
-			GroupLabel:        group,
+			PublicAddress:   addr,
+			Endpoints:       []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
+			Sessions:        map[int64]*SingleConsumerSession{},
+			MaxComputeUnits: 200,
+			PairingEpoch:    firstEpochHeight,
+			GroupLabel:      group,
 		}
 	}
 	primaries := map[uint64]*ConsumerSessionsWithProvider{
-		0: mk("lava@primary0", "g1"),
-		1: mk("lava@primary1", "g2"),
+		0: mk("provider@primary0", "g1"),
+		1: mk("provider@primary1", "g2"),
 	}
 	backups := map[uint64]*ConsumerSessionsWithProvider{
-		0: mk("lava@backup0", "backup-group"),
+		0: mk("provider@backup0", "backup-group"),
 	}
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, primaries, backups))
 
@@ -376,7 +376,7 @@ func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
 	require.NotContains(t, assignments, "backup-group", "backup group must not appear in assignments")
 	for group, addrs := range assignments {
 		for _, addr := range addrs {
-			require.NotEqual(t, "lava@backup0", addr, "backup must not appear under group %q", group)
+			require.NotEqual(t, "provider@backup0", addr, "backup must not appear under group %q", group)
 		}
 	}
 
@@ -386,7 +386,7 @@ func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
 		css, err := csm.GetSessions(ctx, 5, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
 		require.NoError(t, err, "i #%d", i)
 		for provider := range css {
-			require.NotEqual(t, "lava@backup0", provider, "backup leaked into GetSessions on call #%d", i)
+			require.NotEqual(t, "provider@backup0", provider, "backup leaked into GetSessions on call #%d", i)
 		}
 	}
 }
@@ -397,10 +397,10 @@ func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
 func TestOrderForGroupDiversity(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	csm.pairing = map[string]*ConsumerSessionsWithProvider{
-		"p0": {PublicLavaAddress: "p0", GroupLabel: "g1"},
-		"p1": {PublicLavaAddress: "p1", GroupLabel: "g1"},
-		"p2": {PublicLavaAddress: "p2", GroupLabel: "g2"},
-		"p3": {PublicLavaAddress: "p3", GroupLabel: ""}, // empty -> "default"
+		"p0": {PublicAddress: "p0", GroupLabel: "g1"},
+		"p1": {PublicAddress: "p1", GroupLabel: "g1"},
+		"p2": {PublicAddress: "p2", GroupLabel: "g2"},
+		"p3": {PublicAddress: "p3", GroupLabel: ""}, // empty -> "default"
 	}
 	ranked := []string{"p0", "p1", "p2", "p3"} // QoS-ranked
 
@@ -454,14 +454,14 @@ func TestOrderForGroupDiversity(t *testing.T) {
 func TestOrderForGroupDiversity_PerGroupTarget(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	csm.pairing = map[string]*ConsumerSessionsWithProvider{
-		"a0": {PublicLavaAddress: "a0", GroupLabel: "A"},
-		"a1": {PublicLavaAddress: "a1", GroupLabel: "A"},
-		"a2": {PublicLavaAddress: "a2", GroupLabel: "A"},
-		"a3": {PublicLavaAddress: "a3", GroupLabel: "A"},
-		"a4": {PublicLavaAddress: "a4", GroupLabel: "A"},
-		"b0": {PublicLavaAddress: "b0", GroupLabel: "B"},
-		"b1": {PublicLavaAddress: "b1", GroupLabel: "B"},
-		"b2": {PublicLavaAddress: "b2", GroupLabel: "B"},
+		"a0": {PublicAddress: "a0", GroupLabel: "A"},
+		"a1": {PublicAddress: "a1", GroupLabel: "A"},
+		"a2": {PublicAddress: "a2", GroupLabel: "A"},
+		"a3": {PublicAddress: "a3", GroupLabel: "A"},
+		"a4": {PublicAddress: "a4", GroupLabel: "A"},
+		"b0": {PublicAddress: "b0", GroupLabel: "B"},
+		"b1": {PublicAddress: "b1", GroupLabel: "B"},
+		"b2": {PublicAddress: "b2", GroupLabel: "B"},
 	}
 	// QoS-ranked: all of group A's (higher-QoS) providers come before group B's.
 	ranked := []string{"a0", "a1", "a2", "a3", "a4", "b0", "b1", "b2"}
@@ -518,12 +518,12 @@ func TestOrderForGroupDiversity_PerGroupTarget(t *testing.T) {
 		// instead prefer groups that can actually reach the target (A and B).
 		csm3 := CreateConsumerSessionManager()
 		csm3.pairing = map[string]*ConsumerSessionsWithProvider{
-			"a0": {PublicLavaAddress: "a0", GroupLabel: "A"},
-			"a1": {PublicLavaAddress: "a1", GroupLabel: "A"},
-			"a2": {PublicLavaAddress: "a2", GroupLabel: "A"},
-			"c0": {PublicLavaAddress: "c0", GroupLabel: "C"},
-			"b0": {PublicLavaAddress: "b0", GroupLabel: "B"},
-			"b1": {PublicLavaAddress: "b1", GroupLabel: "B"},
+			"a0": {PublicAddress: "a0", GroupLabel: "A"},
+			"a1": {PublicAddress: "a1", GroupLabel: "A"},
+			"a2": {PublicAddress: "a2", GroupLabel: "A"},
+			"c0": {PublicAddress: "c0", GroupLabel: "C"},
+			"b0": {PublicAddress: "b0", GroupLabel: "B"},
+			"b1": {PublicAddress: "b1", GroupLabel: "B"},
 		}
 		ranked3 := []string{"a0", "a1", "a2", "c0", "b0", "b1"} // C ranked ahead of B
 		got := csm3.orderForGroupDiversity(ranked3, 4, 2, 2)
@@ -552,18 +552,18 @@ func TestGetSessions_PerGroupTargetEndToEnd(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	mk := func(addr, group string) *ConsumerSessionsWithProvider {
 		return &ConsumerSessionsWithProvider{
-			PublicLavaAddress: addr,
-			Endpoints:         []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
-			Sessions:          map[int64]*SingleConsumerSession{},
-			MaxComputeUnits:   200,
-			PairingEpoch:      firstEpochHeight,
-			GroupLabel:        group,
+			PublicAddress:   addr,
+			Endpoints:       []*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
+			Sessions:        map[int64]*SingleConsumerSession{},
+			MaxComputeUnits: 200,
+			PairingEpoch:    firstEpochHeight,
+			GroupLabel:      group,
 		}
 	}
 	pairingList := map[uint64]*ConsumerSessionsWithProvider{
-		0: mk("lava@a0", "A"), 1: mk("lava@a1", "A"), 2: mk("lava@a2", "A"),
-		3: mk("lava@a3", "A"), 4: mk("lava@a4", "A"),
-		5: mk("lava@b0", "B"), 6: mk("lava@b1", "B"), 7: mk("lava@b2", "B"),
+		0: mk("provider@a0", "A"), 1: mk("provider@a1", "A"), 2: mk("provider@a2", "A"),
+		3: mk("provider@a3", "A"), 4: mk("provider@a4", "A"),
+		5: mk("provider@b0", "B"), 6: mk("provider@b1", "B"), 7: mk("provider@b2", "B"),
 	}
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
 
@@ -611,10 +611,10 @@ func TestNoPairingAvailableFlow(t *testing.T) {
 	highestProviderCu := ""
 	highestCu := uint64(0)
 	for _, pairing := range csm.pairing {
-		if pairing.PublicLavaAddress != csm.validAddresses[0] {
+		if pairing.PublicAddress != csm.validAddresses[0] {
 			if pairing.UsedComputeUnits > highestCu {
 				highestCu = pairing.UsedComputeUnits
-				highestProviderCu = pairing.PublicLavaAddress
+				highestProviderCu = pairing.PublicAddress
 			}
 		}
 	}
@@ -649,7 +649,7 @@ func TestNoPairingAvailableFlow(t *testing.T) {
 	validSnapshot := append([]string(nil), csm.validAddresses...)
 	csm.lock.RUnlock()
 	for _, addr := range css3 {
-		require.False(t, sliceutil.Contains(validSnapshot, addr.Session.Parent.PublicLavaAddress))
+		require.False(t, sliceutil.Contains(validSnapshot, addr.Session.Parent.PublicAddress))
 	}
 	require.Equal(t, len(validSnapshot), 2)
 }
@@ -664,17 +664,17 @@ func TestSecondChanceRecoveryFlow(t *testing.T) {
 	timeLimit := time.Second * 30
 	loopStartTime := time.Now()
 	for {
-		// implement a struct that returns: map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress} in the implementation for the DirectiveHeadersInf interface
-		directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress}}
+		// implement a struct that returns: map[string]string{"smartrouter-providers-block": pairingList[1].PublicAddress} in the implementation for the DirectiveHeadersInf interface
+		directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicAddress}}
 		usedProviders := NewUsedProviders(directiveHeaders)
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 		require.NoError(t, err)
-		_, expectedProviderAddress := css[pairingList[0].PublicLavaAddress]
+		_, expectedProviderAddress := css[pairingList[0].PublicAddress]
 		require.True(t, expectedProviderAddress)
 		for _, sessionInfo := range css {
 			csm.OnSessionFailure(sessionInfo.Session, fmt.Errorf("testError"))
 		}
-		_, ok := csm.secondChanceGivenToAddresses[pairingList[0].PublicLavaAddress]
+		_, ok := csm.secondChanceGivenToAddresses[pairingList[0].PublicAddress]
 		if ok {
 			// should be present in secondChanceGivenToAddresses at some point.
 			fmt.Println(csm.secondChanceGivenToAddresses)
@@ -687,19 +687,19 @@ func TestSecondChanceRecoveryFlow(t *testing.T) {
 	usedProviders := NewUsedProviders(nil)
 	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 	require.NoError(t, err)
-	_, expectedProviderAddress := css[pairingList[1].PublicLavaAddress]
+	_, expectedProviderAddress := css[pairingList[1].PublicAddress]
 	require.True(t, expectedProviderAddress)
 	// check this provider is not reported.
-	require.False(t, csm.reportedProviders.IsReported(pairingList[0].PublicLavaAddress))
-	require.False(t, csm.reportedProviders.IsReported(pairingList[1].PublicLavaAddress))
+	require.False(t, csm.reportedProviders.IsReported(pairingList[0].PublicAddress))
+	require.False(t, csm.reportedProviders.IsReported(pairingList[1].PublicAddress))
 	// sleep for the duration of the retrySecondChanceAfter
 	loopStartTime = time.Now()
 	for {
 		if func() bool {
 			csm.lock.RLock()
 			defer csm.lock.RUnlock()
-			utils.FormatInfo("waiting for provider to return to valid addresses", utils.LogAttr("provider", pairingList[0].PublicLavaAddress), utils.LogAttr("csm.validAddresses", csm.validAddresses))
-			return sliceutil.Contains(csm.validAddresses, pairingList[0].PublicLavaAddress)
+			utils.FormatInfo("waiting for provider to return to valid addresses", utils.LogAttr("provider", pairingList[0].PublicAddress), utils.LogAttr("csm.validAddresses", csm.validAddresses))
+			return sliceutil.Contains(csm.validAddresses, pairingList[0].PublicAddress)
 		}() {
 			utils.FormatInfo("Wait Completed")
 			break
@@ -708,33 +708,33 @@ func TestSecondChanceRecoveryFlow(t *testing.T) {
 		require.True(t, time.Since(loopStartTime) < timeLimit)
 	}
 
-	require.True(t, sliceutil.Contains(csm.validAddresses, pairingList[0].PublicLavaAddress))
-	require.False(t, sliceutil.Contains(csm.currentlyBlockedProviderAddresses, pairingList[0].PublicLavaAddress))
-	require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus)
+	require.True(t, sliceutil.Contains(csm.validAddresses, pairingList[0].PublicAddress))
+	require.False(t, sliceutil.Contains(csm.currentlyBlockedProviderAddresses, pairingList[0].PublicAddress))
+	require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicAddress].blockedAndUsedWithChanceForRecoveryStatus)
 
 	// now after we gave it a second chance, we give it another failure sequence, expecting it to this time be reported.
 	loopStartTime = time.Now()
 	for {
-		utils.FormatDebug("Test", utils.LogAttr("csm.validAddresses", csm.validAddresses), utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus", csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus))
-		directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress}}
+		utils.FormatDebug("Test", utils.LogAttr("csm.validAddresses", csm.validAddresses), utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("csm.pairing[pairingList[0].PublicAddress].blockedAndUsedWithChanceForRecoveryStatus", csm.pairing[pairingList[0].PublicAddress].blockedAndUsedWithChanceForRecoveryStatus))
+		directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicAddress}}
 		usedProviders := NewUsedProviders(directiveHeaders)
-		require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus)
+		require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicAddress].blockedAndUsedWithChanceForRecoveryStatus)
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
-		require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus)
+		require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicAddress].blockedAndUsedWithChanceForRecoveryStatus)
 		require.NoError(t, err)
-		_, expectedProviderAddress := css[pairingList[0].PublicLavaAddress]
+		_, expectedProviderAddress := css[pairingList[0].PublicAddress]
 		require.True(t, expectedProviderAddress)
 		for _, sessionInfo := range css {
 			csm.OnSessionFailure(sessionInfo.Session, fmt.Errorf("testError"))
-			require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus)
+			require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicAddress].blockedAndUsedWithChanceForRecoveryStatus)
 		}
-		if _, ok := csm.reportedProviders.addedToPurgeAndReport[pairingList[0].PublicLavaAddress]; ok {
+		if _, ok := csm.reportedProviders.addedToPurgeAndReport[pairingList[0].PublicAddress]; ok {
 			break
 		}
 		require.True(t, time.Since(loopStartTime) < timeLimit)
 	}
 	utils.FormatInfo("csm.reportedProviders", utils.LogAttr("csm.reportedProviders", csm.reportedProviders.addedToPurgeAndReport))
-	require.True(t, csm.reportedProviders.IsReported(pairingList[0].PublicLavaAddress))
+	require.True(t, csm.reportedProviders.IsReported(pairingList[0].PublicAddress))
 }
 
 // TestSecondChanceRenewedAfterProvenRecovery verifies that a provider which has
@@ -750,13 +750,13 @@ func TestSecondChanceRenewedAfterProvenRecovery(t *testing.T) {
 	pairingList := createPairingList("", true)
 	err := csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{0: pairingList[0], 1: pairingList[1]}, nil)
 	require.NoError(t, err)
-	provider0 := pairingList[0].PublicLavaAddress
+	provider0 := pairingList[0].PublicAddress
 	timeLimit := time.Second * 30
 
 	// Phase 1: fail provider0 (provider1 directive-blocked) until it consumes its single second chance.
 	loopStartTime := time.Now()
 	for {
-		directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress}}
+		directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicAddress}}
 		usedProviders := NewUsedProviders(directiveHeaders)
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
 		require.NoError(t, err)
@@ -787,7 +787,7 @@ func TestSecondChanceRenewedAfterProvenRecovery(t *testing.T) {
 
 	// Phase 3: a successful relay proves recovery — it must clear the probation
 	// marker (synchronously) and the second-chance memory (via deferred goroutine).
-	directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress}}
+	directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicAddress}}
 	usedProviders := NewUsedProviders(directiveHeaders)
 	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
 	require.NoError(t, err)
@@ -839,9 +839,9 @@ func TestOnSessionDiscardedReleasesReservationWithoutProviderFailure(t *testing.
 	csm := CreateConsumerSessionManager()
 	usedProviders := NewUsedProviders(nil)
 	parent := &ConsumerSessionsWithProvider{
-		PublicLavaAddress: "provider-stale",
-		MaxComputeUnits:   100,
-		UsedComputeUnits:  10,
+		PublicAddress:    "provider-stale",
+		MaxComputeUnits:  100,
+		UsedComputeUnits: 10,
 	}
 	session := &SingleConsumerSession{Parent: parent}
 	blocked, ok := session.TryUseSession()
@@ -1251,14 +1251,14 @@ func TestSessionFailureAndGetReportedProviders(t *testing.T) {
 		require.Equal(t, cs.Session.RelayNum, relayNumberAfterFirstFail)
 
 		// verify provider is blocked and reported
-		require.True(t, csm.reportedProviders.IsReported(cs.Session.Parent.PublicLavaAddress))
-		require.NotContains(t, csm.validAddresses, cs.Session.Parent.PublicLavaAddress) // address isn't in valid addresses list
+		require.True(t, csm.reportedProviders.IsReported(cs.Session.Parent.PublicAddress))
+		require.NotContains(t, csm.validAddresses, cs.Session.Parent.PublicAddress) // address isn't in valid addresses list
 
 		reported := csm.GetReportedProviders(firstEpochHeight)
 		require.NotEmpty(t, reported)
 		for _, providerReported := range reported {
 			require.True(t, csm.reportedProviders.IsReported(providerReported.Address))
-			require.True(t, csm.reportedProviders.IsReported(cs.Session.Parent.PublicLavaAddress))
+			require.True(t, csm.reportedProviders.IsReported(cs.Session.Parent.PublicAddress))
 		}
 	}
 }
@@ -1793,11 +1793,11 @@ func TestDeadConnectionCleanup(t *testing.T) {
 
 	// Create ConsumerSessionsWithProvider with this endpoint
 	cswp := &ConsumerSessionsWithProvider{
-		PublicLavaAddress: "test-provider",
-		Endpoints:         []*Endpoint{endpoint},
-		Sessions:          map[int64]*SingleConsumerSession{},
-		MaxComputeUnits:   200,
-		PairingEpoch:      firstEpochHeight,
+		PublicAddress:   "test-provider",
+		Endpoints:       []*Endpoint{endpoint},
+		Sessions:        map[int64]*SingleConsumerSession{},
+		MaxComputeUnits: 200,
+		PairingEpoch:    firstEpochHeight,
 	}
 
 	// Call fetchEndpointConnectionFromConsumerSessionWithProvider which will trigger cleanup
@@ -2094,7 +2094,7 @@ func TestGetReportedProviders_EpochTransitionRace(t *testing.T) {
 
 	var reportedAddr string
 	for _, cs := range css {
-		reportedAddr = cs.Session.Parent.PublicLavaAddress
+		reportedAddr = cs.Session.Parent.PublicAddress
 		err = csm.OnSessionFailure(cs.Session, ReportAndBlockProviderError)
 		require.NoError(t, err)
 	}
@@ -2170,7 +2170,7 @@ func TestGetReportedProviders_ReconnectRace(t *testing.T) {
 
 	var reportedAddr string
 	for _, cs := range css {
-		reportedAddr = cs.Session.Parent.PublicLavaAddress
+		reportedAddr = cs.Session.Parent.PublicAddress
 		err = csm.OnSessionFailure(cs.Session, ReportAndBlockProviderError)
 		require.NoError(t, err)
 	}
@@ -2253,11 +2253,11 @@ func TestCanceledContextDoesNotPenalizeEndpoint(t *testing.T) {
 	}
 
 	cswp := &ConsumerSessionsWithProvider{
-		PublicLavaAddress: "test-provider",
-		Endpoints:         []*Endpoint{endpoint},
-		Sessions:          map[int64]*SingleConsumerSession{},
-		MaxComputeUnits:   200,
-		PairingEpoch:      firstEpochHeight,
+		PublicAddress:   "test-provider",
+		Endpoints:       []*Endpoint{endpoint},
+		Sessions:        map[int64]*SingleConsumerSession{},
+		MaxComputeUnits: 200,
+		PairingEpoch:    firstEpochHeight,
 	}
 
 	// Pre-cancel the context before calling fetch.
@@ -2300,7 +2300,7 @@ func createBackupProviderList(addr string) map[uint64]*ConsumerSessionsWithProvi
 		ConnectionRefusals: 0,
 	}}
 	cswp := NewConsumerSessionWithProvider(
-		"lava@backup1",
+		"provider@backup1",
 		endpoints,
 		1000,
 		firstEpochHeight,
@@ -2317,7 +2317,7 @@ func TestBlockProvider_BackupProviderIsTracked(t *testing.T) {
 	err := csm.UpdateAllProviders(firstEpochHeight, nil, backupList)
 	require.NoError(t, err)
 
-	backupAddr := backupList[0].PublicLavaAddress
+	backupAddr := backupList[0].PublicAddress
 
 	// Block the backup provider
 	err = csm.blockProvider(context.Background(), backupAddr, false, firstEpochHeight, 0, 0, false, nil)
@@ -2338,7 +2338,7 @@ func TestBlockProvider_BackupProviderFilteredFromSelection(t *testing.T) {
 	err := csm.UpdateAllProviders(firstEpochHeight, nil, backupList)
 	require.NoError(t, err)
 
-	backupAddr := backupList[0].PublicLavaAddress
+	backupAddr := backupList[0].PublicAddress
 
 	// Directly mark it blocked
 	csm.lock.Lock()
@@ -2361,7 +2361,7 @@ func TestUpdateAllProviders_BlockedBackupProviderPersistedAcrossEpoch(t *testing
 	err := csm.UpdateAllProviders(firstEpochHeight, nil, backupList)
 	require.NoError(t, err)
 
-	backupAddr := backupList[0].PublicLavaAddress
+	backupAddr := backupList[0].PublicAddress
 
 	// Block it in the first epoch
 	err = csm.blockProvider(context.Background(), backupAddr, false, firstEpochHeight, 0, 0, false, nil)
@@ -2403,7 +2403,7 @@ func TestUpdateAllProviders_NormalProviderBlockedAsBackupInNextEpoch(t *testing.
 	require.NoError(t, err)
 
 	// Block a normal provider
-	normalAddr := pairingList[0].PublicLavaAddress
+	normalAddr := pairingList[0].PublicAddress
 	err = csm.blockProvider(context.Background(), normalAddr, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
 
@@ -2455,7 +2455,7 @@ func TestCheckAndUnblock_BackupRoutedToComprehensiveProbe(t *testing.T) {
 	// doesn't race with this assertion via the immediate-unblock code path.
 	unreachable := map[uint64]*ConsumerSessionsWithProvider{
 		0: NewConsumerSessionWithProvider(
-			"lava@backup-routed",
+			"provider@backup-routed",
 			[]*Endpoint{{Connections: []*EndpointConnection{}, NetworkAddress: "127.0.0.1:1", Enabled: true}},
 			1000,
 			firstEpochHeight,
@@ -2465,7 +2465,7 @@ func TestCheckAndUnblock_BackupRoutedToComprehensiveProbe(t *testing.T) {
 	err := csm.UpdateAllProviders(firstEpochHeight, nil, unreachable)
 	require.NoError(t, err)
 
-	backupAddr := unreachable[0].PublicLavaAddress
+	backupAddr := unreachable[0].PublicAddress
 
 	// Seed previousEpochBlockedProviders as if this backup was blocked last epoch.
 	csm.lock.Lock()
@@ -2507,7 +2507,7 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 	err := csm.UpdateAllProviders(firstEpochHeight, nil, backupList)
 	require.NoError(t, err)
 
-	backupAddr := backupList[0].PublicLavaAddress
+	backupAddr := backupList[0].PublicAddress
 
 	err = csm.blockProvider(context.Background(), backupAddr, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
@@ -2515,7 +2515,7 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 	// New epoch, same backup address, still pointing at the healthy gRPC listener.
 	backupListEpoch2 := createBackupProviderList(grpcListener)
 	// Reuse the same public address so previousEpoch re-blocking matches this entry.
-	backupListEpoch2[0].PublicLavaAddress = backupAddr
+	backupListEpoch2[0].PublicAddress = backupAddr
 	err = csm.UpdateAllProviders(secondEpochHeight, nil, backupListEpoch2)
 	require.NoError(t, err)
 
@@ -2545,7 +2545,7 @@ func TestGenerateReconnectCallback_BackupProviderUnblocked(t *testing.T) {
 	err := csm.UpdateAllProviders(firstEpochHeight, nil, backupList)
 	require.NoError(t, err)
 
-	backupAddr := backupList[0].PublicLavaAddress
+	backupAddr := backupList[0].PublicAddress
 
 	err = csm.blockProvider(context.Background(), backupAddr, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
@@ -2576,7 +2576,7 @@ func TestGenerateReconnectCallback_NonBackupUsesValidAddressesPath(t *testing.T)
 	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
 	require.NoError(t, err)
 
-	regularAddr := pairingList[0].PublicLavaAddress
+	regularAddr := pairingList[0].PublicAddress
 	err = csm.blockProvider(context.Background(), regularAddr, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
 
@@ -2629,7 +2629,7 @@ func TestGenerateReconnectCallback_OverlapBothPairingAndBackup(t *testing.T) {
 	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
 	require.NoError(t, err)
 
-	overlapAddr := pairingList[0].PublicLavaAddress
+	overlapAddr := pairingList[0].PublicAddress
 
 	// Block as primary — lands in currentlyBlockedProviderAddresses, removed from
 	// validAddresses.
@@ -2689,18 +2689,18 @@ func TestGetAllDirectRPCEndpoints_IncludesBackupProviders(t *testing.T) {
 	csm.lock.Lock()
 	csm.pairing = map[string]*ConsumerSessionsWithProvider{
 		"blockpi1": {
-			Sessions:          make(map[int64]*SingleConsumerSession),
-			PublicLavaAddress: "blockpi1",
-			Endpoints:         []*Endpoint{primaryEndpoint},
-			StaticProvider:    true,
+			Sessions:       make(map[int64]*SingleConsumerSession),
+			PublicAddress:  "blockpi1",
+			Endpoints:      []*Endpoint{primaryEndpoint},
+			StaticProvider: true,
 		},
 	}
 	csm.backupProviders = map[string]*ConsumerSessionsWithProvider{
 		"lava1": {
-			Sessions:          make(map[int64]*SingleConsumerSession),
-			PublicLavaAddress: "lava1",
-			Endpoints:         []*Endpoint{backupEndpoint},
-			StaticProvider:    true,
+			Sessions:       make(map[int64]*SingleConsumerSession),
+			PublicAddress:  "lava1",
+			Endpoints:      []*Endpoint{backupEndpoint},
+			StaticProvider: true,
 		},
 	}
 	csm.lock.Unlock()
@@ -2740,14 +2740,14 @@ func TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint(t *testing.T) {
 	}
 
 	cswp := &ConsumerSessionsWithProvider{
-		Sessions:          make(map[int64]*SingleConsumerSession),
-		PublicLavaAddress: "lava@stuck-backup",
-		Endpoints:         []*Endpoint{disabledEndpoint},
-		StaticProvider:    true,
+		Sessions:       make(map[int64]*SingleConsumerSession),
+		PublicAddress:  "provider@stuck-backup",
+		Endpoints:      []*Endpoint{disabledEndpoint},
+		StaticProvider: true,
 	}
 
 	csm := CreateConsumerSessionManager()
-	_, _, probeErr := csm.probeDirectRPCEndpoints(ctx, cswp, cswp.PublicLavaAddress)
+	_, _, probeErr := csm.probeDirectRPCEndpoints(ctx, cswp, cswp.PublicAddress)
 	require.Error(t, probeErr,
 		"a disabled endpoint must cause the direct RPC probe to fail (no usable enabled endpoints)")
 }
@@ -2801,7 +2801,7 @@ func createConsumerSessionManagerWithMetrics(m metrics.ConsumerMetricsManagerInf
 	rand.InitRandomSeed()
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
 	optimizer.SetDeterministicSeed(1234567)
-	return NewConsumerSessionManager(&RPCEndpoint{"stub", "stub", "stub", false, "/"}, optimizer, m, "lava@test", NewActiveSubscriptionProvidersStorage())
+	return NewConsumerSessionManager(&RPCEndpoint{"stub", "stub", "stub", false, "/"}, optimizer, m, "provider@test", NewActiveSubscriptionProvidersStorage())
 }
 
 // TestPublishStateSizes_PopulateThenReset verifies that publishStateSizes
@@ -2889,10 +2889,10 @@ func TestResetTransientFailureState(t *testing.T) {
 	// epoch-boundary operation, so this endpoint leaves it alone.
 	csm.currentlyBlockedProviderAddresses = []string{"now-blocked"}
 	csm.pairing = map[string]*ConsumerSessionsWithProvider{
-		"good-provider": {PublicLavaAddress: "good-provider"},
+		"good-provider": {PublicAddress: "good-provider"},
 	}
 	csm.backupProviders = map[string]*ConsumerSessionsWithProvider{
-		"backup-1": {PublicLavaAddress: "backup-1"},
+		"backup-1": {PublicAddress: "backup-1"},
 	}
 	csm.lock.Unlock()
 	csm.stickySessions.Set("session-id", &StickySession{Provider: "good-provider", Epoch: 1})
@@ -2936,9 +2936,9 @@ func TestResetBlockedProviders(t *testing.T) {
 	// has one entry and currentlyBlockedProviderAddresses has two.
 	csm.lock.Lock()
 	csm.pairing = map[string]*ConsumerSessionsWithProvider{
-		"provider-a": {PublicLavaAddress: "provider-a", Endpoints: []*Endpoint{{NetworkAddress: "addr-a"}}},
-		"provider-b": {PublicLavaAddress: "provider-b", Endpoints: []*Endpoint{{NetworkAddress: "addr-b"}}},
-		"provider-c": {PublicLavaAddress: "provider-c", Endpoints: []*Endpoint{{NetworkAddress: "addr-c"}}},
+		"provider-a": {PublicAddress: "provider-a", Endpoints: []*Endpoint{{NetworkAddress: "addr-a"}}},
+		"provider-b": {PublicAddress: "provider-b", Endpoints: []*Endpoint{{NetworkAddress: "addr-b"}}},
+		"provider-c": {PublicAddress: "provider-c", Endpoints: []*Endpoint{{NetworkAddress: "addr-c"}}},
 	}
 	csm.pairingAddresses = map[uint64]string{
 		0: "provider-a",
@@ -2980,7 +2980,7 @@ func TestResetBlockedProviders_NoBlockedIsNoOp(t *testing.T) {
 
 	csm.lock.Lock()
 	csm.pairing = map[string]*ConsumerSessionsWithProvider{
-		"provider-a": {PublicLavaAddress: "provider-a", Endpoints: []*Endpoint{{NetworkAddress: "addr-a"}}},
+		"provider-a": {PublicAddress: "provider-a", Endpoints: []*Endpoint{{NetworkAddress: "addr-a"}}},
 	}
 	csm.pairingAddresses = map[uint64]string{0: "provider-a"}
 	csm.validAddresses = []string{"provider-a"}

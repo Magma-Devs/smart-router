@@ -26,7 +26,7 @@ import (
 )
 
 // DirectRPCRelaySender handles sending relay requests directly to RPC endpoints
-// (bypassing the Lava provider-relay protocol)
+// (bypassing the provider-relay protocol)
 type DirectRPCRelaySender struct {
 	directConnection    routersession.DirectRPCConnection
 	endpointName        string             // Sanitized endpoint name (no API keys)
@@ -514,7 +514,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	latestBlockFromResponse := extractBlockHeightFromJSONResponse(responseData, chainMessage)
 
 	// Convert response headers to metadata (same as REST path)
-	// This enables Provider-Latest-Block, lava-identified-node-error, and upstream hints
+	// This enables Provider-Latest-Block, smartrouter-identified-node-error, and upstream hints
 	responseMetadata := convertHTTPHeadersToMetadata(response.Headers)
 
 	result := &common.RelayResult{

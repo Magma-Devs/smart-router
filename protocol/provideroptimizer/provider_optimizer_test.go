@@ -39,7 +39,7 @@ type providersGenerator struct {
 func (pg *providersGenerator) setupProvidersForTest(count int) *providersGenerator {
 	pg.providersAddresses = make([]string, count)
 	for i := range pg.providersAddresses {
-		pg.providersAddresses[i] = "lava@test_" + strconv.Itoa(i)
+		pg.providersAddresses[i] = "provider@test_" + strconv.Itoa(i)
 	}
 	return pg
 }
@@ -61,7 +61,7 @@ func (po *ProviderOptimizer) readSyncFloor(provider string) uint64 {
 // -race -count to actually hit the interleaving.
 func TestProviderOptimizer_SyncBlockNeverDecreasesUnderConcurrency(t *testing.T) {
 	po := setupProviderOptimizer(1)
-	const provider = "lava@sync_race"
+	const provider = "provider@sync_race"
 	freshRef := func(block uint64) SyncReference {
 		return SyncReference{ConsensusConfigured: true, Block: block, Time: po.now(), Fresh: true}
 	}
@@ -1257,7 +1257,7 @@ func TestProviderOptimizerBlockAvailabilityIntegration(t *testing.T) {
 // future-dated cache entries so fresh real-time writes are accepted immediately.
 func TestProviderOptimizer_ResetState_AllowsRealTimeSamplesAfterClockReset(t *testing.T) {
 	po := setupProviderOptimizer(1)
-	addr := "lava@test_reset"
+	addr := "provider@test_reset"
 	cu := uint64(10)
 	syncBlock := uint64(1000)
 

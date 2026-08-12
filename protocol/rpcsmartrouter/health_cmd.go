@@ -205,7 +205,7 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 	viper.SetConfigType("yml")
 	viper.AddConfigPath(".")
 	viper.AddConfigPath("./config")
-	viper.AddConfigPath(lavaDefaultNodeHome)
+	viper.AddConfigPath(defaultNodeHome)
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, utils.FormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configName})
 	}

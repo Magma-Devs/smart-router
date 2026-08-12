@@ -100,9 +100,9 @@ type ConsumerSessionManager struct {
 
 	qosManager *qos.QoSManager
 
-	// getLavaBlockHeight returns the current Lava blockchain block height
+	// getBlockHeight returns the current upstream block height
 	// This is NOT used for RelaySession.Epoch (which must be the pairing epoch start block)
-	getLavaBlockHeight func() int64
+	getBlockHeight func() int64
 
 	// consensusBaselineGetter resolves THIS interface's consensus baseline (block, the time it was
 	// computed, and whether a fresh majority exists) for the relay sync dimension (Topic E / F4). It
@@ -390,10 +390,10 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	csm.pairingPurge = csm.pairing
 	csm.pairing = make(map[string]*ConsumerSessionsWithProvider, pairingListLength)
 	for idx, provider := range pairingList {
-		csm.pairingAddresses[idx] = provider.PublicLavaAddress
-		csm.pairing[provider.PublicLavaAddress] = provider
+		csm.pairingAddresses[idx] = provider.PublicAddress
+		csm.pairing[provider.PublicAddress] = provider
 		if len(provider.Endpoints) > 0 {
-			providerAddressToEndpoint[provider.PublicLavaAddress] = provider.Endpoints[0].NetworkAddress
+			providerAddressToEndpoint[provider.PublicAddress] = provider.Endpoints[0].NetworkAddress
 		}
 	}
 	csm.setValidAddressesToDefaultValue("", nil, context.Background()) // the starting point is that valid addresses are equal to pairing addresses.
@@ -429,7 +429,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	// Store backup providers separately from main pairing list for emergency fallback scenarios
 	csm.backupProviders = make(map[string]*ConsumerSessionsWithProvider, len(backupProviderList))
 	for _, provider := range backupProviderList {
-		csm.backupProviders[provider.PublicLavaAddress] = provider
+		csm.backupProviders[provider.PublicAddress] = provider
 	}
 
 	// Re-block backup providers that were blocked in previous epoch and still exist in new backup list
@@ -617,7 +617,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 	// the gRPC probe loop below to fail with "returned nil client in endpoint", resulting
 	// in success=false, latency=0s for every probe.
 	if consumerSessionsWithProvider.StaticProvider {
-		return csm.probeDirectRPCEndpoints(ctx, consumerSessionsWithProvider, consumerSessionsWithProvider.PublicLavaAddress)
+		return csm.probeDirectRPCEndpoints(ctx, consumerSessionsWithProvider, consumerSessionsWithProvider.PublicAddress)
 	}
 
 	// A probe measures reachability of the provider, not of one api collection —
@@ -678,9 +678,9 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 				Latency:  relayLatency,
 				Endpoint: endpointAndConnection.endpoint,
 			})
-			// public lava address is a value that is not changing, so it's thread safe
+			// the public address is a value that is not changing, so it's thread safe
 			if DebugProbesEnabled() {
-				utils.FormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicLavaAddress})
+				utils.FormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicAddress})
 			}
 			return nil
 		}()
@@ -1675,7 +1675,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 	var providerAddresses []string
 	if minGroups > 1 {
 		// A group-diversity policy (an operator mandate) needs >= minGroups distinct provider groups, which
-		// is fundamentally incompatible with a single-provider directive: lava-select-provider and a sticky
+		// is fundamentally incompatible with a single-provider directive: smartrouter-select-provider and a sticky
 		// session each pin selection to exactly ONE provider (getValidProviderAddresses returns just that
 		// address). The operator policy wins (UC-1: stricter validation regardless of what the caller asked),
 		// so we intentionally pass empty stickiness/selectedProvider into the diverse fetch below — but make
@@ -2067,7 +2067,7 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 	}
 	cuToDecrease := consumerSession.LatestRelayCu
 	// latency, isHangingApi, syncScore aren't updated when there is a failure
-	go csm.providerOptimizer.AppendRelayFailure(consumerSession.Parent.PublicLavaAddress)
+	go csm.providerOptimizer.AppendRelayFailure(consumerSession.Parent.PublicAddress)
 	consumerSession.LatestRelayCu = 0 // making sure no one uses it in a wrong way
 	consecutiveErrors := uint64(len(consumerSession.ConsecutiveErrors))
 	parentConsumerSessionsWithProvider := consumerSession.Parent // must read this pointer before unlocking
@@ -2081,7 +2081,7 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 	}
 
 	if !redemptionSession && blockProvider {
-		publicProviderAddress, pairingEpoch := parentConsumerSessionsWithProvider.getPublicLavaAddressAndPairingEpoch()
+		publicProviderAddress, pairingEpoch := parentConsumerSessionsWithProvider.getPublicAddressAndPairingEpoch()
 		err = csm.blockProvider(context.Background(), publicProviderAddress, reportProvider, pairingEpoch, 0, consecutiveErrors, allowSecondChance, nil)
 		if err != nil {
 			if errors.Is(err, EpochMismatchError) {
@@ -2189,7 +2189,7 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		// we will deal with the removal of this provider from the blocked list so we can for now set it as default
 		consumerSession.Parent.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
 		// this provider is probably in the ignored provider list. we need to validate and return it to valid addresses
-		providerAddress := consumerSession.Parent.PublicLavaAddress
+		providerAddress := consumerSession.Parent.PublicAddress
 		// we want this method to run last after we unlock the consumer session
 		// golang defer operates in a Last-In-First-Out (LIFO) order, meaning this defer will run last.
 		defer func() { go csm.validateAndReturnBlockedProviderToValidAddressesList(providerAddress) }()
@@ -2201,7 +2201,7 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 	// 3-minute second chance) instead of an immediate, lifetime-long hard block.
 	// The atomic CAS ensures exactly one cleanup is scheduled across concurrent relays.
 	if consumerSession.Parent.atomicTryClearSecondChanceProbation() {
-		recoveredProviderAddress := consumerSession.Parent.PublicLavaAddress
+		recoveredProviderAddress := consumerSession.Parent.PublicAddress
 		defer func() { go csm.forgetSecondChanceGiven(recoveredProviderAddress) }()
 	}
 
@@ -2211,7 +2211,7 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 	consumerSession.ConsecutiveErrors = []error{}
 	consumerSession.LatestBlock = latestServicedBlock // update latest serviced block
 	// calculate QoS - syncGap is the difference between expected and actual block height (0 if not tracked)
-	csm.qosManager.CalculateQoS(csm.atomicReadCurrentEpoch(), consumerSession.SessionId, consumerSession.Parent.PublicLavaAddress, currentLatency, expectedLatency, syncGap, numOfProviders, int64(providersCount))
+	csm.qosManager.CalculateQoS(csm.atomicReadCurrentEpoch(), consumerSession.SessionId, consumerSession.Parent.PublicAddress, currentLatency, expectedLatency, syncGap, numOfProviders, int64(providersCount))
 	if !isHangingApi {
 		// Append relay data only for non-hanging apis. Two composed fixes:
 		//
@@ -2237,7 +2237,7 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		// shared-getter/max-across-providers behavior. The per-endpoint block above is the provider's
 		// observed position; syncRef is the reference it is compared against.
 		syncRef := csm.resolveSyncReference()
-		go csm.providerOptimizer.AppendRelayDataConsensus(consumerSession.Parent.PublicLavaAddress, currentLatency, specComputeUnits, syncBlock, syncRef)
+		go csm.providerOptimizer.AppendRelayDataConsensus(consumerSession.Parent.PublicAddress, currentLatency, specComputeUnits, syncBlock, syncRef)
 	}
 
 	csm.updateMetricsManager(consumerSession, currentLatency, !isHangingApi) // apply latency only for non hanging apis
@@ -2267,7 +2267,7 @@ func (csm *ConsumerSessionManager) updateMetricsManager(consumerSession *SingleC
 		qosRep := *lastReputationReport
 		lastReputation = &qosRep
 	}
-	publicProviderAddress := consumerSession.Parent.PublicLavaAddress
+	publicProviderAddress := consumerSession.Parent.PublicAddress
 	publicProviderEndpoint := consumerSession.Parent.Endpoints[0].NetworkAddress
 	// Capture the session-owned fields while the caller still holds the session lock (this method is
 	// documented as called under it). The goroutine below outlives OnSessionDone's `defer Free`, so a
@@ -2504,7 +2504,7 @@ func NewConsumerSessionManager(
 		consumerMetricsManager: metrics.SafeMetrics(consumerMetricsManager),
 		consumerPublicAddress:  consumerPublicAddress,
 		qosManager:             qos.NewQoSManager(),
-		getLavaBlockHeight:     func() int64 { return 0 }, // default to 0, should be set by caller
+		getBlockHeight:         func() int64 { return 0 }, // default to 0, should be set by caller
 		blockedBackupProviders: make(map[string]struct{}),
 	}
 	csm.rpcEndpoint = rpcEndpoint
@@ -2515,10 +2515,10 @@ func NewConsumerSessionManager(
 	return csm
 }
 
-// SetLavaBlockHeightCallback sets the callback function to get current Lava blockchain block height
+// SetBlockHeightCallback sets the callback used to derive the current block height
 // This must be called after creating the ConsumerSessionManager
-func (csm *ConsumerSessionManager) SetLavaBlockHeightCallback(getLavaBlockHeight func() int64) {
-	csm.getLavaBlockHeight = getLavaBlockHeight
+func (csm *ConsumerSessionManager) SetBlockHeightCallback(getBlockHeight func() int64) {
+	csm.getBlockHeight = getBlockHeight
 }
 
 // ResetTransientFailureState clears every cross-epoch failure-tracking store
@@ -2616,7 +2616,7 @@ func (csm *ConsumerSessionManager) ResetEndpointHealth() int {
 // resetting the per-provider redemption flag.
 //
 // Why ResetTransientFailureState alone is not enough:
-// The lava-pairing-network mode relies on UpdateAllProviders firing on every
+// The the pairing network mode relies on UpdateAllProviders firing on every
 // epoch transition to repopulate validAddresses from pairingAddresses — that
 // is the only path that drains currentlyBlockedProviderAddresses without
 // stranding addresses in routing limbo. In direct-rpc mode the pairing list

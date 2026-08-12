@@ -79,7 +79,7 @@ func TestRebuildPairingFromConfig_ReadmitsDemotedProvider(t *testing.T) {
 
 	names := map[string]bool{}
 	for _, s := range rpsr.providerSessions[chainKey] {
-		names[s.PublicLavaAddress] = true
+		names[s.PublicAddress] = true
 	}
 	require.Len(t, rpsr.providerSessions[chainKey], 3, "pairing should hold all three configured providers after rebuild")
 	require.True(t, names["simprovider1"] && names["simprovider2"] && names["simprovider3"],

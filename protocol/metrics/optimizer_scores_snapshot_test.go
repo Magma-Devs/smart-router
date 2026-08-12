@@ -55,13 +55,13 @@ func newSnapshotFixture(t *testing.T, sink UsageEventSink) (*ConsumerOptimizerQo
 	t.Helper()
 	coqc := NewConsumerOptimizerQoSClient("consumer", sink)
 	opt := &staticOptimizer{
-		scores: map[string]float64{"lava@provider1": 0.85},
-		raw:    map[string]float64{"lava@provider1": 0.99},
+		scores: map[string]float64{"provider@provider1": 0.85},
+		raw:    map[string]float64{"provider@provider1": 0.99},
 	}
 	coqc.RegisterOptimizer(opt, "ETH1")
 	// A provider is only scored once it is known through the stake map — the same gate the periodic
 	// sampler applies.
-	coqc.UpdatePairingListStake(map[string]int64{"lava@provider1": 1000}, "ETH1", 7)
+	coqc.UpdatePairingListStake(map[string]int64{"provider@provider1": 1000}, "ETH1", 7)
 	return coqc, opt
 }
 
@@ -78,7 +78,7 @@ func TestSnapshotReports_ReturnsScoresForKnownProviders(t *testing.T) {
 
 	report := snapshot.Reports[0]
 	require.Equal(t, "ETH1", report.ChainId)
-	require.Equal(t, "lava@provider1", report.ProviderAddress)
+	require.Equal(t, "provider@provider1", report.ProviderAddress)
 	require.Equal(t, 0.85, report.SelectionComposite)
 	require.Equal(t, 0.99, report.AvailabilityScore, "the raw EWMA value is reported alongside the normalised one")
 	require.Equal(t, int64(1000), report.ProviderStake)
@@ -111,10 +111,10 @@ func TestSnapshotReports_DoesNotEmitToUsageSink(t *testing.T) {
 func TestSnapshotReports_SanitizesNonFiniteScores(t *testing.T) {
 	coqc := NewConsumerOptimizerQoSClient("consumer", NoopUsageSink{})
 	coqc.RegisterOptimizer(&staticOptimizer{
-		scores: map[string]float64{"lava@provider1": math.NaN()},
-		raw:    map[string]float64{"lava@provider1": math.Inf(1)},
+		scores: map[string]float64{"provider@provider1": math.NaN()},
+		raw:    map[string]float64{"provider@provider1": math.Inf(1)},
 	}, "ETH1")
-	coqc.UpdatePairingListStake(map[string]int64{"lava@provider1": 1}, "ETH1", 1)
+	coqc.UpdatePairingListStake(map[string]int64{"provider@provider1": 1}, "ETH1", 1)
 
 	snapshot := coqc.SnapshotReports("")
 	require.Len(t, snapshot.Reports, 1)
@@ -137,7 +137,7 @@ func TestSnapshotReports_ReportsChainsWithNoProviders(t *testing.T) {
 	// Same when the optimizer knows the provider but produces no scores for it.
 	coqc2 := NewConsumerOptimizerQoSClient("consumer", NoopUsageSink{})
 	coqc2.RegisterOptimizer(&staticOptimizer{unknown: true}, "ETH1")
-	coqc2.UpdatePairingListStake(map[string]int64{"lava@provider1": 1}, "ETH1", 1)
+	coqc2.UpdatePairingListStake(map[string]int64{"provider@provider1": 1}, "ETH1", 1)
 	snapshot = coqc2.SnapshotReports("")
 	require.Equal(t, []string{"ETH1"}, snapshot.ChainsUnavailable)
 	require.Empty(t, snapshot.Reports)
@@ -148,15 +148,15 @@ func TestSnapshotReports_ReportsChainsWithNoProviders(t *testing.T) {
 // 404 rather than an empty success.
 func TestSnapshotReports_ChainFilter(t *testing.T) {
 	coqc, _ := newSnapshotFixture(t, NoopUsageSink{})
-	coqc.RegisterOptimizer(&staticOptimizer{scores: map[string]float64{"lava@provider2": 0.5}}, "SOLANA")
-	coqc.UpdatePairingListStake(map[string]int64{"lava@provider2": 5}, "SOLANA", 7)
+	coqc.RegisterOptimizer(&staticOptimizer{scores: map[string]float64{"provider@provider2": 0.5}}, "SOLANA")
+	coqc.UpdatePairingListStake(map[string]int64{"provider@provider2": 5}, "SOLANA", 7)
 
 	require.Len(t, coqc.SnapshotReports("").Reports, 2, "no filter returns every chain")
 
 	filtered := coqc.SnapshotReports("eth1")
 	require.Equal(t, []string{"ETH1"}, filtered.ChainsRegistered, "the filter matches case-insensitively")
 	require.Len(t, filtered.Reports, 1)
-	require.Equal(t, "lava@provider1", filtered.Reports[0].ProviderAddress)
+	require.Equal(t, "provider@provider1", filtered.Reports[0].ProviderAddress)
 
 	missing := coqc.SnapshotReports("NOSUCHCHAIN")
 	require.Empty(t, missing.ChainsRegistered)

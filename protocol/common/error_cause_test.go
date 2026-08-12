@@ -124,7 +124,7 @@ func TestIsClientCancellation(t *testing.T) {
 //
 // The constructors always set RouterErr today, so every case here is latent. They are pinned
 // anyway: this type exists because a silently unreachable resolution path was expensive.
-func TestRouterWrappedError_NilLavaErrIsSafe(t *testing.T) {
+func TestRouterWrappedError_NilErrIsSafe(t *testing.T) {
 	bare := &RouterWrappedError{Context: "some context"}
 
 	t.Run("Error does not panic", func(t *testing.T) {

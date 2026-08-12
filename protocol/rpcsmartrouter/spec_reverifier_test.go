@@ -35,7 +35,7 @@ func fakeConvert(p []*routersession.RPCStaticProviderEndpoint) map[uint64]*route
 func collectNames(m map[uint64]*routersession.ConsumerSessionsWithProvider) map[string]struct{} {
 	out := map[string]struct{}{}
 	for _, s := range m {
-		out[s.PublicLavaAddress] = struct{}{}
+		out[s.PublicAddress] = struct{}{}
 	}
 	return out
 }
@@ -171,7 +171,7 @@ func TestApplyReverification(t *testing.T) {
 
 			demotedNames := make([]string, 0, len(demoted))
 			for _, s := range demoted {
-				demotedNames = append(demotedNames, s.PublicLavaAddress)
+				demotedNames = append(demotedNames, s.PublicAddress)
 			}
 			require.ElementsMatch(t, tt.wantDemoted, demotedNames, "demoted set, tc #%d", i)
 
@@ -182,7 +182,7 @@ func TestApplyReverification(t *testing.T) {
 			}
 			gotByName := map[string]*routersession.ConsumerSessionsWithProvider{}
 			for _, s := range got {
-				gotByName[s.PublicLavaAddress] = s
+				gotByName[s.PublicAddress] = s
 			}
 			for n := range gotByName {
 				if _, isAdmit := admits[n]; isAdmit {
@@ -315,7 +315,7 @@ func TestApplyReverification_DemoteHysteresis(t *testing.T) {
 		}
 		got, demotedSessions, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
 		for _, s := range demotedSessions {
-			demoted = append(demoted, s.PublicLavaAddress)
+			demoted = append(demoted, s.PublicAddress)
 		}
 		return collectNames(got), demoted
 	}

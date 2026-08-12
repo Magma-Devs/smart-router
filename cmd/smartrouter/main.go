@@ -15,7 +15,7 @@ import (
 func main() {
 	rootCmd := rpcsmartrouter.CreateRPCSmartRouterCobraCommand()
 	rootCmd.Use = "smartrouter [config-file] | { {listen-ip:listen-port spec-chain-id api-interface} ... }"
-	rootCmd.Short = "Lava Smart Router — centralized RPC routing engine"
+	rootCmd.Short = "Smart Router — centralized RPC routing engine"
 
 	cmdVersion := &cobra.Command{
 		Use:   "version",

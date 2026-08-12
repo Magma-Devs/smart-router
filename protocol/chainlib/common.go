@@ -628,7 +628,7 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 		c.Set("Access-Control-Allow-Origin", cmdFlags.OriginFlag)
 		// Expose selected response headers to browser JS. Access-Control-Expose-
 		// Headers must be present on the ACTUAL response (not just the preflight)
-		// for fetch() to read a non-simple header like Lava-Provider-Address.
+		// for fetch() to read a non-simple header like Smart-Router-Provider-Address.
 		// Empty flag => header omitted (only simple response headers readable).
 		if cmdFlags.ExposeHeadersFlag != "" {
 			c.Set("Access-Control-Expose-Headers", cmdFlags.ExposeHeadersFlag)

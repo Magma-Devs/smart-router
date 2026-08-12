@@ -116,7 +116,7 @@ func TestUpdateEpoch_FreshSessions(t *testing.T) {
 	rpsr.sessionManagers[chainKey] = sessionManager
 
 	// 3. Create initial provider session
-	providerAddr := "lava@provider1"
+	providerAddr := "provider@provider1"
 	initialEpoch := uint64(1)
 
 	initialSession := routersession.NewConsumerSessionWithProvider(
@@ -148,7 +148,7 @@ func TestUpdateEpoch_FreshSessions(t *testing.T) {
 	require.False(t, initialSession == updatedSession, "Session object should be replaced with a fresh instance")
 
 	// Verify properties are preserved/updated correctly
-	require.Equal(t, providerAddr, updatedSession.PublicLavaAddress)
+	require.Equal(t, providerAddr, updatedSession.PublicAddress)
 	require.Equal(t, newEpoch, updatedSession.PairingEpoch)
 	require.True(t, updatedSession.StaticProvider)
 
@@ -173,13 +173,13 @@ func TestUpdateEpoch_PreservesGroupLabel(t *testing.T) {
 	chainKey := rpcEndpoint.Key()
 	rpsr.sessionManagers[chainKey] = routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 
-	primary := routersession.NewConsumerSessionWithProvider("lava@primary",
+	primary := routersession.NewConsumerSessionWithProvider("provider@primary",
 		[]*routersession.Endpoint{{NetworkAddress: "http://primary:8080", Enabled: true}}, 100, 1, int64(1))
 	primary.StaticProvider = true
 	primary.GroupLabel = "tier-1"
 	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{0: primary}
 
-	backup := routersession.NewConsumerSessionWithProvider("lava@backup",
+	backup := routersession.NewConsumerSessionWithProvider("provider@backup",
 		[]*routersession.Endpoint{{NetworkAddress: "http://backup:8080", Enabled: true}}, 100, 1, int64(1))
 	backup.StaticProvider = true
 	backup.GroupLabel = "external"
@@ -232,7 +232,7 @@ func TestUpdateEpoch_ResetsDisabledEndpoints(t *testing.T) {
 	initialEpoch := uint64(1)
 
 	providerSession := routersession.NewConsumerSessionWithProvider(
-		"lava@provider1",
+		"provider@provider1",
 		[]*routersession.Endpoint{disabledEndpoint},
 		100,
 		initialEpoch,
@@ -241,7 +241,7 @@ func TestUpdateEpoch_ResetsDisabledEndpoints(t *testing.T) {
 	providerSession.StaticProvider = true
 
 	backupSession := routersession.NewConsumerSessionWithProvider(
-		"lava@backup1",
+		"provider@backup1",
 		[]*routersession.Endpoint{disabledBackupEndpoint},
 		100,
 		initialEpoch,
@@ -276,8 +276,8 @@ func TestUpdateEpoch_ResetsHealthMetric(t *testing.T) {
 	const (
 		testChainID      = "SMARTROUTER_METRIC_RESET_TEST"
 		testApiInterface = "tendermintrpc"
-		primaryProvider  = "lava@primary-metric-test"
-		backupProvider   = "lava@backup-metric-test"
+		primaryProvider  = "provider@primary-metric-test"
+		backupProvider   = "provider@backup-metric-test"
 	)
 
 	rpsr := &RPCSmartRouter{
@@ -405,7 +405,7 @@ func TestUpdateEpoch_NilListenEndpointDoesNotPanic(t *testing.T) {
 		ConnectionRefusals: routersession.MaxConsecutiveConnectionAttempts,
 	}
 	session := routersession.NewConsumerSessionWithProvider(
-		"lava@provider-nil-listen",
+		"provider@provider-nil-listen",
 		[]*routersession.Endpoint{disabledEndpoint},
 		100, uint64(1), int64(1),
 	)
@@ -450,8 +450,8 @@ func TestGracefulFailure_AllProvidersHealthy_NoRetryLaunched(t *testing.T) {
 	// Verify: epoch update works and preserves both providers
 	rpsr.updateEpoch(context.Background(), 2)
 	require.Len(t, rpsr.providerSessions[chainKey], 2)
-	require.Equal(t, "providerA", rpsr.providerSessions[chainKey][0].PublicLavaAddress)
-	require.Equal(t, "providerB", rpsr.providerSessions[chainKey][1].PublicLavaAddress)
+	require.Equal(t, "providerA", rpsr.providerSessions[chainKey][0].PublicAddress)
+	require.Equal(t, "providerB", rpsr.providerSessions[chainKey][1].PublicAddress)
 }
 
 // Scenario 3: One provider fails, others healthy — epoch doesn't resurrect the failed one.
@@ -482,7 +482,7 @@ func TestGracefulFailure_EpochDoesNotResurrectFailedProviders(t *testing.T) {
 	require.Len(t, sessions, 2)
 	addresses := map[string]bool{}
 	for _, s := range sessions {
-		addresses[s.PublicLavaAddress] = true
+		addresses[s.PublicAddress] = true
 	}
 	require.True(t, addresses["providerA"], "providerA should be in sessions")
 	require.True(t, addresses["providerC"], "providerC should be in sessions")
@@ -781,7 +781,7 @@ func TestGracefulFailure_CopyOnWriteDoesNotMutateOldMap(t *testing.T) {
 
 	// Verify: new map has the merged result
 	require.Len(t, mergedSessions, originalLen+1)
-	require.Equal(t, "providerB", mergedSessions[maxIdx].PublicLavaAddress)
+	require.Equal(t, "providerB", mergedSessions[maxIdx].PublicAddress)
 
 	// Verify: old entries are shared (same pointers)
 	require.Equal(t, oldSessions[0], mergedSessions[0])
@@ -813,7 +813,7 @@ func TestGracefulFailure_EpochBeforeRetry_OnlyHealthyProviders(t *testing.T) {
 	// Verify: still only A in sessions after 3 epochs — B never resurrected
 	sessions := rpsr.providerSessions[chainKey]
 	require.Len(t, sessions, 1)
-	require.Equal(t, "providerA", sessions[0].PublicLavaAddress)
+	require.Equal(t, "providerA", sessions[0].PublicAddress)
 	require.Equal(t, uint64(4), sessions[0].PairingEpoch)
 
 	// Verify: failed list unchanged
@@ -908,7 +908,7 @@ func newReverifyTestRig(t *testing.T, chainID, networkAddress string) *reverifyT
 
 // makeReverifyProvider builds a configured static-provider entry whose Name and
 // ApiInterface match the rig's endpoint. applyReverification keys the active-set
-// lookup off provider.Name == session.PublicLavaAddress.
+// lookup off provider.Name == session.PublicAddress.
 func makeReverifyProvider(name, chainID string) *routersession.RPCStaticProviderEndpoint {
 	return &routersession.RPCStaticProviderEndpoint{
 		Name:         name,
@@ -918,7 +918,7 @@ func makeReverifyProvider(name, chainID string) *routersession.RPCStaticProvider
 }
 
 // makeReverifySession builds a session matching one a freshen pass would produce:
-// PublicLavaAddress == provider name, StaticProvider true, single trivial endpoint
+// PublicAddress == provider name, StaticProvider true, single trivial endpoint
 // (UpdateAllProviders only requires non-empty endpoints).
 func makeReverifySession(name string, epoch uint64) *routersession.ConsumerSessionsWithProvider {
 	s := routersession.NewConsumerSessionWithProvider(
@@ -953,7 +953,7 @@ func TestUpdateEpoch_ReverifyDemotesFailingStatic(t *testing.T) {
 	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_DEMOTE", "127.0.0.1:3340")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
-	const providerName = "lava@A"
+	const providerName = "provider@A"
 	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: makeReverifySession(providerName, uint64(1)),
 	}
@@ -988,7 +988,7 @@ func TestUpdateEpoch_ReverifyPromotesRecoveredStatic(t *testing.T) {
 	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_PROMOTE", "127.0.0.1:3341")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
-	const providerName = "lava@A"
+	const providerName = "provider@A"
 	const newEpoch = uint64(2)
 
 	// No prior session: simulates failed-init or a provider that was quarantined
@@ -1012,7 +1012,7 @@ func TestUpdateEpoch_ReverifyPromotesRecoveredStatic(t *testing.T) {
 	for _, s := range rpsr.providerSessions[chainKey] {
 		promoted = s
 	}
-	require.Equal(t, providerName, promoted.PublicLavaAddress, "promoted session address must match configured provider name")
+	require.Equal(t, providerName, promoted.PublicAddress, "promoted session address must match configured provider name")
 	require.Equal(t, newEpoch, promoted.PairingEpoch,
 		"promoted session must carry the new epoch — applyReverification stamps it, updateEpoch must preserve it through storage")
 	// End-to-end checks: data must flow through to the session manager. The count
@@ -1035,8 +1035,8 @@ func TestUpdateEpoch_ReverifyMixedDemoteAndPromote(t *testing.T) {
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
 	const (
-		failingName   = "lava@A"
-		recoveredName = "lava@B"
+		failingName   = "provider@A"
+		recoveredName = "provider@B"
 		newEpoch      = uint64(2)
 	)
 	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
@@ -1061,7 +1061,7 @@ func TestUpdateEpoch_ReverifyMixedDemoteAndPromote(t *testing.T) {
 
 	gotNames := map[string]*routersession.ConsumerSessionsWithProvider{}
 	for _, s := range rpsr.providerSessions[chainKey] {
-		gotNames[s.PublicLavaAddress] = s
+		gotNames[s.PublicAddress] = s
 	}
 	require.Len(t, gotNames, 1, "exactly one provider must survive: failing demoted, recovered promoted")
 	require.NotContains(t, gotNames, failingName, "demoted provider must be absent from rpsr.providerSessions")
@@ -1083,7 +1083,7 @@ func TestUpdateEpoch_ReverifyEmptyBackupTierDeletes(t *testing.T) {
 	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_BACKUP_DELETE", "127.0.0.1:3343")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
-	const providerName = "lava@backup-A"
+	const providerName = "provider@backup-A"
 	rpsr.backupProviderSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: makeReverifySession(providerName, uint64(1)),
 	}
@@ -1115,8 +1115,8 @@ func TestUpdateEpoch_ReverifyBackupPartialDemote(t *testing.T) {
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
 	const (
-		failingName  = "lava@backup-A"
-		survivorName = "lava@backup-B"
+		failingName  = "provider@backup-A"
+		survivorName = "provider@backup-B"
 		newEpoch     = uint64(2)
 	)
 	rpsr.backupProviderSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
@@ -1144,7 +1144,7 @@ func TestUpdateEpoch_ReverifyBackupPartialDemote(t *testing.T) {
 	require.True(t, present, "partial-demote must take the assign branch, not delete")
 	gotNames := map[string]struct{}{}
 	for _, s := range stored {
-		gotNames[s.PublicLavaAddress] = struct{}{}
+		gotNames[s.PublicAddress] = struct{}{}
 	}
 	require.NotContains(t, gotNames, failingName, "demoted backup must be absent")
 	require.Contains(t, gotNames, survivorName, "healthy backup must be retained")
@@ -1161,7 +1161,7 @@ func TestUpdateEpoch_ReverifyPromotesRecoveredBackup(t *testing.T) {
 	rig := newReverifyTestRig(t, "SMARTROUTER_REVERIFY_BACKUP_PROMOTE", "127.0.0.1:3345")
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 
-	const providerName = "lava@backup-A"
+	const providerName = "provider@backup-A"
 	const newEpoch = uint64(2)
 
 	rpsr.backupProviderSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{}
@@ -1183,7 +1183,7 @@ func TestUpdateEpoch_ReverifyPromotesRecoveredBackup(t *testing.T) {
 	for _, s := range stored {
 		promoted = s
 	}
-	require.Equal(t, providerName, promoted.PublicLavaAddress, "promoted backup address must match configured provider name")
+	require.Equal(t, providerName, promoted.PublicAddress, "promoted backup address must match configured provider name")
 	require.Equal(t, newEpoch, promoted.PairingEpoch,
 		"promoted backup must carry the new epoch — applyReverification stamps it via toAdmit, updateEpoch must preserve it through storage to backupProviderSessions")
 	// End-to-end: the promoted backup must reach the session manager's
@@ -1215,7 +1215,7 @@ func TestUpdateEpoch_ReverifyCrossEpochDemoteThenPromote(t *testing.T) {
 	rpsr, chainKey := rig.rpsr, rig.chainKey
 	sm := rpsr.sessionManagers[chainKey]
 
-	const providerName = "lava@A"
+	const providerName = "provider@A"
 
 	shouldFail := false
 	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{}

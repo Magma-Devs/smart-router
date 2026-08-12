@@ -72,7 +72,7 @@ func (psbm *pendingSubscriptionsBroadcastManager) broadcastToChannelList(value b
 }
 
 // DirectWSSubscriptionManager manages WebSocket subscriptions directly to upstream endpoints
-// without going through Lava providers. It implements chainlib.WSSubscriptionManager.
+// without going through relay providers. It implements chainlib.WSSubscriptionManager.
 //
 // This follows the same patterns as ConsumerWSSubscriptionManager but connects directly
 // to RPC endpoints instead of routing through providers.

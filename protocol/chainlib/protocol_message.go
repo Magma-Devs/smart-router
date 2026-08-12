@@ -46,7 +46,7 @@ func (bpm *BaseProtocolMessage) HashCacheRequest(chainId string) ([]byte, func([
 	return hashCacheRequest(bpm.relayRequestData, chainId, bpm.explicitExtensionDirective())
 }
 
-// explicitExtensionDirective returns the normalized value of the client's lava-extension directive
+// explicitExtensionDirective returns the normalized value of the client's smartrouter-extension directive
 // header, or "" when absent. Normalization makes equivalent directives such as "Archive",
 // " archive " and "archive,debug"/"debug,archive" collapse to the same cache lane.
 func (bpm *BaseProtocolMessage) explicitExtensionDirective() string {

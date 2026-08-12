@@ -1,4 +1,4 @@
-// Package rpcsmartrouter provides the RPC routing solution for the Lava protocol.
+// Package rpcsmartrouter provides the RPC routing solution for the Smart Router.
 //
 // # Architecture Overview
 //
@@ -61,10 +61,10 @@ const (
 	DebugRelaysFlagName           = "debug-relays"
 	DebugProbesFlagName           = "debug-probes"
 
-	// lavaAppName is the application name, previously app.Name.
-	lavaAppName = "lava"
-	// lavaDefaultNodeHome is the default home directory, previously lavaDefaultNodeHome (~/.lava).
-	lavaDefaultNodeHome = "$HOME/." + lavaAppName
+	// appName is the application name, used to derive the default config home.
+	appName = "smartrouter"
+	// defaultNodeHome is the default config home directory (~/.smartrouter).
+	defaultNodeHome = "$HOME/." + appName
 )
 
 var (
@@ -691,7 +691,7 @@ type providerScoresResponse struct {
 // so a /debug/provider-scores row can be joined to /debug/endpoint-state (MAG-2707).
 //
 // The two views key on different identities and neither can be derived from the other: the optimizer
-// — and therefore every score — is keyed by provider address (PublicLavaAddress, the same identity
+// — and therefore every score — is keyed by provider address (PublicAddress, the same identity
 // /debug/provider-routing reports), while per-endpoint health is keyed by NetworkAddress. Carrying
 // the URLs on the score row is what lets the automation ask "this provider's score moved, was its
 // endpoint healthy?" from two reads instead of needing a third mapping call.
@@ -807,7 +807,7 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 			for _, cswp := range sessions {
 				if cswp != nil {
 					server.smartRouterEndpointMetrics.SetEndpointOverallHealth(
-						server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, cswp.PublicLavaAddress, true)
+						server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, cswp.PublicAddress, true)
 				}
 			}
 		}
@@ -1104,7 +1104,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    Why ResetBlockedProviders runs separately from
 		//    ResetTransientFailureState:
 		//    ResetTransientFailureState deliberately preserves
-		//    currentlyBlockedProviderAddresses because in lava-pairing-network
+		//    currentlyBlockedProviderAddresses because in the pairing network
 		//    mode unblocking is an epoch-boundary operation. In direct-rpc mode
 		//    (this fork's default) there are no epoch transitions, so blocked
 		//    providers can only accumulate across test runs unless we mass-
@@ -2280,14 +2280,14 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	activeSubscriptionProvidersStorage := routersession.NewActiveSubscriptionProvidersStorage()
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
 
-	// Set callback to get Lava blockchain block height for RelaySession.Epoch
-	// Smart router doesn't connect to blockchain, so calculate approximate block height from epoch
-	// Epoch duration is 15 minutes (900 seconds), and Lava block time is ~15 seconds
-	// So each epoch is approximately 60 blocks (900 / 15)
-	sessionManager.SetLavaBlockHeightCallback(func() int64 {
+	// Set the callback that derives RelaySession.Epoch's block height.
+	// Smart router doesn't connect to a chain, so approximate the block height from the epoch:
+	// epoch duration is 15 minutes (900 seconds) and the assumed block time is ~15 seconds,
+	// so each epoch is approximately 60 blocks (900 / 15).
+	sessionManager.SetBlockHeightCallback(func() int64 {
 		currentEpoch := rpsr.epochTimer.GetCurrentEpoch()
 		// Approximate blocks per epoch: epochDuration / averageBlockTime
-		blocksPerEpoch := int64(rpsr.epochTimer.GetEpochDuration().Seconds() / 15) // 15 second Lava block time
+		blocksPerEpoch := int64(rpsr.epochTimer.GetEpochDuration().Seconds() / 15) // assumed 15-second block time
 		return int64(currentEpoch) * blocksPerEpoch
 	})
 
@@ -2737,9 +2737,9 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 		// error line, swamping kubectl logs in a CrashLoopBackOff. Operators need
 		// to see the error, not the flag catalogue.
 		SilenceUsage: true,
-		Long: `rpcsmartrouter sets up a centralized server with static and backup providers to perform api requests through the lava protocol.
+		Long: `rpcsmartrouter sets up a centralized server with static and backup providers to perform api requests through the router.
 		This is the smart router mode that uses pre-configured static providers instead of dynamically discovering providers on-chain.
-		all configs should be located in the local running directory /config or ` + lavaDefaultNodeHome + `
+		all configs should be located in the local running directory /config or ` + defaultNodeHome + `
 		if no arguments are passed, assumes default config file: ` + DefaultRPCSmartRouterFileName + `
 		if one argument is passed, its assumed the config file name
 		`,
@@ -2776,7 +2776,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			viper.SetConfigType("yml")
 			viper.AddConfigPath(".")
 			viper.AddConfigPath("./config")
-			viper.AddConfigPath(lavaDefaultNodeHome)
+			viper.AddConfigPath(defaultNodeHome)
 
 			// Bind all cobra flags to viper so viper.GetString/GetBool works.
 			// Previously Cosmos SDK's AddTxFlagsToCmd did this automatically.
@@ -3177,7 +3177,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().String(common.CorsHeadersFlag, "", "Set up CORS allowed headers, * for all, default simple cors specification headers")
 	cmdRPCSmartRouter.Flags().String(common.CorsOriginFlag, "*", "Set up CORS allowed origin, enabled * by default")
 	cmdRPCSmartRouter.Flags().String(common.CorsMethodsFlag, "GET,POST,PUT,DELETE,OPTIONS", "set up Allowed OPTIONS methods, defaults to: \"GET,POST,PUT,DELETE,OPTIONS\"")
-	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Lava-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
+	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Smart-Router-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
 	cmdRPCSmartRouter.Flags().String(common.CDNCacheDurationFlag, "86400", "set up preflight options response cache duration, default 86400 (24h in seconds)")
 	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share the consumer consistency state with the cache service. this should be used with cache backend enabled if you want to state sync multiple rpc consumers")
 	// relays health check related flags
@@ -3227,7 +3227,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	// unless OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none; when no OTLP
 	// endpoint is configured the SDK falls back to the spec default
 	// (localhost:4317 for gRPC, localhost:4318 for HTTP).
-	// --otel-trace-body is the only Lava-specific knob, exposed as a CLI flag
+	// --otel-trace-body is the only router-specific knob, exposed as a CLI flag
 	// because it's a per-invocation debug toggle rather than deployment
 	// configuration. Body size is delegated to the SDK via
 	// OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT (SDK default: unlimited).
@@ -3302,10 +3302,10 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			// Mirror the struct reset onto the Prometheus gauge so operators see the
 			// provider recover at the epoch boundary rather than remaining stuck at 0.
 			if epochMetrics != nil {
-				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, oldSession.PublicLavaAddress, true)
+				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, oldSession.PublicAddress, true)
 			}
 			freshSession := routersession.NewConsumerSessionWithProvider(
-				oldSession.PublicLavaAddress,
+				oldSession.PublicAddress,
 				oldSession.Endpoints,
 				oldSession.MaxComputeUnits,
 				epoch,
@@ -3316,7 +3316,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			freshProviderSessions[idx] = freshSession
 
 			utils.FormatDebug("Created fresh provider session for epoch",
-				utils.LogAttr("provider", freshSession.PublicLavaAddress),
+				utils.LogAttr("provider", freshSession.PublicAddress),
 				utils.LogAttr("epoch", epoch),
 				utils.LogAttr("chainKey", chainKeyLog))
 		}
@@ -3331,10 +3331,10 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			// unhealthy gauge because they rarely receive the successful relay that
 			// would otherwise toggle it back to 1.
 			if epochMetrics != nil {
-				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, oldSession.PublicLavaAddress, true)
+				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, oldSession.PublicAddress, true)
 			}
 			freshSession := routersession.NewConsumerSessionWithProvider(
-				oldSession.PublicLavaAddress,
+				oldSession.PublicAddress,
 				oldSession.Endpoints,
 				oldSession.MaxComputeUnits,
 				epoch,
@@ -3345,7 +3345,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			freshBackupSessions[idx] = freshSession
 
 			utils.FormatDebug("Created fresh backup provider session for epoch",
-				utils.LogAttr("provider", freshSession.PublicLavaAddress),
+				utils.LogAttr("provider", freshSession.PublicAddress),
 				utils.LogAttr("epoch", epoch),
 				utils.LogAttr("chainKey", chainKeyLog))
 		}
@@ -3371,7 +3371,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			// invariant rebuildPairingFromConfig enforces. Without this the provider stays
 			// in the failed list, retryFailedProviders revalidates it, succeeds, and
 			// mergeRecoveredSessions appends a SECOND session for it — that helper keys by
-			// index and does not dedupe by PublicLavaAddress. csm.pairing collapses the
+			// index and does not dedupe by PublicAddress. csm.pairing collapses the
 			// duplicate but pairingAddresses and validAddresses do not, so the provider
 			// lands twice in validAddresses with double its selection weight, and the
 			// superseded ConsumerSessionsWithProvider is dropped without its
@@ -3567,7 +3567,7 @@ func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string
 
 // activeProviders returns the configured providers that are currently in the pairing,
 // in configured order. Sessions are keyed by index and carry the provider name as
-// PublicLavaAddress (see convertProvidersToSessions), so this is the bridge from "what
+// PublicAddress (see convertProvidersToSessions), so this is the bridge from "what
 // is live" back to the RPCStaticProviderEndpoint records that own the NodeUrls.
 func activeProviders(
 	configured []*routersession.RPCStaticProviderEndpoint,
@@ -3578,7 +3578,7 @@ func activeProviders(
 	}
 	active := make(map[string]struct{}, len(sessions))
 	for _, s := range sessions {
-		active[s.PublicLavaAddress] = struct{}{}
+		active[s.PublicAddress] = struct{}{}
 	}
 	live := make([]*routersession.RPCStaticProviderEndpoint, 0, len(active))
 	for _, p := range configured {
@@ -3918,7 +3918,7 @@ func mergeAbsentProviders(
 ) (map[uint64]*routersession.ConsumerSessionsWithProvider, []string) {
 	active := make(map[string]struct{}, len(current))
 	for _, s := range current {
-		active[s.PublicLavaAddress] = struct{}{}
+		active[s.PublicAddress] = struct{}{}
 	}
 
 	var absent []*routersession.RPCStaticProviderEndpoint
@@ -3950,7 +3950,7 @@ func mergeAbsentProviders(
 		session.Lock.Unlock()
 		merged[maxIdx] = session
 		maxIdx++
-		converted[session.PublicLavaAddress] = struct{}{}
+		converted[session.PublicAddress] = struct{}{}
 	}
 
 	var restored []string

@@ -62,7 +62,7 @@ type DirectRPCResponse struct {
 }
 
 // DirectRPCConnection represents a direct connection to an RPC endpoint
-// (no Lava provider-relay protocol involved)
+// (no provider-relay protocol involved)
 type DirectRPCConnection interface {
 	// SendRequest sends the already-built raw request bytes and returns a response
 	// containing both data and metadata.

@@ -64,7 +64,7 @@ type handler struct {
 	log            log.Logger
 	allowSubscribe bool
 
-	subLock    utils.LavaMutex
+	subLock    utils.Mutex
 	serverSubs map[ID]*Subscription
 }
 

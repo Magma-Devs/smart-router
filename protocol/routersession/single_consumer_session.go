@@ -14,7 +14,7 @@ type SingleConsumerSession struct {
 	QoSManager    *qos.QoSManager
 	SessionId     int64
 	Parent        *ConsumerSessionsWithProvider
-	lock          utils.LavaMutex
+	lock          utils.Mutex
 	RelayNum      uint64
 	LatestBlock   int64
 
@@ -55,7 +55,7 @@ func (scs *SingleConsumerSession) SetUsageForSession(cuNeededForSession uint64, 
 
 func (scs *SingleConsumerSession) Free(err error) {
 	if scs.usedProviders != nil {
-		scs.usedProviders.RemoveUsed(scs.Parent.PublicLavaAddress, scs.routerKey, err)
+		scs.usedProviders.RemoveUsed(scs.Parent.PublicAddress, scs.routerKey, err)
 		scs.usedProviders = nil
 	}
 	scs.routerKey = NewRouterKey(nil)

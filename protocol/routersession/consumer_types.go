@@ -740,13 +740,13 @@ func (rpce *RPCEndpoint) Key() string {
 }
 
 type ConsumerSessionsWithProvider struct {
-	Lock              sync.RWMutex
-	PublicLavaAddress string
-	Endpoints         []*Endpoint
-	Sessions          map[int64]*SingleConsumerSession
-	MaxComputeUnits   uint64
-	UsedComputeUnits  uint64
-	PairingEpoch      uint64
+	Lock             sync.RWMutex
+	PublicAddress    string
+	Endpoints        []*Endpoint
+	Sessions         map[int64]*SingleConsumerSession
+	MaxComputeUnits  uint64
+	UsedComputeUnits uint64
+	PairingEpoch     uint64
 	// whether we already reported this provider this epoch, we can only report one conflict per provider per epoch
 	conflictFoundAndReported uint32 // 0 == not reported, 1 == reported
 	stakeSize                int64  // the stake size the provider staked (ulava)
@@ -766,14 +766,14 @@ type ConsumerSessionsWithProvider struct {
 	GroupLabel string
 }
 
-func NewConsumerSessionWithProvider(publicLavaAddress string, pairingEndpoints []*Endpoint, maxCu uint64, epoch uint64, stakeSize int64) *ConsumerSessionsWithProvider {
+func NewConsumerSessionWithProvider(publicAddress string, pairingEndpoints []*Endpoint, maxCu uint64, epoch uint64, stakeSize int64) *ConsumerSessionsWithProvider {
 	return &ConsumerSessionsWithProvider{
-		PublicLavaAddress: publicLavaAddress,
-		Endpoints:         pairingEndpoints,
-		Sessions:          map[int64]*SingleConsumerSession{},
-		MaxComputeUnits:   maxCu,
-		PairingEpoch:      epoch,
-		stakeSize:         stakeSize,
+		PublicAddress:   publicAddress,
+		Endpoints:       pairingEndpoints,
+		Sessions:        map[int64]*SingleConsumerSession{},
+		MaxComputeUnits: maxCu,
+		PairingEpoch:    epoch,
+		stakeSize:       stakeSize,
 	}
 }
 
@@ -838,7 +838,7 @@ func (cswp *ConsumerSessionsWithProvider) IsSupportingExtensions(extensions []st
 	// Debug logging for archive extension filtering
 	if len(extensions) > 0 {
 		utils.FormatTrace("[Archive Debug] Checking extensions support",
-			utils.LogAttr("providerAddress", cswp.PublicLavaAddress),
+			utils.LogAttr("providerAddress", cswp.PublicAddress),
 			utils.LogAttr("requestedExtensions", extensions),
 			utils.LogAttr("endpointExtensions", cswp.Endpoints),
 			utils.LogAttr("GUID", ctx))
@@ -850,7 +850,7 @@ endpointLoop:
 			if _, ok := endpoint.Extensions[extension]; !ok {
 				// doesn't support the extension required, continue to next endpoint
 				utils.FormatTrace("[Archive Debug] Extension not supported",
-					utils.LogAttr("providerAddress", cswp.PublicLavaAddress),
+					utils.LogAttr("providerAddress", cswp.PublicAddress),
 					utils.LogAttr("extension", extension),
 					utils.LogAttr("endpointExtensions", endpoint.Extensions),
 					utils.LogAttr("GUID", ctx))
@@ -859,14 +859,14 @@ endpointLoop:
 		}
 		// get here only if all extensions are supported in the endpoint
 		utils.FormatTrace("[Archive Debug] All extensions supported",
-			utils.LogAttr("providerAddress", cswp.PublicLavaAddress),
+			utils.LogAttr("providerAddress", cswp.PublicAddress),
 			utils.LogAttr("extensions", extensions),
 			utils.LogAttr("GUID", ctx))
 		return true
 	}
 
 	utils.FormatTrace("[Archive Debug] No endpoint supports all extensions",
-		utils.LogAttr("providerAddress", cswp.PublicLavaAddress),
+		utils.LogAttr("providerAddress", cswp.PublicAddress),
 		utils.LogAttr("extensions", extensions),
 		utils.LogAttr("GUID", ctx))
 	return false
@@ -880,10 +880,10 @@ func (cswp *ConsumerSessionsWithProvider) GetPairingEpoch() uint64 {
 	return atomic.LoadUint64(&cswp.PairingEpoch)
 }
 
-func (cswp *ConsumerSessionsWithProvider) getPublicLavaAddressAndPairingEpoch() (string, uint64) {
+func (cswp *ConsumerSessionsWithProvider) getPublicAddressAndPairingEpoch() (string, uint64) {
 	cswp.Lock.RLock()
 	defer cswp.Lock.RUnlock()
-	return cswp.PublicLavaAddress, cswp.PairingEpoch
+	return cswp.PublicAddress, cswp.PairingEpoch
 }
 
 // Validate the compute units for this provider
@@ -1066,7 +1066,7 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 	consumerSession.TryUseSession()                            // we must lock the session so other requests wont get it.
 	cswp.Sessions[consumerSession.SessionId] = consumerSession // applying the session to the pool of sessions.
 	utils.FormatTrace("GetConsumerSessionInstanceFromEndpoint returning session",
-		utils.LogAttr("provider", cswp.PublicLavaAddress),
+		utils.LogAttr("provider", cswp.PublicAddress),
 		utils.LogAttr("pairingEpoch", cswp.PairingEpoch),
 		utils.LogAttr("sessionId", consumerSession.SessionId),
 		utils.LogAttr("isDirectRPC", !isProviderRelay),
@@ -1154,7 +1154,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 				continue
 			}
 			if retryDisabledEndpoints {
-				utils.FormatDebug("retrying to connect to disabled endpoint", utils.LogAttr("endpoint", endpoint.NetworkAddress), utils.LogAttr("provider", cswp.PublicLavaAddress), utils.LogAttr("GUID", ctx))
+				utils.FormatDebug("retrying to connect to disabled endpoint", utils.LogAttr("endpoint", endpoint.NetworkAddress), utils.LogAttr("provider", cswp.PublicAddress), utils.LogAttr("GUID", ctx))
 			}
 
 			// check endpoint supports the requested addons
@@ -1222,7 +1222,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 						deadConnectionCount++
 						// Log cleanup for visibility
 						utils.FormatDebug("Cleaning up dead connection",
-							utils.LogAttr("provider", cswp.PublicLavaAddress),
+							utils.LogAttr("provider", cswp.PublicAddress),
 							utils.LogAttr("endpoint", endpoint.NetworkAddress),
 							utils.LogAttr("reason", func() string {
 								if conn.disconnected {
@@ -1241,7 +1241,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 				if deadConnectionCount > 0 {
 					endpoint.Connections = cleanedConnections
 					utils.FormatDebug("Cleaned up dead connections",
-						utils.LogAttr("provider", cswp.PublicLavaAddress),
+						utils.LogAttr("provider", cswp.PublicAddress),
 						utils.LogAttr("endpoint", endpoint.NetworkAddress),
 						utils.LogAttr("removedCount", deadConnectionCount),
 						utils.LogAttr("remainingCount", len(cleanedConnections)),
@@ -1254,7 +1254,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					if endpointConnection.Client != nil && endpointConnection.connection != nil && !endpointConnection.disconnected {
 						// Check if the endpoint is not blocked
 						if endpointConnection.blockListed.Load() {
-							utils.FormatDebug("Skipping provider's endpoint as its block listed", utils.LogAttr("address", endpoint.NetworkAddress), utils.LogAttr("PublicLavaAddress", cswp.PublicLavaAddress), utils.LogAttr("GUID", ctx))
+							utils.FormatDebug("Skipping provider's endpoint as its block listed", utils.LogAttr("address", endpoint.NetworkAddress), utils.LogAttr("PublicAddress", cswp.PublicAddress), utils.LogAttr("GUID", ctx))
 							continue
 						}
 						connectionState := endpointConnection.connection.GetState()
@@ -1307,7 +1307,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					utils.FormatInfo("error connecting to provider",
 						utils.LogAttr("err", err),
 						utils.LogAttr("provider endpoint", networkAddress),
-						utils.LogAttr("providerName", cswp.PublicLavaAddress),
+						utils.LogAttr("providerName", cswp.PublicAddress),
 						utils.LogAttr("endpoint", endpoint),
 						utils.LogAttr("refusals", endpoint.ConnectionRefusals),
 						utils.LogAttr("GUID", ctx),
@@ -1326,7 +1326,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 						}
 						utils.FormatWarning("disabling provider endpoint for the duration of current epoch.", nil,
 							utils.LogAttr("Endpoint", networkAddress),
-							utils.LogAttr("address", cswp.PublicLavaAddress),
+							utils.LogAttr("address", cswp.PublicAddress),
 							utils.LogAttr("GUID", ctx),
 						)
 					}
@@ -1380,14 +1380,14 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 	if allDisabled {
 		utils.FormatInfo("purging provider after all endpoints are disabled",
 			utils.LogAttr("provider endpoints", cswp.Endpoints),
-			utils.LogAttr("providerName", cswp.PublicLavaAddress),
+			utils.LogAttr("providerName", cswp.PublicAddress),
 			utils.LogAttr("GUID", ctx),
 		)
 		// report provider.
-		return connected, endpointsList, cswp.PublicLavaAddress, AllProviderEndpointsDisabledError
+		return connected, endpointsList, cswp.PublicAddress, AllProviderEndpointsDisabledError
 	}
 
-	return connected, endpointsList, cswp.PublicLavaAddress, nil
+	return connected, endpointsList, cswp.PublicAddress, nil
 }
 
 func CalcWeightsByStake(providers map[uint64]*ConsumerSessionsWithProvider) (weights map[string]int64) {
@@ -1412,10 +1412,10 @@ func CalcWeightsByStake(providers map[uint64]*ConsumerSessionsWithProvider) (wei
 		if stake > maxWeight {
 			maxWeight = stake
 		}
-		weights[cswp.PublicLavaAddress] = stake
+		weights[cswp.PublicAddress] = stake
 	}
 	for _, cswp := range staticProvidersToBoost {
-		weights[cswp.PublicLavaAddress] = maxWeight * WeightMultiplierForStaticProviders
+		weights[cswp.PublicAddress] = maxWeight * WeightMultiplierForStaticProviders
 	}
 	return weights
 }

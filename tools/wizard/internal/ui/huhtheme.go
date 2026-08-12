@@ -16,7 +16,7 @@ func HuhTheme() *huh.Theme {
 	t.Focused.SelectSelector = t.Focused.SelectSelector.Foreground(Brand)
 	t.Focused.SelectedOption = t.Focused.SelectedOption.Foreground(Ember2)
 	t.Focused.MultiSelectSelector = t.Focused.MultiSelectSelector.Foreground(Brand)
-	t.Focused.SelectedPrefix = lipgloss.NewStyle().Foreground(Good).SetString(Check+" ")
+	t.Focused.SelectedPrefix = lipgloss.NewStyle().Foreground(Good).SetString(Check + " ")
 	t.Focused.UnselectedPrefix = lipgloss.NewStyle().Foreground(Faint).SetString("• ")
 	t.Focused.FocusedButton = t.Focused.FocusedButton.Background(Brand).Foreground(PanelBg).Bold(true)
 	t.Focused.BlurredButton = t.Focused.BlurredButton.Foreground(Muted)
