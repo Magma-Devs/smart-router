@@ -63,7 +63,7 @@ func resolvePollDivisor(divisor int, chainID, apiInterface string) int {
 		return DefaultPollDivisor
 	}
 	if divisor < MinPollDivisor || divisor > MaxPollDivisor {
-		utils.LavaFormatWarning("--"+PollDivisorFlagName+" out of allowed range; reverting to default", nil,
+		utils.FormatWarning("--"+PollDivisorFlagName+" out of allowed range; reverting to default", nil,
 			utils.LogAttr("provided", divisor),
 			utils.LogAttr("allowed", []int{MinPollDivisor, MaxPollDivisor}),
 			utils.LogAttr("default", DefaultPollDivisor),

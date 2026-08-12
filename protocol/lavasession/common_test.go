@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/encoding/gzip"
@@ -27,7 +27,7 @@ func (rs *RelayerConnectionServer) Relay(ctx context.Context, request *pairingty
 
 func (rs *RelayerConnectionServer) Probe(ctx context.Context, probeReq *pairingtypes.ProbeRequest) (*pairingtypes.ProbeReply, error) {
 	// peerAddress := common.GetIpFromGrpcContext(ctx)
-	// utils.LavaFormatInfo("received probe", utils.LogAttr("incoming-ip", peerAddress))
+	// utils.FormatInfo("received probe", utils.LogAttr("incoming-ip", peerAddress))
 	return &pairingtypes.ProbeReply{
 		Guid: rs.guid,
 	}, nil
@@ -67,7 +67,7 @@ func BenchmarkGRPCServer(b *testing.B) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, _, err := csp.ConnectRawClientWithTimeout(ctx, address)
 		if err != nil {
-			utils.LavaFormatDebug("waiting for grpc server to launch")
+			utils.FormatDebug("waiting for grpc server to launch")
 			continue
 		}
 		cancel()

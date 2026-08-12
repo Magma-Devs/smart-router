@@ -11,8 +11,8 @@ import (
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"golang.org/x/net/http2"
@@ -33,7 +33,7 @@ func CreateTestConnectionServerCobraCommand() *cobra.Command {
 		Example: `connection-server 127.0.0.1:3333`,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			utils.LavaFormatInfo("Connection-server started")
+			utils.FormatInfo("Connection-server started")
 			ctx := context.Background()
 			listenAddr := args[0]
 			ctx, cancel := context.WithCancel(ctx)
@@ -66,7 +66,7 @@ func CreateTestConnectionServerCobraCommand() *cobra.Command {
 			disableTLS := viper.GetBool(disableTLSFlagName)
 			var serveExecutor func() error
 			if disableTLS {
-				utils.LavaFormatWarning("Running with disabled TLS configuration", nil)
+				utils.FormatWarning("Running with disabled TLS configuration", nil)
 				serveExecutor = func() error { return httpServer.Serve(lis) }
 			} else {
 				NetworkAddressData := lavasession.NetworkAddressData{}
@@ -75,7 +75,7 @@ func CreateTestConnectionServerCobraCommand() *cobra.Command {
 			}
 
 			guid := utils.GenerateUniqueIdentifier()
-			utils.LavaFormatInfo("running with unique identifier", utils.LogAttr("guid", guid))
+			utils.FormatInfo("running with unique identifier", utils.LogAttr("guid", guid))
 			Server := &RelayerConnectionServer{guid: guid}
 
 			pairingtypes.RegisterRelayerServer(grpcServer, Server)
@@ -83,24 +83,24 @@ func CreateTestConnectionServerCobraCommand() *cobra.Command {
 			go func() {
 				select {
 				case <-ctx.Done():
-					_ = utils.LavaFormatInfo("connection-server ctx.Done")
+					_ = utils.FormatInfo("connection-server ctx.Done")
 				case <-signalChan:
-					_ = utils.LavaFormatInfo("connection-server signalChan")
+					_ = utils.FormatInfo("connection-server signalChan")
 				}
 
 				shutdownCtx, shutdownRelease := context.WithTimeout(ctx, 10*time.Second)
 				defer shutdownRelease()
 
 				if err := httpServer.Shutdown(shutdownCtx); err != nil {
-					utils.LavaFormatFatal("connection-server failed to shutdown", err)
+					utils.FormatFatal("connection-server failed to shutdown", err)
 				}
 			}()
 
-			utils.LavaFormatInfo("connection-server active", utils.Attribute{Key: "address", Value: listenAddr})
+			utils.FormatInfo("connection-server active", utils.Attribute{Key: "address", Value: listenAddr})
 			if err := serveExecutor(); !errors.Is(err, http.ErrServerClosed) {
-				utils.LavaFormatFatal("connection-server failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr().String()})
+				utils.FormatFatal("connection-server failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr().String()})
 			}
-			utils.LavaFormatInfo("connection-server closed server", utils.Attribute{Key: "address", Value: listenAddr})
+			utils.FormatInfo("connection-server closed server", utils.Attribute{Key: "address", Value: listenAddr})
 
 			return nil
 		},
@@ -117,7 +117,7 @@ func CreateTestConnectionProbeCobraCommand() *cobra.Command {
 		Example: `connection-probe 127.0.0.1:3333 --interval 2s`,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			utils.LavaFormatInfo("Connection-prober started")
+			utils.FormatInfo("Connection-prober started")
 			ctx, cancel := context.WithCancel(context.Background())
 			signalChan := make(chan os.Signal, 1)
 			signal.Notify(signalChan, os.Interrupt)
@@ -127,14 +127,14 @@ func CreateTestConnectionProbeCobraCommand() *cobra.Command {
 			}()
 			lavasession.AllowInsecureConnectionToProviders = viper.GetBool(lavasession.AllowInsecureConnectionToProvidersFlag)
 			if lavasession.AllowInsecureConnectionToProviders {
-				utils.LavaFormatWarning("AllowInsecureConnectionToProviders is set to true, this should be used only in development", nil, utils.Attribute{Key: lavasession.AllowInsecureConnectionToProvidersFlag, Value: lavasession.AllowInsecureConnectionToProviders})
+				utils.FormatWarning("AllowInsecureConnectionToProviders is set to true, this should be used only in development", nil, utils.Attribute{Key: lavasession.AllowInsecureConnectionToProvidersFlag, Value: lavasession.AllowInsecureConnectionToProviders})
 			}
 			address := args[0]
 			prober := NewProber(address)
-			utils.LavaFormatInfo("[+] making a run")
+			utils.FormatInfo("[+] making a run")
 			err := prober.RunOnce(ctx)
 			if err != nil {
-				utils.LavaFormatError("failed a run", err)
+				utils.FormatError("failed a run", err)
 			}
 			interval := viper.GetDuration(intervalFlagName)
 			if interval > 0*time.Second {
@@ -142,14 +142,14 @@ func CreateTestConnectionProbeCobraCommand() *cobra.Command {
 				for {
 					select {
 					case <-ticker.C:
-						utils.LavaFormatInfo("[+] making a run")
+						utils.FormatInfo("[+] making a run")
 						err = prober.RunOnce(ctx)
-						utils.LavaFormatError("failed a run", err)
+						utils.FormatError("failed a run", err)
 					case <-ctx.Done():
-						utils.LavaFormatInfo("prober ctx.Done")
+						utils.FormatInfo("prober ctx.Done")
 						return nil
 					case <-signalChan:
-						utils.LavaFormatInfo("prober signalChan")
+						utils.FormatInfo("prober signalChan")
 						return nil
 					}
 				}

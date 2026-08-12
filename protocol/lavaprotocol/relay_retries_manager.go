@@ -29,7 +29,7 @@ type RelayRetriesManager struct {
 func NewRelayRetriesManager() *RelayRetriesManager {
 	cache, err := ristretto.NewCache(&ristretto.Config[string, any]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
 	if err != nil {
-		utils.LavaFormatFatal("failed setting up cache for consumer consistency", err)
+		utils.FormatFatal("failed setting up cache for consumer consistency", err)
 	}
 	return &RelayRetriesManager{
 		cache: cache,

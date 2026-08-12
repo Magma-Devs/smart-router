@@ -376,7 +376,7 @@ func PrewarmDirectConnections(ctx context.Context, connections []DirectRPCConnec
 				// Warning, not error: an endpoint that could not be prewarmed is still
 				// a usable endpoint, and saying otherwise at boot would read as a
 				// failure the operator has to act on.
-				utils.LavaFormatWarning("direct RPC connection prewarm did not complete", err,
+				utils.FormatWarning("direct RPC connection prewarm did not complete", err,
 					utils.LogAttr("url", t.connection.GetURL()))
 			}
 		}(t)
@@ -395,7 +395,7 @@ func PrewarmDirectConnections(ctx context.Context, connections []DirectRPCConnec
 	select {
 	case <-done:
 	case <-ctx.Done():
-		utils.LavaFormatWarning("direct RPC prewarm budget elapsed, publishing endpoints anyway", ctx.Err(),
+		utils.FormatWarning("direct RPC prewarm budget elapsed, publishing endpoints anyway", ctx.Err(),
 			utils.LogAttr("connections", len(targets)),
 			utils.LogAttr("budget", budget))
 	}
@@ -744,7 +744,7 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal WebSocket response for %s: %w", w.nodeUrl.Url, err)
 	}
-	utils.LavaFormatTrace("WebSocket SendRequest succeeded",
+	utils.FormatTrace("WebSocket SendRequest succeeded",
 		utils.LogAttr("endpoint", w.nodeUrl.Url),
 		utils.LogAttr("method", reqMsg.Method),
 		utils.LogAttr("responseBytes", len(respBytes)),
@@ -848,7 +848,7 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	g.connMu.RUnlock()
 
 	if err != nil {
-		return nil, utils.LavaFormatError("gRPC get connection failed", err,
+		return nil, utils.FormatError("gRPC get connection failed", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
 
@@ -880,7 +880,7 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	// Get method descriptor (with caching)
 	methodDescriptor, err := g.getMethodDescriptor(ctx, svc, methodName)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to get method descriptor", err,
+		return nil, utils.FormatError("failed to get method descriptor", err,
 			utils.LogAttr("method", methodPath))
 	}
 
@@ -893,7 +893,7 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	// Parse input data (JSON or binary proto)
 	if len(data) > 0 {
 		if err := g.parseInputMessage(ctx, data, inputMsg, methodDescriptor, conn); err != nil {
-			return nil, utils.LavaFormatError("failed to parse input message", err,
+			return nil, utils.FormatError("failed to parse input message", err,
 				utils.LogAttr("method", methodPath))
 		}
 	}
@@ -912,7 +912,7 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	// Marshal response to binary proto
 	respBytes, err := proto.Marshal(outputMsg)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to marshal gRPC response", err,
+		return nil, utils.FormatError("failed to marshal gRPC response", err,
 			utils.LogAttr("method", methodPath))
 	}
 
@@ -1018,7 +1018,7 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 	// Extract host from URL for GRPCConnector (it expects host:port without scheme)
 	parsedURL, err := url.Parse(g.nodeUrl.Url)
 	if err != nil {
-		return utils.LavaFormatError("failed to parse gRPC URL", err,
+		return utils.FormatError("failed to parse gRPC URL", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
 
@@ -1051,7 +1051,7 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 	//	                which delays failover for all of them.
 	connector, err := newConnector(g.connectorCtx, ctx, 10, connectorNodeUrl)
 	if err != nil {
-		return utils.LavaFormatError("failed to create gRPC connector", err,
+		return utils.FormatError("failed to create gRPC connector", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
 
@@ -1077,7 +1077,7 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 	// an unsynchronized pointer write to a field getMethodDescriptor and
 	// GetCachedMethodDescriptor read without holding initMu.
 
-	utils.LavaFormatInfo("gRPC direct connection initialized",
+	utils.FormatInfo("gRPC direct connection initialized",
 		utils.LogAttr("url", g.nodeUrl.Url),
 		utils.LogAttr("tls", parsedURL.Scheme == "grpcs"))
 
@@ -1180,7 +1180,7 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 	conn, err := connector.GetRpc(ctx, true)
 	g.connMu.RUnlock()
 	if err != nil {
-		utils.LavaFormatDebug("gRPC descriptor warm-up skipped, no connection",
+		utils.FormatDebug("gRPC descriptor warm-up skipped, no connection",
 			utils.LogAttr("error", err.Error()),
 			utils.LogAttr("url", g.nodeUrl.Url))
 		return
@@ -1200,7 +1200,7 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 		// Not an error: a node that does not serve reflection is a supported
 		// configuration ("file"/"hybrid" with a protoset), and one that is merely
 		// slow or unreachable right now still resolves on demand later.
-		utils.LavaFormatDebug("gRPC descriptor warm-up could not list services",
+		utils.FormatDebug("gRPC descriptor warm-up could not list services",
 			utils.LogAttr("error", err.Error()),
 			utils.LogAttr("url", g.nodeUrl.Url))
 		return
@@ -1242,7 +1242,7 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 		} else {
 			// One unresolvable service must not abandon the rest; it falls back to an
 			// on-demand lookup like any other cache miss.
-			utils.LavaFormatDebug("gRPC descriptor warm-up skipped a service",
+			utils.FormatDebug("gRPC descriptor warm-up skipped a service",
 				utils.LogAttr("service", service),
 				utils.LogAttr("error", err.Error()),
 				utils.LogAttr("url", g.nodeUrl.Url))
@@ -1252,7 +1252,7 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 		g.publishServiceResolution(service, resolution, serviceDescriptor, err)
 	}
 
-	utils.LavaFormatInfo("gRPC descriptor cache warmed",
+	utils.FormatInfo("gRPC descriptor cache warmed",
 		utils.LogAttr("services", warmed),
 		utils.LogAttr("methods", methods),
 		utils.LogAttr("alreadyResolving", skipped),
@@ -1272,7 +1272,7 @@ func resolveServiceFrom(descriptorSource grpcurl.DescriptorSource, service strin
 
 	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
 	if !ok {
-		return nil, utils.LavaFormatError("descriptor is not a ServiceDescriptor", nil,
+		return nil, utils.FormatError("descriptor is not a ServiceDescriptor", nil,
 			utils.LogAttr("service", service))
 	}
 
@@ -1295,13 +1295,13 @@ func (g *GRPCDirectRPCConnection) cacheServiceMethods(serviceDescriptor *desc.Se
 func (g *GRPCDirectRPCConnection) validateURL() error {
 	parsedURL, err := url.Parse(g.nodeUrl.Url)
 	if err != nil {
-		return utils.LavaFormatError("invalid gRPC URL", err,
+		return utils.FormatError("invalid gRPC URL", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
 
 	scheme := strings.ToLower(parsedURL.Scheme)
 	if scheme != "grpc" && scheme != "grpcs" {
-		return utils.LavaFormatError("invalid gRPC URL scheme", nil,
+		return utils.FormatError("invalid gRPC URL scheme", nil,
 			utils.LogAttr("url", g.nodeUrl.Url),
 			utils.LogAttr("scheme", scheme),
 			utils.LogAttr("expected", "grpc:// or grpcs://"))
@@ -1309,7 +1309,7 @@ func (g *GRPCDirectRPCConnection) validateURL() error {
 
 	// Check insecure connections
 	if scheme == "grpc" && !g.nodeUrl.GrpcConfig.AllowInsecure {
-		return utils.LavaFormatError("insecure gRPC (grpc://) not allowed without allow-insecure: true", nil,
+		return utils.FormatError("insecure gRPC (grpc://) not allowed without allow-insecure: true", nil,
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
 
@@ -1395,7 +1395,7 @@ func (g *GRPCDirectRPCConnection) getMethodDescriptor(
 	if finished && resolution.err == nil {
 		methodDescriptor := resolution.svc.FindMethodByName(methodName)
 		if methodDescriptor == nil {
-			return nil, utils.LavaFormatError("method not found in service", nil,
+			return nil, utils.FormatError("method not found in service", nil,
 				utils.LogAttr("service", service),
 				utils.LogAttr("method", methodName))
 		}
@@ -1428,7 +1428,7 @@ func (g *GRPCDirectRPCConnection) getMethodDescriptor(
 		// The lookup itself is NOT abandoned here — it runs on its own budget and
 		// caches what it finds, so the next relay to this endpoint is not cold. That
 		// is what stops one slow endpoint being permanently unusable (MAG-2860).
-		return nil, utils.LavaFormatWarning("gRPC descriptor lookup outlived the relay, continuing in background", ctxErr,
+		return nil, utils.FormatWarning("gRPC descriptor lookup outlived the relay, continuing in background", ctxErr,
 			utils.LogAttr("service", service),
 			utils.LogAttr("method", methodName),
 			utils.LogAttr("url", g.nodeUrl.Url))
@@ -1512,7 +1512,7 @@ func (g *GRPCDirectRPCConnection) runServiceResolution(service string, resolutio
 		// cache, and finding it already filled is one less way to race.
 		g.cacheServiceMethods(serviceDescriptor)
 
-		utils.LavaFormatDebug("gRPC service descriptor resolved",
+		utils.FormatDebug("gRPC service descriptor resolved",
 			utils.LogAttr("service", service),
 			utils.LogAttr("methods", len(serviceDescriptor.GetMethods())),
 			utils.LogAttr("duration", time.Since(started)),
@@ -1552,7 +1552,7 @@ func (g *GRPCDirectRPCConnection) lookupService(service string) (*desc.ServiceDe
 	conn, err := connector.GetRpc(ctx, true)
 	g.connMu.RUnlock()
 	if err != nil {
-		return nil, utils.LavaFormatError("gRPC get connection failed for descriptor lookup", err,
+		return nil, utils.FormatError("gRPC get connection failed for descriptor lookup", err,
 			utils.LogAttr("service", service),
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
@@ -1571,7 +1571,7 @@ func (g *GRPCDirectRPCConnection) lookupService(service string) (*desc.ServiceDe
 
 	serviceDescriptor, err := resolveServiceFrom(descriptorSource, service)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to find service descriptor", err,
+		return nil, utils.FormatError("failed to find service descriptor", err,
 			utils.LogAttr("service", service),
 			utils.LogAttr("descriptor-source", g.nodeUrl.GrpcConfig.GetDescriptorSource()),
 			utils.LogAttr("reflection-timeout", g.nodeUrl.GrpcConfig.GetReflectionTimeout()))
@@ -1696,7 +1696,7 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 
 	respBytes, marshalErr := json.Marshal(resp)
 	if marshalErr != nil {
-		return nil, utils.LavaFormatError("failed to marshal gRPC error response", marshalErr)
+		return nil, utils.FormatError("failed to marshal gRPC error response", marshalErr)
 	}
 
 	// Return the error response with metadata

@@ -47,7 +47,7 @@ func NewChainListener(
 	wsSubscriptionManager WSSubscriptionManager,
 ) (ChainListener, error) {
 	if listenEndpoint.NetworkAddress == INTERNAL_ADDRESS {
-		utils.LavaFormatDebug("skipping chain listener for internal address")
+		utils.FormatDebug("skipping chain listener for internal address")
 		return NewEmptyChainListener(), nil
 	}
 	switch listenEndpoint.ApiInterface {

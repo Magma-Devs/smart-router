@@ -262,7 +262,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// appears when the answer is "off" leaves them with nothing to read when it is "on", and
 	// the spec reason can override the flag on some chains of a multichain process but not
 	// others. The reason attribute distinguishes the two ways it can be off.
-	utils.LavaFormatInfo("block-hash polling (fork detection) resolved",
+	utils.FormatInfo("block-hash polling (fork detection) resolved",
 		utils.LogAttr("chainID", config.ChainID),
 		utils.LogAttr("apiInterface", config.ApiInterface),
 		utils.LogAttr("enabled", !manager.hashPolling.HeadOnly()),
@@ -273,7 +273,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// confirm from the logs that the value survived validation, while the default needs no
 	// line of its own (it is already visible as PollIntervalMs on /debug/endpoint-state).
 	if pollDivisor != DefaultPollDivisor {
-		utils.LavaFormatInfo("per-endpoint chain tracker poll cadence overridden",
+		utils.FormatInfo("per-endpoint chain tracker poll cadence overridden",
 			utils.LogAttr("chainID", config.ChainID),
 			utils.LogAttr("apiInterface", config.ApiInterface),
 			utils.LogAttr("divisor", pollDivisor),
@@ -427,7 +427,7 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.obsMu.Lock()
 		delete(m.generations, endpointURL)
 		m.obsMu.Unlock()
-		return nil, utils.LavaFormatError("failed to create ChainTracker for endpoint", err,
+		return nil, utils.FormatError("failed to create ChainTracker for endpoint", err,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 		)
@@ -444,7 +444,7 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	// until the endpoint recovers or this tracker is removed/stopped.
 	go m.startTrackerWithRetry(tracker, trackerCtx, endpointURL)
 
-	utils.LavaFormatInfo("created ChainTracker for endpoint",
+	utils.FormatInfo("created ChainTracker for endpoint",
 		utils.LogAttr("endpoint", endpointURL),
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("avgBlockTime", m.averageBlockTime),
@@ -472,7 +472,7 @@ func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTrack
 
 		retryDelay := m.trackerStartRetryDelay(attempt)
 		m.setTrackerState(endpointURL, EndpointChainTrackerRetryingStart, err)
-		utils.LavaFormatWarning("ChainTracker startup failed; retrying", err,
+		utils.FormatWarning("ChainTracker startup failed; retrying", err,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 			utils.LogAttr("attempt", attempt+1),
@@ -728,7 +728,7 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 	m.mu.RUnlock()
 
 	if !exists {
-		return EndpointObservation{}, false, utils.LavaFormatError("poll-now: no ChainTracker for endpoint", nil,
+		return EndpointObservation{}, false, utils.FormatError("poll-now: no ChainTracker for endpoint", nil,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 		)
@@ -774,7 +774,7 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 			// tracker, the budget was too short for this upstream.
 			message = "poll-now: a poll is running but its result was not awaited; the record below predates it"
 		}
-		return observation, false, utils.LavaFormatError(message, pollErr,
+		return observation, false, utils.FormatError(message, pollErr,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 			utils.LogAttr("trackerState", string(state)),
@@ -817,7 +817,7 @@ func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	// stale entry in the process-global map.
 	endpointtip.Default().Remove(m.tipKey(endpointURL))
 
-	utils.LavaFormatInfo("stopped and removed ChainTracker for endpoint",
+	utils.FormatInfo("stopped and removed ChainTracker for endpoint",
 		utils.LogAttr("endpoint", endpointURL),
 		utils.LogAttr("chainID", m.chainID),
 	)
@@ -891,7 +891,7 @@ func (m *EndpointMonitor) Stop() {
 	m.generations = make(map[string]uint64)
 	m.obsMu.Unlock()
 
-	utils.LavaFormatInfo("stopped EndpointMonitor",
+	utils.FormatInfo("stopped EndpointMonitor",
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("trackersStopped", trackerCount),
 	)

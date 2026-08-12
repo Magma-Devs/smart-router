@@ -79,19 +79,19 @@ func NewRelayProcessor(
 	// Defensive validation - these should never fail in production as params
 	// are validated at parse time, but guards against programming errors
 	if selection == CrossValidation && crossValidationParams == nil {
-		utils.LavaFormatFatal("CrossValidation selection requires non-nil crossValidationParams", nil)
+		utils.FormatFatal("CrossValidation selection requires non-nil crossValidationParams", nil)
 	}
 	if crossValidationParams != nil {
 		if crossValidationParams.AgreementThreshold < 1 {
-			utils.LavaFormatFatal("invalid cross-validation AgreementThreshold", nil,
+			utils.FormatFatal("invalid cross-validation AgreementThreshold", nil,
 				utils.LogAttr("AgreementThreshold", crossValidationParams.AgreementThreshold))
 		}
 		if crossValidationParams.MaxParticipants < 1 {
-			utils.LavaFormatFatal("invalid cross-validation MaxParticipants", nil,
+			utils.FormatFatal("invalid cross-validation MaxParticipants", nil,
 				utils.LogAttr("MaxParticipants", crossValidationParams.MaxParticipants))
 		}
 		if crossValidationParams.MaxParticipants > MaxCallsPerRelay {
-			utils.LavaFormatFatal("cross-validation MaxParticipants exceeds maximum allowed",
+			utils.FormatFatal("cross-validation MaxParticipants exceeds maximum allowed",
 				nil,
 				utils.LogAttr("MaxParticipants", crossValidationParams.MaxParticipants),
 				utils.LogAttr("MaxCallsPerRelay", MaxCallsPerRelay))
@@ -318,7 +318,7 @@ func (rp *RelayProcessor) String() string {
 
 func (rp *RelayProcessor) GetUsedProviders() *lavasession.UsedProviders {
 	if rp == nil {
-		utils.LavaFormatError("RelayProcessor.GetUsedProviders is nil, misuse detected", nil)
+		utils.FormatError("RelayProcessor.GetUsedProviders is nil, misuse detected", nil)
 		return nil
 	}
 	rp.lock.RLock()
@@ -351,7 +351,7 @@ func (rp *RelayProcessor) checkEndProcessing(responsesCount int) bool {
 
 	// Common exit condition: all responses received from all providers in the batch
 	if responsesCount >= rp.usedProviders.SessionsLatestBatch() {
-		utils.LavaFormatDebug("[RelayProcessor] checkEndProcessing - all responses received",
+		utils.FormatDebug("[RelayProcessor] checkEndProcessing - all responses received",
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("selection", rp.selection),
 			utils.LogAttr("responsesCount", responsesCount),
@@ -366,7 +366,7 @@ func (rp *RelayProcessor) checkEndProcessing(responsesCount int) bool {
 		// groups — exiting on count alone could stop before a later same-hash response from a new group
 		// arrives, then fail the diversity gate (the seam bug 1.2 must avoid).
 		if rp.crossValidationQuorumReached() {
-			utils.LavaFormatDebug("[RelayProcessor] checkEndProcessing - CrossValidation quorum (count+diversity) met",
+			utils.FormatDebug("[RelayProcessor] checkEndProcessing - CrossValidation quorum (count+diversity) met",
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("agreementThreshold", rp.getAgreementThreshold()),
 				utils.LogAttr("minGroups", rp.getMinGroups()),
@@ -376,7 +376,7 @@ func (rp *RelayProcessor) checkEndProcessing(responsesCount int) bool {
 	case Stateless, Stateful:
 		// Early exit if we have a successful result
 		if rp.ResultsManager.RequiredResults(1, rp.selection) {
-			utils.LavaFormatDebug("[RelayProcessor] checkEndProcessing - RequiredResults met",
+			utils.FormatDebug("[RelayProcessor] checkEndProcessing - RequiredResults met",
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("selection", rp.selection))
 			return true
@@ -467,7 +467,7 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 				go rp.relayRetriesManager.RemoveHashFromCache(hash)
 			}
 			if rp.debugRelay {
-				utils.LavaFormatDebug("HasRequiredNodeResults CrossValidation quorum (count+diversity) met",
+				utils.FormatDebug("HasRequiredNodeResults CrossValidation quorum (count+diversity) met",
 					utils.LogAttr("GUID", rp.guid),
 					utils.LogAttr("tries", tries),
 					utils.LogAttr("agreementThreshold", rp.getAgreementThreshold()),
@@ -481,7 +481,7 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 		// CrossValidation doesn't retry - return true only when all expected responses received
 		// (The state machine handles no-retry logic)
 		if rp.debugRelay {
-			utils.LavaFormatDebug("HasRequiredNodeResults CrossValidation threshold not met",
+			utils.FormatDebug("HasRequiredNodeResults CrossValidation threshold not met",
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("tries", tries),
 				utils.LogAttr("agreementThreshold", rp.getAgreementThreshold()),
@@ -500,7 +500,7 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 			go rp.relayRetriesManager.RemoveHashFromCache(hash)
 		}
 		if rp.debugRelay {
-			utils.LavaFormatDebug("HasRequiredNodeResults requirements met",
+			utils.FormatDebug("HasRequiredNodeResults requirements met",
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("tries", tries),
 				utils.LogAttr("resultsCount", resultsCount),
@@ -515,7 +515,7 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 	// No successful results — signal false unconditionally.
 	// The state machine calls policy.Decide() to determine whether to retry.
 	if rp.debugRelay {
-		utils.LavaFormatDebug("HasRequiredNodeResults no success, signaling false",
+		utils.FormatDebug("HasRequiredNodeResults no success, signaling false",
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("tries", tries),
 			utils.LogAttr("resultsCount", resultsCount),
@@ -607,7 +607,7 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	if nodeError != nil && rp.selection != Stateful {
 		chainId, apiInterface := rp.chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
 		go rp.metricsInf.SetRelayNodeErrorMetric(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage().GetApi().Name)
-		utils.LavaFormatInfo("Relay received a node error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("Error", nodeError), utils.LogAttr("provider", response.RelayResult.ProviderInfo), utils.LogAttr("Request", rp.RelayStateMachine.GetProtocolMessage().GetApi().Name))
+		utils.FormatInfo("Relay received a node error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("Error", nodeError), utils.LogAttr("provider", response.RelayResult.ProviderInfo), utils.LogAttr("Request", rp.RelayStateMachine.GetProtocolMessage().GetApi().Name))
 	}
 
 	// Only successful responses (not errors) count toward cross-validation quorum.
@@ -827,7 +827,7 @@ func classifyStragglerResponse(response *RelayResponse, consensusHash [32]byte, 
 // it then updates the responses in their respective place, node errors, protocol errors or success results
 func (rp *RelayProcessor) WaitForResults(ctx context.Context) error {
 	if rp == nil {
-		return utils.LavaFormatError("RelayProcessor.WaitForResults is nil, misuse detected", nil)
+		return utils.FormatError("RelayProcessor.WaitForResults is nil, misuse detected", nil)
 	}
 	responsesCount := 0
 	for {
@@ -840,7 +840,7 @@ func (rp *RelayProcessor) WaitForResults(ctx context.Context) error {
 				return nil
 			}
 		case <-ctx.Done():
-			return utils.LavaFormatDebug("cancelled relay processor", utils.LogAttr("total responses", responsesCount))
+			return utils.FormatDebug("cancelled relay processor", utils.LogAttr("total responses", responsesCount))
 		}
 	}
 }
@@ -888,7 +888,7 @@ type quorumWinner struct {
 func selectQuorumWinner(guid uint64, countMap map[[32]byte]*resultCount, results []common.RelayResult, nilReplies, nilReplyIdx int, nilReplyGroups map[string]struct{}, crossValidationSize, minGroups int, perGroup bool) quorumWinner {
 	var w quorumWinner
 	for hash, count := range countMap {
-		utils.LavaFormatDebug("🔍 [Quorum] Response group details",
+		utils.FormatDebug("🔍 [Quorum] Response group details",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr("responseHashHex", fmt.Sprintf("%x", hash[:8])),
 			utils.LogAttr("matchingProviders", count.count),
@@ -941,7 +941,7 @@ func selectQuorumWinner(guid uint64, countMap map[[32]byte]*resultCount, results
 		w.result = results[nilReplyIdx]
 		w.distinctGroups = len(nilReplyGroups)
 		// Note: w.hash is intentionally left zero — the nil/empty-reply consensus has no real response hash.
-		utils.LavaFormatInfo("🔍 [Quorum] Nil replies reached quorum",
+		utils.FormatInfo("🔍 [Quorum] Nil replies reached quorum",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr("nilRepliesCount", nilReplies),
 			utils.LogAttr("requiredQuorumSize", crossValidationSize),
@@ -956,7 +956,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 	}
 
 	// Log quorum validation start
-	utils.LavaFormatInfo("🔍 [Quorum Validation] Starting consensus check",
+	utils.FormatInfo("🔍 [Quorum Validation] Starting consensus check",
 		utils.LogAttr("GUID", rp.guid),
 		utils.LogAttr("totalResults", len(results)),
 		utils.LogAttr("requiredQuorumSize", crossValidationSize),
@@ -989,7 +989,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 			if count, exists := countMap[hash]; exists {
 				count.count++
 				count.groupCounts[quorumGroupOf(result)]++
-				utils.LavaFormatDebug("🔍 [Quorum] Response hash matches existing group",
+				utils.FormatDebug("🔍 [Quorum] Response hash matches existing group",
 					utils.LogAttr("GUID", rp.guid),
 					utils.LogAttr("providerIdx", idx),
 					utils.LogAttr("provider", result.ProviderInfo.ProviderAddress),
@@ -1002,7 +1002,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 					result:      result,
 					groupCounts: map[string]int{quorumGroupOf(result): 1},
 				}
-				utils.LavaFormatDebug("🔍 [Quorum] New unique response hash detected",
+				utils.FormatDebug("🔍 [Quorum] New unique response hash detected",
 					utils.LogAttr("GUID", rp.guid),
 					utils.LogAttr("providerIdx", idx),
 					utils.LogAttr("provider", result.ProviderInfo.ProviderAddress),
@@ -1014,7 +1014,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 			nilReplies++
 			nilReplyIdx = idx
 			nilReplyGroups[quorumGroupOf(result)] = struct{}{}
-			utils.LavaFormatDebug("🔍 [Quorum] Nil or invalid response detected",
+			utils.FormatDebug("🔍 [Quorum] Nil or invalid response detected",
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("providerIdx", idx),
 				utils.LogAttr("nilRepliesCount", nilReplies),
@@ -1025,7 +1025,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 	minGroups := rp.getMinGroups()
 	perGroup := rp.perGroupQuorum()
 
-	utils.LavaFormatInfo("🔍 [Quorum] Response groups summary",
+	utils.FormatInfo("🔍 [Quorum] Response groups summary",
 		utils.LogAttr("GUID", rp.guid),
 		utils.LogAttr("uniqueResponseGroups", len(countMap)),
 		utils.LogAttr("nilReplies", nilReplies),
@@ -1040,7 +1040,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 			// Per-group mode: either too few groups reached their own internal quorum, or the per-group
 			// winners disagreed across groups (no single hash was corroborated by MinGroups groups). Both
 			// surface as group-quorum-unmet, distinct from the MinGroups-mode diversity-unmet/no-agreement.
-			return nil, common.CrossValidationReasonGroupQuorumUnmet, utils.LavaFormatInfo("cross-validation failed: per-group quorum not reached",
+			return nil, common.CrossValidationReasonGroupQuorumUnmet, utils.FormatInfo("cross-validation failed: per-group quorum not reached",
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("anyGroupReachedInternalQuorum", winner.anyGroupReachedQuorum),
 				utils.LogAttr("minGroups", minGroups),
@@ -1051,7 +1051,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 			// No REAL response hash reached the agreement threshold (a plentiful nil count that failed to
 			// form a diverse quorum is still "nothing agreed", not a diversity failure).
 			if rp.selection == CrossValidation {
-				return nil, common.CrossValidationReasonNoAgreement, utils.LavaFormatInfo("cross-validation failed: agreement threshold not reached",
+				return nil, common.CrossValidationReasonNoAgreement, utils.FormatInfo("cross-validation failed: agreement threshold not reached",
 					utils.LogAttr("nilReplies", nilReplies),
 					utils.LogAttr("results", len(results)),
 					utils.LogAttr("maxMatchingResults", winner.maxCount),
@@ -1059,7 +1059,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 					utils.LogAttr("maxParticipants", rp.getMaxParticipants()))
 			}
 			// Stateless/Stateful modes - return original error message
-			return nil, common.CrossValidationReasonNoAgreement, utils.LavaFormatInfo("❌ [Quorum] FAILED - Majority count is less than required quorum size",
+			return nil, common.CrossValidationReasonNoAgreement, utils.FormatInfo("❌ [Quorum] FAILED - Majority count is less than required quorum size",
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("nilReplies", nilReplies),
 				utils.LogAttr("totalResults", len(results)),
@@ -1069,7 +1069,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 		// Some hash reached the agreement threshold, but none spanned MinGroups distinct groups (1.2c).
 		// A quorum within too few groups is a failure, not a success (a single-group outage/compromise
 		// must not satisfy quorum on its own).
-		return nil, common.CrossValidationReasonDiversityUnmet, utils.LavaFormatInfo("cross-validation failed: group-diversity requirement not met",
+		return nil, common.CrossValidationReasonDiversityUnmet, utils.FormatInfo("cross-validation failed: group-diversity requirement not met",
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("bestAgreementCount", winner.maxCount),
 			utils.LogAttr("minGroups", minGroups),
@@ -1081,7 +1081,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 	mostCommonResult.ResponseHash = winner.hash // ensure the returned consensus carries the winning hash
 
 	// Log successful quorum consensus
-	utils.LavaFormatInfo("✅ [Quorum] CONSENSUS REACHED",
+	utils.FormatInfo("✅ [Quorum] CONSENSUS REACHED",
 		utils.LogAttr("GUID", rp.guid),
 		utils.LogAttr("consensusProvider", mostCommonResult.ProviderInfo.ProviderAddress),
 		utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", winner.hash[:8])),
@@ -1106,7 +1106,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 // on error: we will return a placeholder relayResult, with a provider address and a status code
 func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult, processingError error) {
 	if rp == nil {
-		return nil, utils.LavaFormatError("RelayProcessor.ProcessingResult is nil, misuse detected", nil)
+		return nil, utils.FormatError("RelayProcessor.ProcessingResult is nil, misuse detected", nil)
 	}
 
 	rp.lock.RLock()
@@ -1117,22 +1117,22 @@ func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult
 
 	if rp.debugRelay {
 		// adding as much debug info as possible. all successful relays, all node errors and all protocol errors
-		utils.LavaFormatDebug("[Processing Result] Debug Relay",
+		utils.FormatDebug("[Processing Result] Debug Relay",
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("selection", rp.selection),
 			utils.LogAttr("agreementThreshold", rp.getAgreementThreshold()),
 			utils.LogAttr("maxParticipants", rp.getMaxParticipants()))
-		utils.LavaFormatDebug("[Processing Debug] number of node results", utils.LogAttr("GUID", rp.guid), utils.LogAttr("successResultsCount", successResultsCount), utils.LogAttr("nodeErrorCount", nodeErrorCount), utils.LogAttr("protocolErrorCount", protocolErrorCount))
+		utils.FormatDebug("[Processing Debug] number of node results", utils.LogAttr("GUID", rp.guid), utils.LogAttr("successResultsCount", successResultsCount), utils.LogAttr("nodeErrorCount", nodeErrorCount), utils.LogAttr("protocolErrorCount", protocolErrorCount))
 		for idx, result := range successResults {
-			utils.LavaFormatDebug("[Processing Debug] success result", utils.LogAttr("GUID", rp.guid), utils.LogAttr("idx", idx), utils.LogAttr("result", result))
+			utils.FormatDebug("[Processing Debug] success result", utils.LogAttr("GUID", rp.guid), utils.LogAttr("idx", idx), utils.LogAttr("result", result))
 		}
 		for idx, result := range nodeErrors {
-			utils.LavaFormatDebug("[Processing Debug] node result", utils.LogAttr("GUID", rp.guid), utils.LogAttr("idx", idx), utils.LogAttr("result", result))
+			utils.FormatDebug("[Processing Debug] node result", utils.LogAttr("GUID", rp.guid), utils.LogAttr("idx", idx), utils.LogAttr("result", result))
 		}
 		for idx, result := range protocolErrors {
-			utils.LavaFormatDebug("[Processing Debug] protocol error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("idx", idx), utils.LogAttr("result", result))
+			utils.FormatDebug("[Processing Debug] protocol error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("idx", idx), utils.LogAttr("result", result))
 		}
-		utils.LavaFormatDebug("[ProcessingResult]:", utils.LogAttr("GUID", rp.guid), utils.LogAttr("successResultsCount", successResultsCount))
+		utils.FormatDebug("[ProcessingResult]:", utils.LogAttr("GUID", rp.guid), utils.LogAttr("successResultsCount", successResultsCount))
 	}
 
 	// Process results based on selection mode
@@ -1146,7 +1146,7 @@ func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult
 		return rp.processNonCrossValidationResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, protocolErrorCount)
 
 	default:
-		return nil, utils.LavaFormatError("unknown selection mode", nil, utils.LogAttr("selection", rp.selection))
+		return nil, utils.FormatError("unknown selection mode", nil, utils.LogAttr("selection", rp.selection))
 	}
 }
 
@@ -1161,7 +1161,7 @@ func (rp *RelayProcessor) processCrossValidationResult(
 		result, failureReason, err := rp.responsesCrossValidation(successResults, requiredCrossValidationSize)
 		if err == nil {
 			// Successes formed a quorum
-			utils.LavaFormatInfo("✅ [ProcessingResult] Quorum formed with success responses",
+			utils.FormatInfo("✅ [ProcessingResult] Quorum formed with success responses",
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("successCount", successResultsCount),
 				utils.LogAttr("quorumCount", result.CrossValidation),
@@ -1173,7 +1173,7 @@ func (rp *RelayProcessor) processCrossValidationResult(
 		// Successful responses exist but did not form a quorum (either no agreement or insufficient group
 		// diversity). Carry the specific reason on the minimal result so the client header can expose it.
 		return &common.RelayResult{StatusCode: http.StatusInternalServerError, CrossValidationFailureReason: failureReason},
-			utils.LavaFormatError("cross-validation failed: successful responses did not reach a diverse quorum",
+			utils.FormatError("cross-validation failed: successful responses did not reach a diverse quorum",
 				err,
 				utils.LogAttr("GUID", rp.guid),
 				utils.LogAttr("failureReason", failureReason),
@@ -1186,7 +1186,7 @@ func (rp *RelayProcessor) processCrossValidationResult(
 	// Not enough successful responses
 	// Return a minimal result so headers can be attached
 	return &common.RelayResult{StatusCode: http.StatusInternalServerError, CrossValidationFailureReason: common.CrossValidationReasonInsufficientResponses},
-		utils.LavaFormatError("cross-validation failed: insufficient successful responses",
+		utils.FormatError("cross-validation failed: insufficient successful responses",
 			nil,
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("successCount", successResultsCount),
@@ -1257,5 +1257,5 @@ func (rp *RelayProcessor) buildFailureResult(
 			chainID, 0, "", utils.LogAttr("GUID", rp.guid))
 	}
 
-	return returnedResult, utils.LavaFormatError("failed relay, insufficient results", processingError, utils.LogAttr("GUID", rp.guid))
+	return returnedResult, utils.FormatError("failed relay, insufficient results", processingError, utils.LogAttr("GUID", rp.guid))
 }

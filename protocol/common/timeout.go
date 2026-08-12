@@ -9,11 +9,11 @@ import (
 )
 
 const (
-	TimePerCU                           = uint64(100 * time.Millisecond)
-	CacheWriteTimeout                   = 5 * time.Second
-	AverageWorldLatency                 = 300 * time.Millisecond
-	DefaultTimeoutSeconds               = 30 // default timeout in seconds, can be overridden by flag
-	CacheTimeout                        = 50 * time.Millisecond
+	TimePerCU             = uint64(100 * time.Millisecond)
+	CacheWriteTimeout     = 5 * time.Second
+	AverageWorldLatency   = 300 * time.Millisecond
+	DefaultTimeoutSeconds = 30 // default timeout in seconds, can be overridden by flag
+	CacheTimeout          = 50 * time.Millisecond
 	// On subscriptions we must use context.Background(),
 	// we cant have a context.WithTimeout() context, meaning we can hang for ever.
 	// to avoid that we introduced a first reply timeout using a routine.
@@ -37,7 +37,7 @@ func ValidateAndCapMinRelayTimeout() {
 	// CapContextTimeout — values below 1s cause immediate DeadlineExceeded on every relay.
 	reset := time.Duration(DefaultTimeoutSeconds) * time.Second
 	if DefaultTimeout < time.Second {
-		utils.LavaFormatWarning("default-processing-timeout is unreasonably small, resetting to default",
+		utils.FormatWarning("default-processing-timeout is unreasonably small, resetting to default",
 			nil,
 			utils.LogAttr("invalid_value", DefaultTimeout),
 			utils.LogAttr("reset_to", reset),
@@ -52,7 +52,7 @@ func ValidateAndCapMinRelayTimeout() {
 		if capped <= 0 {
 			capped = time.Millisecond
 		}
-		utils.LavaFormatWarning("min-relay-timeout >= default-processing-timeout, capping to 50% of processing timeout",
+		utils.FormatWarning("min-relay-timeout >= default-processing-timeout, capping to 50% of processing timeout",
 			nil,
 			utils.LogAttr("min_relay_timeout", MinimumTimePerRelayDelay),
 			utils.LogAttr("default_processing_timeout", DefaultTimeout),
@@ -64,7 +64,7 @@ func ValidateAndCapMinRelayTimeout() {
 	// Guard MinimumTimePerRelayDelay <= 0: GetTimePerCu returns 0 for low-CU methods,
 	// which feeds into CapContextTimeout and causes immediate timeouts.
 	if MinimumTimePerRelayDelay <= 0 {
-		utils.LavaFormatWarning("min-relay-timeout is zero or negative, resetting to 1s",
+		utils.FormatWarning("min-relay-timeout is zero or negative, resetting to 1s",
 			nil,
 			utils.LogAttr("invalid_value", MinimumTimePerRelayDelay),
 		)

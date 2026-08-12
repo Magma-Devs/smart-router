@@ -60,7 +60,7 @@ func InitErrorMetrics() {
 					counter = reused
 				}
 			} else {
-				utils.LavaFormatWarning("failed to register smartrouter_errors_total Prometheus counter; metric will not appear in /metrics scrapes", err)
+				utils.FormatWarning("failed to register smartrouter_errors_total Prometheus counter; metric will not appear in /metrics scrapes", err)
 			}
 		}
 

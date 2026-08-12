@@ -44,7 +44,7 @@ func (s *ReflectionProxyService) ServerReflectionInfo(stream reflectionpb.Server
 	// Get connection to upstream server
 	conn, cleanup, err := s.getConnection(ctx)
 	if err != nil {
-		utils.LavaFormatWarning("reflection proxy: failed to get upstream connection", err)
+		utils.FormatWarning("reflection proxy: failed to get upstream connection", err)
 		return status.Errorf(codes.Unavailable, "failed to connect to upstream: %v", err)
 	}
 	defer cleanup()
@@ -53,7 +53,7 @@ func (s *ReflectionProxyService) ServerReflectionInfo(stream reflectionpb.Server
 	upstreamClient := reflectionpb.NewServerReflectionClient(conn)
 	upstreamStream, err := upstreamClient.ServerReflectionInfo(ctx)
 	if err != nil {
-		utils.LavaFormatWarning("reflection proxy: failed to create upstream stream", err)
+		utils.FormatWarning("reflection proxy: failed to create upstream stream", err)
 		return status.Errorf(codes.Unavailable, "failed to create upstream reflection stream: %v", err)
 	}
 
@@ -114,11 +114,11 @@ func (s *ReflectionProxyService) ServerReflectionInfo(stream reflectionpb.Server
 // This should be called before the server starts serving.
 func RegisterReflectionProxy(server *grpc.Server, getConnection ReflectionProxyCallback) {
 	if getConnection == nil {
-		utils.LavaFormatWarning("reflection proxy: no connection callback provided, skipping registration", nil)
+		utils.FormatWarning("reflection proxy: no connection callback provided, skipping registration", nil)
 		return
 	}
 
 	service := NewReflectionProxyService(getConnection)
 	reflectionpb.RegisterServerReflectionServer(server, service)
-	utils.LavaFormatDebug("reflection proxy: registered on gRPC server")
+	utils.FormatDebug("reflection proxy: registered on gRPC server")
 }

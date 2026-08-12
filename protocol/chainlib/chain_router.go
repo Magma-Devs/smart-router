@@ -54,7 +54,7 @@ func (cri *chainRouterImpl) GetChainProxySupporting(ctx context.Context, addon s
 					if _, ok := chainRouterEntry.methodsRouted[method]; !ok {
 						continue
 					}
-					utils.LavaFormatTrace("chainProxy supporting method routing selected",
+					utils.FormatTrace("chainProxy supporting method routing selected",
 						utils.LogAttr("addon", addon),
 						utils.LogAttr("wantedRouterKey", wantedRouterKeyStr),
 						utils.LogAttr("method", method),
@@ -66,16 +66,16 @@ func (cri *chainRouterImpl) GetChainProxySupporting(ctx context.Context, addon s
 				return chainRouterEntry.ChainProxy, nil
 			}
 
-			utils.LavaFormatTrace("chainProxy supporting extensions but not supporting addon",
+			utils.FormatTrace("chainProxy supporting extensions but not supporting addon",
 				utils.LogAttr("addon", addon),
 				utils.LogAttr("wantedRouterKey", wantedRouterKeyStr),
 			)
 		}
 		// no support for this addon
-		return nil, utils.LavaFormatError("no chain proxy supporting requested addon", nil, utils.Attribute{Key: "addon", Value: addon})
+		return nil, utils.FormatError("no chain proxy supporting requested addon", nil, utils.Attribute{Key: "addon", Value: addon})
 	}
 	// no support for these extensions
-	return nil, utils.LavaFormatError("no chain proxy supporting requested extensions and internal path", nil,
+	return nil, utils.FormatError("no chain proxy supporting requested extensions and internal path", nil,
 		utils.LogAttr("extensions", extensions),
 		utils.LogAttr("internalPath", internalPath),
 		utils.LogAttr("supported", cri.chainProxyRouter),
@@ -150,7 +150,7 @@ func (cri *chainRouterImpl) autoGenerateMissingInternalPaths(isWs bool, nodeUrl 
 			continue
 		}
 
-		utils.LavaFormatDebug("auto generated internal path",
+		utils.FormatDebug("auto generated internal path",
 			utils.LogAttr("nodeUrl", nodeUrl.Url),
 			utils.LogAttr("internalPath", internalPath),
 			utils.LogAttr("routerKey", routerKey.String()),
@@ -205,19 +205,19 @@ func (cri *chainRouterImpl) BatchNodeUrlsByServices(ctx context.Context, rpcProv
 	}
 
 	if !httpRootRouteSet && chainParser.IsInternalPathEnabled("", rpcProviderEndpoint.ApiInterface, "") {
-		return nil, utils.LavaFormatError("HTTP/HTTPS is mandatory. It is recommended to configure both HTTP/HTTP and WS/WSS.", nil, utils.LogAttr("nodeUrls", rpcProviderEndpoint.NodeUrls))
+		return nil, utils.FormatError("HTTP/HTTPS is mandatory. It is recommended to configure both HTTP/HTTP and WS/WSS.", nil, utils.LogAttr("nodeUrls", rpcProviderEndpoint.NodeUrls))
 	}
 
 	if len(returnedBatch) == 0 {
-		return nil, utils.LavaFormatError("invalid batch, routes are empty", nil, utils.LogAttr("endpoint", rpcProviderEndpoint))
+		return nil, utils.FormatError("invalid batch, routes are empty", nil, utils.LogAttr("endpoint", rpcProviderEndpoint))
 	}
 	// validate all defined method routes have a regular route
 	for routerKey, valid := range routesToCheck {
 		if !valid {
-			return nil, utils.LavaFormatError("invalid batch, missing regular route for method route", nil, utils.LogAttr("routerKey", routerKey))
+			return nil, utils.FormatError("invalid batch, missing regular route for method route", nil, utils.LogAttr("routerKey", routerKey))
 		}
 	}
-	utils.LavaFormatDebug("batched nodeUrls by services", utils.LogAttr("batch", returnedBatch))
+	utils.FormatDebug("batched nodeUrls by services", utils.LogAttr("batch", returnedBatch))
 	return returnedBatch, nil
 }
 
@@ -250,7 +250,7 @@ func newChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint lavase
 	}
 	for _, rpcProviderEndpointEntry := range rpcProviderEndpointBatch {
 		if len(rpcProviderEndpointEntry.NodeUrls) == 0 {
-			utils.LavaFormatError("[ChainRouter] No NodeUrls found in endpoint entry", nil)
+			utils.FormatError("[ChainRouter] No NodeUrls found in endpoint entry", nil)
 			continue
 		}
 		firstNodeUrl := rpcProviderEndpointEntry.NodeUrls[0]
@@ -312,8 +312,8 @@ func newChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint lavase
 				missingKeys = append(missingKeys, key)
 			}
 		}
-		utils.LavaFormatError("missing extensions or addons in definitions", nil, utils.Attribute{Key: "missing setups", Value: missingKeys})
-		return nil, utils.LavaFormatError("not all requirements supported in chainRouter, missing extensions or addons in definitions", nil, utils.Attribute{Key: "required", Value: requiredMap}, utils.Attribute{Key: "supported", Value: supportedMap})
+		utils.FormatError("missing extensions or addons in definitions", nil, utils.Attribute{Key: "missing setups", Value: missingKeys})
+		return nil, utils.FormatError("not all requirements supported in chainRouter, missing extensions or addons in definitions", nil, utils.Attribute{Key: "required", Value: requiredMap}, utils.Attribute{Key: "supported", Value: supportedMap})
 	}
 
 	_, apiCollection, hasSubscriptionInSpec := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SUBSCRIBE)
@@ -326,25 +326,25 @@ func newChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint lavase
 		}
 	}
 	if !IgnoreWsEnforcementForTestCommands && hasSubscriptionInSpec && apiCollection.Enabled && !webSocketSupported && !chainParser.SkipWebsocketVerification() {
-		return nil, utils.LavaFormatError("subscriptions are applicable for this chain, but websocket is not provided in 'supported' map. By not setting ws/wss your provider wont be able to accept ws subscriptions, therefore might receive less rewards and lower QOS score.", nil,
+		return nil, utils.FormatError("subscriptions are applicable for this chain, but websocket is not provided in 'supported' map. By not setting ws/wss your provider wont be able to accept ws subscriptions, therefore might receive less rewards and lower QOS score.", nil,
 			utils.LogAttr("apiInterface", apiCollection.CollectionData.ApiInterface),
 			utils.LogAttr("supportedMap", supportedMap),
 			utils.LogAttr("required", WebSocketExtension),
 		)
 	}
-	utils.LavaFormatDebug("router keys", utils.LogAttr("chainProxyRouter", chainProxyRouter))
+	utils.FormatDebug("router keys", utils.LogAttr("chainProxyRouter", chainProxyRouter))
 
 	// make sure all chainProxyRouter entries have one without a method routing
 	for routerKey, chainRouterEntries := range chainProxyRouter {
 		// get the last entry, if it has methods routed, we need to error out
 		lastEntry := chainRouterEntries[len(chainRouterEntries)-1]
 		if len(lastEntry.methodsRouted) > 0 {
-			return nil, utils.LavaFormatError("last entry in chainProxyRouter has methods routed, this means no chainProxy supports all methods", nil, utils.LogAttr("routerKey", routerKey))
+			return nil, utils.FormatError("last entry in chainProxyRouter has methods routed, this means no chainProxy supports all methods", nil, utils.LogAttr("routerKey", routerKey))
 		}
 	}
 
 	cri.chainProxyRouter = chainProxyRouter
-	utils.LavaFormatDebug("chainRouter created", utils.LogAttr("chainProxyRouter", chainProxyRouter))
+	utils.FormatDebug("chainRouter created", utils.LogAttr("chainProxyRouter", chainProxyRouter))
 
 	return &cri, nil
 }

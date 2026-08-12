@@ -88,7 +88,7 @@ func maybeFileDescriptorResponse(resp *grpc_reflection_v1alpha.ServerReflectionR
 		if convertionSuccessful {
 			return nil, fmt.Errorf("%#v", errorResponse.ErrorResponse.ErrorMessage)
 		}
-		return nil, utils.LavaFormatError("Failed to convert response to ServerReflectionResponse_FileDescriptorResponse and is not an error", nil, utils.Attribute{Key: "resp.MessageResponse", Value: resp.MessageResponse})
+		return nil, utils.FormatError("Failed to convert response to ServerReflectionResponse_FileDescriptorResponse and is not an error", nil, utils.Attribute{Key: "resp.MessageResponse", Value: resp.MessageResponse})
 	}
 	return r, nil
 }

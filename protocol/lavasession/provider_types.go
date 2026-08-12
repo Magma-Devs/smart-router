@@ -162,7 +162,7 @@ func (endpoint *RPCProviderEndpoint) String() string {
 
 func (endpoint *RPCProviderEndpoint) Validate() error {
 	if len(endpoint.NodeUrls) == 0 {
-		return utils.LavaFormatError("Empty URL list for endpoint", nil, utils.Attribute{Key: "endpoint", Value: endpoint.String()})
+		return utils.FormatError("Empty URL list for endpoint", nil, utils.Attribute{Key: "endpoint", Value: endpoint.String()})
 	}
 	for _, url := range endpoint.NodeUrls {
 		err := common.ValidateEndpoint(url.Url, endpoint.ApiInterface)

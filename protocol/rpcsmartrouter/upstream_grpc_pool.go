@@ -158,7 +158,7 @@ func (c *UpstreamGRPCStreamConnection) connect(ctx context.Context, timeout time
 	c.conn = grpcConn
 	c.healthy.Store(true)
 
-	utils.LavaFormatDebug("gRPC streaming connection established",
+	utils.FormatDebug("gRPC streaming connection established",
 		utils.LogAttr("endpoint", c.sanitizedURL),
 	)
 
@@ -197,7 +197,7 @@ func (c *UpstreamGRPCStreamConnection) Close() error {
 	if c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
-		utils.LavaFormatDebug("gRPC streaming connection closed",
+		utils.FormatDebug("gRPC streaming connection closed",
 			utils.LogAttr("endpoint", c.sanitizedURL),
 		)
 		return err
@@ -265,20 +265,20 @@ func (c *UpstreamGRPCStreamConnection) GetMethodDescriptor(
 
 	descriptor, err := descriptorSource.FindSymbol(service)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to find service descriptor", err,
+		return nil, utils.FormatError("failed to find service descriptor", err,
 			utils.LogAttr("service", service),
 			utils.LogAttr("descriptor-source", c.nodeUrl.GrpcConfig.GetDescriptorSource()))
 	}
 
 	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
 	if !ok {
-		return nil, utils.LavaFormatError("descriptor is not a ServiceDescriptor", nil,
+		return nil, utils.FormatError("descriptor is not a ServiceDescriptor", nil,
 			utils.LogAttr("service", service))
 	}
 
 	methodDescriptor := serviceDescriptor.FindMethodByName(methodName)
 	if methodDescriptor == nil {
-		return nil, utils.LavaFormatError("method not found in service", nil,
+		return nil, utils.FormatError("method not found in service", nil,
 			utils.LogAttr("service", service),
 			utils.LogAttr("method", methodName))
 	}
@@ -380,7 +380,7 @@ func (p *UpstreamGRPCPool) GetConnectionForStream(ctx context.Context) (*Upstrea
 		if err != nil {
 			// If we can't create a new connection but have an existing one, use it
 			if bestConn != nil {
-				utils.LavaFormatWarning("gRPC pool: failed to scale up, using existing connection", err,
+				utils.FormatWarning("gRPC pool: failed to scale up, using existing connection", err,
 					utils.LogAttr("endpoint", p.sanitizedURL),
 					utils.LogAttr("currentConnections", len(p.connections)),
 					utils.LogAttr("existingStreamCount", lowestStreams),
@@ -390,7 +390,7 @@ func (p *UpstreamGRPCPool) GetConnectionForStream(ctx context.Context) (*Upstrea
 			return nil, fmt.Errorf("failed to create connection: %w", err)
 		}
 
-		utils.LavaFormatInfo("gRPC pool: scaled up",
+		utils.FormatInfo("gRPC pool: scaled up",
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("totalConnections", len(p.connections)),
 			utils.LogAttr("reason", "all connections near capacity"),
@@ -417,7 +417,7 @@ func (p *UpstreamGRPCPool) createConnectionLocked(ctx context.Context) (*Upstrea
 	p.connections = append(p.connections, conn)
 	p.backoff.Reset()
 
-	utils.LavaFormatDebug("gRPC pool: connection added",
+	utils.FormatDebug("gRPC pool: connection added",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 		utils.LogAttr("totalConnections", len(p.connections)),
 	)
@@ -478,7 +478,7 @@ func (p *UpstreamGRPCPool) maybeScaleDown() {
 			for _, conn := range conns {
 				conn.Close()
 			}
-			utils.LavaFormatDebug("gRPC pool: scaled down",
+			utils.FormatDebug("gRPC pool: scaled down",
 				utils.LogAttr("endpoint", p.sanitizedURL),
 				utils.LogAttr("removedConnections", len(conns)),
 				utils.LogAttr("remainingConnections", len(kept)),
@@ -499,7 +499,7 @@ func (p *UpstreamGRPCPool) ReconnectWithBackoff(ctx context.Context) error {
 
 	// Get backoff duration
 	backoffDuration, _ := p.backoff.NextBackoff()
-	utils.LavaFormatDebug("gRPC pool: waiting before reconnect",
+	utils.FormatDebug("gRPC pool: waiting before reconnect",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 		utils.LogAttr("backoff", backoffDuration),
 	)
@@ -523,7 +523,7 @@ func (p *UpstreamGRPCPool) ReconnectWithBackoff(ctx context.Context) error {
 	callback := p.onReconnect
 	p.lock.Unlock()
 
-	utils.LavaFormatInfo("gRPC pool: reconnected successfully",
+	utils.FormatInfo("gRPC pool: reconnected successfully",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 	)
 
@@ -550,7 +550,7 @@ func (p *UpstreamGRPCPool) Close() error {
 		conn.Close()
 	}
 
-	utils.LavaFormatDebug("gRPC pool: closed",
+	utils.FormatDebug("gRPC pool: closed",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 		utils.LogAttr("closedConnections", len(conns)),
 	)

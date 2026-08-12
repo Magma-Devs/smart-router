@@ -31,7 +31,7 @@ func NewSafeChannelSender[T any](ctx context.Context, ch chan<- T) *SafeChannelS
 
 func (scs *SafeChannelSender[T]) sendInner(msg T) {
 	if scs.closed {
-		utils.LavaFormatTrace("Attempted to send message to closed channel")
+		utils.FormatTrace("Attempted to send message to closed channel")
 		return
 	}
 
@@ -43,7 +43,7 @@ func (scs *SafeChannelSender[T]) sendInner(msg T) {
 		case scs.ch <- msg:
 			shouldBreak = true
 		default:
-			utils.LavaFormatTrace("Failed to send message to channel", utils.LogAttr("attempt", retry))
+			utils.FormatTrace("Failed to send message to channel", utils.LogAttr("attempt", retry))
 		}
 		if shouldBreak {
 			break

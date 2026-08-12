@@ -174,13 +174,13 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 	if len(args) > 1 {
 		viperEndpoints, err := commonlib.ParseEndpointArgs(args, Yaml_config_properties, commonlib.EndpointsConfigName)
 		if err != nil {
-			return nil, utils.LavaFormatError("invalid inline endpoints", err, utils.Attribute{Key: "args", Value: strings.Join(args, " ")})
+			return nil, utils.FormatError("invalid inline endpoints", err, utils.Attribute{Key: "args", Value: strings.Join(args, " ")})
 		}
 		viper.Reset()
 		viper.MergeConfigMap(viperEndpoints.AllSettings())
 		rpcEndpoints, err := ParseEndpoints(viper.GetViper())
 		if err != nil || len(rpcEndpoints) == 0 {
-			return nil, utils.LavaFormatError("invalid inline endpoints definition", err)
+			return nil, utils.FormatError("invalid inline endpoints definition", err)
 		}
 		providers := make([]healthProvider, 0, len(rpcEndpoints))
 		for _, ep := range rpcEndpoints {
@@ -206,7 +206,7 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 	viper.AddConfigPath("./config")
 	viper.AddConfigPath(lavaDefaultNodeHome)
 	if err := viper.ReadInConfig(); err != nil {
-		return nil, utils.LavaFormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configName})
+		return nil, utils.FormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configName})
 	}
 
 	keys := []string{commonlib.DirectRPCConfigName}
@@ -231,7 +231,7 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 	// same check the router runs, run here for its message and not for its verdict; the rows are
 	// still told apart by their `url`, which is what identifies the broken node.
 	if err := lavasession.ValidateUniqueProviderNames(lists...); err != nil {
-		utils.LavaFormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
+		utils.FormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
 	}
 
 	var providers []healthProvider

@@ -22,26 +22,26 @@ const (
 	EventPrefix = "smartrouter_"
 )
 
-// wrappedLavaError wraps a cause error and preserves error chain traversal
+// wrappedError wraps a cause error and preserves error chain traversal
 // for callers using errors.Is() or pkg-errors Cause().
-type wrappedLavaError struct {
+type wrappedError struct {
 	msg   string
 	cause error
 }
 
-func (e *wrappedLavaError) Error() string { return e.msg }
-func (e *wrappedLavaError) Cause() error  { return e.cause }
-func (e *wrappedLavaError) Unwrap() error { return e.cause }
+func (e *wrappedError) Error() string { return e.msg }
+func (e *wrappedError) Cause() error  { return e.cause }
+func (e *wrappedError) Unwrap() error { return e.cause }
 
 const (
-	LAVA_LOG_TRACE = iota
-	LAVA_LOG_DEBUG
-	LAVA_LOG_INFO
-	LAVA_LOG_WARN
-	LAVA_LOG_ERROR
-	LAVA_LOG_FATAL
-	LAVA_LOG_PANIC
-	LAVA_LOG_PRODUCTION
+	LOG_TRACE = iota
+	LOG_DEBUG
+	LOG_INFO
+	LOG_WARN
+	LOG_ERROR
+	LOG_FATAL
+	LOG_PANIC
+	LOG_PRODUCTION
 	NoColor = true
 )
 
@@ -117,7 +117,7 @@ var (
 	// Held in an atomic.Pointer because EnableDebugLogBuffer swaps the logger
 	// at startup while goroutines spawned by Start (epoch timer, monitoring)
 	// may already be logging — a plain assignment would be a data race on the
-	// read sites in LavaFormatLog.
+	// read sites in FormatLog.
 	debugBufferLogger atomic.Pointer[zerolog.Logger]
 	debugRingMu       sync.Mutex
 	debugRing         *debugRingWriter
@@ -287,7 +287,7 @@ func SetGlobalLoggingLevel(logLevel string) {
 	} else {
 		zerologlog.Logger = zerologlog.Output(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: NoColor, TimeFormat: time.Stamp}).Level(defaultGlobalLogLevel)
 	}
-	LavaFormatInfo("setting log level", Attribute{Key: "loglevel", Value: logLevel})
+	FormatInfo("setting log level", Attribute{Key: "loglevel", Value: logLevel})
 }
 
 // IsDebugEnabled reports whether debug-level logging is currently active.
@@ -300,15 +300,15 @@ func IsDebugEnabled() bool {
 func RollingLoggerSetup(rollingLogLevel string, filePath string, maxSize string, maxBackups string, maxAge string, stdFormat string) func() {
 	maxSizeNumber, err := strconv.Atoi(maxSize)
 	if err != nil {
-		LavaFormatFatal("strconv.Atoi(maxSize)", err, LogAttr("maxSize", maxSize))
+		FormatFatal("strconv.Atoi(maxSize)", err, LogAttr("maxSize", maxSize))
 	}
 	maxBackupsNumber, err := strconv.Atoi(maxBackups)
 	if err != nil {
-		LavaFormatFatal("strconv.Atoi(maxSize)", err, LogAttr("maxBackups", maxBackups))
+		FormatFatal("strconv.Atoi(maxSize)", err, LogAttr("maxBackups", maxBackups))
 	}
 	maxAgeNumber, err := strconv.Atoi(maxAge)
 	if err != nil {
-		LavaFormatFatal("strconv.Atoi(maxSize)", err, LogAttr("maxAge", maxAge))
+		FormatFatal("strconv.Atoi(maxSize)", err, LogAttr("maxAge", maxAge))
 	}
 
 	rollingLogOutput := &lumberjack.Logger{
@@ -335,7 +335,7 @@ func RollingLoggerSetup(rollingLogLevel string, filePath string, maxSize string,
 	case "fatal":
 		logLevel = zerolog.FatalLevel
 	default:
-		LavaFormatFatal("unsupported case for rollingLoggerSetup", nil, LogAttr("rollingLogLevel", rollingLogLevel))
+		FormatFatal("unsupported case for rollingLoggerSetup", nil, LogAttr("rollingLogLevel", rollingLogLevel))
 	}
 	// set the rolling log level.
 	if stdFormat == "json" {
@@ -412,7 +412,7 @@ func StrValue(val interface{}) string {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					LavaFormatWarning("protobuf String() panic detected",
+					FormatWarning("protobuf String() panic detected",
 						fmt.Errorf("panic: %v", r),
 						LogAttr("type", fmt.Sprintf("%T", value)))
 					st_val = fmt.Sprintf("<panic in String(): %v>", r)
@@ -450,7 +450,7 @@ func StrValue(val interface{}) string {
 	return st_val
 }
 
-func LavaFormatLog(description string, err error, attributes []Attribute, severity uint) error {
+func FormatLog(description string, err error, attributes []Attribute, severity uint) error {
 	// OPTIMIZATION: Early return if log level is not enabled
 	// This prevents expensive string formatting and attribute processing
 	// when logs would be filtered anyway
@@ -458,26 +458,26 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 	// the purpose of this function is to fail E2E tests and not allow unexpected behavior to reach main.
 	// while in production some errors may occur as consumers / providers might set up their processes in the wrong way.
 	// in test environment we don't expect to have these errors and if they occur we would like to fail the test.
-	if severity == LAVA_LOG_PRODUCTION {
+	if severity == LOG_PRODUCTION {
 		if ExtendedLogLevel == "production" {
-			severity = LAVA_LOG_WARN
+			severity = LOG_WARN
 		} else {
-			severity = LAVA_LOG_ERROR
+			severity = LOG_ERROR
 		}
 	}
 
 	// Check if this log level is enabled before doing expensive work
 	var logLevelEnabled bool
 	switch severity {
-	case LAVA_LOG_TRACE:
+	case LOG_TRACE:
 		logLevelEnabled = defaultGlobalLogLevel <= zerolog.TraceLevel
-	case LAVA_LOG_DEBUG:
+	case LOG_DEBUG:
 		logLevelEnabled = defaultGlobalLogLevel <= zerolog.DebugLevel
-	case LAVA_LOG_INFO:
+	case LOG_INFO:
 		logLevelEnabled = defaultGlobalLogLevel <= zerolog.InfoLevel
-	case LAVA_LOG_WARN:
+	case LOG_WARN:
 		logLevelEnabled = defaultGlobalLogLevel <= zerolog.WarnLevel
-	case LAVA_LOG_ERROR, LAVA_LOG_FATAL, LAVA_LOG_PANIC:
+	case LOG_ERROR, LOG_FATAL, LOG_PANIC:
 		logLevelEnabled = true // Always process errors, fatal, and panic
 	default:
 		logLevelEnabled = true
@@ -489,7 +489,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			return err // Return original error without formatting
 		}
 		// Still return an error based on description to maintain the contract
-		// that LavaFormat* functions always return an error when called
+		// that Format* functions always return an error when called
 		return fmt.Errorf("%s", description)
 	}
 	// if JsonFormat {
@@ -505,7 +505,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 	dbgLogger := debugBufferLogger.Load()
 	debugBufferEnabled := dbgLogger.GetLevel() != zerolog.Disabled
 	switch severity {
-	case LAVA_LOG_PANIC:
+	case LOG_PANIC:
 		logEvent = zerologlog.Panic()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Panic()
@@ -513,7 +513,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		if debugBufferEnabled {
 			debugBufferEvent = dbgLogger.Error()
 		}
-	case LAVA_LOG_FATAL:
+	case LOG_FATAL:
 		logEvent = zerologlog.Fatal()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Fatal()
@@ -521,7 +521,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		if debugBufferEnabled {
 			debugBufferEvent = dbgLogger.Error()
 		}
-	case LAVA_LOG_ERROR:
+	case LOG_ERROR:
 		logEvent = zerologlog.Error()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Error()
@@ -529,7 +529,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		if debugBufferEnabled {
 			debugBufferEvent = dbgLogger.Error()
 		}
-	case LAVA_LOG_WARN:
+	case LOG_WARN:
 		logEvent = zerologlog.Warn()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Warn()
@@ -537,7 +537,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		if debugBufferEnabled {
 			debugBufferEvent = dbgLogger.Warn()
 		}
-	case LAVA_LOG_INFO:
+	case LOG_INFO:
 		logEvent = zerologlog.Info()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Info()
@@ -545,7 +545,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		if debugBufferEnabled {
 			debugBufferEvent = dbgLogger.Info()
 		}
-	case LAVA_LOG_DEBUG:
+	case LOG_DEBUG:
 		logEvent = zerologlog.Debug()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Debug()
@@ -553,7 +553,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		if debugBufferEnabled {
 			debugBufferEvent = dbgLogger.Debug()
 		}
-	case LAVA_LOG_TRACE:
+	case LOG_TRACE:
 		logEvent = zerologlog.Trace()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Trace()
@@ -598,43 +598,43 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 	if debugBufferEvent != nil {
 		debugBufferEvent.Msg(description)
 	}
-	// Return a wrappedLavaError that supports both Unwrap() (stdlib) and
+	// Return a wrappedError that supports both Unwrap() (stdlib) and
 	// Cause() (pkg-errors causer interface), preserving error chain
 	// traversal for callers using errors.Is().
 	if err != nil {
-		return &wrappedLavaError{msg: output, cause: err}
+		return &wrappedError{msg: output, cause: err}
 	}
 	return fmt.Errorf("%s", output)
 }
 
-func LavaFormatFatal(description string, err error, attributes ...Attribute) {
+func FormatFatal(description string, err error, attributes ...Attribute) {
 	attributes = append(attributes, Attribute{Key: "StackTrace", Value: debug.Stack()})
-	LavaFormatLog(description, err, attributes, LAVA_LOG_FATAL)
+	FormatLog(description, err, attributes, LOG_FATAL)
 }
 
-// see documentation in LavaFormatLog function
-func LavaFormatProduction(description string, err error, attributes ...Attribute) error {
-	return LavaFormatLog(description, err, attributes, LAVA_LOG_PRODUCTION)
+// see documentation in FormatLog function
+func FormatProduction(description string, err error, attributes ...Attribute) error {
+	return FormatLog(description, err, attributes, LOG_PRODUCTION)
 }
 
-func LavaFormatError(description string, err error, attributes ...Attribute) error {
-	return LavaFormatLog(description, err, attributes, LAVA_LOG_ERROR)
+func FormatError(description string, err error, attributes ...Attribute) error {
+	return FormatLog(description, err, attributes, LOG_ERROR)
 }
 
-func LavaFormatWarning(description string, err error, attributes ...Attribute) error {
-	return LavaFormatLog(description, err, attributes, LAVA_LOG_WARN)
+func FormatWarning(description string, err error, attributes ...Attribute) error {
+	return FormatLog(description, err, attributes, LOG_WARN)
 }
 
-func LavaFormatInfo(description string, attributes ...Attribute) error {
-	return LavaFormatLog(description, nil, attributes, LAVA_LOG_INFO)
+func FormatInfo(description string, attributes ...Attribute) error {
+	return FormatLog(description, nil, attributes, LOG_INFO)
 }
 
-func LavaFormatDebug(description string, attributes ...Attribute) error {
-	return LavaFormatLog(description, nil, attributes, LAVA_LOG_DEBUG)
+func FormatDebug(description string, attributes ...Attribute) error {
+	return FormatLog(description, nil, attributes, LOG_DEBUG)
 }
 
-func LavaFormatTrace(description string, attributes ...Attribute) error {
-	return LavaFormatLog(description, nil, attributes, LAVA_LOG_TRACE)
+func FormatTrace(description string, attributes ...Attribute) error {
+	return FormatLog(description, nil, attributes, LOG_TRACE)
 }
 
 func FormatLongString(msg string, maxCharacters int) string {

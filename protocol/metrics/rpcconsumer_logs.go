@@ -46,7 +46,7 @@ func NewRPCConsumerLogs(consumerMetricsManager ConsumerMetricsManagerInf, usageS
 	}
 	err := godotenv.Load()
 	if err != nil {
-		utils.LavaFormatInfo("New relic missing environment file")
+		utils.FormatInfo("New relic missing environment file")
 		return &RPCConsumerLogs{
 			consumerMetricsManager:     consumerMetricsManager,
 			usageSink:                  usageSink,
@@ -57,7 +57,7 @@ func NewRPCConsumerLogs(consumerMetricsManager ConsumerMetricsManagerInf, usageS
 	newRelicAppName := os.Getenv("NEW_RELIC_APP_NAME")
 	newRelicLicenseKey := os.Getenv("NEW_RELIC_LICENSE_KEY")
 	if newRelicAppName == "" || newRelicLicenseKey == "" {
-		utils.LavaFormatInfo("New relic missing environment variables")
+		utils.FormatInfo("New relic missing environment variables")
 		return &RPCConsumerLogs{
 			consumerMetricsManager:     consumerMetricsManager,
 			usageSink:                  usageSink,
@@ -72,15 +72,15 @@ func NewRPCConsumerLogs(consumerMetricsManager ConsumerMetricsManagerInf, usageS
 			// Set specific Config fields inside a custom ConfigOption.
 			sMaxSamplesStored, ok := os.LookupEnv("NEW_RELIC_TRANSACTION_EVENTS_MAX_SAMPLES_STORED")
 			if ok {
-				utils.LavaFormatDebug("Setting NEW_RELIC_TRANSACTION_EVENTS_MAX_SAMPLES_STORED", utils.Attribute{Key: "sMaxSamplesStored", Value: sMaxSamplesStored})
+				utils.FormatDebug("Setting NEW_RELIC_TRANSACTION_EVENTS_MAX_SAMPLES_STORED", utils.Attribute{Key: "sMaxSamplesStored", Value: sMaxSamplesStored})
 				maxSamplesStored, err := strconv.Atoi(sMaxSamplesStored)
 				if err != nil {
-					utils.LavaFormatError("Failed converting sMaxSamplesStored to number", err, utils.Attribute{Key: "sMaxSamplesStored", Value: sMaxSamplesStored})
+					utils.FormatError("Failed converting sMaxSamplesStored to number", err, utils.Attribute{Key: "sMaxSamplesStored", Value: sMaxSamplesStored})
 				} else {
 					cfg.TransactionEvents.MaxSamplesStored = maxSamplesStored
 				}
 			} else {
-				utils.LavaFormatDebug("Did not find NEW_RELIC_TRANSACTION_EVENTS_MAX_SAMPLES_STORED in env")
+				utils.FormatDebug("Did not find NEW_RELIC_TRANSACTION_EVENTS_MAX_SAMPLES_STORED in env")
 			}
 		},
 		newrelic.ConfigFromEnvironment(),
@@ -179,7 +179,7 @@ func (rpccl *RPCConsumerLogs) GetUniqueGuidResponseForError(responseError error,
 		data.Error = responseError.Error()
 	}
 
-	utils.LavaFormatError("UniqueGuidResponseForError", responseError, utils.Attribute{Key: "msgSeed", Value: msgSeed})
+	utils.FormatError("UniqueGuidResponseForError", responseError, utils.Attribute{Key: "msgSeed", Value: msgSeed})
 
 	ret, _ := json.Marshal(data)
 
@@ -192,7 +192,7 @@ func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSoc
 	if err != nil {
 		errMessage := err.Error()
 		if strings.Contains(errMessage, webSocketCloseMessage) {
-			utils.LavaFormatDebug("Websocket connection closed by the user", utils.LogAttr("error", errMessage))
+			utils.FormatDebug("Websocket connection closed by the user", utils.LogAttr("error", errMessage))
 			return nil
 		}
 		rpccl.LogRequestAndResponse(rpcType+" ws msg", true, "ws", webSocketAddr, string(msg), "", msgSeed, timeTaken, err)
@@ -201,7 +201,7 @@ func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSoc
 			"Error_Received": rpccl.GetUniqueGuidResponseForError(err, msgSeed),
 		})
 		if err != nil {
-			utils.LavaFormatError("AnalyzeWebSocketErrorAndGetFormattedMessage unexpected behavior, failed marshalling json response", err, utils.LogAttr("seed", msgSeed))
+			utils.FormatError("AnalyzeWebSocketErrorAndGetFormattedMessage unexpected behavior, failed marshalling json response", err, utils.LogAttr("seed", msgSeed))
 		}
 		return jsonResponse
 	}
@@ -210,10 +210,10 @@ func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSoc
 
 func (rpccl *RPCConsumerLogs) LogRequestAndResponse(module string, hasError bool, method, path, req, resp, msgSeed string, timeTaken time.Duration, err error) {
 	if hasError && err != nil {
-		utils.LavaFormatError(module, err, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
+		utils.FormatError(module, err, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
 		return
 	}
-	utils.LavaFormatDebug(module, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
+	utils.FormatDebug(module, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
 }
 
 func (rpccl *RPCConsumerLogs) LogStartTransaction(name string) func() {
@@ -322,5 +322,5 @@ func (rpccl *RPCConsumerLogs) LogTestMode(fiberCtx *fiber.Ctx) {
 	for header, HeaderVal := range headers {
 		st += fmt.Sprintf("Header %16s HeaderVal: %s\n", header, HeaderVal)
 	}
-	utils.LavaFormatInfo(st)
+	utils.FormatInfo(st)
 }

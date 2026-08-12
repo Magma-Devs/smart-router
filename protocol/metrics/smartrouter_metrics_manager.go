@@ -163,7 +163,7 @@ type SmartRouterMetricsManagerOptions struct {
 // NewSmartRouterMetricsManager creates a new SmartRouterMetricsManager instance
 func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *SmartRouterMetricsManager {
 	if options.NetworkAddress == DisabledFlagOption {
-		utils.LavaFormatWarning("prometheus endpoint inactive, option is disabled", nil)
+		utils.FormatWarning("prometheus endpoint inactive, option is disabled", nil)
 		return nil
 	}
 
@@ -714,9 +714,9 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		manager.registerHTTPHandlers(mux)
 
 		go func() {
-			utils.LavaFormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
+			utils.FormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
 			if err := http.ListenAndServe(options.NetworkAddress, mux); err != nil {
-				utils.LavaFormatError("metrics endpoint failed", err, utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
+				utils.FormatError("metrics endpoint failed", err, utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
 			}
 		}()
 	}
@@ -1533,7 +1533,7 @@ func (m *SmartRouterMetricsManager) StartSelectionStatsUpdater(ctx context.Conte
 		return
 	}
 	if updateInterval <= 0 {
-		utils.LavaFormatWarning("StartSelectionStatsUpdater: invalid updateInterval, selection stats will not be reported", nil,
+		utils.FormatWarning("StartSelectionStatsUpdater: invalid updateInterval, selection stats will not be reported", nil,
 			utils.LogAttr("updateInterval", updateInterval))
 		return
 	}

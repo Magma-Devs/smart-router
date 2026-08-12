@@ -155,7 +155,7 @@ func GetAllSpecsFromLocalDir(specPath string) (map[string]types.Spec, error) {
 		for id := range specs {
 			specIDs = append(specIDs, id)
 		}
-		utils.LavaFormatInfo("Loaded specs from local directory",
+		utils.FormatInfo("Loaded specs from local directory",
 			utils.LogAttr("spec_count", len(specs)),
 			utils.LogAttr("directory", specPath),
 			utils.LogAttr("spec_ids", strings.Join(specIDs, ", ")))

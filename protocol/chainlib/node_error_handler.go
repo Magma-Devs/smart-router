@@ -236,44 +236,44 @@ func (geh *genericErrorHandler) handleConnectionError(err error) error {
 
 	switch {
 	case err == net.ErrWriteToConnected:
-		return utils.LavaFormatProduction(genericMsg+", Reason: Write to connected connection", nil)
+		return utils.FormatProduction(genericMsg+", Reason: Write to connected connection", nil)
 	case err == net.ErrClosed:
-		return utils.LavaFormatProduction(genericMsg+", Reason: Operation on closed connection", nil)
+		return utils.FormatProduction(genericMsg+", Reason: Operation on closed connection", nil)
 	case err == io.EOF:
-		return utils.LavaFormatProduction(genericMsg+", Reason: End of input stream reached", nil)
+		return utils.FormatProduction(genericMsg+", Reason: End of input stream reached", nil)
 	case strings.Contains(err.Error(), "http: server gave HTTP response to HTTPS client"):
-		return utils.LavaFormatProduction(genericMsg+", Reason: misconfigured http endpoint as https", nil)
+		return utils.FormatProduction(genericMsg+", Reason: misconfigured http endpoint as https", nil)
 	}
 
 	if opErr, ok := err.(*net.OpError); ok {
 		switch {
 		case opErr.Timeout():
-			return utils.LavaFormatProduction(genericMsg+", Reason: Network operation timed out", nil)
+			return utils.FormatProduction(genericMsg+", Reason: Network operation timed out", nil)
 		case strings.Contains(opErr.Error(), "connection refused"):
-			return utils.LavaFormatProduction(genericMsg+", Reason: Connection refused", nil)
+			return utils.FormatProduction(genericMsg+", Reason: Connection refused", nil)
 		default:
 			// Handle other OpError cases without exposing specific details
-			return utils.LavaFormatProduction(genericMsg+", Reason: Network operation error", nil)
+			return utils.FormatProduction(genericMsg+", Reason: Network operation error", nil)
 		}
 	}
 	if urlErr, ok := err.(*url.Error); ok {
 		switch {
 		case urlErr.Timeout():
-			return utils.LavaFormatProduction(genericMsg+", Reason: url.Error issue", nil)
+			return utils.FormatProduction(genericMsg+", Reason: url.Error issue", nil)
 		case strings.Contains(urlErr.Error(), "connection refused"):
-			return utils.LavaFormatProduction(genericMsg+", Reason: Connection refused", nil)
+			return utils.FormatProduction(genericMsg+", Reason: Connection refused", nil)
 		}
 	}
 
 	if _, ok := err.(*net.DNSError); ok {
-		return utils.LavaFormatProduction(genericMsg+", Reason: DNS resolution failed", nil)
+		return utils.FormatProduction(genericMsg+", Reason: DNS resolution failed", nil)
 	}
 
 	// Mask IP addresses and potential secrets in the error message, and check if any secret was found
 	maskedError, foundSecret := maskSensitiveInfo(err.Error())
 	if foundSecret {
 		// Log or handle the case when a secret was found, if necessary
-		utils.LavaFormatProduction(genericMsg+maskedError, nil)
+		utils.FormatProduction(genericMsg+maskedError, nil)
 	}
 	return nil
 }
@@ -298,12 +298,12 @@ func maskSensitiveInfo(errMsg string) (string, bool) {
 // is received, preserving pre-existing behavior for unrecognised error shapes.
 func (geh *genericErrorHandler) handleGenericErrors(ctx context.Context, nodeError error) error {
 	if nodeError == context.DeadlineExceeded || ctx.Err() == context.DeadlineExceeded {
-		return utils.LavaFormatProduction("Provider Failed Sending Message", common.ContextDeadlineExceededError)
+		return utils.FormatProduction("Provider Failed Sending Message", common.ContextDeadlineExceededError)
 	}
 	retError := geh.handleConnectionError(nodeError)
 	if retError != nil {
 		// printing the original error as  it was masked for the consumer to not see the private information such as ip address etc..
-		utils.LavaFormatProduction("Original Node Error", nodeError)
+		utils.FormatProduction("Original Node Error", nodeError)
 	}
 	return retError
 }
@@ -315,7 +315,7 @@ func (geh *genericErrorHandler) HandleStatusError(statusCode int, strict bool) e
 func (geh *genericErrorHandler) HandleJSONFormatError(replyData []byte) error {
 	_, err := gojq.Parse(string(replyData))
 	if err != nil {
-		return utils.LavaFormatError("Rest reply is not in JSON format", err, utils.Attribute{Key: "reply.Data", Value: string(replyData)})
+		return utils.FormatError("Rest reply is not in JSON format", err, utils.Attribute{Key: "reply.Data", Value: string(replyData)})
 	}
 	return nil
 }
@@ -356,7 +356,7 @@ func TryRecoverNodeErrorFromClientError(nodeErr error) *rpcclient.JsonrpcMessage
 		jsonMessage := &rpcclient.JsonrpcMessage{}
 		err := json.Unmarshal(httpError.Body, jsonMessage)
 		if err == nil {
-			utils.LavaFormatDebug("Successfully recovered HTTPError to node message", utils.LogAttr("jsonMessage", jsonMessage))
+			utils.FormatDebug("Successfully recovered HTTPError to node message", utils.LogAttr("jsonMessage", jsonMessage))
 			return jsonMessage
 		}
 	}
@@ -366,7 +366,7 @@ func TryRecoverNodeErrorFromClientError(nodeErr error) *rpcclient.JsonrpcMessage
 // emitClassificationTelemetry emits structured log + metric for a node
 // failure, respecting the single-log invariant: if a downstream handler
 // already logged the same failure via a different path (e.g.
-// LavaFormatProduction inside handleGenericErrors), we emit the metric
+// FormatProduction inside handleGenericErrors), we emit the metric
 // only and skip our structured log so each failure produces at most one
 // log line.
 //
@@ -391,7 +391,7 @@ func emitClassificationTelemetry(nodeError error, classified *common.LavaError, 
 //     (see emitClassificationTelemetry for the single-log invariant).
 //
 // The Unknown branch is load-bearing: handleGenericErrors may log via
-// LavaFormatProduction for recognised connection shapes, and its return
+// FormatProduction for recognised connection shapes, and its return
 // value controls whether the caller falls back to the raw error. Callers
 // of HandleNodeError treat a nil return as "fall back to raw err" — see
 // jsonRPC.go: `if parsedError != nil { return parsedError } return err`.
@@ -409,7 +409,7 @@ func handleAndClassify(ctx context.Context, nodeError error, transport common.Tr
 
 	// Step 2 (Unknown path): delegate to handleGenericErrors. A non-nil
 	// return means it recognised a connection pattern and logged via
-	// LavaFormatProduction; a nil return means it didn't recognise the
+	// FormatProduction; a nil return means it didn't recognise the
 	// shape and the caller should fall back to the raw error.
 	parsed := geh.handleGenericErrors(ctx, nodeError)
 

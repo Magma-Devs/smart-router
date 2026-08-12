@@ -484,11 +484,11 @@ func LogCodedWarning(description string, err error, lavaError *LavaError, chainI
 
 ## 5. Design: Standardized Logging Integration
 
-Extend existing `LavaFormatError` with a coded error helper:
+Extend existing `FormatError` with a coded error helper:
 
 ```go
 // Dedicated coded error helper — auto-populates structured fields
-utils.LavaFormatCodedError(PROTOCOL_CONNECTION_TIMEOUT, err,
+utils.FormatCodedError(PROTOCOL_CONNECTION_TIMEOUT, err,
     utils.LogAttr("provider", providerAddr),
 )
 ```
@@ -521,7 +521,7 @@ Log output automatically includes:
 - [x] Write table-driven fixture tests that run every fixture through `ClassifyError` and assert expected Lava error code
 
 ### Phase 2: Logging Integration
-- [x] Add `LavaFormatCodedError` helper to `utils/lavalog.go` that takes a `LavaError` code
+- [x] Add `FormatCodedError` helper to `utils/lavalog.go` that takes a `LavaError` code
 - [x] Ensure coded errors emit `error_code`, `error_name`, `error_category`, `retryable`, `chain_error_code`, `chain_error_message` fields in structured logs
 - [x] Add Prometheus counter that auto-increments per error code (`smartrouter_errors_total{code, name, category, retryable, chain_id}`)
 - [x] Write unit tests for coded error logging

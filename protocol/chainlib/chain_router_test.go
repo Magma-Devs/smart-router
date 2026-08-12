@@ -19,9 +19,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1239,18 +1239,18 @@ func TestMain(m *testing.M) {
 		_, err := rpcclient.DialContext(ctx, listenerAddressHttp, nil)
 		_, err2 := rpcclient.DialContext(ctx, listenerAddressWs, nil)
 		if err2 != nil {
-			utils.LavaFormatDebug("waiting for grpc server to launch")
+			utils.FormatDebug("waiting for grpc server to launch")
 			continue
 		}
 		if err != nil {
-			utils.LavaFormatDebug("waiting for grpc server to launch")
+			utils.FormatDebug("waiting for grpc server to launch")
 			continue
 		}
 		cancel()
 		break
 	}
 
-	utils.LavaFormatDebug("listening on", utils.LogAttr("address", listenerAddressHttp))
+	utils.FormatDebug("listening on", utils.LogAttr("address", listenerAddressHttp))
 
 	// Start running tests.
 	code := m.Run()

@@ -42,7 +42,7 @@ func (asps *ActiveSubscriptionProvidersStorage) RemoveProvider(providerAddress s
 			delete(asps.providers, providerAddress)
 			purgeCallBack, foundPurgerCb := asps.purgeWhenDone[providerAddress]
 			if foundPurgerCb {
-				utils.LavaFormatTrace("RemoveProvider, Purging provider on callback", utils.LogAttr("address", providerAddress))
+				utils.FormatTrace("RemoveProvider, Purging provider on callback", utils.LogAttr("address", providerAddress))
 				if purgeCallBack != nil {
 					purgeCallBack()
 				}
@@ -50,7 +50,7 @@ func (asps *ActiveSubscriptionProvidersStorage) RemoveProvider(providerAddress s
 			}
 		} else {
 			// Reduce number of active subscriptions on this provider address
-			utils.LavaFormatTrace("RemoveProvider, Reducing number of active provider subscriptions", utils.LogAttr("address", providerAddress))
+			utils.FormatTrace("RemoveProvider, Reducing number of active provider subscriptions", utils.LogAttr("address", providerAddress))
 			asps.providers[providerAddress] = activeSubscriptions - 1
 		}
 	}

@@ -121,7 +121,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 	}
 	// Check batch size limit
 	if MaxBatchRequestSize > 0 && len(msgs) > MaxBatchRequestSize {
-		return nil, utils.LavaFormatWarning("batch request size exceeded", ErrBatchRequestSizeExceeded,
+		return nil, utils.FormatWarning("batch request size exceeded", ErrBatchRequestSizeExceeded,
 			utils.LogAttr("batchSize", len(msgs)),
 			utils.LogAttr("maxAllowed", MaxBatchRequestSize),
 		)
@@ -140,7 +140,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		// Check api is supported and save it in nodeMsg
 		apiCont, err := apip.getSupportedApi(msg.Method, connectionType, internalPath)
 		if err != nil {
-			utils.LavaFormatError("getSupportedApi jsonrpc failed",
+			utils.FormatError("getSupportedApi jsonrpc failed",
 				err,
 				utils.LogAttr("method", msg.Method),
 				utils.LogAttr("connectionType", connectionType),
@@ -173,7 +173,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			parsedBlock, err := msg.ParseBlock(overwriteReqBlock)
 			parsedInput.SetBlock(parsedBlock)
 			if err != nil {
-				utils.LavaFormatError("failed parsing block from an overwrite header", err,
+				utils.FormatError("failed parsing block from an overwrite header", err,
 					utils.LogAttr("chain", apip.spec.Name),
 					utils.LogAttr("overwriteReqBlock", overwriteReqBlock),
 				)
@@ -193,7 +193,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		if msg.Method == "eth_call" && parsedBlock >= 0 &&
 			extensionInfo.LatestBlock > ethCallArchiveBlockDepth &&
 			uint64(parsedBlock) < extensionInfo.LatestBlock-ethCallArchiveBlockDepth {
-			utils.LavaFormatInfo("adding extension requirement to archive since block is 127 before lastest block")
+			utils.FormatInfo("adding extension requirement to archive since block is 127 before lastest block")
 			// change to archive
 			extensionInfo.AdditionalExtensions = append(extensionInfo.AdditionalExtensions, extensionslib.ArchiveExtension)
 		}
@@ -206,7 +206,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
-				utils.LavaFormatFatal("invalid parsing, api is nil", nil)
+				utils.FormatFatal("invalid parsing, api is nil", nil)
 			}
 			// on a batch request we need to do the following:
 			// 1. create a new api object, since it's not a single one
@@ -218,7 +218,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			category = category.Combine(apiCont.api.GetCategory())
 			if apiCollectionForMessage.CollectionData.AddOn != "" && apiCollectionForMessage.CollectionData.AddOn != apiCollection.CollectionData.AddOn {
 				if apiCollection.CollectionData.AddOn != "" {
-					return nil, utils.LavaFormatError("unable to parse batch request with api from multiple addons", nil,
+					return nil, utils.FormatError("unable to parse batch request with api from multiple addons", nil,
 						utils.Attribute{Key: "first addon", Value: apiCollection.CollectionData.AddOn},
 						utils.Attribute{Key: "second addon", Value: apiCollectionForMessage.CollectionData.AddOn})
 				}
@@ -425,8 +425,8 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			rateLimit = 0
 		}
 
-		utils.LavaFormatDebug("jsonrpc websocket opened", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
-		defer utils.LavaFormatDebug("jsonrpc websocket closed", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
+		utils.FormatDebug("jsonrpc websocket opened", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
+		defer utils.FormatDebug("jsonrpc websocket closed", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
 
 		consumerWebsocketManager := NewConsumerWebsocketManager(ConsumerWebsocketManagerOptions{
 			WebsocketConn:          websocketConn,
@@ -481,7 +481,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		}
 
 		path := "/" + fiberCtx.Params("*")
-		utils.LavaFormatInfo("Consumer received a new JSON-RPC request",
+		utils.FormatInfo("Consumer received a new JSON-RPC request",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
 			utils.LogAttr(utils.KEY_TASK_ID, ctx),
@@ -539,7 +539,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		response := checkUTXOResponseAndFixReply(chainID, reply.Data)
 		// Log request and response — gate the string conversion behind the
 		// debug-level check because LogRequestAndResponse routes the happy path
-		// through LavaFormatDebug. At info/warn+ the value is never emitted,
+		// through FormatDebug. At info/warn+ the value is never emitted,
 		// but Go evaluates arguments eagerly, so a blind string(response) would
 		// still allocate a full copy of every reply body on the hot path.
 		var loggedResponse string
@@ -590,7 +590,7 @@ type JrpcChainProxy struct {
 
 func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
 	if len(rpcProviderEndpoint.NodeUrls) == 0 {
-		return nil, utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+		return nil, utils.FormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
 	}
 	_, averageBlockTime, _, _ := chainParser.ChainBlockStats()
 
@@ -619,7 +619,7 @@ func (cp *JrpcChainProxy) start(ctx context.Context, nConns uint, nodeUrl common
 		if parseErr == nil && isWs {
 			newUrl := strings.TrimSuffix(nodeUrl.Url, "/") + "/ws"
 			originalUrl := nodeUrl.Url
-			utils.LavaFormatWarning("Failed creating connector for ws, trying to create with /ws path", err, utils.LogAttr("url", nodeUrl.UrlStr()), utils.LogAttr("newUrl", newUrl))
+			utils.FormatWarning("Failed creating connector for ws, trying to create with /ws path", err, utils.LogAttr("url", nodeUrl.UrlStr()), utils.LogAttr("newUrl", newUrl))
 			nodeUrl.Url = newUrl
 			conn, newConnErr := chainproxy.NewConnector(ctx, nConns, nodeUrl)
 			if newConnErr == nil {
@@ -708,10 +708,10 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		// this could be a batch message
 		batchMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.JsonrpcBatchMessage)
 		if !ok {
-			return nil, "", nil, utils.LavaFormatError("invalid message type in jsonrpc failed to cast JsonrpcMessage or JsonrpcBatchMessage from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
+			return nil, "", nil, utils.FormatError("invalid message type in jsonrpc failed to cast JsonrpcMessage or JsonrpcBatchMessage from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
 		}
 		if ch != nil {
-			return nil, "", nil, utils.LavaFormatError("does not support subscribe in a batch", nil)
+			return nil, "", nil, utils.FormatError("does not support subscribe in a batch", nil)
 		}
 		reply, err := cp.sendBatchMessage(ctx, batchMessage, chainMessage)
 		return reply, "", nil, err
@@ -755,7 +755,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		if nodeErr != nil {
 			// here we are getting an error for every code that is not 200-300
 			if errors.Is(nodeErr, common.StatusCodeError504) || errors.Is(nodeErr, common.StatusCodeError429) || errors.Is(nodeErr, common.StatusCodeErrorStrict) {
-				return nil, "", nil, utils.LavaFormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
+				return nil, "", nil, utils.FormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
 			}
 			// Validate if the error is related to the provider connection to the node or it is a valid error
 			// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
@@ -771,14 +771,14 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		// try to parse node error as json message
 		rpcMessage = TryRecoverNodeErrorFromClientError(nodeErr)
 		if rpcMessage == nil {
-			utils.LavaFormatDebug("got error from node", utils.LogAttr("GUID", ctx), utils.LogAttr("nodeErr", nodeErr), utils.LogAttr("nodeUrl", cp.NodeUrl.Url))
+			utils.FormatDebug("got error from node", utils.LogAttr("GUID", ctx), utils.LogAttr("nodeErr", nodeErr), utils.LogAttr("nodeUrl", cp.NodeUrl.Url))
 			return nil, "", nil, nodeErr
 		}
 	}
 
 	replyMsg, err = rpcInterfaceMessages.ConvertJsonRPCMsg(rpcMessage)
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("jsonRPC error", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, "", nil, utils.FormatError("jsonRPC error", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 
 	// validate result is valid
@@ -797,7 +797,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		if replyMsg.Error != nil {
 			responseError = replyMsg.Error.Message
 		}
-		return nil, "", nil, utils.LavaFormatError("jsonRPC ID mismatch error", err,
+		return nil, "", nil, utils.FormatError("jsonRPC ID mismatch error", err,
 			utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx},
 			utils.Attribute{Key: "nodeMessageRequestId", Value: nodeMessage.ID},
 			utils.Attribute{Key: "responseId", Value: rpcMessage.ID},
@@ -832,7 +832,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		if common.IsQuoted(string(replyMsg.Result)) {
 			subscriptionID, err = strconv.Unquote(string(replyMsg.Result))
 			if err != nil {
-				return nil, "", nil, utils.LavaFormatError("Subscription failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+				return nil, "", nil, utils.FormatError("Subscription failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 			}
 		} else {
 			subscriptionID = string(replyMsg.Result)

@@ -96,7 +96,7 @@ func NewConnector(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (*Co
 	}
 
 	connector.client = rpcClient
-	utils.LavaFormatInfo("Created HTTP connector with shared client",
+	utils.FormatInfo("Created HTTP connector with shared client",
 		utils.Attribute{Key: "url", Value: connector.nodeUrl.String()})
 
 	// Start the connector loop to handle graceful shutdown
@@ -135,19 +135,19 @@ func (connector *Connector) createConnection(ctx context.Context, nodeUrl common
 			return rpcClient, nil
 		}
 
-		utils.LavaFormatDebug("Failed to create connection, retrying",
+		utils.FormatDebug("Failed to create connection, retrying",
 			utils.Attribute{Key: "attempt", Value: attempt},
 			utils.Attribute{Key: "error", Value: err.Error()},
 			utils.Attribute{Key: "url", Value: nodeUrl.UrlStr()})
 	}
 
-	return nil, utils.LavaFormatError("Failed to create connection after max attempts",
+	return nil, utils.FormatError("Failed to create connection after max attempts",
 		err, utils.Attribute{Key: "url", Value: nodeUrl.UrlStr()})
 }
 
 func (connector *Connector) connectorLoop(ctx context.Context) {
 	<-ctx.Done()
-	utils.LavaFormatDebug("HTTP connector shutting down", utils.Attribute{Key: "url", Value: connector.nodeUrl.String()})
+	utils.FormatDebug("HTTP connector shutting down", utils.Attribute{Key: "url", Value: connector.nodeUrl.String()})
 	connector.Close()
 }
 
@@ -248,7 +248,7 @@ func NewGRPCConnector(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl
 
 	rpcClient, err := connector.createConnection(dialCtx, nodeUrl, connector.numberOfFreeClients())
 	if err != nil {
-		return nil, utils.LavaFormatError("grpc failed to create the first connection", err, utils.Attribute{Key: "address", Value: nodeUrl.UrlStr()})
+		return nil, utils.FormatError("grpc failed to create the first connection", err, utils.Attribute{Key: "address", Value: nodeUrl.UrlStr()})
 	}
 	connector.addClient(rpcClient)
 	go addClientsAsynchronouslyGrpc(lifetimeCtx, connector, nConns-1, nodeUrl)
@@ -273,7 +273,7 @@ func getTlsConf(nodeUrl common.NodeUrl) *tls.Config {
 	var tlsConf tls.Config
 	cacert := nodeUrl.AuthConfig.GetCaCertificateParams()
 	if cacert != "" {
-		utils.LavaFormatDebug("Loading ca certificate from local path", utils.Attribute{Key: "cacert", Value: cacert})
+		utils.FormatDebug("Loading ca certificate from local path", utils.Attribute{Key: "cacert", Value: cacert})
 		caCert, err := os.ReadFile(cacert)
 		if err == nil {
 			caCertPool := x509.NewCertPool()
@@ -281,15 +281,15 @@ func getTlsConf(nodeUrl common.NodeUrl) *tls.Config {
 			tlsConf.RootCAs = caCertPool
 			tlsConf.InsecureSkipVerify = true
 		} else {
-			utils.LavaFormatError("Failed loading CA certificate, continuing with a default certificate", err)
+			utils.FormatError("Failed loading CA certificate, continuing with a default certificate", err)
 		}
 	} else {
 		keyPem, certPem := nodeUrl.AuthConfig.GetLoadingCertificateParams()
 		if keyPem != "" && certPem != "" {
-			utils.LavaFormatDebug("Loading certificate from local path", utils.Attribute{Key: "certPem", Value: certPem}, utils.Attribute{Key: "keyPem", Value: keyPem})
+			utils.FormatDebug("Loading certificate from local path", utils.Attribute{Key: "certPem", Value: certPem}, utils.Attribute{Key: "keyPem", Value: keyPem})
 			cert, err := tls.LoadX509KeyPair(certPem, keyPem)
 			if err != nil {
-				utils.LavaFormatError("Failed setting up tls certificate from local path, continuing with dynamic certificates", err)
+				utils.FormatError("Failed setting up tls certificate from local path, continuing with dynamic certificates", err)
 			} else {
 				tlsConf.Certificates = []tls.Certificate{cert}
 			}
@@ -342,7 +342,7 @@ func grpcDialAddress(url string) (addr string, impliesTLS bool) {
 }
 
 func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, numberOfFreeClients int) {
-	utils.LavaFormatDebug("increasing number of clients", utils.Attribute{Key: "numberOfFreeClients", Value: numberOfFreeClients},
+	utils.FormatDebug("increasing number of clients", utils.Attribute{Key: "numberOfFreeClients", Value: numberOfFreeClients},
 		utils.Attribute{Key: "url", Value: connector.nodeUrl.Url})
 	if connector.isClosed() {
 		return // the pool is being torn down; dialing now would only resurrect it
@@ -354,7 +354,7 @@ func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, num
 		dialAddr, _ := grpcDialAddress(connector.nodeUrl.Url)
 		grpcClient, err = grpc.DialContext(nctx, dialAddr, connector.grpcDialOptions(connector.getTransportCredentials())...)
 		if err != nil {
-			utils.LavaFormatDebug("increaseNumberOfClients, Could not connect to the node, retrying", []utils.Attribute{{Key: "err", Value: err.Error()}, {Key: "Number Of Attempts", Value: connectionAttempt}, {Key: "nodeUrl", Value: connector.nodeUrl.UrlStr()}}...)
+			utils.FormatDebug("increaseNumberOfClients, Could not connect to the node, retrying", []utils.Attribute{{Key: "err", Value: err.Error()}, {Key: "Number Of Attempts", Value: connectionAttempt}, {Key: "nodeUrl", Value: connector.nodeUrl.UrlStr()}}...)
 			cancel()
 			continue
 		}
@@ -372,7 +372,7 @@ func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, num
 		connector.freeClients = append(connector.freeClients, grpcClient)
 		return
 	}
-	utils.LavaFormatDebug("increasing number of clients failed")
+	utils.FormatDebug("increasing number of clients failed")
 }
 
 func (connector *GRPCConnector) GetRpc(ctx context.Context, block bool) (*grpc.ClientConn, error) {
@@ -479,7 +479,7 @@ func (connector *GRPCConnector) Close() {
 
 		if connector.usedClients > 0 {
 			if i > 10 {
-				utils.LavaFormatError("stuck while closing grpc connector", nil, utils.LogAttr("freeClients", connector.freeClients), utils.LogAttr("usedClients", connector.usedClients))
+				utils.FormatError("stuck while closing grpc connector", nil, utils.LogAttr("freeClients", connector.freeClients), utils.LogAttr("usedClients", connector.usedClients))
 			}
 			connector.lock.Unlock()
 			time.Sleep(100 * time.Millisecond)
@@ -511,25 +511,25 @@ func addClientsAsynchronouslyGrpc(lifetimeCtx context.Context, connector *GRPCCo
 			// A connector closed this early legitimately has no clients — Close
 			// drained them. Reaching the fatal below would turn an ordinary
 			// teardown during startup into a process exit.
-			utils.LavaFormatWarning("gRPC connector closed before the async fill finished", nil,
+			utils.FormatWarning("gRPC connector closed before the async fill finished", nil,
 				utils.LogAttr("address", nodeUrl.UrlStr()),
 			)
 		} else if lifetimeCtx.Err() != nil {
 			// Probe-scoped ctx (validateProvider, etc.) was cancelled before
 			// the async fill produced any client. Caller will treat the
 			// returned error as a probe failure; the process must not exit.
-			utils.LavaFormatWarning("gRPC connector aborted before any connection was built", lifetimeCtx.Err(),
+			utils.FormatWarning("gRPC connector aborted before any connection was built", lifetimeCtx.Err(),
 				utils.LogAttr("address", nodeUrl.UrlStr()),
 			)
 		} else {
-			utils.LavaFormatFatal("Could not create any connections to the node check address", nil,
+			utils.FormatFatal("Could not create any connections to the node check address", nil,
 				utils.Attribute{Key: "address", Value: nodeUrl.UrlStr()},
 			)
 		}
 	}
 	// Read the count through the locked accessor: addClient / GetRpc mutate freeClients under the lock
 	// concurrently, so a bare len(connector.freeClients) here is a data race.
-	utils.LavaFormatInfo("Finished adding clients asynchronously", utils.LogAttr("count", connector.numberOfFreeClients()))
+	utils.FormatInfo("Finished adding clients asynchronously", utils.LogAttr("count", connector.numberOfFreeClients()))
 	go connector.connectorLoop(lifetimeCtx)
 }
 
@@ -590,7 +590,7 @@ func (connector *GRPCConnector) createConnection(ctx context.Context, nodeUrl co
 	for {
 		numberOfConnectionAttempts += 1
 		if numberOfConnectionAttempts > MaximumNumberOfParallelConnectionsAttempts {
-			err = utils.LavaFormatError("Reached maximum number of parallel connections attempts, consider decreasing number of connections",
+			err = utils.FormatError("Reached maximum number of parallel connections attempts, consider decreasing number of connections",
 				nil, utils.Attribute{Key: "Currently Connected", Value: currentNumberOfConnections})
 			return nil, err
 		}
@@ -620,12 +620,12 @@ func (connector *GRPCConnector) createConnection(ctx context.Context, nodeUrl co
 			cancel()
 			if errNew == nil {
 				// this means our endpoint is TLS, and we support upgrading even if the config didn't explicitly say it
-				utils.LavaFormatDebug("upgraded TLS connection for grpc instead of insecure", utils.LogAttr("address", nodeUrl.String()))
+				utils.FormatDebug("upgraded TLS connection for grpc instead of insecure", utils.LogAttr("address", nodeUrl.String()))
 				connector.setCredentials(credentialsToConnect)
 				return rpcClient, nil
 			}
 		}
-		utils.LavaFormatWarning("grpc could not connect to the node, retrying", err, []utils.Attribute{{
+		utils.FormatWarning("grpc could not connect to the node, retrying", err, []utils.Attribute{{
 			Key: "Current Number Of Connections", Value: currentNumberOfConnections,
 		}, {Key: "Number Of Attempts Remaining", Value: numberOfConnectionAttempts}, {Key: "nodeUrl", Value: connector.nodeUrl.UrlStr()}}...)
 	}

@@ -136,7 +136,7 @@ func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
 		}
 
 		if err := stream.SetHeader(md); err != nil {
-			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headers", md))
+			utils.FormatError("Got error when setting header", err, utils.LogAttr("headers", md))
 		}
 		return stream.SendMsg(respBytes)
 	}
@@ -147,7 +147,7 @@ type RawBytesCodec struct{}
 func (RawBytesCodec) Marshal(v interface{}) ([]byte, error) {
 	bytes, ok := v.([]byte)
 	if !ok {
-		return nil, utils.LavaFormatError("cannot encode type", nil, utils.Attribute{Key: "v", Value: v})
+		return nil, utils.FormatError("cannot encode type", nil, utils.Attribute{Key: "v", Value: v})
 	}
 	return bytes, nil
 }
@@ -155,7 +155,7 @@ func (RawBytesCodec) Marshal(v interface{}) ([]byte, error) {
 func (RawBytesCodec) Unmarshal(data []byte, v interface{}) error {
 	bufferPtr, ok := v.(*[]byte)
 	if !ok {
-		return utils.LavaFormatDebug("cannot decode into type", utils.LogAttr("v", v), utils.LogAttr("data", data))
+		return utils.FormatDebug("cannot decode into type", utils.LogAttr("v", v), utils.LogAttr("data", data))
 	}
 	*bufferPtr = data
 	return nil

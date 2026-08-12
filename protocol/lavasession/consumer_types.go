@@ -154,7 +154,7 @@ func (ec *EndpointConnection) decreaseSessionUsingConnection() {
 				return
 			}
 		} else {
-			utils.LavaFormatError("decreaseSessionUsingConnection, Value below 1 is stored in numberOfSessionsUsingThisConnection. it must always be above 1", nil)
+			utils.FormatError("decreaseSessionUsingConnection, Value below 1 is stored in numberOfSessionsUsingThisConnection. it must always be above 1", nil)
 			return
 		}
 	}
@@ -441,7 +441,7 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 	e.mu.Unlock()
 
 	if transitioned {
-		utils.LavaFormatWarning("disabled unhealthy endpoint", nil,
+		utils.FormatWarning("disabled unhealthy endpoint", nil,
 			utils.LogAttr("endpoint", addr),
 			utils.LogAttr("refusals", refusals),
 			utils.LogAttr("is_direct_rpc", isDirect),
@@ -522,7 +522,7 @@ func (e *Endpoint) RecordProbeVerdict(recoveryPoll time.Time, recoveryHealthy bo
 	}
 
 	e.reenableFromProbeLocked()
-	utils.LavaFormatInfo("probe re-enabled recovered endpoint",
+	utils.FormatInfo("probe re-enabled recovered endpoint",
 		utils.LogAttr("endpoint", e.NetworkAddress),
 		utils.LogAttr("is_direct_rpc", e.IsDirectRPC()),
 		utils.LogAttr("re_enable_after_k", effectiveK),
@@ -574,7 +574,7 @@ func (e *Endpoint) ConfirmRelayRecovery() bool {
 	addr, isDirect, flaps := e.NetworkAddress, e.IsDirectRPC(), e.reenableProbeFlaps
 	e.mu.Unlock()
 
-	utils.LavaFormatInfo("probe re-enabled recovered endpoint",
+	utils.FormatInfo("probe re-enabled recovered endpoint",
 		utils.LogAttr("endpoint", addr),
 		utils.LogAttr("is_direct_rpc", isDirect),
 		utils.LogAttr("relay_probe", "confirmed"),
@@ -612,14 +612,14 @@ func (e *Endpoint) RelayProbeFailed() {
 	e.mu.Unlock()
 
 	if evidenceDropped {
-		utils.LavaFormatWarning("relay probe evidence dropped after repeated failed replays, falling back to poll-only re-enable", nil,
+		utils.FormatWarning("relay probe evidence dropped after repeated failed replays, falling back to poll-only re-enable", nil,
 			utils.LogAttr("endpoint", addr),
 			utils.LogAttr("max_replay_attempts", maxRelayProbeAttempts),
 			utils.LogAttr("reenable_probe_flaps", flaps),
 		)
 		return
 	}
-	utils.LavaFormatInfo("relay probe still failing, endpoint stays disabled",
+	utils.FormatInfo("relay probe still failing, endpoint stays disabled",
 		utils.LogAttr("endpoint", addr),
 		utils.LogAttr("method", method),
 		utils.LogAttr("replay_attempts", attempts),
@@ -647,13 +647,13 @@ func (e *Endpoint) RelayProbeInconclusive() {
 	e.mu.Unlock()
 
 	if evidenceDropped {
-		utils.LavaFormatWarning("relay probe evidence dropped after repeated inconclusive replays, falling back to poll-only re-enable", nil,
+		utils.FormatWarning("relay probe evidence dropped after repeated inconclusive replays, falling back to poll-only re-enable", nil,
 			utils.LogAttr("endpoint", addr),
 			utils.LogAttr("max_replay_attempts", maxRelayProbeAttempts),
 		)
 		return
 	}
-	utils.LavaFormatInfo("relay probe inconclusive, endpoint stays disabled",
+	utils.FormatInfo("relay probe inconclusive, endpoint stays disabled",
 		utils.LogAttr("endpoint", addr),
 		utils.LogAttr("method", method),
 		utils.LogAttr("replay_attempts", attempts),
@@ -700,12 +700,12 @@ func (e *Endpoint) ResetHealth() bool {
 	if wasEnabled {
 		// Already enabled with a nonzero refusal count — typically a probe-granted trial budget
 		// (reenableFromProbeLocked) that a real relay just validated. Not a re-enable transition.
-		utils.LavaFormatDebug("relay success validated endpoint, full health restored",
+		utils.FormatDebug("relay success validated endpoint, full health restored",
 			utils.LogAttr("endpoint", addr),
 			utils.LogAttr("is_direct_rpc", isDirect),
 		)
 	} else {
-		utils.LavaFormatInfo("re-enabled healthy endpoint",
+		utils.FormatInfo("re-enabled healthy endpoint",
 			utils.LogAttr("endpoint", addr),
 			utils.LogAttr("is_direct_rpc", isDirect),
 		)
@@ -836,7 +836,7 @@ func (cswp *ConsumerSessionsWithProvider) IsSupportingExtensions(extensions []st
 
 	// Debug logging for archive extension filtering
 	if len(extensions) > 0 {
-		utils.LavaFormatTrace("[Archive Debug] Checking extensions support",
+		utils.FormatTrace("[Archive Debug] Checking extensions support",
 			utils.LogAttr("providerAddress", cswp.PublicLavaAddress),
 			utils.LogAttr("requestedExtensions", extensions),
 			utils.LogAttr("endpointExtensions", cswp.Endpoints),
@@ -848,7 +848,7 @@ endpointLoop:
 		for _, extension := range extensions {
 			if _, ok := endpoint.Extensions[extension]; !ok {
 				// doesn't support the extension required, continue to next endpoint
-				utils.LavaFormatTrace("[Archive Debug] Extension not supported",
+				utils.FormatTrace("[Archive Debug] Extension not supported",
 					utils.LogAttr("providerAddress", cswp.PublicLavaAddress),
 					utils.LogAttr("extension", extension),
 					utils.LogAttr("endpointExtensions", endpoint.Extensions),
@@ -857,14 +857,14 @@ endpointLoop:
 			}
 		}
 		// get here only if all extensions are supported in the endpoint
-		utils.LavaFormatTrace("[Archive Debug] All extensions supported",
+		utils.FormatTrace("[Archive Debug] All extensions supported",
 			utils.LogAttr("providerAddress", cswp.PublicLavaAddress),
 			utils.LogAttr("extensions", extensions),
 			utils.LogAttr("GUID", ctx))
 		return true
 	}
 
-	utils.LavaFormatTrace("[Archive Debug] No endpoint supports all extensions",
+	utils.FormatTrace("[Archive Debug] No endpoint supports all extensions",
 		utils.LogAttr("providerAddress", cswp.PublicLavaAddress),
 		utils.LogAttr("extensions", extensions),
 		utils.LogAttr("GUID", ctx))
@@ -891,7 +891,7 @@ func (cswp *ConsumerSessionsWithProvider) validateComputeUnits(cu uint64, virtua
 	defer cswp.Lock.RUnlock()
 	// add additional CU for virtual epochs
 	if (cswp.UsedComputeUnits + cu) > cswp.MaxComputeUnits*(virtualEpoch+1) {
-		return utils.LavaFormatWarning("validateComputeUnits", MaxComputeUnitsExceededError,
+		return utils.FormatWarning("validateComputeUnits", MaxComputeUnitsExceededError,
 			utils.LogAttr("cu", cswp.UsedComputeUnits+cu),
 			utils.LogAttr("maxCu", cswp.MaxComputeUnits*(virtualEpoch+1)),
 			utils.LogAttr("virtualEpoch", virtualEpoch),
@@ -1064,7 +1064,7 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 
 	consumerSession.TryUseSession()                            // we must lock the session so other requests wont get it.
 	cswp.Sessions[consumerSession.SessionId] = consumerSession // applying the session to the pool of sessions.
-	utils.LavaFormatTrace("GetConsumerSessionInstanceFromEndpoint returning session",
+	utils.FormatTrace("GetConsumerSessionInstanceFromEndpoint returning session",
 		utils.LogAttr("provider", cswp.PublicLavaAddress),
 		utils.LogAttr("pairingEpoch", cswp.PairingEpoch),
 		utils.LogAttr("sessionId", consumerSession.SessionId),
@@ -1079,7 +1079,7 @@ func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos [
 
 	// validate we do not overflow no matter what.
 	if len(endpointInfos) > len(cswp.Endpoints) {
-		utils.LavaFormatError("Not suppose to have larger endpointInfos length than cswp.Endpoints length", nil, utils.LogAttr("endpointInfos", endpointInfos), utils.LogAttr("cswp.Endpoints", cswp.Endpoints))
+		utils.FormatError("Not suppose to have larger endpointInfos length than cswp.Endpoints length", nil, utils.LogAttr("endpointInfos", endpointInfos), utils.LogAttr("cswp.Endpoints", cswp.Endpoints))
 		return
 	}
 
@@ -1153,7 +1153,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 				continue
 			}
 			if retryDisabledEndpoints {
-				utils.LavaFormatDebug("retrying to connect to disabled endpoint", utils.LogAttr("endpoint", endpoint.NetworkAddress), utils.LogAttr("provider", cswp.PublicLavaAddress), utils.LogAttr("GUID", ctx))
+				utils.FormatDebug("retrying to connect to disabled endpoint", utils.LogAttr("endpoint", endpoint.NetworkAddress), utils.LogAttr("provider", cswp.PublicLavaAddress), utils.LogAttr("GUID", ctx))
 			}
 
 			// check endpoint supports the requested addons
@@ -1188,14 +1188,14 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					// case — and lets a nil element fall through to the (nil, false) skip below
 					// instead of panicking the relay goroutine.
 					if len(endpoint.DirectConnections) > 0 && endpoint.DirectConnections[0] != nil {
-						utils.LavaFormatTrace("using direct RPC connection",
+						utils.FormatTrace("using direct RPC connection",
 							utils.LogAttr("url", endpoint.DirectConnections[0].GetURL()),
 							utils.LogAttr("protocol", endpoint.DirectConnections[0].GetProtocol()),
 							utils.LogAttr("GUID", ctx),
 						)
 						return nil, true
 					}
-					utils.LavaFormatWarning("direct RPC endpoint has no connection object", nil,
+					utils.FormatWarning("direct RPC endpoint has no connection object", nil,
 						utils.LogAttr("endpoint", endpoint.NetworkAddress),
 						utils.LogAttr("GUID", ctx),
 					)
@@ -1220,7 +1220,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					} else {
 						deadConnectionCount++
 						// Log cleanup for visibility
-						utils.LavaFormatDebug("Cleaning up dead connection",
+						utils.FormatDebug("Cleaning up dead connection",
 							utils.LogAttr("provider", cswp.PublicLavaAddress),
 							utils.LogAttr("endpoint", endpoint.NetworkAddress),
 							utils.LogAttr("reason", func() string {
@@ -1239,7 +1239,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 				// Update endpoint connections with cleaned list
 				if deadConnectionCount > 0 {
 					endpoint.Connections = cleanedConnections
-					utils.LavaFormatDebug("Cleaned up dead connections",
+					utils.FormatDebug("Cleaned up dead connections",
 						utils.LogAttr("provider", cswp.PublicLavaAddress),
 						utils.LogAttr("endpoint", endpoint.NetworkAddress),
 						utils.LogAttr("removedCount", deadConnectionCount),
@@ -1253,7 +1253,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					if endpointConnection.Client != nil && endpointConnection.connection != nil && !endpointConnection.disconnected {
 						// Check if the endpoint is not blocked
 						if endpointConnection.blockListed.Load() {
-							utils.LavaFormatDebug("Skipping provider's endpoint as its block listed", utils.LogAttr("address", endpoint.NetworkAddress), utils.LogAttr("PublicLavaAddress", cswp.PublicLavaAddress), utils.LogAttr("GUID", ctx))
+							utils.FormatDebug("Skipping provider's endpoint as its block listed", utils.LogAttr("address", endpoint.NetworkAddress), utils.LogAttr("PublicLavaAddress", cswp.PublicLavaAddress), utils.LogAttr("GUID", ctx))
 							continue
 						}
 						connectionState := endpointConnection.connection.GetState()
@@ -1294,7 +1294,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					// is NOT exempt here — a slow/unreachable endpoint should still
 					// increment refusals.
 					if common.IsClientCancellation(err, ctx) {
-						utils.LavaFormatDebug("skipping ConnectionRefusals increment: request context canceled (client disconnect)",
+						utils.FormatDebug("skipping ConnectionRefusals increment: request context canceled (client disconnect)",
 							utils.LogAttr("err", err),
 							utils.LogAttr("ctx_err", ctx.Err()),
 							utils.LogAttr("provider endpoint", networkAddress),
@@ -1303,7 +1303,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 						return nil, false
 					}
 					endpoint.ConnectionRefusals++
-					utils.LavaFormatInfo("error connecting to provider",
+					utils.FormatInfo("error connecting to provider",
 						utils.LogAttr("err", err),
 						utils.LogAttr("provider endpoint", networkAddress),
 						utils.LogAttr("providerName", cswp.PublicLavaAddress),
@@ -1323,7 +1323,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 							endpoint.disabledAt = time.Now()
 							endpoint.clearRecoveryStreakLocked()
 						}
-						utils.LavaFormatWarning("disabling provider endpoint for the duration of current epoch.", nil,
+						utils.FormatWarning("disabling provider endpoint for the duration of current epoch.", nil,
 							utils.LogAttr("Endpoint", networkAddress),
 							utils.LogAttr("address", cswp.PublicLavaAddress),
 							utils.LogAttr("GUID", ctx),
@@ -1377,7 +1377,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 	var allDisabled bool
 	connected, endpointsList, allDisabled = getConnectionFromConsumerSessionsWithProvider(ctx)
 	if allDisabled {
-		utils.LavaFormatInfo("purging provider after all endpoints are disabled",
+		utils.FormatInfo("purging provider after all endpoints are disabled",
 			utils.LogAttr("provider endpoints", cswp.Endpoints),
 			utils.LogAttr("providerName", cswp.PublicLavaAddress),
 			utils.LogAttr("GUID", ctx),

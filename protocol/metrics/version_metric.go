@@ -21,7 +21,7 @@ func SetVersionInner(protocolVersionMetric *prometheus.GaugeVec, version string)
 	var major, minor, patch int
 	_, err := fmt.Sscanf(cleaned, "%d.%d.%d", &major, &minor, &patch)
 	if err != nil {
-		utils.LavaFormatError("Failed parsing version at metrics manager", err, utils.LogAttr("version", version))
+		utils.FormatError("Failed parsing version at metrics manager", err, utils.LogAttr("version", version))
 		protocolVersionMetric.WithLabelValues("version").Set(0)
 		return
 	}

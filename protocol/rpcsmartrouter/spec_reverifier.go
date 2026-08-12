@@ -180,7 +180,7 @@ func applyReverification(
 			healthyNames[p.Name] = struct{}{}
 			if !wasActive {
 				toAdmit = append(toAdmit, p)
-				utils.LavaFormatInfo("re-verify: "+tier.String()+" provider recovered",
+				utils.FormatInfo("re-verify: "+tier.String()+" provider recovered",
 					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 					utils.LogAttr("provider", p.Name),
 				)
@@ -191,7 +191,7 @@ func applyReverification(
 			// Already out of the pairing — nothing to demote, and the streak governs only the
 			// demote decision, so keep it clear (a later promote then gets a full grace budget).
 			delete(inputs.demoteFailStreak, streakKey)
-			utils.LavaFormatDebug("re-verify: failed-init "+tier.String()+" still failing",
+			utils.FormatDebug("re-verify: failed-init "+tier.String()+" still failing",
 				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 				utils.LogAttr("provider", p.Name),
 				utils.LogAttr("err", err.Error()),
@@ -205,7 +205,7 @@ func applyReverification(
 		streak := inputs.demoteFailStreak[streakKey]
 		if streak < reverifyDemoteThreshold {
 			healthyNames[p.Name] = struct{}{} // grace: stays paired this cycle
-			utils.LavaFormatWarning("re-verify: active "+tier.String()+" failed but kept — under demote threshold", err,
+			utils.FormatWarning("re-verify: active "+tier.String()+" failed but kept — under demote threshold", err,
 				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 				utils.LogAttr("provider", p.Name),
 				utils.LogAttr("consecutiveFailures", streak),
@@ -214,7 +214,7 @@ func applyReverification(
 			continue
 		}
 		delete(inputs.demoteFailStreak, streakKey)
-		utils.LavaFormatWarning("re-verify: demoting active "+tier.String(), err,
+		utils.FormatWarning("re-verify: demoting active "+tier.String(), err,
 			utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 			utils.LogAttr("provider", p.Name),
 			utils.LogAttr("consecutiveFailures", streak),
@@ -290,7 +290,7 @@ func closeDemotedDirectConnections(demoted []*lavasession.ConsumerSessionsWithPr
 					continue
 				}
 				if err := dc.Close(); err != nil {
-					utils.LavaFormatDebug("re-verify: error closing demoted direct connection",
+					utils.FormatDebug("re-verify: error closing demoted direct connection",
 						utils.LogAttr("provider", s.PublicLavaAddress),
 						utils.LogAttr("url", dc.GetURL()),
 						utils.LogAttr("err", err.Error()),
@@ -346,7 +346,7 @@ func validateProviderTier(
 		}
 	}
 
-	utils.LavaFormatInfo("Validating providers",
+	utils.FormatInfo("Validating providers",
 		utils.LogAttr("chain", rpcEndpoint.ChainID),
 		utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 		utils.LogAttr("tier", tier.String()),
@@ -372,14 +372,14 @@ func validateProviderTier(
 		if err := results[i]; err != nil {
 			failedSet[p] = struct{}{}
 			failedOrdered = append(failedOrdered, p)
-			utils.LavaFormatWarning("provider validation failed — excluding from provider list", err,
+			utils.FormatWarning("provider validation failed — excluding from provider list", err,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("tier", tier.String()),
 				utils.LogAttr("provider", p.Name),
 			)
 			continue
 		}
-		utils.LavaFormatInfo("Provider validated successfully",
+		utils.FormatInfo("Provider validated successfully",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("tier", tier.String()),
 			utils.LogAttr("provider", p.Name),

@@ -121,7 +121,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCKNUM.String()
 	if !ok {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" tag function not found", nil,
+		return spectypes.NOT_APPLICABLE, utils.FormatError(tagName+" tag function not found", nil,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 		)
@@ -132,7 +132,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 	// Build the request body from the function template.
 	requestData, ok := blockNumRequestBody(ecf.apiInterface, parsing.FunctionTemplate)
 	if !ok {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" missing function template", nil,
+		return spectypes.NOT_APPLICABLE, utils.FormatError(tagName+" missing function template", nil,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 		)
@@ -143,7 +143,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 	responseData, err := ecf.sendRawRequest(ctx, requestData, collectionData.Type, parsing.ApiName, metrics.TrackerRequestKindLatestBlock)
 	pollLatency = time.Since(reqStart)
 	if err != nil {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebug(tagName+" failed sending request",
+		return spectypes.NOT_APPLICABLE, utils.FormatDebug(tagName+" failed sending request",
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 			utils.LogAttr("endpoint", ecf.endpointURL),
@@ -159,7 +159,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 	}
 	chainMessage, err := chainlib.CraftChainMessage(parsing, collectionData.Type, ecf.chainParser, craftData, ecf.chainFetcherMetadata())
 	if err != nil {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" failed creating chainMessage for parsing", err,
+		return spectypes.NOT_APPLICABLE, utils.FormatError(tagName+" failed creating chainMessage for parsing", err,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 		)
@@ -177,7 +177,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 	// Parse the response using spec-driven rules
 	parserInput, err := chainlib.FormatResponseForParsing(&pairingtypes.RelayReply{Data: responseData}, chainMessage)
 	if err != nil {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebug(tagName+" failed formatResponseForParsing",
+		return spectypes.NOT_APPLICABLE, utils.FormatDebug(tagName+" failed formatResponseForParsing",
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
 			utils.LogAttr("method", parsing.ApiName),
@@ -189,7 +189,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 	parsedInput := parser.ParseBlockFromReply(parserInput, parsing.ResultParsing, parsing.Parsers)
 	blockNum = parsedInput.GetBlock()
 	if blockNum == spectypes.NOT_APPLICABLE {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebug(tagName+" failed to parse response",
+		return spectypes.NOT_APPLICABLE, utils.FormatDebug(tagName+" failed to parse response",
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
 			utils.LogAttr("method", parsing.ApiName),
@@ -213,7 +213,7 @@ func (ecf *EndpointPoller) FetchBlockHashByNum(ctx context.Context, blockNum int
 	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM.String()
 	if !ok {
-		return "", utils.LavaFormatError(tagName+" tag function not found", nil,
+		return "", utils.FormatError(tagName+" tag function not found", nil,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 		)
@@ -222,14 +222,14 @@ func (ecf *EndpointPoller) FetchBlockHashByNum(ctx context.Context, blockNum int
 	collectionData := apiCollection.CollectionData
 
 	if parsing.FunctionTemplate == "" {
-		return "", utils.LavaFormatError(tagName+" missing function template", nil,
+		return "", utils.FormatError(tagName+" missing function template", nil,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 		)
 	}
 
 	if blockNum < 0 {
-		return "", utils.LavaFormatError(tagName+" invalid negative block number", nil,
+		return "", utils.FormatError(tagName+" invalid negative block number", nil,
 			utils.LogAttr("blockNum", blockNum),
 			utils.LogAttr("chainID", ecf.chainID),
 		)
@@ -245,14 +245,14 @@ func (ecf *EndpointPoller) FetchBlockHashByNum(ctx context.Context, blockNum int
 	}
 	hash, fetchedBlock, err := chainlib.FetchBlockHashWithSolanaRetry(ctx, blockNum, chainlib.SameSlotRetryDelay, fetchFn)
 	if err != nil {
-		return "", utils.LavaFormatError(tagName+" all block-not-available retries exhausted", err,
+		return "", utils.FormatError(tagName+" all block-not-available retries exhausted", err,
 			utils.LogAttr("originalBlock", blockNum),
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
 		)
 	}
 	if fetchedBlock != blockNum {
-		utils.LavaFormatWarning("Chain Tracker fetched previous slot after block-not-available",
+		utils.FormatWarning("Chain Tracker fetched previous slot after block-not-available",
 			nil,
 			utils.LogAttr("originalBlock", blockNum),
 			utils.LogAttr("fetchedBlock", fetchedBlock),
@@ -278,7 +278,7 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 	responseData, err := ecf.sendRawRequest(ctx, requestData, connectionType, parsing.ApiName, metrics.TrackerRequestKindBlockHash)
 	if err != nil {
 		timeTaken := time.Since(start)
-		return "", nil, utils.LavaFormatDebug(tagName+" failed sending request",
+		return "", nil, utils.FormatDebug(tagName+" failed sending request",
 			utils.LogAttr("sendTime", timeTaken),
 			utils.LogAttr("error", err),
 			utils.LogAttr("chainID", ecf.chainID),
@@ -293,7 +293,7 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 	}
 	chainMessage, err := chainlib.CraftChainMessage(parsing, connectionType, ecf.chainParser, craftData, ecf.chainFetcherMetadata())
 	if err != nil {
-		return "", responseData, utils.LavaFormatError(tagName+" failed CraftChainMessage", err,
+		return "", responseData, utils.FormatError(tagName+" failed CraftChainMessage", err,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 		)
@@ -307,7 +307,7 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 
 	parserInput, err := chainlib.FormatResponseForParsing(&pairingtypes.RelayReply{Data: responseData}, chainMessage)
 	if err != nil {
-		return "", responseData, utils.LavaFormatDebug(tagName+" failed formatResponseForParsing",
+		return "", responseData, utils.FormatDebug(tagName+" failed formatResponseForParsing",
 			utils.LogAttr("error", err),
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
@@ -318,7 +318,7 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 
 	res, err := parser.ParseBlockHashFromReplyAndDecode(parserInput, parsing.ResultParsing, parsing.Parsers)
 	if err != nil {
-		return "", responseData, utils.LavaFormatDebug(tagName+" failed ParseBlockHashFromReplyAndDecode",
+		return "", responseData, utils.FormatDebug(tagName+" failed ParseBlockHashFromReplyAndDecode",
 			utils.LogAttr("error", err),
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),

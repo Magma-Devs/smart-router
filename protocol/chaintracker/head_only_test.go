@@ -46,11 +46,11 @@ func (f *headlessFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int6
 }
 
 func (f *headlessFetcher) FetchChainID(ctx context.Context) (string, string, error) {
-	return "", "", utils.LavaFormatError("FetchChainID not supported", nil)
+	return "", "", utils.FormatError("FetchChainID not supported", nil)
 }
 
 func (f *headlessFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
-	return nil, utils.LavaFormatError("not implemented", nil)
+	return nil, utils.FormatError("not implemented", nil)
 }
 
 func (f *headlessFetcher) advance() {

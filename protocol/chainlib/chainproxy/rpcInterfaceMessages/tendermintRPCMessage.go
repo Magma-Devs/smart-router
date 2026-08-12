@@ -22,7 +22,7 @@ type TendermintrpcMessage struct {
 func (tm TendermintrpcMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
 	params, err := json.Marshal(tm.GetParams())
 	if err != nil {
-		utils.LavaFormatWarning("failed marshaling params", err, utils.LogAttr("request", tm))
+		utils.FormatWarning("failed marshaling params", err, utils.LogAttr("request", tm))
 		return ""
 	}
 	return string(params)
@@ -33,14 +33,14 @@ func (tm *TendermintrpcMessage) GetRawRequestHash() ([]byte, error) {
 	headers := tm.GetHeaders()
 	headersByteArray, err := json.Marshal(headers)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", headers))
+		utils.FormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", headers))
 		return []byte{}, err
 	}
 	methodByteArray := []byte(tm.Method + tm.Path)
 
 	paramsByteArray, err := json.Marshal(tm.Params)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("headers", tm.Params))
+		utils.FormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("headers", tm.Params))
 		return []byte{}, err
 	}
 	return sigs.HashMsg(append(append(methodByteArray, paramsByteArray...), headersByteArray...)), nil
@@ -81,7 +81,7 @@ func (jm TendermintrpcMessage) CheckResponseError(data []byte, httpStatusCode in
 
 func (tm TendermintrpcMessage) GetResult() json.RawMessage {
 	if tm.Error != nil {
-		utils.LavaFormatWarning("GetResult() Request got an error from the node", nil, utils.Attribute{Key: "error", Value: tm.Error})
+		utils.FormatWarning("GetResult() Request got an error from the node", nil, utils.Attribute{Key: "error", Value: tm.Error})
 	}
 	return tm.Result
 }
@@ -106,7 +106,7 @@ func GetTendermintRPCError(jsonError *rpcclient.JsonError) (*tenderminttypes.RPC
 	if jsonError.Data != nil {
 		errData, ok = (jsonError.Data).(string)
 		if !ok {
-			return nil, utils.LavaFormatError("(rpcMsg.Error.Data).(string) conversion failed", nil, utils.Attribute{Key: "data", Value: jsonError.Data})
+			return nil, utils.FormatError("(rpcMsg.Error.Data).(string) conversion failed", nil, utils.Attribute{Key: "data", Value: jsonError.Data})
 		}
 	}
 
@@ -122,7 +122,7 @@ func ConvertErrorToRPCError(errString string, code int) *tenderminttypes.RPCErro
 	var rpcError *tenderminttypes.RPCError
 	unmarshalError := json.Unmarshal([]byte(errString), &rpcError)
 	if unmarshalError != nil || (rpcError.Data == "" && rpcError.Message == "") {
-		utils.LavaFormatWarning("Failed unmarshalling error tendermintrpc", unmarshalError, utils.Attribute{Key: "err", Value: errString})
+		utils.FormatWarning("Failed unmarshalling error tendermintrpc", unmarshalError, utils.Attribute{Key: "err", Value: errString})
 		rpcError = &tenderminttypes.RPCError{
 			Code:    code,
 			Message: "Rpc Error",
@@ -206,7 +206,7 @@ func ConvertToTendermintError(errString string, inputInfo []byte) string {
 	if err == nil {
 		id, errId := IdFromRawMessage(msg.ID)
 		if errId != nil {
-			utils.LavaFormatError("error idFromRawMessage", errId)
+			utils.FormatError("error idFromRawMessage", errId)
 			return chainproxy.InternalErrorString
 		}
 		res, merr := json.Marshal(&RPCResponse{
@@ -215,11 +215,11 @@ func ConvertToTendermintError(errString string, inputInfo []byte) string {
 			Error:   ConvertErrorToRPCError(errString, chainproxy.LavaErrorCode),
 		})
 		if merr != nil {
-			utils.LavaFormatError("convertToTendermintError json.Marshal", merr)
+			utils.FormatError("convertToTendermintError json.Marshal", merr)
 			return chainproxy.InternalErrorString
 		}
 		return string(res)
 	}
-	utils.LavaFormatError("error convertToTendermintError", err)
+	utils.FormatError("error convertToTendermintError", err)
 	return chainproxy.InternalErrorString
 }

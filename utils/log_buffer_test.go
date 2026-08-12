@@ -11,7 +11,7 @@ import (
 )
 
 // resetDebugBuffer restores the debug-buffer package state to its disabled
-// default. lavalog uses package-level singletons; tests must leave the buffer
+// default. the log package uses package-level singletons; tests must leave the buffer
 // disabled so they don't leak into one another or other package tests.
 func resetDebugBuffer() {
 	debugRingMu.Lock()
@@ -66,8 +66,8 @@ func TestReadDebugLogBuffer_RequestIDFilter(t *testing.T) {
 
 	EnableDebugLogBuffer(100)
 	// defaultGlobalLogLevel is DebugLevel by default → Info passes the gate.
-	LavaFormatInfo("hello target", LogAttr(KEY_REQUEST_ID, "req-123"))
-	LavaFormatInfo("hello other", LogAttr(KEY_REQUEST_ID, "req-999"))
+	FormatInfo("hello target", LogAttr(KEY_REQUEST_ID, "req-123"))
+	FormatInfo("hello other", LogAttr(KEY_REQUEST_ID, "req-999"))
 
 	got := ReadDebugLogBuffer("req-123", time.Time{}, time.Time{}, 0)
 	if len(got) != 1 {
@@ -87,7 +87,7 @@ func TestReadDebugLogBuffer_TimeWindowFilter(t *testing.T) {
 
 	EnableDebugLogBuffer(100)
 	before := time.Now()
-	LavaFormatInfo("within window")
+	FormatInfo("within window")
 	after := time.Now()
 
 	// A window that brackets the record keeps it.
@@ -115,7 +115,7 @@ func TestReadDebugLogBuffer_LimitKeepsTail(t *testing.T) {
 
 	EnableDebugLogBuffer(100)
 	for i := 0; i < 10; i++ {
-		LavaFormatInfo("msg", LogAttr("i", i))
+		FormatInfo("msg", LogAttr("i", i))
 	}
 	got := ReadDebugLogBuffer("", time.Time{}, time.Time{}, 3)
 	if len(got) != 3 {
@@ -130,7 +130,7 @@ func TestReadDebugLogBuffer_DisabledByDefault(t *testing.T) {
 	defer resetDebugBuffer()
 
 	// No EnableDebugLogBuffer call → buffer is disabled.
-	LavaFormatInfo("should not be buffered", LogAttr(KEY_REQUEST_ID, "req-abc"))
+	FormatInfo("should not be buffered", LogAttr(KEY_REQUEST_ID, "req-abc"))
 	got := ReadDebugLogBuffer("", time.Time{}, time.Time{}, 0)
 	if len(got) != 0 {
 		t.Fatalf("buffer disabled by default but returned %d records", len(got))
@@ -142,8 +142,8 @@ func TestClearDebugLogBuffer(t *testing.T) {
 	defer resetDebugBuffer()
 
 	EnableDebugLogBuffer(100)
-	LavaFormatInfo("one")
-	LavaFormatInfo("two")
+	FormatInfo("one")
+	FormatInfo("two")
 	if got := ReadDebugLogBuffer("", time.Time{}, time.Time{}, 0); len(got) != 2 {
 		t.Fatalf("pre-clear: %d records, want 2", len(got))
 	}
@@ -155,7 +155,7 @@ func TestClearDebugLogBuffer(t *testing.T) {
 
 // TestDebugBuffer_ConcurrentEnableAndLog exercises the data race the
 // atomic.Pointer guards against: EnableDebugLogBuffer swaps the sink logger
-// while other goroutines are calling LavaFormat* (which reads it). Run under
+// while other goroutines are calling Format* (which reads it). Run under
 // `go test -race` to catch a regression to a plain assignment. The assertions
 // are weak on purpose — the point is the race detector, not the contents.
 func TestDebugBuffer_ConcurrentEnableAndLog(t *testing.T) {
@@ -181,7 +181,7 @@ func TestDebugBuffer_ConcurrentEnableAndLog(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				LavaFormatInfo("concurrent line", LogAttr(KEY_REQUEST_ID, "race"))
+				FormatInfo("concurrent line", LogAttr(KEY_REQUEST_ID, "race"))
 				_ = ReadDebugLogBuffer("race", time.Time{}, time.Time{}, 0)
 			}
 		}()

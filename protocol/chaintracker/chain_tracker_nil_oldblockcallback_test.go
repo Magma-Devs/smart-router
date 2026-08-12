@@ -13,11 +13,11 @@ import (
 
 // timeoutChainFetcher is a minimal ChainFetcher whose latest-block fetch always
 // fails with the exact error shape a wss upstream produces on a deadline: a
-// wrappedLavaError (from utils.LavaFormatWarning) wrapping context.DeadlineExceeded.
+// wrappedError (from utils.FormatWarning) wrapping context.DeadlineExceeded.
 //
 // This mirrors production: SVMChainTracker.FetchLatestBlockNum wraps the raw
 // CallContext error returned by WebSocketDirectRPCConnection.SendRequest via
-// LavaFormatWarning, yielding a *wrappedLavaError whose single Unwrap() exposes a
+// FormatWarning, yielding a *wrappedError whose single Unwrap() exposes a
 // net.Error. That is precisely what drives the net.Error branch of
 // fetchAllPreviousBlocksIfNecessary. (HTTP upstreams are shielded because
 // HTTPDirectRPCConnection.SendRequest wraps with fmt.Errorf, so one Unwrap() yields
@@ -25,7 +25,7 @@ import (
 type timeoutChainFetcher struct{}
 
 func (timeoutChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	return 0, utils.LavaFormatWarning("[test] simulated wss latest-block timeout", context.DeadlineExceeded)
+	return 0, utils.FormatWarning("[test] simulated wss latest-block timeout", context.DeadlineExceeded)
 }
 
 func (timeoutChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {

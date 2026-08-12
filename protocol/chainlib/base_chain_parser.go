@@ -107,7 +107,7 @@ func (bcp *BaseChainParser) Active() bool {
 func (bcp *BaseChainParser) UpdateBlockTime(newBlockTime time.Duration) {
 	bcp.rwLock.Lock()
 	defer bcp.rwLock.Unlock()
-	utils.LavaFormatInfo("chainParser updated block time", utils.Attribute{Key: "newTime", Value: newBlockTime}, utils.Attribute{Key: "oldTime", Value: time.Duration(bcp.spec.AverageBlockTime) * time.Millisecond}, utils.Attribute{Key: "specID", Value: bcp.spec.Index})
+	utils.FormatInfo("chainParser updated block time", utils.Attribute{Key: "newTime", Value: newBlockTime}, utils.Attribute{Key: "oldTime", Value: time.Duration(bcp.spec.AverageBlockTime) * time.Millisecond}, utils.Attribute{Key: "specID", Value: bcp.spec.Index})
 	bcp.spec.AverageBlockTime = newBlockTime.Milliseconds()
 }
 
@@ -172,7 +172,7 @@ func (bcp *BaseChainParser) ValidateMessage(chainMsg ChainMessage) error {
 	defer bcp.rwLock.RUnlock()
 	if addon := GetAddon(nodeMessage); addon != "" {
 		if allowed := bcp.allowedAddons[addon]; !allowed {
-			return utils.LavaFormatError("consumer policy does not allow addon", nil,
+			return utils.FormatError("consumer policy does not allow addon", nil,
 				utils.LogAttr("addon", addon),
 			)
 		}
@@ -265,7 +265,7 @@ func (bcp *BaseChainParser) SeparateAddonsExtensions(ctx context.Context, suppor
 				continue
 			}
 			// neither is an error
-			err = utils.LavaFormatError("invalid supported to check, is neither an addon or an extension", err,
+			err = utils.FormatError("invalid supported to check, is neither an addon or an extension", err,
 				utils.Attribute{Key: "spec", Value: bcp.spec.Index},
 				utils.Attribute{Key: "supported", Value: supportedToCheck})
 		}
@@ -378,22 +378,22 @@ func (bcp *BaseChainParser) ExtensionParsing(addon string, parsedMessageArg *bas
 	// Only emit archive debug traces for user relays (LatestBlock > 0), not internal chain tracker polls
 	debugLog := extensionInfo.LatestBlock > 0
 	if debugLog {
-		utils.LavaFormatTrace("[Archive Debug] ExtensionParsing called", utils.LogAttr("addon", addon), utils.LogAttr("extensionInfo", extensionInfo))
+		utils.FormatTrace("[Archive Debug] ExtensionParsing called", utils.LogAttr("addon", addon), utils.LogAttr("extensionInfo", extensionInfo))
 	}
 	if extensionInfo.ExtensionOverride == nil {
 		if debugLog {
-			utils.LavaFormatTrace("[Archive Debug] Using extensionParsingInner", utils.LogAttr("latestBlock", extensionInfo.LatestBlock))
+			utils.FormatTrace("[Archive Debug] Using extensionParsingInner", utils.LogAttr("latestBlock", extensionInfo.LatestBlock))
 		}
 		bcp.extensionParsingInner(addon, parsedMessageArg, extensionInfo.LatestBlock)
 	} else {
 		if debugLog {
-			utils.LavaFormatTrace("[Archive Debug] Using OverrideExtensions", utils.LogAttr("extensionOverride", extensionInfo.ExtensionOverride))
+			utils.FormatTrace("[Archive Debug] Using OverrideExtensions", utils.LogAttr("extensionOverride", extensionInfo.ExtensionOverride))
 		}
 		parsedMessageArg.OverrideExtensions(extensionInfo.ExtensionOverride, &bcp.extensionParser)
 	}
 	if extensionInfo.AdditionalExtensions != nil {
 		if debugLog {
-			utils.LavaFormatTrace("[Archive Debug] Using AdditionalExtensions", utils.LogAttr("additionalExtensions", extensionInfo.AdditionalExtensions))
+			utils.FormatTrace("[Archive Debug] Using AdditionalExtensions", utils.LogAttr("additionalExtensions", extensionInfo.AdditionalExtensions))
 		}
 		parsedMessageArg.OverrideExtensions(extensionInfo.AdditionalExtensions, &bcp.extensionParser)
 	}
@@ -410,7 +410,7 @@ func (apip *BaseChainParser) defaultApiContainer(apiKey ApiKey) (*ApiContainer, 
 	if apip == nil {
 		return nil, errors.New("ChainParser not defined")
 	}
-	utils.LavaFormatDebug("api not supported", utils.Attribute{Key: "apiKey", Value: apiKey})
+	utils.FormatDebug("api not supported", utils.Attribute{Key: "apiKey", Value: apiKey})
 	apiCont := &ApiContainer{
 		api: &spectypes.Api{
 			Enabled:      true,
@@ -457,7 +457,7 @@ func (apip *BaseChainParser) getSupportedApi(apiKey ApiKey) (*ApiContainer, erro
 
 	// Return an error if api is disabled
 	if !apiCont.api.Enabled {
-		return nil, utils.LavaFormatInfo("api is disabled", utils.Attribute{Key: "apiKey", Value: apiKey})
+		return nil, utils.FormatInfo("api is disabled", utils.Attribute{Key: "apiKey", Value: apiKey})
 	}
 
 	return &apiCont, nil
@@ -561,13 +561,13 @@ func (apip *BaseChainParser) getApiCollection(connectionType, internalPath, addo
 
 	// Return an error if spec does not exist
 	if !ok {
-		utils.LavaFormatDebug("api not supported", utils.Attribute{Key: "connectionType", Value: connectionType})
+		utils.FormatDebug("api not supported", utils.Attribute{Key: "connectionType", Value: connectionType})
 		return nil, common.APINotSupportedError
 	}
 
 	// Return an error if api is disabled
 	if !api.Enabled {
-		return nil, utils.LavaFormatError("api is disabled", nil, utils.Attribute{Key: "connectionType", Value: connectionType})
+		return nil, utils.FormatError("api is disabled", nil, utils.Attribute{Key: "connectionType", Value: connectionType})
 	}
 
 	return api, nil
@@ -640,7 +640,7 @@ func getServiceApis(
 				if rpcInterface == spectypes.APIInterfaceRest {
 					apiKey, apiContainer, err := newRestApiContainer(api, collectionKey)
 					if err != nil {
-						utils.LavaFormatError("regex Compile api", err, utils.Attribute{Key: "apiName", Value: api.Name})
+						utils.FormatError("regex Compile api", err, utils.Attribute{Key: "apiName", Value: api.Name})
 						continue
 					}
 					serverApis[apiKey] = apiContainer
@@ -687,7 +687,7 @@ func getServiceApis(
 					if _, ok := taggedApis[verification.ParseDirective.FunctionTag]; ok {
 						verification.ParseDirective = taggedApis[verification.ParseDirective.FunctionTag].Parsing
 					} else {
-						utils.LavaFormatError("Bad verification definition", fmt.Errorf("verification function tag is not defined in the collections parse directives"), utils.LogAttr("function_tag", verification.ParseDirective.FunctionTag))
+						utils.FormatError("Bad verification definition", fmt.Errorf("verification function tag is not defined in the collections parse directives"), utils.LogAttr("function_tag", verification.ParseDirective.FunctionTag))
 						continue
 					}
 				}
@@ -878,7 +878,7 @@ func matchSpecApiByName(name, connectionType string, serverApis map[ApiKey]ApiCo
 			// matcher, so this is unreachable. Matching without one would mean compiling in
 			// the loop — the per-lookup cost the precompilation exists to remove — so an
 			// entry that arrived some other way is dropped loudly rather than absorbed.
-			utils.LavaFormatError("REST api container has no compiled matcher", nil, utils.Attribute{Key: "apiKey", Value: apiKey})
+			utils.FormatError("REST api container has no compiled matcher", nil, utils.Attribute{Key: "apiKey", Value: apiKey})
 			continue
 		}
 		exact := matcher.pattern.MatchString(name)
@@ -916,7 +916,7 @@ func matchSpecApiByName(name, connectionType string, serverApis map[ApiKey]ApiCo
 		return best, true
 	}
 	if foundNameOnDifferentConnectionType != "" { // its hard to notice when we have an API on only one connection type.
-		utils.LavaFormatWarning("API was found on a different connection type", nil,
+		utils.FormatWarning("API was found on a different connection type", nil,
 			utils.Attribute{Key: "connection_type_found", Value: foundNameOnDifferentConnectionType},
 			utils.Attribute{Key: "connection_type_requested", Value: connectionType},
 			utils.LogAttr("requested_api", name),

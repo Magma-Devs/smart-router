@@ -86,7 +86,7 @@ func (srsm *SmartRouterRelaySenderMock) ParseRelay(
 		}
 	}
 	if !foundArchive {
-		utils.LavaFormatFatal("misuse in mocked parse relay", nil)
+		utils.FormatFatal("misuse in mocked parse relay", nil)
 	}
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Handle the incoming request and provide the desired response

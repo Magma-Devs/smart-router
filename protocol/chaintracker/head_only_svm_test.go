@@ -64,7 +64,7 @@ func (f *svmHeadOnlyFetcher) FetchLatestBlockNum(ctx context.Context) (int64, er
 }
 
 func (f *svmHeadOnlyFetcher) FetchChainID(ctx context.Context) (string, string, error) {
-	return "", "", utils.LavaFormatError("FetchChainID not supported", nil)
+	return "", "", utils.FormatError("FetchChainID not supported", nil)
 }
 
 // ObserveLatestBlockPoll makes this fetcher a chaintracker.PollObserver.
@@ -251,7 +251,7 @@ func (f *svmBadReplyFetcher) FetchBlockHashByNum(ctx context.Context, blockNum i
 func (f *svmBadReplyFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) { return 0, nil }
 
 func (f *svmBadReplyFetcher) FetchChainID(ctx context.Context) (string, string, error) {
-	return "", "", utils.LavaFormatError("FetchChainID not supported", nil)
+	return "", "", utils.FormatError("FetchChainID not supported", nil)
 }
 
 // compile-time proof the fetcher really is the observer hook the SVM path looks for.

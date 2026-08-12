@@ -270,7 +270,7 @@ func sameEndpointURLs(a, b []*common.NodeUrl) bool {
 // This should be called once after creating the manager.
 func (dwsm *DirectWSSubscriptionManager) Start(ctx context.Context) {
 	go dwsm.cleanupStaleSubscriptions(ctx)
-	utils.LavaFormatInfo("DirectWS: started subscription manager",
+	utils.FormatInfo("DirectWS: started subscription manager",
 		utils.LogAttr("chainID", dwsm.chainID),
 		utils.LogAttr("cleanupInterval", dwsm.config.CleanupInterval),
 		utils.LogAttr("maxSubsPerClient", dwsm.config.MaxSubscriptionsPerClient),
@@ -287,7 +287,7 @@ func (dwsm *DirectWSSubscriptionManager) cleanupStaleSubscriptions(ctx context.C
 	for {
 		select {
 		case <-ctx.Done():
-			utils.LavaFormatDebug("DirectWS: cleanup goroutine stopped")
+			utils.FormatDebug("DirectWS: cleanup goroutine stopped")
 			return
 		case <-ticker.C:
 			dwsm.performCleanup()
@@ -309,7 +309,7 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 		select {
 		case <-activeSub.ctx.Done():
 			// Context cancelled, clean up
-			utils.LavaFormatDebug("DirectWS: cleaning up subscription with cancelled context",
+			utils.FormatDebug("DirectWS: cleaning up subscription with cancelled context",
 				utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 			)
 			activeSub.upstreamSubscription.Unsubscribe()
@@ -327,7 +327,7 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 
 		// If no clients left, close the subscription
 		if len(activeSub.connectedClients) == 0 {
-			utils.LavaFormatDebug("DirectWS: cleaning up subscription with no clients",
+			utils.FormatDebug("DirectWS: cleaning up subscription with no clients",
 				utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 			)
 			activeSub.upstreamSubscription.Unsubscribe()
@@ -356,14 +356,14 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 	// Log warning if subscription count is high
 	totalSubs := len(dwsm.activeSubscriptions)
 	if totalSubs > dwsm.config.MaxTotalSubscriptions {
-		utils.LavaFormatWarning("DirectWS: subscription count high, potential memory issue", nil,
+		utils.FormatWarning("DirectWS: subscription count high, potential memory issue", nil,
 			utils.LogAttr("current", totalSubs),
 			utils.LogAttr("threshold", dwsm.config.MaxTotalSubscriptions),
 		)
 	}
 
 	if removedSubs > 0 || removedClients > 0 {
-		utils.LavaFormatDebug("DirectWS: cleanup completed",
+		utils.FormatDebug("DirectWS: cleanup completed",
 			utils.LogAttr("removedSubscriptions", removedSubs),
 			utils.LogAttr("removedClients", removedClients),
 			utils.LogAttr("activeSubscriptions", len(dwsm.activeSubscriptions)),
@@ -393,21 +393,21 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 			if found {
 				// Check if sticky endpoint is not ignored
 				if ignoredEndpoints == nil {
-					utils.LavaFormatDebug("DirectWS: using sticky session endpoint",
+					utils.FormatDebug("DirectWS: using sticky session endpoint",
 						utils.LogAttr("clientKey", clientKey),
 						utils.LogAttr("endpoint", sanitizeEndpointURL(stickySession.Provider)),
 					)
 					return stickyEndpoint, nil
 				}
 				if _, ignored := ignoredEndpoints[stickySession.Provider]; !ignored {
-					utils.LavaFormatDebug("DirectWS: using sticky session endpoint",
+					utils.FormatDebug("DirectWS: using sticky session endpoint",
 						utils.LogAttr("clientKey", clientKey),
 						utils.LogAttr("endpoint", sanitizeEndpointURL(stickySession.Provider)),
 					)
 					return stickyEndpoint, nil
 				}
 				// Sticky endpoint is ignored — clear and continue to cascade.
-				utils.LavaFormatDebug("DirectWS: sticky endpoint ignored, clearing affinity",
+				utils.FormatDebug("DirectWS: sticky endpoint ignored, clearing affinity",
 					utils.LogAttr("clientKey", clientKey),
 					utils.LogAttr("ignoredEndpoint", sanitizeEndpointURL(stickySession.Provider)),
 				)
@@ -423,7 +423,7 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 	}
 
 	// Tier 2: backup endpoints (only when primary is exhausted).
-	utils.LavaFormatDebug("DirectWS: primary endpoints exhausted, falling back to backup",
+	utils.FormatDebug("DirectWS: primary endpoints exhausted, falling back to backup",
 		utils.LogAttr("primaryReason", primaryErr.Error()),
 		utils.LogAttr("backupCount", len(snapshot.backup)),
 	)
@@ -487,7 +487,7 @@ func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tie
 		return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", selectedURL)
 	}
 
-	utils.LavaFormatDebug("DirectWS: selected endpoint via optimizer",
+	utils.FormatDebug("DirectWS: selected endpoint via optimizer",
 		utils.LogAttr("endpoint", sanitizeEndpointURL(selectedURL)),
 		utils.LogAttr("tierSize", len(tier)),
 	)
@@ -527,7 +527,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// Extract hashed params from protocol message (same as ConsumerWSSubscriptionManager)
 	hashedParams, subscriptionParams, err := dwsm.getHashedParams(protocolMessage)
 	if err != nil {
-		return nil, nil, utils.LavaFormatError("could not marshal params", err)
+		return nil, nil, utils.FormatError("could not marshal params", err)
 	}
 
 	// Extract the subscription method from the API definition
@@ -541,7 +541,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 
 	clientKey := dwsm.CreateWebSocketConnectionUniqueKey(dappID, consumerIp, webSocketConnectionUniqueId)
 
-	utils.LavaFormatTrace("DirectWS: request to start subscription",
+	utils.FormatTrace("DirectWS: request to start subscription",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		utils.LogAttr("clientKey", clientKey),
 		utils.LogAttr("subscribeMethod", subscribeMethod),
@@ -550,7 +550,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 
 	// Check rate limiting (subscriptions per minute per client)
 	if !dwsm.rateLimiter.AllowSubscribe(clientKey) {
-		utils.LavaFormatWarning("DirectWS: client rate limit exceeded", nil,
+		utils.FormatWarning("DirectWS: client rate limit exceeded", nil,
 			utils.LogAttr("clientKey", clientKey),
 			utils.LogAttr("limit", dwsm.config.SubscriptionsPerMinutePerClient),
 		)
@@ -567,7 +567,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 
 	if currentSubCount >= dwsm.config.MaxSubscriptionsPerClient {
 		if dwsm.config.ShouldRejectOnClientLimit() {
-			utils.LavaFormatWarning("DirectWS: client subscription limit exceeded (rejecting)", nil,
+			utils.FormatWarning("DirectWS: client subscription limit exceeded (rejecting)", nil,
 				utils.LogAttr("clientKey", clientKey),
 				utils.LogAttr("currentCount", currentSubCount),
 				utils.LogAttr("limit", dwsm.config.MaxSubscriptionsPerClient),
@@ -577,7 +577,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 				currentSubCount, dwsm.config.MaxSubscriptionsPerClient)
 		}
 		// Warn but continue (default behavior)
-		utils.LavaFormatWarning("DirectWS: client subscription limit exceeded (warn only)", nil,
+		utils.FormatWarning("DirectWS: client subscription limit exceeded (warn only)", nil,
 			utils.LogAttr("clientKey", clientKey),
 			utils.LogAttr("currentCount", currentSubCount),
 			utils.LogAttr("limit", dwsm.config.MaxSubscriptionsPerClient),
@@ -588,7 +588,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	totalSubs := dwsm.totalSubscriptions.Load()
 	if int(totalSubs) >= dwsm.config.MaxTotalSubscriptions {
 		if dwsm.config.ShouldRejectOnTotalLimit() {
-			utils.LavaFormatWarning("DirectWS: global subscription limit exceeded (rejecting)", nil,
+			utils.FormatWarning("DirectWS: global subscription limit exceeded (rejecting)", nil,
 				utils.LogAttr("currentTotal", totalSubs),
 				utils.LogAttr("limit", dwsm.config.MaxTotalSubscriptions),
 			)
@@ -597,7 +597,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 				totalSubs, dwsm.config.MaxTotalSubscriptions)
 		}
 		// Warn but continue (default behavior)
-		utils.LavaFormatWarning("DirectWS: global subscription limit exceeded (warn only)", nil,
+		utils.FormatWarning("DirectWS: global subscription limit exceeded (warn only)", nil,
 			utils.LogAttr("currentTotal", totalSubs),
 			utils.LogAttr("limit", dwsm.config.MaxTotalSubscriptions),
 		)
@@ -625,7 +625,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	for {
 		pendingChan, foundPending := dwsm.checkAndAddPendingSubscription(hashedParams)
 		if foundPending {
-			utils.LavaFormatTrace("DirectWS: waiting for pending subscription")
+			utils.FormatTrace("DirectWS: waiting for pending subscription")
 			success := <-pendingChan
 			if success {
 				existingReply, joined := dwsm.checkForActiveSubscriptionAndConnect(ctx, hashedParams, clientKey, safeChannelSender, requestID)
@@ -638,7 +638,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 				}
 			}
 			// Failed, retry
-			utils.LavaFormatDebug("DirectWS: pending subscription failed, retrying")
+			utils.FormatDebug("DirectWS: pending subscription failed, retrying")
 		} else {
 			break
 		}
@@ -654,7 +654,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		return nil, nil, fmt.Errorf("failed to select WebSocket endpoint: %w", err)
 	}
 
-	utils.LavaFormatTrace("DirectWS: creating new upstream subscription",
+	utils.FormatTrace("DirectWS: creating new upstream subscription",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		utils.LogAttr("endpoint", sanitizeEndpointURL(selectedEndpoint.Url)),
 	)
@@ -698,7 +698,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		Provider: selectedEndpoint.Url,
 		Epoch:    0, // Epoch is not used for direct RPC (no provider rotation)
 	})
-	utils.LavaFormatTrace("DirectWS: stored sticky session",
+	utils.FormatTrace("DirectWS: stored sticky session",
 		utils.LogAttr("clientKey", clientKey),
 		utils.LogAttr("endpoint", sanitizeEndpointURL(selectedEndpoint.Url)),
 	)
@@ -783,7 +783,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// Handle client disconnect
 	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams)
 
-	utils.LavaFormatInfo("DirectWS: subscription started",
+	utils.FormatInfo("DirectWS: subscription started",
 		utils.LogAttr("routerID", routerID),
 		utils.LogAttr("upstreamID", upstreamID),
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
@@ -807,7 +807,7 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 
 	// Check unsubscribe rate limiting
 	if !dwsm.rateLimiter.AllowUnsubscribe(clientKey) {
-		utils.LavaFormatWarning("DirectWS: client unsubscribe rate limit exceeded", nil,
+		utils.FormatWarning("DirectWS: client unsubscribe rate limit exceeded", nil,
 			utils.LogAttr("clientKey", clientKey),
 			utils.LogAttr("limit", dwsm.config.UnsubscribesPerMinutePerClient),
 		)
@@ -862,7 +862,7 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 
 	if !clientOwnsSubscription {
 		dwsm.lock.Unlock()
-		utils.LavaFormatWarning("DirectWS: unsubscribe rejected - client does not own subscription", nil,
+		utils.FormatWarning("DirectWS: unsubscribe rejected - client does not own subscription", nil,
 			utils.LogAttr("subIDFromRequest", subIDFromRequest),
 			utils.LogAttr("clientKey", clientKey),
 		)
@@ -900,7 +900,7 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 			resp, callErr := client.CallContext(callCtx, requestID, unsubscribeMethod, unsubscribeParams, true, false)
 			cancel()
 			if callErr != nil {
-				utils.LavaFormatWarning("DirectWS: upstream unsubscribe call failed", callErr,
+				utils.FormatWarning("DirectWS: upstream unsubscribe call failed", callErr,
 					utils.LogAttr("upstreamID", upstreamID),
 					utils.LogAttr("clientKey", clientKey),
 				)
@@ -978,7 +978,7 @@ func (dwsm *DirectWSSubscriptionManager) UnsubscribeAll(
 	// 3. It's a single batch operation, not a repeated action like individual unsubscribes
 	// The rate limiter's AllowUnsubscribe is designed for individual eth_unsubscribe calls.
 
-	utils.LavaFormatTrace("DirectWS: unsubscribe all request",
+	utils.FormatTrace("DirectWS: unsubscribe all request",
 		utils.LogAttr("clientKey", clientKey),
 	)
 
@@ -1035,7 +1035,7 @@ func (dwsm *DirectWSSubscriptionManager) UnsubscribeAll(
 	// Clean up rate limiter for this client
 	dwsm.rateLimiter.CleanupClient(clientKey)
 
-	utils.LavaFormatTrace("DirectWS: cleared sticky session and rate limiter on unsubscribe all",
+	utils.FormatTrace("DirectWS: cleared sticky session and rate limiter on unsubscribe all",
 		utils.LogAttr("clientKey", clientKey),
 	)
 
@@ -1046,7 +1046,7 @@ func (dwsm *DirectWSSubscriptionManager) UnsubscribeAll(
 func (dwsm *DirectWSSubscriptionManager) getHashedParams(protocolMessage chainlib.ProtocolMessage) (hashedParams string, params []byte, err error) {
 	params, err = gojson.Marshal(protocolMessage.GetRPCMessage().GetParams())
 	if err != nil {
-		return "", nil, utils.LavaFormatError("could not marshal params", err)
+		return "", nil, utils.FormatError("could not marshal params", err)
 	}
 
 	hashedParams = rpcclient.CreateHashFromParams(params)
@@ -1122,7 +1122,7 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 		// For Tendermint: uses originalResult to preserve {"query":"..."} format
 		replyData, err := createSubscriptionReplyFromRouterID(existingRouterID, requestID, dwsm.apiInterface, activeSub.originalResult)
 		if err != nil {
-			utils.LavaFormatWarning("DirectWS: failed to create reply for existing client", err)
+			utils.FormatWarning("DirectWS: failed to create reply for existing client", err)
 			return activeSub.firstReply, false
 		}
 		return &pairingtypes.RelayReply{Data: replyData}, false
@@ -1143,7 +1143,7 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	}
 	dwsm.connectedClients[clientKey][hashedParams] = safeChannelSender
 
-	utils.LavaFormatTrace("DirectWS: client joined existing subscription with unique router ID",
+	utils.FormatTrace("DirectWS: client joined existing subscription with unique router ID",
 		utils.LogAttr("clientKey", clientKey),
 		utils.LogAttr("clientRouterID", clientRouterID),
 		utils.LogAttr("upstreamID", activeSub.upstreamID),
@@ -1154,7 +1154,7 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	// For Tendermint: uses originalResult to preserve {"query":"..."} format
 	replyData, err := createSubscriptionReplyFromRouterID(clientRouterID, requestID, dwsm.apiInterface, activeSub.originalResult)
 	if err != nil {
-		utils.LavaFormatWarning("DirectWS: failed to create reply for joining client", err)
+		utils.FormatWarning("DirectWS: failed to create reply for joining client", err)
 		return activeSub.firstReply, true // Fallback to original reply
 	}
 
@@ -1228,7 +1228,7 @@ func (dwsm *DirectWSSubscriptionManager) createUpstreamSubscription(
 		return nil, nil, nil, fmt.Errorf("failed to unmarshal params: %w", err)
 	}
 
-	utils.LavaFormatTrace("DirectWS: creating upstream subscription",
+	utils.FormatTrace("DirectWS: creating upstream subscription",
 		utils.LogAttr("method", subscribeMethod),
 		utils.LogAttr("apiInterface", dwsm.apiInterface),
 	)
@@ -1294,20 +1294,20 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 	for {
 		select {
 		case <-ctx.Done():
-			utils.LavaFormatTrace("DirectWS: subscription context done",
+			utils.FormatTrace("DirectWS: subscription context done",
 				utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 			)
 			return
 
 		case <-activeSub.closeSubChan:
-			utils.LavaFormatTrace("DirectWS: subscription close requested",
+			utils.FormatTrace("DirectWS: subscription close requested",
 				utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 			)
 			return
 
 		case err := <-upstreamSub.Err():
 			if err != nil {
-				utils.LavaFormatWarning("DirectWS: upstream subscription error",
+				utils.FormatWarning("DirectWS: upstream subscription error",
 					err,
 					utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 				)
@@ -1352,7 +1352,7 @@ func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
 		// Rewrite the message with this client's unique router ID
 		rewrittenMsg, err := rewriteSubscriptionID(msg, info.routerID)
 		if err != nil {
-			utils.LavaFormatWarning("DirectWS: failed to rewrite subscription ID for client", err,
+			utils.FormatWarning("DirectWS: failed to rewrite subscription ID for client", err,
 				utils.LogAttr("clientKey", clientKey),
 			)
 			continue
@@ -1363,7 +1363,7 @@ func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
 		}
 
 		info.sender.Send(reply)
-		utils.LavaFormatTrace("DirectWS: sent message to client with unique router ID",
+		utils.FormatTrace("DirectWS: sent message to client with unique router ID",
 			utils.LogAttr("clientKey", clientKey),
 			utils.LogAttr("routerID", info.routerID),
 		)
@@ -1378,14 +1378,14 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 ) {
 	// Prevent concurrent restoration attempts
 	if !activeSub.restoring.CompareAndSwap(false, true) {
-		utils.LavaFormatDebug("DirectWS: restoration already in progress",
+		utils.FormatDebug("DirectWS: restoration already in progress",
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
 		return
 	}
 	defer activeSub.restoring.Store(false)
 
-	utils.LavaFormatInfo("DirectWS: handling upstream disconnect",
+	utils.FormatInfo("DirectWS: handling upstream disconnect",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		utils.LogAttr("connectedClients", len(activeSub.clientRouterIDs)),
 	)
@@ -1393,7 +1393,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	// Try to reconnect the WebSocket connection
 	err := activeSub.upstreamPool.ReconnectWithBackoff(ctx)
 	if err != nil {
-		utils.LavaFormatError("DirectWS: reconnection failed, cleaning up subscription", err,
+		utils.FormatError("DirectWS: reconnection failed, cleaning up subscription", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
 		dwsm.cleanupSubscription(hashedParams)
@@ -1401,14 +1401,14 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	}
 
 	// Connection restored, now restore the subscription
-	utils.LavaFormatInfo("DirectWS: connection restored, restoring subscription",
+	utils.FormatInfo("DirectWS: connection restored, restoring subscription",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
 
 	// Get the restored connection
 	conn, err := activeSub.upstreamPool.GetConnection(ctx)
 	if err != nil {
-		utils.LavaFormatError("DirectWS: failed to get connection after reconnect", err,
+		utils.FormatError("DirectWS: failed to get connection after reconnect", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
 		dwsm.cleanupSubscription(hashedParams)
@@ -1418,7 +1418,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	// Re-subscribe using the stored params and method
 	newUpstreamSub, firstMsg, newMsgChan, err := dwsm.createUpstreamSubscription(ctx, conn, activeSub.subscriptionParams, activeSub.subscribeMethod)
 	if err != nil {
-		utils.LavaFormatError("DirectWS: failed to restore subscription", err,
+		utils.FormatError("DirectWS: failed to restore subscription", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
 		dwsm.cleanupSubscription(hashedParams)
@@ -1461,7 +1461,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		dwsm.idMapper.RegisterMapping(routerID, newUpstreamID)
 	}
 
-	utils.LavaFormatInfo("DirectWS: subscription restored successfully",
+	utils.FormatInfo("DirectWS: subscription restored successfully",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		utils.LogAttr("oldUpstreamID", oldUpstreamID),
 		utils.LogAttr("newUpstreamID", newUpstreamID),
@@ -1481,7 +1481,7 @@ func (dwsm *DirectWSSubscriptionManager) handleClientDisconnect(
 ) {
 	<-ctx.Done()
 
-	utils.LavaFormatTrace("DirectWS: client disconnected",
+	utils.FormatTrace("DirectWS: client disconnected",
 		utils.LogAttr("clientKey", clientKey),
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
@@ -1514,7 +1514,7 @@ func (dwsm *DirectWSSubscriptionManager) handleClientDisconnect(
 			// Clean up sticky session and rate limiter when client has no more subscriptions
 			dwsm.stickyStore.Delete(clientKey)
 			dwsm.rateLimiter.CleanupClient(clientKey)
-			utils.LavaFormatTrace("DirectWS: cleared sticky session and rate limiter on client disconnect",
+			utils.FormatTrace("DirectWS: cleared sticky session and rate limiter on client disconnect",
 				utils.LogAttr("clientKey", clientKey),
 			)
 		}
@@ -1522,7 +1522,7 @@ func (dwsm *DirectWSSubscriptionManager) handleClientDisconnect(
 
 	// If no more clients, close the upstream subscription
 	if len(activeSub.connectedClients) == 0 {
-		utils.LavaFormatTrace("DirectWS: no more clients, closing upstream subscription",
+		utils.FormatTrace("DirectWS: no more clients, closing upstream subscription",
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
 		// Capture connection reference before async cleanup
@@ -1576,7 +1576,7 @@ func (dwsm *DirectWSSubscriptionManager) cleanupSubscription(hashedParams string
 		activeSub.upstreamPool.NotifySubscriptionRemoved(activeSub.upstreamConnection)
 	}
 
-	utils.LavaFormatTrace("DirectWS: subscription cleaned up",
+	utils.FormatTrace("DirectWS: subscription cleaned up",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
 }
@@ -1602,7 +1602,7 @@ func (dwsm *DirectWSSubscriptionManager) Close() {
 	}
 	dwsm.upstreamPools = make(map[string]*UpstreamWSPool)
 
-	utils.LavaFormatInfo("DirectWS: subscription manager closed")
+	utils.FormatInfo("DirectWS: subscription manager closed")
 }
 
 // Helper functions

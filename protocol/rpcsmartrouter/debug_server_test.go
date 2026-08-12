@@ -786,7 +786,7 @@ func TestDebugLogs_SmartRouter_ReturnsJSON(t *testing.T) {
 	utils.EnableDebugLogBuffer(100)
 	defer utils.ClearDebugLogBuffer()
 	utils.ClearDebugLogBuffer()
-	utils.LavaFormatInfo("debug-logs test line", utils.LogAttr(utils.KEY_REQUEST_ID, "req-logs-1"))
+	utils.FormatInfo("debug-logs test line", utils.LogAttr(utils.KEY_REQUEST_ID, "req-logs-1"))
 
 	var offsetNano atomic.Int64
 	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
@@ -817,8 +817,8 @@ func TestDebugLogs_SmartRouter_RequestIDFilter(t *testing.T) {
 	utils.EnableDebugLogBuffer(100)
 	defer utils.ClearDebugLogBuffer()
 	utils.ClearDebugLogBuffer()
-	utils.LavaFormatInfo("line a", utils.LogAttr(utils.KEY_REQUEST_ID, "req-A"))
-	utils.LavaFormatInfo("line b", utils.LogAttr(utils.KEY_REQUEST_ID, "req-B"))
+	utils.FormatInfo("line a", utils.LogAttr(utils.KEY_REQUEST_ID, "req-A"))
+	utils.FormatInfo("line b", utils.LogAttr(utils.KEY_REQUEST_ID, "req-B"))
 
 	var offsetNano atomic.Int64
 	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
@@ -847,7 +847,7 @@ func TestDebugLogs_SmartRouter_MethodNotAllowed(t *testing.T) {
 func TestDebugLogsClear_SmartRouter_ReturnsJSON(t *testing.T) {
 	utils.EnableDebugLogBuffer(100)
 	defer utils.ClearDebugLogBuffer()
-	utils.LavaFormatInfo("to be cleared")
+	utils.FormatInfo("to be cleared")
 
 	var offsetNano atomic.Int64
 	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})

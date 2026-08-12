@@ -103,7 +103,7 @@ func (cs *CacheServer) InitCache(
 		OnEvict:     onEvictHandler,
 	})
 	if err != nil {
-		utils.LavaFormatFatal("could not create cache", err)
+		utils.FormatFatal("could not create cache", err)
 	}
 
 	cs.finalizedCache, err = ristretto.NewCache(&ristretto.Config[string, any]{
@@ -114,7 +114,7 @@ func (cs *CacheServer) InitCache(
 		OnEvict:     onEvictHandler,
 	})
 	if err != nil {
-		utils.LavaFormatFatal("could not create finalized cache", err)
+		utils.FormatFatal("could not create finalized cache", err)
 	}
 
 	cs.blocksHashesToHeightsCache, err = ristretto.NewCache(&ristretto.Config[string, any]{
@@ -125,7 +125,7 @@ func (cs *CacheServer) InitCache(
 		OnEvict:     onEvictHandler,
 	})
 	if err != nil {
-		utils.LavaFormatFatal("could not create blocks hashes to heights cache", err)
+		utils.FormatFatal("could not create blocks hashes to heights cache", err)
 	}
 
 	go cs.periodicCacheSizeUpdate(ctx)
@@ -145,7 +145,7 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 	if strings.HasPrefix(listenAddr, unixPrefix) {
 		host, port, err := net.SplitHostPort(listenAddr)
 		if err != nil {
-			utils.LavaFormatFatal("Failed to parse unix socket, provide address in this format unix:/tmp/example.sock", err)
+			utils.FormatFatal("Failed to parse unix socket, provide address in this format unix:/tmp/example.sock", err)
 			return
 		}
 
@@ -153,25 +153,25 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 
 		addr, err := net.ResolveUnixAddr(host, port)
 		if err != nil {
-			utils.LavaFormatFatal("Failed to resolve unix socket address", err)
+			utils.FormatFatal("Failed to resolve unix socket address", err)
 			return
 		}
 
 		lis, err = net.ListenUnix(host, addr)
 		if err != nil {
-			utils.LavaFormatFatal("Failed to listen to unix socket listener", err)
+			utils.FormatFatal("Failed to listen to unix socket listener", err)
 			return
 		}
 
 		err = os.Chmod(port, 0o600)
 		if err != nil {
-			utils.LavaFormatFatal("Failed to set permissions for Unix socket", err)
+			utils.FormatFatal("Failed to set permissions for Unix socket", err)
 			return
 		}
 	} else {
 		lis, err = net.Listen("tcp", listenAddr)
 		if err != nil {
-			utils.LavaFormatFatal("Cache server failure setting up TCP listener", err)
+			utils.FormatFatal("Cache server failure setting up TCP listener", err)
 			return
 		}
 	}
@@ -193,25 +193,25 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = utils.LavaFormatInfo("Cache Server ctx.Done")
+			_ = utils.FormatInfo("Cache Server ctx.Done")
 		case <-signalChan:
-			_ = utils.LavaFormatInfo("Cache Server signalChan")
+			_ = utils.FormatInfo("Cache Server signalChan")
 		}
 
 		shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownRelease()
 
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			utils.LavaFormatFatal("Cache failed to shutdown", err)
+			utils.FormatFatal("Cache failed to shutdown", err)
 		}
 	}()
 
 	cacheServer := &RelayerCacheServer{CacheServer: cs}
 	relaytypes.RegisterRelayerCacheServer(s, cacheServer)
 
-	_ = utils.LavaFormatInfo("Cache Server listening", utils.Attribute{Key: "Address", Value: lis.Addr().String()})
+	_ = utils.FormatInfo("Cache Server listening", utils.Attribute{Key: "Address", Value: lis.Addr().String()})
 	if err := httpServer.Serve(lis); !errors.Is(err, http.ErrServerClosed) {
-		utils.LavaFormatFatal("cache failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr().String()})
+		utils.FormatFatal("cache failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr().String()})
 	}
 }
 
@@ -282,37 +282,37 @@ func Server(
 ) {
 	expiration, err := flags.GetDuration(ExpirationFlagName)
 	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationFlagName})
+		utils.FormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationFlagName})
 	}
 
 	expirationNonFinalized, err := flags.GetDuration(ExpirationNonFinalizedFlagName)
 	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationNonFinalizedFlagName})
+		utils.FormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationNonFinalizedFlagName})
 	}
 
 	expirationNodeErrors, err := flags.GetDuration(ExpirationNodeErrorsOnFinalizedFlagName)
 	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationNodeErrorsOnFinalizedFlagName})
+		utils.FormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationNodeErrorsOnFinalizedFlagName})
 	}
 
 	expirationBlocksHashesToHeights, err := flags.GetDuration(ExpirationBlocksHashesToHeightsFlagName)
 	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationBlocksHashesToHeightsFlagName})
+		utils.FormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationBlocksHashesToHeightsFlagName})
 	}
 
 	expirationFinalizedMultiplier, err := flags.GetFloat64(ExpirationTimeFinalizedMultiplierFlagName)
 	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationTimeFinalizedMultiplierFlagName})
+		utils.FormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationTimeFinalizedMultiplierFlagName})
 	}
 
 	expirationNonFinalizedMultiplier, err := flags.GetFloat64(ExpirationTimeNonFinalizedMultiplierFlagName)
 	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationTimeNonFinalizedMultiplierFlagName})
+		utils.FormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationTimeNonFinalizedMultiplierFlagName})
 	}
 
 	cacheMaxCost, err := flags.GetInt64(FlagCacheSizeName)
 	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: FlagCacheSizeName})
+		utils.FormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: FlagCacheSizeName})
 	}
 
 	cs := CacheServer{CacheMaxCost: cacheMaxCost}

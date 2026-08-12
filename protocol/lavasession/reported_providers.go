@@ -30,7 +30,7 @@ func (rp *ReportedProviders) Reset() {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
 	if debugReportedProviders {
-		utils.LavaFormatDebug("[debugReportedProviders] Reset called")
+		utils.FormatDebug("[debugReportedProviders] Reset called")
 	}
 	rp.addedToPurgeAndReport = make(map[string]*ReportedProviderEntry, 0)
 	rp.generation++
@@ -61,7 +61,7 @@ func (rp *ReportedProviders) ReportProvider(providerAddr string, errors uint64, 
 // reportProviderLocked performs the actual report. Caller must hold rp.lock.Lock().
 func (rp *ReportedProviders) reportProviderLocked(providerAddr string, errors uint64, disconnections uint64, reconnectCB func() error) {
 	if _, ok := rp.addedToPurgeAndReport[providerAddr]; !ok { // add if it doesn't exist already
-		utils.LavaFormatInfo("Reporting Provider for unresponsiveness", utils.Attribute{Key: "Provider address", Value: providerAddr})
+		utils.FormatInfo("Reporting Provider for unresponsiveness", utils.Attribute{Key: "Provider address", Value: providerAddr})
 		rp.addedToPurgeAndReport[providerAddr] = &ReportedProviderEntry{}
 		rp.addedToPurgeAndReport[providerAddr].addedTime = time.Now()
 	}
@@ -71,7 +71,7 @@ func (rp *ReportedProviders) reportProviderLocked(providerAddr string, errors ui
 		rp.addedToPurgeAndReport[providerAddr].reconnectCB = reconnectCB
 	}
 	if debugReportedProviders {
-		utils.LavaFormatDebug("[debugReportedProviders] adding provider to reported providers", utils.LogAttr("rp.addedToPurgeAndReport", rp.addedToPurgeAndReport))
+		utils.FormatDebug("[debugReportedProviders] adding provider to reported providers", utils.LogAttr("rp.addedToPurgeAndReport", rp.addedToPurgeAndReport))
 	}
 }
 
@@ -80,7 +80,7 @@ func (rp *ReportedProviders) RemoveReport(address string) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
 	if debugReportedProviders {
-		utils.LavaFormatDebug("[debugReportedProviders] Removing Report", utils.LogAttr("address", address))
+		utils.FormatDebug("[debugReportedProviders] Removing Report", utils.LogAttr("address", address))
 	}
 	delete(rp.addedToPurgeAndReport, address)
 }
@@ -115,7 +115,7 @@ func (rp *ReportedProviders) ReconnectCandidates() reconnectCandidatesResult {
 	defer rp.lock.RUnlock()
 	candidates := []reconnectCandidate{}
 	if debugReportedProviders {
-		utils.LavaFormatDebug("[debugReportedProviders] Reconnect candidates", utils.LogAttr("candidate list", rp.addedToPurgeAndReport))
+		utils.FormatDebug("[debugReportedProviders] Reconnect candidates", utils.LogAttr("candidate list", rp.addedToPurgeAndReport))
 	}
 	for address, entry := range rp.addedToPurgeAndReport {
 		// only reconnect providers that didn't have consecutive errors
@@ -135,7 +135,7 @@ func (rp *ReportedProviders) ReconnectProviders() {
 	for _, candidate := range result.candidates {
 		if candidate.reconnectCB != nil {
 			if debugReportedProviders {
-				utils.LavaFormatDebug("[debugReportedProviders] Trying to reconnect candidate", utils.LogAttr("candidate", candidate.address))
+				utils.FormatDebug("[debugReportedProviders] Trying to reconnect candidate", utils.LogAttr("candidate", candidate.address))
 			}
 			err := candidate.reconnectCB()
 			// Generation check and mutation must happen under the same lock
@@ -148,7 +148,7 @@ func (rp *ReportedProviders) ReconnectProviders() {
 				}
 				if err == nil {
 					if debugReportedProviders {
-						utils.LavaFormatDebug("[debugReportedProviders] Removing Report", utils.LogAttr("address", candidate.address))
+						utils.FormatDebug("[debugReportedProviders] Removing Report", utils.LogAttr("address", candidate.address))
 					}
 					delete(rp.addedToPurgeAndReport, candidate.address)
 				} else {
@@ -157,11 +157,11 @@ func (rp *ReportedProviders) ReconnectProviders() {
 				return false
 			}()
 			if stale {
-				utils.LavaFormatDebug("skipping stale reconnect candidate after epoch transition",
+				utils.FormatDebug("skipping stale reconnect candidate after epoch transition",
 					utils.Attribute{Key: "provider", Value: candidate.address})
 				continue
 			}
-			utils.LavaFormatDebug("reconnect attempt", utils.Attribute{Key: "provider", Value: candidate.address}, utils.Attribute{Key: "success", Value: err == nil})
+			utils.FormatDebug("reconnect attempt", utils.Attribute{Key: "provider", Value: candidate.address}, utils.Attribute{Key: "success", Value: err == nil})
 		}
 	}
 }

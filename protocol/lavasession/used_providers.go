@@ -94,7 +94,7 @@ func (up *UsedProviders) SetEligibilityFunc(fn EligibilityFunc) {
 
 func (up *UsedProviders) CurrentlyUsed() int {
 	if up == nil {
-		utils.LavaFormatError("UsedProviders.CurrentlyUsed is nil, misuse detected", nil)
+		utils.FormatError("UsedProviders.CurrentlyUsed is nil, misuse detected", nil)
 		return 0
 	}
 	up.lock.RLock()
@@ -108,7 +108,7 @@ func (up *UsedProviders) CurrentlyUsed() int {
 
 func (up *UsedProviders) SessionsLatestBatch() int {
 	if up == nil {
-		utils.LavaFormatError("UsedProviders.SessionsLatestBatch is nil, misuse detected", nil)
+		utils.FormatError("UsedProviders.SessionsLatestBatch is nil, misuse detected", nil)
 		return 0
 	}
 	up.lock.RLock()
@@ -118,7 +118,7 @@ func (up *UsedProviders) SessionsLatestBatch() int {
 
 func (up *UsedProviders) BatchNumber() int {
 	if up == nil {
-		utils.LavaFormatError("UsedProviders.BatchNumber is nil, misuse detected", nil)
+		utils.FormatError("UsedProviders.BatchNumber is nil, misuse detected", nil)
 		return 0
 	}
 	up.lock.RLock()
@@ -128,7 +128,7 @@ func (up *UsedProviders) BatchNumber() int {
 
 func (up *UsedProviders) CurrentlyUsedAddresses() []string {
 	if up == nil {
-		utils.LavaFormatError("UsedProviders.CurrentlyUsedAddresses is nil, misuse detected", nil)
+		utils.FormatError("UsedProviders.CurrentlyUsedAddresses is nil, misuse detected", nil)
 		return []string{}
 	}
 	up.lock.RLock()
@@ -144,7 +144,7 @@ func (up *UsedProviders) CurrentlyUsedAddresses() []string {
 
 func (up *UsedProviders) AllUnwantedAddresses() []string {
 	if up == nil {
-		utils.LavaFormatError("UsedProviders.UnwantedAddresses is nil, misuse detected", nil)
+		utils.FormatError("UsedProviders.UnwantedAddresses is nil, misuse detected", nil)
 		return []string{}
 	}
 	up.lock.RLock()
@@ -199,7 +199,7 @@ func (up *UsedProviders) createOrUseUniqueUsedProvidersForKey(key RouterKey) *Un
 
 func (up *UsedProviders) AddUnwantedAddresses(address string, routerKey RouterKey) {
 	if up == nil {
-		utils.LavaFormatError("UsedProviders.AddUnwantedAddresses is nil, misuse detected", nil)
+		utils.FormatError("UsedProviders.AddUnwantedAddresses is nil, misuse detected", nil)
 		return
 	}
 	up.lock.Lock()
@@ -271,7 +271,7 @@ func (up *UsedProviders) RemoveUsed(provider string, routerKey RouterKey, err er
 
 	if result.Action == common.EligibilityAllowRetry {
 		uniqueUsedProviders.blockOnSyncLoss[provider] = struct{}{}
-		utils.LavaFormatWarning("Identified SyncLoss in provider, allowing retry", err, utils.Attribute{Key: "address", Value: provider})
+		utils.FormatWarning("Identified SyncLoss in provider, allowing retry", err, utils.Attribute{Key: "address", Value: provider})
 	} else {
 		up.setUnwanted(uniqueUsedProviders, provider)
 	}
@@ -354,7 +354,7 @@ func (up *UsedProviders) TryLockSelection(ctx context.Context) error {
 	for counter := 0; counter < MaximumNumberOfSelectionLockAttempts; counter++ {
 		select {
 		case <-ctx.Done():
-			utils.LavaFormatTrace("Failed locking selection, context is done")
+			utils.FormatTrace("Failed locking selection, context is done")
 			return ContextDoneNoNeedToLockSelectionError
 		default:
 			canSelect := up.tryLockSelection()
@@ -366,7 +366,7 @@ func (up *UsedProviders) TryLockSelection(ctx context.Context) error {
 	}
 
 	// if we got here we failed locking the selection.
-	return utils.LavaFormatError("Failed locking selection after MaximumNumberOfSelectionLockAttempts", nil, utils.LogAttr("GUID", ctx))
+	return utils.FormatError("Failed locking selection after MaximumNumberOfSelectionLockAttempts", nil, utils.LogAttr("GUID", ctx))
 }
 
 func (up *UsedProviders) tryLockSelection() bool {

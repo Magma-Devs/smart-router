@@ -208,7 +208,7 @@ func (m *metricCounter) snapshot() int {
 // TestHandleAndClassify_SingleMetricPerCall verifies the single-emit invariant:
 // every path through handleAndClassify emits exactly one metric (including the
 // Unknown + handleGenericErrors branch, which previously double-logged via both
-// LogCodedError and LavaFormatProduction).
+// LogCodedError and FormatProduction).
 func TestHandleAndClassify_SingleMetricPerCall(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -232,7 +232,7 @@ func TestHandleAndClassify_SingleMetricPerCall(t *testing.T) {
 		},
 		{
 			// io.EOF is not in the registry (classifies Unknown), but
-			// handleGenericErrors recognises it and logs via LavaFormatProduction.
+			// handleGenericErrors recognises it and logs via FormatProduction.
 			// The handler routes the metric through EmitErrorMetric only for
 			// this path so the structured log fires exactly once while the
 			// Prometheus counter still increments.

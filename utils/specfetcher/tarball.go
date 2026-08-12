@@ -10,8 +10,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // MaxTarballDecompressedBytes caps how much decompressed tarball data is read
@@ -23,7 +23,7 @@ const MaxTarballDecompressedBytes = 256 << 20 // 256 MiB
 // GitLab (/-/archive/) serve archives outside their metered REST APIs, so a
 // single unauthenticated request replaces the listing + per-file flow.
 func (f *Fetcher) fetchTarball(ctx context.Context, tarballURL, pathInRepo string, setHeaders func(*http.Request)) (map[string]types.Spec, error) {
-	utils.LavaFormatInfo("Fetching specs tarball",
+	utils.FormatInfo("Fetching specs tarball",
 		utils.LogAttr("tarball_url", tarballURL))
 
 	fetchCtx, cancel := context.WithTimeout(ctx, f.config.FileFetchTimeout)
@@ -103,7 +103,7 @@ func extractSpecsFromTarGz(r io.Reader, pathInRepo string) (map[string]types.Spe
 	}
 
 	if len(parseErrors) > 0 {
-		utils.LavaFormatWarning("Some spec files in the tarball failed to parse", nil,
+		utils.FormatWarning("Some spec files in the tarball failed to parse", nil,
 			utils.LogAttr("error_count", len(parseErrors)),
 			utils.LogAttr("errors", strings.Join(parseErrors, "; ")))
 	}

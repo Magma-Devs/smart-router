@@ -110,7 +110,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 	}
 
 	if response.RelayResult.Reply == nil {
-		utils.LavaFormatError("got to setValidResponse with nil Reply",
+		utils.FormatError("got to setValidResponse with nil Reply",
 			response.Err,
 			utils.LogAttr("ProviderInfo", response.RelayResult.ProviderInfo),
 			utils.LogAttr("StatusCode", response.RelayResult.StatusCode),
@@ -250,7 +250,7 @@ func (rp *ResultsManagerInst) RequiredResults(requiredSuccesses int, selection S
 	resultsCount := len(rp.successResults)
 	if resultsCount >= requiredSuccesses {
 		// we have enough successes, we can return
-		utils.LavaFormatDebug("Reached RequiredResults", utils.LogAttr("resultsCount", resultsCount), utils.LogAttr("requiredSuccesses", requiredSuccesses), utils.LogAttr("GUID", rp.guid))
+		utils.FormatDebug("Reached RequiredResults", utils.LogAttr("resultsCount", resultsCount), utils.LogAttr("requiredSuccesses", requiredSuccesses), utils.LogAttr("GUID", rp.guid))
 		return true
 	}
 	// Only count successful results for cross-validation

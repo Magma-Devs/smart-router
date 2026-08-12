@@ -105,11 +105,11 @@ func (r *RelayErrors) GetBestErrorMessageForUser() RelayError {
 
 	// Step 2+3: external preference with score tiebreak (populated above).
 	if bestIndex != -1 {
-		utils.LavaFormatDebug("Failed all relays", utils.LogAttr("error_map", errorMap))
+		utils.FormatDebug("Failed all relays", utils.LogAttr("error_map", errorMap))
 		return r.RelayErrors[bestIndex]
 	}
 	// if we didn't manage to find any index return all.
-	utils.LavaFormatError("Failed finding the best error index in GetErrorMessageForUser", nil, utils.LogAttr("relayErrors", r.RelayErrors))
+	utils.FormatError("Failed finding the best error index in GetErrorMessageForUser", nil, utils.LogAttr("relayErrors", r.RelayErrors))
 	if r.OnFailureMergeAll {
 		return RelayError{Err: r.mergeAllErrors()}
 	}

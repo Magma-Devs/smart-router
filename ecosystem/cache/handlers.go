@@ -56,7 +56,7 @@ func (cv *CacheValue) ToCacheReply() *relaytypes.CacheRelayReply {
 	if cv.IsCompressed && len(response.Data) > 0 {
 		decompressed, err := decompressData(response.Data)
 		if err != nil {
-			utils.LavaFormatError("Failed to decompress cache data", err)
+			utils.FormatError("Failed to decompress cache data", err)
 		} else {
 			response.Data = decompressed
 		}
@@ -135,14 +135,14 @@ func (s *RelayerCacheServer) getSeenBlockForSharedStateMode(chainId string, shar
 		id := latestBlockKey(chainId, sharedStateId)
 		value, found := getNonExpiredFromCache(s.CacheServer.finalizedCache, id)
 		if !found {
-			utils.LavaFormatInfo("Failed fetching state from cache for this user id", utils.LogAttr("id", id))
+			utils.FormatInfo("Failed fetching state from cache for this user id", utils.LogAttr("id", id))
 			return 0
 		}
-		utils.LavaFormatInfo("getting seen block cache", utils.LogAttr("id", id), utils.LogAttr("value", value))
+		utils.FormatInfo("getting seen block cache", utils.LogAttr("id", id), utils.LogAttr("value", value))
 		if cacheValue, ok := value.(int64); ok {
 			return cacheValue
 		}
-		utils.LavaFormatFatal("Failed converting cache result to int64", nil, utils.LogAttr("value", value))
+		utils.FormatFatal("Failed converting cache result to int64", nil, utils.LogAttr("value", value))
 	}
 	return 0
 }
@@ -180,7 +180,7 @@ func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relayt
 		relayCacheGet.RequestedBlock = replaceRequestedBlock(originalRequestedBlock, getLatestBlock)
 	}
 
-	utils.LavaFormatDebug("Got Cache Get",
+	utils.FormatDebug("Got Cache Get",
 		utils.Attribute{Key: "request_hash", Value: string(relayCacheGet.RequestHash)},
 		utils.Attribute{Key: "finalized", Value: relayCacheGet.Finalized},
 		utils.Attribute{Key: "requested_block", Value: originalRequestedBlock},
@@ -219,7 +219,7 @@ func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relayt
 
 		if err == nil {
 			if cacheReply.SeenBlock < lavaslices.Min([]int64{relayCacheGet.SeenBlock, relayCacheGet.RequestedBlock}) {
-				err = utils.LavaFormatDebug("reply seen block is smaller than our expectations",
+				err = utils.FormatDebug("reply seen block is smaller than our expectations",
 					utils.LogAttr("cacheReply.SeenBlock", cacheReply.SeenBlock),
 					utils.LogAttr("seenBlock", relayCacheGet.SeenBlock),
 				)
@@ -230,7 +230,7 @@ func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relayt
 			cacheReply.SeenBlock = relayCacheGet.SeenBlock
 		}
 	} else {
-		err = utils.LavaFormatDebug("Requested block is invalid",
+		err = utils.FormatDebug("Requested block is invalid",
 			utils.LogAttr("requested block", relayCacheGet.RequestedBlock),
 			utils.LogAttr("request_hash", string(relayCacheGet.RequestHash)),
 		)
@@ -239,7 +239,7 @@ func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relayt
 
 	cacheReply.BlocksHashesToHeights = blockHashes
 	if blockHashes != nil {
-		utils.LavaFormatDebug("block hashes:", utils.LogAttr("hashes", blockHashes))
+		utils.FormatDebug("block hashes:", utils.LogAttr("hashes", blockHashes))
 	}
 
 	cacheHit := cacheReply.Reply != nil
@@ -260,7 +260,7 @@ func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relayt
 }
 
 func (s *RelayerCacheServer) formatHashKey(hash []byte, parsedRequestedBlock int64) []byte {
-	utils.LavaFormatDebug("formatHashKey",
+	utils.FormatDebug("formatHashKey",
 		utils.Attribute{Key: "hash", Value: fmt.Sprintf("%x", hash)},
 		utils.Attribute{Key: "parsedRequestedBlock", Value: parsedRequestedBlock},
 	)
@@ -279,7 +279,7 @@ func (s *RelayerCacheServer) getRelayInner(relayCacheGet *relaytypes.RelayCacheG
 		return nil, NotFoundError
 	}
 	if cacheVal.Hash == nil {
-		utils.LavaFormatDebug("returning response",
+		utils.FormatDebug("returning response",
 			utils.Attribute{Key: "cache_source", Value: cacheSource},
 			utils.Attribute{Key: "hash", Value: "nil"},
 			utils.Attribute{Key: "response_data", Value: parser.CapStringLen(string(cacheVal.Response.Data))},
@@ -287,7 +287,7 @@ func (s *RelayerCacheServer) getRelayInner(relayCacheGet *relaytypes.RelayCacheG
 		return cacheVal.ToCacheReply(), nil
 	}
 	if bytes.Equal(cacheVal.Hash, relayCacheGet.BlockHash) {
-		utils.LavaFormatDebug("returning response",
+		utils.FormatDebug("returning response",
 			utils.Attribute{Key: "cache_source", Value: cacheSource},
 			utils.Attribute{Key: "hash", Value: "match"},
 			utils.Attribute{Key: "response_data", Value: parser.CapStringLen(string(cacheVal.Response.Data))},
@@ -345,13 +345,13 @@ func (s *RelayerCacheServer) setBlocksHashesToHeights(chainId string, blocksHash
 
 func (s *RelayerCacheServer) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCacheSet) (*emptypb.Empty, error) {
 	if relayCacheSet.RequestedBlock < 0 {
-		return nil, utils.LavaFormatError("invalid relay cache set data, request block is negative", nil, utils.Attribute{Key: "requestBlock", Value: relayCacheSet.RequestedBlock})
+		return nil, utils.FormatError("invalid relay cache set data, request block is negative", nil, utils.Attribute{Key: "requestBlock", Value: relayCacheSet.RequestedBlock})
 	}
 	latestKnownBlock := int64(math.Max(float64(relayCacheSet.Response.LatestBlock), float64(relayCacheSet.SeenBlock)))
 
 	cacheKey := s.formatHashKey(relayCacheSet.RequestHash, relayCacheSet.RequestedBlock)
 	cacheValue := formatCacheValue(relayCacheSet.Response, relayCacheSet.BlockHash, relayCacheSet.Finalized, relayCacheSet.OptionalMetadata, latestKnownBlock)
-	utils.LavaFormatDebug("Got Cache Set",
+	utils.FormatDebug("Got Cache Set",
 		utils.Attribute{Key: "cacheKey", Value: string(cacheKey)},
 		utils.Attribute{Key: "finalized", Value: fmt.Sprintf("%t", relayCacheSet.Finalized)},
 		utils.Attribute{Key: "requested_block", Value: relayCacheSet.RequestedBlock},
@@ -411,7 +411,7 @@ func (s *RelayerCacheServer) FlushCache(ctx context.Context, req *emptypb.Empty)
 		c.Clear()
 		c.Wait()
 	}
-	utils.LavaFormatInfo("cache server flushed by FlushCache RPC")
+	utils.FormatInfo("cache server flushed by FlushCache RPC")
 	return &emptypb.Empty{}, nil
 }
 
@@ -432,7 +432,7 @@ func (s *RelayerCacheServer) cacheMiss(ctx context.Context, errPrint error) {
 func (s *RelayerCacheServer) PrintCacheStats(ctx context.Context, desc string) {
 	hits := atomic.LoadUint64(&s.cacheHits)
 	misses := atomic.LoadUint64(&s.cacheMisses)
-	_ = utils.LavaFormatDebug(desc,
+	_ = utils.FormatDebug(desc,
 		utils.Attribute{Key: "misses", Value: strconv.FormatUint(misses, 10)},
 		utils.Attribute{Key: "hits", Value: strconv.FormatUint(hits, 10)},
 	)
@@ -446,7 +446,7 @@ func (s *RelayerCacheServer) getLatestBlockInner(key string) (latestBlock int64,
 	if cacheValue, ok := value.(LastestCacheStore); ok {
 		return cacheValue.latestBlock, cacheValue.latestExpirationTime
 	}
-	utils.LavaFormatError("latestBlock value is not a LastestCacheStore", EntryTypeError, utils.Attribute{Key: "value", Value: fmt.Sprintf("%+v", value)})
+	utils.FormatError("latestBlock value is not a LastestCacheStore", EntryTypeError, utils.Attribute{Key: "value", Value: fmt.Sprintf("%+v", value)})
 	return spectypes.NOT_APPLICABLE, time.Time{}
 }
 
@@ -460,7 +460,7 @@ func (s *RelayerCacheServer) getLatestBlock(key string) int64 {
 
 func (s *RelayerCacheServer) setLatestBlock(key string, latestBlock int64) {
 	cacheStore := LastestCacheStore{latestBlock: latestBlock, latestExpirationTime: time.Now().Add(DefaultExpirationForNonFinalized)}
-	utils.LavaFormatDebug("setting latest block", utils.Attribute{Key: "key", Value: key}, utils.Attribute{Key: "latestBlock", Value: latestBlock})
+	utils.FormatDebug("setting latest block", utils.Attribute{Key: "key", Value: key}, utils.Attribute{Key: "latestBlock", Value: latestBlock})
 	set := func() {
 		s.CacheServer.finalizedCache.Set(key, cacheStore, cacheStore.Cost())
 	}
@@ -521,7 +521,7 @@ func (s *RelayerCacheServer) findInAllCaches(finalized bool, cacheKey []byte) (r
 	if cacheVal, ok := value.(CacheValue); ok {
 		return cacheVal, cacheSource, true
 	}
-	utils.LavaFormatError("entry in cache was not a CacheValue", EntryTypeError, utils.Attribute{Key: "entry", Value: fmt.Sprintf("%+v", value)})
+	utils.FormatError("entry in cache was not a CacheValue", EntryTypeError, utils.Attribute{Key: "entry", Value: fmt.Sprintf("%+v", value)})
 	return CacheValue{}, "", false
 }
 
@@ -530,7 +530,7 @@ func formatCacheValue(response *relaytypes.RelayReply, hash []byte, finalized bo
 
 	compressed, isCompressed, err := compressData(response.Data)
 	if err != nil {
-		utils.LavaFormatWarning("Failed to compress cache data, storing uncompressed", err)
+		utils.FormatWarning("Failed to compress cache data, storing uncompressed", err)
 	} else if isCompressed {
 		response.Data = compressed
 	}

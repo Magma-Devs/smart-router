@@ -309,7 +309,7 @@ func (csm *ConsumerSessionManager) RPCEndpoint() RPCEndpoint {
 }
 
 func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList map[uint64]*ConsumerSessionsWithProvider, backupProviderList map[uint64]*ConsumerSessionsWithProvider) error {
-	utils.LavaFormatDebug("UpdateAllProviders", utils.Attribute{Key: "epoch", Value: epoch}, utils.Attribute{Key: "pairingListLen", Value: len(pairingList)})
+	utils.FormatDebug("UpdateAllProviders", utils.Attribute{Key: "epoch", Value: epoch}, utils.Attribute{Key: "pairingListLen", Value: len(pairingList)})
 	pairingListLength := len(pairingList)
 	// TODO: we can block updating until some of the probing is done, this can prevent failed attempts on epoch change when we have no information on the providers,
 	// and all of them are new (less effective on big pairing lists or a process that runs for a few epochs)
@@ -331,7 +331,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	defer csm.lock.Unlock() // we defer here so in case we return an error it will unlock automatically.
 
 	if epoch < previousEpoch { // sentry shouldn't update an old epoch
-		return utils.LavaFormatError("trying to update provider list for older epoch", nil, utils.Attribute{Key: "epoch", Value: epoch}, utils.Attribute{Key: "currentEpoch", Value: csm.atomicReadCurrentEpoch()})
+		return utils.FormatError("trying to update provider list for older epoch", nil, utils.Attribute{Key: "epoch", Value: epoch}, utils.Attribute{Key: "currentEpoch", Value: csm.atomicReadCurrentEpoch()})
 	}
 
 	// For same-epoch updates, we still need to proceed with the update
@@ -339,7 +339,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	// that needs to be reset. We just skip the epoch write to avoid redundant atomic operations.
 	skipEpochWrite := (epoch == previousEpoch)
 	if skipEpochWrite {
-		utils.LavaFormatDebug("UpdateAllProviders called with same epoch, updating state anyway",
+		utils.FormatDebug("UpdateAllProviders called with same epoch, updating state anyway",
 			utils.Attribute{Key: "epoch", Value: epoch},
 			utils.Attribute{Key: "spec", Value: csm.rpcEndpoint.Key()})
 	}
@@ -358,7 +358,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	csm.previousEpochBlockedProviders = make(map[string]struct{})
 	for _, blockedAddr := range csm.currentlyBlockedProviderAddresses {
 		csm.previousEpochBlockedProviders[blockedAddr] = struct{}{}
-		utils.LavaFormatDebug("UpdateAllProviders: Preserving blocked provider from previous epoch",
+		utils.FormatDebug("UpdateAllProviders: Preserving blocked provider from previous epoch",
 			utils.Attribute{Key: "provider", Value: blockedAddr},
 			utils.Attribute{Key: "fromEpoch", Value: previousEpoch},
 			utils.Attribute{Key: "toEpoch", Value: epoch},
@@ -366,7 +366,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	}
 	for blockedAddr := range csm.blockedBackupProviders {
 		csm.previousEpochBlockedProviders[blockedAddr] = struct{}{}
-		utils.LavaFormatDebug("UpdateAllProviders: Preserving blocked backup provider from previous epoch",
+		utils.FormatDebug("UpdateAllProviders: Preserving blocked backup provider from previous epoch",
 			utils.Attribute{Key: "provider", Value: blockedAddr},
 			utils.Attribute{Key: "fromEpoch", Value: previousEpoch},
 			utils.Attribute{Key: "toEpoch", Value: epoch},
@@ -402,7 +402,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	// This prevents users from hitting known-bad providers at epoch transition
 	for blockedAddr := range csm.previousEpochBlockedProviders {
 		if _, exists := csm.pairing[blockedAddr]; exists {
-			utils.LavaFormatDebug("UpdateAllProviders: Re-blocking provider from previous epoch",
+			utils.FormatDebug("UpdateAllProviders: Re-blocking provider from previous epoch",
 				utils.Attribute{Key: "provider", Value: blockedAddr},
 				utils.Attribute{Key: "epoch", Value: epoch},
 			)
@@ -436,7 +436,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	for blockedAddr := range csm.previousEpochBlockedProviders {
 		if _, exists := csm.backupProviders[blockedAddr]; exists {
 			csm.blockedBackupProviders[blockedAddr] = struct{}{}
-			utils.LavaFormatDebug("UpdateAllProviders: Re-blocking backup provider from previous epoch",
+			utils.FormatDebug("UpdateAllProviders: Re-blocking backup provider from previous epoch",
 				utils.Attribute{Key: "provider", Value: blockedAddr},
 				utils.Attribute{Key: "epoch", Value: epoch},
 			)
@@ -446,7 +446,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	// Clean up expired sticky sessions
 	csm.stickySessions.DeleteOldSessions(previousEpoch)
 
-	utils.LavaFormatDebug("updated providers", utils.Attribute{Key: "epoch", Value: epoch}, utils.Attribute{Key: "spec", Value: csm.rpcEndpoint.Key()})
+	utils.FormatDebug("updated providers", utils.Attribute{Key: "epoch", Value: epoch}, utils.Attribute{Key: "spec", Value: csm.rpcEndpoint.Key()})
 
 	// Close old connections OUTSIDE the lock to prevent blocking other operations
 	// This is safe because after an entire epoch, it's impossible to have sessions connected to the old purged list
@@ -526,48 +526,48 @@ func (csm *ConsumerSessionManager) RemoveAddonAddresses(addon string, extensions
 
 // csm is Rlocked
 func (csm *ConsumerSessionManager) CalculateAddonValidAddresses(addon string, extensions []string, ctx context.Context) (supportingProviderAddresses []string) {
-	utils.LavaFormatInfo("🔎 CALCULATING VALID ADDRESSES", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("totalValidAddresses", len(csm.validAddresses)), utils.LogAttr("currentlyBlockedCount", len(csm.currentlyBlockedProviderAddresses)), utils.LogAttr("GUID", ctx))
+	utils.FormatInfo("🔎 CALCULATING VALID ADDRESSES", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("totalValidAddresses", len(csm.validAddresses)), utils.LogAttr("currentlyBlockedCount", len(csm.currentlyBlockedProviderAddresses)), utils.LogAttr("GUID", ctx))
 	for _, providerAdress := range csm.validAddresses {
 		providerEntry := csm.pairing[providerAdress]
 		supportsAddon := providerEntry.IsSupportingAddon(addon)
 		supportsExtensions := providerEntry.IsSupportingExtensions(extensions, ctx)
-		utils.LavaFormatTrace("[Archive Debug] Provider extension check",
+		utils.FormatTrace("[Archive Debug] Provider extension check",
 			utils.LogAttr("providerAddress", providerAdress),
 			utils.LogAttr("supportsAddon", supportsAddon),
 			utils.LogAttr("supportsExtensions", supportsExtensions),
 			utils.LogAttr("GUID", ctx))
 		if supportsAddon && supportsExtensions {
 			supportingProviderAddresses = append(supportingProviderAddresses, providerAdress)
-			utils.LavaFormatTrace("[Archive Debug] Provider added to supporting list",
+			utils.FormatTrace("[Archive Debug] Provider added to supporting list",
 				utils.LogAttr("providerAddress", providerAdress),
 				utils.LogAttr("GUID", ctx))
 		} else {
-			utils.LavaFormatTrace("[Archive Debug] Provider filtered out",
+			utils.FormatTrace("[Archive Debug] Provider filtered out",
 				utils.LogAttr("providerAddress", providerAdress),
 				utils.LogAttr("reason", "does not support addon or extensions"),
 				utils.LogAttr("GUID", ctx))
 		}
 	}
-	utils.LavaFormatInfo("CALCULATION RESULT", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("supportingProviderCount", len(supportingProviderAddresses)), utils.LogAttr("supportingProviders", supportingProviderAddresses), utils.LogAttr("GUID", ctx))
+	utils.FormatInfo("CALCULATION RESULT", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("supportingProviderCount", len(supportingProviderAddresses)), utils.LogAttr("supportingProviders", supportingProviderAddresses), utils.LogAttr("GUID", ctx))
 	return supportingProviderAddresses
 }
 
 // assuming csm is Rlocked
 func (csm *ConsumerSessionManager) getValidAddresses(addon string, extensions []string, ctx context.Context) (addresses []string) {
-	utils.LavaFormatTrace("[Archive Debug] getValidAddresses called",
+	utils.FormatTrace("[Archive Debug] getValidAddresses called",
 		utils.LogAttr("addon", addon),
 		utils.LogAttr("extensions", extensions),
 		utils.LogAttr("GUID", ctx))
 	routerKey := NewRouterKey(append(extensions, addon))
 	routerKeyString := routerKey.String()
 	if csm.addonAddresses == nil || csm.addonAddresses[routerKeyString] == nil {
-		utils.LavaFormatTrace("[Archive Debug] Calling CalculateAddonValidAddresses",
+		utils.FormatTrace("[Archive Debug] Calling CalculateAddonValidAddresses",
 			utils.LogAttr("addon", addon),
 			utils.LogAttr("extensions", extensions),
 			utils.LogAttr("GUID", ctx))
 		return csm.CalculateAddonValidAddresses(addon, extensions, ctx)
 	}
-	utils.LavaFormatTrace("[Archive Debug] Using cached addonAddresses",
+	utils.FormatTrace("[Archive Debug] Using cached addonAddresses",
 		utils.LogAttr("routerKeyString", routerKeyString),
 		utils.LogAttr("cachedAddresses", csm.addonAddresses[routerKeyString]),
 		utils.LogAttr("GUID", ctx))
@@ -588,7 +588,7 @@ func (csm *ConsumerSessionManager) closePurgedUnusedPairingsConnections(pairingP
 			for _, endpoint := range purgedPairing.Endpoints {
 				for _, endpointConnection := range endpoint.Connections {
 					if endpointConnection.connection != nil {
-						utils.LavaFormatTrace("purging connection",
+						utils.FormatTrace("purging connection",
 							utils.LogAttr("providerAddr", providerAddr),
 							utils.LogAttr("endpoint", endpoint.NetworkAddress),
 						)
@@ -599,7 +599,7 @@ func (csm *ConsumerSessionManager) closePurgedUnusedPairingsConnections(pairingP
 		}
 		// on cases where there is still an active subscription over the epoch handover, we purge the connection when subscription ends.
 		if csm.activeSubscriptionProvidersStorage.IsProviderCurrentlyUsed(providerAddr) {
-			utils.LavaFormatTrace("skipping purge for provider, as its currently used in a subscription",
+			utils.FormatTrace("skipping purge for provider, as its currently used in a subscription",
 				utils.LogAttr("providerAddr", providerAddr),
 			)
 			csm.activeSubscriptionProvidersStorage.addToPurgeWhenDone(providerAddr, callbackPurge)
@@ -638,7 +638,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 			defer cancel()
 			guid, found := utils.GetUniqueIdentifier(connectCtx)
 			if !found {
-				return utils.LavaFormatError("probeProvider failed fetching unique identifier from context when it's set", nil)
+				return utils.FormatError("probeProvider failed fetching unique identifier from context when it's set", nil)
 			}
 			if endpointAndConnection == nil ||
 				endpointAndConnection.chosenEndpointConnection == nil ||
@@ -647,7 +647,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 				// For direct RPC, we handle this case above
 				consumerSessionsWithProvider.Lock.Lock()
 				defer consumerSessionsWithProvider.Lock.Unlock()
-				return utils.LavaFormatError("returned nil client in endpoint", nil, utils.Attribute{Key: "consumerSessionWithProvider", Value: consumerSessionsWithProvider})
+				return utils.FormatError("returned nil client in endpoint", nil, utils.Attribute{Key: "consumerSessionWithProvider", Value: consumerSessionsWithProvider})
 			}
 			client := endpointAndConnection.chosenEndpointConnection.Client
 			probeReq := &pairingtypes.ProbeRequest{
@@ -664,14 +664,14 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 
 			relayLatency := time.Since(relaySentTime)
 			if err != nil {
-				return utils.LavaFormatError("probe call error", err, utils.Attribute{Key: "provider", Value: providerAddress})
+				return utils.FormatError("probe call error", err, utils.Attribute{Key: "provider", Value: providerAddress})
 			}
 			providerGuid := probeResp.GetGuid()
 			if providerGuid != guid {
-				return utils.LavaFormatWarning("mismatch probe response", nil, utils.Attribute{Key: "provider", Value: providerAddress}, utils.Attribute{Key: "provider Guid", Value: providerGuid}, utils.Attribute{Key: "sent guid", Value: guid})
+				return utils.FormatWarning("mismatch probe response", nil, utils.Attribute{Key: "provider", Value: providerAddress}, utils.Attribute{Key: "provider Guid", Value: providerGuid}, utils.Attribute{Key: "sent guid", Value: guid})
 			}
 			if probeResp.LatestBlock == 0 {
-				return utils.LavaFormatWarning("provider returned 0 latest block", nil, utils.Attribute{Key: "provider", Value: providerAddress}, utils.Attribute{Key: "sent guid", Value: guid})
+				return utils.FormatWarning("provider returned 0 latest block", nil, utils.Attribute{Key: "provider", Value: providerAddress}, utils.Attribute{Key: "sent guid", Value: guid})
 			}
 
 			endpointInfos = append(endpointInfos, EndpointInfo{
@@ -680,7 +680,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 			})
 			// public lava address is a value that is not changing, so it's thread safe
 			if DebugProbesEnabled() {
-				utils.LavaFormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicLavaAddress})
+				utils.FormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicLavaAddress})
 			}
 			return nil
 		}()
@@ -734,7 +734,7 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 		// path no longer emits liveness metrics or QoS — it is only a race-free routability gate for
 		// the epoch-transition unblock/reconnect callers; the prober owns direct-RPC liveness.
 		if !endpoint.IsEnabled() {
-			utils.LavaFormatDebug("Direct RPC endpoint is disabled, skipping probe",
+			utils.FormatDebug("Direct RPC endpoint is disabled, skipping probe",
 				utils.LogAttr("provider", providerAddress),
 				utils.LogAttr("endpoint", endpoint.NetworkAddress),
 			)
@@ -749,7 +749,7 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 			usableEndpoints++
 
 			if DebugProbesEnabled() {
-				utils.LavaFormatDebug("Direct RPC endpoint probe (no health gate)",
+				utils.FormatDebug("Direct RPC endpoint probe (no health gate)",
 					utils.LogAttr("provider", providerAddress),
 					utils.LogAttr("url", conn.GetURL()),
 					utils.LogAttr("protocol", conn.GetProtocol()),
@@ -771,7 +771,7 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 	// the provider-relay probe API.
 	minLatency := time.Millisecond
 
-	utils.LavaFormatTrace("Direct RPC endpoints probe completed",
+	utils.FormatTrace("Direct RPC endpoints probe completed",
 		utils.LogAttr("provider", providerAddress),
 		utils.LogAttr("usableEndpoints", usableEndpoints),
 		utils.LogAttr("totalEndpoints", totalEndpoints),
@@ -783,9 +783,9 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 
 // csm needs to be locked here
 func (csm *ConsumerSessionManager) setValidAddressesToDefaultValue(addon string, extensions []string, ctx context.Context) {
-	utils.LavaFormatInfo("Resetting blocked provider list", utils.LogAttr("blockedProvidersBeforeReset", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("GUID", ctx))
+	utils.FormatInfo("Resetting blocked provider list", utils.LogAttr("blockedProvidersBeforeReset", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("GUID", ctx))
 	csm.currentlyBlockedProviderAddresses = make([]string, 0) // reset currently blocked provider addresses
-	utils.LavaFormatInfo("Blocked provider list reset complete", utils.LogAttr("blockedProvidersAfterReset", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("GUID", ctx))
+	utils.FormatInfo("Blocked provider list reset complete", utils.LogAttr("blockedProvidersAfterReset", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("GUID", ctx))
 	if addon == "" && len(extensions) == 0 {
 		csm.validAddresses = make([]string, len(csm.pairingAddresses))
 		index := 0
@@ -800,7 +800,7 @@ func (csm *ConsumerSessionManager) setValidAddressesToDefaultValue(addon string,
 			supportsAddon := csm.pairing[provider].IsSupportingAddon(addon)
 			supportsExtensions := csm.pairing[provider].IsSupportingExtensions(extensions, ctx)
 
-			utils.LavaFormatTrace("[Archive Debug] Provider filtering check",
+			utils.FormatTrace("[Archive Debug] Provider filtering check",
 				utils.LogAttr("providerAddress", provider),
 				utils.LogAttr("addon", addon),
 				utils.LogAttr("extensions", extensions),
@@ -816,12 +816,12 @@ func (csm *ConsumerSessionManager) setValidAddressesToDefaultValue(addon string,
 					}
 				}
 				// get here only it found a supporting provider that is not valid
-				utils.LavaFormatTrace("[Archive Debug] Adding provider to valid addresses",
+				utils.FormatTrace("[Archive Debug] Adding provider to valid addresses",
 					utils.LogAttr("providerAddress", provider),
 					utils.LogAttr("GUID", ctx))
 				csm.validAddresses = append(csm.validAddresses, provider)
 			} else {
-				utils.LavaFormatTrace("[Archive Debug] Provider filtered out",
+				utils.FormatTrace("[Archive Debug] Provider filtered out",
 					utils.LogAttr("providerAddress", provider),
 					utils.LogAttr("reason", "does not support addon or extensions"),
 					utils.LogAttr("GUID", ctx))
@@ -854,11 +854,11 @@ func (csm *ConsumerSessionManager) resetValidAddresses(addon string, extensions 
 		csm.setValidAddressesToDefaultValue(addon, extensions, context.Background())
 		// only if length is larger than 0 after reset we actually reset. otherwise we don't have any providers for addon or extension
 		if len(csm.getValidAddresses(addon, extensions, context.Background())) != 0 {
-			utils.LavaFormatWarning("Provider pairing list is empty, resetting state.", nil, utils.Attribute{Key: "addon", Value: addon}, utils.Attribute{Key: "extensions", Value: extensions})
+			utils.FormatWarning("Provider pairing list is empty, resetting state.", nil, utils.Attribute{Key: "addon", Value: addon}, utils.Attribute{Key: "extensions", Value: extensions})
 		} else {
-			utils.LavaFormatWarning("No providers for asked addon or extension, list is empty after trying to reset", nil, utils.Attribute{Key: "addon", Value: addon}, utils.Attribute{Key: "extensions", Value: extensions})
+			utils.FormatWarning("No providers for asked addon or extension, list is empty after trying to reset", nil, utils.Attribute{Key: "addon", Value: addon}, utils.Attribute{Key: "extensions", Value: extensions})
 			if addon == "" && len(extensions) == 0 {
-				utils.LavaFormatError("User subscription might have expired or not purchased properly, pairing list is empty after reset.", nil, utils.LogAttr("consumer_address", csm.consumerPublicAddress))
+				utils.FormatError("User subscription might have expired or not purchased properly, pairing list is empty after reset.", nil, utils.LogAttr("consumer_address", csm.consumerPublicAddress))
 			}
 		}
 		csm.numberOfResets += 1
@@ -912,11 +912,11 @@ func (csm *ConsumerSessionManager) validatePairingListNotEmpty(addon string, ext
 	validAddresses := csm.cacheAddonAddresses(addon, extensions, ctx)
 	// currentlyBlockedProviderAddresses is intentionally not read here: this method holds no csm.lock,
 	// so reading the shared slice for a log attr races a concurrent writer (blockProvider / restore).
-	utils.LavaFormatInfo("VALIDATING PROVIDERS", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("validAddressesCount", len(validAddresses)), utils.LogAttr("validAddresses", validAddresses), utils.LogAttr("GUID", ctx))
+	utils.FormatInfo("VALIDATING PROVIDERS", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("validAddressesCount", len(validAddresses)), utils.LogAttr("validAddresses", validAddresses), utils.LogAttr("GUID", ctx))
 	if len(validAddresses) == 0 {
-		utils.LavaFormatWarning("NO VALID PROVIDERS - TRIGGERING RESET", nil, utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("GUID", ctx))
+		utils.FormatWarning("NO VALID PROVIDERS - TRIGGERING RESET", nil, utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("GUID", ctx))
 		numberOfResets = csm.resetValidAddresses(addon, extensions)
-		utils.LavaFormatInfo("RESET COMPLETED", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("newValidAddressesCount", len(csm.cacheAddonAddresses(addon, extensions, ctx))), utils.LogAttr("GUID", ctx))
+		utils.FormatInfo("RESET COMPLETED", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("newValidAddressesCount", len(csm.cacheAddonAddresses(addon, extensions, ctx))), utils.LogAttr("GUID", ctx))
 	}
 	return numberOfResets
 }
@@ -927,26 +927,26 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 		if errors.Is(err, PairingListEmptyError) {
 			// Emergency fallback chain: backup providers first, then blocked providers for maximum availability
 			if len(csm.backupProviders) > 0 {
-				utils.LavaFormatDebug("No regular providers available, trying backup providers", utils.LogAttr("GUID", ctx))
+				utils.FormatDebug("No regular providers available, trying backup providers", utils.LogAttr("GUID", ctx))
 				// try to get a session from the backup providers
 				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
 				if err == nil {
 					// backup providers succeeded, return the session
-					utils.LavaFormatDebug("Successfully got session from backup providers", utils.LogAttr("GUID", ctx))
+					utils.FormatDebug("Successfully got session from backup providers", utils.LogAttr("GUID", ctx))
 					return sessionWithProviderMap, nil
 				}
 				// backup providers failed, continue to blocked providers
-				utils.LavaFormatDebug("Backup providers failed, trying blocked providers", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
+				utils.FormatDebug("Backup providers failed, trying blocked providers", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 			}
 
 			// try to recover a session from the currently blocked providers
 			var errOnRetry error
 			sessionWithProviderMap, errOnRetry = csm.tryGetConsumerSessionWithProviderFromBlockedProviderList(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
 			if errOnRetry != nil {
-				utils.LavaFormatDebug("All providers failed (regular, backup, and blocked)", utils.LogAttr("GUID", ctx))
+				utils.FormatDebug("All providers failed (regular, backup, and blocked)", utils.LogAttr("GUID", ctx))
 				return nil, errOnRetry
 			}
-			utils.LavaFormatDebug("Successfully got session from blocked providers", utils.LogAttr("GUID", ctx))
+			utils.FormatDebug("Successfully got session from blocked providers", utils.LogAttr("GUID", ctx))
 		} else {
 			return nil, err
 		}
@@ -1015,16 +1015,16 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	cantSelectError := usedProviders.TryLockSelection(timeoutCtx)
 	if cantSelectError != nil {
 		if errors.Is(cantSelectError, ContextDoneNoNeedToLockSelectionError) {
-			return nil, utils.LavaFormatDebug("Context deadline exceeded when trying to lock selection", utils.LogAttr("GUID", ctx))
+			return nil, utils.FormatDebug("Context deadline exceeded when trying to lock selection", utils.LogAttr("GUID", ctx))
 		}
-		return nil, utils.LavaFormatError("failed getting sessions from used Providers", nil, utils.LogAttr("usedProviders", usedProviders), utils.LogAttr("endpoint", csm.rpcEndpoint), utils.LogAttr("GUID", ctx))
+		return nil, utils.FormatError("failed getting sessions from used Providers", nil, utils.LogAttr("usedProviders", usedProviders), utils.LogAttr("endpoint", csm.rpcEndpoint), utils.LogAttr("GUID", ctx))
 	}
 	defer func() { usedProviders.AddUsed(consumerSessionMap, errRet) }()
 	routerKey := NewRouterKeyFromExtensions(extensions)
 	initUnwantedProviders := usedProviders.GetUnwantedProvidersToSend(routerKey)
 
 	extensionNames := common.GetExtensionNames(extensions)
-	utils.LavaFormatTrace("[Archive Debug] GetSessions extension conversion",
+	utils.FormatTrace("[Archive Debug] GetSessions extension conversion",
 		utils.LogAttr("originalExtensions", extensions),
 		utils.LogAttr("extensionNames", extensionNames),
 		utils.LogAttr("GUID", ctx))
@@ -1036,12 +1036,12 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		providers:    initUnwantedProviders,
 		currentEpoch: csm.atomicReadCurrentEpoch(),
 	}
-	utils.LavaFormatTrace("GetSessions tempIgnoredProviders", utils.LogAttr("tempIgnoredProviders", tempIgnoredProviders), utils.LogAttr("GUID", ctx))
+	utils.FormatTrace("GetSessions tempIgnoredProviders", utils.LogAttr("tempIgnoredProviders", tempIgnoredProviders), utils.LogAttr("GUID", ctx))
 
 	// Get a valid consumerSessionsWithProvider
 	sessionWithProviderMap, err := csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
 	if err != nil {
-		utils.LavaFormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
+		utils.FormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 		return nil, err
 	}
 
@@ -1065,12 +1065,12 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 					if err != nil {
 						if !errors.Is(err, EpochMismatchError) {
 							// only acceptable error is EpochMismatchError so if different, throw fatal
-							utils.LavaFormatFatal("Unsupported Error", err, utils.LogAttr("GUID", ctx))
+							utils.FormatFatal("Unsupported Error", err, utils.LogAttr("GUID", ctx))
 						}
 					}
 					continue
 				} else {
-					utils.LavaFormatFatal("Unsupported Error", err, utils.LogAttr("GUID", ctx))
+					utils.FormatFatal("Unsupported Error", err, utils.LogAttr("GUID", ctx))
 				}
 			} else if !connected {
 				// If failed to connect we ignore this provider for this get session request only
@@ -1088,7 +1088,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 			// Get session from endpoint or create new or continue. if more than 10 connections are open.
 			consumerSession, pairingEpoch, err := consumerSessionsWithProvider.GetConsumerSessionInstanceFromEndpoint(endpoint.chosenEndpointConnection, numberOfResets, csm.qosManager, endpoint.endpoint.NetworkAddress)
 			if err != nil {
-				utils.LavaFormatError("Error on consumerSessionWithProvider.getConsumerSessionInstanceFromEndpoint", err,
+				utils.FormatError("Error on consumerSessionWithProvider.getConsumerSessionInstanceFromEndpoint", err,
 					utils.LogAttr("providerAddress", providerAddress),
 					utils.LogAttr("validAddresses", csm.validAddresses),
 					utils.LogAttr("Error", err.Error()),
@@ -1102,10 +1102,10 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 					tempIgnoredProviders.providers[providerAddress] = struct{}{}
 					err = csm.blockProvider(ctx, providerAddress, false, sessionEpoch, 0, 0, false, nil)
 					if err != nil {
-						utils.LavaFormatError("Failed to block provider: ", err, utils.LogAttr("GUID", ctx))
+						utils.FormatError("Failed to block provider: ", err, utils.LogAttr("GUID", ctx))
 					}
 				} else {
-					utils.LavaFormatFatal("Unsupported Error", err, utils.LogAttr("GUID", ctx))
+					utils.FormatFatal("Unsupported Error", err, utils.LogAttr("GUID", ctx))
 				}
 
 				continue
@@ -1113,27 +1113,27 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 
 			if pairingEpoch != sessionEpoch {
 				// pairingEpoch and SessionEpoch must be the same, we validate them here if they are different we raise an error and continue with pairingEpoch
-				utils.LavaFormatError("sessionEpoch and pairingEpoch mismatch", nil, utils.Attribute{Key: "sessionEpoch", Value: sessionEpoch}, utils.Attribute{Key: "pairingEpoch", Value: pairingEpoch})
+				utils.FormatError("sessionEpoch and pairingEpoch mismatch", nil, utils.Attribute{Key: "sessionEpoch", Value: sessionEpoch}, utils.Attribute{Key: "pairingEpoch", Value: pairingEpoch})
 				sessionEpoch = pairingEpoch
 			}
 
 			// If we successfully got a consumerSession we can apply the current CU to the consumerSessionWithProvider.UsedComputeUnits
 			err = consumerSessionsWithProvider.addUsedComputeUnits(cuNeededForSession, virtualEpoch)
 			if err != nil {
-				utils.LavaFormatDebug("consumerSessionWithProvider.addUsedComputeUnit", utils.Attribute{Key: "Error", Value: err.Error()}, utils.LogAttr("GUID", ctx))
+				utils.FormatDebug("consumerSessionWithProvider.addUsedComputeUnit", utils.Attribute{Key: "Error", Value: err.Error()}, utils.LogAttr("GUID", ctx))
 				if errors.Is(err, MaxComputeUnitsExceededError) {
 					tempIgnoredProviders.providers[providerAddress] = struct{}{}
 					// We must unlock the consumer session before continuing.
 					consumerSession.Free(nil)
 					continue
 				} else {
-					utils.LavaFormatFatal("Unsupported Error", err, utils.LogAttr("GUID", ctx))
+					utils.FormatFatal("Unsupported Error", err, utils.LogAttr("GUID", ctx))
 				}
 			} else {
 				// consumer session is locked and valid, we need to set the relayNumber and the relay cu. before returning.
 				// Successfully created/got a consumerSession.
 
-				utils.LavaFormatTrace("Consumer get session",
+				utils.FormatTrace("Consumer get session",
 					utils.LogAttr("provider", providerAddress),
 					utils.LogAttr("sessionEpoch", sessionEpoch),
 					utils.LogAttr("consumerSession.CUSum", consumerSession.CuSum),
@@ -1229,7 +1229,7 @@ func convertSelectionStatsToMetrics(stats *provideroptimizer.SelectionStats) (al
 // It returns the canonical address rather than the header's spelling because everything
 // past this point keys on the router's own name: csm.pairing, the session store, the
 // in-request ignored set, the metrics labels. csm.pairing in particular is a
-// LavaFormatFatal on a miss, so handing the caller's spelling downstream would turn a
+// FormatFatal on a miss, so handing the caller's spelling downstream would turn a
 // mis-cased header from a rejected relay into a dead router.
 //
 // An exact hit wins outright, so a config registering two names that differ only in case
@@ -1276,7 +1276,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 			// exactly: which one the caller meant is unknowable. Pinning exists so a request
 			// is never served by a provider the caller did not ask for, so report the
 			// collision rather than picking one.
-			return nil, utils.LavaFormatError(
+			return nil, utils.FormatError(
 				"Selected provider name matches more than one provider",
 				SelectedProviderUnavailableError,
 				utils.LogAttr("selectedProvider", selectedProvider),
@@ -1299,7 +1299,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 			// this error from SelectedProviderAlreadyFailedError exists to remove. The sentinel
 			// carries the precision; this description has to stay true for every way the branch
 			// is reached.
-			return nil, utils.LavaFormatError(
+			return nil, utils.FormatError(
 				"Selected provider not available",
 				SelectedProviderUnavailableError,
 				utils.LogAttr("selectedProvider", selectedProvider),
@@ -1320,7 +1320,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		// addresses that came out of the pairing, so folding case here as well would let a
 		// case-twin's failure reject a provider that never failed.
 		if _, ignored := ignoredProvidersList[providerAddress]; ignored {
-			return nil, utils.LavaFormatWarning(
+			return nil, utils.FormatWarning(
 				"Selected provider cannot be retried",
 				SelectedProviderAlreadyFailedError,
 				utils.LogAttr("provider", providerAddress),
@@ -1332,7 +1332,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		}
 
 		addresses = []string{providerAddress}
-		utils.LavaFormatInfo("Provider selected via header",
+		utils.FormatInfo("Provider selected via header",
 			utils.LogAttr("provider", providerAddress),
 			utils.LogAttr("requestedProvider", selectedProvider),
 			utils.LogAttr("addon", addon),
@@ -1346,10 +1346,10 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		providerValid := slices.Contains(validAddresses, stickysession.Provider)
 		if providerValid {
 			addresses = []string{stickysession.Provider}
-			utils.LavaFormatTrace("returning sticky session", utils.LogAttr("provider", stickysession.Provider), utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
+			utils.FormatTrace("returning sticky session", utils.LogAttr("provider", stickysession.Provider), utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
 			return addresses, nil
 		} else {
-			utils.LavaFormatTrace("sticky session provider is no longer valid, deleting", utils.LogAttr("provider", stickysession.Provider), utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
+			utils.FormatTrace("sticky session provider is no longer valid, deleting", utils.LogAttr("provider", stickysession.Provider), utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
 			csm.stickySessions.Delete(stickiness)
 		}
 	}
@@ -1363,7 +1363,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 			}
 		}
 		if validAddressesLength-ignoredProvidersListLength <= 0 {
-			utils.LavaFormatDebug("Pairing list empty", utils.Attribute{Key: "Provider list", Value: validAddresses}, utils.Attribute{Key: "IgnoredProviderList", Value: ignoredProvidersList}, utils.Attribute{Key: "addon", Value: addon}, utils.Attribute{Key: "extensions", Value: extensions}, utils.LogAttr("GUID", ctx))
+			utils.FormatDebug("Pairing list empty", utils.Attribute{Key: "Provider list", Value: validAddresses}, utils.Attribute{Key: "IgnoredProviderList", Value: ignoredProvidersList}, utils.Attribute{Key: "addon", Value: addon}, utils.Attribute{Key: "extensions", Value: extensions}, utils.LogAttr("GUID", ctx))
 			err = PairingListEmptyError
 			return addresses, err
 		}
@@ -1380,7 +1380,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		// Track provider selection for metrics with all provider scores
 		if len(providers) > 0 {
 			if selectionStats == nil {
-				utils.LavaFormatWarning("Selection stats missing for sticky session provider", nil,
+				utils.FormatWarning("Selection stats missing for sticky session provider", nil,
 					utils.LogAttr("provider", providers[0]),
 					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
 					utils.LogAttr("addon", addon),
@@ -1388,7 +1388,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 					utils.LogAttr("GUID", ctx),
 				)
 			} else if len(selectionStats.ProviderScores) == 0 {
-				utils.LavaFormatWarning("Selection stats missing provider scores for sticky session", nil,
+				utils.FormatWarning("Selection stats missing provider scores for sticky session", nil,
 					utils.LogAttr("provider", providers[0]),
 					utils.LogAttr("selectedProvider", selectionStats.SelectedProvider),
 					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
@@ -1417,7 +1417,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 			}
 			// Track provider selection for metrics with all provider scores
 			if selectionStats == nil {
-				utils.LavaFormatWarning("Selection stats missing for provider selection", nil,
+				utils.FormatWarning("Selection stats missing for provider selection", nil,
 					utils.LogAttr("provider", provider[0]),
 					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
 					utils.LogAttr("addon", addon),
@@ -1425,7 +1425,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 					utils.LogAttr("GUID", ctx),
 				)
 			} else if len(selectionStats.ProviderScores) == 0 {
-				utils.LavaFormatWarning("Selection stats missing provider scores", nil,
+				utils.FormatWarning("Selection stats missing provider scores", nil,
 					utils.LogAttr("provider", provider[0]),
 					utils.LogAttr("selectedProvider", selectionStats.SelectedProvider),
 					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
@@ -1443,7 +1443,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		}
 	}
 
-	utils.LavaFormatInfo("Choosing providers",
+	utils.FormatInfo("Choosing providers",
 		utils.LogAttr("validAddresses", validAddresses),
 		utils.LogAttr("ignoredProvidersList", ignoredProvidersList),
 		utils.LogAttr("chosenProviders", providers),
@@ -1455,7 +1455,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 
 	// Archive-specific debug logging
 	if len(extensions) > 0 {
-		utils.LavaFormatTrace("[Archive Debug] Final provider selection",
+		utils.FormatTrace("[Archive Debug] Final provider selection",
 			utils.LogAttr("validAddresses", validAddresses),
 			utils.LogAttr("extensions", extensions),
 			utils.LogAttr("chosenProviders", providers),
@@ -1464,14 +1464,14 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 
 	// make sure we have at least 1 valid provider
 	if len(providers) == 0 || providers[0] == "" {
-		utils.LavaFormatDebug("No providers returned by the optimizer", utils.Attribute{Key: "Provider list", Value: validAddresses}, utils.Attribute{Key: "IgnoredProviderList", Value: ignoredProvidersList}, utils.LogAttr("GUID", ctx))
+		utils.FormatDebug("No providers returned by the optimizer", utils.Attribute{Key: "Provider list", Value: validAddresses}, utils.Attribute{Key: "IgnoredProviderList", Value: ignoredProvidersList}, utils.LogAttr("GUID", ctx))
 		err = PairingListEmptyError
 		return addresses, err
 	}
 
 	// If stickiness is requested, store the first provider for future use
 	if stickiness != "" {
-		utils.LavaFormatTrace("setting sticky session", utils.LogAttr("provider", providers[0]), utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
+		utils.FormatTrace("setting sticky session", utils.LogAttr("provider", providers[0]), utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
 		csm.stickySessions.Set(stickiness, &StickySession{
 			Provider: providers[0],
 			Epoch:    csm.atomicReadCurrentEpoch(),
@@ -1497,7 +1497,7 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	if len(csm.currentlyBlockedProviderAddresses) == 0 || ignoredProviders.currentEpoch < currentEpoch {
 		// epoch changed just now (between the getValidConsumerSessionsWithProvider to tryGetConsumerSessionWithProviderFromBlockedProviderList)
 		if ignoredProviders.currentEpoch < currentEpoch {
-			utils.LavaFormatDebug("Epoch changed between getValidConsumerSessionsWithProvider to tryGetConsumerSessionWithProviderFromBlockedProviderList getting pairing from new epoch list", utils.LogAttr("GUID", ctx))
+			utils.FormatDebug("Epoch changed between getValidConsumerSessionsWithProvider to tryGetConsumerSessionWithProviderFromBlockedProviderList getting pairing from new epoch list", utils.LogAttr("GUID", ctx))
 		}
 		csm.lock.RUnlock() // unlock because getValidConsumerSessionsWithProvider is locking.
 		// Emergency blocked-provider fallback: group-blind selection. The diversity / per-group gate still
@@ -1514,7 +1514,7 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	for _, providerAddress := range csm.currentlyBlockedProviderAddresses {
 		// check if we have this provider already.
 		if _, providerExistInIgnoredProviders := ignoredProviders.providers[providerAddress]; providerExistInIgnoredProviders {
-			utils.LavaFormatTrace("[continue] provider already in ignored providers", utils.LogAttr("providerAddress", providerAddress), utils.LogAttr("GUID", ctx))
+			utils.FormatTrace("[continue] provider already in ignored providers", utils.LogAttr("providerAddress", providerAddress), utils.LogAttr("GUID", ctx))
 			continue
 		}
 		consumerSessionsWithProvider := csm.pairing[providerAddress]
@@ -1525,13 +1525,13 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 		// validate this provider has enough cu to be used
 		if err := consumerSessionsWithProvider.validateComputeUnits(cuNeededForSession, virtualEpoch); err != nil {
 			// we already added to ignored we can just continue to the next provider
-			utils.LavaFormatTrace("[continue] no compute units", utils.LogAttr("providerAddress", providerAddress), utils.LogAttr("GUID", ctx))
+			utils.FormatTrace("[continue] no compute units", utils.LogAttr("providerAddress", providerAddress), utils.LogAttr("GUID", ctx))
 			continue
 		}
 
 		// validate this provider supports the required extension or addon
 		if !consumerSessionsWithProvider.IsSupportingAddon(addon) || !consumerSessionsWithProvider.IsSupportingExtensions(extensions, ctx) {
-			utils.LavaFormatTrace("[continue] no addon or extensions", utils.LogAttr("providerAddress", providerAddress), utils.LogAttr("GUID", ctx))
+			utils.FormatTrace("[continue] no addon or extensions", utils.LogAttr("providerAddress", providerAddress), utils.LogAttr("GUID", ctx))
 			continue
 		}
 
@@ -1547,7 +1547,7 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	}
 
 	// if we got here we failed to fetch a valid provider meaning no pairing available.
-	return nil, utils.LavaFormatError(csm.rpcEndpoint.ChainID+" could not get a provider address from blocked provider list", PairingListEmptyError, utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addons", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("ignoredProviders", ignoredProviders.providers), utils.LogAttr("GUID", ctx))
+	return nil, utils.FormatError(csm.rpcEndpoint.ChainID+" could not get a provider address from blocked provider list", PairingListEmptyError, utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addons", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("ignoredProviders", ignoredProviders.providers), utils.LogAttr("GUID", ctx))
 }
 
 // getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider sessions for emergency fallback when no regular providers are available.
@@ -1555,7 +1555,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
-	utils.LavaFormatInfo("[BackupProviders] Static providers exhausted — entering backup fallback",
+	utils.FormatInfo("[BackupProviders] Static providers exhausted — entering backup fallback",
 		utils.LogAttr("ignored_providers", ignoredProviders.providers),
 		utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
 		utils.LogAttr("GUID", ctx),
@@ -1563,15 +1563,15 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 
 	currentEpoch := csm.atomicReadCurrentEpoch() // reading the epoch here while locked, to get the epoch of the pairing.
 	if ignoredProviders.currentEpoch < currentEpoch {
-		utils.LavaFormatDebug("ignoredProviders epoch is not the current epoch, resetting ignoredProviders", utils.Attribute{Key: "ignoredProvidersEpoch", Value: ignoredProviders.currentEpoch}, utils.Attribute{Key: "currentEpoch", Value: currentEpoch}, utils.LogAttr("GUID", ctx))
+		utils.FormatDebug("ignoredProviders epoch is not the current epoch, resetting ignoredProviders", utils.Attribute{Key: "ignoredProvidersEpoch", Value: ignoredProviders.currentEpoch}, utils.Attribute{Key: "currentEpoch", Value: currentEpoch}, utils.LogAttr("GUID", ctx))
 		ignoredProviders.providers = make(map[string]struct{}) // reset the old providers as epochs changed so we have a new pairing list.
 		ignoredProviders.currentEpoch = currentEpoch
 	}
 
 	// Check if backup providers exist
 	if len(csm.backupProviders) == 0 {
-		utils.LavaFormatDebug("No backup providers configured", utils.LogAttr("GUID", ctx))
-		return nil, utils.LavaFormatError("no backup providers configured", nil, utils.LogAttr("GUID", ctx))
+		utils.FormatDebug("No backup providers configured", utils.LogAttr("GUID", ctx))
+		return nil, utils.FormatError("no backup providers configured", nil, utils.LogAttr("GUID", ctx))
 	}
 
 	// Get valid backup provider addresses that support the required addon and extensions
@@ -1596,14 +1596,14 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	}
 
 	if len(backupProviderAddresses) == 0 {
-		utils.LavaFormatInfo("[BackupProviders] No eligible backup providers after filtering (all ignored or addon mismatch)",
+		utils.FormatInfo("[BackupProviders] No eligible backup providers after filtering (all ignored or addon mismatch)",
 			utils.LogAttr("ignored_providers", ignoredProviders.providers),
 			utils.LogAttr("GUID", ctx),
 		)
-		return nil, utils.LavaFormatError("no valid backup providers available", nil, utils.LogAttr("GUID", ctx))
+		return nil, utils.FormatError("no valid backup providers available", nil, utils.LogAttr("GUID", ctx))
 	}
 
-	utils.LavaFormatInfo("[BackupProviders] Asking optimizer to select from backup candidates",
+	utils.FormatInfo("[BackupProviders] Asking optimizer to select from backup candidates",
 		utils.LogAttr("candidates", backupProviderAddresses),
 		utils.LogAttr("candidate_count", len(backupProviderAddresses)),
 		utils.LogAttr("GUID", ctx),
@@ -1615,17 +1615,17 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	// Returning one provider per call allows each retry to pick the next-best backup.
 	selectedAddresses := csm.providerOptimizer.ChooseProvider(ctx, backupProviderAddresses, ignoredProviders.providers, cuNeededForSession, requestedBlock)
 	if len(selectedAddresses) == 0 {
-		utils.LavaFormatInfo("[BackupProviders] Optimizer returned no selection from backup candidates",
+		utils.FormatInfo("[BackupProviders] Optimizer returned no selection from backup candidates",
 			utils.LogAttr("candidates", backupProviderAddresses),
 			utils.LogAttr("GUID", ctx),
 		)
-		return nil, utils.LavaFormatError("optimizer returned no backup provider", nil, utils.LogAttr("GUID", ctx))
+		return nil, utils.FormatError("optimizer returned no backup provider", nil, utils.LogAttr("GUID", ctx))
 	}
 	selectedAddress := selectedAddresses[0]
 
 	consumerSessionsWithProvider := csm.backupProviders[selectedAddress]
 	if consumerSessionsWithProvider == nil {
-		utils.LavaFormatFatal("optimizer selected backup provider missing from map", nil,
+		utils.FormatFatal("optimizer selected backup provider missing from map", nil,
 			utils.Attribute{Key: "selectedAddress", Value: selectedAddress},
 			utils.Attribute{Key: "backupProviderAddresses", Value: backupProviderAddresses},
 			utils.Attribute{Key: "epochAtStart", Value: currentEpoch},
@@ -1637,7 +1637,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	// Add selected provider to ignored so the next retry picks a different backup
 	ignoredProviders.providers[selectedAddress] = struct{}{}
 
-	utils.LavaFormatInfo("[BackupProviders] Optimizer selected backup provider",
+	utils.FormatInfo("[BackupProviders] Optimizer selected backup provider",
 		utils.LogAttr("selected", selectedAddress),
 		utils.LogAttr("candidates_considered", backupProviderAddresses),
 		utils.LogAttr("remaining_backups", len(backupProviderAddresses)-1),
@@ -1658,11 +1658,11 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
-	utils.LavaFormatTrace("Called getValidConsumerSessionsWithProvider", utils.LogAttr("wantedProviderNumber", wantedProviderNumber), utils.LogAttr("ignoredProviders", ignoredProviders), utils.LogAttr("GUID", ctx))
+	utils.FormatTrace("Called getValidConsumerSessionsWithProvider", utils.LogAttr("wantedProviderNumber", wantedProviderNumber), utils.LogAttr("ignoredProviders", ignoredProviders), utils.LogAttr("GUID", ctx))
 
 	currentEpoch := csm.atomicReadCurrentEpoch() // reading the epoch here while locked, to get the epoch of the pairing.
 	if ignoredProviders.currentEpoch < currentEpoch {
-		utils.LavaFormatDebug("ignoredProviders epoch is not the current epoch, resetting ignoredProviders", utils.Attribute{Key: "ignoredProvidersEpoch", Value: ignoredProviders.currentEpoch}, utils.Attribute{Key: "currentEpoch", Value: currentEpoch}, utils.LogAttr("GUID", ctx))
+		utils.FormatDebug("ignoredProviders epoch is not the current epoch, resetting ignoredProviders", utils.Attribute{Key: "ignoredProvidersEpoch", Value: ignoredProviders.currentEpoch}, utils.Attribute{Key: "currentEpoch", Value: currentEpoch}, utils.LogAttr("GUID", ctx))
 		ignoredProviders.providers = make(map[string]struct{}) // reset the old providers as epochs changed so we have a new pairing list.
 		ignoredProviders.currentEpoch = currentEpoch
 	}
@@ -1681,7 +1681,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 		// so we intentionally pass empty stickiness/selectedProvider into the diverse fetch below — but make
 		// the override OBSERVABLE instead of silently discarding the caller's directive.
 		if selectedProvider != "" || stickiness != "" {
-			utils.LavaFormatWarning("cross-validation group-diversity policy overrides caller provider selection / stickiness", nil,
+			utils.FormatWarning("cross-validation group-diversity policy overrides caller provider selection / stickiness", nil,
 				utils.LogAttr("selectedProvider", selectedProvider),
 				utils.LogAttr("stickiness", stickiness),
 				utils.LogAttr("minGroups", minGroups),
@@ -1690,14 +1690,14 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 		}
 		ranked, rankErr := csm.getValidProviderAddresses(ctx, len(csm.validAddresses), ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "")
 		if rankErr != nil {
-			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get group-diverse provider addresses", utils.LogAttr("error", rankErr), utils.LogAttr("GUID", ctx))
+			utils.FormatDebug(csm.rpcEndpoint.ChainID+" could not get group-diverse provider addresses", utils.LogAttr("error", rankErr), utils.LogAttr("GUID", ctx))
 			return nil, rankErr
 		}
 		providerAddresses = csm.orderForGroupDiversity(ranked, wantedProviderNumber, minGroups, perGroupTarget)
 	} else {
 		providerAddresses, err = csm.getValidProviderAddresses(ctx, wantedProviderNumber, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider)
 		if err != nil {
-			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get a provider addresses", utils.LogAttr("error", err), utils.LogAttr("GUID", ctx))
+			utils.FormatDebug(csm.rpcEndpoint.ChainID+" could not get a provider addresses", utils.LogAttr("error", err), utils.LogAttr("GUID", ctx))
 			return nil, err
 		}
 	}
@@ -1714,7 +1714,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 		for _, providerAddress := range providerAddresses {
 			consumerSessionsWithProvider := csm.pairing[providerAddress]
 			if consumerSessionsWithProvider == nil {
-				utils.LavaFormatFatal("invalid provider address returned from csm.getValidProviderAddresses", nil,
+				utils.FormatFatal("invalid provider address returned from csm.getValidProviderAddresses", nil,
 					utils.Attribute{Key: "providerAddress", Value: providerAddress},
 					utils.Attribute{Key: "all_providerAddresses", Value: providerAddresses},
 					utils.Attribute{Key: "pairing", Value: csm.pairing},
@@ -1755,7 +1755,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 
 		// If error happens, and we do not have any provider return error
 		if err != nil {
-			utils.LavaFormatError("could not get a provider addresses", err, utils.LogAttr("GUID", ctx))
+			utils.FormatError("could not get a provider addresses", err, utils.LogAttr("GUID", ctx))
 			return nil, err
 		}
 	}
@@ -1856,7 +1856,7 @@ func (csm *ConsumerSessionManager) removeAddressFromValidAddresses(address strin
 			csm.RemoveAddonAddresses("", nil)
 			// add the address to our block provider list.
 			csm.currentlyBlockedProviderAddresses = append(csm.currentlyBlockedProviderAddresses, address)
-			utils.LavaFormatInfo("➕ ADDED TO BLOCKED LIST", utils.LogAttr("address", address), utils.LogAttr("newBlockedCount", len(csm.currentlyBlockedProviderAddresses)))
+			utils.FormatInfo("➕ ADDED TO BLOCKED LIST", utils.LogAttr("address", address), utils.LogAttr("newBlockedCount", len(csm.currentlyBlockedProviderAddresses)))
 			// sort the blocked provider list by cu served
 			csm.sortBlockedProviderListByCuServed()
 			provider, ok := csm.pairing[addr]
@@ -1878,7 +1878,7 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 	// NOTE: the blocked-list count is intentionally NOT logged here — this runs before csm.lock is
 	// taken (below), so reading the slice would race a concurrent holder's append. It is logged under
 	// the lock at "ADDED TO BLOCKED LIST".
-	utils.LavaFormatInfo("🔒 BLOCKING PROVIDER", utils.LogAttr("address", address), utils.LogAttr("GUID", ctx))
+	utils.FormatInfo("🔒 BLOCKING PROVIDER", utils.LogAttr("address", address), utils.LogAttr("GUID", ctx))
 
 	// find Index of the address
 	if sessionEpoch != csm.atomicReadCurrentEpoch() { // we read here atomically so cs.currentEpoch cant change in the middle, so we can save time if epochs mismatch
@@ -1898,7 +1898,7 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 				if sessionEpoch != csm.atomicReadCurrentEpoch() {
 					return
 				}
-				utils.LavaFormatDebug("Running second chance for provider", utils.LogAttr("address", address), utils.LogAttr("GUID", ctx))
+				utils.FormatDebug("Running second chance for provider", utils.LogAttr("address", address), utils.LogAttr("GUID", ctx))
 				csm.validateAndReturnBlockedProviderToValidAddressesList(address)
 			}()
 		}
@@ -1914,9 +1914,9 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 			// Address not in validAddresses — check if it's a backup provider and block it there.
 			if _, isBackup := csm.backupProviders[address]; isBackup {
 				csm.blockedBackupProviders[address] = struct{}{}
-				utils.LavaFormatInfo("blocking backup provider", utils.LogAttr("address", address), utils.LogAttr("GUID", ctx))
+				utils.FormatInfo("blocking backup provider", utils.LogAttr("address", address), utils.LogAttr("GUID", ctx))
 			} else {
-				utils.LavaFormatDebug("address was not found in valid addresses list", utils.Attribute{Key: "address", Value: address}, utils.Attribute{Key: "error", Value: err}, utils.Attribute{Key: "validAddresses", Value: csm.validAddresses}, utils.LogAttr("GUID", ctx))
+				utils.FormatDebug("address was not found in valid addresses list", utils.Attribute{Key: "address", Value: address}, utils.Attribute{Key: "error", Value: err}, utils.Attribute{Key: "validAddresses", Value: csm.validAddresses}, utils.LogAttr("GUID", ctx))
 			}
 		} else {
 			return err
@@ -2028,7 +2028,7 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 	}
 
 	if errors.Is(errorReceived, BlockEndpointError) {
-		utils.LavaFormatTrace("Got BlockEndpointError, blocking endpoint and session",
+		utils.FormatTrace("Got BlockEndpointError, blocking endpoint and session",
 			utils.LogAttr("error", errorReceived),
 			utils.LogAttr("sessionID", consumerSession.SessionId),
 		)
@@ -2048,7 +2048,7 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 	allowSecondChance := false
 	// if this session failed more than MaximumNumberOfFailuresAllowedPerConsumerSession times or session went out of sync we block it.
 	if len(consumerSession.ConsecutiveErrors) > MaximumNumberOfFailuresAllowedPerConsumerSession || IsSessionSyncLoss(errorReceived) {
-		utils.LavaFormatDebug("Blocking consumer session",
+		utils.FormatDebug("Blocking consumer session",
 			utils.LogAttr("ConsecutiveErrors", consumerSession.ConsecutiveErrors),
 			utils.LogAttr("errorsCount", consumerSession.errorsCount),
 			utils.LogAttr("id", consumerSession.SessionId),
@@ -2158,7 +2158,7 @@ func (csm *ConsumerSessionManager) RestoreRecoveredProvider(providerAddress stri
 	// regular pool — a provider overlapping both is restored in both.
 	if _, blocked := csm.blockedBackupProviders[providerAddress]; blocked {
 		delete(csm.blockedBackupProviders, providerAddress)
-		utils.LavaFormatInfo("probe restored recovered backup provider to routing", utils.LogAttr("address", providerAddress))
+		utils.FormatInfo("probe restored recovered backup provider to routing", utils.LogAttr("address", providerAddress))
 	}
 	csm.lock.Unlock()
 
@@ -2315,7 +2315,7 @@ func (csm *ConsumerSessionManager) GetReportedProviders(epoch uint64) []*pairing
 			_, ok = csm.backupProviders[reportedProvider.Address]
 		}
 		if !ok {
-			utils.LavaFormatError("Failed to find a reported provider in pairing list", nil, utils.LogAttr("provider_address", reportedProvider.Address), utils.LogAttr("epoch", csm.currentEpoch))
+			utils.FormatError("Failed to find a reported provider in pairing list", nil, utils.LogAttr("provider_address", reportedProvider.Address), utils.LogAttr("epoch", csm.currentEpoch))
 			continue
 		}
 		filteredReportedProviders = append(filteredReportedProviders, reportedProvider)
@@ -2347,7 +2347,7 @@ func (csm *ConsumerSessionManager) GenerateReconnectCallback(consumerSessionsWit
 		ctx := utils.WithUniqueIdentifier(context.Background(), utils.GenerateUniqueIdentifier()) // unique identifier for retries
 		_, providerAddress, err := csm.probeProvider(ctx, consumerSessionsWithProvider, csm.atomicReadCurrentEpoch(), true)
 		if err == nil {
-			utils.LavaFormatDebug("Reconnecting provider succeeded returning provider to valid addresses list", utils.LogAttr("provider", providerAddress))
+			utils.FormatDebug("Reconnecting provider succeeded returning provider to valid addresses list", utils.LogAttr("provider", providerAddress))
 			// csm.pairing and csm.backupProviders are built from separate inputs by
 			// UpdateAllProviders with no dedup, so a provider address can legitimately
 			// appear in both. The old "if backup else primary" branching silently dropped
@@ -2378,7 +2378,7 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 	// Check if epoch is still current - if epoch changed, our previousEpochBlockedProviders data is stale
 	currentEpoch := csm.atomicReadCurrentEpoch()
 	if epoch != currentEpoch {
-		utils.LavaFormatDebug("Skipping re-blocked provider check due to epoch change",
+		utils.FormatDebug("Skipping re-blocked provider check due to epoch change",
 			utils.Attribute{Key: "requestedEpoch", Value: epoch},
 			utils.Attribute{Key: "currentEpoch", Value: currentEpoch},
 		)
@@ -2431,7 +2431,7 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 		if !isBackup && !csm.reportedProviders.IsReported(blockedAddr) {
 			// Non-backup provider whose probe succeeded (it wasn't added to reportedProviders).
 			// Unblock immediately.
-			utils.LavaFormatInfo("Re-blocked provider's probe succeeded, immediately unblocking",
+			utils.FormatInfo("Re-blocked provider's probe succeeded, immediately unblocking",
 				utils.Attribute{Key: "provider", Value: blockedAddr},
 				utils.Attribute{Key: "isBackup", Value: isBackup},
 				utils.Attribute{Key: "epoch", Value: epoch},
@@ -2444,7 +2444,7 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 			// or a non-backup that was reported for relay failures.
 			// In both cases, run a comprehensive probe with tryReconnect=true.
 			providersNeedingComprehensiveProbe[blockedAddr] = reBlockedProviderInfo{cswp: cswp, isBackup: isBackup}
-			utils.LavaFormatDebug("Re-blocked provider needs explicit probe",
+			utils.FormatDebug("Re-blocked provider needs explicit probe",
 				utils.Attribute{Key: "provider", Value: blockedAddr},
 				utils.Attribute{Key: "isBackup", Value: isBackup},
 				utils.Attribute{Key: "epoch", Value: epoch},
@@ -2456,7 +2456,7 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 
 	// Second pass: For providers that failed initial probe, try comprehensive probe with reconnection
 	for blockedAddr, info := range providersNeedingComprehensiveProbe {
-		utils.LavaFormatDebug("Attempting comprehensive probe with endpoint reconnection",
+		utils.FormatDebug("Attempting comprehensive probe with endpoint reconnection",
 			utils.Attribute{Key: "provider", Value: blockedAddr},
 			utils.Attribute{Key: "isBackup", Value: info.isBackup},
 			utils.Attribute{Key: "epoch", Value: epoch},
@@ -2466,7 +2466,7 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 		_, providerAddress, err := csm.probeProvider(ctx, info.cswp, epoch, true)
 
 		if err == nil {
-			utils.LavaFormatInfo("Re-blocked provider's comprehensive probe succeeded, immediately unblocking",
+			utils.FormatInfo("Re-blocked provider's comprehensive probe succeeded, immediately unblocking",
 				utils.Attribute{Key: "provider", Value: providerAddress},
 				utils.Attribute{Key: "isBackup", Value: info.isBackup},
 				utils.Attribute{Key: "epoch", Value: epoch},
@@ -2481,7 +2481,7 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 			}
 			csm.reportedProviders.RemoveReport(providerAddress)
 		} else {
-			utils.LavaFormatDebug("Re-blocked provider still unhealthy after comprehensive probe, keeping blocked",
+			utils.FormatDebug("Re-blocked provider still unhealthy after comprehensive probe, keeping blocked",
 				utils.Attribute{Key: "provider", Value: providerAddress},
 				utils.Attribute{Key: "isBackup", Value: info.isBackup},
 				utils.Attribute{Key: "error", Value: err.Error()},

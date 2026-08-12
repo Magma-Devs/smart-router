@@ -338,14 +338,14 @@ func (gc *GrpcConfig) Validate() error {
 	case GrpcDescriptorSourceReflection, GrpcDescriptorSourceFile, GrpcDescriptorSourceHybrid, "":
 		// Valid
 	default:
-		return utils.LavaFormatError("invalid gRPC descriptor source", nil,
+		return utils.FormatError("invalid gRPC descriptor source", nil,
 			utils.LogAttr("source", source),
 			utils.LogAttr("valid_options", "reflection, file, hybrid"))
 	}
 
 	// Validate descriptor path is provided when needed
 	if gc.NeedsDescriptorFile() && gc.DescriptorSetPath == "" {
-		return utils.LavaFormatError("descriptor-set-path is required when descriptor-source is file or hybrid", nil,
+		return utils.FormatError("descriptor-set-path is required when descriptor-source is file or hybrid", nil,
 			utils.LogAttr("descriptor_source", source))
 	}
 
@@ -376,12 +376,12 @@ func (gc *GrpcConfig) ValidateReflectionTimeout() error {
 	}
 
 	if gc.ReflectionTimeout < 100*time.Millisecond {
-		return utils.LavaFormatError("reflection-timeout too short", nil,
+		return utils.FormatError("reflection-timeout too short", nil,
 			utils.LogAttr("timeout", gc.ReflectionTimeout),
 			utils.LogAttr("min", "100ms"))
 	}
 	if gc.ReflectionTimeout > 30*time.Second {
-		return utils.LavaFormatError("reflection-timeout too long", nil,
+		return utils.FormatError("reflection-timeout too long", nil,
 			utils.LogAttr("timeout", gc.ReflectionTimeout),
 			utils.LogAttr("max", "30s"))
 	}
@@ -394,7 +394,7 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 	case spectypes.APIInterfaceRest:
 		parsedUrl, err := url.Parse(endpoint)
 		if err != nil {
-			return utils.LavaFormatError("could not parse node url", err,
+			return utils.FormatError("could not parse node url", err,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
@@ -404,7 +404,7 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 		case "http", "https":
 			return nil
 		default:
-			return utils.LavaFormatError("URL scheme should be (http/https), got: "+parsedUrl.Scheme, nil,
+			return utils.FormatError("URL scheme should be (http/https), got: "+parsedUrl.Scheme, nil,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
@@ -412,7 +412,7 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
 		parsedUrl, err := url.Parse(endpoint)
 		if err != nil {
-			return utils.LavaFormatError("could not parse node url", err,
+			return utils.FormatError("could not parse node url", err,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
@@ -424,20 +424,20 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 		case "ws", "wss":
 			return nil
 		default:
-			return utils.LavaFormatError("URL scheme should be websocket (ws/wss) or (http/https), got: "+parsedUrl.Scheme, nil,
+			return utils.FormatError("URL scheme should be websocket (ws/wss) or (http/https), got: "+parsedUrl.Scheme, nil,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
 		}
 	case spectypes.APIInterfaceGrpc:
 		if endpoint == "" {
-			return utils.LavaFormatError("invalid grpc URL, empty", nil)
+			return utils.FormatError("invalid grpc URL, empty", nil)
 		}
 		parsedUrl, err := url.Parse(endpoint)
 		if err == nil {
 			// user provided a valid url with a scheme
 			if parsedUrl.Scheme != "" && strings.Contains(endpoint, "/") {
-				return utils.LavaFormatError("grpc URL scheme should be empty and it is not, endpoint definition example: 127.0.0.1:9090 -or- my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "scheme", Value: parsedUrl.Scheme})
+				return utils.FormatError("grpc URL scheme should be empty and it is not, endpoint definition example: 127.0.0.1:9090 -or- my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "scheme", Value: parsedUrl.Scheme})
 			}
 			return nil
 		} else {
@@ -446,10 +446,10 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 			if err == nil {
 				return nil
 			}
-			return utils.LavaFormatError("invalid grpc URL, usage example: 127.0.0.1:9090 or my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "url", Value: endpoint})
+			return utils.FormatError("invalid grpc URL, usage example: 127.0.0.1:9090 or my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "url", Value: endpoint})
 		}
 	default:
-		return utils.LavaFormatError("unsupported apiInterface", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface})
+		return utils.FormatError("unsupported apiInterface", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface})
 	}
 }
 

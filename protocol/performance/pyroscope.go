@@ -72,10 +72,10 @@ func StartPyroscope(appName, serverAddress string, mutexProfileFraction, blockPr
 		},
 	})
 	if err != nil {
-		return utils.LavaFormatError("failed to start pyroscope profiler", err)
+		return utils.FormatError("failed to start pyroscope profiler", err)
 	}
 
-	utils.LavaFormatInfo("started pyroscope profiler",
+	utils.FormatInfo("started pyroscope profiler",
 		utils.Attribute{Key: "application", Value: appName},
 		utils.Attribute{Key: "server", Value: serverAddress},
 	)

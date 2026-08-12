@@ -174,7 +174,7 @@ func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientC
 	// Refuse the config rather than pick one of them at random (MAG-2350).
 	wanted := grpcDescriptorConfig{source: grpcConfig.GetDescriptorSource(), path: grpcConfig.DescriptorSetPath}
 	if apip.descriptorConfig != nil && *apip.descriptorConfig != wanted {
-		return utils.LavaFormatError("conflicting gRPC descriptor-source across a chain's node-urls", nil,
+		return utils.FormatError("conflicting gRPC descriptor-source across a chain's node-urls", nil,
 			utils.LogAttr("configured", apip.descriptorConfig.String()),
 			utils.LogAttr("conflicting", wanted.String()),
 			utils.LogAttr("resolution", "block parsing resolves through one registry per chain, so every gRPC node-url on a chain must declare the same descriptor-source and descriptor-set-path"))
@@ -233,15 +233,15 @@ func (apip *GrpcChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 // parser_arg navigation behaves identically on poll and relay responses.
 func HydrateGrpcResponseParsing(chainMessage ChainMessageForSend, methodDescriptor *desc.MethodDescriptor) error {
 	if methodDescriptor == nil {
-		return utils.LavaFormatError("HydrateGrpcResponseParsing: nil method descriptor", nil)
+		return utils.FormatError("HydrateGrpcResponseParsing: nil method descriptor", nil)
 	}
 	grpcMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
 	if !ok {
-		return utils.LavaFormatError("HydrateGrpcResponseParsing: chain message is not a gRPC message", nil)
+		return utils.FormatError("HydrateGrpcResponseParsing: chain message is not a gRPC message", nil)
 	}
 	descriptorSource, err := grpcurl.DescriptorSourceFromFileDescriptors(methodDescriptor.GetFile())
 	if err != nil {
-		return utils.LavaFormatError("HydrateGrpcResponseParsing: failed building descriptor source", err)
+		return utils.FormatError("HydrateGrpcResponseParsing: failed building descriptor source", err)
 	}
 	_, formatter, err := grpcurl.RequestParserAndFormatter(grpcurl.FormatJSON, descriptorSource, nil, grpcurl.FormatOptions{
 		EmitJSONDefaultFields: false,
@@ -249,7 +249,7 @@ func HydrateGrpcResponseParsing(chainMessage ChainMessageForSend, methodDescript
 		AllowUnknownFields:    true,
 	})
 	if err != nil {
-		return utils.LavaFormatError("HydrateGrpcResponseParsing: failed building formatter", err)
+		return utils.FormatError("HydrateGrpcResponseParsing: failed building formatter", err)
 	}
 	grpcMessage.SetParsingData(methodDescriptor, formatter)
 	return nil
@@ -265,12 +265,12 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 	// Check API is supported and save it in nodeMsg.
 	apiCont, err := apip.getSupportedApi(url, connectionType)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to getSupportedApi gRPC", err, utils.LogAttr("url", url), utils.LogAttr("connectionType", connectionType))
+		return nil, utils.FormatError("failed to getSupportedApi gRPC", err, utils.LogAttr("url", url), utils.LogAttr("connectionType", connectionType))
 	}
 
 	apiCollection, err := apip.getApiCollection(connectionType, apiCont.collectionKey.InternalPath, apiCont.collectionKey.Addon)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to getApiCollection gRPC", err)
+		return nil, utils.FormatError("failed to getApiCollection gRPC", err)
 	}
 
 	// handle headers
@@ -297,7 +297,7 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 		parsedBlock, err := grpcMessage.ParseBlock(overwriteReqBlock)
 		parsedInput.SetBlock(parsedBlock)
 		if err != nil {
-			utils.LavaFormatError("failed parsing block from an overwrite header", err,
+			utils.FormatError("failed parsing block from an overwrite header", err,
 				utils.LogAttr("chain", apip.spec.Name),
 				utils.LogAttr("overwriteRequestedBlock", overwriteReqBlock),
 			)
@@ -417,7 +417,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		dappID := extractDappIDFromGrpcHeader(metadataValues)
 
 		grpcHeaders := convertToMetadataMapOfSlices(metadataValues)
-		utils.LavaFormatDebug("in <<< GRPC Relay ",
+		utils.FormatDebug("in <<< GRPC Relay ",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr("_method", method),
 			utils.LogAttr("headers", grpcHeaders),
@@ -437,7 +437,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			// (the proxy attaches it as gRPC trailers on the error path) so gRPC clients get the same
 			// structured cross-validation signal as the HTTP interfaces. nil/empty when there is nothing to
 			// propagate, preserving prior behavior for ordinary errors.
-			return nil, convertRelayMetaDataToMDMetaData(relayReply.GetMetadata()), utils.LavaFormatError("Failed to SendRelay", fmt.Errorf("%s", errMasking))
+			return nil, convertRelayMetaDataToMDMetaData(relayReply.GetMetadata()), utils.FormatError("Failed to SendRelay", fmt.Errorf("%s", errMasking))
 		}
 		apil.logger.LogRequestAndResponse("grpc in/out", false, method, string(reqBody), "", "", msgSeed, time.Since(startTime), nil)
 
@@ -455,33 +455,33 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	var reflectionCallback grpcproxy.ReflectionProxyCallback
 	if reflectionProvider, ok := apil.relaySender.(GRPCReflectionProvider); ok {
 		reflectionCallback = reflectionProvider.GetGRPCReflectionConnection
-		utils.LavaFormatInfo("gRPC reflection support enabled",
+		utils.FormatInfo("gRPC reflection support enabled",
 			utils.LogAttr("address", apil.endpoint.NetworkAddress),
 		)
 	}
 
 	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionCallback)
 	if err != nil {
-		utils.LavaFormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
+		utils.FormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
 	}
 	apil.httpServer = httpServer
 
 	// setup chain parser
 	apil.chainParser.setupForConsumer(sendRelayCallback)
 
-	utils.LavaFormatInfo("Server listening", utils.Attribute{Key: "Address", Value: lis.Addr()})
+	utils.FormatInfo("Server listening", utils.Attribute{Key: "Address", Value: lis.Addr()})
 
 	var serveExecutor func() error
 	if apil.endpoint.TLSEnabled {
-		utils.LavaFormatInfo("Running with self signed TLS certificate")
+		utils.FormatInfo("Running with self signed TLS certificate")
 		var certificateErr error
 		httpServer.TLSConfig, certificateErr = lavasession.GetSelfSignedConfig()
 		if certificateErr != nil {
-			utils.LavaFormatFatal("failed getting a self signed certificate", certificateErr)
+			utils.FormatFatal("failed getting a self signed certificate", certificateErr)
 		}
 		serveExecutor = func() error { return httpServer.ServeTLS(lis, "", "") }
 	} else {
-		utils.LavaFormatInfo("Running with disabled TLS configuration")
+		utils.FormatInfo("Running with disabled TLS configuration")
 		serveExecutor = func() error { return httpServer.Serve(lis) }
 	}
 
@@ -494,7 +494,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 `, truncateAndPadString(apil.endpoint.NetworkAddress, 36), truncateAndPadString(version.Version, 27))
 	if err := serveExecutor(); !errors.Is(err, http.ErrServerClosed) {
-		utils.LavaFormatFatal("Portal failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr()}, utils.Attribute{Key: "ChainID", Value: apil.endpoint.ChainID})
+		utils.FormatFatal("Portal failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr()}, utils.Attribute{Key: "ChainID", Value: apil.endpoint.ChainID})
 	}
 }
 
@@ -518,7 +518,7 @@ type grpcConnectorInterface interface {
 
 func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, parser ChainParser) (ChainProxy, error) {
 	if len(rpcProviderEndpoint.NodeUrls) == 0 {
-		return nil, utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+		return nil, utils.FormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
 	}
 	_, averageBlockTime, _, _ := parser.ChainBlockStats()
 	nodeUrl := rpcProviderEndpoint.NodeUrls[0]
@@ -543,17 +543,17 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 	}
 	cp.conn = conn
 	if cp.conn == nil {
-		return nil, utils.LavaFormatError("g_conn == nil", nil)
+		return nil, utils.FormatError("g_conn == nil", nil)
 	}
 
 	reflectionConnection, err := conn.GetRpc(context.Background(), true)
 	if err != nil {
-		return nil, utils.LavaFormatError("reflectionConnection Error", err)
+		return nil, utils.FormatError("reflectionConnection Error", err)
 	}
 	// this connection is kept open so it needs to be closed on teardown
 	go func() {
 		<-ctx.Done()
-		utils.LavaFormatInfo("tearing down reflection connection, context done")
+		utils.FormatInfo("tearing down reflection connection, context done")
 		conn.ReturnRpc(reflectionConnection)
 	}()
 
@@ -570,11 +570,11 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 
 func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) {
 	if ch != nil {
-		return nil, "", nil, utils.LavaFormatError("Subscribe is not allowed on grpc", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, "", nil, utils.FormatError("Subscribe is not allowed on grpc", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 	conn, err := cp.conn.GetRpc(ctx, true)
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("grpc get connection failed ", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, "", nil, utils.FormatError("grpc get connection failed ", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 	defer cp.conn.ReturnRpc(conn)
 
@@ -584,7 +584,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.GrpcMessage)
 	if !ok {
-		return nil, "", nil, utils.LavaFormatError("invalid message type in grpc failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
+		return nil, "", nil, utils.FormatError("invalid message type in grpc failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
 	}
 
 	metadataMap := make(map[string]string, 0)
@@ -602,7 +602,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	cl := grpcreflect.NewClientAuto(ctx, conn)
 	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&cp.NodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("failed resolving grpc descriptor source", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, "", nil, utils.FormatError("failed resolving grpc descriptor source", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(nodeMessage.Path)
 
@@ -614,15 +614,15 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	if !found { // method descriptor not cached yet, need to fetch it and add to cache
 		var descriptor desc.Descriptor
 		if descriptor, err = descriptorSource.FindSymbol(svc); err != nil {
-			return nil, "", nil, utils.LavaFormatError("descriptorSource.FindSymbol", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+			return nil, "", nil, utils.FormatError("descriptorSource.FindSymbol", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 		}
 		serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
 		if !ok {
-			return nil, "", nil, utils.LavaFormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "descriptor", Value: descriptor})
+			return nil, "", nil, utils.FormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "descriptor", Value: descriptor})
 		}
 		methodDescriptor = serviceDescriptor.FindMethodByName(methodName)
 		if methodDescriptor == nil {
-			return nil, "", nil, utils.LavaFormatError("serviceDescriptor.FindMethodByName returned nil", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "methodName", Value: methodName})
+			return nil, "", nil, utils.FormatError("serviceDescriptor.FindMethodByName returned nil", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "methodName", Value: methodName})
 		}
 
 		// add the descriptor to the chainProxy cache
@@ -640,11 +640,11 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 			msgLocal := msgFactory.NewMessage(methodDescriptor.GetInputType())
 			err = proto.Unmarshal(nodeMessage.Msg, msgLocal)
 			if err != nil {
-				return nil, "", nil, utils.LavaFormatError("Failed to unmarshal proto.Unmarshal(nodeMessage.Msg, msgLocal)", err)
+				return nil, "", nil, utils.FormatError("Failed to unmarshal proto.Unmarshal(nodeMessage.Msg, msgLocal)", err)
 			}
 			jsonBytes, err := marshalJSON(msgLocal)
 			if err != nil {
-				return nil, "", nil, utils.LavaFormatError("Failed to unmarshal marshalJSON(msgLocal)", err)
+				return nil, "", nil, utils.FormatError("Failed to unmarshal marshalJSON(msgLocal)", err)
 			}
 			reader = bytes.NewReader(jsonBytes)
 		} else {
@@ -659,7 +659,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		AllowUnknownFields:    true,
 	})
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("Failed to create formatter", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, "", nil, utils.FormatError("Failed to create formatter", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 
 	// used when parsing the grpc result
@@ -668,11 +668,11 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	if formatMessage {
 		err = rp.Next(msg)
 		if err != nil {
-			return nil, "", nil, utils.LavaFormatError("rp.Next(msg) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+			return nil, "", nil, utils.FormatError("rp.Next(msg) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 		}
 	}
 
-	utils.LavaFormatTrace("provider sending node message",
+	utils.FormatTrace("provider sending node message",
 		utils.LogAttr("_method", nodeMessage.Path),
 		utils.LogAttr("headers", metadataMap),
 		utils.LogAttr("apiInterface", "grpc"),
@@ -709,7 +709,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	var respBytes []byte
 	respBytes, err = proto.Marshal(response)
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("proto.Marshal(response) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, "", nil, utils.FormatError("proto.Marshal(response) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 	// set response status code
 	validResponseStatus := http.StatusOK
@@ -737,12 +737,12 @@ func parseGrpcNodeErrorToReply(ctx context.Context, err error) ([]byte, uint32, 
 		errorCode = uint32(statusError.Code())
 		respBytes, marshalingError = json.Marshal(&GrpcNodeErrorResponse{ErrorMessage: statusError.Message(), ErrorCode: errorCode})
 		if marshalingError != nil {
-			return nil, errorCode, utils.LavaFormatError("json.Marshal(&GrpcNodeErrorResponse Failed 1", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+			return nil, errorCode, utils.FormatError("json.Marshal(&GrpcNodeErrorResponse Failed 1", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 		}
 	} else {
 		respBytes, marshalingError = json.Marshal(&GrpcNodeErrorResponse{ErrorMessage: err.Error(), ErrorCode: errorCode})
 		if marshalingError != nil {
-			return nil, errorCode, utils.LavaFormatError("json.Marshal(&GrpcNodeErrorResponse Failed 2", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+			return nil, errorCode, utils.FormatError("json.Marshal(&GrpcNodeErrorResponse Failed 2", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 		}
 	}
 	return respBytes, errorCode, nil

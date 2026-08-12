@@ -114,7 +114,7 @@ func ConnectGRPCClient(ctx context.Context, address string, allowInsecure bool, 
 
 func GenerateSelfSignedCertificate() (tls.Certificate, error) {
 	// Generate a private key
-	utils.LavaFormatWarning("Warning: Using Self signed certificate is not recommended, this will not allow https connections to be established", nil)
+	utils.FormatWarning("Warning: Using Self signed certificate is not recommended, this will not allow https connections to be established", nil)
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return tls.Certificate{}, err
@@ -160,7 +160,7 @@ func GetCaCertificate(serverCertPath, serverKeyPath string) (*tls.Config, error)
 func GetSelfSignedConfig() (*tls.Config, error) {
 	cert, err := GenerateSelfSignedCertificate()
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to generate TLS certificate", err)
+		return nil, utils.FormatError("failed to generate TLS certificate", err)
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -171,15 +171,15 @@ func GetTlsConfig(networkAddress NetworkAddressData) *tls.Config {
 	var tlsConfig *tls.Config
 	var err error
 	if networkAddress.CertPem != "" {
-		utils.LavaFormatInfo("Running with TLS certificate", utils.Attribute{Key: "cert", Value: networkAddress.CertPem}, utils.Attribute{Key: "key", Value: networkAddress.KeyPem})
+		utils.FormatInfo("Running with TLS certificate", utils.Attribute{Key: "cert", Value: networkAddress.CertPem}, utils.Attribute{Key: "key", Value: networkAddress.KeyPem})
 		tlsConfig, err = GetCaCertificate(networkAddress.CertPem, networkAddress.KeyPem)
 		if err != nil {
-			utils.LavaFormatFatal("failed to generate TLS certificate", err)
+			utils.FormatFatal("failed to generate TLS certificate", err)
 		}
 	} else {
 		tlsConfig, err = GetSelfSignedConfig()
 		if err != nil {
-			utils.LavaFormatFatal("failed GetSelfSignedConfig", err)
+			utils.FormatFatal("failed GetSelfSignedConfig", err)
 		}
 	}
 	return tlsConfig

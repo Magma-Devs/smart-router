@@ -34,19 +34,19 @@ func LoadProtoset(path string) (grpcurl.DescriptorSource, error) {
 	cached, _ := protosetCache.LoadOrStore(path, &protosetEntry{})
 	entry, ok := cached.(*protosetEntry)
 	if !ok {
-		return nil, utils.LavaFormatError("corrupt protoset cache entry", nil,
+		return nil, utils.FormatError("corrupt protoset cache entry", nil,
 			utils.LogAttr("descriptor-set-path", path))
 	}
 
 	entry.once.Do(func() {
 		source, err := grpcurl.DescriptorSourceFromProtoSets(path)
 		if err != nil {
-			entry.err = utils.LavaFormatError("failed loading gRPC descriptor set", err,
+			entry.err = utils.FormatError("failed loading gRPC descriptor set", err,
 				utils.LogAttr("descriptor-set-path", path))
 			return
 		}
 		entry.source = source
-		utils.LavaFormatDebug("loaded gRPC descriptor set",
+		utils.FormatDebug("loaded gRPC descriptor set",
 			utils.LogAttr("descriptor-set-path", path))
 	})
 
@@ -89,7 +89,7 @@ func (c compositeDescriptorSource) ListServices() ([]string, error) {
 	// answered. Report what we have rather than losing it to the node being down.
 	serverServices, serverErr := c.server.ListServices()
 	if serverErr != nil {
-		utils.LavaFormatDebug("hybrid descriptor source: reflection ListServices failed, using protoset only",
+		utils.FormatDebug("hybrid descriptor source: reflection ListServices failed, using protoset only",
 			utils.LogAttr("error", serverErr))
 		return services, nil
 	}
@@ -120,7 +120,7 @@ func (c compositeDescriptorSource) FindSymbol(fullyQualifiedName string) (desc.D
 	// Both halves missed. Surface both causes: in practice one of them is the
 	// actionable one (stale protoset vs. node not serving reflection) and which
 	// it is depends on the deployment.
-	return nil, utils.LavaFormatError("symbol not found in protoset or via reflection", nil,
+	return nil, utils.FormatError("symbol not found in protoset or via reflection", nil,
 		utils.LogAttr("symbol", fullyQualifiedName),
 		utils.LogAttr("protoset_error", fileErr),
 		utils.LogAttr("reflection_error", serverErr))
@@ -160,7 +160,7 @@ func DescriptorSourceForNode(mode, descriptorSetPath string, serverSource grpcur
 	switch mode {
 	case common.GrpcDescriptorSourceFile:
 		if descriptorSetPath == "" {
-			return nil, utils.LavaFormatError("descriptor-set-path is required for descriptor-source: file", nil)
+			return nil, utils.FormatError("descriptor-set-path is required for descriptor-source: file", nil)
 		}
 		return LoadProtoset(descriptorSetPath)
 
@@ -174,7 +174,7 @@ func DescriptorSourceForNode(mode, descriptorSetPath string, serverSource grpcur
 		if err != nil {
 			// Hybrid tolerates an unusable protoset — reflection is the other half.
 			// Degrading here is the whole point of the mode.
-			utils.LavaFormatWarning("hybrid descriptor source: protoset unusable, falling back to reflection only", err,
+			utils.FormatWarning("hybrid descriptor source: protoset unusable, falling back to reflection only", err,
 				utils.LogAttr("descriptor-set-path", descriptorSetPath))
 			return serverSource, nil
 		}
@@ -184,7 +184,7 @@ func DescriptorSourceForNode(mode, descriptorSetPath string, serverSource grpcur
 		return serverSource, nil
 
 	default:
-		return nil, utils.LavaFormatError("invalid gRPC descriptor-source", nil,
+		return nil, utils.FormatError("invalid gRPC descriptor-source", nil,
 			utils.LogAttr("descriptor-source", mode),
 			utils.LogAttr("valid_options", fmt.Sprintf("%s, %s, %s",
 				common.GrpcDescriptorSourceReflection,

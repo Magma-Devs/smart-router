@@ -53,7 +53,7 @@ type testServer struct {
 }
 
 func (rpcps *testServer) Probe(ctx context.Context, probeReq *pairingtypes.ProbeRequest) (*pairingtypes.ProbeReply, error) {
-	utils.LavaFormatDebug("Debug probe called")
+	utils.FormatDebug("Debug probe called")
 	probeReply := &pairingtypes.ProbeReply{
 		Guid:                  probeReq.GetGuid(),
 		LatestBlock:           1,
@@ -64,11 +64,11 @@ func (rpcps *testServer) Probe(ctx context.Context, probeReq *pairingtypes.Probe
 }
 
 func (rpcps *testServer) Relay(context.Context, *pairingtypes.RelayRequest) (*pairingtypes.RelayReply, error) {
-	return nil, utils.LavaFormatError("not Implemented", nil)
+	return nil, utils.FormatError("not Implemented", nil)
 }
 
 func (rpcps *testServer) RelaySubscribe(*pairingtypes.RelayRequest, pairingtypes.Relayer_RelaySubscribeServer) error {
-	return utils.LavaFormatError("not implemented", nil)
+	return utils.FormatError("not implemented", nil)
 }
 
 // Test the basic functionality of the consumerSessionManager
@@ -191,7 +191,7 @@ func TestMain(m *testing.M) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, _, err := csp.ConnectRawClientWithTimeout(ctx, grpcListener)
 		if err != nil {
-			utils.LavaFormatDebug("waiting for grpc server to launch")
+			utils.FormatDebug("waiting for grpc server to launch")
 			continue
 		}
 		cancel()
@@ -697,10 +697,10 @@ func TestSecondChanceRecoveryFlow(t *testing.T) {
 		if func() bool {
 			csm.lock.RLock()
 			defer csm.lock.RUnlock()
-			utils.LavaFormatInfo("waiting for provider to return to valid addresses", utils.LogAttr("provider", pairingList[0].PublicLavaAddress), utils.LogAttr("csm.validAddresses", csm.validAddresses))
+			utils.FormatInfo("waiting for provider to return to valid addresses", utils.LogAttr("provider", pairingList[0].PublicLavaAddress), utils.LogAttr("csm.validAddresses", csm.validAddresses))
 			return lavaslices.Contains(csm.validAddresses, pairingList[0].PublicLavaAddress)
 		}() {
-			utils.LavaFormatInfo("Wait Completed")
+			utils.FormatInfo("Wait Completed")
 			break
 		}
 		time.Sleep(time.Second)
@@ -714,7 +714,7 @@ func TestSecondChanceRecoveryFlow(t *testing.T) {
 	// now after we gave it a second chance, we give it another failure sequence, expecting it to this time be reported.
 	loopStartTime = time.Now()
 	for {
-		utils.LavaFormatDebug("Test", utils.LogAttr("csm.validAddresses", csm.validAddresses), utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus", csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus))
+		utils.FormatDebug("Test", utils.LogAttr("csm.validAddresses", csm.validAddresses), utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus", csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus))
 		directiveHeaders := DirectiveHeaders{map[string]string{"smartrouter-providers-block": pairingList[1].PublicLavaAddress}}
 		usedProviders := NewUsedProviders(directiveHeaders)
 		require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus)
@@ -732,7 +732,7 @@ func TestSecondChanceRecoveryFlow(t *testing.T) {
 		}
 		require.True(t, time.Since(loopStartTime) < timeLimit)
 	}
-	utils.LavaFormatInfo("csm.reportedProviders", utils.LogAttr("csm.reportedProviders", csm.reportedProviders.addedToPurgeAndReport))
+	utils.FormatInfo("csm.reportedProviders", utils.LogAttr("csm.reportedProviders", csm.reportedProviders.addedToPurgeAndReport))
 	require.True(t, csm.reportedProviders.IsReported(pairingList[0].PublicLavaAddress))
 }
 
@@ -935,7 +935,7 @@ func TestPairingResetWithFailures(t *testing.T) {
 	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil) // update the providers.
 	require.NoError(t, err)
 	for {
-		utils.LavaFormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
+		utils.FormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
 		if len(csm.validAddresses) == 0 { // wait for all pairings to be blocked.
 			break
 		}
@@ -971,7 +971,7 @@ func TestPairingResetWithMultipleFailures(t *testing.T) {
 
 	for numberOfResets := 0; numberOfResets < numberOfResetsToTest; numberOfResets++ {
 		for {
-			utils.LavaFormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
+			utils.FormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
 			if len(csm.validAddresses) == 0 { // wait for all pairings to be blocked.
 				break
 			}
@@ -1130,7 +1130,7 @@ func failedSession(ctx context.Context, csm *ConsumerSessionManager, t *testing.
 }
 
 func TestHappyFlowMultiThreaded(t *testing.T) {
-	utils.LavaFormatInfo("Parallel test:")
+	utils.FormatInfo("Parallel test:")
 
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()
@@ -1154,10 +1154,10 @@ func TestHappyFlowMultiThreaded(t *testing.T) {
 			all_chs[ch2val] = struct{}{}
 		}
 		if len(all_chs) >= parallelGoRoutines*2 {
-			utils.LavaFormatInfo(fmt.Sprintf("finished routines len(all_chs): %d", len(all_chs)))
+			utils.FormatInfo(fmt.Sprintf("finished routines len(all_chs): %d", len(all_chs)))
 			break // routines finished
 		} else {
-			utils.LavaFormatInfo(fmt.Sprintf("awaiting routines: ch1: %d, ch2: %d", ch1val, ch2val))
+			utils.FormatInfo(fmt.Sprintf("awaiting routines: ch1: %d, ch2: %d", ch1val, ch2val))
 		}
 	}
 
@@ -1175,7 +1175,7 @@ func TestHappyFlowMultiThreaded(t *testing.T) {
 }
 
 func TestHappyFlowMultiThreadedWithUpdateSession(t *testing.T) {
-	utils.LavaFormatInfo("Parallel test:")
+	utils.FormatInfo("Parallel test:")
 
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()
@@ -1195,7 +1195,7 @@ func TestHappyFlowMultiThreadedWithUpdateSession(t *testing.T) {
 		ch2val := <-ch2 + parallelGoRoutines
 		if len(all_chs) == parallelGoRoutines { // at half of the go routines launch the swap.
 			go func() {
-				utils.LavaFormatInfo("#### UPDATING PROVIDERS ####")
+				utils.FormatInfo("#### UPDATING PROVIDERS ####")
 				err := csm.UpdateAllProviders(secondEpochHeight, createPairingList("test2", true), nil) // update the providers. with half of them
 				require.NoError(t, err)
 			}()
@@ -1208,10 +1208,10 @@ func TestHappyFlowMultiThreadedWithUpdateSession(t *testing.T) {
 			all_chs[ch2val] = struct{}{}
 		}
 		if len(all_chs) >= parallelGoRoutines*2 {
-			utils.LavaFormatInfo(fmt.Sprintf("finished routines len(all_chs): %d", len(all_chs)))
+			utils.FormatInfo(fmt.Sprintf("finished routines len(all_chs): %d", len(all_chs)))
 			break // routines finished
 		} else {
-			utils.LavaFormatInfo(fmt.Sprintf("awaiting routines: ch1: %d, ch2: %d", ch1val, ch2val))
+			utils.FormatInfo(fmt.Sprintf("awaiting routines: ch1: %d, ch2: %d", ch1val, ch2val))
 		}
 	}
 
@@ -1372,7 +1372,7 @@ func TestPairingWithAddons(t *testing.T) {
 			err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil) // update the providers.
 			require.NoError(t, err)
 			time.Sleep(5 * time.Millisecond) // let probes finish
-			utils.LavaFormatDebug("valid providers::::", utils.Attribute{Key: "length", Value: len(csm.getValidAddresses(addon, nil, ctx))}, utils.Attribute{Key: "valid addresses", Value: csm.getValidAddresses(addon, nil, ctx)}, utils.Attribute{Key: "addon", Value: addon})
+			utils.FormatDebug("valid providers::::", utils.Attribute{Key: "length", Value: len(csm.getValidAddresses(addon, nil, ctx))}, utils.Attribute{Key: "valid addresses", Value: csm.getValidAddresses(addon, nil, ctx)}, utils.Attribute{Key: "addon", Value: addon})
 			require.NotEqual(t, 0, len(csm.getValidAddresses(addon, nil, ctx)), "valid addresses: %#v addonAddresses %#v", csm.getValidAddresses(addon, nil, ctx), csm.addonAddresses)
 			// block all providers
 			initialProvidersLen := len(csm.getValidAddresses(addon, nil, ctx))
@@ -1383,7 +1383,7 @@ func TestPairingWithAddons(t *testing.T) {
 					err = csm.OnSessionFailure(cs.Session, ReportAndBlockProviderError)
 					require.NoError(t, err)
 				}
-				utils.LavaFormatDebug("length!", utils.Attribute{Key: "length", Value: len(csm.getValidAddresses(addon, nil, ctx))}, utils.Attribute{Key: "valid addresses", Value: csm.getValidAddresses(addon, nil, ctx)})
+				utils.FormatDebug("length!", utils.Attribute{Key: "length", Value: len(csm.getValidAddresses(addon, nil, ctx))}, utils.Attribute{Key: "valid addresses", Value: csm.getValidAddresses(addon, nil, ctx)})
 			}
 			require.Equal(t, 0, len(csm.getValidAddresses(addon, nil, ctx)), csm.validAddresses)
 			if addon != "" {
@@ -1440,7 +1440,7 @@ func TestPairingWithExtensions(t *testing.T) {
 			err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil) // update the providers.
 			require.NoError(t, err)
 			time.Sleep(5 * time.Millisecond) // let probes finish
-			utils.LavaFormatDebug("valid providers::::", utils.Attribute{Key: "length", Value: len(csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx))}, utils.Attribute{Key: "valid addresses", Value: csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx)}, utils.Attribute{Key: "extensions", Value: extensionOpt.extensions}, utils.Attribute{Key: "addon", Value: extensionOpt.addon})
+			utils.FormatDebug("valid providers::::", utils.Attribute{Key: "length", Value: len(csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx))}, utils.Attribute{Key: "valid addresses", Value: csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx)}, utils.Attribute{Key: "extensions", Value: extensionOpt.extensions}, utils.Attribute{Key: "addon", Value: extensionOpt.addon})
 			require.NotEqual(t, 0, len(csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx)), "valid addresses: %#v addonAddresses %#v", csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx), csm.addonAddresses)
 			// block all providers
 			extensionsList := []*spectypes.Extension{}
@@ -1458,7 +1458,7 @@ func TestPairingWithExtensions(t *testing.T) {
 					err = csm.OnSessionFailure(cs.Session, ReportAndBlockProviderError)
 					require.NoError(t, err)
 				}
-				utils.LavaFormatDebug("length!", utils.Attribute{Key: "length", Value: len(csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx))}, utils.Attribute{Key: "valid addresses", Value: csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx)})
+				utils.FormatDebug("length!", utils.Attribute{Key: "length", Value: len(csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx))}, utils.Attribute{Key: "valid addresses", Value: csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx)})
 			}
 			require.Equal(t, 0, len(csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx)), csm.validAddresses)
 			if len(extensionOpt.extensions) > 0 || extensionOpt.addon != "" {
@@ -1689,7 +1689,7 @@ func TestPairingWithStateful(t *testing.T) {
 		require.NoError(t, err)
 		addon := ""
 		time.Sleep(5 * time.Millisecond) // let probes finish
-		utils.LavaFormatDebug("valid providers::::", utils.Attribute{Key: "length", Value: len(csm.getValidAddresses(addon, nil, ctx))}, utils.Attribute{Key: "valid addresses", Value: csm.getValidAddresses(addon, nil, ctx)}, utils.Attribute{Key: "addon", Value: addon})
+		utils.FormatDebug("valid providers::::", utils.Attribute{Key: "length", Value: len(csm.getValidAddresses(addon, nil, ctx))}, utils.Attribute{Key: "valid addresses", Value: csm.getValidAddresses(addon, nil, ctx)}, utils.Attribute{Key: "addon", Value: addon})
 		require.NotEqual(t, 0, len(csm.getValidAddresses(addon, nil, ctx)), "valid addresses: %#v addonAddresses %#v", csm.getValidAddresses(addon, nil, ctx), csm.addonAddresses)
 		providerAddresses := csm.getValidAddresses(addon, nil, ctx)
 		allProviders := len(providerAddresses)
@@ -1715,7 +1715,7 @@ func TestMaximumBlockedSessionsErrorsInPairingListEmpty(t *testing.T) {
 	pairingList := createPairingList("", true)
 	err := csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{0: pairingList[0]}, nil) // update the providers.
 	require.NoError(t, err)
-	utils.LavaFormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
+	utils.FormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
 	for i := 0; i < MaxSessionsAllowedPerProvider; i++ {
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 		require.NoError(t, err)

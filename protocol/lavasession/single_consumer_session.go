@@ -75,7 +75,7 @@ func (session *SingleConsumerSession) TryUseSession() (blocked bool, ok bool) {
 			return true, false
 		}
 		if session.usedProviders != nil {
-			utils.LavaFormatError("session misuse detected, usedProviders isn't nil, missing Free call, blocking", nil, utils.LogAttr("session", session.SessionId))
+			utils.FormatError("session misuse detected, usedProviders isn't nil, missing Free call, blocking", nil, utils.LogAttr("session", session.SessionId))
 			session.BlockListed = true
 			session.lock.Unlock()
 			return true, false
@@ -98,7 +98,7 @@ func (consumerSession *SingleConsumerSession) VerifyLock() error {
 		defer consumerSession.Free(nil)
 		// if failed to lock we should block session as it seems like a very rare case.
 		consumerSession.BlockListed = true // block this session from future usages
-		utils.LavaFormatError("Verify Lock failed on session Failure, blocking session", nil, utils.LogAttr("consumerSession", consumerSession))
+		utils.FormatError("Verify Lock failed on session Failure, blocking session", nil, utils.LogAttr("consumerSession", consumerSession))
 		return LockMisUseDetectedError
 	}
 	return nil
@@ -106,7 +106,7 @@ func (consumerSession *SingleConsumerSession) VerifyLock() error {
 
 func (scs *SingleConsumerSession) VerifyProviderUniqueIdAndStoreIfFirstTime(providerUniqueId string) bool {
 	if scs.providerUniqueId == "" {
-		utils.LavaFormatTrace("First time getting providerUniqueId for SingleConsumerSession",
+		utils.FormatTrace("First time getting providerUniqueId for SingleConsumerSession",
 			utils.LogAttr("sessionId", scs.SessionId),
 			utils.LogAttr("providerUniqueId", providerUniqueId),
 		)

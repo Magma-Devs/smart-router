@@ -45,7 +45,7 @@ func (gm *GrpcMessage) GetRawRequestHash() ([]byte, error) {
 	headers := gm.GetHeaders()
 	headersByteArray, err := json.Marshal(headers)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", headers))
+		utils.FormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", headers))
 		return []byte{}, err
 	}
 	pathByteArray := []byte(gm.Path)
@@ -68,7 +68,7 @@ func (gm GrpcMessage) GetParams() interface{} {
 			var parsedData interface{}
 			err := json.Unmarshal(gm.Msg, &parsedData)
 			if err != nil {
-				utils.LavaFormatError("failed to unmarshal GetParams", err)
+				utils.FormatError("failed to unmarshal GetParams", err)
 				return nil
 			}
 			return parsedData
@@ -76,7 +76,7 @@ func (gm GrpcMessage) GetParams() interface{} {
 	}
 	parsedData, err := gm.dynamicResolve()
 	if err != nil {
-		utils.LavaFormatError("failed to dynamicResolve", err)
+		utils.FormatError("failed to dynamicResolve", err)
 		return nil
 	}
 	return parsedData
@@ -133,16 +133,16 @@ func (gm GrpcMessage) GetError() *rpcclient.JsonError {
 func (gm GrpcMessage) NewParsableRPCInput(input json.RawMessage) (parser.RPCInput, error) {
 	msgFactory := dynamic.NewMessageFactoryWithDefaults()
 	if gm.methodDesc == nil {
-		return nil, utils.LavaFormatError("does not have a methodDescriptor set in grpcMessage", nil)
+		return nil, utils.FormatError("does not have a methodDescriptor set in grpcMessage", nil)
 	}
 	msg := msgFactory.NewMessage(gm.methodDesc.GetOutputType())
 	if err := proto.Unmarshal(input, msg); err != nil {
-		return nil, utils.LavaFormatError("failed to unmarshal input", err)
+		return nil, utils.FormatError("failed to unmarshal input", err)
 	}
 
 	formattedInput, err := gm.formatter(msg)
 	if err != nil {
-		return nil, utils.LavaFormatError("m.formatter(msg)", err)
+		return nil, utils.FormatError("m.formatter(msg)", err)
 	}
 	return ParsableRPCInput{Result: []byte(formattedInput)}, nil
 }
@@ -176,7 +176,7 @@ func (ss ServerSource) FindSymbol(fullyQualifiedName string) (desc.Descriptor, e
 	}
 	d := file.FindSymbol(fullyQualifiedName)
 	if d == nil {
-		return nil, utils.LavaFormatError("Symbol not found", fmt.Errorf("missing symbol: %s", fullyQualifiedName))
+		return nil, utils.FormatError("Symbol not found", fmt.Errorf("missing symbol: %s", fullyQualifiedName))
 	}
 	return d, nil
 }
@@ -202,7 +202,7 @@ func ReflectionSupport(err error) error {
 		return nil
 	}
 	if stat, ok := status.FromError(err); ok && stat.Code() == codes.Unimplemented {
-		return utils.LavaFormatError("server does not support the reflection API", err)
+		return utils.FormatError("server does not support the reflection API", err)
 	}
 	return err
 }

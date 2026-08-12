@@ -46,7 +46,7 @@ func (s *StickySessionStore) DeleteOldSessions(epoch uint64) {
 	defer s.lock.Unlock()
 	for id, session := range s.sessions {
 		if session.Epoch < epoch {
-			utils.LavaFormatTrace("deleting sticky session", utils.LogAttr("id", id))
+			utils.FormatTrace("deleting sticky session", utils.LogAttr("id", id))
 			delete(s.sessions, id)
 		}
 	}

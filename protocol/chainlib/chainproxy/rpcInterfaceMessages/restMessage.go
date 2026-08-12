@@ -42,7 +42,7 @@ func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 	headers := rm.GetHeaders()
 	headersByteArray, err := json.Marshal(headers)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", headers))
+		utils.FormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", headers))
 		return []byte{}, err
 	}
 	pathByteArray := []byte(rm.Path)

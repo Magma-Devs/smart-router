@@ -411,7 +411,7 @@ func (c *Client) BatchCallContext(ctx context.Context, b []BatchElemWithId, stri
 		// only sends valid IDs to our channel.
 		byOrder, found := byID[string(resp.ID)]
 		if !found {
-			utils.LavaFormatError("invalid ID returned", nil, utils.LogAttr("id", string(resp.ID)))
+			utils.FormatError("invalid ID returned", nil, utils.LogAttr("id", string(resp.ID)))
 		}
 		elem := &b[byOrder]
 		if resp.Error != nil {
@@ -434,7 +434,7 @@ func (c *Client) BatchCallContext(ctx context.Context, b []BatchElemWithId, stri
 				validIds = append(validIds, elem.ID)
 			}
 		}
-		return utils.LavaFormatError("partial batches response", err, utils.LogAttr("timeToProcess", timeToSend), utils.LogAttr("supported", n), utils.LogAttr("valid_ids", validIds), utils.LogAttr("missing_ids", missingIds))
+		return utils.FormatError("partial batches response", err, utils.LogAttr("timeToProcess", timeToSend), utils.LogAttr("supported", n), utils.LogAttr("valid_ids", validIds), utils.LogAttr("missing_ids", missingIds))
 	}
 	return err
 }

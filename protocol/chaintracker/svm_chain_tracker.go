@@ -103,7 +103,7 @@ func (cs *SVMChainTracker) fetchLatestBlockNumInner(ctx context.Context) (int64,
 		cs.hashCache.SetWithTTL(slot, blockHash, 1, hashCacheTTL)
 	}
 
-	utils.LavaFormatTrace("[SVMChainTracker] fetching latest slot",
+	utils.FormatTrace("[SVMChainTracker] fetching latest slot",
 		utils.LogAttr("slot", slot),
 		utils.LogAttr("block_hash", blockHash),
 	)
@@ -125,12 +125,12 @@ func (cs *SVMChainTracker) FetchLatestBlockNum(ctx context.Context) (int64, erro
 	}
 
 	if err != nil {
-		return 0, utils.LavaFormatWarning("[SVMChainTracker] failed to get latest block num, getting from chain fetcher", err,
+		return 0, utils.FormatWarning("[SVMChainTracker] failed to get latest block num, getting from chain fetcher", err,
 			utils.LogAttr("block_num", latestBlockNum),
 			utils.LogAttr("latest_block", cs.dataFetcher.GetAtomicLatestBlockNum()),
 			utils.LogAttr("server_memory", cs.dataFetcher.GetServerBlockMemory()))
 	}
-	utils.LavaFormatTrace("[SVMChainTracker] fetched latest block num", utils.LogAttr("block_num", latestBlockNum))
+	utils.FormatTrace("[SVMChainTracker] fetched latest block num", utils.LogAttr("block_num", latestBlockNum))
 	return latestBlockNum, nil
 }
 
@@ -146,7 +146,7 @@ func (cs *SVMChainTracker) FetchBlockHashByNum(ctx context.Context, slot int64) 
 		return "", fmt.Errorf("requested slot: %d, latest slot: %d, server memory %d: %w", slot, cs.dataFetcher.GetAtomicLatestBlockNum(), cs.dataFetcher.GetServerBlockMemory(), ErrorFailedToFetchTooEarlyBlock)
 	}
 	if blockHash, ok := cs.hashCache.Get(slot); ok {
-		utils.LavaFormatTrace("[SVMChainTracker] FetchBlockHashByNum found hash in cache", utils.LogAttr("slot", slot), utils.LogAttr("hash", blockHash))
+		utils.FormatTrace("[SVMChainTracker] FetchBlockHashByNum found hash in cache", utils.LogAttr("slot", slot), utils.LogAttr("hash", blockHash))
 		return blockHash, nil
 	}
 
@@ -156,7 +156,7 @@ func (cs *SVMChainTracker) FetchBlockHashByNum(ctx context.Context, slot int64) 
 
 	hash, err := cs.chainFetcher.FetchBlockHashByNum(ctx, slot)
 	if err == nil {
-		utils.LavaFormatTrace("[SVMChainTracker] FetchBlockHashByNum succeeded", utils.LogAttr("slot", slot), utils.LogAttr("hash", hash))
+		utils.FormatTrace("[SVMChainTracker] FetchBlockHashByNum succeeded", utils.LogAttr("slot", slot), utils.LogAttr("hash", hash))
 	}
 	return hash, err
 }

@@ -227,7 +227,7 @@ func (dgm *DirectGRPCSubscriptionManager) SetEndpoints(grpcEndpoints, grpcBackup
 
 // Start initializes the manager and starts background tasks
 func (dgm *DirectGRPCSubscriptionManager) Start(ctx context.Context) {
-	utils.LavaFormatInfo("DirectGRPCSubscriptionManager starting",
+	utils.FormatInfo("DirectGRPCSubscriptionManager starting",
 		utils.LogAttr("chainID", dgm.chainID),
 		utils.LogAttr("endpoints", len(dgm.endpointsSnapshot().primary)),
 	)
@@ -256,7 +256,7 @@ func (dgm *DirectGRPCSubscriptionManager) Stop() {
 	}
 	dgm.upstreamPools = make(map[string]*UpstreamGRPCPool)
 
-	utils.LavaFormatInfo("DirectGRPCSubscriptionManager stopped",
+	utils.FormatInfo("DirectGRPCSubscriptionManager stopped",
 		utils.LogAttr("chainID", dgm.chainID),
 	)
 }
@@ -309,7 +309,7 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupStaleSubscriptions() {
 	}
 
 	if len(stale) > 0 {
-		utils.LavaFormatDebug("DirectGRPC: cleaned up stale subscriptions",
+		utils.FormatDebug("DirectGRPC: cleaned up stale subscriptions",
 			utils.LogAttr("count", len(stale)),
 		)
 	}
@@ -450,7 +450,7 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 	// Track subscription for this client
 	dgm.trackClientSubscription(clientKey, hashedParams)
 
-	utils.LavaFormatDebug("DirectGRPC: client joined existing subscription",
+	utils.FormatDebug("DirectGRPC: client joined existing subscription",
 		utils.LogAttr("clientKey", clientKey),
 		utils.LogAttr("routerID", routerID),
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
@@ -569,7 +569,7 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	firstReply := dgm.createStreamAcknowledgement(clientRouterID, methodPath)
 	activeSub.firstReply = firstReply
 
-	utils.LavaFormatInfo("DirectGRPC: created new subscription",
+	utils.FormatInfo("DirectGRPC: created new subscription",
 		utils.LogAttr("methodPath", methodPath),
 		utils.LogAttr("clientKey", clientKey),
 		utils.LogAttr("routerSubID", routerSubID),
@@ -673,13 +673,13 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 			// Receive next message
 			err := activeSub.upstreamStream.RecvMsg(outputMsg)
 			if err == io.EOF {
-				utils.LavaFormatInfo("DirectGRPC: stream ended normally",
+				utils.FormatInfo("DirectGRPC: stream ended normally",
 					utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 				)
 				return
 			}
 			if err != nil {
-				utils.LavaFormatWarning("DirectGRPC: stream error",
+				utils.FormatWarning("DirectGRPC: stream error",
 					err,
 					utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 				)
@@ -693,7 +693,7 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 			// Marshal to bytes
 			msgBytes, err := proto.Marshal(outputMsg)
 			if err != nil {
-				utils.LavaFormatWarning("DirectGRPC: failed to marshal message", err)
+				utils.FormatWarning("DirectGRPC: failed to marshal message", err)
 				continue
 			}
 
@@ -768,20 +768,20 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 		}
 	}()
 
-	utils.LavaFormatInfo("DirectGRPC: attempting to restore subscription",
+	utils.FormatInfo("DirectGRPC: attempting to restore subscription",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
 
 	// Reconnect pool
 	if err := activeSub.upstreamPool.ReconnectWithBackoff(ctx); err != nil {
-		utils.LavaFormatWarning("DirectGRPC: failed to reconnect", err)
+		utils.FormatWarning("DirectGRPC: failed to reconnect", err)
 		return
 	}
 
 	// Get new connection
 	newConn, err := activeSub.upstreamPool.GetConnectionForStream(ctx)
 	if err != nil {
-		utils.LavaFormatWarning("DirectGRPC: failed to get new connection", err)
+		utils.FormatWarning("DirectGRPC: failed to get new connection", err)
 		return
 	}
 
@@ -794,7 +794,7 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 		activeSub.methodDescriptor,
 	)
 	if err != nil {
-		utils.LavaFormatWarning("DirectGRPC: failed to create new stream", err)
+		utils.FormatWarning("DirectGRPC: failed to create new stream", err)
 		return
 	}
 
@@ -811,7 +811,7 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	}
 	newConn.IncrementStreams()
 
-	utils.LavaFormatInfo("DirectGRPC: subscription restored",
+	utils.FormatInfo("DirectGRPC: subscription restored",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
 
@@ -896,7 +896,7 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupSubscription(hashedParams strin
 		dgm.idMapper.RemoveMapping(routerID)
 	}
 
-	utils.LavaFormatDebug("DirectGRPC: subscription cleaned up",
+	utils.FormatDebug("DirectGRPC: subscription cleaned up",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
 }
@@ -1067,7 +1067,7 @@ func (dgm *DirectGRPCSubscriptionManager) selectEndpoint(ctx context.Context, cl
 					return stickyEndpoint, nil
 				}
 				// Sticky endpoint is ignored — clear and continue to cascade.
-				utils.LavaFormatDebug("DirectGRPC: sticky endpoint ignored, clearing affinity",
+				utils.FormatDebug("DirectGRPC: sticky endpoint ignored, clearing affinity",
 					utils.LogAttr("clientKey", clientKey),
 					utils.LogAttr("ignoredEndpoint", stickySession.Provider),
 				)
@@ -1082,7 +1082,7 @@ func (dgm *DirectGRPCSubscriptionManager) selectEndpoint(ctx context.Context, cl
 	}
 
 	// Tier 2: backup (only when primary is empty/unavailable).
-	utils.LavaFormatDebug("DirectGRPC: primary endpoints exhausted, falling back to backup",
+	utils.FormatDebug("DirectGRPC: primary endpoints exhausted, falling back to backup",
 		utils.LogAttr("backupCount", len(snapshot.backup)),
 	)
 	if endpoint, err := dgm.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints); err == nil {
@@ -1152,7 +1152,7 @@ func (dgm *DirectGRPCSubscriptionManager) checkClientSubscriptionLimit(clientKey
 		if dgm.config.ShouldRejectOnClientLimit() {
 			return fmt.Errorf("client subscription limit reached (%d)", dgm.config.MaxSubscriptionsPerClient)
 		}
-		utils.LavaFormatWarning("DirectGRPC: client near subscription limit",
+		utils.FormatWarning("DirectGRPC: client near subscription limit",
 			nil,
 			utils.LogAttr("clientKey", clientKey),
 			utils.LogAttr("count", count),
@@ -1167,7 +1167,7 @@ func (dgm *DirectGRPCSubscriptionManager) checkGlobalSubscriptionLimit() error {
 		if dgm.config.ShouldRejectOnTotalLimit() {
 			return fmt.Errorf("global subscription limit reached (%d)", dgm.config.MaxTotalSubscriptions)
 		}
-		utils.LavaFormatWarning("DirectGRPC: approaching global subscription limit",
+		utils.FormatWarning("DirectGRPC: approaching global subscription limit",
 			nil,
 			utils.LogAttr("total", total),
 		)

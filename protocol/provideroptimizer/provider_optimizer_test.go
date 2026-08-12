@@ -114,7 +114,7 @@ func TestProviderOptimizerProviderDataSetGet(t *testing.T) {
 		address := providerAddress + strconv.Itoa(i)
 		set := providerOptimizer.providersStorage.Set(address, providerData, 1)
 		if set == false {
-			utils.LavaFormatWarning("set in cache dropped", nil)
+			utils.FormatWarning("set in cache dropped", nil)
 		}
 	}
 	time.Sleep(4 * time.Millisecond)
@@ -839,7 +839,7 @@ func TestProviderOptimizerChoiceSimulationBasedOnLatency(t *testing.T) {
 	// Use more iterations to reduce statistical variance
 	iterations := 5000
 	res := runChooseManyTimesAndReturnResults(t, providerOptimizer, providersGen.providersAddresses, nil, iterations, cu, requestBlock)
-	utils.LavaFormatInfo("res", utils.LogAttr("res", res))
+	utils.FormatInfo("res", utils.LogAttr("res", res))
 
 	// With weighted selection and equal availability, latency differences should result in
 	// provider 0 (best latency) getting more selections than provider 2 (worst latency)
@@ -904,7 +904,7 @@ func TestProviderOptimizerChoiceSimulationBasedOnSync(t *testing.T) {
 	iterations := 2000 // Increased iterations for more stable results
 	res := runChooseManyTimesAndReturnResults(t, providerOptimizer, providersGen.providersAddresses, nil, iterations, cu, spectypes.LATEST_BLOCK)
 
-	utils.LavaFormatInfo("res", utils.LogAttr("res", res))
+	utils.FormatInfo("res", utils.LogAttr("res", res))
 
 	// With weighted selection and sync weight at 20%, provider 0 (best sync) should clearly
 	// get more selections than the others, but the difference between provider 1 and 2 may be small

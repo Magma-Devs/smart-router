@@ -78,7 +78,7 @@ func LogCodedError(description string, err error, lavaError *LavaError, chainID 
 		lavaError = LavaErrorUnknown
 	}
 	EmitErrorMetric(lavaError, chainID)
-	return utils.LavaFormatError(description, err, buildCodedAttrs(lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)...)
+	return utils.FormatError(description, err, buildCodedAttrs(lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)...)
 }
 
 // ExtractJSONRPCErrorCode extracts the error code from a JSON-RPC error response body.
