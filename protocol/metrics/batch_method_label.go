@@ -91,15 +91,21 @@ func buildBatchSignature(apiName string) (signature string, size int, tooWide bo
 	return BatchMethodPrefix + strings.Join(distinct, batchSignatureElementSeparator), size, false
 }
 
-// batchSignatureRegistry bounds the set of batch signatures allowed to become label
-// values, tracked per spec so a chatty chain can't consume another chain's budget.
+// batchSignatureRegistry bounds a set of label values, tracked per spec so a chatty
+// chain can't consume another chain's budget. Batch signatures were the first user;
+// unmatched-API names (default_method_label.go) reuse it with their own cap.
 type batchSignatureRegistry struct {
 	lock     sync.RWMutex
-	admitted map[string]map[string]struct{} // spec -> set of admitted signatures
+	cap      int
+	admitted map[string]map[string]struct{} // spec -> set of admitted values
 }
 
 func newBatchSignatureRegistry() *batchSignatureRegistry {
-	return &batchSignatureRegistry{admitted: make(map[string]map[string]struct{})}
+	return &batchSignatureRegistry{cap: maxBatchSignaturesPerSpec, admitted: make(map[string]map[string]struct{})}
+}
+
+func newDefaultMethodRegistry() *batchSignatureRegistry {
+	return &batchSignatureRegistry{cap: maxDefaultMethodsPerSpec, admitted: make(map[string]map[string]struct{})}
 }
 
 // admit reports whether signature may be used as a label value for spec.
@@ -127,13 +133,13 @@ func (r *batchSignatureRegistry) admit(spec, signature string) bool {
 
 	signatures, ok := r.admitted[spec]
 	if !ok {
-		signatures = make(map[string]struct{}, maxBatchSignaturesPerSpec)
+		signatures = make(map[string]struct{}, r.cap)
 		r.admitted[spec] = signatures
 	}
 	if _, alreadyAdmitted := signatures[signature]; alreadyAdmitted {
 		return true
 	}
-	if len(signatures) >= maxBatchSignaturesPerSpec {
+	if len(signatures) >= r.cap {
 		return false
 	}
 	signatures[signature] = struct{}{}
@@ -148,8 +154,13 @@ func (r *batchSignatureRegistry) admit(spec, signature string) bool {
 // RecordRelaySuccess → AddEndpointRelayServiced), and each normalizes at its own
 // boundary so that calling any of them directly is still safe.
 func (m *SmartRouterMetricsManager) normalizeMethodLabel(spec, method string) string {
-	if m == nil || !strings.Contains(method, batchMethodSeparator) {
+	if m == nil {
 		return method
+	}
+	if !strings.Contains(method, batchMethodSeparator) {
+		// Single-method names have their own unbounded case: the synthetic
+		// "Default-<raw request>" apis minted for spec misses (default_method_label.go).
+		return m.normalizeDefaultMethodLabel(spec, method)
 	}
 
 	signature, _, tooWide := buildBatchSignature(method)
