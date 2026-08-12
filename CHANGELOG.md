@@ -8,6 +8,36 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.3.2 — 2026-08-12
+
+### Highlights
+
+Smart Router v1.3.2 expands operator visibility by introducing two new endpoints to the debug HTTP server. To assist in diagnosing upstream routing decisions, SREs can query `GET /debug/provider-scores` to inspect current QoS metrics, which explicitly identifies any chains that have not yet generated scoring data. Operators can also manually trigger immediate state updates using `POST /debug/poll-now`, an endpoint designed with strict 504 timeout semantics that guarantees unwitnessed polls are never reported as completed. Finally, protocol routing behavior is corrected in the session layer by allowing a specification's `Content-Type` to override the direct-RPC default, ensuring payloads are formatted correctly for strict upstream nodes.
+
+### Changes
+
+#### New Features
+- feat(smart-router/debug): add POST /debug/poll-now (MAG-2649) ([#258]) [`acbeb1d`]
+- feat(smart-router/debug): add GET /debug/provider-scores (MAG-2707) ([#259]) [`6b45d72`]
+
+#### Bug fixes
+- fix(smart-router/debug): never report an unwitnessed poll as a completed one (MAG-2649 review) ([#258]) [`2161fd2`]
+- fix(smart-router/debug): name the chains that produced no scores (MAG-2707 review) ([#259]) [`0d0c32a`]
+- fix(lavasession): let a spec content-type override the direct-RPC default (MAG-2744) ([#268]) [`0a0d287`]
+
+#### Documentation updates
+- docs(smart-router/debug): correct /debug/poll-now's 504 semantics (MAG-2649 review) ([#258]) [`dcb916d`]
+
+[#258]: https://github.com/magma-Devs/smart-router/pull/258
+[#259]: https://github.com/magma-Devs/smart-router/pull/259
+[#268]: https://github.com/magma-Devs/smart-router/pull/268
+[`0a0d287`]: https://github.com/magma-Devs/smart-router/commit/0a0d28787d9b169e08aa419a3876afb5e0205e14
+[`0d0c32a`]: https://github.com/magma-Devs/smart-router/commit/0d0c32a1a5c7f171e8cb14f04f0961b2b1064881
+[`2161fd2`]: https://github.com/magma-Devs/smart-router/commit/2161fd2f2c1cf858ccabd4d34b6ea1169fbb6847
+[`6b45d72`]: https://github.com/magma-Devs/smart-router/commit/6b45d72c0496ae570642f8c67352dde1ed784cc2
+[`acbeb1d`]: https://github.com/magma-Devs/smart-router/commit/acbeb1d88579010227f92e41677ec20419641f2e
+[`dcb916d`]: https://github.com/magma-Devs/smart-router/commit/dcb916d74f311f58209b1fa985065a61625be4f9
+
 ## v1.3.1 — 2026-08-06
 
 ### Highlights
