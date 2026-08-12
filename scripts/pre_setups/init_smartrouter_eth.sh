@@ -140,7 +140,7 @@ echo "    WS Endpoint 3: ${ETH_WS_URL_3:0:50}..."
 echo ""
 echo "IMPORTANT: This is DIRECT RPC mode"
 echo "    - Smart router connects DIRECTLY to Ethereum RPC endpoints"
-echo "    - NO Lava providers in the middle!"
+echo "    - NO provider-relay network in the middle!"
 echo "    - 3 endpoints enable cross-validation testing (2-of-3 / 3-of-3)"
 echo "    - Testing Phases 1-5 implementation"
 echo ""
@@ -152,7 +152,7 @@ echo ""
 cat > $CONFIG_FILE <<EOF
 # Smart Router Direct RPC Configuration
 # Testing Phases 1-5: JSON-RPC over HTTP/HTTPS + WebSocket Subscriptions
-# Mode: Direct connections to Ethereum RPC endpoints (no Lava providers!)
+# Mode: Direct connections to Ethereum RPC endpoints (no provider-relay network — direct upstreams)
 
 endpoints:
   - listen-address: "0.0.0.0:3360"
@@ -239,7 +239,7 @@ fi
 echo "[Test Setup] starting Smart Router (DIRECT RPC mode, standalone)"
 echo ""
 echo "Smart Router Configuration:"
-echo "   - Mode: DIRECT RPC (bypasses Lava providers)"
+echo "   - Mode: DIRECT RPC (bypasses the provider-relay network)"
 echo "   - Protocols: JSON-RPC over HTTP/HTTPS"
 if [[ "$WS_ENABLED" == "true" ]]; then
     echo "   - WebSocket: ENABLED (Phase 5 subscriptions)"

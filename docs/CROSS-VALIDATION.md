@@ -27,7 +27,7 @@ Cross-validation only does something useful when both pieces are present:
    api-interface)`, each tagged with a `group-label` (vendor / operator / region). Providers
    with no label fold into the implicit `"default"` group.
 2. **A policy (or caller headers) that mandates a quorum.** Either a per-request header
-   (`lava-cross-validation-*`) or a per-method `cross-validation:` policy block. The two
+   (`smartrouter-cross-validation-*`) or a per-method `cross-validation:` policy block. The two
    compose as `clamp(caller, floor, cap)`.
 
 ```yaml
@@ -81,7 +81,7 @@ misconfiguration fails fast rather than silently degrading.
 ## What the caller sees
 
 A cross-validated response carries headers describing the quorum
-(`lava-cross-validation-status`, `…-agreeing-providers`, `…-disagreeing-providers`,
+(`smartrouter-cross-validation-status`, `…-agreeing-providers`, `…-disagreeing-providers`,
 `…-pending-providers`, and on failure `…-failure-reason`). The quorum early-exits once the
 threshold is met, so a provider that answers too late is reported as **pending** rather than
 silently dropped — `disagreeing-providers` only ever lists dissent the router actually received,

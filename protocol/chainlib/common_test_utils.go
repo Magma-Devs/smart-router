@@ -34,25 +34,25 @@ import (
 // ---------------------------------------------------------------------------
 //
 // The test gRPC spec (specs/grpctest.json) references
-// lavatest.v1.BlockService/GetLatestBlock. For gRPC reflection to resolve
+// smartroutertest.v1.BlockService/GetLatestBlock. For gRPC reflection to resolve
 // this service, we register a FileDescriptorProto in the global proto
 // registry at init time. The mock handler uses dynamicpb messages so that
 // proto marshal/unmarshal works end-to-end.
 
-// testBlockServiceFD holds the registered file descriptor for lavatest.v1.
+// testBlockServiceFD holds the registered file descriptor for smartroutertest.v1.
 var testBlockServiceFD protoreflect.FileDescriptor
 
 func init() {
 	syntax := "proto3"
-	fileName := "lavatest/v1/block_service.proto"
-	pkgName := "lavatest.v1"
+	fileName := "smartroutertest/v1/block_service.proto"
+	pkgName := "smartroutertest.v1"
 	reqName := "GetLatestBlockRequest"
 	respName := "GetLatestBlockResponse"
 	svcName := "BlockService"
 	methodName := "GetLatestBlock"
 	heightField := "height"
-	inputType := ".lavatest.v1.GetLatestBlockRequest"
-	outputType := ".lavatest.v1.GetLatestBlockResponse"
+	inputType := ".smartroutertest.v1.GetLatestBlockRequest"
+	outputType := ".smartroutertest.v1.GetLatestBlockResponse"
 	fieldNum := int32(1)
 	fieldType := descriptorpb.FieldDescriptorProto_TYPE_INT64
 	fieldLabel := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
@@ -121,7 +121,7 @@ func (mrw mockResponseWriter) WriteHeader(statusCode int) {
 
 // mockGRPCServiceDesc is the gRPC service descriptor for the test block service.
 var mockGRPCServiceDesc = grpc.ServiceDesc{
-	ServiceName: "lavatest.v1.BlockService",
+	ServiceName: "smartroutertest.v1.BlockService",
 	HandlerType: (*mockBlockServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{

@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — Cosmos Hub (COSMOSHUB)
-# Mode: Direct connections to public Cosmos Hub endpoints (no Lava providers!)
+# Mode: Direct connections to public Cosmos Hub endpoints (no provider-relay network — direct upstreams)
 #
 # Each of the three Cosmos Hub interfaces (rest, grpc, tendermintrpc) is backed
 # by two DISTINCT upstream sources so cross-validation / group-diversity

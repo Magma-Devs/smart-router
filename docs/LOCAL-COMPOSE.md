@@ -83,7 +83,7 @@ it (see `smartrouter_eth_cached.yml`) and run it with the overlay.
 
 ### `smartrouter_eth.yml` — Ethereum (default)
 
-2 upstreams (PublicNode + Tenderly), each HTTP + WS. No Lava endpoints.
+2 upstreams (PublicNode + Tenderly), each HTTP + WS. No vendor-gateway endpoints.
 
 ### `smartrouter_eth_cached.yml` — Ethereum with cache
 
@@ -95,7 +95,7 @@ the cache overlay (see [Enabling the cache](#enabling-the-cache)).
 Single-chain JSON-RPC (Solana, Bitcoin, Hyperliquid) or REST (Aptos) examples,
 each on port `3360` and HTTP-only — run with `--skip-websocket-verification`
 (the compose command already passes it). Upstreams are PublicNode and each
-chain's official/community endpoint; no Lava endpoints.
+chain's official/community endpoint; no vendor-gateway endpoints.
 
 ### `smartrouter_cosmos.yml` — Cosmos Hub (REST + gRPC + Tendermint RPC)
 

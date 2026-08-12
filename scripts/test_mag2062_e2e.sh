@@ -182,7 +182,7 @@ if [[ "$START_ROUTER" == true ]]; then
         || { fail "router build failed"; exit 1; }
 
     # The router resolves its config arg as a viper config NAME searched in
-    # [cwd, cwd/config, ~/.lava] — not an arbitrary path. Write it into the repo
+    # [cwd, cwd/config, ~/.smartrouter] — not an arbitrary path. Write it into the repo
     # root (a search path) and pass the basename; remove it on exit.
     ROUTER_CFG="$REPO_ROOT/.mag2062_sim_cv.yml"
     cat > "$ROUTER_CFG" <<YAML
