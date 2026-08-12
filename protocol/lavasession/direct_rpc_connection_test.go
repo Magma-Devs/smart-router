@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -627,4 +629,93 @@ func TestHTTPDirectRPCConnection_AdvertisesAcceptEncodingIdentity(t *testing.T) 
 		"SendRequest must advertise Accept-Encoding: identity so Go does not auto-negotiate gzip")
 	require.Equal(t, "identity", dae,
 		"DoHTTPRequest must advertise Accept-Encoding: identity so Go does not auto-negotiate gzip")
+}
+
+// TestDoHTTPRequest_PerRequestHeadersOverrideDefaultContentType locks in the
+// precedence between HTTPRequestParams.ContentType and HTTPRequestParams.Headers.
+//
+// ContentType is a *default* the caller supplies for requests with a body (the
+// REST and JSON-RPC relay paths both hardcode "application/json"). Headers carries
+// what the chain spec resolved for this specific request. The spec is more specific
+// than the default, so the spec must win.
+//
+// This regression exists because the two were applied in the opposite order:
+// per-request headers were written first and the default was written over them.
+// Stellar's REST POST collection overrides content-type to
+// application/x-www-form-urlencoded — Horizon rejects anything else on
+// /transactions with 415 unsupported_media_type — so every Stellar transaction
+// submission through direct-RPC failed, and no spec change could fix it because
+// the resolved value was discarded here. Do not reorder these two blocks.
+func TestDoHTTPRequest_PerRequestHeadersOverrideDefaultContentType(t *testing.T) {
+	tests := []struct {
+		name        string
+		headers     []pairingtypes.Metadata
+		contentType string
+		expected    string
+		reason      string
+	}{
+		{
+			name:        "spec-provided content-type beats the hardcoded default",
+			headers:     []pairingtypes.Metadata{{Name: "content-type", Value: "application/x-www-form-urlencoded"}},
+			contentType: "application/json",
+			expected:    "application/x-www-form-urlencoded",
+			reason:      "the Stellar case: a spec override must survive to the node, or Horizon answers 415",
+		},
+		{
+			name:        "default still applies when the spec says nothing",
+			headers:     nil,
+			contentType: "application/json",
+			expected:    "application/json",
+			reason:      "chains without a content-type directive must keep the JSON default",
+		},
+		{
+			name:        "unrelated spec headers do not disturb the default",
+			headers:     []pairingtypes.Metadata{{Name: "x-custom", Value: "value"}},
+			contentType: "application/json",
+			expected:    "application/json",
+			reason:      "only a content-type directive may replace the default",
+		},
+		{
+			name:        "empty value deletes the header (delete semantics)",
+			headers:     []pairingtypes.Metadata{{Name: "content-type", Value: ""}},
+			contentType: "application/json",
+			expected:    "",
+			reason:      "a spec may remove the header entirely; the default must not resurrect it",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			var gotBody string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("Content-Type")
+				body, _ := io.ReadAll(r.Body)
+				gotBody = string(body)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer server.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: server.URL}, 1, "rest")
+			require.NoError(t, err)
+			doer, ok := conn.(HTTPDirectRPCDoer)
+			require.True(t, ok, "an HTTP connection must implement HTTPDirectRPCDoer")
+
+			_, err = doer.DoHTTPRequest(ctx, HTTPRequestParams{
+				Method:      http.MethodPost,
+				URL:         server.URL + "/transactions",
+				Body:        []byte("tx=AAAAtest"),
+				Headers:     tt.headers,
+				ContentType: tt.contentType,
+			})
+			require.NoError(t, err)
+
+			require.Equal(t, tt.expected, got, tt.reason)
+			require.Equal(t, "tx=AAAAtest", gotBody, "the body must reach the node untouched")
+		})
+	}
 }

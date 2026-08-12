@@ -418,6 +418,17 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	// Apply IP forwarding if needed
 	h.nodeUrl.SetIpForwardingIfNecessary(ctx, req.Header.Set)
 
+	// Set the default Content-Type for requests with a body BEFORE applying
+	// per-request headers, so a spec-supplied content-type wins over this default
+	// instead of being overwritten by it. Stellar's REST POST collection overrides
+	// content-type to application/x-www-form-urlencoded (Horizon rejects anything
+	// else on /transactions with 415); with the opposite ordering that override was
+	// computed correctly and then discarded here. This matches the ordering the
+	// chainlib REST proxy has always used.
+	if params.Body != nil && params.ContentType != "" {
+		req.Header.Set("Content-Type", params.ContentType)
+	}
+
 	// Apply per-request headers with delete semantics
 	for _, header := range params.Headers {
 		if header.Value == "" {
@@ -427,10 +438,6 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 		}
 	}
 
-	// Set Content-Type for requests with body
-	if params.Body != nil && params.ContentType != "" {
-		req.Header.Set("Content-Type", params.ContentType)
-	}
 	// Scoped smart-router override: skip upstream gzip auto-negotiation. See
 	// SendRequest above for the full rationale. Set last so it cannot be
 	// overridden by per-request headers.
