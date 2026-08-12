@@ -42,7 +42,7 @@ Smart Router v1.3.2 expands operator visibility by introducing two new endpoints
 
 ### Highlights
 
-Smart Router v1.3.1 introduces a head-only mode for the chain tracker, enabling support for chains that do not expose block-by-number queries while correctly handling absent parse directives. To improve failover accuracy and QoS scoring, the router now gates probe re-enables by replaying the specific failing relay and drops the finality distance calculation from the `EndpointLagThreshold`. Protocol routing receives targeted stability updates, ensuring that authentication headers are correctly forwarded during gRPC dials and that `nil` upstream subscriptions are safely rejected instead of triggering a panic. Finally, internal error handling is stabilized by nil-guarding all `LavaWrappedError` methods, alongside observability updates that add tracking for relay cancellations and remove unused write-only `EndpointMetrics` state to reduce overhead.
+Smart Router v1.3.1 introduces a head-only mode for the chain tracker, enabling support for chains that do not expose block-by-number queries while correctly handling absent parse directives. To improve failover accuracy and QoS scoring, the router now gates probe re-enables by replaying the specific failing relay and drops the finality distance calculation from the `EndpointLagThreshold`. Protocol routing receives targeted stability updates, ensuring that authentication headers are correctly forwarded during gRPC dials and that `nil` upstream subscriptions are safely rejected instead of triggering a panic. Finally, internal error handling is stabilized by nil-guarding all `RouterWrappedError` methods, alongside observability updates that add tracking for relay cancellations and remove unused write-only `EndpointMetrics` state to reduce overhead.
 
 ### Changes
 
@@ -55,7 +55,7 @@ Smart Router v1.3.1 introduces a head-only mode for the chain tracker, enabling 
 - fix(relaycore): drop the finality distance from EndpointLagThreshold ([#246]) [`a48ea47`]
 - fix(smart-router): gate probe re-enable on replaying the failing relay (MAG-2550) ([#247]) [`7d42b19`]
 - fix(smart-router): bound the relay-probe gate and judge honestly (MAG-2550 review) ([#247]) [`e77029b`]
-- fix(common): nil-guard every LavaWrappedError method that reads LavaErr ([#252]) [`ba45a3b`]
+- fix(common): nil-guard every RouterWrappedError method that reads RouterErr ([#252]) [`ba45a3b`]
 - fix(rpcsmartrouter): reject a nil upstream subscription instead of panicking (MAG-2685) ([#253]) [`cfb3254`]
 - refactor(smart-router): remove dead code unreachable from all entry points (MAG-2690) ([#254]) [`79a5ce8`]
 - refactor(smart-router): remove test-only-reachable dead code (MAG-2691) ([#254]) [`84bbbd2`]

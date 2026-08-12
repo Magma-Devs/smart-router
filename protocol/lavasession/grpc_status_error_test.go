@@ -151,9 +151,9 @@ func TestHandleGRPCError_RemoteCancellationIsNotLocal(t *testing.T) {
 				"the local-deadline sentinel must NOT be attached to a remote status")
 
 			if le := common.DetectConnectionError(err); le != nil {
-				require.NotEqual(t, common.LavaErrorContextCanceled.Code, le.Code,
+				require.NotEqual(t, common.RouterErrorContextCanceled.Code, le.Code,
 					"remote cancel classified as local — the rpc-error guard was narrowed")
-				require.NotEqual(t, common.LavaErrorContextDeadline.Code, le.Code,
+				require.NotEqual(t, common.RouterErrorContextDeadline.Code, le.Code,
 					"remote deadline classified as local — the rpc-error guard was narrowed")
 			}
 		})

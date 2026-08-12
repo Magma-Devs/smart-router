@@ -21,19 +21,19 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// NewUnsupportedMethodError creates an error wrapping a LavaError with unsupported method classification.
+// NewUnsupportedMethodError creates an error wrapping a RouterError with unsupported method classification.
 // The methodName is included in the context for logging.
 func NewUnsupportedMethodError(_ error, methodName string) error {
 	context := "unsupported method"
 	if methodName != "" {
 		context = fmt.Sprintf("unsupported method %q", methodName)
 	}
-	return common.NewLavaError(common.LavaErrorNodeMethodNotFound, context)
+	return common.NewRouterError(common.RouterErrorNodeMethodNotFound, context)
 }
 
-// NewSolanaNonRetryableError creates an error wrapping a LavaError with non-retryable classification.
+// NewSolanaNonRetryableError creates an error wrapping a RouterError with non-retryable classification.
 func NewSolanaNonRetryableError(err error) error {
-	return common.NewLavaError(common.LavaErrorChainSolanaMissingLongTerm, err.Error())
+	return common.NewRouterError(common.RouterErrorChainSolanaMissingLongTerm, err.Error())
 }
 
 // ExtractNodeErrorDetails extracts the numeric error code and canonical message from a node error.
@@ -107,7 +107,7 @@ func ExtractNodeErrorDetails(nodeError error) (errorCode int, errorMessage strin
 	return 0, errorMessage
 }
 
-// ClassifyNodeError classifies a node error into a LavaError using the error registry.
+// ClassifyNodeError classifies a node error into a RouterError using the error registry.
 // It extracts error codes and messages from JSON-RPC, gRPC, and HTTP errors,
 // then delegates to common.ClassifyError for two-tier classification.
 //
@@ -115,7 +115,7 @@ func ExtractNodeErrorDetails(nodeError error) (errorCode int, errorMessage strin
 //   - nodeError: the error from the node
 //   - chainFamily: the chain family for Tier 2 lookups (use -1 if unknown)
 //   - transport: the transport type for Tier 1 generic matcher partitioning
-func ClassifyNodeError(nodeError error, chainFamily common.ChainFamily, transport common.TransportType) *common.LavaError {
+func ClassifyNodeError(nodeError error, chainFamily common.ChainFamily, transport common.TransportType) *common.RouterError {
 	classified, _, _ := ClassifyNodeErrorWithDetails(nodeError, chainFamily, transport)
 	return classified
 }
@@ -124,7 +124,7 @@ func ClassifyNodeError(nodeError error, chainFamily common.ChainFamily, transpor
 // error code and inner error message extracted from the raw node error. Callers that
 // emit structured logs should prefer this so they don't lose the precise code/message
 // that classification already computed. Returns (nil, 0, "") when nodeError is nil.
-func ClassifyNodeErrorWithDetails(nodeError error, chainFamily common.ChainFamily, transport common.TransportType) (*common.LavaError, int, string) {
+func ClassifyNodeErrorWithDetails(nodeError error, chainFamily common.ChainFamily, transport common.TransportType) (*common.RouterError, int, string) {
 	if nodeError == nil {
 		return nil, 0, ""
 	}
@@ -152,18 +152,18 @@ func IsUnsupportedMethodError(nodeError error) bool {
 	return false
 }
 
-// unwrapLavaError extracts the *LavaError from a LavaWrappedError, or returns nil.
-func unwrapLavaError(err error) *common.LavaError {
-	var wrapped *common.LavaWrappedError
+// unwrapRouterError extracts the *RouterError from a RouterWrappedError, or returns nil.
+func unwrapRouterError(err error) *common.RouterError {
+	var wrapped *common.RouterWrappedError
 	if errors.As(err, &wrapped) {
-		return wrapped.LavaErr
+		return wrapped.RouterErr
 	}
 	return nil
 }
 
-// IsUnsupportedMethodErrorType checks if an error wraps a LavaError with unsupported method SubCategory.
+// IsUnsupportedMethodErrorType checks if an error wraps a RouterError with unsupported method SubCategory.
 func IsUnsupportedMethodErrorType(err error) bool {
-	if le := unwrapLavaError(err); le != nil {
+	if le := unwrapRouterError(err); le != nil {
 		return le.SubCategory.IsUnsupportedMethod()
 	}
 	return false
@@ -178,15 +178,15 @@ func IsSolanaNonRetryableError(nodeError error) bool {
 	}
 	classified := ClassifyNodeError(nodeError, common.ChainFamilySolana, common.TransportJsonRPC)
 	switch classified {
-	case common.LavaErrorChainSolanaMissingLongTerm, common.LavaErrorUserInvalidParams:
+	case common.RouterErrorChainSolanaMissingLongTerm, common.RouterErrorUserInvalidParams:
 		return true
 	}
 	return false
 }
 
-// IsSolanaNonRetryableErrorType checks if an error wraps a non-retryable LavaError.
+// IsSolanaNonRetryableErrorType checks if an error wraps a non-retryable RouterError.
 func IsSolanaNonRetryableErrorType(err error) bool {
-	if le := unwrapLavaError(err); le != nil {
+	if le := unwrapRouterError(err); le != nil {
 		return !le.Retryable
 	}
 	return false
@@ -216,7 +216,7 @@ func ShouldRetryErrorWithContext(err error, chainFamily common.ChainFamily, tran
 
 	// Classify using the registry with chain-specific and transport-specific matchers
 	classified := ClassifyNodeError(err, chainFamily, transport)
-	if classified != nil && classified != common.LavaErrorUnknown {
+	if classified != nil && classified != common.RouterErrorUnknown {
 		// Unsupported methods are never retried regardless of Retryable flag
 		if classified.SubCategory.IsUnsupportedMethod() {
 			return false
@@ -372,7 +372,7 @@ func TryRecoverNodeErrorFromClientError(nodeErr error) *rpcclient.JsonrpcMessage
 //
 // Passing alreadyLoggedElsewhere=true is the "metric-only" path; passing
 // false is the "log + metric" path.
-func emitClassificationTelemetry(nodeError error, classified *common.LavaError, chainID string, errorCode int, errorMessage string, alreadyLoggedElsewhere bool) {
+func emitClassificationTelemetry(nodeError error, classified *common.RouterError, chainID string, errorCode int, errorMessage string, alreadyLoggedElsewhere bool) {
 	if alreadyLoggedElsewhere {
 		common.EmitErrorMetric(classified, chainID)
 		return
@@ -383,7 +383,7 @@ func emitClassificationTelemetry(nodeError error, classified *common.LavaError, 
 // handleAndClassify is the shared error handling path for all transports.
 // It composes three steps:
 //
-//  1. Classify — extract code/message and resolve to a *LavaError.
+//  1. Classify — extract code/message and resolve to a *RouterError.
 //  2. Route    — classified errors return immediately wrapped; Unknown
 //     errors fall through to handleGenericErrors for IP masking /
 //     transport-specific handling.
@@ -402,9 +402,9 @@ func handleAndClassify(ctx context.Context, nodeError error, transport common.Tr
 
 	// Step 2 + 3 (classified path): log + metric here, wrap, return.
 	// handleGenericErrors is not reached on this branch.
-	if classified != common.LavaErrorUnknown {
+	if classified != common.RouterErrorUnknown {
 		emitClassificationTelemetry(nodeError, classified, chainID, errorCode, errorMessage, false /* not already logged */)
-		return common.NewLavaError(classified, nodeError.Error())
+		return common.NewRouterError(classified, nodeError.Error())
 	}
 
 	// Step 2 (Unknown path): delegate to handleGenericErrors. A non-nil

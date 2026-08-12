@@ -37,7 +37,7 @@ func TestRaceLoser_SurvivesClassification(t *testing.T) {
 	wrapped := classifyAndWrap(transportErr, common.ChainFamily(-1), common.TransportJsonRPC)
 
 	t.Run("classification is still correct", func(t *testing.T) {
-		require.Equal(t, common.LavaErrorContextCanceled.Code, extractLavaError(wrapped).Code)
+		require.Equal(t, common.RouterErrorContextCanceled.Code, extractRouterError(wrapped).Code)
 	})
 	t.Run("sentinel survives wrapping", func(t *testing.T) {
 		require.True(t, errors.Is(wrapped, context.Canceled))
@@ -46,7 +46,7 @@ func TestRaceLoser_SurvivesClassification(t *testing.T) {
 		require.True(t, common.IsClientCancellation(wrapped, ctx))
 	})
 	t.Run("endpoint is not blamed", func(t *testing.T) {
-		markUnhealthy, backoff := classifyEndpointHealth(extractLavaError(wrapped), common.IsClientCancellation(wrapped, ctx))
+		markUnhealthy, backoff := classifyEndpointHealth(extractRouterError(wrapped), common.IsClientCancellation(wrapped, ctx))
 		require.False(t, markUnhealthy, "a relay-race loser must not mark the endpoint unhealthy")
 		require.False(t, backoff)
 	})
@@ -81,7 +81,7 @@ func TestGenuineFaults_StillPenalised(t *testing.T) {
 				"%s must NOT be mistaken for a client cancellation even on a cancelled ctx", tc.name)
 
 			markUnhealthy, backoff := classifyEndpointHealth(
-				extractLavaError(wrapped),
+				extractRouterError(wrapped),
 				common.IsClientCancellation(wrapped, cancelledCtx),
 			)
 			require.True(t, markUnhealthy, "%s must still mark the endpoint unhealthy", tc.name)
@@ -93,7 +93,7 @@ func TestGenuineFaults_StillPenalised(t *testing.T) {
 // Rate limiting keeps its distinct treatment: healthy but busy — backoff without
 // marking unhealthy. The new cancellation branch must not have collapsed this case.
 func TestRateLimit_StillHealthyButBusy(t *testing.T) {
-	markUnhealthy, backoff := classifyEndpointHealth(common.LavaErrorNodeRateLimited, false)
+	markUnhealthy, backoff := classifyEndpointHealth(common.RouterErrorNodeRateLimited, false)
 	require.False(t, markUnhealthy, "a rate-limited endpoint is healthy, just busy")
 	require.True(t, backoff)
 }
@@ -119,7 +119,7 @@ func TestClassification_PreservesOtherSentinels(t *testing.T) {
 		cause := &url.Error{Op: "Post", URL: "http://bor:8545", Err: context.DeadlineExceeded}
 		wrapped := classifyAndWrap(cause, common.ChainFamily(-1), common.TransportJsonRPC)
 		require.True(t, errors.Is(wrapped, context.DeadlineExceeded))
-		require.Equal(t, common.LavaErrorContextDeadline.Code, extractLavaError(wrapped).Code)
+		require.Equal(t, common.RouterErrorContextDeadline.Code, extractRouterError(wrapped).Code)
 	})
 	t.Run("typed http status error stays reachable", func(t *testing.T) {
 		cause := &lavasession.HTTPStatusError{StatusCode: 503, Status: "503"}

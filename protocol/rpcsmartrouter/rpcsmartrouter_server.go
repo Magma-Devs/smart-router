@@ -3852,8 +3852,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		)
 
 		// Classify error using the error registry and decide on health tracking
-		// Try to extract LavaError from classifiedError (already classified by classifyAndWrap)
-		classified := extractLavaError(err)
+		// Try to extract RouterError from classifiedError (already classified by classifyAndWrap)
+		classified := extractRouterError(err)
 		if classified == nil {
 			// Fallback: derive transport and chain family, classify from scratch
 			transport := common.TransportJsonRPC

@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func makeRelayError(err error, lavaErr *common.LavaError, stake int64, reputation string) RelayError {
+func makeRelayError(err error, routerErr *common.RouterError, stake int64, reputation string) RelayError {
 	rep, _ := strconv.ParseFloat(reputation, 64)
 	return RelayError{
 		Err: err,
@@ -19,7 +19,7 @@ func makeRelayError(err error, lavaErr *common.LavaError, stake int64, reputatio
 			ProviderReputationSummary: rep,
 			ProviderAddress:           "lava@test",
 		},
-		LavaError: lavaErr,
+		RouterError: routerErr,
 	}
 }
 
@@ -29,16 +29,16 @@ func TestGetBestError_PrefersExternalOverInternal(t *testing.T) {
 	// WHEN GetBestErrorMessageForUser is called
 	// THEN the external error is preferred over higher-scored internal errors
 	re := &RelayErrors{RelayErrors: []RelayError{
-		makeRelayError(errors.New("timeout alpha"), common.LavaErrorConnectionTimeout, 1000, "1.0"),
-		makeRelayError(errors.New("timeout beta"), common.LavaErrorConnectionRefused, 900, "1.0"),
-		makeRelayError(errors.New("timeout gamma"), common.LavaErrorConnectionReset, 800, "1.0"),
-		makeRelayError(errors.New("nonce too low"), common.LavaErrorChainNonceTooLow, 100, "0.5"),
-		makeRelayError(errors.New("execution reverted"), common.LavaErrorChainExecutionReverted, 50, "0.3"),
+		makeRelayError(errors.New("timeout alpha"), common.RouterErrorConnectionTimeout, 1000, "1.0"),
+		makeRelayError(errors.New("timeout beta"), common.RouterErrorConnectionRefused, 900, "1.0"),
+		makeRelayError(errors.New("timeout gamma"), common.RouterErrorConnectionReset, 800, "1.0"),
+		makeRelayError(errors.New("nonce too low"), common.RouterErrorChainNonceTooLow, 100, "0.5"),
+		makeRelayError(errors.New("execution reverted"), common.RouterErrorChainExecutionReverted, 50, "0.3"),
 	}}
 
 	best := re.GetBestErrorMessageForUser()
-	require.NotNil(t, best.LavaError)
-	assert.Equal(t, common.CategoryExternal, best.LavaError.Category)
+	require.NotNil(t, best.RouterError)
+	assert.Equal(t, common.CategoryExternal, best.RouterError.Category)
 }
 
 func TestGetBestError_ExternalTiebreakByScore(t *testing.T) {
@@ -46,11 +46,11 @@ func TestGetBestError_ExternalTiebreakByScore(t *testing.T) {
 	// WHEN GetBestErrorMessageForUser is called
 	// THEN the higher-scored provider's error wins
 	re := &RelayErrors{RelayErrors: []RelayError{
-		makeRelayError(errors.New("nonce too low"), common.LavaErrorChainNonceTooLow, 100, "0.5"),
-		makeRelayError(errors.New("execution reverted"), common.LavaErrorChainExecutionReverted, 1000, "1.0"),
-		makeRelayError(errors.New("out of gas"), common.LavaErrorChainOutOfGas, 500, "0.8"),
-		makeRelayError(errors.New("insufficient funds"), common.LavaErrorChainInsufficientFunds, 200, "0.6"),
-		makeRelayError(errors.New("block not found"), common.LavaErrorChainBlockNotFound, 300, "0.7"),
+		makeRelayError(errors.New("nonce too low"), common.RouterErrorChainNonceTooLow, 100, "0.5"),
+		makeRelayError(errors.New("execution reverted"), common.RouterErrorChainExecutionReverted, 1000, "1.0"),
+		makeRelayError(errors.New("out of gas"), common.RouterErrorChainOutOfGas, 500, "0.8"),
+		makeRelayError(errors.New("insufficient funds"), common.RouterErrorChainInsufficientFunds, 200, "0.6"),
+		makeRelayError(errors.New("block not found"), common.RouterErrorChainBlockNotFound, 300, "0.7"),
 	}}
 
 	best := re.GetBestErrorMessageForUser()
@@ -62,17 +62,17 @@ func TestGetBestError_MajorityWins(t *testing.T) {
 	// WHEN GetBestErrorMessageForUser is called
 	// THEN the majority error wins regardless of category/score
 	re := &RelayErrors{RelayErrors: []RelayError{
-		makeRelayError(errors.New("nonce too low"), common.LavaErrorChainNonceTooLow, 100, "0.5"),
-		makeRelayError(errors.New("nonce too low"), common.LavaErrorChainNonceTooLow, 200, "0.5"),
-		makeRelayError(errors.New("timeout"), common.LavaErrorConnectionTimeout, 1000, "1.0"),
+		makeRelayError(errors.New("nonce too low"), common.RouterErrorChainNonceTooLow, 100, "0.5"),
+		makeRelayError(errors.New("nonce too low"), common.RouterErrorChainNonceTooLow, 200, "0.5"),
+		makeRelayError(errors.New("timeout"), common.RouterErrorConnectionTimeout, 1000, "1.0"),
 	}}
 
 	best := re.GetBestErrorMessageForUser()
 	assert.Equal(t, "nonce too low", best.Err.Error())
 }
 
-func TestGetBestError_NilLavaErrorFallsBack(t *testing.T) {
-	// GIVEN 5 errors where LavaError is nil (unclassified, no majority)
+func TestGetBestError_NilRouterErrorFallsBack(t *testing.T) {
+	// GIVEN 5 errors where RouterError is nil (unclassified, no majority)
 	// WHEN GetBestErrorMessageForUser is called
 	// THEN it falls back to score-based selection (backwards compatible)
 	re := &RelayErrors{RelayErrors: []RelayError{
@@ -87,17 +87,17 @@ func TestGetBestError_NilLavaErrorFallsBack(t *testing.T) {
 	assert.Equal(t, "error B", best.Err.Error())
 }
 
-func TestGetBestError_LavaErrorPropagated(t *testing.T) {
-	// GIVEN a relay error with LavaError populated
+func TestGetBestError_RouterErrorPropagated(t *testing.T) {
+	// GIVEN a relay error with RouterError populated
 	// WHEN GetBestErrorMessageForUser returns it
-	// THEN the LavaError field is preserved
+	// THEN the RouterError field is preserved
 	re := &RelayErrors{RelayErrors: []RelayError{
-		makeRelayError(errors.New("nonce too low"), common.LavaErrorChainNonceTooLow, 100, "0.5"),
+		makeRelayError(errors.New("nonce too low"), common.RouterErrorChainNonceTooLow, 100, "0.5"),
 	}}
 
 	best := re.GetBestErrorMessageForUser()
-	require.NotNil(t, best.LavaError)
-	assert.Equal(t, common.LavaErrorChainNonceTooLow, best.LavaError)
-	assert.Equal(t, "CHAIN_NONCE_TOO_LOW", best.LavaError.Name)
-	assert.False(t, best.LavaError.Retryable)
+	require.NotNil(t, best.RouterError)
+	assert.Equal(t, common.RouterErrorChainNonceTooLow, best.RouterError)
+	assert.Equal(t, "CHAIN_NONCE_TOO_LOW", best.RouterError.Name)
+	assert.False(t, best.RouterError.Retryable)
 }

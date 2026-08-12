@@ -24,7 +24,7 @@ func InitErrorMetrics() {
 		//   - chain_id:       ~50 live chains
 		// Theoretical max: 100 × 2 × 2 × 50 = 20,000 series.
 		// Practical max is much lower because (a) category and retryable are
-		// 1:1 derivable from error_name — each LavaError pins both at
+		// 1:1 derivable from error_name — each RouterError pins both at
 		// registration — and (b) most (name, chain) pairs never fire.
 		// Realistic steady-state: a few hundred series.
 		//

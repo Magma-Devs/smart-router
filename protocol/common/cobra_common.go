@@ -152,7 +152,7 @@ type ConsumerCmdFlags struct {
 	CredentialsFlag          string        // access-control-allow-credentials, defaults to "true"
 	OriginFlag               string        // comma separated list of origins, or * for all, default enabled completely
 	MethodsFlag              string        // whether to allow access control headers *, most proxies have their own access control so its not required
-	ExposeHeadersFlag        string        // Access-Control-Expose-Headers — response headers the browser is allowed to read (e.g. Lava-Provider-Address). Empty = none.
+	ExposeHeadersFlag        string        // Access-Control-Expose-Headers — response headers the browser is allowed to read (e.g. Smart-Router-Provider-Address). Empty = none.
 	CDNCacheDuration         string        // how long to cache the preflight response defaults 24 hours (in seconds) "86400"
 	RelaysHealthEnableFlag   bool          // enables relay health check
 	RelaysHealthIntervalFlag time.Duration // interval for relay health check

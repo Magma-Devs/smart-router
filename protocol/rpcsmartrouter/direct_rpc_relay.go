@@ -569,7 +569,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// upstream rejected the request shape itself (not a node-internal
 		// hiccup), trust that verdict. We only escalate to non-retryable —
 		// never demote — so 2xx body errors keep their existing semantics
-		// and 5xx (which already map to retryable LavaErrors) are unaffected.
+		// and 5xx (which already map to retryable RouterErrors) are unaffected.
 		//
 		// The statusCode != errorCode guard skips the redundant pass in the
 		// bare-body fallback case where ExtractJSONRPCErrorCode returned 0

@@ -20,39 +20,39 @@ import (
 var chainErrorMappings = map[ChainFamily][]errorMapping{
 	ChainFamilySolana: {
 		// Source: Solana RPC custom error codes (agave rpc-client-api/src/custom_error.rs)
-		{CodeEquals(-32001), LavaErrorChainStatePruned},                                        // "Block cleaned up, does not exist on node"
-		{CodeEquals(-32002), LavaErrorChainSolanaSimulationFailed},                             // "Transaction simulation failed"
-		{CodeEquals(-32003), LavaErrorChainSolanaSignatureVerifyFailed},                        // "Signature verification failure"
-		{CodeEquals(-32004), LavaErrorChainBlockNotFound},                                      // "Block not available for slot N"
-		{CodeEquals(-32005), LavaErrorNodeSolanaUnhealthy},                                     // "Node is unhealthy" / "Node is behind by N slots"
-		{CodeEquals(-32007), LavaErrorChainSolanaLedgerJump},                                   // "Slot skipped or missing"
-		{CodeEquals(-32009), LavaErrorChainSolanaMissingLongTerm},                              // "Slot missing in long-term storage"
-		{MessageContains("missing in long-term storage"), LavaErrorChainSolanaMissingLongTerm}, // message-based fallback
-		{CodeEquals(-32010), LavaErrorChainSolanaExcludedFromIndex},                            // "Excluded from account secondary indexes"
-		{CodeEquals(-32013), LavaErrorChainSolanaSignatureLengthMismatch},                      // "Signature length mismatch"
-		{CodeEquals(-32014), LavaErrorChainSolanaBlockStatusUnavailable},                       // "Block status unavailable"
-		{CodeEquals(-32015), LavaErrorChainSolanaTxVersionUnsupported},                         // "Transaction version not supported"
-		{CodeEquals(-32016), LavaErrorChainSolanaMinContextSlotNotReached},                     // "Minimum context slot not reached"
+		{CodeEquals(-32001), RouterErrorChainStatePruned},                                        // "Block cleaned up, does not exist on node"
+		{CodeEquals(-32002), RouterErrorChainSolanaSimulationFailed},                             // "Transaction simulation failed"
+		{CodeEquals(-32003), RouterErrorChainSolanaSignatureVerifyFailed},                        // "Signature verification failure"
+		{CodeEquals(-32004), RouterErrorChainBlockNotFound},                                      // "Block not available for slot N"
+		{CodeEquals(-32005), RouterErrorNodeSolanaUnhealthy},                                     // "Node is unhealthy" / "Node is behind by N slots"
+		{CodeEquals(-32007), RouterErrorChainSolanaLedgerJump},                                   // "Slot skipped or missing"
+		{CodeEquals(-32009), RouterErrorChainSolanaMissingLongTerm},                              // "Slot missing in long-term storage"
+		{MessageContains("missing in long-term storage"), RouterErrorChainSolanaMissingLongTerm}, // message-based fallback
+		{CodeEquals(-32010), RouterErrorChainSolanaExcludedFromIndex},                            // "Excluded from account secondary indexes"
+		{CodeEquals(-32013), RouterErrorChainSolanaSignatureLengthMismatch},                      // "Signature length mismatch"
+		{CodeEquals(-32014), RouterErrorChainSolanaBlockStatusUnavailable},                       // "Block status unavailable"
+		{CodeEquals(-32015), RouterErrorChainSolanaTxVersionUnsupported},                         // "Transaction version not supported"
+		{CodeEquals(-32016), RouterErrorChainSolanaMinContextSlotNotReached},                     // "Minimum context slot not reached"
 		// Blockhash expiry — extremely common under load when clients submit tx
 		// with a recent blockhash that has since rolled off the 150-slot window.
 		// Placed before generic Tier-1 matchers would see it; case-insensitive
 		// via the matcher pre-lowering.
-		{MessageContains("blockhash not found"), LavaErrorChainSolanaBlockhashNotFound},
+		{MessageContains("blockhash not found"), RouterErrorChainSolanaBlockhashNotFound},
 	},
 	ChainFamilyBitcoin: {
 		// Source: Bitcoin Core src/rpc/protocol.h
-		{CodeEquals(-28), LavaErrorNodeBitcoinWarmup},                  // RPC_IN_WARMUP: "Loading block index..."
-		{CodeEquals(-10), LavaErrorNodeBitcoinInitialDownload},         // RPC_CLIENT_IN_INITIAL_DOWNLOAD
-		{CodeEquals(-9), LavaErrorNodeBitcoinNotConnected},             // RPC_CLIENT_NOT_CONNECTED: "Shutting down"
-		{CodeEquals(-25), LavaErrorChainBitcoinVerifyError},            // RPC_VERIFY_ERROR
-		{CodeEquals(-26), LavaErrorChainBitcoinVerifyRejected},         // RPC_VERIFY_REJECTED
-		{CodeEquals(-27), LavaErrorChainBitcoinAlreadyInChain},         // RPC_VERIFY_ALREADY_IN_CHAIN
-		{CodeEquals(-6), LavaErrorChainBitcoinWalletInsufficientFunds}, // RPC_WALLET_INSUFFICIENT_FUNDS
+		{CodeEquals(-28), RouterErrorNodeBitcoinWarmup},                  // RPC_IN_WARMUP: "Loading block index..."
+		{CodeEquals(-10), RouterErrorNodeBitcoinInitialDownload},         // RPC_CLIENT_IN_INITIAL_DOWNLOAD
+		{CodeEquals(-9), RouterErrorNodeBitcoinNotConnected},             // RPC_CLIENT_NOT_CONNECTED: "Shutting down"
+		{CodeEquals(-25), RouterErrorChainBitcoinVerifyError},            // RPC_VERIFY_ERROR
+		{CodeEquals(-26), RouterErrorChainBitcoinVerifyRejected},         // RPC_VERIFY_REJECTED
+		{CodeEquals(-27), RouterErrorChainBitcoinAlreadyInChain},         // RPC_VERIFY_ALREADY_IN_CHAIN
+		{CodeEquals(-6), RouterErrorChainBitcoinWalletInsufficientFunds}, // RPC_WALLET_INSUFFICIENT_FUNDS
 		// Message-based: UTXO already spent / double-spend detection.
 		// Bitcoin Core returns these through sendrawtransaction rejections.
-		{MessageContains("already spent"), LavaErrorChainDoubleSpend},
-		{MessageContains("double spend"), LavaErrorChainDoubleSpend},
-		{MessageContains("txn-mempool-conflict"), LavaErrorChainDoubleSpend}, // Bitcoin Core specific
+		{MessageContains("already spent"), RouterErrorChainDoubleSpend},
+		{MessageContains("double spend"), RouterErrorChainDoubleSpend},
+		{MessageContains("txn-mempool-conflict"), RouterErrorChainDoubleSpend}, // Bitcoin Core specific
 	},
 	ChainFamilyCosmosSDK: {
 		// Cosmos SDK transaction errors. These must be Tier-2 (not Tier-1)
@@ -60,39 +60,39 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// CHAIN_STARKNET_INSUFFICIENT_FEE (code 53) which is handled in the
 		// Starknet block below — Tier-2 scoping keeps each chain's semantics
 		// from bleeding into the other.
-		{MessageContains("account sequence mismatch"), LavaErrorChainInvalidSequence}, // Cosmos SDK x/auth
-		{MessageContains("insufficient fees"), LavaErrorChainInsufficientFee},         // Cosmos SDK x/auth plural
-		{MessageContains("insufficient fee"), LavaErrorChainInsufficientFee},          // Singular variant
+		{MessageContains("account sequence mismatch"), RouterErrorChainInvalidSequence}, // Cosmos SDK x/auth
+		{MessageContains("insufficient fees"), RouterErrorChainInsufficientFee},         // Cosmos SDK x/auth plural
+		{MessageContains("insufficient fee"), RouterErrorChainInsufficientFee},          // Singular variant
 		// "account not found" is Cosmos SDK x/auth for a missing signer account.
 		// Generic Tier-1 doesn't carry this matcher because EVM uses different
 		// phrasing and would false-match contract calls against unfunded addresses.
-		{MessageContains("account not found"), LavaErrorChainAccountNotFound},
+		{MessageContains("account not found"), RouterErrorChainAccountNotFound},
 	},
 	ChainFamilyStarknet: {
 		// Source: Starknet JSON-RPC spec error codes
-		{CodeEquals(1), LavaErrorChainStarknetFailedToReceiveTx},
-		{CodeEquals(20), LavaErrorChainStarknetContractNotFound},
-		{CodeEquals(24), LavaErrorChainStarknetBlockNotFound},
-		{CodeEquals(28), LavaErrorChainStarknetClassNotFound},
-		{CodeEquals(29), LavaErrorChainStarknetTxHashNotFound},
-		{CodeEquals(40), LavaErrorChainStarknetContractError},
-		{CodeEquals(41), LavaErrorChainStarknetTxExecError},
-		{CodeEquals(51), LavaErrorChainStarknetClassAlreadyDeclared},
-		{CodeEquals(52), LavaErrorChainStarknetInvalidNonce},
-		{CodeEquals(53), LavaErrorChainStarknetInsufficientFee},
-		{CodeEquals(54), LavaErrorChainStarknetInsufficientBalance},
-		{CodeEquals(55), LavaErrorChainStarknetValidationFailure},
-		{CodeEquals(56), LavaErrorChainStarknetCompilationFailed},
-		{CodeEquals(59), LavaErrorChainStarknetDuplicateTx},
-		{CodeEquals(61), LavaErrorChainStarknetTxVersionUnsupported},
-		{CodeEquals(63), LavaErrorChainStarknetUnexpectedError},
+		{CodeEquals(1), RouterErrorChainStarknetFailedToReceiveTx},
+		{CodeEquals(20), RouterErrorChainStarknetContractNotFound},
+		{CodeEquals(24), RouterErrorChainStarknetBlockNotFound},
+		{CodeEquals(28), RouterErrorChainStarknetClassNotFound},
+		{CodeEquals(29), RouterErrorChainStarknetTxHashNotFound},
+		{CodeEquals(40), RouterErrorChainStarknetContractError},
+		{CodeEquals(41), RouterErrorChainStarknetTxExecError},
+		{CodeEquals(51), RouterErrorChainStarknetClassAlreadyDeclared},
+		{CodeEquals(52), RouterErrorChainStarknetInvalidNonce},
+		{CodeEquals(53), RouterErrorChainStarknetInsufficientFee},
+		{CodeEquals(54), RouterErrorChainStarknetInsufficientBalance},
+		{CodeEquals(55), RouterErrorChainStarknetValidationFailure},
+		{CodeEquals(56), RouterErrorChainStarknetCompilationFailed},
+		{CodeEquals(59), RouterErrorChainStarknetDuplicateTx},
+		{CodeEquals(61), RouterErrorChainStarknetTxVersionUnsupported},
+		{CodeEquals(63), RouterErrorChainStarknetUnexpectedError},
 	},
 	ChainFamilyNEAR: {
 		// Source: NEAR RPC docs — matched by error.cause.name in message
-		{MessageContains("UNKNOWN_BLOCK"), LavaErrorChainNEARUnknownBlock},
-		{MessageContains("UNKNOWN_CHUNK"), LavaErrorChainNEARUnknownChunk},
-		{MessageContains("INVALID_SHARD_ID"), LavaErrorChainNEARInvalidShardID},
-		{MessageContains("NOT_SYNCED_YET"), LavaErrorChainNEARNotSyncedYet},
+		{MessageContains("UNKNOWN_BLOCK"), RouterErrorChainNEARUnknownBlock},
+		{MessageContains("UNKNOWN_CHUNK"), RouterErrorChainNEARUnknownChunk},
+		{MessageContains("INVALID_SHARD_ID"), RouterErrorChainNEARInvalidShardID},
+		{MessageContains("NOT_SYNCED_YET"), RouterErrorChainNEARNotSyncedYet},
 	},
 }
 
@@ -112,18 +112,18 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// --- Code-based matchers first (more precise than substring matching) ---
 
 		// Standard JSON-RPC 2.0 codes
-		{CodeEquals(-32601), LavaErrorNodeMethodNotFound},
-		{CodeEquals(-32700), LavaErrorUserParseError},
-		{CodeEquals(-32600), LavaErrorUserInvalidRequest},
-		{CodeEquals(-32602), LavaErrorUserInvalidParams},
-		{CodeEquals(-32603), LavaErrorNodeInternalError},
+		{CodeEquals(-32601), RouterErrorNodeMethodNotFound},
+		{CodeEquals(-32700), RouterErrorUserParseError},
+		{CodeEquals(-32600), RouterErrorUserInvalidRequest},
+		{CodeEquals(-32602), RouterErrorUserInvalidParams},
+		{CodeEquals(-32603), RouterErrorNodeInternalError},
 
 		// EIP-1474 server error codes
-		{CodeEquals(-32001), LavaErrorNodeResourceNotFound},    // "Resource not found"
-		{CodeEquals(-32002), LavaErrorNodeResourceUnavailable}, // "Resource unavailable"
-		{CodeEquals(-32003), LavaErrorChainTxRejected},         // "Transaction rejected"
-		{CodeEquals(-32004), LavaErrorNodeMethodNotSupported},  // "Method not supported"
-		{CodeEquals(-32005), LavaErrorNodeLimitExceeded},       // "Limit exceeded"
+		{CodeEquals(-32001), RouterErrorNodeResourceNotFound},    // "Resource not found"
+		{CodeEquals(-32002), RouterErrorNodeResourceUnavailable}, // "Resource unavailable"
+		{CodeEquals(-32003), RouterErrorChainTxRejected},         // "Transaction rejected"
+		{CodeEquals(-32004), RouterErrorNodeMethodNotSupported},  // "Method not supported"
+		{CodeEquals(-32005), RouterErrorNodeLimitExceeded},       // "Limit exceeded"
 
 		// --- Message-based matchers (for -32000 catch-all and codeless errors) ---
 
@@ -132,25 +132,25 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// SubCategoryUnsupportedMethod (zero CU, no retry), so a false positive
 		// silently stops retries and bills nothing. When in doubt, require the
 		// literal word "method" to appear alongside the trigger phrase.
-		{MessageContains("method not found"), LavaErrorNodeMethodNotFound},
-		{MessageContains("method not supported"), LavaErrorNodeMethodNotSupported},
-		{MessageContains("unknown method"), LavaErrorNodeMethodNotFound},
-		{MessageContains("method does not exist"), LavaErrorNodeMethodNotFound},
-		{MessageRegex(`(?i)method .* does not exist`), LavaErrorNodeMethodNotFound},
+		{MessageContains("method not found"), RouterErrorNodeMethodNotFound},
+		{MessageContains("method not supported"), RouterErrorNodeMethodNotSupported},
+		{MessageContains("unknown method"), RouterErrorNodeMethodNotFound},
+		{MessageContains("method does not exist"), RouterErrorNodeMethodNotFound},
+		{MessageRegex(`(?i)method .* does not exist`), RouterErrorNodeMethodNotFound},
 		// "<keyword> ... is not available" — require a method/rpc/endpoint/api keyword
 		// in the same clause so chain-native messages like Solana's "Block is not
 		// available for slot N" or generic "data is not available for block" don't
 		// get pinned as unsupported method.
-		{MessageRegex(`(?i)\b(?:method|rpc|endpoint|api)\b[^,;.]*\bis not available\b`), LavaErrorNodeMethodNotSupported},
+		{MessageRegex(`(?i)\b(?:method|rpc|endpoint|api)\b[^,;.]*\bis not available\b`), RouterErrorNodeMethodNotSupported},
 		// "invalid method" — match only when the phrase is terminal, quoted, or
 		// followed by "name"/colon. This rejects "invalid method argument",
 		// "invalid method parameters", "invalid method signature", etc., which
 		// would otherwise trip the zero-CU path on a user-input error.
-		{MessageRegex(`(?i)invalid method(?:\s*$|\s*[:'"]|\s+name\b)`), LavaErrorNodeMethodNotFound},
+		{MessageRegex(`(?i)invalid method(?:\s*$|\s*[:'"]|\s+name\b)`), RouterErrorNodeMethodNotFound},
 		// Provider-disabled methods (e.g. QuickNode paid tier). Require "method"
 		// or "rpc" near the "blocked" token so unrelated firewall/proxy messages
 		// ("blocked external request") aren't misclassified.
-		{MessageRegex(`(?i)blocked[^,]*\b(?:method|rpc)\b|(?i)\b(?:method|rpc)\b[^,]*\bblocked\b`), LavaErrorNodeMethodNotSupported},
+		{MessageRegex(`(?i)blocked[^,]*\b(?:method|rpc)\b|(?i)\b(?:method|rpc)\b[^,]*\bblocked\b`), RouterErrorNodeMethodNotSupported},
 
 		// --- User input validation (Layer D) ---
 		// These must be ordered BEFORE the broader chain-transaction matchers so
@@ -161,88 +161,88 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		//
 		// Block format: "hex string without 0x prefix" is Geth's exact phrase;
 		// "invalid block number" and "invalid block hash" are generic.
-		{MessageContains("hex string without 0x prefix"), LavaErrorUserInvalidBlockFormat}, // Geth
-		{MessageContains("invalid block number"), LavaErrorUserInvalidBlockFormat},
-		{MessageContains("invalid block hash"), LavaErrorUserInvalidBlockFormat},
+		{MessageContains("hex string without 0x prefix"), RouterErrorUserInvalidBlockFormat}, // Geth
+		{MessageContains("invalid block number"), RouterErrorUserInvalidBlockFormat},
+		{MessageContains("invalid block hash"), RouterErrorUserInvalidBlockFormat},
 		// Address format: "bad address checksum" is Geth; bare "invalid address"
 		// covers most EVM variants.
-		{MessageContains("bad address checksum"), LavaErrorUserInvalidAddress},
-		{MessageContains("invalid address"), LavaErrorUserInvalidAddress},
+		{MessageContains("bad address checksum"), RouterErrorUserInvalidAddress},
+		{MessageContains("invalid address"), RouterErrorUserInvalidAddress},
 		// Hex encoding: "hex string has odd length" is Geth's exact phrase; bare
 		// "invalid hex" is a common catch-all but placed last so the more
 		// specific phrases (block, address) win first.
-		{MessageContains("hex string has odd length"), LavaErrorUserInvalidHex}, // Geth
-		{MessageContains("invalid hex"), LavaErrorUserInvalidHex},
+		{MessageContains("hex string has odd length"), RouterErrorUserInvalidHex}, // Geth
+		{MessageContains("invalid hex"), RouterErrorUserInvalidHex},
 
 		// Rate limiting
-		{MessageContains("rate limit"), LavaErrorNodeRateLimited},
-		{MessageContains("enhance_your_calm"), LavaErrorNodeRateLimited}, // HTTP/2 GOAWAY with ENHANCE_YOUR_CALM — server-side rate limit
+		{MessageContains("rate limit"), RouterErrorNodeRateLimited},
+		{MessageContains("enhance_your_calm"), RouterErrorNodeRateLimited}, // HTTP/2 GOAWAY with ENHANCE_YOUR_CALM — server-side rate limit
 
 		// Chain transaction errors — matchers cover Geth, Erigon, and Nethermind variants
-		{MessageContains("nonce too low"), LavaErrorChainNonceTooLow},
-		{MessageContains("nonce is too low"), LavaErrorChainNonceTooLow}, // Nethermind processor
-		{MessageContains("nonce too high"), LavaErrorChainNonceTooHigh},
-		{MessageContains("nonce is too high"), LavaErrorChainNonceTooHigh},                // Nethermind processor
-		{MessageContains("insufficient funds"), LavaErrorChainInsufficientFunds},          // Geth + Erigon
-		{MessageContains("insufficientfunds"), LavaErrorChainInsufficientFunds},           // Nethermind PascalCase
-		{MessageContains("insufficient maxfeeper"), LavaErrorChainInsufficientFunds},      // Nethermind: "insufficient MaxFeePerGas..."
-		{MessageContains("insufficient sender balance"), LavaErrorChainInsufficientFunds}, // Nethermind
-		{MessageContains("intrinsic gas too low"), LavaErrorChainGasTooLow},               // Geth
-		{MessageContains("intrinsicgas"), LavaErrorChainGasTooLow},                        // Erigon: "IntrinsicGas"
-		{MessageContains("gas limit below intrinsic gas"), LavaErrorChainGasTooLow},       // Nethermind
-		{MessageContains("exceeds block gas limit"), LavaErrorChainGasLimitExceeded},
-		{MessageContains("replacement transaction underpriced"), LavaErrorChainTxReplacementUnderpriced},
-		{MessageContains("could not replace existing tx"), LavaErrorChainTxReplacementUnderpriced}, // Erigon
-		{MessageContains("transaction underpriced"), LavaErrorChainTxUnderpriced},                  // Geth
-		{MessageContains("underpriced"), LavaErrorChainTxUnderpriced},                              // Erigon: bare "underpriced"
-		{MessageContains("fee too low"), LavaErrorChainTxUnderpriced},                              // Erigon: "fee too low"
-		{MessageContains("already known"), LavaErrorChainTxAlreadyKnown},                           // Geth + Erigon
-		{MessageContains("alreadyknown"), LavaErrorChainTxAlreadyKnown},                            // Nethermind PascalCase
-		{MessageContains("txpool is full"), LavaErrorChainMempoolFull},
-		{MessageContains("max fee per gas less than block base fee"), LavaErrorChainMaxFeeBelowBase},
+		{MessageContains("nonce too low"), RouterErrorChainNonceTooLow},
+		{MessageContains("nonce is too low"), RouterErrorChainNonceTooLow}, // Nethermind processor
+		{MessageContains("nonce too high"), RouterErrorChainNonceTooHigh},
+		{MessageContains("nonce is too high"), RouterErrorChainNonceTooHigh},                // Nethermind processor
+		{MessageContains("insufficient funds"), RouterErrorChainInsufficientFunds},          // Geth + Erigon
+		{MessageContains("insufficientfunds"), RouterErrorChainInsufficientFunds},           // Nethermind PascalCase
+		{MessageContains("insufficient maxfeeper"), RouterErrorChainInsufficientFunds},      // Nethermind: "insufficient MaxFeePerGas..."
+		{MessageContains("insufficient sender balance"), RouterErrorChainInsufficientFunds}, // Nethermind
+		{MessageContains("intrinsic gas too low"), RouterErrorChainGasTooLow},               // Geth
+		{MessageContains("intrinsicgas"), RouterErrorChainGasTooLow},                        // Erigon: "IntrinsicGas"
+		{MessageContains("gas limit below intrinsic gas"), RouterErrorChainGasTooLow},       // Nethermind
+		{MessageContains("exceeds block gas limit"), RouterErrorChainGasLimitExceeded},
+		{MessageContains("replacement transaction underpriced"), RouterErrorChainTxReplacementUnderpriced},
+		{MessageContains("could not replace existing tx"), RouterErrorChainTxReplacementUnderpriced}, // Erigon
+		{MessageContains("transaction underpriced"), RouterErrorChainTxUnderpriced},                  // Geth
+		{MessageContains("underpriced"), RouterErrorChainTxUnderpriced},                              // Erigon: bare "underpriced"
+		{MessageContains("fee too low"), RouterErrorChainTxUnderpriced},                              // Erigon: "fee too low"
+		{MessageContains("already known"), RouterErrorChainTxAlreadyKnown},                           // Geth + Erigon
+		{MessageContains("alreadyknown"), RouterErrorChainTxAlreadyKnown},                            // Nethermind PascalCase
+		{MessageContains("txpool is full"), RouterErrorChainMempoolFull},
+		{MessageContains("max fee per gas less than block base fee"), RouterErrorChainMaxFeeBelowBase},
 		// Node is still catching up to the chain head. NEAR carries its own
 		// Tier-2 matcher (CHAIN_NEAR_NOT_SYNCED_YET), so this Tier-1 matcher
 		// only fires for chains that surface a generic string message. The
 		// phrase is tightly bounded to avoid matching unrelated "syncing"
 		// contexts (e.g. a smart contract whose name contains "sync").
-		{MessageContains("node is syncing"), LavaErrorNodeSyncing},
-		{MessageContains("node is still syncing"), LavaErrorNodeSyncing},
-		{MessageContains("catching up to the chain"), LavaErrorNodeSyncing},
+		{MessageContains("node is syncing"), RouterErrorNodeSyncing},
+		{MessageContains("node is still syncing"), RouterErrorNodeSyncing},
+		{MessageContains("catching up to the chain"), RouterErrorNodeSyncing},
 
 		// Tx size limits — Geth/Erigon variants
-		{MessageContains("oversized data"), LavaErrorChainTxTooLarge},           // Geth
-		{MessageContains("transaction size exceeds"), LavaErrorChainTxTooLarge}, // Erigon
-		{MessageContains("tx too large"), LavaErrorChainTxTooLarge},
+		{MessageContains("oversized data"), RouterErrorChainTxTooLarge},           // Geth
+		{MessageContains("transaction size exceeds"), RouterErrorChainTxTooLarge}, // Erigon
+		{MessageContains("tx too large"), RouterErrorChainTxTooLarge},
 		// Invalid signature — Tier-2 Solana (code 3306) runs first and wins
 		// for the Solana family, so this generic matcher only fires for
 		// non-Solana chains that use a free-form error message.
-		{MessageContains("invalid signature"), LavaErrorChainInvalidSignature},
-		{MessageContains("signature verification failed"), LavaErrorChainInvalidSignature},
+		{MessageContains("invalid signature"), RouterErrorChainInvalidSignature},
+		{MessageContains("signature verification failed"), RouterErrorChainInvalidSignature},
 
 		// Chain execution errors
-		{MessageContains("execution reverted"), LavaErrorChainExecutionReverted},
-		{MessageContains("out of gas"), LavaErrorChainOutOfGas},
-		{MessageContains("stack limit reached"), LavaErrorChainStackOverflow},
-		{MessageContains("invalid opcode"), LavaErrorChainInvalidOpcode},
-		{MessageContains("write protection"), LavaErrorChainWriteProtection},
+		{MessageContains("execution reverted"), RouterErrorChainExecutionReverted},
+		{MessageContains("out of gas"), RouterErrorChainOutOfGas},
+		{MessageContains("stack limit reached"), RouterErrorChainStackOverflow},
+		{MessageContains("invalid opcode"), RouterErrorChainInvalidOpcode},
+		{MessageContains("write protection"), RouterErrorChainWriteProtection},
 		// EIP-170 contract bytecode size limit. Geth/Erigon emit this as
 		// "max code size exceeded" during contract creation.
-		{MessageContains("max code size exceeded"), LavaErrorChainContractSizeExceeded},
+		{MessageContains("max code size exceeded"), RouterErrorChainContractSizeExceeded},
 		// Polygon zkEVM prover exceeded the circuit counter budget
 		// (arithmetic, keccak, storage, etc.). zkEVMs speak EVM JSON-RPC
 		// so this matcher sits in the generic Tier-1 block rather than a
 		// family-scoped Tier-2 entry.
-		{MessageContains("out of counters"), LavaErrorChainZkEVMOutOfCounters},
+		{MessageContains("out of counters"), RouterErrorChainZkEVMOutOfCounters},
 
 		// Chain state/data errors
-		{MessageContains("missing trie node"), LavaErrorChainStatePruned},
-		{MessageContains("historical state"), LavaErrorChainStatePruned},
-		{MessageContains("block not found"), LavaErrorChainBlockNotFound},
-		{MessageRegex(`(?i)block #?\w+ not found`), LavaErrorChainBlockNotFound},
-		{MessageContains("transaction not found"), LavaErrorChainTxNotFound},  // some nodes return an error instead of null
-		{MessageContains("receipt not found"), LavaErrorChainReceiptNotFound}, // Cosmos-EVM variant
-		{MessageContains("response is too big"), LavaErrorChainLogResponseTooLarge},
-		{MessageContains("exceeded max limit"), LavaErrorChainLogResponseTooLarge},
+		{MessageContains("missing trie node"), RouterErrorChainStatePruned},
+		{MessageContains("historical state"), RouterErrorChainStatePruned},
+		{MessageContains("block not found"), RouterErrorChainBlockNotFound},
+		{MessageRegex(`(?i)block #?\w+ not found`), RouterErrorChainBlockNotFound},
+		{MessageContains("transaction not found"), RouterErrorChainTxNotFound},  // some nodes return an error instead of null
+		{MessageContains("receipt not found"), RouterErrorChainReceiptNotFound}, // Cosmos-EVM variant
+		{MessageContains("response is too big"), RouterErrorChainLogResponseTooLarge},
+		{MessageContains("exceeded max limit"), RouterErrorChainLogResponseTooLarge},
 
 		// Truncated node responses — historically mapped to NODE_INTERNAL_ERROR
 		// but this is a transport-layer symptom (connection closed mid-body /
@@ -250,21 +250,21 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// Classifying it alongside PROTOCOL_CONNECTION_RESET lets endpoint-
 		// health tracking treat it as a retryable connection failure, which
 		// matches the production traces observed in commit 3136d4f35.
-		{MessageContains("unexpected end of JSON input"), LavaErrorConnectionReset},
+		{MessageContains("unexpected end of JSON input"), RouterErrorConnectionReset},
 
 		// Node server/generic errors — broadest matchers last
-		{MessageContains("all attempts exhausted"), LavaErrorNodeServerError},
-		{CodeEquals(-32000), LavaErrorNodeServerError},
+		{MessageContains("all attempts exhausted"), RouterErrorNodeServerError},
+		{CodeEquals(-32000), RouterErrorNodeServerError},
 
 		// HTTP status matchers are appended by init() via httpStatusMessageMappings()
 	},
 
 	TransportREST: {
 		// Message-based matchers for common REST error patterns
-		{MessageContains("endpoint not found"), LavaErrorNodeEndpointNotFound},
-		{MessageContains("route not found"), LavaErrorNodeEndpointNotFound},
-		{MessageContains("path not found"), LavaErrorNodeEndpointNotFound},
-		{MessageContains("method not allowed"), LavaErrorNodeMethodNotAllowed},
+		{MessageContains("endpoint not found"), RouterErrorNodeEndpointNotFound},
+		{MessageContains("route not found"), RouterErrorNodeEndpointNotFound},
+		{MessageContains("path not found"), RouterErrorNodeEndpointNotFound},
+		{MessageContains("method not allowed"), RouterErrorNodeMethodNotAllowed},
 		// CodeEquals and HTTPStatusContains matchers are appended by init()
 		// via httpStatusCodeMappings() and httpStatusMessageMappings()
 	},
@@ -292,7 +292,7 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// .HandleNodeError — an INVALID_ARGUMENT becomes non-retryable there too. That
 		// is intended and follows from gRPC's own definition of the code, but it is
 		// wider than "direct RPC only" and should be read as such.
-		{GRPCCodeEquals(3), LavaErrorUserInvalidParams}, // codes.InvalidArgument
+		{GRPCCodeEquals(3), RouterErrorUserInvalidParams}, // codes.InvalidArgument
 		// codes.NotFound and codes.OutOfRange are the ordinary "I do not have this"
 		// outcomes of a Cosmos or Sui gRPC query — a missing object, an account that
 		// was never funded, a height below the node's pruning window. They are the
@@ -305,10 +305,10 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// is Retryable=true so the pruned-node-to-archive-node retry survives, and
 		// SubCategoryDataScope is what keeps the gate off an endpoint that answered
 		// truthfully about its own data scope.
-		{GRPCCodeEquals(5), LavaErrorNodeDataNotHeld},         // codes.NotFound
-		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},        // codes.OutOfRange
-		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented},      // codes.Unimplemented
-		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
+		{GRPCCodeEquals(5), RouterErrorNodeDataNotHeld},         // codes.NotFound
+		{GRPCCodeEquals(11), RouterErrorNodeDataNotHeld},        // codes.OutOfRange
+		{GRPCCodeEquals(12), RouterErrorNodeUnimplemented},      // codes.Unimplemented
+		{GRPCCodeEquals(14), RouterErrorNodeServiceUnavailable}, // codes.Unavailable
 		// Deliberately NOT registered, each for its own reason — do not add them
 		// as a block, which is how `Code >= 13` went wrong in the first place:
 		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
@@ -323,11 +323,11 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		//                          handleGRPCError resolves it structurally. One that
 		//                          does reach here is remote and unproven.
 		// Message-based matchers for gRPC errors conveyed without status codes
-		{MessageContains("rate limit"), LavaErrorNodeRateLimited},
-		{MessageContains("enhance_your_calm"), LavaErrorNodeRateLimited}, // HTTP/2 GOAWAY ENHANCE_YOUR_CALM
-		{MessageContains("unimplemented"), LavaErrorNodeUnimplemented},
-		{MessageContains("not implemented"), LavaErrorNodeUnimplemented},
-		{MessageContains("service not found"), LavaErrorNodeUnimplemented},
+		{MessageContains("rate limit"), RouterErrorNodeRateLimited},
+		{MessageContains("enhance_your_calm"), RouterErrorNodeRateLimited}, // HTTP/2 GOAWAY ENHANCE_YOUR_CALM
+		{MessageContains("unimplemented"), RouterErrorNodeUnimplemented},
+		{MessageContains("not implemented"), RouterErrorNodeUnimplemented},
+		{MessageContains("service not found"), RouterErrorNodeUnimplemented},
 	},
 }
 
@@ -339,28 +339,28 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 // These are used for REST transport where the error code is the HTTP status code itself.
 func httpStatusCodeMappings() []errorMapping {
 	return []errorMapping{
-		{CodeEquals(401), LavaErrorNodeUnauthorized},
-		{CodeEquals(404), LavaErrorNodeEndpointNotFound},
-		{CodeEquals(405), LavaErrorNodeMethodNotAllowed},
-		{CodeEquals(413), LavaErrorUserRequestTooLarge},
-		{CodeEquals(429), LavaErrorNodeRateLimited},
-		{CodeEquals(500), LavaErrorNodeInternalError},
+		{CodeEquals(401), RouterErrorNodeUnauthorized},
+		{CodeEquals(404), RouterErrorNodeEndpointNotFound},
+		{CodeEquals(405), RouterErrorNodeMethodNotAllowed},
+		{CodeEquals(413), RouterErrorUserRequestTooLarge},
+		{CodeEquals(429), RouterErrorNodeRateLimited},
+		{CodeEquals(500), RouterErrorNodeInternalError},
 		// 501 Not Implemented: node lacks this method/endpoint (e.g. Cosmos REST
 		// gRPC-gateway). Non-retryable node error, not a transient server failure.
-		{CodeEquals(501), LavaErrorNodeUnimplemented},
-		{CodeEquals(502), LavaErrorNodeBadGateway},
-		{CodeEquals(503), LavaErrorNodeServiceUnavailable},
-		{CodeEquals(504), LavaErrorNodeGatewayTimeout},
+		{CodeEquals(501), RouterErrorNodeUnimplemented},
+		{CodeEquals(502), RouterErrorNodeBadGateway},
+		{CodeEquals(503), RouterErrorNodeServiceUnavailable},
+		{CodeEquals(504), RouterErrorNodeGatewayTimeout},
 		// Cloudflare custom 5xx errors
-		{CodeEquals(520), LavaErrorNodeServerError},    // Web server returned unknown error
-		{CodeEquals(521), LavaErrorNodeServerError},    // Web server is down
-		{CodeEquals(522), LavaErrorNodeGatewayTimeout}, // Connection timed out
-		{CodeEquals(523), LavaErrorNodeServerError},    // Origin is unreachable
-		{CodeEquals(524), LavaErrorNodeGatewayTimeout}, // A timeout occurred
-		{CodeEquals(525), LavaErrorNodeServerError},    // SSL handshake failed
-		{CodeEquals(526), LavaErrorNodeServerError},    // Invalid SSL certificate
-		{CodeEquals(527), LavaErrorNodeServerError},    // Railgun error
-		{CodeEquals(530), LavaErrorNodeServerError},    // Origin DNS error
+		{CodeEquals(520), RouterErrorNodeServerError},    // Web server returned unknown error
+		{CodeEquals(521), RouterErrorNodeServerError},    // Web server is down
+		{CodeEquals(522), RouterErrorNodeGatewayTimeout}, // Connection timed out
+		{CodeEquals(523), RouterErrorNodeServerError},    // Origin is unreachable
+		{CodeEquals(524), RouterErrorNodeGatewayTimeout}, // A timeout occurred
+		{CodeEquals(525), RouterErrorNodeServerError},    // SSL handshake failed
+		{CodeEquals(526), RouterErrorNodeServerError},    // Invalid SSL certificate
+		{CodeEquals(527), RouterErrorNodeServerError},    // Railgun error
+		{CodeEquals(530), RouterErrorNodeServerError},    // Origin DNS error
 	}
 }
 
@@ -368,27 +368,27 @@ func httpStatusCodeMappings() []errorMapping {
 // These match status codes appearing as substrings in error messages (e.g., "HTTP status 429").
 func httpStatusMessageMappings() []errorMapping {
 	return []errorMapping{
-		{HTTPStatusContains(401), LavaErrorNodeUnauthorized},
-		{HTTPStatusContains(404), LavaErrorNodeEndpointNotFound},
-		{HTTPStatusContains(405), LavaErrorNodeMethodNotAllowed},
-		{HTTPStatusContains(413), LavaErrorUserRequestTooLarge},
-		{HTTPStatusContains(429), LavaErrorNodeRateLimited},
-		{HTTPStatusContains(500), LavaErrorNodeInternalError},
+		{HTTPStatusContains(401), RouterErrorNodeUnauthorized},
+		{HTTPStatusContains(404), RouterErrorNodeEndpointNotFound},
+		{HTTPStatusContains(405), RouterErrorNodeMethodNotAllowed},
+		{HTTPStatusContains(413), RouterErrorUserRequestTooLarge},
+		{HTTPStatusContains(429), RouterErrorNodeRateLimited},
+		{HTTPStatusContains(500), RouterErrorNodeInternalError},
 		// 501 Not Implemented: node lacks this method/endpoint. Non-retryable.
-		{HTTPStatusContains(501), LavaErrorNodeUnimplemented},
-		{HTTPStatusContains(502), LavaErrorNodeBadGateway},
-		{HTTPStatusContains(503), LavaErrorNodeServiceUnavailable},
-		{HTTPStatusContains(504), LavaErrorNodeGatewayTimeout},
+		{HTTPStatusContains(501), RouterErrorNodeUnimplemented},
+		{HTTPStatusContains(502), RouterErrorNodeBadGateway},
+		{HTTPStatusContains(503), RouterErrorNodeServiceUnavailable},
+		{HTTPStatusContains(504), RouterErrorNodeGatewayTimeout},
 		// Cloudflare custom 5xx errors
-		{HTTPStatusContains(520), LavaErrorNodeServerError},
-		{HTTPStatusContains(521), LavaErrorNodeServerError},
-		{HTTPStatusContains(522), LavaErrorNodeGatewayTimeout},
-		{HTTPStatusContains(523), LavaErrorNodeServerError},
-		{HTTPStatusContains(524), LavaErrorNodeGatewayTimeout},
-		{HTTPStatusContains(525), LavaErrorNodeServerError},
-		{HTTPStatusContains(526), LavaErrorNodeServerError},
-		{HTTPStatusContains(527), LavaErrorNodeServerError},
-		{HTTPStatusContains(530), LavaErrorNodeServerError},
+		{HTTPStatusContains(520), RouterErrorNodeServerError},
+		{HTTPStatusContains(521), RouterErrorNodeServerError},
+		{HTTPStatusContains(522), RouterErrorNodeGatewayTimeout},
+		{HTTPStatusContains(523), RouterErrorNodeServerError},
+		{HTTPStatusContains(524), RouterErrorNodeGatewayTimeout},
+		{HTTPStatusContains(525), RouterErrorNodeServerError},
+		{HTTPStatusContains(526), RouterErrorNodeServerError},
+		{HTTPStatusContains(527), RouterErrorNodeServerError},
+		{HTTPStatusContains(530), RouterErrorNodeServerError},
 	}
 }
 
@@ -434,7 +434,7 @@ func classifySubCategoryAcrossTransports(chainID string, statusCode int, message
 		family = GetChainFamilyOrDefault(chainID)
 	}
 	for _, transport := range []TransportType{TransportJsonRPC, TransportREST, TransportGRPC} {
-		if c := ClassifyError(nil, family, transport, statusCode, message); c != LavaErrorUnknown {
+		if c := ClassifyError(nil, family, transport, statusCode, message); c != RouterErrorUnknown {
 			return c.SubCategory
 		}
 	}
@@ -454,7 +454,7 @@ func IsUnsupportedMethodError(chainID string, statusCode int, message string) bo
 	return classifySubCategoryAcrossTransports(chainID, statusCode, message).IsUnsupportedMethod()
 }
 
-// IsNonRetryableNodeError returns true when the classified LavaError for the
+// IsNonRetryableNodeError returns true when the classified RouterError for the
 // given node-error response has Retryable=false.
 func IsNonRetryableNodeError(chainID string, statusCode int, message string) bool {
 	family := ChainFamilyUnknown
@@ -463,7 +463,7 @@ func IsNonRetryableNodeError(chainID string, statusCode int, message string) boo
 	}
 	for _, transport := range []TransportType{TransportJsonRPC, TransportREST, TransportGRPC} {
 		c := ClassifyError(nil, family, transport, statusCode, message)
-		if c == nil || c == LavaErrorUnknown {
+		if c == nil || c == RouterErrorUnknown {
 			continue
 		}
 		return !c.Retryable
@@ -475,7 +475,7 @@ func IsNonRetryableNodeError(chainID string, statusCode int, message string) boo
 // for call sites that already know the chain family and transport exactly.
 func IsNonRetryableNodeErrorWithContext(family ChainFamily, transport TransportType, statusCode int, message string) bool {
 	c := ClassifyError(nil, family, transport, statusCode, message)
-	if c == nil || c == LavaErrorUnknown {
+	if c == nil || c == RouterErrorUnknown {
 		return false
 	}
 	return !c.Retryable
@@ -518,7 +518,7 @@ type NodeErrorClassification struct {
 // misread every novel error body.
 func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, errorCode int, message string) NodeErrorClassification {
 	c := ClassifyError(nil, family, transport, errorCode, message)
-	if c == nil || c == LavaErrorUnknown {
+	if c == nil || c == RouterErrorUnknown {
 		return NodeErrorClassification{}
 	}
 	return NodeErrorClassification{
@@ -542,7 +542,7 @@ func ApiInterfaceToTransport(apiInterface string) TransportType {
 	}
 }
 
-// ClassifyError classifies an error into a LavaError for internal use (logging, metrics, endpoint health).
+// ClassifyError classifies an error into a RouterError for internal use (logging, metrics, endpoint health).
 // The original error always passes through unchanged to the user (transparent hop).
 //
 // Parameters:
@@ -551,7 +551,7 @@ func ApiInterfaceToTransport(apiInterface string) TransportType {
 //   - transport: the transport type for Tier 1 generic matcher partitioning
 //   - errorCode: the numeric error code (e.g., JSON-RPC error code), or 0 if not applicable
 //   - errorMessage: the error message string for substring/regex matching
-func ClassifyError(connectionError *LavaError, chainFamily ChainFamily, transport TransportType, errorCode int, errorMessage string) *LavaError {
+func ClassifyError(connectionError *RouterError, chainFamily ChainFamily, transport TransportType, errorCode int, errorMessage string) *RouterError {
 	// Step 0: If caller already identified a connection-level error, use it
 	if connectionError != nil {
 		return connectionError
@@ -567,7 +567,7 @@ func ClassifyError(connectionError *LavaError, chainFamily ChainFamily, transpor
 	if chainMappings, ok := chainErrorMappings[chainFamily]; ok {
 		for _, mapping := range chainMappings {
 			if matchMapping(mapping.Matcher, errorCode, errorMessage, loweredMessage) {
-				return mapping.LavaError
+				return mapping.RouterError
 			}
 		}
 	}
@@ -576,13 +576,13 @@ func ClassifyError(connectionError *LavaError, chainFamily ChainFamily, transpor
 	if transportMappings, ok := genericErrorMappings[transport]; ok {
 		for _, mapping := range transportMappings {
 			if matchMapping(mapping.Matcher, errorCode, errorMessage, loweredMessage) {
-				return mapping.LavaError
+				return mapping.RouterError
 			}
 		}
 	}
 
 	// Step 3: Unknown
-	return LavaErrorUnknown
+	return RouterErrorUnknown
 }
 
 // matchMapping dispatches to the loweredMessageMatcher fast path when available,
@@ -595,7 +595,7 @@ func matchMapping(m ErrorMatcher, errorCode int, errorMessage, loweredMessage st
 }
 
 // DetectConnectionError inspects err for connection-level failures and returns the
-// corresponding LavaError, or nil if the error is not connection-related.
+// corresponding RouterError, or nil if the error is not connection-related.
 // This is the single place for connection detection — callers pass the result as the
 // connectionError argument to ClassifyError.
 //
@@ -608,20 +608,20 @@ func matchMapping(m ErrorMatcher, errorCode int, errorMessage, loweredMessage st
 // The string fallback is deliberately second, so structured detection wins when
 // it can. Within the string fallback, the match order is explicit in the
 // stringConnectionFallbacks data table to make precedence easy to audit.
-func DetectConnectionError(err error) *LavaError {
+func DetectConnectionError(err error) *RouterError {
 	if err == nil {
 		return nil
 	}
 	// Layer 1: structured sentinel checks
 	if errors.Is(err, context.Canceled) {
-		return LavaErrorContextCanceled
+		return RouterErrorContextCanceled
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return LavaErrorContextDeadline
+		return RouterErrorContextDeadline
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
-		return LavaErrorConnectionTimeout
+		return RouterErrorConnectionTimeout
 	}
 
 	// Layer 2: string fallback for errors wrapped without %w.
@@ -636,11 +636,11 @@ func DetectConnectionError(err error) *LavaError {
 		if errors.As(opErr.Err, &syscallErr) {
 			switch *syscallErr {
 			case syscall.ECONNREFUSED:
-				return LavaErrorConnectionRefused
+				return RouterErrorConnectionRefused
 			case syscall.ECONNRESET:
-				return LavaErrorConnectionReset
+				return RouterErrorConnectionReset
 			case syscall.ENETUNREACH, syscall.EHOSTUNREACH:
-				return LavaErrorNetworkUnreachable
+				return RouterErrorNetworkUnreachable
 			}
 		}
 	}
@@ -656,8 +656,8 @@ type stringConnectionFallback struct {
 	// substrings that, if any are present, disqualify the row. Used to carve
 	// exceptions out of a broad match (e.g. GOAWAY except ENHANCE_YOUR_CALM).
 	mustNotContain []string
-	// lava error returned when the row matches.
-	result *LavaError
+	// router error returned when the row matches.
+	result *RouterError
 }
 
 func (r stringConnectionFallback) matches(msg string) bool {
@@ -715,44 +715,44 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 	{
 		mustContain:    []string{"context deadline exceeded"},
 		mustNotContain: []string{"rpc error"},
-		result:         LavaErrorContextDeadline,
+		result:         RouterErrorContextDeadline,
 	},
 	{
 		mustContain:    []string{"context canceled"},
 		mustNotContain: []string{"rpc error"},
-		result:         LavaErrorContextCanceled,
+		result:         RouterErrorContextCanceled,
 	},
 	// HTTP/2 GOAWAY closes the whole connection. Exclude ENHANCE_YOUR_CALM —
 	// that's a server-side rate-limit signal handled by the transport matchers.
 	{
 		mustContain:    []string{"goaway"},
 		mustNotContain: []string{"enhance_your_calm"},
-		result:         LavaErrorConnectionReset,
+		result:         RouterErrorConnectionReset,
 	},
 	// HTTP/2 RST_STREAM appears as "stream error: stream ID ...; ...".
 	// This is a narrow hazard — "stream error" could in principle appear in
 	// unrelated messages — but in practice the gRPC/HTTP2 stack is the only
 	// known producer, and losing this signal would break retry of RST_STREAM.
-	{mustContain: []string{"stream error"}, result: LavaErrorConnectionReset},
+	{mustContain: []string{"stream error"}, result: RouterErrorConnectionReset},
 	// Proxy / sidecar variants — Envoy wraps upstream failures with verbose
 	// bodies that still contain these phrases. Order is not load-bearing here
 	// because the phrases are mutually exclusive in practice, but keeping the
 	// explicit order avoids accidental churn during future reordering.
-	{mustContain: []string{"connection refused"}, result: LavaErrorConnectionRefused},
-	{mustContain: []string{"network is unreachable"}, result: LavaErrorNetworkUnreachable},
-	{mustContain: []string{"host is unreachable"}, result: LavaErrorNetworkUnreachable},
-	{mustContain: []string{"no route to host"}, result: LavaErrorNetworkUnreachable},
-	{mustContain: []string{"connection reset"}, result: LavaErrorConnectionReset},
+	{mustContain: []string{"connection refused"}, result: RouterErrorConnectionRefused},
+	{mustContain: []string{"network is unreachable"}, result: RouterErrorNetworkUnreachable},
+	{mustContain: []string{"host is unreachable"}, result: RouterErrorNetworkUnreachable},
+	{mustContain: []string{"no route to host"}, result: RouterErrorNetworkUnreachable},
+	{mustContain: []string{"connection reset"}, result: RouterErrorConnectionReset},
 	// Envoy "connection termination" — proxy/sidecar closed an established
 	// upstream stream (distinct from "connection refused" which is a connect
 	// failure before any stream was established).
-	{mustContain: []string{"connection termination"}, result: LavaErrorConnectionReset},
+	{mustContain: []string{"connection termination"}, result: RouterErrorConnectionReset},
 }
 
 // detectConnectionErrorFromString walks stringConnectionFallbacks in order and
 // returns the first matching result, or nil if no row matches. msg must
 // already be lowercased by the caller.
-func detectConnectionErrorFromString(msg string) *LavaError {
+func detectConnectionErrorFromString(msg string) *RouterError {
 	for _, row := range stringConnectionFallbacks {
 		if row.matches(msg) {
 			return row.result

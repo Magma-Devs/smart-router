@@ -43,12 +43,12 @@ func TestUnsupportedMethodCodesAreAllNonRetryable_MAG2156(t *testing.T) {
 // still not be removed without re-reading this test, since the subcategory is the contract and
 // retryability is only incidentally aligned with it.
 func TestRateLimitSubCategorySpansBothRetryabilities_MAG2156(t *testing.T) {
-	require.True(t, LavaErrorNodeRateLimited.SubCategory.IsRateLimit())
-	require.True(t, LavaErrorNodeRateLimited.Retryable,
+	require.True(t, RouterErrorNodeRateLimited.SubCategory.IsRateLimit())
+	require.True(t, RouterErrorNodeRateLimited.Retryable,
 		"NODE_RATE_LIMITED (2005) is retryable — IsNonRetryable cannot carve it out of availability scoring")
 
-	require.True(t, LavaErrorNodeLimitExceeded.SubCategory.IsRateLimit())
-	require.False(t, LavaErrorNodeLimitExceeded.Retryable,
+	require.True(t, RouterErrorNodeLimitExceeded.SubCategory.IsRateLimit())
+	require.False(t, RouterErrorNodeLimitExceeded.Retryable,
 		"NODE_LIMIT_EXCEEDED (2011) is not retryable — same subcategory, opposite axis")
 }
 

@@ -78,7 +78,7 @@ func (r *RelayErrors) GetBestErrorMessageForUser() RelayError {
 		errorMessage := r.sanitizeError(relayError.Err)
 		errorMap[errorMessage] = append(errorMap[errorMessage], idx)
 		currentResult := relayError.ProviderInfo.ProviderReputationSummary * float64(relayError.ProviderInfo.ProviderStake)
-		isExternal := relayError.LavaError != nil && relayError.LavaError.Category == common.CategoryExternal
+		isExternal := relayError.RouterError != nil && relayError.RouterError.Category == common.CategoryExternal
 
 		// Scored candidate: apply external-beats-internal preference, then
 		// score tiebreak. This result is only consulted if step 1 (majority
@@ -156,7 +156,7 @@ type RelayError struct {
 	Err          error
 	ProviderInfo common.ProviderInfo
 	Response     *RelayResponse
-	LavaError    *common.LavaError // classified error code (nil if not yet classified)
+	RouterError  *common.RouterError // classified error code (nil if not yet classified)
 }
 
 func (re RelayError) String() string {

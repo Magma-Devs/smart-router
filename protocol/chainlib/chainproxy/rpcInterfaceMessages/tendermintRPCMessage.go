@@ -212,7 +212,7 @@ func ConvertToTendermintError(errString string, inputInfo []byte) string {
 		res, merr := json.Marshal(&RPCResponse{
 			JSONRPC: msg.Version,
 			ID:      id,
-			Error:   ConvertErrorToRPCError(errString, chainproxy.LavaErrorCode),
+			Error:   ConvertErrorToRPCError(errString, chainproxy.RouterErrorCode),
 		})
 		if merr != nil {
 			utils.FormatError("convertToTendermintError json.Marshal", merr)

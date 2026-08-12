@@ -487,10 +487,10 @@ type RelayResult struct {
 	ResponseHash        [32]byte // cached SHA256 hash of Reply.Data for cross-validation comparison, zero-value if not computed
 	IsUnsupportedMethod bool     // Indicates this node error is an unsupported method (zero CU, cached)
 	// CrossValidationFailureReason distinguishes WHY cross-validation failed, surfaced to the client via
-	// the lava-cross-validation-failure-reason header. One of CrossValidationReason* ("" on success).
+	// the smartrouter-cross-validation-failure-reason header. One of CrossValidationReason* ("" on success).
 	CrossValidationFailureReason string
 	// IsNonRetryable is the umbrella flag the retry state machine consults:
-	// it's true whenever the matched registry LavaError has Retryable=false,
+	// it's true whenever the matched registry RouterError has Retryable=false,
 	// which covers unsupported method, execution reverted, out of gas,
 	// invalid signature, double spend, etc. Retrying on another provider
 	// would just reproduce the same deterministic failure.

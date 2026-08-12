@@ -1232,28 +1232,28 @@ func (rp *RelayProcessor) buildFailureResult(
 	returnedResult := &common.RelayResult{StatusCode: http.StatusInternalServerError}
 	var processingError error
 
-	var bestLavaError *common.LavaError
+	var bestRouterError *common.RouterError
 	if nodeErrorCount > 0 {
 		// Prefer node errors over protocol errors
 		nodeErr := rp.GetBestNodeErrorMessageForUser()
 		processingError = nodeErr.Err
-		bestLavaError = nodeErr.LavaError
+		bestRouterError = nodeErr.RouterError
 		if nodeErr.Response != nil {
 			returnedResult = &nodeErr.Response.RelayResult
 		}
 	} else if protocolErrorCount > 0 {
 		protocolErr := rp.GetBestProtocolErrorMessageForUser()
 		processingError = protocolErr.Err
-		bestLavaError = protocolErr.LavaError
+		bestRouterError = protocolErr.RouterError
 		if protocolErr.Response != nil {
 			returnedResult = &protocolErr.Response.RelayResult
 		}
 	}
 
 	// Log with classified error code for metrics/observability
-	if bestLavaError != nil {
+	if bestRouterError != nil {
 		chainID, _ := rp.chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
-		common.LogCodedError("failed relay, insufficient results", processingError, bestLavaError,
+		common.LogCodedError("failed relay, insufficient results", processingError, bestRouterError,
 			chainID, 0, "", utils.LogAttr("GUID", rp.guid))
 	}
 

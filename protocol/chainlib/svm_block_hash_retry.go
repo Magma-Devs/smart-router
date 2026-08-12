@@ -77,7 +77,7 @@ func FetchBlockHashWithSolanaRetry(ctx context.Context, blockNum int64, retryDel
 }
 
 // IsBlockNotAvailableError reports whether a Solana JSON-RPC response classifies as
-// LavaErrorChainBlockNotFound (e.g. -32004 "Block not available for slot X"), via the
+// RouterErrorChainBlockNotFound (e.g. -32004 "Block not available for slot X"), via the
 // chain-aware error registry. Callers must gate invocation to Solana-family chains.
 func IsBlockNotAvailableError(responseData []byte) bool {
 	if len(responseData) == 0 {
@@ -96,5 +96,5 @@ func IsBlockNotAvailableError(responseData []byte) bool {
 		return false
 	}
 	classified := common.ClassifyError(nil, common.ChainFamilySolana, common.TransportJsonRPC, resp.Error.Code, resp.Error.Message)
-	return classified == common.LavaErrorChainBlockNotFound
+	return classified == common.RouterErrorChainBlockNotFound
 }

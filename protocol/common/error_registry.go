@@ -11,11 +11,11 @@ import (
 // Core types
 // ---------------------------------------------------------------------------
 
-// ErrorCategory — top-level grouping: internal (Lava-introduced) vs external (pass-through)
+// ErrorCategory — top-level grouping: internal (router-introduced) vs external (pass-through)
 type ErrorCategory int
 
 const (
-	CategoryInternal ErrorCategory = iota // Errors introduced by Lava — user would never see these without Lava
+	CategoryInternal ErrorCategory = iota // Errors introduced by the router — user would never see these without it
 	CategoryExternal                      // Pass-through errors — user would get the same error talking to the node directly
 )
 
@@ -87,10 +87,10 @@ func (sc ErrorSubCategory) IsDataScope() bool {
 	return sc == SubCategoryDataScope
 }
 
-// LavaError is the central error definition — a classification struct, not a Go error.
+// RouterError is the central error definition — a classification struct, not a Go error.
 // It is metadata *about* an error, used for logging, metrics, and retry decisions.
 // The original error always passes through unchanged to the user (transparent hop).
-type LavaError struct {
+type RouterError struct {
 	Code        uint32
 	Name        string
 	Category    ErrorCategory
@@ -99,29 +99,29 @@ type LavaError struct {
 	Retryable   bool // retrying same relay with same params to a different provider has a chance of succeeding
 }
 
-func (le *LavaError) String() string {
+func (le *RouterError) String() string {
 	return fmt.Sprintf("[%d] %s", le.Code, le.Name)
 }
 
-// Error implements the error interface so LavaError can be used directly as an error
+// Error implements the error interface so RouterError can be used directly as an error
 // and checked with errors.Is().
-func (le *LavaError) Error() string {
+func (le *RouterError) Error() string {
 	return fmt.Sprintf("%s: %s", le.Name, le.Description)
 }
 
 // Is implements errors.Is matching by error code.
-// This allows errors.Is(err, LavaErrorSomething) to work when err wraps a LavaError.
-func (le *LavaError) Is(target error) bool {
-	if t, ok := target.(*LavaError); ok {
+// This allows errors.Is(err, RouterErrorSomething) to work when err wraps a RouterError.
+func (le *RouterError) Is(target error) bool {
+	if t, ok := target.(*RouterError); ok {
 		return le.Code == t.Code
 	}
 	return false
 }
 
 // ABCICode returns the error code for gRPC wire protocol compatibility.
-// This replaces the sdkerrors.ABCICode() method so LavaError can be used
+// This replaces the sdkerrors.ABCICode() method so RouterError can be used
 // in status.Error(codes.Code(err.ABCICode()), ...) calls.
-func (le *LavaError) ABCICode() uint32 {
+func (le *RouterError) ABCICode() uint32 {
 	return le.Code
 }
 
@@ -129,7 +129,7 @@ func (le *LavaError) ABCICode() uint32 {
 // signal from any layer (protocol, node, or node-specific limit exceeded).
 // Driven by SubCategoryRateLimit rather than a hardcoded code comparison so
 // new rate-limit codes only need to be tagged at registration time.
-func (le *LavaError) IsRateLimited() bool {
+func (le *RouterError) IsRateLimited() bool {
 	return le != nil && le.SubCategory.IsRateLimit()
 }
 
@@ -456,15 +456,15 @@ func GRPCCodeEquals(code uint32) ErrorMatcher {
 // ---------------------------------------------------------------------------
 
 type errorMapping struct {
-	Matcher   ErrorMatcher
-	LavaError *LavaError
+	Matcher     ErrorMatcher
+	RouterError *RouterError
 }
 
 // ---------------------------------------------------------------------------
 // Reserved error codes
 // ---------------------------------------------------------------------------
 
-// LavaErrorUnknown is the fallback for unclassified errors.
+// RouterErrorUnknown is the fallback for unclassified errors.
 // Category is External because unmatched errors are node pass-throughs.
 //
 // Retryable is intentionally TRUE: retrying unknowns is the deliberate
@@ -488,7 +488,7 @@ type errorMapping struct {
 // production, the right response is to add a matcher for it in
 // error_classifier.go (demoting it from Unknown to a specific code with
 // the appropriate Retryable flag), not to flip this default.
-var LavaErrorUnknown = &LavaError{
+var RouterErrorUnknown = &RouterError{
 	Code: 0, Name: "UNKNOWN_ERROR", Category: CategoryExternal,
 	Description: "Unclassified error — no matcher matched", Retryable: true,
 }
@@ -499,21 +499,21 @@ var LavaErrorUnknown = &LavaError{
 
 // INVARIANT: errorRegistry and errorRegistryName are populated exclusively at
 // package-init time via registerError() calls from the var declarations in
-// error_codes.go. After init, they are read-only — getLavaError() and
-// getLavaErrorByName() access them without locking and rely on this invariant.
+// error_codes.go. After init, they are read-only — getRouterError() and
+// getRouterErrorByName() access them without locking and rely on this invariant.
 // Do NOT introduce runtime mutations without adding explicit synchronisation.
 var (
-	errorRegistry     = map[uint32]*LavaError{LavaErrorUnknown.Code: LavaErrorUnknown}
-	errorRegistryName = map[string]*LavaError{LavaErrorUnknown.Name: LavaErrorUnknown}
+	errorRegistry     = map[uint32]*RouterError{RouterErrorUnknown.Code: RouterErrorUnknown}
+	errorRegistryName = map[string]*RouterError{RouterErrorUnknown.Name: RouterErrorUnknown}
 )
 
-func registerError(le *LavaError) *LavaError {
-	// Code 0 is reserved for LavaErrorUnknown, which is wired into the registry
+func registerError(le *RouterError) *RouterError {
+	// Code 0 is reserved for RouterErrorUnknown, which is wired into the registry
 	// directly (not via registerError). Rejecting Code 0 here with an explicit
 	// message avoids a confusing "duplicate error code: 0 (UNKNOWN_ERROR)" panic
 	// when a new error is accidentally declared with Code: 0.
 	if le.Code == 0 {
-		panic(fmt.Sprintf("error code 0 is reserved for LavaErrorUnknown; %s must use a non-zero code", le.Name))
+		panic(fmt.Sprintf("error code 0 is reserved for RouterErrorUnknown; %s must use a non-zero code", le.Name))
 	}
 	if existing, exists := errorRegistry[le.Code]; exists {
 		panic(fmt.Sprintf("duplicate error code: %d — %s conflicts with existing %s", le.Code, le.Name, existing.Name))
@@ -530,132 +530,132 @@ func registerError(le *LavaError) *LavaError {
 // Lookup helpers
 // ---------------------------------------------------------------------------
 
-func getLavaError(code uint32) *LavaError {
+func getRouterError(code uint32) *RouterError {
 	if le, ok := errorRegistry[code]; ok {
 		return le
 	}
-	return LavaErrorUnknown
+	return RouterErrorUnknown
 }
 
-func getLavaErrorByName(name string) *LavaError {
+func getRouterErrorByName(name string) *RouterError {
 	if le, ok := errorRegistryName[name]; ok {
 		return le
 	}
-	return LavaErrorUnknown
+	return RouterErrorUnknown
 }
 
 func isRetryable(code uint32) bool {
-	return getLavaError(code).Retryable
+	return getRouterError(code).Retryable
 }
 
-// LavaWrappedError wraps a LavaError with context, supporting errors.Is matching.
-type LavaWrappedError struct {
-	LavaErr *LavaError
-	Context string
+// RouterWrappedError wraps a RouterError with context, supporting errors.Is matching.
+type RouterWrappedError struct {
+	RouterErr *RouterError
+	Context   string
 	// cause is the error this classification was derived from, retained so sentinel
 	// checks (errors.Is(err, context.Canceled), net.Error, syscall errnos) still work
-	// on the far side of classification. Constructing with NewLavaError leaves it nil
+	// on the far side of classification. Constructing with NewRouterError leaves it nil
 	// and only the Context string survives — which is exactly how the relay-race
-	// cancellation carve-out silently died (MAG-2648). Prefer NewLavaErrorWrapping
+	// cancellation carve-out silently died (MAG-2648). Prefer NewRouterErrorWrapping
 	// whenever the original error is in hand.
 	cause error
 }
 
-// Every method below guards e.LavaErr. The constructors always set it today, so these are
+// Every method below guards e.RouterErr. The constructors always set it today, so these are
 // latent — but a nil there fails in three different ways (Error panics inside a logging
 // call, Is silently mismatches, As hands back a nil AND halts the walk), and this type's
 // whole reason for existing is that a quietly unreachable resolution path is expensive.
 
-func (e *LavaWrappedError) Error() string {
+func (e *RouterWrappedError) Error() string {
 	if e == nil {
 		return ""
 	}
-	if e.LavaErr == nil {
+	if e.RouterErr == nil {
 		return e.Context
 	}
 	if e.Context != "" {
-		return fmt.Sprintf("%s: %s", e.Context, e.LavaErr.Description)
+		return fmt.Sprintf("%s: %s", e.Context, e.RouterErr.Description)
 	}
-	return e.LavaErr.Error()
+	return e.RouterErr.Error()
 }
 
-func (e *LavaWrappedError) Is(target error) bool {
-	if e == nil || e.LavaErr == nil {
+func (e *RouterWrappedError) Is(target error) bool {
+	if e == nil || e.RouterErr == nil {
 		return false
 	}
-	if t, ok := target.(*LavaError); ok {
-		return e.LavaErr.Code == t.Code
+	if t, ok := target.(*RouterError); ok {
+		return e.RouterErr.Code == t.Code
 	}
 	return false
 }
 
 // Unwrap returns the original cause when one was retained, else the classification.
 //
-// Returning e.LavaErr unconditionally was the MAG-2648 bug: the cause's sentinel
+// Returning e.RouterErr unconditionally was the MAG-2648 bug: the cause's sentinel
 // (context.Canceled) became unreachable, so the relay-race carve-out could never fire.
 //
 // The multi-error form (Unwrap() []error) looks like the tidier fix and is NOT used
 // here on purpose: errors.Unwrap — the singular one — is documented to return nil for
 // multi-unwrap types, which would silently break every caller walking a chain with it,
 // including the sentinel walker in utils/score/score_errors.go. Keeping the singular
-// form preserves that traversal; the LavaErr branch it displaces stays reachable
+// form preserves that traversal; the RouterErr branch it displaces stays reachable
 // through Is and As below, so nothing loses a path.
-func (e *LavaWrappedError) Unwrap() error {
+func (e *RouterWrappedError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
 	if e.cause != nil {
 		return e.cause
 	}
-	if e.LavaErr == nil {
+	if e.RouterErr == nil {
 		// Returning a typed nil here would hand back a non-nil error interface holding a
-		// nil *LavaError, and the next errors.Is would call LavaError.Is on a nil receiver.
+		// nil *RouterError, and the next errors.Is would call RouterError.Is on a nil receiver.
 		return nil
 	}
-	return e.LavaErr
+	return e.RouterErr
 }
 
-// As keeps the *LavaError reachable via errors.As even when Unwrap yields the cause
+// As keeps the *RouterError reachable via errors.As even when Unwrap yields the cause
 // instead. Without this, retaining a cause would quietly remove a resolution path that
 // worked before — the same species of silent reachability loss this fix exists to undo.
 // Guarding on nil is load-bearing, not defensive noise: returning true with a nil
-// *LavaError would both hand the caller a nil AND stop errors.As walking to a real one
+// *RouterError would both hand the caller a nil AND stop errors.As walking to a real one
 // deeper in the chain — strictly worse than never matching.
-func (e *LavaWrappedError) As(target any) bool {
-	if e == nil || e.LavaErr == nil {
+func (e *RouterWrappedError) As(target any) bool {
+	if e == nil || e.RouterErr == nil {
 		return false
 	}
-	if t, ok := target.(**LavaError); ok {
-		*t = e.LavaErr
+	if t, ok := target.(**RouterError); ok {
+		*t = e.RouterErr
 		return true
 	}
 	return false
 }
 
-// NewLavaError creates an error that wraps a LavaError with optional context.
-// Supports errors.Is(err, LavaErrorSomething) matching by code.
+// NewRouterError creates an error that wraps a RouterError with optional context.
+// Supports errors.Is(err, RouterErrorSomething) matching by code.
 //
 // This constructor keeps no cause, so sentinel checks against the underlying error
-// will NOT match. Use NewLavaErrorWrapping when the original error is available.
-func NewLavaError(lavaErr *LavaError, context string) error {
-	return &LavaWrappedError{LavaErr: lavaErr, Context: context}
+// will NOT match. Use NewRouterErrorWrapping when the original error is available.
+func NewRouterError(routerErr *RouterError, context string) error {
+	return &RouterWrappedError{RouterErr: routerErr, Context: context}
 }
 
-// NewLavaErrorWrapping is NewLavaError that retains the original error, so both
-// errors.Is(err, LavaErrorSomething) and errors.Is(err, <sentinel of the cause>)
+// NewRouterErrorWrapping is NewRouterError that retains the original error, so both
+// errors.Is(err, RouterErrorSomething) and errors.Is(err, <sentinel of the cause>)
 // resolve. The Context string is derived from the cause, preserving the message
-// shape NewLavaError(classified, err.Error()) produced.
-func NewLavaErrorWrapping(lavaErr *LavaError, cause error) error {
+// shape NewRouterError(classified, err.Error()) produced.
+func NewRouterErrorWrapping(routerErr *RouterError, cause error) error {
 	if cause == nil {
-		return &LavaWrappedError{LavaErr: lavaErr}
+		return &RouterWrappedError{RouterErr: routerErr}
 	}
-	return &LavaWrappedError{LavaErr: lavaErr, Context: cause.Error(), cause: cause}
+	return &RouterWrappedError{RouterErr: routerErr, Context: cause.Error(), cause: cause}
 }
 
 func IsInternal(code uint32) bool {
-	return getLavaError(code).Category == CategoryInternal
+	return getRouterError(code).Category == CategoryInternal
 }
 
 func IsExternal(code uint32) bool {
-	return getLavaError(code).Category == CategoryExternal
+	return getRouterError(code).Category == CategoryExternal
 }

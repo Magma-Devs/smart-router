@@ -7,12 +7,12 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
-// extractLavaError extracts the *common.LavaError from a LavaWrappedError,
-// or returns nil if the error is not (or does not wrap) a LavaWrappedError.
-func extractLavaError(err error) *common.LavaError {
-	var wrapped *common.LavaWrappedError
+// extractRouterError extracts the *common.RouterError from a RouterWrappedError,
+// or returns nil if the error is not (or does not wrap) a RouterWrappedError.
+func extractRouterError(err error) *common.RouterError {
+	var wrapped *common.RouterWrappedError
 	if errors.As(err, &wrapped) {
-		return wrapped.LavaErr
+		return wrapped.RouterErr
 	}
 	return nil
 }
@@ -21,13 +21,13 @@ func extractLavaError(err error) *common.LavaError {
 // Classification helpers
 // ---------------------------------------------------------------------------
 
-// classifyDirectRPCError classifies a direct RPC error into a LavaError for
+// classifyDirectRPCError classifies a direct RPC error into a RouterError for
 // internal use (logging, metrics, endpoint health). The original error is never
 // modified — the router is a transparent hop for the user.
 // Returns both the classification and a classifiedError that wraps the original.
-func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport common.TransportType) (*common.LavaError, error) {
+func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport common.TransportType) (*common.RouterError, error) {
 	if err == nil {
-		return common.LavaErrorUnknown, nil
+		return common.RouterErrorUnknown, nil
 	}
 
 	// Connection-level errors — detected before inspecting the message
@@ -41,11 +41,11 @@ func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport
 	// errors.Is still resolves its sentinel downstream. Flattening to err.Error() here
 	// is what severed context.Canceled and left the relay-race carve-out at the endpoint
 	// health decision permanently false (MAG-2648).
-	return classified, common.NewLavaErrorWrapping(classified, err)
+	return classified, common.NewRouterErrorWrapping(classified, err)
 }
 
 // classifyAndWrap is a convenience that calls classifyDirectRPCError and returns
-// only the wrapped error (discarding the *LavaError for call sites that don't need it).
+// only the wrapped error (discarding the *RouterError for call sites that don't need it).
 func classifyAndWrap(err error, chainFamily common.ChainFamily, transport common.TransportType) error {
 	if err == nil {
 		return nil
@@ -68,7 +68,7 @@ func classifyAndWrap(err error, chainFamily common.ChainFamily, transport common
 // The isClientCancellation carve-out lives here so callers have exactly one
 // source of truth for endpoint-health decisions — see common.IsClientCancellation
 // for the rule that produces the bool.
-func classifyEndpointHealth(classified *common.LavaError, isClientCancellation bool) (shouldMarkUnhealthy bool, needsBackoff bool) {
+func classifyEndpointHealth(classified *common.RouterError, isClientCancellation bool) (shouldMarkUnhealthy bool, needsBackoff bool) {
 	if classified == nil {
 		return false, false
 	}
@@ -90,7 +90,7 @@ func classifyEndpointHealth(classified *common.LavaError, isClientCancellation b
 	// retryable NODE_METHOD_NOT_SUPPORTED, which previously marked unhealthy. No backoff:
 	// the endpoint is neither broken nor busy — steering THIS request to a different
 	// provider is the relay processor's job (Retryable=true), not backoff's.
-	if classified.SubCategory.IsUnsupportedMethod() || classified.Code == common.LavaErrorNodeMethodNotSupported.Code {
+	if classified.SubCategory.IsUnsupportedMethod() || classified.Code == common.RouterErrorNodeMethodNotSupported.Code {
 		return false, false
 	}
 	switch {
