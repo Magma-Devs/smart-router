@@ -29,10 +29,11 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 const (

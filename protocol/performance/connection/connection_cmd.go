@@ -9,15 +9,16 @@ import (
 	"time"
 
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 const (
@@ -69,8 +70,8 @@ func CreateTestConnectionServerCobraCommand() *cobra.Command {
 				utils.FormatWarning("Running with disabled TLS configuration", nil)
 				serveExecutor = func() error { return httpServer.Serve(lis) }
 			} else {
-				NetworkAddressData := lavasession.NetworkAddressData{}
-				httpServer.TLSConfig = lavasession.GetTlsConfig(NetworkAddressData)
+				NetworkAddressData := routersession.NetworkAddressData{}
+				httpServer.TLSConfig = routersession.GetTlsConfig(NetworkAddressData)
 				serveExecutor = func() error { return httpServer.ServeTLS(lis, "", "") }
 			}
 
@@ -125,9 +126,9 @@ func CreateTestConnectionProbeCobraCommand() *cobra.Command {
 				signal.Stop(signalChan)
 				cancel()
 			}()
-			lavasession.AllowInsecureConnectionToProviders = viper.GetBool(lavasession.AllowInsecureConnectionToProvidersFlag)
-			if lavasession.AllowInsecureConnectionToProviders {
-				utils.FormatWarning("AllowInsecureConnectionToProviders is set to true, this should be used only in development", nil, utils.Attribute{Key: lavasession.AllowInsecureConnectionToProvidersFlag, Value: lavasession.AllowInsecureConnectionToProviders})
+			routersession.AllowInsecureConnectionToProviders = viper.GetBool(routersession.AllowInsecureConnectionToProvidersFlag)
+			if routersession.AllowInsecureConnectionToProviders {
+				utils.FormatWarning("AllowInsecureConnectionToProviders is set to true, this should be used only in development", nil, utils.Attribute{Key: routersession.AllowInsecureConnectionToProvidersFlag, Value: routersession.AllowInsecureConnectionToProviders})
 			}
 			address := args[0]
 			prober := NewProber(address)
@@ -157,7 +158,7 @@ func CreateTestConnectionProbeCobraCommand() *cobra.Command {
 			return err
 		},
 	}
-	cmdTestConnectionProbe.Flags().Bool(lavasession.AllowInsecureConnectionToProvidersFlag, false, "allow insecure provider-dialing. used for development and testing without TLS")
+	cmdTestConnectionProbe.Flags().Bool(routersession.AllowInsecureConnectionToProvidersFlag, false, "allow insecure provider-dialing. used for development and testing without TLS")
 	cmdTestConnectionProbe.Flags().Duration(intervalFlagName, 0, "the interval duration for the health check, (defaults to 0s) if 0 runs once")
 	return cmdTestConnectionProbe
 }

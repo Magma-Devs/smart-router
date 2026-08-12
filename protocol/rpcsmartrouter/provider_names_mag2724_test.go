@@ -6,10 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // MAG-2724, router side. The duplicate-name check belongs to the boot path, not to the parser:
@@ -55,7 +56,7 @@ func TestParseStaticProviderEndpoints_AcceptsDuplicateNames(t *testing.T) {
 	require.Len(t, endpoints, 3)
 
 	// And the boot path is where it is rejected.
-	require.Error(t, lavasession.ValidateUniqueProviderNames(endpoints))
+	require.Error(t, routersession.ValidateUniqueProviderNames(endpoints))
 }
 
 // TestCollectHealthProviders_LoadsConfigWithDuplicateNames pins that `smart-router health` still

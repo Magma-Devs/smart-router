@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 func NewRegistry(remote ProtoFileRegistry) *Registry {

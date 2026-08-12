@@ -6,9 +6,9 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // RelayStateMachine interface for managing relay state
@@ -19,9 +19,9 @@ type RelayStateMachine interface {
 	UpdateBatch(err error)
 	GetSelection() Selection
 	GetCrossValidationParams() *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
-	GetUsedProviders() *lavasession.UsedProviders
+	GetUsedProviders() *routersession.UsedProviders
 	SetResultsChecker(resultsChecker ResultsCheckerInf)
-	SetRelayRetriesManager(relayRetriesManager *lavaprotocol.RelayRetriesManager)
+	SetRelayRetriesManager(relayRetriesManager *relayprotocol.RelayRetriesManager)
 }
 
 // ResultsCheckerInf interface for checking results

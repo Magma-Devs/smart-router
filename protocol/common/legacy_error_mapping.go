@@ -9,7 +9,7 @@ type legacyKey struct {
 	code      uint32
 }
 
-// legacyCodeToRouterError maps existing sdkerrors errors (from lavasession,
+// legacyCodeToRouterError maps existing sdkerrors errors (from routersession,
 // protocolerrors, chaintracker, common, performance) to their RouterError
 // equivalents. The key is the (codespace, code) tuple taken directly from
 // each sdkerrors.New(...) definition.
@@ -32,7 +32,7 @@ var legacyCodeToRouterError = map[legacyKey]*RouterError{
 	{"SubscriptionNotFoundError Error", 901}:               RouterErrorSubscriptionNotFound,
 	{"ProviderFinalizationDataAccountability Error", 3365}: RouterErrorFinalizationError,
 
-	// --- protocol/lavasession/errors.go (consumer) ---
+	// --- protocol/routersession/errors.go (consumer) ---
 	{"pairingListEmpty Error", 665}:                   RouterErrorNoProviders,
 	{"AllProviderEndpointsDisabled Error", 667}:       RouterErrorAllEndpointsDisabled,
 	{"MaximumNumberOfSessionsExceeded Error", 668}:    RouterErrorSessionNotFound,
@@ -45,7 +45,7 @@ var legacyCodeToRouterError = map[legacyKey]*RouterError{
 	{"ContextDoneNoNeedToLockSelection Error", 687}:   RouterErrorContextDeadline,
 	{"ConsistencyPreValidation Error", 699}:           RouterErrorConsistencyError,
 
-	// --- protocol/lavasession/errors.go (provider) ---
+	// --- protocol/routersession/errors.go (provider) ---
 	{"InvalidEpoch Error", 881}:                    RouterErrorEpochMismatch,
 	{"NewSessionWithRelayNum Error", 882}:          RouterErrorRelayNumberMismatch,
 	{"ConsumerIsBlockListed Error", 883}:           RouterErrorConsumerBlocked,
@@ -66,7 +66,7 @@ var legacyCodeToRouterError = map[legacyKey]*RouterError{
 	{"ProviderIndexMisMatch Error", 898}:                       RouterErrorSessionOutOfSync,
 	{"SessionIdNotFound Error", 899}:                           RouterErrorSessionNotFound,
 
-	// --- protocol/lavaprotocol/protocolerrors/errors.go ---
+	// --- protocol/relayprotocol/protocolerrors/errors.go ---
 	{"ProviderFinalizationData Error", 3365}:               RouterErrorFinalizationError,
 	{"ProviderFinalizationDataAccountability Error", 3366}: RouterErrorFinalizationError,
 	{"HashesConsensus Error", 3367}:                        RouterErrorHashConsensusError,
@@ -101,7 +101,7 @@ var legacyCodeToRouterError = map[legacyKey]*RouterError{
 //
 // transport is used for the message-based fallback when no sdkerrors
 // codespace+code is found or the pair is not in our mapping. Use this for
-// protocol-layer errors from the lavasession/protocolerrors packages that
+// protocol-layer errors from the routersession/protocolerrors packages that
 // carry an ABCI code via the sdkerrors interface.
 func ClassifyLegacyError(err error, transport TransportType) *RouterError {
 	if err == nil {

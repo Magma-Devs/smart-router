@@ -697,7 +697,7 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 	//
 	// The guard is deliberately the BARE substring "rpc error", not the fuller
 	// "rpc error: code =" prefix. Widening it to the full prefix was tried and
-	// reverted (MAG-2687): lavasession.GRPCStatusError renders as
+	// reverted (MAG-2687): routersession.GRPCStatusError renders as
 	// "gRPC error 1: context canceled", which lowercased contains "rpc error"
 	// inside the word "gRPC" but NOT "rpc error: code =". That wrapper is built
 	// for REMOTE statuses — a cancel the *endpoint* reported — so admitting it

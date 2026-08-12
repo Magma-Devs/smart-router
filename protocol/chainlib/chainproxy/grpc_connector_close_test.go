@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // GRPCConnector had no closed state at all, unlike its HTTP sibling. The tests

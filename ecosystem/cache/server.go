@@ -13,14 +13,15 @@ import (
 
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
-	relaytypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"github.com/spf13/pflag"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	grpc "google.golang.org/grpc"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	relaytypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
+	"github.com/magma-Devs/smart-router/utils/sliceutil"
 )
 
 const (
@@ -217,7 +218,7 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 
 func (cs *CacheServer) ExpirationForChain(averageBlockTimeForChain time.Duration) time.Duration {
 	eighthBlock := averageBlockTimeForChain / 8
-	return lavaslices.Max([]time.Duration{eighthBlock, cs.ExpirationNonFinalized})
+	return sliceutil.Max([]time.Duration{eighthBlock, cs.ExpirationNonFinalized})
 }
 
 // SharedStateTipExpiration returns the TTL for a pod's published chain tip in shared-state
@@ -232,7 +233,7 @@ func (cs *CacheServer) ExpirationForChain(averageBlockTimeForChain time.Duration
 // constant precisely so no flag combination can defeat either guarantee.
 func (cs *CacheServer) SharedStateTipExpiration(averageBlockTimeForChain time.Duration) time.Duration {
 	ttl := averageBlockTimeForChain * SharedStateTipBlockMultiplier
-	return lavaslices.Max([]time.Duration{ttl, cs.ExpirationNonFinalized, MinSharedStateTipExpiration})
+	return sliceutil.Max([]time.Duration{ttl, cs.ExpirationNonFinalized, MinSharedStateTipExpiration})
 }
 
 func (cs *CacheServer) GetTotalCacheSize() int64 {

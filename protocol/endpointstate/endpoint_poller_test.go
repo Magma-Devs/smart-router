@@ -6,11 +6,12 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 // TestBlockNumRequestBody pins the GET_BLOCKNUM template resolution. The bug it guards: the cosmos
@@ -67,7 +68,7 @@ func TestEndpointPoller_CustomMessage_POSTDelegatesToConnection(t *testing.T) {
 		},
 	}
 	fetcher := NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
+		&routersession.Endpoint{NetworkAddress: url, Enabled: true},
 		conn,
 		nil, // chainParser unused by the POST path
 		"SOLANA",
@@ -122,7 +123,7 @@ func TestEndpointMonitor_ForcesBlocksToSave1ForSolana(t *testing.T) {
 // a QoS penalty, instead of being pre-empted by a latched health bit.)
 func TestEndpointPoller_CustomMessage_PropagatesMissingConnection(t *testing.T) {
 	fetcher := NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: "https://solana.lava.build:443/", Enabled: true},
+		&routersession.Endpoint{NetworkAddress: "https://solana.lava.build:443/", Enabled: true},
 		nil, // no direct connection
 		nil,
 		"SOLANA",
@@ -143,7 +144,7 @@ type recordingConnection struct {
 	statusCode int    // status returned by DoHTTPRequest; 0 means 200
 	respBody   []byte // body returned by both routes
 
-	httpCalls []lavasession.HTTPRequestParams
+	httpCalls []routersession.HTTPRequestParams
 	sendCalls []recordedSend
 }
 
@@ -152,22 +153,22 @@ type recordedSend struct {
 	headers map[string]string
 }
 
-func (m *recordingConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*lavasession.DirectRPCResponse, error) {
+func (m *recordingConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*routersession.DirectRPCResponse, error) {
 	m.sendCalls = append(m.sendCalls, recordedSend{data: data, headers: headers})
-	return &lavasession.DirectRPCResponse{Data: m.respBody, StatusCode: http.StatusOK}, nil
+	return &routersession.DirectRPCResponse{Data: m.respBody, StatusCode: http.StatusOK}, nil
 }
 
-func (m *recordingConnection) DoHTTPRequest(ctx context.Context, params lavasession.HTTPRequestParams) (*lavasession.HTTPDirectRPCResponse, error) {
+func (m *recordingConnection) DoHTTPRequest(ctx context.Context, params routersession.HTTPRequestParams) (*routersession.HTTPDirectRPCResponse, error) {
 	m.httpCalls = append(m.httpCalls, params)
 	status := m.statusCode
 	if status == 0 {
 		status = http.StatusOK
 	}
-	return &lavasession.HTTPDirectRPCResponse{StatusCode: status, Body: m.respBody}, nil
+	return &routersession.HTTPDirectRPCResponse{StatusCode: status, Body: m.respBody}, nil
 }
 
-func (m *recordingConnection) GetProtocol() lavasession.DirectRPCProtocol {
-	return lavasession.DirectRPCProtocolHTTP
+func (m *recordingConnection) GetProtocol() routersession.DirectRPCProtocol {
+	return routersession.DirectRPCProtocolHTTP
 }
 func (m *recordingConnection) Close() error                { return nil }
 func (m *recordingConnection) GetURL() string              { return m.url }
@@ -248,7 +249,7 @@ func TestEndpointPoller_SendRawRequestRouting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			conn := &recordingConnection{url: baseURL, respBody: []byte(`{"ok":true}`)}
 			poller := NewEndpointPoller(
-				&lavasession.Endpoint{NetworkAddress: baseURL, Enabled: true},
+				&routersession.Endpoint{NetworkAddress: baseURL, Enabled: true},
 				conn,
 				nil, // chainParser unused: sendRawRequest does no parsing
 				"TRX",
@@ -275,7 +276,7 @@ func TestEndpointPoller_SendRawRequestRouting(t *testing.T) {
 			call := conn.sendCalls[0]
 			require.Equal(t, tc.wantBody, string(call.data))
 			require.Equal(t, "application/json", call.headers["Content-Type"])
-			require.Equal(t, tc.wantGrpcHeader, call.headers[lavasession.GRPCMethodHeader],
+			require.Equal(t, tc.wantGrpcHeader, call.headers[routersession.GRPCMethodHeader],
 				"gRPC dials the method from this header; every other interface must leave it unset")
 		})
 	}
@@ -323,7 +324,7 @@ func TestEndpointPoller_CustomMessage_PathArgument(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			conn := &recordingConnection{url: baseURL, respBody: []byte(`{"ok":true}`)}
 			poller := NewEndpointPoller(
-				&lavasession.Endpoint{NetworkAddress: baseURL, Enabled: true},
+				&routersession.Endpoint{NetworkAddress: baseURL, Enabled: true},
 				conn,
 				nil,
 				"TRX",
@@ -341,7 +342,7 @@ func TestEndpointPoller_CustomMessage_PathArgument(t *testing.T) {
 
 			require.Empty(t, conn.httpCalls)
 			require.Len(t, conn.sendCalls, 1)
-			require.Equal(t, tc.wantGrpcHeader, conn.sendCalls[0].headers[lavasession.GRPCMethodHeader])
+			require.Equal(t, tc.wantGrpcHeader, conn.sendCalls[0].headers[routersession.GRPCMethodHeader])
 		})
 	}
 }
@@ -360,7 +361,7 @@ func TestEndpointPoller_RESTRejectionSurfacesHTTPStatus(t *testing.T) {
 		respBody:   []byte("405 Not Allowed"),
 	}
 	poller := NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: baseURL, Enabled: true},
+		&routersession.Endpoint{NetworkAddress: baseURL, Enabled: true},
 		conn,
 		nil,
 		"TRX",
@@ -370,7 +371,7 @@ func TestEndpointPoller_RESTRejectionSurfacesHTTPStatus(t *testing.T) {
 	_, err := poller.sendRawRequest(context.Background(), []byte(`{}`), "POST", "/wallet/getnowblock", metrics.TrackerRequestKindLatestBlock)
 	require.Error(t, err)
 
-	var statusErr *lavasession.HTTPStatusError
+	var statusErr *routersession.HTTPStatusError
 	require.True(t, errors.As(err, &statusErr), "REST rejections must stay typed for error classification")
 	require.Equal(t, http.StatusMethodNotAllowed, statusErr.StatusCode)
 	require.Equal(t, "405 Not Allowed", string(statusErr.Body), "the upstream body must survive for diagnostics")

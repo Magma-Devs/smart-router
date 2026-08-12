@@ -45,7 +45,7 @@ sleep 2
 # PublicNode upstream endpoints (TLS)
 LAVA_REST_LOCAL="https://lava-rest.publicnode.com:443"
 # gRPC URLs MUST have a scheme prefix; the validator in
-# protocol/lavasession/direct_rpc_connection.go (validateURL) rejects anything
+# protocol/routersession/direct_rpc_connection.go (validateURL) rejects anything
 # else. Use grpcs:// for TLS — it implicitly sets AuthConfig.UseTLS=true.
 LAVA_GRPC_LOCAL="grpcs://YOUR_LAVA_GRPC_KEY-lava.g.w.lavanet.xyz:443"
 LAVA_TENDERMINTRPC_LOCAL="https://lava-rpc.publicnode.com:443"

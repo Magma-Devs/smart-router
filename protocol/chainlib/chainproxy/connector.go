@@ -19,13 +19,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/sigs"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -324,7 +325,7 @@ func (connector *GRPCConnector) getTransportCredentials() grpc.DialOption {
 // grpcDialAddress converts a configured node URL into what grpc.DialContext expects.
 // DialContext takes host:port; the grpc:// / grpcs:// prefixes are a config-time
 // convention enforced by the direct-RPC validator (see
-// protocol/lavasession/direct_rpc_connection.go validateURL). The grpcs:// form also
+// protocol/routersession/direct_rpc_connection.go validateURL). The grpcs:// form also
 // implies TLS.
 //
 // EVERY dial site must go through this. increaseNumberOfClients used to dial the raw

@@ -5,10 +5,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // healthy/unhealthy row builders for the rollup tests.

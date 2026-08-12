@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
 func TestNewDirectGRPCSubscriptionManager(t *testing.T) {
@@ -265,8 +266,8 @@ func TestDirectGRPCSubscriptionManager_StickySessions(t *testing.T) {
 	assert.False(t, exists)
 
 	// Simulate setting a sticky session
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "grpc://node1:9090"})
-	manager.stickyStore.Set("client-2", &lavasession.StickySession{Provider: "grpc://node2:9090"})
+	manager.stickyStore.Set("client-1", &routersession.StickySession{Provider: "grpc://node1:9090"})
+	manager.stickyStore.Set("client-2", &routersession.StickySession{Provider: "grpc://node2:9090"})
 
 	s1, ok1 := manager.stickyStore.Get("client-1")
 	require.True(t, ok1)
@@ -456,7 +457,7 @@ func TestSelectEndpoint_GRPC_StickyOnBackup_Returns(t *testing.T) {
 	)
 
 	// Pre-seed sticky to point at the backup URL.
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{
+	manager.stickyStore.Set("client-1", &routersession.StickySession{
 		Provider: "grpc://backup-1.example.com:9090",
 	})
 
@@ -586,7 +587,7 @@ func TestSelectEndpoint_GRPC_IgnoredSticky_ClearsAndCascades(t *testing.T) {
 		nil, nil,
 	)
 
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{
+	manager.stickyStore.Set("client-1", &routersession.StickySession{
 		Provider: "grpc://primary-1.example.com:9090",
 	})
 

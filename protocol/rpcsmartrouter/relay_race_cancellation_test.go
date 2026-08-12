@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 func raceLoserError() error {
@@ -122,9 +122,9 @@ func TestClassification_PreservesOtherSentinels(t *testing.T) {
 		require.Equal(t, common.RouterErrorContextDeadline.Code, extractRouterError(wrapped).Code)
 	})
 	t.Run("typed http status error stays reachable", func(t *testing.T) {
-		cause := &lavasession.HTTPStatusError{StatusCode: 503, Status: "503"}
+		cause := &routersession.HTTPStatusError{StatusCode: 503, Status: "503"}
 		wrapped := classifyAndWrap(cause, common.ChainFamily(-1), common.TransportJsonRPC)
-		var httpErr *lavasession.HTTPStatusError
+		var httpErr *routersession.HTTPStatusError
 		require.True(t, errors.As(wrapped, &httpErr))
 		require.Equal(t, 503, httpErr.StatusCode)
 	})

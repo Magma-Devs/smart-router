@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // SetVersionInner encodes a semantic version string onto a protocol-version gauge as

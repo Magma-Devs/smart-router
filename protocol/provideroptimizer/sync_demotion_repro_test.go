@@ -21,8 +21,9 @@ import (
 	"testing"
 	"time"
 
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
+
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 const syncDemotionVisibility = 4 * time.Millisecond // ristretto async-write settle

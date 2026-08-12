@@ -12,12 +12,14 @@ import (
 
 	"github.com/goccy/go-json"
 
+	"google.golang.org/grpc/status"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"google.golang.org/grpc/status"
 
 	"github.com/itchyny/gojq"
+
 	"github.com/magma-Devs/smart-router/utils"
 )
 

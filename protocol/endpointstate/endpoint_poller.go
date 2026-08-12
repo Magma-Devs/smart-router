@@ -9,9 +9,9 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -20,8 +20,8 @@ import (
 // EndpointPoller implements chaintracker.ChainFetcher for direct RPC endpoints.
 // It enables per-endpoint ChainTracker to continuously poll block data.
 type EndpointPoller struct {
-	endpoint         *lavasession.Endpoint
-	directConnection lavasession.DirectRPCConnection
+	endpoint         *routersession.Endpoint
+	directConnection routersession.DirectRPCConnection
 	chainParser      chainlib.ChainParser
 	chainID          string
 	apiInterface     string
@@ -47,8 +47,8 @@ type EndpointPoller struct {
 
 // NewEndpointPoller creates a new ChainFetcher for a direct RPC endpoint.
 func NewEndpointPoller(
-	endpoint *lavasession.Endpoint,
-	directConnection lavasession.DirectRPCConnection,
+	endpoint *routersession.Endpoint,
+	directConnection routersession.DirectRPCConnection,
 	chainParser chainlib.ChainParser,
 	chainID string,
 	apiInterface string,
@@ -94,7 +94,7 @@ func (ecf *EndpointPoller) hydrateGrpcChainMessage(chainMessage chainlib.ChainMe
 	if ecf.apiInterface != spectypes.APIInterfaceGrpc {
 		return nil
 	}
-	provider, ok := ecf.directConnection.(lavasession.GRPCDescriptorProvider)
+	provider, ok := ecf.directConnection.(routersession.GRPCDescriptorProvider)
 	if !ok {
 		return nil
 	}
@@ -332,8 +332,8 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 
 // FetchEndpoint returns the endpoint information for this fetcher.
 // Required by chaintracker.ChainFetcher interface.
-func (ecf *EndpointPoller) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{
+func (ecf *EndpointPoller) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{
 		ChainID:      ecf.chainID,
 		ApiInterface: ecf.apiInterface,
 		NodeUrls:     []common.NodeUrl{{Url: ecf.endpointURL}},
@@ -420,7 +420,7 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 	// method path not provided", so the per-endpoint gRPC poll never completes. The relay path sets
 	// this header already; the poll path must too.
 	if ecf.apiInterface == spectypes.APIInterfaceGrpc {
-		headers[lavasession.GRPCMethodHeader] = apiName
+		headers[routersession.GRPCMethodHeader] = apiName
 	}
 	response, err := ecf.directConnection.SendRequest(ctx, requestData, headers)
 	if err != nil {
@@ -433,7 +433,7 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 // returns the response body. body is nil for GET. A >=400 status is returned as an
 // HTTPStatusError so callers can distinguish an upstream rejection from a transport error.
 func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path string, body []byte) ([]byte, error) {
-	httpDoer, ok := ecf.directConnection.(lavasession.HTTPDirectRPCDoer)
+	httpDoer, ok := ecf.directConnection.(routersession.HTTPDirectRPCDoer)
 	if !ok {
 		return nil, fmt.Errorf("connection does not support HTTP requests for endpoint %s", ecf.endpointURL)
 	}
@@ -443,7 +443,7 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 		return nil, fmt.Errorf("failed to build REST URL: %w", err)
 	}
 
-	params := lavasession.HTTPRequestParams{
+	params := routersession.HTTPRequestParams{
 		Method: method,
 		URL:    fullURL,
 		Body:   body,
@@ -458,7 +458,7 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 	}
 	if resp.StatusCode >= 400 {
 		retryAfter, _ := common.ParseRetryAfter(http.Header(resp.Headers), time.Now())
-		return nil, &lavasession.HTTPStatusError{
+		return nil, &routersession.HTTPStatusError{
 			StatusCode: resp.StatusCode,
 			Status:     fmt.Sprintf("%d", resp.StatusCode),
 			Body:       resp.Body,

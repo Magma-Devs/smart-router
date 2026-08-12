@@ -4,8 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // TestShouldFailSessionForResult_MAG2156 pins the gate that decides whether a completed direct-RPC

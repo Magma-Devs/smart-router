@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
+
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
 func TestCalculateQoS(t *testing.T) {

@@ -60,7 +60,7 @@ func NewResultsManager(guid uint64, chainID string) ResultsManager {
 func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
-	// Protocol errors come from the lavasession/protocolerrors packages and carry an sdkerrors ABCI
+	// Protocol errors come from the routersession/protocolerrors packages and carry an sdkerrors ABCI
 	// code — use ClassifyLegacyError to extract it. These errors travel over gRPC (provider →
 	// consumer), so TransportGRPC is used for the message-based fallback path.
 	classified := common.ClassifyLegacyError(response.Err, common.TransportGRPC)

@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
+
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
+	"github.com/magma-Devs/smart-router/utils/sliceutil"
 )
 
 // IChainTracker represents the interface for chain tracking functionality
@@ -96,7 +97,7 @@ const (
 type ChainFetcher interface {
 	FetchLatestBlockNum(ctx context.Context) (int64, error)
 	FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error)
-	FetchEndpoint() lavasession.RPCProviderEndpoint
+	FetchEndpoint() routersession.RPCProviderEndpoint
 	CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error)
 }
 
@@ -133,7 +134,7 @@ type ChainTracker struct {
 	consistencyCallback     func(oldBlock int64, block int64)
 	fetchErrorCallback      func() // a function to be called when the latest-block fetch fails
 	serverBlockMemory       uint64
-	endpoint                lavasession.RPCProviderEndpoint
+	endpoint                routersession.RPCProviderEndpoint
 	blockCheckpointDistance uint64 // used to do something every X blocks
 	blockCheckpoint         uint64 // last time checkpoint was met
 	timer                   *time.Timer
@@ -919,8 +920,8 @@ func (ct *ChainTracker) updatePollingTimeBasedOnBlockGap(pollingTime time.Durati
 	if blockGapsLen > PollingUpdateLength { // check we have enough samples
 		// smaller times give more resolution to indentify changes, and also make block arrival predictions more optimistic
 		// so we take a 0.33 percentile because we want to be on the safe side by have a smaller time than expected
-		percentileTime := lavaslices.Percentile(ct.blockEventsGap, 0.33, false)
-		stability := lavaslices.Stability(ct.blockEventsGap, percentileTime)
+		percentileTime := sliceutil.Percentile(ct.blockEventsGap, 0.33, false)
+		stability := sliceutil.Stability(ct.blockEventsGap, percentileTime)
 		utils.FormatTrace("block gaps",
 			utils.LogAttr("block gaps", ct.blockEventsGap),
 			utils.LogAttr("specID", ct.endpoint.ChainID),

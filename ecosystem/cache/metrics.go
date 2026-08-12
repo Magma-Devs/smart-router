@@ -4,10 +4,11 @@ import (
 	"net/http"
 	"sync"
 
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 const (

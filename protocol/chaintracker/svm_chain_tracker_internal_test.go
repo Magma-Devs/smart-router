@@ -7,8 +7,9 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // These tests live in package chaintracker (not chaintracker_test) so they can construct
@@ -44,8 +45,8 @@ func (f *svmObserverFetcher) FetchBlockHashByNum(ctx context.Context, blockNum i
 	return "", nil
 }
 
-func (f *svmObserverFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+func (f *svmObserverFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
 
 func (f *svmObserverFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType, apiName string) ([]byte, error) {
@@ -159,9 +160,11 @@ func (f *plainSVMFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error
 func (f *plainSVMFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
 	return "", nil
 }
-func (f *plainSVMFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+
+func (f *plainSVMFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
+
 func (f *plainSVMFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType, apiName string) ([]byte, error) {
 	return f.response, nil
 }

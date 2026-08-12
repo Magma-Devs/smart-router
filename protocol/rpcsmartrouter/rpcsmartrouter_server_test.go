@@ -11,6 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
@@ -18,18 +22,15 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/goleak"
 )
 
 // Mock interface for RelayProcessor that only implements the methods we need for testing
@@ -63,8 +64,8 @@ func (m *MockRelayProcessorForHeaders) GetCrossValidationQueriedProviders() []st
 	return m.crossValidationQueriedProviders
 }
 
-func (m *MockRelayProcessorForHeaders) GetUsedProviders() *lavasession.UsedProviders {
-	return lavasession.NewUsedProviders(nil)
+func (m *MockRelayProcessorForHeaders) GetUsedProviders() *routersession.UsedProviders {
+	return routersession.NewUsedProviders(nil)
 }
 
 func (m *MockRelayProcessorForHeaders) NodeErrors() (ret []common.RelayResult) {
@@ -554,7 +555,7 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 		cs.SetLatestBlock(1_000_000) // so finality resolves (not "unknown")
 		s := &RPCSmartRouterServer{
 			smartRouterEndpointMetrics: mm,
-			listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			chainParser:                chainParser,
 			chainState:                 cs,
 		}
@@ -671,7 +672,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 	cs.SetLatestBlock(1_000_000) // so finality resolves (not "unknown")
 	srv := &RPCSmartRouterServer{
 		smartRouterEndpointMetrics: mm,
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainParser:                chainParser,
 		chainState:                 cs,
 	}
@@ -734,7 +735,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 			common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
 			common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
 		}, nil, "dapp", "1.2.3.4")
-		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, routersession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
 		require.NoError(t, smErr)
 		require.Equal(t, relaycore.CrossValidation, sm.GetSelection(), "caller CV headers must enable cross-validation")
 		rp := relaycore.NewRelayProcessor(ctx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, sm)
@@ -882,7 +883,7 @@ func TestCrossValidationFailFast_EmitsRequestFailedMetrics(t *testing.T) {
 	require.NoError(t, err)
 	srv := &RPCSmartRouterServer{
 		rpcSmartRouterLogs: logs,
-		listenEndpoint:     &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:     &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 	}
 	const method = "cv_failfast_metric"
 	pm := &MockProtocolMessage{api: &spectypes.Api{Name: method}}
@@ -2059,7 +2060,7 @@ func TestWaitForPairingContextCancellation(t *testing.T) {
 
 	// Create RPC smart router server with minimal setup
 	rpcss := &RPCSmartRouterServer{
-		sessionManager: &lavasession.ConsumerSessionManager{},
+		sessionManager: &routersession.ConsumerSessionManager{},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2095,7 +2096,7 @@ func TestWaitForPairingNoInitialization(t *testing.T) {
 
 	// Create RPC smart router server with session manager that will never initialize
 	rpcss := &RPCSmartRouterServer{
-		sessionManager: &lavasession.ConsumerSessionManager{},
+		sessionManager: &routersession.ConsumerSessionManager{},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2130,7 +2131,7 @@ func TestWaitForPairingRapidStartStop(t *testing.T) {
 	// Run 50 rapid start/stop cycles
 	for i := 0; i < 50; i++ {
 		rpcss := &RPCSmartRouterServer{
-			sessionManager: &lavasession.ConsumerSessionManager{},
+			sessionManager: &routersession.ConsumerSessionManager{},
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -2166,8 +2167,8 @@ func TestWaitForPairingLongWait(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 	rpcss := &RPCSmartRouterServer{
-		sessionManager: &lavasession.ConsumerSessionManager{},
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "test-chain", ApiInterface: "jsonrpc"},
+		sessionManager: &routersession.ConsumerSessionManager{},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "test-chain", ApiInterface: "jsonrpc"},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2201,8 +2202,8 @@ func TestWaitForPairingCancelDuringWait(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 	rpcss := &RPCSmartRouterServer{
-		sessionManager: &lavasession.ConsumerSessionManager{},
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "test-chain", ApiInterface: "jsonrpc"},
+		sessionManager: &routersession.ConsumerSessionManager{},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "test-chain", ApiInterface: "jsonrpc"},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2246,7 +2247,7 @@ func TestWaitForPairingConcurrentCalls(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			rpcss := &RPCSmartRouterServer{
-				sessionManager: &lavasession.ConsumerSessionManager{},
+				sessionManager: &routersession.ConsumerSessionManager{},
 			}
 			rpcss.waitForPairing(ctx)
 		}()
@@ -2667,13 +2668,13 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		config := relaycore.DefaultConsistencyValidationConfig()
 
 		// Create endpoint at block 100 (synced)
-		endpoint := &lavasession.Endpoint{NetworkAddress: "http://ep1:8545"}
+		endpoint := &routersession.Endpoint{NetworkAddress: "http://ep1:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://ep1:8545", 100)
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://ep1:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://ep1:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: endpoint,
 					},
 				},
@@ -2681,7 +2682,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 			chainState:        chainTip,
 		}
@@ -2707,24 +2708,24 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		config := relaycore.DefaultConsistencyValidationConfig()
 
 		// Create synced endpoint at block 195 (within threshold)
-		syncedEndpoint := &lavasession.Endpoint{NetworkAddress: "http://synced:8545"}
+		syncedEndpoint := &routersession.Endpoint{NetworkAddress: "http://synced:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://synced:8545", 195)
 
 		// Create stale endpoint at block 100 (way behind, lag=100 > threshold=10)
-		staleEndpoint := &lavasession.Endpoint{NetworkAddress: "http://stale:8545"}
+		staleEndpoint := &routersession.Endpoint{NetworkAddress: "http://stale:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://stale:8545", 100)
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://synced:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://synced:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: syncedEndpoint,
 					},
 				},
 			},
-			"http://stale:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+			"http://stale:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: staleEndpoint,
 					},
 				},
@@ -2732,7 +2733,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 			chainState:        chainTip,
 		}
@@ -2759,23 +2760,23 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		config := relaycore.DefaultConsistencyValidationConfig()
 
 		// Both endpoints are stale
-		staleEndpoint1 := &lavasession.Endpoint{NetworkAddress: "http://stale1:8545"}
+		staleEndpoint1 := &routersession.Endpoint{NetworkAddress: "http://stale1:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://stale1:8545", 100)
 
-		staleEndpoint2 := &lavasession.Endpoint{NetworkAddress: "http://stale2:8545"}
+		staleEndpoint2 := &routersession.Endpoint{NetworkAddress: "http://stale2:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://stale2:8545", 50)
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://stale1:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://stale1:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: staleEndpoint1,
 					},
 				},
 			},
-			"http://stale2:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+			"http://stale2:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: staleEndpoint2,
 					},
 				},
@@ -2783,7 +2784,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 			chainState:        chainTip,
 		}
@@ -2796,7 +2797,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 
 		valid, failed, err := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMsg)
 		require.Error(t, err)
-		require.True(t, errors.Is(err, lavasession.ConsistencyPreValidationError))
+		require.True(t, errors.Is(err, routersession.ConsistencyPreValidationError))
 		require.Nil(t, valid)
 		require.Len(t, failed, 2)
 	})
@@ -2808,13 +2809,13 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 
 		config := relaycore.DefaultConsistencyValidationConfig()
 
-		endpoint := &lavasession.Endpoint{NetworkAddress: "http://ep1:8545"}
+		endpoint := &routersession.Endpoint{NetworkAddress: "http://ep1:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://ep1:8545", 100)
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://ep1:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://ep1:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: endpoint,
 					},
 				},
@@ -2822,7 +2823,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 		}
 
@@ -2839,9 +2840,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 	})
 
 	t.Run("no config - skip validation, return all as valid", func(t *testing.T) {
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://ep1:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{},
+		sessions := routersession.ConsumerSessionsMap{
+			"http://ep1:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{},
 			},
 		}
 
@@ -2868,12 +2869,12 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		config := relaycore.DefaultConsistencyValidationConfig()
 
 		// Endpoint has no block data yet (LatestBlock == 0)
-		newEndpoint := &lavasession.Endpoint{NetworkAddress: "http://new:8545"}
+		newEndpoint := &routersession.Endpoint{NetworkAddress: "http://new:8545"}
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://new:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://new:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: newEndpoint,
 					},
 				},
@@ -2881,7 +2882,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 			chainState:        chainTip,
 		}
@@ -2906,13 +2907,13 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 
 		config := relaycore.DefaultConsistencyValidationConfig()
 
-		staleEndpoint := &lavasession.Endpoint{NetworkAddress: "http://stale:8545"}
+		staleEndpoint := &routersession.Endpoint{NetworkAddress: "http://stale:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://stale:8545", 50) // very stale
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://stale:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://stale:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: staleEndpoint,
 					},
 				},
@@ -2920,7 +2921,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 			chainState:        chainTip,
 		}
@@ -2942,13 +2943,13 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 	t.Run("all stale exhausts normal selection then serves one fallback pass", func(t *testing.T) {
 		state := newConsistencyFallbackState()
-		usedProviders := lavasession.NewUsedProviders(nil)
-		routerKey := lavasession.NewRouterKey(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
+		routerKey := routersession.NewRouterKey(nil)
 		usedProviders.AddUnwantedAddresses("transport-failure", routerKey)
 
 		reject := func(provider string) {
-			state.recordRejected(lavasession.ConsumerSessionsMap{
-				provider: &lavasession.SessionInfo{},
+			state.recordRejected(routersession.ConsumerSessionsMap{
+				provider: &routersession.SessionInfo{},
 			})
 			usedProviders.AddUnwantedAddresses(provider, routerKey)
 		}
@@ -2964,12 +2965,12 @@ func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 				switch attempts {
 				case 1:
 					reject("stale-1")
-					return lavasession.ConsistencyPreValidationError
+					return routersession.ConsistencyPreValidationError
 				case 2:
 					reject("stale-2")
-					return fmt.Errorf("second stale candidate: %w", lavasession.ConsistencyPreValidationError)
+					return fmt.Errorf("second stale candidate: %w", routersession.ConsistencyPreValidationError)
 				case 3:
-					return lavasession.PairingListEmptyError
+					return routersession.PairingListEmptyError
 				case 4:
 					require.True(t, state.allows("stale-1"))
 					require.True(t, state.allows("stale-2"))
@@ -2992,8 +2993,8 @@ func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 
 	t.Run("fresh alternative wins without activating stale fallback", func(t *testing.T) {
 		state := newConsistencyFallbackState()
-		usedProviders := lavasession.NewUsedProviders(nil)
-		routerKey := lavasession.NewRouterKey(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
+		routerKey := routersession.NewRouterKey(nil)
 		attempts := 0
 
 		err := sendRelayTaskWithConsistencyFallback(
@@ -3001,9 +3002,9 @@ func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 			func() error {
 				attempts++
 				if attempts == 1 {
-					state.recordRejected(lavasession.ConsumerSessionsMap{"stale": &lavasession.SessionInfo{}})
+					state.recordRejected(routersession.ConsumerSessionsMap{"stale": &routersession.SessionInfo{}})
 					usedProviders.AddUnwantedAddresses("stale", routerKey)
-					return lavasession.ConsistencyPreValidationError
+					return routersession.ConsistencyPreValidationError
 				}
 				return nil
 			},
@@ -3017,8 +3018,8 @@ func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 
 	t.Run("fallback activation is one shot", func(t *testing.T) {
 		state := newConsistencyFallbackState()
-		usedProviders := lavasession.NewUsedProviders(nil)
-		routerKey := lavasession.NewRouterKey(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
+		routerKey := routersession.NewRouterKey(nil)
 		attempts := 0
 
 		err := sendRelayTaskWithConsistencyFallback(
@@ -3026,54 +3027,54 @@ func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 			func() error {
 				attempts++
 				if attempts == 1 {
-					state.recordRejected(lavasession.ConsumerSessionsMap{"stale": &lavasession.SessionInfo{}})
+					state.recordRejected(routersession.ConsumerSessionsMap{"stale": &routersession.SessionInfo{}})
 					usedProviders.AddUnwantedAddresses("stale", routerKey)
-					return lavasession.ConsistencyPreValidationError
+					return routersession.ConsistencyPreValidationError
 				}
-				return lavasession.PairingListEmptyError
+				return routersession.PairingListEmptyError
 			},
 		)
 
-		require.ErrorIs(t, err, lavasession.PairingListEmptyError)
+		require.ErrorIs(t, err, routersession.PairingListEmptyError)
 		require.Equal(t, 3, attempts, "a failed fallback pass must not reopen providers indefinitely")
 	})
 
 	t.Run("cross-validation remains strict", func(t *testing.T) {
 		state := newConsistencyFallbackState()
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		attempts := 0
 
 		err := sendRelayTaskWithConsistencyFallback(
 			context.Background(), relaycore.CrossValidation, state, usedProviders,
 			func() error {
 				attempts++
-				return lavasession.ConsistencyPreValidationError
+				return routersession.ConsistencyPreValidationError
 			},
 		)
 
-		require.ErrorIs(t, err, lavasession.ConsistencyPreValidationError)
+		require.ErrorIs(t, err, routersession.ConsistencyPreValidationError)
 		require.Equal(t, 1, attempts)
 	})
 }
 
 func TestPromoteConsistencyFallback(t *testing.T) {
 	state := newConsistencyFallbackState()
-	usedProviders := lavasession.NewUsedProviders(nil)
-	state.recordRejected(lavasession.ConsumerSessionsMap{
-		"previously-rejected": &lavasession.SessionInfo{},
+	usedProviders := routersession.NewUsedProviders(nil)
+	state.recordRejected(routersession.ConsumerSessionsMap{
+		"previously-rejected": &routersession.SessionInfo{},
 	})
-	usedProviders.AddUnwantedAddresses("previously-rejected", lavasession.NewRouterKey(nil))
+	usedProviders.AddUnwantedAddresses("previously-rejected", routersession.NewRouterKey(nil))
 	_, activated := state.activate(usedProviders)
 	require.True(t, activated)
 
-	failed := lavasession.ConsumerSessionsMap{
-		"previously-rejected": &lavasession.SessionInfo{},
-		"new-stale-provider":  &lavasession.SessionInfo{},
+	failed := routersession.ConsumerSessionsMap{
+		"previously-rejected": &routersession.SessionInfo{},
+		"new-stale-provider":  &routersession.SessionInfo{},
 	}
 	valid, remainingFailed, err, promoted := promoteConsistencyFallback(
 		nil,
 		failed,
-		lavasession.ConsistencyPreValidationError,
+		routersession.ConsistencyPreValidationError,
 		state,
 	)
 
@@ -3090,11 +3091,11 @@ func TestPromoteConsistencyFallback(t *testing.T) {
 // This ensures immediate blocking via unwantedProviders rather than "allow one retry".
 func TestConsistencyPreValidationError_NotRetryable(t *testing.T) {
 	// ConsistencyPreValidationError should NOT be a session sync loss
-	require.False(t, lavasession.IsSessionSyncLoss(lavasession.ConsistencyPreValidationError),
+	require.False(t, routersession.IsSessionSyncLoss(routersession.ConsistencyPreValidationError),
 		"ConsistencyPreValidationError should NOT be treated as session sync loss")
 
 	// SessionOutOfSyncError IS a session sync loss (for comparison)
-	require.True(t, lavasession.IsSessionSyncLoss(lavasession.SessionOutOfSyncError),
+	require.True(t, routersession.IsSessionSyncLoss(routersession.SessionOutOfSyncError),
 		"SessionOutOfSyncError should be treated as session sync loss")
 }
 
@@ -3108,7 +3109,7 @@ func TestConsistencyPreValidationError_NotRetryable(t *testing.T) {
 // and the cross-validation params; the early-exit path under test does not
 // touch the other methods.
 type cvGuardStateMachine struct {
-	usedProviders *lavasession.UsedProviders
+	usedProviders *routersession.UsedProviders
 	cvParams      *common.CrossValidationParams
 }
 
@@ -3122,9 +3123,9 @@ func (m *cvGuardStateMachine) GetSelection() relaycore.Selection { return relayc
 func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidationParams {
 	return m.cvParams
 }
-func (m *cvGuardStateMachine) GetUsedProviders() *lavasession.UsedProviders                { return m.usedProviders }
-func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf)            {}
-func (m *cvGuardStateMachine) SetRelayRetriesManager(rm *lavaprotocol.RelayRetriesManager) {}
+func (m *cvGuardStateMachine) GetUsedProviders() *routersession.UsedProviders               { return m.usedProviders }
+func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf)             {}
+func (m *cvGuardStateMachine) SetRelayRetriesManager(rm *relayprotocol.RelayRetriesManager) {}
 
 // cvGuardMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter
 // for the CV-guard test. The early-exit path does not hit metrics callbacks.
@@ -3147,7 +3148,7 @@ func (cvGuardMetrics) GetChainIdAndApiInterface() (string, string) { return "LAV
 //
 // Asserts:
 //   - returns in well under processingTimeout (the regression was a 30s stall)
-//   - error wraps lavasession.PairingListEmptyError (CV state machine short-circuits on this)
+//   - error wraps routersession.PairingListEmptyError (CV state machine short-circuits on this)
 //   - usedProviders.CurrentlyUsed() == 0 (catches surviving-session leak — 97266e4 regression)
 //   - usedProviders.SessionsLatestBatch() == 0 (catches counter leak — a78426a regression)
 func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *testing.T) {
@@ -3174,42 +3175,42 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	// Tips live in the shared endpointtip store, keyed LAVA|rest|url (matching the rpcss
 	// listenEndpoint below). Reset first so other tests' entries can't interfere.
 	endpointtip.Default().Reset()
-	syncedEp := &lavasession.Endpoint{NetworkAddress: "http://synced:8545"}
+	syncedEp := &routersession.Endpoint{NetworkAddress: "http://synced:8545"}
 	seedEndpointTip("LAVA", "rest", "http://synced:8545", 195)
-	staleEp1 := &lavasession.Endpoint{NetworkAddress: "http://stale1:8545"}
+	staleEp1 := &routersession.Endpoint{NetworkAddress: "http://stale1:8545"}
 	seedEndpointTip("LAVA", "rest", "http://stale1:8545", 50)
-	staleEp2 := &lavasession.Endpoint{NetworkAddress: "http://stale2:8545"}
+	staleEp2 := &routersession.Endpoint{NetworkAddress: "http://stale2:8545"}
 	seedEndpointTip("LAVA", "rest", "http://stale2:8545", 50)
 
-	mkSession := func(addr string, ep *lavasession.Endpoint) *lavasession.SingleConsumerSession {
-		return &lavasession.SingleConsumerSession{
+	mkSession := func(addr string, ep *routersession.Endpoint) *routersession.SingleConsumerSession {
+		return &routersession.SingleConsumerSession{
 			// Parent.Endpoints[0] is read by the QoS metrics path inside
 			// OnSessionFailure (consumer_session_manager.go:1807); leaving the
 			// slice empty panics. The endpoint identity doesn't matter here —
 			// only the indexing has to succeed.
-			Parent:     &lavasession.ConsumerSessionsWithProvider{PublicLavaAddress: addr, Endpoints: []*lavasession.Endpoint{ep}},
-			Connection: &lavasession.DirectRPCSessionConnection{Endpoint: ep},
+			Parent:     &routersession.ConsumerSessionsWithProvider{PublicLavaAddress: addr, Endpoints: []*routersession.Endpoint{ep}},
+			Connection: &routersession.DirectRPCSessionConnection{Endpoint: ep},
 			QoSManager: qos.NewQoSManager(),
 		}
 	}
 	sess1 := mkSession("lava@provider1", syncedEp)
 	sess2 := mkSession("lava@provider2", staleEp1)
 	sess3 := mkSession("lava@provider3", staleEp2)
-	for _, s := range []*lavasession.SingleConsumerSession{sess1, sess2, sess3} {
+	for _, s := range []*routersession.SingleConsumerSession{sess1, sess2, sess3} {
 		_, ok := s.TryUseSession()
 		require.True(t, ok, "test setup: failed to lock session")
 	}
 
 	// Mimic GetSessions: AddUsed registers all 3 in UsedProviders; SetUsageForSession
 	// wires each session back to UsedProviders so Free(nil) calls RemoveUsed correctly.
-	usedProviders := lavasession.NewUsedProviders(nil)
-	sessionsMap := lavasession.ConsumerSessionsMap{
-		"lava@provider1": &lavasession.SessionInfo{Session: sess1},
-		"lava@provider2": &lavasession.SessionInfo{Session: sess2},
-		"lava@provider3": &lavasession.SessionInfo{Session: sess3},
+	usedProviders := routersession.NewUsedProviders(nil)
+	sessionsMap := routersession.ConsumerSessionsMap{
+		"lava@provider1": &routersession.SessionInfo{Session: sess1},
+		"lava@provider2": &routersession.SessionInfo{Session: sess2},
+		"lava@provider3": &routersession.SessionInfo{Session: sess3},
 	}
 	usedProviders.AddUsed(sessionsMap, nil)
-	routerKey := lavasession.NewRouterKey(nil)
+	routerKey := routersession.NewRouterKey(nil)
 	require.NoError(t, sess1.SetUsageForSession(0, nil, usedProviders, routerKey))
 	require.NoError(t, sess2.SetUsageForSession(0, nil, usedProviders, routerKey))
 	require.NoError(t, sess3.SetUsageForSession(0, nil, usedProviders, routerKey))
@@ -3222,14 +3223,14 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	metricsStub := cvGuardMetrics{}
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, cvParams, metricsStub, metricsStub,
-		lavaprotocol.NewRelayRetriesManager(), sm)
+		relayprotocol.NewRelayRetriesManager(), sm)
 
 	// Real session manager — OnSessionFailure runs against it for the 2 dropped sessions.
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
-	sessionManager := lavasession.NewConsumerSessionManager(
+	sessionManager := routersession.NewConsumerSessionManager(
 		rpcEndpoint, optimizer, nil, "test-router",
-		lavasession.NewActiveSubscriptionProvidersStorage())
+		routersession.NewActiveSubscriptionProvidersStorage())
 
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:    rpcEndpoint,
@@ -3254,7 +3255,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	require.Less(t, elapsed, time.Second,
 		"fast-fail required (commit 97266e4 regression catch); took %v", elapsed)
 	require.Error(t, sendErr)
-	require.Truef(t, errors.Is(sendErr, lavasession.PairingListEmptyError),
+	require.Truef(t, errors.Is(sendErr, routersession.PairingListEmptyError),
 		"error must wrap PairingListEmptyError so the CV short-circuit in policy.OnSendRelayResult can see it; got: %v", sendErr)
 	require.Equal(t, 0, usedProviders.CurrentlyUsed(),
 		"surviving valid sessions leaked into CurrentlyUsed — commit 97266e4 regression: validateReturnCondition will block on this and the request will stall processingTimeout")
@@ -3390,22 +3391,22 @@ func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *tes
 		return &RPCSmartRouterServer{
 			consistencyConfig: config,
 			chainState:        cs,
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface},
 		}
 	}
-	endpointSession := func(addr string, latest int64) *lavasession.SessionInfo {
-		ep := &lavasession.Endpoint{NetworkAddress: addr}
+	endpointSession := func(addr string, latest int64) *routersession.SessionInfo {
+		ep := &routersession.Endpoint{NetworkAddress: addr}
 		// Per-endpoint tip now lives in the shared endpointtip store (keyed chain|api|url),
 		// read by filterEndpointsByConsistency in place of the removed Endpoint.LatestBlock.
 		seedEndpointTip(chainID, apiInterface, addr, latest)
-		return &lavasession.SessionInfo{Session: &lavasession.SingleConsumerSession{
-			Connection: &lavasession.DirectRPCSessionConnection{Endpoint: ep},
+		return &routersession.SessionInfo{Session: &routersession.SingleConsumerSession{
+			Connection: &routersession.DirectRPCSessionConnection{Endpoint: ep},
 		}}
 	}
 
 	t.Run("slot tip (fixed) is in sync -> endpoint valid", func(t *testing.T) {
 		rpcss := newServer()
-		sessions := lavasession.ConsumerSessionsMap{
+		sessions := routersession.ConsumerSessionsMap{
 			"http://slot:8899": endpointSession("http://slot:8899", slotTip),
 		}
 		valid, failed, err := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMsg)
@@ -3416,7 +3417,7 @@ func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *tes
 
 	t.Run("block-height tip (regression) looks ~21M behind -> filtered, no pairings", func(t *testing.T) {
 		rpcss := newServer()
-		sessions := lavasession.ConsumerSessionsMap{
+		sessions := routersession.ConsumerSessionsMap{
 			"http://blockheight:8899": endpointSession("http://blockheight:8899", blockHeightTip),
 		}
 		valid, failed, err := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMsg)
@@ -3427,7 +3428,7 @@ func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *tes
 
 	t.Run("mixed fleet -> only the slot tip survives", func(t *testing.T) {
 		rpcss := newServer()
-		sessions := lavasession.ConsumerSessionsMap{
+		sessions := routersession.ConsumerSessionsMap{
 			"http://slot:8899":        endpointSession("http://slot:8899", slotTip),
 			"http://blockheight:8899": endpointSession("http://blockheight:8899", blockHeightTip),
 		}

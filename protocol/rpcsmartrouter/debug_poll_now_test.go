@@ -16,11 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/stretchr/testify/require"
 )
 
 func postDebugJSON(mux http.Handler, path, body string) *httptest.ResponseRecorder {
@@ -83,10 +84,10 @@ func TestDebugPollNow_TrackerNotPollingIs504(t *testing.T) {
 	// A closed port: registration is synchronous (so the endpoint IS resolvable), but every fetch
 	// fails, so the tracker never leaves startTrackerWithRetry and no poll goroutine exists.
 	const deadURL = "http://127.0.0.1:0"
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: deadURL}, 5, "jsonrpc")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: deadURL}, 5, "jsonrpc")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = directConn.Close() })
-	_, err = monitor.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: deadURL, Enabled: true}, directConn)
+	_, err = monitor.GetOrCreateTracker(&routersession.Endpoint{NetworkAddress: deadURL, Enabled: true}, directConn)
 	require.NoError(t, err)
 
 	var offsetNano atomic.Int64
@@ -94,7 +95,7 @@ func TestDebugPollNow_TrackerNotPollingIs504(t *testing.T) {
 		rpcServers: map[string]*RPCSmartRouterServer{
 			"ETH1-jsonrpc": {
 				endpointChainTrackerManager: monitor,
-				listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+				listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			},
 		},
 	}
@@ -161,11 +162,11 @@ func TestDebugPollNow_PollsEndpointAndReturnsFreshRecord(t *testing.T) {
 	})
 	t.Cleanup(monitor.Stop)
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "jsonrpc")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "jsonrpc")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = directConn.Close() })
 
-	_, err = monitor.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: upstream.URL, Enabled: true}, directConn)
+	_, err = monitor.GetOrCreateTracker(&routersession.Endpoint{NetworkAddress: upstream.URL, Enabled: true}, directConn)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		state, _, exists := monitor.GetTrackerState(upstream.URL)
@@ -177,7 +178,7 @@ func TestDebugPollNow_PollsEndpointAndReturnsFreshRecord(t *testing.T) {
 		rpcServers: map[string]*RPCSmartRouterServer{
 			"ETH1-jsonrpc": {
 				endpointChainTrackerManager: monitor,
-				listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+				listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			},
 			"NIL-rest": {}, // no monitor, no listen endpoint: skipped, never a panic
 		},

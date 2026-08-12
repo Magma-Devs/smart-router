@@ -23,7 +23,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
@@ -249,7 +249,7 @@ func CreateChainLibMocks(
 	wsServerCallback http.HandlerFunc,
 	getToTopMostPath string,
 	services []string,
-) (cpar ChainParser, crout ChainRouter, cfetc chaintracker.ChainFetcher, closeServer func(), endpointRet *lavasession.RPCProviderEndpoint, errRet error) {
+) (cpar ChainParser, crout ChainRouter, cfetc chaintracker.ChainFetcher, closeServer func(), endpointRet *routersession.RPCProviderEndpoint, errRet error) {
 	// SetGlobalLoggingLevel reassigns process-global logger state (defaultGlobalLogLevel,
 	// zerologlog.Logger). Production sets it once at startup; this mock was calling it on EVERY
 	// invocation, so a later test's setup wrote those globals while an earlier test's leaked goroutine
@@ -282,8 +282,8 @@ func CreateChainLibMocks(
 	}
 	var chainRouter ChainRouter
 	chainParser.SetSpec(spec)
-	endpoint := &lavasession.RPCProviderEndpoint{
-		NetworkAddress: lavasession.NetworkAddressData{},
+	endpoint := &routersession.RPCProviderEndpoint{
+		NetworkAddress: routersession.NetworkAddressData{},
 		ChainID:        specIndex,
 		ApiInterface:   apiInterface,
 		NodeUrls:       []common.NodeUrl{},

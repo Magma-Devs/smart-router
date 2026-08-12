@@ -8,13 +8,14 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 // newResolver builds a single-policy resolver for ETH1/jsonrpc/<method>.
@@ -622,8 +623,8 @@ func TestGroupLabel_ConfigToSession_InertWithoutPolicy(t *testing.T) {
 	require.Equal(t, "tier-1", endpoints[0].GroupLabel)
 
 	// -> ConsumerSessionsWithProvider.GroupLabel (mirrors the provider build in rpcsmartrouter.go)
-	session := lavasession.NewConsumerSessionWithProvider(endpoints[0].Name,
-		[]*lavasession.Endpoint{{NetworkAddress: "http://a", Enabled: true}}, 1, 1, 0)
+	session := routersession.NewConsumerSessionWithProvider(endpoints[0].Name,
+		[]*routersession.Endpoint{{NetworkAddress: "http://a", Enabled: true}}, 1, 1, 0)
 	session.GroupLabel = endpoints[0].GroupLabel
 	require.Equal(t, "tier-1", session.GroupLabel, "group label must flow config -> session record")
 

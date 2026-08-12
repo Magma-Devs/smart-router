@@ -16,13 +16,13 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
 type RelayProcessor struct {
-	usedProviders                *lavasession.UsedProviders
+	usedProviders                *routersession.UsedProviders
 	responses                    chan *RelayResponse
 	crossValidationParams        *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	lock                         sync.RWMutex
@@ -32,7 +32,7 @@ type RelayProcessor struct {
 	allowSessionDegradation      uint32 // used in the scenario where extension was previously used.
 	metricsInf                   MetricsInterface
 	chainIdAndApiInterfaceGetter ChainIdAndApiInterfaceGetter
-	relayRetriesManager          *lavaprotocol.RelayRetriesManager
+	relayRetriesManager          *relayprotocol.RelayRetriesManager
 	ResultsManager
 	RelayStateMachine
 	// quorumMap tracks, per identical response hash, how many providers returned it and which distinct
@@ -70,7 +70,7 @@ func NewRelayProcessor(
 	crossValidationParams *common.CrossValidationParams, // nil for Stateless/Stateful
 	metricsInf MetricsInterface,
 	chainIdAndApiInterfaceGetter ChainIdAndApiInterfaceGetter,
-	relayRetriesManager *lavaprotocol.RelayRetriesManager,
+	relayRetriesManager *relayprotocol.RelayRetriesManager,
 	relayStateMachine RelayStateMachine,
 ) *RelayProcessor {
 	guid, _ := utils.GetUniqueIdentifier(ctx)
@@ -316,7 +316,7 @@ func (rp *RelayProcessor) String() string {
 		rp.ResultsManager.String(), strings.Join(unwantedAddresses, ";"), strings.Join(currentlyUsedAddresses, ";"))
 }
 
-func (rp *RelayProcessor) GetUsedProviders() *lavasession.UsedProviders {
+func (rp *RelayProcessor) GetUsedProviders() *routersession.UsedProviders {
 	if rp == nil {
 		utils.FormatError("RelayProcessor.GetUsedProviders is nil, misuse detected", nil)
 		return nil
@@ -424,7 +424,7 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 	hasPermanentProtocolError := false
 	hasEpochMismatch := false
 	for _, protocolError := range protocolErrorResults {
-		if errors.Is(protocolError.GetError(), lavasession.EpochMismatchError) {
+		if errors.Is(protocolError.GetError(), routersession.EpochMismatchError) {
 			hasEpochMismatch = true
 			continue
 		}

@@ -17,12 +17,13 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
@@ -337,7 +338,7 @@ func (apip *JsonRPCChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 }
 
 type JsonRPCChainListener struct {
-	endpoint                   *lavasession.RPCEndpoint
+	endpoint                   *routersession.RPCEndpoint
 	relaySender                RelaySender
 	healthReporter             HealthReporter
 	logger                     *metrics.RPCConsumerLogs
@@ -350,7 +351,7 @@ type JsonRPCChainListener struct {
 }
 
 // NewJrpcChainListener creates a new instance of JsonRPCChainListener
-func NewJrpcChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEndpoint,
+func NewJrpcChainListener(ctx context.Context, listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender, healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
 	refererData *RefererData,
@@ -588,7 +589,7 @@ type JrpcChainProxy struct {
 	conn *chainproxy.Connector
 }
 
-func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
+func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
 	if len(rpcProviderEndpoint.NodeUrls) == 0 {
 		return nil, utils.FormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
 	}

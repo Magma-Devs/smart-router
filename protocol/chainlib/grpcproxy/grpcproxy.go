@@ -7,8 +7,6 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
@@ -17,6 +15,9 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 const MaxCallRecvMsgSize = 1024 * 1024 * 512 // 512MB for large debug responses

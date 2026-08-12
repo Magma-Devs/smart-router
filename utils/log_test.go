@@ -4,8 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 var TestError = errors.New("error for tests")

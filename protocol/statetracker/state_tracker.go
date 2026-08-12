@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	speckeeper "github.com/magma-Devs/smart-router/utils/keeper"
@@ -62,7 +62,7 @@ func expandCommaSeparatedPaths(specPaths []string) []string {
 //
 // For remote repositories, the appropriate token (githubToken or gitlabToken) is used for authentication.
 // smart-router loads specs statically; empty specPaths is an error (there is no live blockchain fallback).
-func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint lavasession.RPCEndpoint, githubToken string, gitlabToken string) error {
+func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint routersession.RPCEndpoint, githubToken string, gitlabToken string) error {
 	if len(specPaths) == 0 {
 		return utils.FormatError("no spec paths provided", nil,
 			utils.LogAttr("chain_id", rpcEndpoint.ChainID))

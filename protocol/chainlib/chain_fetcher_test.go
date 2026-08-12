@@ -3,8 +3,9 @@ package chainlib
 import (
 	"testing"
 
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
+
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
 // testing hash cache request doesn't change the fields it resets to calculate hash.

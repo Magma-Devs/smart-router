@@ -10,11 +10,12 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/itchyny/gojq"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
+	"github.com/magma-Devs/smart-router/utils/sliceutil"
 )
 
 const (
@@ -218,7 +219,7 @@ func ParseBlockHashFromReplyAndDecode(rpcInput RPCInput, resultParser spectypes.
 			}
 
 			return "", utils.FormatLog("failed to parse with legacy block parser", err,
-				lavaslices.Slice(
+				sliceutil.Slice(
 					utils.LogAttr("rpcInput", rpcInput),
 					utils.LogAttr("resultParser", resultParser),
 				),

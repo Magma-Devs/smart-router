@@ -9,26 +9,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/stretchr/testify/require"
 )
 
 // Mock RelayStateMachine for testing
 type mockRelayStateMachine struct {
 	protocolMessage       chainlib.ProtocolMessage
-	usedProviders         *lavasession.UsedProviders
+	usedProviders         *routersession.UsedProviders
 	debugState            bool
 	selection             Selection
 	crossValidationParams *common.CrossValidationParams // nil for Stateless/Stateful
 }
 
-func newMockRelayStateMachine(protocolMessage chainlib.ProtocolMessage, usedProviders *lavasession.UsedProviders) *mockRelayStateMachine {
+func newMockRelayStateMachine(protocolMessage chainlib.ProtocolMessage, usedProviders *routersession.UsedProviders) *mockRelayStateMachine {
 	return &mockRelayStateMachine{
 		protocolMessage:       protocolMessage,
 		usedProviders:         usedProviders,
@@ -38,7 +39,7 @@ func newMockRelayStateMachine(protocolMessage chainlib.ProtocolMessage, usedProv
 	}
 }
 
-func newMockRelayStateMachineWithSelection(protocolMessage chainlib.ProtocolMessage, usedProviders *lavasession.UsedProviders, selection Selection) *mockRelayStateMachine {
+func newMockRelayStateMachineWithSelection(protocolMessage chainlib.ProtocolMessage, usedProviders *routersession.UsedProviders, selection Selection) *mockRelayStateMachine {
 	var cvParams *common.CrossValidationParams
 	if selection == CrossValidation {
 		cvParams = &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2}
@@ -75,14 +76,14 @@ func (m *mockRelayStateMachine) GetCrossValidationParams() *common.CrossValidati
 	return m.crossValidationParams
 }
 
-func (m *mockRelayStateMachine) GetUsedProviders() *lavasession.UsedProviders {
+func (m *mockRelayStateMachine) GetUsedProviders() *routersession.UsedProviders {
 	return m.usedProviders
 }
 
 func (m *mockRelayStateMachine) SetResultsChecker(resultsChecker ResultsCheckerInf) {
 }
 
-func (m *mockRelayStateMachine) SetRelayRetriesManager(relayRetriesManager *lavaprotocol.RelayRetriesManager) {
+func (m *mockRelayStateMachine) SetRelayRetriesManager(relayRetriesManager *relayprotocol.RelayRetriesManager) {
 }
 
 func (m *mockRelayStateMachine) GetResultsSummary() ResultsSummary {
@@ -107,7 +108,7 @@ func TestRelayProcessorHappyFlow(t *testing.T) {
 		dappId := "dapp"
 		consumerIp := "123.11"
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachine(protocolMessage, usedProviders))
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
@@ -117,7 +118,7 @@ func TestRelayProcessorHappyFlow(t *testing.T) {
 		require.Nil(t, canUse)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}, "lava@test2": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}, "lava@test2": &routersession.SessionInfo{}}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 		ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond*10)
 		defer cancel()
@@ -155,7 +156,7 @@ func TestRelayProcessorTimeout(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachine(protocolMessage, usedProviders))
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
@@ -165,7 +166,7 @@ func TestRelayProcessorTimeout(t *testing.T) {
 		require.Nil(t, canUse)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}, "lava@test2": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}, "lava@test2": &routersession.SessionInfo{}}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 		go func() {
 			time.Sleep(time.Millisecond * 5)
@@ -174,7 +175,7 @@ func TestRelayProcessorTimeout(t *testing.T) {
 			canUse := usedProviders.TryLockSelection(ctx)
 			require.NoError(t, ctx.Err())
 			require.Nil(t, canUse)
-			consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test3": &lavasession.SessionInfo{}, "lava@test4": &lavasession.SessionInfo{}}
+			consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test3": &routersession.SessionInfo{}, "lava@test4": &routersession.SessionInfo{}}
 			usedProviders.AddUsed(consumerSessionsMap, nil)
 		}()
 		go SendSuccessResp(relayProcessor, "lava@test", time.Millisecond*20)
@@ -208,7 +209,7 @@ func TestRelayProcessorRetry(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachine(protocolMessage, usedProviders))
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
@@ -218,7 +219,7 @@ func TestRelayProcessorRetry(t *testing.T) {
 		require.Nil(t, canUse)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}, "lava@test2": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}, "lava@test2": &routersession.SessionInfo{}}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
 		go SendProtocolError(relayProcessor, "lava@test", time.Millisecond*5, fmt.Errorf("bad"))
@@ -256,7 +257,7 @@ func TestRelayProcessorExhaustedTransportErrors(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, selection))
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
@@ -264,7 +265,7 @@ func TestRelayProcessorExhaustedTransportErrors(t *testing.T) {
 		canUse := usedProviders.TryLockSelection(ctx)
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}, "lava@test2": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}, "lava@test2": &routersession.SessionInfo{}}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
 		go SendProtocolError(relayProcessor, "lava@test", time.Millisecond*5, fmt.Errorf("bad"))
@@ -302,7 +303,7 @@ func TestRelayProcessorRetryNodeError(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachine(protocolMessage, usedProviders))
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
@@ -312,7 +313,7 @@ func TestRelayProcessorRetryNodeError(t *testing.T) {
 		require.Nil(t, canUse)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}, "lava@test2": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}, "lava@test2": &routersession.SessionInfo{}}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
 		go SendProtocolError(relayProcessor, "lava@test", time.Millisecond*5, fmt.Errorf("bad"))
@@ -350,7 +351,7 @@ func TestRelayProcessorStatefulApi(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/tx/v1beta1/txs", []byte("data"), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachine(protocolMessage, usedProviders))
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
 		defer cancel()
@@ -359,7 +360,7 @@ func TestRelayProcessorStatefulApi(t *testing.T) {
 		require.Nil(t, canUse)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava4@test": &lavasession.SessionInfo{}, "lava3@test": &lavasession.SessionInfo{}, "lava@test": &lavasession.SessionInfo{}, "lava2@test": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava4@test": &routersession.SessionInfo{}, "lava3@test": &routersession.SessionInfo{}, "lava@test": &routersession.SessionInfo{}, "lava2@test": &routersession.SessionInfo{}}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 		go SendProtocolError(relayProcessor, "lava@test", time.Millisecond*5, fmt.Errorf("bad"))
 		go SendNodeError(relayProcessor, "lava2@test", time.Millisecond*20)
@@ -405,7 +406,7 @@ func TestRelayProcessorStatefulApiErr(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/tx/v1beta1/txs", []byte("data"), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachine(protocolMessage, usedProviders))
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
 		defer cancel()
@@ -414,7 +415,7 @@ func TestRelayProcessorStatefulApiErr(t *testing.T) {
 		require.Nil(t, canUse)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava4@test": &lavasession.SessionInfo{}, "lava3@test": &lavasession.SessionInfo{}, "lava@test": &lavasession.SessionInfo{}, "lava2@test": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava4@test": &routersession.SessionInfo{}, "lava3@test": &routersession.SessionInfo{}, "lava@test": &routersession.SessionInfo{}, "lava2@test": &routersession.SessionInfo{}}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 		go SendProtocolError(relayProcessor, "lava@test", time.Millisecond*5, fmt.Errorf("bad"))
 		go SendNodeError(relayProcessor, "lava2@test", time.Millisecond*20)
@@ -453,7 +454,7 @@ func TestRelayProcessorLatest(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/latest", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachine(protocolMessage, usedProviders))
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
 		defer cancel()
@@ -463,7 +464,7 @@ func TestRelayProcessorLatest(t *testing.T) {
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}, "lava@test2": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}, "lava@test2": &routersession.SessionInfo{}}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
 		go SendProtocolError(relayProcessor, "lava@test", time.Millisecond*5, fmt.Errorf("bad"))
@@ -593,7 +594,7 @@ func TestHasRequiredNodeResultsCrossValidationScenarios(t *testing.T) {
 			chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 
 			relayProcessor := NewRelayProcessor(
 				ctx,
@@ -605,9 +606,9 @@ func TestHasRequiredNodeResultsCrossValidationScenarios(t *testing.T) {
 			)
 
 			// Set the batch size so WaitForResults knows how many responses to expect
-			consumerSessionsMap := lavasession.ConsumerSessionsMap{}
+			consumerSessionsMap := routersession.ConsumerSessionsMap{}
 			for i := 0; i < tt.successResults+tt.nodeErrors; i++ {
-				consumerSessionsMap[fmt.Sprintf("provider%d", i)] = &lavasession.SessionInfo{}
+				consumerSessionsMap[fmt.Sprintf("provider%d", i)] = &routersession.SessionInfo{}
 			}
 			relayProcessor.GetUsedProviders().AddUsed(consumerSessionsMap, nil)
 
@@ -679,7 +680,7 @@ func TestStatelessReturnsFirstNodeError(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// Stateless mode - just returns first result, no consensus
 		relayProcessor := NewRelayProcessor(
@@ -698,10 +699,10 @@ func TestStatelessReturnsFirstNodeError(t *testing.T) {
 		require.Nil(t, canUse)
 
 		// Add 3 providers to the session
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{
-			"lava@test1": &lavasession.SessionInfo{},
-			"lava@test2": &lavasession.SessionInfo{},
-			"lava@test3": &lavasession.SessionInfo{},
+		consumerSessionsMap := routersession.ConsumerSessionsMap{
+			"lava@test1": &routersession.SessionInfo{},
+			"lava@test2": &routersession.SessionInfo{},
+			"lava@test3": &routersession.SessionInfo{},
 		}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
@@ -741,7 +742,7 @@ func TestNodeErrorCrossValidationNotMet(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// CrossValidation mode - node errors do NOT count towards consensus
 		relayProcessor := NewRelayProcessor(
@@ -759,10 +760,10 @@ func TestNodeErrorCrossValidationNotMet(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{
-			"lava@test1": &lavasession.SessionInfo{},
-			"lava@test2": &lavasession.SessionInfo{},
-			"lava@test3": &lavasession.SessionInfo{},
+		consumerSessionsMap := routersession.ConsumerSessionsMap{
+			"lava@test1": &routersession.SessionInfo{},
+			"lava@test2": &routersession.SessionInfo{},
+			"lava@test3": &routersession.SessionInfo{},
 		}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
@@ -801,7 +802,7 @@ func TestStatelessReturnsNodeErrorOverProtocolError(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// Stateless mode - returns first result
 		relayProcessor := NewRelayProcessor(
@@ -819,11 +820,11 @@ func TestStatelessReturnsNodeErrorOverProtocolError(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{
-			"lava@test1": &lavasession.SessionInfo{},
-			"lava@test2": &lavasession.SessionInfo{},
-			"lava@test3": &lavasession.SessionInfo{},
-			"lava@test4": &lavasession.SessionInfo{},
+		consumerSessionsMap := routersession.ConsumerSessionsMap{
+			"lava@test1": &routersession.SessionInfo{},
+			"lava@test2": &routersession.SessionInfo{},
+			"lava@test3": &routersession.SessionInfo{},
+			"lava@test4": &routersession.SessionInfo{},
 		}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
@@ -865,7 +866,7 @@ func TestNodeErrorPrioritizedOverProtocolErrors(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// CrossValidation disabled (Stateful selection)
 		relayProcessor := NewRelayProcessor(
@@ -883,12 +884,12 @@ func TestNodeErrorPrioritizedOverProtocolErrors(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{
-			"lava@test1": &lavasession.SessionInfo{},
-			"lava@test2": &lavasession.SessionInfo{},
-			"lava@test3": &lavasession.SessionInfo{},
-			"lava@test4": &lavasession.SessionInfo{},
-			"lava@test5": &lavasession.SessionInfo{},
+		consumerSessionsMap := routersession.ConsumerSessionsMap{
+			"lava@test1": &routersession.SessionInfo{},
+			"lava@test2": &routersession.SessionInfo{},
+			"lava@test3": &routersession.SessionInfo{},
+			"lava@test4": &routersession.SessionInfo{},
+			"lava@test5": &routersession.SessionInfo{},
 		}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
@@ -931,7 +932,7 @@ func TestNodeErrorPrioritizedOverProtocolErrors(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// Stateless selection but cross-validation feature disabled (DefaultCrossValidationParams)
 		relayProcessor := NewRelayProcessor(
@@ -949,12 +950,12 @@ func TestNodeErrorPrioritizedOverProtocolErrors(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{
-			"lava@test1": &lavasession.SessionInfo{},
-			"lava@test2": &lavasession.SessionInfo{},
-			"lava@test3": &lavasession.SessionInfo{},
-			"lava@test4": &lavasession.SessionInfo{},
-			"lava@test5": &lavasession.SessionInfo{},
+		consumerSessionsMap := routersession.ConsumerSessionsMap{
+			"lava@test1": &routersession.SessionInfo{},
+			"lava@test2": &routersession.SessionInfo{},
+			"lava@test3": &routersession.SessionInfo{},
+			"lava@test4": &routersession.SessionInfo{},
+			"lava@test5": &routersession.SessionInfo{},
 		}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
@@ -1006,7 +1007,7 @@ func TestSuccessCrossValidationTakesPriorityOverNodeError(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		relayProcessor := NewRelayProcessor(
 			ctx,
@@ -1023,13 +1024,13 @@ func TestSuccessCrossValidationTakesPriorityOverNodeError(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{
-			"lava@test1": &lavasession.SessionInfo{},
-			"lava@test2": &lavasession.SessionInfo{},
-			"lava@test3": &lavasession.SessionInfo{},
-			"lava@test4": &lavasession.SessionInfo{},
-			"lava@test5": &lavasession.SessionInfo{},
-			"lava@test6": &lavasession.SessionInfo{},
+		consumerSessionsMap := routersession.ConsumerSessionsMap{
+			"lava@test1": &routersession.SessionInfo{},
+			"lava@test2": &routersession.SessionInfo{},
+			"lava@test3": &routersession.SessionInfo{},
+			"lava@test4": &routersession.SessionInfo{},
+			"lava@test5": &routersession.SessionInfo{},
+			"lava@test6": &routersession.SessionInfo{},
 		}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
@@ -1076,7 +1077,7 @@ func TestNodeErrorCrossValidationWhenSuccessInsufficient(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// CrossValidation mode - node errors do NOT count towards consensus
 		relayProcessor := NewRelayProcessor(
@@ -1094,12 +1095,12 @@ func TestNodeErrorCrossValidationWhenSuccessInsufficient(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{
-			"lava@test1": &lavasession.SessionInfo{},
-			"lava@test2": &lavasession.SessionInfo{},
-			"lava@test3": &lavasession.SessionInfo{},
-			"lava@test4": &lavasession.SessionInfo{},
-			"lava@test5": &lavasession.SessionInfo{},
+		consumerSessionsMap := routersession.ConsumerSessionsMap{
+			"lava@test1": &routersession.SessionInfo{},
+			"lava@test2": &routersession.SessionInfo{},
+			"lava@test3": &routersession.SessionInfo{},
+			"lava@test4": &routersession.SessionInfo{},
+			"lava@test5": &routersession.SessionInfo{},
 		}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
@@ -1144,7 +1145,7 @@ func TestSuccessCrossValidationIgnoresNodeErrors(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		relayProcessor := NewRelayProcessor(
 			ctx,
@@ -1161,15 +1162,15 @@ func TestSuccessCrossValidationIgnoresNodeErrors(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{
-			"lava@test1": &lavasession.SessionInfo{},
-			"lava@test2": &lavasession.SessionInfo{},
-			"lava@test3": &lavasession.SessionInfo{},
-			"lava@test4": &lavasession.SessionInfo{},
-			"lava@test5": &lavasession.SessionInfo{},
-			"lava@test6": &lavasession.SessionInfo{},
-			"lava@test7": &lavasession.SessionInfo{},
-			"lava@test8": &lavasession.SessionInfo{},
+		consumerSessionsMap := routersession.ConsumerSessionsMap{
+			"lava@test1": &routersession.SessionInfo{},
+			"lava@test2": &routersession.SessionInfo{},
+			"lava@test3": &routersession.SessionInfo{},
+			"lava@test4": &routersession.SessionInfo{},
+			"lava@test5": &routersession.SessionInfo{},
+			"lava@test6": &routersession.SessionInfo{},
+			"lava@test7": &routersession.SessionInfo{},
+			"lava@test8": &routersession.SessionInfo{},
 		}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
@@ -1220,7 +1221,7 @@ func TestSuccessCrossValidationFailsWhenCrossValidationDisabled(t *testing.T) {
 		chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// CrossValidation feature DISABLED (Stateful selection) - uses default params, needs just 1 successful result
 		relayProcessor := NewRelayProcessor(
@@ -1238,9 +1239,9 @@ func TestSuccessCrossValidationFailsWhenCrossValidationDisabled(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{
-			"lava@test1": &lavasession.SessionInfo{},
-			"lava@test2": &lavasession.SessionInfo{},
+		consumerSessionsMap := routersession.ConsumerSessionsMap{
+			"lava@test1": &routersession.SessionInfo{},
+			"lava@test2": &routersession.SessionInfo{},
 		}
 		usedProviders.AddUsed(consumerSessionsMap, nil)
 
@@ -1290,7 +1291,7 @@ func TestSuccessCrossValidationFailsWhenCrossValidationDisabled(t *testing.T) {
 // Helper to send a node error with custom data
 func sendNodeErrorWithData(relayProcessor *RelayProcessor, provider string, delay time.Duration, data []byte) {
 	time.Sleep(delay)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	response := &RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -1309,7 +1310,7 @@ func sendNodeErrorWithData(relayProcessor *RelayProcessor, provider string, dela
 // Helper to send a success response with custom data
 func sendSuccessWithData(relayProcessor *RelayProcessor, provider string, delay time.Duration, data []byte) {
 	time.Sleep(delay)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	response := &RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -1561,13 +1562,13 @@ func TestGetResultsSummary_NonRetryableFlag(t *testing.T) {
 			require.NoError(t, err)
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 			relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachine(protocolMessage, usedProviders))
 
 			lockCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
 			defer cancel()
 			require.Nil(t, usedProviders.TryLockSelection(lockCtx))
-			usedProviders.AddUsed(lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}}, nil)
+			usedProviders.AddUsed(routersession.ConsumerSessionsMap{"lava@test": &routersession.SessionInfo{}}, nil)
 
 			go SendNodeErrorWithRetryable(relayProcessor, "lava@test", time.Millisecond*5, tc.nonRetryable)
 
@@ -1630,7 +1631,7 @@ func TestCrossValidationEmptyArrayResponse(t *testing.T) {
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 
 	cvParams := &common.CrossValidationParams{
 		AgreementThreshold: 2,
@@ -1647,10 +1648,10 @@ func TestCrossValidationEmptyArrayResponse(t *testing.T) {
 	)
 
 	// Set the batch size so WaitForResults knows how many responses to expect
-	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{
-		"provider1": &lavasession.SessionInfo{},
-		"provider2": &lavasession.SessionInfo{},
-		"provider3": &lavasession.SessionInfo{},
+	usedProviders.AddUsed(routersession.ConsumerSessionsMap{
+		"provider1": &routersession.SessionInfo{},
+		"provider2": &routersession.SessionInfo{},
+		"provider3": &routersession.SessionInfo{},
 	}, nil)
 
 	// All providers return empty array [] (e.g., eth_getLogs with no matching logs)
@@ -1689,7 +1690,7 @@ func TestCrossValidationEmptyObjectResponse(t *testing.T) {
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 
 	cvParams := &common.CrossValidationParams{
 		AgreementThreshold: 2,
@@ -1706,9 +1707,9 @@ func TestCrossValidationEmptyObjectResponse(t *testing.T) {
 	)
 
 	// Set the batch size so WaitForResults knows how many responses to expect
-	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{
-		"provider1": &lavasession.SessionInfo{},
-		"provider2": &lavasession.SessionInfo{},
+	usedProviders.AddUsed(routersession.ConsumerSessionsMap{
+		"provider1": &routersession.SessionInfo{},
+		"provider2": &routersession.SessionInfo{},
 	}, nil)
 
 	// Both providers return empty object {}
@@ -1765,7 +1766,7 @@ func TestCrossValidationUniformBehaviorDeterministicAndNonDeterministic(t *testi
 
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 
 			cvParams := &common.CrossValidationParams{
 				AgreementThreshold: 2,
@@ -1782,10 +1783,10 @@ func TestCrossValidationUniformBehaviorDeterministicAndNonDeterministic(t *testi
 			)
 
 			// Set the batch size so WaitForResults knows how many responses to expect
-			usedProviders.AddUsed(lavasession.ConsumerSessionsMap{
-				"provider1": &lavasession.SessionInfo{},
-				"provider2": &lavasession.SessionInfo{},
-				"provider3": &lavasession.SessionInfo{},
+			usedProviders.AddUsed(routersession.ConsumerSessionsMap{
+				"provider1": &routersession.SessionInfo{},
+				"provider2": &routersession.SessionInfo{},
+				"provider3": &routersession.SessionInfo{},
 			}, nil)
 
 			// 2 providers return same data (meets threshold of 2)
@@ -1828,7 +1829,7 @@ func TestCrossValidationUniformBehaviorDeterministicAndNonDeterministic(t *testi
 
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 
 			cvParams := &common.CrossValidationParams{
 				AgreementThreshold: 2,
@@ -1845,10 +1846,10 @@ func TestCrossValidationUniformBehaviorDeterministicAndNonDeterministic(t *testi
 			)
 
 			// Set the batch size so WaitForResults knows how many responses to expect
-			usedProviders.AddUsed(lavasession.ConsumerSessionsMap{
-				"provider1": &lavasession.SessionInfo{},
-				"provider2": &lavasession.SessionInfo{},
-				"provider3": &lavasession.SessionInfo{},
+			usedProviders.AddUsed(routersession.ConsumerSessionsMap{
+				"provider1": &routersession.SessionInfo{},
+				"provider2": &routersession.SessionInfo{},
+				"provider3": &routersession.SessionInfo{},
 			}, nil)
 
 			// All providers return different data (none meet threshold)
@@ -1893,7 +1894,7 @@ func TestCrossValidationMaxParticipantsLimit(t *testing.T) {
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 
 	// Valid case: MaxParticipants <= MaxCallsPerRelay
 	cvParams := &common.CrossValidationParams{
@@ -1930,7 +1931,7 @@ func TestCrossValidationRequiresNonNilParams(t *testing.T) {
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 
 	// Stateless mode with nil params should work
 	statelessProcessor := NewRelayProcessor(
@@ -1999,7 +2000,7 @@ func TestHasRequiredNodeResults_RelayRetryLimit(t *testing.T) {
 			chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 			relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateless))
 
 			// Send node errors one at a time, each in its own batch
@@ -2010,7 +2011,7 @@ func TestHasRequiredNodeResults_RelayRetryLimit(t *testing.T) {
 				require.NoError(t, ctx.Err())
 				require.Nil(t, canUse)
 				cancel()
-				consumerSessionsMap := lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{}}
+				consumerSessionsMap := routersession.ConsumerSessionsMap{provider: &routersession.SessionInfo{}}
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 
 				go SendNodeError(relayProcessor, provider, 0)
@@ -2081,7 +2082,7 @@ func TestHasRequiredNodeResults_RelayRetryLimitProtocolError(t *testing.T) {
 			chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 			relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateless))
 
 			// Send protocol errors one at a time, each in its own batch
@@ -2092,7 +2093,7 @@ func TestHasRequiredNodeResults_RelayRetryLimitProtocolError(t *testing.T) {
 				require.NoError(t, ctx.Err())
 				require.Nil(t, canUse)
 				cancel()
-				consumerSessionsMap := lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{}}
+				consumerSessionsMap := routersession.ConsumerSessionsMap{provider: &routersession.SessionInfo{}}
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 
 				go SendProtocolError(relayProcessor, provider, 0, fmt.Errorf("protocol error %d", i))
@@ -2167,7 +2168,7 @@ func TestHasRequiredNodeResults_RelayRetryLimitMixed(t *testing.T) {
 			chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 			relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateless))
 
 			totalErrors := tc.nodeErrorsToSend + tc.protocolErrorsToSend
@@ -2179,7 +2180,7 @@ func TestHasRequiredNodeResults_RelayRetryLimitMixed(t *testing.T) {
 				require.NoError(t, ctx.Err())
 				require.Nil(t, canUse)
 				cancel()
-				consumerSessionsMap := lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{}}
+				consumerSessionsMap := routersession.ConsumerSessionsMap{provider: &routersession.SessionInfo{}}
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 
 				if i < tc.nodeErrorsToSend {
@@ -2223,7 +2224,7 @@ func TestCrossValidationAgreesOnDifferentKeyOrder(t *testing.T) {
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	cvParams := &common.CrossValidationParams{
 		AgreementThreshold: 2,
 		MaxParticipants:    2,
@@ -2237,9 +2238,9 @@ func TestCrossValidationAgreesOnDifferentKeyOrder(t *testing.T) {
 		newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation),
 	)
 
-	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{
-		"lavagateway": &lavasession.SessionInfo{},
-		"tatum1":      &lavasession.SessionInfo{},
+	usedProviders.AddUsed(routersession.ConsumerSessionsMap{
+		"lavagateway": &routersession.SessionInfo{},
+		"tatum1":      &routersession.SessionInfo{},
 	}, nil)
 
 	// Same result value, byte-different envelopes (key order differs).

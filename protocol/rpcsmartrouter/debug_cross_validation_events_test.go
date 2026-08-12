@@ -21,18 +21,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/stretchr/testify/require"
 )
 
 // useCrossValidationEventRing installs a fresh ring for one test and removes it afterwards, so the
@@ -283,7 +284,7 @@ func newCrossValidationEventTestServer(t *testing.T) (*RPCSmartRouterServer, cha
 	cs.SetLatestBlock(1_000_000)
 	return &RPCSmartRouterServer{
 		smartRouterEndpointMetrics: mm,
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainParser:                chainParser,
 		chainState:                 cs,
 	}, chainParser
@@ -405,7 +406,7 @@ func TestCrossValidationEvents_StragglerPathRecords(t *testing.T) {
 			common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
 			common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
 		}, nil, "dapp", "1.2.3.4")
-		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(baseCtx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(baseCtx, routersession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
 		require.NoError(t, smErr)
 		rp := relaycore.NewRelayProcessor(baseCtx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, sm)
 		rp.SetCrossValidationQueriedProviders([]string{"p1", "p2", "p3"})

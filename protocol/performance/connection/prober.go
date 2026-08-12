@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"math/rand"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 type Prober struct {
@@ -23,7 +24,7 @@ func NewProber(addrss string) *Prober {
 }
 
 func createConnection(ctx context.Context, address string) (pairingtypes.RelayerClient, *grpc.ClientConn, error) {
-	cswp := lavasession.ConsumerSessionsWithProvider{}
+	cswp := routersession.ConsumerSessionsWithProvider{}
 	return cswp.ConnectRawClientWithTimeout(ctx, address)
 }
 

@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/spf13/cobra"
+
 	"github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/protocol/performance/connection"
 	"github.com/magma-Devs/smart-router/protocol/rpcsmartrouter"
 	"github.com/magma-Devs/smart-router/version"
-	"github.com/spf13/cobra"
 )
 
 func main() {

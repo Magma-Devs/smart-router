@@ -23,11 +23,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/stretchr/testify/require"
 )
 
 // pollNowConn answers the two ETH poll requests (eth_blockNumber and eth_getBlockByNumber) from a
@@ -43,7 +44,7 @@ type pollNowConn struct {
 	delayNanos atomic.Int64
 }
 
-func (c *pollNowConn) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*lavasession.DirectRPCResponse, error) {
+func (c *pollNowConn) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*routersession.DirectRPCResponse, error) {
 	if delay := time.Duration(c.delayNanos.Load()); delay > 0 {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
@@ -58,19 +59,19 @@ func (c *pollNowConn) SendRequest(ctx context.Context, data []byte, headers map[
 	}
 	request := string(data)
 	if strings.Contains(request, "eth_getBlockByNumber") {
-		return &lavasession.DirectRPCResponse{
+		return &routersession.DirectRPCResponse{
 			Data:       []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"hash":"0x%064x"}}`, requestedBlockOf(request))),
 			StatusCode: 200,
 		}, nil
 	}
-	return &lavasession.DirectRPCResponse{
+	return &routersession.DirectRPCResponse{
 		Data:       []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":"0x%x"}`, c.block.Load())),
 		StatusCode: 200,
 	}, nil
 }
 
-func (c *pollNowConn) GetProtocol() lavasession.DirectRPCProtocol {
-	return lavasession.DirectRPCProtocolHTTP
+func (c *pollNowConn) GetProtocol() routersession.DirectRPCProtocol {
+	return routersession.DirectRPCProtocolHTTP
 }
 func (c *pollNowConn) Close() error                { return nil }
 func (c *pollNowConn) GetURL() string              { return c.url }
@@ -115,7 +116,7 @@ func newPollNowMonitor(t *testing.T, ctx context.Context, url string, startBlock
 
 	conn := &pollNowConn{url: url}
 	conn.block.Store(startBlock)
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker(&routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -264,7 +265,7 @@ func TestEndpointMonitor_PollNow_TrackerNotPolling_NamesTheState(t *testing.T) {
 	const url = "http://eth-pollnow-dead:8545"
 	conn := &pollNowConn{url: url}
 	conn.fail.Store(true) // every fetch fails → init never completes → no poll goroutine
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker(&routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	triggerCtx, triggerCancel := context.WithTimeout(ctx, 300*time.Millisecond)

@@ -11,14 +11,15 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/dynamic"
+	"google.golang.org/grpc"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
-	"google.golang.org/grpc"
 )
 
 // grpcActiveSubscription holds state for an active upstream gRPC stream
@@ -107,7 +108,7 @@ type DirectGRPCSubscriptionManager struct {
 	// Written in createNewSubscription only after the upstream connection is
 	// established, so a primary that fails to connect doesn't pin the client
 	// and prevent the cascade from reaching the backup tier.
-	stickyStore *lavasession.StickySessionStore
+	stickyStore *routersession.StickySessionStore
 
 	// Total subscription counter
 	totalSubscriptions atomic.Int64
@@ -156,7 +157,7 @@ func NewDirectGRPCSubscriptionManager(
 		optimizer:            optimizer,
 		config:               config,
 		rateLimiter:          NewGRPCClientRateLimiter(config),
-		stickyStore:          lavasession.NewStickySessionStore(),
+		stickyStore:          routersession.NewStickySessionStore(),
 		clientSubscriptions:  make(map[string]map[string]struct{}),
 		ctx:                  ctx,
 		cancel:               cancel,
@@ -496,7 +497,7 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	// Connection established — pin client to this endpoint for future
 	// subscriptions. Mirrors DirectWSSubscriptionManager.startUpstreamSubscription
 	// (Epoch is unused for direct RPC — there's no provider rotation).
-	dgm.stickyStore.Set(clientKey, &lavasession.StickySession{
+	dgm.stickyStore.Set(clientKey, &routersession.StickySession{
 		Provider: endpoint.Url,
 		Epoch:    0,
 	})

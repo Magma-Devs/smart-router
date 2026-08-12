@@ -17,8 +17,8 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"github.com/magma-Devs/smart-router/utils/maps"
+	"github.com/magma-Devs/smart-router/utils/sliceutil"
 )
 
 var (
@@ -354,7 +354,7 @@ func (bcp *BaseChainParser) IsTagInCollection(tag spectypes.FUNCTION_TAG, collec
 	defer bcp.rwLock.RUnlock()
 
 	apiCollection, ok := bcp.apiCollections[collectionKey]
-	return ok && lavaslices.ContainsPredicate(apiCollection.ParseDirectives, func(elem *spectypes.ParseDirective) bool {
+	return ok && sliceutil.ContainsPredicate(apiCollection.ParseDirectives, func(elem *spectypes.ParseDirective) bool {
 		return elem.FunctionTag == tag
 	})
 }
@@ -362,7 +362,7 @@ func (bcp *BaseChainParser) IsTagInCollection(tag spectypes.FUNCTION_TAG, collec
 func (bcp *BaseChainParser) GetAllInternalPaths() []string {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
-	return lavaslices.Map(maps.ValuesSlice(bcp.internalPaths), func(internalPath InternalPath) string {
+	return sliceutil.Map(maps.ValuesSlice(bcp.internalPaths), func(internalPath InternalPath) string {
 		return internalPath.Path
 	})
 }

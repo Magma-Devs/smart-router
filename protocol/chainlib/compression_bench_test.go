@@ -9,8 +9,9 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // SMARTROUTER_BENCH_HUGE=1 opts into the huge_* payload buckets (128 MB / 1 GB).

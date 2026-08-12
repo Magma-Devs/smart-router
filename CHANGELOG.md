@@ -23,7 +23,7 @@ Smart Router v1.3.2 expands operator visibility by introducing two new endpoints
 #### Bug fixes
 - fix(smart-router/debug): never report an unwitnessed poll as a completed one (MAG-2649 review) ([#258]) [`2161fd2`]
 - fix(smart-router/debug): name the chains that produced no scores (MAG-2707 review) ([#259]) [`0d0c32a`]
-- fix(lavasession): let a spec content-type override the direct-RPC default (MAG-2744) ([#268]) [`0a0d287`]
+- fix(routersession): let a spec content-type override the direct-RPC default (MAG-2744) ([#268]) [`0a0d287`]
 
 #### Documentation updates
 - docs(smart-router/debug): correct /debug/poll-now's 504 semantics (MAG-2649 review) ([#258]) [`dcb916d`]
@@ -109,7 +109,7 @@ Smart Router v1.3.0 overhauls chain state consistency by replacing per-user bloc
 - fix(rpcsmartrouter): report CV stragglers as pending + compare late responses async (MAG-2187) ([#212]) [`816efce`]
 - fix(smart-router/debug): review feedback on reset-chaintracker-rows (MAG-2395) ([#223]) [`499c728`]
 - fix(rpcsmartrouter): wire /debug/time-warp into ChainState TTL/staleness (MAG-2307) ([#222]) [`c011a80`]
-- fix(lavasession): give each router key its own unwanted set (MAG-2442) ([#221]) [`b73bd69`]
+- fix(routersession): give each router key its own unwanted set (MAG-2442) ([#221]) [`b73bd69`]
 - fix(rpcsmartrouter): dedicated ChainState time-warp endpoint + real-clock timestamps (MAG-2307 review) ([#224]) [`b75d68b`]
 - fix(rpcsmartrouter): address PR #224 review — distinct response field, reset-all test, doc note (MAG-2307) ([#224]) [`bf1edab`]
 - fix(consistency): measure endpoints against the guarded chain tip; retire per-user seenBlock ([#225]) [`969c076`]
@@ -456,7 +456,7 @@ Smart Router v1.0.3 introduces two breaking changes that require immediate opera
 - fix(smart-router/health): stop gating selection on the per-socket isHealthy bit ([#100]) [`e868552`]
 - refactor(smart-router/health): rip out the dead per-socket healthy bit & its debug reset ([#100]) [`4f5f208`]
 - fix(smart-router/health): guard against a nil direct-connection element ([#100]) [`39bbe65`]
-- fix(protocol/lavasession): increase max consecutive connection attempts from 5 to 50 ([#100]) [`1c67b2f`]
+- fix(protocol/routersession): increase max consecutive connection attempts from 5 to 50 ([#100]) [`1c67b2f`]
 - fix(cross-validation): address Phase 0/1.1 review findings ([#102]) [`5d2cff8`]
 - fix(cross-validation): tighten min-groups capacity, float parsing, guard fail-closed ([#102]) [`6bab82c`]
 - fix(cross-validation): diverse-quorum selection, post-filter capacity, failure reason ([#102]) [`ae4c7ba`]
@@ -473,7 +473,7 @@ Smart Router v1.0.3 introduces two breaking changes that require immediate opera
 - fix(relaycore): canonicalize response before cross-validation hashing ([#102]) [`b154d8b`]
 - refactor(cross-validation): drop intPtr helper for Go 1.26 new(expr) ([#102]) [`22e51f9`]
 - refactor(cross-validation): extract default group label into a constant ([#102]) [`8daa448`]
-- refactor(lavasession): name the group-blind selection sentinels ([#102]) [`f030eca`]
+- refactor(routersession): name the group-blind selection sentinels ([#102]) [`f030eca`]
 - refactor(relaycore): name the no-cross-validation default knob value ([#102]) [`c81a8b5`]
 - refactor(relaycore): extract selectQuorumWinner with unit tests ([#102]) [`1b929b0`]
 - refactor(rpcsmartrouter): require integer cross-validation knobs ([#102]) [`5984395`]
@@ -490,7 +490,7 @@ Smart Router v1.0.3 introduces two breaking changes that require immediate opera
 - docs(cross-validation): tighten outlier-behavior accuracy ([#102]) [`6aaef2e`]
 - docs(metrics): note structural fail-fasts in CV requests/failed totals ([#102]) [`e1a994f`]
 - docs(relaycore): name common.DefaultProviderGroup in group-folding comments ([#102]) [`df053f3`]
-- docs(lavasession,rpcsmartrouter): name common.DefaultProviderGroup in group comments ([#102]) [`ba03abc`]
+- docs(routersession,rpcsmartrouter): name common.DefaultProviderGroup in group comments ([#102]) [`ba03abc`]
 
 #### Build process updates
 - ci: validate PR artifact on dev-sim-prtests ([#123]) [`fe45489`]
@@ -616,7 +616,7 @@ Smart Router v1.0.2 transitions telemetry to an OpenTelemetry usage pipeline, re
 - refactor: remove standalone dead code (unreachable funcs) [`a8cca59`]
 - refactor(common): remove zero-reference dead helpers [`29c0890`]
 - fix(chaintracker): read polling-relief flags after config-file load [`3a811bc`]
-- fix(lavasession): renew provider second chance after proven recovery [`69491ec`]
+- fix(routersession): renew provider second chance after proven recovery [`69491ec`]
 - fix(relaycore): canonicalize response before cross-validation hashing [`60826c1`]
 
 #### Documentation updates

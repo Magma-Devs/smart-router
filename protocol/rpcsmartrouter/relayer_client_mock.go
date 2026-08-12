@@ -6,10 +6,11 @@ import (
 	context "context"
 	reflect "reflect"
 
-	types "github.com/magma-Devs/smart-router/types/relay"
 	gomock "go.uber.org/mock/gomock"
 	grpc "google.golang.org/grpc"
 	metadata "google.golang.org/grpc/metadata"
+
+	types "github.com/magma-Devs/smart-router/types/relay"
 )
 
 // MockRelayerClient is a mock of RelayerClient interface.

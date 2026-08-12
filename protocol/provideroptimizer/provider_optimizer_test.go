@@ -9,12 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/magma-Devs/smart-router/utils/score"
-	"github.com/stretchr/testify/require"
+	"github.com/magma-Devs/smart-router/utils/sliceutil"
 )
 
 func init() {
@@ -716,7 +717,7 @@ func TestProviderOptimizerRetriesWithReducedProvidersSet(t *testing.T) {
 	highStakeProviderIndexes := []int{1, 3, 5}
 	weights := map[string]int64{}
 	for i := 0; i < providersCount; i++ {
-		if lavaslices.Contains(highStakeProviderIndexes, i) {
+		if sliceutil.Contains(highStakeProviderIndexes, i) {
 			weights[providersGen.providersAddresses[i]] = highStake
 		} else {
 			weights[providersGen.providersAddresses[i]] = normalStake

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/grafana/pyroscope-go"
+
 	"github.com/magma-Devs/smart-router/utils"
 )
 

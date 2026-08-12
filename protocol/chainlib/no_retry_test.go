@@ -4,8 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 func TestShouldRetryError(t *testing.T) {

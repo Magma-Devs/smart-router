@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 )
 
 // togglableFailFetcher wraps MockChainFetcher and starts failing its fetches once fail is set, so a

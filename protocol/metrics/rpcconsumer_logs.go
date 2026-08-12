@@ -13,10 +13,11 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
 	"github.com/joho/godotenv"
-	"github.com/magma-Devs/smart-router/protocol/parser"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/newrelic/go-agent/v3/newrelic"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 var ReturnMaskedErrors = "false"

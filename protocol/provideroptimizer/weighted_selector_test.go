@@ -8,8 +8,9 @@ import (
 	"testing"
 	"time"
 
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
+
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
 // Helper function to create a QoS report

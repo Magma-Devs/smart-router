@@ -11,7 +11,7 @@ import (
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
-	slices "github.com/magma-Devs/smart-router/utils/lavaslices"
+	slices "github.com/magma-Devs/smart-router/utils/sliceutil"
 )
 
 type RetryHashCacheInf interface {

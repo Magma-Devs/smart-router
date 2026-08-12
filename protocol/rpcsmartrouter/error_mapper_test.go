@@ -6,10 +6,11 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 func TestClassifyDirectRPCError_Nil(t *testing.T) {

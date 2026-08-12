@@ -3,9 +3,10 @@ package metrics
 import (
 	"sync"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 var errorMetricsOnce sync.Once

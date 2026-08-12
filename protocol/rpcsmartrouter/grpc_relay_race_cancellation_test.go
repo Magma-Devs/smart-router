@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // grpcRaceLoserError is the shape handleGRPCError returns once the router
@@ -74,10 +74,10 @@ func TestGRPCRaceLoser_SurvivesClassification(t *testing.T) {
 func TestGRPCStatusError_IsNeverReadAsLocalCancellation(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		err  *lavasession.GRPCStatusError
+		err  *routersession.GRPCStatusError
 	}{
-		{"canceled", &lavasession.GRPCStatusError{Code: 1, Message: "context canceled"}},
-		{"deadline", &lavasession.GRPCStatusError{Code: 4, Message: "context deadline exceeded"}},
+		{"canceled", &routersession.GRPCStatusError{Code: 1, Message: "context canceled"}},
+		{"deadline", &routersession.GRPCStatusError{Code: 4, Message: "context deadline exceeded"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Contains(t, strings.ToLower(tc.err.Error()), "rpc error",
@@ -150,7 +150,7 @@ func TestRemoteStatusGuard_AppliesAcrossTransports(t *testing.T) {
 		// The discriminating case: contains "rpc error" but NOT "rpc error: code =".
 		// The two cases above pass under EITHER guard width, so this is the only one
 		// that detects a widening — and it does so on a non-gRPC transport, which is
-		// the reach this test exists to pin. lavasession.GRPCStatusError's rendering
+		// the reach this test exists to pin. routersession.GRPCStatusError's rendering
 		// ("gRPC error 1: ...") is the concrete real-world instance of that string
 		// class, and it denotes a status the endpoint reported.
 		t.Run(transport.String()+"/bare-rpc-error-substring-still-excluded", func(t *testing.T) {

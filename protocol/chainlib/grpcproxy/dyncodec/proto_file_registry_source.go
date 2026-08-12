@@ -5,10 +5,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // This is the ProtoFileRegistry half of descriptor-source selection. The grpcurl

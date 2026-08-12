@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
 )
 
 func TestNewNoOpWSSubscriptionManager(t *testing.T) {

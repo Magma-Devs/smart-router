@@ -15,12 +15,13 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
+	emptypb "google.golang.org/protobuf/types/known/emptypb"
+
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	relaytypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
-	emptypb "google.golang.org/protobuf/types/known/emptypb"
+	"github.com/magma-Devs/smart-router/utils/sliceutil"
 )
 
 var (
@@ -218,7 +219,7 @@ func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relayt
 		waitGroup.Wait()
 
 		if err == nil {
-			if cacheReply.SeenBlock < lavaslices.Min([]int64{relayCacheGet.SeenBlock, relayCacheGet.RequestedBlock}) {
+			if cacheReply.SeenBlock < sliceutil.Min([]int64{relayCacheGet.SeenBlock, relayCacheGet.RequestedBlock}) {
 				err = utils.FormatDebug("reply seen block is smaller than our expectations",
 					utils.LogAttr("cacheReply.SeenBlock", cacheReply.SeenBlock),
 					utils.LogAttr("seenBlock", relayCacheGet.SeenBlock),
@@ -365,7 +366,7 @@ func (s *RelayerCacheServer) SetRelay(ctx context.Context, relayCacheSet *relayt
 	if relayCacheSet.Finalized {
 		cache := s.CacheServer.finalizedCache
 		if relayCacheSet.IsNodeError {
-			nodeErrorExpiration := lavaslices.Min([]time.Duration{time.Duration(relayCacheSet.AverageBlockTime), s.CacheServer.ExpirationNodeErrors})
+			nodeErrorExpiration := sliceutil.Min([]time.Duration{time.Duration(relayCacheSet.AverageBlockTime), s.CacheServer.ExpirationNodeErrors})
 			cache.SetWithTTL(string(cacheKey), cacheValue, cacheValue.Cost(), nodeErrorExpiration)
 		} else {
 			cache.SetWithTTL(string(cacheKey), cacheValue, cacheValue.Cost(), s.CacheServer.ExpirationFinalized)

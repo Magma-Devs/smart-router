@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
+
 	"github.com/magma-Devs/smart-router/utils"
 )
 

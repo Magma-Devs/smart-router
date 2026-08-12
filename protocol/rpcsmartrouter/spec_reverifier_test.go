@@ -6,32 +6,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/stretchr/testify/require"
 )
 
-func makeSession(name string) *lavasession.ConsumerSessionsWithProvider {
-	return lavasession.NewConsumerSessionWithProvider(name, nil, 1, 1, 0)
+func makeSession(name string) *routersession.ConsumerSessionsWithProvider {
+	return routersession.NewConsumerSessionWithProvider(name, nil, 1, 1, 0)
 }
 
-func makeProvider(name string) *lavasession.RPCStaticProviderEndpoint {
-	return &lavasession.RPCStaticProviderEndpoint{Name: name, ApiInterface: "rest"}
+func makeProvider(name string) *routersession.RPCStaticProviderEndpoint {
+	return &routersession.RPCStaticProviderEndpoint{Name: name, ApiInterface: "rest"}
 }
 
 // fakeConvert mimics the closure built in CreateSmartRouterEndpoint: turn a
 // list of providers into a session map. Used only by the promote path.
-func fakeConvert(p []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-	out := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+func fakeConvert(p []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
+	out := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 	for i, ep := range p {
 		out[uint64(i)] = makeSession(ep.Name)
 	}
 	return out
 }
 
-func collectNames(m map[uint64]*lavasession.ConsumerSessionsWithProvider) map[string]struct{} {
+func collectNames(m map[uint64]*routersession.ConsumerSessionsWithProvider) map[string]struct{} {
 	out := map[string]struct{}{}
 	for _, s := range m {
 		out[s.PublicLavaAddress] = struct{}{}
@@ -56,7 +57,7 @@ func withImmediateDemote(t *testing.T) {
 
 func TestApplyReverification(t *testing.T) {
 	withImmediateDemote(t)
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
 
 	tests := []struct {
 		name        string
@@ -122,14 +123,14 @@ func TestApplyReverification(t *testing.T) {
 
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fresh := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
-			freshByName := map[string]*lavasession.ConsumerSessionsWithProvider{}
+			fresh := map[uint64]*routersession.ConsumerSessionsWithProvider{}
+			freshByName := map[string]*routersession.ConsumerSessionsWithProvider{}
 			for j, n := range tt.fresh {
 				s := makeSession(n)
 				fresh[uint64(j)] = s
 				freshByName[n] = s
 			}
-			configured := make([]*lavasession.RPCStaticProviderEndpoint, len(tt.configured))
+			configured := make([]*routersession.RPCStaticProviderEndpoint, len(tt.configured))
 			for j, n := range tt.configured {
 				configured[j] = makeProvider(n)
 			}
@@ -137,14 +138,14 @@ func TestApplyReverification(t *testing.T) {
 			// Track what convertProvidersToSessions is called with — promotions must
 			// flow through it; survivors must not.
 			var convertCalls []string
-			convert := func(p []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+			convert := func(p []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
 				for _, ep := range p {
 					convertCalls = append(convertCalls, ep.Name)
 				}
 				return fakeConvert(p)
 			}
 
-			validate := func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+			validate := func(_ context.Context, p *routersession.RPCStaticProviderEndpoint) error {
 				if tt.failing[p.Name] {
 					return errors.New("mock failure")
 				}
@@ -179,7 +180,7 @@ func TestApplyReverification(t *testing.T) {
 			for _, n := range tt.wantAdmits {
 				admits[n] = struct{}{}
 			}
-			gotByName := map[string]*lavasession.ConsumerSessionsWithProvider{}
+			gotByName := map[string]*routersession.ConsumerSessionsWithProvider{}
 			for _, s := range got {
 				gotByName[s.PublicLavaAddress] = s
 			}
@@ -203,12 +204,12 @@ func TestApplyReverification(t *testing.T) {
 // with reverifyTierBackup. The static path is exercised by the table tests
 // above; this ensures the discriminator actually routes.
 func TestApplyReverification_BackupTierReadsBackupList(t *testing.T) {
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
-	staticOnly := []*lavasession.RPCStaticProviderEndpoint{makeProvider("S")}
-	backupOnly := []*lavasession.RPCStaticProviderEndpoint{makeProvider("B")}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
+	staticOnly := []*routersession.RPCStaticProviderEndpoint{makeProvider("S")}
+	backupOnly := []*routersession.RPCStaticProviderEndpoint{makeProvider("B")}
 
 	var calls []string
-	validate := func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+	validate := func(_ context.Context, p *routersession.RPCStaticProviderEndpoint) error {
 		calls = append(calls, p.Name)
 		return nil
 	}
@@ -221,12 +222,12 @@ func TestApplyReverification_BackupTierReadsBackupList(t *testing.T) {
 		validateFn:                 validate,
 	}
 
-	_, _, _ = applyReverification(context.Background(), inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{}, reverifyTierBackup, 1)
+	_, _, _ = applyReverification(context.Background(), inputs, map[uint64]*routersession.ConsumerSessionsWithProvider{}, reverifyTierBackup, 1)
 	require.Equal(t, []string{"B"}, calls, "backup tier must validate the backup list")
 }
 
 func TestByName(t *testing.T) {
-	sessions := map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	sessions := map[uint64]*routersession.ConsumerSessionsWithProvider{
 		3: makeSession("X"),
 		7: makeSession("Y"),
 	}
@@ -255,7 +256,7 @@ func TestValidateProvider_SmokeWiring(t *testing.T) {
 	require.NoError(t, err)
 	parser.SetSpec(spectypes.Spec{})
 
-	provider := &lavasession.RPCStaticProviderEndpoint{
+	provider := &routersession.RPCStaticProviderEndpoint{
 		ChainID:      "TEST",
 		ApiInterface: "rest",
 		NodeUrls:     []common.NodeUrl{{Url: "http://127.0.0.1:1"}},
@@ -287,8 +288,8 @@ func TestValidateProvider_SmokeWiring(t *testing.T) {
 // back after the eventual promote either. Validate's own 3x retry does not help: those attempts
 // run back-to-back with no delay, so all three land inside the same outage.
 func TestApplyReverification_DemoteHysteresis(t *testing.T) {
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
-	configured := []*lavasession.RPCStaticProviderEndpoint{makeProvider("A"), makeProvider("B")}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
+	configured := []*routersession.RPCStaticProviderEndpoint{makeProvider("A"), makeProvider("B")}
 
 	// One inputs value reused across cycles — demoteFailStreak living there is exactly what
 	// carries the failure count from one epoch tick to the next.
@@ -297,7 +298,7 @@ func TestApplyReverification_DemoteHysteresis(t *testing.T) {
 		rpcEndpoint:                rpc,
 		convertProvidersToSessions: fakeConvert,
 		configuredStatic:           configured,
-		validateFn: func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+		validateFn: func(_ context.Context, p *routersession.RPCStaticProviderEndpoint) error {
 			if failing[p.Name] {
 				return errors.New("mock outage")
 			}
@@ -308,7 +309,7 @@ func TestApplyReverification_DemoteHysteresis(t *testing.T) {
 	// cycle runs one epoch tick over a pairing containing exactly `present`, and reports which
 	// providers survived and which were demoted.
 	cycle := func(epoch uint64, present ...string) (survived map[string]struct{}, demoted []string) {
-		fresh := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+		fresh := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 		for i, n := range present {
 			fresh[uint64(i)] = makeSession(n)
 		}
@@ -351,15 +352,15 @@ func TestApplyReverification_DemoteHysteresis(t *testing.T) {
 // is never demoted by accumulation. Separated from the walk above because it pins the reset rule
 // specifically: without the delete-on-success the two failures would sum to the threshold.
 func TestApplyReverification_SuccessResetsDemoteStreak(t *testing.T) {
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
-	configured := []*lavasession.RPCStaticProviderEndpoint{makeProvider("A")}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
+	configured := []*routersession.RPCStaticProviderEndpoint{makeProvider("A")}
 
 	var fail bool
 	inputs := &chainReverifyInputs{
 		rpcEndpoint:                rpc,
 		convertProvidersToSessions: fakeConvert,
 		configuredStatic:           configured,
-		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+		validateFn: func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 			if fail {
 				return errors.New("mock outage")
 			}
@@ -368,7 +369,7 @@ func TestApplyReverification_SuccessResetsDemoteStreak(t *testing.T) {
 	}
 
 	run := func(epoch uint64) map[string]struct{} {
-		fresh := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("A")}
+		fresh := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession("A")}
 		got, _, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
 		return collectNames(got)
 	}

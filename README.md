@@ -399,7 +399,7 @@ cmd/smartrouter/    — Standalone Smart Router binary
 protocol/           — Core protocol implementation
   chainlib/         — Chain-specific parsers and proxies
   rpcsmartrouter/   — Smart router server and relay logic
-  lavasession/      — Session and connection management
+  routersession/      — Session and connection management
   provideroptimizer/ — QoS-based upstream selection
   relaycore/        — Relay processing pipeline
   metrics/          — Prometheus metrics

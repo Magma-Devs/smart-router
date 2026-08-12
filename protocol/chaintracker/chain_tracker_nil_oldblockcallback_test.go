@@ -6,9 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // timeoutChainFetcher is a minimal ChainFetcher whose latest-block fetch always
@@ -32,8 +33,8 @@ func (timeoutChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int
 	return "", nil
 }
 
-func (timeoutChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+func (timeoutChainFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
 
 func (timeoutChainFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {

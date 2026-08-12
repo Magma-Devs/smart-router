@@ -9,17 +9,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestDirectRPCRelaySender_SendDirectRelay(t *testing.T) {
@@ -40,7 +41,7 @@ func TestDirectRPCRelaySender_SendDirectRelay(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 	require.NotNil(t, directConn)
 
@@ -104,7 +105,7 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 		defer mockServer.Close()
 
 		ctx := context.Background()
-		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 		require.NoError(t, err)
 
 		sender := &DirectRPCRelaySender{
@@ -128,7 +129,7 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 		defer mockServer.Close()
 
 		ctx := context.Background()
-		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 		require.NoError(t, err)
 
 		sender := &DirectRPCRelaySender{
@@ -154,7 +155,7 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 		defer mockServer.Close()
 
 		ctx := context.Background()
-		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 		require.NoError(t, err)
 
 		sender := &DirectRPCRelaySender{
@@ -182,7 +183,7 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 		defer mockServer.Close()
 
 		ctx := context.Background()
-		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 		require.NoError(t, err)
 
 		sender := &DirectRPCRelaySender{
@@ -217,7 +218,7 @@ func TestDirectRPCRelaySender_SendDirectRelay_Timeout(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	// Create sender
@@ -250,7 +251,7 @@ func TestDirectRPCRelaySender_SendDirectRelay_ServerError(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	// Create sender
@@ -325,7 +326,7 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666(t *testi
 			ctx := context.Background()
 			nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+			directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 			require.NoError(t, err)
 
 			sender := &DirectRPCRelaySender{
@@ -374,7 +375,7 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixSkippedOn2xx(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -469,7 +470,7 @@ func TestDirectRPCRelaySender_HTTPStatusOverridesRetryableBodyCode_MAG1870(t *te
 			ctx := context.Background()
 			nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+			directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 			require.NoError(t, err)
 
 			sender := &DirectRPCRelaySender{
@@ -531,7 +532,7 @@ func TestDirectRPCRelaySender_SendDirectRelay_BatchRequest(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 	require.NotNil(t, directConn)
 
@@ -584,26 +585,26 @@ func TestDirectRPCSession_IsDirectRPC(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	// Create parent ConsumerSessionsWithProvider with endpoint
-	cswp := &lavasession.ConsumerSessionsWithProvider{
+	cswp := &routersession.ConsumerSessionsWithProvider{
 		PublicLavaAddress: "test-direct-endpoint",
 		PairingEpoch:      100,
-		Endpoints: []*lavasession.Endpoint{
+		Endpoints: []*routersession.Endpoint{
 			{
 				NetworkAddress:    mockServer.URL,
 				Enabled:           true,
-				DirectConnections: []lavasession.DirectRPCConnection{directConn},
+				DirectConnections: []routersession.DirectRPCConnection{directConn},
 			},
 		},
 	}
 
 	// Create DirectRPCSessionConnection (smart router session)
-	session := &lavasession.SingleConsumerSession{
+	session := &routersession.SingleConsumerSession{
 		Parent: cswp,
-		Connection: &lavasession.DirectRPCSessionConnection{
+		Connection: &routersession.DirectRPCSessionConnection{
 			DirectConnection: directConn,
 			EndpointAddress:  mockServer.URL,
 		},
@@ -723,9 +724,11 @@ func (m *mockChainMessage) GetApiCollection() *spectypes.ApiCollection {
 
 // Implement remaining ChainMessage interface methods (stubs for testing)
 func (m *mockChainMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string { return "" }
+
 func (m *mockChainMessage) RequestedBlock() (latest int64, earliest int64) {
 	return m.requestedBlock, m.requestedBlock
 }
+
 func (m *mockChainMessage) UpdateLatestBlockInMessage(latestBlock int64, modifyContent bool) bool {
 	return false
 }

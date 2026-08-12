@@ -11,15 +11,16 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestTendermintChainParser_Spec(t *testing.T) {
@@ -430,7 +431,7 @@ func startTestTendermintListener(t *testing.T, ctx context.Context) (*Tendermint
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	endpoint := &lavasession.RPCEndpoint{
+	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "COS5",
 		ApiInterface:    "tendermintrpc",

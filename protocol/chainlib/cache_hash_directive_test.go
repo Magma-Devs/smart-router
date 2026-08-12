@@ -3,10 +3,11 @@ package chainlib
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/stretchr/testify/require"
 )
 
 // TestHashCacheRequestExplicitExtensionDirectiveSeparatesLane is the regression guard for the

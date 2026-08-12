@@ -12,7 +12,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // SmartRouterTracerName is the OTel instrumentation scope name used for all
@@ -222,7 +222,7 @@ func RecordHTTPRequest(span trace.Span, method, urlStr string) {
 // RecordHTTPResponse records `http.status_code` and
 // `http.response_content_length` on a client HTTP span. Skipped when
 // response is nil (transport error before a response was received).
-func RecordHTTPResponse(span trace.Span, response *lavasession.HTTPDirectRPCResponse) {
+func RecordHTTPResponse(span trace.Span, response *routersession.HTTPDirectRPCResponse) {
 	if !span.IsRecording() || response == nil {
 		return
 	}
@@ -257,7 +257,7 @@ func RecordGRPCRequest(span trace.Span, methodPath, urlStr string) {
 // a client gRPC span. Skipped when response is nil. We reuse the
 // http.status_code attribute because the SmartRouter's DirectRPCResponse
 // surfaces a unified status field across protocols.
-func RecordGRPCResponse(span trace.Span, response *lavasession.DirectRPCResponse) {
+func RecordGRPCResponse(span trace.Span, response *routersession.DirectRPCResponse) {
 	if !span.IsRecording() || response == nil {
 		return
 	}

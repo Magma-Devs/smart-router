@@ -2,8 +2,10 @@ package metrics
 
 import (
 	"context"
+	"maps"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,11 +14,10 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
+
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
-	"maps"
-	"slices"
 )
 
 // sanitizeFloat returns 0 if the value is NaN or Inf, otherwise returns the value

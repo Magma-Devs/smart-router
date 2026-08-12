@@ -6,8 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	types "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
+
+	types "github.com/magma-Devs/smart-router/types/spec"
 )
 
 func TestGetAllSpecsFromFile(t *testing.T) {

@@ -4,11 +4,12 @@ import (
 	"context"
 	"io"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	reflectionpb "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 	"google.golang.org/grpc/status"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // ReflectionProxyCallback is a function that creates a reflection client for proxying.

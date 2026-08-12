@@ -15,9 +15,10 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
 	websocket2 "github.com/gorilla/websocket"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 type WebSocketError struct {

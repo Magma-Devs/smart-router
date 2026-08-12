@@ -7,13 +7,14 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/stretchr/testify/require"
 )
 
 // MAG-2550 — the recovery-probe pair: recordRelayProbeEvidence (relay path, eligibility) and
@@ -39,7 +40,7 @@ type relayProbeRecorder struct {
 	timeout  time.Duration
 }
 
-func (r *relayProbeRecorder) probe(ep *lavasession.EndpointWithDirectConnection, method string, payload []byte, relayTimeout time.Duration) relayProbeVerdict {
+func (r *relayProbeRecorder) probe(ep *routersession.EndpointWithDirectConnection, method string, payload []byte, relayTimeout time.Duration) relayProbeVerdict {
 	r.calls++
 	r.method = method
 	r.payload = payload
@@ -66,7 +67,7 @@ func TestProbeCycle_RelayEvidenceGatesReEnableUntilReplayPasses(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	dc := ep("http://ep:8545", "provider1", false)
 	dc.Endpoint.RecordFailingRelay("eth_call", testEvidence, testEvidenceTimeout)
-	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	endpoints := []*routersession.EndpointWithDirectConnection{dc}
 
 	probe := &relayProbeRecorder{verdicts: []relayProbeVerdict{relayProbeRecovered}}
 	runner := syncRunner(probe)
@@ -108,7 +109,7 @@ func TestProbeCycle_FailedReplayKeepsDisabledAndPacesRetries(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	dc := ep("http://ep:8545", "provider1", false)
 	dc.Endpoint.RecordFailingRelay("eth_call", testEvidence, testEvidenceTimeout)
-	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	endpoints := []*routersession.EndpointWithDirectConnection{dc}
 
 	probe := &relayProbeRecorder{verdicts: []relayProbeVerdict{relayProbeStillFailing, relayProbeRecovered}}
 	runner := syncRunner(probe)
@@ -150,7 +151,7 @@ func TestProbeCycle_InconclusiveReplayRetriesAtBaseStreak(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	dc := ep("http://ep:8545", "provider1", false)
 	dc.Endpoint.RecordFailingRelay("eth_call", testEvidence, testEvidenceTimeout)
-	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	endpoints := []*routersession.EndpointWithDirectConnection{dc}
 
 	probe := &relayProbeRecorder{verdicts: []relayProbeVerdict{relayProbeInconclusive, relayProbeRecovered}}
 	runner := syncRunner(probe)
@@ -187,13 +188,13 @@ func TestProbeCycle_AsyncReplayDoesNotBlockTheCycle(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	dc := ep("http://ep:8545", "provider1", false)
 	dc.Endpoint.RecordFailingRelay("eth_call", testEvidence, testEvidenceTimeout)
-	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	endpoints := []*routersession.EndpointWithDirectConnection{dc}
 
 	release := make(chan struct{})
 	var calls atomic.Int32
 	runner := &relayProbeRunner{
 		async: true,
-		probe: func(*lavasession.EndpointWithDirectConnection, string, []byte, time.Duration) relayProbeVerdict {
+		probe: func(*routersession.EndpointWithDirectConnection, string, []byte, time.Duration) relayProbeVerdict {
 			calls.Add(1)
 			<-release
 			return relayProbeRecovered
@@ -257,7 +258,7 @@ func TestProbeCycle_NilRelayProbeFallsBackToPollOnly(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	dc := ep("http://ep:8545", "provider1", false)
 	dc.Endpoint.RecordFailingRelay("eth_call", testEvidence, testEvidenceTimeout)
-	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	endpoints := []*routersession.EndpointWithDirectConnection{dc}
 
 	K := int(probeCfg().ReEnableHysteresis)
 	for i := 1; i <= K; i++ {
@@ -277,35 +278,35 @@ func TestProbeCycle_NilRelayProbeFallsBackToPollOnly(t *testing.T) {
 
 // fakeDirectConn is a scriptable DirectRPCConnection for the replay judge.
 type fakeDirectConn struct {
-	resp       *lavasession.DirectRPCResponse
+	resp       *routersession.DirectRPCResponse
 	err        error
 	gotPayload []byte
 	gotTimeout time.Duration // remaining context budget observed by the request
 }
 
-func (f *fakeDirectConn) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*lavasession.DirectRPCResponse, error) {
+func (f *fakeDirectConn) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*routersession.DirectRPCResponse, error) {
 	f.gotPayload = data
 	if deadline, ok := ctx.Deadline(); ok {
 		f.gotTimeout = time.Until(deadline)
 	}
 	return f.resp, f.err
 }
-func (f *fakeDirectConn) GetProtocol() lavasession.DirectRPCProtocol { return "http" }
-func (f *fakeDirectConn) Close() error                               { return nil }
-func (f *fakeDirectConn) GetURL() string                             { return "http://fake:8545" }
-func (f *fakeDirectConn) GetNodeUrl() *common.NodeUrl                { return nil }
+func (f *fakeDirectConn) GetProtocol() routersession.DirectRPCProtocol { return "http" }
+func (f *fakeDirectConn) Close() error                                 { return nil }
+func (f *fakeDirectConn) GetURL() string                               { return "http://fake:8545" }
+func (f *fakeDirectConn) GetNodeUrl() *common.NodeUrl                  { return nil }
 
 func replayServer() *RPCSmartRouterServer {
 	return &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
 	}
 }
 
 func replayWith(t *testing.T, conn *fakeDirectConn) relayProbeVerdict {
 	t.Helper()
 	rpcss := replayServer()
-	epc := &lavasession.EndpointWithDirectConnection{
-		Endpoint:         &lavasession.Endpoint{NetworkAddress: "http://fake:8545"},
+	epc := &routersession.EndpointWithDirectConnection{
+		Endpoint:         &routersession.Endpoint{NetworkAddress: "http://fake:8545"},
 		DirectConnection: conn,
 		ProviderAddress:  "provider1",
 	}
@@ -323,24 +324,30 @@ func TestReplayFailingRelay_JudgesByHealthClassification(t *testing.T) {
 		conn *fakeDirectConn
 		want relayProbeVerdict
 	}{
-		{"clean 200 result", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}}, relayProbeRecovered},
-		{"5xx still failing", &fakeDirectConn{err: &lavasession.HTTPStatusError{StatusCode: 503, Status: "503"}}, relayProbeStillFailing},
-		{"429 proves nothing", &fakeDirectConn{err: &lavasession.HTTPStatusError{StatusCode: 429, Status: "429"}}, relayProbeInconclusive},
-		{"501 is a capability answer, not a fault", &fakeDirectConn{err: &lavasession.HTTPStatusError{StatusCode: 501, Status: "501"}}, relayProbeRecovered},
-		{"404 proves nothing (auth drift, proxy in the way)", &fakeDirectConn{err: &lavasession.HTTPStatusError{StatusCode: 404, Status: "404"}}, relayProbeInconclusive},
-		{"401 proves nothing", &fakeDirectConn{err: &lavasession.HTTPStatusError{StatusCode: 401, Status: "401"}}, relayProbeInconclusive},
+		{"clean 200 result", &fakeDirectConn{resp: &routersession.DirectRPCResponse{
+			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`),
+		}}, relayProbeRecovered},
+		{"5xx still failing", &fakeDirectConn{err: &routersession.HTTPStatusError{StatusCode: 503, Status: "503"}}, relayProbeStillFailing},
+		{"429 proves nothing", &fakeDirectConn{err: &routersession.HTTPStatusError{StatusCode: 429, Status: "429"}}, relayProbeInconclusive},
+		{"501 is a capability answer, not a fault", &fakeDirectConn{err: &routersession.HTTPStatusError{StatusCode: 501, Status: "501"}}, relayProbeRecovered},
+		{"404 proves nothing (auth drift, proxy in the way)", &fakeDirectConn{err: &routersession.HTTPStatusError{StatusCode: 404, Status: "404"}}, relayProbeInconclusive},
+		{"401 proves nothing", &fakeDirectConn{err: &routersession.HTTPStatusError{StatusCode: 401, Status: "401"}}, relayProbeInconclusive},
 		{"transport error still failing", &fakeDirectConn{err: context.DeadlineExceeded}, relayProbeStillFailing},
-		{"node internal error rides HTTP 200", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}`)}}, relayProbeStillFailing},
-		{"unsupported method in body is not a fault", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`)}}, relayProbeRecovered},
-		{"unparseable 200 body (proxy HTML page) proves nothing", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: []byte(`<html><body>Bad Gateway</body></html>`)}}, relayProbeInconclusive},
-		{"empty 200 body proves nothing", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: nil}}, relayProbeInconclusive},
-		{"batch reply (JSON array) cannot be judged", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: []byte(`[{"jsonrpc":"2.0","id":1,"result":"0x1"}]`)}}, relayProbeInconclusive},
+		{"node internal error rides HTTP 200", &fakeDirectConn{resp: &routersession.DirectRPCResponse{
+			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}`),
+		}}, relayProbeStillFailing},
+		{"unsupported method in body is not a fault", &fakeDirectConn{resp: &routersession.DirectRPCResponse{
+			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`),
+		}}, relayProbeRecovered},
+		{"unparseable 200 body (proxy HTML page) proves nothing", &fakeDirectConn{resp: &routersession.DirectRPCResponse{
+			StatusCode: 200, Data: []byte(`<html><body>Bad Gateway</body></html>`),
+		}}, relayProbeInconclusive},
+		{"empty 200 body proves nothing", &fakeDirectConn{resp: &routersession.DirectRPCResponse{
+			StatusCode: 200, Data: nil,
+		}}, relayProbeInconclusive},
+		{"batch reply (JSON array) cannot be judged", &fakeDirectConn{resp: &routersession.DirectRPCResponse{
+			StatusCode: 200, Data: []byte(`[{"jsonrpc":"2.0","id":1,"result":"0x1"}]`),
+		}}, relayProbeInconclusive},
 		{"nil response with nil error proves nothing", &fakeDirectConn{}, relayProbeInconclusive},
 	}
 	for _, tc := range cases {
@@ -357,15 +364,15 @@ func TestReplayFailingRelay_JudgesByHealthClassification(t *testing.T) {
 // slow-but-recovered heavy method forever.
 func TestReplayFailingRelay_UsesRecordedTimeout(t *testing.T) {
 	rpcss := replayServer()
-	mkEp := func(conn *fakeDirectConn) *lavasession.EndpointWithDirectConnection {
-		return &lavasession.EndpointWithDirectConnection{
-			Endpoint:         &lavasession.Endpoint{NetworkAddress: "http://fake:8545"},
+	mkEp := func(conn *fakeDirectConn) *routersession.EndpointWithDirectConnection {
+		return &routersession.EndpointWithDirectConnection{
+			Endpoint:         &routersession.Endpoint{NetworkAddress: "http://fake:8545"},
 			DirectConnection: conn,
 			ProviderAddress:  "provider1",
 		}
 	}
-	okResp := func() *lavasession.DirectRPCResponse {
-		return &lavasession.DirectRPCResponse{StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}
+	okResp := func() *routersession.DirectRPCResponse {
+		return &routersession.DirectRPCResponse{StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}
 	}
 
 	// A heavy method recorded with a 25s relay budget is judged under ~25s.
@@ -389,7 +396,7 @@ func TestReplayFailingRelay_UsesRecordedTimeout(t *testing.T) {
 func TestReplayFailingRelay_NoConnectionIsInconclusive(t *testing.T) {
 	rpcss := replayServer()
 	require.Equal(t, relayProbeInconclusive, rpcss.replayFailingRelay(nil, "eth_call", testEvidence, testEvidenceTimeout))
-	require.Equal(t, relayProbeInconclusive, rpcss.replayFailingRelay(&lavasession.EndpointWithDirectConnection{}, "eth_call", testEvidence, testEvidenceTimeout))
+	require.Equal(t, relayProbeInconclusive, rpcss.replayFailingRelay(&routersession.EndpointWithDirectConnection{}, "eth_call", testEvidence, testEvidenceTimeout))
 }
 
 // ---------------------------------------------------------------------------
@@ -430,17 +437,21 @@ func TestRecordRelayProbeEvidence_Eligibility(t *testing.T) {
 		{"hanging api never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, hanging, nil), testEvidence, false},
 		{"subscription never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, subscribe, subscribeDirective), testEvidence, false},
 		{"non-jsonrpc interface never recorded", spectypes.APIInterfaceRest, mockMessage(t, readOnly, nil), testEvidence, false},
-		{"batch (JSON array body) never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, batched, nil),
-			[]byte(`[{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[]}]`), false},
-		{"batch with leading whitespace never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, batched, nil),
-			[]byte("  \n\t[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[]}]"), false},
+		{
+			"batch (JSON array body) never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, batched, nil),
+			[]byte(`[{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[]}]`), false,
+		},
+		{
+			"batch with leading whitespace never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, batched, nil),
+			[]byte("  \n\t[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[]}]"), false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rpcss := &RPCSmartRouterServer{
-				listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: tc.apiInterface},
+				listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: tc.apiInterface},
 			}
-			endpoint := &lavasession.Endpoint{NetworkAddress: "http://ep:8545", Enabled: true}
+			endpoint := &routersession.Endpoint{NetworkAddress: "http://ep:8545", Enabled: true}
 			rpcss.recordRelayProbeEvidence(endpoint, tc.msg, tc.payload, testEvidenceTimeout)
 			recorded := endpoint.HealthSnapshot().RelayProbeMethod != ""
 			require.Equal(t, tc.wantRecorded, recorded)

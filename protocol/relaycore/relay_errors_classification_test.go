@@ -5,9 +5,10 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 func makeRelayError(err error, routerErr *common.RouterError, stake int64, reputation string) RelayError {

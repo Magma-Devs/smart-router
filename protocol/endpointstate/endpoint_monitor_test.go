@@ -8,35 +8,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/stretchr/testify/require"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
-// mockDirectRPCConnection implements lavasession.DirectRPCConnection for testing
+// mockDirectRPCConnection implements routersession.DirectRPCConnection for testing
 type mockDirectRPCConnection struct {
 	url       string
 	responses map[string][]byte // request -> response
 }
 
-func (m *mockDirectRPCConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*lavasession.DirectRPCResponse, error) {
+func (m *mockDirectRPCConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*routersession.DirectRPCResponse, error) {
 	// Return mock response based on request
 	if response, ok := m.responses[string(data)]; ok {
-		return &lavasession.DirectRPCResponse{
+		return &routersession.DirectRPCResponse{
 			Data:       response,
 			StatusCode: 200,
 		}, nil
 	}
 	// Default response for eth_blockNumber
-	return &lavasession.DirectRPCResponse{
+	return &routersession.DirectRPCResponse{
 		Data:       []byte(`{"jsonrpc":"2.0","id":1,"result":"0x100"}`),
 		StatusCode: 200,
 	}, nil
 }
 
-func (m *mockDirectRPCConnection) GetProtocol() lavasession.DirectRPCProtocol {
-	return lavasession.DirectRPCProtocolHTTP
+func (m *mockDirectRPCConnection) GetProtocol() routersession.DirectRPCProtocol {
+	return routersession.DirectRPCProtocolHTTP
 }
 
 func (m *mockDirectRPCConnection) Close() error {

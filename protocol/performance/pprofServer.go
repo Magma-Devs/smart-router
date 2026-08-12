@@ -5,6 +5,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	fiberpprof "github.com/gofiber/fiber/v2/middleware/pprof"
+
 	"github.com/magma-Devs/smart-router/utils"
 )
 

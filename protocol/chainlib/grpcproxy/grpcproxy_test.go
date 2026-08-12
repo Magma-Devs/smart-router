@@ -5,11 +5,12 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/testproto"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/testproto"
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 func TestGRPCProxy(t *testing.T) {

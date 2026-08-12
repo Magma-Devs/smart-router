@@ -5,10 +5,10 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -55,7 +55,7 @@ func SmartRouterPolicyConfig() relaypolicy.PolicyConfig {
 // policy resolver.
 func NewSmartRouterRelayStateMachine(
 	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
+	usedProviders *routersession.UsedProviders,
 	relaySender SmartRouterRelaySender,
 	protocolMessage chainlib.ProtocolMessage,
 	analytics *metrics.RelayMetrics,
@@ -71,7 +71,7 @@ func NewSmartRouterRelayStateMachine(
 // case behavior is identical to the header-driven path.
 func NewSmartRouterRelayStateMachineWithPolicy(
 	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
+	usedProviders *routersession.UsedProviders,
 	relaySender SmartRouterRelaySender,
 	protocolMessage chainlib.ProtocolMessage,
 	analytics *metrics.RelayMetrics,

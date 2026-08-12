@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tdigest "github.com/caio/go-tdigest/v5"
+
 	"github.com/magma-Devs/smart-router/utils"
 )
 

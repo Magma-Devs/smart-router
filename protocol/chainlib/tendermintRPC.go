@@ -17,19 +17,20 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 )
 
 type TendermintChainParser struct {
@@ -350,7 +351,7 @@ func (apip *TendermintChainParser) ChainBlockStats() (allowedBlockLagForQosSync 
 }
 
 type TendermintRpcChainListener struct {
-	endpoint                   *lavasession.RPCEndpoint
+	endpoint                   *routersession.RPCEndpoint
 	relaySender                RelaySender
 	healthReporter             HealthReporter
 	logger                     *metrics.RPCConsumerLogs
@@ -363,7 +364,7 @@ type TendermintRpcChainListener struct {
 }
 
 // NewTendermintRpcChainListener creates a new instance of TendermintRpcChainListener
-func NewTendermintRpcChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEndpoint,
+func NewTendermintRpcChainListener(ctx context.Context, listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender, healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
 	refererData *RefererData,
@@ -629,7 +630,7 @@ type tendermintRpcChainProxy struct {
 	httpClient *http.Client
 }
 
-func NewtendermintRpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
+func NewtendermintRpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
 	if len(rpcProviderEndpoint.NodeUrls) == 0 {
 		return nil, utils.FormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
 	}

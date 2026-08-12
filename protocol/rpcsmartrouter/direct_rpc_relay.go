@@ -14,11 +14,12 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/dynamic"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
@@ -27,7 +28,7 @@ import (
 // DirectRPCRelaySender handles sending relay requests directly to RPC endpoints
 // (bypassing the Lava provider-relay protocol)
 type DirectRPCRelaySender struct {
-	directConnection    lavasession.DirectRPCConnection
+	directConnection    routersession.DirectRPCConnection
 	endpointName        string             // Sanitized endpoint name (no API keys)
 	originalRequestData []byte             // Original request bytes (for batch support)
 	chainFamily         common.ChainFamily // Chain family for Tier 2 classification (-1 if unknown)
@@ -412,13 +413,13 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 
 	// Use DoHTTPRequest with []Metadata (preserves duplicates, supports delete semantics)
 	// Instead of map[string]string which loses duplicates and doesn't support delete (empty = delete)
-	httpDoer, ok := d.directConnection.(lavasession.HTTPDirectRPCDoer)
+	httpDoer, ok := d.directConnection.(routersession.HTTPDirectRPCDoer)
 	if !ok {
 		return nil, fmt.Errorf("connection does not support HTTP requests (protocol: %s)", d.directConnection.GetProtocol())
 	}
 
 	// Build HTTP request params (same as REST path for consistency)
-	httpParams := lavasession.HTTPRequestParams{
+	httpParams := routersession.HTTPRequestParams{
 		Method:      "POST",
 		URL:         nodeUrl.Url,
 		Body:        requestData,
@@ -458,7 +459,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 			utils.LogAttr("status", statusCode),
 			utils.LogAttr("latency", latency),
 		)
-		httpErr := &lavasession.HTTPStatusError{
+		httpErr := &routersession.HTTPStatusError{
 			StatusCode: statusCode,
 			Status:     fmt.Sprintf("%d", statusCode),
 			Body:       responseData,
@@ -630,7 +631,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	}
 
 	// Type-assert to HTTP doer
-	httpDoer, ok := d.directConnection.(lavasession.HTTPDirectRPCDoer)
+	httpDoer, ok := d.directConnection.(routersession.HTTPDirectRPCDoer)
 	if !ok {
 		return nil, fmt.Errorf("connection doesn't support REST (HTTP)")
 	}
@@ -642,7 +643,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	headers = tracing.InjectHTTP(requestCtx, headers)
 
 	startTime := time.Now()
-	response, err := httpDoer.DoHTTPRequest(requestCtx, lavasession.HTTPRequestParams{
+	response, err := httpDoer.DoHTTPRequest(requestCtx, routersession.HTTPRequestParams{
 		Method:      httpMethod,
 		URL:         fullURL,
 		Body:        restBody, // Send body as-is (for POST/PUT)
@@ -771,7 +772,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 
 	// Build headers with required gRPC method header
 	headers := make(map[string]string)
-	headers[lavasession.GRPCMethodHeader] = methodPath
+	headers[routersession.GRPCMethodHeader] = methodPath
 
 	// Add any additional headers from the RPC message
 	for _, meta := range grpcMessage.GetHeaders() {
@@ -816,7 +817,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		// Unwrap, so it is meant to be inspected through wrapping. A plain assertion
 		// would silently stop matching the moment anything wraps the error on its way
 		// here, rerouting node errors into classifyAndWrap with no visible cause.
-		var grpcErr *lavasession.GRPCStatusError
+		var grpcErr *routersession.GRPCStatusError
 		isGRPCErr := errors.As(err, &grpcErr)
 
 		if isGRPCErr && response != nil {
@@ -919,7 +920,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	// This is required because FormatResponseForParsing needs the method descriptor and formatter
 	// to properly parse the binary protobuf response into JSON for block extraction.
 	// The descriptor is cached by GRPCDirectRPCConnection during SendRequest.
-	if descriptorProvider, ok := d.directConnection.(lavasession.GRPCDescriptorProvider); ok {
+	if descriptorProvider, ok := d.directConnection.(routersession.GRPCDescriptorProvider); ok {
 		if methodDesc := descriptorProvider.GetCachedMethodDescriptor(methodPath); methodDesc != nil {
 			formatter := createGRPCFormatter(methodDesc)
 			grpcMessage.SetParsingData(methodDesc, formatter)

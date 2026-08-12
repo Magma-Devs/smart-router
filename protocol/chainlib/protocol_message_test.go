@@ -3,10 +3,11 @@ package chainlib
 import (
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	types "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	types "github.com/magma-Devs/smart-router/types/spec"
 )
 
 func TestIsDefaultApi(t *testing.T) {

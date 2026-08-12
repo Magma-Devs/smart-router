@@ -9,11 +9,12 @@ import (
 	"time"
 
 	gojson "github.com/goccy/go-json"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -112,7 +113,7 @@ type DirectWSSubscriptionManager struct {
 	optimizer         WebSocketEndpointOptimizer // Optimizer for endpoint selection (can be nil)
 
 	// Sticky sessions for subscription affinity - same client uses same endpoint
-	stickyStore *lavasession.StickySessionStore
+	stickyStore *routersession.StickySessionStore
 
 	// Configuration - all configurable parameters
 	config *WebsocketConfig
@@ -182,7 +183,7 @@ func NewDirectWSSubscriptionManager(
 		wsBackupEndpoints:    wsBackupEndpoints,
 		endpointsByURL:       endpointsByURL,
 		optimizer:            optimizer,
-		stickyStore:          lavasession.NewStickySessionStore(),
+		stickyStore:          routersession.NewStickySessionStore(),
 		config:               config,
 		rateLimiter:          NewClientRateLimiter(config),
 	}
@@ -379,7 +380,7 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 //  3. Backup tier (optimizer or first-available) — only when primary is exhausted
 //
 // Backup-tier consultation mirrors ConsumerSessionManager.getSessionWithProviderOrError
-// (see protocol/lavasession/consumer_session_manager.go:820-852).
+// (see protocol/routersession/consumer_session_manager.go:820-852).
 func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
 	// One snapshot for the whole cascade: SetEndpoints can swap the tiers underneath
 	// us, and re-reading between tiers could see primary from before the swap and
@@ -694,7 +695,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 
 	// Store sticky session for client affinity
 	// Future subscriptions from this client will use the same endpoint
-	dwsm.stickyStore.Set(clientKey, &lavasession.StickySession{
+	dwsm.stickyStore.Set(clientKey, &routersession.StickySession{
 		Provider: selectedEndpoint.Url,
 		Epoch:    0, // Epoch is not used for direct RPC (no provider rotation)
 	})

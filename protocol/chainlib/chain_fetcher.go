@@ -11,9 +11,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/protocol/performance"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -27,14 +27,14 @@ const (
 type IChainFetcher interface {
 	FetchLatestBlockNum(ctx context.Context) (int64, error)
 	FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error)
-	FetchEndpoint() lavasession.RPCProviderEndpoint
+	FetchEndpoint() routersession.RPCProviderEndpoint
 	Validate(ctx context.Context) error
 	GetVerificationsStatus() []*pairingtypes.Verification
 	CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error)
 }
 
 type ChainFetcher struct {
-	endpoint            *lavasession.RPCProviderEndpoint
+	endpoint            *routersession.RPCProviderEndpoint
 	chainRouter         ChainRouter
 	chainParser         ChainParser
 	cache               *performance.Cache
@@ -76,7 +76,7 @@ func (cf *ChainFetcher) invalidateVerificationsCache() {
 	cf.cacheValid.Store(false)
 }
 
-func (cf *ChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
+func (cf *ChainFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
 	return *cf.endpoint
 }
 
@@ -654,7 +654,7 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 type ChainFetcherOptions struct {
 	ChainRouter ChainRouter
 	ChainParser ChainParser
-	Endpoint    *lavasession.RPCProviderEndpoint
+	Endpoint    *routersession.RPCProviderEndpoint
 	Cache       *performance.Cache
 }
 

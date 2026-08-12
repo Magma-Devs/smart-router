@@ -9,12 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	chaintracker "github.com/magma-Devs/smart-router/protocol/chaintracker"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -40,8 +41,8 @@ type MockChainFetcher struct {
 	callBack    func()
 }
 
-func (mcf *MockChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+func (mcf *MockChainFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
 
 func (mcf *MockChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {

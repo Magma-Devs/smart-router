@@ -10,13 +10,14 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/gofiber/websocket/v2"
+	"github.com/tidwall/gjson"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/tidwall/gjson"
 )
 
 var (

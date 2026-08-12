@@ -12,9 +12,10 @@ import (
 	context "context"
 	reflect "reflect"
 
-	lavasession "github.com/magma-Devs/smart-router/protocol/lavasession"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	gomock "go.uber.org/mock/gomock"
+
+	routersession "github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
 // MockChainFetcherIf is a mock of ChainFetcherIf interface.
@@ -83,10 +84,10 @@ func (mr *MockChainFetcherIfMockRecorder) FetchBlockHashByNum(ctx, blockNum any)
 }
 
 // FetchEndpoint mocks base method.
-func (m *MockChainFetcherIf) FetchEndpoint() lavasession.RPCProviderEndpoint {
+func (m *MockChainFetcherIf) FetchEndpoint() routersession.RPCProviderEndpoint {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "FetchEndpoint")
-	ret0, _ := ret[0].(lavasession.RPCProviderEndpoint)
+	ret0, _ := ret[0].(routersession.RPCProviderEndpoint)
 	return ret0
 }
 

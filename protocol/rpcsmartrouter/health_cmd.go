@@ -8,15 +8,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 // healthVerification is one spec verification's result, as emitted in the JSON report.
@@ -213,7 +214,7 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 	if includeBackup {
 		keys = append(keys, commonlib.BackupDirectRPCConfigName)
 	}
-	lists := make([][]*lavasession.RPCStaticProviderEndpoint, 0, len(keys))
+	lists := make([][]*routersession.RPCStaticProviderEndpoint, 0, len(keys))
 	for _, key := range keys {
 		if !viper.IsSet(key) {
 			continue
@@ -230,7 +231,7 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 	// the collision and probes anyway, rather than refusing the config like the router does. The
 	// same check the router runs, run here for its message and not for its verdict; the rows are
 	// still told apart by their `url`, which is what identifies the broken node.
-	if err := lavasession.ValidateUniqueProviderNames(lists...); err != nil {
+	if err := routersession.ValidateUniqueProviderNames(lists...); err != nil {
 		utils.FormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
 	}
 
@@ -395,7 +396,7 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 	// guard is false — but a cross-endpoint race on that bool is not what `health` hit.
 	chainParser.SetSkipWebsocketVerification(!(verifyWs && providerHasWebSocketURL(provider.nodeUrls)))
 
-	rpcEndpoint := lavasession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
+	rpcEndpoint := routersession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
 	if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, staticSpecPaths, rpcEndpoint, "", ""); err != nil {
 		return rowsFromError(fmt.Errorf("load spec: %w", err))
 	}
@@ -449,7 +450,7 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 		return append(rows, wsSkippedRows()...)
 	}
 
-	providerEndpoint := &lavasession.RPCProviderEndpoint{
+	providerEndpoint := &routersession.RPCProviderEndpoint{
 		ChainID:      provider.chainID,
 		ApiInterface: provider.apiInterface,
 		NodeUrls:     probedUrls,

@@ -14,17 +14,18 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	plantypes "github.com/magma-Devs/smart-router/types/plans"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func createWebSocketHandler(handler func(string) string) http.HandlerFunc {
@@ -710,7 +711,7 @@ func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler boo
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	endpoint := &lavasession.RPCEndpoint{
+	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "ETH1",
 		ApiInterface:    "jsonrpc",

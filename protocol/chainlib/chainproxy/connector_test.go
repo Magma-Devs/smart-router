@@ -13,13 +13,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/websocket"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // ---------------------------------------------------------------------------

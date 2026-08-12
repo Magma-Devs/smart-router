@@ -5,10 +5,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // Pool capacity used to live in the package-global NumberOfParallelConnections,

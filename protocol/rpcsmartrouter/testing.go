@@ -7,17 +7,18 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/magma-Devs/smart-router/version"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 // startTesting connects to a running smart router's endpoints and starts chain
@@ -27,7 +28,7 @@ import (
 // blockchain, so specs must be loaded from files/URLs (--use-static-spec).
 // Any goroutine that fails during setup sends its error to errCh, which causes
 // the command to cancel and return the error immediately.
-func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEndpoint, parallelConnections uint, staticSpecPaths []string) error {
+func startTesting(ctx context.Context, rpcEndpoints []*routersession.RPCProviderEndpoint, parallelConnections uint, staticSpecPaths []string) error {
 	ctx, stopSignal := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignal()
 
@@ -42,7 +43,7 @@ func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEn
 	errCh := make(chan error, len(rpcEndpoints))
 
 	for _, rpcProviderEndpoint := range rpcEndpoints {
-		go func(rpcProviderEndpoint *lavasession.RPCProviderEndpoint) {
+		go func(rpcProviderEndpoint *routersession.RPCProviderEndpoint) {
 			chainParser, err := chainlib.NewChainParser(rpcProviderEndpoint.ApiInterface)
 			if err != nil {
 				errCh <- utils.FormatError("failed creating chain parser, aborting endpoint", err,
@@ -52,7 +53,7 @@ func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEn
 
 			// smart-router has no live blockchain spec query; load specs
 			// statically, mirroring what the main rpcsmartrouter command does.
-			rpcEndpoint := lavasession.RPCEndpoint{
+			rpcEndpoint := routersession.RPCEndpoint{
 				ChainID:      rpcProviderEndpoint.ChainID,
 				ApiInterface: rpcProviderEndpoint.ApiInterface,
 			}
@@ -165,20 +166,20 @@ func CreateTestRPCSmartRouterCobraCommand() *cobra.Command {
 				return utils.FormatError("invalid endpoints arguments", err, utils.Attribute{Key: "endpoint_strings", Value: strings.Join(args, "")})
 			}
 			viper.MergeConfigMap(viper_endpoints.AllSettings())
-			var rpcEndpoints []*lavasession.RPCEndpoint
+			var rpcEndpoints []*routersession.RPCEndpoint
 			rpcEndpoints, err = ParseEndpoints(viper.GetViper())
 			if err != nil || len(rpcEndpoints) == 0 {
 				return utils.FormatError("invalid endpoints definition", err)
 			}
-			modifiedProviderEndpoints := make([]*lavasession.RPCProviderEndpoint, len(rpcEndpoints))
+			modifiedProviderEndpoints := make([]*routersession.RPCProviderEndpoint, len(rpcEndpoints))
 			for idx := range modifiedProviderEndpoints {
 				endpoint := rpcEndpoints[idx]
 				err := commonlib.ValidateEndpoint(endpoint.NetworkAddress, endpoint.ApiInterface)
 				if err != nil {
 					return err
 				}
-				modifiedProviderEndpoints[idx] = &lavasession.RPCProviderEndpoint{
-					NetworkAddress: lavasession.NetworkAddressData{Address: ""},
+				modifiedProviderEndpoints[idx] = &routersession.RPCProviderEndpoint{
+					NetworkAddress: routersession.NetworkAddressData{Address: ""},
 					ChainID:        endpoint.ChainID,
 					ApiInterface:   endpoint.ApiInterface,
 					NodeUrls: []commonlib.NodeUrl{{

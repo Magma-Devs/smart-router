@@ -5,12 +5,13 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/stretchr/testify/require"
 )
 
 // newCapacityTestServer builds an RPCSmartRouterServer whose session manager holds the given
@@ -21,17 +22,17 @@ func newCapacityTestServer(t *testing.T, groupByAddr map[string]string) *RPCSmar
 	t.Helper()
 	rand.InitRandomSeed()
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
-	csm := lavasession.NewConsumerSessionManager(
-		&lavasession.RPCEndpoint{NetworkAddress: "stub", ChainID: "LAVA", ApiInterface: "rest"},
-		optimizer, nil, "lava@test", lavasession.NewActiveSubscriptionProvidersStorage())
+	csm := routersession.NewConsumerSessionManager(
+		&routersession.RPCEndpoint{NetworkAddress: "stub", ChainID: "LAVA", ApiInterface: "rest"},
+		optimizer, nil, "lava@test", routersession.NewActiveSubscriptionProvidersStorage())
 
-	pairingList := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(groupByAddr))
+	pairingList := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(groupByAddr))
 	var i uint64
 	for addr, group := range groupByAddr {
-		pairingList[i] = &lavasession.ConsumerSessionsWithProvider{
+		pairingList[i] = &routersession.ConsumerSessionsWithProvider{
 			PublicLavaAddress: addr,
-			Endpoints:         []*lavasession.Endpoint{{NetworkAddress: "127.0.0.1:0", Enabled: true, Connections: []*lavasession.EndpointConnection{}}},
-			Sessions:          map[int64]*lavasession.SingleConsumerSession{},
+			Endpoints:         []*routersession.Endpoint{{NetworkAddress: "127.0.0.1:0", Enabled: true, Connections: []*routersession.EndpointConnection{}}},
+			Sessions:          map[int64]*routersession.SingleConsumerSession{},
 			MaxComputeUnits:   200,
 			PairingEpoch:      1,
 			GroupLabel:        group,
@@ -41,7 +42,7 @@ func newCapacityTestServer(t *testing.T, groupByAddr map[string]string) *RPCSmar
 	require.NoError(t, csm.UpdateAllProviders(1, pairingList, nil))
 	return &RPCSmartRouterServer{
 		sessionManager: csm,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
 	}
 }
 

@@ -20,11 +20,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	chaintracker "github.com/magma-Devs/smart-router/protocol/chaintracker"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/stretchr/testify/require"
 )
 
 // svmHeadOnlyFetcher models a Solana node. getLatestBlockhash (CustomMessage) returns an
@@ -41,8 +42,8 @@ type svmHeadOnlyFetcher struct {
 	observedErrors atomic.Int64
 }
 
-func (f *svmHeadOnlyFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
+func (f *svmHeadOnlyFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
 }
 
 func (f *svmHeadOnlyFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType, apiName string) ([]byte, error) {
@@ -235,8 +236,8 @@ type svmBadReplyFetcher struct {
 	hashCalls atomic.Int64
 }
 
-func (f *svmBadReplyFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
+func (f *svmBadReplyFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
 }
 
 func (f *svmBadReplyFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType, apiName string) ([]byte, error) {

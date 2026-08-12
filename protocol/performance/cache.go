@@ -6,13 +6,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
+
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 type relayerCacheClientStore struct {
@@ -56,7 +57,7 @@ func (r *relayerCacheClientStore) connectGRPCConnectionToRelayerCacheService() (
 	connectCtx, cancel := context.WithTimeout(r.ctx, 3*time.Second)
 	defer cancel()
 
-	conn, err := lavasession.ConnectGRPCClient(connectCtx, r.address, false, true)
+	conn, err := routersession.ConnectGRPCClient(connectCtx, r.address, false, true)
 	if err != nil {
 		return nil, nil, err
 	}

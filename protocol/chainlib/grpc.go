@@ -15,6 +15,7 @@ import (
 	"github.com/goccy/go-json"
 
 	"github.com/gogo/protobuf/jsonpb"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	dyncodec "github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
@@ -30,16 +31,17 @@ import (
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/dynamic"
 	"github.com/jhump/protoreflect/grpcreflect"
+	"google.golang.org/grpc/status"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"google.golang.org/grpc/status"
 )
 
 const GRPCStatusCodeOnFailedMessages = 32
@@ -223,7 +225,7 @@ func (apip *GrpcChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 //
 // The chain proxy's relay path resolves the descriptor via live reflection during the send
 // (see the SendNodeMsg path) and calls SetParsingData itself. But a caller that sends a gRPC poll
-// through a lavasession.DirectRPCConnection — the per-endpoint ChainTracker poller — gets the
+// through a routersession.DirectRPCConnection — the per-endpoint ChainTracker poller — gets the
 // descriptor resolved INSIDE the connection (it caches it and exposes it via GetCachedMethodDescriptor)
 // and a raw protobuf response back, so the crafted message has no descriptor. This wires the
 // connection's descriptor into that message.
@@ -364,7 +366,7 @@ func (apip *GrpcChainParser) ChainBlockStats() (allowedBlockLagForQosSync int64,
 }
 
 type GrpcChainListener struct {
-	endpoint         *lavasession.RPCEndpoint
+	endpoint         *routersession.RPCEndpoint
 	relaySender      RelaySender
 	logger           *metrics.RPCConsumerLogs
 	chainParser      *GrpcChainParser
@@ -375,7 +377,7 @@ type GrpcChainListener struct {
 
 func NewGrpcChainListener(
 	ctx context.Context,
-	listenEndpoint *lavasession.RPCEndpoint,
+	listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender,
 	healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
@@ -475,7 +477,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	if apil.endpoint.TLSEnabled {
 		utils.FormatInfo("Running with self signed TLS certificate")
 		var certificateErr error
-		httpServer.TLSConfig, certificateErr = lavasession.GetSelfSignedConfig()
+		httpServer.TLSConfig, certificateErr = routersession.GetSelfSignedConfig()
 		if certificateErr != nil {
 			utils.FormatFatal("failed getting a self signed certificate", certificateErr)
 		}
@@ -516,7 +518,7 @@ type grpcConnectorInterface interface {
 	ReturnRpc(rpc *grpc.ClientConn)
 }
 
-func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, parser ChainParser) (ChainProxy, error) {
+func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, parser ChainParser) (ChainProxy, error) {
 	if len(rpcProviderEndpoint.NodeUrls) == 0 {
 		return nil, utils.FormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
 	}
@@ -533,7 +535,7 @@ func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	return newGrpcChainProxy(ctx, averageBlockTime, parser, conn, rpcProviderEndpoint)
 }
 
-func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, parser ChainParser, conn grpcConnectorInterface, rpcProviderEndpoint lavasession.RPCProviderEndpoint) (ChainProxy, error) {
+func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, parser ChainParser, conn grpcConnectorInterface, rpcProviderEndpoint routersession.RPCProviderEndpoint) (ChainProxy, error) {
 	cp := &GrpcChainProxy{
 		// NodeUrl is what carries grpc-config onto the request path; without it
 		// cp.NodeUrl.GrpcConfig is the zero value and descriptor-source is invisible

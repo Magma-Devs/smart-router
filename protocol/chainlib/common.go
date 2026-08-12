@@ -2,6 +2,7 @@ package chainlib
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,19 +11,18 @@ import (
 	"sync"
 	"time"
 
-	"errors"
-
 	"github.com/goccy/go-json"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/favicon"
+	"google.golang.org/grpc/metadata"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"google.golang.org/grpc/metadata"
 )
 
 const (

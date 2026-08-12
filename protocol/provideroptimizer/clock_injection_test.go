@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils/score"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/utils/score"
 )
 
 // TestProviderOptimizer_NowFuncDefault verifies that when NowFunc is nil (default),

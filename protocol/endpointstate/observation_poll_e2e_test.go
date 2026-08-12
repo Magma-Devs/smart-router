@@ -6,12 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/stretchr/testify/require"
 )
 
 // These tests exercise the REAL ChainTracker poll path end to end — GetOrCreateTracker
@@ -55,7 +56,7 @@ func TestEndpointPoller_FetchLatestBlockNum_RecordsExactlyOneObservation(t *test
 	url := "http://eth-ep:8545"
 	conn := &mockDirectRPCConnection{url: url} // default response is eth_blockNumber -> 0x100 (256)
 	poller := NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
+		&routersession.Endpoint{NetworkAddress: url, Enabled: true},
 		conn,
 		chainParser,
 		"ETH1",
@@ -105,7 +106,7 @@ func TestEndpointMonitor_RealPoll_NonSVM_PopulatesObservation(t *testing.T) {
 
 	url := "http://eth-ep:8545"
 	conn := &mockDirectRPCConnection{url: url}
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker(&routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -152,7 +153,7 @@ func TestEndpointMonitor_RealPoll_SVM_PopulatesObservation(t *testing.T) {
 	require.NotNil(t, m)
 	defer m.Stop()
 
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker(&routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -192,7 +193,7 @@ func TestEndpointMonitor_RealPoll_SVM_FailureRecordsFailure(t *testing.T) {
 	require.NotNil(t, m)
 	defer m.Stop()
 
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker(&routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {

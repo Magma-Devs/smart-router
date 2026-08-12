@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 func TestGRPCParseBlock(t *testing.T) {

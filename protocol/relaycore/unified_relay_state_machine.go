@@ -9,9 +9,9 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	lavasession "github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	routersession "github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -27,8 +27,8 @@ type UnifiedRelayStateMachine struct {
 	crossValidationParams *common.CrossValidationParams
 	debugRelays           bool
 	batchUpdate           chan error
-	usedProviders         *lavasession.UsedProviders
-	relayRetriesManager   *lavaprotocol.RelayRetriesManager
+	usedProviders         *routersession.UsedProviders
+	relayRetriesManager   *relayprotocol.RelayRetriesManager
 	relayState            []*RelayState
 	protocolMessage       chainlib.ProtocolMessage
 	relayStateLock        sync.RWMutex
@@ -38,7 +38,7 @@ type UnifiedRelayStateMachine struct {
 
 func NewUnifiedRelayStateMachine(
 	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
+	usedProviders *routersession.UsedProviders,
 	relaySender RelaySenderInf,
 	protocolMessage chainlib.ProtocolMessage,
 	analytics *metrics.RelayMetrics,
@@ -117,7 +117,7 @@ func (sm *UnifiedRelayStateMachine) Initialized() bool {
 	return sm.relayRetriesManager != nil && sm.resultsChecker != nil
 }
 
-func (sm *UnifiedRelayStateMachine) SetRelayRetriesManager(relayRetriesManager *lavaprotocol.RelayRetriesManager) {
+func (sm *UnifiedRelayStateMachine) SetRelayRetriesManager(relayRetriesManager *relayprotocol.RelayRetriesManager) {
 	sm.relayRetriesManager = relayRetriesManager
 }
 
@@ -125,7 +125,7 @@ func (sm *UnifiedRelayStateMachine) SetResultsChecker(resultsChecker ResultsChec
 	sm.resultsChecker = resultsChecker
 }
 
-func (sm *UnifiedRelayStateMachine) GetUsedProviders() *lavasession.UsedProviders {
+func (sm *UnifiedRelayStateMachine) GetUsedProviders() *routersession.UsedProviders {
 	return sm.usedProviders
 }
 
@@ -179,8 +179,8 @@ func (sm *UnifiedRelayStateMachine) stateTransition(relayState *RelayState, numb
 		// by routerKey, so providers already tried under the old key would not be excluded
 		// under the new one and a just-failed provider could be re-selected for the retry.
 		// Carry the exclusion across the toggle.
-		oldRouterKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
-		newRouterKey := lavasession.NewRouterKeyFromExtensions(upgradedProtocolMessage.GetExtensions())
+		oldRouterKey := routersession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
+		newRouterKey := routersession.NewRouterKeyFromExtensions(upgradedProtocolMessage.GetExtensions())
 		if oldRouterKey.String() != newRouterKey.String() {
 			sm.usedProviders.MigrateUnwantedProviders(oldRouterKey, newRouterKey)
 		}
@@ -341,7 +341,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 
 			select {
 			case err := <-sm.batchUpdate:
-				isPairingListEmpty := err != nil && errors.Is(err, lavasession.PairingListEmptyError)
+				isPairingListEmpty := err != nil && errors.Is(err, routersession.PairingListEmptyError)
 				result := sm.policy.OnSendRelayResult(err, isPairingListEmpty, sm.selection)
 
 				switch result {

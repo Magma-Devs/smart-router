@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // TestErrorMetrics_EndToEnd verifies the full flow:

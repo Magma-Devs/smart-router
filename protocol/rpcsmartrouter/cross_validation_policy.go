@@ -5,9 +5,10 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // Per-method cross-validation policy (Phase 1.1).

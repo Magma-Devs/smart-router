@@ -11,7 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -287,8 +287,8 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 // GetOrCreateTracker returns an existing ChainTracker for the endpoint or creates a new one.
 // Thread-safe - uses lazy initialization to avoid creating trackers for unused endpoints.
 func (m *EndpointMonitor) GetOrCreateTracker(
-	endpoint *lavasession.Endpoint,
-	directConnection lavasession.DirectRPCConnection,
+	endpoint *routersession.Endpoint,
+	directConnection routersession.DirectRPCConnection,
 ) (chaintracker.IChainTracker, error) {
 	endpointURL := endpoint.NetworkAddress
 

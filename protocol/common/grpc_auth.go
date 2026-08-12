@@ -4,8 +4,9 @@ import (
 	"context"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // MAG-2218: auth-headers were honoured by every transport EXCEPT gRPC — HTTP sets them
@@ -15,7 +16,7 @@ import (
 // Unauthenticated for every call, including the boot-time spec verification.
 //
 // The fix attaches them at DIAL time rather than at each call site: both gRPC stacks
-// (the chainlib GrpcChainProxy used by boot verification, and the lavasession
+// (the chainlib GrpcChainProxy used by boot verification, and the routersession
 // GRPCDirectRPCConnection used by relays and per-endpoint polls) construct their
 // connections through chainproxy.GRPCConnector, and the subscription manager's pool is
 // the only other dialler. Attaching there covers unary calls, server reflection and

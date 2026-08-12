@@ -29,6 +29,7 @@ import (
 	"github.com/goccy/go-json"
 
 	"github.com/ethereum/go-ethereum/log"
+
 	"github.com/magma-Devs/smart-router/utils"
 )
 

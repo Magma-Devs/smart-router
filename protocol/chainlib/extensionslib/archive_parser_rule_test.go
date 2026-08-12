@@ -3,8 +3,9 @@ package extensionslib
 import (
 	"testing"
 
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
+
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 // mockExtensionsChainMessage implements ExtensionsChainMessage for testing

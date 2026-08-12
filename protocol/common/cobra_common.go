@@ -3,9 +3,10 @@ package common
 import (
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 const (

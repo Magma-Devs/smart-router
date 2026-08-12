@@ -527,8 +527,8 @@ Log output automatically includes:
 - [x] Write unit tests for coded error logging
 
 ### Phase 3: Migrate Existing Errors — Protocol Layer
-- [x] Map existing `protocol/lavaprotocol/protocolerrors/errors.go` codes to new registry
-- [x] Map existing `protocol/lavasession/errors.go` (consumer + provider) to new registry
+- [x] Map existing `protocol/relayprotocol/protocolerrors/errors.go` codes to new registry
+- [x] Map existing `protocol/routersession/errors.go` (consumer + provider) to new registry
 - [x] Map existing `protocol/chaintracker/errors.go` to new registry
 - [x] Map existing `protocol/common/errors.go` to new registry
 - [x] Map existing `protocol/chainlib/common.go` errors to new registry

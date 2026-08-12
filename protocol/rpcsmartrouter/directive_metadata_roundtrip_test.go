@@ -3,8 +3,9 @@ package rpcsmartrouter
 import (
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // TestMetadataFromDirectiveHeadersRoundTrip guards the earliest-block re-parse fix in
