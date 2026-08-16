@@ -79,6 +79,37 @@ intentionally does **not** pass `--cache-be` — an explicitly-passed flag (even
 YAML `cache-be:`. To make any config cached, add `cache-be: "cache:20100"` to
 it (see `smartrouter_eth_cached.yml`) and run it with the overlay.
 
+## Using a RESP (Redis/Valkey) cache backend
+
+Instead of the cache sidecar, the router can run its cache engine in-process
+against a RESP-compatible backend ([RESP-CACHE.md](RESP-CACHE.md)). The
+`docker/docker-compose.resp-cache.yml` overlay starts a valkey service; pair
+it with a config that declares the `resp-cache:` block — e.g.
+`smartrouter_eth_resp_cache.yml`:
+
+```bash
+SR_CONFIG=config/smartrouter_examples/smartrouter_eth_resp_cache.yml \
+  docker compose -f docker/docker-compose.yml \
+                 -f docker/docker-compose.resp-cache.yml up --build
+```
+
+Confirm entries land in the backend (and per-backend health on the router
+metrics, `:7779`):
+
+```bash
+docker exec smart-router-valkey-1 valkey-cli --scan --pattern 'sr:*'
+curl -s http://localhost:7779/metrics | grep smartrouter_resp_cache_connected
+```
+
+When a config declares **both** `resp-cache:` and `cache-be:`, the RESP
+backend takes precedence (with a startup warning); the preserved `cache-be:`
+is the rollback path — delete the `resp-cache:` block to revert.
+
+Note: `/metrics/overall-health` (and the container health status) is
+fail-closed and reports 503 until the first relays health-check cycle —
+`--relays-health-interval` defaults to 5 minutes, so a freshly started stack
+is "unhealthy" while it warms up even though relays already serve.
+
 ## Example configs
 
 ### `smartrouter_eth.yml` — Ethereum (default)

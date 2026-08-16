@@ -39,7 +39,7 @@ type ChainFetcher struct {
 	endpoint            *lavasession.RPCProviderEndpoint
 	chainRouter         ChainRouter
 	chainParser         ChainParser
-	cache               *performance.Cache
+	cache               performance.CacheBackend
 	latestBlock         int64
 	verificationsStatus common.SafeSyncMap[string, bool]
 	cachedVerifications atomic.Value // holds []*pairingtypes.Verification for faster access
@@ -241,7 +241,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 }
 
 func (cf *ChainFetcher) populateCache(relayData *pairingtypes.RelayPrivateData, reply *pairingtypes.RelayReply, requestedBlockHash []byte, finalized bool) {
-	if cf.cache.CacheActive() && (requestedBlockHash != nil || finalized) {
+	if cf.cache != nil && cf.cache.CacheActive() && (requestedBlockHash != nil || finalized) {
 		new_ctx := context.Background()
 		new_ctx, cancel := context.WithTimeout(new_ctx, common.CacheWriteTimeout)
 		defer cancel()
@@ -639,7 +639,7 @@ type ChainFetcherOptions struct {
 	ChainRouter ChainRouter
 	ChainParser ChainParser
 	Endpoint    *lavasession.RPCProviderEndpoint
-	Cache       *performance.Cache
+	Cache       performance.CacheBackend
 }
 
 func NewChainFetcher(ctx context.Context, options *ChainFetcherOptions) *ChainFetcher {

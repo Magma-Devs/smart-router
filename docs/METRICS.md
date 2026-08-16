@@ -246,6 +246,28 @@ Once it is non-zero they are lossy — some batch types are being merged into `b
 | `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method` | Cache misses. |
 | `smartrouter_cache_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `method` | Cache lookup latency. |
 
+#### RESP cache backend — `smartrouter_resp_cache_*`
+
+Present only when the router runs with a RESP-compatible (Redis/Valkey) cache
+backend (the `resp-cache:` config block). The shared `smartrouter_cache_*`
+series above keep firing unchanged regardless of backend; they cannot
+distinguish a backend error or timeout from a clean miss — these can, and they
+are the alerting surface for cache degradation.
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_resp_cache_failed_total` | Counter | `op`, `kind` | Backend-level operation failures (never clean misses): `op` = `get` \| `set`; `kind` = `error` (unreachable / protocol error) \| `timeout` (budget exceeded — saturation reads differently from outage). |
+| `smartrouter_resp_cache_connection_errors_total` | Counter | — | Failed background health probes (PING, every 10s). |
+| `smartrouter_resp_cache_connected` | Gauge | — | 1 while the last health probe succeeded, 0 after a failure. Reachability *transitions* are also logged; steady state stays quiet. |
+| `smartrouter_resp_cache_pool_total_conns` | Gauge | — | Connections currently held by the client pool(s) (write + read summed when the read/write split is configured). |
+| `smartrouter_resp_cache_pool_idle_conns` | Gauge | — | Idle pool connections. |
+| `smartrouter_resp_cache_pool_stale_conns` | Gauge | — | Stale connections removed from the pool. |
+
+A failing backend never fails relays: lookups degrade to misses within the
+caller's budget and requests proceed to the upstreams. Alert on
+`smartrouter_resp_cache_connected == 0` or a `smartrouter_resp_cache_failed_total`
+rate, not on request errors.
+
 #### CSM state-store sizes (diagnostics)
 
 Expose otherwise black-box Consumer-Session-Manager state so integration tests can
