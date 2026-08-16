@@ -28,11 +28,19 @@ func TestParseSelectionMode(t *testing.T) {
 	// Unknown values must be rejected, not defaulted: the selection dispatch treats
 	// anything that is not SelectionModeBest as weighted-random, so a silent fallback
 	// would leave an operator who asked for "best" running the old policy unnoticed.
-	for _, in := range []string{"", "bset", "greedy", "highest"} {
+	for _, in := range []string{"bset", "greedy", "highest"} {
 		t.Run("invalid/"+in, func(t *testing.T) {
 			_, err := ParseSelectionMode(in)
 			require.Error(t, err)
 		})
+	}
+
+	// Empty means "not specified" and must resolve to the default rather than error —
+	// otherwise any caller that has not viper-bound the flag reads "" and aborts.
+	for _, in := range []string{"", "   "} {
+		got, err := ParseSelectionMode(in)
+		require.NoError(t, err)
+		require.Equal(t, SelectionModeWeightedRandom, got)
 	}
 }
 
