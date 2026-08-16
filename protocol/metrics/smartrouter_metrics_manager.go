@@ -464,7 +464,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	endpointServingTier := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_endpoint_serving_tier",
-		Help: "Which provider tier an endpoint is serving from: 2=primaries, 1=DEGRADED (backups only), 0=DARK (no healthy providers). Since MAG-2525 a dark chain no longer crash-loops, so this gauge — not pod restarts — is the signal that a chain cannot serve.",
+		Help: "Which provider tier an endpoint is serving from: 2=primaries, 1=DEGRADED (backups only), 0=DARK (no healthy providers). Since MAG-2525 a dark chain no longer crash-loops, so this gauge — not pod restarts — is the signal that a chain cannot serve. Expected time at 0 depends on how the chain went dark: dark at boot is retried from ~2s (doubling to a 3m ceiling), but a chain demoted to dark after booting healthy is only re-checked by the 15m epoch re-verifier. Size alert windows for the 15m case.",
 	}, csmStateLabels)
 
 	// =========================================================================

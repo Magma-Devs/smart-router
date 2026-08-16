@@ -117,13 +117,17 @@ type chainReverifyInputs struct {
 // Configured lists are pre-filtered by chain+ApiInterface at startup (see
 // relevantStaticProviderList in rpcsmartrouter.go), so no further filter is
 // needed here.
+//
+// The third return is the names promoted this cycle. updateEpoch needs them to drop
+// those providers from the failed lists — promoting here while leaving them pending
+// for retryFailedProviders produces two sessions for one provider.
 func applyReverification(
 	ctx context.Context,
 	inputs *chainReverifyInputs,
 	fresh map[uint64]*lavasession.ConsumerSessionsWithProvider,
 	tier reverifyTier,
 	epoch uint64,
-) (map[uint64]*lavasession.ConsumerSessionsWithProvider, []*lavasession.ConsumerSessionsWithProvider) {
+) (map[uint64]*lavasession.ConsumerSessionsWithProvider, []*lavasession.ConsumerSessionsWithProvider, []string) {
 	var configured []*lavasession.RPCStaticProviderEndpoint
 	switch tier {
 	case reverifyTierStatic:
@@ -132,7 +136,7 @@ func applyReverification(
 		configured = inputs.configuredBackup
 	}
 	if len(configured) == 0 {
-		return fresh, nil
+		return fresh, nil, nil
 	}
 	validate := inputs.validateFn
 	if validate == nil {
@@ -234,6 +238,7 @@ func applyReverification(
 
 	// Promote: append fresh sessions for healthy providers absent from `fresh`.
 	// Pick keys that don't collide with surviving entries.
+	var promoted []string
 	if len(toAdmit) > 0 {
 		nextIdx := uint64(0)
 		for k := range next {
@@ -248,9 +253,13 @@ func applyReverification(
 			next[nextIdx] = s
 			nextIdx++
 		}
+		promoted = make([]string, 0, len(toAdmit))
+		for _, p := range toAdmit {
+			promoted = append(promoted, p.Name)
+		}
 	}
 
-	return next, demoted
+	return next, demoted, promoted
 }
 
 // byName builds a name → session lookup so callers can answer

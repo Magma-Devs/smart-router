@@ -101,6 +101,11 @@ type DirectWSSubscriptionManager struct {
 	// Upstream endpoint configuration - two-tier separation matches HTTP backup model.
 	// Primary tier serves all selections; backup tier is only consulted when primary is
 	// exhausted (analogous to ConsumerSessionManager's pairing/backupProviders split).
+	//
+	// These three are mutable: SetEndpoints swaps them (copy-on-write) whenever the live
+	// pairing changes, so a provider that was down at boot joins the tier once it
+	// recovers. All three are guarded by `lock` — read them via endpointsSnapshot, never
+	// directly, or selection races the swap.
 	wsEndpoints       []*common.NodeUrl          // Primary tier — selected first
 	wsBackupEndpoints []*common.NodeUrl          // Backup tier — used only when primary exhausted
 	endpointsByURL    map[string]*common.NodeUrl // Quick lookup by URL across both tiers (sticky-session uniformity)
@@ -181,6 +186,84 @@ func NewDirectWSSubscriptionManager(
 		config:               config,
 		rateLimiter:          NewClientRateLimiter(config),
 	}
+}
+
+// wsEndpointsSnapshot is an immutable view of both tiers plus the URL index,
+// taken under the read lock. SetEndpoints replaces the manager's slices and map
+// wholesale rather than mutating them, so a snapshot stays coherent for the
+// duration of a selection — including across the optimizer call, which must not
+// run while the lock is held.
+type wsEndpointsSnapshot struct {
+	primary []*common.NodeUrl
+	backup  []*common.NodeUrl
+	byURL   map[string]*common.NodeUrl
+}
+
+func (dwsm *DirectWSSubscriptionManager) endpointsSnapshot() wsEndpointsSnapshot {
+	dwsm.lock.RLock()
+	defer dwsm.lock.RUnlock()
+	return wsEndpointsSnapshot{
+		primary: dwsm.wsEndpoints,
+		backup:  dwsm.wsBackupEndpoints,
+		byURL:   dwsm.endpointsByURL,
+	}
+}
+
+// SetEndpoints replaces both tiers with the currently-serving WebSocket endpoints
+// and reports whether anything actually changed.
+//
+// The tiers are built once at boot from the providers that passed verification, so
+// without this the set is frozen for the process lifetime: a chain that booted dark
+// would keep the empty tiers forever and every eth_subscribe would fail even after
+// every provider recovered, and a chain that booted on backups alone would never
+// promote a recovered primary back into tier 1 (MAG-2525).
+//
+// Callers pass only endpoints that are live in the pairing. Seeding a tier with
+// configured-but-dead endpoints would be worse than an empty tier: selectEndpoint is
+// called once per subscription with no ignore set and no retry loop, so a dead entry
+// is handed straight to the client, and a non-empty primary tier suppresses the
+// primary→backup cascade entirely.
+func (dwsm *DirectWSSubscriptionManager) SetEndpoints(wsEndpoints, wsBackupEndpoints []*common.NodeUrl) (changed bool) {
+	byURL := make(map[string]*common.NodeUrl, len(wsEndpoints)+len(wsBackupEndpoints))
+	for _, ep := range wsEndpoints {
+		byURL[ep.Url] = ep
+	}
+	for _, ep := range wsBackupEndpoints {
+		byURL[ep.Url] = ep
+	}
+
+	dwsm.lock.Lock()
+	defer dwsm.lock.Unlock()
+
+	if sameEndpointURLs(dwsm.wsEndpoints, wsEndpoints) && sameEndpointURLs(dwsm.wsBackupEndpoints, wsBackupEndpoints) {
+		return false
+	}
+
+	// Copy-on-write: in-flight selections hold a snapshot of the old slices.
+	dwsm.wsEndpoints = wsEndpoints
+	dwsm.wsBackupEndpoints = wsBackupEndpoints
+	dwsm.endpointsByURL = byURL
+
+	// Existing upstream pools are deliberately left alone. A pool keyed by a URL that
+	// just left the tier still serves its live subscriptions until they close, and
+	// performCleanup reaps it once it is idle; tearing it down here would kill working
+	// subscriptions on a provider that merely failed spec re-verification.
+	return true
+}
+
+// sameEndpointURLs reports whether two tiers hold the same URLs in the same order.
+// Order matters: it is the fallback selection order when the optimizer is absent
+// or returns nothing.
+func sameEndpointURLs(a, b []*common.NodeUrl) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Url != b[i].Url {
+			return false
+		}
+	}
+	return true
 }
 
 // Start starts the background cleanup goroutine for the DirectWSSubscriptionManager.
@@ -298,10 +381,15 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 // Backup-tier consultation mirrors ConsumerSessionManager.getSessionWithProviderOrError
 // (see protocol/lavasession/consumer_session_manager.go:820-852).
 func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+	// One snapshot for the whole cascade: SetEndpoints can swap the tiers underneath
+	// us, and re-reading between tiers could see primary from before the swap and
+	// backup from after.
+	snapshot := dwsm.endpointsSnapshot()
+
 	// Tier 0: sticky session for this client (resolves across both tiers).
 	if clientKey != "" {
 		if stickySession, exists := dwsm.stickyStore.Get(clientKey); exists {
-			stickyEndpoint, found := dwsm.endpointsByURL[stickySession.Provider]
+			stickyEndpoint, found := snapshot.byURL[stickySession.Provider]
 			if found {
 				// Check if sticky endpoint is not ignored
 				if ignoredEndpoints == nil {
@@ -329,7 +417,7 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 	}
 
 	// Tier 1: primary endpoints.
-	ep, primaryErr := dwsm.selectFromTier(ctx, dwsm.wsEndpoints, ignoredEndpoints)
+	ep, primaryErr := dwsm.selectFromTier(ctx, snapshot.primary, snapshot.byURL, ignoredEndpoints)
 	if primaryErr == nil {
 		return ep, nil
 	}
@@ -337,9 +425,9 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 	// Tier 2: backup endpoints (only when primary is exhausted).
 	utils.LavaFormatDebug("DirectWS: primary endpoints exhausted, falling back to backup",
 		utils.LogAttr("primaryReason", primaryErr.Error()),
-		utils.LogAttr("backupCount", len(dwsm.wsBackupEndpoints)),
+		utils.LogAttr("backupCount", len(snapshot.backup)),
 	)
-	ep, backupErr := dwsm.selectFromTier(ctx, dwsm.wsBackupEndpoints, ignoredEndpoints)
+	ep, backupErr := dwsm.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints)
 	if backupErr == nil {
 		return ep, nil
 	}
@@ -350,7 +438,10 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 // selectFromTier picks one endpoint from the given tier's endpoint slice using
 // the optimizer when available, falling back to first-non-ignored. The caller is
 // responsible for cascade ordering — this helper is tier-agnostic.
-func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tier []*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+//
+// tier and byURL come from one endpointsSnapshot so the optimizer's chosen URL is
+// resolved against the same generation of the index it was offered from.
+func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tier []*common.NodeUrl, byURL map[string]*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
 	if len(tier) == 0 {
 		return nil, fmt.Errorf("tier is empty")
 	}
@@ -391,7 +482,7 @@ func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tie
 	}
 
 	selectedURL := selectedURLs[0]
-	selectedEndpoint, exists := dwsm.endpointsByURL[selectedURL]
+	selectedEndpoint, exists := byURL[selectedURL]
 	if !exists {
 		return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", selectedURL)
 	}
