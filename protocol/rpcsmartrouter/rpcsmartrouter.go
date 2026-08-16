@@ -2478,10 +2478,11 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 	cmdRPCSmartRouter := &cobra.Command{
 		Use:   "rpcsmartrouter [config-file] | { {listen-ip:listen-port spec-chain-id api-interface} ... }",
 		Short: `rpcsmartrouter sets up a centralized server with static providers to perform api requests`,
-		// On startup failure (e.g. all static providers failed verification)
-		// cobra otherwise dumps the full --help text after the error line,
-		// swamping kubectl logs in a CrashLoopBackOff. Operators need to see
-		// the error, not the flag catalogue.
+		// On startup failure (now only configuration errors — a chain with no
+		// provider configured, an unresolvable spec — since MAG-2525 made provider
+		// health non-fatal) cobra otherwise dumps the full --help text after the
+		// error line, swamping kubectl logs in a CrashLoopBackOff. Operators need
+		// to see the error, not the flag catalogue.
 		SilenceUsage: true,
 		Long: `rpcsmartrouter sets up a centralized server with static and backup providers to perform api requests through the lava protocol.
 		This is the smart router mode that uses pre-configured static providers instead of dynamically discovering providers on-chain.
