@@ -5,9 +5,25 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      # The OpenTelemetry modules release in lockstep and share types across
+      # module boundaries: otel/log and otel/sdk/log are built against a
+      # specific otel core, so bumping any one of them alone does not compile
+      # (`undefined: log.KeyValue`). Ungrouped, dependabot opens one PR per
+      # module and every one of them is red on arrival. Grouped, the whole
+      # family moves in a single PR that builds.
+      opentelemetry:
+        patterns:
+          - "go.opentelemetry.io/*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      # Action bumps are independent, but batching them keeps the queue short
+      # so the gomod PRs are not competing for the open-PR limit.
+      github-actions:
+        patterns:
+          - "*"

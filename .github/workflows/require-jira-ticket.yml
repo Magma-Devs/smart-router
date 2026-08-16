@@ -158,6 +158,34 @@ jobs:
             exit 1
           fi
 
+          # Automated dependency PRs carry no Jira ticket and cannot be made to
+          # carry one: the author is a GitHub App, so it can neither open a
+          # ticket nor be granted a ruleset bypass (bypass actors are users and
+          # teams, and an App cannot join a team). Left unhandled the gate is a
+          # permanent block, and the only workaround is a human hand-editing a
+          # ticket key into every bump's description.
+          #
+          # The status is published as success rather than the job being
+          # skipped on purpose. `jira-ticket/validated` is a REQUIRED check, and
+          # a skipped job never reports its context at all — the PR would stay
+          # blocked on a check that never arrives. It has to report green.
+          PR_AUTHOR=$(jq -r '.pull_request.user.login // empty' "$GITHUB_EVENT_PATH")
+          PR_AUTHOR_TYPE=$(jq -r '.pull_request.user.type // empty' "$GITHUB_EVENT_PATH")
+
+          # Both conditions are required. `type` is set by GitHub and is not
+          # spoofable, and the login allowlist keeps the exemption to bots we
+          # have actually vetted rather than any App that opens a PR.
+          EXEMPT_BOT_LOGINS='dependabot[bot]'
+
+          if [[ "$PR_AUTHOR_TYPE" == 'Bot' ]] && printf '%s\n' $EXEMPT_BOT_LOGINS | grep -qxF -- "$PR_AUTHOR"; then
+            write_summary 'Success' "Automated dependency PR by ${PR_AUTHOR}; Jira ticket not applicable."
+            if publish_status 'success' "Jira gate not applicable to ${PR_AUTHOR}"; then
+              FINAL_STATUS_PUBLISHED='true'
+              exit 0
+            fi
+            exit 1
+          fi
+
           JIRA_LINE_COUNT=$(jq '
             [
               ((.pull_request.body // "") | split("\n")[])
