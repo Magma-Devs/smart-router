@@ -258,6 +258,34 @@ assert `/debug/reset-all` emptied each store (see MAG-1762). All drop to `0` aft
 | `smartrouter_csm_sticky_sessions` | Gauge | `spec`, `apiInterface` | Live sticky-session affinities. |
 | `smartrouter_csm_reported_providers` | Gauge | `spec`, `apiInterface` | Size of the reported-providers register. |
 
+#### Serving tier (availability)
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_endpoint_serving_tier` | Gauge | `spec`, `apiInterface` | Which provider tier the endpoint is serving from: `2` = primaries, `1` = degraded (backups only), `0` = dark (no healthy providers). |
+
+Before MAG-2525 an endpoint with no healthy provider exited the process, so a
+CrashLoopBackOff was the de-facto alert. It now boots and reports unhealthy instead,
+which is what makes a restart during a failover survivable — and it means **this gauge,
+not pod restarts, is the signal that a chain cannot serve**. It is republished from
+every path that mutates the live pairing (boot, background retry, epoch
+promote/demote, config reload), so it tracks the current state rather than the boot
+verdict.
+
+Suggested alerts:
+
+| Condition | Meaning |
+| --- | --- |
+| `smartrouter_endpoint_serving_tier == 0` | Endpoint is dark — all relays 5xx. Page. |
+| `smartrouter_endpoint_serving_tier < 2` | Serving on backups only. Redundancy is gone; the next failure is an outage. |
+
+Sizing the `for:` window: recovery from `0` is not one cadence. A chain that was **dark
+at boot** is retried on an adaptive schedule starting at ~2s and doubling to a 3m
+ceiling, so it typically self-heals in seconds. A chain that booted healthy and was
+later **demoted to dark** has no retry loop — demoted providers are not fed into the
+failed-provider lists — and is only re-checked by the 15m epoch re-verifier. Alert
+windows should assume the 15m case.
+
 ---
 
 ## Shared metrics

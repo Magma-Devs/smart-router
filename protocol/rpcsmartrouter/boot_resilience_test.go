@@ -472,3 +472,95 @@ func shortenRetryIntervals(t *testing.T) {
 		retryDarkBaseInterval, retryMaxInterval = prevDark, prevMax
 	})
 }
+
+// The epoch re-verifier promotes a provider back into the pairing, but until this fix
+// it left that provider sitting in the failed list. retryFailedProviders would then
+// revalidate it, succeed, and merge a SECOND session for the same name —
+// mergeRecoveredSessions keys by index and does not dedupe by PublicLavaAddress. The
+// consumer session manager's pairing map collapses the duplicate but validAddresses
+// does not, so the provider ends up with double its selection weight.
+func TestUpdateEpoch_PromotedProviderLeavesTheFailedList(t *testing.T) {
+	rand.InitRandomSeed()
+	const chainKey = "BSC-jsonrpc"
+	rpsr := createTestRPCSmartRouter()
+	sm, rpcEndpoint := createTestSessionManager("BSC", "jsonrpc")
+	rpsr.sessionManagers[chainKey] = sm
+
+	// primary1 failed boot verification and is pending retry; backup1 likewise.
+	staticProviders := bootTestProviders("primary1")
+	backupProviders := bootTestProviders("backup1")
+	rpsr.failedStaticProviders[chainKey] = staticProviders
+	rpsr.failedBackupProviders[chainKey] = backupProviders
+
+	convert := func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+		out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
+		for i, p := range providers {
+			out[uint64(i)] = createTestProviderSession(p.Name, 0)
+		}
+		return out
+	}
+	rpsr.reverifyInputs = map[string]*chainReverifyInputs{
+		chainKey: {
+			rpcEndpoint:                rpcEndpoint,
+			convertProvidersToSessions: convert,
+			configuredStatic:           staticProviders,
+			configuredBackup:           backupProviders,
+			validateFn:                 failThese(), // both upstreams are back
+		},
+	}
+
+	rpsr.updateEpoch(context.Background(), 2)
+
+	require.Len(t, rpsr.providerSessions[chainKey], 1, "primary promoted")
+	require.Len(t, rpsr.backupProviderSessions[chainKey], 1, "backup promoted")
+	require.Empty(t, rpsr.failedStaticProviders[chainKey],
+		"promoted provider must not stay pending, or the retry loop merges a duplicate session")
+	require.Empty(t, rpsr.failedBackupProviders[chainKey])
+}
+
+// Pruning is per tier: a name configured in both tiers must not have its still-failing
+// backup dropped from the retry loop just because its static twin recovered.
+func TestUpdateEpoch_PromotionPrunesOnlyItsOwnTier(t *testing.T) {
+	rand.InitRandomSeed()
+	const chainKey = "BSC-jsonrpc"
+	rpsr := createTestRPCSmartRouter()
+	sm, rpcEndpoint := createTestSessionManager("BSC", "jsonrpc")
+	rpsr.sessionManagers[chainKey] = sm
+
+	// Same provider name configured in both tiers; only the static one recovers.
+	shared := bootTestProviders("shared")
+	sharedBackup := bootTestProviders("shared")
+	rpsr.failedStaticProviders[chainKey] = shared
+	rpsr.failedBackupProviders[chainKey] = sharedBackup
+
+	convert := func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+		out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
+		for i, p := range providers {
+			out[uint64(i)] = createTestProviderSession(p.Name, 0)
+		}
+		return out
+	}
+	var tierSeen int
+	rpsr.reverifyInputs = map[string]*chainReverifyInputs{
+		chainKey: {
+			rpcEndpoint:                rpcEndpoint,
+			convertProvidersToSessions: convert,
+			configuredStatic:           shared,
+			configuredBackup:           sharedBackup,
+			// applyReverification runs static first, then backup.
+			validateFn: func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
+				tierSeen++
+				if tierSeen == 1 {
+					return nil // static recovered
+				}
+				return errors.New("backup still unreachable")
+			},
+		},
+	}
+
+	rpsr.updateEpoch(context.Background(), 2)
+
+	require.Empty(t, rpsr.failedStaticProviders[chainKey], "static promoted, so it leaves its own list")
+	require.Len(t, rpsr.failedBackupProviders[chainKey], 1,
+		"the backup never recovered — it must stay queued for retry")
+}

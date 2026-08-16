@@ -82,6 +82,9 @@ type DirectGRPCSubscriptionManager struct {
 	// Primary tier serves all selections; backup tier is only consulted when
 	// primary is exhausted (analogous to ConsumerSessionManager's
 	// pairing/backupProviders split).
+	//
+	// Mutable, same as the WS manager's tiers: SetEndpoints swaps them (copy-on-write)
+	// when the live pairing changes. Guarded by `lock` — read via endpointsSnapshot.
 	grpcEndpoints       []*common.NodeUrl          // Primary tier — selected first
 	grpcBackupEndpoints []*common.NodeUrl          // Backup tier — used only when primary exhausted
 	endpointsByURL      map[string]*common.NodeUrl // Lookup across both tiers (sticky-session uniformity)
@@ -166,11 +169,62 @@ func NewDirectGRPCSubscriptionManager(
 	return manager
 }
 
+// grpcEndpointsSnapshot is an immutable view of both tiers plus the URL index,
+// taken under the read lock. See wsEndpointsSnapshot — same contract.
+type grpcEndpointsSnapshot struct {
+	primary []*common.NodeUrl
+	backup  []*common.NodeUrl
+	byURL   map[string]*common.NodeUrl
+}
+
+func (dgm *DirectGRPCSubscriptionManager) endpointsSnapshot() grpcEndpointsSnapshot {
+	dgm.lock.RLock()
+	defer dgm.lock.RUnlock()
+	return grpcEndpointsSnapshot{
+		primary: dgm.grpcEndpoints,
+		backup:  dgm.grpcBackupEndpoints,
+		byURL:   dgm.endpointsByURL,
+	}
+}
+
+// SetEndpoints replaces both tiers with the currently-serving gRPC endpoints and
+// reports whether anything changed. Counterpart to
+// DirectWSSubscriptionManager.SetEndpoints — see there for why the tiers must track
+// the live pairing and why only live endpoints may be passed in (MAG-2525).
+//
+// This also un-sticks gRPC reflection: GetReflectionConnection selects through the
+// same cascade, so a chain that booted dark answered reflection with "no endpoints"
+// until the tiers were repopulated.
+func (dgm *DirectGRPCSubscriptionManager) SetEndpoints(grpcEndpoints, grpcBackupEndpoints []*common.NodeUrl) (changed bool) {
+	byURL := make(map[string]*common.NodeUrl, len(grpcEndpoints)+len(grpcBackupEndpoints))
+	for _, ep := range grpcEndpoints {
+		byURL[ep.Url] = ep
+	}
+	for _, ep := range grpcBackupEndpoints {
+		byURL[ep.Url] = ep
+	}
+
+	dgm.lock.Lock()
+	defer dgm.lock.Unlock()
+
+	if sameEndpointURLs(dgm.grpcEndpoints, grpcEndpoints) && sameEndpointURLs(dgm.grpcBackupEndpoints, grpcBackupEndpoints) {
+		return false
+	}
+
+	dgm.grpcEndpoints = grpcEndpoints
+	dgm.grpcBackupEndpoints = grpcBackupEndpoints
+	dgm.endpointsByURL = byURL
+
+	// Pools for departed URLs are left for the cleanup loop to reap once idle —
+	// live streams on a provider that only failed re-verification keep running.
+	return true
+}
+
 // Start initializes the manager and starts background tasks
 func (dgm *DirectGRPCSubscriptionManager) Start(ctx context.Context) {
 	utils.LavaFormatInfo("DirectGRPCSubscriptionManager starting",
 		utils.LogAttr("chainID", dgm.chainID),
-		utils.LogAttr("endpoints", len(dgm.grpcEndpoints)),
+		utils.LogAttr("endpoints", len(dgm.endpointsSnapshot().primary)),
 	)
 
 	// Start cleanup goroutine
@@ -903,10 +957,13 @@ func (dgm *DirectGRPCSubscriptionManager) getOrCreatePool(ctx context.Context, e
 // after the upstream connection is verified, not here, so a primary that fails to
 // connect doesn't pin the client and block the cascade.
 func (dgm *DirectGRPCSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+	// One snapshot for the whole cascade — see DirectWSSubscriptionManager.selectEndpoint.
+	snapshot := dgm.endpointsSnapshot()
+
 	// Tier 0: sticky session for this client (resolves across both tiers).
 	if clientKey != "" {
 		if stickySession, exists := dgm.stickyStore.Get(clientKey); exists {
-			if stickyEndpoint, found := dgm.endpointsByURL[stickySession.Provider]; found {
+			if stickyEndpoint, found := snapshot.byURL[stickySession.Provider]; found {
 				if ignoredEndpoints == nil {
 					return stickyEndpoint, nil
 				}
@@ -924,15 +981,15 @@ func (dgm *DirectGRPCSubscriptionManager) selectEndpoint(ctx context.Context, cl
 	}
 
 	// Tier 1: primary (optimizer-aware).
-	if endpoint, err := dgm.selectFromTier(ctx, dgm.grpcEndpoints, ignoredEndpoints); err == nil {
+	if endpoint, err := dgm.selectFromTier(ctx, snapshot.primary, snapshot.byURL, ignoredEndpoints); err == nil {
 		return endpoint, nil
 	}
 
 	// Tier 2: backup (only when primary is empty/unavailable).
 	utils.LavaFormatDebug("DirectGRPC: primary endpoints exhausted, falling back to backup",
-		utils.LogAttr("backupCount", len(dgm.grpcBackupEndpoints)),
+		utils.LogAttr("backupCount", len(snapshot.backup)),
 	)
-	if endpoint, err := dgm.selectFromTier(ctx, dgm.grpcBackupEndpoints, ignoredEndpoints); err == nil {
+	if endpoint, err := dgm.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints); err == nil {
 		return endpoint, nil
 	}
 
@@ -942,7 +999,9 @@ func (dgm *DirectGRPCSubscriptionManager) selectEndpoint(ctx context.Context, cl
 // selectFromTier picks an endpoint from a single tier using the optimizer when
 // available, falling back to first-non-ignored. Tier-agnostic — the cascade
 // order is the caller's responsibility.
-func (dgm *DirectGRPCSubscriptionManager) selectFromTier(ctx context.Context, tier []*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+//
+// tier and byURL come from one endpointsSnapshot; see the WS counterpart.
+func (dgm *DirectGRPCSubscriptionManager) selectFromTier(ctx context.Context, tier []*common.NodeUrl, byURL map[string]*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
 	if len(tier) == 0 {
 		return nil, fmt.Errorf("tier is empty")
 	}
@@ -982,7 +1041,7 @@ func (dgm *DirectGRPCSubscriptionManager) selectFromTier(ctx context.Context, ti
 	}
 
 	selectedURL := selectedURLs[0]
-	if endpoint, exists := dgm.endpointsByURL[selectedURL]; exists {
+	if endpoint, exists := byURL[selectedURL]; exists {
 		return endpoint, nil
 	}
 	return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", selectedURL)

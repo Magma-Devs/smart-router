@@ -158,7 +158,7 @@ func TestApplyReverification(t *testing.T) {
 				validateFn:                 validate,
 			}
 
-			got, demoted := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, uint64(42))
+			got, demoted, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, uint64(42))
 			gotNames := collectNames(got)
 
 			require.Len(t, gotNames, len(tt.want), "result size, tc #%d", i)
@@ -221,7 +221,7 @@ func TestApplyReverification_BackupTierReadsBackupList(t *testing.T) {
 		validateFn:                 validate,
 	}
 
-	_, _ = applyReverification(context.Background(), inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{}, reverifyTierBackup, 1)
+	_, _, _ = applyReverification(context.Background(), inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{}, reverifyTierBackup, 1)
 	require.Equal(t, []string{"B"}, calls, "backup tier must validate the backup list")
 }
 
@@ -312,7 +312,7 @@ func TestApplyReverification_DemoteHysteresis(t *testing.T) {
 		for i, n := range present {
 			fresh[uint64(i)] = makeSession(n)
 		}
-		got, demotedSessions := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
+		got, demotedSessions, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
 		for _, s := range demotedSessions {
 			demoted = append(demoted, s.PublicLavaAddress)
 		}
@@ -369,7 +369,7 @@ func TestApplyReverification_SuccessResetsDemoteStreak(t *testing.T) {
 
 	run := func(epoch uint64) map[string]struct{} {
 		fresh := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("A")}
-		got, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
+		got, _, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
 		return collectNames(got)
 	}
 

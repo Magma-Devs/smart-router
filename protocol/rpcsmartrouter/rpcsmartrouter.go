@@ -2355,12 +2355,22 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 	// Collect WebSocket-capable endpoints for direct subscriptions.
 	// Primary tier serves all selections; backup tier is consulted on primary exhaustion.
+	// Tiers hold only healthy providers — republishSubscriptionEndpointsLocked keeps them
+	// in step with the live pairing from here on.
 	wsEndpoints := collectWSEndpoints(healthyStaticProviders, "primary")
 	wsBackupEndpoints := collectWSEndpoints(healthyBackupProviders, "backup")
 
-	// Create DirectWSSubscriptionManager if any WebSocket endpoints are available
-	// (primary or backup); otherwise install the NoOp manager.
-	if len(wsEndpoints) > 0 || len(wsBackupEndpoints) > 0 {
+	// Whether a real manager is installed is decided from the CONFIGURED providers, not
+	// the healthy ones. Since MAG-2525 a chain can boot with nothing healthy, and keying
+	// this off the healthy lists would install the NoOp manager permanently: every
+	// eth_subscribe would fail for the process lifetime even after every provider
+	// recovered and HTTP relays were serving, because nothing re-creates the manager.
+	// A Direct manager with empty tiers returns the same "no endpoint" error today and
+	// can be filled in on recovery.
+	wsConfigured := len(collectWSEndpoints(relevantStaticProviderList, "")) > 0 ||
+		len(collectWSEndpoints(relevantBackupProviderList, "")) > 0
+
+	if wsConfigured {
 		directWSManager := NewDirectWSSubscriptionManager(
 			smartRouterMetricsManager,
 			spectypes.APIInterfaceJsonRPC, // WebSocket subscriptions use JSON-RPC
@@ -2382,7 +2392,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			utils.LogAttr("optimizerEnabled", optimizer != nil),
 		)
 	} else {
-		// No WebSocket endpoints configured — use NoOp manager that returns clear errors
+		// Nothing ws:// or wss:// in the config at all — no amount of recovery can
+		// produce a WebSocket endpoint here, so the NoOp manager is permanent by
+		// definition and its error is the honest answer.
 		wsSubscriptionManager = NewNoOpWSSubscriptionManager(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface)
 		utils.LavaFormatInfo("No WebSocket endpoints configured for direct subscriptions",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
@@ -2394,14 +2406,18 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// This supports Cosmos Event Streaming, Solana Geyser, and other gRPC streaming protocols.
 	// Primary tier from healthy static providers; backup tier from healthy backup providers.
 	var grpcEndpoints, grpcBackupEndpoints []*common.NodeUrl
+	grpcConfigured := false
 	if rpcEndpoint.ApiInterface == spectypes.APIInterfaceGrpc {
 		grpcEndpoints = collectGRPCEndpoints(healthyStaticProviders, "primary")
 		grpcBackupEndpoints = collectGRPCEndpoints(healthyBackupProviders, "backup")
+		// Same reasoning as wsConfigured above: keyed off the configured providers so a
+		// dark boot still gets a manager. Leaving grpcSubscriptionManager nil would also
+		// disable gRPC reflection permanently (GetGRPCReflectionConnection nil-checks it).
+		grpcConfigured = len(collectGRPCEndpoints(relevantStaticProviderList, "")) > 0 ||
+			len(collectGRPCEndpoints(relevantBackupProviderList, "")) > 0
 	}
 
-	// Initialize DirectGRPCSubscriptionManager if any gRPC endpoints are available
-	// (primary or backup).
-	if len(grpcEndpoints) > 0 || len(grpcBackupEndpoints) > 0 {
+	if grpcConfigured {
 		grpcSubManager := NewDirectGRPCSubscriptionManager(
 			smartRouterMetricsManager, // Metrics manager for tracking
 			rpcEndpoint.ChainID,
@@ -3087,9 +3103,26 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		if inputs := rpsr.reverifyInputs[chainKey]; inputs != nil {
 			reverifyStart := time.Now()
 			var demotedStatic, demotedBackup []*lavasession.ConsumerSessionsWithProvider
-			freshProviderSessions, demotedStatic = applyReverification(ctx, inputs, freshProviderSessions, reverifyTierStatic, epoch)
-			freshBackupSessions, demotedBackup = applyReverification(ctx, inputs, freshBackupSessions, reverifyTierBackup, epoch)
+			var promotedStatic, promotedBackup []string
+			freshProviderSessions, demotedStatic, promotedStatic = applyReverification(ctx, inputs, freshProviderSessions, reverifyTierStatic, epoch)
+			freshBackupSessions, demotedBackup, promotedBackup = applyReverification(ctx, inputs, freshBackupSessions, reverifyTierBackup, epoch)
 			demotedSessions = append(demotedStatic, demotedBackup...)
+
+			// A promoted provider supersedes any pending failed-init retry, the same
+			// invariant rebuildPairingFromConfig enforces. Without this the provider stays
+			// in the failed list, retryFailedProviders revalidates it, succeeds, and
+			// mergeRecoveredSessions appends a SECOND session for it — that helper keys by
+			// index and does not dedupe by PublicLavaAddress. csm.pairing collapses the
+			// duplicate but pairingAddresses and validAddresses do not, so the provider
+			// lands twice in validAddresses with double its selection weight, and the
+			// superseded ConsumerSessionsWithProvider is dropped without its
+			// DirectRPCConnection being closed.
+			//
+			// Pruned per tier, not by the union: a name configured in both tiers must not
+			// have its still-failing backup dropped from the retry loop because its static
+			// twin recovered.
+			pruneRestoredFromFailed(rpsr.failedStaticProviders, chainKey, nameSet(promotedStatic))
+			pruneRestoredFromFailed(rpsr.failedBackupProviders, chainKey, nameSet(promotedBackup))
 			// Per-chain re-verify is internally bounded by SpecReVerifyConcurrency,
 			// but updateEpoch iterates chains serially. Surfacing per-chain duration
 			// gives operators a signal when total tick time approaches epoch length —
@@ -3115,6 +3148,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			delete(rpsr.backupProviderSessions, chainKey)
 		}
 		rpsr.publishServingTierLocked(chainKey)
+		rpsr.republishSubscriptionEndpointsLocked(chainKey)
 		server := rpsr.rpcServers[chainKey]
 
 		// UpdateAllProviders stays under rpsr.mu so the (rpsr.providerSessions write
@@ -3209,6 +3243,91 @@ func (rpsr *RPCSmartRouter) publishServingTierLocked(chainKey string) {
 		len(rpsr.providerSessions[chainKey]),
 		len(rpsr.backupProviderSessions[chainKey]),
 	)
+}
+
+// subscriptionEndpointSetter is the slice of the Direct WS/gRPC subscription managers
+// republishSubscriptionEndpointsLocked needs. The NoOp WS manager deliberately does not
+// implement it — a chain with no ws:// URL configured has nothing to republish.
+type subscriptionEndpointSetter interface {
+	SetEndpoints(primary, backup []*common.NodeUrl) bool
+}
+
+// republishSubscriptionEndpointsLocked pushes the currently-serving WS and gRPC
+// endpoints into the subscription managers. Callers must already hold rpsr.mu.
+//
+// Companion to publishServingTierLocked, and it belongs on every path that mutates the
+// live pairing for the same reason: the managers' tiers are built once at boot, and
+// nothing else updates them. Left alone they are frozen for the process lifetime, which
+// after MAG-2525 turns both of this fix's own scenarios into permanent subscription
+// outages — a chain that booted dark keeps two empty tiers and fails every eth_subscribe
+// forever, and a chain that booted on backups alone never promotes a recovered primary.
+// HTTP relays recover in both cases, so nothing else surfaces the fault.
+//
+// The tiers are rebuilt from the configured providers filtered by what is live in the
+// session maps, which is the same source of truth publishServingTierLocked reads. Only
+// live endpoints go in: a configured-but-dead endpoint in the primary tier would be
+// handed to a subscription with no fallback, and would suppress the primary→backup
+// cascade, which only fires when the primary tier is empty or fully ignored.
+func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string) {
+	server := rpsr.rpcServers[chainKey]
+	if server == nil {
+		return // not yet registered (boot seeds the tiers via the constructors)
+	}
+	inputs := rpsr.reverifyInputs[chainKey]
+	if inputs == nil {
+		return // no configured lists to filter — test-constructed router
+	}
+
+	liveStatic := activeProviders(inputs.configuredStatic, rpsr.providerSessions[chainKey])
+	liveBackup := activeProviders(inputs.configuredBackup, rpsr.backupProviderSessions[chainKey])
+
+	if setter, ok := server.wsSubscriptionManager.(subscriptionEndpointSetter); ok {
+		primary := collectWSEndpoints(liveStatic, "")
+		backup := collectWSEndpoints(liveBackup, "")
+		if setter.SetEndpoints(primary, backup) {
+			utils.LavaFormatInfo("subscriptions: WebSocket endpoint tiers updated to match live pairing",
+				utils.LogAttr("chainKey", chainKey),
+				utils.LogAttr("primaryCount", len(primary)),
+				utils.LogAttr("backupCount", len(backup)),
+			)
+		}
+	}
+
+	if server.grpcSubscriptionManager != nil {
+		primary := collectGRPCEndpoints(liveStatic, "")
+		backup := collectGRPCEndpoints(liveBackup, "")
+		if server.grpcSubscriptionManager.SetEndpoints(primary, backup) {
+			utils.LavaFormatInfo("subscriptions: gRPC endpoint tiers updated to match live pairing",
+				utils.LogAttr("chainKey", chainKey),
+				utils.LogAttr("primaryCount", len(primary)),
+				utils.LogAttr("backupCount", len(backup)),
+			)
+		}
+	}
+}
+
+// activeProviders returns the configured providers that are currently in the pairing,
+// in configured order. Sessions are keyed by index and carry the provider name as
+// PublicLavaAddress (see convertProvidersToSessions), so this is the bridge from "what
+// is live" back to the RPCStaticProviderEndpoint records that own the NodeUrls.
+func activeProviders(
+	configured []*lavasession.RPCStaticProviderEndpoint,
+	sessions map[uint64]*lavasession.ConsumerSessionsWithProvider,
+) []*lavasession.RPCStaticProviderEndpoint {
+	if len(configured) == 0 || len(sessions) == 0 {
+		return nil
+	}
+	active := make(map[string]struct{}, len(sessions))
+	for _, s := range sessions {
+		active[s.PublicLavaAddress] = struct{}{}
+	}
+	live := make([]*lavasession.RPCStaticProviderEndpoint, 0, len(active))
+	for _, p := range configured {
+		if _, ok := active[p.Name]; ok {
+			live = append(live, p)
+		}
+	}
+	return live
 }
 
 // retryFailedProviders periodically re-validates providers that failed
@@ -3349,6 +3468,7 @@ func (rpsr *RPCSmartRouter) readmitRecoveredProviders(
 		rpsr.backupProviderSessions[sessionManagerKey] = mergedBackup
 	}
 	rpsr.publishServingTierLocked(sessionManagerKey)
+	rpsr.republishSubscriptionEndpointsLocked(sessionManagerKey)
 
 	err := rpsr.sessionManagers[sessionManagerKey].UpdateAllProviders(currentEpoch, mergedStatic, mergedBackup)
 	rpsr.mu.Unlock()
@@ -3374,6 +3494,18 @@ func (rpsr *RPCSmartRouter) readmitRecoveredProviders(
 			)
 		}
 	}
+}
+
+// nameSet turns a provider-name slice into the set pruneRestoredFromFailed wants.
+func nameSet(names []string) map[string]struct{} {
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[n] = struct{}{}
+	}
+	return set
 }
 
 // pruneRestoredFromFailed removes providers named in `restored` from one chain's
@@ -3476,6 +3608,7 @@ func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
 			delete(rpsr.backupProviderSessions, chainKey)
 		}
 		rpsr.publishServingTierLocked(chainKey)
+		rpsr.republishSubscriptionEndpointsLocked(chainKey)
 
 		// A re-admitted provider supersedes any pending failed-init retry: drop it
 		// from the failed lists so retryFailedProviders won't later merge a duplicate
@@ -3626,7 +3759,9 @@ func testModeWarn(desc string) {
 
 // collectWSEndpoints returns every ws://|wss:// NodeUrl from the given providers.
 // tierLabel ("primary" / "backup") is logged so operators can see which tier each
-// endpoint came from.
+// endpoint came from; an empty tierLabel suppresses that per-endpoint line. Boot wants
+// the full inventory, but the republish path runs on every pairing change and would
+// otherwise re-log every endpoint of every chain each epoch — it logs deltas instead.
 func collectWSEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, tierLabel string) []*common.NodeUrl {
 	var endpoints []*common.NodeUrl
 	for _, provider := range providers {
@@ -3634,6 +3769,9 @@ func collectWSEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, tier
 			url := strings.ToLower(provider.NodeUrls[i].Url)
 			if strings.HasPrefix(url, "ws://") || strings.HasPrefix(url, "wss://") {
 				endpoints = append(endpoints, &provider.NodeUrls[i])
+				if tierLabel == "" {
+					continue
+				}
 				utils.LavaFormatInfo("Found WebSocket endpoint for direct subscriptions",
 					utils.LogAttr("tier", tierLabel),
 					utils.LogAttr("url", provider.NodeUrls[i].Url),
@@ -3647,7 +3785,8 @@ func collectWSEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, tier
 }
 
 // collectGRPCEndpoints returns every NodeUrl from providers whose ApiInterface is gRPC.
-// tierLabel ("primary" / "backup") is logged for operator visibility.
+// tierLabel ("primary" / "backup") is logged for operator visibility; an empty label
+// suppresses that line — see collectWSEndpoints.
 func collectGRPCEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, tierLabel string) []*common.NodeUrl {
 	var endpoints []*common.NodeUrl
 	for _, provider := range providers {
@@ -3656,6 +3795,9 @@ func collectGRPCEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, ti
 		}
 		for i := range provider.NodeUrls {
 			endpoints = append(endpoints, &provider.NodeUrls[i])
+			if tierLabel == "" {
+				continue
+			}
 			utils.LavaFormatInfo("Found gRPC endpoint for streaming subscriptions",
 				utils.LogAttr("tier", tierLabel),
 				utils.LogAttr("url", provider.NodeUrls[i].Url),
