@@ -51,14 +51,14 @@ func (m *mutexRandomizer) Intn(n int) int {
 	return m.rng.Intn(n)
 }
 
-// ProviderSelector scores providers on composite QoS and picks one of them. It replaces
+// UpstreamSelector scores providers on composite QoS and picks one of them. It replaces
 // the tier-based selection system with a continuous, score-based approach where providers
 // are ranked by overall quality without artificial tier boundaries.
 //
 // Scoring is shared by every selection policy; only the final pick varies, governed by
 // selectionMode — a weighted random draw (the default) or the highest scorer. The type was
 // named WeightedSelector while the weighted draw was the only policy.
-type ProviderSelector struct {
+type UpstreamSelector struct {
 	// Configuration weights for different QoS metrics (should sum to 1.0)
 	availabilityWeight float64 // Default: 0.3 (30% weight)
 	latencyWeight      float64 // Default: 0.3 (30% weight)
@@ -85,8 +85,8 @@ type ProviderSelector struct {
 	adaptiveSyncGetter    func() (p10, p90 float64) // Function to get adaptive P10-P90 bounds for sync
 }
 
-// ProviderScore represents a provider's calculated scores for selection
-type ProviderScore struct {
+// UpstreamScore represents a provider's calculated scores for selection
+type UpstreamScore struct {
 	Address         string  // Provider address
 	CompositeScore  float64 // Normalized 0-1 composite score
 	SelectionWeight float64 // Score adjusted by strategy and stake
@@ -94,7 +94,7 @@ type ProviderScore struct {
 
 // SelectionStats contains detailed information about provider selection for debugging
 type SelectionStats struct {
-	ProviderScores   []ProviderScoreDetails // Scores for all candidates
+	UpstreamScores   []UpstreamScoreDetails // Scores for all candidates
 	RNGValue         float64                // Random number used for selection
 	SelectedProvider string                 // The provider that was selected
 	// Mode is the policy that produced this pick. It disambiguates RNGValue, which is
@@ -104,8 +104,8 @@ type SelectionStats struct {
 	Mode SelectionMode
 }
 
-// ProviderScoreDetails contains detailed scoring information for a single provider
-type ProviderScoreDetails struct {
+// UpstreamScoreDetails contains detailed scoring information for a single provider
+type UpstreamScoreDetails struct {
 	Address      string  // Provider address
 	Availability float64 // Availability score (0-1)
 	Latency      float64 // Latency score (0-1)
@@ -114,8 +114,8 @@ type ProviderScoreDetails struct {
 	Composite    float64 // Combined QoS score (0-1)
 }
 
-// ProviderSelectorConfig holds configuration options for creating a ProviderSelector
-type ProviderSelectorConfig struct {
+// UpstreamSelectorConfig holds configuration options for creating a UpstreamSelector
+type UpstreamSelectorConfig struct {
 	AvailabilityWeight    float64
 	LatencyWeight         float64
 	SyncWeight            float64
@@ -129,9 +129,9 @@ type ProviderSelectorConfig struct {
 	AdaptiveSyncGetter    func() (p10, p90 float64) // Phase 2: Function to get adaptive P10-P90 bounds for sync
 }
 
-// DefaultProviderSelectorConfig returns a configuration with balanced default weights
-func DefaultProviderSelectorConfig() ProviderSelectorConfig {
-	return ProviderSelectorConfig{
+// DefaultUpstreamSelectorConfig returns a configuration with balanced default weights
+func DefaultUpstreamSelectorConfig() UpstreamSelectorConfig {
+	return UpstreamSelectorConfig{
 		AvailabilityWeight: 0.3,  // Availability remains critical (30%)
 		LatencyWeight:      0.3,  // Latency shares equal emphasis (30%)
 		SyncWeight:         0.2,  // Sync is third priority (20%)
@@ -142,15 +142,15 @@ func DefaultProviderSelectorConfig() ProviderSelectorConfig {
 	}
 }
 
-// NewProviderSelector creates a new ProviderSelector with the given configuration
-func NewProviderSelector(config ProviderSelectorConfig) *ProviderSelector {
+// NewUpstreamSelector creates a new UpstreamSelector with the given configuration
+func NewUpstreamSelector(config UpstreamSelectorConfig) *UpstreamSelector {
 	// Validate and normalize weights
 	//
 	// Important: we only want to fallback the *weights* if they are invalid, but keep
 	// other user choices (Strategy / SelectionMode / MinSelectionChance) intact.
 	validateWeight := func(name string, w float64) bool {
 		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
-			utils.LavaFormatWarning("invalid provider selector weight, must be finite and >= 0",
+			utils.LavaFormatWarning("invalid endpoint selector weight, must be finite and >= 0",
 				nil,
 				utils.LogAttr("weightName", name),
 				utils.LogAttr("weight", w),
@@ -167,7 +167,7 @@ func NewProviderSelector(config ProviderSelectorConfig) *ProviderSelector {
 
 	totalWeight := config.AvailabilityWeight + config.LatencyWeight + config.SyncWeight + config.StakeWeight
 	if !weightsValid || math.IsNaN(totalWeight) || math.IsInf(totalWeight, 0) || totalWeight <= 0 {
-		utils.LavaFormatWarning("provider selector weights sum to zero/negative or contain invalid values, using default weights", nil,
+		utils.LavaFormatWarning("endpoint selector weights sum to zero/negative or contain invalid values, using default weights", nil,
 			utils.LogAttr("totalWeight", totalWeight),
 			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
 			utils.LogAttr("latencyWeight", config.LatencyWeight),
@@ -175,7 +175,7 @@ func NewProviderSelector(config ProviderSelectorConfig) *ProviderSelector {
 			utils.LogAttr("stakeWeight", config.StakeWeight),
 		)
 
-		defaultCfg := DefaultProviderSelectorConfig()
+		defaultCfg := DefaultUpstreamSelectorConfig()
 		config.AvailabilityWeight = defaultCfg.AvailabilityWeight
 		config.LatencyWeight = defaultCfg.LatencyWeight
 		config.SyncWeight = defaultCfg.SyncWeight
@@ -184,7 +184,7 @@ func NewProviderSelector(config ProviderSelectorConfig) *ProviderSelector {
 	}
 
 	if math.Abs(totalWeight-1.0) > 0.001 {
-		utils.LavaFormatWarning("provider selector weights do not sum to 1.0, normalizing",
+		utils.LavaFormatWarning("endpoint selector weights do not sum to 1.0, normalizing",
 			nil,
 			utils.LogAttr("totalWeight", totalWeight),
 			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
@@ -199,7 +199,7 @@ func NewProviderSelector(config ProviderSelectorConfig) *ProviderSelector {
 		config.StakeWeight /= totalWeight
 	}
 
-	return &ProviderSelector{
+	return &UpstreamSelector{
 		availabilityWeight:    config.AvailabilityWeight,
 		latencyWeight:         config.LatencyWeight,
 		syncWeight:            config.SyncWeight,
@@ -215,9 +215,9 @@ func NewProviderSelector(config ProviderSelectorConfig) *ProviderSelector {
 	}
 }
 
-// SetDeterministicSeed sets a specific seed for the provider selector's RNG
+// SetDeterministicSeed sets a specific seed for the endpoint selector's RNG
 // This should ONLY be used for testing to ensure deterministic selection
-func (ws *ProviderSelector) SetDeterministicSeed(seed int64) {
+func (ws *UpstreamSelector) SetDeterministicSeed(seed int64) {
 	ws.rng = &mutexRandomizer{
 		rng: stdrand.New(stdrand.NewSource(seed)),
 	}
@@ -226,7 +226,7 @@ func (ws *ProviderSelector) SetDeterministicSeed(seed int64) {
 // CalculateScore computes a composite score for a provider based on QoS metrics and stake.
 // stake and totalStake are raw stake amounts (e.g. in ulava).
 // Returns a normalized score between 0 and 1, where higher is better
-func (ws *ProviderSelector) CalculateScore(
+func (ws *UpstreamSelector) CalculateScore(
 	qos *pairingtypes.QualityOfServiceReport,
 	stake float64,
 	totalStake float64,
@@ -336,7 +336,7 @@ func (ws *ProviderSelector) CalculateScore(
 //   - ✅ Zero complexity, no state, no memory overhead
 //   - ✅ Clear business rule: < 80% availability = unacceptable
 //   - ✅ Stable and predictable
-func (ws *ProviderSelector) normalizeAvailability(availability float64) float64 {
+func (ws *UpstreamSelector) normalizeAvailability(availability float64) float64 {
 	// Phase 1: Simple Rescaling
 	const minAcceptable = score.MinAcceptableAvailability // currently 0.80
 	const maxAvailability = 1.0
@@ -388,7 +388,7 @@ func (ws *ProviderSelector) normalizeAvailability(availability float64) float64 
 // Phase 1 (Fallback):
 //   - Uses fixed maximum expected latency (score.WorstLatencyScore = 30s)
 //   - Formula: normalized = 1 - (latency / maxLatency)
-func (ws *ProviderSelector) normalizeLatency(latency float64) float64 {
+func (ws *UpstreamSelector) normalizeLatency(latency float64) float64 {
 	// Phase 2: Adaptive P10-P90 normalization (if enabled)
 	if ws.useAdaptiveLatencyMax && ws.adaptiveLatencyGetter != nil {
 		p10, p90 := ws.adaptiveLatencyGetter()
@@ -483,7 +483,7 @@ func (ws *ProviderSelector) normalizeLatency(latency float64) float64 {
 // Phase 1 (Fallback):
 //   - Uses fixed maximum expected sync lag (score.WorstSyncScore = 1200s)
 //   - Formula: normalized = 1 - (syncLag / maxSyncLag)
-func (ws *ProviderSelector) normalizeSync(syncLag float64) float64 {
+func (ws *UpstreamSelector) normalizeSync(syncLag float64) float64 {
 	// Phase 2: Adaptive P10-P90 normalization (if enabled)
 	if ws.useAdaptiveSyncMax && ws.adaptiveSyncGetter != nil {
 		p10, p90 := ws.adaptiveSyncGetter()
@@ -568,7 +568,7 @@ func (ws *ProviderSelector) normalizeSync(syncLag float64) float64 {
 // normalizeStake converts stake to 0-1 range relative to total stake.
 // stake and totalStake are raw stake amounts.
 // Uses square root scaling to reduce whale dominance while maintaining incentives
-func (ws *ProviderSelector) normalizeStake(stake float64, totalStake float64) float64 {
+func (ws *UpstreamSelector) normalizeStake(stake float64, totalStake float64) float64 {
 	if totalStake == 0 || stake == 0 {
 		return 0.0
 	}
@@ -606,7 +606,7 @@ func (ws *ProviderSelector) normalizeStake(stake float64, totalStake float64) fl
 
 // applyStrategyAdjustments modifies scores based on the configured strategy
 // This allows different strategies to emphasize different metrics
-func (ws *ProviderSelector) applyStrategyAdjustments(latency, sync float64) (float64, float64) {
+func (ws *UpstreamSelector) applyStrategyAdjustments(latency, sync float64) (float64, float64) {
 	switch ws.strategy {
 	case StrategyLatency:
 		// Boost latency importance by squaring good latency scores
@@ -634,27 +634,27 @@ func (ws *ProviderSelector) applyStrategyAdjustments(latency, sync float64) (flo
 	return latency, sync
 }
 
-// SelectProvider selects a provider from the scored candidates according to the
-// configured SelectionMode (weighted random by default, see SelectProviderWithStats)
-func (ws *ProviderSelector) SelectProvider(
+// SelectUpstream selects a provider from the scored candidates according to the
+// configured SelectionMode (weighted random by default, see SelectUpstreamWithStats)
+func (ws *UpstreamSelector) SelectUpstream(
 	ctx context.Context,
-	providerScores []ProviderScore,
+	providerScores []UpstreamScore,
 ) string {
-	selected, _ := ws.SelectProviderWithStats(ctx, providerScores, nil)
+	selected, _ := ws.SelectUpstreamWithStats(ctx, providerScores, nil)
 	return selected
 }
 
-// SelectProviderWithStats selects a provider and returns detailed selection statistics
+// SelectUpstreamWithStats selects a provider and returns detailed selection statistics
 // if scoreDetails is provided.
 //
 // Only the winner-picking step depends on ws.selectionMode: SelectionModeWeightedRandom
 // draws proportionally to SelectionWeight, SelectionModeBest takes the highest score.
 // The guards below, the stats payload and the debug breakdown are shared by both modes so
 // the reporting contract cannot drift between them.
-func (ws *ProviderSelector) SelectProviderWithStats(
+func (ws *UpstreamSelector) SelectUpstreamWithStats(
 	ctx context.Context,
-	providerScores []ProviderScore,
-	scoreDetails []ProviderScoreDetails,
+	providerScores []UpstreamScore,
+	scoreDetails []UpstreamScoreDetails,
 ) (string, *SelectionStats) {
 	if len(providerScores) == 0 {
 		return "", nil
@@ -695,7 +695,7 @@ func (ws *ProviderSelector) SelectProviderWithStats(
 // pickWeightedIndex draws a provider with probability proportional to its SelectionWeight
 // and returns the winning index alongside the random value that produced it.
 // Callers must ensure totalScore > 0.
-func (ws *ProviderSelector) pickWeightedIndex(providerScores []ProviderScore, totalScore float64) (int, float64) {
+func (ws *UpstreamSelector) pickWeightedIndex(providerScores []UpstreamScore, totalScore float64) (int, float64) {
 	// Generate random value in [0, totalScore)
 	randomValue := ws.rng.Float64() * totalScore
 
@@ -724,7 +724,7 @@ func (ws *ProviderSelector) pickWeightedIndex(providerScores []ProviderScore, to
 // minSelectionChance, so exact N-way ties are routine on a degraded chain — a first-wins
 // scan would pin all traffic onto whichever address happens to sort first in the pairing
 // list, which is precisely the starvation the floor exists to prevent.
-func (ws *ProviderSelector) pickBestIndex(providerScores []ProviderScore) int {
+func (ws *UpstreamSelector) pickBestIndex(providerScores []UpstreamScore) int {
 	best, tied := 0, 1
 	for i := 1; i < len(providerScores); i++ {
 		switch {
@@ -744,10 +744,10 @@ func (ws *ProviderSelector) pickBestIndex(providerScores []ProviderScore) int {
 
 // buildSelectionResult emits the debug breakdown and assembles the SelectionStats payload
 // for the winning candidate. Shared by every selection path, including the short-circuits.
-func (ws *ProviderSelector) buildSelectionResult(
+func (ws *UpstreamSelector) buildSelectionResult(
 	ctx context.Context,
-	providerScores []ProviderScore,
-	scoreDetails []ProviderScoreDetails,
+	providerScores []UpstreamScore,
+	scoreDetails []UpstreamScoreDetails,
 	selectedIndex int,
 	randomValue float64,
 	totalScore float64,
@@ -799,23 +799,23 @@ func (ws *ProviderSelector) buildSelectionResult(
 	}
 
 	return selected.Address, &SelectionStats{
-		ProviderScores:   scoreDetails,
+		UpstreamScores:   scoreDetails,
 		RNGValue:         randomValue,
 		SelectedProvider: selected.Address,
 		Mode:             ws.selectionMode,
 	}
 }
 
-// CalculateProviderScores computes scores for all providers
-func (ws *ProviderSelector) CalculateProviderScores(
+// CalculateUpstreamScores computes scores for all providers
+func (ws *UpstreamSelector) CalculateUpstreamScores(
 	allAddresses []string,
 	ignoredProviders map[string]struct{},
 	providerDataGetter func(string) (*pairingtypes.QualityOfServiceReport, time.Time, bool),
 	stakeGetter func(string) int64,
-) ([]ProviderScore, map[string]*metrics.OptimizerQoSReport, []ProviderScoreDetails) {
-	providerScores := make([]ProviderScore, 0, len(allAddresses))
+) ([]UpstreamScore, map[string]*metrics.OptimizerQoSReport, []UpstreamScoreDetails) {
+	providerScores := make([]UpstreamScore, 0, len(allAddresses))
 	qosReports := make(map[string]*metrics.OptimizerQoSReport)
-	scoreDetails := make([]ProviderScoreDetails, 0, len(allAddresses))
+	scoreDetails := make([]UpstreamScoreDetails, 0, len(allAddresses))
 
 	// Calculate total stake from FULL pairing list for consistent normalization
 	// This ensures stake scores remain constant regardless of which providers
@@ -836,7 +836,7 @@ func (ws *ProviderSelector) CalculateProviderScores(
 
 		qos, _, found := providerDataGetter(providerAddress)
 		if !found || qos == nil {
-			utils.LavaFormatWarning("[ProviderSelector] could not get QoS for provider",
+			utils.LavaFormatWarning("[UpstreamSelector] could not get QoS for provider",
 				nil,
 				utils.LogAttr("provider", providerAddress),
 			)
@@ -860,7 +860,7 @@ func (ws *ProviderSelector) CalculateProviderScores(
 		// Calculate composite score
 		compositeScore := ws.CalculateScore(qos, stakeFloat, totalStakeFloat, providerAddress)
 
-		providerScore := ProviderScore{
+		providerScore := UpstreamScore{
 			Address:         providerAddress,
 			CompositeScore:  compositeScore,
 			SelectionWeight: compositeScore,
@@ -868,7 +868,7 @@ func (ws *ProviderSelector) CalculateProviderScores(
 		providerScores = append(providerScores, providerScore)
 
 		// Store detailed scores for selection stats
-		scoreDetails = append(scoreDetails, ProviderScoreDetails{
+		scoreDetails = append(scoreDetails, UpstreamScoreDetails{
 			Address:      providerAddress,
 			Availability: availabilityScore,
 			Latency:      latencyScore,
@@ -897,7 +897,7 @@ func (ws *ProviderSelector) CalculateProviderScores(
 			StakeContribution:        stakeScore * ws.stakeWeight,
 		}
 
-		utils.LavaFormatTrace("[ProviderSelector] calculated provider score",
+		utils.LavaFormatTrace("[UpstreamSelector] calculated provider score",
 			utils.LogAttr("provider", providerAddress),
 			utils.LogAttr("compositeScore", compositeScore),
 			utils.LogAttr("availability", availability),
@@ -911,8 +911,8 @@ func (ws *ProviderSelector) CalculateProviderScores(
 }
 
 // GetConfig returns the current configuration
-func (ws *ProviderSelector) GetConfig() ProviderSelectorConfig {
-	return ProviderSelectorConfig{
+func (ws *UpstreamSelector) GetConfig() UpstreamSelectorConfig {
+	return UpstreamSelectorConfig{
 		AvailabilityWeight:    ws.availabilityWeight,
 		LatencyWeight:         ws.latencyWeight,
 		SyncWeight:            ws.syncWeight,
@@ -928,7 +928,7 @@ func (ws *ProviderSelector) GetConfig() ProviderSelectorConfig {
 }
 
 // UpdateStrategy changes the strategy and recalculates any strategy-dependent parameters
-func (ws *ProviderSelector) UpdateStrategy(strategy Strategy) {
+func (ws *UpstreamSelector) UpdateStrategy(strategy Strategy) {
 	ws.strategy = strategy
 }
 
@@ -945,7 +945,7 @@ func (stats *SelectionStats) FormatSelectionStats() string {
 	var result strings.Builder
 
 	// Format each provider's scores
-	for i, ps := range stats.ProviderScores {
+	for i, ps := range stats.UpstreamScores {
 		if i > 0 {
 			result.WriteString(" ")
 		}

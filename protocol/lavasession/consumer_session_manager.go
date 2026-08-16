@@ -1291,8 +1291,8 @@ func convertSelectionStatsToMetrics(stats *provideroptimizer.SelectionStats) (al
 		return nil, 0
 	}
 	rngValue = stats.RNGValue
-	allScores = make([]metrics.ProviderSelectionScores, 0, len(stats.ProviderScores))
-	for _, score := range stats.ProviderScores {
+	allScores = make([]metrics.ProviderSelectionScores, 0, len(stats.UpstreamScores))
+	for _, score := range stats.UpstreamScores {
 		allScores = append(allScores, metrics.ProviderSelectionScores{
 			ProviderAddress: score.Address,
 			Availability:    score.Availability,
@@ -1515,7 +1515,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		providers = csm.getTopTenProvidersForStatefulCalls(validAddresses, ignoredProvidersList)
 	} else if stickiness != "" {
 		var selectionStats *provideroptimizer.SelectionStats
-		providers, selectionStats = csm.providerOptimizer.ChooseProviderWithStats(ctx, validAddresses, ignoredProvidersList, cu, requestedBlock)
+		providers, selectionStats = csm.providerOptimizer.ChooseUpstreamWithStats(ctx, validAddresses, ignoredProvidersList, cu, requestedBlock)
 		if selectionStats != nil {
 			csm.setSelectionStats(selectionStats)
 		}
@@ -1529,7 +1529,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 					utils.LogAttr("extensions", extensions),
 					utils.LogAttr("GUID", ctx),
 				)
-			} else if len(selectionStats.ProviderScores) == 0 {
+			} else if len(selectionStats.UpstreamScores) == 0 {
 				utils.LavaFormatWarning("Selection stats missing provider scores for sticky session", nil,
 					utils.LogAttr("provider", providers[0]),
 					utils.LogAttr("selectedProvider", selectionStats.SelectedProvider),
@@ -1549,7 +1549,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 			ignoredProvidersListCopy[k] = v
 		}
 		for i := 0; i < wantedProviders; i++ {
-			provider, selectionStats := csm.providerOptimizer.ChooseProviderWithStats(ctx, validAddresses, ignoredProvidersListCopy, cu, requestedBlock)
+			provider, selectionStats := csm.providerOptimizer.ChooseUpstreamWithStats(ctx, validAddresses, ignoredProvidersListCopy, cu, requestedBlock)
 			if len(provider) == 0 {
 				break
 			}
@@ -1566,7 +1566,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 					utils.LogAttr("extensions", extensions),
 					utils.LogAttr("GUID", ctx),
 				)
-			} else if len(selectionStats.ProviderScores) == 0 {
+			} else if len(selectionStats.UpstreamScores) == 0 {
 				utils.LavaFormatWarning("Selection stats missing provider scores", nil,
 					utils.LogAttr("provider", provider[0]),
 					utils.LogAttr("selectedProvider", selectionStats.SelectedProvider),
@@ -1755,7 +1755,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	// On cold start (no relay history) selection is uniform; as backups serve relays the optimizer
 	// accumulates latency/availability data and improves ranking.
 	// Returning one provider per call allows each retry to pick the next-best backup.
-	selectedAddresses := csm.providerOptimizer.ChooseProvider(ctx, backupProviderAddresses, ignoredProviders.providers, cuNeededForSession, requestedBlock)
+	selectedAddresses := csm.providerOptimizer.ChooseUpstream(ctx, backupProviderAddresses, ignoredProviders.providers, cuNeededForSession, requestedBlock)
 	if len(selectedAddresses) == 0 {
 		utils.LavaFormatInfo("[BackupProviders] Optimizer returned no selection from backup candidates",
 			utils.LogAttr("candidates", backupProviderAddresses),

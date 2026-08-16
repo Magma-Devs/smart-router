@@ -21,10 +21,10 @@ func createQoSReport(availability, latency, sync float64) *pairingtypes.QualityO
 	}
 }
 
-// TestNewProviderSelector tests the creation of a new ProviderSelector
-func TestNewProviderSelector(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+// TestNewUpstreamSelector tests the creation of a new UpstreamSelector
+func TestNewUpstreamSelector(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	require.NotNil(t, ws)
 	require.Equal(t, 0.3, ws.availabilityWeight)
@@ -36,7 +36,7 @@ func TestNewProviderSelector(t *testing.T) {
 
 // TestWeightNormalization tests that weights are normalized if they don't sum to 1.0
 func TestWeightNormalization(t *testing.T) {
-	config := ProviderSelectorConfig{
+	config := UpstreamSelectorConfig{
 		AvailabilityWeight: 0.5,
 		LatencyWeight:      0.5,
 		SyncWeight:         0.5,
@@ -45,7 +45,7 @@ func TestWeightNormalization(t *testing.T) {
 		Strategy:           StrategyBalanced,
 	}
 
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 
 	// Weights should be normalized to sum to 1.0
 	totalWeight := ws.availabilityWeight + ws.latencyWeight + ws.syncWeight + ws.stakeWeight
@@ -58,8 +58,8 @@ func TestWeightNormalization(t *testing.T) {
 	require.InDelta(t, 0.25, ws.stakeWeight, 0.001)
 }
 
-func TestNewProviderSelectorZeroTotalWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
-	config := ProviderSelectorConfig{
+func TestNewUpstreamSelectorZeroTotalWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
+	config := UpstreamSelectorConfig{
 		AvailabilityWeight: 0,
 		LatencyWeight:      0,
 		SyncWeight:         0,
@@ -68,7 +68,7 @@ func TestNewProviderSelectorZeroTotalWeightFallsBackToDefaultWeightsButKeepsOthe
 		Strategy:           StrategyLatency,
 	}
 
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 
 	// Falls back to default weights
 	require.InDelta(t, 0.3, ws.availabilityWeight, 0.0001)
@@ -81,8 +81,8 @@ func TestNewProviderSelectorZeroTotalWeightFallsBackToDefaultWeightsButKeepsOthe
 	require.Equal(t, StrategyLatency, ws.strategy)
 }
 
-func TestNewProviderSelectorNegativeWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
-	config := ProviderSelectorConfig{
+func TestNewUpstreamSelectorNegativeWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
+	config := UpstreamSelectorConfig{
 		AvailabilityWeight: -0.1,
 		LatencyWeight:      0.6,
 		SyncWeight:         0.3,
@@ -91,7 +91,7 @@ func TestNewProviderSelectorNegativeWeightFallsBackToDefaultWeightsButKeepsOther
 		Strategy:           StrategySyncFreshness,
 	}
 
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 
 	// Falls back to default weights
 	require.InDelta(t, 0.3, ws.availabilityWeight, 0.0001)
@@ -104,8 +104,8 @@ func TestNewProviderSelectorNegativeWeightFallsBackToDefaultWeightsButKeepsOther
 	require.Equal(t, StrategySyncFreshness, ws.strategy)
 }
 
-func TestNewProviderSelectorNaNWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
-	config := ProviderSelectorConfig{
+func TestNewUpstreamSelectorNaNWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
+	config := UpstreamSelectorConfig{
 		AvailabilityWeight: 0.3,
 		LatencyWeight:      0.3,
 		SyncWeight:         0.2,
@@ -115,7 +115,7 @@ func TestNewProviderSelectorNaNWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 	}
 	config.LatencyWeight = stdmath.NaN()
 
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 
 	// Falls back to default weights
 	require.InDelta(t, 0.3, ws.availabilityWeight, 0.0001)
@@ -128,8 +128,8 @@ func TestNewProviderSelectorNaNWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 	require.Equal(t, StrategyAccuracy, ws.strategy)
 }
 
-func TestNewProviderSelectorInfWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
-	config := ProviderSelectorConfig{
+func TestNewUpstreamSelectorInfWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
+	config := UpstreamSelectorConfig{
 		AvailabilityWeight: 0.3,
 		LatencyWeight:      0.3,
 		SyncWeight:         0.2,
@@ -139,7 +139,7 @@ func TestNewProviderSelectorInfWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 	}
 	config.SyncWeight = stdmath.Inf(1)
 
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 
 	// Falls back to default weights
 	require.InDelta(t, 0.3, ws.availabilityWeight, 0.0001)
@@ -154,8 +154,8 @@ func TestNewProviderSelectorInfWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 
 // TestCalculateScorePerfectProvider tests scoring for a perfect provider
 func TestCalculateScorePerfectProvider(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	qos := createQoSReport(1.0, 0.0, 0.0) // Perfect availability, latency, sync
 
@@ -172,8 +172,8 @@ func TestCalculateScorePerfectProvider(t *testing.T) {
 
 // TestCalculateScorePoorProvider tests scoring for a poor provider
 func TestCalculateScorePoorProvider(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	qos := createQoSReport(0.5, 30.0, 1200.0) // Poor availability, high latency, poor sync
 
@@ -190,8 +190,8 @@ func TestCalculateScorePoorProvider(t *testing.T) {
 
 // TestCalculateScoreMinimumChance ensures minimum selection chance is enforced
 func TestCalculateScoreMinimumChance(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	qos := createQoSReport(0.0, 10.0, 1000.0) // Terrible metrics
 
@@ -203,8 +203,8 @@ func TestCalculateScoreMinimumChance(t *testing.T) {
 
 // TestNormalizeLatency tests latency normalization
 func TestNormalizeLatency(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	testCases := []struct {
 		name     string
@@ -228,8 +228,8 @@ func TestNormalizeLatency(t *testing.T) {
 
 // TestNormalizeSync tests sync normalization
 func TestNormalizeSync(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	testCases := []struct {
 		name     string
@@ -253,8 +253,8 @@ func TestNormalizeSync(t *testing.T) {
 
 // TestNormalizeStake tests stake normalization
 func TestNormalizeStake(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	testCases := []struct {
 		name       string
@@ -280,38 +280,38 @@ func TestNormalizeStake(t *testing.T) {
 	}
 }
 
-// TestSelectProviderSingleProvider tests selection with only one provider
-func TestSelectProviderSingleProvider(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+// TestSelectUpstreamSingleProvider tests selection with only one provider
+func TestSelectUpstreamSingleProvider(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "provider1", CompositeScore: 0.8, SelectionWeight: 0.8},
 	}
 
-	selected := ws.SelectProvider(context.Background(), providers)
+	selected := ws.SelectUpstream(context.Background(), providers)
 	require.Equal(t, "provider1", selected)
 }
 
-// TestSelectProviderEmptyList tests selection with empty provider list
-func TestSelectProviderEmptyList(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+// TestSelectUpstreamEmptyList tests selection with empty provider list
+func TestSelectUpstreamEmptyList(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
-	providers := []ProviderScore{}
+	providers := []UpstreamScore{}
 
-	selected := ws.SelectProvider(context.Background(), providers)
+	selected := ws.SelectUpstream(context.Background(), providers)
 	require.Equal(t, "", selected)
 }
 
-// TestSelectProviderDistribution tests that selection follows probability distribution
-func TestSelectProviderDistribution(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+// TestSelectUpstreamDistribution tests that selection follows probability distribution
+func TestSelectUpstreamDistribution(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 	ws.SetDeterministicSeed(1234567) // Use fixed seed for deterministic test
 
 	// Create providers with different scores
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "high_score", CompositeScore: 0.8, SelectionWeight: 0.8},
 		{Address: "medium_score", CompositeScore: 0.4, SelectionWeight: 0.4},
 		{Address: "low_score", CompositeScore: 0.2, SelectionWeight: 0.2},
@@ -322,7 +322,7 @@ func TestSelectProviderDistribution(t *testing.T) {
 	iterations := 10000
 
 	for i := 0; i < iterations; i++ {
-		selected := ws.SelectProvider(context.Background(), providers)
+		selected := ws.SelectUpstream(context.Background(), providers)
 		selections[selected]++
 	}
 
@@ -350,15 +350,15 @@ func TestSelectProviderDistribution(t *testing.T) {
 // minSelectionChance is applied as a minimum *weight* (composite score floor), not a minimum *probability*.
 // Therefore, when there are other large weights, the effective probability can be < minSelectionChance.
 func TestMinSelectionChanceIsAWeightFloorNotAProbabilityGuarantee(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
+	config := DefaultUpstreamSelectorConfig()
 	config.MinSelectionChance = 0.01
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 	ws.SetDeterministicSeed(1234567)
 
 	// Simulate one "dominant" provider and one provider that only gets the minimum weight floor.
 	// Effective probability for the min provider is:
 	//   p = 0.01 / (1.0 + 0.01) ≈ 0.00990099 < 0.01
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "dominant", CompositeScore: 1.0, SelectionWeight: 1.0},
 		{Address: "min_floor", CompositeScore: config.MinSelectionChance, SelectionWeight: config.MinSelectionChance},
 	}
@@ -366,7 +366,7 @@ func TestMinSelectionChanceIsAWeightFloorNotAProbabilityGuarantee(t *testing.T) 
 	const iterations = 100000
 	countMin := 0
 	for i := 0; i < iterations; i++ {
-		if ws.SelectProvider(context.Background(), providers) == "min_floor" {
+		if ws.SelectUpstream(context.Background(), providers) == "min_floor" {
 			countMin++
 		}
 	}
@@ -381,8 +381,8 @@ func TestMinSelectionChanceIsAWeightFloorNotAProbabilityGuarantee(t *testing.T) 
 }
 
 func TestNormalizeStakeMaxInt64DoesNotOverflowOrNaN(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	max := float64(stdmath.MaxInt64)
 	normalized := ws.normalizeStake(max, max)
@@ -391,12 +391,12 @@ func TestNormalizeStakeMaxInt64DoesNotOverflowOrNaN(t *testing.T) {
 	require.InDelta(t, 1.0, normalized, 0.000001)
 }
 
-func TestSelectProviderConcurrentDoesNotPanicAndReturnsValidProvider(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+func TestSelectUpstreamConcurrentDoesNotPanicAndReturnsValidProvider(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 	ws.SetDeterministicSeed(1234567)
 
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "p1", CompositeScore: 0.8, SelectionWeight: 0.8},
 		{Address: "p2", CompositeScore: 0.4, SelectionWeight: 0.4},
 		{Address: "p3", CompositeScore: 0.2, SelectionWeight: 0.2},
@@ -414,7 +414,7 @@ func TestSelectProviderConcurrentDoesNotPanicAndReturnsValidProvider(t *testing.
 		go func() {
 			defer wg.Done()
 			for i := 0; i < perG; i++ {
-				selected := ws.SelectProvider(context.Background(), providers)
+				selected := ws.SelectUpstream(context.Background(), providers)
 				total.Add(1)
 				switch selected {
 				case "p1", "p2", "p3":
@@ -431,13 +431,13 @@ func TestSelectProviderConcurrentDoesNotPanicAndReturnsValidProvider(t *testing.
 	require.Equal(t, int64(0), invalid.Load())
 }
 
-// TestSelectProviderEqualScores tests selection when all providers have equal scores
-func TestSelectProviderEqualScores(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+// TestSelectUpstreamEqualScores tests selection when all providers have equal scores
+func TestSelectUpstreamEqualScores(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 	ws.SetDeterministicSeed(1234567) // Use fixed seed for deterministic test
 
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "provider1", CompositeScore: 0.5, SelectionWeight: 0.5},
 		{Address: "provider2", CompositeScore: 0.5, SelectionWeight: 0.5},
 		{Address: "provider3", CompositeScore: 0.5, SelectionWeight: 0.5},
@@ -447,7 +447,7 @@ func TestSelectProviderEqualScores(t *testing.T) {
 	iterations := 3000
 
 	for i := 0; i < iterations; i++ {
-		selected := ws.SelectProvider(context.Background(), providers)
+		selected := ws.SelectUpstream(context.Background(), providers)
 		selections[selected]++
 	}
 
@@ -458,29 +458,29 @@ func TestSelectProviderEqualScores(t *testing.T) {
 	}
 }
 
-// TestSelectProviderZeroScores tests fallback when all scores are zero
-func TestSelectProviderZeroScores(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+// TestSelectUpstreamZeroScores tests fallback when all scores are zero
+func TestSelectUpstreamZeroScores(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 	ws.SetDeterministicSeed(1234567) // Use fixed seed for deterministic test
 
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "provider1", CompositeScore: 0.0, SelectionWeight: 0.0},
 		{Address: "provider2", CompositeScore: 0.0, SelectionWeight: 0.0},
 		{Address: "provider3", CompositeScore: 0.0, SelectionWeight: 0.0},
 	}
 
 	// Should still select a provider (uniform random)
-	selected := ws.SelectProvider(context.Background(), providers)
+	selected := ws.SelectUpstream(context.Background(), providers)
 	require.NotEmpty(t, selected)
 	require.Contains(t, []string{"provider1", "provider2", "provider3"}, selected)
 }
 
 // TestStrategyLatencyAdjustment tests latency strategy score adjustments
 func TestStrategyLatencyAdjustment(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
+	config := DefaultUpstreamSelectorConfig()
 	config.Strategy = StrategyLatency
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 
 	// High latency score should be boosted by strategy
 	latency, sync := ws.applyStrategyAdjustments(0.8, 0.5)
@@ -492,9 +492,9 @@ func TestStrategyLatencyAdjustment(t *testing.T) {
 
 // TestStrategySyncAdjustment tests sync strategy score adjustments
 func TestStrategySyncAdjustment(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
+	config := DefaultUpstreamSelectorConfig()
 	config.Strategy = StrategySyncFreshness
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 
 	// High sync score should be boosted by strategy
 	latency, sync := ws.applyStrategyAdjustments(0.5, 0.8)
@@ -503,10 +503,10 @@ func TestStrategySyncAdjustment(t *testing.T) {
 	require.Greater(t, sync, 0.75)         // Sync should be boosted
 }
 
-// TestCalculateProviderScores tests the full score calculation pipeline
-func TestCalculateProviderScores(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+// TestCalculateUpstreamScores tests the full score calculation pipeline
+func TestCalculateUpstreamScores(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	allAddresses := []string{"provider1", "provider2", "provider3"}
 	ignoredProviders := map[string]struct{}{}
@@ -532,7 +532,7 @@ func TestCalculateProviderScores(t *testing.T) {
 		return stakes[addr]
 	}
 
-	scores, qosReports, _ := ws.CalculateProviderScores(allAddresses, ignoredProviders, providerDataGetter, stakeGetter)
+	scores, qosReports, _ := ws.CalculateUpstreamScores(allAddresses, ignoredProviders, providerDataGetter, stakeGetter)
 
 	require.Len(t, scores, 3)
 	require.Len(t, qosReports, 3)
@@ -548,10 +548,10 @@ func TestCalculateProviderScores(t *testing.T) {
 	}
 }
 
-// TestCalculateProviderScoresWithIgnored tests that ignored providers are skipped
-func TestCalculateProviderScoresWithIgnored(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+// TestCalculateUpstreamScoresWithIgnored tests that ignored providers are skipped
+func TestCalculateUpstreamScoresWithIgnored(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	allAddresses := []string{"provider1", "provider2", "provider3"}
 	ignoredProviders := map[string]struct{}{
@@ -579,7 +579,7 @@ func TestCalculateProviderScoresWithIgnored(t *testing.T) {
 		return stakes[addr]
 	}
 
-	scores, qosReports, _ := ws.CalculateProviderScores(allAddresses, ignoredProviders, providerDataGetter, stakeGetter)
+	scores, qosReports, _ := ws.CalculateUpstreamScores(allAddresses, ignoredProviders, providerDataGetter, stakeGetter)
 
 	// Should only have 2 providers (provider2 is ignored)
 	require.Len(t, scores, 2)
@@ -595,7 +595,7 @@ func TestCalculateProviderScoresWithIgnored(t *testing.T) {
 
 // TestGetConfig tests retrieving the configuration
 func TestGetConfig(t *testing.T) {
-	originalConfig := ProviderSelectorConfig{
+	originalConfig := UpstreamSelectorConfig{
 		AvailabilityWeight: 0.5,
 		LatencyWeight:      0.3,
 		SyncWeight:         0.15,
@@ -604,7 +604,7 @@ func TestGetConfig(t *testing.T) {
 		Strategy:           StrategyLatency,
 	}
 
-	ws := NewProviderSelector(originalConfig)
+	ws := NewUpstreamSelector(originalConfig)
 	retrievedConfig := ws.GetConfig()
 
 	// Weights will be normalized, so check they sum to 1.0
@@ -619,8 +619,8 @@ func TestGetConfig(t *testing.T) {
 
 // TestUpdateStrategy tests changing the strategy
 func TestUpdateStrategy(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	require.Equal(t, StrategyBalanced, ws.strategy)
 
@@ -633,8 +633,8 @@ func TestUpdateStrategy(t *testing.T) {
 
 // BenchmarkCalculateScore benchmarks score calculation
 func BenchmarkCalculateScore(b *testing.B) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	qos := createQoSReport(0.95, 0.15, 2.5)
 
@@ -644,15 +644,15 @@ func BenchmarkCalculateScore(b *testing.B) {
 	}
 }
 
-// BenchmarkSelectProvider benchmarks provider selection
-func BenchmarkSelectProvider(b *testing.B) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+// BenchmarkSelectUpstream benchmarks provider selection
+func BenchmarkSelectUpstream(b *testing.B) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 	ws.SetDeterministicSeed(1234567) // Use fixed seed for deterministic benchmark
 
-	providers := make([]ProviderScore, 50)
+	providers := make([]UpstreamScore, 50)
 	for i := 0; i < 50; i++ {
-		providers[i] = ProviderScore{
+		providers[i] = UpstreamScore{
 			Address:         "provider" + string(rune(i)),
 			CompositeScore:  0.5 + float64(i)*0.01,
 			SelectionWeight: 0.5 + float64(i)*0.01,
@@ -661,14 +661,14 @@ func BenchmarkSelectProvider(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ws.SelectProvider(context.Background(), providers)
+		ws.SelectUpstream(context.Background(), providers)
 	}
 }
 
-// BenchmarkCalculateProviderScores benchmarks full score calculation pipeline
-func BenchmarkCalculateProviderScores(b *testing.B) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+// BenchmarkCalculateUpstreamScores benchmarks full score calculation pipeline
+func BenchmarkCalculateUpstreamScores(b *testing.B) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	allAddresses := make([]string, 50)
 	providerData := make(map[string]*pairingtypes.QualityOfServiceReport)
@@ -694,14 +694,14 @@ func BenchmarkCalculateProviderScores(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ws.CalculateProviderScores(allAddresses, ignoredProviders, providerDataGetter, stakeGetter)
+		ws.CalculateUpstreamScores(allAddresses, ignoredProviders, providerDataGetter, stakeGetter)
 	}
 }
 
 // TestQoSReportGeneration tests that QoS reports are generated correctly
 func TestQoSReportGeneration(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	allAddresses := []string{"provider1"}
 	ignoredProviders := map[string]struct{}{}
@@ -729,7 +729,7 @@ func TestQoSReportGeneration(t *testing.T) {
 		return stakes[addr]
 	}
 
-	_, qosReports, _ := ws.CalculateProviderScores(allAddresses, ignoredProviders, providerDataGetter, stakeGetter)
+	_, qosReports, _ := ws.CalculateUpstreamScores(allAddresses, ignoredProviders, providerDataGetter, stakeGetter)
 
 	require.Len(t, qosReports, 1)
 	report := qosReports["provider1"]
@@ -743,13 +743,13 @@ func TestQoSReportGeneration(t *testing.T) {
 
 // TestStrategyDistributedFlattening tests that distributed strategy flattens the score curve
 func TestStrategyDistributedFlattening(t *testing.T) {
-	balancedConfig := DefaultProviderSelectorConfig()
+	balancedConfig := DefaultUpstreamSelectorConfig()
 	balancedConfig.Strategy = StrategyBalanced
-	balancedWS := NewProviderSelector(balancedConfig)
+	balancedWS := NewUpstreamSelector(balancedConfig)
 
-	distributedConfig := DefaultProviderSelectorConfig()
+	distributedConfig := DefaultUpstreamSelectorConfig()
 	distributedConfig.Strategy = StrategyDistributed
-	distributedWS := NewProviderSelector(distributedConfig)
+	distributedWS := NewUpstreamSelector(distributedConfig)
 
 	// Apply strategy adjustments
 	balancedLatency, balancedSync := balancedWS.applyStrategyAdjustments(0.8, 0.8)
@@ -760,38 +760,38 @@ func TestStrategyDistributedFlattening(t *testing.T) {
 	require.Less(t, distributedSync, balancedSync)
 }
 
-// TestSelectProviderBestMode verifies SelectionModeBest always returns the highest-scoring
+// TestSelectUpstreamBestMode verifies SelectionModeBest always returns the highest-scoring
 // provider, regardless of position in the candidate list.
-func TestSelectProviderBestMode(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
+func TestSelectUpstreamBestMode(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
 	config.SelectionMode = SelectionModeBest
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 	ws.SetDeterministicSeed(1234567)
 
 	// Best score deliberately placed last so a first-wins scan would fail this test
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "low_score", CompositeScore: 0.2, SelectionWeight: 0.2},
 		{Address: "medium_score", CompositeScore: 0.4, SelectionWeight: 0.4},
 		{Address: "high_score", CompositeScore: 0.8, SelectionWeight: 0.8},
 	}
 
 	for i := 0; i < 1000; i++ {
-		require.Equal(t, "high_score", ws.SelectProvider(context.Background(), providers))
+		require.Equal(t, "high_score", ws.SelectUpstream(context.Background(), providers))
 	}
 }
 
-// TestSelectProviderBestModeTieBreak verifies that exact ties are broken uniformly at
+// TestSelectUpstreamBestModeTieBreak verifies that exact ties are broken uniformly at
 // random rather than always landing on the first candidate. This is the degraded-chain
 // case: CalculateScore collapses every unhealthy provider to exactly minSelectionChance,
 // so a first-wins argmax would pin all traffic onto one address.
-func TestSelectProviderBestModeTieBreak(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
+func TestSelectUpstreamBestModeTieBreak(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
 	config.SelectionMode = SelectionModeBest
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 	ws.SetDeterministicSeed(1234567)
 
 	// All tied at the starvation floor, as CalculateScore would leave them
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "dead1", CompositeScore: 0.01, SelectionWeight: 0.01},
 		{Address: "dead2", CompositeScore: 0.01, SelectionWeight: 0.01},
 		{Address: "dead3", CompositeScore: 0.01, SelectionWeight: 0.01},
@@ -800,7 +800,7 @@ func TestSelectProviderBestModeTieBreak(t *testing.T) {
 	selections := make(map[string]int)
 	iterations := 9000
 	for i := 0; i < iterations; i++ {
-		selections[ws.SelectProvider(context.Background(), providers)]++
+		selections[ws.SelectUpstream(context.Background(), providers)]++
 	}
 
 	// Uniform across the three maxima (~33.3% each)
@@ -810,34 +810,34 @@ func TestSelectProviderBestModeTieBreak(t *testing.T) {
 	}
 }
 
-// TestSelectProviderBestModeTracksLeader verifies Best mode follows the score, so a
+// TestSelectUpstreamBestModeTracksLeader verifies Best mode follows the score, so a
 // provider that overtakes the incumbent immediately takes all traffic.
-func TestSelectProviderBestModeTracksLeader(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
+func TestSelectUpstreamBestModeTracksLeader(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
 	config.SelectionMode = SelectionModeBest
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 	ws.SetDeterministicSeed(1234567)
 
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "provider1", CompositeScore: 0.9, SelectionWeight: 0.9},
 		{Address: "provider2", CompositeScore: 0.5, SelectionWeight: 0.5},
 	}
-	require.Equal(t, "provider1", ws.SelectProvider(context.Background(), providers))
+	require.Equal(t, "provider1", ws.SelectUpstream(context.Background(), providers))
 
 	// provider2 overtakes
 	providers[1].SelectionWeight = 0.95
-	require.Equal(t, "provider2", ws.SelectProvider(context.Background(), providers))
+	require.Equal(t, "provider2", ws.SelectUpstream(context.Background(), providers))
 }
 
-// TestSelectProviderWeightedModeUnchanged pins the default: an unconfigured selector still
+// TestSelectUpstreamWeightedModeUnchanged pins the default: an unconfigured selector still
 // spreads traffic proportionally, so adding Best mode did not change existing behaviour.
-func TestSelectProviderWeightedModeUnchanged(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+func TestSelectUpstreamWeightedModeUnchanged(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 	ws.SetDeterministicSeed(1234567)
 	require.Equal(t, SelectionModeWeightedRandom, ws.GetConfig().SelectionMode)
 
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "high_score", CompositeScore: 0.8, SelectionWeight: 0.8},
 		{Address: "low_score", CompositeScore: 0.2, SelectionWeight: 0.2},
 	}
@@ -845,7 +845,7 @@ func TestSelectProviderWeightedModeUnchanged(t *testing.T) {
 	selections := make(map[string]int)
 	iterations := 10000
 	for i := 0; i < iterations; i++ {
-		selections[ws.SelectProvider(context.Background(), providers)]++
+		selections[ws.SelectUpstream(context.Background(), providers)]++
 	}
 
 	// 0.8 / 1.0 = 80% vs 20% — the low scorer must still get real traffic
@@ -853,40 +853,40 @@ func TestSelectProviderWeightedModeUnchanged(t *testing.T) {
 	require.InDelta(t, 0.2, float64(selections["low_score"])/float64(iterations), 0.03)
 }
 
-// TestSelectProviderBestModeStats verifies the shared stats tail is populated identically
+// TestSelectUpstreamBestModeStats verifies the shared stats tail is populated identically
 // in Best mode, with RNGValue left at zero since no weighted draw took place.
-func TestSelectProviderBestModeStats(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
+func TestSelectUpstreamBestModeStats(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
 	config.SelectionMode = SelectionModeBest
-	ws := NewProviderSelector(config)
+	ws := NewUpstreamSelector(config)
 
-	providers := []ProviderScore{
+	providers := []UpstreamScore{
 		{Address: "low_score", CompositeScore: 0.2, SelectionWeight: 0.2},
 		{Address: "high_score", CompositeScore: 0.8, SelectionWeight: 0.8},
 	}
-	details := []ProviderScoreDetails{
+	details := []UpstreamScoreDetails{
 		{Address: "low_score", Composite: 0.2},
 		{Address: "high_score", Composite: 0.8},
 	}
 
-	selected, stats := ws.SelectProviderWithStats(context.Background(), providers, details)
+	selected, stats := ws.SelectUpstreamWithStats(context.Background(), providers, details)
 	require.Equal(t, "high_score", selected)
 	require.NotNil(t, stats)
 	require.Equal(t, "high_score", stats.SelectedProvider)
 	require.Equal(t, 0.0, stats.RNGValue)
-	require.Len(t, stats.ProviderScores, 2)
+	require.Len(t, stats.UpstreamScores, 2)
 }
 
 // TestSelectionStatsCarriesMode verifies every selection path stamps the policy that
 // produced the pick, including the short-circuits where RNGValue is zero for reasons
 // unrelated to the mode.
 func TestSelectionStatsCarriesMode(t *testing.T) {
-	twoProviders := []ProviderScore{
+	twoProviders := []UpstreamScore{
 		{Address: "low_score", CompositeScore: 0.2, SelectionWeight: 0.2},
 		{Address: "high_score", CompositeScore: 0.8, SelectionWeight: 0.8},
 	}
-	oneProvider := []ProviderScore{{Address: "solo", CompositeScore: 0.5, SelectionWeight: 0.5}}
-	zeroScores := []ProviderScore{
+	oneProvider := []UpstreamScore{{Address: "solo", CompositeScore: 0.5, SelectionWeight: 0.5}}
+	zeroScores := []UpstreamScore{
 		{Address: "zero1", CompositeScore: 0, SelectionWeight: 0},
 		{Address: "zero2", CompositeScore: 0, SelectionWeight: 0},
 	}
@@ -894,7 +894,7 @@ func TestSelectionStatsCarriesMode(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		mode      SelectionMode
-		providers []ProviderScore
+		providers []UpstreamScore
 	}{
 		{"weighted/normal", SelectionModeWeightedRandom, twoProviders},
 		{"weighted/single", SelectionModeWeightedRandom, oneProvider},
@@ -904,12 +904,12 @@ func TestSelectionStatsCarriesMode(t *testing.T) {
 		{"best/all_zero", SelectionModeBest, zeroScores},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			config := DefaultProviderSelectorConfig()
+			config := DefaultUpstreamSelectorConfig()
 			config.SelectionMode = tc.mode
-			ws := NewProviderSelector(config)
+			ws := NewUpstreamSelector(config)
 			ws.SetDeterministicSeed(1234567)
 
-			_, stats := ws.SelectProviderWithStats(context.Background(), tc.providers, nil)
+			_, stats := ws.SelectUpstreamWithStats(context.Background(), tc.providers, nil)
 			require.NotNil(t, stats)
 			require.Equal(t, tc.mode, stats.Mode)
 		})
@@ -920,7 +920,7 @@ func TestSelectionStatsCarriesMode(t *testing.T) {
 // an RNG of 0 can be read correctly rather than being mistaken for a weighted draw.
 func TestFormatSelectionStatsIncludesMode(t *testing.T) {
 	stats := &SelectionStats{
-		ProviderScores:   []ProviderScoreDetails{{Address: "provider1", Composite: 0.8}},
+		UpstreamScores:   []UpstreamScoreDetails{{Address: "provider1", Composite: 0.8}},
 		RNGValue:         0.0,
 		SelectedProvider: "provider1",
 		Mode:             SelectionModeBest,
