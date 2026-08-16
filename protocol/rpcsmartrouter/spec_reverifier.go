@@ -301,10 +301,6 @@ func closeDemotedDirectConnections(demoted []*lavasession.ConsumerSessionsWithPr
 	}
 }
 
-// validateProvider runs a single spec-verification pass against one provider.
-// It builds a fresh ChainRouter + ChainFetcher under a bounded attempt context
-// (so a hung upstream cannot stall a whole reconcile cycle), calls Validate,
-// and tears the temporary resources down regardless of outcome.
 // BootValidateTimeout bounds a single provider validation during startup.
 // Before MAG-2525 the two boot tiers disagreed: static providers got a 30s
 // timeout while backups got a bare context.WithCancel, so one blackholed backup
@@ -392,6 +388,10 @@ func validateProviderTier(
 	return failedSet, failedOrdered
 }
 
+// validateProvider runs a single spec-verification pass against one provider.
+// It builds a fresh ChainRouter + ChainFetcher under a bounded attempt context
+// (so a hung upstream cannot stall a whole reconcile cycle), calls Validate,
+// and tears the temporary resources down regardless of outcome.
 func validateProvider(
 	ctx context.Context,
 	provider *lavasession.RPCStaticProviderEndpoint,
