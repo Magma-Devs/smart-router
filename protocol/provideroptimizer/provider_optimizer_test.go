@@ -169,7 +169,7 @@ func TestProviderOptimizerBasicProbeData(t *testing.T) {
 func runChooseManyTimesAndReturnResults(t *testing.T, providerOptimizer *ProviderOptimizer, providers []string, ignoredProviders map[string]struct{}, times int, cu uint64, requestBlock int64) map[string]int {
 	results := make(map[string]int)
 	for i := 0; i < times; i++ {
-		returnedProviders := providerOptimizer.ChooseProvider(context.Background(), providers, ignoredProviders, cu, requestBlock)
+		returnedProviders := providerOptimizer.ChooseUpstream(context.Background(), providers, ignoredProviders, cu, requestBlock)
 		require.Equal(t, 1, len(returnedProviders))
 		results[returnedProviders[0]]++
 	}
@@ -422,19 +422,19 @@ func TestProviderOptimizerUpdatingLatency(t *testing.T) {
 	}
 }
 
-func TestProviderOptimizerUpdateProviderSelectorStrategyPropagatesToSelector(t *testing.T) {
+func TestProviderOptimizerUpdateUpstreamSelectorStrategyPropagatesToSelector(t *testing.T) {
 	providerOptimizer := setupProviderOptimizer(1)
 
-	// Sanity: default strategy is balanced, and ConfigureProviderSelector enforces optimizer strategy.
-	cfg := providerOptimizer.GetProviderSelectorConfig()
+	// Sanity: default strategy is balanced, and ConfigureUpstreamSelector enforces optimizer strategy.
+	cfg := providerOptimizer.GetUpstreamSelectorConfig()
 	require.Equal(t, StrategyBalanced, cfg.Strategy)
 
 	// Change optimizer strategy and explicitly propagate to selector.
 	// (This is required because tests sometimes mutate providerOptimizer.strategy directly.)
 	providerOptimizer.strategy = StrategyLatency
-	providerOptimizer.UpdateProviderSelectorStrategy(providerOptimizer.strategy)
+	providerOptimizer.UpdateUpstreamSelectorStrategy(providerOptimizer.strategy)
 
-	cfg2 := providerOptimizer.GetProviderSelectorConfig()
+	cfg2 := providerOptimizer.GetUpstreamSelectorConfig()
 	require.Equal(t, StrategyLatency, cfg2.Strategy)
 }
 
@@ -563,7 +563,7 @@ func TestProviderOptimizerProvidersCount(t *testing.T) {
 	for _, play := range playbook {
 		t.Run(play.name, func(t *testing.T) {
 			for i := 0; i < 10; i++ {
-				returnedProviders := providerOptimizer.ChooseProvider(context.Background(), providersGen.providersAddresses[:play.providers], nil, cu, requestBlock)
+				returnedProviders := providerOptimizer.ChooseUpstream(context.Background(), providersGen.providersAddresses[:play.providers], nil, cu, requestBlock)
 				require.Greater(t, len(returnedProviders), 0)
 			}
 		})
@@ -613,13 +613,13 @@ func TestProviderOptimizerWeights(t *testing.T) {
 	}
 }
 
-// TestProviderOptimizerChooseProvider checks that the follwing occurs:
+// TestProviderOptimizerChooseUpstream checks that the follwing occurs:
 // 0. Assume 6 providers: 2 with great score, 2 with mid score but one has a great stake, and 2 with low score (benchmark).
 // We choose 2 providers in each choice. We choose many times.
 // 1. ~80% of the times, the great score providers are picked (no preference between the two)
 // 2. high stake mid score is picked more than 0 times and picked more than mid score with average stake
 // 3. low score are not selected
-func TestProviderOptimizerChooseProvider(t *testing.T) {
+func TestProviderOptimizerChooseUpstream(t *testing.T) {
 	providerOptimizer := setupProviderOptimizer(1)
 	providerOptimizer.SetDeterministicSeed(1234567) // Use fixed seed for deterministic test
 	providersCount := 6
@@ -697,7 +697,7 @@ func TestProviderOptimizerChooseProvider(t *testing.T) {
 // TestProviderOptimizerRetriesWithReducedProvidersSet checks that when having a set of providers, the amount of
 // providers doesn't matter and the choice is deterministic. The test does the following:
 // 0. Assume a set of providers (great/mid/low score with high/low stake, all combinations)
-// 1. Run ChooseProvider() <providers_amount> number of times. Each iteration, the chosen provider from the
+// 1. Run ChooseUpstream() <providers_amount> number of times. Each iteration, the chosen provider from the
 // last iteration is removed from the providers set. We check the ranking of providers stays the same.
 // 2. Do step 1 many times.
 // Expected: the ranking of providers stays the same, providers with high stake are picked more often,
@@ -733,7 +733,7 @@ func TestProviderOptimizerRetriesWithReducedProvidersSet(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		for j, address := range providersGen.providersAddresses {
 			// Exponential latency degradation on a scale that matches the selector normalization.
-			// ProviderSelector normalizes latency against score.WorstLatencyScore (=30s), so we need
+			// UpstreamSelector normalizes latency against score.WorstLatencyScore (=30s), so we need
 			// the "bad" providers to approach that range; otherwise 1ms vs 800ms is nearly identical.
 			//
 			// Exponential degradation: 10ms, 100ms, 1s, 5s, 15s, 30s

@@ -15,7 +15,7 @@ import (
 // Changed() behaves exactly as it does for the real command.
 func newWeightFlagSet(t *testing.T) *pflag.FlagSet {
 	t.Helper()
-	def := provideroptimizer.DefaultProviderSelectorConfig()
+	def := provideroptimizer.DefaultUpstreamSelectorConfig()
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	fs.Float64(common.ProviderOptimizerAvailabilityWeight, def.AvailabilityWeight, "")
 	fs.Float64(common.ProviderOptimizerLatencyWeight, def.LatencyWeight, "")
@@ -41,7 +41,7 @@ func TestResolveSelectionWeights_PresetApplies(t *testing.T) {
 	config, err := resolveSelectionWeights(newWeightFlagSet(t))
 	require.NoError(t, err)
 
-	want := provideroptimizer.SelectionPriorityFastest.ApplyTo(provideroptimizer.DefaultProviderSelectorConfig())
+	want := provideroptimizer.SelectionPriorityFastest.ApplyTo(provideroptimizer.DefaultUpstreamSelectorConfig())
 	require.Equal(t, want.LatencyWeight, config.LatencyWeight)
 	require.Equal(t, want.AvailabilityWeight, config.AvailabilityWeight)
 	require.Equal(t, want.SyncWeight, config.SyncWeight)
@@ -106,7 +106,7 @@ func TestResolveSelectionWeights_DefaultIsUnchanged(t *testing.T) {
 	config, err := resolveSelectionWeights(newWeightFlagSet(t))
 	require.NoError(t, err)
 
-	def := provideroptimizer.DefaultProviderSelectorConfig()
+	def := provideroptimizer.DefaultUpstreamSelectorConfig()
 	require.Equal(t, def.AvailabilityWeight, config.AvailabilityWeight)
 	require.Equal(t, def.LatencyWeight, config.LatencyWeight)
 	require.Equal(t, def.SyncWeight, config.SyncWeight)

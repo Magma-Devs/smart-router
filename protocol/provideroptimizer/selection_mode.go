@@ -9,7 +9,7 @@ import (
 // It is orthogonal to Strategy: Strategy shapes *how providers are scored* (which QoS
 // axis is emphasised, see applyStrategyAdjustments), while SelectionMode governs only
 // *how the winner is drawn* from those scores. Both modes share the identical scoring
-// pipeline in CalculateProviderScores.
+// pipeline in CalculateUpstreamScores.
 type SelectionMode int
 
 const (

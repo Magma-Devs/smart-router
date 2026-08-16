@@ -18,7 +18,7 @@ import (
 // endpoint therefore kept a composite of ~2/3 of a healthy peer and was still selected ~7–18% of
 // the time (measured), instead of being starved to the MinSelectionChance floor.
 //
-// Fix (provider_selector.CalculateScore): once availability falls below the acceptable minimum
+// Fix (upstream_selector.CalculateScore): once availability falls below the acceptable minimum
 // (availabilityScore == 0, i.e. raw availability < score.MinAcceptableAvailability), collapse the
 // composite to the starvation floor — frozen latency/sync must not prop up a dead node. Recovery is
 // driven by the proactive prober (cheap polls), not by continuing to route real traffic.
@@ -27,8 +27,8 @@ import (
 // availability below the minimum but latency/sync/stake all pristine, the composite must be exactly
 // the floor — not the ~0.6 the frozen latency/sync would otherwise yield.
 func TestCalculateScore_DeadAvailabilityCollapsesToFloor(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	// Dead availability, but perfect (frozen-healthy) latency + sync, and a large stake — none of
 	// which may rescue the score once availability has collapsed.
@@ -51,8 +51,8 @@ func TestCalculateScore_DeadAvailabilityCollapsesToFloor(t *testing.T) {
 // is merely degraded (availability above the minimum) must keep a real composite and NOT be slammed
 // to the floor — the fix targets dead nodes only.
 func TestCalculateScore_AcceptableAvailabilityNotCollapsed(t *testing.T) {
-	config := DefaultProviderSelectorConfig()
-	ws := NewProviderSelector(config)
+	config := DefaultUpstreamSelectorConfig()
+	ws := NewUpstreamSelector(config)
 
 	// availability 0.90 → normalized 0.5 (above the 0.80 cutoff), perfect latency/sync.
 	degraded := createQoSReport(0.90, 0.0, 0.0)
@@ -130,7 +130,7 @@ func TestDeadProviderStarvedFromOrganicTraffic(t *testing.T) {
 
 // TestSingleDeadProviderNotHalted is the critical safety guard: the fix must NOT strand a
 // single-provider deployment. When it's the only candidate, weighted selection returns it
-// unconditionally (SelectProviderWithStats short-circuits len==1), and the composite floor is
+// unconditionally (SelectUpstreamWithStats short-circuits len==1), and the composite floor is
 // MinSelectionChance (not 0) — so even fully dead it keeps getting selected. Collapsing its score
 // starves it only when a HEALTHY alternative exists; with no alternative there is nothing to starve
 // toward, so traffic keeps flowing (the router must keep trying its only node, never halt).

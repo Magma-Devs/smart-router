@@ -1648,12 +1648,12 @@ func TestTendermintSubscriptionEndToEnd(t *testing.T) {
 // fakeSubscriptionOptimizer is a minimal WebSocketEndpointOptimizer for cascade tests.
 // Used by both DirectWSSubscriptionManager and DirectGRPCSubscriptionManager test suites
 // (the interface is shared across both subscription managers despite its name).
-// It returns a configurable address from ChooseProvider; relay-data callbacks are no-ops.
+// It returns a configurable address from ChooseUpstream; relay-data callbacks are no-ops.
 type fakeSubscriptionOptimizer struct {
 	chooseFn func(allAddresses []string, ignored map[string]struct{}) []string
 }
 
-func (f *fakeSubscriptionOptimizer) ChooseProvider(_ context.Context, allAddresses []string, ignored map[string]struct{}, _ uint64, _ int64) []string {
+func (f *fakeSubscriptionOptimizer) ChooseUpstream(_ context.Context, allAddresses []string, ignored map[string]struct{}, _ uint64, _ int64) []string {
 	if f.chooseFn != nil {
 		return f.chooseFn(allAddresses, ignored)
 	}
