@@ -1430,6 +1430,41 @@ func promoteConsistencyFallback(
 	return validSessions, failedSessions, filterErr, promoted
 }
 
+// shouldFailSessionForResult decides whether a completed direct-RPC relay is reported to the
+// session manager as a failure (OnSessionFailure -> AppendRelayFailure, an availability sample of
+// 0) or as a success (OnSessionDone -> AppendRelayDataConsensus, a sample of 1). It is the ONLY
+// gate feeding the optimizer's availability dimension, so anything it calls a success is, to the
+// optimizer, indistinguishable from a healthy relay.
+//
+// MAG-2156: this used to test only `err != nil || statusCode >= 500 || statusCode == 429`. A
+// JSON-RPC node error is HTTP 200 with {"error":...} in the body, so none of those fired and the
+// relay landed on OnSessionDone — scoring a failed response as a success. A provider erroring on
+// 90% of relays therefore held availability 1.0, identical to a healthy peer, and stayed
+// first-picked ~1/3 of the time no matter how long it kept failing. The classification itself was
+// never the problem: direct_rpc_relay.go tags these IsNodeError=true, the gate just didn't read it.
+//
+// The IsNonRetryable carve-out is load-bearing, not defensive. Deterministic caller-fault errors
+// (unsupported method, invalid params, execution reverted — see RelayResult.IsNonRetryable) come
+// back from EVERY provider for the same request, so scoring them would drive the whole pairing
+// below score.MinAcceptableAvailability on a burst of malformed client requests and collapse every
+// endpoint to the selection floor — punishing healthy nodes for a bad request instead of
+// identifying a bad node. It also preserves the SubCategoryUnsupportedMethod "no provider scoring"
+// contract documented in common/error_registry.go.
+func shouldFailSessionForResult(err error, relayResult *common.RelayResult) bool {
+	if err != nil {
+		return true
+	}
+	if relayResult == nil {
+		return false
+	}
+	// REST/HTTP transport failures: err == nil but the status still means the node failed us.
+	if relayResult.StatusCode >= 500 || relayResult.StatusCode == 429 {
+		return true
+	}
+	// Node error delivered inside a 2xx body — scoreable only when it is not deterministic.
+	return relayResult.IsNodeError && !relayResult.IsNonRetryable
+}
+
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
 func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	ctx context.Context,
@@ -1823,7 +1858,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// Check status code to determine if session should fail
 			// For REST 5xx/429, err == nil but we still want to fail the session for QoS/retry
 			statusCode := localRelayResult.StatusCode
-			shouldFailSession := err != nil || statusCode >= 500 || statusCode == 429
+			shouldFailSession := shouldFailSessionForResult(err, localRelayResult)
 
 			if isClientCancel {
 				// We cancelled it, so the endpoint's availability was never actually tested —
@@ -1907,11 +1942,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					)
 				}
 			} else {
-				// Failure case: err != nil OR status >= 500 OR status == 429
+				// Failure case: err != nil OR status >= 500 OR status == 429 OR a scoreable node error
 				failureErr := err
 				if failureErr == nil {
-					// REST 5xx/429 with err == nil - create descriptive error
-					failureErr = fmt.Errorf("upstream returned HTTP %d", statusCode)
+					// err == nil - create descriptive error. Either a REST 5xx/429, or a node
+					// error the upstream delivered inside an HTTP 200 body (MAG-2156).
+					if localRelayResult.IsNodeError {
+						failureErr = fmt.Errorf("upstream returned a node error (HTTP %d)", statusCode)
+					} else {
+						failureErr = fmt.Errorf("upstream returned HTTP %d", statusCode)
+					}
 				}
 				rpcss.sessionManager.OnSessionFailure(singleConsumerSession, failureErr)
 			}
