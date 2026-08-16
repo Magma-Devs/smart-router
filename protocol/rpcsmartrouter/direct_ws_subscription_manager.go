@@ -129,8 +129,8 @@ type DirectWSSubscriptionManager struct {
 // WebSocketEndpointOptimizer is an interface for selecting WebSocket endpoints
 // This allows using ProviderOptimizer or a simple round-robin fallback
 type WebSocketEndpointOptimizer interface {
-	// ChooseProvider selects the best endpoint(s) from available addresses
-	ChooseProvider(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
+	// ChooseUpstream selects the best endpoint(s) from available addresses
+	ChooseUpstream(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
 	// AppendRelayData updates metrics after successful relay
 	AppendRelayData(provider string, latency time.Duration, cu, syncBlock uint64)
 	// AppendRelayFailure updates metrics after failed relay
@@ -466,7 +466,7 @@ func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tie
 	}
 
 	// cu=1 and requestedBlock=LATEST_BLOCK (-2) are sensible defaults for subscriptions.
-	selectedURLs := dwsm.optimizer.ChooseProvider(ctx, allURLs, ignoredEndpoints, 1, -2)
+	selectedURLs := dwsm.optimizer.ChooseUpstream(ctx, allURLs, ignoredEndpoints, 1, -2)
 
 	if len(selectedURLs) == 0 {
 		// Optimizer returned nothing — fall back to first-non-ignored within tier.

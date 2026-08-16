@@ -44,7 +44,7 @@ func TestParseSelectionPriority(t *testing.T) {
 	}
 }
 
-// TestSelectionPriorityWeightsSumToOne matters because NewProviderSelector renormalises
+// TestSelectionPriorityWeightsSumToOne matters because NewUpstreamSelector renormalises
 // any weight set that does not sum to 1.0 — a preset that drifted would be silently
 // rescaled, and the logged weights would stop matching the table in this file.
 func TestSelectionPriorityWeightsSumToOne(t *testing.T) {
@@ -55,7 +55,7 @@ func TestSelectionPriorityWeightsSumToOne(t *testing.T) {
 		SelectionPriorityFreshest,
 	} {
 		t.Run(p.String(), func(t *testing.T) {
-			cfg := p.ApplyTo(DefaultProviderSelectorConfig())
+			cfg := p.ApplyTo(DefaultUpstreamSelectorConfig())
 			sum := cfg.AvailabilityWeight + cfg.LatencyWeight + cfg.SyncWeight + cfg.StakeWeight
 			require.InDelta(t, 1.0, sum, 1e-9)
 		})
@@ -66,7 +66,7 @@ func TestSelectionPriorityWeightsSumToOne(t *testing.T) {
 // guarantee: balanced is the flag's default value, so it must not move any existing
 // deployment off the weights it runs today.
 func TestSelectionPriorityBalancedIsTheCurrentDefault(t *testing.T) {
-	def := DefaultProviderSelectorConfig()
+	def := DefaultUpstreamSelectorConfig()
 	applied := SelectionPriorityBalanced.ApplyTo(def)
 
 	require.Equal(t, def.AvailabilityWeight, applied.AvailabilityWeight)
@@ -79,7 +79,7 @@ func TestSelectionPriorityBalancedIsTheCurrentDefault(t *testing.T) {
 // the four weights — it must not disturb the selection mode, the starvation floor, the
 // strategy or the adaptive-max wiring.
 func TestSelectionPriorityApplyToLeavesOtherFieldsAlone(t *testing.T) {
-	cfg := DefaultProviderSelectorConfig()
+	cfg := DefaultUpstreamSelectorConfig()
 	cfg.SelectionMode = SelectionModeBest
 	cfg.MinSelectionChance = 0.07
 	cfg.Strategy = StrategyLatency
@@ -99,14 +99,14 @@ func TestSelectionPriorityApplyToLeavesOtherFieldsAlone(t *testing.T) {
 func TestSelectionPriorityDominantNotExclusive(t *testing.T) {
 	for _, tc := range []struct {
 		priority SelectionPriority
-		dominant func(ProviderSelectorConfig) float64
+		dominant func(UpstreamSelectorConfig) float64
 	}{
-		{SelectionPriorityMostReliable, func(c ProviderSelectorConfig) float64 { return c.AvailabilityWeight }},
-		{SelectionPriorityFastest, func(c ProviderSelectorConfig) float64 { return c.LatencyWeight }},
-		{SelectionPriorityFreshest, func(c ProviderSelectorConfig) float64 { return c.SyncWeight }},
+		{SelectionPriorityMostReliable, func(c UpstreamSelectorConfig) float64 { return c.AvailabilityWeight }},
+		{SelectionPriorityFastest, func(c UpstreamSelectorConfig) float64 { return c.LatencyWeight }},
+		{SelectionPriorityFreshest, func(c UpstreamSelectorConfig) float64 { return c.SyncWeight }},
 	} {
 		t.Run(tc.priority.String(), func(t *testing.T) {
-			cfg := tc.priority.ApplyTo(DefaultProviderSelectorConfig())
+			cfg := tc.priority.ApplyTo(DefaultUpstreamSelectorConfig())
 			require.Greater(t, tc.dominant(cfg), 0.5, "chosen axis must dominate")
 			require.Greater(t, cfg.AvailabilityWeight, 0.0, "availability must never be zeroed out")
 			// Stake is a constant per candidate in a static-provider deployment, so the
@@ -132,7 +132,7 @@ func TestSelectionPriorityChangesTheWinner(t *testing.T) {
 	fastFlaky := &pairingtypes.QualityOfServiceReport{Availability: 0.85, Latency: 0.05, Sync: 1.0}
 
 	scoreBoth := func(p SelectionPriority) (solid, flaky float64) {
-		ws := NewProviderSelector(p.ApplyTo(DefaultProviderSelectorConfig()))
+		ws := NewUpstreamSelector(p.ApplyTo(DefaultUpstreamSelectorConfig()))
 		return ws.CalculateScore(slowSolid, 0, 0, "slow_solid"),
 			ws.CalculateScore(fastFlaky, 0, 0, "fast_flaky")
 	}
@@ -150,7 +150,7 @@ func TestSelectionPriorityFreshestPrefersTheFresherProvider(t *testing.T) {
 	stale := &pairingtypes.QualityOfServiceReport{Availability: 0.99, Latency: 0.1, Sync: 600.0}
 	fresh := &pairingtypes.QualityOfServiceReport{Availability: 0.95, Latency: 0.1, Sync: 0.5}
 
-	ws := NewProviderSelector(SelectionPriorityFreshest.ApplyTo(DefaultProviderSelectorConfig()))
+	ws := NewUpstreamSelector(SelectionPriorityFreshest.ApplyTo(DefaultUpstreamSelectorConfig()))
 	require.Greater(t,
 		ws.CalculateScore(fresh, 0, 0, "fresh"),
 		ws.CalculateScore(stale, 0, 0, "stale"),

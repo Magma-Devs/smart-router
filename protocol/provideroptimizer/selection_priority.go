@@ -38,7 +38,7 @@ const (
 )
 
 // priorityWeights holds the four QoS weights a preset applies. Each set sums to 1.0,
-// which keeps NewProviderSelector's normaliser from rescaling them.
+// which keeps NewUpstreamSelector's normaliser from rescaling them.
 type priorityWeights struct {
 	availability float64
 	latency      float64
@@ -131,7 +131,7 @@ func ParseSelectionPriority(str string) (SelectionPriority, error) {
 //
 // Callers that also honour explicit --qos-*-weight flags must apply those AFTER this,
 // so a hand-set weight overrides the preset.
-func (p SelectionPriority) ApplyTo(cfg ProviderSelectorConfig) ProviderSelectorConfig {
+func (p SelectionPriority) ApplyTo(cfg UpstreamSelectorConfig) UpstreamSelectorConfig {
 	weights, ok := presetWeights[p]
 	if !ok {
 		// Unreachable via ParseSelectionPriority, which rejects unknown values. Guard
