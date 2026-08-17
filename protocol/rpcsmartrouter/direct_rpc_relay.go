@@ -499,7 +499,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		if statusCode < 200 || statusCode >= 300 {
 			classifierMessage = fmt.Sprintf("HTTP %d: %s", statusCode, errorMessage)
 		}
-		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, errorCode, classifierMessage)
+		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportJsonRPC, errorCode, classifierMessage)
 
 		// MAG-1870 — HTTP status must be authoritative for 4xx-class transport
 		// errors. The single-pass classification above iterates matchers in
@@ -521,6 +521,11 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// The statusCode != errorCode guard skips the redundant pass in the
 		// bare-body fallback case where ExtractJSONRPCErrorCode returned 0
 		// and the first pass already ran with errorCode = statusCode.
+		//
+		// Only IsNonRetryable escalates here. The fault-axis flags
+		// (IsUnsupportedMethod, IsRateLimited) keep the first pass's verdict:
+		// the body code is the authoritative statement of *what* went wrong,
+		// and this pass exists solely to override *retryability*.
 		if !result.IsNonRetryable && (statusCode < 200 || statusCode >= 300) && statusCode != errorCode {
 			result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
 		}
@@ -664,7 +669,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		IsNodeError: isNodeError, // Correct transport-level classification
 	}
 	if hasError {
-		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportREST, response.StatusCode, errorMessage)
+		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, response.StatusCode, errorMessage)
 	}
 
 	utils.LavaFormatTrace("REST request completed",
@@ -760,7 +765,8 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		if isGRPCErr && response != nil {
 			// gRPC error with status code - might contain valid error response
 			// The response.Data contains the error details in JSON format
-			return &common.RelayResult{
+			isNodeError := grpcErr.Code >= 13 // INTERNAL and above are node errors
+			grpcResult := &common.RelayResult{
 				Reply: &pairingtypes.RelayReply{
 					Data:     response.Data,                                   // Error response in JSON format
 					Metadata: convertHTTPHeadersToMetadata(response.Metadata), // Include metadata even for errors
@@ -770,8 +776,25 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 					ProviderAddress: endpointIdentifier,
 					ProviderGroup:   d.groupLabel,
 				},
-				IsNodeError: grpcErr.Code >= 13, // INTERNAL and above are node errors
-			}, nil
+				IsNodeError: isNodeError,
+			}
+			// This branch returns err == nil, so downstream sees a completed relay
+			// carrying a node error — same shape as the four body-error paths. It
+			// must therefore classify like them: without this, the availability gate
+			// in rpcsmartrouter_server.shouldFailSessionForResult had no carve-out to
+			// consult on the gRPC status-error path and scored every code >= 13 as an
+			// availability failure, with no way to exempt a deterministic one.
+			//
+			// Of the codes that reach here, only 14 (UNAVAILABLE) is registered; 13,
+			// 15 and 16 classify Unknown and so are scored. That is intended for all
+			// three, 16 (UNAUTHENTICATED) included: credentials are configured per
+			// endpoint, so an endpoint rejecting ours is unusable to us and should be
+			// demoted. If every endpoint rejects them, all demote together and
+			// selection degrades to uniform rather than starving.
+			if isNodeError {
+				grpcResult.ApplyNodeErrorClassification(d.chainFamily, common.TransportGRPC, int(grpcErr.Code), err.Error())
+			}
+			return grpcResult, nil
 		}
 
 		return nil, classifyAndWrap(err, d.chainFamily, common.TransportGRPC)
@@ -829,7 +852,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		IsNodeError: hasError,
 	}
 	if hasError {
-		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage)
+		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage)
 	}
 
 	return result, nil

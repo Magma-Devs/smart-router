@@ -1443,26 +1443,57 @@ func promoteConsistencyFallback(
 // first-picked ~1/3 of the time no matter how long it kept failing. The classification itself was
 // never the problem: direct_rpc_relay.go tags these IsNodeError=true, the gate just didn't read it.
 //
-// The IsNonRetryable carve-out is load-bearing, not defensive. Deterministic caller-fault errors
-// (unsupported method, invalid params, execution reverted — see RelayResult.IsNonRetryable) come
-// back from EVERY provider for the same request, so scoring them would drive the whole pairing
-// below score.MinAcceptableAvailability on a burst of malformed client requests and collapse every
-// endpoint to the selection floor — punishing healthy nodes for a bad request instead of
-// identifying a bad node. It also preserves the SubCategoryUnsupportedMethod "no provider scoring"
-// contract documented in common/error_registry.go.
+// The two carve-outs are load-bearing, not defensive, and they exclude on DIFFERENT axes:
+//
+//   - IsNonRetryable — "retrying elsewhere would not help". Deterministic caller-fault errors
+//     (unsupported method, invalid params, execution reverted) come back from EVERY endpoint for
+//     the same request, so scoring them would drive the whole pairing below
+//     score.MinAcceptableAvailability on a burst of malformed client requests and collapse every
+//     endpoint to the selection floor — punishing healthy nodes for a bad request instead of
+//     identifying a bad node. All four SubCategoryUnsupportedMethod codes are Retryable=false, so
+//     this also preserves that subcategory's "no provider scoring" contract.
+//   - IsRateLimited — "the endpoint is healthy but busy". SubCategoryRateLimit is contractually
+//     backoff-without-marking-unhealthy (common/error_registry.go), and it does NOT follow from
+//     retryability: NODE_RATE_LIMITED (2005) is Retryable=true, NODE_LIMIT_EXCEEDED (2011) is
+//     Retryable=false, and both must stay out of the availability signal.
+//
+// KNOWN AND ACCEPTED — an unclassified error body scores. ClassifyNodeErrorForRetry returns all
+// flags false when nothing in the registry matches, and a false flag is an absence of information,
+// not a verdict of "the node's fault". Two consequences, both deliberate:
+//
+//  1. A novel/vendor error body is scored against availability. This is the behaviour the ticket
+//     asks for — an endpoint failing in a way we have not catalogued is still failing — and
+//     narrowing the gate to positively-classified errors would silently exempt exactly the novel
+//     failures we most want to catch.
+//  2. Errors that ARE classified retryable but are request-shaped rather than node-shaped
+//     (CHAIN_BLOCK_NOT_FOUND 3201, CHAIN_TX_NOT_FOUND 3202, CHAIN_RECEIPT_NOT_FOUND 3203,
+//     CHAIN_DATA_NOT_AVAILABLE 3205, NODE_RESOURCE_NOT_FOUND 2012, NODE_RESOURCE_UNAVAILABLE 2013)
+//     are scored. Retryable=true is defined as "another endpoint has a chance of succeeding", so
+//     the endpoint IS the differentiator and demoting it is defensible; when it is not — every
+//     endpoint lacks the tx — all of them demote equally and weighted_selector collapses to uniform
+//     random rather than starving. Tag these with a fault-axis SubCategory if that proves wrong in
+//     production; the gate reads the axis, so no change here would be needed.
+//
+// Every relay through this gate also feeds ConsecutiveErrors. An endpoint with ZERO successful
+// relays is blocklisted on its 16th consecutive failure (consumer_session_manager.go), so a
+// sustained burst of scored node errors can drain the pairing pool before it resets. That is the
+// intended escalation for a genuinely dead endpoint, and the reason the carve-outs above are
+// exclusions rather than mere score adjustments.
 func shouldFailSessionForResult(err error, relayResult *common.RelayResult) bool {
 	if err != nil {
 		return true
 	}
 	if relayResult == nil {
+		// Unreachable from the current call site, which dereferences relayResult first. Kept so
+		// the helper is total on its own signature rather than relying on a caller invariant.
 		return false
 	}
 	// REST/HTTP transport failures: err == nil but the status still means the node failed us.
 	if relayResult.StatusCode >= 500 || relayResult.StatusCode == 429 {
 		return true
 	}
-	// Node error delivered inside a 2xx body — scoreable only when it is not deterministic.
-	return relayResult.IsNodeError && !relayResult.IsNonRetryable
+	// Node error delivered inside a 2xx body — scoreable unless a carve-out claims it.
+	return relayResult.IsNodeError && !relayResult.IsNonRetryable && !relayResult.IsRateLimited
 }
 
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
@@ -3870,6 +3901,11 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	relayResult.StatusCode = result.StatusCode
 	relayResult.IsNodeError = result.IsNodeError
 	relayResult.IsNonRetryable = result.IsNonRetryable
+	// IsUnsupportedMethod and IsRateLimited are the fault-axis flags direct_rpc_relay.go classifies
+	// alongside IsNonRetryable. Both were dropped here, so the zero-CU/caching carve-out and the
+	// availability gate's rate-limit exclusion could never see them on the direct path.
+	relayResult.IsUnsupportedMethod = result.IsUnsupportedMethod
+	relayResult.IsRateLimited = result.IsRateLimited
 	relayResult.ProviderInfo = result.ProviderInfo
 	if relayResult.Reply != nil {
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{

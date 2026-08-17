@@ -442,6 +442,29 @@ type RelayResult struct {
 	// IsUnsupportedMethod is an independent subset flag derived from the
 	// SubCategory and used to gate the zero-CU carve-out and caching policy.
 	IsNonRetryable bool
+	// IsRateLimited is true when the node error carries SubCategoryRateLimit:
+	// the endpoint is healthy but busy. Callers back off but must not mark it
+	// unhealthy, which is why the direct-RPC availability gate excludes it.
+	// Orthogonal to IsNonRetryable — NODE_RATE_LIMITED (2005) is retryable,
+	// NODE_LIMIT_EXCEEDED (2011) is not, and both set this flag.
+	IsRateLimited bool
+}
+
+// ApplyNodeErrorClassification stamps every registry-derived policy flag onto a node-error
+// result in one call.
+//
+// Deliberately a single method rather than three assignments at each transport's call site: the
+// flags are a set, and setting them individually is how IsUnsupportedMethod ended up classified
+// but never assigned on the direct-RPC path — reachable in the registry, dead in production.
+// Adding a flag to the set means adding it here, once, and every transport picks it up.
+func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transport TransportType, errorCode int, message string) {
+	if rr == nil {
+		return
+	}
+	classification := ClassifyNodeErrorForRetry(family, transport, errorCode, message)
+	rr.IsNonRetryable = classification.IsNonRetryable
+	rr.IsUnsupportedMethod = classification.IsUnsupportedMethod
+	rr.IsRateLimited = classification.IsRateLimited
 }
 
 func (rr *RelayResult) GetReplyServer() pairingtypes.Relayer_RelaySubscribeClient {

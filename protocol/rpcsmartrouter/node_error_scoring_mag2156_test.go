@@ -53,7 +53,32 @@ func TestShouldFailSessionForResult_MAG2156(t *testing.T) {
 			name:   "unsupported method",
 			result: &common.RelayResult{StatusCode: 200, IsNodeError: true, IsNonRetryable: true, IsUnsupportedMethod: true},
 			want:   false,
-			why:    "SubCategoryUnsupportedMethod is contractually 'no provider scoring'",
+			// The gate never reads IsUnsupportedMethod — this passes on IsNonRetryable alone. That
+			// is the point: all four SubCategoryUnsupportedMethod codes (2001/2008/2009/2010) are
+			// Retryable=false, so the "no provider scoring" contract is upheld by the retryability
+			// carve-out without the gate needing a third condition. If a future unsupported-method
+			// code is ever registered Retryable=true, this case still passes but the contract
+			// breaks — see TestUnsupportedMethodCodesAreAllNonRetryable_MAG2156 below, which is
+			// what actually guards it.
+			why: "SubCategoryUnsupportedMethod is contractually 'no provider scoring', delivered here via Retryable=false",
+		},
+		{
+			name:   "retryable rate limit",
+			result: &common.RelayResult{StatusCode: 200, IsNodeError: true, IsRateLimited: true},
+			want:   false,
+			why:    "NODE_RATE_LIMITED (2005) is Retryable=true, so only the rate-limit axis can carve it out: 'healthy but busy, do not mark unhealthy'",
+		},
+		{
+			name:   "non-retryable rate limit",
+			result: &common.RelayResult{StatusCode: 200, IsNodeError: true, IsNonRetryable: true, IsRateLimited: true},
+			want:   false,
+			why:    "NODE_LIMIT_EXCEEDED (2011) shares the subcategory with opposite retryability and must reach the same verdict",
+		},
+		{
+			name:   "unclassified node error",
+			result: &common.RelayResult{StatusCode: 200, IsNodeError: true},
+			want:   true,
+			why:    "KNOWN AND ACCEPTED: an unmatched error body has every flag false, so it scores. An endpoint failing in a way we have not catalogued is still failing — see shouldFailSessionForResult's doc comment",
 		},
 		{
 			name:   "upstream 500",
