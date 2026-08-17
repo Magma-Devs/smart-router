@@ -1288,9 +1288,19 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		}
 
 		if providerAddress == "" {
-			// Return error instead of falling back to random selection
+			// Return error instead of falling back to random selection.
+			//
+			// Deliberately broad. This branch fires both for a name that is not configured at
+			// all and for one that is configured but not usable for this request — blocked
+			// (removeAddressFromValidAddresses pops it into currentlyBlockedProviderAddresses)
+			// or not serving this addon/extension, since getValidAddresses returns the filtered
+			// list. Calling that "unknown" would tell an operator their provider does not exist
+			// in the middle of an outage, which is the same class of misdirection the split of
+			// this error from SelectedProviderAlreadyFailedError exists to remove. The sentinel
+			// carries the precision; this description has to stay true for every way the branch
+			// is reached.
 			return nil, utils.LavaFormatError(
-				"Selected provider is unknown",
+				"Selected provider not available",
 				SelectedProviderUnavailableError,
 				utils.LogAttr("selectedProvider", selectedProvider),
 				utils.LogAttr("validProviders", validAddresses),
