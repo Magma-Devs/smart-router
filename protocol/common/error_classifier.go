@@ -636,17 +636,22 @@ func (r stringConnectionFallback) matches(msg string) bool {
 //
 // INVARIANT: written at package-init time (declaration), read-only thereafter.
 var stringConnectionFallbacks = []stringConnectionFallback{
-	// Remote gRPC status errors start with "rpc error"; those carry a *remote*
-	// deadline/cancel and must not be classified as a local context error.
-	// The guard is encoded as a mustNotContain on the rpc-error prefix marker.
+	// Remote gRPC status errors render as "rpc error: code = ..."; those carry a
+	// *remote* deadline/cancel and must not be classified as a local context error.
+	//
+	// The guard matches that full prefix and NOT the bare substring "rpc error".
+	// Our own local wrapper renders as "gRPC error 1: context canceled", which
+	// lowercased contains "rpc error" inside the word "gRPC" — so the bare guard
+	// disqualified local cancellations from the very rows they needed to match,
+	// classifying them as UNKNOWN_ERROR instead (MAG-2687).
 	{
 		mustContain:    []string{"context deadline exceeded"},
-		mustNotContain: []string{"rpc error"},
+		mustNotContain: []string{"rpc error: code ="},
 		result:         LavaErrorContextDeadline,
 	},
 	{
 		mustContain:    []string{"context canceled"},
-		mustNotContain: []string{"rpc error"},
+		mustNotContain: []string{"rpc error: code ="},
 		result:         LavaErrorContextCanceled,
 	},
 	// HTTP/2 GOAWAY closes the whole connection. Exclude ENHANCE_YOUR_CALM —

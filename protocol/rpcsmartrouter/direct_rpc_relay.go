@@ -760,41 +760,64 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		)
 
 		// Check if it's a gRPC status error (use comma-ok idiom to avoid panic)
-		grpcErr, isGRPCErr := err.(*lavasession.GRPCStatusError)
+		_, isGRPCErr := err.(*lavasession.GRPCStatusError)
 
 		if isGRPCErr && response != nil {
-			// gRPC error with status code - might contain valid error response
-			// The response.Data contains the error details in JSON format
-			isNodeError := grpcErr.Code >= 13 // INTERNAL and above are node errors
-			grpcResult := &common.RelayResult{
+			// A gRPC status error that still carried a response body: the node
+			// answered, and its answer is an error. Classify it exactly the way the
+			// success path below does rather than applying a separate rule here —
+			// same CheckResponseError, same StatusCode, same classification call.
+			//
+			// This arm previously left StatusCode at its 0 default and derived
+			// IsNodeError from `Code >= 13`. Both were wrong, independently:
+			//
+			//   - StatusCode 0 makes GrpcMessage.CheckResponseError report "no error"
+			//     downstream in results_manager.setValidResponse, so any upstream
+			//     error (INVALID_ARGUMENT on a malformed tx, NOT_FOUND on an object)
+			//     was served to the client as a success and was cacheable (MAG-2549).
+			//   - `Code >= 13` additionally left DeadlineExceeded (4) and every other
+			//     sub-13 code marked as not-a-node-error, which is what gates the
+			//     cache write and the lava-identified-node-error header.
+			//
+			// response.StatusCode is the same value the error carried (handleGRPCError
+			// builds both from one errorCode), so this loses nothing.
+			hasError, errorMessage := chainMessage.CheckResponseError(response.Data, response.StatusCode)
+			// GrpcMessage.CheckResponseError reports hasError from the status code alone
+			// and always returns an EMPTY message. Classifying on "" would reduce the
+			// gRPC registry to its two code matchers and silently disable every
+			// message-based row it has — "rate limit", "unimplemented", ENHANCE_YOUR_CALM.
+			if errorMessage == "" {
+				errorMessage = err.Error()
+			}
+			result := &common.RelayResult{
 				Reply: &pairingtypes.RelayReply{
 					Data:     response.Data,                                   // Error response in JSON format
 					Metadata: convertHTTPHeadersToMetadata(response.Metadata), // Include metadata even for errors
 				},
-				Finalized: true,
+				Finalized:  true,
+				StatusCode: response.StatusCode,
 				ProviderInfo: common.ProviderInfo{
 					ProviderAddress: endpointIdentifier,
 					ProviderGroup:   d.groupLabel,
 				},
-				IsNodeError: isNodeError,
+				IsNodeError: hasError,
 			}
 			// This branch returns err == nil, so downstream sees a completed relay
 			// carrying a node error — same shape as the four body-error paths. It
 			// must therefore classify like them: without this, the availability gate
 			// in rpcsmartrouter_server.shouldFailSessionForResult had no carve-out to
-			// consult on the gRPC status-error path and scored every code >= 13 as an
-			// availability failure, with no way to exempt a deterministic one.
+			// consult on the gRPC status-error path and scored every non-OK status as
+			// an availability failure, with no way to exempt a deterministic one.
 			//
-			// Of the codes that reach here, only 14 (UNAVAILABLE) is registered; 13,
-			// 15 and 16 classify Unknown and so are scored. That is intended for all
-			// three, 16 (UNAUTHENTICATED) included: credentials are configured per
-			// endpoint, so an endpoint rejecting ours is unusable to us and should be
-			// demoted. If every endpoint rejects them, all demote together and
-			// selection degrades to uniform rather than starving.
-			if isNodeError {
-				grpcResult.ApplyNodeErrorClassification(d.chainFamily, common.TransportGRPC, int(grpcErr.Code), err.Error())
+			// ApplyNodeErrorClassification rather than assigning IsNonRetryable alone:
+			// the flags are a set. IsRateLimited is what keeps a busy-but-healthy
+			// endpoint (RESOURCE_EXHAUSTED) out of the availability signal, and
+			// IsUnsupportedMethod is what gates the zero-CU carve-out — setting only
+			// IsNonRetryable is how both ended up classified but never assigned before.
+			if hasError {
+				result.ApplyNodeErrorClassification(d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage)
 			}
-			return grpcResult, nil
+			return result, nil
 		}
 
 		return nil, classifyAndWrap(err, d.chainFamily, common.TransportGRPC)

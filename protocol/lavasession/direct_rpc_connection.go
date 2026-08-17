@@ -26,6 +26,7 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -905,6 +906,21 @@ func (g *GRPCDirectRPCConnection) parseInputMessage(
 
 // handleGRPCError handles gRPC errors and returns an appropriate response
 func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders metadata.MD) (*DirectRPCResponse, error) {
+	// A relay the router itself cancelled — a loser of a stateful fan-out race,
+	// or a client that disconnected — is not a node failure and must not be
+	// scored as one. grpc-go reports this as status.Error(codes.Canceled, ...),
+	// which does NOT wrap context.Canceled, so re-attach the sentinel that
+	// common.IsClientCancellation looks for.
+	//
+	// Returning a NIL response is the load-bearing half: sendGRPCRelay only takes
+	// its error-with-response arm when response != nil, so a nil response is what
+	// routes cancellation through classifyAndWrap like every other transport
+	// instead of recording it as a successful relay with fabricated latency
+	// (MAG-2687).
+	if ctx.Err() != nil && status.Code(err) == codes.Canceled {
+		return nil, fmt.Errorf("gRPC relay cancelled: %w", context.Canceled)
+	}
+
 	var errorCode uint32 = GRPCStatusCodeOnFailedMessages
 	var errorMessage string
 
@@ -935,18 +951,32 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		}, &GRPCStatusError{
 			Code:    errorCode,
 			Message: errorMessage,
+			cause:   err,
 		}
 }
 
-// GRPCStatusError represents a gRPC status error
+// GRPCStatusError represents a gRPC status error.
+//
+// cause preserves the originating error. Without it this type was a dead end for
+// errors.Is / errors.As: every sentinel carried by the underlying grpc-go error
+// was lost the moment we rebuilt the error from just a code and a message, which
+// is what made gRPC cancellations invisible to the relay-race carve-out
+// (MAG-2687).
 type GRPCStatusError struct {
 	Code    uint32
 	Message string
+	cause   error
 }
 
 func (e *GRPCStatusError) Error() string {
 	return fmt.Sprintf("gRPC error %d: %s", e.Code, e.Message)
 }
+
+// Unwrap exposes the originating error so errors.Is / errors.As see through this
+// wrapper. Note this makes status.Code(err) resolve to the underlying gRPC code
+// rather than Unknown; SessionOutOfSyncGRPCCode is 677 and so cannot collide with
+// any real code, which grpc_status_error_test.go pins.
+func (e *GRPCStatusError) Unwrap() error { return e.cause }
 
 func (g *GRPCDirectRPCConnection) GetProtocol() DirectRPCProtocol {
 	return DirectRPCProtocolGRPC
