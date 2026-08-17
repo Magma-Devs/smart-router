@@ -624,13 +624,27 @@ func (dgm *DirectGRPCSubscriptionManager) createUpstreamStream(
 }
 
 // listenForUpstreamMessages listens for messages from upstream gRPC stream
+// On an upstream error we hand off to handleUpstreamDisconnect, which either restores the
+// subscription (mutating activeSub in place and spawning a fresh listener) or tears it down.
+// Cleanup must NOT run from this goroutine in that case: it deletes the entry from
+// dgm.activeSubscriptions, closes every client channel and nils connectedClients — so a
+// successful restoration would route into nobody, leak the new upstream stream, and
+// decrement totalSubscriptions a second time when the restarted listener later exits,
+// driving the counter below zero and disabling the max-subscriptions limit (MAG-2540).
+//
+// Cleanup ownership: once reconnectInFlight is set, handleUpstreamDisconnect owns
+// cleanupSubscription on every failure path, so a failed restoration still releases the
+// subscription. This mirrors the contract DirectWSSubscriptionManager already documents.
 func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 	ctx context.Context,
 	hashedParams string,
 	activeSub *grpcActiveSubscription,
 ) {
+	reconnectInFlight := false
 	defer func() {
-		dgm.cleanupSubscription(hashedParams, activeSub)
+		if !reconnectInFlight {
+			dgm.cleanupSubscription(hashedParams, activeSub)
+		}
 	}()
 
 	msgFactory := dynamic.NewMessageFactoryWithDefaults()
@@ -658,7 +672,9 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 					err,
 					utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 				)
-				// Attempt reconnection
+				// Hand ownership of this subscription to the reconnect goroutine —
+				// including responsibility for cleanup if restoration fails.
+				reconnectInFlight = true
 				go dgm.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
 				return
 			}
@@ -715,7 +731,11 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	hashedParams string,
 	activeSub *grpcActiveSubscription,
 ) {
-	// Prevent concurrent restoration
+	// Prevent concurrent restoration.
+	//
+	// Returning here without cleanup is correct: another handleUpstreamDisconnect is
+	// already in flight for this subscription and holds cleanup ownership, so cleaning
+	// up here would tear down a restoration that is still in progress.
 	if !activeSub.restoring.CompareAndSwap(false, true) {
 		return
 	}
@@ -729,6 +749,9 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	if err := activeSub.upstreamPool.ReconnectWithBackoff(ctx); err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to reconnect", err)
 		activeSub.cancel()
+		// Restoration failed: this goroutine owns cleanup, because the listener that
+		// handed off skipped its own deferred cleanup (MAG-2540).
+		dgm.cleanupSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -737,6 +760,7 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	if err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to get new connection", err)
 		activeSub.cancel()
+		dgm.cleanupSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -751,6 +775,7 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	if err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to create new stream", err)
 		activeSub.cancel()
+		dgm.cleanupSubscription(hashedParams, activeSub)
 		return
 	}
 
