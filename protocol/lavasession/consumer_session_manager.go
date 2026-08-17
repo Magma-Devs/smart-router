@@ -1278,37 +1278,40 @@ func convertSelectionStatsToMetrics(stats *provideroptimizer.SelectionStats) (al
 	return allScores, rngValue
 }
 
-// Provider names are free-form config strings and the pipeline does not preserve
-// their case — the helm chart folds node names into the router's config, the
-// values file spells them for humans. Both lookups below fold case.
-
-// resolveSelectedProviderAddress maps a header-supplied name onto the address the
-// router registered, so downstream lookups key on the router's spelling.
-func resolveSelectedProviderAddress(selectedProvider string, addresses []string) (string, bool) {
-	// Exact hit wins: two config names differing only in case resolve as spelled.
+// resolveSelectedProviderAddress maps a header-supplied provider name onto the address
+// the router registered. Provider names are free-form config strings and the pipeline
+// does not preserve their case — the helm chart folds node names into the router's
+// config, the values file spells them for humans — so the match folds case.
+//
+// It returns the canonical address rather than the header's spelling because everything
+// past this point keys on the router's own name: csm.pairing, the session store, the
+// in-request ignored set, the metrics labels. csm.pairing in particular is a
+// LavaFormatFatal on a miss, so handing the caller's spelling downstream would turn a
+// mis-cased header from a rejected relay into a dead router.
+//
+// An exact hit wins outright, so a config registering two names that differ only in case
+// still resolves the way the caller spelled it. Absent one, a fold matching more than one
+// address resolves to nothing and returns those candidates instead: validAddresses is
+// built by ranging a map and is reordered as providers are blocked and recovered, so
+// picking one would serve the same pinned name from a different upstream run to run —
+// the opposite of what pinning is for. The caller reports the collision so the operator
+// can rename a provider.
+func resolveSelectedProviderAddress(selectedProvider string, addresses []string) (address string, ambiguous []string) {
 	if slices.Contains(addresses, selectedProvider) {
-		return selectedProvider, true
+		return selectedProvider, nil
 	}
-	for _, address := range addresses {
-		if strings.EqualFold(address, selectedProvider) {
-			return address, true
+	var folded []string
+	for _, candidate := range addresses {
+		if strings.EqualFold(candidate, selectedProvider) {
+			folded = append(folded, candidate)
 		}
 	}
-	return "", false
-}
-
-// providerInSetFold reports whether a provider name is in a set keyed by
-// canonical addresses. Exact hit is the fast path; the scan handles a case diff.
-func providerInSetFold(set map[string]struct{}, provider string) bool {
-	if _, ok := set[provider]; ok {
-		return true
+	if len(folded) == 1 {
+		return folded[0], nil
 	}
-	for address := range set {
-		if strings.EqualFold(address, provider) {
-			return true
-		}
-	}
-	return false
+	// Sorted so the same collision reports the same way on every run.
+	sort.Strings(folded)
+	return "", folded
 }
 
 // Get a valid provider address.
@@ -1321,15 +1324,53 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 
 	// Handle provider selection via header (smartrouter only)
 	if selectedProvider != "" {
+		// Resolve to the router's own spelling first, so every check below — and everything
+		// downstream — keys on the canonical address rather than on what the header said.
+		providerAddress, ambiguous := resolveSelectedProviderAddress(selectedProvider, validAddresses)
+
+		if len(ambiguous) > 0 {
+			// Providers whose names differ only in case, and a header matching none of them
+			// exactly: which one the caller meant is unknowable. Pinning exists so a request
+			// is never served by a provider the caller did not ask for, so report the
+			// collision rather than picking one.
+			return nil, utils.LavaFormatError(
+				"Selected provider name matches more than one provider",
+				SelectedProviderUnavailableError,
+				utils.LogAttr("selectedProvider", selectedProvider),
+				utils.LogAttr("matchingProviders", ambiguous),
+				utils.LogAttr("addon", addon),
+				utils.LogAttr("extensions", extensions),
+				utils.LogAttr("GUID", ctx),
+			)
+		}
+
+		if providerAddress == "" {
+			// Return error instead of falling back to random selection
+			return nil, utils.LavaFormatError(
+				"Selected provider not available",
+				SelectedProviderUnavailableError,
+				utils.LogAttr("selectedProvider", selectedProvider),
+				utils.LogAttr("validProviders", validAddresses),
+				utils.LogAttr("addon", addon),
+				utils.LogAttr("extensions", extensions),
+				utils.LogAttr("GUID", ctx),
+			)
+		}
+
 		// If the pinned provider has already been added to ignoredProvidersList during this
 		// GetSessions call (e.g. a prior fetchEndpointConnectionFromConsumerSessionWithProvider
 		// returned connected=false), the outer loop would otherwise re-call us with the same
 		// selectedProvider and we'd return the same address again — an unbounded spin. Bound
 		// it here by returning an error the caller propagates as a single attempt.
-		if providerInSetFold(ignoredProvidersList, selectedProvider) {
+		//
+		// Looked up by the resolved address, exactly: the set is only ever written with
+		// addresses that came out of the pairing, so folding case here as well would let a
+		// case-twin's failure reject a provider that never failed.
+		if _, ignored := ignoredProvidersList[providerAddress]; ignored {
 			return nil, utils.LavaFormatWarning(
 				"Selected provider already failed in this request",
 				SelectedProviderUnavailableError,
+				utils.LogAttr("provider", providerAddress),
 				utils.LogAttr("selectedProvider", selectedProvider),
 				utils.LogAttr("addon", addon),
 				utils.LogAttr("extensions", extensions),
@@ -1337,29 +1378,14 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 			)
 		}
 
-		// Validate that the selected provider is in the valid addresses list, and
-		// carry the canonical address forward rather than what the header said.
-		if providerAddress, providerValid := resolveSelectedProviderAddress(selectedProvider, validAddresses); providerValid {
-			addresses = []string{providerAddress}
-			utils.LavaFormatInfo("Provider selected via header",
-				utils.LogAttr("provider", providerAddress),
-				utils.LogAttr("requestedProvider", selectedProvider),
-				utils.LogAttr("addon", addon),
-				utils.LogAttr("extensions", extensions),
-				utils.LogAttr("GUID", ctx))
-			return addresses, nil
-		}
-
-		// Return error instead of falling back to random selection
-		return nil, utils.LavaFormatError(
-			"Selected provider not available",
-			SelectedProviderUnavailableError,
-			utils.LogAttr("selectedProvider", selectedProvider),
-			utils.LogAttr("validProviders", validAddresses),
+		addresses = []string{providerAddress}
+		utils.LavaFormatInfo("Provider selected via header",
+			utils.LogAttr("provider", providerAddress),
+			utils.LogAttr("requestedProvider", selectedProvider),
 			utils.LogAttr("addon", addon),
 			utils.LogAttr("extensions", extensions),
-			utils.LogAttr("GUID", ctx),
-		)
+			utils.LogAttr("GUID", ctx))
+		return addresses, nil
 	}
 
 	if stickysession, ok := csm.stickySessions.Get(stickiness); ok {

@@ -356,6 +356,22 @@ func createPairingList(providerPrefixAddress string, enabled bool) map[uint64]*C
 	return cswpList
 }
 
+// createNamedPairingList builds a pairing from exact provider names, for the cases where
+// the name itself is what is under test rather than the count of providers.
+func createNamedPairingList(names ...string) map[uint64]*ConsumerSessionsWithProvider {
+	cswpList := make(map[uint64]*ConsumerSessionsWithProvider, len(names))
+	for i, name := range names {
+		cswpList[uint64(i)] = &ConsumerSessionsWithProvider{
+			PublicLavaAddress: name,
+			Endpoints:         []*Endpoint{{Connections: []*EndpointConnection{}, NetworkAddress: grpcListener, Enabled: true, ConnectionRefusals: 0}},
+			Sessions:          map[int64]*SingleConsumerSession{},
+			MaxComputeUnits:   200,
+			PairingEpoch:      firstEpochHeight,
+		}
+	}
+	return cswpList
+}
+
 // TestNumberOfValidProviderGroups covers the Fix 3 group-capacity helper: distinct cross-validation
 // group labels across valid providers, with empty GroupLabel folded into the implicit "default" group.
 func TestNumberOfValidProviderGroups(t *testing.T) {
@@ -1628,54 +1644,103 @@ func TestSelectedProviderUnknownNameStillRejected(t *testing.T) {
 		"expected SelectedProviderUnavailableError, got: %v", err)
 }
 
+// With two providers whose names differ only in case, the in-request ignored set has to be
+// consulted by the resolved address rather than by a case-fold. `lava` having failed says
+// nothing about `Lava` — they are two different upstreams — so folding here would reject a
+// provider that is healthy and was never tried.
+func TestSelectedProviderIgnoredSetDoesNotFoldOntoACaseTwin(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	err := csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("Lava", "lava"), nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	require.ElementsMatch(t, []string{"Lava", "lava"}, csm.getValidAddresses("", nil, context.Background()))
+
+	// `lava` failed earlier in this request; the header pins `Lava`, which did not.
+	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"lava": {}}, 10, 100, "", nil, common.NO_STATE, "", "Lava")
+	require.NoError(t, err, "Lava never failed — its case-twin's failure must not reject it")
+	require.Equal(t, []string{"Lava"}, got)
+
+	// ...and the reverse, so neither spelling is privileged.
+	got, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, 10, 100, "", nil, common.NO_STATE, "", "lava")
+	require.NoError(t, err)
+	require.Equal(t, []string{"lava"}, got)
+
+	// The spin bound still holds when it is the pinned provider itself that failed.
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, 10, 100, "", nil, common.NO_STATE, "", "Lava")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
+		"expected SelectedProviderUnavailableError, got: %v", err)
+}
+
+// A header matching two case-colliding providers and neither of them exactly is refused,
+// not guessed: pinning exists so a request is never served by a provider the caller did
+// not ask for, and validAddresses has no stable order to break the tie with anyway.
+func TestSelectedProviderAmbiguousCaseIsRejected(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	err := csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("Lava", "lava"), nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "LAVA")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
+		"expected SelectedProviderUnavailableError, got: %v", err)
+	// The operator has to be able to see which names collided to know what to rename.
+	require.Contains(t, err.Error(), "matches more than one provider")
+	require.Contains(t, err.Error(), "Lava")
+	require.Contains(t, err.Error(), "lava")
+}
+
 func TestResolveSelectedProviderAddress(t *testing.T) {
 	addresses := []string{"lava", "blockdaemon", "my-node-co"}
 
 	for _, tt := range []struct {
 		requested string
 		want      string
-		wantOK    bool
 	}{
-		{"lava", "lava", true},
-		{"Lava", "lava", true},
-		{"LAVA", "lava", true},
-		{"BlockDaemon", "blockdaemon", true},
-		{"My-Node-Co", "my-node-co", true},
-		{"tatum", "", false},
-		{"", "", false},
+		{"lava", "lava"},
+		{"Lava", "lava"},
+		{"LAVA", "lava"},
+		{"BlockDaemon", "blockdaemon"},
+		{"My-Node-Co", "my-node-co"},
+		{"tatum", ""},
+		{"", ""},
 	} {
-		got, ok := resolveSelectedProviderAddress(tt.requested, addresses)
-		require.Equal(t, tt.wantOK, ok, "requested %q", tt.requested)
+		got, ambiguous := resolveSelectedProviderAddress(tt.requested, addresses)
 		require.Equal(t, tt.want, got, "requested %q", tt.requested)
+		require.Empty(t, ambiguous, "requested %q is not a collision", tt.requested)
 	}
 }
 
 func TestResolveSelectedProviderAddressPrefersTheExactSpelling(t *testing.T) {
-	// Two names differing only in case is legal in config; the exact spelling wins.
+	// Two names differing only in case is legal config — ValidateUniqueProviderNames
+	// groups by exact name — so an exact hit has to win outright.
 	addresses := []string{"Lava", "lava"}
 
-	got, ok := resolveSelectedProviderAddress("lava", addresses)
-	require.True(t, ok)
+	got, ambiguous := resolveSelectedProviderAddress("lava", addresses)
+	require.Empty(t, ambiguous)
 	require.Equal(t, "lava", got)
 
-	got, ok = resolveSelectedProviderAddress("Lava", addresses)
-	require.True(t, ok)
-	require.Equal(t, "Lava", got)
-
-	// No exact hit: the fold resolves to the first registered spelling.
-	got, ok = resolveSelectedProviderAddress("LAVA", addresses)
-	require.True(t, ok)
+	got, ambiguous = resolveSelectedProviderAddress("Lava", addresses)
+	require.Empty(t, ambiguous)
 	require.Equal(t, "Lava", got)
 }
 
-func TestProviderInSetFold(t *testing.T) {
-	set := map[string]struct{}{"lava": {}, "blockdaemon": {}}
+// Absent an exact hit, a fold matching two providers resolves to neither. Which one the
+// caller meant is unknowable, and there is no stable order to break the tie with:
+// validAddresses is built by ranging a map and is reordered as providers are blocked and
+// recovered, so picking by position would serve the same pinned name from a different
+// upstream run to run.
+func TestResolveSelectedProviderAddressRefusesAnAmbiguousFold(t *testing.T) {
+	got, ambiguous := resolveSelectedProviderAddress("LAVA", []string{"Lava", "lava"})
+	require.Empty(t, got)
+	require.Equal(t, []string{"Lava", "lava"}, ambiguous)
 
-	require.True(t, providerInSetFold(set, "lava"))
-	require.True(t, providerInSetFold(set, "Lava"))
-	require.True(t, providerInSetFold(set, "BLOCKDAEMON"))
-	require.False(t, providerInSetFold(set, "tatum"))
-	require.False(t, providerInSetFold(map[string]struct{}{}, "lava"))
+	// Reported sorted, so one bad config reads the same way on every run whatever order
+	// the reset happened to leave validAddresses in.
+	_, ambiguous = resolveSelectedProviderAddress("LAVA", []string{"lava", "Lava"})
+	require.Equal(t, []string{"Lava", "lava"}, ambiguous)
 }
 
 func TestPairingWithStateful(t *testing.T) {
