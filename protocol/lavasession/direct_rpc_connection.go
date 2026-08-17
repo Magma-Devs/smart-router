@@ -179,7 +179,19 @@ type GRPCDirectRPCConnection struct {
 	initialized atomic.Bool
 	initMu      sync.Mutex
 	initErr     error
+
+	// closed is set by Close and never cleared: a closed connection stays closed.
+	// Without it, Close leaves `initialized` true with a nil connector, so
+	// ensureInitialized short-circuits and SendRequest walks into the nil — and in
+	// the not-yet-initialized case it would instead silently resurrect the
+	// connection by building a fresh connector (MAG-2808).
+	closed atomic.Bool
 }
+
+// ErrGRPCConnectionClosed is returned when a request is attempted on a gRPC
+// direct connection that has been closed. Callers should treat it as a normal
+// relay failure and fail over, not as a fatal condition.
+var ErrGRPCConnectionClosed = errors.New("gRPC connection is closed")
 
 // grpcConnectorInterface abstracts GRPCConnector for testing
 type grpcConnectorInterface interface {
@@ -593,13 +605,31 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 		return nil, err
 	}
 
+	// Snapshot the connector under the lock rather than dereferencing g.connector
+	// directly. Close() nils it under connMu while requests may be in flight, and
+	// an unguarded read raced that write straight into a nil dereference — which
+	// takes the whole process down, every chain on the pod with it (MAG-2808).
+	//
+	// The snapshot also fixes a second, subtler hazard: `defer g.connector.X()`
+	// re-reads the field at function EXIT, so a Close landing mid-RPC panicked on
+	// the way out even when the initial read had succeeded. Returning the pooled
+	// conn to the same connector we borrowed it from is the correct behaviour
+	// independently of the race.
+	g.connMu.RLock()
+	connector := g.connector
+	g.connMu.RUnlock()
+
+	if connector == nil {
+		return nil, ErrGRPCConnectionClosed
+	}
+
 	// Get gRPC connection from pool
-	conn, err := g.connector.GetRpc(ctx, true)
+	conn, err := connector.GetRpc(ctx, true)
 	if err != nil {
 		return nil, utils.LavaFormatError("gRPC get connection failed", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
-	defer g.connector.ReturnRpc(conn)
+	defer connector.ReturnRpc(conn)
 
 	// Build metadata context from headers
 	metadataMap := make(map[string]string)
@@ -670,6 +700,15 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 // ensureInitialized performs lazy initialization of the gRPC connection.
 // This includes creating the connection pool and setting up descriptor sources.
 func (g *GRPCDirectRPCConnection) ensureInitialized(ctx context.Context) error {
+	// A closed connection must never lazily re-initialize itself. Close() does not
+	// clear `initialized`, so a connection closed AFTER init short-circuits below
+	// and is caught by the nil-connector check in SendRequest; but one closed
+	// BEFORE its first request would otherwise build a fresh connector here and
+	// silently come back to life (MAG-2808).
+	if g.closed.Load() {
+		return ErrGRPCConnectionClosed
+	}
+
 	if g.initialized.Load() {
 		return g.initErr
 	}
@@ -719,7 +758,13 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 		return utils.LavaFormatError("failed to create gRPC connector", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
+
+	// Publish under connMu: this write is serialized against other initializers by
+	// initMu, but Close() guards the same field with connMu only — so without this
+	// the two had no lock in common and raced on g.connector outright.
+	g.connMu.Lock()
 	g.connector = connector
+	g.connMu.Unlock()
 
 	// Initialize descriptor cache
 	g.descriptorsCache = &common.SafeSyncMap[string, *desc.MethodDescriptor]{}
@@ -1001,6 +1046,13 @@ func (g *GRPCDirectRPCConnection) GetProtocol() DirectRPCProtocol {
 }
 
 func (g *GRPCDirectRPCConnection) Close() error {
+	// Mark closed BEFORE taking the lock so a racing ensureInitialized cannot slip
+	// a freshly built connector in behind us. A request that gets past this point
+	// still holds a valid connector snapshot; GetRpc/ReturnRpc on a closing
+	// connector degrade to an error rather than a panic, which is the intended
+	// failure mode — the relay then fails over.
+	g.closed.Store(true)
+
 	g.connMu.Lock()
 	defer g.connMu.Unlock()
 
