@@ -3308,6 +3308,11 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 	}
 }
 
+// providerRetryVerificationTimeout bounds a single provider's verification attempt
+// so one hung upstream cannot stall the retries of the remaining providers in the
+// same cycle.
+const providerRetryVerificationTimeout = 30 * time.Second
+
 // retryFailedStaticProviders periodically re-validates failed static providers
 // and re-registers them with the session manager when they recover.
 // It runs as a background goroutine, one per endpoint that had failures.
@@ -3351,54 +3356,13 @@ func (rpsr *RPCSmartRouter) retryFailedStaticProviders(
 		var recovered []*lavasession.RPCStaticProviderEndpoint
 
 		for _, provider := range failedProviders {
-			// Build verification endpoint (same logic as Phase 1)
-			verificationNodeUrls := []common.NodeUrl{}
-			for _, nodeUrl := range provider.NodeUrls {
-				verificationNodeUrls = append(verificationNodeUrls, nodeUrl)
-				if len(nodeUrl.Addons) > 0 {
-					noAddonUrl := nodeUrl
-					noAddonUrl.Addons = []string{}
-					verificationNodeUrls = append(verificationNodeUrls, noAddonUrl)
-				}
-			}
-
-			verificationEndpoint := &lavasession.RPCProviderEndpoint{
-				NetworkAddress: provider.NetworkAddress,
-				ChainID:        provider.ChainID,
-				ApiInterface:   provider.ApiInterface,
-				NodeUrls:       verificationNodeUrls,
-			}
-
-			// Scoped context for this verification attempt. GetChainRouter creates
-			// connector goroutines tied to ctx that only exit on cancellation.
-			// Without this, each retry iteration leaks goroutines and connections
-			// for permanently failing providers.
-			// Timeout bounds a hung provider so it can't stall retries of the
-			// remaining providers in this cycle.
-			attemptCtx, attemptCancel := context.WithTimeout(ctx, 30*time.Second)
-
-			parallelConnections := uint(lavasession.MaximumStreamsOverASingleConnection)
-			verificationRouter, err := chainlib.GetChainRouter(attemptCtx, parallelConnections, verificationEndpoint, chainParser)
-			if err != nil {
-				attemptCancel()
-				stillFailed = append(stillFailed, provider)
-				utils.LavaFormatWarning("retry: static provider chain router creation still failing", err,
-					utils.LogAttr("chain", rpcEndpoint.ChainID),
-					utils.LogAttr("provider", provider.Name),
-				)
-				continue
-			}
-
-			verificationFetcher := chainlib.NewChainFetcher(attemptCtx, &chainlib.ChainFetcherOptions{
-				ChainRouter: verificationRouter,
-				ChainParser: chainParser,
-				Endpoint:    verificationEndpoint,
-				Cache:       nil,
-			})
-
-			err = verificationFetcher.Validate(attemptCtx)
-			attemptCancel() // cleanup temporary router resources regardless of outcome
-			if err != nil {
+			// Shares the spec re-verifier's verification sequence rather than
+			// duplicating it. validateProvider builds the addon-expanded endpoint,
+			// scopes a timeout so a hung upstream can't stall the rest of the cycle,
+			// and — load-bearing — clones the live chainParser before handing it to
+			// the chain router. A hand-copied version of this block did not clone,
+			// which broke live gRPC relays until pod restart (MAG-2538).
+			if err := validateProvider(ctx, provider, chainParser, providerRetryVerificationTimeout); err != nil {
 				stillFailed = append(stillFailed, provider)
 				utils.LavaFormatWarning("retry: static provider verification still failing", err,
 					utils.LogAttr("chain", rpcEndpoint.ChainID),
