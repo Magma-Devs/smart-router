@@ -1290,7 +1290,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		if providerAddress == "" {
 			// Return error instead of falling back to random selection
 			return nil, utils.LavaFormatError(
-				"Selected provider not available",
+				"Selected provider is unknown",
 				SelectedProviderUnavailableError,
 				utils.LogAttr("selectedProvider", selectedProvider),
 				utils.LogAttr("validProviders", validAddresses),
@@ -1311,8 +1311,8 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		// case-twin's failure reject a provider that never failed.
 		if _, ignored := ignoredProvidersList[providerAddress]; ignored {
 			return nil, utils.LavaFormatWarning(
-				"Selected provider already failed in this request",
-				SelectedProviderUnavailableError,
+				"Selected provider cannot be retried",
+				SelectedProviderAlreadyFailedError,
 				utils.LogAttr("provider", providerAddress),
 				utils.LogAttr("selectedProvider", selectedProvider),
 				utils.LogAttr("addon", addon),

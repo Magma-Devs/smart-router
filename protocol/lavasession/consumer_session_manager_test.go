@@ -1512,8 +1512,27 @@ func TestSelectedProviderAlreadyFailedReturnsError(t *testing.T) {
 	ignored := map[string]struct{}{pinned: {}}
 	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, 10, 100, "", nil, common.NO_STATE, "", pinned)
 	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
+		"expected SelectedProviderAlreadyFailedError, got: %v", err)
+	// A provider that failed is not one that was never valid — must not alias.
+	require.False(t, errors.Is(err, SelectedProviderUnavailableError))
+}
+
+// An unknown pinned name reported itself as "already failed", sending whoever
+// read the message looking for an outage that had not happened.
+func TestSelectedProviderUnknownNameIsNotReportedAsAFailure(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairingList := createPairingList("", true)
+	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "no-such-provider")
+	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
 		"expected SelectedProviderUnavailableError, got: %v", err)
+	require.False(t, errors.Is(err, SelectedProviderAlreadyFailedError))
+	require.NotContains(t, err.Error(), "already failed")
 }
 
 // The header naming the right provider in the wrong case: `lava-select-provider:
@@ -1558,8 +1577,8 @@ func TestSelectedProviderAlreadyFailedIsCaseInsensitive(t *testing.T) {
 	ignored := map[string]struct{}{pinned: {}}
 	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, 10, 100, "", nil, common.NO_STATE, "", strings.ToUpper(pinned))
 	require.Error(t, err)
-	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
-		"expected SelectedProviderUnavailableError, got: %v", err)
+	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
+		"expected SelectedProviderAlreadyFailedError, got: %v", err)
 }
 
 // Folding case must not soften the contract: a name matching no provider in any
@@ -1602,8 +1621,8 @@ func TestSelectedProviderIgnoredSetDoesNotFoldOntoACaseTwin(t *testing.T) {
 	// The spin bound still holds when it is the pinned provider itself that failed.
 	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, 10, 100, "", nil, common.NO_STATE, "", "Lava")
 	require.Error(t, err)
-	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
-		"expected SelectedProviderUnavailableError, got: %v", err)
+	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
+		"expected SelectedProviderAlreadyFailedError, got: %v", err)
 }
 
 // A header matching two case-colliding providers and neither of them exactly is refused,
