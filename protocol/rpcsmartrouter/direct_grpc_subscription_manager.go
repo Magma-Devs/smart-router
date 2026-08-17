@@ -741,6 +741,17 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	}
 	defer activeSub.restoring.Store(false)
 
+	// Cleanup ownership, expressed once rather than at each early return. The listener
+	// that handed off skipped its own deferred cleanup, so every way out of this
+	// function short of a completed restoration must release the subscription — and a
+	// failure path added later gets that for free instead of having to remember it.
+	restored := false
+	defer func() {
+		if !restored {
+			dgm.cleanupSubscription(hashedParams, activeSub)
+		}
+	}()
+
 	utils.LavaFormatInfo("DirectGRPC: attempting to restore subscription",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
@@ -749,9 +760,6 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	if err := activeSub.upstreamPool.ReconnectWithBackoff(ctx); err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to reconnect", err)
 		activeSub.cancel()
-		// Restoration failed: this goroutine owns cleanup, because the listener that
-		// handed off skipped its own deferred cleanup (MAG-2540).
-		dgm.cleanupSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -760,7 +768,6 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	if err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to get new connection", err)
 		activeSub.cancel()
-		dgm.cleanupSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -775,7 +782,6 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	if err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to create new stream", err)
 		activeSub.cancel()
-		dgm.cleanupSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -796,13 +802,35 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
 
+	// Restoration completed — the new listener now owns this subscription's lifecycle,
+	// so the cleanup defer above must stand down.
+	restored = true
+
 	// Restart listener
 	go dgm.listenForUpstreamMessages(activeSub.ctx, hashedParams, activeSub)
 }
 
 // cleanupSubscription removes a subscription and notifies clients
+// Idempotent: cleaning up a subscription that is already gone is a no-op, matching
+// DirectWSSubscriptionManager.cleanupSubscription. Without the existence check the
+// counter decrement was unconditional while the map delete was not, so a second call
+// for the same subscription drove totalSubscriptions below zero — which is what
+// disables the max-subscriptions limit (MAG-2540).
+//
+// That is not hypothetical even after the ownership fix: cleanupStaleSubscriptions
+// removes any subscription whose ctx is done, and handleUpstreamDisconnect's failure
+// paths call activeSub.cancel() BEFORE cleaning up. A sweep landing in that window
+// would decrement, and this function would decrement again. The guard, not the call
+// ordering, is what makes that safe.
+//
+// The early return covers more than the counter: NotifyStreamRemoved and
+// RemoveMapping are also not safe to run twice for one subscription.
 func (dgm *DirectGRPCSubscriptionManager) cleanupSubscription(hashedParams string, activeSub *grpcActiveSubscription) {
 	dgm.lock.Lock()
+	if _, found := dgm.activeSubscriptions[hashedParams]; !found {
+		dgm.lock.Unlock()
+		return
+	}
 	delete(dgm.activeSubscriptions, hashedParams)
 	dgm.totalSubscriptions.Add(-1)
 	dgm.lock.Unlock()
