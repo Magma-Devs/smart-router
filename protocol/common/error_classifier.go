@@ -437,14 +437,31 @@ func IsNonRetryableNodeErrorWithContext(family ChainFamily, transport TransportT
 //   - IsNonRetryable: registry entry is Retryable=false (hard stop for retries).
 //   - IsUnsupportedMethod: SubCategory-based predicate used by the consumer
 //     to apply the zero-CU carve-out and response caching.
+//   - IsRateLimited: SubCategoryRateLimit, i.e. "the endpoint is healthy but
+//     busy". Health- and QoS-tracking callers must apply backoff but must NOT
+//     mark the endpoint unhealthy — see ErrorSubCategory's declaration.
+//
+// The three are orthogonal axes, not a hierarchy. IsNonRetryable answers
+// "would retrying elsewhere help", the SubCategory flags answer "whose fault
+// is this". NODE_RATE_LIMITED (2005) is retryable AND rate-limited;
+// NODE_LIMIT_EXCEEDED (2011) is non-retryable AND rate-limited. A caller that
+// needs "is this the node's fault" must read the fault axis, not infer it from
+// retryability.
 type NodeErrorClassification struct {
 	IsNonRetryable      bool
 	IsUnsupportedMethod bool
+	IsRateLimited       bool
 }
 
 // ClassifyNodeErrorForRetry runs ClassifyError exactly once and derives the
-// policy flags consumed by the consumer's retry decision and CU/caching
-// carve-outs.
+// policy flags consumed by the consumer's retry decision, its CU/caching
+// carve-outs, and the direct-RPC availability-scoring gate.
+//
+// An unmatched error yields the zero value — every flag false. That is a
+// deliberate absence of information, not a positive "retryable, node's fault"
+// verdict: retrying unknowns is the documented default (see error_codes.go),
+// and callers that treat a false flag as an affirmative classification will
+// misread every novel error body.
 func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, errorCode int, message string) NodeErrorClassification {
 	c := ClassifyError(nil, family, transport, errorCode, message)
 	if c == nil || c == LavaErrorUnknown {
@@ -453,6 +470,7 @@ func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, erro
 	return NodeErrorClassification{
 		IsNonRetryable:      !c.Retryable,
 		IsUnsupportedMethod: c.SubCategory.IsUnsupportedMethod(),
+		IsRateLimited:       c.SubCategory.IsRateLimit(),
 	}
 }
 
