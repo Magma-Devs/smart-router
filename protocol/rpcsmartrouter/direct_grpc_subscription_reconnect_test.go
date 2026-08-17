@@ -101,6 +101,36 @@ func TestGRPCHandleUpstreamDisconnect_ReconnectFailureCleansUp(t *testing.T) {
 		"a failed restoration must release its slot; leaking it erodes the max-subscriptions limit")
 }
 
+// TestGRPCCleanupSubscription_IsIdempotent pins the guard that makes the whole
+// MAG-2540 damage class impossible rather than merely avoided.
+//
+// The map delete was already a no-op on a missing key, but the counter decrement was
+// unconditional — so any second cleanup for one subscription drove totalSubscriptions
+// below zero, which is precisely what disables the max-subscriptions limit. Fixing the
+// double-CALL (the listener/reconnect hand-off) is not sufficient on its own: there is
+// a live second path, since cleanupStaleSubscriptions removes anything whose ctx is
+// done and handleUpstreamDisconnect's failure paths call activeSub.cancel() before
+// cleaning up. A sweep landing in that window decrements, and cleanup decrements again.
+//
+// DirectWSSubscriptionManager.cleanupSubscription has had this guard all along.
+func TestGRPCCleanupSubscription_IsIdempotent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager, activeSub, hashedParams := newTestGRPCManagerWithSub(t, ctx, cancel)
+
+	manager.cleanupSubscription(hashedParams, activeSub)
+	require.Equal(t, int64(0), manager.totalSubscriptions.Load(),
+		"first cleanup releases the slot")
+
+	manager.cleanupSubscription(hashedParams, activeSub)
+	require.Equal(t, int64(0), manager.totalSubscriptions.Load(),
+		"a second cleanup must be a no-op — a negative counter disables the subscription limit")
+
+	// And a third, to be explicit that this is a property rather than an off-by-one.
+	manager.cleanupSubscription(hashedParams, activeSub)
+	require.Equal(t, int64(0), manager.totalSubscriptions.Load())
+}
+
 // TestGRPCHandleUpstreamDisconnect_ConcurrentRestorationDoesNotDoubleClean guards the
 // restoring CAS early-return. A second handler must NOT clean up: the first one holds
 // ownership and may still be restoring successfully.
