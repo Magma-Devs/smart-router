@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1277,6 +1278,39 @@ func convertSelectionStatsToMetrics(stats *provideroptimizer.SelectionStats) (al
 	return allScores, rngValue
 }
 
+// Provider names are free-form config strings and the pipeline does not preserve
+// their case — the helm chart folds node names into the router's config, the
+// values file spells them for humans. Both lookups below fold case.
+
+// resolveSelectedProviderAddress maps a header-supplied name onto the address the
+// router registered, so downstream lookups key on the router's spelling.
+func resolveSelectedProviderAddress(selectedProvider string, addresses []string) (string, bool) {
+	// Exact hit wins: two config names differing only in case resolve as spelled.
+	if slices.Contains(addresses, selectedProvider) {
+		return selectedProvider, true
+	}
+	for _, address := range addresses {
+		if strings.EqualFold(address, selectedProvider) {
+			return address, true
+		}
+	}
+	return "", false
+}
+
+// providerInSetFold reports whether a provider name is in a set keyed by
+// canonical addresses. Exact hit is the fast path; the scan handles a case diff.
+func providerInSetFold(set map[string]struct{}, provider string) bool {
+	if _, ok := set[provider]; ok {
+		return true
+	}
+	for address := range set {
+		if strings.EqualFold(address, provider) {
+			return true
+		}
+	}
+	return false
+}
+
 // Get a valid provider address.
 func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context, wantedProviders int, ignoredProvidersList map[string]struct{}, cu uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, stickiness string, selectedProvider string) (addresses []string, err error) {
 	// cs.Lock must be Rlocked here.
@@ -1292,7 +1326,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 		// returned connected=false), the outer loop would otherwise re-call us with the same
 		// selectedProvider and we'd return the same address again — an unbounded spin. Bound
 		// it here by returning an error the caller propagates as a single attempt.
-		if _, ignored := ignoredProvidersList[selectedProvider]; ignored {
+		if providerInSetFold(ignoredProvidersList, selectedProvider) {
 			return nil, utils.LavaFormatWarning(
 				"Selected provider already failed in this request",
 				SelectedProviderUnavailableError,
@@ -1303,12 +1337,13 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 			)
 		}
 
-		// Validate that the selected provider is in the valid addresses list
-		providerValid := slices.Contains(validAddresses, selectedProvider)
-		if providerValid {
-			addresses = []string{selectedProvider}
+		// Validate that the selected provider is in the valid addresses list, and
+		// carry the canonical address forward rather than what the header said.
+		if providerAddress, providerValid := resolveSelectedProviderAddress(selectedProvider, validAddresses); providerValid {
+			addresses = []string{providerAddress}
 			utils.LavaFormatInfo("Provider selected via header",
-				utils.LogAttr("provider", selectedProvider),
+				utils.LogAttr("provider", providerAddress),
+				utils.LogAttr("requestedProvider", selectedProvider),
 				utils.LogAttr("addon", addon),
 				utils.LogAttr("extensions", extensions),
 				utils.LogAttr("GUID", ctx))

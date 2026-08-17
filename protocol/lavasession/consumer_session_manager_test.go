@@ -1567,6 +1567,117 @@ func TestSelectedProviderAlreadyFailedReturnsError(t *testing.T) {
 		"expected SelectedProviderUnavailableError, got: %v", err)
 }
 
+// The header naming the right provider in the wrong case: `lava-select-provider:
+// Lava` and a registered `lava` are the same provider. A case-sensitive match
+// rejected the relay outright rather than falling back.
+func TestSelectedProviderMatchesCaseInsensitively(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairingList := createPairingList("", true)
+	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	validAddresses := csm.getValidAddresses("", nil, context.Background())
+	require.NotEmpty(t, validAddresses)
+	pinned := validAddresses[0]
+
+	for _, requested := range []string{
+		strings.ToUpper(pinned),
+		strings.ToLower(pinned),
+		strings.ToUpper(pinned[:1]) + pinned[1:], // "Provider0"
+	} {
+		got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", requested)
+		require.NoError(t, err, "header %q should resolve to %q", requested, pinned)
+		// The canonical address comes back, not the caller's spelling.
+		require.Equal(t, []string{pinned}, got, "header %q must resolve to the registered address", requested)
+	}
+}
+
+// The ignored list is keyed by canonical address, so a differently-cased header
+// must still be recognised — otherwise the re-selection spin comes back.
+func TestSelectedProviderAlreadyFailedIsCaseInsensitive(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairingList := createPairingList("", true)
+	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	validAddresses := csm.getValidAddresses("", nil, context.Background())
+	require.NotEmpty(t, validAddresses)
+	pinned := validAddresses[0]
+
+	ignored := map[string]struct{}{pinned: {}}
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, 10, 100, "", nil, common.NO_STATE, "", strings.ToUpper(pinned))
+	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
+		"expected SelectedProviderUnavailableError, got: %v", err)
+}
+
+// Folding case must not soften the contract: a name matching no provider in any
+// case is still an error, not a silent fallback.
+func TestSelectedProviderUnknownNameStillRejected(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairingList := createPairingList("", true)
+	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "no-such-provider")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
+		"expected SelectedProviderUnavailableError, got: %v", err)
+}
+
+func TestResolveSelectedProviderAddress(t *testing.T) {
+	addresses := []string{"lava", "blockdaemon", "my-node-co"}
+
+	for _, tt := range []struct {
+		requested string
+		want      string
+		wantOK    bool
+	}{
+		{"lava", "lava", true},
+		{"Lava", "lava", true},
+		{"LAVA", "lava", true},
+		{"BlockDaemon", "blockdaemon", true},
+		{"My-Node-Co", "my-node-co", true},
+		{"tatum", "", false},
+		{"", "", false},
+	} {
+		got, ok := resolveSelectedProviderAddress(tt.requested, addresses)
+		require.Equal(t, tt.wantOK, ok, "requested %q", tt.requested)
+		require.Equal(t, tt.want, got, "requested %q", tt.requested)
+	}
+}
+
+func TestResolveSelectedProviderAddressPrefersTheExactSpelling(t *testing.T) {
+	// Two names differing only in case is legal in config; the exact spelling wins.
+	addresses := []string{"Lava", "lava"}
+
+	got, ok := resolveSelectedProviderAddress("lava", addresses)
+	require.True(t, ok)
+	require.Equal(t, "lava", got)
+
+	got, ok = resolveSelectedProviderAddress("Lava", addresses)
+	require.True(t, ok)
+	require.Equal(t, "Lava", got)
+
+	// No exact hit: the fold resolves to the first registered spelling.
+	got, ok = resolveSelectedProviderAddress("LAVA", addresses)
+	require.True(t, ok)
+	require.Equal(t, "Lava", got)
+}
+
+func TestProviderInSetFold(t *testing.T) {
+	set := map[string]struct{}{"lava": {}, "blockdaemon": {}}
+
+	require.True(t, providerInSetFold(set, "lava"))
+	require.True(t, providerInSetFold(set, "Lava"))
+	require.True(t, providerInSetFold(set, "BLOCKDAEMON"))
+	require.False(t, providerInSetFold(set, "tatum"))
+	require.False(t, providerInSetFold(map[string]struct{}{}, "lava"))
+}
+
 func TestPairingWithStateful(t *testing.T) {
 	ctx := context.Background()
 	t.Run("stateful", func(t *testing.T) {
