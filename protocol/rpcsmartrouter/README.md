@@ -273,6 +273,45 @@ sync. The watcher's deadline is anchored at batch launch and sized generously (i
 of the individually-bounded relay phases), so a `not-received` outcome means the goroutine genuinely
 leaked; in the normal case the watcher exits as soon as the last straggler pushes its response.
 
+### Reading recorded dissent
+
+`GET /debug/cross-validation-events` returns the dissent the router actually recorded, as a flat JSON
+array of self-describing rows (MAG-2772). Read-only, and registered only in debug mode
+(`--debug-address`), like the rest of `/debug/*`.
+
+It exists because the two surfaces above cannot be asserted on from an automated run: logs are
+diagnostic evidence only, and `smartrouter_cross_validation_mismatch_total` lives on the unpublished
+metrics port, where a down tunnel reads as empty and a test passes having measured nothing. It is
+**event-shaped** rather than counter-shaped because the questions are per-request — *which* provider
+dissented on *this* request — and the counter's labels carry neither a provider nor a request id.
+Counts are derivable from these rows; the rows are not derivable from the counter.
+
+One row per recorded comparison outcome, oldest first:
+
+| Field | Meaning |
+| --- | --- |
+| `Seq`, `RecordedAt` | monotonic id and timestamp; `Seq` is the unambiguous ordering key |
+| `Source` | `reply-time` (seen before the reply → in `disagreeing-providers`) or `straggler` (resolved after it → was in `pending-providers`) |
+| `ChainID`, `ApiInterface` | the row's own chain identity, as on every other `/debug` row |
+| `RequestID` | the `Lava-Guid` response header value — **not** `/debug/logs`' `request_id`, which is the caller's `X-Request-Id` |
+| `Method`, `ProviderAddress`, `ProviderGroup`, `Finality` | who dissented, on what, in which group, at which finality |
+| `Outcome` | `disagreed` at reply time; any straggler outcome on the async path |
+| `ConsensusHash`, `OutlierHash` | full 32-byte hex; the log's short form is a prefix. `OutlierHash` is the provider's own hash — equal to `ConsensusHash` on an agreed straggler, and `""` when nothing was hashed (`node-error` / `protocol-error` / `not-received`) |
+| `MismatchCounted` | whether **this** row is the one that incremented `smartrouter_cross_validation_mismatch_total`, making the counter's once-per-distinct-group dedup visible rather than implicit |
+
+Every straggler resolution is recorded, not only dissent: an `agreed` row is the positive control a
+test asserting "no dissent happened" anchors on. A cross-validated request where **everyone agreed at
+reply time** records nothing — that request is proven to have run by its own
+`lava-cross-validation-status` / `-agreeing-providers` headers.
+
+Filters (optional, ANDed): `request_id`, `chain_id`, `outcome`, `limit` (keeps the most recent N).
+`POST /debug/cross-validation-events/clear` empties the ring for test isolation.
+
+Both answer **503**, never an empty 200, when the recorder is not installed — "nothing was being
+recorded" and "nothing dissented" are opposite answers. The ring is bounded (4096 events); the
+`X-Cross-Validation-Events-Dropped` response header reports evictions so truncation cannot pass for
+absence.
+
 ## Usage
 
 ```bash

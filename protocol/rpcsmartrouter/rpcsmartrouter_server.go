@@ -4000,22 +4000,49 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			utils.LogAttr("method", apiName),
 			utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
 		)
+		group := straggler.ProviderGroup
+		if group == "" {
+			group = common.DefaultProviderGroup
+		}
+		// Decide admission to the mismatch alerting surface FIRST, so the decision is recorded on the
+		// debug event even on a fixture with no metrics manager wired. Shared admission rule with the
+		// reply-time outlier path — see crossValidationMismatchEligible — plus the once-per-distinct-
+		// group-per-request dedup this closure carries across stragglers.
+		mismatchCounted := false
+		if straggler.Outcome == common.CrossValidationStragglerOutcomeDisagreed && crossValidationMismatchEligible(deterministic, consensusHash) {
+			if _, counted := emittedMismatchGroups[group]; !counted {
+				emittedMismatchGroups[group] = struct{}{}
+				// The flag means the counter MOVED, so it stays false on a fixture with no metrics
+				// manager — matching the reply-time path rather than claiming an increment that
+				// never happened.
+				mismatchCounted = rpcss.smartRouterEndpointMetrics != nil
+			}
+		}
+		// Record the debug event BEFORE either metric, so the straggler counter remains the LAST side
+		// effect of record(): a caller (or test) that observes the straggler count reaching N is then
+		// guaranteed both the mismatch decision AND the event for those N have already landed
+		// (MAG-2772). Recording is a no-op unless the router runs with --debug-address.
+		recordCrossValidationEvent(crossValidationEvent{
+			Source:          crossValidationEventSourceStraggler,
+			ChainID:         chainId,
+			ApiInterface:    apiInterface,
+			RequestID:       crossValidationRequestID(ctx),
+			Method:          apiName,
+			ProviderAddress: straggler.ProviderAddress,
+			ProviderGroup:   group,
+			Outcome:         straggler.Outcome,
+			Finality:        finality,
+			ConsensusHash:   consensusHash,
+			OutlierHash:     straggler.ResponseHash,
+			MismatchCounted: mismatchCounted,
+			DelayMs:         straggler.Delay.Milliseconds(),
+		})
 		if rpcss.smartRouterEndpointMetrics == nil {
 			return
 		}
-		// Emit the mismatch metric BEFORE the straggler metric so the straggler counter is the LAST
-		// side effect of record(): a caller (or test) that observes the straggler count reaching N
-		// is then guaranteed record()'s mismatch decision for those N has already completed.
-		// Shared admission rule with the reply-time outlier path — see crossValidationMismatchEligible.
-		if straggler.Outcome == common.CrossValidationStragglerOutcomeDisagreed && crossValidationMismatchEligible(deterministic, consensusHash) {
-			group := straggler.ProviderGroup
-			if group == "" {
-				group = common.DefaultProviderGroup
-			}
-			if _, counted := emittedMismatchGroups[group]; !counted {
-				emittedMismatchGroups[group] = struct{}{}
-				rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
-			}
+		// Mismatch before straggler, for the same last-side-effect reason.
+		if mismatchCounted {
+			rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
 		}
 		rpcss.smartRouterEndpointMetrics.SetCrossValidationStragglerMetric(chainId, apiInterface, apiName, straggler.Outcome)
 	}
@@ -4129,16 +4156,24 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			consensusHash = relayResult.ResponseHash
 		}
 		successOutliers := crossValidationSuccessOutliers(successResults, consensusHash, cvSuccess, deterministic)
-		if len(successOutliers) > 0 && rpcss.smartRouterEndpointMetrics != nil && rpcss.listenEndpoint != nil {
+		// listenEndpoint is still required — it is where the chain identity comes from, and both the
+		// metric labels and the self-describing debug row are meaningless without it. The metrics
+		// manager is NOT required: a router that cannot count the dissent can still record it.
+		if len(successOutliers) > 0 && rpcss.listenEndpoint != nil {
 			chainId, apiInterface := rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 			finality := rpcss.crossValidationFinalityLabel(protocolMessage)
-			outlierGroups := map[string]struct{}{}
+			requestID := crossValidationRequestID(ctx)
+			// One pass, so the debug event can say WHICH outlier carried the group's single increment.
+			// The metric contract is unchanged — once per distinct outlier group — and emitting in
+			// outlier order rather than map order makes it deterministic as a side benefit.
+			countedGroups := map[string]struct{}{}
 			for _, outlier := range successOutliers {
 				group := outlier.ProviderInfo.ProviderGroup
 				if group == "" {
 					group = common.DefaultProviderGroup
 				}
-				outlierGroups[group] = struct{}{}
+				_, alreadyCounted := countedGroups[group]
+				countedGroups[group] = struct{}{}
 				utils.LavaFormatInfo("cross-validation outlier detected",
 					utils.LogAttr("GUID", ctx),
 					utils.LogAttr("provider", outlier.ProviderInfo.ProviderAddress),
@@ -4148,9 +4183,28 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
 					utils.LogAttr("outlierHashHex", fmt.Sprintf("%x", outlier.ResponseHash[:8])),
 				)
-			}
-			for group := range outlierGroups {
-				rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
+				// The debug read surface for the same dissent the log and the counter describe, keyed
+				// by request so the automation can assert per-request facts a counter cannot carry
+				// (MAG-2772). No-op unless the router runs with --debug-address.
+				recordCrossValidationEvent(crossValidationEvent{
+					Source:          crossValidationEventSourceReplyTime,
+					ChainID:         chainId,
+					ApiInterface:    apiInterface,
+					RequestID:       requestID,
+					Method:          apiName,
+					ProviderAddress: outlier.ProviderInfo.ProviderAddress,
+					ProviderGroup:   group,
+					// A reply-time content outlier is by construction a dissent: crossValidationSuccessOutliers
+					// only returns successful responses whose hash differs from a reached consensus.
+					Outcome:         common.CrossValidationStragglerOutcomeDisagreed,
+					Finality:        finality,
+					ConsensusHash:   consensusHash,
+					OutlierHash:     outlier.ResponseHash,
+					MismatchCounted: !alreadyCounted && rpcss.smartRouterEndpointMetrics != nil,
+				})
+				if !alreadyCounted && rpcss.smartRouterEndpointMetrics != nil {
+					rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
+				}
 			}
 		}
 

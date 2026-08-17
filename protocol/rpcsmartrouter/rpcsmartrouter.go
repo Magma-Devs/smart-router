@@ -390,6 +390,10 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 		// Debug-mode-only: enable the in-memory ring-buffer log sink so the
 		// /debug/logs endpoint can serve recent logs to the test harness.
 		utils.EnableDebugLogBuffer(50000)
+		// Debug-mode-only, same reasoning: start recording cross-validation dissent so
+		// /debug/cross-validation-events can serve it (MAG-2772). Until this call the recorder is a
+		// nil check on the relay path, so a production router stores nothing.
+		enableCrossValidationEventRing(crossValidationEventRingCapacity)
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers: optimizers,
@@ -1699,6 +1703,95 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}); err != nil {
 			utils.LavaFormatWarning("failed encoding provider scores response", err)
 		}
+	})
+
+	// GET /debug/cross-validation-events — the cross-validation dissent the router actually recorded
+	// (MAG-2772). Read-only.
+	//
+	// Same reason /debug/provider-scores exists (MAG-2707): the two surfaces that already held this
+	// information could not be asserted on from an automated run. The info logs are diagnostic
+	// evidence only by team rule, and smartrouter_cross_validation_mismatch_total sits on the
+	// unpublished metrics port, where a down tunnel returns empty and the test passes having measured
+	// nothing.
+	//
+	// It is EVENT-shaped rather than counter-shaped because the questions are per-request: which
+	// provider dissented on THIS request, in which group. The counter's labels are
+	// {spec, apiInterface, method, group, finality} — no provider, no request id — so counts can be
+	// derived from these rows but these rows cannot be derived from the counter.
+	//
+	// One row per recorded comparison outcome, oldest first, from both recording paths (Source):
+	//   reply-time  a content outlier seen before the reply — it is in the request's
+	//               lava-cross-validation-disagreeing-providers header.
+	//   straggler   a provider that lost the race to quorum (it is in pending-providers) and whose
+	//               late answer the async watcher resolved. EVERY resolution is recorded, not only
+	//               dissent: an "agreed" row is the positive control a test asserting "no dissent
+	//               happened" anchors on, and node-error / protocol-error / not-received rows say a
+	//               late answer arrived broken or never arrived.
+	//
+	// Filters (all optional, ANDed): request_id (the Lava-Guid response header value — NOT
+	// /debug/logs' request_id, which is the caller's X-Request-Id), chain_id, outcome, limit (keeps
+	// the most recent N). Status codes:
+	//   200  the rows follow, as a flat JSON array; [] means the recorder was live and saw no dissent.
+	//   503  the recorder is not installed, so nothing was being recorded and an empty answer would
+	//        mean nothing. Structurally impossible on a router that serves this endpoint at all (the
+	//        ring is installed by the same --debug-address condition that registers this mux), and
+	//        answered anyway so the impossible case can never read as "no dissent".
+	//
+	// The ring is bounded; X-Cross-Validation-Events-Dropped reports how many events were evicted
+	// since it was installed (or since the last clear), so truncation cannot pass for absence.
+	mux.HandleFunc("/debug/cross-validation-events", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		q := r.URL.Query()
+		limit := 0 // 0 = the whole ring
+		if v := q.Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		events, dropped, enabled := readCrossValidationEvents(crossValidationEventFilter{
+			RequestID: q.Get("request_id"),
+			ChainID:   q.Get("chain_id"),
+			Outcome:   q.Get("outcome"),
+			Limit:     limit,
+		})
+		if !enabled {
+			http.Error(w, "cross-validation event recording is not enabled on this router", http.StatusServiceUnavailable)
+			return
+		}
+		rows := make([]map[string]any, 0, len(events))
+		for _, event := range events {
+			rows = append(rows, crossValidationEventRow(event))
+		}
+		// Deliberately NOT sortDebugRows: these are events, not state, and recording order is the
+		// meaningful one — it is what pairs a reply-time dissent with the straggler that followed it.
+		// Seq makes that order explicit for a caller that re-sorts.
+		w.Header().Set("X-Cross-Validation-Events-Dropped", strconv.FormatUint(dropped, 10))
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(rows); err != nil {
+			utils.LavaFormatWarning("failed encoding cross-validation events response", err)
+		}
+	})
+
+	// POST /debug/cross-validation-events/clear — drop every recorded event so a test can isolate
+	// itself from earlier traffic (MAG-2772). Optional for correctness — the rows are filterable by
+	// request_id, which every test already holds — and provided because it is the same one-liner
+	// /debug/logs/clear already offers. 503 when the recorder is not installed, so a clear that
+	// cleared nothing is never reported as success.
+	mux.HandleFunc("/debug/cross-validation-events/clear", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		cleared, enabled := clearCrossValidationEvents()
+		if !enabled {
+			http.Error(w, "cross-validation event recording is not enabled on this router", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"cleared":true,"events_cleared":%d}`, cleared)
 	})
 
 	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):

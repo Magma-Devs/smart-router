@@ -91,6 +91,11 @@ failure — the structured signal lets the client decide whether to retry (quoru
 fall back (structural reasons). Header names, the closed failure-reason enum, and the gRPC-trailer
 caveat are tabulated in the [in-package reference](../protocol/rpcsmartrouter/README.md#response-headers).
 
+A router started with `--debug-address` additionally serves `GET /debug/cross-validation-events`, a
+read-only per-request record of the dissent it observed (which provider, which group, which
+recording path) for test suites that cannot scrape the metrics port — see
+[Reading recorded dissent](../protocol/rpcsmartrouter/README.md#reading-recorded-dissent).
+
 ## Caveats
 
 - **Writes.** An *operator policy* on a stateful (write) method is rejected at startup.
