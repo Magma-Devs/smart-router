@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -917,7 +918,10 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	// routes cancellation through classifyAndWrap like every other transport
 	// instead of recording it as a successful relay with fabricated latency
 	// (MAG-2687).
-	if ctx.Err() != nil && status.Code(err) == codes.Canceled {
+	// Match on context.Canceled specifically rather than `ctx.Err() != nil`: a ctx
+	// whose DEADLINE expired is also non-nil, and relabelling a timeout as a client
+	// cancellation would let a genuinely slow endpoint escape being blamed.
+	if errors.Is(ctx.Err(), context.Canceled) && status.Code(err) == codes.Canceled {
 		return nil, fmt.Errorf("gRPC relay cancelled: %w", context.Canceled)
 	}
 

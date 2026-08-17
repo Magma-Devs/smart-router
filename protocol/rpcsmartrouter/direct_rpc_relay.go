@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -759,8 +760,12 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			utils.LogAttr("latency", latency),
 		)
 
-		// Check if it's a gRPC status error (use comma-ok idiom to avoid panic)
-		_, isGRPCErr := err.(*lavasession.GRPCStatusError)
+		// errors.As rather than a bare type assertion: GRPCStatusError now implements
+		// Unwrap, so it is meant to be inspected through wrapping. A plain assertion
+		// would silently stop matching the moment anything wraps the error on its way
+		// here, rerouting node errors into classifyAndWrap with no visible cause.
+		var grpcErr *lavasession.GRPCStatusError
+		isGRPCErr := errors.As(err, &grpcErr)
 
 		if isGRPCErr && response != nil {
 			// A gRPC status error that still carried a response body: the node

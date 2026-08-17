@@ -92,3 +92,45 @@ func TestGRPCRemoteStatusError_StillNotLocalCancellation(t *testing.T) {
 		})
 	}
 }
+
+// TestRemoteStatusGuard_AppliesAcrossTransports makes the reach of the guard change
+// explicit.
+//
+// stringConnectionFallbacks is a single package-level table and
+// detectConnectionErrorFromString takes no transport argument, so narrowing
+// "rpc error" to "rpc error: code =" changes classification for EVERY transport —
+// not just gRPC. That is intended (the discriminator is the remote status prefix,
+// which is transport-independent), but it was previously verified only on
+// gRPC-shaped inputs. These cases pin both directions on a non-gRPC transport.
+func TestRemoteStatusGuard_AppliesAcrossTransports(t *testing.T) {
+	for _, transport := range []common.TransportType{common.TransportJsonRPC, common.TransportREST} {
+		t.Run(transport.String()+"/remote-prefix-still-excluded", func(t *testing.T) {
+			wrapped := classifyAndWrap(
+				errors.New("rpc error: code = Canceled desc = context canceled"),
+				common.ChainFamily(-1), transport)
+			require.NotEqual(t, common.LavaErrorContextCanceled.Code, extractLavaError(wrapped).Code,
+				"the remote-status prefix must exclude on non-gRPC transports too")
+		})
+
+		t.Run(transport.String()+"/plain-local-cancel-still-matches", func(t *testing.T) {
+			wrapped := classifyAndWrap(
+				errors.New("context canceled"),
+				common.ChainFamily(-1), transport)
+			require.Equal(t, common.LavaErrorContextCanceled.Code, extractLavaError(wrapped).Code,
+				"a plain local cancellation must still classify as such")
+		})
+
+		// The discriminating case: contains "rpc error" but NOT "rpc error: code =".
+		// The two cases above pass under both the old and the new guard, so only this
+		// one actually detects the widening — and it does so on a non-gRPC transport,
+		// which is the reach this test exists to pin. GRPCStatusError's rendering is
+		// the concrete real-world instance of that string class.
+		t.Run(transport.String()+"/bare-rpc-error-substring-no-longer-excluded", func(t *testing.T) {
+			wrapped := classifyAndWrap(
+				errors.New("gRPC error 1: context canceled"),
+				common.ChainFamily(-1), transport)
+			require.Equal(t, common.LavaErrorContextCanceled.Code, extractLavaError(wrapped).Code,
+				"only the full remote-status prefix may exclude — a bare 'rpc error' substring must not, on any transport")
+		})
+	}
+}
