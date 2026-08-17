@@ -210,7 +210,7 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 	if includeBackup {
 		keys = append(keys, commonlib.BackupDirectRPCConfigName)
 	}
-	var providers []healthProvider
+	lists := make([][]*lavasession.RPCStaticProviderEndpoint, 0, len(keys))
 	for _, key := range keys {
 		if !viper.IsSet(key) {
 			continue
@@ -219,6 +219,20 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 		if err != nil {
 			return nil, err
 		}
+		lists = append(lists, static)
+	}
+
+	// A duplicate provider name stops the router from starting (MAG-2724), and this command is
+	// exactly what an operator reaches for to work out why a config will not boot — so it reports
+	// the collision and probes anyway, rather than refusing the config like the router does. The
+	// same check the router runs, run here for its message and not for its verdict; the rows are
+	// still told apart by their `url`, which is what identifies the broken node.
+	if err := lavasession.ValidateUniqueProviderNames(lists...); err != nil {
+		utils.LavaFormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
+	}
+
+	var providers []healthProvider
+	for _, static := range lists {
 		for _, ep := range static {
 			providers = append(providers, healthProvider{
 				name:         ep.Name,

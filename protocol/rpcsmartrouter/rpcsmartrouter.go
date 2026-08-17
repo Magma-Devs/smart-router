@@ -2798,6 +2798,21 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				}
 			}
 
+			// Refuse to start on a config that cannot be routed unambiguously (MAG-2724). A
+			// provider's name is its routing identity — the key of csm.pairing and of the retry
+			// skip-list — so two providers sharing one on a chain+api-interface collapse into a
+			// single entry: one upstream serves everything, the other sits idle, and setting that
+			// name aside after a failure leaves nothing to retry against.
+			//
+			// Both lists are checked together, which is the only complete check: static and backup
+			// land in separate maps but are looked up across both by address, so a name shared
+			// between the two is as ambiguous as one shared within either. Failing here means it
+			// fails before any listener binds, and the error names every collision so one edit to
+			// the config fixes it.
+			if err := lavasession.ValidateUniqueProviderNames(directRPCEndpoints, backupDirectRPCEndpoints); err != nil {
+				return utils.LavaFormatError("invalid direct-rpc endpoints definition", err)
+			}
+
 			if len(directRPCEndpoints) == 0 {
 				return utils.LavaFormatError(
 					"smart router requires direct-rpc endpoints configuration",
