@@ -485,7 +485,40 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 		applyValidation(&row, validations[i])
 		rows = append(rows, row)
 	}
+
+	backfillLatestBlock(rows, func() (int64, error) { return chainFetcher.FetchLatestBlockNum(ctx) })
+
 	return append(rows, wsSkippedRows()...)
+}
+
+// backfillLatestBlock gives rows that came back without a block height a reporting-only
+// value from fetch.
+//
+// ValidateCollect fetches the latest block only when some verification needs it to
+// compute a LatestDistance. A spec with no such verification therefore reports
+// latestBlock 0 on legs that passed every check, which reads as a dead node — the
+// "known related quirk" in MAG-2333.
+//
+// fetch is called at most once per endpoint and only if some row actually needs it, so
+// a spec that already reports a height costs no extra relay. A fetch failure leaves the
+// rows untouched: this is a reporting field and must never change a leg's ok verdict.
+func backfillLatestBlock(rows []healthEndpointResult, fetch func() (int64, error)) {
+	var block int64
+	fetched := false
+	for i := range rows {
+		if rows[i].LatestBlock > 0 {
+			continue
+		}
+		if !fetched {
+			fetched = true
+			if fetchedBlock, err := fetch(); err == nil {
+				block = fetchedBlock
+			}
+		}
+		if block > 0 {
+			rows[i].LatestBlock = block
+		}
+	}
 }
 
 // applyValidation folds one node-URL's spec-verification results into its result row:
