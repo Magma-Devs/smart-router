@@ -478,3 +478,53 @@ func TestSetupForProvider_RejectsConflictingDescriptorSource(t *testing.T) {
 		require.NotNil(t, live.registry, "the clone must not have disturbed the live parser")
 	})
 }
+
+// TestCloneChainParserForValidation_AbsorbsRealSetupForProvider is the other half
+// of MAG-2538, and the half TestCloneChainParserForValidation_GrpcIsolation cannot
+// cover: that one stands in for the mutation by assigning registry/codec directly,
+// so it proves the clone is a distinct struct but not that the clone actually
+// absorbs what NewGrpcChainProxy does to it.
+//
+// The distinction matters for anyone editing cloneForValidation. It aliases most of
+// BaseChainParser deliberately; the invariant is that nothing setupForProvider
+// touches is shared. A field added to the clone that aliases mutable state would
+// sail past the simulated version and be caught here, because this drives the real
+// GetChainRouter -> newGrpcChainProxy -> setupForProvider path against a live
+// reflection server.
+func TestCloneChainParserForValidation_AbsorbsRealSetupForProvider(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	noop := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	chainParser, _, _, closeServer, endpoint, err := CreateChainLibMocks(
+		ctx, "GRPCTEST", spectypes.APIInterfaceGrpc, noop, nil, "../../", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if closeServer != nil {
+			closeServer()
+		}
+	})
+
+	live, ok := chainParser.(*GrpcChainParser)
+	require.True(t, ok)
+	// CreateChainLibMocks builds the parser through GetChainRouter, so it arrives
+	// bound the way boot leaves it — which is the state recovery has to preserve.
+	servingRegistry, servingCodec := live.registry, live.codec
+	require.NotNil(t, servingRegistry)
+	require.NotNil(t, servingCodec)
+
+	_, err = GetChainRouter(ctx, 1, endpoint, CloneChainParserForValidation(live))
+	require.NoError(t, err)
+
+	require.Same(t, servingRegistry, live.registry,
+		"MAG-2538: a verification pass through the clone must not rebind the live registry")
+	require.Same(t, servingCodec, live.codec, "nor the live codec")
+
+	// Control, last so it cannot disturb the assertions above: the same call without
+	// the clone does rebind the live parser. Without this the test would still pass
+	// if GetChainRouter had stopped reaching setupForProvider at all.
+	_, err = GetChainRouter(ctx, 1, endpoint, live)
+	require.NoError(t, err)
+	require.NotSame(t, servingRegistry, live.registry,
+		"control: an unprotected GetChainRouter must rebind the live registry")
+}
