@@ -232,14 +232,19 @@ type ChainListener interface {
 	Shutdown(ctx context.Context) error
 }
 
+// ChainRouter and ChainProxy send a single request and return a single reply.
+// Subscriptions do not go through them: the router talks to endpoints directly, and
+// the direct WS and gRPC subscription managers own that path end to end. They used to
+// carry a subscription channel and return the provider relay's subscription handle,
+// which no caller ever supplied or read once provider relaying was removed.
 type ChainRouter interface {
-	SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend, extensions []string) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, proxyUrl common.NodeUrl, chainId string, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
+	SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend, extensions []string) (relayReply *RelayReplyWrapper, proxyUrl common.NodeUrl, chainId string, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
 	ExtensionsSupported(internalPath string, extensions []string) bool
 }
 
 type ChainProxy interface {
 	GetChainProxyInformation() (common.NodeUrl, string)
-	SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
+	SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
 }
 
 func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainRouter, error) {

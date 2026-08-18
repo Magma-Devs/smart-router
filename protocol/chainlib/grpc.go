@@ -32,7 +32,6 @@ import (
 	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -720,13 +719,10 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 	return cp, nil
 }
 
-func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) {
-	if ch != nil {
-		return nil, "", nil, utils.LavaFormatError("Subscribe is not allowed on grpc", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
-	}
+func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
 	conn, err := cp.conn.GetRpc(ctx, true)
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("grpc get connection failed ", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, utils.LavaFormatError("grpc get connection failed ", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 	defer cp.conn.ReturnRpc(conn)
 
@@ -736,7 +732,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.GrpcMessage)
 	if !ok {
-		return nil, "", nil, utils.LavaFormatError("invalid message type in grpc failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
+		return nil, utils.LavaFormatError("invalid message type in grpc failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
 	}
 
 	metadataMap := make(map[string]string, 0)
@@ -754,7 +750,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	cl := grpcreflect.NewClientAuto(ctx, conn)
 	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&cp.NodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("failed resolving grpc descriptor source", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, utils.LavaFormatError("failed resolving grpc descriptor source", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(nodeMessage.Path)
 
@@ -766,15 +762,15 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	if !found { // method descriptor not cached yet, need to fetch it and add to cache
 		var descriptor desc.Descriptor
 		if descriptor, err = descriptorSource.FindSymbol(svc); err != nil {
-			return nil, "", nil, utils.LavaFormatError("descriptorSource.FindSymbol", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+			return nil, utils.LavaFormatError("descriptorSource.FindSymbol", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 		}
 		serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
 		if !ok {
-			return nil, "", nil, utils.LavaFormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "descriptor", Value: descriptor})
+			return nil, utils.LavaFormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "descriptor", Value: descriptor})
 		}
 		methodDescriptor = serviceDescriptor.FindMethodByName(methodName)
 		if methodDescriptor == nil {
-			return nil, "", nil, utils.LavaFormatError("serviceDescriptor.FindMethodByName returned nil", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "methodName", Value: methodName})
+			return nil, utils.LavaFormatError("serviceDescriptor.FindMethodByName returned nil", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "methodName", Value: methodName})
 		}
 
 		// add the descriptor to the chainProxy cache
@@ -792,11 +788,11 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 			msgLocal := msgFactory.NewMessage(methodDescriptor.GetInputType())
 			err = proto.Unmarshal(nodeMessage.Msg, msgLocal)
 			if err != nil {
-				return nil, "", nil, utils.LavaFormatError("Failed to unmarshal proto.Unmarshal(nodeMessage.Msg, msgLocal)", err)
+				return nil, utils.LavaFormatError("Failed to unmarshal proto.Unmarshal(nodeMessage.Msg, msgLocal)", err)
 			}
 			jsonBytes, err := marshalJSON(msgLocal)
 			if err != nil {
-				return nil, "", nil, utils.LavaFormatError("Failed to unmarshal marshalJSON(msgLocal)", err)
+				return nil, utils.LavaFormatError("Failed to unmarshal marshalJSON(msgLocal)", err)
 			}
 			reader = bytes.NewReader(jsonBytes)
 		} else {
@@ -811,7 +807,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		AllowUnknownFields:    true,
 	})
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("Failed to create formatter", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, utils.LavaFormatError("Failed to create formatter", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 
 	// used when parsing the grpc result
@@ -820,7 +816,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	if formatMessage {
 		err = rp.Next(msg)
 		if err != nil {
-			return nil, "", nil, utils.LavaFormatError("rp.Next(msg) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+			return nil, utils.LavaFormatError("rp.Next(msg) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 		}
 	}
 
@@ -842,7 +838,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		// or on RESOURCE_EXHAUSTED corroborated by a retry delay in the metadata.
 		if st, ok := status.FromError(err); ok {
 			if retryAfter, limited := common.RateLimitFromGRPC(uint32(st.Code()), st.Message(), respHeaders); limited {
-				return nil, "", nil, utils.LavaFormatWarning("gRPC node rate-limited the request", common.RateLimited(err, retryAfter),
+				return nil, utils.LavaFormatWarning("gRPC node rate-limited the request", common.RateLimited(err, retryAfter),
 					utils.Attribute{Key: "GUID", Value: ctx},
 					utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID},
 					utils.Attribute{Key: "apiName", Value: nodeMessage.Path},
@@ -852,12 +848,12 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		// Validate if the error is related to the provider connection to the node or it is a valid error
 		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
 		if parsedError := cp.HandleNodeError(ctx, err); parsedError != nil {
-			return nil, "", nil, parsedError
+			return nil, parsedError
 		}
 		// return the node's error back to the client as the error type is a invalid request which is cu deductible
 		respBytes, statusCode, handlingError := parseGrpcNodeErrorToReply(ctx, err)
 		if handlingError != nil {
-			return nil, "", nil, handlingError
+			return nil, handlingError
 		}
 		// set status code for user header
 		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(int(statusCode)))) // we ignore this error here since this code can be triggered not from grpc
@@ -868,13 +864,13 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 				Metadata: convertToMetadataMapOfSlices(respHeaders),
 			},
 		}
-		return reply, "", nil, nil
+		return reply, nil
 	}
 
 	var respBytes []byte
 	respBytes, err = proto.Marshal(response)
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("proto.Marshal(response) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, utils.LavaFormatError("proto.Marshal(response) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 	// set response status code
 	validResponseStatus := http.StatusOK
@@ -887,7 +883,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 			Metadata: convertToMetadataMapOfSlices(respHeaders),
 		},
 	}
-	return reply, "", nil, nil
+	return reply, nil
 }
 
 // This method assumes that the error is due to misuse of the request arguments, meaning the user would like to get

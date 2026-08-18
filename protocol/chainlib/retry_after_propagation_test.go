@@ -44,7 +44,7 @@ func TestRetryAfterPropagatesOutOfChainProxies(t *testing.T) {
 		chainMessage, err := chainParser.ParseMsg(parsing.ApiName, []byte{}, apiCollection.CollectionData.Type, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 
-		_, _, _, _, _, err = chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+		_, _, _, err = chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 		requireRateLimited(t, err)
 	})
 
@@ -62,7 +62,7 @@ func TestRetryAfterPropagatesOutOfChainProxies(t *testing.T) {
 		chainMessage, err := chainParser.ParseMsg("", []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 
-		_, _, _, _, _, err = chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+		_, _, _, err = chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 		requireRateLimited(t, err)
 	})
 
@@ -79,7 +79,7 @@ func TestRetryAfterPropagatesOutOfChainProxies(t *testing.T) {
 		chainMessage, err := chainParser.ParseMsg("status", nil, "", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 
-		_, _, _, _, _, err = chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+		_, _, _, err = chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 		requireRateLimited(t, err)
 	})
 }

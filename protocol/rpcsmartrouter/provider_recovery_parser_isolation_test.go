@@ -137,7 +137,7 @@ func TestRevalidateTier_DoesNotRebindLiveGrpcParser(t *testing.T) {
 	// so it cannot observe this ticket's defect — verified: it passes with the clone
 	// removed from validateProvider. What it does prove is the adjacent property that
 	// the serving connector itself outlived recovery's teardown.
-	reply, _, _, _, _, err := servingRouter.SendNodeMsg(ctx, nil, craftGetBlockMessage(t, chainParser), nil)
+	reply, _, _, err := servingRouter.SendNodeMsg(ctx, craftGetBlockMessage(t, chainParser), nil)
 	require.NoError(t, err, "the serving connector must survive background recovery")
 	require.NotNil(t, reply)
 
