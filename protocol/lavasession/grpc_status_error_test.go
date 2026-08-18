@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // TestHandleGRPCError_CancelledContextReturnsNilResponse is the MAG-2687 pin.
@@ -28,6 +30,57 @@ func TestHandleGRPCError_CancelledContextReturnsNilResponse(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, context.Canceled),
 		"the context.Canceled sentinel must be re-attached so the relay-race carve-out can see it")
+}
+
+// TestHandleGRPCError_RemoteCancellationIsNotLocal is the collateral guard for
+// the test above, and the one that actually constrains the classifier.
+//
+// Same gRPC status codes, but a LIVE context: nothing local was cancelled, so the
+// status came from the endpoint. Three things must hold, and each corresponds to a
+// distinct way this has gone wrong:
+//
+//  1. the response is non-nil, so sendGRPCRelay takes its node-error arm and the
+//     endpoint is actually held responsible;
+//  2. no context sentinel is attached, so common.IsClientCancellation's relay-race
+//     carve-out cannot fire and excuse the endpoint;
+//  3. the error does not classify as a LOCAL context error. This is the assertion
+//     that fails if the "rpc error" guard in stringConnectionFallbacks is narrowed
+//     to "rpc error: code =" — the wrapper renders as "gRPC error 1: context
+//     canceled", which slips past the narrower prefix and lands on
+//     PROTOCOL_CONTEXT_CANCELED (Retryable=false), suppressing the retry.
+func TestHandleGRPCError_RemoteCancellationIsNotLocal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code codes.Code
+		msg  string
+	}{
+		{"remote canceled", codes.Canceled, "context canceled"},
+		{"remote deadline", codes.DeadlineExceeded, "context deadline exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &GRPCDirectRPCConnection{}
+			// context.Background() is never cancelled — the production shape of a
+			// status the endpoint reported on a healthy local request.
+			resp, err := g.handleGRPCError(context.Background(), status.Error(tc.code, tc.msg), nil)
+
+			require.NotNil(t, resp,
+				"a remote status must keep its response so the node-error arm runs")
+			require.Equal(t, int(tc.code), resp.StatusCode)
+			require.Error(t, err)
+
+			require.False(t, errors.Is(err, context.Canceled),
+				"the local-cancellation sentinel must NOT be attached to a remote status")
+			require.False(t, errors.Is(err, context.DeadlineExceeded),
+				"the local-deadline sentinel must NOT be attached to a remote status")
+
+			if le := common.DetectConnectionError(err); le != nil {
+				require.NotEqual(t, common.LavaErrorContextCanceled.Code, le.Code,
+					"remote cancel classified as local — the rpc-error guard was narrowed")
+				require.NotEqual(t, common.LavaErrorContextDeadline.Code, le.Code,
+					"remote deadline classified as local — the rpc-error guard was narrowed")
+			}
+		})
+	}
 }
 
 // TestGrpcGoDoesNotWrapCancelSentinel documents WHY the sentinel has to be

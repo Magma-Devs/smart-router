@@ -271,8 +271,39 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 
 	TransportGRPC: {
 		// gRPC status code matchers (codes from google.golang.org/grpc/codes)
+		//
+		// A code earns a row here only when its verdict is the SAME at every
+		// endpoint. Rows are what let the direct-RPC availability gate
+		// (rpcsmartrouter.shouldFailSessionForResult) exempt a status from
+		// demoting the endpoint, and an unregistered code scores — which is the
+		// right default for "we have not catalogued this failure".
+		//
+		// codes.InvalidArgument is the one caller-fault code in the set: gRPC
+		// defines it as arguments "problematic regardless of the state of the
+		// system", so every endpoint rejects the same malformed request
+		// identically. Left unregistered it classified UNKNOWN_ERROR, and a burst
+		// of malformed client requests demoted the whole healthy pairing toward
+		// the selection floor — blocklisting on the 16th consecutive one
+		// (MAG-2549). USER_INVALID_PARAMS is Retryable=false, which both stops the
+		// pointless retry and keeps the gate off the endpoint.
+		{GRPCCodeEquals(3), LavaErrorUserInvalidParams},       // codes.InvalidArgument
 		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented},      // codes.Unimplemented
 		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
+		// Deliberately NOT registered, each for its own reason — do not add them
+		// as a block, which is how `Code >= 13` went wrong in the first place:
+		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
+		//                          Demoting it is the correct signal.
+		//   5  NotFound          - pruned vs archive nodes genuinely disagree, so a
+		//   11 OutOfRange          retry elsewhere can legitimately succeed.
+		//   7  PermissionDenied  - credentials are configured per endpoint, so one
+		//   16 Unauthenticated     rejecting ours is unusable to us and should demote.
+		//   8  ResourceExhausted - ambiguous in the gRPC spec (per-user quota vs.
+		//                          out of disk). The "rate limit" message row below
+		//                          catches the quota case without asserting the code
+		//                          alone means "healthy but busy".
+		//   1  Canceled          - a LOCAL cancellation never reaches this table;
+		//                          handleGRPCError resolves it structurally. One that
+		//                          does reach here is remote and unproven.
 		// Message-based matchers for gRPC errors conveyed without status codes
 		{MessageContains("rate limit"), LavaErrorNodeRateLimited},
 		{MessageContains("enhance_your_calm"), LavaErrorNodeRateLimited}, // HTTP/2 GOAWAY ENHANCE_YOUR_CALM
@@ -636,22 +667,35 @@ func (r stringConnectionFallback) matches(msg string) bool {
 //
 // INVARIANT: written at package-init time (declaration), read-only thereafter.
 var stringConnectionFallbacks = []stringConnectionFallback{
-	// Remote gRPC status errors render as "rpc error: code = ..."; those carry a
-	// *remote* deadline/cancel and must not be classified as a local context error.
+	// Remote gRPC status errors start with "rpc error"; those carry a *remote*
+	// deadline/cancel and must not be classified as a local context error.
+	// The guard is encoded as a mustNotContain on the rpc-error prefix marker.
 	//
-	// The guard matches that full prefix and NOT the bare substring "rpc error".
-	// Our own local wrapper renders as "gRPC error 1: context canceled", which
-	// lowercased contains "rpc error" inside the word "gRPC" — so the bare guard
-	// disqualified local cancellations from the very rows they needed to match,
-	// classifying them as UNKNOWN_ERROR instead (MAG-2687).
+	// The guard is deliberately the BARE substring "rpc error", not the fuller
+	// "rpc error: code =" prefix. Widening it to the full prefix was tried and
+	// reverted (MAG-2687): lavasession.GRPCStatusError renders as
+	// "gRPC error 1: context canceled", which lowercased contains "rpc error"
+	// inside the word "gRPC" but NOT "rpc error: code =". That wrapper is built
+	// for REMOTE statuses — a cancel the *endpoint* reported — so admitting it
+	// here labels an upstream fault as local orchestration and, because
+	// PROTOCOL_CONTEXT_CANCELED is Retryable=false, silently suppresses the
+	// retry that would have reached a healthy endpoint.
+	//
+	// Nothing is lost by keeping the guard broad. A cancellation the router
+	// itself caused never depends on this table: GRPCDirectRPCConnection
+	// .handleGRPCError returns a nil response and an error wrapping the real
+	// context.Canceled sentinel, which DetectConnectionError resolves in its
+	// layer-1 errors.Is check well before the string fallback runs. This table
+	// only ever sees errors whose sentinel chain was already lost, and for those
+	// "contains an rpc-error marker" is the conservative read.
 	{
 		mustContain:    []string{"context deadline exceeded"},
-		mustNotContain: []string{"rpc error: code ="},
+		mustNotContain: []string{"rpc error"},
 		result:         LavaErrorContextDeadline,
 	},
 	{
 		mustContain:    []string{"context canceled"},
-		mustNotContain: []string{"rpc error: code ="},
+		mustNotContain: []string{"rpc error"},
 		result:         LavaErrorContextCanceled,
 	},
 	// HTTP/2 GOAWAY closes the whole connection. Exclude ENHANCE_YOUR_CALM —
