@@ -140,6 +140,73 @@ func TestGRPCConnectorCloseDrainsBorrowedClient(t *testing.T) {
 		"a client returned to a closing connector must be dropped, not pooled")
 }
 
+// TestGRPCConnectorLifetimeIsItsConstructorContext pins the contract that made
+// MAG-2808's second failure possible: the context handed to NewGRPCConnector is
+// the connector's LIFETIME, not merely a dial deadline. addClientsAsynchronouslyGrpc
+// ends with `go connectorLoop(ctx)`, and connectorLoop is `<-ctx.Done(); Close()`.
+//
+// Nothing covered this. Every other test here builds a connector and calls Close()
+// on it directly, never reaching connectorLoop — so a caller that passed a
+// request-scoped context, as the direct-RPC path did, tore its own pool down on
+// every relay with no test noticing. Callers must pass a context that lives as
+// long as the pool should; see lavasession.newGRPCDirectRPCConnection.
+func TestGRPCConnectorLifetimeIsItsConstructorContext(t *testing.T) {
+	server := createGRPCServer(t)
+	defer server.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	rpc, err := conn.GetRpc(ctx, true)
+	require.NoError(t, err)
+	conn.ReturnRpc(rpc)
+
+	cancel()
+
+	require.Eventually(t, conn.isClosed, 10*time.Second, 5*time.Millisecond,
+		"connectorLoop must close the connector when its constructor context ends")
+
+	// And the closure is permanent, which is what turns a caller's short-lived
+	// context from a wasteful re-dial into a dead endpoint.
+	rpc, err = conn.GetRpc(context.Background(), true)
+	require.Nil(t, rpc)
+	require.ErrorIs(t, err, ErrGRPCConnectorClosed)
+}
+
+// TestGRPCConnectorReturnRpcNilStillDecrements covers the defensive branch in
+// ReturnRpc. The nil check guards every rpc.Close() below it, but it must not
+// skip the usedClients decrement: Close spins until that count reaches zero, so
+// an early return there would wedge teardown for the life of the process.
+func TestGRPCConnectorReturnRpcNilStillDecrements(t *testing.T) {
+	server := createGRPCServer(t)
+	defer server.Stop()
+
+	ctx := context.Background()
+	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	require.NoError(t, err)
+
+	rpc, err := conn.GetRpc(ctx, true)
+	require.NoError(t, err)
+	require.NotNil(t, rpc)
+	require.Equal(t, 1, conn.numberOfUsedClients())
+
+	require.NotPanics(t, func() { conn.ReturnRpc(nil) })
+	require.Equal(t, 0, conn.numberOfUsedClients())
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		conn.Close()
+	}()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close hung: the borrow count was never decremented")
+	}
+}
+
 // TestGRPCConnectorRefillAfterCloseIsDropped covers the two paths that append to
 // the pool without going through GetRpc: the startup fill and the retry fill.
 // Both ran with no notion of Close, so a dial in flight when Close drained the
