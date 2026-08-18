@@ -3172,6 +3172,7 @@ func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peer
 // - Quorum is enabled (quorum requires fresh endpoint validation)
 // - Response is a node error
 // - Requested block is NOT_APPLICABLE
+// - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	ctx context.Context,
 	protocolMessage chainlib.ProtocolMessage,
@@ -3282,6 +3283,19 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 			)
 			return
 		}
+	}
+
+	// EARLIEST (-3), PENDING (-4), SAFE (-5) and FINALIZED (-6) are never resolved to a
+	// height above, so they would reach SetRelay as a negative RequestedBlock, which it
+	// rejects outright — one "cache write failed" warning per relay for no possible gain.
+	// Skipping loses nothing: SetRelay's guard returns before it publishes the chain tip,
+	// so that side effect is already forgone today. NOT_APPLICABLE (-1) is filtered above.
+	if requestedBlockForCache < 0 {
+		utils.LavaFormatDebug("cache write skipped: unresolved block tag",
+			utils.LogAttr("requestedBlock", requestedBlockForCache),
+			utils.LogAttr("GUID", ctx),
+		)
+		return
 	}
 
 	// Get seen block
