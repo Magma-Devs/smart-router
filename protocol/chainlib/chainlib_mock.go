@@ -311,6 +311,18 @@ func (mr *MockChainParserMockRecorder) SetResponseFromRelayResult(arg0 interface
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetResponseFromRelayResult", reflect.TypeOf((*MockChainParser)(nil).SetResponseFromRelayResult), arg0)
 }
 
+// SetSkipWebsocketVerification mocks base method.
+func (m *MockChainParser) SetSkipWebsocketVerification(skip bool) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetSkipWebsocketVerification", skip)
+}
+
+// SetSkipWebsocketVerification indicates an expected call of SetSkipWebsocketVerification.
+func (mr *MockChainParserMockRecorder) SetSkipWebsocketVerification(skip interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSkipWebsocketVerification", reflect.TypeOf((*MockChainParser)(nil).SetSkipWebsocketVerification), skip)
+}
+
 // SetSpec mocks base method.
 func (m *MockChainParser) SetSpec(spec spec.Spec) {
 	m.ctrl.T.Helper()
@@ -321,6 +333,20 @@ func (m *MockChainParser) SetSpec(spec spec.Spec) {
 func (mr *MockChainParserMockRecorder) SetSpec(spec interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSpec", reflect.TypeOf((*MockChainParser)(nil).SetSpec), spec)
+}
+
+// SkipWebsocketVerification mocks base method.
+func (m *MockChainParser) SkipWebsocketVerification() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SkipWebsocketVerification")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// SkipWebsocketVerification indicates an expected call of SkipWebsocketVerification.
+func (mr *MockChainParserMockRecorder) SkipWebsocketVerification() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SkipWebsocketVerification", reflect.TypeOf((*MockChainParser)(nil).SkipWebsocketVerification))
 }
 
 // UpdateBlockTime mocks base method.

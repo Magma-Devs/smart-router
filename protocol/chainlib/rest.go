@@ -36,7 +36,9 @@ type RestChainParser struct {
 
 // NewRestChainParser creates a new instance of RestChainParser
 func NewRestChainParser() (chainParser *RestChainParser, err error) {
-	return &RestChainParser{}, nil
+	parser := &RestChainParser{}
+	parser.skipWebsocketVerification = SkipWebsocketVerificationDefault
+	return parser, nil
 }
 
 func (bcp *RestChainParser) GetUniqueName() string {

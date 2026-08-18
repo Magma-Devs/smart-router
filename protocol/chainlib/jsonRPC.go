@@ -46,7 +46,9 @@ type JsonRPCChainParser struct {
 
 // NewJrpcChainParser creates a new instance of JsonRPCChainParser
 func NewJrpcChainParser() (chainParser *JsonRPCChainParser, err error) {
-	return &JsonRPCChainParser{}, nil
+	parser := &JsonRPCChainParser{}
+	parser.skipWebsocketVerification = SkipWebsocketVerificationDefault
+	return parser, nil
 }
 
 func (bcp *JsonRPCChainParser) GetUniqueName() string {

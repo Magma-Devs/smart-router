@@ -38,7 +38,9 @@ type TendermintChainParser struct {
 
 // NewTendermintRpcChainParser creates a new instance of TendermintChainParser
 func NewTendermintRpcChainParser() (chainParser *TendermintChainParser, err error) {
-	return &TendermintChainParser{}, nil
+	parser := &TendermintChainParser{}
+	parser.skipWebsocketVerification = SkipWebsocketVerificationDefault
+	return parser, nil
 }
 
 func (bcp *TendermintChainParser) GetUniqueName() string {
