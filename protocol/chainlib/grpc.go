@@ -54,6 +54,24 @@ type GrpcChainParser struct {
 
 	registry *dyncodec.Registry
 	codec    *dyncodec.Codec
+
+	// descriptorConfig records which node-url's grpc-config produced registry/codec,
+	// so a second node-url asking for a different one is caught rather than silently
+	// winning. See setupForProvider.
+	descriptorConfig *grpcDescriptorConfig
+}
+
+// grpcDescriptorConfig is the descriptor resolution a single node-url asks for.
+type grpcDescriptorConfig struct {
+	source string
+	path   string
+}
+
+func (c grpcDescriptorConfig) String() string {
+	if c.path == "" {
+		return c.source
+	}
+	return c.source + " (" + c.path + ")"
 }
 
 // NewGrpcChainParser creates a new instance of GrpcChainParser
@@ -83,6 +101,12 @@ func NewGrpcChainParser() (chainParser *GrpcChainParser, err error) {
 //
 // registry/codec are aliased initially; setupForProvider on the clone will
 // replace the *clone's* fields, leaving the live parser untouched.
+//
+// descriptorConfig is deliberately NOT carried over: it records which node-url
+// produced the clone's registry, and the clone is built for a verification
+// endpoint whose node-url set is chosen by the caller. Starting it at nil lets
+// the clone record what it is actually given, and still catches a conflict
+// within that set.
 func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 	return &GrpcChainParser{
 		BaseChainParser: BaseChainParser{
@@ -134,6 +158,22 @@ func (apip *GrpcChainParser) setupForConsumer(relayer grpcproxy.ProxyCallBack) {
 // a node that does not serve reflection would otherwise boot and then fail here,
 // at parse time, instead of at connect time (MAG-2350).
 func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientConn, grpcConfig *common.GrpcConfig) error {
+	// registry/codec are per chain; grpc-config is per node-url. newChainRouter
+	// builds one proxy per node-url batch entry and hands every one of them THIS
+	// parser, so each call overwrites the last — and since the batch is a map, "last"
+	// is whatever Go's randomized iteration order picks that boot. That was benign
+	// while every iteration produced an equivalent reflection registry; now that the
+	// registry follows the node-url's grpc-config, a chain whose gRPC node-urls
+	// disagree would parse blocks against a different descriptor set on each restart.
+	// Refuse the config rather than pick one of them at random (MAG-2350).
+	wanted := grpcDescriptorConfig{source: grpcConfig.GetDescriptorSource(), path: grpcConfig.DescriptorSetPath}
+	if apip.descriptorConfig != nil && *apip.descriptorConfig != wanted {
+		return utils.LavaFormatError("conflicting gRPC descriptor-source across a chain's node-urls", nil,
+			utils.LogAttr("configured", apip.descriptorConfig.String()),
+			utils.LogAttr("conflicting", wanted.String()),
+			utils.LogAttr("resolution", "block parsing resolves through one registry per chain, so every gRPC node-url on a chain must declare the same descriptor-source and descriptor-set-path"))
+	}
+
 	var remote dyncodec.ProtoFileRegistry = dyncodec.NewGRPCReflectionProtoFileRegistryFromConn(reflectionConnection)
 	remote, err := dyncodec.ProtoFileRegistryForGrpcConfig(grpcConfig, remote)
 	if err != nil {
@@ -141,6 +181,7 @@ func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientC
 	}
 	apip.registry = dyncodec.NewRegistry(remote)
 	apip.codec = dyncodec.NewCodec(apip.registry)
+	apip.descriptorConfig = &wanted
 	return nil
 }
 

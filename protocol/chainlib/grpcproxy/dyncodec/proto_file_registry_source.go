@@ -2,6 +2,7 @@ package dyncodec
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -80,6 +81,31 @@ type compositeProtoFileRegistry struct {
 
 var _ ProtoFileRegistry = (*compositeProtoFileRegistry)(nil)
 
+// exactSymbolLookup is the strict half of a descriptor-set registry: does it declare
+// this symbol itself, as opposed to merely declaring one of its ancestors.
+//
+// FileDescriptorSetRegistry.ProtoFileContainingSymbol walks up the parent chain —
+// "pkg.Query.Ping" resolves through "pkg.Query" — and on a miss returns the
+// ancestor's file with a nil error. That is harmless in "file" mode, where the
+// lookup was going to fail either way, but in hybrid the nil error is precisely what
+// decides whether reflection gets asked. An rpc the node gained after the protoset
+// was cut resolves to the stale file, reflection is never consulted, and the
+// operator sees "not found" at the one point the mode exists to cover.
+type exactSymbolLookup interface {
+	HasSymbol(name string) bool
+}
+
+// fileHalfDeclares reports whether the descriptor-set half declares name itself. A
+// half that cannot answer strictly is taken at its word.
+func (c *compositeProtoFileRegistry) fileHalfDeclares(name protoreflect.FullName) bool {
+	strict, ok := c.file.(exactSymbolLookup)
+	if !ok {
+		return true
+	}
+	// ProtoFileContainingSymbol tolerates a leading dot; the symbol index does not.
+	return strict.HasSymbol(strings.TrimPrefix(string(name), "."))
+}
+
 func (c *compositeProtoFileRegistry) ProtoFileByPath(path string) (*descriptorpb.FileDescriptorProto, error) {
 	file, fileErr := c.file.ProtoFileByPath(path)
 	if fileErr == nil {
@@ -99,8 +125,13 @@ func (c *compositeProtoFileRegistry) ProtoFileByPath(path string) (*descriptorpb
 
 func (c *compositeProtoFileRegistry) ProtoFileContainingSymbol(name protoreflect.FullName) (*descriptorpb.FileDescriptorProto, error) {
 	file, fileErr := c.file.ProtoFileContainingSymbol(name)
-	if fileErr == nil {
+	if fileErr == nil && c.fileHalfDeclares(name) {
 		return file, nil
+	}
+	if fileErr == nil {
+		// An ancestor matched but the symbol itself is absent. Treating that as a hit
+		// is what made hybrid's fallback unreachable; treat it as the miss it is.
+		fileErr = fmt.Errorf("descriptor set declares an ancestor of %s but not the symbol itself", name)
 	}
 
 	file, serverErr := c.server.ProtoFileContainingSymbol(name)

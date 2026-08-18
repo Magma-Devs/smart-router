@@ -272,3 +272,74 @@ func TestCompositeProtoFileRegistry_CloseClosesReflectionHalf(t *testing.T) {
 	require.NoError(t, registry.Close())
 	require.True(t, remote.closed.Load())
 }
+
+// TestCompositeProtoFileRegistry_AncestorMatchDoesNotShadowReflection pins the bug
+// hybrid exists to avoid: a protoset that predates the node.
+//
+// FileDescriptorSetRegistry.ProtoFileContainingSymbol walks up the parent chain, so
+// "pkg.Query.Balance" resolves through "pkg.Query" and returns the stale file with a
+// NIL error even though the rpc is absent. The composite falls back on error alone,
+// so before this guard reflection was never consulted and the caller got NotFound
+// from Registry.FindDescriptorByName — at exactly the staleness case DescriptorSetPath's
+// doc comment warns about. dynamicResolve (GetParams → block parsing) passes a method
+// full name, so a node upgrade adding an rpc is the live trigger, not a rare nested type.
+func TestCompositeProtoFileRegistry_AncestorMatchDoesNotShadowReflection(t *testing.T) {
+	// The protoset knows service hybrid.v1.Query with a single rpc, Ping.
+	descriptorSet := writeTestDescriptorSet(t, t.TempDir(), "chain", "hybrid.v1", "Query")
+
+	t.Run("rpc added upstream falls through to reflection", func(t *testing.T) {
+		ResetFileRegistryCacheForTest()
+		remote := &countingRegistry{answers: map[string]string{"hybrid.v1.Query.Balance": "reflected.proto"}}
+
+		registry, err := ProtoFileRegistryForNode(common.GrpcDescriptorSourceHybrid, descriptorSet, remote)
+		require.NoError(t, err)
+
+		file, err := registry.ProtoFileContainingSymbol("hybrid.v1.Query.Balance")
+		require.NoError(t, err)
+		require.Equal(t, "reflected.proto", file.GetName(),
+			"an ancestor match must not be accepted as the symbol's file")
+		require.Equal(t, int32(1), remote.symbolCalls.Load(), "reflection must be consulted")
+	})
+
+	t.Run("nested type added upstream falls through to reflection", func(t *testing.T) {
+		ResetFileRegistryCacheForTest()
+		remote := &countingRegistry{answers: map[string]string{"hybrid.v1.PingRequest.Added": "reflected.proto"}}
+
+		registry, err := ProtoFileRegistryForNode(common.GrpcDescriptorSourceHybrid, descriptorSet, remote)
+		require.NoError(t, err)
+
+		file, err := registry.ProtoFileContainingSymbol("hybrid.v1.PingRequest.Added")
+		require.NoError(t, err)
+		require.Equal(t, "reflected.proto", file.GetName())
+		require.Equal(t, int32(1), remote.symbolCalls.Load())
+	})
+
+	// The other half of the guard: strictness must not cost the protoset its hits.
+	// A method the set DOES declare still resolves locally, reflection untouched.
+	for _, symbol := range []string{"hybrid.v1.Query", "hybrid.v1.Query.Ping", "hybrid.v1.PingRequest", ".hybrid.v1.Query.Ping"} {
+		t.Run("declared symbol stays local: "+symbol, func(t *testing.T) {
+			ResetFileRegistryCacheForTest()
+			remote := &countingRegistry{answers: map[string]string{symbol: "reflected.proto"}}
+
+			registry, err := ProtoFileRegistryForNode(common.GrpcDescriptorSourceHybrid, descriptorSet, remote)
+			require.NoError(t, err)
+
+			file, err := registry.ProtoFileContainingSymbol(protoreflect.FullName(symbol))
+			require.NoError(t, err)
+			require.Equal(t, "chain.proto", file.GetName())
+			require.Zero(t, remote.symbolCalls.Load(), "the protoset declares it; reflection must not be asked")
+		})
+	}
+
+	t.Run("absent everywhere reports both causes", func(t *testing.T) {
+		ResetFileRegistryCacheForTest()
+		remote := &countingRegistry{}
+
+		registry, err := ProtoFileRegistryForNode(common.GrpcDescriptorSourceHybrid, descriptorSet, remote)
+		require.NoError(t, err)
+
+		_, err = registry.ProtoFileContainingSymbol("hybrid.v1.Query.Balance")
+		require.Error(t, err)
+		require.Equal(t, int32(1), remote.symbolCalls.Load())
+	})
+}

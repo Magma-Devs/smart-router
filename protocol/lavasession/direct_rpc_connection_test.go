@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -718,4 +720,99 @@ func TestDoHTTPRequest_PerRequestHeadersOverrideDefaultContentType(t *testing.T)
 			require.Equal(t, "tx=AAAAtest", gotBody, "the body must reach the node untouched")
 		})
 	}
+}
+
+// TestGRPCDirectRPCConnection_DescriptorSourceFailureIsFatal pins that a descriptor
+// source the node can never resolve fails the connection instead of warning past it.
+//
+// The old call site logged "will use reflection" and continued. That was true only
+// while every path resolved through reflection regardless; in "file" mode
+// getMethodDescriptor and parseInputMessage go through this same loader and return
+// this same error, and LoadProtoset caches failures — so continuing bought one WARN
+// at boot and then total relay failure on the endpoint, with no further signal and
+// no recovery. That is the silent-misconfiguration shape MAG-2350 removes, not one
+// to relocate.
+func TestGRPCDirectRPCConnection_DescriptorSourceFailureIsFatal(t *testing.T) {
+	newGrpcConn := func(t *testing.T, grpcConfig common.GrpcConfig) (*GRPCDirectRPCConnection, *atomic.Int32) {
+		t.Helper()
+		conn, err := NewDirectRPCConnection(context.Background(), common.NodeUrl{
+			Url:        "grpcs://localhost:9090",
+			GrpcConfig: grpcConfig,
+		}, 5, "")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+
+		grpcConn, ok := conn.(*GRPCDirectRPCConnection)
+		require.True(t, ok)
+
+		// Fail the dial rather than perform it: reaching this at all is the bug.
+		var dials atomic.Int32
+		grpcConn.newConnector = func(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
+			dials.Add(1)
+			return nil, fmt.Errorf("dial must not be reached")
+		}
+		return grpcConn, &dials
+	}
+
+	for _, tt := range []struct {
+		name   string
+		config common.GrpcConfig
+	}{
+		{
+			name: "file mode with an unreadable descriptor set",
+			config: common.GrpcConfig{
+				DescriptorSource: common.GrpcDescriptorSourceFile,
+				// Unique per run: LoadProtoset caches by path, including failures.
+				DescriptorSetPath: filepath.Join(t.TempDir(), "missing.pb"),
+			},
+		},
+		{
+			name:   "file mode with no descriptor set at all",
+			config: common.GrpcConfig{DescriptorSource: common.GrpcDescriptorSourceFile},
+		},
+		{
+			// GrpcConfig.Validate has no callers, so an unrecognised mode reaches the
+			// request path. It resolves to nothing, which makes it fatal here too.
+			name:   "unrecognised descriptor-source",
+			config: common.GrpcConfig{DescriptorSource: "astrology"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			grpcConn, dials := newGrpcConn(t, tt.config)
+
+			require.Error(t, grpcConn.initialize(context.Background()))
+			require.Zero(t, dials.Load(),
+				"config that cannot resolve must fail before spending a dial budget on it")
+
+			grpcConn.connMu.Lock()
+			connector := grpcConn.connector
+			grpcConn.connMu.Unlock()
+			require.Nil(t, connector, "a failed initialize must leave no connector installed")
+
+			// Not latched: ensureInitialized surfaces the error and leaves the
+			// connection re-initializable, matching every other initialize() failure.
+			require.Error(t, grpcConn.ensureInitialized(context.Background()))
+			require.False(t, grpcConn.initialized.Load())
+		})
+	}
+
+	// The vacuity guard. Making this fatal is only safe because it cannot fire for
+	// the reflection default — which is every gRPC node-url in every config today.
+	t.Run("reflection default never trips it", func(t *testing.T) {
+		for _, config := range []common.GrpcConfig{
+			{},
+			{DescriptorSource: common.GrpcDescriptorSourceReflection},
+			{DescriptorSource: common.GrpcDescriptorSourceReflection, ReflectionTimeout: 2 * time.Second},
+			// Hybrid degrades to reflection rather than failing: an unusable protoset
+			// is exactly the case its other half covers.
+			{
+				DescriptorSource:  common.GrpcDescriptorSourceHybrid,
+				DescriptorSetPath: filepath.Join(t.TempDir(), "missing.pb"),
+			},
+			{DescriptorSource: common.GrpcDescriptorSourceHybrid},
+		} {
+			grpcConn, _ := newGrpcConn(t, config)
+			require.NoError(t, grpcConn.initializeDescriptorSource())
+		}
+	})
 }
