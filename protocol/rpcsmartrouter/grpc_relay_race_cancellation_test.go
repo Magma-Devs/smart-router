@@ -55,19 +55,48 @@ func TestGRPCRaceLoser_SurvivesClassification(t *testing.T) {
 	})
 }
 
-// TestGRPCLocalError_NotDisqualifiedByRpcErrorSubstring pins the substring
-// collision. GRPCStatusError renders as "gRPC error 1: context canceled", which
-// lowercased contains "rpc error" INSIDE the word "gRPC" — so a guard written to
-// exclude remote status errors was disqualifying our own local ones.
-func TestGRPCLocalError_NotDisqualifiedByRpcErrorSubstring(t *testing.T) {
-	local := &lavasession.GRPCStatusError{Code: 1, Message: "context canceled"}
+// TestGRPCStatusError_IsNeverReadAsLocalCancellation is the inverse of a test
+// that used to live here, and the inversion is the point.
+//
+// The earlier version asserted that a bare GRPCStatusError{Code: 1, Message:
+// "context canceled"} SHOULD classify as PROTOCOL_CONTEXT_CANCELED, and narrowed
+// the classifier guard from "rpc error" to "rpc error: code =" to make that pass.
+// The premise was wrong. GRPCStatusError is built by handleGRPCError only AFTER
+// the local-cancellation branch has already returned, so a value of this shape
+// describes a status the ENDPOINT reported — remote, or at minimum not proven
+// local. PROTOCOL_CONTEXT_CANCELED is Retryable=false, so reading it as local
+// suppresses the retry that would have reached a healthy endpoint.
+//
+// A genuinely local cancellation never needs this table: handleGRPCError returns
+// a nil response and an error wrapping the real context.Canceled sentinel, which
+// DetectConnectionError resolves structurally in layer 1. That path is pinned in
+// TestGRPCRaceLoser_SurvivesClassification above.
+func TestGRPCStatusError_IsNeverReadAsLocalCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  *lavasession.GRPCStatusError
+	}{
+		{"canceled", &lavasession.GRPCStatusError{Code: 1, Message: "context canceled"}},
+		{"deadline", &lavasession.GRPCStatusError{Code: 4, Message: "context deadline exceeded"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Contains(t, strings.ToLower(tc.err.Error()), "rpc error",
+				"precondition: the rendering really does contain the substring the guard keys on")
 
-	require.Contains(t, strings.ToLower(local.Error()), "rpc error",
-		"precondition: the local error really does contain the substring the guard keys on")
+			wrapped := classifyAndWrap(tc.err, common.ChainFamily(-1), common.TransportGRPC)
+			got := extractLavaError(wrapped)
 
-	wrapped := classifyAndWrap(local, common.ChainFamily(-1), common.TransportGRPC)
-	require.Equal(t, common.LavaErrorContextCanceled.Code, extractLavaError(wrapped).Code,
-		"the guard must key on the full remote prefix, not the bare substring")
+			// got may be nil when nothing matched, which is itself a pass — the
+			// assertion is only that it is not one of the two LOCAL verdicts.
+			if got == nil {
+				return
+			}
+			require.NotEqual(t, common.LavaErrorContextCanceled.Code, got.Code,
+				"a status the endpoint reported must not be attributed to local orchestration")
+			require.NotEqual(t, common.LavaErrorContextDeadline.Code, got.Code,
+				"a status the endpoint reported must not be attributed to local orchestration")
+		})
+	}
 }
 
 // COLLATERAL GUARD — the most important test in this file.
@@ -93,15 +122,13 @@ func TestGRPCRemoteStatusError_StillNotLocalCancellation(t *testing.T) {
 	}
 }
 
-// TestRemoteStatusGuard_AppliesAcrossTransports makes the reach of the guard change
+// TestRemoteStatusGuard_AppliesAcrossTransports makes the reach of the guard
 // explicit.
 //
 // stringConnectionFallbacks is a single package-level table and
-// detectConnectionErrorFromString takes no transport argument, so narrowing
-// "rpc error" to "rpc error: code =" changes classification for EVERY transport —
-// not just gRPC. That is intended (the discriminator is the remote status prefix,
-// which is transport-independent), but it was previously verified only on
-// gRPC-shaped inputs. These cases pin both directions on a non-gRPC transport.
+// detectConnectionErrorFromString takes no transport argument, so the width of
+// the "rpc error" exclusion decides classification for EVERY transport, not just
+// gRPC. These cases pin all three directions on non-gRPC transports.
 func TestRemoteStatusGuard_AppliesAcrossTransports(t *testing.T) {
 	for _, transport := range []common.TransportType{common.TransportJsonRPC, common.TransportREST} {
 		t.Run(transport.String()+"/remote-prefix-still-excluded", func(t *testing.T) {
@@ -121,16 +148,21 @@ func TestRemoteStatusGuard_AppliesAcrossTransports(t *testing.T) {
 		})
 
 		// The discriminating case: contains "rpc error" but NOT "rpc error: code =".
-		// The two cases above pass under both the old and the new guard, so only this
-		// one actually detects the widening — and it does so on a non-gRPC transport,
-		// which is the reach this test exists to pin. GRPCStatusError's rendering is
-		// the concrete real-world instance of that string class.
-		t.Run(transport.String()+"/bare-rpc-error-substring-no-longer-excluded", func(t *testing.T) {
+		// The two cases above pass under EITHER guard width, so this is the only one
+		// that detects a widening — and it does so on a non-gRPC transport, which is
+		// the reach this test exists to pin. lavasession.GRPCStatusError's rendering
+		// ("gRPC error 1: ...") is the concrete real-world instance of that string
+		// class, and it denotes a status the endpoint reported.
+		t.Run(transport.String()+"/bare-rpc-error-substring-still-excluded", func(t *testing.T) {
 			wrapped := classifyAndWrap(
 				errors.New("gRPC error 1: context canceled"),
 				common.ChainFamily(-1), transport)
-			require.Equal(t, common.LavaErrorContextCanceled.Code, extractLavaError(wrapped).Code,
-				"only the full remote-status prefix may exclude — a bare 'rpc error' substring must not, on any transport")
+			got := extractLavaError(wrapped)
+			if got == nil {
+				return // nothing matched — the exclusion held
+			}
+			require.NotEqual(t, common.LavaErrorContextCanceled.Code, got.Code,
+				"any rpc-error marker must exclude on every transport — a remote status is not local orchestration")
 		})
 	}
 }

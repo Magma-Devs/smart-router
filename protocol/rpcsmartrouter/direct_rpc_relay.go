@@ -787,10 +787,21 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			// response.StatusCode is the same value the error carried (handleGRPCError
 			// builds both from one errorCode), so this loses nothing.
 			hasError, errorMessage := chainMessage.CheckResponseError(response.Data, response.StatusCode)
-			// GrpcMessage.CheckResponseError reports hasError from the status code alone
+			// GrpcMessage.CheckResponseError decides hasError from the status code alone
 			// and always returns an EMPTY message. Classifying on "" would reduce the
-			// gRPC registry to its two code matchers and silently disable every
-			// message-based row it has — "rate limit", "unimplemented", ENHANCE_YOUR_CALM.
+			// gRPC registry to its three code matchers and silently disable every
+			// message-based row it has — "rate limit", "unimplemented", ENHANCE_YOUR_CALM
+			// — so a RESOURCE_EXHAUSTED saying "rate limit exceeded" would be scored as
+			// an availability failure instead of exempted as healthy-but-busy.
+			//
+			// grpcErr.Message before err.Error(): the former is the node's own status
+			// message, the latter is that message wrapped in our "gRPC error N: "
+			// rendering. Feed the classifier the undecorated text — the wrapper adds a
+			// literal "rpc error" substring (inside "gRPC error") that several guards
+			// key on, and it is our string, not the node's evidence.
+			if errorMessage == "" {
+				errorMessage = grpcErr.Message
+			}
 			if errorMessage == "" {
 				errorMessage = err.Error()
 			}
