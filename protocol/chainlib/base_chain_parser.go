@@ -22,8 +22,20 @@ import (
 )
 
 var (
-	SkipWebsocketVerification = false
-	DefaultApiName            = "Default-"
+	// SkipWebsocketVerificationDefault seeds every parser built by NewChainParser and
+	// is bound to --skip-websocket-verification. It is written once during flag parsing,
+	// before any parser or goroutine exists, and is read-only from then on.
+	//
+	// It is deliberately NOT consulted at the point of use. The `health` command probes
+	// each direct-rpc entry concurrently and needs a different answer per entry (ws
+	// augmentation only routes for an entry that actually has a ws:// URL), so it used to
+	// flip a package global under a mutex around ValidateCollect. That missed the second
+	// reader — newChainRouter — which runs outside that mutex, so entries raced each other
+	// into the wrong ws enforcement and healthy legs reported red (MAG-2333). Per-parser
+	// state removes the shared cell entirely.
+	SkipWebsocketVerificationDefault = false
+
+	DefaultApiName = "Default-"
 )
 
 type PolicyInf interface {
@@ -52,6 +64,30 @@ type BaseChainParser struct {
 	allowedExtensions map[string]struct{}
 	extensionParser   extensionslib.ExtensionParser
 	active            bool
+
+	// skipWebsocketVerification is this parser's own answer to "should verifications be
+	// augmented with the websocket extension, and should the router enforce ws support".
+	// Seeded from SkipWebsocketVerificationDefault; overridden per-endpoint by callers
+	// that probe several endpoints concurrently. Guarded by rwLock like every other
+	// mutable field here.
+	skipWebsocketVerification bool
+}
+
+// SkipWebsocketVerification reports whether this parser's endpoint opts out of
+// websocket augmentation and enforcement.
+func (bcp *BaseChainParser) SkipWebsocketVerification() bool {
+	bcp.rwLock.RLock()
+	defer bcp.rwLock.RUnlock()
+	return bcp.skipWebsocketVerification
+}
+
+// SetSkipWebsocketVerification overrides the process default for this parser only.
+// Callers probing multiple endpoints concurrently must build one parser per endpoint
+// and set it here rather than reaching for the package-level default.
+func (bcp *BaseChainParser) SetSkipWebsocketVerification(skip bool) {
+	bcp.rwLock.Lock()
+	defer bcp.rwLock.Unlock()
+	bcp.skipWebsocketVerification = skip
 }
 
 func (bcp *BaseChainParser) Activate() {

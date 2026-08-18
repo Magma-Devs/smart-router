@@ -76,7 +76,9 @@ func (c grpcDescriptorConfig) String() string {
 
 // NewGrpcChainParser creates a new instance of GrpcChainParser
 func NewGrpcChainParser() (chainParser *GrpcChainParser, err error) {
-	return &GrpcChainParser{}, nil
+	parser := &GrpcChainParser{}
+	parser.skipWebsocketVerification = SkipWebsocketVerificationDefault
+	return parser, nil
 }
 
 // cloneForValidation returns a *GrpcChainParser with isolated registry/codec
@@ -121,6 +123,10 @@ func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 			allowedExtensions: apip.allowedExtensions,
 			extensionParser:   apip.extensionParser,
 			active:            apip.active,
+
+			// Carried, not re-seeded from the package default: the clone must verify
+			// under the same ws policy as the parser it stands in for.
+			skipWebsocketVerification: apip.SkipWebsocketVerification(),
 		},
 		registry: apip.registry,
 		codec:    apip.codec,

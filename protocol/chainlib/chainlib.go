@@ -85,6 +85,8 @@ type ChainParser interface {
 	ExtractDataFromRequest(*http.Request) (url string, data string, connectionType string, metadata []pairingtypes.Metadata, err error)
 	SetResponseFromRelayResult(*common.RelayResult) (*http.Response, error)
 	ParseDirectiveEnabled() bool
+	SkipWebsocketVerification() bool
+	SetSkipWebsocketVerification(skip bool)
 }
 
 // CloneChainParserForValidation returns a parser instance safe to pass into

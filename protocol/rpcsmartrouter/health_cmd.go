@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -143,8 +142,9 @@ or from inline "address chain-id api-interface" triplets like the rpcsmartrouter
 			// sanity check, or when ws nodes are known-unreachable and you don't want them probed).
 			skipWs, _ := cmd.Flags().GetBool(commonlib.SkipWebsocketVerificationFlag)
 			verifyWs := !skipWs
-			// chainlib.SkipWebsocketVerification is set per-provider inside probeProvider
-			// (a provider with no ws URL can't have ws verified) — see the note there.
+			// This is only the run-wide default; probeProvider narrows it per endpoint on
+			// that endpoint's own parser (an endpoint with no ws URL can't have ws
+			// verified) — see the note there.
 
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			results := runHealthProbes(ctx, providers, staticSpecPaths, timeout, verifyWs)
@@ -369,6 +369,22 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 		return rowsFromError(fmt.Errorf("create chain parser: %w", err))
 	}
 
+	// Per-endpoint websocket gating. For a chain whose spec supports subscriptions every
+	// verification is augmented with the websocket extension — which can only route if this
+	// endpoint actually has a ws:// URL. An http-only endpoint (e.g. an inline
+	// `address chain-id api-interface` probe) would otherwise fail EVERY check with
+	// "no chain proxy supporting requested extensions {websocket}".
+	//
+	// This is set on our own parser, which nothing else shares, and set here — before
+	// GetChainRouter, which reads it too. It used to be a package global flipped under a
+	// mutex held only around ValidateCollect: that left GetChainRouter reading whatever
+	// value a concurrently-probed endpoint had last written, and serialized every
+	// endpoint's verification phase behind one lock while each endpoint's own timeout kept
+	// running — so late endpoints entered ValidateCollect with most of their budget gone,
+	// their context expired mid-probe, and connectorLoop closed the connector out from
+	// under the remaining relays ("connector is closed" on healthy nodes, MAG-2333).
+	chainParser.SetSkipWebsocketVerification(!(verifyWs && providerHasWebSocketURL(provider.nodeUrls)))
+
 	rpcEndpoint := lavasession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
 	if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, staticSpecPaths, rpcEndpoint, "", ""); err != nil {
 		return rowsFromError(fmt.Errorf("load spec: %w", err))
@@ -452,19 +468,9 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 	// provider can list the same URL twice with different addons (e.g. a base URL and an
 	// `addons:[archive]` URL), which would otherwise collide in a url-keyed map.
 	//
-	// Per-provider websocket gating: for a chain whose spec supports subscriptions, every
-	// verification is augmented with the websocket extension — which can only route if this
-	// provider actually has a ws:// URL. A provider with only http URLs (e.g. an inline
-	// `address chain-id api-interface` probe) would otherwise fail EVERY check with
-	// "no chain proxy supporting requested extensions {websocket}". So we disable ws
-	// augmentation for providers that have no ws URL, even when ws is globally on.
-	// chainlib.SkipWebsocketVerification is a package global read inside ValidateCollect,
-	// so set it under a mutex around the call to stay correct under concurrent providers.
-	wsForThisProvider := verifyWs && providerHasWebSocketURL(provider.nodeUrls)
-	wsVerificationMu.Lock()
-	chainlib.SkipWebsocketVerification = !wsForThisProvider
+	// ws gating for this endpoint was applied to chainParser above, so nothing here is
+	// shared with the endpoints probed concurrently alongside it.
 	validations := chainFetcher.ValidateCollect(ctx)
-	wsVerificationMu.Unlock()
 
 	rows := make([]healthEndpointResult, 0, len(provider.nodeUrls))
 	for i, url := range probedUrls {
@@ -548,11 +554,6 @@ func emitFatal(err error) error {
 	writeHealthReport(buildHealthReport(nil, err))
 	return err
 }
-
-// wsVerificationMu serializes the per-provider mutation of the package-global
-// chainlib.SkipWebsocketVerification (read inside ValidateCollect) so concurrent provider
-// probes don't race on it.
-var wsVerificationMu sync.Mutex
 
 // providerHasWebSocketURL reports whether any of the provider's node URLs is ws://wss://.
 func providerHasWebSocketURL(urls []commonlib.NodeUrl) bool {
