@@ -404,7 +404,24 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		)
 	}
 
-	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionCallback)
+	// Same optional-interface pattern for server-streaming methods (MAG-2643). Left nil
+	// unless BOTH the relay sender has a subscription manager and this chain's spec
+	// declares a subscription — the callback parses every request it is offered, and
+	// that parse is pure overhead on a chain with no streaming methods to find. When it
+	// is nil, a streaming method is refused further down the relay path rather than
+	// being invoked as a unary call.
+	var streamCallback grpcproxy.StreamProxyCallBack
+	if subscriptionProvider, ok := apil.relaySender.(GRPCSubscriptionProvider); ok && apil.chainParser.HasSubscriptionApis() {
+		if subscriptionManager := subscriptionProvider.GetGRPCSubscriptionManager(); subscriptionManager != nil {
+			streamCallback = apil.makeStreamRelayCallback(subscriptionManager)
+			utils.LavaFormatInfo("gRPC server-streaming support enabled",
+				utils.LogAttr("address", apil.endpoint.NetworkAddress),
+				utils.LogAttr("chainID", apil.endpoint.ChainID),
+			)
+		}
+	}
+
+	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionCallback, streamCallback)
 	if err != nil {
 		utils.LavaFormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
 	}
@@ -440,6 +457,141 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	if err := serveExecutor(); !errors.Is(err, http.ErrServerClosed) {
 		utils.LavaFormatFatal("Portal failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr()}, utils.Attribute{Key: "ChainID", Value: apil.endpoint.ChainID})
 	}
+}
+
+// makeStreamRelayCallback builds the gRPC listener's server-streaming entry point
+// (MAG-2643). It mirrors what ConsumerWebsocketManager does for eth_subscribe: parse
+// the request, recognise it as a subscription, start (or join) the upstream stream,
+// and hand back the per-client channel — except the client connection here is the
+// gRPC stream itself, which grpcproxy holds open and pumps.
+//
+// Returns (nil, nil) for anything that is not a spec-declared gRPC subscription, which
+// puts the call back on the unary path unchanged.
+func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCSubscriptionManager) grpcproxy.StreamProxyCallBack {
+	return func(ctx context.Context, method string, reqBody []byte) (*grpcproxy.StreamResponse, error) {
+		metadataValues, _ := metadata.FromIncomingContext(ctx)
+		dappID := extractDappIDFromGrpcHeader(metadataValues)
+		consumerIp := common.GetIpFromGrpcContext(ctx)
+
+		protocolMessage, err := apil.relaySender.ParseRelay(ctx, method, string(reqBody), "", dappID, consumerIp, convertToMetadataMapOfSlices(metadataValues))
+		if err != nil {
+			// Not this callback's error to report: an unknown or malformed method must
+			// keep producing exactly the error the unary path already produces for it.
+			return nil, nil
+		}
+		if !IsGrpcSubscription(protocolMessage) {
+			return nil, nil
+		}
+
+		guid := utils.GenerateUniqueIdentifier()
+		ctx = utils.WithUniqueIdentifier(ctx, guid)
+
+		// One gRPC stream is one subscriber. The WebSocket path keys clients by
+		// connection UID because a single socket multiplexes many subscriptions; here
+		// the stream is the connection, so the GUID identifies it for its whole life.
+		//
+		// It has to be per-stream: the manager holds one reply channel per client key
+		// per subscription, so two streams sharing a key would overwrite each other's
+		// channel, and releasing one on disconnect would release the other. The cost is
+		// that the manager's per-client limits (subscribe rate, max subscriptions per
+		// client) see every stream as a new client and so never bind for gRPC — the
+		// global subscription cap is what bounds this interface.
+		connectionUniqueId := strconv.FormatUint(guid, 10)
+		clientKey := subscriptionManager.ClientKey(dappID, consumerIp, connectionUniqueId)
+
+		startTime := time.Now()
+		metricsData := metrics.NewRelayAnalytics(dappID, apil.endpoint.ChainID, apil.endpoint.ApiInterface)
+		metricsData.SetProcessingTimestampBeforeRelay(startTime)
+
+		utils.LavaFormatDebug("in <<< GRPC stream subscribe",
+			utils.LogAttr("GUID", ctx),
+			utils.LogAttr("_method", method),
+			utils.LogAttr("dappID", dappID),
+		)
+
+		firstReply, repliesChan, err := subscriptionManager.StartSubscription(ctx, protocolMessage, dappID, consumerIp, connectionUniqueId, metricsData)
+
+		// Snapshot before the emit goroutine starts. AddMetricForGrpc writes Success and
+		// Origin on the struct it is handed, and the per-delivery emits work from these
+		// same fields for the life of the subscription — so each side needs its own
+		// copy. ConsumerWebsocketManager copies for the same reason.
+		subscriptionFields := *metricsData
+		go apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
+		if err != nil {
+			apil.logger.LogRequestAndResponse("grpc stream in/out", true, method, string(reqBody), "", err.Error(), connectionUniqueId, time.Since(startTime), err)
+			return nil, utils.LavaFormatError("failed to start gRPC subscription", err,
+				utils.LogAttr("GUID", ctx),
+				utils.LogAttr("_method", method),
+				utils.LogAttr("dappID", dappID),
+			)
+		}
+
+		return &grpcproxy.StreamResponse{
+			Replies: apil.forwardSubscriptionReplies(ctx, repliesChan, subscriptionFields, snapshotMetricsHeaders(metadataValues)),
+			// firstReply's payload is a JSON acknowledgement, which would not decode as
+			// the method's output type — only its subscription id is carried, as headers.
+			Metadata: convertRelayMetaDataToMDMetaData(firstReply.GetMetadata()),
+			Close: func() {
+				if err := subscriptionManager.UnsubscribeAll(context.Background(), clientKey); err != nil {
+					utils.LavaFormatWarning("failed to release gRPC subscription on stream close", err,
+						utils.LogAttr("GUID", ctx),
+						utils.LogAttr("_method", method),
+					)
+				}
+				apil.logger.LogRequestAndResponse("grpc stream in/out", false, method, string(reqBody), "", "", connectionUniqueId, time.Since(startTime), nil)
+			},
+		}, nil
+	}
+}
+
+// forwardSubscriptionReplies adapts the manager's reply channel to the raw payload
+// channel grpcproxy pumps, and emits one analytics record per pushed message.
+//
+// The billing shape matches the WebSocket path: the subscribe itself is billed at the
+// spec CU under its real method, and every pushed message is a separate operation at
+// the flat delivery default, so downstream billing stays a plain SUM(cu).
+//
+// subscriptionFields is taken by value because the per-message emits would otherwise
+// race each other on the shared RelayMetrics pointer.
+func (apil *GrpcChainListener) forwardSubscriptionReplies(ctx context.Context, repliesChan <-chan *pairingtypes.RelayReply, subscriptionFields metrics.RelayMetrics, metricsHeaders metadata.MD) <-chan []byte {
+	payloads := make(chan []byte)
+	go func() {
+		// Closing tells grpcproxy the upstream ended, which closes the client stream
+		// with OK.
+		defer close(payloads)
+		for reply := range repliesChan {
+			select {
+			case payloads <- reply.GetData():
+			case <-ctx.Done():
+				// The client is gone and grpcproxy has stopped reading, so this send
+				// would block forever. Leaving repliesChan undrained is safe: the
+				// manager's sender never blocks on a full channel, and the teardown
+				// StreamResponse.Close triggers closes it.
+				return
+			}
+
+			perMessage := subscriptionFields
+			perMessage.Timestamp = time.Now()
+			perMessage.ApiMethod = SubscriptionDeliveryMethod
+			perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
+			go apil.logger.AddMetricForGrpc(&perMessage, nil, &metricsHeaders)
+		}
+	}()
+	return payloads
+}
+
+// snapshotMetricsHeaders detaches the headers AddMetricForGrpc reads from the request
+// metadata. gRPC metadata strings can alias the transport receive buffer, and a
+// subscription's per-delivery emits keep referring to them for as long as the stream
+// lives — far past the point where the unary path would have released them.
+func snapshotMetricsHeaders(metadataValues metadata.MD) metadata.MD {
+	snapshot := metadata.MD{}
+	for _, key := range []string{metrics.RefererHeaderKey, metrics.UserAgentHeaderKey, metrics.OriginHeaderKey} {
+		if values := metadataValues.Get(key); len(values) > 0 {
+			snapshot.Set(key, strings.Clone(values[0]))
+		}
+	}
+	return snapshot
 }
 
 func (apil *GrpcChainListener) GetListeningAddress() string {
@@ -697,8 +849,10 @@ func marshalJSON(msg proto.Message) ([]byte, error) {
 
 // Shutdown drains in-flight gRPC unary requests and closes the listener.
 // http.Server.Shutdown sends HTTP/2 GOAWAY frames automatically — that is
-// the gRPC "going away" equivalent for streaming clients (the smart router's
-// gRPC API is currently unary-only, so no client streams exist to drain).
+// the gRPC "going away" equivalent for the server-streaming subscriptions the
+// listener now serves. Each of those ends when its stream context is cancelled,
+// which releases the client from the upstream subscription via
+// grpcproxy.StreamResponse.Close.
 func (apil *GrpcChainListener) Shutdown(ctx context.Context) error {
 	if apil == nil || apil.httpServer == nil {
 		return nil

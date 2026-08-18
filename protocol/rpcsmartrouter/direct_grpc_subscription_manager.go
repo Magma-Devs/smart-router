@@ -41,13 +41,11 @@ type grpcActiveSubscription struct {
 	methodPath    string
 	requestParams []byte
 
-	// First reply cached for late joiners
-	firstReply *pairingtypes.RelayReply
-
 	// Lifecycle management
 	ctx          context.Context
 	cancel       context.CancelFunc
 	closeSubChan chan struct{}
+	closeOnce    sync.Once
 
 	// Restoration state
 	restoring atomic.Bool
@@ -61,6 +59,20 @@ type grpcActiveSubscription struct {
 	messageSeq atomic.Uint64
 
 	lock sync.RWMutex
+}
+
+// signalClose closes closeSubChan exactly once.
+//
+// Two owners reach it and they race: the last client leaving
+// (removeClientFromSubscription) and manager shutdown (Stop). The listener only observes
+// the close between receives, so a subscription whose upstream has gone quiet stays
+// registered — and visible to Stop — indefinitely after its last client left. A plain
+// close in both places panicked the process on shutdown whenever Stop landed in that
+// window. Same reasoning as the cleanedUp latch, on the other half of the teardown.
+func (sub *grpcActiveSubscription) signalClose() {
+	sub.closeOnce.Do(func() {
+		close(sub.closeSubChan)
+	})
 }
 
 // DirectGRPCSubscriptionManager manages gRPC streaming subscriptions directly to upstream endpoints.
@@ -246,7 +258,7 @@ func (dgm *DirectGRPCSubscriptionManager) Stop() {
 	// Close all active subscriptions
 	for _, sub := range dgm.activeSubscriptions {
 		sub.cancel()
-		close(sub.closeSubChan)
+		sub.signalClose()
 	}
 	dgm.activeSubscriptions = make(map[string]*grpcActiveSubscription)
 
@@ -456,14 +468,11 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
 
-	// Return first reply if available (for late joiners)
-	firstReply := sub.firstReply
-	if firstReply == nil {
-		// Create acknowledgement
-		firstReply = dgm.createStreamAcknowledgement(routerID, sub.methodPath)
-	}
-
-	return firstReply, replyChan, nil
+	// The acknowledgement is minted per client, never shared. It carries the router
+	// id this client must quote to unsubscribe, and clientRouterIDs holds a distinct
+	// one per client — handing a joiner the creator's copy would tell it to
+	// unsubscribe using an id that is not its own.
+	return dgm.createStreamAcknowledgement(routerID, sub.methodPath), replyChan, nil
 }
 
 // createNewSubscription creates a new upstream subscription
@@ -515,17 +524,23 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 		return nil, nil, fmt.Errorf("method %s is not a server-streaming method", methodPath)
 	}
 
+	// The subscription context is rooted in the manager, NOT in ctx. conn.NewStream
+	// binds the upstream stream's whole life to the context it was created with, and
+	// with sharing enabled later clients join this same stream — so rooting it in the
+	// creating client's request context meant the first client to disconnect killed
+	// the stream for every joiner. Rooted here, only the subscription's own teardown
+	// ends it: the last client leaving (removeClientFromSubscription) or Stop.
+	subCtx, subCancel := context.WithCancel(dgm.ctx)
+
 	// Create the upstream stream
-	stream, err := dgm.createUpstreamStream(ctx, conn.GetConn(), methodPath, requestData, methodDesc)
+	stream, err := dgm.createUpstreamStream(subCtx, conn.GetConn(), methodPath, requestData, methodDesc)
 	if err != nil {
+		subCancel()
 		return nil, nil, fmt.Errorf("failed to create stream: %w", err)
 	}
 
 	// Increment stream count
 	conn.IncrementStreams()
-
-	// Create subscription context
-	subCtx, subCancel := context.WithCancel(ctx)
 
 	// Generate IDs
 	routerSubID := dgm.idMapper.GenerateRouterID(clientKey)
@@ -567,7 +582,6 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 
 	// Create acknowledgement as first reply
 	firstReply := dgm.createStreamAcknowledgement(clientRouterID, methodPath)
-	activeSub.firstReply = firstReply
 
 	utils.LavaFormatInfo("DirectGRPC: created new subscription",
 		utils.LogAttr("methodPath", methodPath),
@@ -602,20 +616,18 @@ func (dgm *DirectGRPCSubscriptionManager) createUpstreamStream(
 
 	// Parse and send the initial request message
 	if len(requestData) > 0 {
-		msgFactory := dynamic.NewMessageFactoryWithDefaults()
-		inputMsg := msgFactory.NewMessage(methodDesc.GetInputType())
+		// dynamic.NewMessage, not the message factory: the factory consults the known-type
+		// registry and hands back a linked Go type whenever one is registered for this
+		// message name, which the JSON branch below then had to reject outright. Chains
+		// whose types happen to be linked into the router (anything cosmos-shaped) took
+		// that path. A dynamic message parses both encodings for every method.
+		inputMsg := dynamic.NewMessage(methodDesc.GetInputType())
 
 		// Detect format and parse request data
-		if len(requestData) > 0 && (requestData[0] == '{' || requestData[0] == '[') {
-			// JSON input - use dynamic message's JSON unmarshaler
-			if dynMsg, ok := inputMsg.(*dynamic.Message); ok {
-				if err := dynMsg.UnmarshalJSON(requestData); err != nil {
-					stream.CloseSend()
-					return nil, fmt.Errorf("failed to parse JSON request: %w", err)
-				}
-			} else {
+		if requestData[0] == '{' || requestData[0] == '[' {
+			if err := inputMsg.UnmarshalJSON(requestData); err != nil {
 				stream.CloseSend()
-				return nil, fmt.Errorf("unexpected message type for JSON parsing")
+				return nil, fmt.Errorf("failed to parse JSON request: %w", err)
 			}
 		} else {
 			// Binary proto input
@@ -1001,13 +1013,20 @@ func (dgm *DirectGRPCSubscriptionManager) removeClientFromSubscription(
 	// If last client, close the subscription
 	if len(sub.connectedClients) == 0 {
 		sub.cancel()
-		close(sub.closeSubChan)
+		sub.signalClose()
 	}
 
 	return nil
 }
 
 // Helper methods
+
+// ClientKey implements chainlib.GRPCSubscriptionManager. The listener needs the key
+// StartSubscription derived internally so that it can release the same client on
+// disconnect, without reproducing the key format on its side.
+func (dgm *DirectGRPCSubscriptionManager) ClientKey(dappID, consumerIp, connectionUniqueId string) string {
+	return dgm.createClientKey(dappID, consumerIp, connectionUniqueId)
+}
 
 func (dgm *DirectGRPCSubscriptionManager) createClientKey(dappID, consumerIp, connectionUniqueId string) string {
 	return fmt.Sprintf("%s:%s:%s", dappID, consumerIp, connectionUniqueId)

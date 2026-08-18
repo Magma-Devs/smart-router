@@ -312,6 +312,17 @@ func (rpcss *RPCSmartRouterServer) GetGRPCReflectionConnection(ctx context.Conte
 	return rpcss.grpcSubscriptionManager.GetReflectionConnection(ctx)
 }
 
+// GetGRPCSubscriptionManager implements chainlib.GRPCSubscriptionProvider, which is how
+// the gRPC listener picks up server-streaming support (MAG-2643).
+func (rpcss *RPCSmartRouterServer) GetGRPCSubscriptionManager() chainlib.GRPCSubscriptionManager {
+	if rpcss.grpcSubscriptionManager == nil {
+		// Untyped nil on purpose: returning the nil *DirectGRPCSubscriptionManager
+		// would box into a non-nil interface and defeat the listener's nil check.
+		return nil
+	}
+	return rpcss.grpcSubscriptionManager
+}
+
 func (rpcss *RPCSmartRouterServer) sendCraftedRelaysWrapper(ctx context.Context, initialRelays bool) (bool, error) {
 	if initialRelays {
 		// Only start after everything is initialized - check consumer session manager
@@ -3755,26 +3766,56 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		)
 	}
 
-	// Check for gRPC streaming method - currently not supported in Direct RPC mode
-	// TODO: Full streaming support requires ChainListener changes to maintain client connections
-	// and route repliesChan messages back to the client. For now, we refuse streaming RPCs
-	// to avoid resource leaks (upstream subscriptions left running without consumers).
-	if rpcss.grpcSubscriptionManager != nil && directConnection.GetProtocol() == "grpc" {
+	// Backstop against invoking a server-streaming method as a unary call (MAG-2643).
+	//
+	// Streaming methods are served by the gRPC listener now, which recognises them from
+	// the spec and routes them to DirectGRPCSubscriptionManager before they ever reach
+	// a relay. Anything that arrives here is therefore either a spec-declared
+	// subscription that slipped past the listener — a wiring bug — or a method that is
+	// server-streaming upstream but not declared as one in the spec.
+	//
+	// Both are refused. A unary Invoke on a server-streaming method reads the first
+	// message and then fails the response-must-be-single check, so the caller gets a
+	// truncated stream after waiting out the (typically generous, hanging_api) timeout.
+	// A refusal is a worse-looking but far more honest answer.
+	if directConnection.GetProtocol() == lavasession.DirectRPCProtocolGRPC {
 		methodPath := chainMessage.GetApi().Name
-		// Bound the reflection lookup explicitly: it dials + queries the upstream's reflection
-		// service, and detached CV relay contexts carry no deadline — an upstream that accepts the
-		// connection but never answers would otherwise block this goroutine (and leak its session)
-		// forever, since the relay-timeout bound is only applied later inside SendDirectRelay.
-		streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
-		isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
-		streamCheckCancel()
-		if streamErr == nil && isStreaming {
-			utils.LavaFormatWarning("gRPC streaming methods not yet supported in Direct RPC mode",
-				nil,
+
+		// The spec check comes first and is deliberately independent of both the
+		// manager and reflection: it is the one signal that is always available. When
+		// reflection was the only classifier, a throttled reflection endpoint (normal
+		// on public gRPC gateways) skipped the guard entirely and dropped the call into
+		// the unary path — silently.
+		if chainlib.IsGrpcSubscription(chainMessage) {
+			utils.LavaFormatWarning("gRPC subscription reached the unary relay path", nil,
 				utils.LogAttr("method", methodPath),
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+				utils.LogAttr("GUID", ctx),
 			)
-			return 0, fmt.Errorf("gRPC streaming method %q not supported in Direct RPC mode; use provider-based relay for streaming", methodPath), false
+			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath), false
+		}
+
+		// Second line of defence for methods the spec does not declare as
+		// subscriptions. Reflection may be unavailable, in which case we have nothing
+		// left to check and the call proceeds as unary, which is the correct handling
+		// for the overwhelming majority of gRPC methods.
+		if rpcss.grpcSubscriptionManager != nil {
+			// Bound the reflection lookup explicitly: it dials + queries the upstream's reflection
+			// service, and detached CV relay contexts carry no deadline — an upstream that accepts the
+			// connection but never answers would otherwise block this goroutine (and leak its session)
+			// forever, since the relay-timeout bound is only applied later inside SendDirectRelay.
+			streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
+			isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
+			streamCheckCancel()
+			if streamErr == nil && isStreaming {
+				utils.LavaFormatWarning("gRPC method is server-streaming upstream but is not declared as a subscription in the spec", nil,
+					utils.LogAttr("method", methodPath),
+					utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
+					utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+					utils.LogAttr("GUID", ctx),
+				)
+				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec does not mark it `\"subscription\": true`; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID), false
+			}
 		}
 	}
 
