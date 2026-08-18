@@ -481,6 +481,31 @@ func (apip *BaseChainParser) ApiHasStatefulCategory(name string) bool {
 	return false
 }
 
+// HasSubscriptionApis reports whether this spec declares any API as a subscription
+// (`category.subscription`).
+//
+// Asked once, at listener start: recognising a gRPC subscription per request costs a
+// parse, and it is pure waste on a chain that has no streaming methods to recognise —
+// which is nearly every gRPC spec (MAG-2643). This does not decide whether a given call
+// is a subscription; IsGrpcSubscription remains the single answer to that.
+//
+// Read once, so a spec refreshed at runtime into declaring its first subscription would
+// not be picked up until restart. Such a call is refused with a clear error on the relay
+// path rather than mishandled, so the degradation is visible.
+func (apip *BaseChainParser) HasSubscriptionApis() bool {
+	if apip == nil {
+		return false
+	}
+	apip.rwLock.RLock()
+	defer apip.rwLock.RUnlock()
+	for _, apiCont := range apip.serverApis {
+		if apiCont.api != nil && apiCont.api.Category.Subscription {
+			return true
+		}
+	}
+	return false
+}
+
 func (apip *BaseChainParser) isValidInternalPath(path string) bool {
 	if apip == nil || len(apip.internalPaths) == 0 {
 		return false

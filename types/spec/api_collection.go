@@ -104,6 +104,18 @@ type SpecCategory struct {
 	Deterministic bool   `json:"deterministic,omitempty"`
 	Stateful      uint32 `json:"stateful,omitempty"`
 	HangingApi    bool   `json:"hanging_api,omitempty"`
+	// Subscription marks an API that pushes a stream of replies rather than
+	// answering once: a gRPC server-streaming method, or a WebSocket subscribe.
+	//
+	// The flag has been present in spec JSON for a long time but had no field to
+	// land in, so encoding/json dropped it silently and every reader had to fall
+	// back to something else. For WebSocket that fallback is the SUBSCRIBE
+	// function tag, which works. gRPC has no equivalent tag, so the router's only
+	// signal was a live reflection lookup on the method descriptor — and when
+	// reflection is throttled or disabled (common on public gRPC gateways) a
+	// server-streaming method was indistinguishable from a unary one and got
+	// invoked as unary. See IsGrpcSubscription (MAG-2643).
+	Subscription bool `json:"subscription,omitempty"`
 }
 
 // Verification pairs a ParseDirective with a set of expected values, enabling
@@ -464,6 +476,13 @@ func (m *SpecCategory) GetHangingApi() bool {
 	return false
 }
 
+func (m *SpecCategory) GetSubscription() bool {
+	if m != nil {
+		return m.Subscription
+	}
+	return false
+}
+
 // Combine merges two SpecCategory values following the spec inheritance rules:
 // Deterministic is AND-ed (both must agree), all boolean flags are OR-ed, and
 // Stateful takes the maximum value.
@@ -472,6 +491,7 @@ func (sc SpecCategory) Combine(other SpecCategory) SpecCategory {
 		Deterministic: sc.Deterministic && other.Deterministic,
 		Stateful:      max(sc.Stateful, other.Stateful),
 		HangingApi:    sc.HangingApi || other.HangingApi,
+		Subscription:  sc.Subscription || other.Subscription,
 	}
 }
 
