@@ -461,12 +461,13 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 	// Same optional-interface pattern for server-streaming methods (MAG-2643). Left nil
 	// unless BOTH the relay sender has a subscription manager and this chain's spec
-	// declares a subscription — the callback parses every request it is offered, and
-	// that parse is pure overhead on a chain with no streaming methods to find. When it
-	// is nil, a streaming method is refused further down the relay path rather than
-	// being invoked as a unary call.
+	// carries a SUBSCRIBE directive — the callback parses every request it is offered,
+	// and that parse is pure overhead on a chain with no streaming methods to find.
+	// When it is nil, a streaming method is refused further down the relay path rather
+	// than being invoked as a unary call.
+	_, _, specHasSubscription := apil.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SUBSCRIBE)
 	var streamCallback grpcproxy.StreamProxyCallBack
-	if subscriptionProvider, ok := apil.relaySender.(GRPCSubscriptionProvider); ok && apil.chainParser.HasSubscriptionApis() {
+	if subscriptionProvider, ok := apil.relaySender.(GRPCSubscriptionProvider); ok && specHasSubscription {
 		if subscriptionManager := subscriptionProvider.GetGRPCSubscriptionManager(); subscriptionManager != nil {
 			streamCallback = apil.makeStreamRelayCallback(subscriptionManager)
 			utils.LavaFormatInfo("gRPC server-streaming support enabled",

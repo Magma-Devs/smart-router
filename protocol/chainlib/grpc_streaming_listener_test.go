@@ -2,6 +2,7 @@ package chainlib
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -102,30 +103,39 @@ const (
 	unaryApiName     = "sui.rpc.v2.LedgerService/GetCheckpoint"
 )
 
-// grpcParserWithSubscription builds a parser whose collection holds one API marked
-// `"subscription": true` and one that is not, so the classification split is real
-// rather than mocked.
+// grpcParserWithSubscription builds a real parser from spec JSON: one gRPC API
+// carrying a SUBSCRIBE parse directive and one that is not, so the classification
+// split comes out of the same spec-shaped input an operator would write.
+//
+// SUBSCRIBE is the only sanctioned way to declare a subscription — lava-specs keeps
+// `category.subscription` on its removed-fields list and rejects any spec with it.
 func grpcParserWithSubscription() *GrpcChainParser {
-	collectionKey := CollectionKey{ConnectionType: ""}
-	collection := &spectypes.ApiCollection{
-		Enabled:        true,
-		CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGrpc},
+	raw := `{
+      "index": "SUIT", "name": "Sui Testnet", "enabled": true, "average_block_time": 222,
+      "api_collections": [{
+        "enabled": true,
+        "collection_data": {"api_interface": "grpc", "internal_path": "", "type": "", "add_on": ""},
+        "apis": [
+          {"name": "` + streamingApiName + `", "enabled": true, "compute_units": 10,
+           "category": {"deterministic": false, "stateful": 0, "hanging_api": true}},
+          {"name": "` + unaryApiName + `", "enabled": true, "compute_units": 10,
+           "category": {"deterministic": true, "stateful": 0}}
+        ],
+        "parse_directives": [
+          {"function_tag": "SUBSCRIBE", "api_name": "` + streamingApiName + `"}
+        ]
+      }]
+    }`
+	var spec spectypes.Spec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		panic(err)
 	}
-	return &GrpcChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: streamingApiName, ConnectionType: ""}: {
-					api:           &spectypes.Api{Name: streamingApiName, Enabled: true, Category: spectypes.SpecCategory{Subscription: true, HangingApi: true}},
-					collectionKey: collectionKey,
-				},
-				{Name: unaryApiName, ConnectionType: ""}: {
-					api:           &spectypes.Api{Name: unaryApiName, Enabled: true},
-					collectionKey: collectionKey,
-				},
-			},
-			apiCollections: map[CollectionKey]*spectypes.ApiCollection{collectionKey: collection},
-		},
+	parser, err := NewGrpcChainParser()
+	if err != nil {
+		panic(err)
 	}
+	parser.SetSpec(spec)
+	return parser
 }
 
 func newStreamingListener(t *testing.T, sender *stubRelaySender) *GrpcChainListener {
@@ -149,7 +159,7 @@ func TestIsGrpcSubscription(t *testing.T) {
 
 	streaming, err := parser.ParseMsg(streamingApiName, []byte("{}"), "", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
-	require.True(t, IsGrpcSubscription(streaming), "an API marked subscription:true must classify as streaming")
+	require.True(t, IsGrpcSubscription(streaming), "an API carrying a SUBSCRIBE directive must classify as streaming")
 
 	unary, err := parser.ParseMsg(unaryApiName, []byte("{}"), "", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
@@ -158,53 +168,57 @@ func TestIsGrpcSubscription(t *testing.T) {
 	require.False(t, IsGrpcSubscription(nil), "a nil message must not classify as streaming")
 }
 
-// TestIsGrpcSubscription_OnlyGrpcInterface keeps the flag scoped to gRPC. WebSocket
-// subscriptions are identified by the SUBSCRIBE function tag and must stay that way.
+// TestIsGrpcSubscription_OnlyGrpcInterface keeps the check scoped to gRPC. The same
+// SUBSCRIBE tag marks WebSocket subscriptions, and those belong to the WS path — a
+// jsonrpc eth_subscribe must not be mistaken for a gRPC stream.
 func TestIsGrpcSubscription_OnlyGrpcInterface(t *testing.T) {
-	collectionKey := CollectionKey{ConnectionType: ""}
-	parser := &JsonRPCChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: "eth_subscribe", ConnectionType: ""}: {
-					api:           &spectypes.Api{Name: "eth_subscribe", Enabled: true, Category: spectypes.SpecCategory{Subscription: true}},
-					collectionKey: collectionKey,
-				},
-			},
-			apiCollections: map[CollectionKey]*spectypes.ApiCollection{collectionKey: {
-				Enabled:        true,
-				CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceJsonRPC},
-			}},
-		},
-	}
-	message, err := parser.ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`), "", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	raw := `{
+      "index": "ETH1", "name": "Ethereum", "enabled": true, "average_block_time": 13000,
+      "api_collections": [{
+        "enabled": true,
+        "collection_data": {"api_interface": "jsonrpc", "internal_path": "", "type": "POST", "add_on": ""},
+        "apis": [{"name": "eth_subscribe", "enabled": true, "compute_units": 10,
+                  "category": {"deterministic": false, "stateful": 0}}],
+        "parse_directives": [{"function_tag": "SUBSCRIBE", "api_name": "eth_subscribe"}]
+      }]
+    }`
+	var spec spectypes.Spec
+	require.NoError(t, json.Unmarshal([]byte(raw), &spec))
+	parser, err := NewJrpcChainParser()
 	require.NoError(t, err)
-	require.False(t, IsGrpcSubscription(message), "the flag is gRPC-scoped; jsonrpc keeps using the SUBSCRIBE tag")
+	parser.SetSpec(spec)
+
+	message, err := parser.ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`), "POST", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	require.True(t, IsFunctionTagOfType(message, spectypes.FUNCTION_TAG_SUBSCRIBE), "the WS path must still see its own SUBSCRIBE tag")
+	require.False(t, IsGrpcSubscription(message), "IsGrpcSubscription is gRPC-scoped; a jsonrpc subscribe is not one")
 }
 
-// TestHasSubscriptionApis decides whether the listener installs the streaming callback
-// at all. Getting it wrong in one direction costs a wasted parse on every request; in
-// the other it silently disables streaming for a chain that needs it.
-func TestHasSubscriptionApis(t *testing.T) {
-	require.True(t, grpcParserWithSubscription().HasSubscriptionApis(),
-		"a spec declaring a subscription must enable the streaming callback")
+// TestSpecSubscriptionTagGatesStreamingCallback covers the boot-time question that
+// decides whether the listener installs the streaming callback at all. Getting it
+// wrong in one direction costs a wasted parse on every request; in the other it
+// silently disables streaming for a chain that needs it.
+func TestSpecSubscriptionTagGatesStreamingCallback(t *testing.T) {
+	_, _, found := grpcParserWithSubscription().GetParsingByTag(spectypes.FUNCTION_TAG_SUBSCRIBE)
+	require.True(t, found, "a spec carrying a SUBSCRIBE directive must enable the streaming callback")
 
-	collectionKey := CollectionKey{ConnectionType: ""}
-	unaryOnly := &GrpcChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: unaryApiName, ConnectionType: ""}: {
-					api:           &spectypes.Api{Name: unaryApiName, Enabled: true},
-					collectionKey: collectionKey,
-				},
-			},
-			apiCollections: map[CollectionKey]*spectypes.ApiCollection{collectionKey: {
-				Enabled:        true,
-				CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGrpc},
-			}},
-		},
-	}
-	require.False(t, unaryOnly.HasSubscriptionApis(),
-		"a spec with no subscriptions must not pay the per-request parse")
+	raw := `{
+      "index": "COSMOSHUB", "name": "Cosmos Hub", "enabled": true, "average_block_time": 6000,
+      "api_collections": [{
+        "enabled": true,
+        "collection_data": {"api_interface": "grpc", "internal_path": "", "type": "", "add_on": ""},
+        "apis": [{"name": "` + unaryApiName + `", "enabled": true, "compute_units": 10,
+                  "category": {"deterministic": true, "stateful": 0}}]
+      }]
+    }`
+	var spec spectypes.Spec
+	require.NoError(t, json.Unmarshal([]byte(raw), &spec))
+	unaryOnly, err := NewGrpcChainParser()
+	require.NoError(t, err)
+	unaryOnly.SetSpec(spec)
+
+	_, _, found = unaryOnly.GetParsingByTag(spectypes.FUNCTION_TAG_SUBSCRIBE)
+	require.False(t, found, "a spec with no subscriptions must not pay the per-request parse")
 }
 
 // TestStreamRelayCallback_StreamsSubscription is the wiring MAG-2643 was opened for:
