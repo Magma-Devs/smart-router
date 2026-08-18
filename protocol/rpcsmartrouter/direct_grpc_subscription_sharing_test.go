@@ -183,6 +183,30 @@ func TestGRPCManagerStop_AfterLastClientLeft(t *testing.T) {
 	require.NotPanics(t, fixture.manager.Stop, "shutdown must tolerate a subscription whose last client already left")
 }
 
+// TestGRPCSubscription_SendsRequestEvenWhenEmpty covers a bug found by running this
+// against a live Sui testnet node: SubscribeCheckpoints with no options is an
+// all-default request, which marshals to zero bytes. The initial send was skipped on
+// that basis, so the stream half-closed without ever sending a request message and the
+// upstream failed the whole call with "Internal: Missing request message".
+//
+// Empty is a valid message, not an absent one. The fake upstream only signals once its
+// RecvMsg succeeds, so a skipped send shows up here as a stream that never opens.
+func TestGRPCSubscription_SendsRequestEvenWhenEmpty(t *testing.T) {
+	upstream := startFakeStreamingUpstream(t)
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	defer manager.Stop()
+
+	message := newGrpcSubscriptionMessageWithRequest(t, nil)
+
+	_, replies, err := manager.StartSubscription(context.Background(), message, "dapp", "1.1.1.1", "conn-1", nil)
+	require.NoError(t, err)
+	requireUpstreamStreamOpened(t, upstream)
+
+	upstream.messages <- marshalStreamPayload(t, "checkpoint-1")
+	require.Equal(t, "checkpoint-1", awaitStreamPayload(t, replies),
+		"an empty request must still open a working stream")
+}
+
 // --- harness ----------------------------------------------------------------
 
 // fakeStreamingUpstream serves any method as a server stream, pushing whatever the test
@@ -274,6 +298,12 @@ func streamingMethodDescriptor(t *testing.T) *desc.MethodDescriptor {
 // newGrpcSubscriptionMessage builds a real gRPC chain message through the production
 // parser, with the API declared `"subscription": true` the way a spec would.
 func newGrpcSubscriptionMessage(t *testing.T) chainlib.ChainMessage {
+	return newGrpcSubscriptionMessageWithRequest(t, []byte("{}"))
+}
+
+// newGrpcSubscriptionMessageWithRequest is the same, with control over the request
+// payload — an empty one is the ordinary case for a no-options subscribe.
+func newGrpcSubscriptionMessageWithRequest(t *testing.T, requestData []byte) chainlib.ChainMessage {
 	t.Helper()
 
 	parser, err := chainlib.NewChainParser(spectypes.APIInterfaceGrpc)
@@ -294,7 +324,7 @@ func newGrpcSubscriptionMessage(t *testing.T) chainlib.ChainMessage {
 		}},
 	})
 
-	message, err := parser.ParseMsg(streamingMethodPath, []byte("{}"), "", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	message, err := parser.ParseMsg(streamingMethodPath, requestData, "", nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	require.True(t, chainlib.IsGrpcSubscription(message), "the fixture must classify as a gRPC subscription")
 	return message
