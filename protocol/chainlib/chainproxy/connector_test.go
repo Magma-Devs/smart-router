@@ -210,7 +210,7 @@ func TestConnectorGrpc(t *testing.T) {
 	server := createGRPCServer(t) // create a grpcServer so we can connect to its endpoint and validate everything works.
 	defer server.Stop()
 	ctx := context.Background()
-	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	conn, err := NewGRPCConnector(ctx, ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
 	require.NoError(t, err)
 	for { // wait for the routine to finish connecting
 		if conn.numberOfFreeClients() == numberOfClients {
@@ -237,7 +237,7 @@ func TestConnectorGrpcAndInvoke(t *testing.T) {
 	server := createGRPCServerWithRegisteredProto(t) // create a grpcServer so we can connect to its endpoint and validate everything works.
 	defer server.Stop()
 	ctx := context.Background()
-	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	conn, err := NewGRPCConnector(ctx, ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
 	require.NoError(t, err)
 	for { // wait for the routine to finish connecting
 		if conn.numberOfFreeClients() == numberOfClients {
@@ -286,7 +286,7 @@ func TestConnectorPoolSurvivesProbeCancellation(t *testing.T) {
 	defer server.Stop()
 
 	ctx := context.Background()
-	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	conn, err := NewGRPCConnector(ctx, ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
 	require.NoError(t, err)
 	for { // wait for the async fill goroutine to finish populating the pool
 		if conn.numberOfFreeClients() == numberOfClients {

@@ -22,7 +22,7 @@ func TestGRPCConnectorGetRpcAfterCloseReturnsError(t *testing.T) {
 	defer server.Stop()
 
 	ctx := context.Background()
-	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	conn, err := NewGRPCConnector(ctx, ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
 	require.NoError(t, err)
 
 	conn.Close()
@@ -107,7 +107,7 @@ func TestGRPCConnectorCloseDrainsBorrowedClient(t *testing.T) {
 	defer server.Stop()
 
 	ctx := context.Background()
-	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	conn, err := NewGRPCConnector(ctx, ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
 	require.NoError(t, err)
 
 	rpc, err := conn.GetRpc(ctx, true)
@@ -140,39 +140,90 @@ func TestGRPCConnectorCloseDrainsBorrowedClient(t *testing.T) {
 		"a client returned to a closing connector must be dropped, not pooled")
 }
 
-// TestGRPCConnectorLifetimeIsItsConstructorContext pins the contract that made
-// MAG-2808's second failure possible: the context handed to NewGRPCConnector is
-// the connector's LIFETIME, not merely a dial deadline. addClientsAsynchronouslyGrpc
-// ends with `go connectorLoop(ctx)`, and connectorLoop is `<-ctx.Done(); Close()`.
+// TestGRPCConnectorLifetimeIsItsLifetimeContext pins the contract that made
+// MAG-2808's second failure possible: one of NewGRPCConnector's contexts is the
+// connector's LIFETIME. addClientsAsynchronouslyGrpc ends with
+// `go connectorLoop(lifetimeCtx)`, and connectorLoop is `<-ctx.Done(); Close()`.
 //
 // Nothing covered this. Every other test here builds a connector and calls Close()
 // on it directly, never reaching connectorLoop — so a caller that passed a
 // request-scoped context, as the direct-RPC path did, tore its own pool down on
-// every relay with no test noticing. Callers must pass a context that lives as
-// long as the pool should; see lavasession.newGRPCDirectRPCConnection.
-func TestGRPCConnectorLifetimeIsItsConstructorContext(t *testing.T) {
+// every relay with no test noticing.
+func TestGRPCConnectorLifetimeIsItsLifetimeContext(t *testing.T) {
 	server := createGRPCServer(t)
 	defer server.Stop()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	lifetimeCtx, endLifetime := context.WithCancel(context.Background())
+	conn, err := NewGRPCConnector(lifetimeCtx, context.Background(), numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
 	require.NoError(t, err)
 	defer conn.Close()
 
-	rpc, err := conn.GetRpc(ctx, true)
+	rpc, err := conn.GetRpc(context.Background(), true)
 	require.NoError(t, err)
 	conn.ReturnRpc(rpc)
 
-	cancel()
+	endLifetime()
 
 	require.Eventually(t, conn.isClosed, 10*time.Second, 5*time.Millisecond,
-		"connectorLoop must close the connector when its constructor context ends")
+		"connectorLoop must close the connector when its lifetime context ends")
 
 	// And the closure is permanent, which is what turns a caller's short-lived
 	// context from a wasteful re-dial into a dead endpoint.
 	rpc, err = conn.GetRpc(context.Background(), true)
 	require.Nil(t, rpc)
 	require.ErrorIs(t, err, ErrGRPCConnectorClosed)
+}
+
+// TestGRPCConnectorDialContextDoesNotEndTheConnector is the other half of that
+// contract, and the reason the two contexts are separate at all.
+//
+// dialCtx exists to bound the caller's wait on the one blocking dial in
+// NewGRPCConnector. It is the caller's own context — on the direct-RPC path, a
+// single relay's — so it ends almost immediately. If it reached connectorLoop or
+// the async fill, the pool would die with that caller, which is exactly the bug.
+func TestGRPCConnectorDialContextDoesNotEndTheConnector(t *testing.T) {
+	server := createGRPCServer(t)
+	defer server.Stop()
+
+	dialCtx, endDial := context.WithCancel(context.Background())
+	conn, err := NewGRPCConnector(context.Background(), dialCtx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	endDial() // the caller that built the pool has returned
+
+	// A regressed implementation closes within microseconds of the cancellation,
+	// so it loses this by the full margin rather than by a hair.
+	time.Sleep(100 * time.Millisecond)
+
+	require.False(t, conn.isClosed(), "the dial context must not end the connector")
+	rpc, err := conn.GetRpc(context.Background(), true)
+	require.NoError(t, err, "the pool must outlive the caller that dialed it")
+	conn.ReturnRpc(rpc)
+}
+
+// TestGRPCConnectorDialContextBoundsTheBlockingDial is the point of restoring a
+// caller deadline: NewGRPCConnector's first dial runs in the caller's critical
+// path, and createConnection retries it up to
+// MaximumNumberOfParallelConnectionsAttempts times at AverageWorldLatency*2 each
+// (doubling again on the TLS-upgrade retry). Against a dead address that is
+// several seconds of a relay's life, and — because the direct-RPC layer holds
+// initMu across this call — several seconds for every relay queued behind it too.
+//
+// With only a lifetime context to dial under, this test takes the full budget.
+func TestGRPCConnectorDialContextBoundsTheBlockingDial(t *testing.T) {
+	dialCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	// Port 1 is never listened on. WithBlock keeps retrying rather than failing on
+	// the first refusal, so the dial runs until a deadline stops it.
+	_, err := NewGRPCConnector(context.Background(), dialCtx, 1, common.NodeUrl{Url: "127.0.0.1:1"})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Less(t, elapsed, 2*time.Second,
+		"the blocking dial must honour the caller's deadline, not createConnection's full retry budget")
 }
 
 // TestGRPCConnectorReturnRpcNilStillDecrements covers the defensive branch in
@@ -184,7 +235,7 @@ func TestGRPCConnectorReturnRpcNilStillDecrements(t *testing.T) {
 	defer server.Stop()
 
 	ctx := context.Background()
-	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	conn, err := NewGRPCConnector(ctx, ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
 	require.NoError(t, err)
 
 	rpc, err := conn.GetRpc(ctx, true)
@@ -216,7 +267,7 @@ func TestGRPCConnectorRefillAfterCloseIsDropped(t *testing.T) {
 	defer server.Stop()
 
 	ctx := context.Background()
-	conn, err := NewGRPCConnector(ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
+	conn, err := NewGRPCConnector(ctx, ctx, numberOfClients, common.NodeUrl{Url: listenerAddressGrpc})
 	require.NoError(t, err)
 	conn.Close()
 

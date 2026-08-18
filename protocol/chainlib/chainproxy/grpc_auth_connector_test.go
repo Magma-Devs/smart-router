@@ -92,7 +92,7 @@ func TestGRPCConnector_SendsAuthHeadersOnUnaryCall(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	connector, err := NewGRPCConnector(ctx, 1, common.NodeUrl{
+	connector, err := NewGRPCConnector(ctx, ctx, 1, common.NodeUrl{
 		Url:        addr,
 		AuthConfig: common.AuthConfig{AuthHeaders: map[string]string{"Authorization": "Bearer unit-test-token"}},
 	})
@@ -126,7 +126,7 @@ func TestGRPCConnector_SendsAuthHeadersOnReflection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	connector, err := NewGRPCConnector(ctx, 1, common.NodeUrl{
+	connector, err := NewGRPCConnector(ctx, ctx, 1, common.NodeUrl{
 		Url:        addr,
 		AuthConfig: common.AuthConfig{AuthHeaders: map[string]string{"Authorization": "Bearer reflect-token"}},
 	})
@@ -157,7 +157,7 @@ func TestGRPCConnector_NoAuthHeadersSendsNone(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	connector, err := NewGRPCConnector(ctx, 1, common.NodeUrl{Url: addr})
+	connector, err := NewGRPCConnector(ctx, ctx, 1, common.NodeUrl{Url: addr})
 	if err != nil {
 		t.Fatalf("NewGRPCConnector: %v", err)
 	}
