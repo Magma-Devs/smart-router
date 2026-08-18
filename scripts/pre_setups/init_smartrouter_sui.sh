@@ -9,12 +9,11 @@
 #  1. SUI is not bundled in this repo's specs/ directory. The spec is fetched
 #     from magma-Devs/lava-specs at run time into a local, gitignored directory.
 #
-#  2. That fetched spec is PATCHED before use. sui.json declares Sui's three
-#     SubscriptionService methods as ordinary APIs, with no SUBSCRIBE parse
-#     directive, so the router cannot know they are server streaming without
-#     asking the upstream. Streaming is served off that directive, so without
-#     the patch the router refuses these methods rather than streaming them.
-#     See the SPEC PATCH section below.
+#  2. That fetched spec is PATCHED before use — a no-op against current
+#     lava-specs, kept as a safety net. Streaming is served off the SUBSCRIBE
+#     parse directive; lava-specs#115 added it for Sui's three
+#     SubscriptionService methods, so a fresh fetch already has it. The patch
+#     only bites on an older snapshot, where it prevents a confusing refusal.
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 source "$__dir"/../useful_commands.sh
 . "${__dir}"/../vars/variables.sh
@@ -32,7 +31,13 @@ PROJECT_ROOT=$(cd ${__dir}/../.. && pwd)
 # like the other pre-setup scripts. This one renders SUI_GRPC_API_KEY into the
 # node-url auth-headers, and a rendered config carrying a secret must not sit in
 # a tracked directory (AGENTS.md, security rules).
-CONFIG_FILE="$PROJECT_ROOT/debugging/smartrouter_sui.yml"
+CONFIG_REL="debugging/smartrouter_sui.yml"
+CONFIG_FILE="$PROJECT_ROOT/$CONFIG_REL"
+
+# The router resolves its config argument with viper.SetConfigName plus a search
+# path of "." and "./config", so the argument is a NAME looked up under those —
+# an absolute path is searched for *inside* them and never resolves. Every
+# pre-setup script therefore cds to the project root and passes a relative path.
 
 # Specs are fetched here rather than into specs/, which holds only the bundled set.
 SPECS_DIR="$PROJECT_ROOT/debugging/specs_sui"
@@ -123,16 +128,18 @@ fi
 # the lookup failed, returning a truncated stream after the full timeout instead
 # of refusing (MAG-2643).
 #
-# As of this writing sui.json has no SUBSCRIBE directive for any of:
+# lava-specs#115 added that directive for all three of:
 #   sui.rpc.v2.SubscriptionService/SubscribeCheckpoints
 #   sui.rpc.v2.SubscriptionService/SubscribeEvents
 #   sui.rpc.v2.SubscriptionService/SubscribeTransactions
 #
-# Unpatched, the router refuses them with a message naming this exact fix, which
-# is the correct safe behaviour but is not what we want to demonstrate here.
-# The real fix belongs upstream in lava-specs; this patch is local to the test.
+# so a fresh fetch needs nothing and this reports "already patched". It stays as
+# a safety net for a pinned or cached snapshot from before that landed: without
+# the directive the router refuses these methods — correct and safe, but not what
+# this script is here to demonstrate. It also sets hanging_api on them, which the
+# spec does not, keeping an unbounded stream out of latency scoring.
 echo ""
-echo "Patching sui.json: adding SUBSCRIBE directives for SubscriptionService..."
+echo "Checking sui.json for the SUBSCRIBE directives streaming needs..."
 python3 - "$SPEC_FILE" <<'PYEOF'
 import json, sys
 
@@ -177,15 +184,20 @@ echo ""
 #
 # Sui gRPC endpoints. SUIT is the Sui Testnet spec (SUI = mainnet, SUID = devnet).
 #
-#   export SUI_GRPC_URL_1="grpcs://sui-testnet-grpc.gateway.tatum.io:443"
-#   export SUI_GRPC_URL_2="grpcs://fullnode.testnet.sui.io:443"
+# The default is Sui's own public testnet fullnode, because it works out of the
+# box: it answers unary calls AND streams SubscribeCheckpoints anonymously.
 #
-# NOTE on the Tatum gateway: unary methods answer anonymously, but
-# SubscribeCheckpoints returns Unauthenticated without a key:
-#   "Method is not available for anonymous access."
-# So streaming against Tatum needs a key. It is sent as the x-api-key gRPC
-# metadata header on every call, via the node-url's auth-config.
-export SUI_GRPC_URL_1="${SUI_GRPC_URL_1:-grpcs://sui-testnet-grpc.gateway.tatum.io:443}"
+# The Tatum gateway is supported but is NOT the default, for two reasons found by
+# running it: its free tier allows 5 requests per minute, which the router's own
+# startup probing exhausts before you can issue a call (every request then comes
+# back 429), and SubscribeCheckpoints refuses anonymous access outright
+# ("Method is not available for anonymous access"). To use it, supply a key:
+#
+#   export SUI_GRPC_URL_1="grpcs://sui-testnet-grpc.gateway.tatum.io:443"
+#   export SUI_GRPC_API_KEY="<your tatum key>"
+#
+# The key is sent as the x-api-key gRPC metadata header via auth-config.
+export SUI_GRPC_URL_1="${SUI_GRPC_URL_1:-grpcs://fullnode.testnet.sui.io:443}"
 export SUI_GRPC_URL_2="${SUI_GRPC_URL_2:-}"
 export SUI_GRPC_URL_3="${SUI_GRPC_URL_3:-}"
 # Optional backup endpoint — emitted under `backup-direct-rpc:` only when set.
@@ -246,7 +258,7 @@ echo "  Endpoint 1: ${SUI_GRPC_URL_1:0:60}..."
 if [[ -n "$SUI_GRPC_API_KEY_1" ]]; then
     echo "  API key 1:  set (sent to endpoint 1 as x-api-key)"
 else
-    echo "  API key 1:  NOT set — unary will work, streaming may be refused"
+    echo "  API key 1:  none (the default endpoint needs none)"
 fi
 [[ -n "$SUI_GRPC_API_KEY_2" ]] && echo "  API key 2:  set"
 [[ -n "$SUI_GRPC_API_KEY_3" ]] && echo "  API key 3:  set"
@@ -307,12 +319,12 @@ echo "   - Mode: DIRECT RPC"
 echo "   - Protocol: gRPC over HTTP/2 (TLS)"
 echo "   - Streaming: gRPC server-streaming subscriptions"
 echo "   - Cache: Enabled (127.0.0.1:20100)"
-echo "   - Specs: $SPEC_FILE (patched)"
+echo "   - Specs: $SPECS_DIR"
 echo "   - Listen: 0.0.0.0:3370"
 echo ""
 
 screen -d -m -S smartrouter bash -c "cd $PROJECT_ROOT && source ~/.bashrc; smartrouter \
-$CONFIG_FILE \
+$CONFIG_REL \
 --log-level debug \
 --cache-be \"127.0.0.1:20100\" \
 --use-static-spec $SPECS_DIR \
@@ -384,6 +396,11 @@ echo ""
 echo "  # 4. Subscribe to checkpoints — this is the streaming path."
 echo "  #    Expect a continuous stream of messages, NOT a single reply."
 echo "  #    Ctrl-C to stop; the router releases the upstream subscription."
+echo "  #"
+echo "  #    The FIRST subscribe after startup takes a few seconds: the method"
+echo "  #    descriptor is fetched from the upstream by reflection and cached."
+echo "  #    Do not pass a short -max-time on that first call or it will look"
+echo "  #    like an empty stream. Later subscribes start immediately."
 echo "  grpcurl -plaintext -d '{}' 127.0.0.1:3370 \\"
 echo "    sui.rpc.v2.SubscriptionService/SubscribeCheckpoints"
 echo ""
@@ -400,13 +417,17 @@ echo "  # 7. Response headers carry the router's subscription id:"
 echo "  grpcurl -plaintext -v -d '{}' 127.0.0.1:3370 \\"
 echo "    sui.rpc.v2.SubscriptionService/SubscribeCheckpoints 2>&1 | grep -i sub-id"
 echo ""
-if [[ -z "$SUI_GRPC_API_KEY_1" ]]; then
-echo "  NOTE: no API key is set for endpoint 1. The Tatum gateway refuses"
-echo "        SubscribeCheckpoints anonymously (Unauthenticated), though unary"
-echo "        calls still answer. Either export SUI_GRPC_API_KEY=<your key>, or"
-echo "        point SUI_GRPC_URL_1 at an endpoint that streams without one."
+case "$SUI_GRPC_URL_1" in
+  *tatum*)
+    if [[ -z "$SUI_GRPC_API_KEY_1" ]]; then
+echo "  WARNING: endpoint 1 is a Tatum gateway with no API key set. Its free"
+echo "           tier caps at 5 requests/minute — the router's startup probing"
+echo "           alone exceeds that, so calls come back 429 — and it refuses"
+echo "           SubscribeCheckpoints anonymously. Set SUI_GRPC_API_KEY."
 echo ""
-fi
+    fi
+    ;;
+esac
 echo "============================================"
 echo "WHAT TO LOOK FOR IN LOGS"
 echo "============================================"
