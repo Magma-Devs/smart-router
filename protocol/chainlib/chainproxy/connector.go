@@ -177,7 +177,19 @@ type GRPCConnector struct {
 	usedClients int64
 	credentials credentials.TransportCredentials
 	nodeUrl     common.NodeUrl
+
+	// closed is set by Close and never cleared. Unlike the HTTP Connector's atomic
+	// flag it is guarded by lock, because every reader already holds lock: that
+	// makes "is the pool alive" and "take a client" a single atomic step, which a
+	// separate atomic could not guarantee.
+	closed bool
 }
+
+// ErrGRPCConnectorClosed is returned by GetRpc once Close has run. The HTTP
+// Connector has always reported this; GRPCConnector had no closed state at all,
+// so callers racing a Close either blocked forever on a pool that would never
+// refill or had their retry goroutines repopulate it (MAG-2808).
+var ErrGRPCConnectorClosed = errors.New("grpc connector is closed")
 
 func NewGRPCConnector(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (*GRPCConnector, error) {
 	NumberOfParallelConnections = nConns // set number of parallel connections requested by user (or default.)
@@ -268,6 +280,9 @@ func (connector *GRPCConnector) getTransportCredentials() grpc.DialOption {
 func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, numberOfFreeClients int) {
 	utils.LavaFormatDebug("increasing number of clients", utils.Attribute{Key: "numberOfFreeClients", Value: numberOfFreeClients},
 		utils.Attribute{Key: "url", Value: connector.nodeUrl.Url})
+	if connector.isClosed() {
+		return // the pool is being torn down; dialing now would only resurrect it
+	}
 	var grpcClient *grpc.ClientConn
 	var err error
 	for connectionAttempt := 0; connectionAttempt < MaximumNumberOfParallelConnectionsAttempts; connectionAttempt++ {
@@ -282,6 +297,13 @@ func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, num
 
 		connector.lock.Lock() // add connection to free list.
 		defer connector.lock.Unlock()
+		if connector.closed {
+			// Close drained the pool while this dial was in flight. Appending now
+			// would hand a live client to a closed connector that nobody will ever
+			// borrow from again, so close it here instead.
+			grpcClient.Close()
+			return
+		}
 		connector.freeClients = append(connector.freeClients, grpcClient)
 		return
 	}
@@ -292,6 +314,10 @@ func (connector *GRPCConnector) GetRpc(ctx context.Context, block bool) (*grpc.C
 	connector.lock.Lock()
 	defer connector.lock.Unlock()
 
+	if connector.closed {
+		return nil, ErrGRPCConnectorClosed
+	}
+
 	numberOfFreeClients := len(connector.freeClients)
 	if numberOfFreeClients <= int(connector.usedClients) { // if we reached half of the free clients start creating new connections
 		go connector.increaseNumberOfClients(ctx, numberOfFreeClients) // increase asynchronously the free list.
@@ -300,18 +326,35 @@ func (connector *GRPCConnector) GetRpc(ctx context.Context, block bool) (*grpc.C
 	if numberOfFreeClients == 0 {
 		if !block {
 			return nil, errors.New("out of clients")
-		} else {
-			for {
-				connector.lock.Unlock()
-				// if we reached 0 connections we need to create more connections
-				// before sleeping, increase asynchronously the free list.
-				go connector.increaseNumberOfClients(ctx, numberOfFreeClients)
-				time.Sleep(50 * time.Millisecond)
-				connector.lock.Lock()
-				numberOfFreeClients = len(connector.freeClients)
-				if numberOfFreeClients != 0 {
-					break
-				}
+		}
+		// Wait for the async fill to produce a client. Both exits below are new:
+		// this loop used to spin unconditionally, so a caller waiting on a pool
+		// that would never refill was stuck forever even after its context was
+		// cancelled, and the goroutines it kept spawning could repopulate a pool
+		// Close had just drained (MAG-2808).
+		for {
+			connector.lock.Unlock()
+			// if we reached 0 connections we need to create more connections
+			// before sleeping, increase asynchronously the free list.
+			go connector.increaseNumberOfClients(ctx, numberOfFreeClients)
+
+			var ctxDone bool
+			select {
+			case <-ctx.Done():
+				ctxDone = true
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			connector.lock.Lock()
+			if ctxDone {
+				return nil, fmt.Errorf("waiting for a free grpc client: %w", ctx.Err())
+			}
+			if connector.closed {
+				return nil, ErrGRPCConnectorClosed
+			}
+			numberOfFreeClients = len(connector.freeClients)
+			if numberOfFreeClients != 0 {
+				break
 			}
 		}
 	}
@@ -328,6 +371,15 @@ func (connector *GRPCConnector) ReturnRpc(rpc *grpc.ClientConn) {
 	defer connector.lock.Unlock()
 
 	connector.usedClients--
+	if connector.closed {
+		// Close is blocked waiting for usedClients to reach zero, so the decrement
+		// above must happen either way. Drop the conn rather than appending it to a
+		// pool that is being torn down, which would leave a live client behind.
+		if rpc != nil {
+			rpc.Close()
+		}
+		return
+	}
 	if len(connector.freeClients) > (int(connector.usedClients) + int(NumberOfParallelConnections) /* the number we started with */) {
 		rpc.Close() // close connection
 		return      // return without appending back to decrease idle connections
@@ -344,6 +396,11 @@ func (connector *GRPCConnector) connectorLoop(ctx context.Context) {
 func (connector *GRPCConnector) Close() {
 	for i := 0; ; i++ {
 		connector.lock.Lock()
+		// Mark closed under the same lock GetRpc, ReturnRpc and
+		// increaseNumberOfClients take. From here on no client can be handed out
+		// and no in-flight dial can refill the pool we are about to drain, so the
+		// usedClients wait below is guaranteed to make progress.
+		connector.closed = true
 		for i := 0; i < len(connector.freeClients); i++ {
 			connector.freeClients[i].Close()
 		}
@@ -364,6 +421,9 @@ func (connector *GRPCConnector) Close() {
 
 func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector, nConns uint, nodeUrl common.NodeUrl) {
 	for i := uint(0); i < nConns; i++ {
+		if connector.isClosed() {
+			break // Close is draining; further dials would only be thrown away
+		}
 		rpcClient, err := connector.createConnection(ctx, nodeUrl, connector.numberOfFreeClients())
 		if err != nil {
 			break
@@ -371,7 +431,14 @@ func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector,
 		connector.addClient(rpcClient)
 	}
 	if (connector.numberOfFreeClients() + connector.numberOfUsedClients()) == 0 {
-		if ctx.Err() != nil {
+		if connector.isClosed() {
+			// A connector closed this early legitimately has no clients — Close
+			// drained them. Reaching the fatal below would turn an ordinary
+			// teardown during startup into a process exit.
+			utils.LavaFormatWarning("gRPC connector closed before the async fill finished", nil,
+				utils.LogAttr("address", nodeUrl.UrlStr()),
+			)
+		} else if ctx.Err() != nil {
 			// Probe-scoped ctx (validateProvider, etc.) was cancelled before
 			// the async fill produced any client. Caller will treat the
 			// returned error as a probe failure; the process must not exit.
@@ -393,7 +460,20 @@ func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector,
 func (connector *GRPCConnector) addClient(client *grpc.ClientConn) {
 	connector.lock.Lock()
 	defer connector.lock.Unlock()
+	if connector.closed {
+		// The startup fill is still running while Close drains. Appending here
+		// would refill the pool behind Close's back, exactly as the retry path in
+		// increaseNumberOfClients could (MAG-2808).
+		client.Close()
+		return
+	}
 	connector.freeClients = append(connector.freeClients, client)
+}
+
+func (connector *GRPCConnector) isClosed() bool {
+	connector.lock.RLock()
+	defer connector.lock.RUnlock()
+	return connector.closed
 }
 
 func (connector *GRPCConnector) numberOfFreeClients() int {
