@@ -8,12 +8,11 @@ import (
 )
 
 // WSSubscriptionManager defines the interface for WebSocket subscription management.
-// This interface is implemented by both:
-//   - ConsumerWSSubscriptionManager: routes subscriptions through Lava providers
-//   - DirectWSSubscriptionManager: connects directly to RPC endpoints (for smart router)
+// Implemented by:
+//   - DirectWSSubscriptionManager: connects directly to the configured RPC endpoints
+//   - NoOpWSSubscriptionManager: refuses, for a chain with no WebSocket endpoint
 //
-// The interface enables the chain listener to work with either implementation,
-// supporting both provider-based and direct RPC subscription models.
+// The gRPC counterpart is GRPCSubscriptionManager.
 type WSSubscriptionManager interface {
 	// StartSubscription starts a new WebSocket subscription or joins an existing one.
 	// If a subscription with the same parameters already exists, the client joins it
@@ -34,8 +33,8 @@ type WSSubscriptionManager interface {
 
 	// Unsubscribe handles an explicit unsubscribe request from a client.
 	// The subscription ID is extracted from the protocolMessage.
-	// Returns the node's response bytes when available (e.g. DirectWS streams actual node response);
-	// returns nil when the implementation does not provide a response (e.g. provider relay path).
+	// Returns the node's response bytes when available (DirectWS streams the actual node
+	// response); returns nil when the implementation has no response to hand back.
 	Unsubscribe(
 		ctx context.Context,
 		protocolMessage ProtocolMessage,

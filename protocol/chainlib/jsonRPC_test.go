@@ -227,7 +227,7 @@ func TestAddonAndVerifications(t *testing.T) {
 		collectionType := verification.ConnectionType
 		chainMessage, err := CraftChainMessage(parsing, collectionType, chainParser, nil, nil)
 		require.NoError(t, err)
-		reply, _, _, _, _, err := chainRouter.SendNodeMsg(ctx, nil, chainMessage, []string{verification.Extension})
+		reply, _, _, err := chainRouter.SendNodeMsg(ctx, chainMessage, []string{verification.Extension})
 		require.NoError(t, err)
 		_, err = FormatResponseForParsing(reply.RelayReply, chainMessage)
 		require.NoError(t, err)
@@ -367,7 +367,7 @@ func TestJsonRpcBatchCall(t *testing.T) {
 	requestedBlock, _ := chainMessage.RequestedBlock()
 	require.Equal(t, spectypes.LATEST_BLOCK, requestedBlock)
 
-	relayReply, _, _, _, _, err := chainProxy.SendNodeMsg(ctx, nil, chainMessage, nil)
+	relayReply, _, _, err := chainProxy.SendNodeMsg(ctx, chainMessage, nil)
 	require.True(t, gotCalled)
 	require.NoError(t, err)
 	require.NotNil(t, relayReply)
@@ -481,7 +481,7 @@ func TestJsonRpcBatchCallSameID(t *testing.T) {
 	require.NoError(t, err)
 	requestedBlock, _ := chainMessage.RequestedBlock()
 	require.Equal(t, spectypes.LATEST_BLOCK, requestedBlock)
-	relayReply, _, _, _, _, err := chainProxy.SendNodeMsg(ctx, nil, chainMessage, nil)
+	relayReply, _, _, err := chainProxy.SendNodeMsg(ctx, chainMessage, nil)
 	require.True(t, gotCalled)
 	require.NoError(t, err)
 	require.NotNil(t, relayReply)

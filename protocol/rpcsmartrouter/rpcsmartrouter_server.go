@@ -263,9 +263,8 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// and the "keeping up" tolerance must match consistency pre-validation's per-chain threshold.
 	go rpcss.runProbeLoop(ctx, validatedProbeCadence(lavasession.ProbeLoopInterval), probeVerdictConfigFor(effectiveBlockTime, rpcss.consistencyConfig))
 
-	// NewChainListener now accepts WSSubscriptionManager interface, which is implemented
-	// by both ConsumerWSSubscriptionManager (provider-relay mode) and
-	// DirectWSSubscriptionManager (direct RPC mode for smart router).
+	// wsSubscriptionManager is DirectWSSubscriptionManager, or the NoOp one when the
+	// chain has no WebSocket endpoint configured.
 	rpcss.chainListener, err = chainlib.NewChainListener(ctx, listenEndpoint, rpcss, rpcss, rpcSmartRouterLogs, chainParser, nil, wsSubscriptionManager)
 	if err != nil {
 		return err
