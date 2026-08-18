@@ -321,6 +321,26 @@ func (connector *GRPCConnector) getTransportCredentials() grpc.DialOption {
 	return grpc.WithTransportCredentials(insecure.NewCredentials())
 }
 
+// grpcDialAddress converts a configured node URL into what grpc.DialContext expects.
+// DialContext takes host:port; the grpc:// / grpcs:// prefixes are a config-time
+// convention enforced by the direct-RPC validator (see
+// protocol/lavasession/direct_rpc_connection.go validateURL). The grpcs:// form also
+// implies TLS.
+//
+// EVERY dial site must go through this. increaseNumberOfClients used to dial the raw
+// configured URL while createConnection stripped the scheme locally, so a grpcs://
+// endpoint opened its first connection and then could never refill its pool: GetRpc
+// spawns a refill every 50ms while a caller waits, each one failed on the unresolvable
+// scheme-prefixed target, and the caller blocked until its context expired. On a
+// one-connection pool whose single client is held for reflection, that is every relay
+// (MAG-2333).
+func grpcDialAddress(url string) (addr string, impliesTLS bool) {
+	if strings.HasPrefix(url, "grpcs://") {
+		return strings.TrimPrefix(url, "grpcs://"), true
+	}
+	return strings.TrimPrefix(url, "grpc://"), false
+}
+
 func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, numberOfFreeClients int) {
 	utils.LavaFormatDebug("increasing number of clients", utils.Attribute{Key: "numberOfFreeClients", Value: numberOfFreeClients},
 		utils.Attribute{Key: "url", Value: connector.nodeUrl.Url})
@@ -331,7 +351,8 @@ func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, num
 	var err error
 	for connectionAttempt := 0; connectionAttempt < MaximumNumberOfParallelConnectionsAttempts; connectionAttempt++ {
 		nctx, cancel := connector.nodeUrl.LowerContextTimeoutWithDuration(ctx, common.AverageWorldLatency*2)
-		grpcClient, err = grpc.DialContext(nctx, connector.nodeUrl.Url, connector.grpcDialOptions(connector.getTransportCredentials())...)
+		dialAddr, _ := grpcDialAddress(connector.nodeUrl.Url)
+		grpcClient, err = grpc.DialContext(nctx, dialAddr, connector.grpcDialOptions(connector.getTransportCredentials())...)
 		if err != nil {
 			utils.LavaFormatDebug("increaseNumberOfClients, Could not connect to the node, retrying", []utils.Attribute{{Key: "err", Value: err.Error()}, {Key: "Number Of Attempts", Value: connectionAttempt}, {Key: "nodeUrl", Value: connector.nodeUrl.UrlStr()}}...)
 			cancel()
@@ -548,17 +569,11 @@ func (connector *GRPCConnector) numberOfUsedClients() int {
 }
 
 func (connector *GRPCConnector) createConnection(ctx context.Context, nodeUrl common.NodeUrl, currentNumberOfConnections int) (*grpc.ClientConn, error) {
-	// grpc.DialContext expects host:port, not a URL with scheme. The grpc:// /
-	// grpcs:// prefixes are a config-time convention enforced by the direct-RPC
-	// validator (see protocol/lavasession/direct_rpc_connection.go validateURL).
-	// When the grpcs:// prefix is present, also auto-enable TLS on the local
-	// nodeUrl copy so config can rely on the scheme alone.
-	addr := nodeUrl.Url
-	if strings.HasPrefix(addr, "grpcs://") {
-		addr = strings.TrimPrefix(addr, "grpcs://")
+	// Auto-enable TLS on the local nodeUrl copy when the scheme implies it, so config
+	// can rely on the scheme alone.
+	addr, impliesTLS := grpcDialAddress(nodeUrl.Url)
+	if impliesTLS {
 		nodeUrl.AuthConfig.UseTLS = true
-	} else if strings.HasPrefix(addr, "grpc://") {
-		addr = strings.TrimPrefix(addr, "grpc://")
 	}
 	var rpcClient *grpc.ClientConn
 	var err error
