@@ -370,14 +370,20 @@ func (connector *GRPCConnector) ReturnRpc(rpc *grpc.ClientConn) {
 	connector.lock.Lock()
 	defer connector.lock.Unlock()
 
+	// The decrement happens on every path below, including the nil handback: Close
+	// is blocked waiting for usedClients to reach zero, so skipping it would leave
+	// teardown spinning forever.
 	connector.usedClients--
+	if rpc == nil {
+		// Defensive — a successful GetRpc never yields nil, and callers must not
+		// hand back what they did not borrow. Checked once here so no path below
+		// dereferences it.
+		return
+	}
 	if connector.closed {
-		// Close is blocked waiting for usedClients to reach zero, so the decrement
-		// above must happen either way. Drop the conn rather than appending it to a
-		// pool that is being torn down, which would leave a live client behind.
-		if rpc != nil {
-			rpc.Close()
-		}
+		// Drop the conn rather than appending it to a pool that is being torn down,
+		// which would leave a live client behind.
+		rpc.Close()
 		return
 	}
 	if len(connector.freeClients) > (int(connector.usedClients) + int(NumberOfParallelConnections) /* the number we started with */) {

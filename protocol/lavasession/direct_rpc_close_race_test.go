@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -148,6 +149,25 @@ func newLoopbackClientConn(t *testing.T) *grpc.ClientConn {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
+}
+
+// startLocalGRPCServer brings up a real gRPC server on a loopback port and
+// returns its host:port.
+//
+// bufconn is not usable here. The one test that needs this goes through the
+// PRODUCTION connector factory on purpose, and chainproxy.NewGRPCConnector dials
+// the node URL itself with no dialer seam. A real listener is the point.
+func startLocalGRPCServer(t *testing.T) string {
+	t.Helper()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	srv := grpc.NewServer()
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	return lis.Addr().String()
 }
 
 func grpcTestHeaders() map[string]string {
@@ -470,4 +490,70 @@ func TestInitialization_ConcurrentWithClose_NeverLeaksConnector(t *testing.T) {
 		}
 		mu.Unlock()
 	}
+}
+
+// TestConnector_OutlivesTheRelayThatInitializedIt is the second MAG-2808 pin, and
+// the one every other test in this file routes around.
+//
+// The pool is built lazily inside the FIRST relay, so initialize() used to hand
+// chainproxy.NewGRPCConnector that relay's context. NewGRPCConnector treats its
+// context as the connector's lifetime — addClientsAsynchronouslyGrpc ends with
+// `go connectorLoop(ctx)`, which is `<-ctx.Done(); connector.Close()` — so the
+// pool died with the relay that happened to build it, and sendGRPCRelay's own
+// `defer cancel()` fired that on every single request.
+//
+// On main that was survivable: Close was a pool drain and the next GetRpc
+// silently re-dialled, costing a reconnect per relay. With the closed flag this
+// PR adds, the same teardown is terminal — every later checkout returns
+// ErrGRPCConnectorClosed and the refill paths discard the dials that would have
+// healed it. endpoint.DirectConnections caches this object for the whole pairing,
+// so the endpoint stays dead until the pairing is rebuilt. That is the direct
+// gRPC path this change exists to protect.
+//
+// Every other test here injects a fake through grpcConnectorFactory and so never
+// constructs a real GRPCConnector; the seam that made this code testable is
+// exactly what hid the defect. This one runs the production factory against a
+// real server.
+func TestConnector_OutlivesTheRelayThatInitializedIt(t *testing.T) {
+	addr := startLocalGRPCServer(t)
+
+	g := newGRPCDirectRPCConnection(common.NodeUrl{
+		Url:        "grpc://" + addr,
+		GrpcConfig: common.GrpcConfig{AllowInsecure: true},
+	})
+	require.Nil(t, g.newConnector, "this test must exercise the production factory")
+	t.Cleanup(func() { _ = g.Close() })
+
+	// Act as sendGRPCRelay does: a per-relay context, cancelled when the relay
+	// returns. The request itself fails at the reflection lookup — the server
+	// registers no services — which is beside the point: initialization has
+	// already happened by then, and that is what we are here for.
+	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	_, err := g.SendRequest(relayCtx, []byte("{}"), grpcTestHeaders())
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrGRPCConnectionClosed, "the first relay must reach a live pool")
+
+	g.connMu.RLock()
+	connector := g.connector
+	g.connMu.RUnlock()
+	require.NotNil(t, connector, "the first relay must have published a connector")
+
+	cancelRelay() // the relay returns
+
+	// connectorLoop acts on cancellation in microseconds, so a regression loses
+	// this by the full margin rather than by a hair.
+	time.Sleep(blockedFor)
+
+	conn, err := connector.GetRpc(context.Background(), true)
+	require.NoError(t, err, "the pool must not die with the relay that built it")
+	connector.ReturnRpc(conn)
+
+	// The other half of the contract: the connector's life must still END, and end
+	// with the connection. Cancelling connectorCtx is also what releases the
+	// connectorLoop goroutine parked on it.
+	require.NoError(t, g.Close())
+	require.ErrorIs(t, g.connectorCtx.Err(), context.Canceled,
+		"Close must end the connector's lifetime context")
+	_, err = connector.GetRpc(context.Background(), true)
+	require.ErrorIs(t, err, chainproxy.ErrGRPCConnectorClosed)
 }

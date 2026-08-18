@@ -169,8 +169,10 @@ type WebSocketDirectRPCConnection struct {
 // Lock order is initMu -> connMu. connMu is never held while acquiring initMu.
 //
 //	initMu  serializes lazy initialization against itself and against Close, so
-//	        registry/codec/descriptorsCache are never written while Close tears
-//	        them down. Those fields have no lock of their own.
+//	        that once Close returns no initializer is still running: one already
+//	        in flight has had its fate decided (it bails at the closed re-check
+//	        under connMu and tears its own connector down) before Close's caller
+//	        moves on.
 //	connMu  guards the connector field. Requests hold it in read mode for the
 //	        whole pool checkout, which turns "pick a connector" and "borrow one of
 //	        its clients" into one step that Close must wait behind.
@@ -185,9 +187,13 @@ type GRPCDirectRPCConnection struct {
 	connector grpcConnectorInterface
 	connMu    sync.RWMutex
 
+	// connectorCtx bounds the pooled connector's life to THIS connection's, and
+	// connectorCancel is what ends it — see newGRPCDirectRPCConnection for why it
+	// cannot be the relay's context (MAG-2808).
+	connectorCtx    context.Context
+	connectorCancel context.CancelFunc
+
 	// Descriptor handling
-	registry         *dyncodec.Registry
-	codec            *dyncodec.Codec
 	descriptorsCache *common.SafeSyncMap[string, *desc.MethodDescriptor]
 
 	// Initialization state
@@ -212,10 +218,29 @@ type GRPCDirectRPCConnection struct {
 // newGRPCDirectRPCConnection builds a gRPC connection with its descriptor cache in
 // place. The cache is a pointer with no lazy initialization, so every construction
 // site has to set it or the first descriptor lookup dereferences nil.
+//
+// It also gives the connection its own context, which is the connector's lifetime
+// (MAG-2808). chainproxy.NewGRPCConnector treats the context it is handed as
+// exactly that: addClientsAsynchronouslyGrpc ends with `go connectorLoop(ctx)`,
+// and connectorLoop is `<-ctx.Done(); connector.Close()`. Because the pool is
+// built lazily inside the FIRST relay, passing that relay's context down bound
+// the pool's life to one request — the connector was torn down the moment the
+// relay that happened to initialize it returned.
+//
+// That used to be merely wasteful: Close was a pool drain, and the next GetRpc
+// silently re-dialled, costing a reconnect per relay. Once Close became permanent
+// it turned terminal — every subsequent checkout returns ErrGRPCConnectorClosed
+// and the refill paths discard the dials that would have healed it, while
+// endpoint.DirectConnections caches this object for the whole pairing. The
+// context is deliberately rooted at Background rather than at any caller's:
+// re-parenting it on a context this connection does not own is the bug.
 func newGRPCDirectRPCConnection(nodeUrl common.NodeUrl) *GRPCDirectRPCConnection {
+	connectorCtx, connectorCancel := context.WithCancel(context.Background())
 	return &GRPCDirectRPCConnection{
 		nodeUrl:          nodeUrl,
 		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
+		connectorCtx:     connectorCtx,
+		connectorCancel:  connectorCancel,
 	}
 }
 
@@ -815,7 +840,13 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 	if newConnector == nil {
 		newConnector = newGRPCConnector
 	}
-	connector, err := newConnector(ctx, 10, connectorNodeUrl)
+	// g.connectorCtx, NOT ctx: the argument is this relay's context and would make
+	// the pool die with this relay (MAG-2808, see newGRPCDirectRPCConnection). The
+	// dial is still bounded — createConnection caps every attempt and gives up
+	// after MaximumNumberOfParallelConnectionsAttempts — and Close cancels
+	// g.connectorCtx, so a teardown racing this call aborts it rather than waiting
+	// it out.
+	connector, err := newConnector(g.connectorCtx, 10, connectorNodeUrl)
 	if err != nil {
 		return utils.LavaFormatError("failed to create gRPC connector", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
@@ -839,8 +870,9 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 	g.connector = connector
 	g.connMu.Unlock()
 
-	// Initialize descriptor cache
-	g.descriptorsCache = &common.SafeSyncMap[string, *desc.MethodDescriptor]{}
+	// descriptorsCache is set at construction, not here: re-assigning it would be
+	// an unsynchronized pointer write to a field getMethodDescriptor and
+	// GetCachedMethodDescriptor read without holding initMu.
 
 	// Initialize descriptor source based on config
 	if err := g.initializeDescriptorSource(ctx); err != nil {
@@ -881,7 +913,15 @@ func (g *GRPCDirectRPCConnection) validateURL() error {
 	return nil
 }
 
-// initializeDescriptorSource sets up the descriptor source based on config
+// initializeDescriptorSource validates the configured descriptor source.
+//
+// Neither branch below keeps the loaded registry. Descriptor resolution goes
+// through reflection in getMethodDescriptor on every path, so the load is a
+// config check: a bad descriptor-set-path surfaces here, at initialization,
+// rather than at the first relay. The registry/codec fields that used to hold the
+// result were written here and nil'd in Close but never read anywhere in the
+// package, so they were removed (MAG-2808) along with the locking commentary that
+// claimed to protect them.
 func (g *GRPCDirectRPCConnection) initializeDescriptorSource(ctx context.Context) error {
 	grpcConfig := &g.nodeUrl.GrpcConfig
 	source := grpcConfig.GetDescriptorSource()
@@ -891,24 +931,17 @@ func (g *GRPCDirectRPCConnection) initializeDescriptorSource(ctx context.Context
 		if grpcConfig.DescriptorSetPath == "" {
 			return fmt.Errorf("descriptor-set-path required for file descriptor source")
 		}
-		fileReg, err := dyncodec.NewFileDescriptorSetRegistryFromPath(grpcConfig.DescriptorSetPath)
-		if err != nil {
+		if _, err := dyncodec.NewFileDescriptorSetRegistryFromPath(grpcConfig.DescriptorSetPath); err != nil {
 			return err
 		}
-		g.registry = dyncodec.NewRegistry(fileReg)
-		g.codec = dyncodec.NewCodec(g.registry)
 
 	case common.GrpcDescriptorSourceHybrid:
-		// Will be set up on first connection with hybrid source
-		// For now, try to load file if available
+		// The file half of hybrid mode is optional; only report a path that is set
+		// and unloadable.
 		if grpcConfig.DescriptorSetPath != "" {
-			fileReg, err := dyncodec.NewFileDescriptorSetRegistryFromPath(grpcConfig.DescriptorSetPath)
-			if err != nil {
+			if _, err := dyncodec.NewFileDescriptorSetRegistryFromPath(grpcConfig.DescriptorSetPath); err != nil {
 				utils.LavaFormatWarning("failed to load file descriptors for hybrid mode", err,
 					utils.LogAttr("path", grpcConfig.DescriptorSetPath))
-			} else {
-				g.registry = dyncodec.NewRegistry(fileReg)
-				g.codec = dyncodec.NewCodec(g.registry)
 			}
 		}
 
@@ -1123,29 +1156,37 @@ func (g *GRPCDirectRPCConnection) Close() error {
 	//    that has not yet started initializing.
 	g.closed.Store(true)
 
-	// 2. Wait out any initialization already in flight. Setting closed does not
-	//    stop an initializer that is already past its own check, and that
-	//    initializer still writes registry/codec/descriptorsCache — fields with no
-	//    lock of their own. Taking initMu makes those writes strictly happen before
-	//    the teardown below instead of racing it; the initializer either bails at
-	//    its closed re-check or publishes a connector we then tear down here.
+	// 2. End the connector's lifetime. This is what closing the connection means
+	//    to the pool: connectorLoop is parked on this context and closes the
+	//    connector when it ends, which also releases that goroutine. Doing it
+	//    before taking initMu keeps teardown prompt — an initializer already
+	//    dialing with grpc.WithBlock() aborts on the cancellation instead of making
+	//    step 3 wait out a full dial. Cancel is idempotent, so repeated Close calls
+	//    are fine.
+	g.connectorCancel()
+
+	// 3. Wait out any initialization already in flight. Setting closed does not
+	//    stop an initializer that is already past its own check. Taking initMu
+	//    means that once Close returns, no initialization is still running: the
+	//    initializer either bailed at its closed re-check under connMu, tearing its
+	//    own fresh connector down, or published one that we tear down below.
 	g.initMu.Lock()
 	defer g.initMu.Unlock()
 
-	// 3. Detach under connMu. The write lock waits for every in-flight pool
+	// 4. Detach under connMu. The write lock waits for every in-flight pool
 	//    checkout to finish, so once it is acquired no GetRpc can be running, and
 	//    once the field is nil none can start.
 	g.connMu.Lock()
 	connector := g.connector
 	g.connector = nil
-	g.registry = nil
-	g.codec = nil
 	g.connMu.Unlock()
 
-	// 4. Drain outside connMu. GRPCConnector.Close blocks until every borrowed
+	// 5. Drain outside connMu. GRPCConnector.Close blocks until every borrowed
 	//    client has been handed back, which can take as long as the requests
 	//    holding them; holding connMu across that would stall new requests instead
-	//    of letting them fail fast with ErrGRPCConnectionClosed.
+	//    of letting them fail fast with ErrGRPCConnectionClosed. Closing here
+	//    rather than leaving it to connectorLoop makes the drain synchronous with
+	//    this call; the loop's own Close then finds nothing left to do.
 	if connector != nil {
 		connector.Close()
 	}
