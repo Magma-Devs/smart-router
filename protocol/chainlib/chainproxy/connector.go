@@ -36,7 +36,19 @@ const (
 	MaxCallRecvMsgSize                         = 1024 * 1024 * 512 // setting receive size to 512mb for large debug responses
 )
 
-var NumberOfParallelConnections uint = 10
+// NumberOfParallelConnections is the DEFAULT pool size — the default value of the
+// --parallel-connections flag. It is configuration, not state, and const is what
+// makes that a guarantee rather than a convention: no future caller can reintroduce
+// the write below, because the assignment no longer compiles.
+//
+// It used to be both. NewConnector and NewGRPCConnector each wrote it with their own
+// nConns, and GRPCConnector.ReturnRpc read it back as "the number we started with",
+// so a connector's idle-trim threshold was whichever connector happened to be built
+// last, process-wide. With one connector that is invisible; with two it is a data
+// race (MAG-2538 tears a verification connector down while the next is constructed),
+// and across differing nConns it trims the wrong pool. Capacity belongs to a
+// connector, so it now lives on the connector.
+const NumberOfParallelConnections uint = 10
 
 // Connector manages HTTP/JSON-RPC connections to blockchain nodes.
 // For HTTP connections, a single shared rpcclient.Client is used since
@@ -66,7 +78,11 @@ func HashURL(url string) string {
 // pooling internally). The parameter is kept for API compatibility with
 // gRPC connector which still uses connection pooling.
 func NewConnector(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (*Connector, error) {
-	NumberOfParallelConnections = nConns // used by gRPC connector, ignored for HTTP
+	// nConns is deliberately not recorded anywhere: HTTP pools inside http.Transport.
+	// This used to assign NumberOfParallelConnections "for the gRPC connector", which
+	// made building an HTTP connector silently reset an unrelated gRPC connector's
+	// idle-trim threshold — and race its ReturnRpc. That constant is now const, so
+	// the assignment cannot come back.
 	connector := &Connector{
 		nodeUrl:       nodeUrl,
 		hashedNodeUrl: HashURL(nodeUrl.Url),
@@ -178,6 +194,15 @@ type GRPCConnector struct {
 	credentials credentials.TransportCredentials
 	nodeUrl     common.NodeUrl
 
+	// capacity is the pool size this connector was built with — the nConns its
+	// caller asked for, not whatever the last-constructed connector asked for.
+	// ReturnRpc trims idle clients against it.
+	//
+	// Written once in NewGRPCConnector before the connector is published and never
+	// again, so readers need no synchronization beyond the happens-before that
+	// publishing already gives them.
+	capacity uint
+
 	// closed is set by Close and never cleared. Unlike the HTTP Connector's atomic
 	// flag it is guarded by lock, because every reader already holds lock: that
 	// makes "is the pool alive" and "take a client" a single atomic step, which a
@@ -211,10 +236,10 @@ var ErrGRPCConnectorClosed = errors.New("grpc connector is closed")
 // request — the direct-RPC path — must NOT: passing the request's context as
 // lifetimeCtx tears the pool down the moment that request returns.
 func NewGRPCConnector(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (*GRPCConnector, error) {
-	NumberOfParallelConnections = nConns // set number of parallel connections requested by user (or default.)
 	connector := &GRPCConnector{
 		freeClients: make([]*grpc.ClientConn, 0, nConns),
 		nodeUrl:     nodeUrl,
+		capacity:    nConns,
 	}
 
 	// MAG-2218: warn once per connector, not per dial. createConnection may still upgrade an
@@ -405,7 +430,7 @@ func (connector *GRPCConnector) ReturnRpc(rpc *grpc.ClientConn) {
 		rpc.Close()
 		return
 	}
-	if len(connector.freeClients) > (int(connector.usedClients) + int(NumberOfParallelConnections) /* the number we started with */) {
+	if len(connector.freeClients) > (int(connector.usedClients) + int(connector.capacity) /* the number THIS connector started with */) {
 		rpc.Close() // close connection
 		return      // return without appending back to decrease idle connections
 	}
