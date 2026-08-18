@@ -14,8 +14,10 @@ import (
 func TestLegacyFieldsAreIgnoredOnDecode(t *testing.T) {
 	// A spec carrying every removed key, in the rich shapes the deleted custom
 	// unmarshalers used to handle: a string coin amount, a string
-	// contributor_percentage, api-level extra_compute_units and
-	// category.local/subscription.
+	// contributor_percentage, api-level extra_compute_units and category.local.
+	//
+	// category.subscription is in here too but is no longer among them — it gained a
+	// field in MAG-2643 and is asserted below.
 	legacy := []byte(`{
 		"index": "LEGACY",
 		"name": "Legacy Chain",
@@ -69,6 +71,12 @@ func TestLegacyFieldsAreIgnoredOnDecode(t *testing.T) {
 	// compute_units is the only CU input; category.deterministic/stateful survive.
 	if !api.Category.Deterministic || api.Category.Stateful != 1 {
 		t.Fatalf("active category fields not preserved: %+v", api.Category)
+	}
+	// category.subscription is the router's only reflection-free signal that a gRPC
+	// method is server-streaming. It sat in spec JSON with no field to decode into,
+	// so it was silently dropped (MAG-2643).
+	if !api.Category.Subscription {
+		t.Fatalf("category.subscription must decode, got: %+v", api.Category)
 	}
 }
 
