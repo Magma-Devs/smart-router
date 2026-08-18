@@ -196,10 +196,11 @@ type GRPCDirectRPCConnection struct {
 	// Descriptor handling
 	descriptorsCache *common.SafeSyncMap[string, *desc.MethodDescriptor]
 
-	// Initialization state
+	// Initialization state. `initialized` latches on SUCCESS only: a failed
+	// initialize is retried by the next relay rather than replayed from a cached
+	// error, which would strand the connection for the life of the pairing.
 	initialized atomic.Bool
 	initMu      sync.Mutex
-	initErr     error
 
 	// closed is set by Close and never cleared: a closed connection stays closed.
 	// Without it, Close leaves `initialized` true with a nil connector, so
@@ -786,7 +787,7 @@ func (g *GRPCDirectRPCConnection) ensureInitialized(ctx context.Context) error {
 	}
 
 	if g.initialized.Load() {
-		return g.initErr
+		return nil
 	}
 
 	g.initMu.Lock()
@@ -801,12 +802,37 @@ func (g *GRPCDirectRPCConnection) ensureInitialized(ctx context.Context) error {
 
 	// Double-check after acquiring lock
 	if g.initialized.Load() {
-		return g.initErr
+		return nil
 	}
 
-	g.initErr = g.initialize(ctx)
+	// This relay may have spent its whole budget queued behind another
+	// initializer's dial. Starting a fresh one on a context that is already spent
+	// would hold initMu for a full dial budget while every relay behind us waits,
+	// so fail this one and leave the attempt to a relay that still has time. This
+	// is what keeps the retry below from turning a dead endpoint into a serialized
+	// dial storm.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if err := g.initialize(ctx); err != nil {
+		// Deliberately NOT latched. `initialized` used to be stored regardless of
+		// outcome, with the error cached in an initErr field and replayed to every
+		// later request — so a node that happened to be down when the FIRST relay
+		// arrived poisoned the connection permanently, and endpoint.DirectConnections
+		// caches this object until the pairing is rebuilt. Same "dead until the
+		// pairing changes" shape as the connector-lifetime bug (MAG-2808).
+		//
+		// A failed dial is transient, so the next relay retries it. Every error path
+		// in initialize() leaves no connector installed — the one that dials
+		// successfully and then finds the connection closed tears its own connector
+		// down — so retrying cannot leak a pool or publish twice. Taking a genuinely
+		// dead endpoint out of rotation is consumer_session_manager's job (endpoint
+		// health, connection refusals, probe re-enable), not a latch here.
+		return err
+	}
 	g.initialized.Store(true)
-	return g.initErr
+	return nil
 }
 
 // initialize performs the actual initialization
