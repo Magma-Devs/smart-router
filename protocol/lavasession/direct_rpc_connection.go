@@ -842,6 +842,13 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 		return err
 	}
 
+	// Resolve the descriptor source before dialing. It needs no connection — it
+	// only reads config and the process-wide protoset cache — and failing here
+	// keeps a misconfigured endpoint from spending a dial budget it can never use.
+	if err := g.initializeDescriptorSource(); err != nil {
+		return err
+	}
+
 	// Create connection pool
 	// Extract host from URL for GRPCConnector (it expects host:port without scheme)
 	parsedURL, err := url.Parse(g.nodeUrl.Url)
@@ -905,13 +912,6 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 	// an unsynchronized pointer write to a field getMethodDescriptor and
 	// GetCachedMethodDescriptor read without holding initMu.
 
-	// Initialize descriptor source based on config
-	if err := g.initializeDescriptorSource(); err != nil {
-		// Log warning but don't fail - we'll try reflection on first request
-		utils.LavaFormatWarning("failed to initialize descriptor source, will use reflection", err,
-			utils.LogAttr("url", g.nodeUrl.Url))
-	}
-
 	utils.LavaFormatInfo("gRPC direct connection initialized",
 		utils.LogAttr("url", g.nodeUrl.Url),
 		utils.LogAttr("tls", parsedURL.Scheme == "grpcs"))
@@ -954,6 +954,16 @@ func (g *GRPCDirectRPCConnection) validateURL() error {
 // what would actually be consumed, and in "file" mode nothing was consumed at all
 // (MAG-2350). Loading here now also warms the per-path cache, making the first
 // relay's descriptor lookup free.
+//
+// A failure is fatal to initialize(), not advisory. It used to be logged as "will
+// use reflection", which was true only while every path resolved through reflection
+// anyway: in "file" mode getMethodDescriptor and parseInputMessage now go through
+// this same loader and return this same error, and LoadProtoset caches failures, so
+// there is no fallback and nothing recovers. Warning and continuing buys one line at
+// boot followed by total relay failure on the endpoint — the silent-misconfiguration
+// shape MAG-2350 exists to remove. It cannot fire for the reflection default:
+// DescriptorSourceForGrpcConfig only errors for "file" and for an unrecognised
+// descriptor-source, both of which are operator config.
 //
 // The load is not retained on the struct: the cache is keyed by path and shared
 // process-wide, so re-resolving per request is a map hit.

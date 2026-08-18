@@ -34,6 +34,11 @@
 # It is a static snapshot: rebuild it when a node upgrade adds rpcs or fields the
 # spec starts using, or those methods fail with "symbol not found" in file mode.
 #
+# All of a chain's gRPC node-urls must agree on descriptor-source and
+# descriptor-set-path. Block parsing resolves through one registry per chain, not
+# one per node-url, so a chain whose node-urls disagree is rejected at boot rather
+# than served by whichever one happened to be applied last.
+#
 # Run it:
 #   smartrouter config/smartrouter_examples/smartrouter_cosmos.yml --use-static-spec specs/
 
