@@ -286,15 +286,33 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// the selection floor — blocklisting on the 16th consecutive one
 		// (MAG-2549). USER_INVALID_PARAMS is Retryable=false, which both stops the
 		// pointless retry and keeps the gate off the endpoint.
-		{GRPCCodeEquals(3), LavaErrorUserInvalidParams},       // codes.InvalidArgument
+		//
+		// Reach: this table is keyed by TRANSPORT, not by relay path, so the row also
+		// applies on the provider-based gRPC path via chainlib.GrpcErrorHandler
+		// .HandleNodeError — an INVALID_ARGUMENT becomes non-retryable there too. That
+		// is intended and follows from gRPC's own definition of the code, but it is
+		// wider than "direct RPC only" and should be read as such.
+		{GRPCCodeEquals(3), LavaErrorUserInvalidParams}, // codes.InvalidArgument
+		// codes.NotFound and codes.OutOfRange are the ordinary "I do not have this"
+		// outcomes of a Cosmos or Sui gRPC query — a missing object, an account that
+		// was never funded, a height below the node's pruning window. They are the
+		// most COMMON non-OK codes on those chains, not a failure mode.
+		//
+		// They need a row for a reason the other two do not: sendGRPCRelay marks every
+		// non-OK status IsNodeError, so without one they fall through to UNKNOWN_ERROR
+		// and the availability gate scores them — one demotion per retry, on every
+		// endpoint asked, for a query whose answer is simply "no". NODE_DATA_NOT_HELD
+		// is Retryable=true so the pruned-node-to-archive-node retry survives, and
+		// SubCategoryDataScope is what keeps the gate off an endpoint that answered
+		// truthfully about its own data scope.
+		{GRPCCodeEquals(5), LavaErrorNodeDataNotHeld},         // codes.NotFound
+		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},        // codes.OutOfRange
 		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented},      // codes.Unimplemented
 		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
 		// Deliberately NOT registered, each for its own reason — do not add them
 		// as a block, which is how `Code >= 13` went wrong in the first place:
 		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
 		//                          Demoting it is the correct signal.
-		//   5  NotFound          - pruned vs archive nodes genuinely disagree, so a
-		//   11 OutOfRange          retry elsewhere can legitimately succeed.
 		//   7  PermissionDenied  - credentials are configured per endpoint, so one
 		//   16 Unauthenticated     rejecting ours is unusable to us and should demote.
 		//   8  ResourceExhausted - ambiguous in the gRPC spec (per-user quota vs.
@@ -482,6 +500,11 @@ type NodeErrorClassification struct {
 	IsNonRetryable      bool
 	IsUnsupportedMethod bool
 	IsRateLimited       bool
+	// IsDataScope is the third fault axis: the endpoint does not hold the
+	// requested data. Independent of IsNonRetryable — these errors ARE retryable
+	// (an archive node may answer) but must not demote the endpoint that told us
+	// the truth. See ErrorSubCategory.IsDataScope.
+	IsDataScope bool
 }
 
 // ClassifyNodeErrorForRetry runs ClassifyError exactly once and derives the
@@ -502,6 +525,7 @@ func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, erro
 		IsNonRetryable:      !c.Retryable,
 		IsUnsupportedMethod: c.SubCategory.IsUnsupportedMethod(),
 		IsRateLimited:       c.SubCategory.IsRateLimit(),
+		IsDataScope:         c.SubCategory.IsDataScope(),
 	}
 }
 

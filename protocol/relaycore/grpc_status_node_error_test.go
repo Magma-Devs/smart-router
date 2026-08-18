@@ -138,6 +138,46 @@ func TestResultsManager_GRPCStatusResponseIsANodeError(t *testing.T) {
 	})
 }
 
+// TestResultsManager_ClassifiesOnTheNodesBodyWhenTheMessageIsEmpty pins the
+// empty-message fallback in setValidResponse.
+//
+// sendGRPCRelay already worked around GrpcMessage.CheckResponseError returning
+// ("", true) by falling back to the node's own status message. setValidResponse hit
+// the identical trap one layer up and did not: it built `err := fmt.Errorf("%s",
+// "")` and then classified on err.Error(). Code matchers still fired — StatusCode
+// is passed as errorCode — but every MESSAGE-based row was dead, so a
+// RESOURCE_EXHAUSTED whose body says "rate limit" was filed as UNKNOWN_ERROR and
+// the node error was logged with an empty error string.
+//
+// RESOURCE_EXHAUSTED is the witness because code 8 deliberately has NO registry row
+// of its own: NODE_RATE_LIMITED here can only come from the body surviving.
+func TestResultsManager_ClassifiesOnTheNodesBodyWhenTheMessageIsEmpty(t *testing.T) {
+	rm := NewResultsManager(1, "LAVA")
+
+	body := []byte(`{"error_message":"rate limit exceeded, retry after 1s","error_code":8}`)
+	nodeErr := rm.SetResponse(&RelayResponse{
+		RelayResult: common.RelayResult{
+			Reply:       &pairingtypes.RelayReply{Data: body},
+			StatusCode:  int(codes.ResourceExhausted),
+			IsNodeError: true,
+			Finalized:   true,
+		},
+	}, grpcProtocolMessage())
+
+	require.Error(t, nodeErr)
+	require.NotEmpty(t, nodeErr.Error(),
+		"an empty error string is what reached both the classifier and the node-error log line")
+
+	inst, ok := rm.(*ResultsManagerInst)
+	require.True(t, ok)
+	require.Len(t, inst.nodeResponseErrors.RelayErrors, 1)
+
+	classified := inst.nodeResponseErrors.RelayErrors[0].LavaError
+	require.NotNil(t, classified)
+	require.Equal(t, common.LavaErrorNodeRateLimited.Code, classified.Code,
+		"the message-based row must be reachable here; on the empty string this was UNKNOWN_ERROR")
+}
+
 // TestGrpcCheckResponseError_DependsOnlyOnStatusCode isolates the contract the
 // test above depends on, so a change to GrpcMessage is attributed to GrpcMessage
 // rather than surfacing as a confusing failure in the results manager.

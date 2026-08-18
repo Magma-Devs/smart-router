@@ -132,6 +132,21 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// this is a node error, meaning we still didn't get a good response.
 		// we may choose to wait until there will be a response or timeout happens
 		// if we decide to wait and timeout happens we will take the majority of response messages
+		//
+		// A CheckResponseError implementation may report hasError WITHOUT a message:
+		// GrpcMessage decides purely from the status code and always returns "". Classifying on
+		// the empty string reduces the transport's registry to its code matchers and leaves every
+		// message-based row unreachable — a RESOURCE_EXHAUSTED whose body says "rate limit" would
+		// be scored as an availability failure instead of exempted as healthy-but-busy — and it
+		// also logs the node error below with an empty error string. Fall back to the node's own
+		// reply body, which is where the evidence actually is, and only then to a synthetic
+		// description so `err` is never blank.
+		if errorMessage == "" {
+			errorMessage = string(response.RelayResult.Reply.Data)
+		}
+		if errorMessage == "" {
+			errorMessage = fmt.Sprintf("node error with no message (status %d)", response.RelayResult.StatusCode)
+		}
 		err := fmt.Errorf("%s", errorMessage)
 		// Log node error payload and headers for troubleshooting
 		// also log the original request payload and request headers if available

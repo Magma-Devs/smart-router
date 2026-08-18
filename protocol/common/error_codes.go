@@ -258,6 +258,21 @@ var (
 		Code: 2016, Name: "NODE_UNAUTHORIZED", Category: CategoryExternal,
 		Description: "Upstream rejected router credentials (HTTP 401)", Retryable: false,
 	})
+	// NODE_DATA_NOT_HELD: the endpoint answered correctly and the answer is "I do
+	// not have this" — a pruned height, an object that never existed, a request
+	// outside the range this node retains. Distinct from NODE_RESOURCE_NOT_FOUND
+	// (2012) in the fault axis, not the symptom: 2012 stays scoreable because a
+	// JSON-RPC -32001 is an error the node RAISED, whereas this is the node
+	// truthfully describing its own data scope.
+	//
+	// Retryable stays true so a pruned node still falls through to an archive one.
+	// SubCategoryDataScope is what keeps it out of the availability signal, which
+	// Retryable alone cannot express (see ErrorSubCategory.IsDataScope).
+	LavaErrorNodeDataNotHeld = registerError(&LavaError{
+		Code: 2017, Name: "NODE_DATA_NOT_HELD", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
+		Description: "Endpoint does not hold the requested data (pruned or never existed)", Retryable: true,
+	})
 
 	// Bitcoin/UTXO node errors (2100-2149)
 	// Source: Bitcoin Core src/rpc/protocol.h

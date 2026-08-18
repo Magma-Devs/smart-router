@@ -27,7 +27,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -921,8 +920,23 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	// Match on context.Canceled specifically rather than `ctx.Err() != nil`: a ctx
 	// whose DEADLINE expired is also non-nil, and relabelling a timeout as a client
 	// cancellation would let a genuinely slow endpoint escape being blamed.
-	if errors.Is(ctx.Err(), context.Canceled) && status.Code(err) == codes.Canceled {
-		return nil, fmt.Errorf("gRPC relay cancelled: %w", context.Canceled)
+	//
+	// The LOCAL context is the whole test. Pairing it with `status.Code(err) ==
+	// codes.Canceled` was a hole of the same class this branch exists to close: when
+	// the router cancels and grpc-go surfaces something other than Canceled — most
+	// often Unavailable from a connection torn down in the same instant — the
+	// conjunct fails, sendGRPCRelay takes its node-error arm and returns (result,
+	// nil), and the `err != nil` guard at the relay-race carve-out never fires. A
+	// relay we abandoned is then scored against a healthy endpoint. The risk is
+	// asymmetric: missing a local cancel penalises an endpoint that did nothing
+	// wrong, while over-detecting one only skips scoring for a relay whose result we
+	// were going to discard anyway.
+	//
+	// Both errors are wrapped. context.Canceled is the sentinel
+	// common.IsClientCancellation resolves; err keeps the originating gRPC status so
+	// logs can still say what the endpoint was doing when we pulled the plug.
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, fmt.Errorf("gRPC relay cancelled: %w: %w", context.Canceled, err)
 	}
 
 	var errorCode uint32 = GRPCStatusCodeOnFailedMessages

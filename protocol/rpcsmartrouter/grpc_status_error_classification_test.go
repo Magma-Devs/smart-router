@@ -100,12 +100,19 @@ func grpcStatusRelay(t *testing.T, code codes.Code, nodeMessage string) *common.
 // TestSendGRPCRelay_StatusErrorClassification is the table of production gRPC
 // statuses and the policy each must produce.
 //
-// The four rows are chosen to separate axes that a single boolean cannot:
+// The rows are chosen to separate axes that a single boolean cannot:
 // InvalidArgument is non-retryable and NOT the endpoint's fault; ResourceExhausted
-// is retryable and also not the endpoint's fault; Unimplemented is non-retryable
-// AND a capability gap; Unavailable is the only one the endpoint should be
-// demoted for. The old `Code >= 13` rule collapsed all four into two wrong
-// buckets.
+// is retryable and also not the endpoint's fault; NotFound and OutOfRange are
+// retryable, not the endpoint's fault, and yet must still reach another endpoint;
+// Unimplemented is non-retryable AND a capability gap; DeadlineExceeded and
+// Unavailable are the two the endpoint should be demoted for. The old
+// `Code >= 13` rule collapsed all of them into two wrong buckets.
+//
+// Codes 4, 5 and 11 are here because they are where the change is LARGEST: under
+// `Code >= 13` they were not node errors at all, so replacing that threshold with
+// CheckResponseError is what first exposes them to the availability gate. Pinning
+// only the codes that were already node errors would leave the newly-reachable
+// behaviour untested (MAG-2549 review, finding 4).
 func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -115,6 +122,7 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 		wantNonRetryable      bool
 		wantRateLimited       bool
 		wantUnsupportedMethod bool
+		wantDataScope         bool
 		wantScored            bool // shouldFailSessionForResult — demotes the endpoint
 		why                   string
 	}{
@@ -137,6 +145,34 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 			why: "SubCategoryRateLimit is contractually back-off-without-marking-unhealthy; this only " +
 				"matches because the classification message falls back to the node's own text when " +
 				"GrpcMessage.CheckResponseError returns the empty string",
+		},
+		{
+			name:          "NotFound is an ordinary query outcome and must not demote the endpoint",
+			code:          codes.NotFound,
+			nodeMessage:   "object 0xdeadbeef not found",
+			wantDataScope: true,
+			wantScored:    false,
+			why: "a missing object or account is the most common non-OK code on Cosmos and Sui gRPC; " +
+				"scoring it charges an availability failure to every endpoint asked, once per retry, " +
+				"for a query whose answer is simply \"no\"",
+		},
+		{
+			name:          "OutOfRange is the same shape as NotFound",
+			code:          codes.OutOfRange,
+			nodeMessage:   "height 100 is not available, lowest height is 8000000",
+			wantDataScope: true,
+			wantScored:    false,
+			why: "a height below the node's pruning window is a statement about its retention, " +
+				"not a fault — identical fault axis to NotFound",
+		},
+		{
+			name:        "DeadlineExceeded stays scoreable — this endpoint really was slow",
+			code:        codes.DeadlineExceeded,
+			nodeMessage: "context deadline exceeded",
+			wantScored:  true,
+			why: "the counterweight to the two rows above: carving out data-scope codes must not " +
+				"drag the rest of the sub-13 range out of the availability signal with them. A " +
+				"deadline is about THIS endpoint's latency and another may well be faster",
 		},
 		{
 			name:                  "Unimplemented is a capability gap, not a failure",
@@ -172,6 +208,7 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 			require.Equal(t, tc.wantNonRetryable, result.IsNonRetryable, tc.why)
 			require.Equal(t, tc.wantRateLimited, result.IsRateLimited, tc.why)
 			require.Equal(t, tc.wantUnsupportedMethod, result.IsUnsupportedMethod, tc.why)
+			require.Equal(t, tc.wantDataScope, result.IsDataScope, tc.why)
 
 			require.Equal(t, tc.wantScored, shouldFailSessionForResult(nil, result),
 				"availability gate: %s", tc.why)
@@ -189,6 +226,7 @@ func TestSendGRPCRelay_StatusErrorIsNotCacheable(t *testing.T) {
 	for _, code := range []codes.Code{
 		codes.InvalidArgument, // 3  — was below the old `Code >= 13` cutoff
 		codes.NotFound,        // 5
+		codes.OutOfRange,      // 11
 		codes.ResourceExhausted,
 		codes.Unimplemented,
 		codes.Unavailable,
@@ -227,4 +265,62 @@ func TestSendGRPCRelay_ClassificationMessageIsTheNodesOwn(t *testing.T) {
 		"code 8 alone must not imply rate limiting — the gRPC spec also uses it for out-of-space")
 	require.True(t, shouldFailSessionForResult(nil, withoutRateLimitText),
 		"an unclassified node error is still a failure and stays scoreable")
+}
+
+// TestSendGRPCRelay_DataScopeCodesStayRetryable is the other half of the
+// NOT_FOUND / OUT_OF_RANGE carve-out, and the reason it is a third fault axis
+// rather than a Retryable=false registry row.
+//
+// Marking these non-retryable would also keep them out of the availability signal
+// — IsNonRetryable is already a carve-out — but it would buy that by killing the
+// pruned-node-to-archive-node retry: a height a pruned endpoint discarded is a
+// height an archive endpoint still has, and hasNonRetryableNodeError short-circuits
+// the retry loop for the whole request. Both properties have to hold at once.
+func TestSendGRPCRelay_DataScopeCodesStayRetryable(t *testing.T) {
+	for _, code := range []codes.Code{codes.NotFound, codes.OutOfRange} {
+		t.Run(code.String(), func(t *testing.T) {
+			result := grpcStatusRelay(t, code, "not available at this node")
+
+			require.True(t, result.IsDataScope,
+				"the data-scope axis is what the availability gate reads")
+			require.False(t, result.IsNonRetryable,
+				"a pruned endpoint saying it lacks the data must not stop the retry that reaches "+
+					"an archive endpoint — relay_processor.hasNonRetryableNodeError ends the request")
+			require.False(t, shouldFailSessionForResult(nil, result),
+				"retryable and unscored at the same time is the point of the axis")
+		})
+	}
+}
+
+// TestHealthResetAgreesWithScoring pins the coherence fix in relayInnerDirect.
+//
+// The endpoint-health path and the QoS path read the same relay and used to reach
+// opposite conclusions about it: relayInnerDirect's `statusCode >= 500 || == 429`
+// gate cannot fire on a gRPC status (the codes are 0-16), so every gRPC node error
+// fell through to "Success — reset endpoint health" at the same moment
+// shouldFailSessionForResult was reporting it to the session manager as an
+// availability failure. The endpoint was demoted and certified healthy by one
+// relay.
+//
+// UNAVAILABLE is the witness because it is the one gRPC status this PR agrees
+// should demote — before the fix it also called ResetHealth.
+func TestHealthResetAgreesWithScoring(t *testing.T) {
+	scored := grpcStatusRelay(t, codes.Unavailable, "upstream connect error")
+	require.True(t, shouldFailSessionForResult(nil, scored),
+		"precondition: an UNAVAILABLE endpoint is scored against")
+	require.False(t, shouldResetEndpointHealth(scored),
+		"a relay the optimizer is told to score against the endpoint must not also certify it healthy")
+
+	// A carved-out node error is the mirror image: not scored, so health still
+	// resets. The endpoint answered correctly, it simply does not hold the data —
+	// and the carve-out must not cost it the recovery the answer earned.
+	carvedOut := grpcStatusRelay(t, codes.NotFound, "object not found")
+	require.False(t, shouldFailSessionForResult(nil, carvedOut))
+	require.True(t, shouldResetEndpointHealth(carvedOut),
+		"a data-scope answer proves the endpoint is working and must still restore its health")
+
+	// A plain success is unchanged — the gate that matters most, since it is the
+	// path virtually every relay takes.
+	require.True(t, shouldResetEndpointHealth(&common.RelayResult{StatusCode: 200}),
+		"a clean relay must still reset health; narrowing this gate would strand recovering endpoints")
 }
