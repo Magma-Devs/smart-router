@@ -126,6 +126,53 @@ func TestApplyValidation_FailedCheckSetsNotOk(t *testing.T) {
 	assert.Equal(t, "expected and received are different", row.Verifications[0].Error)
 }
 
+// MAG-2333: legs that passed every check reported latestBlock 0 whenever the spec had no
+// verification needing a LatestDistance, which reads as a dead node in the JSON report.
+func TestBackfillLatestBlock_FillsOnlyMissingAndFetchesOnce(t *testing.T) {
+	rows := []healthEndpointResult{
+		{URL: "https://a", LatestBlock: 0},
+		{URL: "https://b", LatestBlock: 5324700}, // already has a height — must not be touched
+		{URL: "https://c", LatestBlock: 0},
+	}
+
+	calls := 0
+	backfillLatestBlock(rows, func() (int64, error) {
+		calls++
+		return 9000001, nil
+	})
+
+	assert.Equal(t, 1, calls, "the block must be fetched once per endpoint, not once per row")
+	assert.Equal(t, int64(9000001), rows[0].LatestBlock)
+	assert.Equal(t, int64(5324700), rows[1].LatestBlock, "a row that already reported a height must keep it")
+	assert.Equal(t, int64(9000001), rows[2].LatestBlock)
+}
+
+func TestBackfillLatestBlock_NoFetchWhenNothingMissing(t *testing.T) {
+	rows := []healthEndpointResult{{URL: "https://a", LatestBlock: 42}}
+
+	calls := 0
+	backfillLatestBlock(rows, func() (int64, error) {
+		calls++
+		return 9000001, nil
+	})
+
+	assert.Zero(t, calls, "a spec that already reports a height must not cost an extra relay")
+	assert.Equal(t, int64(42), rows[0].LatestBlock)
+}
+
+// A failed fetch must stay invisible: latestBlock is a reporting field and cannot be
+// allowed to flip any leg's ok verdict.
+func TestBackfillLatestBlock_FetchFailureLeavesRowsAlone(t *testing.T) {
+	rows := []healthEndpointResult{{URL: "https://a", LatestBlock: 0, Ok: true}}
+
+	backfillLatestBlock(rows, func() (int64, error) {
+		return 0, assert.AnError
+	})
+
+	assert.Equal(t, int64(0), rows[0].LatestBlock)
+	assert.True(t, rows[0].Ok, "a reporting-only fetch failure must not change the verdict")
+}
+
 func TestTransportForURL(t *testing.T) {
 	cases := map[string]string{
 		"https://eth1.lava.build":         "http",
