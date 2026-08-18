@@ -1060,22 +1060,20 @@ func (mr *MockChainRouterMockRecorder) ExtensionsSupported(internalPath, extensi
 }
 
 // SendNodeMsg mocks base method.
-func (m *MockChainRouter) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend, extensions []string) (*RelayReplyWrapper, string, *rpcclient.ClientSubscription, common.NodeUrl, string, error) {
+func (m *MockChainRouter) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend, extensions []string) (*RelayReplyWrapper, common.NodeUrl, string, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SendNodeMsg", ctx, ch, chainMessage, extensions)
+	ret := m.ctrl.Call(m, "SendNodeMsg", ctx, chainMessage, extensions)
 	ret0, _ := ret[0].(*RelayReplyWrapper)
-	ret1, _ := ret[1].(string)
-	ret2, _ := ret[2].(*rpcclient.ClientSubscription)
-	ret3, _ := ret[3].(common.NodeUrl)
-	ret4, _ := ret[4].(string)
-	ret5, _ := ret[5].(error)
-	return ret0, ret1, ret2, ret3, ret4, ret5
+	ret1, _ := ret[1].(common.NodeUrl)
+	ret2, _ := ret[2].(string)
+	ret3, _ := ret[3].(error)
+	return ret0, ret1, ret2, ret3
 }
 
 // SendNodeMsg indicates an expected call of SendNodeMsg.
-func (mr *MockChainRouterMockRecorder) SendNodeMsg(ctx, ch, chainMessage, extensions interface{}) *gomock.Call {
+func (mr *MockChainRouterMockRecorder) SendNodeMsg(ctx, chainMessage, extensions interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendNodeMsg", reflect.TypeOf((*MockChainRouter)(nil).SendNodeMsg), ctx, ch, chainMessage, extensions)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendNodeMsg", reflect.TypeOf((*MockChainRouter)(nil).SendNodeMsg), ctx, chainMessage, extensions)
 }
 
 // MockChainProxy is a mock of ChainProxy interface.
@@ -1117,18 +1115,16 @@ func (mr *MockChainProxyMockRecorder) GetChainProxyInformation() *gomock.Call {
 }
 
 // SendNodeMsg mocks base method.
-func (m *MockChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (*RelayReplyWrapper, string, *rpcclient.ClientSubscription, error) {
+func (m *MockChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (*RelayReplyWrapper, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SendNodeMsg", ctx, ch, chainMessage)
+	ret := m.ctrl.Call(m, "SendNodeMsg", ctx, chainMessage)
 	ret0, _ := ret[0].(*RelayReplyWrapper)
-	ret1, _ := ret[1].(string)
-	ret2, _ := ret[2].(*rpcclient.ClientSubscription)
-	ret3, _ := ret[3].(error)
-	return ret0, ret1, ret2, ret3
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // SendNodeMsg indicates an expected call of SendNodeMsg.
-func (mr *MockChainProxyMockRecorder) SendNodeMsg(ctx, ch, chainMessage interface{}) *gomock.Call {
+func (mr *MockChainProxyMockRecorder) SendNodeMsg(ctx, chainMessage interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendNodeMsg", reflect.TypeOf((*MockChainProxy)(nil).SendNodeMsg), ctx, ch, chainMessage)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendNodeMsg", reflect.TypeOf((*MockChainProxy)(nil).SendNodeMsg), ctx, chainMessage)
 }

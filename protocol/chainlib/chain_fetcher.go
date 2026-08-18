@@ -371,7 +371,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 
 	extensions := getExtensionsForVerification(verification, cf.chainParser)
 
-	reply, _, _, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, extensions)
+	reply, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, chainMessage, extensions)
 	if err != nil {
 		return utils.LavaFormatWarning("[-] verify failed sending chainMessage", err,
 			utils.LogAttr("chainID", cf.endpoint.ChainID),
@@ -497,7 +497,7 @@ func (cf *ChainFetcher) CustomMessage(ctx context.Context, path string, data []b
 	if err != nil {
 		return nil, err
 	}
-	reply, _, _, _, _, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+	reply, _, _, err := cf.chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 	utils.LavaFormatTrace("CustomMessage", utils.Attribute{Key: "reply", Value: reply})
 	if err != nil {
 		return nil, err
@@ -522,7 +522,7 @@ func (cf *ChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) 
 	if err != nil {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" failed creating chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
-	reply, _, _, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+	reply, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 	if err != nil {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" failed sending chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
@@ -619,7 +619,7 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 		return "", nil, utils.LavaFormatError(tagName+" failed CraftChainMessage on function template", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 	start := time.Now()
-	reply, _, _, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+	reply, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 	if err != nil {
 		timeTaken := time.Since(start)
 		return "", nil, utils.LavaFormatDebugErr(tagName+" failed sending chainMessage", err, []utils.Attribute{{Key: "sendTime", Value: timeTaken}, {Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)

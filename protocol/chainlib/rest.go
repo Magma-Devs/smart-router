@@ -14,7 +14,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/parser"
@@ -458,10 +457,7 @@ func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	return rcp, nil
 }
 
-func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) {
-	if ch != nil {
-		return nil, "", nil, utils.LavaFormatError("Subscribe is not allowed on rest", nil)
-	}
+func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
 	if rcp.httpClient == nil {
 		rcp.httpClient = common.OptimizedHttpClient()
 	}
@@ -473,7 +469,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{},
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.RestMessage)
 	if !ok {
-		return nil, "", nil, utils.LavaFormatError("invalid message type in rest, failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
+		return nil, utils.LavaFormatError("invalid message type in rest, failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
 	}
 	var connectionTypeSlected string = http.MethodGet
 	// if ConnectionType is default value or empty we will choose http.MethodGet otherwise choosing the header type provided
@@ -490,7 +486,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{},
 
 	req, err := http.NewRequestWithContext(connectCtx, connectionTypeSlected, rcp.NodeUrl.AuthConfig.AddAuthPath(urlPath), msgBuffer)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
 
 	// setting the content-type to be application/json instead of Go's defult http.DefaultClient
@@ -525,10 +521,10 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{},
 		// Validate if the error is related to the provider connection to the node or it is a valid error
 		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
 		if parsedError := rcp.HandleNodeError(ctx, err); parsedError != nil {
-			return nil, "", nil, parsedError
+			return nil, parsedError
 		}
 		// always return a lava error in this case
-		return nil, "", nil, err
+		return nil, err
 	}
 	// here we received a response that can be an error response with Code >300 or code < 200
 	if res.Body != nil {
@@ -538,12 +534,12 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{},
 	err = rcp.HandleStatusError(res.StatusCode, nodeMessage.GetDisableErrorHandling())
 	if err != nil {
 		err = common.WithRetryAfter(err, res.Header, time.Now())
-		return nil, "", nil, utils.LavaFormatWarning("Received invalid status code", err, utils.Attribute{Key: "Status Code", Value: res.StatusCode}, utils.Attribute{Key: "chainID", Value: rcp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
+		return nil, utils.LavaFormatWarning("Received invalid status code", err, utils.Attribute{Key: "Status Code", Value: res.StatusCode}, utils.Attribute{Key: "chainID", Value: rcp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
 	}
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
 
 	reply := &RelayReplyWrapper{
@@ -558,11 +554,11 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{},
 		// checking if rest reply data is in json format
 		err = rcp.HandleJSONFormatError(reply.RelayReply.Data)
 		if err != nil {
-			return nil, "", nil, utils.LavaFormatError("Rest reply is neither a JSON object nor a JSON array of objects", nil, utils.Attribute{Key: "reply.Data", Value: string(reply.RelayReply.Data)})
+			return nil, utils.LavaFormatError("Rest reply is neither a JSON object nor a JSON array of objects", nil, utils.Attribute{Key: "reply.Data", Value: string(reply.RelayReply.Data)})
 		}
 	}
 
-	return reply, "", nil, nil
+	return reply, nil
 }
 
 // Shutdown drains in-flight HTTP requests and closes the listener.

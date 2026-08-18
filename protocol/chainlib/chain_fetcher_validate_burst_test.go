@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -23,11 +22,11 @@ type countingChainRouter struct {
 	err   error
 }
 
-func (r *countingChainRouter) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend, extensions []string) (*RelayReplyWrapper, string, *rpcclient.ClientSubscription, common.NodeUrl, string, error) {
+func (r *countingChainRouter) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend, extensions []string) (*RelayReplyWrapper, common.NodeUrl, string, error) {
 	r.mu.Lock()
 	r.calls[chainMessage.GetApi().Name]++
 	r.mu.Unlock()
-	return nil, "", nil, common.NodeUrl{}, "", r.err
+	return nil, common.NodeUrl{}, "", r.err
 }
 
 func (r *countingChainRouter) ExtensionsSupported(internalPath string, extensions []string) bool {
