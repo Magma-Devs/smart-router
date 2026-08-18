@@ -3807,13 +3807,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
 			streamCheckCancel()
 			if streamErr == nil && isStreaming {
-				utils.LavaFormatWarning("gRPC method is server-streaming upstream but is not declared as a subscription in the spec", nil,
+				utils.LavaFormatWarning("gRPC method is server-streaming upstream but carries no SUBSCRIBE directive in the spec", nil,
 					utils.LogAttr("method", methodPath),
 					utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
 					utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
 					utils.LogAttr("GUID", ctx),
 				)
-				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec does not mark it `\"subscription\": true`; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID), false
+				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID), false
 			}
 		}
 	}

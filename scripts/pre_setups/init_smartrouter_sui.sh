@@ -10,11 +10,11 @@
 #     from magma-Devs/lava-specs at run time into a local, gitignored directory.
 #
 #  2. That fetched spec is PATCHED before use. sui.json declares Sui's three
-#     SubscriptionService methods as ordinary APIs — none of them carries
-#     `"subscription": true` — so the router cannot know they are server
-#     streaming without asking the upstream. Streaming is served off that spec
-#     flag, so without the patch the router refuses these methods rather than
-#     streaming them. See the SPEC PATCH section below.
+#     SubscriptionService methods as ordinary APIs, with no SUBSCRIBE parse
+#     directive, so the router cannot know they are server streaming without
+#     asking the upstream. Streaming is served off that directive, so without
+#     the patch the router refuses these methods rather than streaming them.
+#     See the SPEC PATCH section below.
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 source "$__dir"/../useful_commands.sh
 . "${__dir}"/../vars/variables.sh
@@ -116,13 +116,14 @@ fi
 # ---- The patch -------------------------------------------------------------
 #
 # The router decides whether a gRPC method is server-streaming from the spec's
-# `category.subscription` flag, not from a live reflection lookup. That is
-# deliberate: reflection is throttled or disabled on many public gRPC gateways,
-# and a router that could only learn streaming-ness from reflection silently
-# fell back to a unary Invoke whenever the lookup failed — returning a truncated
-# stream after the full timeout instead of refusing (MAG-2643).
+# SUBSCRIBE parse directive — the same signal the WebSocket path uses — not from
+# a live reflection lookup. That is deliberate: reflection is throttled or
+# disabled on many public gRPC gateways, and a router that could only learn
+# streaming-ness from reflection silently fell back to a unary Invoke whenever
+# the lookup failed, returning a truncated stream after the full timeout instead
+# of refusing (MAG-2643).
 #
-# As of this writing sui.json does NOT set that flag on any of:
+# As of this writing sui.json has no SUBSCRIBE directive for any of:
 #   sui.rpc.v2.SubscriptionService/SubscribeCheckpoints
 #   sui.rpc.v2.SubscriptionService/SubscribeEvents
 #   sui.rpc.v2.SubscriptionService/SubscribeTransactions
@@ -131,7 +132,7 @@ fi
 # is the correct safe behaviour but is not what we want to demonstrate here.
 # The real fix belongs upstream in lava-specs; this patch is local to the test.
 echo ""
-echo "Patching sui.json: marking SubscriptionService methods as subscriptions..."
+echo "Patching sui.json: adding SUBSCRIBE directives for SubscriptionService..."
 python3 - "$SPEC_FILE" <<'PYEOF'
 import json, sys
 
@@ -144,23 +145,27 @@ for spec in document["proposal"]["specs"]:
     for collection in spec.get("api_collections", []):
         if collection["collection_data"]["api_interface"] != "grpc":
             continue
+        directives = collection.setdefault("parse_directives", [])
+        declared = {
+            d.get("api_name") for d in directives if d.get("function_tag") == "SUBSCRIBE"
+        }
         for api in collection.get("apis", []):
             if "SubscriptionService/" not in api["name"]:
                 continue
-            category = api.setdefault("category", {})
-            if not category.get("subscription"):
-                category["subscription"] = True
-                # Streaming calls are long-lived; keep their latency out of QoS
-                # scoring and give them the long timeout, same as any hanging API.
-                category["hanging_api"] = True
-                patched.append(f'{spec["index"]}:{api["name"]}')
+            # Streaming calls are long-lived; keep their latency out of QoS scoring
+            # and give them the long timeout, same as any hanging API.
+            api.setdefault("category", {})["hanging_api"] = True
+            if api["name"] in declared:
+                continue
+            directives.append({"function_tag": "SUBSCRIBE", "api_name": api["name"]})
+            patched.append(f'{spec["index"]}:{api["name"]}')
 
 with open(path, "w") as handle:
     json.dump(document, handle, indent=2)
 
 if patched:
     for name in patched:
-        print(f"  + subscription=true  {name}")
+        print(f"  + SUBSCRIBE directive  {name}")
 else:
     print("  (already patched — nothing to do)")
 PYEOF
@@ -423,7 +428,7 @@ echo ""
 echo "Refusals (both are correct behaviour, not bugs):"
 echo "  - 'must be served through the streaming listener'"
 echo "        a spec-declared subscription reached the unary relay path"
-echo "  - 'is server-streaming upstream but ... does not mark it'"
+echo "  - 'is server-streaming upstream but ... no SUBSCRIBE parse directive'"
 echo "        the spec patch above did not apply — streaming stays refused"
 echo "        rather than being invoked as a unary call and truncated"
 echo ""

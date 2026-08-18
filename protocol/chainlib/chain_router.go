@@ -316,6 +316,14 @@ func newChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint lavase
 	}
 
 	_, apiCollection, hasSubscriptionInSpec := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SUBSCRIBE)
+	// A SUBSCRIBE directive on a gRPC collection describes server streaming, which
+	// rides the same HTTP/2 connection as every other gRPC call — there is no
+	// WebSocket anywhere in that picture. Requiring a ws:// URL for it would reject a
+	// perfectly good gRPC endpoint at startup (MAG-2643). The requirement still holds
+	// for the interfaces that genuinely subscribe over a socket.
+	subscriptionNeedsWebSocket := hasSubscriptionInSpec &&
+		apiCollection.GetCollectionData().ApiInterface != spectypes.APIInterfaceGrpc
+
 	// validating we have websocket support for subscription supported specs.
 	webSocketSupported := false
 	for _, requirement := range supportedMap {
@@ -324,7 +332,7 @@ func newChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint lavase
 			break
 		}
 	}
-	if !IgnoreWsEnforcementForTestCommands && hasSubscriptionInSpec && apiCollection.Enabled && !webSocketSupported && !SkipWebsocketVerification {
+	if !IgnoreWsEnforcementForTestCommands && subscriptionNeedsWebSocket && apiCollection.Enabled && !webSocketSupported && !SkipWebsocketVerification {
 		return nil, utils.LavaFormatError("subscriptions are applicable for this chain, but websocket is not provided in 'supported' map. By not setting ws/wss your provider wont be able to accept ws subscriptions, therefore might receive less rewards and lower QOS score.", nil,
 			utils.LogAttr("apiInterface", apiCollection.CollectionData.ApiInterface),
 			utils.LogAttr("supportedMap", supportedMap),

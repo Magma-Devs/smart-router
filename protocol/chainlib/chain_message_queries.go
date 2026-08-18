@@ -21,9 +21,9 @@ func GetStateful(chainMessage ChainMessageForSend) uint32 {
 }
 
 // IsGrpcSubscription reports whether this message targets a gRPC server-streaming
-// method, according to `category.subscription` in the spec.
+// method, from the SUBSCRIBE parse directive its API carries in the spec.
 //
-// The spec flag is what decides routing, not a live reflection lookup. Reflection is
+// The spec is what decides routing, not a live reflection lookup. Reflection is
 // throttled or switched off on many public gRPC gateways (the header of
 // config/smartrouter_examples/smartrouter_cosmos.yml calls this out), and a router
 // that could only learn streaming-ness from reflection fell back to a unary Invoke
@@ -33,9 +33,12 @@ func GetStateful(chainMessage ChainMessageForSend) uint32 {
 // (MAG-2643). Reading it from the spec means the classification is available before
 // any upstream is touched, and is identical whether or not reflection answers.
 //
-// The interface check keeps the flag scoped: the WebSocket path identifies
-// subscriptions by the SUBSCRIBE function tag and must keep doing so, since a
-// tendermintrpc collection can carry both.
+// The signal is the SUBSCRIBE function tag — the same one the WebSocket path uses,
+// and the only sanctioned way to declare a subscription: `category.subscription` is
+// on lava-specs' removed-fields list and its CI rejects any spec carrying it.
+//
+// The interface check keeps this gRPC-scoped. A tendermintrpc collection carries
+// SUBSCRIBE directives too, and those belong to the WebSocket path.
 func IsGrpcSubscription(chainMessage ChainMessageForSend) bool {
 	if chainMessage == nil {
 		return false
@@ -43,8 +46,7 @@ func IsGrpcSubscription(chainMessage ChainMessageForSend) bool {
 	if chainMessage.GetApiCollection().GetCollectionData().ApiInterface != types.APIInterfaceGrpc {
 		return false
 	}
-	api := chainMessage.GetApi()
-	return api != nil && api.Category.Subscription
+	return IsFunctionTagOfType(chainMessage, types.FUNCTION_TAG_SUBSCRIBE)
 }
 
 func GetParseDirective(api *types.Api, apiCollection *types.ApiCollection) *types.ParseDirective {

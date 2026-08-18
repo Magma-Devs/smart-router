@@ -296,7 +296,7 @@ func streamingMethodDescriptor(t *testing.T) *desc.MethodDescriptor {
 }
 
 // newGrpcSubscriptionMessage builds a real gRPC chain message through the production
-// parser, with the API declared `"subscription": true` the way a spec would.
+// parser, with the API carrying a SUBSCRIBE parse directive the way a spec would.
 func newGrpcSubscriptionMessage(t *testing.T) chainlib.ChainMessage {
 	return newGrpcSubscriptionMessageWithRequest(t, []byte("{}"))
 }
@@ -319,7 +319,11 @@ func newGrpcSubscriptionMessageWithRequest(t *testing.T, requestData []byte) cha
 				Name:         streamingMethodPath,
 				Enabled:      true,
 				ComputeUnits: 10,
-				Category:     spectypes.SpecCategory{Subscription: true, HangingApi: true},
+				Category:     spectypes.SpecCategory{HangingApi: true},
+			}},
+			ParseDirectives: []*spectypes.ParseDirective{{
+				FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE,
+				ApiName:     streamingMethodPath,
 			}},
 		}},
 	})
