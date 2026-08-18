@@ -191,7 +191,26 @@ type GRPCConnector struct {
 // refill or had their retry goroutines repopulate it (MAG-2808).
 var ErrGRPCConnectorClosed = errors.New("grpc connector is closed")
 
-func NewGRPCConnector(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (*GRPCConnector, error) {
+// NewGRPCConnector builds a pooled gRPC connector.
+//
+// The two contexts are deliberately separate, because a single one was three
+// different things at once and callers could only get two of them right
+// (MAG-2808):
+//
+//	lifetimeCtx  owns the pool. connectorLoop parks on it and closes the connector
+//	             when it ends, and the async fill dials under it — that fill is
+//	             background work which should finish, not work that belongs to
+//	             whoever happened to call this.
+//	dialCtx      bounds ONLY the initial blocking dial below, which runs in the
+//	             caller's critical path. It is the caller's own deadline, so a
+//	             relay does not wait materially past the point it would have given
+//	             up anyway.
+//
+// Callers with nothing to distinguish (a startup path, where the process's
+// context is both) pass the same context twice. Callers building a pool inside a
+// request — the direct-RPC path — must NOT: passing the request's context as
+// lifetimeCtx tears the pool down the moment that request returns.
+func NewGRPCConnector(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (*GRPCConnector, error) {
 	NumberOfParallelConnections = nConns // set number of parallel connections requested by user (or default.)
 	connector := &GRPCConnector{
 		freeClients: make([]*grpc.ClientConn, 0, nConns),
@@ -202,12 +221,12 @@ func NewGRPCConnector(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) 
 	// unconfigured endpoint to TLS on retry, so this reflects the configured intent.
 	nodeUrl.TokenOverInsecureWarning(nodeUrl.AuthConfig.GetUseTls() || strings.HasPrefix(nodeUrl.Url, "grpcs://"))
 
-	rpcClient, err := connector.createConnection(ctx, nodeUrl, connector.numberOfFreeClients())
+	rpcClient, err := connector.createConnection(dialCtx, nodeUrl, connector.numberOfFreeClients())
 	if err != nil {
 		return nil, utils.LavaFormatError("grpc failed to create the first connection", err, utils.Attribute{Key: "address", Value: nodeUrl.UrlStr()})
 	}
 	connector.addClient(rpcClient)
-	go addClientsAsynchronouslyGrpc(ctx, connector, nConns-1, nodeUrl)
+	go addClientsAsynchronouslyGrpc(lifetimeCtx, connector, nConns-1, nodeUrl)
 	return connector, nil
 }
 
@@ -425,12 +444,17 @@ func (connector *GRPCConnector) Close() {
 	}
 }
 
-func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector, nConns uint, nodeUrl common.NodeUrl) {
+// addClientsAsynchronouslyGrpc fills the pool behind the caller and then hands the
+// connector to connectorLoop. Both halves run under lifetimeCtx, never the dial
+// context: the fill is background work that should finish even after the caller
+// has moved on, and connectorLoop parked on a caller's context is precisely the
+// bug MAG-2808 fixed.
+func addClientsAsynchronouslyGrpc(lifetimeCtx context.Context, connector *GRPCConnector, nConns uint, nodeUrl common.NodeUrl) {
 	for i := uint(0); i < nConns; i++ {
 		if connector.isClosed() {
 			break // Close is draining; further dials would only be thrown away
 		}
-		rpcClient, err := connector.createConnection(ctx, nodeUrl, connector.numberOfFreeClients())
+		rpcClient, err := connector.createConnection(lifetimeCtx, nodeUrl, connector.numberOfFreeClients())
 		if err != nil {
 			break
 		}
@@ -444,11 +468,11 @@ func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector,
 			utils.LavaFormatWarning("gRPC connector closed before the async fill finished", nil,
 				utils.LogAttr("address", nodeUrl.UrlStr()),
 			)
-		} else if ctx.Err() != nil {
+		} else if lifetimeCtx.Err() != nil {
 			// Probe-scoped ctx (validateProvider, etc.) was cancelled before
 			// the async fill produced any client. Caller will treat the
 			// returned error as a probe failure; the process must not exit.
-			utils.LavaFormatWarning("gRPC connector aborted before any connection was built", ctx.Err(),
+			utils.LavaFormatWarning("gRPC connector aborted before any connection was built", lifetimeCtx.Err(),
 				utils.LogAttr("address", nodeUrl.UrlStr()),
 			)
 		} else {
@@ -460,7 +484,7 @@ func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector,
 	// Read the count through the locked accessor: addClient / GetRpc mutate freeClients under the lock
 	// concurrently, so a bare len(connector.freeClients) here is a data race.
 	utils.LavaFormatInfo("Finished adding clients asynchronously", utils.LogAttr("count", connector.numberOfFreeClients()))
-	go connector.connectorLoop(ctx)
+	go connector.connectorLoop(lifetimeCtx)
 }
 
 func (connector *GRPCConnector) addClient(client *grpc.ClientConn) {

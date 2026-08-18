@@ -467,7 +467,10 @@ func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	_, averageBlockTime, _, _ := parser.ChainBlockStats()
 	nodeUrl := rpcProviderEndpoint.NodeUrls[0]
 	nodeUrl.Url = strings.TrimSuffix(nodeUrl.Url, "/") // remove suffix if exists
-	conn, err := chainproxy.NewGRPCConnector(ctx, nConns, nodeUrl)
+	// Same context for lifetime and dial: this is a startup path, and ctx is the
+	// process's. There is nothing to distinguish — unlike the direct-RPC path,
+	// which builds its pool inside a relay (MAG-2808).
+	conn, err := chainproxy.NewGRPCConnector(ctx, ctx, nConns, nodeUrl)
 	if err != nil {
 		return nil, err
 	}

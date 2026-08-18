@@ -197,7 +197,7 @@ func TestSendRequest_AfterClose_ReturnsErrorNotPanic(t *testing.T) {
 // connector and quietly come back to life.
 func TestSendRequest_CloseBeforeInit_DoesNotResurrect(t *testing.T) {
 	built := 0
-	g := newUninitializedGRPCConn(func(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
+	g := newUninitializedGRPCConn(func(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
 		built++
 		return newFakeGRPCConnector(), nil
 	})
@@ -351,7 +351,7 @@ func TestClose_DuringFirstInitialization_DoesNotPublishConnector(t *testing.T) {
 	release := make(chan struct{})
 	built := newFakeGRPCConnector()
 
-	g := newUninitializedGRPCConn(func(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
+	g := newUninitializedGRPCConn(func(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
 		close(building)
 		<-release
 		return built, nil
@@ -451,7 +451,7 @@ func TestInitialization_ConcurrentWithClose_NeverLeaksConnector(t *testing.T) {
 			mu    sync.Mutex
 			built []*fakeGRPCConnector
 		)
-		g := newUninitializedGRPCConn(func(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
+		g := newUninitializedGRPCConn(func(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
 			connector := newFakeGRPCConnector()
 			mu.Lock()
 			built = append(built, connector)
@@ -504,7 +504,7 @@ func TestInitialization_ConcurrentWithClose_NeverLeaksConnector(t *testing.T) {
 // connector-lifetime bug, reached by a different route.
 func TestInitialization_FailureIsRetriedNotLatched(t *testing.T) {
 	var attempts atomic.Int32
-	g := newUninitializedGRPCConn(func(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
+	g := newUninitializedGRPCConn(func(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
 		if attempts.Add(1) == 1 {
 			return nil, errors.New("node is down")
 		}
@@ -540,7 +540,7 @@ func TestInitialization_SpentContextDoesNotQueueAnotherDial(t *testing.T) {
 	release := make(chan struct{})
 	dialing := make(chan struct{})
 
-	g := newUninitializedGRPCConn(func(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
+	g := newUninitializedGRPCConn(func(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
 		attempts.Add(1)
 		close(dialing)
 		<-release
@@ -578,6 +578,46 @@ func TestInitialization_SpentContextDoesNotQueueAnotherDial(t *testing.T) {
 
 	require.Equal(t, int32(1), attempts.Load(),
 		"a relay whose context expired while queued must not start its own dial")
+}
+
+// TestInitialization_RelayDeadlineBoundsTheDial is the counterweight to giving
+// the connector its own lifetime context.
+//
+// Handing that context to the factory fixes the pool's lifetime, but if it were
+// also the dial context the caller would wait out createConnection's whole retry
+// budget — MaximumNumberOfParallelConnectionsAttempts attempts at
+// AverageWorldLatency*2 each, doubling again on the TLS-upgrade retry — instead
+// of its own deadline. Several seconds against a dead node, which delays failover
+// to another endpoint, which is the thing the router exists to do quickly.
+//
+// Worse, initMu is held across initialize(), so it is not just the dialing relay:
+// every relay that arrives during the dial blocks on that lock for its full
+// duration regardless of its own deadline. The ctx.Err() check in
+// ensureInitialized stops them starting a SECOND dial, but only after they have
+// already waited out the first.
+//
+// So initialize passes both: g.connectorCtx for the lifetime, the relay's ctx for
+// the dial.
+func TestInitialization_RelayDeadlineBoundsTheDial(t *testing.T) {
+	// Port 1 is never listened on. grpc.WithBlock keeps retrying rather than
+	// failing on the first refusal, so the dial runs until a deadline stops it.
+	g := newGRPCDirectRPCConnection(common.NodeUrl{
+		Url:        "grpc://127.0.0.1:1",
+		GrpcConfig: common.GrpcConfig{AllowInsecure: true},
+	})
+	require.Nil(t, g.newConnector, "this test must exercise the production factory")
+	t.Cleanup(func() { _ = g.Close() })
+
+	relayCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := g.SendRequest(relayCtx, []byte("{}"), grpcTestHeaders())
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Less(t, elapsed, 2*time.Second,
+		"a relay must not wait out the connector's dial budget past its own deadline")
 }
 
 // TestConnector_OutlivesTheRelayThatInitializedIt is the second MAG-2808 pin, and

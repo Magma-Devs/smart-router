@@ -245,17 +245,18 @@ func newGRPCDirectRPCConnection(nodeUrl common.NodeUrl) *GRPCDirectRPCConnection
 	}
 }
 
-// grpcConnectorFactory mirrors chainproxy.NewGRPCConnector. It completes the seam
-// grpcConnectorInterface already opens: without it, reaching initialize() in a test
-// means dialing a real node.
-type grpcConnectorFactory func(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error)
+// grpcConnectorFactory mirrors chainproxy.NewGRPCConnector, including its two
+// contexts: lifetimeCtx owns the pool, dialCtx bounds only the initial blocking
+// dial. It completes the seam grpcConnectorInterface already opens — without it,
+// reaching initialize() in a test means dialing a real node.
+type grpcConnectorFactory func(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error)
 
 // newGRPCConnector is the production factory. It returns an explicit nil interface
 // on failure: returning the (*GRPCConnector)(nil) that NewGRPCConnector hands back
 // alongside an error would produce a non-nil interface holding a nil pointer, and
 // every downstream nil check would silently pass.
-func newGRPCConnector(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
-	connector, err := chainproxy.NewGRPCConnector(ctx, nConns, nodeUrl)
+func newGRPCConnector(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
+	connector, err := chainproxy.NewGRPCConnector(lifetimeCtx, dialCtx, nConns, nodeUrl)
 	if err != nil {
 		return nil, err
 	}
@@ -866,13 +867,18 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 	if newConnector == nil {
 		newConnector = newGRPCConnector
 	}
-	// g.connectorCtx, NOT ctx: the argument is this relay's context and would make
-	// the pool die with this relay (MAG-2808, see newGRPCDirectRPCConnection). The
-	// dial is still bounded — createConnection caps every attempt and gives up
-	// after MaximumNumberOfParallelConnectionsAttempts — and Close cancels
-	// g.connectorCtx, so a teardown racing this call aborts it rather than waiting
-	// it out.
-	connector, err := newConnector(g.connectorCtx, 10, connectorNodeUrl)
+	// The two contexts are the whole point of MAG-2808's second half:
+	//
+	//	g.connectorCtx  owns the pool. The relay's context here is what tore the
+	//	                connector down the moment that relay returned; Close cancels
+	//	                this one instead, so a teardown racing this call aborts it
+	//	                rather than waiting it out.
+	//	ctx             is this relay's, and bounds only the blocking dial below.
+	//	                Without it the caller waits out createConnection's own retry
+	//	                budget instead of its own deadline — and because initMu is
+	//	                held across this call, every relay queued behind waits too,
+	//	                which delays failover for all of them.
+	connector, err := newConnector(g.connectorCtx, ctx, 10, connectorNodeUrl)
 	if err != nil {
 		return utils.LavaFormatError("failed to create gRPC connector", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
