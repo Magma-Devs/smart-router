@@ -614,15 +614,14 @@ func (dgm *DirectGRPCSubscriptionManager) createUpstreamStream(
 		return nil, fmt.Errorf("failed to create stream: %w", err)
 	}
 
-	// Parse and send the initial request message
-	if len(requestData) > 0 {
-		// dynamic.NewMessage, not the message factory: the factory consults the known-type
-		// registry and hands back a linked Go type whenever one is registered for this
-		// message name, which the JSON branch below then had to reject outright. Chains
-		// whose types happen to be linked into the router (anything cosmos-shaped) took
-		// that path. A dynamic message parses both encodings for every method.
-		inputMsg := dynamic.NewMessage(methodDesc.GetInputType())
+	// dynamic.NewMessage, not the message factory: the factory consults the known-type
+	// registry and hands back a linked Go type whenever one is registered for this
+	// message name, which the JSON branch below then had to reject outright. Chains
+	// whose types happen to be linked into the router (anything cosmos-shaped) took
+	// that path. A dynamic message parses both encodings for every method.
+	inputMsg := dynamic.NewMessage(methodDesc.GetInputType())
 
+	if len(requestData) > 0 {
 		// Detect format and parse request data
 		if requestData[0] == '{' || requestData[0] == '[' {
 			if err := inputMsg.UnmarshalJSON(requestData); err != nil {
@@ -636,13 +635,20 @@ func (dgm *DirectGRPCSubscriptionManager) createUpstreamStream(
 				return nil, fmt.Errorf("failed to parse proto request: %w", err)
 			}
 		}
-
-		if err := stream.SendMsg(inputMsg); err != nil {
-			return nil, fmt.Errorf("failed to send request: %w", err)
-		}
 	}
 
-	// Close send direction (server-streaming is receive-only after initial request)
+	// Send unconditionally, INCLUDING when the request is empty. A server-streaming
+	// call owes the server exactly one request message before half-closing, and an
+	// all-default request marshals to zero bytes — which is a valid message, not an
+	// absent one. Sending only when requestData was non-empty meant the most ordinary
+	// call there is (`SubscribeCheckpoints` with no options) half-closed without ever
+	// sending anything, and the upstream failed the whole stream with
+	// "Internal: Missing request message".
+	if err := stream.SendMsg(inputMsg); err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+
+	// Close send direction (server-streaming is receive-only after the initial request)
 	if err := stream.CloseSend(); err != nil {
 		return nil, fmt.Errorf("failed to close send: %w", err)
 	}
