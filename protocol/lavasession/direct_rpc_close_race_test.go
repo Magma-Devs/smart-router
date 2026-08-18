@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -490,6 +491,93 @@ func TestInitialization_ConcurrentWithClose_NeverLeaksConnector(t *testing.T) {
 		}
 		mu.Unlock()
 	}
+}
+
+// TestInitialization_FailureIsRetriedNotLatched pins the third way this
+// connection could end up permanently dead (MAG-2808).
+//
+// ensureInitialized used to store `initialized = true` whatever initialize()
+// returned, cache the error in an initErr field, and replay it to every later
+// request. A node that happened to be down when the FIRST relay arrived poisoned
+// the connection for the life of the pairing, because endpoint.DirectConnections
+// caches this object until the pairing is rebuilt — the same failure shape as the
+// connector-lifetime bug, reached by a different route.
+func TestInitialization_FailureIsRetriedNotLatched(t *testing.T) {
+	var attempts atomic.Int32
+	g := newUninitializedGRPCConn(func(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
+		if attempts.Add(1) == 1 {
+			return nil, errors.New("node is down")
+		}
+		return newFakeGRPCConnector(), nil
+	})
+
+	_, err := g.SendRequest(context.Background(), []byte("{}"), grpcTestHeaders())
+	require.Error(t, err, "the first relay must see the failed dial")
+	require.False(t, g.initialized.Load(), "a failed initialize must not latch")
+
+	// The second relay fails too — the fake hands out no usable client — but it
+	// must fail at the CHECKOUT, having dialled again, rather than replaying a
+	// cached initialization error.
+	_, err = g.SendRequest(context.Background(), []byte("{}"), grpcTestHeaders())
+	require.Error(t, err)
+	require.Equal(t, int32(2), attempts.Load(), "the second relay must retry the dial")
+
+	require.True(t, g.initialized.Load(), "a successful initialize must latch")
+	g.connMu.RLock()
+	defer g.connMu.RUnlock()
+	require.NotNil(t, g.connector, "the retry must publish its connector")
+}
+
+// TestInitialization_SpentContextDoesNotQueueAnotherDial is the guard that keeps
+// the retry above from becoming a serialized dial storm against a dead endpoint.
+//
+// initialize() dials with grpc.WithBlock() under initMu, so relays arriving
+// during a failing dial queue behind it. Without this check each of them would
+// then start its own full dial budget on a context that had already expired while
+// it waited — every relay paying the full cost, one after another.
+func TestInitialization_SpentContextDoesNotQueueAnotherDial(t *testing.T) {
+	var attempts atomic.Int32
+	release := make(chan struct{})
+	dialing := make(chan struct{})
+
+	g := newUninitializedGRPCConn(func(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
+		attempts.Add(1)
+		close(dialing)
+		<-release
+		return nil, errors.New("node is down")
+	})
+
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		_, _ = g.SendRequest(context.Background(), []byte("{}"), grpcTestHeaders())
+	}()
+
+	<-dialing // the first relay now holds initMu inside the factory
+
+	// A second relay arrives and blocks on initMu with a context that dies while
+	// it waits.
+	spentCtx, cancel := context.WithCancel(context.Background())
+	secondErr := make(chan error, 1)
+	go func() {
+		_, err := g.SendRequest(spentCtx, []byte("{}"), grpcTestHeaders())
+		secondErr <- err
+	}()
+	time.Sleep(blockedFor) // let it reach the lock
+	cancel()
+
+	close(release)
+	<-firstDone
+
+	select {
+	case err := <-secondErr:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the queued relay never returned")
+	}
+
+	require.Equal(t, int32(1), attempts.Load(),
+		"a relay whose context expired while queued must not start its own dial")
 }
 
 // TestConnector_OutlivesTheRelayThatInitializedIt is the second MAG-2808 pin, and
