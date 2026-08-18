@@ -128,8 +128,17 @@ func (apip *GrpcChainParser) setupForConsumer(relayer grpcproxy.ProxyCallBack) {
 	apip.codec = dyncodec.NewCodec(apip.registry)
 }
 
-func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientConn) error {
-	remote := dyncodec.NewGRPCReflectionProtoFileRegistryFromConn(reflectionConnection)
+// setupForProvider builds the registry that backs GrpcMessage.dynamicResolve —
+// the path GetParams takes for binary-proto requests, and therefore what block
+// parsing depends on. It honours grpc-config for the same reason SendNodeMsg does:
+// a node that does not serve reflection would otherwise boot and then fail here,
+// at parse time, instead of at connect time (MAG-2350).
+func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientConn, grpcConfig *common.GrpcConfig) error {
+	var remote dyncodec.ProtoFileRegistry = dyncodec.NewGRPCReflectionProtoFileRegistryFromConn(reflectionConnection)
+	remote, err := dyncodec.ProtoFileRegistryForGrpcConfig(grpcConfig, remote)
+	if err != nil {
+		return err
+	}
 	apip.registry = dyncodec.NewRegistry(remote)
 	apip.codec = dyncodec.NewCodec(apip.registry)
 	return nil
@@ -479,7 +488,10 @@ func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 
 func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, parser ChainParser, conn grpcConnectorInterface, rpcProviderEndpoint lavasession.RPCProviderEndpoint) (ChainProxy, error) {
 	cp := &GrpcChainProxy{
-		BaseChainProxy:   BaseChainProxy{averageBlockTime: averageBlockTime, ErrorHandler: &GRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID}, ChainID: rpcProviderEndpoint.ChainID, HashedNodeUrl: chainproxy.HashURL(rpcProviderEndpoint.NodeUrls[0].Url)},
+		// NodeUrl is what carries grpc-config onto the request path; without it
+		// cp.NodeUrl.GrpcConfig is the zero value and descriptor-source is invisible
+		// here no matter what the config says (MAG-2350).
+		BaseChainProxy:   BaseChainProxy{averageBlockTime: averageBlockTime, ErrorHandler: &GRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID}, ChainID: rpcProviderEndpoint.ChainID, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(rpcProviderEndpoint.NodeUrls[0].Url)},
 		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
 	}
 	cp.conn = conn
@@ -502,7 +514,7 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 	if !ok {
 		return nil, fmt.Errorf("grpc chain proxy: parser is not a GrpcChainParser")
 	}
-	err = grpcParser.setupForProvider(reflectionConnection)
+	err = grpcParser.setupForProvider(reflectionConnection, &cp.NodeUrl.GrpcConfig)
 	if err != nil {
 		return nil, fmt.Errorf("grpc chain proxy: failed to setup parser: %w", err)
 	}
@@ -541,7 +553,10 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	}
 
 	cl := grpcreflect.NewClientAuto(ctx, conn)
-	descriptorSource := rpcInterfaceMessages.DescriptorSourceFromServer(cl)
+	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&cp.NodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
+	if err != nil {
+		return nil, "", nil, utils.LavaFormatError("failed resolving grpc descriptor source", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+	}
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(nodeMessage.Path)
 
 	// Check if we have method descriptor already cached.

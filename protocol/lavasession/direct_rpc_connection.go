@@ -22,7 +22,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
@@ -907,7 +906,7 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 	// GetCachedMethodDescriptor read without holding initMu.
 
 	// Initialize descriptor source based on config
-	if err := g.initializeDescriptorSource(ctx); err != nil {
+	if err := g.initializeDescriptorSource(); err != nil {
 		// Log warning but don't fail - we'll try reflection on first request
 		utils.LavaFormatWarning("failed to initialize descriptor source, will use reflection", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
@@ -945,47 +944,33 @@ func (g *GRPCDirectRPCConnection) validateURL() error {
 	return nil
 }
 
-// initializeDescriptorSource validates the configured descriptor source.
+// initializeDescriptorSource loads and validates the configured descriptor source
+// at connect time, so a bad descriptor-set-path surfaces here rather than at the
+// first relay.
 //
-// Neither branch below keeps the loaded registry. Descriptor resolution goes
-// through reflection in getMethodDescriptor on every path, so the load is a
-// config check: a bad descriptor-set-path surfaces here, at initialization,
-// rather than at the first relay. The registry/codec fields that used to hold the
-// result were written here and nil'd in Close but never read anywhere in the
-// package, so they were removed (MAG-2808) along with the locking commentary that
-// claimed to protect them.
-func (g *GRPCDirectRPCConnection) initializeDescriptorSource(ctx context.Context) error {
+// It deliberately goes through the same loader the request path uses. The previous
+// version validated with dyncodec's parser and then threw the result away, while
+// resolution went through reflection regardless — so the check proved nothing about
+// what would actually be consumed, and in "file" mode nothing was consumed at all
+// (MAG-2350). Loading here now also warms the per-path cache, making the first
+// relay's descriptor lookup free.
+//
+// The load is not retained on the struct: the cache is keyed by path and shared
+// process-wide, so re-resolving per request is a map hit.
+func (g *GRPCDirectRPCConnection) initializeDescriptorSource() error {
 	grpcConfig := &g.nodeUrl.GrpcConfig
-	source := grpcConfig.GetDescriptorSource()
 
-	switch source {
-	case common.GrpcDescriptorSourceFile:
-		if grpcConfig.DescriptorSetPath == "" {
-			return fmt.Errorf("descriptor-set-path required for file descriptor source")
-		}
-		if _, err := dyncodec.NewFileDescriptorSetRegistryFromPath(grpcConfig.DescriptorSetPath); err != nil {
-			return err
-		}
-
-	case common.GrpcDescriptorSourceHybrid:
-		// The file half of hybrid mode is optional; only report a path that is set
-		// and unloadable.
-		if grpcConfig.DescriptorSetPath != "" {
-			if _, err := dyncodec.NewFileDescriptorSetRegistryFromPath(grpcConfig.DescriptorSetPath); err != nil {
-				utils.LavaFormatWarning("failed to load file descriptors for hybrid mode", err,
-					utils.LogAttr("path", grpcConfig.DescriptorSetPath))
-			}
-		}
-
-	case common.GrpcDescriptorSourceReflection, "":
-		// Reflection will be used on first request
-		// No initialization needed here
+	// A nil server source is safe to pass: reflection-mode returns it untouched and
+	// no descriptor lookup happens here. Only the file half is being exercised.
+	if _, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(grpcConfig, nil); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// getMethodDescriptor retrieves the method descriptor, using cache or reflection
+// getMethodDescriptor retrieves the method descriptor from cache, or resolves it
+// through the node's configured descriptor source (reflection, file, or hybrid).
 func (g *GRPCDirectRPCConnection) getMethodDescriptor(
 	ctx context.Context,
 	conn *grpc.ClientConn,
@@ -998,16 +983,22 @@ func (g *GRPCDirectRPCConnection) getMethodDescriptor(
 		return methodDesc, nil
 	}
 
-	// Use reflection to get descriptor
+	// Resolve through the node's configured descriptor source. In "reflection" mode
+	// (the default) this is exactly the reflection client below; in "file" mode the
+	// client is built but never queried.
 	cl := grpcreflect.NewClientAuto(ctx, conn)
 	defer cl.Reset()
 
-	descriptorSource := rpcInterfaceMessages.DescriptorSourceFromServer(cl)
+	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&g.nodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
+	if err != nil {
+		return nil, err
+	}
 
 	descriptor, err := descriptorSource.FindSymbol(service)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to find service via reflection", err,
-			utils.LogAttr("service", service))
+		return nil, utils.LavaFormatError("failed to find service descriptor", err,
+			utils.LogAttr("service", service),
+			utils.LogAttr("descriptor-source", g.nodeUrl.GrpcConfig.GetDescriptorSource()))
 	}
 
 	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
@@ -1055,10 +1046,15 @@ func (g *GRPCDirectRPCConnection) parseInputMessage(
 ) error {
 	// Detect if input is JSON or binary proto
 	if len(data) > 0 && (data[0] == '{' || data[0] == '[') {
-		// JSON input - use grpcurl parser
+		// JSON input - use grpcurl parser. The parser resolves any message types the
+		// request references, so it needs the same descriptor source as the method
+		// lookup did — reflection-only here would defeat "file" mode (MAG-2350).
 		cl := grpcreflect.NewClientAuto(ctx, conn)
 		defer cl.Reset()
-		descriptorSource := rpcInterfaceMessages.DescriptorSourceFromServer(cl)
+		descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&g.nodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
+		if err != nil {
+			return err
+		}
 
 		rp, _, err := grpcurl.RequestParserAndFormatter(
 			grpcurl.FormatJSON,
