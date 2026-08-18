@@ -52,6 +52,11 @@ type grpcActiveSubscription struct {
 	// Restoration state
 	restoring atomic.Bool
 
+	// Set once cleanupSubscription has released this subscription's resources. Keyed on
+	// the subscription object rather than on its presence in activeSubscriptions, so
+	// release runs exactly once no matter who reaches cleanup first.
+	cleanedUp atomic.Bool
+
 	// Message sequence counter
 	messageSeq atomic.Uint64
 
@@ -273,29 +278,39 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupLoop(ctx context.Context) {
 	}
 }
 
-// cleanupStaleSubscriptions removes subscriptions with cancelled contexts
+// cleanupStaleSubscriptions removes subscriptions with cancelled contexts.
+//
+// It delegates to cleanupSubscription rather than deleting the entry itself. A partial
+// reap — map delete plus counter, and nothing else — leaves the client channels open,
+// the connection's stream count inflated so the pool cannot scale down, and the idMapper
+// entries live, with no one left to release them: the listener's own cleanup arrives to
+// find the key already gone (MAG-2540).
+//
+// The window is not narrow. removeClientFromSubscription cancels the subscription when
+// its last client leaves and leaves cleanup to the listener, which may be parked in
+// RecvMsg indefinitely — ctx.Done() is only checked between receives — so on a quiet
+// stream this sweep routinely gets there first.
 func (dgm *DirectGRPCSubscriptionManager) cleanupStaleSubscriptions() {
-	dgm.lock.Lock()
-	defer dgm.lock.Unlock()
-
-	var toRemove []string
-	for hashedParams, sub := range dgm.activeSubscriptions {
+	dgm.lock.RLock()
+	var stale []*grpcActiveSubscription
+	for _, sub := range dgm.activeSubscriptions {
 		select {
 		case <-sub.ctx.Done():
-			toRemove = append(toRemove, hashedParams)
+			stale = append(stale, sub)
 		default:
 			// Still active
 		}
 	}
+	dgm.lock.RUnlock()
 
-	for _, hashedParams := range toRemove {
-		delete(dgm.activeSubscriptions, hashedParams)
-		dgm.totalSubscriptions.Add(-1)
+	// Called unlocked: cleanupSubscription takes dgm.lock itself.
+	for _, sub := range stale {
+		dgm.cleanupSubscription(sub.hashedParams, sub)
 	}
 
-	if len(toRemove) > 0 {
+	if len(stale) > 0 {
 		utils.LavaFormatDebug("DirectGRPC: cleaned up stale subscriptions",
-			utils.LogAttr("count", len(toRemove)),
+			utils.LogAttr("count", len(stale)),
 		)
 	}
 }
@@ -623,18 +638,14 @@ func (dgm *DirectGRPCSubscriptionManager) createUpstreamStream(
 	return stream, nil
 }
 
-// listenForUpstreamMessages listens for messages from upstream gRPC stream
-// On an upstream error we hand off to handleUpstreamDisconnect, which either restores the
-// subscription (mutating activeSub in place and spawning a fresh listener) or tears it down.
-// Cleanup must NOT run from this goroutine in that case: it deletes the entry from
-// dgm.activeSubscriptions, closes every client channel and nils connectedClients — so a
-// successful restoration would route into nobody, leak the new upstream stream, and
-// decrement totalSubscriptions a second time when the restarted listener later exits,
-// driving the counter below zero and disabling the max-subscriptions limit (MAG-2540).
+// listenForUpstreamMessages listens for messages from upstream gRPC stream.
 //
-// Cleanup ownership: once reconnectInFlight is set, handleUpstreamDisconnect owns
-// cleanupSubscription on every failure path, so a failed restoration still releases the
-// subscription. This mirrors the contract DirectWSSubscriptionManager already documents.
+// On an upstream error, ownership of the subscription transfers to
+// handleUpstreamDisconnect, which restores it in place or releases it. Cleanup must not
+// also run here: it closes every client channel and nils connectedClients, so a
+// successful restoration would route into nobody and leak the new stream (MAG-2540).
+// Once reconnectInFlight is set, handleUpstreamDisconnect owns cleanup on every failure
+// path — the same contract DirectWSSubscriptionManager documents.
 func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 	ctx context.Context,
 	hashedParams string,
@@ -733,9 +744,13 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 ) {
 	// Prevent concurrent restoration.
 	//
-	// Returning here without cleanup is correct: another handleUpstreamDisconnect is
-	// already in flight for this subscription and holds cleanup ownership, so cleaning
-	// up here would tear down a restoration that is still in progress.
+	// Returning here without cleanup is correct: another handleUpstreamDisconnect holds
+	// the latch and owns cleanup for this subscription, so tearing down here would kill a
+	// restoration still in progress. That is only true because the latch is released
+	// before the restarted listener is spawned (see the end of this function) — if it
+	// outlived the hand-off, a handler spawned by that listener would lose the CAS and
+	// return, leaving the subscription registered with no listener, nobody reconnecting,
+	// and an uncancelled ctx that keeps the stale sweep from collecting it.
 	if !activeSub.restoring.CompareAndSwap(false, true) {
 		return
 	}
@@ -745,6 +760,7 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	// that handed off skipped its own deferred cleanup, so every way out of this
 	// function short of a completed restoration must release the subscription — and a
 	// failure path added later gets that for free instead of having to remember it.
+	// cleanupSubscription cancels, so the failure paths below do not.
 	restored := false
 	defer func() {
 		if !restored {
@@ -759,7 +775,6 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	// Reconnect pool
 	if err := activeSub.upstreamPool.ReconnectWithBackoff(ctx); err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to reconnect", err)
-		activeSub.cancel()
 		return
 	}
 
@@ -767,7 +782,6 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	newConn, err := activeSub.upstreamPool.GetConnectionForStream(ctx)
 	if err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to get new connection", err)
-		activeSub.cancel()
 		return
 	}
 
@@ -781,7 +795,6 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	)
 	if err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to create new stream", err)
-		activeSub.cancel()
 		return
 	}
 
@@ -806,50 +819,80 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	// so the cleanup defer above must stand down.
 	restored = true
 
+	// Release the latch BEFORE the hand-off, not on the way out via defer: if the new
+	// listener errors immediately, its handler has to win the CAS. The trailing defer
+	// is then a no-op.
+	activeSub.restoring.Store(false)
+
 	// Restart listener
 	go dgm.listenForUpstreamMessages(activeSub.ctx, hashedParams, activeSub)
 }
 
-// cleanupSubscription removes a subscription and notifies clients
-// Idempotent: cleaning up a subscription that is already gone is a no-op, matching
-// DirectWSSubscriptionManager.cleanupSubscription. Without the existence check the
-// counter decrement was unconditional while the map delete was not, so a second call
-// for the same subscription drove totalSubscriptions below zero — which is what
-// disables the max-subscriptions limit (MAG-2540).
+// cleanupSubscription releases a subscription: deregisters it, cancels it, closes every
+// client channel, returns the stream slot to the pool and drops the per-client tracking
+// and ID mappings.
 //
-// That is not hypothetical even after the ownership fix: cleanupStaleSubscriptions
-// removes any subscription whose ctx is done, and handleUpstreamDisconnect's failure
-// paths call activeSub.cancel() BEFORE cleaning up. A sweep landing in that window
-// would decrement, and this function would decrement again. The guard, not the call
-// ordering, is what makes that safe.
+// Two guards, answering two different questions (MAG-2540):
 //
-// The early return covers more than the counter: NotifyStreamRemoved and
-// RemoveMapping are also not safe to run twice for one subscription.
+//   - cleanedUp makes the release run exactly once per subscription. Guarding on the map
+//     entry instead would fix the counter and create a leak: a caller arriving after the
+//     entry is gone would skip closing the client channels too.
+//   - The map entry is only removed when this is still the registered subscription.
+//     hashedParams is deterministic — a client re-subscribing to the same method reuses
+//     the key — so a handler parked in ReconnectWithBackoff must not come back seconds
+//     later and evict its own successor.
+//
+// Cancellation lives here, not at the call sites, so the stale sweep can never observe a
+// cancelled-but-unreleased subscription. Same placement as
+// DirectWSSubscriptionManager.cleanupSubscription.
 func (dgm *DirectGRPCSubscriptionManager) cleanupSubscription(hashedParams string, activeSub *grpcActiveSubscription) {
-	dgm.lock.Lock()
-	if _, found := dgm.activeSubscriptions[hashedParams]; !found {
-		dgm.lock.Unlock()
+	if !activeSub.cleanedUp.CompareAndSwap(false, true) {
 		return
 	}
-	delete(dgm.activeSubscriptions, hashedParams)
+
+	dgm.lock.Lock()
+	if current, found := dgm.activeSubscriptions[hashedParams]; found && current == activeSub {
+		delete(dgm.activeSubscriptions, hashedParams)
+	}
+	// Decremented per subscription object, not per map entry: createNewSubscription
+	// increments once when it registers, and the cleanedUp latch above makes this the
+	// matching decrement. Gating it on the identity check instead would strand the slot
+	// of any subscription that left the map by another route.
 	dgm.totalSubscriptions.Add(-1)
 	dgm.lock.Unlock()
 
-	// Close client channels
+	activeSub.cancel()
+
+	// Close client channels, and snapshot what the release below needs — upstreamConnection
+	// is written under this lock by handleUpstreamDisconnect.
 	activeSub.lock.Lock()
-	for _, sender := range activeSub.connectedClients {
+	clientKeys := make([]string, 0, len(activeSub.connectedClients))
+	for clientKey, sender := range activeSub.connectedClients {
 		sender.Close()
+		clientKeys = append(clientKeys, clientKey)
 	}
 	activeSub.connectedClients = nil
+	routerIDs := make([]string, 0, len(activeSub.clientRouterIDs))
+	for _, routerID := range activeSub.clientRouterIDs {
+		routerIDs = append(routerIDs, routerID)
+	}
+	upstreamConnection := activeSub.upstreamConnection
 	activeSub.lock.Unlock()
 
+	// Untrack per client, or checkClientSubscriptionLimit keeps counting a dead
+	// subscription and ratchets the client toward its cap. Outside activeSub.lock —
+	// untrackClientSubscription takes dgm.lock.
+	for _, clientKey := range clientKeys {
+		dgm.untrackClientSubscription(clientKey, hashedParams)
+	}
+
 	// Return connection to pool
-	if activeSub.upstreamConnection != nil {
-		activeSub.upstreamPool.NotifyStreamRemoved(activeSub.upstreamConnection)
+	if upstreamConnection != nil {
+		activeSub.upstreamPool.NotifyStreamRemoved(upstreamConnection)
 	}
 
 	// Clean up ID mappings
-	for _, routerID := range activeSub.clientRouterIDs {
+	for _, routerID := range routerIDs {
 		dgm.idMapper.RemoveMapping(routerID)
 	}
 
