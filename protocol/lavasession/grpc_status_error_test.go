@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -30,6 +31,82 @@ func TestHandleGRPCError_CancelledContextReturnsNilResponse(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, context.Canceled),
 		"the context.Canceled sentinel must be re-attached so the relay-race carve-out can see it")
+}
+
+// TestHandleGRPCError_CancelledContextWinsOverTheReportedStatus closes the hole
+// the branch above was originally written with.
+//
+// That branch required BOTH a cancelled local context AND status.Code(err) ==
+// codes.Canceled. grpc-go does not promise the second: cancelling a call while its
+// connection is being torn down surfaces Unavailable, and a cancel racing a
+// response can surface Unknown or the status the endpoint had already sent. With
+// the conjunct in place those cases fell through to the node-error arm, which
+// returns (result, nil) — and `err != nil` at the relay-race carve-out
+// (rpcsmartrouter_server.go) then sees nil and scores a relay WE abandoned against
+// a healthy endpoint. Same bug class as MAG-2687, narrower window.
+//
+// The local context is the authoritative signal and is sufficient on its own. The
+// risk is asymmetric: missing a local cancel penalises an endpoint that did nothing
+// wrong, over-detecting one merely skips scoring for a result we were discarding.
+func TestHandleGRPCError_CancelledContextWinsOverTheReportedStatus(t *testing.T) {
+	for _, code := range []codes.Code{
+		codes.Unavailable, // connection torn down by the cancel itself
+		codes.Unknown,     // grpc-go's fallback when the cancel races the response
+		codes.Internal,    // a status the endpoint had already sent
+		codes.Canceled,    // the shape the old conjunct required
+	} {
+		t.Run(code.String(), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // a sibling relay won the race, or the client hung up
+
+			g := &GRPCDirectRPCConnection{}
+			resp, err := g.handleGRPCError(ctx, status.Error(code, "boom"), nil)
+
+			require.Nil(t, resp,
+				"a non-nil response routes this into the node-error arm, which returns err == nil "+
+					"and makes the cancellation invisible to the carve-out")
+			require.True(t, errors.Is(err, context.Canceled),
+				"the local context is the authoritative signal; the status the endpoint reported "+
+					"must not be able to veto it")
+		})
+	}
+}
+
+// TestHandleGRPCError_CancelledRelayKeepsItsCause covers the other half: the
+// branch resolves the cancellation but must not throw away what the endpoint was
+// doing when we pulled the plug — in a change whose other half is about preserving
+// causes, wrapping only the sentinel would be the same omission one level up.
+func TestHandleGRPCError_CancelledRelayKeepsItsCause(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cause := status.Error(codes.Unavailable, "connection reset by peer")
+	g := &GRPCDirectRPCConnection{}
+	_, err := g.handleGRPCError(ctx, cause, nil)
+
+	require.True(t, errors.Is(err, context.Canceled),
+		"the sentinel the carve-out resolves must still be reachable")
+	require.ErrorIs(t, err, cause,
+		"the originating gRPC status must survive alongside it, for logs and for any later inspector")
+}
+
+// TestHandleGRPCError_ExpiredDeadlineIsNotACancellation is the collateral guard
+// for the two tests above: dropping the status-code conjunct widens the branch, so
+// the remaining condition has to stay exact. A ctx whose DEADLINE expired is also
+// non-nil, and relabelling a timeout as a client cancellation would let a genuinely
+// slow endpoint escape being blamed for it.
+func TestHandleGRPCError_ExpiredDeadlineIsNotACancellation(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded, "precondition: expired, not cancelled")
+
+	g := &GRPCDirectRPCConnection{}
+	resp, err := g.handleGRPCError(ctx, status.Error(codes.DeadlineExceeded, "context deadline exceeded"), nil)
+
+	require.NotNil(t, resp,
+		"a timeout is the endpoint's problem and must keep its response so the node-error arm runs")
+	require.False(t, errors.Is(err, context.Canceled),
+		"a slow endpoint must not be excused as a relay we cancelled")
 }
 
 // TestHandleGRPCError_RemoteCancellationIsNotLocal is the collateral guard for

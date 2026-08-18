@@ -769,9 +769,16 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 
 		if isGRPCErr && response != nil {
 			// A gRPC status error that still carried a response body: the node
-			// answered, and its answer is an error. Classify it exactly the way the
-			// success path below does rather than applying a separate rule here —
-			// same CheckResponseError, same StatusCode, same classification call.
+			// answered, and its answer is an error. Classify it through the same three
+			// steps every other node-error path uses — CheckResponseError, StatusCode,
+			// ApplyNodeErrorClassification — rather than applying a separate rule here.
+			//
+			// Note this arm is the ONLY one that classifies a gRPC node error. The
+			// success path 40 lines below runs the same three steps, but its
+			// CheckResponseError can never report an error: it is reached only with
+			// StatusCode = http.StatusOK, which GrpcMessage.CheckResponseError treats
+			// as "no error" by definition. Its shape is the model to copy; its
+			// hasError branch is unreachable on this transport.
 			//
 			// This arm previously left StatusCode at its 0 default and derived
 			// IsNodeError from `Code >= 13`. Both were wrong, independently:

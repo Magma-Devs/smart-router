@@ -51,3 +51,28 @@ func TestRateLimitSubCategorySpansBothRetryabilities_MAG2156(t *testing.T) {
 	require.False(t, LavaErrorNodeLimitExceeded.Retryable,
 		"NODE_LIMIT_EXCEEDED (2011) is not retryable — same subcategory, opposite axis")
 }
+
+// TestDataScopeCodesAreAllRetryable_MAG2549 is the same invariant one axis over, and it exists
+// because SubCategoryDataScope only earns its keep while this holds.
+//
+// The axis was added for errors that are retryable AND must not be scored — a pruned endpoint's
+// NOT_FOUND is an archive endpoint's hit, so the retry is worth making, but the endpoint that
+// answered did nothing wrong. Register a data-scope code Retryable=false and the carve-out becomes
+// redundant with IsNonRetryable, which would mean the axis had quietly stopped buying anything and
+// the archive fallback had quietly been killed. Either is worth failing a build over.
+func TestDataScopeCodesAreAllRetryable_MAG2549(t *testing.T) {
+	var checked int
+	for code, le := range errorRegistry {
+		if !le.SubCategory.IsDataScope() {
+			continue
+		}
+		checked++
+		require.True(t, le.Retryable,
+			"%s (%d) carries SubCategoryDataScope but is Retryable=false. The axis exists precisely "+
+				"for errors IsNonRetryable cannot express: retry elsewhere IS worthwhile (a pruned "+
+				"endpoint's miss is an archive endpoint's hit) while the endpoint stays out of the "+
+				"availability signal. Non-retryable makes the carve-out redundant and stops the "+
+				"request from ever reaching the endpoint that holds the data.", le.Name, code)
+	}
+	require.NotZero(t, checked, "expected at least one SubCategoryDataScope code in the registry")
+}

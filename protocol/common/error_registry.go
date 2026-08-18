@@ -39,6 +39,7 @@ const (
 	SubCategoryNone              ErrorSubCategory = iota
 	SubCategoryUnsupportedMethod                  // zero retries, zero CU, cached response, no provider scoring
 	SubCategoryRateLimit                          // rate-limit signal: endpoint is healthy but busy, apply backoff, do not mark unhealthy
+	SubCategoryDataScope                          // endpoint does not hold the data: retry elsewhere may help, but it is not unhealthy
 )
 
 func (sc ErrorSubCategory) String() string {
@@ -47,6 +48,8 @@ func (sc ErrorSubCategory) String() string {
 		return "unsupported_method"
 	case SubCategoryRateLimit:
 		return "rate_limit"
+	case SubCategoryDataScope:
+		return "data_scope"
 	default:
 		return "none"
 	}
@@ -61,6 +64,27 @@ func (sc ErrorSubCategory) IsUnsupportedMethod() bool {
 // but NOT mark the endpoint unhealthy — it's working, just busy.
 func (sc ErrorSubCategory) IsRateLimit() bool {
 	return sc == SubCategoryRateLimit
+}
+
+// IsDataScope reports whether this subcategory represents "the endpoint answered
+// authoritatively that it does not hold the requested data" — pruned history, an
+// object that was never created, a height outside its retained range.
+//
+// It is a third fault axis, independent of the other two, and it exists because
+// neither of them can express this case:
+//
+//   - Retryable stays TRUE. A pruned node and an archive node genuinely disagree,
+//     so another endpoint can still answer. Marking these non-retryable to keep
+//     them out of the availability signal would buy the exemption by killing the
+//     archive fallback.
+//   - The endpoint is nonetheless HEALTHY. It did its job and reported the truth
+//     about its own data scope, so charging it an availability failure demotes it
+//     for the shape of the request rather than for anything it did wrong.
+//
+// Health-tracking callers should therefore keep retrying elsewhere but leave the
+// endpoint's availability score untouched.
+func (sc ErrorSubCategory) IsDataScope() bool {
+	return sc == SubCategoryDataScope
 }
 
 // LavaError is the central error definition — a classification struct, not a Go error.

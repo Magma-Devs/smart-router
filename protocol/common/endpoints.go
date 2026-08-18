@@ -448,6 +448,12 @@ type RelayResult struct {
 	// Orthogonal to IsNonRetryable — NODE_RATE_LIMITED (2005) is retryable,
 	// NODE_LIMIT_EXCEEDED (2011) is not, and both set this flag.
 	IsRateLimited bool
+	// IsDataScope is true when the node error carries SubCategoryDataScope: the
+	// endpoint answered truthfully that it does not hold the requested data
+	// (pruned height, object that never existed). Retryable — an archive node may
+	// hold it — but the endpoint is healthy, so the direct-RPC availability gate
+	// excludes it. Orthogonal to both flags above.
+	IsDataScope bool
 }
 
 // ApplyNodeErrorClassification stamps every registry-derived policy flag onto a node-error
@@ -465,6 +471,7 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	rr.IsNonRetryable = classification.IsNonRetryable
 	rr.IsUnsupportedMethod = classification.IsUnsupportedMethod
 	rr.IsRateLimited = classification.IsRateLimited
+	rr.IsDataScope = classification.IsDataScope
 }
 
 func (rr *RelayResult) GetReplyServer() pairingtypes.Relayer_RelaySubscribeClient {

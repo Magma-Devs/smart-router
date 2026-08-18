@@ -1443,7 +1443,7 @@ func promoteConsistencyFallback(
 // first-picked ~1/3 of the time no matter how long it kept failing. The classification itself was
 // never the problem: direct_rpc_relay.go tags these IsNodeError=true, the gate just didn't read it.
 //
-// The two carve-outs are load-bearing, not defensive, and they exclude on DIFFERENT axes:
+// The three carve-outs are load-bearing, not defensive, and they exclude on DIFFERENT axes:
 //
 //   - IsNonRetryable — "retrying elsewhere would not help". Deterministic caller-fault errors
 //     (unsupported method, invalid params, execution reverted) come back from EVERY endpoint for
@@ -1456,6 +1456,11 @@ func promoteConsistencyFallback(
 //     backoff-without-marking-unhealthy (common/error_registry.go), and it does NOT follow from
 //     retryability: NODE_RATE_LIMITED (2005) is Retryable=true, NODE_LIMIT_EXCEEDED (2011) is
 //     Retryable=false, and both must stay out of the availability signal.
+//   - IsDataScope — "the endpoint does not hold this data, and said so". SubCategoryDataScope
+//     (gRPC NOT_FOUND / OUT_OF_RANGE) is the case neither axis above can express: retrying IS
+//     worthwhile because a pruned node and an archive node genuinely disagree, yet the endpoint
+//     that answered did nothing wrong. Without this carve-out the most COMMON non-OK code on a
+//     Cosmos or Sui gRPC chain demotes every endpoint asked, once per retry (MAG-2549 review).
 //
 // KNOWN AND ACCEPTED — an unclassified error body scores. ClassifyNodeErrorForRetry returns all
 // flags false when nothing in the registry matches, and a false flag is an absence of information,
@@ -1472,7 +1477,9 @@ func promoteConsistencyFallback(
 //     the endpoint IS the differentiator and demoting it is defensible; when it is not — every
 //     endpoint lacks the tx — all of them demote equally and weighted_selector collapses to uniform
 //     random rather than starving. Tag these with a fault-axis SubCategory if that proves wrong in
-//     production; the gate reads the axis, so no change here would be needed.
+//     production — SubCategoryDataScope is exactly that escape hatch being used, and the JSON-RPC
+//     and REST codes listed here are deliberately left on the scoring side for now: only the gRPC
+//     status codes were shown to be a routine query outcome rather than an error the node raised.
 //
 // Every relay through this gate also feeds ConsecutiveErrors. An endpoint with ZERO successful
 // relays is blocklisted on its 16th consecutive failure (consumer_session_manager.go), so a
@@ -1489,11 +1496,36 @@ func shouldFailSessionForResult(err error, relayResult *common.RelayResult) bool
 		return false
 	}
 	// REST/HTTP transport failures: err == nil but the status still means the node failed us.
+	//
+	// Deliberately NOT extended to gRPC status codes even though RelayResult.StatusCode now
+	// carries them (0-16, so nothing here can fire on a gRPC relay). Every gRPC status reaches
+	// this gate through the IsNodeError branch below, where the carve-outs apply; teaching this
+	// clause that 13/14/15 are "gRPC 5xx" and 8 is "gRPC 429" would re-score them ahead of the
+	// carve-outs and undo the rate-limit exemption that direct_rpc_relay.go just classified.
 	if relayResult.StatusCode >= 500 || relayResult.StatusCode == 429 {
 		return true
 	}
 	// Node error delivered inside a 2xx body — scoreable unless a carve-out claims it.
-	return relayResult.IsNodeError && !relayResult.IsNonRetryable && !relayResult.IsRateLimited
+	return relayResult.IsNodeError &&
+		!relayResult.IsNonRetryable &&
+		!relayResult.IsRateLimited &&
+		!relayResult.IsDataScope
+}
+
+// shouldResetEndpointHealth reports whether a completed direct-RPC relay is proof that the endpoint
+// is working — the condition relayInnerDirect calls Endpoint.ResetHealth on.
+//
+// Defined as the exact negation of shouldFailSessionForResult so the endpoint-health path and the
+// QoS path cannot form different opinions about the same relay. They could before: relayInnerDirect
+// gated only on `statusCode >= 500 || == 429`, which no gRPC status can satisfy (the codes are
+// 0-16), so every gRPC node error fell through to "success — reset health" at the same moment
+// shouldFailSessionForResult was reporting it to the session manager as an availability failure.
+//
+// Keeping it a negation rather than a second rule is deliberate: a carve-out added to one gate is
+// then automatically honoured by the other, which is how a rate-limited or data-scope answer keeps
+// restoring health while an UNAVAILABLE one stops.
+func shouldResetEndpointHealth(relayResult *common.RelayResult) bool {
+	return !shouldFailSessionForResult(nil, relayResult)
 }
 
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
@@ -3887,8 +3919,9 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		return relayLatency, fmt.Errorf("HTTP %d", statusCode), needsBackoff
 	}
 
-	// Success - reset endpoint health
-	if targetEndpoint != nil {
+	// Success - reset endpoint health. A node error the QoS path is scoring against this endpoint
+	// is not a success and must not certify it healthy; see shouldResetEndpointHealth.
+	if targetEndpoint != nil && shouldResetEndpointHealth(result) {
 		if targetEndpoint.ResetHealth() {
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, true)
 		}
@@ -3900,11 +3933,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	relayResult.StatusCode = result.StatusCode
 	relayResult.IsNodeError = result.IsNodeError
 	relayResult.IsNonRetryable = result.IsNonRetryable
-	// IsUnsupportedMethod and IsRateLimited are the fault-axis flags direct_rpc_relay.go classifies
-	// alongside IsNonRetryable. Both were dropped here, so the zero-CU/caching carve-out and the
-	// availability gate's rate-limit exclusion could never see them on the direct path.
+	// IsUnsupportedMethod, IsRateLimited and IsDataScope are the fault-axis flags
+	// direct_rpc_relay.go classifies alongside IsNonRetryable. The first two were dropped here, so
+	// the zero-CU/caching carve-out and the availability gate's rate-limit exclusion could never see
+	// them on the direct path; IsDataScope would have the same fate if it were not copied too.
 	relayResult.IsUnsupportedMethod = result.IsUnsupportedMethod
 	relayResult.IsRateLimited = result.IsRateLimited
+	relayResult.IsDataScope = result.IsDataScope
 	relayResult.ProviderInfo = result.ProviderInfo
 	if relayResult.Reply != nil {
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{
