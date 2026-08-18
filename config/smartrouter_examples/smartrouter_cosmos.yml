@@ -17,6 +17,23 @@
 # check is best-effort here. A real Cosmos Hub node (or a gateway that allows
 # full reflection) verifies gRPC cleanly; swap one in for production.
 #
+# If you must stay on a gateway that throttles or omits reflection, point the
+# gRPC endpoint at a pre-built descriptor set instead — descriptors then resolve
+# from disk and reflection is never queried:
+#
+#   node-urls:
+#     - url: "grpcs://cosmos-grpc.publicnode.com:443"
+#       grpc-config:
+#         descriptor-source: "file"     # or "hybrid" to fall back to reflection
+#         descriptor-set-path: "config/cosmoshub.protoset"
+#
+# Build the protoset from the chain's proto tree (either tool works):
+#   buf build -o cosmoshub.protoset
+#   protoc -I . --include_imports --descriptor_set_out=cosmoshub.protoset <root>.proto
+#
+# It is a static snapshot: rebuild it when a node upgrade adds rpcs or fields the
+# spec starts using, or those methods fail with "symbol not found" in file mode.
+#
 # Run it:
 #   smartrouter config/smartrouter_examples/smartrouter_cosmos.yml --use-static-spec specs/
 

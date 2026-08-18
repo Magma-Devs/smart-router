@@ -242,13 +242,25 @@ type GrpcConfig struct {
 	// DescriptorSource specifies how to obtain protobuf descriptors for dynamic message handling.
 	// Options:
 	//   - "reflection" (default): Use gRPC server reflection to auto-discover proto definitions
-	//   - "file": Load from a pre-compiled FileDescriptorSet (.pb file)
-	//   - "hybrid": Try reflection first, fallback to file if reflection is unavailable
+	//   - "file": Load from a pre-compiled FileDescriptorSet (.pb file). Reflection is
+	//     never queried, so this works against nodes that do not serve it at all.
+	//   - "hybrid": Resolve from the file first, fall back to reflection for symbols the
+	//     descriptor set does not contain.
+	//
+	// Hybrid is file-first, not reflection-first: the deployments that need it are the
+	// ones whose upstream reflection is absent, partial, or rate-limited, so asking the
+	// node first would pay that cost on every lookup before arriving at an answer that
+	// was on local disk the whole time.
 	DescriptorSource string `yaml:"descriptor-source,omitempty" json:"descriptor-source,omitempty" mapstructure:"descriptor-source"`
 
 	// DescriptorSetPath is the path to a FileDescriptorSet file (.pb or .prototxt).
 	// Required when DescriptorSource is "file" or "hybrid".
 	// Can be absolute path or relative to the working directory.
+	//
+	// The descriptor set is static — it describes the API as of the commit it was built
+	// from. If a node upgrade adds rpcs or fields the spec starts using, rebuild it, or
+	// those methods fail with "symbol not found" in "file" mode. Record the source repo
+	// and commit when building, and version the file next to the config referencing it.
 	DescriptorSetPath string `yaml:"descriptor-set-path,omitempty" json:"descriptor-set-path,omitempty" mapstructure:"descriptor-set-path"`
 
 	// ReflectionTimeout is the timeout for gRPC reflection queries.
