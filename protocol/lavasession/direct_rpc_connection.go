@@ -163,6 +163,21 @@ type WebSocketDirectRPCConnection struct {
 //   - Dynamic protobuf handling via reflection or file descriptors
 //   - Method descriptor caching for performance
 //   - Proper error handling with gRPC status codes
+//
+// # Lifecycle and locking (MAG-2808)
+//
+// Lock order is initMu -> connMu. connMu is never held while acquiring initMu.
+//
+//	initMu  serializes lazy initialization against itself and against Close, so
+//	        registry/codec/descriptorsCache are never written while Close tears
+//	        them down. Those fields have no lock of their own.
+//	connMu  guards the connector field. Requests hold it in read mode for the
+//	        whole pool checkout, which turns "pick a connector" and "borrow one of
+//	        its clients" into one step that Close must wait behind.
+//
+// After Close returns: connector is nil, no later write can install one, every
+// borrowed client has been returned, and further requests get
+// ErrGRPCConnectionClosed.
 type GRPCDirectRPCConnection struct {
 	nodeUrl common.NodeUrl
 
@@ -186,6 +201,39 @@ type GRPCDirectRPCConnection struct {
 	// the not-yet-initialized case it would instead silently resurrect the
 	// connection by building a fresh connector (MAG-2808).
 	closed atomic.Bool
+
+	// newConnector builds the pooled connector. Production leaves it nil and gets
+	// newGRPCConnector; tests substitute a fake, or one that blocks mid-construction
+	// to pin down the Close-during-initialization ordering. It is read under initMu
+	// and must be set before the first request.
+	newConnector grpcConnectorFactory
+}
+
+// newGRPCDirectRPCConnection builds a gRPC connection with its descriptor cache in
+// place. The cache is a pointer with no lazy initialization, so every construction
+// site has to set it or the first descriptor lookup dereferences nil.
+func newGRPCDirectRPCConnection(nodeUrl common.NodeUrl) *GRPCDirectRPCConnection {
+	return &GRPCDirectRPCConnection{
+		nodeUrl:          nodeUrl,
+		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
+	}
+}
+
+// grpcConnectorFactory mirrors chainproxy.NewGRPCConnector. It completes the seam
+// grpcConnectorInterface already opens: without it, reaching initialize() in a test
+// means dialing a real node.
+type grpcConnectorFactory func(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error)
+
+// newGRPCConnector is the production factory. It returns an explicit nil interface
+// on failure: returning the (*GRPCConnector)(nil) that NewGRPCConnector hands back
+// alongside an error would produce a non-nil interface holding a nil pointer, and
+// every downstream nil check would silently pass.
+func newGRPCConnector(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (grpcConnectorInterface, error) {
+	connector, err := chainproxy.NewGRPCConnector(ctx, nConns, nodeUrl)
+	if err != nil {
+		return nil, err
+	}
+	return connector, nil
 }
 
 // ErrGRPCConnectionClosed is returned when a request is attempted on a gRPC
@@ -261,11 +309,7 @@ func NewDirectRPCConnection(
 		}, nil
 
 	case DirectRPCProtocolGRPC:
-		conn := &GRPCDirectRPCConnection{
-			nodeUrl:          nodeUrl,
-			descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
-		}
-		return conn, nil
+		return newGRPCDirectRPCConnection(nodeUrl), nil
 
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", protocol)
@@ -605,30 +649,37 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 		return nil, err
 	}
 
-	// Snapshot the connector under the lock rather than dereferencing g.connector
-	// directly. Close() nils it under connMu while requests may be in flight, and
-	// an unguarded read raced that write straight into a nil dereference — which
-	// takes the whole process down, every chain on the pod with it (MAG-2808).
+	// Hold connMu in read mode across the whole checkout, not just the field read.
+	// A bare `g.connector.GetRpc(...)` raced Close()'s write straight into a nil
+	// dereference, which takes the whole process down and every chain on the pod
+	// with it — but snapshotting the pointer alone is not enough either: it keeps
+	// the pointer alive without keeping the pool alive, so Close could still drain
+	// the connector in the gap before GetRpc reached it (MAG-2808).
 	//
-	// The snapshot also fixes a second, subtler hazard: `defer g.connector.X()`
-	// re-reads the field at function EXIT, so a Close landing mid-RPC panicked on
-	// the way out even when the initial read had succeeded. Returning the pooled
-	// conn to the same connector we borrowed it from is the correct behaviour
-	// independently of the race.
+	// Keeping the read lock until GetRpc returns closes that gap. Close blocks on
+	// the write lock until the checkout finishes, and by then GRPCConnector has
+	// incremented usedClients, which makes its own Close wait for the ReturnRpc
+	// below. The borrowed conn is therefore valid for the entire request. GetRpc
+	// honours ctx, so this bounds Close by the caller's deadline rather than
+	// indefinitely.
 	g.connMu.RLock()
 	connector := g.connector
-	g.connMu.RUnlock()
-
 	if connector == nil {
+		g.connMu.RUnlock()
 		return nil, ErrGRPCConnectionClosed
 	}
-
-	// Get gRPC connection from pool
 	conn, err := connector.GetRpc(ctx, true)
+	g.connMu.RUnlock()
+
 	if err != nil {
 		return nil, utils.LavaFormatError("gRPC get connection failed", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
+
+	// Return the conn to the same connector that issued it. Go evaluates and saves
+	// a deferred call's receiver when the defer statement runs, so this pins the
+	// local — the hazard in `defer g.connector.ReturnRpc(conn)` was the second
+	// unguarded read of the field here at registration time, not a re-read at exit.
 	defer connector.ReturnRpc(conn)
 
 	// Build metadata context from headers
@@ -716,6 +767,13 @@ func (g *GRPCDirectRPCConnection) ensureInitialized(ctx context.Context) error {
 	g.initMu.Lock()
 	defer g.initMu.Unlock()
 
+	// Re-check closed now that we hold initMu. The load above is only a fast path:
+	// Close may have run in full while we waited here, and initializing behind it
+	// would publish a connector nobody is left to tear down.
+	if g.closed.Load() {
+		return ErrGRPCConnectionClosed
+	}
+
 	// Double-check after acquiring lock
 	if g.initialized.Load() {
 		return g.initErr
@@ -753,7 +811,11 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 		connectorNodeUrl.AuthConfig.UseTLS = true
 	}
 
-	connector, err := chainproxy.NewGRPCConnector(ctx, 10, connectorNodeUrl)
+	newConnector := g.newConnector
+	if newConnector == nil {
+		newConnector = newGRPCConnector
+	}
+	connector, err := newConnector(ctx, 10, connectorNodeUrl)
 	if err != nil {
 		return utils.LavaFormatError("failed to create gRPC connector", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
@@ -762,7 +824,18 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 	// Publish under connMu: this write is serialized against other initializers by
 	// initMu, but Close() guards the same field with connMu only — so without this
 	// the two had no lock in common and raced on g.connector outright.
+	//
+	// Constructing the connector can take a while (NewGRPCConnector dials), so
+	// re-check closed while holding connMu before installing it. Close waits on
+	// initMu and would tear this connector down anyway, but bailing here means a
+	// connection closed mid-construction never sets up a descriptor source it will
+	// not use, and never leaves a dialed pool alive for the length of that setup.
 	g.connMu.Lock()
+	if g.closed.Load() {
+		g.connMu.Unlock()
+		connector.Close()
+		return ErrGRPCConnectionClosed
+	}
 	g.connector = connector
 	g.connMu.Unlock()
 
@@ -1046,24 +1119,35 @@ func (g *GRPCDirectRPCConnection) GetProtocol() DirectRPCProtocol {
 }
 
 func (g *GRPCDirectRPCConnection) Close() error {
-	// Mark closed BEFORE taking the lock so a racing ensureInitialized cannot slip
-	// a freshly built connector in behind us. A request that gets past this point
-	// still holds a valid connector snapshot; GetRpc/ReturnRpc on a closing
-	// connector degrade to an error rather than a panic, which is the intended
-	// failure mode — the relay then fails over.
+	// 1. Publish the intent first, so ensureInitialized turns away every request
+	//    that has not yet started initializing.
 	g.closed.Store(true)
 
+	// 2. Wait out any initialization already in flight. Setting closed does not
+	//    stop an initializer that is already past its own check, and that
+	//    initializer still writes registry/codec/descriptorsCache — fields with no
+	//    lock of their own. Taking initMu makes those writes strictly happen before
+	//    the teardown below instead of racing it; the initializer either bails at
+	//    its closed re-check or publishes a connector we then tear down here.
+	g.initMu.Lock()
+	defer g.initMu.Unlock()
+
+	// 3. Detach under connMu. The write lock waits for every in-flight pool
+	//    checkout to finish, so once it is acquired no GetRpc can be running, and
+	//    once the field is nil none can start.
 	g.connMu.Lock()
-	defer g.connMu.Unlock()
+	connector := g.connector
+	g.connector = nil
+	g.registry = nil
+	g.codec = nil
+	g.connMu.Unlock()
 
-	if g.connector != nil {
-		g.connector.Close()
-		g.connector = nil
-	}
-
-	if g.registry != nil {
-		// Registry cleanup if needed
-		g.registry = nil
+	// 4. Drain outside connMu. GRPCConnector.Close blocks until every borrowed
+	//    client has been handed back, which can take as long as the requests
+	//    holding them; holding connMu across that would stall new requests instead
+	//    of letting them fail fast with ErrGRPCConnectionClosed.
+	if connector != nil {
+		connector.Close()
 	}
 
 	return nil
