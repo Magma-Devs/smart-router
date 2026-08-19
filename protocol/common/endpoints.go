@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -122,6 +123,25 @@ type NodeUrl struct {
 	Methods           []string      `yaml:"methods,omitempty" json:"methods,omitempty" mapstructure:"methods"`
 	// GrpcConfig holds gRPC-specific configuration for direct gRPC connections (smart router)
 	GrpcConfig GrpcConfig `yaml:"grpc-config,omitempty" json:"grpc-config,omitempty" mapstructure:"grpc-config"`
+}
+
+// SkipAllVerifications is the sentinel a node-url's skip-verifications list can carry
+// to suppress every verification the spec defines for that url, without enumerating
+// each name. Follows the wildcard idiom the cors-* flags already use.
+//
+// It must be quoted in YAML (`skip-verifications: ["*"]`) — a bare * opens an alias.
+const SkipAllVerifications = "*"
+
+// ShouldSkipVerification reports whether this node-url's skip-verifications list
+// suppresses the named verification, honouring the SkipAllVerifications wildcard.
+//
+// Callers must consult this before doing ANY work on behalf of a verification —
+// including the shared latest-block fetch that several verifications depend on.
+// Probing an upstream for a verification that is about to be skipped is what made
+// skip-verifications fail to actually skip.
+func (nurl NodeUrl) ShouldSkipVerification(name string) bool {
+	return slices.Contains(nurl.SkipVerifications, SkipAllVerifications) ||
+		slices.Contains(nurl.SkipVerifications, name)
 }
 
 type ChainMessageGetApiInterface interface {
