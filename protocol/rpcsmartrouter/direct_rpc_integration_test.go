@@ -677,6 +677,13 @@ type mockChainMessage struct {
 	// spectypes.LATEST_BLOCK for a latest-requesting method, or a concrete height for a
 	// historical request (used by the MAG-2159 tip-eligibility tests).
 	requestedBlock int64
+	// parseDirective is returned by GetParseDirective(); the nil default preserves
+	// the "no spec parsing" behaviour older tests rely on.
+	parseDirective *spectypes.ParseDirective
+	// parseDirectiveCalls counts GetParseDirective() calls. The MAG-2557 size-guard
+	// tests read it to prove extraction bailed out before touching the parse
+	// machinery — the return value alone can't tell a skip from a failed parse.
+	parseDirectiveCalls int
 }
 
 func (m *mockChainMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
@@ -734,8 +741,11 @@ func (m *mockChainMessage) GetRequestedBlocksHashes() []string                  
 func (m *mockChainMessage) UpdateEarliestInMessage(incomingEarliest int64) bool { return false }
 func (m *mockChainMessage) SetExtension(extension *spectypes.Extension)         {}
 func (m *mockChainMessage) GetUsedDefaultValue() bool                           { return false }
-func (m *mockChainMessage) GetParseDirective() *spectypes.ParseDirective        { return nil }
-func (m *mockChainMessage) IsBatch() bool                                       { return false }
+func (m *mockChainMessage) GetParseDirective() *spectypes.ParseDirective {
+	m.parseDirectiveCalls++
+	return m.parseDirective
+}
+func (m *mockChainMessage) IsBatch() bool { return false }
 
 type mockGenericMessage struct {
 	data []byte
@@ -850,4 +860,61 @@ func TestExtractBlockHeightFromJSONResponse_EVMFallback(t *testing.T) {
 
 	// Should fallback to EVM-specific parsing
 	assert.Equal(t, int64(4096), result, "EVM methods should work via fallback parsing")
+}
+
+// TestBlockExtractionResponseSizeGuard covers MAG-2557: the gRPC block-height
+// extraction path had no response-size cap while the JSON-RPC path capped at 1 MB,
+// so an oversized gRPC response was unmarshalled into a dynamic.Message, re-marshalled
+// to JSON and copied — several full-size allocations off one upstream reply.
+//
+// Both paths are asserted together because the fix is a parity claim: the guard has to
+// hold on gRPC *and* stay on JSON-RPC, at the same threshold and the same boundary.
+//
+// The assertion is parseDirectiveCalls, not the returned height. Extraction returns 0
+// whether it skipped the response or parsed it and found nothing, so the return value
+// alone cannot distinguish a guard that fired from one that never existed — a call
+// count of 0 proves the function bailed out before reaching the parse machinery.
+func TestBlockExtractionResponseSizeGuard(t *testing.T) {
+	// A parse directive has to be present for the "guard did not fire" arm to be
+	// meaningful: without one, extraction returns early for its own reasons.
+	newMsg := func() *mockChainMessage {
+		return &mockChainMessage{
+			api:            &spectypes.Api{Name: "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"},
+			parseDirective: &spectypes.ParseDirective{},
+		}
+	}
+
+	extractors := []struct {
+		name    string
+		extract func([]byte, chainlib.ChainMessage) int64
+	}{
+		{"grpc", extractBlockHeightFromGRPCResponse},
+		{"jsonrpc", extractBlockHeightFromJSONResponse},
+	}
+
+	for _, extractor := range extractors {
+		t.Run(extractor.name+"/over cap is skipped without parsing", func(t *testing.T) {
+			msg := newMsg()
+			oversized := make([]byte, maxResponseSizeForBlockExtraction+1)
+
+			assert.Equal(t, int64(0), extractor.extract(oversized, msg))
+			assert.Zero(t, msg.parseDirectiveCalls,
+				"response over the %d byte cap must be skipped before any parsing work",
+				maxResponseSizeForBlockExtraction)
+		})
+
+		// Boundary: the guard is `>`, so a response of exactly the cap still parses.
+		// Pinning this keeps a later refactor from silently turning it into `>=` and
+		// dropping block tracking for responses that are within budget.
+		t.Run(extractor.name+"/exactly at cap still parses", func(t *testing.T) {
+			msg := newMsg()
+			atCap := make([]byte, maxResponseSizeForBlockExtraction)
+
+			// The payload is zero bytes, so parsing yields no height — the point is
+			// that extraction was attempted at all.
+			extractor.extract(atCap, msg)
+			assert.NotZero(t, msg.parseDirectiveCalls,
+				"response exactly at the cap must not be skipped")
+		})
+	}
 }
