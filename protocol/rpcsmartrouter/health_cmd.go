@@ -32,14 +32,17 @@ type healthVerification struct {
 // One provider with multiple node-urls (e.g. an https + a wss endpoint) yields one
 // row per url, distinguished by `url`/`transport`.
 type healthEndpointResult struct {
-	Name          string               `json:"name"`
-	ChainID       string               `json:"chainId"`
-	APIInterface  string               `json:"apiInterface"`
-	URL           string               `json:"url"`
-	Transport     string               `json:"transport"`
-	Addons        []string             `json:"addons"`
-	Extensions    []string             `json:"extensions"`
-	SpecValid     bool                 `json:"specValid"`
+	Name         string   `json:"name"`
+	ChainID      string   `json:"chainId"`
+	APIInterface string   `json:"apiInterface"`
+	URL          string   `json:"url"`
+	Transport    string   `json:"transport"`
+	Addons       []string `json:"addons"`
+	Extensions   []string `json:"extensions"`
+	SpecValid    bool     `json:"specValid"`
+	// LatestBlock is this URL's own height when a verification measured one. When it was
+	// backfilled instead (see backfillLatestBlock) it is the ENDPOINT's height, obtained
+	// through the router spanning every probed URL. Reporting only — never a verdict.
 	LatestBlock   int64                `json:"latestBlock"`
 	Ok            bool                 `json:"ok"`
 	Error         string               `json:"error,omitempty"`
@@ -375,14 +378,21 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 	// `address chain-id api-interface` probe) would otherwise fail EVERY check with
 	// "no chain proxy supporting requested extensions {websocket}".
 	//
-	// This is set on our own parser, which nothing else shares, and set here — before
-	// GetChainRouter, which reads it too. It used to be a package global flipped under a
-	// mutex held only around ValidateCollect: that left GetChainRouter reading whatever
-	// value a concurrently-probed endpoint had last written, and serialized every
-	// endpoint's verification phase behind one lock while each endpoint's own timeout kept
-	// running — so late endpoints entered ValidateCollect with most of their budget gone,
-	// their context expired mid-probe, and connectorLoop closed the connector out from
-	// under the remaining relays ("connector is closed" on healthy nodes, MAG-2333).
+	// This is set on our own parser, which nothing else shares. It used to be a package
+	// global flipped under a mutex held around ValidateCollect, and that lock is what
+	// produced the reported symptom: it serialized every endpoint's verification phase
+	// while each endpoint's own timeout kept running from goroutine launch, so late
+	// endpoints entered ValidateCollect with most of their budget gone, their context
+	// expired mid-probe, and connectorLoop closed the connector out from under the
+	// remaining relays ("connector is closed" on healthy nodes, MAG-2333).
+	//
+	// The global's other reader, newChainRouter (chain_router.go:328), was NOT part of
+	// that symptom under `health`: this command sets IgnoreWsEnforcementForTestCommands
+	// before any probing, and that guard is the first operand of the same &&, so the ws
+	// check short-circuits before SkipWebsocketVerification is ever evaluated there.
+	// Per-parser state is still the right shape — it removes the shared cell instead of
+	// synchronizing it, and newChainRouter does read it on the serving path, where the
+	// guard is false — but a cross-endpoint race on that bool is not what `health` hit.
 	chainParser.SetSkipWebsocketVerification(!(verifyWs && providerHasWebSocketURL(provider.nodeUrls)))
 
 	rpcEndpoint := lavasession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
@@ -502,11 +512,22 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 // fetch is called at most once per endpoint and only if some row actually needs it, so
 // a spec that already reports a height costs no extra relay. A fetch failure leaves the
 // rows untouched: this is a reporting field and must never change a leg's ok verdict.
+//
+// Two limits follow from the value being ENDPOINT-level while the rows are per-URL:
+//
+//   - Only rows that passed are filled. fetch cannot say anything about a leg that failed
+//     its checks, and a plausible height printed beside those failures reads as if the URL
+//     were reachable. This also matches what the change set out to do — report a real
+//     height on passing legs.
+//   - fetch routes through the router built over ALL of this endpoint's probed URLs, so
+//     the height belongs to the endpoint, not necessarily to the row it lands on. That is
+//     acceptable for a field that never feeds a verdict, but it is not a per-URL
+//     measurement and must not be read as one.
 func backfillLatestBlock(rows []healthEndpointResult, fetch func() (int64, error)) {
 	var block int64
 	fetched := false
 	for i := range rows {
-		if rows[i].LatestBlock > 0 {
+		if !rows[i].Ok || rows[i].LatestBlock > 0 {
 			continue
 		}
 		if !fetched {
