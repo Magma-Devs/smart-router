@@ -334,9 +334,16 @@ func TestSendRequest_ReturnsBorrowedClientExactlyOnce(t *testing.T) {
 	_, err := g.SendRequest(ctx, []byte("{}"), grpcTestHeaders())
 	require.Error(t, err)
 
+	// Two borrows, not one: the descriptor lookup takes a client of its own rather
+	// than riding on the relay's, because it outlives the relay by design and the
+	// relay hands its client back the moment it gives up (MAG-2860). The count is
+	// not racy — the lookup returns its client before it publishes its result, and
+	// the relay does not return its own until it has read that result.
 	returned := fake.returnedConns()
-	require.Len(t, returned, 1)
-	require.Same(t, conn, returned[0])
+	require.Len(t, returned, 2, "each borrowed client must be handed back exactly once")
+	for i, got := range returned {
+		require.Same(t, conn, got, "return %d", i)
+	}
 }
 
 // TestClose_DuringFirstInitialization_DoesNotPublishConnector closes the window
