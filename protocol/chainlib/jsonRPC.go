@@ -699,25 +699,21 @@ func (cp *JrpcChainProxy) sendBatchMessage(ctx context.Context, nodeMessage *rpc
 	return reply, nil
 }
 
-func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) {
+func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.JsonrpcMessage)
 	if !ok {
 		// this could be a batch message
 		batchMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.JsonrpcBatchMessage)
 		if !ok {
-			return nil, "", nil, utils.LavaFormatError("invalid message type in jsonrpc failed to cast JsonrpcMessage or JsonrpcBatchMessage from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
+			return nil, utils.LavaFormatError("invalid message type in jsonrpc failed to cast JsonrpcMessage or JsonrpcBatchMessage from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
 		}
-		if ch != nil {
-			return nil, "", nil, utils.LavaFormatError("does not support subscribe in a batch", nil)
-		}
-		reply, err := cp.sendBatchMessage(ctx, batchMessage, chainMessage)
-		return reply, "", nil, err
+		return cp.sendBatchMessage(ctx, batchMessage, chainMessage)
 	}
 
 	rpc, err := cp.conn.GetRpc(ctx, true)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
 	defer cp.conn.ReturnRpc(rpc)
 
@@ -726,7 +722,6 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 
 	// Call our node
 	var rpcMessage *rpcclient.JsonrpcMessage
-	var sub *rpcclient.ClientSubscription
 	// support setting headers
 	if len(nodeMessage.GetHeaders()) > 0 {
 		for _, metadata := range nodeMessage.GetHeaders() {
@@ -739,27 +734,22 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 			}
 		}
 	}
-	var nodeErr error
-	if ch != nil {
-		sub, rpcMessage, nodeErr = rpc.Subscribe(context.Background(), nodeMessage.ID, nodeMessage.Method, ch, nodeMessage.Params)
-	} else {
-		// we use the minimum timeout between the two, spec or context. to prevent the provider from hanging
-		// we don't use the context alone so the provider won't be hanging forever by an attack
-		connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
-		defer cancel()
+	// we use the minimum timeout between the two, spec or context. to prevent the node from hanging
+	// we don't use the context alone so it won't be hanging forever by an attack
+	connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
+	defer cancel()
 
-		cp.NodeUrl.SetIpForwardingIfNecessary(ctx, rpc.SetHeader)
-		rpcMessage, nodeErr = rpc.CallContext(connectCtx, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, true, nodeMessage.GetDisableErrorHandling())
-		if nodeErr != nil {
-			// here we are getting an error for every code that is not 200-300
-			if errors.Is(nodeErr, common.StatusCodeError504) || errors.Is(nodeErr, common.StatusCodeError429) || errors.Is(nodeErr, common.StatusCodeErrorStrict) {
-				return nil, "", nil, utils.LavaFormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
-			}
-			// Validate if the error is related to the provider connection to the node or it is a valid error
-			// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
-			if parsedError := cp.HandleNodeError(ctx, nodeErr); parsedError != nil {
-				return nil, "", nil, parsedError
-			}
+	cp.NodeUrl.SetIpForwardingIfNecessary(ctx, rpc.SetHeader)
+	rpcMessage, nodeErr := rpc.CallContext(connectCtx, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, true, nodeMessage.GetDisableErrorHandling())
+	if nodeErr != nil {
+		// here we are getting an error for every code that is not 200-300
+		if errors.Is(nodeErr, common.StatusCodeError504) || errors.Is(nodeErr, common.StatusCodeError429) || errors.Is(nodeErr, common.StatusCodeErrorStrict) {
+			return nil, utils.LavaFormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
+		}
+		// Validate if the error is related to the connection to the node or it is a valid error
+		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
+		if parsedError := cp.HandleNodeError(ctx, nodeErr); parsedError != nil {
+			return nil, parsedError
 		}
 	}
 
@@ -770,20 +760,20 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		rpcMessage = TryRecoverNodeErrorFromClientError(nodeErr)
 		if rpcMessage == nil {
 			utils.LavaFormatDebug("got error from node", utils.LogAttr("GUID", ctx), utils.LogAttr("nodeErr", nodeErr), utils.LogAttr("nodeUrl", cp.NodeUrl.Url))
-			return nil, "", nil, nodeErr
+			return nil, nodeErr
 		}
 	}
 
 	replyMsg, err = rpcInterfaceMessages.ConvertJsonRPCMsg(rpcMessage)
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("jsonRPC error", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, utils.LavaFormatError("jsonRPC error", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 
 	// validate result is valid
 	if replyMsg.Error == nil {
 		responseIsNilValidationError := ValidateNilResponse(string(replyMsg.Result))
 		if responseIsNilValidationError != nil {
-			return nil, "", nil, responseIsNilValidationError
+			return nil, responseIsNilValidationError
 		}
 	}
 
@@ -795,7 +785,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		if replyMsg.Error != nil {
 			responseError = replyMsg.Error.Message
 		}
-		return nil, "", nil, utils.LavaFormatError("jsonRPC ID mismatch error", err,
+		return nil, utils.LavaFormatError("jsonRPC ID mismatch error", err,
 			utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx},
 			utils.Attribute{Key: "nodeMessageRequestId", Value: nodeMessage.ID},
 			utils.Attribute{Key: "responseId", Value: rpcMessage.ID},
@@ -811,7 +801,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 
 	retData, err := json.Marshal(replyMsg)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
 
 	reply := &RelayReplyWrapper{
@@ -822,26 +812,11 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		},
 	}
 
-	if ch != nil {
-		if replyMsg.Error != nil {
-			return reply, "", nil, nil
-		}
-
-		if common.IsQuoted(string(replyMsg.Result)) {
-			subscriptionID, err = strconv.Unquote(string(replyMsg.Result))
-			if err != nil {
-				return nil, "", nil, utils.LavaFormatError("Subscription failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
-			}
-		} else {
-			subscriptionID = string(replyMsg.Result)
-		}
-	}
-
 	// Clear replyMsg after all references to it are complete
 	replyMsg.Result = nil
 	replyMsg = nil
 
-	return reply, subscriptionID, sub, err
+	return reply, err
 }
 
 // Shutdown stops accepting new connections, drains in-flight HTTP requests,

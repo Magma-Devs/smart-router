@@ -153,6 +153,49 @@ type GRPCReflectionProvider interface {
 	GetGRPCReflectionConnection(ctx context.Context) (conn *grpc.ClientConn, cleanup func(), err error)
 }
 
+// GRPCSubscriptionManager is the gRPC server-streaming counterpart of
+// WSSubscriptionManager, implemented by rpcsmartrouter.DirectGRPCSubscriptionManager.
+//
+// There is no unsubscribe method here on purpose: a gRPC client has no unsubscribe
+// frame to send, so cancelling the stream *is* the unsubscribe. The listener calls
+// UnsubscribeAll when the client stream ends.
+type GRPCSubscriptionManager interface {
+	// StartSubscription opens a new upstream server-streaming call or joins an
+	// existing one with identical parameters, and returns the per-client channel to
+	// pump back to the caller.
+	//
+	// firstReply is the router's acknowledgement, carrying the assigned subscription
+	// id in its metadata. Its payload is deliberately not forwarded on the wire —
+	// see grpcproxy.StreamResponse.Metadata.
+	StartSubscription(
+		ctx context.Context,
+		chainMessage ChainMessage,
+		dappID string,
+		consumerIp string,
+		connectionUniqueId string,
+		metricsData *metrics.RelayMetrics,
+	) (firstReply *pairingtypes.RelayReply, repliesChan <-chan *pairingtypes.RelayReply, err error)
+
+	// UnsubscribeAll drops every subscription held by clientKey.
+	UnsubscribeAll(ctx context.Context, clientKey string) error
+
+	// ClientKey builds the key that StartSubscription and UnsubscribeAll agree on,
+	// so the listener never has to reproduce the manager's key format.
+	ClientKey(dappID, consumerIp, connectionUniqueId string) string
+}
+
+// GRPCSubscriptionProvider is an optional interface on RelaySender, mirroring
+// GRPCReflectionProvider. When it is implemented and returns a non-nil manager, the
+// gRPC listener serves server-streaming methods through it; otherwise streaming
+// methods are refused, since serving one as a unary call returns a truncated stream.
+type GRPCSubscriptionProvider interface {
+	// GetGRPCSubscriptionManager returns the manager, or nil when gRPC streaming is
+	// not configured for this endpoint. Implementations must return an untyped nil
+	// rather than a nil concrete pointer, which would satisfy the interface and slip
+	// past the caller's nil check.
+	GetGRPCSubscriptionManager() GRPCSubscriptionManager
+}
+
 type RelaySender interface {
 	SendRelay(
 		ctx context.Context,
@@ -187,14 +230,19 @@ type ChainListener interface {
 	Shutdown(ctx context.Context) error
 }
 
+// ChainRouter and ChainProxy send a single request and return a single reply.
+// Subscriptions do not go through them: the router talks to endpoints directly, and
+// the direct WS and gRPC subscription managers own that path end to end. They used to
+// carry a subscription channel and return the provider relay's subscription handle,
+// which no caller ever supplied or read once provider relaying was removed.
 type ChainRouter interface {
-	SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend, extensions []string) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, proxyUrl common.NodeUrl, chainId string, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
+	SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend, extensions []string) (relayReply *RelayReplyWrapper, proxyUrl common.NodeUrl, chainId string, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
 	ExtensionsSupported(internalPath string, extensions []string) bool
 }
 
 type ChainProxy interface {
 	GetChainProxyInformation() (common.NodeUrl, string)
-	SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
+	SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
 }
 
 func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainRouter, error) {

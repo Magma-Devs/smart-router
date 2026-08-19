@@ -73,8 +73,8 @@ func (psbm *pendingSubscriptionsBroadcastManager) broadcastToChannelList(value b
 // DirectWSSubscriptionManager manages WebSocket subscriptions directly to upstream endpoints
 // without going through Lava providers. It implements chainlib.WSSubscriptionManager.
 //
-// This follows the same patterns as ConsumerWSSubscriptionManager but connects directly
-// to RPC endpoints instead of routing through providers.
+// The gRPC counterpart is DirectGRPCSubscriptionManager, which follows the same shape:
+// one upstream stream per distinct subscription, fanned out to per-client channels.
 type DirectWSSubscriptionManager struct {
 	// Client-facing (reuse existing patterns)
 	connectedClients map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]
@@ -524,7 +524,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	webSocketConnectionUniqueId string,
 	metricsData *metrics.RelayMetrics,
 ) (firstReply *pairingtypes.RelayReply, repliesChan <-chan *pairingtypes.RelayReply, err error) {
-	// Extract hashed params from protocol message (same as ConsumerWSSubscriptionManager)
+	// Extract hashed params from protocol message
 	hashedParams, subscriptionParams, err := dwsm.getHashedParams(protocolMessage)
 	if err != nil {
 		return nil, nil, utils.LavaFormatError("could not marshal params", err)

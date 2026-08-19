@@ -2437,9 +2437,8 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 	rpcSmartRouterServer := &RPCSmartRouterServer{}
 
-	// Create WebSocket subscription manager
-	// Uses interface type to support both provider-based (ConsumerWSSubscriptionManager)
-	// and direct RPC (DirectWSSubscriptionManager) implementations
+	// Create WebSocket subscription manager. Interface-typed so a chain with no
+	// WebSocket endpoint gets the NoOp implementation instead of a real one.
 	var wsSubscriptionManager chainlib.WSSubscriptionManager
 
 	// Collect WebSocket-capable endpoints for direct subscriptions.

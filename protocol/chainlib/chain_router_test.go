@@ -759,8 +759,8 @@ func (m *chainProxyMock) GetChainProxyInformation() (common.NodeUrl, string) {
 	return common.NodeUrl{}, urlStr
 }
 
-func (m *chainProxyMock) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) {
-	return nil, "", nil, nil
+func (m *chainProxyMock) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
+	return nil, nil
 }
 
 type PolicySt struct {
