@@ -169,7 +169,7 @@ func TestFetchEndpointConnection_DirectRPC(t *testing.T) {
 		false, // getAllEndpoints (get one endpoint)
 		"",    // addon
 		nil,   // extensionNames
-		"",    // internalPath
+		nil,   // internalPath
 	)
 
 	// Verify connection succeeded
@@ -223,7 +223,7 @@ func TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal(t *testing.T) {
 	}
 
 	fetch := func() (bool, []*EndpointAndChosenConnection, error) {
-		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, "", nil, "")
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, "", nil, nil)
 		return connected, endpoints, err
 	}
 
@@ -286,13 +286,14 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 			Endpoints:         endpoints,
 		}
 	}
-	fetchAll := func(cswp *ConsumerSessionsWithProvider, internalPath string) []*EndpointAndChosenConnection {
+	fetchAll := func(cswp *ConsumerSessionsWithProvider, internalPath *string) []*EndpointAndChosenConnection {
 		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(
 			ctx, false, true, "", nil, internalPath)
 		require.NoError(t, err)
 		require.True(t, connected)
 		return endpoints
 	}
+	path := func(p string) *string { return &p }
 
 	root := newEndpoint(t, "https://ton.example/api", "")
 	v2 := newEndpoint(t, "https://ton.example/api/v2", "/v2")
@@ -300,18 +301,38 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 	cswp := newProvider(root, v2, v3)
 
 	t.Run("a versioned api reaches only its own upstream", func(t *testing.T) {
-		got := fetchAll(cswp, "/v3")
+		got := fetchAll(cswp, path("/v3"))
 		require.Len(t, got, 1)
 		assert.Equal(t, "https://ton.example/api/v3", got[0].endpoint.NetworkAddress)
 
-		got = fetchAll(cswp, "/v2")
+		got = fetchAll(cswp, path("/v2"))
 		require.Len(t, got, 1)
 		assert.Equal(t, "https://ton.example/api/v2", got[0].endpoint.NetworkAddress)
 	})
 
-	t.Run("no internal path keeps every endpoint eligible", func(t *testing.T) {
-		// Probes and every chain that declares no internal path at all.
-		assert.Len(t, fetchAll(cswp, ""), 3)
+	t.Run("a root-collection api stays on the root url", func(t *testing.T) {
+		// STRK enables a root collection carrying the whole method set AND
+		// versioned collections carrying it again. Expansion generates a url
+		// per version, and a root relay must not drift onto one of them —
+		// least of all onto a /ws/... door generated over an http url.
+		got := fetchAll(cswp, path(""))
+		require.Len(t, got, 1)
+		assert.Equal(t, "https://ton.example/api", got[0].endpoint.NetworkAddress)
+	})
+
+	t.Run("no collection to match on keeps every endpoint eligible", func(t *testing.T) {
+		// Probes measure the provider, not one api collection.
+		assert.Len(t, fetchAll(cswp, nil), 3)
+	})
+
+	t.Run("a chain with no internal paths is unaffected", func(t *testing.T) {
+		// Every endpoint is "" and every relay asks for "" — the filter matches
+		// everything, which is the same list as before it existed.
+		plain := newProvider(
+			newEndpoint(t, "https://eth.example", ""),
+			newEndpoint(t, "https://eth-2.example", ""),
+		)
+		assert.Len(t, fetchAll(plain, path("")), 2)
 	})
 
 	t.Run("a provider with no matching endpoint is not filtered to nothing", func(t *testing.T) {
@@ -319,6 +340,21 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 		// our url. Dropping the whole pool would turn a routing refinement into
 		// an outage.
 		plain := newProvider(newEndpoint(t, "https://eth.example", ""))
-		assert.Len(t, fetchAll(plain, "/v2"), 1)
+		assert.Len(t, fetchAll(plain, path("/v2")), 1)
+	})
+
+	t.Run("AVAX shape: no root collection, so the root url is never chosen", func(t *testing.T) {
+		// AVAX disables its root collections and serves from /C/rpc, /P, /X.
+		// Every relay carries a path, so the unpinned url the expansion kept
+		// stays unused rather than swallowing platform.* calls.
+		avax := newProvider(
+			newEndpoint(t, "https://avax.example/ext/bc", ""),
+			newEndpoint(t, "https://avax.example/ext/bc/C/rpc", "/C/rpc"),
+			newEndpoint(t, "https://avax.example/ext/bc/P", "/P"),
+			newEndpoint(t, "https://avax.example/ext/bc/X", "/X"),
+		)
+		got := fetchAll(avax, path("/P"))
+		require.Len(t, got, 1)
+		assert.Equal(t, "https://avax.example/ext/bc/P", got[0].endpoint.NetworkAddress)
 	})
 }
