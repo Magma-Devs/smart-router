@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/viper"
@@ -24,11 +25,15 @@ import (
 // never named (MAG-2861). Relative paths worked only by accident, because "." happens to
 // be a search path.
 //
-// So a path-shaped argument now goes to SetConfigFile and is loaded verbatim, while a
-// bare name keeps the search-path lookup it has always had.
+// So a path-shaped argument now goes to SetConfigFile, while a bare name keeps the
+// search-path lookup it has always had. The branch decides how a failure is *explained* —
+// against the one path the operator named, or against the directories a name is searched
+// in — not where the file is found: a relative path is still resolved against every search
+// path, because that is what SetConfigName did for it and what operators rely on.
 
-// configSearchPaths are the directories a bare config *name* is resolved against, in
-// precedence order.
+// configSearchPaths are the directories a config argument is resolved against, in
+// precedence order — both a bare *name* and a *relative* path. An absolute path names its
+// file outright and is not resolved against them.
 var configSearchPaths = []string{".", "./config", lavaDefaultNodeHome}
 
 // defaultConfigType is the format assumed for a config whose extension does not declare
@@ -90,25 +95,65 @@ func isConfigFilePath(arg string) bool {
 
 // resolveConfigFilePath returns the file an explicit path refers to.
 //
-// A path carrying no recognized config extension is also tried with each supported
-// extension appended, in viper's own order, because that is what the search-path lookup
-// does inside a directory: `smartrouter config/akash` has always loaded config/akash.yml,
-// and a lexical split that skipped this would have broken it. Extensions are tried before
-// the bare path for the same reason — searchInPath does — so resolution is identical
-// whichever branch an argument takes.
+// A *relative* path is probed against configSearchPaths, in the same precedence order a
+// bare name is, because that is what SetConfigName + AddConfigPath already did for it.
+// filepath.Join only swallows a *leading* separator, so Join("./config",
+// "smartrouter_examples/eth.yml") resolved perfectly well — only absolute paths were
+// demoted (MAG-2861). Dropping the search paths for relative paths would have narrowed
+// resolution rather than fixed it: `smartrouter smartrouter_examples/smartrouter_eth.yml`
+// from the project root has always loaded config/smartrouter_examples/smartrouter_eth.yml.
+//
+// An absolute path is never joined onto a search path. That join is the demotion this
+// ticket removed, and a search path cannot contribute anything to an already-rooted path.
+//
+// Within each candidate a path carrying no recognized config extension is tried with each
+// supported extension appended, in viper's own order and before the bare path, exactly as
+// searchInPath does — which is why `smartrouter config/akash` loads config/akash.yml and
+// why an extension-less ./router must not shadow ./router.yml.
 //
 // When nothing resolves, the path as given is returned, so viper fails against the file
 // the operator actually named and the error can say so.
 func resolveConfigFilePath(arg string) string {
-	if ext := strings.TrimPrefix(filepath.Ext(arg), "."); slices.Contains(viper.SupportedExts, ext) {
-		return arg // already declares its format; nothing to append
-	}
-	for _, ext := range viper.SupportedExts {
-		if candidate := arg + "." + ext; isExistingFile(candidate) {
-			return candidate
+	for _, candidate := range configFilePathCandidates(arg) {
+		if resolved, found := resolveWithSupportedExt(candidate); found {
+			return resolved
 		}
 	}
 	return arg
+}
+
+// configFilePathCandidates lists the paths an explicit path argument may refer to, in
+// precedence order. A relative path is joined onto each search path — the first of which is
+// ".", so the working directory is tried first and unchanged. An absolute path refers only
+// to itself.
+func configFilePathCandidates(arg string) []string {
+	if filepath.IsAbs(arg) {
+		return []string{arg}
+	}
+	candidates := make([]string, 0, len(configSearchPaths))
+	for _, searchPath := range configSearchPaths {
+		// Viper runs a search path through absPathify, which expands the $HOME that the
+		// lavaDefaultNodeHome literal carries. filepath.Join would keep it verbatim, so the
+		// expansion has to happen here for $HOME/.lava to mean the same thing in both
+		// branches.
+		candidates = append(candidates, filepath.Join(os.ExpandEnv(searchPath), arg))
+	}
+	return candidates
+}
+
+// resolveWithSupportedExt reports the file a single candidate resolves to, trying each
+// supported extension before the bare path. A candidate that already declares its format
+// has nothing to append and must exist as given.
+func resolveWithSupportedExt(candidate string) (resolved string, found bool) {
+	if ext := strings.TrimPrefix(filepath.Ext(candidate), "."); slices.Contains(viper.SupportedExts, ext) {
+		return candidate, isExistingFile(candidate)
+	}
+	for _, ext := range viper.SupportedExts {
+		if withExt := candidate + "." + ext; isExistingFile(withExt) {
+			return withExt, true
+		}
+	}
+	return candidate, isExistingFile(candidate)
 }
 
 // isExistingFile reports whether path is a regular file that can be stat-ed. A directory is
@@ -119,13 +164,18 @@ func isExistingFile(path string) bool {
 }
 
 // isConfigNotFound reports whether err means "no config file was there", which viper
-// phrases two different ways: ConfigFileNotFoundError when it searched and came up empty,
-// and a plain fs.ErrNotExist when it was pointed at an exact file. Both are operator
-// mistakes worth a clean message; anything else (malformed YAML, a permissions problem) is
-// not.
+// phrases three different ways: ConfigFileNotFoundError when it searched and came up empty,
+// a plain fs.ErrNotExist when it was pointed at an exact file, and EISDIR when that exact
+// path turned out to be a directory. All three are operator mistakes worth a clean message;
+// anything else (malformed YAML, a permissions problem) is not, and must stay on the loud
+// path.
+//
+// The directory case only arises for an explicit path — a search of configSearchPaths
+// skips directories and reports ConfigFileNotFoundError — and without it `smartrouter
+// ./config` would take the LavaFormatFatal stack-dump path this fix exists to remove.
 func isConfigNotFound(err error) bool {
 	var notFound viper.ConfigFileNotFoundError
-	return errors.As(err, &notFound) || errors.Is(err, fs.ErrNotExist)
+	return errors.As(err, &notFound) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.EISDIR)
 }
 
 // configNotFoundMessage explains where the config was looked for, in the terms the
@@ -133,6 +183,9 @@ func isConfigNotFound(err error) bool {
 // resolved against.
 func configNotFoundMessage(target string, isFile bool) string {
 	if isFile {
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			return "the given config path is a directory, not a config file: " + target
+		}
 		return "config file not found at the given path: " + target
 	}
 	return "no config file found — pass a config file as an argument (e.g. `smartrouter <config-file>.yml`, " +
