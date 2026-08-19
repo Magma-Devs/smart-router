@@ -110,6 +110,11 @@ type EndpointMonitor struct {
 	retryMinDelay time.Duration
 	retryMaxDelay time.Duration
 
+	// hashPolling is resolved ONCE at construction (it depends only on the chain spec and
+	// the operator flag, both fixed by then) and reused for every tracker this monitor
+	// creates, so all endpoints of a chain agree and /debug can report a stable reason.
+	hashPolling HashPollingReason
+
 	// relayGateFreshness is the maximum age of a relay-harvested tip that still suppresses
 	// a dedicated poll (MAG-2159 Topic B / Pass 2 — the "gate freshness threshold"). A
 	// relay observation younger than this means served traffic kept the tip at most ~one
@@ -129,6 +134,10 @@ type EndpointMonitor struct {
 	// per-chain ChainState tip (SetLatestBlock). Fired AFTER obsMu is released so the tip lock
 	// is never taken while holding the observation lock. Set once at construction; immutable.
 	onTipObservation func(block int64)
+	// onTrackerRequest counts upstream tracker requests. Deliberately NOT generation-gated
+	// the way observations are: a late request from a replaced tracker still reached the
+	// node, so dropping it would under-report real load.
+	onTrackerRequest func(endpointURL, kind string)
 
 	// Context for managing goroutines (parent context for all trackers)
 	ctx    context.Context
@@ -143,6 +152,12 @@ type EndpointChainTrackerConfig struct {
 	AverageBlockTime time.Duration
 	BlocksToSave     uint64
 
+	// EnableForkDetection turns block-hash polling on. Off by default: the tracker then
+	// asks each endpoint only "what is your latest block?" and never fetches a hash. See
+	// EnableForkDetectionFlagName for why that is the default, and resolveHashPolling for
+	// how this combines with a spec that cannot serve hashes at all.
+	EnableForkDetection bool
+
 	// Optional callbacks
 	OnFork        func(endpointURL string, blockNum int64)
 	OnNewBlock    func(endpointURL string, fromBlock, toBlock int64)
@@ -151,6 +166,11 @@ type EndpointChainTrackerConfig struct {
 	// OnTipObservation, if set, feeds every positive poll/relay block into the per-chain
 	// ChainState tip (MAG-2160). See EndpointMonitor.onTipObservation.
 	OnTipObservation func(block int64)
+
+	// OnTrackerRequest, if set, is invoked once per upstream request a tracker actually sends,
+	// with the endpoint URL and the request kind (metrics.TrackerRequestKind*). It backs the
+	// only metric that measures tracker REQUEST VOLUME — see RecordTrackerRequest.
+	OnTrackerRequest func(endpointURL, kind string)
 }
 
 // NewEndpointMonitor creates a new manager for per-endpoint ChainTrackers.
@@ -206,9 +226,25 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		onConsistency:      config.OnConsistency,
 		onFetchError:       config.OnFetchError,
 		onTipObservation:   config.OnTipObservation,
+		onTrackerRequest:   config.OnTrackerRequest,
 		ctx:                ctxWithCancel,
 		cancel:             cancel,
 	}
+
+	// Resolved after the struct exists because it reads manager.chainParser. Both inputs are
+	// immutable from here on, so one resolution serves every tracker this monitor creates.
+	manager.hashPolling = manager.resolveHashPolling(config.EnableForkDetection)
+	// Logged in BOTH directions. An operator who passes --enable-fork-detection needs to be
+	// able to confirm from the log that it took effect on this chain — a line that only ever
+	// appears when the answer is "off" leaves them with nothing to read when it is "on", and
+	// the spec reason can override the flag on some chains of a multichain process but not
+	// others. The reason attribute distinguishes the two ways it can be off.
+	utils.LavaFormatInfo("block-hash polling (fork detection) resolved",
+		utils.LogAttr("chainID", config.ChainID),
+		utils.LogAttr("apiInterface", config.ApiInterface),
+		utils.LogAttr("enabled", !manager.hashPolling.HeadOnly()),
+		utils.LogAttr("reason", manager.hashPolling.String()),
+	)
 
 	return manager
 }
@@ -267,6 +303,14 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.recordPollObservation(endpointURL, gen, block, latency, pollErr, at)
 	}
 
+	// Count every upstream request this tracker sends. Set only when a consumer is wired, so
+	// the transport pays nothing (a nil check) otherwise.
+	if m.onTrackerRequest != nil {
+		fetcher.onTrackerRequest = func(kind string) {
+			m.onTrackerRequest(endpointURL, kind)
+		}
+	}
+
 	// Configure the ChainTracker
 	config := chaintracker.ChainTrackerConfig{
 		BlocksToSave:             m.blocksToSave,
@@ -275,10 +319,12 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		BlocksCheckpointDistance: chaintracker.DefaultBlockCheckpointDistance,
 		ChainId:                  m.chainID,
 		ParseDirectiveEnabled:    true, // Always enabled for direct RPC
-		// MAG-2218: a spec with a head but no usable GET_BLOCK_BY_NUM runs head-only rather
-		// than failing every hash fetch forever. ParseDirectiveEnabled stays true — turning it
-		// off would swap in a DummyChainTracker, which polls nothing at all.
-		HeadOnlyTracking: m.headOnlyTracking(),
+		// Head-only drops every block-hash fetch, so the tracker asks only for the latest
+		// block. Two reasons lead here (see resolveHashPolling): the operator left fork
+		// detection off (the default), or the spec has a head but no usable GET_BLOCK_BY_NUM
+		// and hashes are impossible anyway (MAG-2218). ParseDirectiveEnabled stays true —
+		// turning it off would swap in a DummyChainTracker, which polls nothing at all.
+		HeadOnlyTracking: m.hashPolling.HeadOnly(),
 		// MAG-2159 (Topic B): per-endpoint trackers use a FIXED flat cadence — the
 		// dedicated poll runs at exactly avgBlockTime/2 (slowed only by failure backoff),
 		// because relay harvest is the primary block signal and the poll is a sparse
@@ -408,16 +454,40 @@ func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTrack
 	}
 }
 
-// headOnlyTracking reports whether this chain can be tracked by head alone: it exposes a
+// resolveHashPolling decides whether this monitor's trackers do block-hash work, and records
+// WHY. Two independent causes disable it and they must stay distinguishable (see
+// HashPollingReason): a spec that cannot serve hashes at all, and the operator's flag.
+//
+// The spec reason wins when both apply. It is the immutable one — turning the flag on would
+// not give a Canton-shaped chain hashes — so reporting it is what stops an operator chasing
+// a flag that cannot help.
+func (m *EndpointMonitor) resolveHashPolling(enableForkDetection bool) HashPollingReason {
+	if m.specRequiresHeadOnly() {
+		return HashPollingOffSpecUnsupported
+	}
+	if !enableForkDetection {
+		return HashPollingOffOperatorChoice
+	}
+	return HashPollingOn
+}
+
+// HashPollingMode reports why block-hash polling is or is not running for this chain. Read
+// by /debug/endpoint-state; the value is fixed at construction.
+func (m *EndpointMonitor) HashPollingMode() HashPollingReason {
+	return m.hashPolling
+}
+
+// specRequiresHeadOnly reports whether this chain can ONLY be tracked by head: it exposes a
 // current block/offset (GET_BLOCKNUM) but has no usable "fetch block N" (GET_BLOCK_BY_NUM).
 // Canton is the case that forced this (MAG-2218) — its Ledger API reads are party-scoped and
 // not addressable by block number, so a generic per-block fetch cannot be expressed.
 //
 // Deliberately keyed on the directives the spec actually declares rather than on a chain
 // allowlist, and it mirrors the graceful degradation resolveTipApiNames already does for the
-// same tag. A chain declaring both tags is unaffected — as of MAG-2218 every shipped spec
-// declares both, so this returns false for all of them.
-func (m *EndpointMonitor) headOnlyTracking() bool {
+// same tag. A chain declaring both tags returns false here — as of MAG-2218 every shipped spec
+// declares both — which is why this is only HALF the decision: such a chain still ends up
+// head-only unless the operator turns fork detection on. See resolveHashPolling.
+func (m *EndpointMonitor) specRequiresHeadOnly() bool {
 	if m.chainParser == nil {
 		return false
 	}

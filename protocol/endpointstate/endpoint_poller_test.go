@@ -8,6 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -254,7 +255,7 @@ func TestEndpointPoller_SendRawRequestRouting(t *testing.T) {
 				tc.apiInterface,
 			)
 
-			got, err := poller.sendRawRequest(context.Background(), []byte(tc.requestData), tc.connectionType, tc.apiName)
+			got, err := poller.sendRawRequest(context.Background(), []byte(tc.requestData), tc.connectionType, tc.apiName, metrics.TrackerRequestKindLatestBlock)
 			require.NoError(t, err)
 			require.Equal(t, `{"ok":true}`, string(got), "the upstream body must be returned verbatim")
 
@@ -366,7 +367,7 @@ func TestEndpointPoller_RESTRejectionSurfacesHTTPStatus(t *testing.T) {
 		spectypes.APIInterfaceRest,
 	)
 
-	_, err := poller.sendRawRequest(context.Background(), []byte(`{}`), "POST", "/wallet/getnowblock")
+	_, err := poller.sendRawRequest(context.Background(), []byte(`{}`), "POST", "/wallet/getnowblock", metrics.TrackerRequestKindLatestBlock)
 	require.Error(t, err)
 
 	var statusErr *lavasession.HTTPStatusError

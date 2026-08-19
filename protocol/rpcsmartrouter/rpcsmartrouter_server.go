@@ -222,9 +222,21 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		ApiInterface:     listenEndpoint.ApiInterface,
 		AverageBlockTime: effectiveBlockTime,
 		BlocksToSave:     endpointstate.DefaultBlocksToSave,
+		// Block-hash polling / fork detection is OFF unless the operator turns it on. Read
+		// straight from viper (flags are bound in the command's RunE) rather than through a
+		// package global, so an embedded server with no flags set gets the same default.
+		// The key is absent in that case and GetBool returns false, which IS the default.
+		EnableForkDetection: viper.GetBool(endpointstate.EnableForkDetectionFlagName),
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
+		// Count the tracker's upstream requests by kind. This is the series that makes the
+		// effect of --enable-fork-detection visible: rpc_endpoint_fetch_latest_{success,fails}
+		// count EVENTS (new block detected / latest-block fetch failed), not requests, so
+		// neither of them moves when request volume changes.
+		OnTrackerRequest: func(endpointURL, kind string) {
+			rpcss.smartRouterEndpointMetrics.RecordTrackerRequest(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, kind)
+		},
 		OnNewBlock: func(endpointURL string, fromBlock, toBlock int64) {
 			utils.LavaFormatTrace("endpoint ChainTracker detected new block",
 				utils.LogAttr("endpoint", endpointURL),

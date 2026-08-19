@@ -134,3 +134,14 @@ func TestRecordBlockFetch_FansOutAcrossSharedURL(t *testing.T) {
 	require.Equal(t, float64(1), bp1, "blockpi1 must be incremented")
 	require.Equal(t, float64(1), bp2, "blockpi2 must be incremented")
 }
+
+// TestRecordTrackerRequest_PartialManagerIsSafe: this fixture builds only the counters it
+// asserts on, which is exactly the shape that would panic if the helper trusted its counter
+// to be non-nil. The poll goroutine calls this on every upstream request, so it must not.
+func TestRecordTrackerRequest_PartialManagerIsSafe(t *testing.T) {
+	m := newSmartRouterForURLFanoutTest()
+	m.RegisterEndpoint("BASE", "jsonrpc", "https://base.example/rpc", "vendor1")
+	require.NotPanics(t, func() {
+		m.RecordTrackerRequest("BASE", "jsonrpc", "https://base.example/rpc", TrackerRequestKindLatestBlock)
+	})
+}
