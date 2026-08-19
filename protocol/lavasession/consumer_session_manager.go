@@ -911,27 +911,39 @@ func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions 
 	return result
 }
 
-// validating we still have providers, otherwise reset valid addresses list
-// also caches validAddresses for an addon to save on compute
-func (csm *ConsumerSessionManager) validatePairingListNotEmpty(addon string, extensions []string, ctx context.Context) uint64 {
-	numberOfResets := csm.atomicReadNumberOfResets()
-	validAddresses := csm.cacheAddonAddresses(addon, extensions, ctx)
-	// currentlyBlockedProviderAddresses is intentionally not read here: this method holds no csm.lock,
-	// so reading the shared slice for a log attr races a concurrent writer (blockProvider / restore).
-	utils.LavaFormatInfo("VALIDATING PROVIDERS", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("validAddressesCount", len(validAddresses)), utils.LogAttr("validAddresses", validAddresses), utils.LogAttr("GUID", ctx))
-	if len(validAddresses) == 0 {
-		utils.LavaFormatWarning("NO VALID PROVIDERS - TRIGGERING RESET", nil, utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("GUID", ctx))
-		numberOfResets = csm.resetValidAddresses(addon, extensions)
-		utils.LavaFormatInfo("RESET COMPLETED", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("newValidAddressesCount", len(csm.cacheAddonAddresses(addon, extensions, ctx))), utils.LogAttr("GUID", ctx))
+// releaseBlockedProvidersIfPoolEmpty releases the standing blocked list and retries selection once,
+// as the last resort of the failover cascade.
+//
+// It is a no-op unless the valid pool is genuinely empty. That guard is the whole subtlety: the
+// errors that bring us here also cover "every valid address is already ignored by this request",
+// which is ordinary retry exhaustion, and releasing on that would let one retried relay wipe the
+// blocked list for every other relay in the process.
+//
+// Returns ok=false when nothing was released, or when the retry after a release still found nothing.
+func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx context.Context, wantedProviderNumber int, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int) (SessionWithProviderMap, bool) {
+	if len(csm.cacheAddonAddresses(addon, extensionNames, ctx)) != 0 {
+		return nil, false
 	}
-	return numberOfResets
+
+	utils.LavaFormatWarning("NO VALID PROVIDERS - TRIGGERING RESET", nil, utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensionNames), utils.LogAttr("GUID", ctx))
+	csm.resetValidAddresses(addon, extensionNames)
+	utils.LavaFormatInfo("RESET COMPLETED", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensionNames), utils.LogAttr("newValidAddressesCount", len(csm.cacheAddonAddresses(addon, extensionNames, ctx))), utils.LogAttr("GUID", ctx))
+
+	sessionWithProviderMap, err := csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+	if err != nil {
+		return nil, false
+	}
+
+	utils.LavaFormatDebug("Successfully got session after releasing the blocked provider list", utils.LogAttr("GUID", ctx))
+	return sessionWithProviderMap, true
 }
 
 func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Context, wantedProviderNumber int, usedProviders UsedProvidersInf, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int) (sessionWithProviderMap SessionWithProviderMap, err error) {
 	sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
 	if err != nil {
 		if errors.Is(err, PairingListEmptyError) {
-			// Emergency fallback chain: backup providers first, then blocked providers for maximum availability
+			// Emergency fallback chain, in order: backup providers, then releasing the standing
+			// blocked list, then the blocked providers themselves, for maximum availability.
 			if len(csm.backupProviders) > 0 {
 				utils.LavaFormatDebug("No regular providers available, trying backup providers", utils.LogAttr("GUID", ctx))
 				// try to get a session from the backup providers
@@ -941,8 +953,18 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 					utils.LavaFormatDebug("Successfully got session from backup providers", utils.LogAttr("GUID", ctx))
 					return sessionWithProviderMap, nil
 				}
-				// backup providers failed, continue to blocked providers
-				utils.LavaFormatDebug("Backup providers failed, trying blocked providers", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
+				// backup providers failed, continue to the standing-bench release
+				utils.LavaFormatDebug("Backup providers failed, releasing the blocked provider list", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
+			}
+
+			// Every primary is blocked and backup could not serve either, so release the standing
+			// blocked list and give the primaries one more chance. This used to run at the top of
+			// every GetSessions, which refilled validAddresses before the backup tier was ever
+			// consulted — so backup was unreachable via this path, and the block never held for
+			// longer than a single request. Running it here is what lets "every primary is blocked"
+			// actually mean "serve backup".
+			if released, ok := csm.releaseBlockedProvidersIfPoolEmpty(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget); ok {
+				return released, nil
 			}
 
 			// try to recover a session from the currently blocked providers
@@ -953,6 +975,16 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 				return nil, errOnRetry
 			}
 			utils.LavaFormatDebug("Successfully got session from blocked providers", utils.LogAttr("GUID", ctx))
+		} else if errors.Is(err, SelectedProviderUnavailableError) {
+			// A pinned request must never fall through to a provider the caller did not ask for, so
+			// neither the backup tier nor the blocked-provider walk applies here. But an empty pool
+			// still has to release the blocked list, exactly as the old top-of-GetSessions reset
+			// did: without this, lava-select-provider stops resolving the moment every provider is
+			// blocked, even though the pinned provider is sitting in that blocked list.
+			if released, ok := csm.releaseBlockedProvidersIfPoolEmpty(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget); ok {
+				return released, nil
+			}
+			return nil, err
 		} else {
 			return nil, err
 		}
@@ -1034,8 +1066,13 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		utils.LogAttr("originalExtensions", extensions),
 		utils.LogAttr("extensionNames", extensionNames),
 		utils.LogAttr("GUID", ctx))
-	// if pairing list is empty we reset the state.
-	numberOfResets := csm.validatePairingListNotEmpty(addon, extensionNames, ctx)
+	// Warm the addon/extension address cache for this router key. The empty-pool reset that used
+	// to run here has moved into getSessionWithProviderOrError, so it fires only once the backup
+	// tier has also been ruled out rather than before the tier is consulted at all.
+	validAddresses := csm.cacheAddonAddresses(addon, extensionNames, ctx)
+	// currentlyBlockedProviderAddresses is intentionally not read here: no csm.lock is held, so
+	// reading the shared slice for a log attr races a concurrent writer (blockProvider / restore).
+	utils.LavaFormatInfo("VALIDATING PROVIDERS", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensionNames), utils.LogAttr("validAddressesCount", len(validAddresses)), utils.LogAttr("validAddresses", validAddresses), utils.LogAttr("GUID", ctx))
 
 	// providers that we don't try to connect this iteration.
 	tempIgnoredProviders := &ignoredProviders{
@@ -1050,6 +1087,10 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		utils.LavaFormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 		return nil, err
 	}
+
+	// Scales the per-provider blocklisted-session allowance, so it is read after the cascade
+	// rather than before it: a last-resort release inside it has to be reflected here.
+	numberOfResets := csm.atomicReadNumberOfResets()
 
 	// Save how many sessions we are aiming to have
 	wantedSession := len(sessionWithProviderMap)

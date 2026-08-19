@@ -163,8 +163,9 @@ func TestEndpointHealthRecovery(t *testing.T) {
 	// The fix: ResetEndpointHealth re-enables the endpoints, and that is the ONLY external
 	// ingredient recovery needs. ResetBlockedProviders alone just failed above; re-enabling the
 	// endpoints was the missing piece. The blocked-provider state then self-heals on the very next
-	// GetSessions: with validAddresses empty it runs validatePairingListNotEmpty → resetValidAddresses
-	// → setValidAddressesToDefaultValue, which clears the blocked list and refills validAddresses from
+	// GetSessions: with validAddresses empty, selection fails, no backup tier is configured, and the
+	// cascade's last resort runs releaseBlockedProvidersIfPoolEmpty → resetValidAddresses →
+	// setValidAddressesToDefaultValue, which clears the blocked list and refills validAddresses from
 	// the pairing pool, so the now-enabled endpoints get selected. No explicit ResetBlockedProviders
 	// is required here — which is exactly why /debug/reset-endpoint-health re-enables endpoints and
 	// nothing else.
