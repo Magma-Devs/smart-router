@@ -105,6 +105,12 @@ const (
 	LimitParallelWebsocketConnectionsPerIpFlag   = "limit-parallel-websocket-connections-per-ip"
 	LimitWebsocketIdleTimeFlag                   = "limit-websocket-connection-idle-time"
 	SkipWebsocketVerificationFlag                = "skip-websocket-verification"
+	// VerificationsIntervalFlag / VerificationsJitterFlag pace the background re-verify
+	// pass. The interval is how stale a capability answer may get; the jitter is how far
+	// apart instances sharing an upstream are spread, so a fleet does not probe in unison
+	// and rate-limit itself.
+	VerificationsIntervalFlag = "verifications-interval"
+	VerificationsJitterFlag   = "verifications-jitter"
 	// specification default flags
 	ProbeUpdateWeightFlagName = "probe-update-weight"
 	// ProbeLoopIntervalFlagName is the cadence of the MAG-2161 (Topic D) proactive health prober —

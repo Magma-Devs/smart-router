@@ -382,6 +382,11 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// Start the epoch timer
 	rpsr.epochTimer.Start(ctx)
 
+	// Re-verification runs on its own jittered schedule rather than on the epoch tick.
+	// Epoch boundaries are identical fleet-wide by construction, so probing on them made
+	// every pod hit the same upstreams at the same instant; see reverifyStartOffset.
+	rpsr.startReVerifyRefresher(ctx)
+
 	relaysMonitorAggregator.StartMonitoring(ctx)
 
 	// Start optional debug HTTP server for integration tests.
@@ -2321,6 +2326,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// callback, bounded by SpecReVerifyConcurrency.
 	rpsr.mu.Lock()
 	rpsr.reverifyInputs[sessionManagerKey] = &chainReverifyInputs{
+		results:                    newReverifyResults(),
 		chainParser:                chainParser,
 		rpcEndpoint:                rpcEndpoint,
 		convertProvidersToSessions: convertProvidersToSessions,
@@ -3049,6 +3055,8 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().DurationVar(&chainlib.WebSocketBanDuration, common.BanDurationForWebsocketRateLimitExceededFlag, chainlib.WebSocketBanDuration, "once websocket rate limit is reached, user will be banned Xfor a duration, default no ban")
 
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerification, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerification, "skip websocket verification for chains that require ws/wss endpoints")
+	cmdRPCSmartRouter.Flags().DurationVar(&SpecReVerifyInterval, common.VerificationsIntervalFlag, SpecReVerifyInterval, "how often the background pass re-verifies configured providers. Capability answers change when a vendor changes config, not by the minute, so this is deliberately slower than the epoch tick")
+	cmdRPCSmartRouter.Flags().DurationVar(&SpecReVerifyJitter, common.VerificationsJitterFlag, SpecReVerifyJitter, "window each re-verify pass is spread over. Every instance picks a pseudo-random point inside it from a seed unique to that process, so instances sharing an upstream account do not probe in unison. 0 disables jitter")
 
 	cmdRPCSmartRouter.Flags().DurationVar(&lavasession.ProbeLoopInterval, common.ProbeLoopIntervalFlagName, lavasession.ProbeLoopInterval, "cadence of the proactive health prober (MAG-2161 Topic D); must be > 0, default 5s")
 	cmdRPCSmartRouter.Flags().Float64(common.ProbeUpdateWeightFlagName, scoreutils.DefaultProbeUpdateWeight, "weight multiplier for provider-optimizer probe updates (liveness/latency); must be > 0")

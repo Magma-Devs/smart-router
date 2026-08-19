@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -85,6 +86,11 @@ type chainReverifyInputs struct {
 	// holds that lock across both tier calls. Lazily allocated so test fixtures that build
 	// chainReverifyInputs by hand need not.
 	demoteFailStreak map[string]int
+	// results is the last completed validation outcome per provider, written by the
+	// background refresher and read here. It is what decouples verification load from the
+	// epoch tick: the boundary reconciles from cached evidence instead of probing inline.
+	// Nil in test fixtures that inject validateFn, which bypasses the cache entirely.
+	results *reverifyResults
 }
 
 // applyReverification revalidates configured providers for one tier and
@@ -138,10 +144,13 @@ func applyReverification(
 	if len(configured) == 0 {
 		return fresh, nil, nil
 	}
+	// Production reads the background refresher's last completed result; it does NO network
+	// work on the epoch boundary. Tests inject validateFn to drive the reconciliation
+	// directly without standing up a refresher.
 	validate := inputs.validateFn
 	if validate == nil {
-		validate = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
-			return validateProvider(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
+		validate = func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+			return inputs.results.get(p.Name)
 		}
 	}
 
@@ -185,6 +194,20 @@ func applyReverification(
 					utils.LogAttr("provider", p.Name),
 				)
 			}
+			continue
+		}
+		if errors.Is(err, errNoReVerifyResultYet) {
+			// The background pass has not reached this provider yet — most often the first
+			// boundary after start-up. No evidence either way, so change nothing: start-up
+			// validation already gated what is in the pairing.
+			if wasActive {
+				healthyNames[p.Name] = struct{}{}
+			}
+			utils.LavaFormatDebug("re-verify: no completed result yet, leaving membership unchanged",
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+				utils.LogAttr("active", wasActive),
+			)
 			continue
 		}
 		if !wasActive {
