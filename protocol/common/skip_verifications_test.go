@@ -21,13 +21,13 @@ func TestShouldSkipVerification(t *testing.T) {
 		{"exact name matches", []string{"pruning"}, "pruning", true},
 		{"unrelated name does not match", []string{"pruning"}, "chain-id", false},
 		{"one of several matches", []string{"pruning", "trace", "chain-id"}, "trace", true},
-		{"wildcard matches any name", []string{SkipAllVerifications}, "chain-id", true},
-		{"wildcard matches a name nobody enumerated", []string{SkipAllVerifications}, "tracking-shard-11", true},
-		{"wildcard alongside explicit names still matches", []string{"pruning", SkipAllVerifications}, "enabled", true},
+		{"wildcard matches any name", []string{SkipVerificationsWildcard}, "chain-id", true},
+		{"wildcard matches a name nobody enumerated", []string{SkipVerificationsWildcard}, "tracking-shard-11", true},
+		{"wildcard alongside explicit names still matches", []string{"pruning", SkipVerificationsWildcard}, "enabled", true},
 		{"wildcard is the literal star only", []string{"*pruning"}, "pruning", false},
 		{"match is case sensitive", []string{"Pruning"}, "pruning", false},
 		{"empty query is not matched by an explicit list", []string{"pruning"}, "", false},
-		{"empty query IS matched by the wildcard", []string{SkipAllVerifications}, "", true},
+		{"empty query IS matched by the wildcard", []string{SkipVerificationsWildcard}, "", true},
 	}
 
 	for _, tc := range playbook {
@@ -40,6 +40,6 @@ func TestShouldSkipVerification(t *testing.T) {
 
 // The wildcard is a config-surface constant; pinning it guards against a rename
 // silently invalidating every deployed values file that carries it.
-func TestSkipAllVerificationsToken(t *testing.T) {
-	require.Equal(t, "*", SkipAllVerifications)
+func TestSkipVerificationsWildcardToken(t *testing.T) {
+	require.Equal(t, "*", SkipVerificationsWildcard)
 }

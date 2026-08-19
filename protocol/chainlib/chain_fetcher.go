@@ -91,6 +91,15 @@ func (cf *ChainFetcher) getVerificationsKey(verification VerificationContainer, 
 	return key
 }
 
+// skipVerification is the single gate deciding whether a verification runs for a node-url.
+// Two independent sources can suppress it: the per-node-url skip-verifications config (with
+// its "*" wildcard), and the process-wide --skip-all-verifications flag. Everything that
+// acts on behalf of a verification must go through here — including needsLatestBlock, so a
+// suppressed verification cannot drag the latest-block probe out to the upstream anyway.
+func skipVerification(url common.NodeUrl, name string) bool {
+	return SkipAllVerifications || url.ShouldSkipVerification(name)
+}
+
 // needsLatestBlock reports whether any verification that will ACTUALLY RUN for this
 // node-url depends on the chain head, and therefore whether Validate has to spend a
 // FetchLatestBlockNum relay against the upstream before verifying.
@@ -102,7 +111,7 @@ func (cf *ChainFetcher) getVerificationsKey(verification VerificationContainer, 
 // the burst still got its provider demoted with every verification skipped.
 func needsLatestBlock(url common.NodeUrl, verifications []VerificationContainer) bool {
 	for _, v := range verifications {
-		if url.ShouldSkipVerification(v.Name) {
+		if skipVerification(url, v.Name) {
 			continue
 		}
 		if v.Value == "" && v.LatestDistance != 0 {
@@ -140,7 +149,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		// invalidating cache as value might change
 		defer cf.invalidateVerificationsCache()
 		for _, verification := range verifications {
-			if url.ShouldSkipVerification(verification.Name) {
+			if skipVerification(url, verification.Name) {
 				utils.LavaFormatInfo("Skipping Verification due to provider configuration (skip-verifications setting)", utils.LogAttr("verification", verification.Name))
 				continue
 			}
@@ -221,7 +230,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 		nodeResult.LatestBlock = latestBlock
 
 		for _, verification := range verifications {
-			if url.ShouldSkipVerification(verification.Name) {
+			if skipVerification(url, verification.Name) {
 				continue
 			}
 			var verifyErr error

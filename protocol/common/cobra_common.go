@@ -105,6 +105,10 @@ const (
 	LimitParallelWebsocketConnectionsPerIpFlag   = "limit-parallel-websocket-connections-per-ip"
 	LimitWebsocketIdleTimeFlag                   = "limit-websocket-connection-idle-time"
 	SkipWebsocketVerificationFlag                = "skip-websocket-verification"
+	// SkipAllVerificationsFlag turns spec verification off process-wide. Broader than the
+	// per-node-url "*" wildcard in skip-verifications: it covers EVERY provider this process
+	// serves, healthy ones included. Prefer the wildcard for anything ongoing.
+	SkipAllVerificationsFlag = "skip-all-verifications"
 	// specification default flags
 	ProbeUpdateWeightFlagName = "probe-update-weight"
 	// ProbeLoopIntervalFlagName is the cadence of the MAG-2161 (Topic D) proactive health prober —
