@@ -330,17 +330,40 @@ func (gc *GrpcConfig) Validate() error {
 	}
 
 	// Validate reflection timeout bounds
-	if gc.ReflectionTimeout > 0 {
-		if gc.ReflectionTimeout < 100*time.Millisecond {
-			return utils.LavaFormatError("reflection-timeout too short", nil,
-				utils.LogAttr("timeout", gc.ReflectionTimeout),
-				utils.LogAttr("min", "100ms"))
-		}
-		if gc.ReflectionTimeout > 30*time.Second {
-			return utils.LavaFormatError("reflection-timeout too long", nil,
-				utils.LogAttr("timeout", gc.ReflectionTimeout),
-				utils.LogAttr("max", "30s"))
-		}
+	if err := gc.ValidateReflectionTimeout(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ValidateReflectionTimeout checks the reflection-timeout bounds on their own.
+//
+// Split out of Validate because the request path needs exactly this check and
+// nothing else. GetReflectionTimeout is what budgets gRPC descriptor lookups, so
+// an out-of-bounds value there is not cosmetic: a nanosecond timeout fails every
+// lookup on the endpoint, and a multi-minute one holds a pooled client for that
+// long. Validate as a whole cannot stand in — it also requires a descriptor-set
+// path for "hybrid", which DescriptorSourceForNode deliberately tolerates by
+// degrading to reflection, so calling it from the connection path would reject
+// configurations that work today.
+func (gc *GrpcConfig) ValidateReflectionTimeout() error {
+	// Bound what GetReflectionTimeout will actually return, which is the 5s default
+	// for anything <= 0. Rejecting a value the getter never yields would make a
+	// config invalid and harmless at the same time.
+	if gc == nil || gc.ReflectionTimeout <= 0 {
+		return nil
+	}
+
+	if gc.ReflectionTimeout < 100*time.Millisecond {
+		return utils.LavaFormatError("reflection-timeout too short", nil,
+			utils.LogAttr("timeout", gc.ReflectionTimeout),
+			utils.LogAttr("min", "100ms"))
+	}
+	if gc.ReflectionTimeout > 30*time.Second {
+		return utils.LavaFormatError("reflection-timeout too long", nil,
+			utils.LogAttr("timeout", gc.ReflectionTimeout),
+			utils.LogAttr("max", "30s"))
 	}
 
 	return nil
