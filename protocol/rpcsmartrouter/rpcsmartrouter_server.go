@@ -3655,6 +3655,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// per-group quorum (2.3), also front-load AgreementThreshold providers per group so each group can
 	// independently reach its internal quorum — otherwise QoS-skewed selection starves the smaller groups.
 	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1, PerGroupTarget: 1}
+	// Which internal path this api is served under, so selection can pick the
+	// endpoint whose URL is that path's root. In direct mode the path lives in
+	// the upstream url — one node-url per API version — and dialing the wrong
+	// one returns the vendor's 404 as if it were the chain's answer.
+	if apiCollection := protocolMessage.GetApiCollection(); apiCollection != nil {
+		sessionOpts.InternalPath = apiCollection.CollectionData.InternalPath
+	}
 	if cvp := relayProcessor.GetCrossValidationParams(); cvp != nil && cvp.MinGroups > 1 {
 		sessionOpts.MinGroups = cvp.MinGroups
 		if cvp.PerGroupQuorum {

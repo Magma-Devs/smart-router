@@ -1803,6 +1803,7 @@ func TestDeadConnectionCleanup(t *testing.T) {
 		false, // getAllEndpoints
 		"",    // addon
 		nil,   // extensionNames
+		"",    // internalPath
 	)
 
 	// Should successfully connect (we have one valid connection)
@@ -2264,6 +2265,7 @@ func TestCanceledContextDoesNotPenalizeEndpoint(t *testing.T) {
 		false, // getAllEndpoints
 		"",    // addon
 		nil,   // extensionNames
+		"",    // internalPath
 	)
 
 	// Connection should fail (context canceled), but the endpoint must not be penalized.

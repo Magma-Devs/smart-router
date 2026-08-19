@@ -1975,6 +1975,57 @@ func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
 	}
 }
 
+// expandInternalPaths resolves each configured node-url into the set of urls
+// the router will actually dial, one per internal path the spec serves.
+//
+// It mirrors chainRouterImpl.BatchNodeUrlsByServices exactly, because the two
+// have to agree on which url answers a given api collection: the chain router
+// builds the proxies the tracker and the verifications run on, and this builds
+// the direct-RPC endpoints relays run on. They diverged, and the relay path —
+// having no internal path anywhere in its endpoint list — dialed whichever url
+// session selection happened to hand it. A chain serving two API versions over
+// two urls (TON: toncenter v2 and tonindex v3) answered v3 apis out of the v2
+// upstream, which shows up as that vendor's 404 rather than as a routing fault.
+//
+//   - a url declaring `internal-path` IS that path's root and is taken as it
+//     stands;
+//   - a url declaring none is the shared root: it stays (for the spec's own
+//     root collection, if it has one) and additionally yields one url per
+//     other internal path, with the path appended — the same
+//     `nodeUrl.Url = baseUrl + internalPath` the chain router does.
+//
+// A spec with no internal paths at all (almost every chain) returns the input
+// unchanged.
+func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string) []common.NodeUrl {
+	nonRoot := make([]string, 0, len(internalPaths))
+	for _, internalPath := range internalPaths {
+		if internalPath != "" {
+			nonRoot = append(nonRoot, internalPath)
+		}
+	}
+	if len(nonRoot) == 0 {
+		return nodeUrls
+	}
+	// Deterministic: the endpoint list feeds session selection, and a map's
+	// iteration order would reshuffle it every boot.
+	sort.Strings(nonRoot)
+
+	expanded := make([]common.NodeUrl, 0, len(nodeUrls))
+	for _, nodeUrl := range nodeUrls {
+		expanded = append(expanded, nodeUrl)
+		if nodeUrl.InternalPath != "" {
+			continue
+		}
+		for _, internalPath := range nonRoot {
+			generated := nodeUrl
+			generated.Url = nodeUrl.Url + internalPath
+			generated.InternalPath = internalPath
+			expanded = append(expanded, generated)
+		}
+	}
+	return expanded
+}
+
 func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	ctx context.Context,
 	rpcEndpoint *lavasession.RPCEndpoint,
@@ -2169,7 +2220,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			}
 
 			endpoints := []*lavasession.Endpoint{}
-			for _, url := range provider.NodeUrls {
+			for _, url := range expandInternalPaths(provider.NodeUrls, chainParser.GetAllInternalPaths()) {
 				extensions := map[string]struct{}{}
 				for _, extension := range url.Addons {
 					extensions[extension] = struct{}{}
@@ -2204,6 +2255,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 					Enabled:           true,
 					Addons:            extensions,
 					Extensions:        extensions,
+					InternalPath:      url.InternalPath,
 					Connections:       nil,
 					DirectConnections: []lavasession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
 				}

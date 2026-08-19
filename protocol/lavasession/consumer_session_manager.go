@@ -620,7 +620,9 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 		return csm.probeDirectRPCEndpoints(ctx, consumerSessionsWithProvider, consumerSessionsWithProvider.PublicLavaAddress)
 	}
 
-	connected, endpoints, providerAddress, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, tryReconnectToDisabledEndpoints, true, "", nil)
+	// A probe measures reachability of the provider, not of one api collection —
+	// no internal path to match on, so every endpoint stays eligible.
+	connected, endpoints, providerAddress, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, tryReconnectToDisabledEndpoints, true, "", nil, "")
 	if err != nil || !connected {
 		if errors.Is(err, AllProviderEndpointsDisabledError) {
 			csm.blockProvider(ctx, providerAddress, true, epoch, MaxConsecutiveConnectionAttempts, 0, false, csm.GenerateReconnectCallback(consumerSessionsWithProvider)) // reporting and blocking provider this epoch
@@ -976,6 +978,15 @@ type GetSessionsOptions struct {
 	// agreement threshold so each group can independently reach its internal quorum; default 0/1 keeps the
 	// one-provider-per-group behavior (group-blind fill).
 	PerGroupTarget int
+	// InternalPath is the internal path of the api collection this relay
+	// resolved to ("/v2", "/P", "" for the root). Endpoint selection matches on
+	// it, because in direct mode the path lives in the upstream URL: a chain
+	// serving two API versions over two node-urls (TON's toncenter v2 +
+	// tonindex v3) has one endpoint per version, and dialing the wrong one
+	// returns that vendor's 404 as if it were an answer. Empty for every caller
+	// that doesn't resolve an api collection (probes, tests) — selection is
+	// then unfiltered, exactly as before.
+	InternalPath string
 }
 
 func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProviderNumber int, cuNeededForSession uint64, usedProviders UsedProvidersInf, requestedBlock int64, addon string, extensions []*spectypes.Extension, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, opts ...GetSessionsOptions) (
@@ -985,6 +996,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	// groups. Variadic so the many existing non-cross-validation callers are unchanged.
 	minGroups := groupBlindMinGroups
 	perGroupTarget := groupBlindPerGroupTarget
+	internalPath := ""
 	if len(opts) > 0 {
 		if opts[0].MinGroups > 1 {
 			minGroups = opts[0].MinGroups
@@ -992,6 +1004,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		if opts[0].PerGroupTarget > 1 {
 			perGroupTarget = opts[0].PerGroupTarget
 		}
+		internalPath = opts[0].InternalPath
 	}
 	// set usedProviders if they were chosen for this relay
 	timeoutCtx, cancel := context.WithTimeout(ctx, time.Second)
@@ -1040,7 +1053,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 			sessionEpoch := sessionWithProvider.CurrentEpoch
 
 			// Get a valid Endpoint from the provider chosen
-			connected, endpoints, _, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, addon, extensionNames)
+			connected, endpoints, _, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, addon, extensionNames, internalPath)
 			if err != nil {
 				// verify err is AllProviderEndpointsDisabled and report.
 				if errors.Is(err, AllProviderEndpointsDisabledError) {

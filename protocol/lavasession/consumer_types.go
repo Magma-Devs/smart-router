@@ -227,6 +227,17 @@ type Endpoint struct {
 	relayProbeAttempts uint64
 	Addons             map[string]struct{}
 	Extensions         map[string]struct{}
+	// InternalPath is the spec collection this endpoint's url serves — "/v2",
+	// "/P", or "" for the root. It mirrors the chain router's own per-path
+	// proxies (chainlib/chain_router.go): a node-url declaring `internal-path`
+	// IS that path's root, and a node-url declaring none is expanded into one
+	// endpoint per path at construction, with the path appended to its url.
+	//
+	// Session selection has to match on it, because the url is where the path
+	// lives: dialing the /v2 upstream for a /v3 api asks the vendor for a route
+	// it does not serve, and the vendor's 404 then reads as a verdict on the
+	// request.
+	InternalPath string
 	mu                 sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload, relayProbeTimeout, relayProbeAttempts
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
@@ -238,6 +249,12 @@ type Endpoint struct {
 // IsDirectRPC returns true if this endpoint uses direct RPC connections (smart router mode)
 func (e *Endpoint) IsDirectRPC() bool {
 	return len(e.DirectConnections) > 0
+}
+
+// ServesInternalPath reports whether this endpoint's url is the one to dial for
+// an api served under `internalPath`.
+func (e *Endpoint) ServesInternalPath(internalPath string) bool {
+	return e.InternalPath == internalPath
 }
 
 // IsEnabled returns the endpoint's enable bit under the endpoint mutex. Enabled is written under
@@ -1088,12 +1105,32 @@ func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos [
 
 // fetching an endpoint from a ConsumerSessionWithProvider and establishing a connection,
 // can fail without an error if trying to connect once to each endpoint but none of them are active.
-func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, retryDisabledEndpoints bool, getAllEndpoints bool, addon string, extensionNames []string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
+func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, retryDisabledEndpoints bool, getAllEndpoints bool, addon string, extensionNames []string, internalPath string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
 	getConnectionFromConsumerSessionsWithProvider := func(ctx context.Context) (connected bool, endpointPtr []*EndpointAndChosenConnection, allDisabled bool) {
 		endpoints := make([]*EndpointAndChosenConnection, 0)
 		cswp.Lock.Lock()
 		defer cswp.Lock.Unlock()
+		// Restrict to the endpoints serving the api's internal path — but only
+		// when this provider has any. Every non-empty path is expanded at
+		// construction (rpcsmartrouter.go), so a provider that CAN serve the
+		// path has a matching endpoint and the filter bites. A provider that
+		// has none — a provider-relay pool, where the path lives on the
+		// provider's side and not in our url, or an endpoint list built some
+		// way we haven't modelled — keeps every endpoint it had, rather than
+		// losing the whole pool to a filter that was never populated for it.
+		restrictToPath := false
+		if internalPath != "" {
+			for _, endpoint := range cswp.Endpoints {
+				if endpoint.ServesInternalPath(internalPath) {
+					restrictToPath = true
+					break
+				}
+			}
+		}
 		for idx, endpoint := range cswp.Endpoints {
+			if restrictToPath && !endpoint.ServesInternalPath(internalPath) {
+				continue
+			}
 			// retryDisabledEndpoints will attempt to reconnect to the provider even though we have disabled the endpoint
 			// this is used on a routine that tries to reconnect to a provider that has been disabled due to being unable to connect to it.
 			endpoint.mu.RLock()

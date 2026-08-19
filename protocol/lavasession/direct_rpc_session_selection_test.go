@@ -169,6 +169,7 @@ func TestFetchEndpointConnection_DirectRPC(t *testing.T) {
 		false, // getAllEndpoints (get one endpoint)
 		"",    // addon
 		nil,   // extensionNames
+		"",    // internalPath
 	)
 
 	// Verify connection succeeded
@@ -222,7 +223,7 @@ func TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal(t *testing.T) {
 	}
 
 	fetch := func() (bool, []*EndpointAndChosenConnection, error) {
-		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, "", nil)
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, "", nil, "")
 		return connected, endpoints, err
 	}
 
@@ -253,4 +254,71 @@ func TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, connected, "the endpoint must be selectable again after self-heal")
 	require.Len(t, endpoints, 1)
+}
+
+// TestFetchEndpointConnection_InternalPath is the regression guard for the TON
+// v2/v3 misroute: a chain serving two API versions over two node-urls had one
+// endpoint per version, but selection never looked at which. Whichever endpoint
+// the session picked answered every api, so v3 calls came back as the v2
+// upstream's 404 — indistinguishable from the chain not supporting them.
+func TestFetchEndpointConnection_InternalPath(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx := context.Background()
+
+	newEndpoint := func(t *testing.T, url, internalPath string) *Endpoint {
+		t.Helper()
+		nodeUrl := common.NodeUrl{Url: url, InternalPath: internalPath}
+		directConn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+		require.NoError(t, err)
+		return &Endpoint{
+			NetworkAddress:    url,
+			Enabled:           true,
+			InternalPath:      internalPath,
+			DirectConnections: []DirectRPCConnection{directConn},
+		}
+	}
+	newProvider := func(endpoints ...*Endpoint) *ConsumerSessionsWithProvider {
+		return &ConsumerSessionsWithProvider{
+			Sessions:          make(map[int64]*SingleConsumerSession),
+			PairingEpoch:      100,
+			StaticProvider:    true,
+			PublicLavaAddress: "ton-provider",
+			Endpoints:         endpoints,
+		}
+	}
+	fetchAll := func(cswp *ConsumerSessionsWithProvider, internalPath string) []*EndpointAndChosenConnection {
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(
+			ctx, false, true, "", nil, internalPath)
+		require.NoError(t, err)
+		require.True(t, connected)
+		return endpoints
+	}
+
+	root := newEndpoint(t, "https://ton.example/api", "")
+	v2 := newEndpoint(t, "https://ton.example/api/v2", "/v2")
+	v3 := newEndpoint(t, "https://ton.example/api/v3", "/v3")
+	cswp := newProvider(root, v2, v3)
+
+	t.Run("a versioned api reaches only its own upstream", func(t *testing.T) {
+		got := fetchAll(cswp, "/v3")
+		require.Len(t, got, 1)
+		assert.Equal(t, "https://ton.example/api/v3", got[0].endpoint.NetworkAddress)
+
+		got = fetchAll(cswp, "/v2")
+		require.Len(t, got, 1)
+		assert.Equal(t, "https://ton.example/api/v2", got[0].endpoint.NetworkAddress)
+	})
+
+	t.Run("no internal path keeps every endpoint eligible", func(t *testing.T) {
+		// Probes and every chain that declares no internal path at all.
+		assert.Len(t, fetchAll(cswp, ""), 3)
+	})
+
+	t.Run("a provider with no matching endpoint is not filtered to nothing", func(t *testing.T) {
+		// Provider-relay pools carry the path on the provider's side, not in
+		// our url. Dropping the whole pool would turn a routing refinement into
+		// an outage.
+		plain := newProvider(newEndpoint(t, "https://eth.example", ""))
+		assert.Len(t, fetchAll(plain, "/v2"), 1)
+	})
 }
