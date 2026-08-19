@@ -2159,6 +2159,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Helper function to convert provider endpoints to sessions
 	convertProvidersToSessions := func(providerList []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
 		sessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
+		// Every connection built below, so the readiness step at the end of this
+		// function can run before any of them is reachable by a relay (MAG-2860).
+		createdConnections := []lavasession.DirectRPCConnection{}
 		for idx, provider := range providerList {
 			// Only process providers matching this endpoint's API interface
 			if provider.ApiInterface != rpcEndpoint.ApiInterface || provider.ChainID != rpcEndpoint.ChainID {
@@ -2194,6 +2197,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 					utils.LogAttr("protocol", directConn.GetProtocol()),
 					utils.LogAttr("provider", provider.Name),
 				)
+				createdConnections = append(createdConnections, directConn)
 
 				endpoint := &lavasession.Endpoint{
 					NetworkAddress:    url.Url,
@@ -2253,6 +2257,24 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			providerEntry.GroupLabel = provider.GroupLabel // cross-validation group-diversity label (may be empty)
 			sessions[uint64(idx)] = providerEntry
 		}
+
+		// The readiness boundary (MAG-2860). Direct connections are lazy — a gRPC one
+		// has made no network call at all when NewDirectRPCConnection returns — so
+		// without this the first RELAY to an endpoint is what dials it and resolves
+		// its protobuf descriptors. Reflection on a slow node outlasts a relay
+		// timeout, and cross-validation needs N successes in one request, so that
+		// first relay failing is the whole defect rather than a slow start.
+		//
+		// Here is the one place that covers every lifecycle which produces a
+		// connection — boot, the failed-provider retry, epoch re-verification and
+		// /debug/reset-pairing all funnel through this closure — and it runs before
+		// the caller hands any of these sessions to UpdateAllProviders, which is what
+		// makes an endpoint selectable.
+		//
+		// Bounded and never fatal, in keeping with MAG-2525: a connection that does
+		// not finish is published anyway and falls back to on-demand resolution.
+		lavasession.PrewarmDirectConnections(ctx, createdConnections, lavasession.DirectRPCPrewarmBudget)
+
 		return sessions
 	}
 

@@ -83,6 +83,26 @@ type DirectRPCConnection interface {
 	GetNodeUrl() *common.NodeUrl
 }
 
+// DirectRPCPrewarmer is an optional interface for connections that have setup
+// work worth doing BEFORE the endpoint holding them is published.
+//
+// It exists for gRPC descriptor resolution (MAG-2860). Everything else about a
+// direct connection is either free at construction or bounded by the relay that
+// needs it; descriptor reflection is neither, and a relay that arrives before it
+// has happened is the one that pays — which for cross-validation, needing N
+// successes in one request, reads as an outage rather than a slow first call.
+//
+// The contract is a boundary, not a guarantee of success: Prewarm returns when
+// the connection is as ready as it is going to get, and a failure is a reason to
+// publish the endpoint anyway, not to withhold it. Boot must not become fatal on
+// upstream health.
+type DirectRPCPrewarmer interface {
+	// Prewarm establishes the connection and fills whatever caches the relay path
+	// would otherwise fill on demand. It is idempotent, safe to call concurrently,
+	// and bounded by ctx.
+	Prewarm(ctx context.Context) error
+}
+
 // GRPCDescriptorProvider is an optional interface that gRPC connections can implement
 // to provide access to method descriptors. This is used for parsing gRPC responses
 // to extract block heights for QoS sync tracking.
@@ -203,6 +223,15 @@ type GRPCDirectRPCConnection struct {
 	inflight  map[string]*descriptorResolution
 	resolveMu sync.Mutex
 
+	// The descriptor warm-up runs exactly once per connection, whichever path
+	// triggers it: Prewarm during endpoint setup, or initialize() on a connection
+	// that was never prewarmed. warmOnce is what makes it once; warmed is closed
+	// when the sweep has finished, and is what Prewarm waits on — a second caller
+	// must be able to WAIT for the sweep, which sync.Once alone cannot express
+	// without also blocking uninterruptibly.
+	warmOnce sync.Once
+	warmed   chan struct{}
+
 	// Initialization state. `initialized` latches on SUCCESS only: a failed
 	// initialize is retried by the next relay rather than replayed from a cached
 	// error, which would strand the connection for the life of the pairing.
@@ -248,6 +277,7 @@ func newGRPCDirectRPCConnection(nodeUrl common.NodeUrl) *GRPCDirectRPCConnection
 		nodeUrl:          nodeUrl,
 		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
 		inflight:         map[string]*descriptorResolution{},
+		warmed:           make(chan struct{}),
 		connectorCtx:     connectorCtx,
 		connectorCancel:  connectorCancel,
 	}
@@ -286,6 +316,90 @@ func newGRPCConnector(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl
 // direct connection that has been closed. Callers should treat it as a normal
 // relay failure and fail over, not as a fatal condition.
 var ErrGRPCConnectionClosed = errors.New("gRPC connection is closed")
+
+// DirectRPCPrewarmBudget bounds the readiness step that endpoint setup runs
+// before publishing connections.
+//
+// It is a cap on how long setup WAITS, not on the work: a prewarm that overruns
+// keeps going in the background and the endpoint is published regardless. That
+// asymmetry is deliberate. Publishing an unwarmed endpoint costs at most one slow
+// relay, which the detached-lookup half of MAG-2860 already makes recoverable,
+// whereas letting an unreachable upstream hold up setup would make boot fatal on
+// upstream health — which it must never be.
+//
+// Prewarms run concurrently, so this is the budget for the slowest endpoint, not
+// the sum. It sits below the sweep's own 6x-reflection-timeout budget: setup
+// waits for the common case and declines to wait out the pathological one.
+const DirectRPCPrewarmBudget = 15 * time.Second
+
+// PrewarmDirectConnections runs the pre-relay readiness step on every connection
+// that has one, concurrently, and returns when they have all finished or the
+// budget runs out.
+//
+// This is the boundary that makes "no relay is ever cold" true rather than
+// merely likely (MAG-2860). Connections are constructed lazily — a gRPC one has
+// made no network call at all when NewDirectRPCConnection returns — so without a
+// step like this the first relay to an endpoint is the one that dials it and
+// resolves its descriptors, and for cross-validation, which needs N successes in
+// a single request, that first relay failing IS the reported bug. Call this
+// before the endpoints holding these connections are published.
+//
+// It never returns an error and never withholds anything: a connection that
+// fails or overruns is logged and left to the on-demand path.
+func PrewarmDirectConnections(ctx context.Context, connections []DirectRPCConnection, budget time.Duration) {
+	// Keep the connection next to its prewarmer rather than asserting back to it
+	// later: the two views are of the same object, but only this loop has proof of
+	// that.
+	type target struct {
+		connection DirectRPCConnection
+		prewarmer  DirectRPCPrewarmer
+	}
+	targets := make([]target, 0, len(connections))
+	for _, connection := range connections {
+		if prewarmer, ok := connection.(DirectRPCPrewarmer); ok {
+			targets = append(targets, target{connection: connection, prewarmer: prewarmer})
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, t := range targets {
+		wg.Add(1)
+		go func(t target) {
+			defer wg.Done()
+			if err := t.prewarmer.Prewarm(ctx); err != nil {
+				// Warning, not error: an endpoint that could not be prewarmed is still
+				// a usable endpoint, and saying otherwise at boot would read as a
+				// failure the operator has to act on.
+				utils.LavaFormatWarning("direct RPC connection prewarm did not complete", err,
+					utils.LogAttr("url", t.connection.GetURL()))
+			}
+		}(t)
+	}
+
+	// Wait on a channel rather than wg.Wait() directly. Every Prewarm honours ctx,
+	// so this should be redundant — but "should" is not a bound, and setup blocking
+	// forever on a misbehaving transport is precisely the failure this budget exists
+	// to rule out.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		utils.LavaFormatWarning("direct RPC prewarm budget elapsed, publishing endpoints anyway", ctx.Err(),
+			utils.LogAttr("connections", len(targets)),
+			utils.LogAttr("budget", budget))
+	}
+}
 
 // grpcConnectorInterface abstracts GRPCConnector for testing
 type grpcConnectorInterface interface {
@@ -862,6 +976,21 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 		return err
 	}
 
+	// Bound reflection-timeout before anything derives a context from it. It budgets
+	// every descriptor lookup (lookupService) and, multiplied, the warm-up sweep, so
+	// an out-of-bounds value is not cosmetic: a nanosecond fails every lookup on the
+	// endpoint for as long as it is configured, and there is no later check to catch
+	// it — common.GrpcConfig.Validate defines these bounds but has no caller on any
+	// path that reaches here, and the static-provider validation only checks the URL.
+	//
+	// Only the timeout half of Validate is applied. The rest of it requires a
+	// descriptor-set path for "hybrid", which DescriptorSourceForNode deliberately
+	// tolerates by degrading to reflection, so running all of Validate here would
+	// reject configurations that work today.
+	if err := g.nodeUrl.GrpcConfig.ValidateReflectionTimeout(); err != nil {
+		return err
+	}
+
 	// Resolve the descriptor source before dialing. It needs no connection — it
 	// only reads config and the process-wide protoset cache — and failing here
 	// keeps a misconfigured endpoint from spending a dial budget it can never use.
@@ -936,16 +1065,62 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 		utils.LogAttr("url", g.nodeUrl.Url),
 		utils.LogAttr("tls", parsedURL.Scheme == "grpcs"))
 
-	// Fill the descriptor cache behind this call, so no RELAY is the one that pays
-	// for it (MAG-2860). Detaching the lookup from the relay timeout is what stops a
-	// slow endpoint being permanently unusable; warming here is what stops the first
-	// request to it failing at all. Deliberately after the connector is published —
-	// the warm borrows from that pool — and deliberately a goroutine: initMu is held
-	// across initialize(), so doing this inline would make every relay queued behind
-	// wait out a reflection sweep.
-	go g.warmDescriptorCache()
+	// Start the descriptor sweep behind this call. On the prewarmed path Prewarm has
+	// already started it and is waiting on it; this is the fallback for a connection
+	// that reached its first relay without one — the lazily-initialized paths, and
+	// any endpoint whose prewarm ran out of budget at setup.
+	//
+	// Deliberately after the connector is published (the sweep borrows from that
+	// pool), and deliberately not awaited: initMu is held across initialize(), so
+	// waiting here would make every relay queued behind sit through a reflection
+	// sweep. The boundary that actually removes the cold relay is Prewarm.
+	g.startDescriptorWarmup()
 
 	return nil
+}
+
+// Prewarm implements DirectRPCPrewarmer: it dials the endpoint and resolves its
+// descriptors, so that by the time this connection is reachable by a relay the
+// work a relay would otherwise trigger is already done.
+//
+// This is the boundary MAG-2860 turns on. Detaching descriptor lookups from the
+// relay deadline stops a slow endpoint being permanently unusable, but it still
+// leaves the FIRST request paying — and cross-validation needs N successes in one
+// request, so a first request that fails is the reported bug, not a slow start.
+// Calling this before the endpoint is published is what removes the cold relay
+// rather than merely making it recoverable.
+//
+// Idempotent and concurrency-safe: the sweep runs once per connection whoever
+// asks, and later callers wait for the running one rather than starting another.
+// Bounded by ctx — an expired ctx abandons the WAIT, never the sweep, which
+// carries on against its own budget and caches what it finds.
+func (g *GRPCDirectRPCConnection) Prewarm(ctx context.Context) error {
+	if err := g.ensureInitialized(ctx); err != nil {
+		return err
+	}
+
+	select {
+	case <-g.startDescriptorWarmup():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// startDescriptorWarmup starts the one descriptor sweep this connection will ever
+// run and returns the channel closed when it finishes.
+//
+// Once-ness is the point: Prewarm and initialize() both reach here, and a second
+// sweep would re-resolve, on a node likely chosen for this treatment because its
+// reflection is slow, everything the first one already cached.
+func (g *GRPCDirectRPCConnection) startDescriptorWarmup() <-chan struct{} {
+	g.warmOnce.Do(func() {
+		go func() {
+			defer close(g.warmed)
+			g.warmDescriptorCache()
+		}()
+	})
+	return g.warmed
 }
 
 // descriptorWarmupBudgetFactor scales grpc-config's per-lookup reflection-timeout
@@ -958,22 +1133,15 @@ func (g *GRPCDirectRPCConnection) initialize(ctx context.Context) error {
 // reflection stream keeps that client checked out until Close.
 const descriptorWarmupBudgetFactor = 6
 
-// warmDescriptorCache resolves every service the node serves, once, in the
-// background.
-//
-// This is the other half of MAG-2860. Detaching a lookup from the relay that
-// triggered it means a cold endpoint costs one failed relay instead of failing
-// forever — but cross-validation needs N successes in ONE request, so "the second
-// attempt works" still reads as an outage to the client that sent the first.
-// Warming at connect time is what removes the cold relay entirely.
+// warmDescriptorCache resolves every service the node serves. It runs at most
+// once per connection — see startDescriptorWarmup — and is what Prewarm waits on.
 //
 // It stays transport-only: the node's own reflection lists what it serves, so
 // nothing here has to know which chain it is or which methods a spec will call.
 //
-// Results go straight into descriptorsCache and NOT through the inflight map: a
-// relay that arrives mid-sweep must not end up waiting on a sweep that is busy
-// with an unrelated service. Worst case the two overlap on one service and the
-// cache absorbs the duplicate.
+// Each service is claimed through the same registry the on-demand path uses, so
+// the two never resolve the same service twice, and a relay that arrives mid-sweep
+// waits on the sweep's claim for ITS service rather than on the sweep as a whole.
 func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 	// Nothing to warm in "file" mode: it never touches the network, and
 	// initializeDescriptorSource has already loaded the protoset into the
@@ -1028,7 +1196,7 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 	}
 
 	started := time.Now()
-	warmed, methods := 0, 0
+	warmed, methods, skipped := 0, 0, 0
 	for _, service := range services {
 		if ctx.Err() != nil {
 			break
@@ -1038,31 +1206,61 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 			continue
 		}
 
-		descriptor, err := descriptorSource.FindSymbol(service)
-		if err != nil {
+		// Claim the service through the same registry the on-demand path uses. A
+		// relay that got here first already owns this one and is resolving it on its
+		// own client; resolving it again would be exactly the duplicate reflection
+		// this sweep exists to avoid, against a node whose reflection is the reason
+		// we are sweeping at all. Skip it and move on — the sweep has other services
+		// to reach, and waiting would only serialize the two.
+		resolution, claimed := g.claimServiceResolution(service)
+		if !claimed {
+			skipped++
+			continue
+		}
+
+		serviceDescriptor, err := resolveServiceFrom(descriptorSource, service)
+		if err == nil {
+			g.cacheServiceMethods(serviceDescriptor)
+			warmed++
+			methods += len(serviceDescriptor.GetMethods())
+		} else {
 			// One unresolvable service must not abandon the rest; it falls back to an
 			// on-demand lookup like any other cache miss.
 			utils.LavaFormatDebug("gRPC descriptor warm-up skipped a service",
 				utils.LogAttr("service", service),
 				utils.LogAttr("error", err.Error()),
 				utils.LogAttr("url", g.nodeUrl.Url))
-			continue
-		}
-		serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
-		if !ok {
-			continue
 		}
 
-		g.cacheServiceMethods(serviceDescriptor)
-		warmed++
-		methods += len(serviceDescriptor.GetMethods())
+		// Always publish: relays that joined this claim mid-sweep are waiting on it.
+		g.publishServiceResolution(service, resolution, serviceDescriptor, err)
 	}
 
 	utils.LavaFormatInfo("gRPC descriptor cache warmed",
 		utils.LogAttr("services", warmed),
 		utils.LogAttr("methods", methods),
+		utils.LogAttr("alreadyResolving", skipped),
 		utils.LogAttr("duration", time.Since(started)),
 		utils.LogAttr("url", g.nodeUrl.Url))
+}
+
+// resolveServiceFrom pulls one service descriptor out of an already-built
+// descriptor source. It is the half of lookupService that does not own a
+// connection, shared so the sweep and the on-demand path cannot drift on what
+// counts as a resolved service.
+func resolveServiceFrom(descriptorSource grpcurl.DescriptorSource, service string) (*desc.ServiceDescriptor, error) {
+	descriptor, err := descriptorSource.FindSymbol(service)
+	if err != nil {
+		return nil, err
+	}
+
+	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
+	if !ok {
+		return nil, utils.LavaFormatError("descriptor is not a ServiceDescriptor", nil,
+			utils.LogAttr("service", service))
+	}
+
+	return serviceDescriptor, nil
 }
 
 // cacheServiceMethods stores every method of a resolved service.
@@ -1158,45 +1356,71 @@ func (g *GRPCDirectRPCConnection) getMethodDescriptor(
 
 	resolution := g.resolveService(service)
 
+	var finished bool
 	select {
 	case <-resolution.done:
+		finished = true
 	case <-ctx.Done():
-		// A lookup that finished in the same instant is not thrown away just because
-		// select picked the other ready case.
-		if methodDesc, found, _ := g.descriptorsCache.Load(fullMethodName); found {
-			return methodDesc, nil
+		// Both cases can be ready at once, and select picks among ready cases at
+		// RANDOM — so landing here proves nothing about the lookup. Ask again before
+		// deciding anything, or roughly half of the races report whichever outcome
+		// the runtime happened to choose.
+		select {
+		case <-resolution.done:
+			finished = true
+		default:
 		}
+	}
 
-		// This relay is out of budget; the lookup it started is not. Failing here is
-		// still right — the caller has a deadline to honour and other endpoints to
-		// try — but the lookup keeps running and warms the cache behind us, so the
-		// next relay to this endpoint is not cold. Before this, the relay timeout
-		// killed the lookup before it could cache anything, and every subsequent
-		// relay repeated the same doomed cold lookup: a permanent stall for any
-		// endpoint whose reflection is slower than one relay timeout, which is what
-		// made cross-validation unable to reach quorum on gRPC (MAG-2860).
-		//
-		// ctx.Err() is passed through rather than flattened into a message so
-		// context.Canceled survives in the chain: a leg the router itself abandoned
-		// must not be scored as a node failure (same reasoning as handleGRPCError).
-		return nil, utils.LavaFormatWarning("gRPC descriptor lookup outlived the relay, continuing in background", ctx.Err(),
+	// A lookup that SUCCEEDED is used whatever the caller's context now says. The
+	// descriptor is in hand and costs nothing to return; discarding it would fail a
+	// relay we can still serve, and the cancellation will be noticed by the caller
+	// on its own terms anyway.
+	if finished && resolution.err == nil {
+		methodDescriptor := resolution.svc.FindMethodByName(methodName)
+		if methodDescriptor == nil {
+			return nil, utils.LavaFormatError("method not found in service", nil,
+				utils.LogAttr("service", service),
+				utils.LogAttr("method", methodName))
+		}
+		return methodDescriptor, nil
+	}
+
+	// Some other resolution — the warm-up sweep, or another relay's lookup — may
+	// have cached this method while we waited. A descriptor is a descriptor.
+	if methodDesc, found, _ := g.descriptorsCache.Load(fullMethodName); found {
+		return methodDesc, nil
+	}
+
+	// From here the lookup has given us nothing, so the question is only which
+	// error to report. The caller's own context wins over the lookup's error
+	// whenever both are available.
+	//
+	// This is not cosmetic. common.IsClientCancellation matches on the
+	// context.Canceled SENTINEL, and a relay the router itself abandoned — a loser
+	// of a stateful fan-out race, or a client that hung up — must not be scored
+	// against the endpoint. Reporting the lookup's generic failure instead drops
+	// that sentinel and hands endpoint health a node error that never happened.
+	// The risk is asymmetric in the same way handleGRPCError's cancellation branch
+	// is: over-reporting cancellation only skips scoring a relay whose result we
+	// were discarding, while under-reporting it penalises an endpoint that did
+	// nothing wrong.
+	//
+	// Passing ctx.Err() through rather than flattening it into a message is what
+	// keeps the sentinel reachable by errors.Is.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The lookup itself is NOT abandoned here — it runs on its own budget and
+		// caches what it finds, so the next relay to this endpoint is not cold. That
+		// is what stops one slow endpoint being permanently unusable (MAG-2860).
+		return nil, utils.LavaFormatWarning("gRPC descriptor lookup outlived the relay, continuing in background", ctxErr,
 			utils.LogAttr("service", service),
 			utils.LogAttr("method", methodName),
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
 
-	if resolution.err != nil {
-		return nil, resolution.err
-	}
-
-	methodDescriptor := resolution.svc.FindMethodByName(methodName)
-	if methodDescriptor == nil {
-		return nil, utils.LavaFormatError("method not found in service", nil,
-			utils.LogAttr("service", service),
-			utils.LogAttr("method", methodName))
-	}
-
-	return methodDescriptor, nil
+	// Unreachable unless the lookup finished: the select above only returns on one
+	// of the two channels, and a live ctx means it was resolution.done.
+	return nil, resolution.err
 }
 
 // resolveService starts — or joins — the one running lookup of `service` on this
@@ -1207,51 +1431,79 @@ func (g *GRPCDirectRPCConnection) getMethodDescriptor(
 // stream turns one slow lookup into N concurrent ones against a node that is
 // already too slow to answer inside a relay timeout.
 func (g *GRPCDirectRPCConnection) resolveService(service string) *descriptorResolution {
-	g.resolveMu.Lock()
-	defer g.resolveMu.Unlock()
-
-	if resolution, ok := g.inflight[service]; ok {
-		return resolution
+	resolution, claimed := g.claimServiceResolution(service)
+	if claimed {
+		go g.runServiceResolution(service, resolution)
 	}
-
-	resolution := &descriptorResolution{done: make(chan struct{})}
-	g.inflight[service] = resolution
-	go g.runServiceResolution(service, resolution)
-
 	return resolution
 }
 
-// runServiceResolution performs one service lookup and publishes its outcome.
+// claimServiceResolution registers the caller as the one resolving `service`, or
+// hands back the resolution already running for it.
+//
+// The claim is what keeps the warm-up sweep and the on-demand path from resolving
+// the same service twice: whichever reaches a service first owns it, and the
+// other either waits on it (a relay) or skips it (the sweep, which has other
+// services to get on with).
+func (g *GRPCDirectRPCConnection) claimServiceResolution(service string) (resolution *descriptorResolution, claimed bool) {
+	g.resolveMu.Lock()
+	defer g.resolveMu.Unlock()
+
+	if existing, ok := g.inflight[service]; ok {
+		return existing, false
+	}
+
+	resolution = &descriptorResolution{done: make(chan struct{})}
+	g.inflight[service] = resolution
+	return resolution, true
+}
+
+// publishServiceResolution ends a claimed resolution, waking every waiter.
+//
+// It must be reached on every path out of a claimed lookup, including failures:
+// a claim that is never published is a resolution every future waiter blocks on
+// until its own context expires.
+func (g *GRPCDirectRPCConnection) publishServiceResolution(
+	service string,
+	resolution *descriptorResolution,
+	serviceDescriptor *desc.ServiceDescriptor,
+	err error,
+) {
+	resolution.svc, resolution.err = serviceDescriptor, err
+
+	// Drop the entry BEFORE publishing, so a relay that arrives after a failed
+	// lookup starts a fresh one instead of joining a finished one and being handed
+	// its stale error. Waiters already holding this resolution still get the real
+	// answer. The cost is a short window in which a second lookup can start while
+	// this one is finishing; the cache check in getMethodDescriptor makes that a
+	// no-op as soon as one of them succeeds.
+	g.resolveMu.Lock()
+	if g.inflight[service] == resolution {
+		delete(g.inflight, service)
+	}
+	g.resolveMu.Unlock()
+
+	close(resolution.done)
+}
+
+// runServiceResolution performs one claimed service lookup and publishes it.
 func (g *GRPCDirectRPCConnection) runServiceResolution(service string, resolution *descriptorResolution) {
 	started := time.Now()
 
-	defer func() {
-		// Drop the entry BEFORE publishing, so a relay that arrives after a failed
-		// lookup starts a fresh one instead of joining a finished one and being
-		// handed its stale error. Waiters already holding this resolution still get
-		// the real answer. The cost is a short window in which a second lookup can
-		// start while this one is finishing; the cache check in getMethodDescriptor
-		// makes that a no-op as soon as one of them succeeds.
-		g.resolveMu.Lock()
-		if g.inflight[service] == resolution {
-			delete(g.inflight, service)
-		}
-		g.resolveMu.Unlock()
-		close(resolution.done)
-	}()
+	serviceDescriptor, err := g.lookupService(service)
+	if err == nil {
+		// Cache before publishing: a waiter woken by the close below re-checks the
+		// cache, and finding it already filled is one less way to race.
+		g.cacheServiceMethods(serviceDescriptor)
 
-	resolution.svc, resolution.err = g.lookupService(service)
-	if resolution.err != nil {
-		return
+		utils.LavaFormatDebug("gRPC service descriptor resolved",
+			utils.LogAttr("service", service),
+			utils.LogAttr("methods", len(serviceDescriptor.GetMethods())),
+			utils.LogAttr("duration", time.Since(started)),
+			utils.LogAttr("url", g.nodeUrl.Url))
 	}
 
-	g.cacheServiceMethods(resolution.svc)
-
-	utils.LavaFormatDebug("gRPC service descriptor resolved",
-		utils.LogAttr("service", service),
-		utils.LogAttr("methods", len(resolution.svc.GetMethods())),
-		utils.LogAttr("duration", time.Since(started)),
-		utils.LogAttr("url", g.nodeUrl.Url))
+	g.publishServiceResolution(service, resolution, serviceDescriptor, err)
 }
 
 // lookupService resolves one service descriptor on a budget of its own.
@@ -1301,18 +1553,12 @@ func (g *GRPCDirectRPCConnection) lookupService(service string) (*desc.ServiceDe
 		return nil, err
 	}
 
-	descriptor, err := descriptorSource.FindSymbol(service)
+	serviceDescriptor, err := resolveServiceFrom(descriptorSource, service)
 	if err != nil {
 		return nil, utils.LavaFormatError("failed to find service descriptor", err,
 			utils.LogAttr("service", service),
 			utils.LogAttr("descriptor-source", g.nodeUrl.GrpcConfig.GetDescriptorSource()),
 			utils.LogAttr("reflection-timeout", g.nodeUrl.GrpcConfig.GetReflectionTimeout()))
-	}
-
-	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
-	if !ok {
-		return nil, utils.LavaFormatError("descriptor is not a ServiceDescriptor", nil,
-			utils.LogAttr("service", service))
 	}
 
 	return serviceDescriptor, nil
