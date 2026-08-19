@@ -3354,7 +3354,7 @@ func TestIsFinalizedForCacheWrite(t *testing.T) {
 // filtered. With one endpoint that means an all-failed result -> ConsistencyError ->
 // the "No pairings available" the customer saw.
 //
-// The numbers are the real incident values from the GK8 logs:
+// The numbers are the real values from the incident logs:
 // seenBlock=424549212, block-height tip=403165980, gap=21383232.
 func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *testing.T) {
 	ctx := context.Background()
