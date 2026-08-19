@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -57,6 +58,55 @@ func TestParseRetryAfter(t *testing.T) {
 		_, ok := ParseRetryAfter(nil, now)
 		require.False(t, ok)
 	})
+
+	// RFC 9110 sets no ceiling, so both wire forms can name a delay long enough to park a
+	// provider indefinitely — and a large enough delta-seconds overflows int64 nanoseconds
+	// into a negative duration. Both clamp.
+	t.Run("clamped to MaxRetryAfter", func(t *testing.T) {
+		for _, tc := range []struct{ name, value string }{
+			{"delta-seconds over the cap", strconv.Itoa(int(MaxRetryAfter/time.Second) + 1)},
+			{"delta-seconds that would overflow", "10000000000"},
+			{"delta-seconds at max int64", "9223372036854775807"},
+			{"http-date beyond the cap", now.Add(365 * 24 * time.Hour).Format(http.TimeFormat)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				d, ok := ParseRetryAfter(hdr(tc.value), now)
+				require.True(t, ok, "%q is a usable delay, just an excessive one", tc.value)
+				require.Equal(t, MaxRetryAfter, d)
+			})
+		}
+	})
+
+	// An HTTP-date is absolute, so it is only as good as the two clocks agreeing. The
+	// upstream's Date header states the clock that wrote the deadline, so the gap between
+	// them is skew-free; without it the local clock is all there is.
+	t.Run("http-date measured against the upstream Date header", func(t *testing.T) {
+		skewed := func(skew time.Duration) http.Header {
+			h := hdr(now.Add(skew + 90*time.Second).Format(http.TimeFormat))
+			h.Set("Date", now.Add(skew).Format(http.TimeFormat))
+			return h
+		}
+
+		t.Run("upstream clock ahead", func(t *testing.T) {
+			d, ok := ParseRetryAfter(skewed(10*time.Minute), now)
+			require.True(t, ok)
+			require.InDelta(t, float64(90*time.Second), float64(d), float64(time.Second))
+		})
+
+		t.Run("upstream clock behind", func(t *testing.T) {
+			d, ok := ParseRetryAfter(skewed(-10*time.Minute), now)
+			require.True(t, ok, "a backdated header must not read as already past")
+			require.InDelta(t, float64(90*time.Second), float64(d), float64(time.Second))
+		})
+
+		t.Run("unparseable Date falls back to the local clock", func(t *testing.T) {
+			h := hdr(now.Add(90 * time.Second).Format(http.TimeFormat))
+			h.Set("Date", "not a date")
+			d, ok := ParseRetryAfter(h, now)
+			require.True(t, ok)
+			require.InDelta(t, float64(90*time.Second), float64(d), float64(time.Second))
+		})
+	})
 }
 
 // The enriched error must stay a 429 to everything that already recognises one — the
@@ -97,5 +147,17 @@ func TestWithRetryAfter_PreservesTheSentinel(t *testing.T) {
 	t.Run("RetryAfterFrom is false for a plain rate-limit", func(t *testing.T) {
 		_, ok := RetryAfterFrom(StatusCodeError429)
 		require.False(t, ok)
+	})
+
+	// Enrichment is additive: whatever context was already wrapped around the sentinel has to
+	// survive, since the call sites apply it to whatever error they were handed.
+	t.Run("keeps the context wrapped around the sentinel", func(t *testing.T) {
+		inner := fmt.Errorf("upstream %s: %w", "eth-mainnet", StatusCodeError429)
+		enriched := WithRetryAfter(inner, hdr("60"), now)
+
+		require.ErrorIs(t, enriched, StatusCodeError429)
+		require.ErrorIs(t, enriched, inner)
+		require.Contains(t, enriched.Error(), "upstream eth-mainnet")
+		require.Contains(t, enriched.Error(), "retry after 1m0s")
 	})
 }

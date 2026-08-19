@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/fullstorydev/grpcurl"
 	"github.com/golang/protobuf/proto"
@@ -438,10 +439,12 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	// We return the response in both cases - the caller will check for RPC errors
 	if resp.StatusCode >= 400 {
 		// For 4xx/5xx errors, include status code in error but also return the response
+		retryAfter, _ := common.ParseRetryAfter(resp.Header, time.Now())
 		return response, &HTTPStatusError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
 			Body:       body,
+			RetryAfter: retryAfter,
 		}
 	}
 
@@ -453,10 +456,24 @@ type HTTPStatusError struct {
 	StatusCode int
 	Status     string
 	Body       []byte
+	// RetryAfter is what a rate-limiting upstream asked for, or 0 when it sent no usable
+	// Retry-After. Read it through common.RetryAfterFrom rather than the field, so a caller
+	// works the same whichever path produced the error.
+	RetryAfter time.Duration
 }
 
 func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("HTTP %d %s", e.StatusCode, e.Status)
+}
+
+// Unwrap presents a 429 as the shared rate-limit error, so errors.Is(err,
+// common.StatusCodeError429) and common.RetryAfterFrom read the same on the direct path as
+// on the chainlib proxies. Any other status has nothing to unwrap to.
+func (e *HTTPStatusError) Unwrap() error {
+	if e.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	return &common.RateLimitedError{RetryAfter: e.RetryAfter}
 }
 
 func (h *HTTPDirectRPCConnection) GetProtocol() DirectRPCProtocol {
