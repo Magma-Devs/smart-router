@@ -227,6 +227,10 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// package global, so an embedded server with no flags set gets the same default.
 		// The key is absent in that case and GetBool returns false, which IS the default.
 		EnableForkDetection: viper.GetBool(endpointstate.EnableForkDetectionFlagName),
+		// Dedicated-poll cadence, read from viper for the same reason as the flag above (an
+		// embedded server with no flags bound gets 0, which IS the default). endpointstate
+		// validates the value and reverts an out-of-range one.
+		PollIntervalDivisor: viper.GetInt(endpointstate.PollDivisorFlagName),
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
@@ -2404,8 +2408,8 @@ func (s *probeLoopStats) snapshot() probeLoopSnapshot {
 // effectiveBlockTime (the floored block time), NOT the raw spec value, drives DefaultVerdictConfig:
 // the alive horizon (StalenessMultiplier × block time, floored at minProbeStaleness) must share the
 // SAME staleness horizon as ChainState and the monitor's poll cadence. With the raw 0 the horizon
-// floors to ~5s while the poll cadence is effectiveBlockTime/2 (~6s), so every healthy endpoint's
-// newest observation would routinely be "too old" at probe time — scoring the whole pod not-alive
+// floors to ~5s while the poll cadence is effectiveBlockTime/divisor (~6-12s), so every healthy
+// endpoint's newest observation would routinely be "too old" at probe time — scoring the pod not-alive
 // and decaying availability QoS on any chain whose spec omits average_block_time.
 //
 // The "keeping up" tolerance is sourced from the SAME per-chain threshold consistency pre-validation

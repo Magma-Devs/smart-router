@@ -48,8 +48,9 @@ type ChainTrackerConfig struct {
 	// by failure backoff. The adaptive /4, /2, /16 tiers AND the block-gap recalibration
 	// are disconnected from scheduling (block-gap estimation still runs for block-time
 	// consumers, it just no longer moves the timer). Per-endpoint trackers set it to
-	// avgBlockTime/2 because relay harvest is the primary block signal, so the dedicated
-	// poll is a sparse fallback. Left 0 (the default) preserves the legacy adaptive
+	// avgBlockTime/divisor (default 2, operator-tunable — see
+	// endpointstate.PollDivisorFlagName) because relay harvest is the primary block signal,
+	// so the dedicated poll is a sparse fallback. Left 0 (the default) preserves the legacy adaptive
 	// cadence — used by the global tracker, whose readers are not yet harvest-fed.
 	//
 	// It is named for what it does (selects the fixed-interval scheduler), not a "floor":

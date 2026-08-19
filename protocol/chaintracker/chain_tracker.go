@@ -76,9 +76,13 @@ const (
 	// defaultMaxRelaySkipsBeforePoll bounds how many consecutive poll cycles the traffic gate
 	// (MAG-2159) may skip before forcing one real poll for independent fork/liveness
 	// verification. Deliberately small: store-#2 staleness (the tracker atomic that consistency
-	// pre-validation reads) scales linearly as N * FlatPollInterval, so at N=4 with a
+	// pre-validation reads) scales linearly as N * FlatPollInterval, so at N=4 with the default
 	// FlatPollInterval of avgBlockTime/2 the atomic is at most ~2 blocks stale — far inside the
-	// default 10-block EndpointLagThreshold.
+	// default 10-block EndpointLagThreshold. endpointstate.MinPollDivisor floors the operator's
+	// cadence knob at one poll per block time, which keeps that worst case at ~5 blocks; a
+	// slower cadence would need this bound revisited. The exposure is in any case narrower than
+	// it reads: consistency pre-validation prefers the relay-fed tip store and only falls back
+	// to this atomic when the store is empty — precisely when the gate never skips.
 	defaultMaxRelaySkipsBeforePoll = 4
 	// MostFrequentPollingMultiplier is the fixed multiplier the legacy adaptive cadence uses
 	// (global tracker only — per-endpoint trackers run a fixed FlatPollInterval and never reach
@@ -817,7 +821,7 @@ func (cs *ChainTracker) CurrentPollInterval() time.Duration {
 // computePollInterval returns the next dedicated-poll interval.
 //
 // When flatPollInterval > 0 (per-endpoint trackers, MAG-2159 / Topic B) the cadence is
-// FIXED: exactly flatPollInterval (avgBlockTime/2), slowed only by failure backoff. The
+// FIXED: exactly flatPollInterval (avgBlockTime/divisor), slowed only by failure backoff. The
 // old adaptive /4, /2, /16 tiers are gone and the block-gap recalibration (which mutates
 // tickerBaseTime) is deliberately ignored here — relay harvest is the primary block
 // signal, so the dedicated poll is a sparse, predictable fallback. Because nothing consumes

@@ -61,9 +61,10 @@ const (
 	DebugProbesFlagName           = "debug-probes"
 
 	// deprecatedChainTrackerPollingMultiplierFlagName is the polling-relief knob main advertised
-	// for the GLOBAL chain tracker, which MAG-2160 removed (per-endpoint trackers poll at a fixed
-	// avgBlockTime/2). It stays registered as a deprecated NO-OP so deployments passing it don't
-	// fail at process start; a RunE warning tells operators the behavior is gone.
+	// for the GLOBAL chain tracker, which MAG-2160 removed (per-endpoint trackers poll at
+	// avgBlockTime/divisor). It stays registered as a deprecated NO-OP so deployments passing it
+	// don't fail at process start; a RunE warning tells operators the behavior is gone and points
+	// them at endpointstate.PollDivisorFlagName, which is the live replacement for the intent.
 	deprecatedChainTrackerPollingMultiplierFlagName = "chain-tracker-polling-multiplier"
 
 	// lavaAppName is the application name, previously app.Name.
@@ -1450,8 +1451,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/poll-now — force ONE endpoint's ChainTracker to run its dedicated poll right now,
 	// and answer only once that poll's result has been recorded (MAG-2649). Without it a test that
-	// checks what a poll records has to sit out the per-endpoint cadence (avgBlockTime/2 — ~6 s on
-	// Ethereum) before it can look; with it the sequence becomes set up state → trigger → read.
+	// checks what a poll records has to sit out the per-endpoint cadence (avgBlockTime/divisor —
+	// ~6-12 s on Ethereum) before it can look; with it the sequence becomes set up state →
+	// trigger → read.
 	//
 	// Fidelity is the whole point: this triggers the production poll cycle
 	// (chaintracker.ChainTracker.PollNow → fetchAllPreviousBlocksIfNecessary) on the tracker's own
@@ -2735,12 +2737,12 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			// to the built-in default (not silent clamp).
 			//
 			// MAG-2160: --chain-tracker-polling-multiplier only ever tuned the global tracker's
-			// adaptive cadence, and the global tracker is gone (per-endpoint trackers run a fixed
-			// avgBlockTime/2 cadence with no runtime knob). The flag survives as a registered
+			// adaptive cadence, and the global tracker is gone. The flag survives as a registered
 			// deprecated NO-OP so existing launch args don't fail process start; warn here — via
-			// viper, so a config.yml value is caught too — that the polling-relief behavior is gone.
+			// viper, so a config.yml value is caught too — that this knob does nothing, and name
+			// --chain-tracker-poll-divisor, which tunes the per-endpoint cadence that replaced it.
 			if m := viper.GetInt(deprecatedChainTrackerPollingMultiplierFlagName); m != 0 {
-				utils.LavaFormatWarning("--"+deprecatedChainTrackerPollingMultiplierFlagName+" is deprecated and has NO EFFECT: the global chain tracker was removed (MAG-2160); per-endpoint trackers poll at a fixed avgBlockTime/2", nil, utils.LogAttr("provided", m))
+				utils.LavaFormatWarning("--"+deprecatedChainTrackerPollingMultiplierFlagName+" is deprecated and has NO EFFECT: the global chain tracker was removed (MAG-2160). Use --"+endpointstate.PollDivisorFlagName+" to tune the per-endpoint cadence (avgBlockTime/divisor)", nil, utils.LogAttr("provided", m))
 			}
 			if f := viper.GetInt(relaycore.ConsistencyBlockGapFactorFlagName); f != 0 {
 				if f < 2 || f > 8 {
@@ -3017,14 +3019,19 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	// smartrouter_multichain.yml): there is no per-chain form of this switch, so a deployment
 	// that wants fork detection on exactly one chain has to run that chain in its own process.
 	cmdRPCSmartRouter.Flags().Bool(endpointstate.EnableForkDetectionFlagName, false, "turn ON per-endpoint block-hash polling (fork detection). OFF by default: the chain tracker then asks each upstream only for its latest block. Process-wide -- it applies to EVERY chain this process serves and cannot be scoped to one of them. The live state per endpoint is reported as HashPolling on /debug/endpoint-state, and the request volume as rpc_endpoint_tracker_requests_total.")
+	// Dedicated-poll cadence. A ratio rather than an absolute interval, so ONE value stays
+	// correct across every chain this process serves (each divides its own spec block time).
+	// Validation lives in endpointstate so config.yml and embedded servers get it too.
+	// Process-wide in the same sense as the flag above.
+	cmdRPCSmartRouter.Flags().Int(endpointstate.PollDivisorFlagName, 0, fmt.Sprintf("polling-relief: per-endpoint chain tracker polls every avgBlockTime/divisor (default %d). Set 1 to halve tracker request volume. Allowed [%d,%d]; out-of-range reverts to default. Applies to EVERY chain this process serves.", endpointstate.DefaultPollDivisor, endpointstate.MinPollDivisor, endpointstate.MaxPollDivisor))
 	// MAG-2160 back-compat shim: the global chain tracker (and the adaptive cadence this knob
-	// tuned) is gone — per-endpoint trackers poll at a fixed avgBlockTime/2 — but existing launch
+	// tuned) is gone — per-endpoint trackers poll at avgBlockTime/divisor — but existing launch
 	// args (systemd/compose/helm) still pass the flag, and an UNREGISTERED flag fails process
 	// start (full pod outage on upgrade). Keep it registered as a deprecated no-op; the RunE
 	// warning tells polling-relief operators the behavior is gone (covers config.yml too, which
 	// cobra's own deprecation notice would miss).
-	cmdRPCSmartRouter.Flags().Int(deprecatedChainTrackerPollingMultiplierFlagName, 0, "DEPRECATED (no-op): the global chain tracker and its polling multiplier were removed (MAG-2160); per-endpoint trackers poll at a fixed avgBlockTime/2.")
-	if err := cmdRPCSmartRouter.Flags().MarkDeprecated(deprecatedChainTrackerPollingMultiplierFlagName, "it is a no-op: the global chain tracker was removed (MAG-2160)"); err != nil {
+	cmdRPCSmartRouter.Flags().Int(deprecatedChainTrackerPollingMultiplierFlagName, 0, "DEPRECATED (no-op): the global chain tracker and its polling multiplier were removed (MAG-2160). Use --"+endpointstate.PollDivisorFlagName+" instead.")
+	if err := cmdRPCSmartRouter.Flags().MarkDeprecated(deprecatedChainTrackerPollingMultiplierFlagName, "it is a no-op: the global chain tracker was removed (MAG-2160); use --"+endpointstate.PollDivisorFlagName+" instead"); err != nil {
 		utils.LavaFormatFatal("failed marking chain-tracker-polling-multiplier deprecated", err)
 	}
 	cmdRPCSmartRouter.Flags().Var(&strategyFlag, "strategy", fmt.Sprintf("the strategy to use to pick providers (%s)", strings.Join(strategyNames, "|")))
