@@ -241,7 +241,9 @@ func (hc *httpConn) doRequest(ctx context.Context, msg interface{}, isJsonRPC bo
 
 	err = ValidateStatusCodes(resp.StatusCode, strict)
 	if err != nil {
-		return nil, err
+		// Attach the upstream's Retry-After while the response is still in scope. Passes
+		// through untouched for anything that is not a rate-limit.
+		return nil, common.WithRetryAfter(err, resp.Header, time.Now())
 	}
 
 	if isJsonRPC && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
