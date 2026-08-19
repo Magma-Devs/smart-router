@@ -87,6 +87,12 @@ type chainReverifyInputs struct {
 	// holds that lock across both tier calls. Lazily allocated so test fixtures that build
 	// chainReverifyInputs by hand need not.
 	demoteFailStreak map[string]int
+	// rateLimitBackoff holds off providers that answered a probe with a rate-limit, so the
+	// pass stops adding load to an upstream that just told us it is over its limit. Lazily
+	// allocated so test fixtures built by hand need not supply one; a nil backoff is
+	// always-ready and never penalises, which keeps existing tests exercising the
+	// no-backoff path unchanged.
+	rateLimitBackoff *reverifyBackoff
 }
 
 // applyReverification revalidates configured providers for one tier and
@@ -179,11 +185,42 @@ func applyReverification(
 	if len(configured) == 0 {
 		return fresh, nil, nil
 	}
-	validate := inputs.validateFn
-	if validate == nil {
-		validate = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+	probe := inputs.validateFn
+	if probe == nil {
+		probe = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
 			return validateProvider(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
 		}
+	}
+	if inputs.rateLimitBackoff == nil {
+		inputs.rateLimitBackoff = newReverifyBackoff()
+	}
+
+	// A provider that answered with a rate-limit is held off rather than re-probed. The
+	// skip returns the rate-limit error itself, so the reconciliation below reaches the same
+	// inconclusive verdict it would have from a fresh 429 -- membership unchanged, streak
+	// untouched -- without spending a request to learn it.
+	validate := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+		now := time.Now()
+		if !inputs.rateLimitBackoff.ready(p.Name, now) {
+			utils.LavaFormatDebug("re-verify: provider held off after a rate-limit, skipping probe",
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+			)
+			return common.StatusCodeError429
+		}
+		err := probe(c, p)
+		if isRateLimitFailure(err) {
+			delay := inputs.rateLimitBackoff.penalise(p.Name, now)
+			utils.LavaFormatWarning("re-verify: provider rate-limited, backing off", err,
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+				utils.LogAttr("backoff", delay.String()),
+			)
+			return err
+		}
+		// Any other outcome means the upstream is answering us again.
+		inputs.rateLimitBackoff.clear(p.Name)
+		return err
 	}
 
 	// WaitGroup + buffered-channel semaphore. Replaces an earlier errgroup —
