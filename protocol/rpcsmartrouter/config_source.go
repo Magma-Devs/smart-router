@@ -141,13 +141,17 @@ func configFilePathCandidates(arg string) []string {
 	return candidates
 }
 
-// resolveWithSupportedExt reports the file a single candidate resolves to, trying each
-// supported extension before the bare path. A candidate that already declares its format
-// has nothing to append and must exist as given.
+// resolveWithSupportedExt reports the file a single candidate resolves to, mirroring
+// searchInPath: every supported extension is appended and tried first, in viper's own
+// order, and only then the candidate as given.
+//
+// The appended forms are tried even when the candidate already ends in a supported
+// extension, because searchInPath appends to v.configName unconditionally — it never checks
+// whether the name already carries one. `sub/router.yml` has therefore always been able to
+// resolve to sub/router.yml.json, and short-circuiting on a recognized extension (which
+// looks obviously right) is the one remaining way the two branches could disagree. Pathological
+// as that layout is, "strictly additive" has to mean it.
 func resolveWithSupportedExt(candidate string) (resolved string, found bool) {
-	if ext := strings.TrimPrefix(filepath.Ext(candidate), "."); slices.Contains(viper.SupportedExts, ext) {
-		return candidate, isExistingFile(candidate)
-	}
 	for _, ext := range viper.SupportedExts {
 		if withExt := candidate + "." + ext; isExistingFile(withExt) {
 			return withExt, true
@@ -179,12 +183,18 @@ func isConfigNotFound(err error) bool {
 }
 
 // configNotFoundMessage explains where the config was looked for, in the terms the
-// operator used: the one path they named, or the search paths their bare name was
-// resolved against.
+// operator used — and, importantly, describes the search that actually happened. An
+// absolute path is resolved against nothing but itself, so naming search paths for it is
+// the MAG-2861 confusion; a relative path *is* probed across configSearchPaths, so claiming
+// otherwise is the same confusion pointed the other way.
 func configNotFoundMessage(target string, isFile bool) string {
 	if isFile {
 		if info, err := os.Stat(target); err == nil && info.IsDir() {
 			return "the given config path is a directory, not a config file: " + target
+		}
+		if !filepath.IsAbs(target) {
+			return "config file not found: " + target +
+				" — a relative path is resolved against each of the search paths"
 		}
 		return "config file not found at the given path: " + target
 	}
@@ -194,7 +204,9 @@ func configNotFoundMessage(target string, isFile bool) string {
 
 // configLocationAttributes describe where the config was looked for, for attachment to a
 // not-found error. A relative target is reported alongside the working directory it was
-// resolved against, since that is the piece an operator cannot see from the log line.
+// resolved against and the full list of paths actually probed, since neither is visible
+// from the log line — and reporting only the working directory would describe a narrower
+// search than the one that ran.
 func configLocationAttributes(target string, isFile bool) []utils.Attribute {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -205,11 +217,20 @@ func configLocationAttributes(target string, isFile bool) []utils.Attribute {
 		if abs, err := filepath.Abs(target); err == nil {
 			resolved = abs
 		}
-		return []utils.Attribute{
+		attributes := []utils.Attribute{
 			{Key: "config_file", Value: target},
 			{Key: "resolved_path", Value: resolved},
 			{Key: "working_directory", Value: cwd},
 		}
+		if !filepath.IsAbs(target) {
+			// The exact candidate list, not a restatement of configSearchPaths: it is what
+			// was probed, and it saves the operator from having to perform the join in
+			// their head to see where the file was expected.
+			attributes = append(attributes, utils.Attribute{
+				Key: "searched_paths", Value: strings.Join(configFilePathCandidates(target), " "),
+			})
+		}
+		return attributes
 	}
 	return []utils.Attribute{
 		{Key: "config_name", Value: target},
