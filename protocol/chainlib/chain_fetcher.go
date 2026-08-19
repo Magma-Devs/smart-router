@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"slices"
-
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -93,6 +91,27 @@ func (cf *ChainFetcher) getVerificationsKey(verification VerificationContainer, 
 	return key
 }
 
+// needsLatestBlock reports whether any verification that will ACTUALLY RUN for this
+// node-url depends on the chain head, and therefore whether Validate has to spend a
+// FetchLatestBlockNum relay against the upstream before verifying.
+//
+// Skipped verifications are excluded deliberately. The latest-block fetch is a real
+// relay: it retries 3x back-to-back and, in Validate, a failure aborts the whole
+// provider. Letting a configured-away verification pull it in meant skip-verifications
+// did not actually stop the router from probing the node — an upstream that rate-limits
+// the burst still got its provider demoted with every verification skipped.
+func needsLatestBlock(url common.NodeUrl, verifications []VerificationContainer) bool {
+	for _, v := range verifications {
+		if url.ShouldSkipVerification(v.Name) {
+			continue
+		}
+		if v.Value == "" && v.LatestDistance != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (cf *ChainFetcher) Validate(ctx context.Context) error {
 	for _, url := range cf.endpoint.NodeUrls {
 		utils.LavaFormatInfo("starting validation for url", utils.LogAttr("url", url.String()))
@@ -106,13 +125,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		}
 
 		var latestBlock int64
-		needToFetchLatestBlock := false
-		for _, v := range verifications {
-			if v.Value == "" && v.LatestDistance != 0 {
-				needToFetchLatestBlock = true
-			}
-		}
-		if needToFetchLatestBlock {
+		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
 				latestBlock, err = cf.FetchLatestBlockNum(ctx)
 				if err == nil {
@@ -127,7 +140,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		// invalidating cache as value might change
 		defer cf.invalidateVerificationsCache()
 		for _, verification := range verifications {
-			if slices.Contains(url.SkipVerifications, verification.Name) {
+			if url.ShouldSkipVerification(verification.Name) {
 				utils.LavaFormatInfo("Skipping Verification due to provider configuration (skip-verifications setting)", utils.LogAttr("verification", verification.Name))
 				continue
 			}
@@ -197,13 +210,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 		}
 
 		var latestBlock int64
-		needToFetchLatestBlock := false
-		for _, v := range verifications {
-			if v.Value == "" && v.LatestDistance != 0 {
-				needToFetchLatestBlock = true
-			}
-		}
-		if needToFetchLatestBlock {
+		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
 				latestBlock, err = cf.FetchLatestBlockNum(ctx)
 				if err == nil {
@@ -214,7 +221,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 		nodeResult.LatestBlock = latestBlock
 
 		for _, verification := range verifications {
-			if slices.Contains(url.SkipVerifications, verification.Name) {
+			if url.ShouldSkipVerification(verification.Name) {
 				continue
 			}
 			var verifyErr error
