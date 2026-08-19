@@ -102,6 +102,11 @@ type EndpointMonitor struct {
 
 	// Chain-specific timing
 	averageBlockTime time.Duration
+	// flatPollInterval is the FIXED dedicated-poll cadence handed to every tracker this
+	// monitor creates (chaintracker.ChainTrackerConfig.FlatPollInterval):
+	// averageBlockTime/divisor, resolved ONCE at construction from the operator's
+	// PollIntervalDivisor. See poll_cadence.go for the knob and the bounds on it.
+	flatPollInterval time.Duration
 	// tipStaleAfter is the per-endpoint tip staleness horizon (T4/C-D): the shared
 	// chainstate.StalenessWindow, derived once and passed to every endpointtip.Store.Set to
 	// gate downward (reorg) moves.
@@ -119,9 +124,14 @@ type EndpointMonitor struct {
 	// a dedicated poll (MAG-2159 Topic B / Pass 2 — the "gate freshness threshold"). A
 	// relay observation younger than this means served traffic kept the tip at most ~one
 	// block stale, so this tick's dedicated poll is redundant and is borrowed instead of
-	// sent upstream (see freshRelayTip / EndpointPoller.relayGate). Defaults to
-	// averageBlockTime: ~1 block of staleness, conveniently 2x the flat poll interval
-	// (avgBlockTime/2), enough margin to suppress consecutive ticks without flapping.
+	// sent upstream (see freshRelayTip / EndpointPoller.relayGate). Always averageBlockTime:
+	// "~one block of staleness" is a property of the CHAIN, so it deliberately does NOT follow
+	// the poll divisor (poll_cadence.go). At the default divisor that is 2x the poll interval,
+	// ample margin to suppress consecutive ticks without flapping; at divisor 1 the margin is
+	// 1x, so an endpoint whose relays arrive around once per block time alternates skip/poll
+	// instead of reliably skipping. That costs one extra poll on a quiet endpoint, never
+	// correctness — the gate reads the RELAY tip's age, and a busy endpoint's tip is far
+	// fresher than either bound.
 	relayGateFreshness time.Duration
 
 	// Callbacks for events (optional)
@@ -151,6 +161,12 @@ type EndpointChainTrackerConfig struct {
 	ApiInterface     string
 	AverageBlockTime time.Duration
 	BlocksToSave     uint64
+
+	// PollIntervalDivisor sets the dedicated-poll cadence to AverageBlockTime/divisor.
+	// 0 (the default) means DefaultPollDivisor — two polls per block time. Lowering it to 1
+	// halves the tracker's upstream request volume. Out-of-range values warn and revert to
+	// the default rather than clamping. See PollDivisorFlagName.
+	PollIntervalDivisor int
 
 	// EnableForkDetection turns block-hash polling on. Off by default: the tracker then
 	// asks each endpoint only "what is your latest block?" and never fetches a hash. See
@@ -201,6 +217,12 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		avgBlockTime = DefaultAverageBlockTime
 	}
 
+	// Dedicated-poll cadence (poll_cadence.go). Validated and derived ONCE here so every
+	// tracker this monitor creates shares one interval, and so a rejected out-of-range value
+	// is reported once per chain rather than per tracker.
+	pollDivisor := resolvePollDivisor(config.PollIntervalDivisor, config.ChainID, config.ApiInterface)
+	flatPollInterval := resolveFlatPollInterval(avgBlockTime, pollDivisor)
+
 	ctxWithCancel, cancel := context.WithCancel(ctx)
 
 	manager := &EndpointMonitor{
@@ -215,6 +237,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		chainID:           config.ChainID,
 		apiInterface:      config.ApiInterface,
 		averageBlockTime:  avgBlockTime,
+		flatPollInterval:  flatPollInterval,
 		tipStaleAfter:     chainstate.StalenessWindow(avgBlockTime),
 		blocksToSave:      blocksToSave,
 		retryMinDelay:     defaultTrackerStartRetryMin,
@@ -245,6 +268,18 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		utils.LogAttr("enabled", !manager.hashPolling.HeadOnly()),
 		utils.LogAttr("reason", manager.hashPolling.String()),
 	)
+
+	// Log only the non-default cadence: an operator who tuned polling has to be able to
+	// confirm from the logs that the value survived validation, while the default needs no
+	// line of its own (it is already visible as PollIntervalMs on /debug/endpoint-state).
+	if pollDivisor != DefaultPollDivisor {
+		utils.LavaFormatInfo("per-endpoint chain tracker poll cadence overridden",
+			utils.LogAttr("chainID", config.ChainID),
+			utils.LogAttr("apiInterface", config.ApiInterface),
+			utils.LogAttr("divisor", pollDivisor),
+			utils.LogAttr("pollInterval", flatPollInterval),
+		)
+	}
 
 	return manager
 }
@@ -326,11 +361,12 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// turning it off would swap in a DummyChainTracker, which polls nothing at all.
 		HeadOnlyTracking: m.hashPolling.HeadOnly(),
 		// MAG-2159 (Topic B): per-endpoint trackers use a FIXED flat cadence — the
-		// dedicated poll runs at exactly avgBlockTime/2 (slowed only by failure backoff),
-		// because relay harvest is the primary block signal and the poll is a sparse
-		// fallback. (The global tracker leaves this 0 and keeps its legacy adaptive
-		// cadence until Topic C.)
-		FlatPollInterval: m.averageBlockTime / 2,
+		// dedicated poll runs at exactly avgBlockTime/divisor (slowed only by failure
+		// backoff), because relay harvest is the primary block signal and the poll is a
+		// sparse fallback. The divisor defaults to DefaultPollDivisor and is operator-tunable
+		// (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The global tracker
+		// leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
+		FlatPollInterval: m.flatPollInterval,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
 		// (above the generic/SVM wrapper split) so it suppresses Solana polls too — the old
@@ -664,7 +700,7 @@ func (m *EndpointMonitor) BackoffSnapshot() map[string]time.Duration {
 // PollNow forces ONE endpoint's ChainTracker to run its dedicated poll immediately and returns
 // that endpoint's observation record once the poll's result has been written (MAG-2649, behind
 // /debug/poll-now). It exists so a test can set a provider's state, trigger the poll, and read the
-// result — instead of waiting out the per-endpoint cadence (avgBlockTime/2).
+// result — instead of waiting out the per-endpoint cadence (avgBlockTime/divisor).
 //
 // polled reports whether THE RETURNED OBSERVATION IS THIS POLL'S. It is the caller's licence to
 // trust the record, and it separates outcomes that must never be conflated:
