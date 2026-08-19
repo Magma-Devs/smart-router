@@ -54,7 +54,7 @@ func TestNeedsLatestBlock(t *testing.T) {
 		},
 		{
 			name:          "wildcard drops the fetch",
-			skip:          []string{common.SkipAllVerifications},
+			skip:          []string{common.SkipVerificationsWildcard},
 			verifications: []VerificationContainer{headDependent("pruning"), headDependent("trace")},
 			want:          false,
 		},
