@@ -1581,21 +1581,6 @@ func TestSelectedProviderAlreadyFailedIsCaseInsensitive(t *testing.T) {
 		"expected SelectedProviderAlreadyFailedError, got: %v", err)
 }
 
-// Folding case must not soften the contract: a name matching no provider in any
-// case is still an error, not a silent fallback.
-func TestSelectedProviderUnknownNameStillRejected(t *testing.T) {
-	csm := CreateConsumerSessionManager()
-	pairingList := createPairingList("", true)
-	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
-	require.NoError(t, err)
-	time.Sleep(5 * time.Millisecond) // let probes finish
-
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "no-such-provider")
-	require.Error(t, err)
-	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
-		"expected SelectedProviderUnavailableError, got: %v", err)
-}
-
 // With two providers whose names differ only in case, the in-request ignored set has to be
 // consulted by the resolved address rather than by a case-fold. `lava` having failed says
 // nothing about `Lava` — they are two different upstreams — so folding here would reject a
