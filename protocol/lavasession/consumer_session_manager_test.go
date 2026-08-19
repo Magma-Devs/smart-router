@@ -2518,11 +2518,23 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 	err = csm.UpdateAllProviders(secondEpochHeight, nil, backupListEpoch2)
 	require.NoError(t, err)
 
-	// Precondition: re-blocked after epoch transition (comes from the previousEpoch merge).
-	csm.lock.RLock()
-	_, reblocked := csm.blockedBackupProviders[backupAddr]
-	csm.lock.RUnlock()
-	require.True(t, reblocked, "backup should be re-blocked immediately after epoch transition")
+	// UpdateAllProviders schedules its own unblock pass on a randomised delay, and against this
+	// live listener that pass SUCCEEDS — so the re-blocked state the epoch merge produces cannot be
+	// observed from here without racing it. (The sibling
+	// TestUpdateAllProviders_BlockedBackupProviderPersistedAcrossEpoch pins that merge
+	// deterministically by pointing epoch 2 at a dead endpoint, which this test cannot do since a
+	// successful probe is the thing under test.) So let the background pass finish first, then set
+	// up the state this test is actually about, leaving the manual pass below the only actor on it.
+	require.Eventually(t, func() bool {
+		csm.lock.RLock()
+		defer csm.lock.RUnlock()
+		return len(csm.previousEpochBlockedProviders) == 0
+	}, 5*time.Second, 10*time.Millisecond, "background unblock pass spawned by UpdateAllProviders should have run")
+
+	csm.lock.Lock()
+	csm.blockedBackupProviders[backupAddr] = struct{}{}
+	csm.previousEpochBlockedProviders[backupAddr] = struct{}{}
+	csm.lock.Unlock()
 
 	// Run the unblock pass. Comprehensive probe against grpcListener should succeed → unblock.
 	csm.checkAndUnblockHealthyReBlockedProviders(context.Background(), secondEpochHeight)
