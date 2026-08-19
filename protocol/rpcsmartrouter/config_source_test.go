@@ -138,6 +138,63 @@ func TestPointViperAtConfigResolution(t *testing.T) {
 				return []string{"./router.yml"}, "dot-slash"
 			},
 		},
+		{
+			// The regression review caught: SetConfigName joined a *relative* path onto
+			// every search path perfectly well — filepath.Join only swallows a leading
+			// separator — so `smartrouter smartrouter_examples/smartrouter_eth.yml` from the
+			// project root has always loaded it out of ./config. Sending path-shaped
+			// arguments to SetConfigFile without re-probing the search paths narrowed
+			// resolution instead of fixing it.
+			name: "relative path resolves through the config search path",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				writeConfig(t, filepath.Join(dir, "config", "smartrouter_examples", "eth.yml"), "via-config-dir")
+				return []string{"smartrouter_examples/eth.yml"}, "via-config-dir"
+			},
+		},
+		{
+			// The same, for the last search path. lavaDefaultNodeHome is the literal
+			// "$HOME/.lava"; viper expands it through absPathify, so the path branch has to
+			// expand it too or this resolves against a directory named "$HOME".
+			name: "relative path resolves through the lava home search path",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				writeConfig(t, filepath.Join(home, ".lava", "sub", "router.yml"), "via-lava-home")
+				return []string{"sub/router.yml"}, "via-lava-home"
+			},
+		},
+		{
+			// Precedence must not change with the branch: the working directory is the first
+			// search path, so it wins over the ./config shadow for a path exactly as it does
+			// for a name.
+			name: "relative path prefers the working directory over the config directory",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				writeConfig(t, filepath.Join(dir, "sub", "router.yml"), "cwd-wins")
+				writeConfig(t, filepath.Join(dir, "config", "sub", "router.yml"), "shadowed")
+				return []string{"sub/router.yml"}, "cwd-wins"
+			},
+		},
+		{
+			// Extension appending applies inside a search path too, since that is what
+			// searchInPath did for the whole joined name.
+			name: "extensionless relative path resolves through the config search path",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				writeConfig(t, filepath.Join(dir, "config", "smartrouter_examples", "eth.yml"), "via-config-dir-ext")
+				return []string{"smartrouter_examples/eth"}, "via-config-dir-ext"
+			},
+		},
+		{
+			// MAG-2861 itself, stated as an invariant rather than a symptom: an absolute path
+			// must never be joined onto a search path. Join("./config", "/abs/x.yml") is
+			// "config/abs/x.yml" — the demotion this ticket removed — so a file planted at
+			// exactly that shadow location must lose to the real one.
+			name: "absolute path is not resolved against the search paths",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				abs := writeConfig(t, filepath.Join(dir, "elsewhere", "router.yml"), "absolute-wins")
+				writeConfig(t, filepath.Join(dir, "config", abs), "demoted-shadow")
+				return []string{abs}, "absolute-wins"
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -232,6 +289,29 @@ func TestPointViperAtConfigNotFound(t *testing.T) {
 			"a relative lookup is only decipherable alongside the directory it resolved against")
 	})
 
+	t.Run("a path that is a directory is a clean not-found, not a stack dump", func(t *testing.T) {
+		// Pointing viper at a directory fails with EISDIR rather than fs.ErrNotExist, which
+		// classified as "not a not-found" and so took the LavaFormatFatal path — the exact
+		// failure mode MAG-2861 exists to remove, reintroduced in a narrow case. Searching
+		// for a *name* never hit this: searchInPath skips directories.
+		dir := t.TempDir()
+		t.Chdir(dir)
+		viper.Reset()
+		t.Cleanup(viper.Reset)
+
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "config"), 0o755))
+
+		target, isFile := pointViperAtConfig([]string{"./config"})
+		require.True(t, isFile)
+
+		err := viper.ReadInConfig()
+		require.Error(t, err)
+		require.True(t, isConfigNotFound(err),
+			"a directory holds no config, so it must stay on the clean path, got %v", err)
+		require.Contains(t, configNotFoundMessage(target, isFile), "is a directory",
+			"the message should say what is actually wrong rather than claim the path is absent")
+	})
+
 	t.Run("malformed config is not mistaken for a missing one", func(t *testing.T) {
 		dir := t.TempDir()
 		t.Chdir(dir)
@@ -281,16 +361,26 @@ func TestIsConfigFilePath(t *testing.T) {
 	}
 }
 
-// TestConfigSearchPathsMatchDocumentedHelp keeps the command help honest: the Long text
-// tells operators which directories a bare name is looked up in, and it is the only place
-// that claim is written down.
+// TestConfigSearchPathsMatchDocumentedHelp keeps the command help honest: the Long text is
+// the only place the search paths are written down, and both commands that take a config
+// resolve it identically, so both have to say so. Documenting only rpcsmartrouter's left
+// health's argument undescribed, and describing the paths as applying to a bare *name*
+// left relative paths — which are resolved against them too — unaccounted for.
 func TestConfigSearchPathsMatchDocumentedHelp(t *testing.T) {
-	long := CreateRPCSmartRouterCobraCommand().Long
-	for _, path := range configSearchPaths {
-		if path == "." {
-			continue // spelled "the local running directory" in prose
-		}
-		require.True(t, strings.Contains(long, path),
-			"search path %q is not mentioned in the command help", path)
+	for name, long := range map[string]string{
+		"rpcsmartrouter": CreateRPCSmartRouterCobraCommand().Long,
+		"health":         CreateHealthCobraCommand().Long,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, path := range configSearchPaths {
+				if path == "." {
+					continue // spelled "the local running directory" in prose
+				}
+				require.True(t, strings.Contains(long, path),
+					"search path %q is not mentioned in the command help", path)
+			}
+			require.Contains(t, long, "relative path",
+				"the help must say a relative path is resolved against the search paths too")
+		})
 	}
 }

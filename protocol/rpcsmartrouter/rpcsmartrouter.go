@@ -2738,15 +2738,17 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 		Long: `rpcsmartrouter sets up a centralized server with static and backup providers to perform api requests through the lava protocol.
 		This is the smart router mode that uses pre-configured static providers instead of dynamically discovering providers on-chain.
 		if no arguments are passed, assumes default config file: ` + DefaultRPCSmartRouterFileName + `
-		if one argument is passed, it is the config to load — either a path to the file
-		(absolute or relative to the working directory), or a bare name looked up in the
-		local running directory, ./config, or ` + lavaDefaultNodeHome + `
+		if one argument is passed, it is the config to load. An absolute path names the file
+		outright; anything else — a relative path, or a bare name — is looked up in the
+		local running directory, ./config, then ` + lavaDefaultNodeHome + `.
+		An argument without a recognized extension has the supported ones appended, so
+		"akash" and "config/akash" both find config/akash.yml.
 		`,
 		Example: `required: --direct-rpc ...
 rpcsmartrouter <flags>
 rpcsmartrouter rpcsmartrouter_conf <flags>
 rpcsmartrouter 127.0.0.1:3333 OSMOSIS tendermintrpc 127.0.0.1:3334 OSMOSIS rest <flags>
-rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127.0.0.1:7778" [--debug-relays] --log_level <debug|warn|...>`,
+rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:7778" [--debug-relays] --log_level <debug|warn|...>`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			// Optionally run one of the validators provided by cobra
 			if err := cobra.RangeArgs(0, 1)(cmd, args); err == nil {
