@@ -1105,30 +1105,43 @@ func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos [
 
 // fetching an endpoint from a ConsumerSessionWithProvider and establishing a connection,
 // can fail without an error if trying to connect once to each endpoint but none of them are active.
-func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, retryDisabledEndpoints bool, getAllEndpoints bool, addon string, extensionNames []string, internalPath string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
+//
+// internalPath is the collection the relay resolved to, or nil when the caller
+// has no collection to match on (probes). "" is a REAL path — the spec's root
+// collection — and matches only the endpoint serving the root, so a chain that
+// enables both a root and versioned collections (STRK) keeps its root traffic
+// on the root url.
+func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, retryDisabledEndpoints bool, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
 	getConnectionFromConsumerSessionsWithProvider := func(ctx context.Context) (connected bool, endpointPtr []*EndpointAndChosenConnection, allDisabled bool) {
 		endpoints := make([]*EndpointAndChosenConnection, 0)
 		cswp.Lock.Lock()
 		defer cswp.Lock.Unlock()
 		// Restrict to the endpoints serving the api's internal path — but only
-		// when this provider has any. Every non-empty path is expanded at
-		// construction (rpcsmartrouter.go), so a provider that CAN serve the
-		// path has a matching endpoint and the filter bites. A provider that
-		// has none — a provider-relay pool, where the path lives on the
-		// provider's side and not in our url, or an endpoint list built some
-		// way we haven't modelled — keeps every endpoint it had, rather than
-		// losing the whole pool to a filter that was never populated for it.
+		// when this provider has any. Every path is expanded at construction
+		// (rpcsmartrouter.go), so a provider that CAN serve the path has a
+		// matching endpoint and the filter bites. A provider that has none — a
+		// provider-relay pool, where the path lives on the provider's side and
+		// not in our url, or an endpoint list built some way we haven't
+		// modelled — keeps every endpoint it had, rather than losing the whole
+		// pool to a filter that was never populated for it.
+		//
+		// Matching is exact in both directions. On a chain with no internal
+		// paths every endpoint is "" and every relay asks for "", so this is a
+		// no-op. On a chain that enables a root collection ALONGSIDE versioned
+		// ones (STRK: "" carries the whole method set, /rpc/v0_8 … carry it
+		// again per version), a root relay must stay on the root url rather
+		// than drift onto a versioned door the expansion generated.
 		restrictToPath := false
-		if internalPath != "" {
+		if internalPath != nil {
 			for _, endpoint := range cswp.Endpoints {
-				if endpoint.ServesInternalPath(internalPath) {
+				if endpoint.ServesInternalPath(*internalPath) {
 					restrictToPath = true
 					break
 				}
 			}
 		}
 		for idx, endpoint := range cswp.Endpoints {
-			if restrictToPath && !endpoint.ServesInternalPath(internalPath) {
+			if restrictToPath && !endpoint.ServesInternalPath(*internalPath) {
 				continue
 			}
 			// retryDisabledEndpoints will attempt to reconnect to the provider even though we have disabled the endpoint

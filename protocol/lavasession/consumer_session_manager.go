@@ -622,7 +622,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 
 	// A probe measures reachability of the provider, not of one api collection —
 	// no internal path to match on, so every endpoint stays eligible.
-	connected, endpoints, providerAddress, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, tryReconnectToDisabledEndpoints, true, "", nil, "")
+	connected, endpoints, providerAddress, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, tryReconnectToDisabledEndpoints, true, "", nil, nil)
 	if err != nil || !connected {
 		if errors.Is(err, AllProviderEndpointsDisabledError) {
 			csm.blockProvider(ctx, providerAddress, true, epoch, MaxConsecutiveConnectionAttempts, 0, false, csm.GenerateReconnectCallback(consumerSessionsWithProvider)) // reporting and blocking provider this epoch
@@ -979,14 +979,17 @@ type GetSessionsOptions struct {
 	// one-provider-per-group behavior (group-blind fill).
 	PerGroupTarget int
 	// InternalPath is the internal path of the api collection this relay
-	// resolved to ("/v2", "/P", "" for the root). Endpoint selection matches on
-	// it, because in direct mode the path lives in the upstream URL: a chain
-	// serving two API versions over two node-urls (TON's toncenter v2 +
-	// tonindex v3) has one endpoint per version, and dialing the wrong one
-	// returns that vendor's 404 as if it were an answer. Empty for every caller
-	// that doesn't resolve an api collection (probes, tests) — selection is
-	// then unfiltered, exactly as before.
-	InternalPath string
+	// resolved to ("/v2", "/P", or "" for a spec's root collection). Endpoint
+	// selection matches on it EXACTLY, because in direct mode the path lives in
+	// the upstream URL: a chain serving two API versions over two node-urls
+	// (TON's toncenter v2 + tonindex v3) has one endpoint per version, and
+	// dialing the wrong one returns that vendor's 404 as if it were an answer.
+	//
+	// nil — not "" — is the "no collection to match on" case (probes, tests),
+	// which leaves selection unfiltered. "" is a real path: a chain that
+	// enables a root collection alongside versioned ones (STRK) must keep its
+	// root traffic on the root url.
+	InternalPath *string
 }
 
 func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProviderNumber int, cuNeededForSession uint64, usedProviders UsedProvidersInf, requestedBlock int64, addon string, extensions []*spectypes.Extension, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, opts ...GetSessionsOptions) (
@@ -996,7 +999,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	// groups. Variadic so the many existing non-cross-validation callers are unchanged.
 	minGroups := groupBlindMinGroups
 	perGroupTarget := groupBlindPerGroupTarget
-	internalPath := ""
+	var internalPath *string
 	if len(opts) > 0 {
 		if opts[0].MinGroups > 1 {
 			minGroups = opts[0].MinGroups

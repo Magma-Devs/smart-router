@@ -3660,7 +3660,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// the upstream url — one node-url per API version — and dialing the wrong
 	// one returns the vendor's 404 as if it were the chain's answer.
 	if apiCollection := protocolMessage.GetApiCollection(); apiCollection != nil {
-		sessionOpts.InternalPath = apiCollection.CollectionData.InternalPath
+		resolvedInternalPath := apiCollection.CollectionData.InternalPath
+		sessionOpts.InternalPath = &resolvedInternalPath
 	}
 	if cvp := relayProcessor.GetCrossValidationParams(); cvp != nil && cvp.MinGroups > 1 {
 		sessionOpts.MinGroups = cvp.MinGroups
