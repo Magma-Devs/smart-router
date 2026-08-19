@@ -1344,6 +1344,11 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 						// exponentialBackoff-stretched when the endpoint has been failing. This is the
 						// observable /debug/reset-probe-backoff returns to base (MAG-2395).
 						"PollIntervalMs": backoffByURL[url].Milliseconds(),
+						// HashPolling says whether this chain's tracker does block-hash work
+						// (fork detection) and, when it does not, WHY — "off-operator-choice"
+						// (--enable-fork-detection not set) vs "off-spec-no-block-by-num" (the
+						// chain cannot serve hashes at all, so the flag would not help).
+						"HashPolling": server.endpointChainTrackerManager.HashPollingMode().String(),
 					})
 				}
 			}
@@ -2970,6 +2975,11 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
 	cmdRPCSmartRouter.Flags().Int(relaycore.ConsistencyBlockGapFactorFlagName, 0, "consistency-relief: widen the consistency endpoint-lag gate (blockLagForQosSync x factor; default 2). Allowed [2,8]; out-of-range reverts to default.")
+	// Block-hash polling (fork detection) is OFF by default — see EnableForkDetectionFlagName
+	// for why. Process-wide, which matters because one process can serve several chains (see
+	// smartrouter_multichain.yml): there is no per-chain form of this switch, so a deployment
+	// that wants fork detection on exactly one chain has to run that chain in its own process.
+	cmdRPCSmartRouter.Flags().Bool(endpointstate.EnableForkDetectionFlagName, false, "turn ON per-endpoint block-hash polling (fork detection). OFF by default: the chain tracker then asks each upstream only for its latest block. Process-wide -- it applies to EVERY chain this process serves and cannot be scoped to one of them. The live state per endpoint is reported as HashPolling on /debug/endpoint-state, and the request volume as rpc_endpoint_tracker_requests_total.")
 	// MAG-2160 back-compat shim: the global chain tracker (and the adaptive cadence this knob
 	// tuned) is gone — per-endpoint trackers poll at a fixed avgBlockTime/2 — but existing launch
 	// args (systemd/compose/helm) still pass the flag, and an UNREGISTERED flag fails process

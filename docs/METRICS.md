@@ -20,6 +20,7 @@ metrics manager.
 | --- | --- | --- |
 | `--metrics-listen-address` | `disabled` | Address to expose Prometheus metrics on, e.g. `:7779` or `localhost:7779`. The literal `disabled` turns the metrics server off entirely. |
 | `--optimizer-qos-sampling-interval` | `1s` | How often the optimizer-QoS sampler refreshes the `rpc_optimizer_selection_score` gauge and — when `--usage-otel-enabled` is set — emits `optimizer_qos` events to the OTel usage pipeline. |
+| `--enable-fork-detection` | `false` | Turns per-endpoint block-hash polling on. Off by default, which pins `rpc_endpoint_tracker_requests_total{kind="block_hash"}` at zero and is the single largest term in tracker request volume. Process-wide: it applies to every chain the process serves, and cannot be scoped to one of them. |
 
 ```bash
 # enable, then scrape
@@ -51,6 +52,8 @@ name and the `disabled` sentinel live in
   - `endpoint_id` — the configured upstream RPC endpoint.
   - `provider_address` — provider the relay was routed to.
   - `method` — RPC method name.
+  - `kind` — closed-set request classifier (`rpc_endpoint_tracker_requests_total` only):
+    `latest_block` or `block_hash`. Never a raw method name — that would be unbounded.
   - `function` — relay function class; the `function` label lets one metric serve both
     the per-function breakdown and (via `sum by (...)`) the aggregate.
 - **Boolean gauges** encode `1 = true / healthy / present`, `0 = false / unhealthy / absent`.
@@ -81,10 +84,35 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `rpc_endpoint_overall_health_breakdown` | Gauge | `spec`, `apiInterface` | Aggregate health per chain/interface. |
 | `rpc_endpoint_selection_score` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `score_type` | Selection scores by `score_type` (availability / latency / sync / stake / composite). |
 | `rpc_endpoint_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Latest block reported by the endpoint. |
-| `rpc_endpoint_fetch_latest_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Failed latest-block fetches. |
+| `rpc_endpoint_fetch_latest_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Latest-block fetch failures. An **event** counter, not a request counter — see the note below. |
 | `rpc_endpoint_fetch_block_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Failed specific-block fetches. |
-| `rpc_endpoint_fetch_latest_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | Successful latest-block fetches. |
+| `rpc_endpoint_fetch_latest_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | New-block **detections** by the chain tracker, not successful requests — see the note below. |
 | `rpc_endpoint_fetch_block_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | Successful specific-block fetches. |
+| `rpc_endpoint_tracker_requests_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `kind` | Upstream requests the per-endpoint chain tracker actually sent, by `kind` (`latest_block`, `block_hash`). The only metric that measures tracker **request volume** — see the note below. |
+
+> **Tracker requests vs. fetch events.** `rpc_endpoint_fetch_latest_success` counts NEW BLOCK
+> detections and `rpc_endpoint_fetch_latest_fails` counts latest-block fetch failures. Neither
+> counts requests, and neither sits on the block-hash path at all — so a change in how much the
+> chain tracker asks of an upstream node moves neither of them. `rpc_endpoint_tracker_requests_total`
+> is the one that does: it increments at the transport chokepoint, once per request the node
+> actually received.
+>
+> `kind` is a closed set of two. `latest_block` is the "what is your latest block?" poll
+> (`eth_blockNumber`, `getLatestBlockhash`, ...), sent on every poll tick the relay traffic gate
+> does not suppress. `block_hash` is a block-hash fetch (`eth_getBlockByNumber`, `getBlock`),
+> which only fork detection asks for — so that series is **exactly zero** unless the router runs
+> with `--enable-fork-detection`, and the drop to zero is what makes the traffic reduction
+> provable. `/debug/endpoint-state` reports the matching `HashPolling` reason per endpoint
+> (`on`, `off-operator-choice`, or `off-spec-no-block-by-num`).
+>
+> Turning fork detection off can make `rpc_endpoint_fetch_latest_success` **increase** on
+> endpoints with flaky hash fetches. With it on, a failed hash fetch aborts the poll cycle before
+> the new-block callback fires, so new blocks stop being counted at all; without the hash step
+> they are recorded again.
+>
+> Like `rpc_endpoint_fetch_*`, this counter fans out across every provider configured on a shared
+> URL, so `endpoint_id` carries a provider name. Group by `endpoint_id` when reading it — a bare
+> `sum()` counts one physical request once per provider sharing that URL.
 
 > **Reading cancelled relays.** A stateful method (`stateful: 1` in the spec — e.g.
 > `eth_sendRawTransaction`, Solana `sendTransaction`) is broadcast to *every* endpoint; the

@@ -55,6 +55,12 @@ type SVMChainTracker struct {
 	slotCache    *ristretto.Cache[int64, int64]  // cache for block to slot. (a few slots can point the same block, but we don't really care about that so overwrite is ok)
 	hashCache    *ristretto.Cache[int64, string] // cache for block to hash.
 	seenBlock    int64
+	// headOnly mirrors the tracker's mode. Both caches exist ONLY to serve
+	// FetchBlockHashByNum, which head-only never calls (the tracker returns right after
+	// publishing the head), so in that mode they are left nil: no allocation, and no
+	// write on every poll into a store nothing reads. Each cache is sized for 100k
+	// entries PER ENDPOINT, so this is real memory, not just cycles.
+	headOnly bool
 }
 
 type SVMLatestBlockResponse struct {
@@ -92,8 +98,10 @@ func (cs *SVMChainTracker) fetchLatestBlockNumInner(ctx context.Context) (int64,
 	blockHash := response.Result.Value.BlockHash
 
 	atomic.StoreInt64(&cs.seenBlock, slot)
-	cs.slotCache.SetWithTTL(slot, slot, 1, slotCacheTTL)
-	cs.hashCache.SetWithTTL(slot, blockHash, 1, hashCacheTTL)
+	if !cs.headOnly {
+		cs.slotCache.SetWithTTL(slot, slot, 1, slotCacheTTL)
+		cs.hashCache.SetWithTTL(slot, blockHash, 1, hashCacheTTL)
+	}
 
 	utils.LavaFormatTrace("[SVMChainTracker] fetching latest slot",
 		utils.LogAttr("slot", slot),
@@ -128,6 +136,12 @@ func (cs *SVMChainTracker) FetchLatestBlockNum(ctx context.Context) (int64, erro
 
 // On Solana the interface's `blockNum` parameter is a slot.
 func (cs *SVMChainTracker) FetchBlockHashByNum(ctx context.Context, slot int64) (string, error) {
+	// Defensive: head-only keeps no caches, and the tracker never reaches a hash fetch in
+	// that mode. Reaching here would mean the mode and the call path disagree, so say so
+	// instead of dereferencing a nil cache.
+	if cs.headOnly {
+		return "", fmt.Errorf("[SVMChainTracker] block hash requested for slot %d while head-only (fork detection off) — no hash cache exists in this mode", slot)
+	}
 	if slot < cs.dataFetcher.GetAtomicLatestBlockNum()-int64(cs.dataFetcher.GetServerBlockMemory()) {
 		return "", fmt.Errorf("requested slot: %d, latest slot: %d, server memory %d: %w", slot, cs.dataFetcher.GetAtomicLatestBlockNum(), cs.dataFetcher.GetServerBlockMemory(), ErrorFailedToFetchTooEarlyBlock)
 	}
