@@ -3374,7 +3374,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 // honored only on the first attempt. On a retry (firstAttempt == false) both are returned
 // empty so the relay falls through to a different provider instead of re-pinning the one
 // that just failed — otherwise a pinned provider that returned a retryable node error gets
-// re-selected, or the retry dead-ends on "Selected provider already failed in this request"
+// re-selected, or the retry dead-ends on "Selected provider cannot be retried"
 // (MAG-2228). firstAttempt is BatchNumber()==0, which stays 0 when attempt 1 never reached a
 // provider (e.g. PairingListEmpty), so the pin is correctly re-honored in that case. Mirrors
 // preserveRetrySafeDirectives, which omits both directives on a rebuilt archive retry.
