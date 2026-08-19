@@ -88,9 +88,8 @@ const (
 	// (global tracker only — per-endpoint trackers run a fixed FlatPollInterval and never reach
 	// the adaptive tiers). It is the SOLE feeder of cs.pollingTimeMultiplier. The adaptive tiers
 	// compute base/(multiplier/4), so the multiplier must stay >= 4 to avoid a divide-by-zero;
-	// 16 satisfies that by construction. MAG-2160 removed the --chain-tracker-polling-multiplier
-	// runtime override (it only ever tuned the now-deleted global tracker), so there is no longer
-	// any operator-supplied value to range-validate.
+	// 16 satisfies that by construction. It is a fixed built-in with no operator-supplied
+	// value to range-validate.
 	MostFrequentPollingMultiplier = 16
 )
 
@@ -983,9 +982,8 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 
 	// The legacy adaptive cadence (global tracker only — per-endpoint trackers set
 	// FlatPollInterval and never reach the adaptive tiers) uses the fixed built-in
-	// MostFrequentPollingMultiplier (16, >= the divide-by-zero floor of 4). MAG-2160 removed
-	// the --chain-tracker-polling-multiplier runtime override along with the global tracker it
-	// tuned; the old per-tracker config.PollingTimeMultiplier knob was set by nobody and was
+	// MostFrequentPollingMultiplier (16, >= the divide-by-zero floor of 4). There is no runtime
+	// override: the old per-tracker config.PollingTimeMultiplier knob was set by nobody and was
 	// removed in the MAG-2159 knob consolidation.
 	pollingTime := MostFrequentPollingMultiplier
 

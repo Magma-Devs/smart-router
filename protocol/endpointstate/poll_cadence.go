@@ -20,11 +20,6 @@ import (
 // average_block_time from its spec, so a single ratio stays chain-relative — 12s/D on
 // Ethereum and 400ms/D on Solana from the same flag. An absolute "--poll-every=6s" would be
 // right for one chain and wrong for every other one the process serves.
-//
-// NOT to be confused with the deprecated --chain-tracker-polling-multiplier (a registered
-// no-op, see rpcsmartrouter.go): that one tuned the GLOBAL tracker's adaptive tiers, which
-// MAG-2160 deleted. This one selects the per-endpoint flat cadence, which is the only
-// cadence that still exists.
 const PollDivisorFlagName = "chain-tracker-poll-divisor"
 
 const (

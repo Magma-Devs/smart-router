@@ -941,7 +941,6 @@ jobs:
               defaultProcessingTimeout: "30s"
               minRelayTimeout: "10s"
               maxBatchRequestSize: 0
-              chainTrackerPollingMultiplier: 0
               consistencyBlockGapFactor: 0
               providerOptimizerAvailabilityWeight: 0.3
               providerOptimizerLatencyWeight: 0.3
