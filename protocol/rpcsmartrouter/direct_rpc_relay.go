@@ -34,11 +34,12 @@ type DirectRPCRelaySender struct {
 	groupLabel          string             // Cross-validation group label of this provider (may be empty)
 }
 
-// maxResponseSizeForBlockExtraction is the threshold above which we skip JSON parsing
-// for block height extraction. Responses larger than this (e.g. debug_traceTransaction,
-// trace_replayBlockTransactions) are too expensive to unmarshal and rarely contain
-// useful block height info. The ChainTracker independently maintains per-endpoint
-// block tracking, so skipping extraction here is safe.
+// maxResponseSizeForBlockExtraction is the threshold above which we skip parsing
+// for block height extraction, on every transport. Responses larger than this
+// (e.g. debug_traceTransaction, trace_replayBlockTransactions) are too expensive to
+// unmarshal and rarely contain useful block height info. The ChainTracker
+// independently maintains per-endpoint block tracking, so skipping extraction here
+// is safe.
 const maxResponseSizeForBlockExtraction = 1 * 1024 * 1024 // 1 MB
 
 // extractBlockHeightFromJSONResponse extracts block height using spec-driven parsing.
@@ -217,6 +218,24 @@ func extractBlockHeightFromGRPCResponse(
 	responseData []byte,
 	chainMessage chainlib.ChainMessage,
 ) int64 {
+	// Guard: skip block extraction for very large responses, same cap the JSON-RPC
+	// path applies (MAG-2557). This transport needs it more, not less: the gRPC
+	// connector accepts messages up to MaxCallRecvMsgSize (512 MB), and extraction
+	// here is not a single parse but a three-step expansion — proto.Unmarshal into a
+	// dynamic.Message, MarshalJSON of that message, then a []byte copy of the
+	// resulting string (grpcMessage.NewParsableRPCInput). Each step allocates a fresh
+	// full-size representation, and JSON is several times the width of the packed
+	// proto it came from, so an oversized response multiplies into the router's heap.
+	// Per-endpoint ChainTracker provides block tracking independently as a fallback.
+	if len(responseData) > maxResponseSizeForBlockExtraction {
+		utils.LavaFormatDebug("skipping gRPC block extraction for large response",
+			utils.LogAttr("response_size", len(responseData)),
+			utils.LogAttr("threshold", maxResponseSizeForBlockExtraction),
+			utils.LogAttr("method", chainMessage.GetApi().Name),
+		)
+		return 0
+	}
+
 	// Get parse directive from chain message (contains spec-defined parsing rules)
 	parseDirective := chainMessage.GetParseDirective()
 	if parseDirective == nil {
