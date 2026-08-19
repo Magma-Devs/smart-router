@@ -100,6 +100,44 @@ func TestPointViperAtConfigResolution(t *testing.T) {
 				return []string{"myconfig.yml"}, "cwd"
 			},
 		},
+		{
+			// An extension-less file must not shadow the .yml a bare name has always
+			// resolved to. Keying the path/name split on os.Stat instead of on the shape
+			// of the argument got this wrong: `router` found ./router and stopped.
+			name: "bare name prefers the extension over an extensionless file",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				writeConfig(t, filepath.Join(dir, "router"), "extensionless-shadow")
+				writeConfig(t, filepath.Join(dir, "router.yml"), "yml-wins")
+				return []string{"router"}, "yml-wins"
+			},
+		},
+		{
+			// A path carrying no extension still resolves, the way it always has via the
+			// "." search path. This is the case that makes the lexical split safe.
+			name: "relative path without extension resolves to the yml file",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				writeConfig(t, filepath.Join(dir, "config", "akash.yml"), "path-ext-appended")
+				return []string{"config/akash"}, "path-ext-appended"
+			},
+		},
+		{
+			// The same precedence inside the explicit-path branch, so an argument resolves
+			// identically no matter which branch its shape sends it down.
+			name: "path prefers the extension over an extensionless file",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				writeConfig(t, filepath.Join(dir, "config", "router"), "extensionless-shadow")
+				writeConfig(t, filepath.Join(dir, "config", "router.yml"), "yml-wins")
+				return []string{"config/router"}, "yml-wins"
+			},
+		},
+		{
+			// An explicit "./" is intent, not decoration.
+			name: "dot-slash relative path",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				writeConfig(t, filepath.Join(dir, "router.yml"), "dot-slash")
+				return []string{"./router.yml"}, "dot-slash"
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -147,6 +185,29 @@ func TestPointViperAtConfigNotFound(t *testing.T) {
 			"an explicit path was never searched for — mentioning search paths is what sent MAG-2861 the wrong way")
 	})
 
+	t.Run("missing relative path is a clean not-found naming that path", func(t *testing.T) {
+		// The whole point of MAG-2861 is that a path the operator named must not come back
+		// as a complaint about directories they never mentioned. A relative path is no
+		// less explicit than an absolute one.
+		dir := t.TempDir()
+		t.Chdir(dir)
+		viper.Reset()
+		t.Cleanup(viper.Reset)
+
+		target, isFile := pointViperAtConfig([]string{"nested/missing.yml"})
+		require.True(t, isFile, "a value naming a directory component is a path, not a name")
+		require.Equal(t, "nested/missing.yml", target)
+
+		err := viper.ReadInConfig()
+		require.Error(t, err)
+		require.True(t, isConfigNotFound(err))
+
+		msg := configNotFoundMessage(target, isFile)
+		require.Contains(t, msg, "nested/missing.yml")
+		require.NotContains(t, msg, "search paths",
+			"the search paths were never consulted for an explicit path — naming them is the MAG-2861 confusion")
+	})
+
 	t.Run("missing bare name reports the search paths", func(t *testing.T) {
 		dir := t.TempDir()
 		t.Chdir(dir)
@@ -191,6 +252,9 @@ func TestPointViperAtConfigNotFound(t *testing.T) {
 // TestIsConfigFilePath pins the one judgement call in the resolution: which arguments are
 // treated as paths. Getting this wrong either resurrects MAG-2861 or breaks the bare-name
 // invocations that have always worked.
+//
+// The classification is deliberately lexical, so these cases hold regardless of what is on
+// disk — the working directory below is populated precisely to prove that.
 func TestIsConfigFilePath(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -204,10 +268,13 @@ func TestIsConfigFilePath(t *testing.T) {
 	}{
 		{"/etc/smartrouter/config.yml", true, "an absolute path can never be resolved by the search paths"},
 		{"/etc/smartrouter/missing.yml", true, "absolute stays a path even when absent, so the error can name it"},
-		{"here.yml", true, "it resolves to a real file from the working directory"},
-		{"there.yml", false, "only ./config/there.yml exists, which is the search path's job"},
+		{"config/router.yml", true, "it names a directory component, so it is a path"},
+		{"nested/missing.yml", true, "a path stays a path when absent, so the error can name it"},
+		{"./router.yml", true, "an explicit ./ is intent"},
+		{"here.yml", false, "no separator: a name, even though ./here.yml exists"},
+		{"there.yml", false, "no separator: the search path's job"},
 		{"myconfig", false, "a bare name is looked up, with the extension appended"},
-		{"config", false, "a directory is not a config file"},
+		{"config", false, "no separator, so a name — the directory on disk is irrelevant"},
 		{"", false, "no argument means the default name"},
 	} {
 		require.Equal(t, tc.want, isConfigFilePath(tc.arg), "%q: %s", tc.arg, tc.why)
