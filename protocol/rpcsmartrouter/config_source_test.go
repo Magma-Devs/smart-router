@@ -195,6 +195,33 @@ func TestPointViperAtConfigResolution(t *testing.T) {
 				return []string{abs}, "absolute-wins"
 			},
 		},
+		{
+			// searchInPath appends every supported extension to v.configName without ever
+			// checking whether it already ends in one, so `sub/router.yml` has always been
+			// able to resolve to sub/router.yml.json. A short-circuit on "already declares
+			// its format" looks obviously correct and silently drops that — the last way the
+			// two branches could disagree. Pathological layout, but "strictly additive"
+			// has to mean it.
+			name: "path with a supported extension still prefers an appended extension",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(dir, "sub"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "sub", "router.yml.json"),
+					[]byte(`{"marker":"appended-wins"}`), 0o644))
+				writeConfig(t, filepath.Join(dir, "sub", "router.yml"), "bare-loses")
+				return []string{"sub/router.yml"}, "appended-wins"
+			},
+		},
+		{
+			// The same rule in the name branch, which never stopped doing it — this is the
+			// case that makes the one above an equivalence rather than a quirk.
+			name: "name with a supported extension still prefers an appended extension",
+			setup: func(t *testing.T, dir string) ([]string, string) {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "router.yml.json"),
+					[]byte(`{"marker":"appended-wins-name"}`), 0o644))
+				writeConfig(t, filepath.Join(dir, "router.yml"), "bare-loses")
+				return []string{"router.yml"}, "appended-wins-name"
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -239,13 +266,20 @@ func TestPointViperAtConfigNotFound(t *testing.T) {
 		msg := configNotFoundMessage(target, isFile)
 		require.Contains(t, msg, missing, "the message must name the path the operator gave")
 		require.NotContains(t, msg, "search paths",
-			"an explicit path was never searched for — mentioning search paths is what sent MAG-2861 the wrong way")
+			"an absolute path is resolved against nothing but itself — mentioning search paths for one is what sent MAG-2861 the wrong way")
+
+		for _, attr := range configLocationAttributes(target, isFile) {
+			require.NotEqual(t, "searched_paths", attr.Key,
+				"an absolute path has exactly one candidate; listing it as a search would be noise")
+		}
 	})
 
-	t.Run("missing relative path is a clean not-found naming that path", func(t *testing.T) {
-		// The whole point of MAG-2861 is that a path the operator named must not come back
-		// as a complaint about directories they never mentioned. A relative path is no
-		// less explicit than an absolute one.
+	t.Run("missing relative path names the path and the roots it was searched under", func(t *testing.T) {
+		// The point of MAG-2861 is that the diagnostics must describe the search that
+		// actually ran. A relative path *is* probed across configSearchPaths, so the message
+		// has to say so and the attributes have to list the candidates — an earlier cut of
+		// this asserted the search paths "were never consulted", which stopped being true
+		// the moment relative paths were resolved against them again.
 		dir := t.TempDir()
 		t.Chdir(dir)
 		viper.Reset()
@@ -253,7 +287,8 @@ func TestPointViperAtConfigNotFound(t *testing.T) {
 
 		target, isFile := pointViperAtConfig([]string{"nested/missing.yml"})
 		require.True(t, isFile, "a value naming a directory component is a path, not a name")
-		require.Equal(t, "nested/missing.yml", target)
+		require.Equal(t, "nested/missing.yml", target,
+			"an unresolvable path is reported as the operator typed it")
 
 		err := viper.ReadInConfig()
 		require.Error(t, err)
@@ -261,8 +296,18 @@ func TestPointViperAtConfigNotFound(t *testing.T) {
 
 		msg := configNotFoundMessage(target, isFile)
 		require.Contains(t, msg, "nested/missing.yml")
-		require.NotContains(t, msg, "search paths",
-			"the search paths were never consulted for an explicit path — naming them is the MAG-2861 confusion")
+		require.Contains(t, msg, "search paths",
+			"a relative path is resolved against them, so a miss that hides that is misleading")
+
+		attrs := map[string]string{}
+		for _, attr := range configLocationAttributes(target, isFile) {
+			attrs[attr.Key] = attr.Value.(string)
+		}
+		require.Contains(t, attrs, "searched_paths")
+		require.Contains(t, attrs["searched_paths"], filepath.Join("config", "nested", "missing.yml"),
+			"the candidate list must name where the file was actually looked for")
+		require.Contains(t, attrs, "working_directory",
+			"a relative lookup is only decipherable alongside the directory it resolved against")
 	})
 
 	t.Run("missing bare name reports the search paths", func(t *testing.T) {
