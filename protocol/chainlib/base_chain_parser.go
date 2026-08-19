@@ -23,7 +23,12 @@ import (
 
 var (
 	SkipWebsocketVerification = false
-	DefaultApiName            = "Default-"
+	// SkipAllVerifications is the process-wide off switch behind --skip-all-verifications.
+	// Read through chainlib.skipVerification, so it suppresses the latest-block probe as well
+	// as the verifications themselves. Bound by the rpcsmartrouter command only — the health
+	// command deliberately does not expose it, since reporting verification results is its job.
+	SkipAllVerifications = false
+	DefaultApiName       = "Default-"
 )
 
 type PolicyInf interface {
