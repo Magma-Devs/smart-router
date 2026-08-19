@@ -2038,6 +2038,17 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string) []co
 		}
 		for _, internalPath := range nonRoot {
 			generated := nodeUrl
+			if strings.HasSuffix(nodeUrl.Url, internalPath) {
+				// The url already ENDS in this path — an operator who baked the
+				// version into the url instead of declaring `internal-path`
+				// (`https://vendor/rpc/v0_8`, no field). It is the endpoint for
+				// that path as it stands; appending would ask the vendor for
+				// `/rpc/v0_8/rpc/v0_8`. It also stays the root endpoint, added
+				// above, which is what that config serves today.
+				generated.InternalPath = internalPath
+				add(generated)
+				continue
+			}
 			generated.Url = nodeUrl.Url + internalPath
 			generated.InternalPath = internalPath
 			add(generated)
