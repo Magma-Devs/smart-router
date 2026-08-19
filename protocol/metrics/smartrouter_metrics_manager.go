@@ -60,6 +60,7 @@ type SmartRouterMetricsManager struct {
 	endpointFetchBlockFails        *MappedLabelsCounterVec // rpc_endpoint_fetch_block_fails
 	endpointFetchLatestSuccess     *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_success
 	endpointFetchBlockSuccess      *MappedLabelsCounterVec // rpc_endpoint_fetch_block_success
+	endpointTrackerRequests        *MappedLabelsCounterVec // rpc_endpoint_tracker_requests_total
 
 	// Router-scoped metrics (labels: spec, apiInterface, function)
 	routerTotalRelaysServiced *prometheus.CounterVec   // smartrouter_total_relays_serviced
@@ -257,6 +258,21 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name:       "rpc_endpoint_fetch_block_success",
 		Help:       "Total successful specific-block fetch operations for this RPC endpoint.",
 		Labels:     endpointLabels,
+		Registerer: prometheus.DefaultRegisterer,
+	})
+
+	// Counts the actual upstream requests the per-endpoint ChainTracker sends, split by what
+	// the request was for. This is the ONLY metric that tracks tracker REQUEST VOLUME:
+	// rpc_endpoint_fetch_latest_{success,fails} count EVENTS (a new block was detected / the
+	// latest-block fetch failed), so neither moves when the number of requests changes — which
+	// is why the tracker's block-hash traffic was invisible until it was measured by hand.
+	//
+	// kind is bounded to trackerRequestKind* below. Watch kind="block_hash" go to zero when
+	// fork detection is off (--enable-fork-detection), and kind="latest_block" stay flat.
+	endpointTrackerRequests := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_tracker_requests_total",
+		Help:       "Total upstream requests sent by the per-endpoint chain tracker, by kind (latest_block, block_hash).",
+		Labels:     []string{"spec", "apiInterface", "endpoint_id", "kind"},
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
@@ -607,6 +623,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		endpointFetchBlockFails:        endpointFetchBlockFails,
 		endpointFetchLatestSuccess:     endpointFetchLatestSuccess,
 		endpointFetchBlockSuccess:      endpointFetchBlockSuccess,
+		endpointTrackerRequests:        endpointTrackerRequests,
 
 		// Router-scoped (with function)
 		routerTotalRelaysServiced: routerTotalRelaysServiced,
@@ -1175,6 +1192,48 @@ func (m *SmartRouterMetricsManager) RecordBlockFetch(spec, apiInterface, endpoin
 				m.AddEndpointFetchBlockFail(spec, apiInterface, providerName)
 			}
 		}
+	}
+}
+
+// TrackerRequestKind values for RecordTrackerRequest. Deliberately a closed set of two —
+// this is a Prometheus label, so it must never carry a raw method name.
+const (
+	// TrackerRequestKindLatestBlock — the "what is your latest block?" poll
+	// (eth_blockNumber, getLatestBlockhash, ...). Sent on every non-gated poll tick.
+	TrackerRequestKindLatestBlock = "latest_block"
+
+	// TrackerRequestKindBlockHash — a block-hash fetch (eth_getBlockByNumber, getBlock).
+	// Only fork detection asks for these, so this series is zero when it is off.
+	TrackerRequestKindBlockHash = "block_hash"
+)
+
+// AddEndpointTrackerRequest increments the tracker upstream-request counter.
+//
+// Guards the counter itself, not just the manager: MappedLabelsCounterVec.WithLabelValues has
+// no nil receiver check, and partially-built managers exist (test fixtures construct only the
+// counters they assert on). A metric must never be the thing that takes the poll goroutine down.
+func (m *SmartRouterMetricsManager) AddEndpointTrackerRequest(spec, apiInterface, endpointID, kind string) {
+	if m == nil || m.endpointTrackerRequests == nil {
+		return
+	}
+	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "kind": kind}
+	m.endpointTrackerRequests.WithLabelValues(labels).Inc()
+}
+
+// RecordTrackerRequest records ONE upstream request sent by the per-endpoint chain tracker.
+// Fans out across every provider sharing the URL, the same way RecordBlockFetch does, so the
+// per-provider view reflects the real load each of them puts on that upstream.
+//
+// Counted at the transport chokepoint (EndpointPoller.sendRawRequest), so it reflects requests
+// the node actually received — not poll ticks. A tick suppressed by the relay traffic gate
+// sends nothing and is therefore not counted, which is the point: this is the series that
+// makes a traffic reduction provable.
+func (m *SmartRouterMetricsManager) RecordTrackerRequest(spec, apiInterface, endpointID, kind string) {
+	if m == nil {
+		return
+	}
+	for _, providerName := range m.resolveProviderNames(endpointID) {
+		m.AddEndpointTrackerRequest(spec, apiInterface, providerName, kind)
 	}
 }
 

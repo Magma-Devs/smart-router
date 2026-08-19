@@ -874,6 +874,15 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 	// error" below — which start() propagates, leaving startTrackerWithRetry looping forever on a
 	// chain that is in fact healthy. Publish the head we just fetched and finish init.
 	if cs.headOnly {
+		// A reply can parse cleanly and still carry no usable height: an SVM result object with
+		// no context.slot unmarshals to slot 0 with a nil error. Nothing below this branch would
+		// catch it, so reject it here — publishing head 0 and reporting the tracker started
+		// leaves an endpoint whose tip reads as "unknown" to consistency pre-validation.
+		if newLatestBlock <= 0 {
+			return utils.LavaFormatError("critical -- node reported no usable latest block, chain tracker creation error", nil,
+				utils.Attribute{Key: "latestBlock", Value: newLatestBlock},
+				utils.Attribute{Key: "endpoint", Value: cs.endpoint})
+		}
 		cs.advanceHeadOnly(newLatestBlock)
 		cs.setLatestChangeTime(time.Now())
 		return nil
@@ -1020,21 +1029,28 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 	// TODO: we can do it better by creating a spec fields for custom trackers.
 	// By applying a name SVM for example
 	case "SOLANA", "SOLANAT", "KOII", "KOIIT":
-		utils.LavaFormatInfo("using SVMChainTracker", utils.Attribute{Key: "chainID", Value: config.ChainId})
-		slotCache, err := ristretto.NewCache(&ristretto.Config[int64, int64]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
-		if err != nil {
-			utils.LavaFormatFatal("could not create cache", err)
-		}
-		hashCache, err := ristretto.NewCache(&ristretto.Config[int64, string]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
-		if err != nil {
-			utils.LavaFormatFatal("could not create cache", err)
-		}
-		chainTracker.iChainFetcherWrapper = &SVMChainTracker{
-			slotCache:    slotCache,
-			hashCache:    hashCache,
+		utils.LavaFormatInfo("using SVMChainTracker", utils.Attribute{Key: "chainID", Value: config.ChainId}, utils.Attribute{Key: "headOnly", Value: config.HeadOnlyTracking})
+		svm := &SVMChainTracker{
 			dataFetcher:  chainTracker,
 			chainFetcher: chainFetcher,
+			headOnly:     config.HeadOnlyTracking,
 		}
+		// Both caches serve FetchBlockHashByNum only, which head-only never calls. Skip the
+		// allocation entirely in that mode — each is sized for 100k entries and there is one
+		// pair PER ENDPOINT.
+		if !config.HeadOnlyTracking {
+			slotCache, err := ristretto.NewCache(&ristretto.Config[int64, int64]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
+			if err != nil {
+				utils.LavaFormatFatal("could not create cache", err)
+			}
+			hashCache, err := ristretto.NewCache(&ristretto.Config[int64, string]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
+			if err != nil {
+				utils.LavaFormatFatal("could not create cache", err)
+			}
+			svm.slotCache = slotCache
+			svm.hashCache = hashCache
+		}
+		chainTracker.iChainFetcherWrapper = svm
 	default:
 		chainTracker.iChainFetcherWrapper = &DefaultChainTrackerFetcher{
 			dataFetcher:  chainTracker,
