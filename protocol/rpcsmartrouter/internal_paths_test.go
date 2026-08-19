@@ -71,6 +71,38 @@ func TestExpandInternalPaths(t *testing.T) {
 		require.Equal(t, "/P", got[1].InternalPath)
 	})
 
+	t.Run("a collection LABEL is not appended to a url", func(t *testing.T) {
+		// STRK carries its shared api set in "HTTP-ONLY" / "WS-ONLY"
+		// collections that exist only to be inherited. They are disabled, so
+		// the parser never reports them — but the idiom is in the spec repo,
+		// and an enabled one must not produce `https://host` + `HTTP-ONLY`.
+		got := expandInternalPaths(
+			[]common.NodeUrl{{Url: "https://strk.example"}},
+			[]string{"", "HTTP-ONLY", "WS-ONLY", "/rpc/v0_9"},
+		)
+		require.Equal(t, []common.NodeUrl{
+			{Url: "https://strk.example"},
+			{Url: "https://strk.example/rpc/v0_9", InternalPath: "/rpc/v0_9"},
+		}, got)
+	})
+
+	t.Run("a pinned url equal to base+path is not emitted twice", func(t *testing.T) {
+		// Legitimate config, and the generated twin would just be probed and
+		// registered in the metrics a second time.
+		got := expandInternalPaths(
+			[]common.NodeUrl{
+				{Url: "https://ton.example/api"},
+				{Url: "https://ton.example/api/v2", InternalPath: "/v2"},
+			},
+			[]string{"", "/v2", "/v3"},
+		)
+		require.Equal(t, []common.NodeUrl{
+			{Url: "https://ton.example/api"},
+			{Url: "https://ton.example/api/v2", InternalPath: "/v2"},
+			{Url: "https://ton.example/api/v3", InternalPath: "/v3"},
+		}, got)
+	})
+
 	t.Run("output order is stable whatever order the paths arrive in", func(t *testing.T) {
 		urls := []common.NodeUrl{{Url: "https://ton.example/api"}}
 		first := expandInternalPaths(urls, []string{"/v3", "/v2", ""})

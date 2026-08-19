@@ -1999,7 +1999,15 @@ func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
 func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string) []common.NodeUrl {
 	nonRoot := make([]string, 0, len(internalPaths))
 	for _, internalPath := range internalPaths {
-		if internalPath != "" {
+		// A path is appended to a url, so only a url path can be expanded.
+		// Specs also use the internal-path field as a plain collection LABEL
+		// for inheritance ingredients — STRK's "HTTP-ONLY" / "WS-ONLY". Those
+		// are disabled today, so the parser never reports them, but the idiom
+		// is in the spec repo and an enabled one would otherwise generate
+		// `https://host` + `HTTP-ONLY`. Skipping it leaves the provider with no
+		// endpoint for that path, which the selection filter reads as "not
+		// populated for this provider" and falls back to today's behaviour.
+		if strings.HasPrefix(internalPath, "/") {
 			nonRoot = append(nonRoot, internalPath)
 		}
 	}
@@ -2011,8 +2019,20 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string) []co
 	sort.Strings(nonRoot)
 
 	expanded := make([]common.NodeUrl, 0, len(nodeUrls))
-	for _, nodeUrl := range nodeUrls {
+	// An operator can declare the base url AND a pinned url that happens to
+	// equal base+path. Both are legitimate; emitting the same (url, path) twice
+	// would just probe it twice and register it twice in the metrics.
+	seen := make(map[string]struct{}, len(nodeUrls))
+	add := func(nodeUrl common.NodeUrl) {
+		key := nodeUrl.Url + "\x00" + nodeUrl.InternalPath
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
 		expanded = append(expanded, nodeUrl)
+	}
+	for _, nodeUrl := range nodeUrls {
+		add(nodeUrl)
 		if nodeUrl.InternalPath != "" {
 			continue
 		}
@@ -2020,7 +2040,7 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string) []co
 			generated := nodeUrl
 			generated.Url = nodeUrl.Url + internalPath
 			generated.InternalPath = internalPath
-			expanded = append(expanded, generated)
+			add(generated)
 		}
 	}
 	return expanded
