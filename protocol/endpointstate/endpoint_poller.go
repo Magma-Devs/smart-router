@@ -3,6 +3,7 @@ package endpointstate
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -456,10 +457,12 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
+		retryAfter, _ := common.ParseRetryAfter(http.Header(resp.Headers), time.Now())
 		return nil, &lavasession.HTTPStatusError{
 			StatusCode: resp.StatusCode,
 			Status:     fmt.Sprintf("%d", resp.StatusCode),
 			Body:       resp.Body,
+			RetryAfter: retryAfter,
 		}
 	}
 	return resp.Body, nil

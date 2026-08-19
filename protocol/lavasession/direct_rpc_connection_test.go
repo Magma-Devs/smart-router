@@ -816,3 +816,49 @@ func TestGRPCDirectRPCConnection_DescriptorSourceFailureIsFatal(t *testing.T) {
 		}
 	})
 }
+
+// TestHTTPDirectRPCConnection_SendRequest_CapturesRetryAfter covers the direct path's own
+// rate-limit surface: it mints its HTTPStatusError with the response in scope, so a caller
+// deciding when to come back reads the upstream's answer through the same
+// common.RetryAfterFrom the chainlib proxies feed. The existing type assertion on
+// *HTTPStatusError (recovery_probe) must keep working alongside it.
+func TestHTTPDirectRPCConnection_SendRequest_CapturesRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "90")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: server.URL}, 5, "")
+	require.NoError(t, err)
+
+	_, sendErr := conn.SendRequest(ctx, []byte(`{"jsonrpc":"2.0"}`), nil)
+	require.Error(t, sendErr)
+
+	httpErr, ok := sendErr.(*HTTPStatusError)
+	require.True(t, ok, "callers type-asserting the concrete error must be unaffected")
+	require.Equal(t, http.StatusTooManyRequests, httpErr.StatusCode)
+
+	require.ErrorIs(t, sendErr, common.StatusCodeError429, "a direct-path 429 is a 429")
+	d, ok := common.RetryAfterFrom(sendErr)
+	require.True(t, ok)
+	require.Equal(t, 90*time.Second, d)
+}
+
+// A non-429 must not read as a rate-limit just because it unwraps, and a 429 without the
+// header carries no opinion — the caller stays on its own backoff.
+func TestHTTPStatusError_UnwrapIsScopedToRateLimits(t *testing.T) {
+	notRateLimited := &HTTPStatusError{StatusCode: http.StatusInternalServerError, Status: "500"}
+	require.NotErrorIs(t, notRateLimited, common.StatusCodeError429)
+	_, ok := common.RetryAfterFrom(notRateLimited)
+	require.False(t, ok)
+
+	noHeader := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, Status: "429"}
+	require.ErrorIs(t, noHeader, common.StatusCodeError429)
+	_, ok = common.RetryAfterFrom(noHeader)
+	require.False(t, ok, "no header means no opinion, not zero delay")
+}
