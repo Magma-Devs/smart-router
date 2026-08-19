@@ -103,6 +103,22 @@ func TestExpandInternalPaths(t *testing.T) {
 		}, got)
 	})
 
+	t.Run("a url that already ends in the path is that path's endpoint, not a parent", func(t *testing.T) {
+		// An operator who baked the version into the url instead of declaring
+		// `internal-path` — a config that works today, because before the
+		// endpoint list carried paths at all every relay went to that one url.
+		// Appending would ask the vendor for /rpc/v0_8/rpc/v0_8.
+		got := expandInternalPaths(
+			[]common.NodeUrl{{Url: "https://vendor.example/rpc/v0_8"}},
+			[]string{"", "/rpc/v0_8", "/rpc/v0_9"},
+		)
+		require.Equal(t, []common.NodeUrl{
+			{Url: "https://vendor.example/rpc/v0_8"},
+			{Url: "https://vendor.example/rpc/v0_8", InternalPath: "/rpc/v0_8"},
+			{Url: "https://vendor.example/rpc/v0_8/rpc/v0_9", InternalPath: "/rpc/v0_9"},
+		}, got)
+	})
+
 	t.Run("output order is stable whatever order the paths arrive in", func(t *testing.T) {
 		urls := []common.NodeUrl{{Url: "https://ton.example/api"}}
 		first := expandInternalPaths(urls, []string{"/v3", "/v2", ""})
