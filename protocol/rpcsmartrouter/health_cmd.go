@@ -194,19 +194,18 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 		return providers, nil
 	}
 
-	// Config-file mode.
-	configName := DefaultRPCSmartRouterFileName
-	if len(args) == 1 {
-		configName = args[0]
-	}
+	// Config-file mode. The argument is a config file path (absolute or relative) or a
+	// bare name resolved against the search paths; see config_source.go.
 	viper.Reset()
-	viper.SetConfigName(configName)
-	viper.SetConfigType("yml")
-	viper.AddConfigPath(".")
-	viper.AddConfigPath("./config")
-	viper.AddConfigPath(lavaDefaultNodeHome)
+	configTarget, configIsFile := pointViperAtConfig(args)
 	if err := viper.ReadInConfig(); err != nil {
-		return nil, utils.LavaFormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configName})
+		// This command is what an operator reaches for when a config will not boot, so a
+		// config it cannot even find has to say where it looked, in the terms they used.
+		if isConfigNotFound(err) {
+			return nil, utils.LavaFormatError(configNotFoundMessage(configTarget, configIsFile), err,
+				configLocationAttributes(configTarget, configIsFile)...)
+		}
+		return nil, utils.LavaFormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configTarget})
 	}
 
 	keys := []string{commonlib.DirectRPCConfigName}
