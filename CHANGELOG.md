@@ -8,6 +8,21 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.3.3 — 2026-08-19
+
+### Highlights
+
+Smart Router v1.3.3 introduces finer configuration controls for upstream polling and chain state tracking. To better accommodate varying provider rate limits and network block times, operators can now specify a custom poll cadence on a per-endpoint basis. This allows SREs to tune request frequencies directly to specific upstream capabilities rather than relying on a single global interval. Additionally, fork detection within the chain tracker has been modified to reduce default processing overhead. This tracking behavior is now strictly opt-in and must be explicitly activated by passing a command-line flag during router startup.
+
+### Changes
+
+#### New Features
+- feat(chaintracker): make fork detection opt-in behind a flag [`ab2a3ba`]
+- feat(smart-router): make the per-endpoint poll cadence configurable [`a382961`]
+
+[`a382961`]: https://github.com/magma-Devs/smart-router/commit/a3829613b6adefb68f66edc60cef54902dd936bf
+[`ab2a3ba`]: https://github.com/magma-Devs/smart-router/commit/ab2a3ba7cfbec44e5e978fff10243cccb3eed55b
+
 ## v1.3.2 — 2026-08-12
 
 ### Highlights
