@@ -50,6 +50,7 @@ func pointViperAtConfig(args []string) (target string, isFile bool) {
 	}
 
 	if isConfigFilePath(target) {
+		target = resolveConfigFilePath(target)
 		viper.SetConfigFile(target)
 		// Let a recognized extension declare the format, and fall back to YAML for
 		// anything else. Set it either way: without an explicit type an extension-less
@@ -73,20 +74,47 @@ func pointViperAtConfig(args []string) (target string, isFile bool) {
 // isConfigFilePath reports whether the argument names a config file directly, rather than
 // a name to look up across the search paths.
 //
-// An absolute path always qualifies: the search-path lookup provably cannot resolve one.
-// A relative path qualifies once it actually resolves to a file from the working
-// directory — which is the very file the "." search path would have returned, so every
-// invocation that worked before still loads exactly what it loaded before. Anything that
-// does not resolve to a file stays on the search-path lookup, which is what lets a bare
-// `smartrouter myconfig` still find ./config/myconfig.yml.
+// The test is lexical — does the value name a directory component? — and deliberately does
+// not consult the filesystem. What is being decided here is what the operator *meant*, and
+// that cannot depend on which files happen to sit in the working directory: an earlier cut
+// of this fix keyed on os.Stat, which made a bare `smartrouter router` load an
+// extension-less ./router in preference to the ./router.yml the search path has always
+// returned. A name with no separator is a name, always, and goes to the lookup that has
+// always handled it.
 func isConfigFilePath(arg string) bool {
 	if arg == "" {
 		return false
 	}
-	if filepath.IsAbs(arg) {
-		return true
+	return filepath.IsAbs(arg) || strings.ContainsRune(arg, '/') || strings.ContainsRune(arg, filepath.Separator)
+}
+
+// resolveConfigFilePath returns the file an explicit path refers to.
+//
+// A path carrying no recognized config extension is also tried with each supported
+// extension appended, in viper's own order, because that is what the search-path lookup
+// does inside a directory: `smartrouter config/akash` has always loaded config/akash.yml,
+// and a lexical split that skipped this would have broken it. Extensions are tried before
+// the bare path for the same reason — searchInPath does — so resolution is identical
+// whichever branch an argument takes.
+//
+// When nothing resolves, the path as given is returned, so viper fails against the file
+// the operator actually named and the error can say so.
+func resolveConfigFilePath(arg string) string {
+	if ext := strings.TrimPrefix(filepath.Ext(arg), "."); slices.Contains(viper.SupportedExts, ext) {
+		return arg // already declares its format; nothing to append
 	}
-	info, err := os.Stat(arg)
+	for _, ext := range viper.SupportedExts {
+		if candidate := arg + "." + ext; isExistingFile(candidate) {
+			return candidate
+		}
+	}
+	return arg
+}
+
+// isExistingFile reports whether path is a regular file that can be stat-ed. A directory is
+// not a config.
+func isExistingFile(path string) bool {
+	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
 }
 
