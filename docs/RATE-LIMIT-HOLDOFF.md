@@ -31,8 +31,8 @@ off" means on its path. This table is the catalog; add a row when wiring a new c
 | Path | What "held off" means there | Records into the registry | Status |
 | --- | --- | --- | --- |
 | Spec re-verification (`spec_reverifier.go`) | Skip the probe, return the rate-limit error so reconciliation stays inconclusive — membership unchanged, streak untouched — without spending a request | 429 from `Validate` | live |
-| Hot relay path (endpoint selection) | Prefer endpoints that are not held off; when every endpoint is held off, fall back to the soonest-to-expire one — the customer is never answered with a synthesized 429 | HTTP 429 relay results | lands with MAG-2948 |
-| Recovery probe (`recovery_probe.go`) | Skip the replay while held off (verdict stays inconclusive), instead of burning replay-attempt budget on a vendor that said stop | 429 probe responses | lands with MAG-2948 |
+| Hot relay path (endpoint selection) | A rate-limited relay releases its session with no QoS sample in either direction, and selection prefers providers that are not held off; when every candidate is held off, the soonest-to-expire one stays in — the customer is never answered with a synthesized 429 | 429 relay results, both shapes (typed HTTP error, 2xx-body/gRPC classification) | live |
+| Recovery probe (`recovery_probe.go`) | Skip the replay while held off (verdict stays inconclusive), instead of burning replay-attempt budget on a vendor that said stop | 429 probe responses (Retry-After floor honoured) | live |
 | Chain tracker / endpoint poller | The poll backoff takes the upstream's Retry-After as a floor instead of guessing with the fail-count doubling | 429 poll responses | lands with MAG-2949 |
 | WS / gRPC transports | Recognition first: a 429 on the WS upgrade or a corroborated gRPC rate limit produces the typed sentinel these consumers key on | handshake / metadata 429s | lands with MAG-2949 |
 
