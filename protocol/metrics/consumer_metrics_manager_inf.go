@@ -23,15 +23,15 @@ var _ ConsumerMetricsManagerInf = NoOpConsumerMetrics{}
 
 type NoOpConsumerMetrics struct{}
 
-func (NoOpConsumerMetrics) SetRelayMetrics(*RelayMetrics, error)                           {}
-func (NoOpConsumerMetrics) RecordEndToEndLatency(string, string, string, float64)          {}
-func (NoOpConsumerMetrics) RecordProviderLatency(string, string, string, string, float64)  {}
-func (NoOpConsumerMetrics) RecordCacheResult(string, string, string, bool, float64)        {}
-func (NoOpConsumerMetrics) SetRelayNodeErrorMetric(string, string, string, string)         {}
-func (NoOpConsumerMetrics) SetProtocolError(string, string, string, string)                {}
-func (NoOpConsumerMetrics) RecordIncidentRetry(string, string, string, uint64, bool)       {}
-func (NoOpConsumerMetrics) RecordIncidentConsistency(string, string, string, bool)         {}
-func (NoOpConsumerMetrics) RecordIncidentHedgeResult(string, string, string, uint64, bool) {}
+func (NoOpConsumerMetrics) SetRelayMetrics(*RelayMetrics, error)                              {}
+func (NoOpConsumerMetrics) RecordEndToEndLatency(string, string, string, float64)             {}
+func (NoOpConsumerMetrics) RecordProviderLatency(string, string, string, string, float64)     {}
+func (NoOpConsumerMetrics) RecordCacheResult(string, string, string, string, string, float64) {}
+func (NoOpConsumerMetrics) SetRelayNodeErrorMetric(string, string, string, string)            {}
+func (NoOpConsumerMetrics) SetProtocolError(string, string, string, string)                   {}
+func (NoOpConsumerMetrics) RecordIncidentRetry(string, string, string, uint64, bool)          {}
+func (NoOpConsumerMetrics) RecordIncidentConsistency(string, string, string, bool)            {}
+func (NoOpConsumerMetrics) RecordIncidentHedgeResult(string, string, string, uint64, bool)    {}
 func (NoOpConsumerMetrics) SetCrossValidationMetric(string, string, string, bool, []string, []string) {
 }
 func (NoOpConsumerMetrics) SetCrossValidationFailureMetric(string, string, string, string) {}
@@ -76,7 +76,7 @@ type ConsumerMetricsManagerInf interface {
 	RecordProviderLatency(chainId string, apiInterface string, providerAddress string, method string, latencyMs float64)
 
 	// --- Cache ---
-	RecordCacheResult(chainId, apiInterface, method string, hit bool, latencyMs float64)
+	RecordCacheResult(chainId, apiInterface, method, cacheTier, outcome string, latencyMs float64)
 
 	// --- Errors (RPCConsumerLogs) ---
 	SetRelayNodeErrorMetric(chainId string, apiInterface string, providerAddress string, method string)
