@@ -30,7 +30,7 @@ off" means on its path. This table is the catalog; add a row when wiring a new c
 
 | Path | What "held off" means there | Records into the registry | Status |
 | --- | --- | --- | --- |
-| Spec re-verification (`spec_reverifier.go`) | Skip the probe, return the rate-limit error so reconciliation stays inconclusive — membership unchanged, streak untouched — without spending a request | 429 from `Validate` | lands with MAG-2910 |
+| Spec re-verification (`spec_reverifier.go`) | Skip the probe, return the rate-limit error so reconciliation stays inconclusive — membership unchanged, streak untouched — without spending a request | 429 from `Validate` | live |
 | Hot relay path (endpoint selection) | Prefer endpoints that are not held off; when every endpoint is held off, fall back to the soonest-to-expire one — the customer is never answered with a synthesized 429 | HTTP 429 relay results | lands with MAG-2948 |
 | Recovery probe (`recovery_probe.go`) | Skip the replay while held off (verdict stays inconclusive), instead of burning replay-attempt budget on a vendor that said stop | 429 probe responses | lands with MAG-2948 |
 | Chain tracker / endpoint poller | The poll backoff takes the upstream's Retry-After as a floor instead of guessing with the fail-count doubling | 429 poll responses | lands with MAG-2949 |
