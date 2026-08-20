@@ -50,6 +50,7 @@ import (
 	scoreutils "github.com/magma-Devs/smart-router/utils/score"
 	"github.com/magma-Devs/smart-router/version"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -235,7 +236,7 @@ type rpcSmartRouterStartOptions struct {
 	stateShare               bool
 	staticProvidersList      []*lavasession.RPCStaticProviderEndpoint // define static providers as primary providers
 	backupProvidersList      []*lavasession.RPCStaticProviderEndpoint // define backup providers as emergency fallback when no providers available
-	weightedSelectorConfig   provideroptimizer.WeightedSelectorConfig
+	upstreamSelectorConfig   provideroptimizer.UpstreamSelectorConfig
 }
 
 // Start sets up the RPCSmartRouter and all its processes, then returns once
@@ -825,12 +826,64 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 // active selection weights, used for each per-chain entry in the PerChainOptimizer map
 // returned by GET /debug/runtime-config. Fields carry no json tags, so each key marshals
 // as the bare Go identifier — tests grep the same string in test code and router source.
+// resolveSelectionWeights turns --qos-selection-priority plus the individual
+// --qos-*-weight flags into the four QoS weights the endpoint selector scores on.
+//
+// Precedence: the priority preset sets the weights, then any weight the operator set by
+// hand overrides it — so the preset is a starting point, never a cage.
+//
+// "Set by hand" deliberately checks the config file as well as the command line.
+// Changed() only reports flags typed on the CLI, so a weight set in config.yml would
+// otherwise lose silently to the preset; viper.InConfig covers that half.
+//
+// Only the four weights are decided here. Every other field is left at its default for
+// the caller to fill in, so a priority can never move something it does not own.
+func resolveSelectionWeights(flags *pflag.FlagSet) (provideroptimizer.UpstreamSelectorConfig, error) {
+	config := provideroptimizer.DefaultUpstreamSelectorConfig()
+
+	priority, err := provideroptimizer.ParseSelectionPriority(viper.GetString(common.ProviderOptimizerSelectionPriority))
+	if err != nil {
+		return config, err
+	}
+	config = priority.ApplyTo(config)
+
+	overridden := []string{}
+	for _, w := range []struct {
+		flagName string
+		target   *float64
+	}{
+		{common.ProviderOptimizerAvailabilityWeight, &config.AvailabilityWeight},
+		{common.ProviderOptimizerLatencyWeight, &config.LatencyWeight},
+		{common.ProviderOptimizerSyncWeight, &config.SyncWeight},
+		{common.ProviderOptimizerStakeWeight, &config.StakeWeight},
+	} {
+		if (flags != nil && flags.Changed(w.flagName)) || viper.InConfig(w.flagName) {
+			*w.target = viper.GetFloat64(w.flagName)
+			overridden = append(overridden, w.flagName)
+		}
+	}
+
+	// Stay quiet on the default path so an untouched deployment logs nothing new.
+	if priority != provideroptimizer.SelectionPriorityBalanced || len(overridden) > 0 {
+		utils.LavaFormatInfo("Working with provider selection priority: "+priority.String(),
+			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
+			utils.LogAttr("latencyWeight", config.LatencyWeight),
+			utils.LogAttr("syncWeight", config.SyncWeight),
+			utils.LogAttr("stakeWeight", config.StakeWeight),
+			utils.LogAttr("manuallyOverridden", strings.Join(overridden, ",")),
+		)
+	}
+
+	return config, nil
+}
+
 type routerConfigOptimizerWeights struct {
 	AvailabilityWeight float64
 	LatencyWeight      float64
 	SyncWeight         float64
 	StakeWeight        float64
 	MinSelectionChance float64
+	SelectionMode      string
 }
 
 // routerConfigResponse is the JSON body of GET /debug/runtime-config. It exposes the
@@ -881,7 +934,7 @@ type routerConfigResponse struct {
 	MostFrequentPollingMultiplier int
 	PollingUpdateLength           int
 
-	// optimizer selection weights from DefaultWeightedSelectorConfig(), as flat
+	// optimizer selection weights from DefaultUpstreamSelectorConfig(), as flat
 	// top-level keys (the ticket's Phase 2 shape rule).
 	AvailabilityWeight float64
 	LatencyWeight      float64
@@ -1859,13 +1912,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			return
 		}
 
-		toWeights := func(c provideroptimizer.WeightedSelectorConfig) routerConfigOptimizerWeights {
+		toWeights := func(c provideroptimizer.UpstreamSelectorConfig) routerConfigOptimizerWeights {
 			return routerConfigOptimizerWeights{
 				AvailabilityWeight: c.AvailabilityWeight,
 				LatencyWeight:      c.LatencyWeight,
 				SyncWeight:         c.SyncWeight,
 				StakeWeight:        c.StakeWeight,
 				MinSelectionChance: c.MinSelectionChance,
+				SelectionMode:      c.SelectionMode.String(),
 			}
 		}
 
@@ -1874,14 +1928,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		perChain := map[string]routerConfigOptimizerWeights{}
 		if optimizers != nil {
 			optimizers.Range(func(chainID string, opt *provideroptimizer.ProviderOptimizer) bool {
-				perChain[chainID] = toWeights(opt.GetWeightedSelectorConfig())
+				perChain[chainID] = toWeights(opt.GetUpstreamSelectorConfig())
 				return true
 			})
 		}
 
 		smConfig := SmartRouterStateMachineConfig()
 
-		optimizerDefaults := provideroptimizer.DefaultWeightedSelectorConfig()
+		optimizerDefaults := provideroptimizer.DefaultUpstreamSelectorConfig()
 
 		resp := routerConfigResponse{
 			SchemaVersion: 1,
@@ -2130,7 +2184,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// aside), so the optimizer's wanted-concurrency is always 1. The legacy
 	// --concurrent-providers flag fed a write-only optimizer field and is removed.
 	newOptimizer := provideroptimizer.NewProviderOptimizer(options.strategy, averageBlockTime, 1, smartRouterOptimizerQoSClient, chainID)
-	newOptimizer.ConfigureWeightedSelector(options.weightedSelectorConfig)
+	newOptimizer.ConfigureUpstreamSelector(options.upstreamSelectorConfig)
 	optimizer, loaded, err := optimizers.LoadOrStore(chainID, newOptimizer)
 	if err != nil {
 		errCh <- err
@@ -2880,13 +2934,21 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			if err := scoreutils.SetProbeUpdateWeight(viper.GetFloat64(common.ProbeUpdateWeightFlagName)); err != nil {
 				return err
 			}
-			weightedSelectorConfig := provideroptimizer.DefaultWeightedSelectorConfig()
-			weightedSelectorConfig.AvailabilityWeight = viper.GetFloat64(common.ProviderOptimizerAvailabilityWeight)
-			weightedSelectorConfig.LatencyWeight = viper.GetFloat64(common.ProviderOptimizerLatencyWeight)
-			weightedSelectorConfig.SyncWeight = viper.GetFloat64(common.ProviderOptimizerSyncWeight)
-			weightedSelectorConfig.StakeWeight = viper.GetFloat64(common.ProviderOptimizerStakeWeight)
-			weightedSelectorConfig.MinSelectionChance = viper.GetFloat64(common.ProviderOptimizerMinSelectionChance)
-			weightedSelectorConfig.Strategy = strategyFlag.Strategy
+			upstreamSelectorConfig, err := resolveSelectionWeights(cmd.Flags())
+			if err != nil {
+				return err
+			}
+			upstreamSelectorConfig.MinSelectionChance = viper.GetFloat64(common.ProviderOptimizerMinSelectionChance)
+			upstreamSelectorConfig.Strategy = strategyFlag.Strategy
+
+			selectionMode, err := provideroptimizer.ParseSelectionMode(viper.GetString(common.ProviderOptimizerSelectionMode))
+			if err != nil {
+				return err
+			}
+			upstreamSelectorConfig.SelectionMode = selectionMode
+			if selectionMode != provideroptimizer.SelectionModeWeightedRandom {
+				utils.LavaFormatInfo("Working with provider selection mode: " + selectionMode.String())
+			}
 
 			// RPCSmartRouter always runs in standalone mode
 			epochDuration := viper.GetDuration(common.EpochDurationFlag)
@@ -2943,7 +3005,7 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				stateShare:               rpcSmartRouterSharedState,
 				staticProvidersList:      directRPCEndpoints,
 				backupProvidersList:      backupDirectRPCEndpoints,
-				weightedSelectorConfig:   weightedSelectorConfig,
+				upstreamSelectorConfig:   upstreamSelectorConfig,
 			})
 			if err != nil {
 				return err
@@ -2998,12 +3060,14 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 		utils.LavaFormatFatal("failed marking chain-tracker-polling-multiplier deprecated", err)
 	}
 	cmdRPCSmartRouter.Flags().Var(&strategyFlag, "strategy", fmt.Sprintf("the strategy to use to pick providers (%s)", strings.Join(strategyNames, "|")))
-	defaultWeightedConfig := provideroptimizer.DefaultWeightedSelectorConfig()
-	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerAvailabilityWeight, defaultWeightedConfig.AvailabilityWeight, "weight assigned to provider availability when computing selection scores")
-	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerLatencyWeight, defaultWeightedConfig.LatencyWeight, "weight assigned to provider latency when computing selection scores")
-	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerSyncWeight, defaultWeightedConfig.SyncWeight, "weight assigned to provider sync freshness when computing selection scores")
-	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerStakeWeight, defaultWeightedConfig.StakeWeight, "weight assigned to provider stake when computing selection scores")
-	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerMinSelectionChance, defaultWeightedConfig.MinSelectionChance, "minimum selection probability for any provider regardless of score")
+	defaultSelectorConfig := provideroptimizer.DefaultUpstreamSelectorConfig()
+	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerAvailabilityWeight, defaultSelectorConfig.AvailabilityWeight, "weight assigned to provider availability when computing selection scores")
+	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerLatencyWeight, defaultSelectorConfig.LatencyWeight, "weight assigned to provider latency when computing selection scores")
+	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerSyncWeight, defaultSelectorConfig.SyncWeight, "weight assigned to provider sync freshness when computing selection scores")
+	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerStakeWeight, defaultSelectorConfig.StakeWeight, "weight assigned to provider stake when computing selection scores")
+	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerMinSelectionChance, defaultSelectorConfig.MinSelectionChance, "minimum selection probability for any provider regardless of score")
+	cmdRPCSmartRouter.Flags().String(common.ProviderOptimizerSelectionMode, defaultSelectorConfig.SelectionMode.String(), fmt.Sprintf("how the winner is picked from the scored providers (%s): weighted_random draws proportionally to score, best always takes the highest scorer", strings.Join(provideroptimizer.SelectionModeNames(), "|")))
+	cmdRPCSmartRouter.Flags().String(common.ProviderOptimizerSelectionPriority, provideroptimizer.SelectionPriorityBalanced.String(), fmt.Sprintf("what to optimise for (%s) — a preset over the four qos-*-weight flags above; any weight set by hand overrides the preset", strings.Join(provideroptimizer.SelectionPriorityNames(), "|")))
 	if err := viper.BindPFlag(common.ProviderOptimizerAvailabilityWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerAvailabilityWeight)); err != nil {
 		utils.LavaFormatFatal("failed binding availability weight flag", err)
 	}
@@ -3018,6 +3082,12 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerMinSelectionChance, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerMinSelectionChance)); err != nil {
 		utils.LavaFormatFatal("failed binding min selection chance flag", err)
+	}
+	if err := viper.BindPFlag(common.ProviderOptimizerSelectionMode, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSelectionMode)); err != nil {
+		utils.LavaFormatFatal("failed binding selection mode flag", err)
+	}
+	if err := viper.BindPFlag(common.ProviderOptimizerSelectionPriority, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSelectionPriority)); err != nil {
+		utils.LavaFormatFatal("failed binding selection priority flag", err)
 	}
 	cmdRPCSmartRouter.Flags().String(metrics.MetricsListenFlagName, metrics.DisabledFlagOption, "the address to expose prometheus metrics (such as localhost:7779)")
 	// Usage telemetry (OTel) — off by default. When enabled, per-relay and
