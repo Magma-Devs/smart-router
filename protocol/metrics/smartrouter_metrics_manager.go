@@ -1398,6 +1398,7 @@ func (m *SmartRouterMetricsManager) SetCrossValidationStragglerMetric(chainId, a
 	if m == nil || outcome == "" {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.crossValidationStragglerTotalMetric.WithLabelValues(chainId, apiInterface, method, outcome).Inc()
 }
 
