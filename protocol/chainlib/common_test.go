@@ -1355,6 +1355,27 @@ func TestRestApiMatcherOrdering(t *testing.T) {
 	}
 }
 
+// TestBuildRestApiMatcherReusesPatternWithoutTrailingSlash pins the invariant the
+// matchSpecApiByName fast path keys on: an api name without a trailing slash reuses
+// pattern as trimmed — the same *regexp.Regexp — and the lookup spots the case by
+// pointer comparison. Recompiling trimmed unconditionally would keep every behaviour
+// test green while silently disabling the skip on every candidate of every lookup.
+func TestBuildRestApiMatcherReusesPatternWithoutTrailingSlash(t *testing.T) {
+	t.Parallel()
+
+	for apiName, reused := range map[string]bool{
+		"/blocks/latest":    true,
+		"/blocks/{height}":  true,
+		"/":                 true,  // a bare root is left alone by the trim
+		"/extended/v1/tx/":  false, // STACKS-style trailing slash needs its own pattern
+		"/v1/names/{name}/": false,
+	} {
+		matcher, err := buildRestApiMatcher(apiName, restApiNameToRegex(apiName))
+		require.NoError(t, err, "api: %s", apiName)
+		require.Equal(t, reused, matcher.trimmed == matcher.pattern, "api: %s", apiName)
+	}
+}
+
 // TestMatchSpecApiByNameTrailingSlashConnectionType guards the fallback against widening
 // the match across connection types — a GET api must not answer a POST.
 func TestMatchSpecApiByNameTrailingSlashConnectionType(t *testing.T) {
