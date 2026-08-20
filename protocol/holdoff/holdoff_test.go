@@ -134,3 +134,47 @@ func TestUnknownIsNotHeldOff(t *testing.T) {
 	require.False(t, r.HeldOff("vendor", "u"))
 	require.True(t, r.ReadyAt("vendor", "u").IsZero())
 }
+
+func TestProviderReadyAt(t *testing.T) {
+	t.Run("unknown provider is not held", func(t *testing.T) {
+		r, _ := newTestRegistry(t0)
+		readyAt, held := r.ProviderReadyAt("vendor")
+		require.False(t, held)
+		require.True(t, readyAt.IsZero())
+	})
+
+	t.Run("all limited URLs held means the provider is held", func(t *testing.T) {
+		r, _ := newTestRegistry(t0)
+		r.RecordRateLimit("vendor", "a", 5*time.Minute)
+		readyAt, held := r.ProviderReadyAt("vendor")
+		require.True(t, held)
+		require.Equal(t, t0.Add(5*time.Minute), readyAt)
+	})
+
+	t.Run("a free URL frees the provider", func(t *testing.T) {
+		r, now := newTestRegistry(t0)
+		r.RecordRateLimit("vendor", "a", 0) // 30s
+		*now = t0.Add(InitialHoldoff + time.Second)
+		r.RecordRateLimit("vendor", "b", 5*time.Minute) // b held, a expired
+		_, held := r.ProviderReadyAt("vendor")
+		require.False(t, held, "an expired URL is worth trying, so the provider is not held")
+	})
+
+	t.Run("escalation holds even past a free URL", func(t *testing.T) {
+		r, now := newTestRegistry(t0)
+		r.RecordRateLimit("vendor", "a", 2*time.Minute)
+		r.RecordRateLimit("vendor", "b", 10*time.Minute) // escalates until t0+10m
+		*now = t0.Add(3 * time.Minute)                   // a expired, escalation active
+		readyAt, held := r.ProviderReadyAt("vendor")
+		require.True(t, held)
+		require.Equal(t, t0.Add(10*time.Minute), readyAt)
+	})
+
+	t.Run("soonest URL bounds the ready time", func(t *testing.T) {
+		r, _ := newTestRegistry(t0)
+		r.RecordRateLimit("vendor", "a", 3*time.Minute)
+		readyAt, held := r.ProviderReadyAt("vendor")
+		require.True(t, held)
+		require.Equal(t, t0.Add(3*time.Minute), readyAt)
+	})
+}

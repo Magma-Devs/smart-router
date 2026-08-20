@@ -199,6 +199,48 @@ func (r *Registry) ReadyAt(provider, url string) time.Time {
 	return ready
 }
 
+// ProviderReadyAt reports whether provider is held off as a whole, and when it next has
+// a URL worth trying. A provider is held off while its name is escalated, or while every
+// URL the registry has been limited on is still held. The registry only knows URLs that
+// answered 429s — a provider with additional never-limited URLs reads as held until its
+// earliest recorded hold-off expires, which slightly over-holds; selection's
+// soonest-to-expire fallback bounds that cost.
+func (r *Registry) ProviderReadyAt(provider string) (readyAt time.Time, held bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ps := r.providers[provider]
+	if ps == nil {
+		return time.Time{}, false
+	}
+	now := r.now()
+
+	anyFree := false
+	minHeld := time.Time{}
+	heldURLs := 0
+	for _, e := range ps.urls {
+		if e.readyAt.After(now) {
+			heldURLs++
+			if minHeld.IsZero() || e.readyAt.Before(minHeld) {
+				minHeld = e.readyAt
+			}
+		} else {
+			anyFree = true
+		}
+	}
+
+	if ps.escalatedUntil.After(now) {
+		readyAt = ps.escalatedUntil
+		if !anyFree && minHeld.After(readyAt) {
+			readyAt = minHeld
+		}
+		return readyAt, true
+	}
+	if heldURLs == 0 || anyFree {
+		return time.Time{}, false
+	}
+	return minHeld, true
+}
+
 // exponentialFor is InitialHoldoff doubled per consecutive strike, capped at MaxHoldoff.
 func exponentialFor(strikes int) time.Duration {
 	d := InitialHoldoff
