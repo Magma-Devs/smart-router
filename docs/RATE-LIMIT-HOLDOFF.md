@@ -51,6 +51,19 @@ off" means on its path. This table is the catalog; add a row when wiring a new c
 | WS subscriptions (`direct_ws_subscription_manager.go`) | A rate-limited connect/subscribe is held off instead of scored (no availability sample), selection skips held endpoints while something ready remains, and the pool's reconnect ladder is floored by the dial's Retry-After. Keyed per WS URL — no provider name exists on this path, so vendor-tier escalation does not apply | 429 handshakes and subscribe failures | live |
 | WS / gRPC transports | Recognition first: a 429 on the WS upgrade or a corroborated gRPC rate limit produces the typed sentinel these consumers key on | handshake / metadata 429s | lands with MAG-2949 |
 
+## Metrics
+
+The registry emits its own events, so every consumer is covered without wiring:
+
+- `smartrouter_rate_limit_holdoffs_total{provider, event}` — `recorded` (a 429 held an
+  endpoint off), `escalated` (counted on the transition to a provider-wide hold-off),
+  `cleared` (an answer dropped a standing penalty).
+- `smartrouter_rate_limit_holdoff_seconds{provider}` — histogram of applied hold-offs,
+  showing upstream Retry-After magnitudes against the exponential default.
+
+URL-shaped registry keys (the ws path) are reduced to scheme://host before they become a
+label — node URLs can embed API keys and must never reach a Prometheus series.
+
 ## Relation to `common/retry_after.go`
 
 `protocol/common/retry_after.go` captures — it parses `Retry-After` and attaches it to
