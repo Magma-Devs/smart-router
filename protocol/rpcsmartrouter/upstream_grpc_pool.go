@@ -12,6 +12,7 @@ import (
 
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/grpcreflect"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
@@ -103,9 +104,11 @@ func (c *UpstreamGRPCStreamConnection) connect(ctx context.Context, timeout time
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	// 512MB for large responses
+	// Large responses. The shared constant rather than a repeated literal: this pool and
+	// chainproxy.GRPCConnector dial the same upstreams, so a divergence between them would
+	// mean the same endpoint accepted a response on one path and rejected it on the other.
 	dialOpts = append(dialOpts,
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(512*1024*1024)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(chainproxy.MaxCallRecvMsgSize)),
 	)
 
 	// MAG-2218: attach the endpoint's configured auth-headers. This pool backs
