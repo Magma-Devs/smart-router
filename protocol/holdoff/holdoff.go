@@ -70,6 +70,13 @@ type providerState struct {
 	escalatedUntil time.Time
 }
 
+// Shared is the process-wide registry every production consumer records into and
+// consults. One instance across chains and paths is what makes the provider-name
+// escalation tier meaningful: a vendor cap is account-wide, and a process probing
+// several chains through one vendor must slow all of them together. Tests build their
+// own via NewRegistry/NewRegistryWithClock instead of touching this one.
+var Shared = NewRegistry()
+
 // Registry is safe for concurrent use. The zero value is not usable; call NewRegistry.
 type Registry struct {
 	mu        sync.Mutex
