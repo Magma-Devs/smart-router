@@ -1699,6 +1699,12 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		return nil, utils.LavaFormatError("failed to marshal gRPC error response", marshalErr)
 	}
 
+	// A corroborated rate limit — a known rate-limit text, or RESOURCE_EXHAUSTED with a
+	// retry delay in the metadata — types the error, so errors.Is(err,
+	// common.StatusCodeError429) and common.RetryAfterFrom read the same on gRPC as on
+	// every HTTP transport (see GRPCStatusError.Unwrap).
+	retryAfter, rateLimited := common.RateLimitFromGRPC(errorCode, errorMessage, respHeaders)
+
 	// Return the error response with metadata
 	// The caller can inspect the response to determine if it's an error
 	return &DirectRPCResponse{
@@ -1706,9 +1712,11 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 			Metadata:   respHeaders, // Include any headers received before the error
 			StatusCode: int(errorCode),
 		}, &GRPCStatusError{
-			Code:    errorCode,
-			Message: errorMessage,
-			cause:   err,
+			Code:        errorCode,
+			Message:     errorMessage,
+			cause:       err,
+			rateLimited: rateLimited,
+			retryAfter:  retryAfter,
 		}
 }
 
@@ -1723,6 +1731,11 @@ type GRPCStatusError struct {
 	Code    uint32
 	Message string
 	cause   error
+	// rateLimited + retryAfter are set by handleGRPCError when the failure is a
+	// corroborated upstream rate refusal (common.RateLimitFromGRPC). They scope Unwrap
+	// so the typed rate-limit error is visible on the gRPC path too.
+	rateLimited bool
+	retryAfter  time.Duration
 }
 
 func (e *GRPCStatusError) Error() string {
@@ -1733,7 +1746,16 @@ func (e *GRPCStatusError) Error() string {
 // wrapper. Note this makes status.Code(err) resolve to the underlying gRPC code
 // rather than Unknown; SessionOutOfSyncGRPCCode is 677 and so cannot collide with
 // any real code, which grpc_status_error_test.go pins.
-func (e *GRPCStatusError) Unwrap() error { return e.cause }
+//
+// A corroborated rate limit unwraps to common.RateLimitedError instead, mirroring
+// HTTPStatusError: rate-limit is the terminal classification, and the typed sentinel is
+// what every consumer keys on.
+func (e *GRPCStatusError) Unwrap() error {
+	if e.rateLimited {
+		return &common.RateLimitedError{RetryAfter: e.retryAfter}
+	}
+	return e.cause
+}
 
 func (g *GRPCDirectRPCConnection) GetProtocol() DirectRPCProtocol {
 	return DirectRPCProtocolGRPC

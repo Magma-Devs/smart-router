@@ -2,8 +2,10 @@ package common
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -100,6 +102,78 @@ func retryAfterReferenceTime(h http.Header, now time.Time) time.Time {
 		return date
 	}
 	return now
+}
+
+// RateLimited types err as an upstream rate refusal carrying retryAfter, for transports
+// where WithRetryAfter's HTTP-header form does not apply (gRPC metadata, WS handshakes).
+// The sentinel lands in the chain, so errors.Is(result, StatusCodeError429) holds, and
+// RetryAfterFrom returns retryAfter when positive (clamped to MaxRetryAfter).
+func RateLimited(err error, retryAfter time.Duration) error {
+	cause := StatusCodeError429
+	if err != nil {
+		cause = fmt.Errorf("%w: %w", StatusCodeError429, err)
+	}
+	if retryAfter <= 0 {
+		return cause
+	}
+	if retryAfter > MaxRetryAfter {
+		retryAfter = MaxRetryAfter
+	}
+	return &RateLimitedError{RetryAfter: retryAfter, cause: cause}
+}
+
+// RateLimitFromGRPC reports whether a gRPC failure is the upstream refusing us for rate,
+// and the wait it asked for (0 when it said nothing usable). md is the response metadata
+// (gRPC keys are lowercase).
+//
+// gRPC carries no HTTP status, so the decision needs corroboration:
+//   - a known rate-limit text in the status message always counts — including the "429
+//     (Too Many Requests)" a vendor's HTTP edge leaves inside codes.Unavailable;
+//   - RESOURCE_EXHAUSTED (code 8) counts only when the metadata carries a retry delay.
+//     Alone it never suffices: grpc-go mints the same code for an oversized message.
+func RateLimitFromGRPC(code uint32, message string, md map[string][]string) (time.Duration, bool) {
+	retryAfter := grpcRetryDelayFromMD(md)
+	msg := strings.ToLower(message)
+	for _, sig := range []string{"too many requests", "rate limit", "ratelimit", "enhance_your_calm"} {
+		if strings.Contains(msg, sig) {
+			return retryAfter, true
+		}
+	}
+	const grpcResourceExhausted = 8
+	if code == grpcResourceExhausted && retryAfter > 0 {
+		return retryAfter, true
+	}
+	return 0, false
+}
+
+// grpcRetryDelayFromMD reads the delay an upstream attached to a gRPC failure: the
+// grpc-retry-pushback-ms convention, or a retry-after header a fronting HTTP proxy left
+// in. Keys are matched lowercase — http.Header canonicalization does not apply to gRPC
+// metadata. Clamped to MaxRetryAfter like every other capture.
+func grpcRetryDelayFromMD(md map[string][]string) time.Duration {
+	first := func(key string) string {
+		if vs := md[key]; len(vs) > 0 {
+			return vs[0]
+		}
+		return ""
+	}
+	if raw := first("grpc-retry-pushback-ms"); raw != "" {
+		if ms, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && ms > 0 {
+			d := time.Duration(ms) * time.Millisecond
+			if d > MaxRetryAfter {
+				return MaxRetryAfter
+			}
+			return d
+		}
+	}
+	if raw := first("retry-after"); raw != "" {
+		h := http.Header{}
+		h.Set("Retry-After", raw)
+		if d, ok := ParseRetryAfter(h, time.Now()); ok {
+			return d
+		}
+	}
+	return 0
 }
 
 // WithRetryAfter enriches a rate-limit error with the upstream's Retry-After, if it sent one.
