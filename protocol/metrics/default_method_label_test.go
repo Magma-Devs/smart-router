@@ -156,6 +156,9 @@ func TestDefaultMethodShapeKeepsRouteElements(t *testing.T) {
 		"/estimate_gas_price",
 		"/transactions/encode_submission",
 		"/wallet/getnowblock",
+		// The longest digit-carrying route segment in any spec (39 chars, TRX). It
+		// pins minOpaqueIDLen from below: a threshold at or under 39 reads it as an id.
+		"/wallet/gettriggerinputforshieldedtrc20contract",
 		"/robots.txt",
 		"/",
 	} {

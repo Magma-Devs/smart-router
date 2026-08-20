@@ -31,11 +31,16 @@ const (
 	defaultMethodIDPlaceholder = "{}"
 
 	// minOpaqueIDLen is the length at or above which an alphanumeric segment carrying a
-	// digit is read as an identifier rather than a path element. It clears the longest
-	// real segments seen in the specs (getBlockTransactionCountByNumber, 32 chars, has
-	// no digit) and sits below the shortest identifiers (base58 tx hashes ~43, bech32
-	// addresses ~39, Tezos block hashes 51).
-	minOpaqueIDLen = 26
+	// digit is read as an identifier rather than a path element. Measured over every
+	// REST api segment in the specs: the longest real route segment carrying a digit is
+	// 39 chars (TRX's gettriggerinputforshieldedtrc20contract) and the shortest real
+	// identifier class starts at 43 (base58 of a 32-byte hash is 43-44 chars; bech32
+	// addresses 44-45, Tezos block hashes 51). 43 is the top of that gap: it still
+	// catches every identifier class while maximizing route-segment headroom, which is
+	// the direction to err in — an under-collapsed value costs a budget entry the cap
+	// absorbs, an over-collapsed route segment merges two real endpoints into one
+	// series and cannot be undone.
+	minOpaqueIDLen = 43
 )
 
 // defaultMethodShape collapses concrete identifiers in an unmatched REST path to
