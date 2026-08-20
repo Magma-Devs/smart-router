@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 const (
@@ -40,8 +41,10 @@ const (
 var wsBufferPool = new(sync.Pool)
 
 type wsHandshakeError struct {
-	err    error
-	status string
+	err        error
+	status     string
+	statusCode int
+	retryAfter time.Duration
 }
 
 func (e wsHandshakeError) Error() string {
@@ -50,6 +53,17 @@ func (e wsHandshakeError) Error() string {
 		s += " (HTTP status " + e.status + ")"
 	}
 	return s
+}
+
+// Unwrap presents a 429 upgrade rejection as the typed rate-limit error, so
+// errors.Is(err, common.StatusCodeError429) and common.RetryAfterFrom read the same on a
+// refused WS handshake as on every HTTP transport. Any other status unwraps to the dial
+// error itself.
+func (e wsHandshakeError) Unwrap() error {
+	if e.statusCode == http.StatusTooManyRequests {
+		return &common.RateLimitedError{RetryAfter: e.retryAfter}
+	}
+	return e.err
 }
 
 // DialWebsocketWithDialer creates a new RPC client that communicates with a JSON-RPC server
@@ -64,7 +78,11 @@ func DialWebsocketWithDialer(ctx context.Context, endpoint string, dialer websoc
 		if err != nil {
 			hErr := wsHandshakeError{err: err}
 			if resp != nil {
+				// Capture the rejection while the response is in scope — the status code
+				// types a 429 (see Unwrap), and Retry-After is what any backoff needs.
 				hErr.status = resp.Status
+				hErr.statusCode = resp.StatusCode
+				hErr.retryAfter, _ = common.ParseRetryAfter(resp.Header, time.Now())
 			}
 			return nil, hErr
 		}

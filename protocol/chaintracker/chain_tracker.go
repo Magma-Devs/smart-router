@@ -169,6 +169,11 @@ type ChainTracker struct {
 	// surfaced by /debug/endpoint-state as PollIntervalMs (MAG-2395). Written only by the poll
 	// goroutine (updateTimer), read by any goroutine.
 	currentPollIntervalNanos atomic.Int64
+	// rateLimitedUntil (unix nanos, 0 = none) is the instant the polled upstream asked us to
+	// stay away until, taken from the typed rate-limit error's Retry-After. computePollInterval
+	// floors the next interval with it, so a 429 with "Retry-After: 300" is not re-polled at the
+	// generic backoff's 60s ceiling. Written on each real poll outcome, cleared by any answer.
+	rateLimitedUntil atomic.Int64
 	// resetBackoffCh signals the poll goroutine to clear the failure backoff — zero fetchFails and
 	// reschedule the next poll at base cadence. Buffered(1) with a non-blocking send in
 	// ResetBackoff, so /debug/reset-probe-backoff never blocks on the poll goroutine (MAG-2395).
@@ -530,7 +535,7 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context, f
 	gotNewBlock := cs.gotNewBlock(ctx, newLatestBlock)
 	forked, err := cs.forkChanged(ctx, newLatestBlock)
 	if err != nil {
-		return false, utils.LavaFormatDebug("could not fetchLatestBlock Hash in ChainTracker", utils.Attribute{Key: "error", Value: err}, utils.Attribute{Key: "block", Value: newLatestBlock}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
+		return false, utils.LavaFormatDebugErr("could not fetchLatestBlock Hash in ChainTracker", err, utils.Attribute{Key: "block", Value: newLatestBlock}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
 	}
 	prev_latest := cs.GetAtomicLatestBlockNum()
 	if gotNewBlock || forked {
@@ -667,6 +672,11 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 				// resulting counter uniformly — a healthy endpoint (fetchFails==0) keeps the normal
 				// cadence; a failing one stays backed off between the bounded forced verification polls.
 				fetchFails = nextFetchFails(fetchFails, skipped, err != nil)
+				if !skipped {
+					// A gate skip contacted nobody, so it can neither set nor clear the
+					// rate-limit floor; a real poll's outcome does both.
+					cs.noteFetchOutcome(err)
+				}
 				cs.updateTimer(pollingTime, fetchFails)
 				if err != nil {
 					if fetchFails > maxFails {
@@ -710,6 +720,9 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 				_, pollErr := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx, true)
 				cancel()
+				// The schedule itself is untouched (see above), but the poll was real, so it
+				// still informs the rate-limit floor the NEXT timer-driven reschedule reads.
+				cs.noteFetchOutcome(pollErr)
 				req.resp <- pollErr // buffered(1): never blocks, even if the requester gave up
 			case <-cs.resetBackoffCh:
 				// /debug/reset-probe-backoff (MAG-2395): clear the failure backoff and reschedule the
@@ -832,7 +845,7 @@ func (cs *ChainTracker) CurrentPollInterval() time.Duration {
 // adaptive tiers are preserved, since its readers are not yet harvest-fed.
 func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchFails uint64) time.Duration {
 	if cs.flatPollInterval > 0 {
-		return exponentialBackoff(cs.flatPollInterval, fetchFails)
+		return cs.floorWithRetryAfter(exponentialBackoff(cs.flatPollInterval, fetchFails))
 	}
 
 	var newPollingTime time.Duration
@@ -845,7 +858,35 @@ func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchF
 	} else {
 		newPollingTime = tickerBaseTime / cs.pollingTimeMultiplier
 	}
-	return exponentialBackoff(newPollingTime, fetchFails)
+	return cs.floorWithRetryAfter(exponentialBackoff(newPollingTime, fetchFails))
+}
+
+// noteFetchOutcome keeps the rate-limit floor current: a poll that failed with the typed
+// rate-limit error records how long the upstream asked us to stay away; any other real
+// poll outcome — success or a different failure — clears it, because the upstream
+// answered and its Retry-After is spent.
+func (cs *ChainTracker) noteFetchOutcome(err error) {
+	if d, ok := common.RetryAfterFrom(err); ok {
+		cs.rateLimitedUntil.Store(time.Now().Add(d).UnixNano())
+		return
+	}
+	cs.rateLimitedUntil.Store(0)
+}
+
+// floorWithRetryAfter stretches the computed poll interval to honour an upstream's
+// Retry-After when it named a longer wait than the generic failure backoff — a 429 with
+// "Retry-After: 300" must not be re-polled at the backoff's 60s ceiling. It never
+// shortens an interval.
+func (cs *ChainTracker) floorWithRetryAfter(interval time.Duration) time.Duration {
+	until := cs.rateLimitedUntil.Load()
+	if until == 0 {
+		return interval
+	}
+	wait := time.Until(time.Unix(0, until))
+	if wait <= interval {
+		return interval
+	}
+	return wait
 }
 
 func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) {
