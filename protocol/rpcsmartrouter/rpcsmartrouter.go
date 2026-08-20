@@ -1722,14 +1722,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	//
 	// One row per recorded comparison outcome, oldest first, from both recording paths (Source):
 	//   reply-time  a content outlier seen before the reply — it is in the request's
-	//               lava-cross-validation-disagreeing-providers header.
+	//               smartrouter-cross-validation-disagreeing-providers header.
 	//   straggler   a provider that lost the race to quorum (it is in pending-providers) and whose
 	//               late answer the async watcher resolved. EVERY resolution is recorded, not only
 	//               dissent: an "agreed" row is the positive control a test asserting "no dissent
 	//               happened" anchors on, and node-error / protocol-error / not-received rows say a
 	//               late answer arrived broken or never arrived.
 	//
-	// Filters (all optional, ANDed): request_id (the Lava-Guid response header value — NOT
+	// Filters (all optional, ANDed): request_id (the Smart-Router-Guid response header value — NOT
 	// /debug/logs' request_id, which is the caller's X-Request-Id), chain_id, outcome, limit (keeps
 	// the most recent N). Status codes:
 	//   200  the rows follow, as a flat JSON array; [] means the recorder was live and saw no dissent.

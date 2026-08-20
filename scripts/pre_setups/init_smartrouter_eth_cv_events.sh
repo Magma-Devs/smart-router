@@ -33,7 +33,7 @@
 # simulator's latency knob to decide who wins the race to quorum:
 #
 #   reply-time  the dissenter answers FIRST, so its response is in hand when the
-#               reply is built -> it lands in lava-cross-validation-disagreeing-providers.
+#               reply is built -> it lands in smartrouter-cross-validation-disagreeing-providers.
 #   straggler   the dissenter is delayed past the quorum early-exit, so it is
 #               PENDING at reply time and the async watcher resolves it after.
 #
@@ -148,7 +148,7 @@ set_fleet() {
 events() { curl -s "http://127.0.0.1:$DEBUG_PORT/debug/cross-validation-events$1"; }
 events_clear() { curl -s -X POST "http://127.0.0.1:$DEBUG_PORT/debug/cross-validation-events/clear"; }
 
-# cv_call <nonce> : one cross-validated eth_getBalance, echoing the request's lava-guid.
+# cv_call <nonce> : one cross-validated eth_getBalance, echoing the request's smart-router-guid.
 # The address varies per call so no response can be served from cache — a cache hit
 # would skip the fan-out entirely and there would be nothing to disagree about.
 cv_call() {
@@ -159,7 +159,7 @@ cv_call() {
 		-d "{\"jsonrpc\":\"2.0\",\"method\":\"$CV_METHOD\",\"params\":[\"$addr\",\"$CV_BLOCK\"],\"id\":$nonce}")
 	# grep -i, not awk's IGNORECASE: that is a gawk extension and macOS ships BWK awk,
 	# where it silently sets an unused variable and the match never fires.
-	printf '%s' "$headers" | grep -i '^lava-guid:' | tr -d '\r' | awk '{print $2}'
+	printf '%s' "$headers" | grep -i '^smart-router-guid:' | tr -d '\r' | awk '{print $2}'
 }
 
 # cv_headers <nonce> : the cross-validation headers for one call, for the manual view.
@@ -169,7 +169,7 @@ cv_headers() {
 	curl -s -D - -o /dev/null -X POST "http://127.0.0.1:$ETH_PORT" \
 		-H 'Content-Type: application/json' \
 		-d "{\"jsonrpc\":\"2.0\",\"method\":\"$CV_METHOD\",\"params\":[\"$addr\",\"$CV_BLOCK\"],\"id\":$nonce}" \
-		| grep -i '^lava-' | sed 's/\r//' | sed 's/^/    /'
+		| grep -iE '^(smart-router-|smartrouter-)' | sed 's/\r//' | sed 's/^/    /'
 }
 
 # -----------------------------------------------------------------------------
@@ -351,7 +351,7 @@ else
 	set_fleet 0 0 800 no
 	events_clear >/dev/null
 	GUID_OK=$(cv_call 1)
-	echo "  lava-guid: ${GUID_OK:-<none>}"
+	echo "  smart-router-guid: ${GUID_OK:-<none>}"
 	check "the guid is returned so a test can correlate" "$([[ -n "$GUID_OK" ]] && echo yes || echo no)" "yes"
 	ROW_OK=$(await_row "$GUID_OK" "")
 	echo "$ROW_OK" | jq . | sed 's/^/    /'
@@ -369,11 +369,11 @@ else
 	echo "============================================"
 	# The dissenter answers FIRST and the two honest providers are held back, so its
 	# response is already in hand when quorum forms — the reply-time path, and the
-	# provider appears in lava-cross-validation-disagreeing-providers.
+	# provider appears in smartrouter-cross-validation-disagreeing-providers.
 	set_fleet 400 400 0 yes
 	events_clear >/dev/null
 	GUID_RT=$(cv_call 2)
-	echo "  lava-guid: ${GUID_RT:-<none>}"
+	echo "  smart-router-guid: ${GUID_RT:-<none>}"
 	ROW_RT=$(await_row "$GUID_RT" "")
 	echo "$ROW_RT" | jq . | sed 's/^/    /'
 	check "Source is reply-time"       "$(echo "$ROW_RT" | jq -r '.Source // ""')" "reply-time"
@@ -397,7 +397,7 @@ else
 	set_fleet 0 0 1500 yes
 	events_clear >/dev/null
 	GUID_ST=$(cv_call 3)
-	echo "  lava-guid: ${GUID_ST:-<none>}"
+	echo "  smart-router-guid: ${GUID_ST:-<none>}"
 	echo "  waiting for the straggler watcher ..."
 	ROW_ST=$(await_row "$GUID_ST" "")
 	echo "$ROW_ST" | jq . | sed 's/^/    /'
@@ -436,9 +436,9 @@ Router is running — manual commands
 Read every recorded event:
   curl -s http://127.0.0.1:$DEBUG_PORT/debug/cross-validation-events | jq
 
-Filter (all optional, ANDed) — request_id is the Lava-Guid response header value,
+Filter (all optional, ANDed) — request_id is the Smart-Router-Guid response header value,
 NOT /debug/logs' request_id (that one is the caller's X-Request-Id):
-  curl -s "http://127.0.0.1:$DEBUG_PORT/debug/cross-validation-events?request_id=<lava-guid>" | jq
+  curl -s "http://127.0.0.1:$DEBUG_PORT/debug/cross-validation-events?request_id=<smart-router-guid>" | jq
   curl -s "http://127.0.0.1:$DEBUG_PORT/debug/cross-validation-events?chain_id=ETH1" | jq
   curl -s "http://127.0.0.1:$DEBUG_PORT/debug/cross-validation-events?outcome=disagreed" | jq
   curl -s "http://127.0.0.1:$DEBUG_PORT/debug/cross-validation-events?limit=5" | jq
@@ -454,7 +454,7 @@ would skip the fan-out):
   curl -s -D - -o /dev/null -X POST http://127.0.0.1:$ETH_PORT \\
     -H 'Content-Type: application/json' \\
     -d '{"jsonrpc":"2.0","method":"$CV_METHOD","params":["0x000000000000000000000000000000000000beef","$CV_BLOCK"],"id":1}' \\
-    | grep -i '^lava-'
+    | grep -iE '^(smart-router-|smartrouter-)'
 
 Make sim-3 dissent (reply-time row), or delay it past the quorum (straggler row):
   curl -s -X POST http://$SIM_CONTROL/scenario -H 'Content-Type: application/json' \\

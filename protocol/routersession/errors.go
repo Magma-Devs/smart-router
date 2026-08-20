@@ -21,7 +21,7 @@ var ( // Consumer Side Errors
 	ContextDoneNoNeedToLockSelectionError   = errors.New("Context deadline exceeded while trying to lock selection")
 	BlockEndpointError                      = errors.New("Block the endpoint")
 	ConsistencyPreValidationError           = errors.New("endpoint failed pre-request consistency validation")
-	// The two outcomes of `lava-select-provider`, kept apart because the message
+	// The two outcomes of `smartrouter-select-provider`, kept apart because the message
 	// reaches the caller verbatim: "not a provider here" and "already failed"
 	// call for different reactions.
 	SelectedProviderUnavailableError   = errors.New("Header-selected provider is not a valid provider for this request")

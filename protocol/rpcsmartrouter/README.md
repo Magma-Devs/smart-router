@@ -293,7 +293,7 @@ One row per recorded comparison outcome, oldest first:
 | `Seq`, `RecordedAt` | monotonic id and timestamp; `Seq` is the unambiguous ordering key |
 | `Source` | `reply-time` (seen before the reply → in `disagreeing-providers`) or `straggler` (resolved after it → was in `pending-providers`) |
 | `ChainID`, `ApiInterface` | the row's own chain identity, as on every other `/debug` row |
-| `RequestID` | the `Lava-Guid` response header value — **not** `/debug/logs`' `request_id`, which is the caller's `X-Request-Id` |
+| `RequestID` | the `Smart-Router-Guid` response header value — **not** `/debug/logs`' `request_id`, which is the caller's `X-Request-Id` |
 | `Method`, `ProviderAddress`, `ProviderGroup`, `Finality` | who dissented, on what, in which group, at which finality |
 | `Outcome` | `disagreed` at reply time; any straggler outcome on the async path |
 | `ConsensusHash`, `OutlierHash` | full 32-byte hex; the log's short form is a prefix. `OutlierHash` is the provider's own hash — equal to `ConsensusHash` on an agreed straggler, and `""` when nothing was hashed (`node-error` / `protocol-error` / `not-received`) |
@@ -302,7 +302,7 @@ One row per recorded comparison outcome, oldest first:
 Every straggler resolution is recorded, not only dissent: an `agreed` row is the positive control a
 test asserting "no dissent happened" anchors on. A cross-validated request where **everyone agreed at
 reply time** records nothing — that request is proven to have run by its own
-`lava-cross-validation-status` / `-agreeing-providers` headers.
+`smartrouter-cross-validation-status` / `-agreeing-providers` headers.
 
 Filters (optional, ANDed): `request_id`, `chain_id`, `outcome`, `limit` (keeps the most recent N).
 `POST /debug/cross-validation-events/clear` empties the ring for test isolation.

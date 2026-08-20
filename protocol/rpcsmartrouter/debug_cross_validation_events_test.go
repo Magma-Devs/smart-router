@@ -173,7 +173,7 @@ func TestDebugCrossValidationEvents_RowShape(t *testing.T) {
 		ApiInterface:    "jsonrpc",
 		RequestID:       "424242",
 		Method:          "eth_getBalance",
-		ProviderAddress: "lava@provider3",
+		ProviderAddress: "provider@provider3",
 		ProviderGroup:   "tier-1",
 		Outcome:         common.CrossValidationStragglerOutcomeDisagreed,
 		Finality:        "finalized",
@@ -188,7 +188,7 @@ func TestDebugCrossValidationEvents_RowShape(t *testing.T) {
 		ApiInterface:    "jsonrpc",
 		RequestID:       "424242",
 		Method:          "eth_getBalance",
-		ProviderAddress: "lava@provider4",
+		ProviderAddress: "provider@provider4",
 		ProviderGroup:   common.DefaultProviderGroup,
 		Outcome:         common.CrossValidationStragglerOutcomeNotReceived,
 		Finality:        "finalized",
@@ -207,7 +207,7 @@ func TestDebugCrossValidationEvents_RowShape(t *testing.T) {
 	require.Equal(t, "jsonrpc", first["ApiInterface"])
 	require.Equal(t, "424242", first["RequestID"])
 	require.Equal(t, "eth_getBalance", first["Method"])
-	require.Equal(t, "lava@provider3", first["ProviderAddress"])
+	require.Equal(t, "provider@provider3", first["ProviderAddress"])
 	require.Equal(t, "tier-1", first["ProviderGroup"])
 	require.Equal(t, "disagreed", first["Outcome"])
 	require.Equal(t, "finalized", first["Finality"])
@@ -347,7 +347,7 @@ func TestCrossValidationEvents_ReplyTimePathRecords(t *testing.T) {
 // TestCrossValidationEvents_ReplyTimeAgreementRecordsNothing guards the surface against becoming a
 // log of every cross-validated relay: with no outlier there is nothing to record. A test asserting
 // "no dissent happened" reads an empty result here and confirms the request ran from its own
-// response headers (lava-cross-validation-status / -agreeing-providers).
+// response headers (smartrouter-cross-validation-status / -agreeing-providers).
 func TestCrossValidationEvents_ReplyTimeAgreementRecordsNothing(t *testing.T) {
 	useCrossValidationEventRing(t, 32)
 	srv, _ := newCrossValidationEventTestServer(t)

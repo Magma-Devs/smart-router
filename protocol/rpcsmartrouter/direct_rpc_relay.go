@@ -842,7 +842,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			//     was served to the client as a success and was cacheable (MAG-2549).
 			//   - `Code >= 13` additionally left DeadlineExceeded (4) and every other
 			//     sub-13 code marked as not-a-node-error, which is what gates the
-			//     cache write and the lava-identified-node-error header.
+			//     cache write and the smartrouter-identified-node-error header.
 			//
 			// response.StatusCode is the same value the error carried (handleGRPCError
 			// builds both from one errorCode), so this loses nothing.

@@ -1536,7 +1536,7 @@ func TestSelectedProviderUnknownNameIsNotReportedAsAFailure(t *testing.T) {
 	require.NotContains(t, err.Error(), "already failed")
 }
 
-// The header naming the right provider in the wrong case: `lava-select-provider:
+// The header naming the right provider in the wrong case: `smartrouter-select-provider:
 // Lava` and a registered `lava` are the same provider. A case-sensitive match
 // rejected the relay outright rather than falling back.
 func TestSelectedProviderMatchesCaseInsensitively(t *testing.T) {
