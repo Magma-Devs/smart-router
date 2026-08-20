@@ -90,6 +90,16 @@ func NewRegistry() *Registry {
 	}
 }
 
+// NewRegistryWithClock is the deterministic variant for consumer tests: time comes from
+// the given clock and jitter is disabled, so applied hold-offs are exact.
+func NewRegistryWithClock(now func() time.Time) *Registry {
+	return &Registry{
+		providers: map[string]*providerState{},
+		now:       now,
+		randFloat: func() float64 { return 0 },
+	}
+}
+
 // RecordRateLimit notes a 429 from url, owned by provider. retryAfter is what the
 // upstream asked for (0 when it said nothing) and floors the hold-off. Returns the
 // applied hold-off so callers can log what was decided.
