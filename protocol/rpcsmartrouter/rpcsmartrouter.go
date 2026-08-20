@@ -1975,6 +1975,40 @@ func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
 	}
 }
 
+// subscriptionCollectionProbe reports whether the collection at `internalPath`
+// carries a SUBSCRIBE api, for the addons a node-url declares. It is the
+// transport half of the chain router's rule for generating per-path urls
+// (chainlib/chain_router.go): a subscription collection is served over ws, and
+// everything else over http.
+func subscriptionCollectionProbe(chainParser chainlib.ChainParser) func(internalPath string, declaredAddons []string) bool {
+	return func(internalPath string, declaredAddons []string) bool {
+		addons, _, err := chainParser.SeparateAddonsExtensions(context.Background(), declaredAddons)
+		if err != nil {
+			// The chain router surfaces this as a construction error. Here the
+			// endpoint list is being built for relays, so an unreadable addon
+			// set falls back to "http collection" — the shape all but STRK's
+			// three ws paths have.
+			return false
+		}
+		if len(addons) == 0 {
+			addons = append(addons, "")
+		}
+		for _, connectionType := range []string{"POST", ""} {
+			for _, addon := range addons {
+				collectionKey := chainlib.CollectionKey{
+					InternalPath:   internalPath,
+					Addon:          addon,
+					ConnectionType: connectionType,
+				}
+				if chainParser.IsTagInCollection(spectypes.FUNCTION_TAG_SUBSCRIBE, collectionKey) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+}
+
 // expandInternalPaths resolves each configured node-url into the set of urls
 // the router will actually dial, one per internal path the spec serves.
 //
@@ -1992,11 +2026,15 @@ func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
 //   - a url declaring none is the shared root: it stays (for the spec's own
 //     root collection, if it has one) and additionally yields one url per
 //     other internal path, with the path appended — the same
-//     `nodeUrl.Url = baseUrl + internalPath` the chain router does.
+//     `nodeUrl.Url = baseUrl + internalPath` the chain router does;
+//   - a path is generated only on the transport that serves it. A ws url
+//     yields the spec's subscription collections and an http url yields the
+//     rest, so STRK's `/ws/rpc/v0_8` is a wss endpoint and its `/rpc/v0_8` an
+//     https one — never the crossed pair, which no upstream answers.
 //
 // A spec with no internal paths at all (almost every chain) returns the input
 // unchanged.
-func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string) []common.NodeUrl {
+func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, servesSubscriptions func(internalPath string, declaredAddons []string) bool) []common.NodeUrl {
 	nonRoot := make([]string, 0, len(internalPaths))
 	for _, internalPath := range internalPaths {
 		// A path is appended to a url, so only a url path can be expanded.
@@ -2036,7 +2074,27 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string) []co
 		if nodeUrl.InternalPath != "" {
 			continue
 		}
+		// gRPC node-urls are a bare host:port and do not parse as a url; the
+		// chain router reads those as non-ws too.
+		isWs, err := chainlib.IsUrlWebSocket(nodeUrl.Url)
+		if err != nil {
+			isWs = false
+		}
 		for _, internalPath := range nonRoot {
+			// The transport has to serve the collection. A ws url answers the
+			// spec's subscription collections and an http url answers the rest
+			// — chain_router.go's autoGenerateMissingInternalPaths applies the
+			// same rule to the proxies the tracker and the verifications run
+			// on, and the two lists have to name the same urls. Generating
+			// every path on every scheme would give a STRK config carrying both
+			// `https://` and `wss://` the crossed pair as well
+			// (`https://host/ws/rpc/v0_8`, `wss://host/rpc/v0_9`): urls no
+			// upstream serves, probed on every sweep and registered in the
+			// metrics, and now — with the filter below preferring an exact path
+			// match — half of what a relay for that path can be routed onto.
+			if isWs != servesSubscriptions(internalPath, nodeUrl.Addons) {
+				continue
+			}
 			generated := nodeUrl
 			if strings.HasSuffix(nodeUrl.Url, internalPath) {
 				// The url already ENDS in this path — an operator who baked the
@@ -2251,7 +2309,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			}
 
 			endpoints := []*lavasession.Endpoint{}
-			for _, url := range expandInternalPaths(provider.NodeUrls, chainParser.GetAllInternalPaths()) {
+			for _, url := range expandInternalPaths(provider.NodeUrls, chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
 				extensions := map[string]struct{}{}
 				for _, extension := range url.Addons {
 					extensions[extension] = struct{}{}
