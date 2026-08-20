@@ -1039,3 +1039,132 @@ func TestConstructFiberCallback_NoOriginWhenMetricsDisabled(t *testing.T) {
 		t.Fatal("websocket handler never ran")
 	}
 }
+
+// restApis builds a serverApis map the way the spec loader does, so these cases exercise
+// the real compiled pattern rather than a hand-copied one.
+func restApis(connectionType string, apiNames ...string) map[ApiKey]ApiContainer {
+	serverApis := map[ApiKey]ApiContainer{}
+	for _, apiName := range apiNames {
+		serverApis[ApiKey{Name: restApiNameToRegex(apiName), ConnectionType: connectionType}] = ApiContainer{
+			api:           &spectypes.Api{Name: apiName, Enabled: true, ComputeUnits: 10},
+			collectionKey: CollectionKey{ConnectionType: connectionType},
+		}
+	}
+	return serverApis
+}
+
+// TestMatchSpecApiByNameTrailingSlash covers the slash-insensitive fallback: specs name
+// apis both with and without a trailing slash and clients send either form, but the
+// compiled name is anchored so the slash alone used to decide the match. A miss is not
+// only a metrics problem — it falls through to defaultApiContainer, which bills a flat 20
+// compute units and pins block parsing to latest.
+func TestMatchSpecApiByNameTrailingSlash(t *testing.T) {
+	t.Parallel()
+	connectionType := "GET"
+
+	testTable := []struct {
+		name         string
+		apiNames     []string
+		inputName    string
+		expectedName string
+		expectedOk   bool
+	}{
+		{
+			// The production shape: TEZOS names the api without a trailing slash, a client
+			// polls with one, and every concrete block number became its own Default- api.
+			name:         "spec omits the slash, request carries it",
+			apiNames:     []string{"/chains/main/blocks/{block_id}/header"},
+			inputName:    "/chains/main/blocks/9427283/header/",
+			expectedName: "/chains/main/blocks/{block_id}/header",
+			expectedOk:   true,
+		},
+		{
+			name:         "a named block_id is matched the same way",
+			apiNames:     []string{"/chains/main/blocks/{block_id}/header"},
+			inputName:    "/chains/main/blocks/head/header/",
+			expectedName: "/chains/main/blocks/{block_id}/header",
+			expectedOk:   true,
+		},
+		{
+			// The reverse direction: STACKS names 11 apis WITH a trailing slash.
+			name:         "spec carries the slash, request omits it",
+			apiNames:     []string{"/extended/v1/tx/"},
+			inputName:    "/extended/v1/tx",
+			expectedName: "/extended/v1/tx/",
+			expectedOk:   true,
+		},
+		{
+			name:         "path with no placeholder still matches with a slash",
+			apiNames:     []string{"/chains/main/chain_id"},
+			inputName:    "/chains/main/chain_id/",
+			expectedName: "/chains/main/chain_id",
+			expectedOk:   true,
+		},
+		{
+			// ARWEAVE, APT1 and XLM each name a real api exactly "/" — trimming must not
+			// reduce it to the empty string and match everything.
+			name:         "the root api keeps matching",
+			apiNames:     []string{"/"},
+			inputName:    "/",
+			expectedName: "/",
+			expectedOk:   true,
+		},
+		{
+			// The fallback must never re-route a request that matches an api as sent:
+			// both apis are present and the exactly-matching one has to win regardless of
+			// map iteration order.
+			name:         "an exact match wins over the slash-insensitive fallback",
+			apiNames:     []string{"/extended/v1/tx/", "/extended/v1/tx"},
+			inputName:    "/extended/v1/tx",
+			expectedName: "/extended/v1/tx",
+			expectedOk:   true,
+		},
+		{
+			name:         "an exact match wins in the other direction too",
+			apiNames:     []string{"/extended/v1/tx/", "/extended/v1/tx"},
+			inputName:    "/extended/v1/tx/",
+			expectedName: "/extended/v1/tx/",
+			expectedOk:   true,
+		},
+		{
+			// Relaxing the slash must not relax anything else: a genuinely unspecced path
+			// still misses, so the Default- fallthrough keeps reporting real spec gaps.
+			name:       "an unspecced path still misses",
+			apiNames:   []string{"/chains/main/blocks/{block_id}/header"},
+			inputName:  "/chains/main/blocks/9427283/header/shell/",
+			expectedOk: false,
+		},
+		{
+			name:       "a sibling path is not swallowed by the relaxed match",
+			apiNames:   []string{"/chains/main/blocks/{block_id}/header"},
+			inputName:  "/chains/main/blocks/9427283/metadata/",
+			expectedOk: false,
+		},
+	}
+
+	for _, testCase := range testTable {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Repeated to catch an order-dependent answer: serverApis is a map, so a case
+			// with two candidates would otherwise pass or fail at random.
+			for i := 0; i < 32; i++ {
+				api, ok := matchSpecApiByName(testCase.inputName, connectionType, restApis(connectionType, testCase.apiNames...))
+				require.Equal(t, testCase.expectedOk, ok)
+				if testCase.expectedOk {
+					require.Equal(t, testCase.expectedName, api.api.Name)
+				}
+			}
+		})
+	}
+}
+
+// TestMatchSpecApiByNameTrailingSlashConnectionType guards the fallback against widening
+// the match across connection types — a GET api must not answer a POST.
+func TestMatchSpecApiByNameTrailingSlashConnectionType(t *testing.T) {
+	t.Parallel()
+
+	serverApis := restApis("GET", "/chains/main/blocks/{block_id}/header")
+	_, ok := matchSpecApiByName("/chains/main/blocks/9427283/header/", "POST", serverApis)
+	require.False(t, ok)
+}

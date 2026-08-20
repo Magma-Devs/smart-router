@@ -307,8 +307,22 @@ func TestRegexParsing(t *testing.T) {
 		_, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 	}
+	// A trailing slash is optional: the spec names this api without one, and the request
+	// resolves to it rather than falling through to the synthetic Default- api.
+	for api, expectedApiName := range map[string]string{
+		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2":  "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
+		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2/": "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
+	} {
+		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, err)
+		require.Equal(t, expectedApiName, chainMessage.GetApi().GetName())
+	}
+
+	// Only the slash is relaxed — a path the spec genuinely does not describe still falls
+	// through, which is what keeps Default-* a usable spec-gap signal.
 	for _, api := range []string{
-		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2/",
+		"/not/a/real/lava/path",
+		"/not/a/real/lava/path/",
 	} {
 		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		if err == nil {

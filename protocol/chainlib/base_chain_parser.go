@@ -639,13 +639,8 @@ func getServiceApis(
 
 				// TODO: find a better spot for this (more optimized, precompile regex, etc)
 				if rpcInterface == spectypes.APIInterfaceRest {
-					re := regexp.MustCompile(`{[^}]+}`)
-					processedName := string(re.ReplaceAll([]byte(api.Name), []byte("replace-me-with-regex")))
-					processedName = regexp.QuoteMeta(processedName)
-					processedName = strings.ReplaceAll(processedName, "replace-me-with-regex/", `[^\/\s]+/`)
-					processedName = strings.ReplaceAll(processedName, "replace-me-with-regex", `[^\/\s]*`)
 					serverApis[ApiKey{
-						Name:           processedName,
+						Name:           restApiNameToRegex(api.Name),
 						ConnectionType: collectionKey.ConnectionType,
 					}] = ApiContainer{
 						api:           api,
@@ -736,10 +731,45 @@ func (bcp *BaseChainParser) ExtensionsParser() *extensionslib.ExtensionParser {
 	return &bcp.extensionParser
 }
 
+// restApiNameToRegex turns a REST spec api name into the pattern stored on its ApiKey:
+// each {placeholder} becomes a single path segment, everything else is literal. A trailing
+// placeholder may match empty, an inner one may not.
+func restApiNameToRegex(apiName string) string {
+	re := regexp.MustCompile(`{[^}]+}`)
+	processedName := string(re.ReplaceAll([]byte(apiName), []byte("replace-me-with-regex")))
+	processedName = regexp.QuoteMeta(processedName)
+	processedName = strings.ReplaceAll(processedName, "replace-me-with-regex/", `[^\/\s]+/`)
+	processedName = strings.ReplaceAll(processedName, "replace-me-with-regex", `[^\/\s]*`)
+	return processedName
+}
+
+// trimOptionalTrailingSlash drops one trailing slash, leaving a bare "/" untouched —
+// several specs (ARWEAVE, APT1, XLM) name a real api exactly "/".
+func trimOptionalTrailingSlash(path string) string {
+	if len(path) > 1 && strings.HasSuffix(path, "/") {
+		return path[:len(path)-1]
+	}
+	return path
+}
+
 // matchSpecApiByName returns service api which match given name
+//
+// A trailing slash is optional on both sides: specs name apis both ways (TEZOS omits it,
+// STACKS carries it) and clients send either form, while the compiled name is anchored
+// "^...$" so the slash alone decides the match. A path that misses here falls through to
+// defaultApiContainer, which bills a flat 20 compute units and pins block parsing to
+// latest, so the miss is a routing error and not only a metrics one.
+//
+// The relaxed comparison is a FALLBACK: every api is first tried against the path exactly
+// as sent, and a slash-insensitive hit is returned only when nothing matched. That way the
+// change can only widen the accepted set — it can never re-route a request that matches an
+// api today.
 func matchSpecApiByName(name, connectionType string, serverApis map[ApiKey]ApiContainer) (*ApiContainer, bool) {
 	// TODO: make it faster and better by not doing a regex instead using a better algorithm
 	foundNameOnDifferentConnectionType := ""
+	trimmedName := trimOptionalTrailingSlash(name)
+	var slashInsensitiveMatch *ApiContainer
+
 	for apiName, api := range serverApis {
 		re, err := regexp.Compile("^" + apiName.Name + "$")
 		if err != nil {
@@ -752,7 +782,35 @@ func matchSpecApiByName(name, connectionType string, serverApis map[ApiKey]ApiCo
 			} else {
 				foundNameOnDifferentConnectionType = apiName.ConnectionType
 			}
+			continue
 		}
+		if slashInsensitiveMatch != nil || apiName.ConnectionType != connectionType {
+			continue
+		}
+		trimmedApiName := trimOptionalTrailingSlash(apiName.Name)
+		if trimmedApiName == apiName.Name {
+			// The spec name carries no trailing slash, so re is already the pattern for
+			// its trimmed form — the relaxation costs nothing beyond one more match.
+			if trimmedName != name && re.MatchString(trimmedName) {
+				matched := api
+				slashInsensitiveMatch = &matched
+			}
+			continue
+		}
+		// Only a spec name that itself ends in a slash needs a second pattern.
+		trimmedRe, err := regexp.Compile("^" + trimmedApiName + "$")
+		if err != nil {
+			utils.LavaFormatError("regex Compile api", err, utils.Attribute{Key: "apiName", Value: trimmedApiName})
+			continue
+		}
+		if trimmedRe.MatchString(trimmedName) {
+			matched := api
+			slashInsensitiveMatch = &matched
+		}
+	}
+
+	if slashInsensitiveMatch != nil {
+		return slashInsensitiveMatch, true
 	}
 	if foundNameOnDifferentConnectionType != "" { // its hard to notice when we have an API on only one connection type.
 		utils.LavaFormatWarning("API was found on a different connection type", nil,
