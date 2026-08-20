@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -441,9 +442,48 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 //
 // tier and byURL come from one endpointsSnapshot so the optimizer's chosen URL is
 // resolved against the same generation of the index it was offered from.
+// notHeldOff returns the endpoints of tier that are not currently rate-limit held off.
+func notHeldOff(tier []*common.NodeUrl) []*common.NodeUrl {
+	ready := make([]*common.NodeUrl, 0, len(tier))
+	for _, ep := range tier {
+		if !relayHoldoff.HeldOff(ep.Url, ep.Url) {
+			ready = append(ready, ep)
+		}
+	}
+	return ready
+}
+
+// noteSubscribeFailure applies a failed connect/subscribe attempt's consequences. A
+// rate-limited attempt is held off instead of scored — the endpoint is busy, not broken,
+// and an availability sample of 0 is the demotion the rate-limit contract forbids
+// (docs/RATE-LIMIT-HOLDOFF.md). Anything else penalizes the optimizer as before. The WS
+// path works on bare node URLs with no provider name in scope, so the URL keys both
+// registry tiers — WS hold-offs are per-URL and do not escalate across a vendor.
+func (dwsm *DirectWSSubscriptionManager) noteSubscribeFailure(url string, err error) {
+	if errors.Is(err, common.StatusCodeError429) {
+		retryAfter, _ := common.RetryAfterFrom(err)
+		heldFor := relayHoldoff.RecordRateLimit(url, url, retryAfter)
+		utils.LavaFormatDebug("DirectWS: subscribe rate-limited by upstream, holding endpoint off",
+			utils.LogAttr("endpoint", sanitizeEndpointURL(url)),
+			utils.LogAttr("holdoff", heldFor.String()),
+		)
+		return
+	}
+	if dwsm.optimizer != nil {
+		dwsm.optimizer.AppendRelayFailure(url)
+	}
+}
+
 func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tier []*common.NodeUrl, byURL map[string]*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
 	if len(tier) == 0 {
 		return nil, fmt.Errorf("tier is empty")
+	}
+
+	// Rate-limit hold-off: prefer endpoints that are not currently held off after a 429.
+	// Only narrows the tier when something ready remains — a subscription must still be
+	// served when every endpoint is held off, so the full tier stays in that case.
+	if ready := notHeldOff(tier); len(ready) > 0 && len(ready) < len(tier) {
+		tier = ready
 	}
 
 	// Single endpoint or no optimizer: first-non-ignored.
@@ -665,10 +705,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// Get connection
 	conn, err := pool.GetConnection(ctx)
 	if err != nil {
-		// Report failure to optimizer
-		if dwsm.optimizer != nil {
-			dwsm.optimizer.AppendRelayFailure(selectedEndpoint.Url)
-		}
+		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
 		dwsm.failPendingSubscription(hashedParams)
 		go dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
 		return nil, nil, fmt.Errorf("failed to get WebSocket connection: %w", err)
@@ -677,16 +714,15 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// Create upstream subscription
 	upstreamSub, firstMsg, msgChan, err := dwsm.createUpstreamSubscription(ctx, conn, subscriptionParams, subscribeMethod)
 	if err != nil {
-		// Report failure to optimizer
-		if dwsm.optimizer != nil {
-			dwsm.optimizer.AppendRelayFailure(selectedEndpoint.Url)
-		}
+		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
 		dwsm.failPendingSubscription(hashedParams)
 		go dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
 		return nil, nil, fmt.Errorf("failed to create upstream subscription: %w", err)
 	}
 
-	// Report success to optimizer
+	// Report success to optimizer. The endpoint answered, so any standing rate-limit
+	// hold-off for it is stale.
+	relayHoldoff.RecordAnswer(selectedEndpoint.Url, selectedEndpoint.Url)
 	if dwsm.optimizer != nil {
 		latency := time.Since(startTime)
 		dwsm.optimizer.AppendRelayData(selectedEndpoint.Url, latency, 1, 0) // cu=1, syncBlock=0 (unknown)
