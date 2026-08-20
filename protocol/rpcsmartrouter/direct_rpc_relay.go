@@ -34,39 +34,44 @@ type DirectRPCRelaySender struct {
 	groupLabel          string             // Cross-validation group label of this provider (may be empty)
 }
 
-// maxResponseSizeForBlockExtraction is the threshold above which the JSON-RPC path skips
-// parsing for block height extraction. Responses larger than this (e.g.
-// debug_traceTransaction, trace_replayBlockTransactions) are too expensive to unmarshal
-// and rarely contain useful block height info. The ChainTracker independently maintains
-// per-endpoint block tracking, so skipping extraction here is safe.
-const maxResponseSizeForBlockExtraction = 1 * 1024 * 1024 // 1 MB
-
-// maxGRPCResponseSizeForBlockExtraction is the same guard for the gRPC path, and it is
-// deliberately NOT the JSON-RPC number (MAG-2557). The two transports guard inverted
-// situations:
+// maxResponseSizeForBlockExtraction is the threshold above which block-height extraction
+// is skipped, on every transport (MAG-2557). One cap rather than one per transport: what
+// differs between JSON-RPC and gRPC is the encoding, not the size of the thing we want to
+// read, so splitting the number by transport would be two knobs serving one decision.
 //
-//   - On JSON-RPC the oversized responses are debug/trace methods, which are never block
-//     sources, so "too big to parse" and "nothing to extract anyway" overlap almost
-//     perfectly. 1 MB sits above every response we do want to read.
-//   - On gRPC the largest response IS the block source. GET_BLOCKNUM resolves to
-//     cosmos.base.tendermint.v1beta1.Service/GetLatestBlock across the Cosmos family
-//     (AKASH, BABYLON, COSMOSSDK, DYDX, KAVA, SEI) and GET_BLOCK_BY_NUM to
-//     GetBlockByHeight — methods returning the entire block, every tx included.
+// The value is derived, not chosen. A block-extraction cap has to sit ABOVE the largest
+// response we legitimately want to parse, because on both transports the biggest response
+// IS the block source:
 //
-// Measured live, those responses run 10-140 KB, but a block may legally grow to the
-// chain's consensus block.max_bytes: 4 MB on dYdX, 3 MB on Osmosis, 2 MB on Cosmos Hub,
-// and Tendermint's own default is 21 MB. A 1 MB cap would therefore fire only on full
-// blocks — i.e. precisely during congestion, when tip accuracy matters most, and
-// silently. A cap belongs above the range of legitimate responses, not inside it.
+//   - gRPC: GET_BLOCKNUM resolves to cosmos.base.tendermint.v1beta1.Service/GetLatestBlock
+//     across the Cosmos family (AKASH, BABYLON, COSMOSSDK, DYDX, KAVA, SEI) and
+//     GET_BLOCK_BY_NUM to GetBlockByHeight — the whole block, every tx included.
+//   - JSON-RPC: GET_BLOCK_BY_NUM is eth_getBlockByNumber, which with full transaction
+//     objects measures ~460 KB median and ~670 KB peak over recent Ethereum mainnet blocks
+//     (Base ~385/577 KB) — already inside 1.5x of the 1 MB this constant used to carry,
+//     and that was a quiet sample.
 //
-// 32 MB clears every legal block with margin while still bounding a pathological reply
-// at 16x under the connector's MaxCallRecvMsgSize (512 MB).
+// The ceiling to clear is therefore the largest block a chain can legally produce: its
+// consensus block.max_bytes — 4 MB on dYdX, 3 MB on Osmosis, 2 MB on Cosmos Hub, and
+// Tendermint's own default 21 MB. 32 MB is the next power of two above that default. A cap
+// below it fires only on full blocks — during congestion, silently, exactly when tip
+// accuracy matters most. A cap belongs above the range of legitimate responses, not inside
+// it.
 //
-// Note this guard is defense in depth, not the primary filter: extraction returns early
-// unless the method carries a spec parse_directive, and only ~17 exist across all 55 gRPC
-// collections in the spec catalog. An untagged multi-MB response never reaches the
-// unmarshal/marshal expansion at all, at any size.
-const maxGRPCResponseSizeForBlockExtraction = 32 * 1024 * 1024 // 32 MB
+// Deliberately not the transport's own MaxCallRecvMsgSize (512 MB): gRPC refuses to decode
+// a message larger than that before extraction ever runs, so a cap set there could never
+// fire. It would read as a guard and behave as none.
+//
+// What it buys differs by path, and neither is the primary filter:
+//   - On gRPC it is defense in depth. Extraction returns early unless the method carries a
+//     spec parse_directive, and only ~17 exist across all 55 gRPC collections in the
+//     catalog, so an untagged multi-MB response never reaches the unmarshal/marshal
+//     expansion at any size.
+//   - On JSON-RPC the EVM fallback is a switch over named methods with no default branch,
+//     so debug_traceTransaction and friends already return without unmarshalling whatever
+//     their size. The one method this genuinely bounds is eth_getLogs, which unmarshals the
+//     full array to read a block number off its first element.
+const maxResponseSizeForBlockExtraction = 32 * 1024 * 1024 // 32 MB
 
 // extractBlockHeightFromJSONResponse extracts block height using spec-driven parsing.
 // This works for any API interface (EVM, Tendermint, etc.) by using the chain's
@@ -76,10 +81,11 @@ func extractBlockHeightFromJSONResponse(
 	responseData []byte,
 	chainMessage chainlib.ChainMessage,
 ) int64 {
-	// Guard: skip block extraction for very large responses (e.g. debug/trace).
-	// Parsing multi-MB responses is extremely expensive (CPU + GC pressure) and
-	// these responses rarely contain block height info. Per-endpoint ChainTracker
-	// provides block tracking independently as a fallback.
+	// Guard: skip block extraction for very large responses. Parsing multi-MB responses
+	// is expensive (CPU + GC pressure) and the ones that reach an unmarshal here without
+	// carrying a height are led by eth_getLogs — see maxResponseSizeForBlockExtraction,
+	// which is shared with the gRPC path. Per-endpoint ChainTracker provides block
+	// tracking independently as a fallback when it fires.
 	if len(responseData) > maxResponseSizeForBlockExtraction {
 		utils.LavaFormatDebug("skipping block extraction for large response",
 			utils.LogAttr("response_size", len(responseData)),
@@ -251,14 +257,13 @@ func extractBlockHeightFromGRPCResponse(
 	// full-size representation, and JSON is several times the width of the packed proto it
 	// came from, so an oversized response multiplies into the router's heap.
 	//
-	// The cap is the gRPC-specific one, which is much larger than the JSON-RPC cap on
-	// purpose — see maxGRPCResponseSizeForBlockExtraction for why reusing the 1 MB number
-	// here would disable tip tracking on exactly the chains that need it. Per-endpoint
-	// ChainTracker provides block tracking independently as a fallback when it does fire.
-	if len(responseData) > maxGRPCResponseSizeForBlockExtraction {
+	// See maxResponseSizeForBlockExtraction for why the cap sits above every legal block
+	// rather than at some smaller round number. Per-endpoint ChainTracker provides block
+	// tracking independently as a fallback when it does fire.
+	if len(responseData) > maxResponseSizeForBlockExtraction {
 		utils.LavaFormatDebug("skipping gRPC block extraction for large response",
 			utils.LogAttr("response_size", len(responseData)),
-			utils.LogAttr("threshold", maxGRPCResponseSizeForBlockExtraction),
+			utils.LogAttr("threshold", maxResponseSizeForBlockExtraction),
 			utils.LogAttr("method", chainMessage.GetApi().Name),
 		)
 		return 0
