@@ -1040,15 +1040,18 @@ func TestConstructFiberCallback_NoOriginWhenMetricsDisabled(t *testing.T) {
 	}
 }
 
-// restApis builds a serverApis map the way the spec loader does, so these cases exercise
-// the real compiled pattern rather than a hand-copied one.
-func restApis(connectionType string, apiNames ...string) map[ApiKey]ApiContainer {
+// restApis builds a serverApis map through the same constructor the spec loader uses, so
+// these cases exercise the real compiled pattern and ranking rather than a hand-copied one.
+func restApis(t *testing.T, connectionType string, apiNames ...string) map[ApiKey]ApiContainer {
+	t.Helper()
 	serverApis := map[ApiKey]ApiContainer{}
 	for _, apiName := range apiNames {
-		serverApis[ApiKey{Name: restApiNameToRegex(apiName), ConnectionType: connectionType}] = ApiContainer{
-			api:           &spectypes.Api{Name: apiName, Enabled: true, ComputeUnits: 10},
-			collectionKey: CollectionKey{ConnectionType: connectionType},
-		}
+		apiKey, apiContainer, err := newRestApiContainer(
+			&spectypes.Api{Name: apiName, Enabled: true, ComputeUnits: 10},
+			CollectionKey{ConnectionType: connectionType},
+		)
+		require.NoError(t, err)
+		serverApis[apiKey] = apiContainer
 	}
 	return serverApis
 }
@@ -1127,6 +1130,15 @@ func TestMatchSpecApiByNameTrailingSlash(t *testing.T) {
 			expectedOk:   true,
 		},
 		{
+			// STACKS names apis with a trailing slash AND a placeholder before it, the one
+			// shape where the two patterns differ in more than their last character.
+			name:         "spec carries the slash after a placeholder",
+			apiNames:     []string{"/extended/v1/address/{principal}/balances/"},
+			inputName:    "/extended/v1/address/SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7/balances",
+			expectedName: "/extended/v1/address/{principal}/balances/",
+			expectedOk:   true,
+		},
+		{
 			// Relaxing the slash must not relax anything else: a genuinely unspecced path
 			// still misses, so the Default- fallthrough keeps reporting real spec gaps.
 			name:       "an unspecced path still misses",
@@ -1149,7 +1161,7 @@ func TestMatchSpecApiByNameTrailingSlash(t *testing.T) {
 			// Repeated to catch an order-dependent answer: serverApis is a map, so a case
 			// with two candidates would otherwise pass or fail at random.
 			for i := 0; i < 32; i++ {
-				api, ok := matchSpecApiByName(testCase.inputName, connectionType, restApis(connectionType, testCase.apiNames...))
+				api, ok := matchSpecApiByName(testCase.inputName, connectionType, restApis(t, connectionType, testCase.apiNames...))
 				require.Equal(t, testCase.expectedOk, ok)
 				if testCase.expectedOk {
 					require.Equal(t, testCase.expectedName, api.api.Name)
@@ -1159,12 +1171,210 @@ func TestMatchSpecApiByNameTrailingSlash(t *testing.T) {
 	}
 }
 
+// TestMatchSpecApiByNameRanksMostSpecific pins the answer when more than one api covers
+// the requested path. Specs pair a literal with the {placeholder} sibling that swallows it
+// all over the catalog — ARWEAVE /info next to /{id}, CARDANO /blocks/latest next to
+// /blocks/{hash_or_number} — and serverApis is a map, so before ranking the winner was Go
+// iteration order: a coin flip per call between apis that carry different compute units
+// (ARWEAVE /block_index is 1000, /{id} is 20) and different block parsing.
+//
+// Every case runs 32× for that reason: a two-candidate case decided by map order passes at
+// random, and a single run proves nothing.
+func TestMatchSpecApiByNameRanksMostSpecific(t *testing.T) {
+	t.Parallel()
+	connectionType := "GET"
+
+	testTable := []struct {
+		name         string
+		apiNames     []string
+		inputName    string
+		expectedName string
+	}{
+		{
+			// ARWEAVE names /{id} at the root, so it covers every one-segment path in the
+			// spec — including the api named exactly "/".
+			name:         "the root api beats the catch-all placeholder",
+			apiNames:     []string{"/", "/{id}"},
+			inputName:    "/",
+			expectedName: "/",
+		},
+		{
+			name:         "a literal beats the catch-all placeholder",
+			apiNames:     []string{"/info", "/{id}"},
+			inputName:    "/info",
+			expectedName: "/info",
+		},
+		{
+			name:         "a literal beats the catch-all placeholder with a trailing slash too",
+			apiNames:     []string{"/info", "/{id}"},
+			inputName:    "/info/",
+			expectedName: "/info",
+		},
+		{
+			// The pair this repo's own specs carry (cosmossdk.json), reached through the
+			// slash-insensitive fallback rather than an exact match.
+			name: "a literal beats its templated sibling",
+			apiNames: []string{
+				"/cosmos/base/tendermint/v1beta1/blocks/latest",
+				"/cosmos/base/tendermint/v1beta1/blocks/{height}",
+			},
+			inputName:    "/cosmos/base/tendermint/v1beta1/blocks/latest/",
+			expectedName: "/cosmos/base/tendermint/v1beta1/blocks/latest",
+		},
+		{
+			// Same pair without the slash: both patterns match the path as sent, so this
+			// one was already order-dependent before the fallback existed.
+			name: "a literal beats its templated sibling on the exact path too",
+			apiNames: []string{
+				"/cosmos/base/tendermint/v1beta1/blocks/latest",
+				"/cosmos/base/tendermint/v1beta1/blocks/{height}",
+			},
+			inputName:    "/cosmos/base/tendermint/v1beta1/blocks/latest",
+			expectedName: "/cosmos/base/tendermint/v1beta1/blocks/latest",
+		},
+		{
+			name:         "a templated block id still resolves when no literal covers it",
+			apiNames:     []string{"/blocks/latest", "/blocks/{hash_or_number}"},
+			inputName:    "/blocks/9427283/",
+			expectedName: "/blocks/{hash_or_number}",
+		},
+		{
+			// MORALIS: fewer placeholders wins even when neither name is fully literal.
+			name:         "fewer placeholders wins",
+			apiNames:     []string{"/nft/{address}/metadata", "/nft/{address}/{token_id}"},
+			inputName:    "/nft/0x1234/metadata/",
+			expectedName: "/nft/{address}/metadata",
+		},
+		{
+			name:         "a literal beats its templated sibling on a slash-named spec",
+			apiNames:     []string{"/v3/tenures/info", "/v3/tenures/{block_id}"},
+			inputName:    "/v3/tenures/info/",
+			expectedName: "/v3/tenures/info",
+		},
+		{
+			// KNOWN LIMITATION, pinned deliberately: a trailing placeholder compiles to a
+			// pattern that also matches empty, so the list path with a slash is an EXACT
+			// match for the item api and never reaches the fallback that would prefer the
+			// list. Changing it would re-route requests that resolve this way today, which
+			// is out of scope here.
+			name:         "a list path with a slash still resolves to its item api",
+			apiNames:     []string{"/cosmos/gov/v1/proposals", "/cosmos/gov/v1/proposals/{proposal_id}"},
+			inputName:    "/cosmos/gov/v1/proposals/",
+			expectedName: "/cosmos/gov/v1/proposals/{proposal_id}",
+		},
+	}
+
+	for _, testCase := range testTable {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			for i := 0; i < 32; i++ {
+				api, ok := matchSpecApiByName(testCase.inputName, connectionType, restApis(t, connectionType, testCase.apiNames...))
+				require.True(t, ok)
+				require.Equal(t, testCase.expectedName, api.api.Name)
+			}
+		})
+	}
+}
+
+// TestRestApiKeyCollapsesNamesWithTheSameShape documents what happens when a spec names
+// one path twice — COSMOSSDK has /cosmos/auth/v1beta1/bech32/{address_bytes} next to
+// {address_string}, CANTO and ELYS do the same. Placeholder identifiers are erased by the
+// name→pattern transform, so both names key the same ApiKey and the later one replaces the
+// earlier at load. The lookup is therefore never ambiguous between them; whichever survives
+// is a property of the spec file, not of map iteration order.
+func TestRestApiKeyCollapsesNamesWithTheSameShape(t *testing.T) {
+	t.Parallel()
+
+	serverApis := restApis(t, "GET",
+		"/cosmos/auth/v1beta1/bech32/{address_string}",
+		"/cosmos/auth/v1beta1/bech32/{address_bytes}",
+	)
+	require.Len(t, serverApis, 1)
+
+	for i := 0; i < 32; i++ {
+		api, ok := matchSpecApiByName("/cosmos/auth/v1beta1/bech32/lava@1abc/", "GET", serverApis)
+		require.True(t, ok)
+		require.Equal(t, "/cosmos/auth/v1beta1/bech32/{address_bytes}", api.api.Name)
+	}
+}
+
+// TestRestApiMatcherOrdering exercises moreSpecificThan directly, including the
+// lexicographic last resort that real specs cannot reach (two names that rank equal also
+// compile to the same pattern, so they collapse to one ApiKey — see the test above). It is
+// there to keep the ordering total: without it two candidates could each claim to outrank
+// the other and the winner would depend on iteration order again.
+func TestRestApiMatcherOrdering(t *testing.T) {
+	t.Parallel()
+
+	matcherFor := func(apiName string) *restApiMatcher {
+		matcher, err := buildRestApiMatcher(apiName, restApiNameToRegex(apiName))
+		require.NoError(t, err)
+		return matcher
+	}
+
+	literal := matcherFor("/blocks/latest")
+	templated := matcherFor("/blocks/{height}")
+	twoPlaceholders := matcherFor("/blocks/{height}/{index}")
+
+	// A match on the path as sent outranks a slash-insensitive one, whatever the names are.
+	require.True(t, templated.moreSpecificThan(true, literal, false))
+	require.False(t, literal.moreSpecificThan(false, templated, true))
+
+	// Within a tier, fewer placeholders wins, then more literal characters.
+	require.True(t, literal.moreSpecificThan(true, templated, true))
+	require.False(t, templated.moreSpecificThan(true, literal, true))
+	require.True(t, templated.moreSpecificThan(false, twoPlaceholders, false))
+
+	// Equal rank falls back to the api name, which is stable across restarts. Asserted in
+	// both directions: exactly one of the two must win.
+	first := matcherFor("/a/{x}")
+	second := matcherFor("/b/{x}")
+	require.True(t, first.moreSpecificThan(true, second, true))
+	require.False(t, second.moreSpecificThan(true, first, true))
+}
+
 // TestMatchSpecApiByNameTrailingSlashConnectionType guards the fallback against widening
 // the match across connection types — a GET api must not answer a POST.
 func TestMatchSpecApiByNameTrailingSlashConnectionType(t *testing.T) {
 	t.Parallel()
 
-	serverApis := restApis("GET", "/chains/main/blocks/{block_id}/header")
+	serverApis := restApis(t, "GET", "/chains/main/blocks/{block_id}/header")
 	_, ok := matchSpecApiByName("/chains/main/blocks/9427283/header/", "POST", serverApis)
 	require.False(t, ok)
+}
+
+// BenchmarkMatchSpecApiByName sizes the lookup against a spec the size of a real one (TEZOS
+// carries 219 apis). Every candidate is now ranked instead of returning on the first hit,
+// which is only affordable because the patterns are compiled at spec load rather than per
+// lookup.
+func BenchmarkMatchSpecApiByName(b *testing.B) {
+	apiNames := make([]string, 0, 200)
+	for i := 0; i < 200; i++ {
+		apiNames = append(apiNames, fmt.Sprintf("/chains/main/blocks/{block_id}/pad%d/header", i))
+	}
+	serverApis := map[ApiKey]ApiContainer{}
+	for _, apiName := range apiNames {
+		apiKey, apiContainer, err := newRestApiContainer(
+			&spectypes.Api{Name: apiName, Enabled: true, ComputeUnits: 10},
+			CollectionKey{ConnectionType: "GET"},
+		)
+		require.NoError(b, err)
+		serverApis[apiKey] = apiContainer
+	}
+
+	for _, benchCase := range []struct {
+		name string
+		path string
+	}{
+		{name: "hit", path: "/chains/main/blocks/9427283/pad180/header"},
+		{name: "hit_trailing_slash", path: "/chains/main/blocks/9427283/pad180/header/"},
+		{name: "miss", path: "/chains/main/blocks/9427283/nothing/header"},
+	} {
+		b.Run(benchCase.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				matchSpecApiByName(benchCase.path, "GET", serverApis)
+			}
+		})
+	}
 }

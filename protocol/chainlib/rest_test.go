@@ -318,6 +318,36 @@ func TestRegexParsing(t *testing.T) {
 		require.Equal(t, expectedApiName, chainMessage.GetApi().GetName())
 	}
 
+	// The point of matching the templated api is not the metric label: the synthetic
+	// Default- api bills a flat 20 compute units and parses no block at all, so a request
+	// that falls through is billed wrong and routed to the latest block. With the api
+	// resolved, the height in the path is the requested block again.
+	for _, api := range []string{
+		"/cosmos/base/tendermint/v1beta1/blocks/244590",
+		"/cosmos/base/tendermint/v1beta1/blocks/244590/",
+	} {
+		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, err)
+		require.Equal(t, "/cosmos/base/tendermint/v1beta1/blocks/{height}", chainMessage.GetApi().GetName())
+		require.EqualValues(t, 10, chainMessage.GetApi().ComputeUnits)
+		requestedBlock, _ := chainMessage.RequestedBlock()
+		require.EqualValues(t, 244590, requestedBlock)
+	}
+
+	// The spec names /blocks/latest next to /blocks/{height}, so both cover this path and
+	// the answer used to depend on map iteration order — with or without the slash. Repeated
+	// because a single call passes at random.
+	for _, api := range []string{
+		"/cosmos/base/tendermint/v1beta1/blocks/latest",
+		"/cosmos/base/tendermint/v1beta1/blocks/latest/",
+	} {
+		for i := 0; i < 32; i++ {
+			chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+			require.NoError(t, err)
+			require.Equal(t, "/cosmos/base/tendermint/v1beta1/blocks/latest", chainMessage.GetApi().GetName())
+		}
+	}
+
 	// Only the slash is relaxed — a path the spec genuinely does not describe still falls
 	// through, which is what keeps Default-* a usable spec-gap signal.
 	for _, api := range []string{

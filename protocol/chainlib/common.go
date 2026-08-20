@@ -84,6 +84,9 @@ type TaggedContainer struct {
 type ApiContainer struct {
 	api           *spectypes.Api
 	collectionKey CollectionKey
+	// restMatcher is set for REST apis only, where ApiKey.Name is a pattern that has to be
+	// matched rather than looked up. Compiled once at spec load; nil on every other interface.
+	restMatcher *restApiMatcher
 }
 
 type ApiKey struct {
