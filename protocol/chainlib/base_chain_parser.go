@@ -821,11 +821,19 @@ func buildRestApiMatcher(apiName, apiPattern string) (*restApiMatcher, error) {
 // can never re-route a request that resolves today. Beyond that the most specific name
 // wins: a literal segment describes a path better than a {placeholder} that happens to
 // swallow it, which is what keeps ARWEAVE /info on the 10-CU /info instead of the 20-CU
-// /{id}. Names that rank equal are indistinguishable — the spec describes one path twice,
-// as COSMOSSDK does with {address_bytes} and {address_string} — so the last resort is
-// lexicographic, chosen only because it is stable across restarts. Without a total order
-// the winner is Go map iteration order: a coin flip per call, between apis that can carry
-// different compute units and different block parsing.
+// /{id}.
+//
+// Two distinct names can still rank equal: /a/{x}/c and /a/b/{y} both cover /a/b/c with one
+// placeholder and five literal characters, and they compile to different patterns, so they
+// do not collapse into one ApiKey the way {address_bytes} and {address_string} do. No shape
+// in the catalog reaches that today, but it is reachable, so the last resort is the api name
+// — without a total order the winner is Go map iteration order: a coin flip per call between
+// apis that can carry different compute units and different block parsing.
+//
+// Comparing names lexicographically is also the right answer rather than merely a stable one:
+// '{' sorts above every character a path segment holds, so it reads as "literal beats
+// placeholder at the first segment where the two names differ" — the precedence an HTTP
+// router applies.
 func (m *restApiMatcher) moreSpecificThan(exact bool, other *restApiMatcher, otherExact bool) bool {
 	if exact != otherExact {
 		return exact
@@ -837,15 +845,6 @@ func (m *restApiMatcher) moreSpecificThan(exact bool, other *restApiMatcher, oth
 		return m.literalLen > other.literalLen
 	}
 	return m.name < other.name
-}
-
-// matcher returns the api's precompiled matcher, compiling one on demand for a serverApis
-// map that was not built by getServiceApis (only tests build one by hand).
-func (apiCont ApiContainer) matcher(apiKey ApiKey) (*restApiMatcher, error) {
-	if apiCont.restMatcher != nil {
-		return apiCont.restMatcher, nil
-	}
-	return buildRestApiMatcher(apiKey.Name, apiKey.Name)
 }
 
 // matchSpecApiByName returns the service api that best matches the given name.
@@ -869,9 +868,13 @@ func matchSpecApiByName(name, connectionType string, serverApis map[ApiKey]ApiCo
 	bestExact := false
 
 	for apiKey, apiCont := range serverApis {
-		matcher, err := apiCont.matcher(apiKey)
-		if err != nil {
-			utils.LavaFormatError("regex Compile api", err, utils.Attribute{Key: "apiName", Value: apiKey})
+		matcher := apiCont.restMatcher
+		if matcher == nil {
+			// Every REST api is keyed through newRestApiContainer, which always compiles a
+			// matcher, so this is unreachable. Matching without one would mean compiling in
+			// the loop — the per-lookup cost the precompilation exists to remove — so an
+			// entry that arrived some other way is dropped loudly rather than absorbed.
+			utils.LavaFormatError("REST api container has no compiled matcher", nil, utils.Attribute{Key: "apiKey", Value: apiKey})
 			continue
 		}
 		exact := matcher.pattern.MatchString(name)

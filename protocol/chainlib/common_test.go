@@ -30,70 +30,55 @@ func TestMatchSpecApiByName(t *testing.T) {
 	connectionType := ""
 	testTable := []struct {
 		name        string
-		serverApis  map[ApiKey]ApiContainer
+		apis        []*spectypes.Api
 		inputName   string
 		expectedApi spectypes.Api
 		expectedOk  bool
 	}{
 		{
 			name: "test1",
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: "/blocks/[^\\/\\s]+", ConnectionType: connectionType}: {
-					api: &spectypes.Api{
-						Name: "/blocks/{height}",
-						BlockParsing: spectypes.BlockParser{
-							ParserArg:  []string{"0"},
-							ParserFunc: spectypes.PARSER_FUNC_PARSE_BY_ARG,
-						},
-						ComputeUnits: 10,
-						Enabled:      true,
-						Category:     spectypes.SpecCategory{Deterministic: true},
-					},
-					collectionKey: CollectionKey{ConnectionType: connectionType},
+			apis: []*spectypes.Api{{
+				Name: "/blocks/{height}",
+				BlockParsing: spectypes.BlockParser{
+					ParserArg:  []string{"0"},
+					ParserFunc: spectypes.PARSER_FUNC_PARSE_BY_ARG,
 				},
-			},
+				ComputeUnits: 10,
+				Enabled:      true,
+				Category:     spectypes.SpecCategory{Deterministic: true},
+			}},
 			inputName:   "/blocks/10",
 			expectedApi: spectypes.Api{Name: "/blocks/{height}"},
 			expectedOk:  true,
 		},
 		{
 			name: "test2",
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: "/cosmos/base/tendermint/v1beta1/blocks/[^\\/\\s]+", ConnectionType: connectionType}: {
-					api: &spectypes.Api{
-						Name: "/cosmos/base/tendermint/v1beta1/blocks/{height}",
-						BlockParsing: spectypes.BlockParser{
-							ParserArg:  []string{"0"},
-							ParserFunc: spectypes.PARSER_FUNC_PARSE_BY_ARG,
-						},
-						ComputeUnits: 10,
-						Enabled:      true,
-						Category:     spectypes.SpecCategory{Deterministic: true},
-					},
-					collectionKey: CollectionKey{ConnectionType: connectionType},
+			apis: []*spectypes.Api{{
+				Name: "/cosmos/base/tendermint/v1beta1/blocks/{height}",
+				BlockParsing: spectypes.BlockParser{
+					ParserArg:  []string{"0"},
+					ParserFunc: spectypes.PARSER_FUNC_PARSE_BY_ARG,
 				},
-			},
+				ComputeUnits: 10,
+				Enabled:      true,
+				Category:     spectypes.SpecCategory{Deterministic: true},
+			}},
 			inputName:   "/cosmos/base/tendermint/v1beta1/blocks/10",
 			expectedApi: spectypes.Api{Name: "/cosmos/base/tendermint/v1beta1/blocks/{height}"},
 			expectedOk:  true,
 		},
 		{
 			name: "test3",
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: "/cosmos/base/tendermint/v1beta1/blocks/latest", ConnectionType: connectionType}: {
-					api: &spectypes.Api{
-						Name: "/cosmos/base/tendermint/v1beta1/blocks/latest",
-						BlockParsing: spectypes.BlockParser{
-							ParserArg:  []string{"0"},
-							ParserFunc: spectypes.PARSER_FUNC_DEFAULT,
-						},
-						ComputeUnits: 10,
-						Enabled:      true,
-						Category:     spectypes.SpecCategory{Deterministic: true},
-					},
-					collectionKey: CollectionKey{ConnectionType: connectionType},
+			apis: []*spectypes.Api{{
+				Name: "/cosmos/base/tendermint/v1beta1/blocks/latest",
+				BlockParsing: spectypes.BlockParser{
+					ParserArg:  []string{"0"},
+					ParserFunc: spectypes.PARSER_FUNC_DEFAULT,
 				},
-			},
+				ComputeUnits: 10,
+				Enabled:      true,
+				Category:     spectypes.SpecCategory{Deterministic: true},
+			}},
 			inputName:   "/cosmos/base/tendermint/v1beta1/blocks/latest",
 			expectedApi: spectypes.Api{Name: "/cosmos/base/tendermint/v1beta1/blocks/latest"},
 			expectedOk:  true,
@@ -103,7 +88,8 @@ func TestMatchSpecApiByName(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			api, ok := matchSpecApiByName(testCase.inputName, connectionType, testCase.serverApis)
+			serverApis := restApiContainers(t, connectionType, testCase.apis...)
+			api, ok := matchSpecApiByName(testCase.inputName, connectionType, serverApis)
 			if ok != testCase.expectedOk {
 				t.Fatalf("expected ok value %v, but got %v", testCase.expectedOk, ok)
 			}
@@ -1040,20 +1026,29 @@ func TestConstructFiberCallback_NoOriginWhenMetricsDisabled(t *testing.T) {
 	}
 }
 
-// restApis builds a serverApis map through the same constructor the spec loader uses, so
-// these cases exercise the real compiled pattern and ranking rather than a hand-copied one.
-func restApis(t *testing.T, connectionType string, apiNames ...string) map[ApiKey]ApiContainer {
-	t.Helper()
+// restApiContainers builds a serverApis map through the same constructor the spec loader
+// uses, so these cases exercise the real compiled pattern and ranking rather than a
+// hand-copied one — and so every container carries the precompiled matcher the lookup
+// requires. Building one by hand would key an api the lookup then drops.
+func restApiContainers(tb testing.TB, connectionType string, apis ...*spectypes.Api) map[ApiKey]ApiContainer {
+	tb.Helper()
 	serverApis := map[ApiKey]ApiContainer{}
-	for _, apiName := range apiNames {
-		apiKey, apiContainer, err := newRestApiContainer(
-			&spectypes.Api{Name: apiName, Enabled: true, ComputeUnits: 10},
-			CollectionKey{ConnectionType: connectionType},
-		)
-		require.NoError(t, err)
+	for _, api := range apis {
+		apiKey, apiContainer, err := newRestApiContainer(api, CollectionKey{ConnectionType: connectionType})
+		require.NoError(tb, err)
 		serverApis[apiKey] = apiContainer
 	}
 	return serverApis
+}
+
+// restApis is restApiContainers for the cases where only the api name matters.
+func restApis(tb testing.TB, connectionType string, apiNames ...string) map[ApiKey]ApiContainer {
+	tb.Helper()
+	apis := make([]*spectypes.Api, 0, len(apiNames))
+	for _, apiName := range apiNames {
+		apis = append(apis, &spectypes.Api{Name: apiName, Enabled: true, ComputeUnits: 10})
+	}
+	return restApiContainers(tb, connectionType, apis...)
 }
 
 // TestMatchSpecApiByNameTrailingSlash covers the slash-insensitive fallback: specs name
@@ -1299,11 +1294,13 @@ func TestRestApiKeyCollapsesNamesWithTheSameShape(t *testing.T) {
 	}
 }
 
-// TestRestApiMatcherOrdering exercises moreSpecificThan directly, including the
-// lexicographic last resort that real specs cannot reach (two names that rank equal also
-// compile to the same pattern, so they collapse to one ApiKey — see the test above). It is
-// there to keep the ordering total: without it two candidates could each claim to outrank
-// the other and the winner would depend on iteration order again.
+// TestRestApiMatcherOrdering exercises moreSpecificThan directly, including the lexicographic
+// last resort. No shape in the catalog reaches that step today, but it is not unreachable the
+// way collapsing names like {address_bytes}/{address_string} are (see the test above): two
+// names can rank equal and still compile to different patterns, so they key different
+// ApiKeys and both reach the lookup. It is what keeps the ordering total — without it two
+// candidates could each claim to outrank the other and the winner would depend on map
+// iteration order again.
 func TestRestApiMatcherOrdering(t *testing.T) {
 	t.Parallel()
 
@@ -1332,6 +1329,30 @@ func TestRestApiMatcherOrdering(t *testing.T) {
 	second := matcherFor("/b/{x}")
 	require.True(t, first.moreSpecificThan(true, second, true))
 	require.False(t, second.moreSpecificThan(true, first, true))
+
+	// The last resort is reachable by two names that DON'T collapse into one ApiKey, so it
+	// is not dead code: these compile to /a/[^\/\s]+/c and /a/b/[^\/\s]*, both cover /a/b/c,
+	// and both carry one placeholder and five literal characters.
+	crossA := matcherFor("/a/{x}/c")
+	crossB := matcherFor("/a/b/{y}")
+	require.NotEqual(t, restApiNameToRegex("/a/{x}/c"), restApiNameToRegex("/a/b/{y}"))
+	require.True(t, crossA.pattern.MatchString("/a/b/c"))
+	require.True(t, crossB.pattern.MatchString("/a/b/c"))
+	require.Equal(t, crossA.placeholders, crossB.placeholders)
+	require.Equal(t, crossA.literalLen, crossB.literalLen)
+
+	// '{' sorts above every character a path segment holds, so the name comparison resolves
+	// it the way an HTTP router would: literal beats placeholder at the first differing
+	// segment, here /a/b/{y} over /a/{x}/c.
+	require.True(t, crossB.moreSpecificThan(true, crossA, true))
+	require.False(t, crossA.moreSpecificThan(true, crossB, true))
+
+	// And end to end: the winner is the same on every one of 32 map iteration orders.
+	for i := 0; i < 32; i++ {
+		api, ok := matchSpecApiByName("/a/b/c", "GET", restApis(t, "GET", "/a/{x}/c", "/a/b/{y}"))
+		require.True(t, ok)
+		require.Equal(t, "/a/b/{y}", api.api.Name)
+	}
 }
 
 // TestMatchSpecApiByNameTrailingSlashConnectionType guards the fallback against widening
@@ -1353,15 +1374,7 @@ func BenchmarkMatchSpecApiByName(b *testing.B) {
 	for i := 0; i < 200; i++ {
 		apiNames = append(apiNames, fmt.Sprintf("/chains/main/blocks/{block_id}/pad%d/header", i))
 	}
-	serverApis := map[ApiKey]ApiContainer{}
-	for _, apiName := range apiNames {
-		apiKey, apiContainer, err := newRestApiContainer(
-			&spectypes.Api{Name: apiName, Enabled: true, ComputeUnits: 10},
-			CollectionKey{ConnectionType: "GET"},
-		)
-		require.NoError(b, err)
-		serverApis[apiKey] = apiContainer
-	}
+	serverApis := restApis(b, "GET", apiNames...)
 
 	for _, benchCase := range []struct {
 		name string
