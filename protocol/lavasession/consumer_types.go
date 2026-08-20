@@ -78,7 +78,6 @@ func (drsc *DirectRPCSessionConnection) GetEndpointAddress() string {
 
 const (
 	AllowInsecureConnectionToProvidersFlag     = "allow-insecure-provider-dialing"
-	AllowGRPCCompressionFlag                   = "enable-application-level-compression"
 	MaximumStreamsOverASingleConnectionFlag    = "maximum-streams-per-connection"
 	DefaultMaximumStreamsOverASingleConnection = 100
 	WeightMultiplierForStaticProviders         = 10
