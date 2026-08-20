@@ -20,7 +20,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/encoding/gzip"
 )
 
 var MaxSessionsAllowedPerProvider = 1000 // Max number of sessions allowed per provider, configurable via flag
@@ -78,7 +77,7 @@ func IsSessionSyncLoss(err error) bool {
 	return code == codes.Code(SessionOutOfSyncGRPCCode) || errors.Is(err, SessionOutOfSyncError)
 }
 
-func ConnectGRPCClient(ctx context.Context, address string, allowInsecure bool, skipTLS bool, allowCompression bool) (*grpc.ClientConn, error) {
+func ConnectGRPCClient(ctx context.Context, address string, allowInsecure bool, skipTLS bool) (*grpc.ClientConn, error) {
 	var opts []grpc.DialOption
 
 	if skipTLS {
@@ -107,13 +106,6 @@ func ConnectGRPCClient(ctx context.Context, address string, allowInsecure bool, 
 		opts = append(opts, grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
 			return net.Dial("tcp", addr)
 		}))
-	}
-
-	// allow gzip compression for grpc.
-	if allowCompression {
-		opts = append(opts, grpc.WithDefaultCallOptions(
-			grpc.UseCompressor(gzip.Name), // Use gzip compression for provider consumer communication
-		))
 	}
 
 	conn, err := grpc.DialContext(ctx, address, opts...)

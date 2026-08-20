@@ -56,7 +56,7 @@ func (r *relayerCacheClientStore) connectGRPCConnectionToRelayerCacheService() (
 	connectCtx, cancel := context.WithTimeout(r.ctx, 3*time.Second)
 	defer cancel()
 
-	conn, err := lavasession.ConnectGRPCClient(connectCtx, r.address, false, true, false)
+	conn, err := lavasession.ConnectGRPCClient(connectCtx, r.address, false, true)
 	if err != nil {
 		return nil, nil, err
 	}

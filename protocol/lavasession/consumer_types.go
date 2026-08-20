@@ -84,9 +84,8 @@ const (
 )
 
 var (
-	AllowInsecureConnectionToProviders                   = false
-	AllowGRPCCompressionForConsumerProviderCommunication = false
-	MaximumStreamsOverASingleConnection                  = uint64(DefaultMaximumStreamsOverASingleConnection)
+	AllowInsecureConnectionToProviders  = false
+	MaximumStreamsOverASingleConnection = uint64(DefaultMaximumStreamsOverASingleConnection)
 )
 
 type UsedProvidersInf interface {
@@ -923,7 +922,7 @@ func (cswp *ConsumerSessionsWithProvider) decreaseUsedComputeUnits(cu uint64) er
 func (cswp *ConsumerSessionsWithProvider) ConnectRawClientWithTimeout(ctx context.Context, addr string) (pairingtypes.RelayerClient, *grpc.ClientConn, error) {
 	connectCtx, cancel := context.WithTimeout(ctx, TimeoutForEstablishingAConnection)
 	defer cancel()
-	conn, err := ConnectGRPCClient(connectCtx, addr, AllowInsecureConnectionToProviders, false, AllowGRPCCompressionForConsumerProviderCommunication)
+	conn, err := ConnectGRPCClient(connectCtx, addr, AllowInsecureConnectionToProviders, false)
 	if err != nil {
 		return nil, nil, err
 	}
