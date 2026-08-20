@@ -69,7 +69,7 @@ func TestRestGetSupportedApi(t *testing.T) {
 	// Test case 1: Successful scenario, returns a supported API
 	apip := &RestChainParser{
 		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
+			serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
 		},
 	}
 	api, err := apip.getSupportedApi("API1", connectionType_test)
@@ -79,7 +79,7 @@ func TestRestGetSupportedApi(t *testing.T) {
 	// Test case 2: Returns error if the API does not exist
 	apip = &RestChainParser{
 		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
+			serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
 		},
 	}
 	apiCont, err := apip.getSupportedApi("API2", connectionType_test)
@@ -92,7 +92,7 @@ func TestRestGetSupportedApi(t *testing.T) {
 	// Test case 3: Returns error if the API is disabled
 	apip = &RestChainParser{
 		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: false}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
+			serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: false}),
 		},
 	}
 	_, err = apip.getSupportedApi("API1", connectionType_test)
@@ -103,9 +103,7 @@ func TestRestGetSupportedApi(t *testing.T) {
 func TestRestParseMessage(t *testing.T) {
 	apip := &RestChainParser{
 		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}},
-			},
+			serverApis:     restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
 			apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceRest}}},
 		},
 	}
