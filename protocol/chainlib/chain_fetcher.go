@@ -3,6 +3,7 @@ package chainlib
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync/atomic"
@@ -121,6 +122,14 @@ func needsLatestBlock(url common.NodeUrl, verifications []VerificationContainer)
 	return false
 }
 
+// stopValidateRetries reports whether a failed attempt should end Validate's zero-delay
+// retry budget early. The budget exists for a cold-booting node; a rate-limited attempt
+// is different in kind — the extra requests land inside the same limiter window and only
+// add to the load that produced the 429.
+func stopValidateRetries(err error) bool {
+	return err == nil || errors.Is(err, common.StatusCodeError429)
+}
+
 func (cf *ChainFetcher) Validate(ctx context.Context) error {
 	for _, url := range cf.endpoint.NodeUrls {
 		utils.LavaFormatInfo("starting validation for url", utils.LogAttr("url", url.String()))
@@ -137,7 +146,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
 				latestBlock, err = cf.FetchLatestBlockNum(ctx)
-				if err == nil {
+				if stopValidateRetries(err) {
 					break
 				}
 			}
@@ -157,7 +166,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 			var err error
 			for attempts := 0; attempts < 3; attempts++ {
 				err = cf.Verify(ctx, verification, uint64(latestBlock))
-				if err == nil {
+				if stopValidateRetries(err) {
 					break
 				}
 			}
@@ -222,7 +231,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
 				latestBlock, err = cf.FetchLatestBlockNum(ctx)
-				if err == nil {
+				if stopValidateRetries(err) {
 					break
 				}
 			}
@@ -236,7 +245,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 			var verifyErr error
 			for attempts := 0; attempts < 3; attempts++ {
 				verifyErr = cf.Verify(ctx, verification, uint64(latestBlock))
-				if verifyErr == nil {
+				if stopValidateRetries(verifyErr) {
 					break
 				}
 			}
