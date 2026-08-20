@@ -633,6 +633,14 @@ func LavaFormatDebug(description string, attributes ...Attribute) error {
 	return LavaFormatLog(description, nil, attributes, LAVA_LOG_DEBUG)
 }
 
+// LavaFormatDebugErr logs at debug severity while keeping err as the returned error's
+// cause, so errors.Is/As still see it through the wrap. Passing err as an Attribute to
+// LavaFormatDebug instead severs the chain: the attribute form returns a plain
+// fmt.Errorf with no Unwrap, and typed errors (rate limits above all) become unreadable.
+func LavaFormatDebugErr(description string, err error, attributes ...Attribute) error {
+	return LavaFormatLog(description, err, attributes, LAVA_LOG_DEBUG)
+}
+
 func LavaFormatTrace(description string, attributes ...Attribute) error {
 	return LavaFormatLog(description, nil, attributes, LAVA_LOG_TRACE)
 }

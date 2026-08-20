@@ -3953,8 +3953,20 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			)
 		}
 
-		// Return error to trigger backoff (but preserve result for client)
-		return relayLatency, fmt.Errorf("HTTP %d", statusCode), needsBackoff
+		// Copy the classifier's verdict into relayResult before failing the relay — the
+		// fault-axis flags (IsRateLimited above all) are only readable downstream through
+		// relayResult, and dying here left the rate-limit carve-out unreachable for real
+		// HTTP 429s. StatusCode is deliberately NOT copied: listeners surface a non-zero
+		// relayResult.StatusCode to the client, and what the client sees on a failed relay
+		// is the hot-path ticket's decision, not this propagation fix's.
+		relayResult.IsNodeError = result.IsNodeError
+		relayResult.IsNonRetryable = result.IsNonRetryable
+		relayResult.IsUnsupportedMethod = result.IsUnsupportedMethod
+		relayResult.IsRateLimited = result.IsRateLimited
+		relayResult.IsDataScope = result.IsDataScope
+		relayResult.ProviderInfo = result.ProviderInfo
+
+		return relayLatency, httpStatusRelayError(statusCode, result.Reply), needsBackoff
 	}
 
 	// Success - reset endpoint health. A node error the QoS path is scoring against this endpoint
@@ -4781,4 +4793,21 @@ func classifyHTTPStatus(code int) (shouldMarkUnhealthy, needsBackoff bool) {
 	default:
 		return false, false
 	}
+}
+
+// httpStatusRelayError is the error relayInnerDirect fails a relay with when the upstream
+// answered a >=500/429 status. A 429 travels as the typed sentinel with the upstream's
+// Retry-After attached, so errors.Is(err, common.StatusCodeError429) and
+// common.RetryAfterFrom read the same on the relay path as on every other transport.
+func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error {
+	if statusCode != 429 {
+		return fmt.Errorf("HTTP %d", statusCode)
+	}
+	header := http.Header{}
+	if reply != nil {
+		for _, md := range reply.Metadata {
+			header.Add(md.Name, md.Value)
+		}
+	}
+	return common.WithRetryAfter(fmt.Errorf("HTTP %d: %w", statusCode, common.StatusCodeError429), header, time.Now())
 }
