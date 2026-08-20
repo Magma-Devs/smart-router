@@ -862,6 +862,10 @@ func (m *restApiMatcher) moreSpecificThan(exact bool, other *restApiMatcher, oth
 func matchSpecApiByName(name, connectionType string, serverApis map[ApiKey]ApiContainer) (*ApiContainer, bool) {
 	foundNameOnDifferentConnectionType := ""
 	trimmedName := trimOptionalTrailingSlash(name)
+	// Whether the request carried a trailing slash at all. When it did not, trimmedName is
+	// name, so for an api whose own name carries none either the slash-insensitive match in
+	// the loop is the exact match re-run against the same string — see below.
+	requestHadTrailingSlash := trimmedName != name
 
 	var best *ApiContainer
 	var bestMatcher *restApiMatcher
@@ -878,10 +882,18 @@ func matchSpecApiByName(name, connectionType string, serverApis map[ApiKey]ApiCo
 			continue
 		}
 		exact := matcher.pattern.MatchString(name)
-		// When the spec name carries no trailing slash, trimmed is pattern, so this second
-		// match only ever succeeds for a request that carried one.
-		if !exact && !matcher.trimmed.MatchString(trimmedName) {
-			continue
+		if !exact {
+			// With a slash on neither side, trimmed is pattern and trimmedName is name, so
+			// the match below is the one above against the same string and can only fail
+			// again. That is the common case — most requests arrive without a trailing
+			// slash, and only STACKS names apis with one — so it is skipped rather than
+			// paid for on every candidate of every lookup.
+			if !requestHadTrailingSlash && matcher.trimmed == matcher.pattern {
+				continue
+			}
+			if !matcher.trimmed.MatchString(trimmedName) {
+				continue
+			}
 		}
 		if apiKey.ConnectionType != connectionType {
 			// its hard to notice when we have an API on only one connection type.
