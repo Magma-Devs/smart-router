@@ -7,13 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestRegistry pins the clock and disables jitter so durations are exact. Tests that
-// exercise jitter override randFloat explicitly.
+// newTestRegistry pins the clock through the public consumer-test constructor. Tests
+// that exercise jitter override randFloat explicitly.
 func newTestRegistry(start time.Time) (*Registry, *time.Time) {
 	now := start
-	r := NewRegistry()
-	r.now = func() time.Time { return now }
-	r.randFloat = func() float64 { return 0 }
+	r := NewRegistryWithClock(func() time.Time { return now })
 	return r, &now
 }
 
@@ -54,8 +52,9 @@ func TestRetryAfterIsTheFloor(t *testing.T) {
 
 func TestRetryAfterIsBounded(t *testing.T) {
 	r, _ := newTestRegistry(t0)
+	r.randFloat = func() float64 { return 1 } // worst case must not exceed the hard bound
 	d := r.RecordRateLimit("vendor", "u", 24*time.Hour)
-	require.Equal(t, maxUpstreamHoldoff, d)
+	require.Equal(t, maxUpstreamHoldoff, d, "the bound includes jitter")
 }
 
 func TestJitterOnlyExtends(t *testing.T) {
@@ -82,7 +81,7 @@ func TestAnswerClearsStrikesAndHoldoff(t *testing.T) {
 }
 
 func TestEscalationCoversTheWholeProvider(t *testing.T) {
-	r, _ := newTestRegistry(t0)
+	r, now := newTestRegistry(t0)
 
 	r.RecordRateLimit("vendor", "https://a.example/eth", 5*time.Minute)
 	require.False(t, r.HeldOff("vendor", "https://b.example/arb"),
@@ -96,6 +95,11 @@ func TestEscalationCoversTheWholeProvider(t *testing.T) {
 
 	// Another provider is untouched.
 	require.False(t, r.HeldOff("other", "https://d.example/eth"))
+
+	// An expired escalation must not leave an unrelated URL with a stale non-zero
+	// ReadyAt value.
+	*now = t0.Add(10*time.Minute + time.Second)
+	require.True(t, r.ReadyAt("vendor", "https://never-limited.example/base").IsZero())
 }
 
 func TestAnswerDropsTheEscalation(t *testing.T) {
@@ -116,6 +120,8 @@ func TestHoldoffExpires(t *testing.T) {
 
 	*now = t0.Add(InitialHoldoff + time.Second)
 	require.False(t, r.HeldOff("vendor", "u"))
+	require.True(t, r.ReadyAt("vendor", "u").IsZero(),
+		"an expired URL hold-off must use the same zero value as an absent one")
 }
 
 func TestStrikeMemoryAgesOut(t *testing.T) {
