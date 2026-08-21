@@ -31,6 +31,8 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 const (
@@ -42,10 +44,9 @@ const (
 	// maxUpstreamHoldoff — the vendor knows its own reset schedule better than we do.
 	MaxHoldoff = 30 * time.Minute
 
-	// maxUpstreamHoldoff bounds what a Retry-After header can demand, mirroring
-	// common.MaxRetryAfter so a hostile or broken upstream cannot park an endpoint
-	// indefinitely.
-	maxUpstreamHoldoff = time.Hour
+	// maxUpstreamHoldoff is the parser's Retry-After bound, shared here so capture and
+	// consumption cannot silently drift apart.
+	maxUpstreamHoldoff = common.MaxRetryAfter
 
 	// JitterFactor extends each hold-off by up to +20%, spreading expirations.
 	JitterFactor = 0.2
@@ -136,6 +137,9 @@ func (r *Registry) RecordRateLimit(provider, url string, retryAfter time.Duratio
 		d = maxUpstreamHoldoff
 	}
 	d += time.Duration(r.randFloat() * JitterFactor * float64(d))
+	if d > maxUpstreamHoldoff {
+		d = maxUpstreamHoldoff
+	}
 	e.readyAt = now.Add(d)
 	e.lastSeen = now
 
@@ -178,8 +182,7 @@ func (r *Registry) RecordAnswer(provider, url string) {
 // HeldOff reports whether requests to url should be avoided right now, either because
 // the URL itself is held off or its provider escalated.
 func (r *Registry) HeldOff(provider, url string) bool {
-	readyAt := r.ReadyAt(provider, url)
-	return readyAt.After(r.now())
+	return !r.ReadyAt(provider, url).IsZero()
 }
 
 // ReadyAt returns when url stops being held off — the later of its own hold-off and its
@@ -192,9 +195,13 @@ func (r *Registry) ReadyAt(provider, url string) time.Time {
 	if ps == nil {
 		return time.Time{}
 	}
+	now := r.now()
 	ready := ps.escalatedUntil
 	if e := ps.urls[url]; e != nil && e.readyAt.After(ready) {
 		ready = e.readyAt
+	}
+	if !ready.After(now) {
+		return time.Time{}
 	}
 	return ready
 }

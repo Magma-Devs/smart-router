@@ -3,6 +3,8 @@
 `protocol/holdoff` is the shared answer to "an upstream said 429 — when may we ask it
 again?". Every path that sends requests upstream records rate limits into one
 `holdoff.Registry` and consults it before sending, instead of growing a private backoff.
+Production consumers use the process-wide `holdoff.Shared`; composition roots may inject
+another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWithClock`.
 
 ## Semantics
 
@@ -13,15 +15,27 @@ again?". Every path that sends requests upstream records rate limits into one
   when its longest-held member does.
 - **Retry-After is the floor.** When the upstream said how long to wait
   (`common.RetryAfterFrom` on the typed error), the hold-off is at least that long,
-  bounded at 1h. Otherwise a per-URL exponential: 30s doubling per consecutive strike,
-  capped at 30m. Jitter extends each hold-off by up to +20% and never shortens it, so a
-  fleet held off by one vendor-wide limit does not return in a synchronized burst.
+  bounded at 1h including jitter. Otherwise a per-URL exponential: 30s doubling per
+  consecutive strike, capped at 30m before jitter. Jitter extends each hold-off by up to
+  +20% and never shortens it, so a fleet held off by one vendor-wide limit does not return
+  in a synchronized burst.
 - **Any answer clears.** An upstream that answered a request — success or a genuine
   failure — is no longer refusing us for load: the URL's strikes and the provider
   escalation are dropped, and later failures reach their normal handling at the normal
-  cadence. Strike memory also ages out after 1h of quiet.
+  cadence. Strike memory becomes eligible for reclamation after 1h of quiet and is
+  reclaimed lazily on the next recorded 429 anywhere in the registry.
 - **Internal only.** The registry and the Retry-After values drive internal retry and
   scheduling decisions. Nothing here is surfaced to the customer.
+
+## Query APIs
+
+- `HeldOff(provider, url)` answers the endpoint-level yes/no question.
+- `ReadyAt(provider, url)` returns the later of the URL and provider-wide deadlines for
+  soonest-to-expire selection. It returns the zero time for absent **and expired** state.
+- `ProviderReadyAt(provider)` answers whether the provider is held as a whole and when it
+  next has a recorded URL worth trying. The registry only knows URLs that have answered
+  429; if a provider has additional never-limited URLs, this query can conservatively
+  over-hold until the earliest recorded deadline expires.
 
 ## Consumer map
 
