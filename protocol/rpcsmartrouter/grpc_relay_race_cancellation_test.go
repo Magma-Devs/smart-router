@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // grpcRaceLoserError is the shape handleGRPCError returns once the router
@@ -38,7 +38,7 @@ func TestGRPCRaceLoser_SurvivesClassification(t *testing.T) {
 	wrapped := classifyAndWrap(transportErr, common.ChainFamily(-1), common.TransportGRPC)
 
 	t.Run("classification is correct", func(t *testing.T) {
-		require.Equal(t, common.LavaErrorContextCanceled.Code, extractLavaError(wrapped).Code,
+		require.Equal(t, common.RouterErrorContextCanceled.Code, extractRouterError(wrapped).Code,
 			"a local gRPC cancellation must classify as context-canceled, not UNKNOWN_ERROR")
 	})
 	t.Run("sentinel survives wrapping", func(t *testing.T) {
@@ -49,7 +49,7 @@ func TestGRPCRaceLoser_SurvivesClassification(t *testing.T) {
 	})
 	t.Run("endpoint is not blamed", func(t *testing.T) {
 		markUnhealthy, backoff := classifyEndpointHealth(
-			extractLavaError(wrapped), common.IsClientCancellation(wrapped, ctx))
+			extractRouterError(wrapped), common.IsClientCancellation(wrapped, ctx))
 		require.False(t, markUnhealthy, "a gRPC relay-race loser must not mark the endpoint unhealthy")
 		require.False(t, backoff)
 	})
@@ -74,26 +74,26 @@ func TestGRPCRaceLoser_SurvivesClassification(t *testing.T) {
 func TestGRPCStatusError_IsNeverReadAsLocalCancellation(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		err  *lavasession.GRPCStatusError
+		err  *routersession.GRPCStatusError
 	}{
-		{"canceled", &lavasession.GRPCStatusError{Code: 1, Message: "context canceled"}},
-		{"deadline", &lavasession.GRPCStatusError{Code: 4, Message: "context deadline exceeded"}},
+		{"canceled", &routersession.GRPCStatusError{Code: 1, Message: "context canceled"}},
+		{"deadline", &routersession.GRPCStatusError{Code: 4, Message: "context deadline exceeded"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Contains(t, strings.ToLower(tc.err.Error()), "rpc error",
 				"precondition: the rendering really does contain the substring the guard keys on")
 
 			wrapped := classifyAndWrap(tc.err, common.ChainFamily(-1), common.TransportGRPC)
-			got := extractLavaError(wrapped)
+			got := extractRouterError(wrapped)
 
 			// got may be nil when nothing matched, which is itself a pass — the
 			// assertion is only that it is not one of the two LOCAL verdicts.
 			if got == nil {
 				return
 			}
-			require.NotEqual(t, common.LavaErrorContextCanceled.Code, got.Code,
+			require.NotEqual(t, common.RouterErrorContextCanceled.Code, got.Code,
 				"a status the endpoint reported must not be attributed to local orchestration")
-			require.NotEqual(t, common.LavaErrorContextDeadline.Code, got.Code,
+			require.NotEqual(t, common.RouterErrorContextDeadline.Code, got.Code,
 				"a status the endpoint reported must not be attributed to local orchestration")
 		})
 	}
@@ -112,11 +112,11 @@ func TestGRPCRemoteStatusError_StillNotLocalCancellation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wrapped := classifyAndWrap(errors.New(tc.msg), common.ChainFamily(-1), common.TransportGRPC)
-			got := extractLavaError(wrapped).Code
+			got := extractRouterError(wrapped).Code
 
-			require.NotEqual(t, common.LavaErrorContextCanceled.Code, got,
+			require.NotEqual(t, common.RouterErrorContextCanceled.Code, got,
 				"a remote cancel must not be attributed to local orchestration")
-			require.NotEqual(t, common.LavaErrorContextDeadline.Code, got,
+			require.NotEqual(t, common.RouterErrorContextDeadline.Code, got,
 				"a remote deadline must not be attributed to local orchestration")
 		})
 	}
@@ -135,7 +135,7 @@ func TestRemoteStatusGuard_AppliesAcrossTransports(t *testing.T) {
 			wrapped := classifyAndWrap(
 				errors.New("rpc error: code = Canceled desc = context canceled"),
 				common.ChainFamily(-1), transport)
-			require.NotEqual(t, common.LavaErrorContextCanceled.Code, extractLavaError(wrapped).Code,
+			require.NotEqual(t, common.RouterErrorContextCanceled.Code, extractRouterError(wrapped).Code,
 				"the remote-status prefix must exclude on non-gRPC transports too")
 		})
 
@@ -143,25 +143,25 @@ func TestRemoteStatusGuard_AppliesAcrossTransports(t *testing.T) {
 			wrapped := classifyAndWrap(
 				errors.New("context canceled"),
 				common.ChainFamily(-1), transport)
-			require.Equal(t, common.LavaErrorContextCanceled.Code, extractLavaError(wrapped).Code,
+			require.Equal(t, common.RouterErrorContextCanceled.Code, extractRouterError(wrapped).Code,
 				"a plain local cancellation must still classify as such")
 		})
 
 		// The discriminating case: contains "rpc error" but NOT "rpc error: code =".
 		// The two cases above pass under EITHER guard width, so this is the only one
 		// that detects a widening — and it does so on a non-gRPC transport, which is
-		// the reach this test exists to pin. lavasession.GRPCStatusError's rendering
+		// the reach this test exists to pin. routersession.GRPCStatusError's rendering
 		// ("gRPC error 1: ...") is the concrete real-world instance of that string
 		// class, and it denotes a status the endpoint reported.
 		t.Run(transport.String()+"/bare-rpc-error-substring-still-excluded", func(t *testing.T) {
 			wrapped := classifyAndWrap(
 				errors.New("gRPC error 1: context canceled"),
 				common.ChainFamily(-1), transport)
-			got := extractLavaError(wrapped)
+			got := extractRouterError(wrapped)
 			if got == nil {
 				return // nothing matched — the exclusion held
 			}
-			require.NotEqual(t, common.LavaErrorContextCanceled.Code, got.Code,
+			require.NotEqual(t, common.RouterErrorContextCanceled.Code, got.Code,
 				"any rpc-error marker must exclude on every transport — a remote status is not local orchestration")
 		})
 	}

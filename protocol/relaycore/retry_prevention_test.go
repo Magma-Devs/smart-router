@@ -4,8 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
 )
 
 func TestRelayProcessorRetryPrevention(t *testing.T) {

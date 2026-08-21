@@ -9,21 +9,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLogCodedError_NilLavaError(t *testing.T) {
-	// Should not panic and should use LavaErrorUnknown
+func TestLogCodedError_NilRouterError(t *testing.T) {
+	// Should not panic and should use RouterErrorUnknown
 	err := LogCodedError("test", errors.New("boom"), nil, "", 0, "")
 	require.NotNil(t, err)
 }
 
-func TestLogCodedError_WithLavaError(t *testing.T) {
+func TestLogCodedError_WithRouterError(t *testing.T) {
 	err := LogCodedError("test timeout", errors.New("connection timed out"),
-		LavaErrorConnectionTimeout, "ETH1", 0, "connection timed out")
+		RouterErrorConnectionTimeout, "ETH1", 0, "connection timed out")
 	require.NotNil(t, err)
 }
 
 func TestLogCodedError_WithChainError(t *testing.T) {
 	err := LogCodedError("node error", errors.New("nonce too low"),
-		LavaErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
+		RouterErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
 	require.NotNil(t, err)
 }
 
@@ -50,11 +50,11 @@ func TestLogCodedError_MetricsCallbackInvoked(t *testing.T) {
 	defer SetErrorMetricsCallback(nil) // cleanup
 
 	LogCodedError("test", errors.New("nonce too low"),
-		LavaErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
+		RouterErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, LavaErrorChainNonceTooLow.Code, captured.code)
+	assert.Equal(t, RouterErrorChainNonceTooLow.Code, captured.code)
 	assert.Equal(t, "CHAIN_NONCE_TOO_LOW", captured.name)
 	assert.Equal(t, "external", captured.category)
 	assert.False(t, captured.retry)
@@ -64,6 +64,6 @@ func TestLogCodedError_MetricsCallbackInvoked(t *testing.T) {
 func TestLogCodedError_NoCallbackNoPanic(t *testing.T) {
 	SetErrorMetricsCallback(nil)
 	// Should not panic
-	err := LogCodedError("test", errors.New("boom"), LavaErrorUnknown, "", 0, "")
+	err := LogCodedError("test", errors.New("boom"), RouterErrorUnknown, "", 0, "")
 	require.NotNil(t, err)
 }

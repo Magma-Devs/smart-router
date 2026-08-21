@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/magma-Devs/smart-router/utils/score"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
 // Randomizer interface allows switching between global probabilistic RNG and deterministic RNG for testing
@@ -136,7 +136,7 @@ func NewWeightedSelector(config WeightedSelectorConfig) *WeightedSelector {
 	// other user choices (Strategy / MinSelectionChance) intact.
 	validateWeight := func(name string, w float64) bool {
 		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
-			utils.LavaFormatWarning("invalid weighted selector weight, must be finite and >= 0",
+			utils.FormatWarning("invalid weighted selector weight, must be finite and >= 0",
 				nil,
 				utils.LogAttr("weightName", name),
 				utils.LogAttr("weight", w),
@@ -153,7 +153,7 @@ func NewWeightedSelector(config WeightedSelectorConfig) *WeightedSelector {
 
 	totalWeight := config.AvailabilityWeight + config.LatencyWeight + config.SyncWeight + config.StakeWeight
 	if !weightsValid || math.IsNaN(totalWeight) || math.IsInf(totalWeight, 0) || totalWeight <= 0 {
-		utils.LavaFormatWarning("weighted selector weights sum to zero/negative or contain invalid values, using default weights", nil,
+		utils.FormatWarning("weighted selector weights sum to zero/negative or contain invalid values, using default weights", nil,
 			utils.LogAttr("totalWeight", totalWeight),
 			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
 			utils.LogAttr("latencyWeight", config.LatencyWeight),
@@ -170,7 +170,7 @@ func NewWeightedSelector(config WeightedSelectorConfig) *WeightedSelector {
 	}
 
 	if math.Abs(totalWeight-1.0) > 0.001 {
-		utils.LavaFormatWarning("weighted selector weights do not sum to 1.0, normalizing",
+		utils.FormatWarning("weighted selector weights do not sum to 1.0, normalizing",
 			nil,
 			utils.LogAttr("totalWeight", totalWeight),
 			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
@@ -272,7 +272,7 @@ func (ws *WeightedSelector) CalculateScore(
 	}
 
 	// Log comprehensive score breakdown for analysis
-	utils.LavaFormatDebug("Provider score calculation breakdown",
+	utils.FormatDebug("Provider score calculation breakdown",
 		utils.LogAttr("provider", providerAddress),
 		utils.LogAttr("raw_availability", availability),
 		utils.LogAttr("raw_latency_sec", latency),
@@ -328,7 +328,7 @@ func (ws *WeightedSelector) normalizeAvailability(availability float64) float64 
 
 	// Below minimum threshold = score of 0
 	if availability < minAcceptable {
-		utils.LavaFormatDebug("availability below minimum threshold",
+		utils.FormatDebug("availability below minimum threshold",
 			utils.LogAttr("raw_availability", availability),
 			utils.LogAttr("min_acceptable", minAcceptable),
 			utils.LogAttr("normalized_score", 0.0),
@@ -349,7 +349,7 @@ func (ws *WeightedSelector) normalizeAvailability(availability float64) float64 
 		normalized = 0.0
 	}
 
-	utils.LavaFormatDebug("normalized availability (Phase 1 rescaling)",
+	utils.FormatDebug("normalized availability (Phase 1 rescaling)",
 		utils.LogAttr("raw_availability", availability),
 		utils.LogAttr("min_acceptable", minAcceptable),
 		utils.LogAttr("rescale_range", maxAvailability-minAcceptable),
@@ -381,7 +381,7 @@ func (ws *WeightedSelector) normalizeLatency(latency float64) float64 {
 		// Validate adaptive bounds
 		if math.IsNaN(p10) || math.IsNaN(p90) || math.IsInf(p10, 0) || math.IsInf(p90, 0) || p10 <= 0 || p90 <= 0 || p90 <= p10 {
 			// Invalid bounds, fallback to Phase 1
-			utils.LavaFormatWarning("invalid adaptive latency bounds, falling back to fixed max",
+			utils.FormatWarning("invalid adaptive latency bounds, falling back to fixed max",
 				nil,
 				utils.LogAttr("p10", p10),
 				utils.LogAttr("p90", p90),
@@ -414,7 +414,7 @@ func (ws *WeightedSelector) normalizeLatency(latency float64) float64 {
 			}
 
 			// Log normalization details for distribution visualization
-			utils.LavaFormatTrace("[LatencyNormalization] P10-P90 normalization applied",
+			utils.FormatTrace("[LatencyNormalization] P10-P90 normalization applied",
 				utils.LogAttr("raw_latency", latency),
 				utils.LogAttr("clamped_latency", clampedLatency),
 				utils.LogAttr("p10", p10),
@@ -432,7 +432,7 @@ func (ws *WeightedSelector) normalizeLatency(latency float64) float64 {
 	// Phase 1 (Fallback): Use fixed maximum expected latency
 	const maxLatency = score.WorstLatencyScore
 	if latency <= 0 {
-		utils.LavaFormatTrace("[LatencyNormalization] Perfect latency",
+		utils.FormatTrace("[LatencyNormalization] Perfect latency",
 			utils.LogAttr("latency", latency),
 			utils.LogAttr("normalized_score", 1.0),
 		)
@@ -446,7 +446,7 @@ func (ws *WeightedSelector) normalizeLatency(latency float64) float64 {
 	}
 
 	// Log normalization details for distribution visualization
-	utils.LavaFormatTrace("[LatencyNormalization] Fixed max normalization applied",
+	utils.FormatTrace("[LatencyNormalization] Fixed max normalization applied",
 		utils.LogAttr("raw_latency", latency),
 		utils.LogAttr("max_latency", maxLatency),
 		utils.LogAttr("normalized_score", normalized),
@@ -476,7 +476,7 @@ func (ws *WeightedSelector) normalizeSync(syncLag float64) float64 {
 		// Validate adaptive bounds
 		if math.IsNaN(p10) || math.IsNaN(p90) || math.IsInf(p10, 0) || math.IsInf(p90, 0) || p10 <= 0 || p90 <= 0 || p90 <= p10 {
 			// Invalid bounds, fallback to Phase 1
-			utils.LavaFormatWarning("invalid adaptive sync bounds, falling back to fixed max",
+			utils.FormatWarning("invalid adaptive sync bounds, falling back to fixed max",
 				nil,
 				utils.LogAttr("p10", p10),
 				utils.LogAttr("p90", p90),
@@ -509,7 +509,7 @@ func (ws *WeightedSelector) normalizeSync(syncLag float64) float64 {
 			}
 
 			// Log normalization details for distribution visualization
-			utils.LavaFormatTrace("[SyncNormalization] P10-P90 normalization applied",
+			utils.FormatTrace("[SyncNormalization] P10-P90 normalization applied",
 				utils.LogAttr("raw_sync_lag", syncLag),
 				utils.LogAttr("clamped_sync_lag", clampedSyncLag),
 				utils.LogAttr("p10", p10),
@@ -527,7 +527,7 @@ func (ws *WeightedSelector) normalizeSync(syncLag float64) float64 {
 	// Phase 1 (Fallback): Use fixed maximum expected sync lag
 	const maxSyncLag = score.WorstSyncScore
 	if syncLag <= 0 {
-		utils.LavaFormatTrace("[SyncNormalization] Perfect sync",
+		utils.FormatTrace("[SyncNormalization] Perfect sync",
 			utils.LogAttr("sync_lag", syncLag),
 			utils.LogAttr("normalized_score", 1.0),
 		)
@@ -541,7 +541,7 @@ func (ws *WeightedSelector) normalizeSync(syncLag float64) float64 {
 	}
 
 	// Log normalization details for distribution visualization
-	utils.LavaFormatTrace("[SyncNormalization] Fixed max normalization applied",
+	utils.FormatTrace("[SyncNormalization] Fixed max normalization applied",
 		utils.LogAttr("raw_sync_lag", syncLag),
 		utils.LogAttr("max_sync_lag", maxSyncLag),
 		utils.LogAttr("normalized_score", normalized),
@@ -578,7 +578,7 @@ func (ws *WeightedSelector) normalizeStake(stake float64, totalStake float64) fl
 	// This reduces the gap between large and small stakers by ~17%
 	normalized := math.Sqrt(stakeRatio)
 
-	utils.LavaFormatDebug("normalized stake (square root scaling)",
+	utils.FormatDebug("normalized stake (square root scaling)",
 		utils.LogAttr("stake", stakeFloat),
 		utils.LogAttr("total_stake", totalStakeFloat),
 		utils.LogAttr("stake_ratio", stakeRatio),
@@ -658,7 +658,7 @@ func (ws *WeightedSelector) SelectProviderWithStats(
 
 	if totalScore <= 0 {
 		// Fallback to uniform random selection if all scores are zero
-		utils.LavaFormatWarning("all provider scores are zero, using uniform selection", nil)
+		utils.FormatWarning("all provider scores are zero, using uniform selection", nil)
 		selected := providerScores[ws.rng.Intn(len(providerScores))].Address
 		stats := &SelectionStats{
 			ProviderScores:   scoreDetails,
@@ -714,7 +714,7 @@ func (ws *WeightedSelector) SelectProviderWithStats(
 					}
 				}
 
-				utils.LavaFormatDebug("Provider selection completed", logAttrs...)
+				utils.FormatDebug("Provider selection completed", logAttrs...)
 			}
 
 			stats := &SelectionStats{
@@ -727,7 +727,7 @@ func (ws *WeightedSelector) SelectProviderWithStats(
 	}
 
 	// Fallback to last provider (should rarely happen due to floating point precision)
-	utils.LavaFormatWarning("weighted selection fallback to last provider", nil,
+	utils.FormatWarning("weighted selection fallback to last provider", nil,
 		utils.LogAttr("totalScore", totalScore),
 		utils.LogAttr("randomValue", randomValue),
 	)
@@ -770,7 +770,7 @@ func (ws *WeightedSelector) CalculateProviderScores(
 
 		qos, _, found := providerDataGetter(providerAddress)
 		if !found || qos == nil {
-			utils.LavaFormatWarning("[WeightedSelector] could not get QoS for provider",
+			utils.FormatWarning("[WeightedSelector] could not get QoS for provider",
 				nil,
 				utils.LogAttr("provider", providerAddress),
 			)
@@ -831,7 +831,7 @@ func (ws *WeightedSelector) CalculateProviderScores(
 			StakeContribution:        stakeScore * ws.stakeWeight,
 		}
 
-		utils.LavaFormatTrace("[WeightedSelector] calculated provider score",
+		utils.FormatTrace("[WeightedSelector] calculated provider score",
 			utils.LogAttr("provider", providerAddress),
 			utils.LogAttr("compositeScore", compositeScore),
 			utils.LogAttr("availability", availability),

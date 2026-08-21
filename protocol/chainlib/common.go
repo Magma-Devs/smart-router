@@ -2,6 +2,7 @@ package chainlib
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,19 +11,18 @@ import (
 	"sync"
 	"time"
 
-	"errors"
-
 	"github.com/goccy/go-json"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/favicon"
+	"google.golang.org/grpc/metadata"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"google.golang.org/grpc/metadata"
 )
 
 const (
@@ -34,8 +34,8 @@ const (
 	ProjectIDHeader            = "project-id"
 	RetryListeningInterval     = 10 // seconds
 	relayMsgLogMaxChars        = 200
-	RPCProviderNodeAddressHash = "Lava-Provider-Node-Address-Hash"
-	RPCProviderNodeExtension   = "Lava-Provider-Node-Extension"
+	RPCProviderNodeAddressHash = "Smart-Router-Provider-Node-Address-Hash"
+	RPCProviderNodeExtension   = "Smart-Router-Provider-Node-Extension"
 	WebSocketExtension         = "websocket"
 )
 
@@ -200,7 +200,7 @@ func drainHTTPThenWS(ctx context.Context, app *fiber.App, wg *sync.WaitGroup, na
 	select {
 	case <-done:
 	case <-ctx.Done():
-		utils.LavaFormatWarning(name+": WS goroutines did not finish within shutdown grace period", nil)
+		utils.FormatWarning(name+": WS goroutines did not finish within shutdown grace period", nil)
 	}
 	return httpErr
 }
@@ -361,7 +361,7 @@ func convertToJsonRpcError(rawErrorMsg string, requestBody []byte) []byte {
 	if guid != "" {
 		data["guid"] = guid
 	}
-	// The inner error message from LavaFormatError already embeds provider
+	// The inner error message from FormatError already embeds provider
 	// context (selectedProvider, validProviders, addon, extensions, GUID) in
 	// its appended attribute block. Surface it under data.error so the full
 	// context is preserved for debugging without brittle substring parsing.
@@ -399,13 +399,13 @@ func ListenWithRetry(ctx context.Context, app *fiber.App, address string, chosen
 	for {
 		ln, err := net.Listen("tcp", address)
 		if err != nil {
-			utils.LavaFormatError("net.Listen(tcp, address)", err, utils.LogAttr("address", address))
+			utils.FormatError("net.Listen(tcp, address)", err, utils.LogAttr("address", address))
 		} else {
 			chosenAddrCh.Send(ln.Addr().String())
 
 			err = app.Listener(ln)
 			if err != nil {
-				utils.LavaFormatError("app.Listen(listenAddr)", err)
+				utils.FormatError("app.Listen(listenAddr)", err)
 			}
 		}
 
@@ -426,9 +426,9 @@ func GetListenerWithRetryGrpc(protocol, addr string) net.Listener {
 		if err == nil {
 			return lis
 		}
-		utils.LavaFormatError("failure setting up listener, net.Listen(protocol, addr)", err, utils.Attribute{Key: "listenAddr", Value: addr})
+		utils.FormatError("failure setting up listener, net.Listen(protocol, addr)", err, utils.Attribute{Key: "listenAddr", Value: addr})
 		time.Sleep(RetryListeningInterval * time.Second)
-		utils.LavaFormatWarning("Attempting connection retry", nil)
+		utils.FormatWarning("Attempting connection retry", nil)
 	}
 }
 
@@ -565,7 +565,7 @@ func applyResponseCompression(app *fiber.App, mode string) {
 		app.Use(compress.New(compress.Config{Level: compress.LevelBestSpeed}))
 	default: // "gzip", "", or anything else
 		if normalized != common.ResponseCompressionGzip && normalized != "" {
-			utils.LavaFormatWarning("unknown response-compression mode, falling back to gzip",
+			utils.FormatWarning("unknown response-compression mode, falling back to gzip",
 				nil, utils.LogAttr("mode", mode))
 		}
 		app.Use(stripBrotliAcceptEncoding)
@@ -628,7 +628,7 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 		c.Set("Access-Control-Allow-Origin", cmdFlags.OriginFlag)
 		// Expose selected response headers to browser JS. Access-Control-Expose-
 		// Headers must be present on the ACTUAL response (not just the preflight)
-		// for fetch() to read a non-simple header like Lava-Provider-Address.
+		// for fetch() to read a non-simple header like Smart-Router-Provider-Address.
 		// Empty flag => header omitted (only simple response headers readable).
 		if cmdFlags.ExposeHeadersFlag != "" {
 			c.Set("Access-Control-Expose-Headers", cmdFlags.ExposeHeadersFlag)

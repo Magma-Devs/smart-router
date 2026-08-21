@@ -3,8 +3,9 @@ package chainlib
 import (
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // headDependent is a verification that needs the chain head resolved before it can run

@@ -74,7 +74,7 @@ func (c *UpstreamWSConnection) connect(ctx context.Context) error {
 	// Note: Don't store nil in lastError - atomic.Value panics on nil
 	// The healthy flag indicates success; lastError is only set on failure
 
-	utils.LavaFormatDebug("WebSocket connection established",
+	utils.FormatDebug("WebSocket connection established",
 		utils.LogAttr("endpoint", c.sanitizedURL),
 	)
 
@@ -115,7 +115,7 @@ func (c *UpstreamWSConnection) Close() error {
 		c.client = nil
 	}
 
-	utils.LavaFormatDebug("WebSocket connection closed",
+	utils.FormatDebug("WebSocket connection closed",
 		utils.LogAttr("endpoint", c.sanitizedURL),
 	)
 
@@ -241,7 +241,7 @@ func (p *UpstreamWSPool) GetConnectionForSubscription(ctx context.Context) (*Ups
 		if err != nil {
 			// If we can't create a new connection but have an existing one, use it
 			if bestConn != nil {
-				utils.LavaFormatWarning("WebSocket pool: failed to scale up, using existing connection", err,
+				utils.FormatWarning("WebSocket pool: failed to scale up, using existing connection", err,
 					utils.LogAttr("endpoint", p.sanitizedURL),
 					utils.LogAttr("currentConnections", len(p.connections)),
 					utils.LogAttr("existingSubCount", lowestSubs),
@@ -251,7 +251,7 @@ func (p *UpstreamWSPool) GetConnectionForSubscription(ctx context.Context) (*Ups
 			return nil, fmt.Errorf("failed to create connection: %w", err)
 		}
 
-		utils.LavaFormatInfo("WebSocket pool: scaled up",
+		utils.FormatInfo("WebSocket pool: scaled up",
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("totalConnections", len(p.connections)),
 			utils.LogAttr("reason", "all connections near capacity"),
@@ -278,7 +278,7 @@ func (p *UpstreamWSPool) createConnectionLocked(ctx context.Context) (*UpstreamW
 	p.connections = append(p.connections, conn)
 	p.backoff.Reset()
 
-	utils.LavaFormatDebug("WebSocket pool: connection added",
+	utils.FormatDebug("WebSocket pool: connection added",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 		utils.LogAttr("totalConnections", len(p.connections)),
 	)
@@ -339,7 +339,7 @@ func (p *UpstreamWSPool) maybeScaleDown() {
 			for _, conn := range conns {
 				conn.Close()
 			}
-			utils.LavaFormatDebug("WebSocket pool: scaled down",
+			utils.FormatDebug("WebSocket pool: scaled down",
 				utils.LogAttr("endpoint", p.sanitizedURL),
 				utils.LogAttr("removedConnections", len(conns)),
 				utils.LogAttr("remainingConnections", len(kept)),
@@ -419,7 +419,7 @@ func (p *UpstreamWSPool) ReconnectWithBackoff(ctx context.Context) error {
 			callback := p.onReconnect
 			p.lock.Unlock()
 
-			utils.LavaFormatInfo("WebSocket pool: reconnected successfully",
+			utils.FormatInfo("WebSocket pool: reconnected successfully",
 				utils.LogAttr("endpoint", p.sanitizedURL),
 				utils.LogAttr("attempts", backoff.Attempt()),
 				utils.LogAttr("totalConnections", len(healthyConns)),
@@ -442,7 +442,7 @@ func (p *UpstreamWSPool) ReconnectWithBackoff(ctx context.Context) error {
 
 		delay = reconnectDelay(delay, err)
 
-		utils.LavaFormatDebug("WebSocket pool: reconnect failed, retrying",
+		utils.FormatDebug("WebSocket pool: reconnect failed, retrying",
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("attempt", backoff.Attempt()),
 			utils.LogAttr("next_delay", delay),
@@ -504,7 +504,7 @@ func (p *UpstreamWSPool) Close() error {
 	}
 	p.connections = nil
 
-	utils.LavaFormatDebug("WebSocket pool closed",
+	utils.FormatDebug("WebSocket pool closed",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 	)
 

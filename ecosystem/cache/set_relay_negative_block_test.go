@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
-	relaytypes "github.com/magma-Devs/smart-router/types/relay"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
+
+	relaytypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 func newCacheServerForTest(t *testing.T) *RelayerCacheServer {

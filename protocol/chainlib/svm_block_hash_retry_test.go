@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 func TestIsBlockNotAvailableError_SolanaErrorCode(t *testing.T) {

@@ -5,10 +5,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // This is the ProtoFileRegistry half of descriptor-source selection. The grpcurl
@@ -36,7 +37,7 @@ func loadCachedFileRegistry(path string) (*FileDescriptorSetRegistry, error) {
 	cached, _ := fileRegistryCache.LoadOrStore(path, &fileRegistryEntry{})
 	entry, ok := cached.(*fileRegistryEntry)
 	if !ok {
-		return nil, utils.LavaFormatError("corrupt descriptor set cache entry", nil,
+		return nil, utils.FormatError("corrupt descriptor set cache entry", nil,
 			utils.LogAttr("descriptor-set-path", path))
 	}
 
@@ -117,7 +118,7 @@ func (c *compositeProtoFileRegistry) ProtoFileByPath(path string) (*descriptorpb
 		return file, nil
 	}
 
-	return nil, utils.LavaFormatError("proto file not found in descriptor set or via reflection", nil,
+	return nil, utils.FormatError("proto file not found in descriptor set or via reflection", nil,
 		utils.LogAttr("path", path),
 		utils.LogAttr("descriptor_set_error", fileErr),
 		utils.LogAttr("reflection_error", serverErr))
@@ -139,7 +140,7 @@ func (c *compositeProtoFileRegistry) ProtoFileContainingSymbol(name protoreflect
 		return file, nil
 	}
 
-	return nil, utils.LavaFormatError("symbol not found in descriptor set or via reflection", nil,
+	return nil, utils.FormatError("symbol not found in descriptor set or via reflection", nil,
 		utils.LogAttr("symbol", string(name)),
 		utils.LogAttr("descriptor_set_error", fileErr),
 		utils.LogAttr("reflection_error", serverErr))
@@ -164,7 +165,7 @@ func ProtoFileRegistryForNode(mode, descriptorSetPath string, serverRemote Proto
 	switch mode {
 	case common.GrpcDescriptorSourceFile:
 		if descriptorSetPath == "" {
-			return nil, utils.LavaFormatError("descriptor-set-path is required for descriptor-source: file", nil)
+			return nil, utils.FormatError("descriptor-set-path is required for descriptor-source: file", nil)
 		}
 		registry, err := loadCachedFileRegistry(descriptorSetPath)
 		if err != nil {
@@ -183,7 +184,7 @@ func ProtoFileRegistryForNode(mode, descriptorSetPath string, serverRemote Proto
 		}
 		registry, err := loadCachedFileRegistry(descriptorSetPath)
 		if err != nil {
-			utils.LavaFormatWarning("hybrid descriptor source: descriptor set unusable, falling back to reflection only", err,
+			utils.FormatWarning("hybrid descriptor source: descriptor set unusable, falling back to reflection only", err,
 				utils.LogAttr("descriptor-set-path", descriptorSetPath))
 			return serverRemote, nil
 		}
@@ -196,7 +197,7 @@ func ProtoFileRegistryForNode(mode, descriptorSetPath string, serverRemote Proto
 		return serverRemote, nil
 
 	default:
-		return nil, utils.LavaFormatError("invalid gRPC descriptor-source", nil,
+		return nil, utils.FormatError("invalid gRPC descriptor-source", nil,
 			utils.LogAttr("descriptor-source", mode),
 			utils.LogAttr("valid_options", fmt.Sprintf("%s, %s, %s",
 				common.GrpcDescriptorSourceReflection,

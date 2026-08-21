@@ -8,11 +8,12 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // writeTestDescriptorSet builds a one-file FileDescriptorSet declaring pkg.service and

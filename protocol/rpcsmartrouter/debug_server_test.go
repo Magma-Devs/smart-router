@@ -11,18 +11,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	scoreutils "github.com/magma-Devs/smart-router/utils/score"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // fakeCacheFlusher records Flush calls so /debug/reset-all tests can verify
@@ -362,7 +363,7 @@ func TestDebugChainState_ReportsRawSnapshot(t *testing.T) {
 
 	router := &RPCSmartRouter{
 		rpcServers: map[string]*RPCSmartRouterServer{
-			"ETH1-jsonrpc": {chainState: cs, listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
+			"ETH1-jsonrpc": {chainState: cs, listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
 			"NIL-rest":     {chainState: nil}, // skipped, not panic
 		},
 	}
@@ -409,7 +410,7 @@ func newAgedChainStateRouter(t *testing.T) (http.Handler, *chainstate.ChainState
 	})
 	router := &RPCSmartRouter{
 		rpcServers: map[string]*RPCSmartRouterServer{
-			"ETH1-jsonrpc": {chainState: cs, listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
+			"ETH1-jsonrpc": {chainState: cs, listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
 		},
 	}
 	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: offsetNano, router: router})
@@ -513,12 +514,12 @@ func TestDebugResetAll_DoesNotTouchChainStateWarp(t *testing.T) {
 func TestDebugProviderRouting_ReportsPerCSMShape(t *testing.T) {
 	var offsetNano atomic.Int64
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "ETH1")
-	csm := lavasession.NewConsumerSessionManager(
-		&lavasession.RPCEndpoint{NetworkAddress: "stub", ChainID: "ETH1", ApiInterface: "jsonrpc", HealthCheckPath: "/"},
-		optimizer, nil, "lava@test", lavasession.NewActiveSubscriptionProvidersStorage(),
+	csm := routersession.NewConsumerSessionManager(
+		&routersession.RPCEndpoint{NetworkAddress: "stub", ChainID: "ETH1", ApiInterface: "jsonrpc", HealthCheckPath: "/"},
+		optimizer, nil, "provider@test", routersession.NewActiveSubscriptionProvidersStorage(),
 	)
 	router := &RPCSmartRouter{
-		sessionManagers: map[string]*lavasession.ConsumerSessionManager{
+		sessionManagers: map[string]*routersession.ConsumerSessionManager{
 			"ETH1-jsonrpc": csm,
 			"NIL-rest":     nil, // skipped, not panic
 		},
@@ -542,7 +543,7 @@ func TestDebugProviderRouting_ReportsPerCSMShape(t *testing.T) {
 
 // TestDebugEndpointState_WiringSafe verifies per-chain iteration, the nil-manager skip, and that a
 // chain whose session manager has no endpoints yields an empty (non-panicking) object. The full
-// observation↔health join is covered by the lavasession/endpointstate accessor tests.
+// observation↔health join is covered by the routersession/endpointstate accessor tests.
 func TestDebugEndpointState_WiringSafe(t *testing.T) {
 	var offsetNano atomic.Int64
 	ctx, cancel := context.WithCancel(context.Background())
@@ -554,10 +555,10 @@ func TestDebugEndpointState_WiringSafe(t *testing.T) {
 
 	router := &RPCSmartRouter{
 		rpcServers: map[string]*RPCSmartRouterServer{
-			"ETH1-jsonrpc": {endpointChainTrackerManager: monitor, listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
+			"ETH1-jsonrpc": {endpointChainTrackerManager: monitor, listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}},
 			"NIL-rest":     {endpointChainTrackerManager: nil}, // skipped, not panic
 		},
-		sessionManagers: map[string]*lavasession.ConsumerSessionManager{}, // no CSM for the chain → no rows, no panic
+		sessionManagers: map[string]*routersession.ConsumerSessionManager{}, // no CSM for the chain → no rows, no panic
 	}
 	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
 
@@ -571,7 +572,7 @@ func TestDebugEndpointState_WiringSafe(t *testing.T) {
 // server is skipped.
 func TestDebugProbeLoop_ReportsCycleStats(t *testing.T) {
 	var offsetNano atomic.Int64
-	server := &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
+	server := &RPCSmartRouterServer{listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
 	server.probeStats.setInterval(5 * time.Second)
 	server.probeStats.recordCycle(time.Now(), 7*time.Millisecond, 4, 1, 2, 1)
 
@@ -603,7 +604,7 @@ func TestDebugProbeLoop_ReportsCycleStats(t *testing.T) {
 
 // TestDebugResetEndpointHealth_SmartRouter_ReturnsJSON covers the focused MAG-2186
 // endpoint's HTTP contract. The recovery behavior itself is proven at the session-manager
-// layer by lavasession.TestEndpointHealthRecovery.
+// layer by routersession.TestEndpointHealthRecovery.
 func TestDebugResetEndpointHealth_SmartRouter_ReturnsJSON(t *testing.T) {
 	var offsetNano atomic.Int64
 	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
@@ -786,7 +787,7 @@ func TestDebugLogs_SmartRouter_ReturnsJSON(t *testing.T) {
 	utils.EnableDebugLogBuffer(100)
 	defer utils.ClearDebugLogBuffer()
 	utils.ClearDebugLogBuffer()
-	utils.LavaFormatInfo("debug-logs test line", utils.LogAttr(utils.KEY_REQUEST_ID, "req-logs-1"))
+	utils.FormatInfo("debug-logs test line", utils.LogAttr(utils.KEY_REQUEST_ID, "req-logs-1"))
 
 	var offsetNano atomic.Int64
 	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
@@ -817,8 +818,8 @@ func TestDebugLogs_SmartRouter_RequestIDFilter(t *testing.T) {
 	utils.EnableDebugLogBuffer(100)
 	defer utils.ClearDebugLogBuffer()
 	utils.ClearDebugLogBuffer()
-	utils.LavaFormatInfo("line a", utils.LogAttr(utils.KEY_REQUEST_ID, "req-A"))
-	utils.LavaFormatInfo("line b", utils.LogAttr(utils.KEY_REQUEST_ID, "req-B"))
+	utils.FormatInfo("line a", utils.LogAttr(utils.KEY_REQUEST_ID, "req-A"))
+	utils.FormatInfo("line b", utils.LogAttr(utils.KEY_REQUEST_ID, "req-B"))
 
 	var offsetNano atomic.Int64
 	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
@@ -847,7 +848,7 @@ func TestDebugLogs_SmartRouter_MethodNotAllowed(t *testing.T) {
 func TestDebugLogsClear_SmartRouter_ReturnsJSON(t *testing.T) {
 	utils.EnableDebugLogBuffer(100)
 	defer utils.ClearDebugLogBuffer()
-	utils.LavaFormatInfo("to be cleared")
+	utils.FormatInfo("to be cleared")
 
 	var offsetNano atomic.Int64
 	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
@@ -945,8 +946,8 @@ func TestDebugRuntimeConfig_SmartRouter_ReturnsValues(t *testing.T) {
 
 	require.Equal(t, 1, resp.SchemaVersion)
 
-	require.Equal(t, lavasession.MaxConsecutiveConnectionAttempts, resp.MaxConsecutiveConnectionAttempts)
-	require.Equal(t, lavasession.MaximumNumberOfFailuresAllowedPerConsumerSession, resp.MaximumNumberOfFailuresAllowedPerConsumerSession)
+	require.Equal(t, routersession.MaxConsecutiveConnectionAttempts, resp.MaxConsecutiveConnectionAttempts)
+	require.Equal(t, routersession.MaximumNumberOfFailuresAllowedPerConsumerSession, resp.MaximumNumberOfFailuresAllowedPerConsumerSession)
 
 	require.Equal(t, relaycore.RelayRetryLimit, resp.RelayRetryLimit)
 	require.Equal(t, relaycore.DisableBatchRequestRetry, resp.DisableBatchRequestRetry)
@@ -966,7 +967,7 @@ func TestDebugRuntimeConfig_SmartRouter_ReturnsValues(t *testing.T) {
 	require.Equal(t, common.MinimumTimePerRelayDelay.Milliseconds(), resp.MinimumTimePerRelayDelay)
 	require.Equal(t, common.DefaultTimeout.Milliseconds(), resp.DefaultTimeout)
 	require.Equal(t, common.CacheTimeout.Milliseconds(), resp.CacheTimeout)
-	require.Equal(t, lavasession.TimeoutForEstablishingAConnection.Milliseconds(), resp.TimeoutForEstablishingAConnection)
+	require.Equal(t, routersession.TimeoutForEstablishingAConnection.Milliseconds(), resp.TimeoutForEstablishingAConnection)
 
 	require.Equal(t, scoreutils.ProbeUpdateWeight, resp.ProbeUpdateWeight)
 	require.Equal(t, scoreutils.DefaultProbeUpdateWeight, resp.DefaultProbeUpdateWeight)

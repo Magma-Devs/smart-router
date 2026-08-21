@@ -21,7 +21,7 @@ type errorFixture struct {
 	Transport    string `json:"transport"`
 	ErrorCode    int    `json:"error_code"`
 	ErrorMessage string `json:"error_message"`
-	ExpectedCode uint32 `json:"expected_lava_code"`
+	ExpectedCode uint32 `json:"expected_error_code"`
 	ExpectedName string `json:"expected_name"`
 }
 
@@ -47,10 +47,10 @@ var transportFromString = map[string]TransportType{
 }
 
 // TestErrorFixtures loads real error responses from testdata/error_fixtures.json
-// and verifies that ClassifyError produces the expected LavaError code for each.
+// and verifies that ClassifyError produces the expected RouterError code for each.
 //
 // To add a new fixture: add an entry to testdata/error_fixtures.json with the
-// actual error code/message from the node and the expected Lava error code.
+// actual error code/message from the node and the expected router error code.
 // This is the primary mechanism for catching classification regressions when
 // new node client variants surface in production as UNKNOWN_ERROR.
 func TestErrorFixtures(t *testing.T) {
@@ -108,9 +108,9 @@ func TestFixtureFileValid(t *testing.T) {
 		assert.True(t, ok, "fixture %s has unknown transport: %s", f.Name, f.Transport)
 
 		// Expected code matches a registered error
-		le := getLavaError(f.ExpectedCode)
+		le := getRouterError(f.ExpectedCode)
 		assert.Equal(t, f.ExpectedName, le.Name,
-			"fixture %s: expected_lava_code %d resolves to %s, not %s",
+			"fixture %s: expected_error_code %d resolves to %s, not %s",
 			f.Name, f.ExpectedCode, le.Name, f.ExpectedName)
 	}
 }

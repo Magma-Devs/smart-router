@@ -3,8 +3,9 @@ package chainlib
 import (
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // withSkipAll flips the process-wide flag for one test and restores it, so a failure

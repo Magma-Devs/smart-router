@@ -2,8 +2,10 @@ package metrics
 
 import (
 	"context"
+	"maps"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,11 +14,10 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
+
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
-	"maps"
-	"slices"
 )
 
 // sanitizeFloat returns 0 if the value is NaN or Inf, otherwise returns the value
@@ -122,7 +123,7 @@ type OptimizerInf interface {
 func NewConsumerOptimizerQoSClient(consumerAddress string, usageSink UsageEventSink) *ConsumerOptimizerQoSClient {
 	hostname, err := os.Hostname()
 	if err != nil {
-		utils.LavaFormatWarning("Error while getting hostname for ConsumerOptimizerQoSClient", err)
+		utils.FormatWarning("Error while getting hostname for ConsumerOptimizerQoSClient", err)
 		hostname = "unknown" + strconv.FormatUint(rand.Uint64(), 10) // random seed for different unknowns
 	}
 	if usageSink == nil {
@@ -407,12 +408,12 @@ func (coqc *ConsumerOptimizerQoSClient) StartOptimizersQoSReportsCollecting(ctx 
 		return
 	}
 
-	utils.LavaFormatTrace("Starting ConsumerOptimizerQoSClient reports collecting")
+	utils.FormatTrace("Starting ConsumerOptimizerQoSClient reports collecting")
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
-				utils.LavaFormatTrace("ConsumerOptimizerQoSClient context done")
+				utils.FormatTrace("ConsumerOptimizerQoSClient context done")
 				return
 			case <-time.After(samplingInterval):
 				reports := coqc.getReportsFromOptimizers()
@@ -431,7 +432,7 @@ func (coqc *ConsumerOptimizerQoSClient) RegisterOptimizer(optimizer OptimizerInf
 	defer coqc.lock.Unlock()
 
 	if _, found := coqc.optimizers[chainId]; found {
-		utils.LavaFormatWarning("Optimizer already registered for chain", nil, utils.LogAttr("chainId", chainId))
+		utils.FormatWarning("Optimizer already registered for chain", nil, utils.LogAttr("chainId", chainId))
 		return
 	}
 

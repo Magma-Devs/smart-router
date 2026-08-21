@@ -6,13 +6,13 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
 // The poll path builds HTTPStatusError with the parsed Retry-After, then used to flatten
-// it into a LavaFormatDebug attribute one frame up — a plain string error with no Unwrap.
+// it into a FormatDebug attribute one frame up — a plain string error with no Unwrap.
 // This pins the fix: the typed 429 and its Retry-After must survive FetchLatestBlockNum's
 // wrapping so the ChainTracker's backoff can read them.
 func TestEndpointPoller_FetchLatestBlockNum_PreservesRateLimit(t *testing.T) {
@@ -21,14 +21,14 @@ func TestEndpointPoller_FetchLatestBlockNum_PreservesRateLimit(t *testing.T) {
 	url := "http://eth-ep:8545"
 	conn := &mockDirectRPCConnection{
 		url: url,
-		sendErr: &lavasession.HTTPStatusError{
+		sendErr: &routersession.HTTPStatusError{
 			StatusCode: 429,
 			Status:     "429",
 			RetryAfter: 90 * time.Second,
 		},
 	}
 	poller := NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
+		&routersession.Endpoint{NetworkAddress: url, Enabled: true},
 		conn,
 		chainParser,
 		"ETH1",
@@ -50,10 +50,10 @@ func TestEndpointPoller_FetchLatestBlockNum_ServerErrorIsNotRateLimit(t *testing
 	url := "http://eth-ep:8545"
 	conn := &mockDirectRPCConnection{
 		url:     url,
-		sendErr: &lavasession.HTTPStatusError{StatusCode: 503, Status: "503"},
+		sendErr: &routersession.HTTPStatusError{StatusCode: 503, Status: "503"},
 	}
 	poller := NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
+		&routersession.Endpoint{NetworkAddress: url, Enabled: true},
 		conn,
 		chainParser,
 		"ETH1",

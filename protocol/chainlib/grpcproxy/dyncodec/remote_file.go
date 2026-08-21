@@ -6,10 +6,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // FileDescriptorSetRegistry implements ProtoFileRegistry by loading descriptors
@@ -60,7 +61,7 @@ func NewFileDescriptorSetRegistry(fds *descriptorpb.FileDescriptorSet) (*FileDes
 		registry.indexFileSymbols(file)
 	}
 
-	utils.LavaFormatDebug("FileDescriptorSetRegistry initialized",
+	utils.FormatDebug("FileDescriptorSetRegistry initialized",
 		utils.LogAttr("files", len(registry.filesByPath)),
 		utils.LogAttr("symbols", len(registry.symbolIndex)))
 
@@ -72,13 +73,13 @@ func NewFileDescriptorSetRegistry(fds *descriptorpb.FileDescriptorSet) (*FileDes
 func NewFileDescriptorSetRegistryFromPath(path string) (*FileDescriptorSetRegistry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to read FileDescriptorSet file", err,
+		return nil, utils.FormatError("failed to read FileDescriptorSet file", err,
 			utils.LogAttr("path", path))
 	}
 
 	fds := &descriptorpb.FileDescriptorSet{}
 	if err := proto.Unmarshal(data, fds); err != nil {
-		return nil, utils.LavaFormatError("failed to parse FileDescriptorSet", err,
+		return nil, utils.FormatError("failed to parse FileDescriptorSet", err,
 			utils.LogAttr("path", path))
 	}
 

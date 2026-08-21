@@ -95,7 +95,7 @@ func NewScoreStore(scoreType string) ScoreStorer {
 		// default latency: 10ms
 		latencyScoreStore, err := NewCustomScoreStore(scoreType, DefaultLatencyNum, 1, time.Now().Add(-InitialDataStaleness))
 		if err != nil {
-			utils.LavaFormatFatal("cannot create default "+scoreType+" ScoreStore", err)
+			utils.FormatFatal("cannot create default "+scoreType+" ScoreStore", err)
 		}
 		return latencyScoreStore
 
@@ -103,7 +103,7 @@ func NewScoreStore(scoreType string) ScoreStorer {
 		// default sync: 100ms
 		syncScoreStore, err := NewCustomScoreStore(scoreType, DefaultSyncNum, 1, time.Now().Add(-InitialDataStaleness))
 		if err != nil {
-			utils.LavaFormatFatal("cannot create default "+scoreType+" ScoreStore", err)
+			utils.FormatFatal("cannot create default "+scoreType+" ScoreStore", err)
 		}
 		return syncScoreStore
 
@@ -111,11 +111,11 @@ func NewScoreStore(scoreType string) ScoreStorer {
 		// default availability: 1
 		availabilityScoreStore, err := NewCustomScoreStore(scoreType, DefaultAvailabilityNum, 1, time.Now().Add(-InitialDataStaleness))
 		if err != nil {
-			utils.LavaFormatFatal("cannot create default "+scoreType+" ScoreStore", err)
+			utils.FormatFatal("cannot create default "+scoreType+" ScoreStore", err)
 		}
 		return availabilityScoreStore
 	default:
-		utils.LavaFormatFatal("cannot create default "+scoreType+" ScoreStore", fmt.Errorf("unknown score type: %s", scoreType))
+		utils.FormatFatal("cannot create default "+scoreType+" ScoreStore", fmt.Errorf("unknown score type: %s", scoreType))
 		return nil // not reached
 	}
 }
@@ -192,7 +192,7 @@ func (ss *ScoreStore) Update(sample float64, sampleTime time.Time) error {
 	}
 
 	if ss.Time.After(sampleTime) {
-		utils.LavaFormatTrace("TimeConflictingScoresError", utils.LogAttr("ss.Time", ss.Time), utils.LogAttr("sampleTime", sampleTime))
+		utils.FormatTrace("TimeConflictingScoresError", utils.LogAttr("ss.Time", ss.Time), utils.LogAttr("sampleTime", sampleTime))
 		return TimeConflictingScoresError
 	}
 
@@ -230,7 +230,7 @@ func (ss *ScoreStore) Update(sample float64, sampleTime time.Time) error {
 // calcNewNum calculates the new numerator update and verifies it's not negative or overflowing
 func (ss *ScoreStore) calcNewNum(sample float64, decayFactor float64) (float64, error) {
 	if math.IsInf(ss.Num*decayFactor, 0) || math.IsInf(sample*ss.Config.Weight, 0) {
-		return 0, utils.LavaFormatError("cannot ScoreStore update numerator", fmt.Errorf("potential overflow"),
+		return 0, utils.FormatError("cannot ScoreStore update numerator", fmt.Errorf("potential overflow"),
 			utils.LogAttr("score_store_name", ss.Name),
 			utils.LogAttr("current_num", ss.Num),
 			utils.LogAttr("decay_factor", decayFactor),
@@ -249,7 +249,7 @@ func (ss *ScoreStore) calcNewNum(sample float64, decayFactor float64) (float64, 
 // calcNewDenom calculates the new denominator update and verifies it's strictly positive or not overflowing
 func (ss *ScoreStore) calcNewDenom(decayFactor float64) (float64, error) {
 	if math.IsInf(ss.Denom*decayFactor, 0) || math.IsInf(ss.Config.Weight, 0) {
-		return 0, utils.LavaFormatError("cannot ScoreStore update denominator", fmt.Errorf("potential overflow"),
+		return 0, utils.FormatError("cannot ScoreStore update denominator", fmt.Errorf("potential overflow"),
 			utils.LogAttr("score_store_name", ss.Name),
 			utils.LogAttr("current_denom", ss.Denom),
 			utils.LogAttr("decay_factor", decayFactor),
@@ -355,7 +355,7 @@ func (ls *LatencyScoreStore) Update(sample float64, sampleTime time.Time) error 
 	if ls.adaptiveMax != nil {
 		if err := ls.adaptiveMax.AddSample(sample, sampleTime); err != nil {
 			// Log error but don't fail the update - adaptive max is optional
-			utils.LavaFormatWarning("failed to update adaptive max for latency",
+			utils.FormatWarning("failed to update adaptive max for latency",
 				err,
 				utils.LogAttr("sample", sample),
 				utils.LogAttr("sampleTime", sampleTime),
@@ -438,7 +438,7 @@ func (ss *SyncScoreStore) Update(sample float64, sampleTime time.Time) error {
 	if ss.adaptiveMax != nil {
 		if err := ss.adaptiveMax.AddSample(sample, sampleTime); err != nil {
 			// Log error but don't fail the update - adaptive max is optional
-			utils.LavaFormatWarning("failed to update adaptive max for sync",
+			utils.FormatWarning("failed to update adaptive max for sync",
 				err,
 				utils.LogAttr("sample", sample),
 				utils.LogAttr("sampleTime", sampleTime),

@@ -3,8 +3,9 @@ package chainlib
 import (
 	"testing"
 
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
+
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
 // testing hash cache request doesn't change the fields it resets to calculate hash.
@@ -15,7 +16,7 @@ func TestHashCacheRequest(t *testing.T) {
 	initSalt := []byte{1, 3, 4, 5}
 
 	relayRequest := &pairingtypes.RelayPrivateData{Data: initData, Salt: initSalt, RequestBlock: initRequestBlock, SeenBlock: initSeenBlock}
-	_, _, err := HashCacheRequest(relayRequest, "Best-Chain-AKA-Lava-Network")
+	_, _, err := HashCacheRequest(relayRequest, "Best-Chain-AKA-Router-Network")
 	require.NoError(t, err)
 	require.Equal(t, relayRequest.SeenBlock, initSeenBlock)
 	require.Equal(t, relayRequest.RequestBlock, initRequestBlock)

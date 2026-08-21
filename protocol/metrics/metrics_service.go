@@ -36,7 +36,7 @@ func NewMetricService() *MetricService {
 	}
 
 	if reportMetricsAuthorization == "" {
-		utils.LavaFormatInfo("Authorization is not set for metrics")
+		utils.FormatInfo("Authorization is not set for metrics")
 	}
 	intervalForMetrics, _ := strconv.ParseInt(intervalData, 10, 32)
 	metricChannelBufferSizeData := os.Getenv("METRICS_BUFFER_SIZE_NR")
@@ -56,11 +56,11 @@ func NewMetricService() *MetricService {
 			select {
 			case <-ticker.C:
 				{
-					utils.LavaFormatDebug("metric triggered, sending accumulated data to server")
+					utils.FormatDebug("metric triggered, sending accumulated data to server")
 					result.SendEachProjectMetricData()
 				}
 			case metricData := <-mChannel:
-				utils.LavaFormatDebug("reading from chanel data")
+				utils.FormatDebug("reading from chanel data")
 				result.storeAggregatedData(metricData)
 			}
 		}
@@ -73,7 +73,7 @@ func (m *MetricService) SendData(data RelayMetrics) {
 		select {
 		case m.MetricsChannel <- data:
 		default:
-			utils.LavaFormatDebug("channel is full, ignoring these data",
+			utils.FormatDebug("channel is full, ignoring these data",
 				utils.Attribute{Key: "projectHash", Value: data.ProjectHash},
 				utils.Attribute{Key: "chainId", Value: data.ChainID},
 				utils.Attribute{Key: "apiType", Value: data.APIType},
@@ -126,17 +126,17 @@ func prepareArrayForProject(projectData map[string]map[string]map[RelaySource]ma
 
 func sendMetricsViaHttp(reportUrl string, authorization string, data []RelayAnalyticsDTO) error {
 	if len(data) == 0 {
-		utils.LavaFormatDebug("no metrics found for this project.")
+		utils.FormatDebug("no metrics found for this project.")
 		return nil
 	}
 	jsonValue, err := json.Marshal(data)
 	if err != nil {
-		utils.LavaFormatError("error converting data to json", err)
+		utils.FormatError("error converting data to json", err)
 		return err
 	}
 	req, err := http.NewRequest("POST", reportUrl, bytes.NewBuffer(jsonValue))
 	if err != nil {
-		utils.LavaFormatError("error creating request for metrics", err, utils.Attribute{Key: "url", Value: reportUrl})
+		utils.FormatError("error creating request for metrics", err, utils.Attribute{Key: "url", Value: reportUrl})
 		return err
 	}
 	if authorization != "" {
@@ -146,17 +146,17 @@ func sendMetricsViaHttp(reportUrl string, authorization string, data []RelayAnal
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		utils.LavaFormatError("error posting data to report url.", err, utils.Attribute{Key: "url", Value: reportUrl})
+		utils.FormatError("error posting data to report url.", err, utils.Attribute{Key: "url", Value: reportUrl})
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		utils.LavaFormatError("error status code returned from server.", nil, utils.Attribute{Key: "url", Value: reportUrl})
+		utils.FormatError("error status code returned from server.", nil, utils.Attribute{Key: "url", Value: reportUrl})
 	}
 	return nil
 }
 
 func (m *MetricService) storeAggregatedData(data RelayMetrics) error {
-	utils.LavaFormatDebug("new data to store",
+	utils.FormatDebug("new data to store",
 		utils.Attribute{Key: "projectHash", Value: data.ProjectHash},
 		utils.Attribute{Key: "apiType", Value: data.APIType},
 		utils.Attribute{Key: "chainId", Value: data.ChainID},

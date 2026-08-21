@@ -23,7 +23,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
@@ -34,25 +34,25 @@ import (
 // ---------------------------------------------------------------------------
 //
 // The test gRPC spec (specs/grpctest.json) references
-// lavatest.v1.BlockService/GetLatestBlock. For gRPC reflection to resolve
+// smartroutertest.v1.BlockService/GetLatestBlock. For gRPC reflection to resolve
 // this service, we register a FileDescriptorProto in the global proto
 // registry at init time. The mock handler uses dynamicpb messages so that
 // proto marshal/unmarshal works end-to-end.
 
-// testBlockServiceFD holds the registered file descriptor for lavatest.v1.
+// testBlockServiceFD holds the registered file descriptor for smartroutertest.v1.
 var testBlockServiceFD protoreflect.FileDescriptor
 
 func init() {
 	syntax := "proto3"
-	fileName := "lavatest/v1/block_service.proto"
-	pkgName := "lavatest.v1"
+	fileName := "smartroutertest/v1/block_service.proto"
+	pkgName := "smartroutertest.v1"
 	reqName := "GetLatestBlockRequest"
 	respName := "GetLatestBlockResponse"
 	svcName := "BlockService"
 	methodName := "GetLatestBlock"
 	heightField := "height"
-	inputType := ".lavatest.v1.GetLatestBlockRequest"
-	outputType := ".lavatest.v1.GetLatestBlockResponse"
+	inputType := ".smartroutertest.v1.GetLatestBlockRequest"
+	outputType := ".smartroutertest.v1.GetLatestBlockResponse"
 	fieldNum := int32(1)
 	fieldType := descriptorpb.FieldDescriptorProto_TYPE_INT64
 	fieldLabel := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
@@ -121,7 +121,7 @@ func (mrw mockResponseWriter) WriteHeader(statusCode int) {
 
 // mockGRPCServiceDesc is the gRPC service descriptor for the test block service.
 var mockGRPCServiceDesc = grpc.ServiceDesc{
-	ServiceName: "lavatest.v1.BlockService",
+	ServiceName: "smartroutertest.v1.BlockService",
 	HandlerType: (*mockBlockServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -249,11 +249,11 @@ func CreateChainLibMocks(
 	wsServerCallback http.HandlerFunc,
 	getToTopMostPath string,
 	services []string,
-) (cpar ChainParser, crout ChainRouter, cfetc chaintracker.ChainFetcher, closeServer func(), endpointRet *lavasession.RPCProviderEndpoint, errRet error) {
+) (cpar ChainParser, crout ChainRouter, cfetc chaintracker.ChainFetcher, closeServer func(), endpointRet *routersession.RPCProviderEndpoint, errRet error) {
 	// SetGlobalLoggingLevel reassigns process-global logger state (defaultGlobalLogLevel,
 	// zerologlog.Logger). Production sets it once at startup; this mock was calling it on EVERY
 	// invocation, so a later test's setup wrote those globals while an earlier test's leaked goroutine
-	// still read them in LavaFormatLog — a data race under -race. It is always "debug", so once is
+	// still read them in FormatLog — a data race under -race. It is always "debug", so once is
 	// enough: the sole write happens before any test goroutine exists.
 	setMockLogLevelOnce.Do(func() { utils.SetGlobalLoggingLevel("debug") })
 	// Create a cancellable context for the connector to prevent leaks
@@ -282,8 +282,8 @@ func CreateChainLibMocks(
 	}
 	var chainRouter ChainRouter
 	chainParser.SetSpec(spec)
-	endpoint := &lavasession.RPCProviderEndpoint{
-		NetworkAddress: lavasession.NetworkAddressData{},
+	endpoint := &routersession.RPCProviderEndpoint{
+		NetworkAddress: routersession.NetworkAddressData{},
 		ChainID:        specIndex,
 		ApiInterface:   apiInterface,
 		NodeUrls:       []common.NodeUrl{},

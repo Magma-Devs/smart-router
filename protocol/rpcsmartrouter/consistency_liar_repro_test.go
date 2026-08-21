@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
-	"github.com/stretchr/testify/require"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -45,18 +46,18 @@ const (
 func liarTestServer(t *testing.T, cs *chainstate.ChainState) *RPCSmartRouterServer {
 	t.Helper()
 	return &RPCSmartRouterServer{
-		listenEndpoint:    &lavasession.RPCEndpoint{ChainID: liarChainID, ApiInterface: liarAPIInterface},
+		listenEndpoint:    &routersession.RPCEndpoint{ChainID: liarChainID, ApiInterface: liarAPIInterface},
 		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
 		chainState:        cs,
 	}
 }
 
-func liarSession(t *testing.T, addr string, tip int64) *lavasession.SessionInfo {
+func liarSession(t *testing.T, addr string, tip int64) *routersession.SessionInfo {
 	t.Helper()
 	seedEndpointTip(liarChainID, liarAPIInterface, addr, tip)
-	return &lavasession.SessionInfo{Session: &lavasession.SingleConsumerSession{
-		Connection: &lavasession.DirectRPCSessionConnection{
-			Endpoint: &lavasession.Endpoint{NetworkAddress: addr},
+	return &routersession.SessionInfo{Session: &routersession.SingleConsumerSession{
+		Connection: &routersession.DirectRPCSessionConnection{
+			Endpoint: &routersession.Endpoint{NetworkAddress: addr},
 		},
 	}}
 }
@@ -117,7 +118,7 @@ func TestLiar_MultiProviderHonestEndpointsKeepServing(t *testing.T) {
 	cs.SetLatestBlock(liarClaim)
 
 	rpcss := liarTestServer(t, cs)
-	sessions := lavasession.ConsumerSessionsMap{
+	sessions := routersession.ConsumerSessionsMap{
 		"http://honest-a:8545": liarSession(t, "http://honest-a:8545", honestBlock),
 		"http://honest-b:8545": liarSession(t, "http://honest-b:8545", honestBlock),
 		"http://liar:8545":     liarSession(t, "http://liar:8545", liarClaim),
@@ -156,7 +157,7 @@ func TestLiar_SingleProviderNoPairingsOutage(t *testing.T) {
 	cs.SetLatestBlock(honestBlock)
 
 	rpcss := liarTestServer(t, cs)
-	sessions := lavasession.ConsumerSessionsMap{
+	sessions := routersession.ConsumerSessionsMap{
 		"http://solo:8545": liarSession(t, "http://solo:8545", honestBlock),
 	}
 
@@ -186,7 +187,7 @@ func TestLiar_SingleProviderSelfHealsWithoutManualReset(t *testing.T) {
 	require.Equal(t, liarClaim, tip, "a cold-start lie is accepted — there is no reference to reject it against yet")
 
 	rpcss := liarTestServer(t, cs)
-	sessions := lavasession.ConsumerSessionsMap{
+	sessions := routersession.ConsumerSessionsMap{
 		"http://solo:8545": liarSession(t, "http://solo:8545", honestBlock),
 	}
 

@@ -269,10 +269,10 @@ HDR=$(mktemp)
 BODY=$(mktemp)   # client response body — Scenario A (UC-6) checks the client got the CONSENSUS value
 pass() { echo "  ✅ PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  ❌ FAIL: $1"; FAIL=$((FAIL + 1)); }
-cv_status()         { grep -i '^lava-cross-validation-status:'           "$HDR" | tr -d '\r' | awk '{print $2}'; }
-cv_failure_reason() { grep -i '^lava-cross-validation-failure-reason:'   "$HDR" | tr -d '\r' | awk '{print $2}'; }
-cv_agreeing()       { grep -i '^lava-cross-validation-agreeing-providers:'    "$HDR" | tr -d '\r' | cut -d' ' -f2-; }
-cv_disagreeing()    { grep -i '^lava-cross-validation-disagreeing-providers:' "$HDR" | tr -d '\r' | cut -d' ' -f2-; }
+cv_status()         { grep -i '^smartrouter-cross-validation-status:'           "$HDR" | tr -d '\r' | awk '{print $2}'; }
+cv_failure_reason() { grep -i '^smartrouter-cross-validation-failure-reason:'   "$HDR" | tr -d '\r' | awk '{print $2}'; }
+cv_agreeing()       { grep -i '^smartrouter-cross-validation-agreeing-providers:'    "$HDR" | tr -d '\r' | cut -d' ' -f2-; }
+cv_disagreeing()    { grep -i '^smartrouter-cross-validation-disagreeing-providers:' "$HDR" | tr -d '\r' | cut -d' ' -f2-; }
 
 # metric_value <name-fragment> <label-grep> : the value of the first matching metric line, or "" .
 metric_value() {
@@ -429,15 +429,15 @@ else
 fi
 # 4) DISTINGUISHABLE from a generic upstream error: a NON-cross-validated method
 #    ('$OTHER_METHOD') — even with all providers erroring — must carry NO
-#    lava-cross-validation-* headers, so a client can tell the two apart by the
+#    smartrouter-cross-validation-* headers, so a client can tell the two apart by the
 #    presence of the cross-validation channel alone.
 curl -s -X POST "http://$SIM_CONTROL/scenario" -H 'Content-Type: application/json' \
 	-d '{"providers":{"1":{"chain_family":"tendermintrpc","mode":"error"},"2":{"chain_family":"tendermintrpc","mode":"error"},"3":{"chain_family":"tendermintrpc","mode":"error"}}}' >/dev/null
 curl -sS -D "$HDR" -o "$BODY" -X POST "http://127.0.0.1:$TM_PORT/" \
 	-d "{\"jsonrpc\":\"2.0\",\"method\":\"$OTHER_METHOD\",\"params\":[],\"id\":1}"
-if grep -qi '^lava-cross-validation' "$HDR"; then
+if grep -qi '^smartrouter-cross-validation' "$HDR"; then
 	fail "a generic upstream error on '$OTHER_METHOD' wrongly carried cross-validation headers:"
-	grep -i '^lava-cross-validation' "$HDR" | tr -d '\r' | sed 's/^/        /'
+	grep -i '^smartrouter-cross-validation' "$HDR" | tr -d '\r' | sed 's/^/        /'
 else
 	pass "a generic upstream error ('$OTHER_METHOD') carries NO cross-validation headers — the quorum failure is distinguishable"
 fi

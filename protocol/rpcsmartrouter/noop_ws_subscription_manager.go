@@ -6,8 +6,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
-	"github.com/magma-Devs/smart-router/utils"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // NoOpWSSubscriptionManager is a WebSocket subscription manager that returns errors
@@ -40,7 +40,7 @@ func (n *NoOpWSSubscriptionManager) StartSubscription(
 	webSocketConnectionUniqueId string,
 	metricsData *metrics.RelayMetrics,
 ) (firstReply *pairingtypes.RelayReply, repliesChan <-chan *pairingtypes.RelayReply, err error) {
-	utils.LavaFormatWarning("WebSocket subscription attempted but no WebSocket endpoints configured", nil,
+	utils.FormatWarning("WebSocket subscription attempted but no WebSocket endpoints configured", nil,
 		utils.LogAttr("chainID", n.chainID),
 		utils.LogAttr("apiInterface", n.apiInterface),
 		utils.LogAttr("dappID", dappID),
@@ -59,7 +59,7 @@ func (n *NoOpWSSubscriptionManager) Unsubscribe(
 	webSocketConnectionUniqueId string,
 	metricsData *metrics.RelayMetrics,
 ) ([]byte, error) {
-	utils.LavaFormatDebug("Unsubscribe attempted but no WebSocket endpoints configured",
+	utils.FormatDebug("Unsubscribe attempted but no WebSocket endpoints configured",
 		utils.LogAttr("chainID", n.chainID),
 		utils.LogAttr("apiInterface", n.apiInterface),
 	)

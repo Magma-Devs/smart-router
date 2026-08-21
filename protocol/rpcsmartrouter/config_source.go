@@ -34,7 +34,7 @@ import (
 // configSearchPaths are the directories a config argument is resolved against, in
 // precedence order — both a bare *name* and a *relative* path. An absolute path names its
 // file outright and is not resolved against them.
-var configSearchPaths = []string{".", "./config", lavaDefaultNodeHome}
+var configSearchPaths = []string{".", "./config", defaultNodeHome}
 
 // defaultConfigType is the format assumed for a config whose extension does not declare
 // one — including the extension-less names the search-path lookup accepts. Every
@@ -133,8 +133,8 @@ func configFilePathCandidates(arg string) []string {
 	candidates := make([]string, 0, len(configSearchPaths))
 	for _, searchPath := range configSearchPaths {
 		// Viper runs a search path through absPathify, which expands the $HOME that the
-		// lavaDefaultNodeHome literal carries. filepath.Join would keep it verbatim, so the
-		// expansion has to happen here for $HOME/.lava to mean the same thing in both
+		// defaultNodeHome literal carries. filepath.Join would keep it verbatim, so the
+		// expansion has to happen here for $HOME/.smartrouter to mean the same thing in both
 		// branches.
 		candidates = append(candidates, filepath.Join(os.ExpandEnv(searchPath), arg))
 	}
@@ -176,7 +176,7 @@ func isExistingFile(path string) bool {
 //
 // The directory case only arises for an explicit path — a search of configSearchPaths
 // skips directories and reports ConfigFileNotFoundError — and without it `smartrouter
-// ./config` would take the LavaFormatFatal stack-dump path this fix exists to remove.
+// ./config` would take the FormatFatal stack-dump path this fix exists to remove.
 func isConfigNotFound(err error) bool {
 	var notFound viper.ConfigFileNotFoundError
 	return errors.As(err, &notFound) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.EISDIR)

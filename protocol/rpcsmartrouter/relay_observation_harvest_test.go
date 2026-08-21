@@ -6,19 +6,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/stretchr/testify/require"
 )
 
 func newHarvestMonitor(t *testing.T) *endpointstate.EndpointMonitor {
@@ -43,7 +44,7 @@ func ethTipServer(t *testing.T, chainID string) *RPCSmartRouterServer {
 	// everything (every tip would be dropped). The Solana path short-circuits before touching
 	// the parser, but a real SOLANA parser still constructs cleanly so we keep this uniform.
 	return &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"},
 		chainParser:    newRealChainParserForHarvest(t, chainID),
 	}
 }
@@ -176,11 +177,11 @@ func TestTipBlockFromRelay_NonSolana_IgnoresCoincidentalSlot(t *testing.T) {
 
 func TestRecordRelayBlockObservation_NoOps(t *testing.T) {
 	// No monitor wired: must not panic.
-	(&RPCSmartRouterServer{}).recordRelayBlockObservation(&lavasession.Endpoint{NetworkAddress: "http://ep:8545"}, 1, 100)
+	(&RPCSmartRouterServer{}).recordRelayBlockObservation(&routersession.Endpoint{NetworkAddress: "http://ep:8545"}, 1, 100)
 
 	m := newHarvestMonitor(t)
 	rpcss := &RPCSmartRouterServer{endpointChainTrackerManager: m}
-	ep := &lavasession.Endpoint{NetworkAddress: "http://ep:8545"}
+	ep := &routersession.Endpoint{NetworkAddress: "http://ep:8545"}
 
 	rpcss.recordRelayBlockObservation(ep, 1, 0) // non-positive block records nothing
 	_, ok := m.GetObservation(ep.NetworkAddress)
@@ -209,7 +210,7 @@ func TestRecordRelayBlockObservation_GenerationPassThrough(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	url := "http://ep:8545"
-	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	// GetOrCreateTracker registers the generation synchronously (a nil connection just
 	// makes the background poll fail gracefully — we only need the generation here).
 	_, err := m.GetOrCreateTracker(ep, nil)
@@ -345,15 +346,15 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	const url = "http://ep:8545"
-	const addr = "lava@provider1"
-	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	const addr = "provider@provider1"
+	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	_, err := m.GetOrCreateTracker(ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
 		// The tip gate resolves GET_BLOCKNUM via the parser; without one every relay (even the
 		// tip-eligible eth_blockNumber below) is rejected and the tip-eligible assertions fail.
@@ -424,13 +425,13 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 	t.Cleanup(m.Stop)
 
 	const url = "http://ep:8545"
-	const addr = "lava@harvestGenProvider"
-	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	const addr = "provider@harvestGenProvider"
+	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	// Empty options => metrics registered on the default registry, no HTTP server started.
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	require.NotNil(t, mm)
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
 		smartRouterEndpointMetrics:  mm,
 		// Needed so the tip gate admits the eth_blockNumber harvest below; the focus here is the
@@ -548,13 +549,13 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 	// and GetOrCreateTracker does no network I/O (the poll that would hit this URL is async and
 	// fails gracefully), so registration is synchronous and deterministic.
 	const url = "http://127.0.0.1:0"
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = directConn.Close() })
 
-	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
 		chainParser:                 newRealChainParserForHarvest(t, "ETH1"),
 	}
@@ -570,7 +571,7 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 	tipMsg := newRealChainParserForHarvest(t, "ETH1")
 	cm, perr := tipMsg.ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, perr)
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 21_000_000}, gen, "lava@provider1")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 21_000_000}, gen, "provider@provider1")
 	o, ok := m.GetObservation(url)
 	require.True(t, ok)
 	require.Equal(t, int64(21_000_000), o.LatestBlock, "the early relay's tip is recorded under the synchronous generation")
@@ -580,7 +581,7 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 	// generation is rejected (a removed URL has no live generation to match).
 	m.RemoveTracker(url)
 	require.Zero(t, rpcss.endpointObservationGeneration(url), "a removed tracker has no live generation")
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 22_000_000}, gen, "lava@provider1")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 22_000_000}, gen, "provider@provider1")
 	if o, exists := m.GetObservation(url); exists {
 		require.NotEqual(t, int64(22_000_000), o.LatestBlock, "a harvest with a removed tracker's generation must be rejected")
 	}

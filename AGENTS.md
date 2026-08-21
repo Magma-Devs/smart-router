@@ -108,7 +108,7 @@ Health status OK
 Router listener health:
 
 ```bash
-curl -i http://localhost:3360/lava/health
+curl -i http://localhost:3360/health
 ```
 
 Expected success:
@@ -243,7 +243,7 @@ A local run is healthy when all of these are true:
 - The compose stack exposes `3360-3367` and `7779`.
 - `curl -i http://localhost:7779/metrics/overall-health` returns `200` with
   `Health status OK`.
-- `curl -i http://localhost:3360/lava/health` returns `200` with
+- `curl -i http://localhost:3360/health` returns `200` with
   `Health status OK`.
 - `eth_blockNumber` against `http://localhost:3360` returns HTTP 200 and a real
   block number.

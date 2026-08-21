@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // fetchFromGitLab fetches all specs from a GitLab repository.
@@ -25,7 +25,7 @@ func (f *Fetcher) fetchFromGitLab(ctx context.Context, info *RepoInfo) (map[stri
 		return specs, nil
 	}
 
-	utils.LavaFormatWarning("GitLab archive fetch failed, falling back to tree API", tarballErr,
+	utils.FormatWarning("GitLab archive fetch failed, falling back to tree API", tarballErr,
 		utils.LogAttr("repo", info.ProjectPath))
 
 	specs, apiErr := f.fetchFromGitLabAPI(ctx, info)
@@ -61,14 +61,14 @@ func (f *Fetcher) fetchFromGitLabAPI(ctx context.Context, info *RepoInfo) (map[s
 	// Build the API URL for listing directory contents
 	apiURL := f.buildGitLabTreeAPIURL(info)
 
-	utils.LavaFormatInfo("Fetching spec file list from GitLab",
+	utils.FormatInfo("Fetching spec file list from GitLab",
 		utils.LogAttr("api_url", apiURL))
 
 	if f.config.Token != "" {
-		utils.LavaFormatInfo("Using GitLab token authentication",
+		utils.FormatInfo("Using GitLab token authentication",
 			utils.LogAttr("token_prefix", f.config.Token[:min(4, len(f.config.Token))]))
 	} else {
-		utils.LavaFormatInfo("Using unauthenticated GitLab access",
+		utils.FormatInfo("Using unauthenticated GitLab access",
 			utils.LogAttr("note", "private repos require authentication"))
 	}
 
@@ -97,7 +97,7 @@ func (f *Fetcher) fetchFromGitLabAPI(ctx context.Context, info *RepoInfo) (map[s
 		return nil, fmt.Errorf("no .json spec files found in repository")
 	}
 
-	utils.LavaFormatInfo("Found spec files to fetch",
+	utils.FormatInfo("Found spec files to fetch",
 		utils.LogAttr("file_count", len(fileURLs)))
 
 	// Fetch all spec files in parallel

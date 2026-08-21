@@ -10,20 +10,21 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	lavasession "github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	routersession "github.com/magma-Devs/smart-router/protocol/routersession"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
-	"github.com/stretchr/testify/require"
+	"github.com/magma-Devs/smart-router/utils/sliceutil"
 )
 
 type PolicySt struct {
@@ -86,7 +87,7 @@ func (srsm *SmartRouterRelaySenderMock) ParseRelay(
 		}
 	}
 	if !foundArchive {
-		utils.LavaFormatFatal("misuse in mocked parse relay", nil)
+		utils.FormatFatal("misuse in mocked parse relay", nil)
 	}
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Handle the incoming request and provide the desired response
@@ -102,7 +103,7 @@ func (srsm *SmartRouterRelaySenderMock) ParseRelay(
 	}
 	chainParser.SetPolicy(policy, specId, spectypes.APIInterfaceJsonRPC)
 	chainMsg, err := chainParser.ParseMsg(url, []byte(req), connectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0, ExtensionOverride: []string{"archive"}})
-	relayRequestData := lavaprotocol.NewRelayData(ctx, connectionType, url, []byte(req), 0, -2, spectypes.APIInterfaceJsonRPC, chainMsg.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMsg), common.GetExtensionNames(chainMsg.GetExtensions()))
+	relayRequestData := relayprotocol.NewRelayData(ctx, connectionType, url, []byte(req), 0, -2, spectypes.APIInterfaceJsonRPC, chainMsg.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMsg), common.GetExtensionNames(chainMsg.GetExtensions()))
 	protocolMessage = chainlib.NewProtocolMessage(chainMsg, nil, relayRequestData, dappID, consumerIp)
 	return protocolMessage, nil
 }
@@ -125,7 +126,7 @@ func TestConsumerStateMachineHappyFlow(t *testing.T) {
 		dappId := "dapp"
 		consumerIp := "123.11"
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil}, protocolMessage, nil, false)
 		require.NoError(t, err)
 		relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, stateMachine)
@@ -137,7 +138,7 @@ func TestConsumerStateMachineHappyFlow(t *testing.T) {
 		require.Nil(t, canUse)
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}, "lava@test2": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}, "provider@test2": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -148,22 +149,22 @@ func TestConsumerStateMachineHappyFlow(t *testing.T) {
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendProtocolError(relayProcessor, "lava@test", time.Millisecond*1, fmt.Errorf("bad"))
+				relaycoretest.SendProtocolError(relayProcessor, "provider@test", time.Millisecond*1, fmt.Errorf("bad"))
 			case 1:
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendNodeError(relayProcessor, "lava2@test", time.Millisecond*1)
+				relaycoretest.SendNodeError(relayProcessor, "provider2@test", time.Millisecond*1)
 			case 2:
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendNodeError(relayProcessor, "lava2@test", time.Millisecond*1)
+				relaycoretest.SendNodeError(relayProcessor, "provider2@test", time.Millisecond*1)
 			case 3:
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendSuccessResp(relayProcessor, "lava4@test", time.Millisecond*1)
+				relaycoretest.SendSuccessResp(relayProcessor, "provider4@test", time.Millisecond*1)
 			case 4:
 				require.True(t, task.IsDone())
 				results, _ := relayProcessor.HasRequiredNodeResults(1)
@@ -197,7 +198,7 @@ func TestConsumerStateMachineExhaustRetries(t *testing.T) {
 		dappId := "dapp"
 		consumerIp := "123.11"
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil, tickerValue: 10 * time.Second}, protocolMessage, nil, false)
 		require.NoError(t, err)
 		relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, stateMachine)
@@ -264,9 +265,9 @@ func TestConsumerStateMachineArchiveRetry(t *testing.T) {
 		reqBlock, _ := chainMsg.RequestedBlock()
 		var seenBlock int64 = 0
 
-		relayRequestData := lavaprotocol.NewRelayData(ctx, http.MethodPost, "", jsonData, seenBlock, reqBlock, spectypes.APIInterfaceJsonRPC, chainMsg.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMsg), common.GetExtensionNames(chainMsg.GetExtensions()))
+		relayRequestData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", jsonData, seenBlock, reqBlock, spectypes.APIInterfaceJsonRPC, chainMsg.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMsg), common.GetExtensionNames(chainMsg.GetExtensions()))
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, relayRequestData, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		stateMachine, err := NewSmartRouterRelayStateMachine(
 			ctx,
 			usedProviders,
@@ -293,7 +294,7 @@ func TestConsumerStateMachineArchiveRetry(t *testing.T) {
 		require.Zero(t, usedProviders.CurrentlyUsed())
 		require.Zero(t, usedProviders.SessionsLatestBatch())
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}, "lava@test2": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}, "provider@test2": &routersession.SessionInfo{}}
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
 		taskNumber := 0
@@ -303,17 +304,17 @@ func TestConsumerStateMachineArchiveRetry(t *testing.T) {
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendNodeErrorJsonRpc(relayProcessor, "lava2@test", time.Millisecond*1)
+				relaycoretest.SendNodeErrorJsonRpc(relayProcessor, "provider2@test", time.Millisecond*1)
 			case 1:
 				require.False(t, task.IsDone())
 				require.True(t,
-					lavaslices.ContainsPredicate(
+					sliceutil.ContainsPredicate(
 						task.RelayState.GetProtocolMessage().GetExtensions(),
 						func(predicate *spectypes.Extension) bool { return predicate.Name == "archive" }),
 				)
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendSuccessRespJsonRpc(relayProcessor, "lava4@test", time.Millisecond*1)
+				relaycoretest.SendSuccessRespJsonRpc(relayProcessor, "provider4@test", time.Millisecond*1)
 			case 2:
 				require.True(t, task.IsDone())
 				results, _ := relayProcessor.HasRequiredNodeResults(1)
@@ -347,7 +348,7 @@ func TestSmartRouterStateMachineCircuitBreakerOnPairingErrors(t *testing.T) {
 		dappId := "dapp"
 		consumerIp := "123.11"
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil}, protocolMessage, nil, false)
 		require.NoError(t, err)
 		relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, stateMachine)
@@ -360,16 +361,16 @@ func TestSmartRouterStateMachineCircuitBreakerOnPairingErrors(t *testing.T) {
 			case 0:
 				// First pairing error
 				require.False(t, task.IsDone())
-				relayProcessor.UpdateBatch(lavasession.PairingListEmptyError)
+				relayProcessor.UpdateBatch(routersession.PairingListEmptyError)
 			case 1:
 				// Second pairing error - circuit breaker should trigger
 				require.False(t, task.IsDone())
-				relayProcessor.UpdateBatch(lavasession.PairingListEmptyError)
+				relayProcessor.UpdateBatch(routersession.PairingListEmptyError)
 			case 2:
 				// Should be done - circuit breaker stopped retries
 				require.True(t, task.IsDone())
 				require.Error(t, task.Err)
-				require.True(t, errors.Is(task.Err, lavasession.PairingListEmptyError))
+				require.True(t, errors.Is(task.Err, routersession.PairingListEmptyError))
 				return // Test successful
 			default:
 				require.Fail(t, "Circuit breaker should have stopped retries after 2 pairing errors")
@@ -396,7 +397,7 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnSuccess(t *testing.T) {
 		dappId := "dapp"
 		consumerIp := "123.11"
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil}, protocolMessage, nil, false)
 		require.NoError(t, err)
 		relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, stateMachine)
@@ -407,7 +408,7 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnSuccess(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -417,13 +418,13 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnSuccess(t *testing.T) {
 			case 0:
 				// First pairing error
 				require.False(t, task.IsDone())
-				relayProcessor.UpdateBatch(lavasession.PairingListEmptyError)
+				relayProcessor.UpdateBatch(routersession.PairingListEmptyError)
 			case 1:
 				// Success - should reset counter
 				require.False(t, task.IsDone())
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendSuccessResp(relayProcessor, "lava@test", time.Millisecond*1)
+				relaycoretest.SendSuccessResp(relayProcessor, "provider@test", time.Millisecond*1)
 			case 2:
 				// Done with success
 				require.True(t, task.IsDone())
@@ -452,7 +453,7 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnDifferentError(t *testing.
 		dappId := "dapp"
 		consumerIp := "123.11"
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil}, protocolMessage, nil, false)
 		require.NoError(t, err)
 		relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, stateMachine)
@@ -465,7 +466,7 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnDifferentError(t *testing.
 			case 0:
 				// First pairing error
 				require.False(t, task.IsDone())
-				relayProcessor.UpdateBatch(lavasession.PairingListEmptyError)
+				relayProcessor.UpdateBatch(routersession.PairingListEmptyError)
 			case 1:
 				// Different error (network timeout) - should reset counter
 				require.False(t, task.IsDone())
@@ -473,11 +474,11 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnDifferentError(t *testing.
 			case 2:
 				// Another pairing error - counter was reset, so this is #1 again
 				require.False(t, task.IsDone())
-				relayProcessor.UpdateBatch(lavasession.PairingListEmptyError)
+				relayProcessor.UpdateBatch(routersession.PairingListEmptyError)
 			case 3:
 				// Second consecutive pairing error - circuit breaker triggers
 				require.False(t, task.IsDone())
-				relayProcessor.UpdateBatch(lavasession.PairingListEmptyError)
+				relayProcessor.UpdateBatch(routersession.PairingListEmptyError)
 			case 4:
 				// Done - circuit breaker triggered
 				require.True(t, task.IsDone())
@@ -511,7 +512,7 @@ func TestProcessingContextTimeoutEnforcement(t *testing.T) {
 		dappId := "dapp"
 		consumerIp := "123.11"
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// Create mock with SHORT processing timeout (100ms) to test timeout enforcement
 		mockSender := &SmartRouterRelaySenderMockWithTimeout{
@@ -528,7 +529,7 @@ func TestProcessingContextTimeoutEnforcement(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -551,9 +552,9 @@ func TestProcessingContextTimeoutEnforcement(t *testing.T) {
 
 			// Simulate various errors to trigger retries
 			if taskNumber%2 == 0 {
-				relaycoretest.SendProtocolError(relayProcessor, "lava@test", time.Millisecond*1, fmt.Errorf("simulated protocol error"))
+				relaycoretest.SendProtocolError(relayProcessor, "provider@test", time.Millisecond*1, fmt.Errorf("simulated protocol error"))
 			} else {
-				relaycoretest.SendNodeError(relayProcessor, "lava@test", time.Millisecond*1)
+				relaycoretest.SendNodeError(relayProcessor, "provider@test", time.Millisecond*1)
 			}
 
 			// Sleep slightly to allow WaitForResults to detect the error and return
@@ -607,7 +608,7 @@ func TestProcessingContextStillValidAllowsRetries(t *testing.T) {
 		dappId := "dapp"
 		consumerIp := "123.11"
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// LONG processing timeout (10 seconds) - retries should continue
 		stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil, tickerValue: 10 * time.Second}, protocolMessage, nil, false)
@@ -620,7 +621,7 @@ func TestProcessingContextStillValidAllowsRetries(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -634,7 +635,7 @@ func TestProcessingContextStillValidAllowsRetries(t *testing.T) {
 				// After 5 retries, send success to end the test
 				usedProviders.AddUsed(consumerSessionsMap, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendSuccessResp(relayProcessor, "lava@test", time.Millisecond*1)
+				relaycoretest.SendSuccessResp(relayProcessor, "provider@test", time.Millisecond*1)
 				time.Sleep(20 * time.Millisecond)
 
 				if task.IsDone() {
@@ -653,7 +654,7 @@ func TestProcessingContextStillValidAllowsRetries(t *testing.T) {
 			// Simulate failure to trigger retry
 			usedProviders.AddUsed(consumerSessionsMap, nil)
 			relayProcessor.UpdateBatch(nil)
-			relaycoretest.SendNodeError(relayProcessor, "lava@test", time.Millisecond*1)
+			relaycoretest.SendNodeError(relayProcessor, "provider@test", time.Millisecond*1)
 			time.Sleep(10 * time.Millisecond)
 
 			taskNumber++
@@ -685,7 +686,7 @@ func TestProcessingContextRaceCondition(t *testing.T) {
 		dappId := "dapp"
 		consumerIp := "123.11"
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// Short timeout (200ms) to create the race condition
 		mockSender := &SmartRouterRelaySenderMockWithTimeout{
@@ -702,7 +703,7 @@ func TestProcessingContextRaceCondition(t *testing.T) {
 		require.NoError(t, ctx.Err())
 		require.Nil(t, canUse)
 
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -732,7 +733,7 @@ func TestProcessingContextRaceCondition(t *testing.T) {
 			// Rapidly fail to create the race condition
 			usedProviders.AddUsed(consumerSessionsMap, nil)
 			relayProcessor.UpdateBatch(nil)
-			relaycoretest.SendNodeError(relayProcessor, "lava@test", time.Millisecond*1)
+			relaycoretest.SendNodeError(relayProcessor, "provider@test", time.Millisecond*1)
 			// Small sleep to let WaitForResults return
 			time.Sleep(5 * time.Millisecond)
 		}
@@ -779,7 +780,7 @@ func TestSmartRouterStateMachineBatchRequestRetryCondition(t *testing.T) {
 		dappId := "dapp"
 		consumerIp := "123.11"
 		protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, dappId, consumerIp)
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 
 		// Create the state machine
 		stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil, tickerValue: 10 * time.Second}, protocolMessage, nil, false)
@@ -988,7 +989,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			retryLimit:       0,
 			expectedMaxTasks: 1,
 			sendError: func(rp *relaycore.RelayProcessor) {
-				relaycoretest.SendNodeError(rp, "lava@test", time.Millisecond*1)
+				relaycoretest.SendNodeError(rp, "provider@test", time.Millisecond*1)
 			},
 			description: "With limit=0, should stop after initial node error",
 		},
@@ -997,7 +998,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			retryLimit:       2,
 			expectedMaxTasks: 4,
 			sendError: func(rp *relaycore.RelayProcessor) {
-				relaycoretest.SendNodeError(rp, "lava@test", time.Millisecond*1)
+				relaycoretest.SendNodeError(rp, "provider@test", time.Millisecond*1)
 			},
 			description: "With limit=2, should stop within a few node error retries",
 		},
@@ -1006,7 +1007,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			retryLimit:       0,
 			expectedMaxTasks: 1,
 			sendError: func(rp *relaycore.RelayProcessor) {
-				relaycoretest.SendProtocolError(rp, "lava@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
+				relaycoretest.SendProtocolError(rp, "provider@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
 			},
 			description: "With limit=0, should stop after initial protocol error",
 		},
@@ -1015,7 +1016,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			retryLimit:       2,
 			expectedMaxTasks: 4,
 			sendError: func(rp *relaycore.RelayProcessor) {
-				relaycoretest.SendProtocolError(rp, "lava@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
+				relaycoretest.SendProtocolError(rp, "provider@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
 			},
 			description: "With limit=2, should stop within a few protocol error retries",
 		},
@@ -1028,9 +1029,9 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 				return func(rp *relaycore.RelayProcessor) {
 					callCount++
 					if callCount%2 == 1 {
-						relaycoretest.SendNodeError(rp, "lava@test", time.Millisecond*1)
+						relaycoretest.SendNodeError(rp, "provider@test", time.Millisecond*1)
 					} else {
-						relaycoretest.SendProtocolError(rp, "lava@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
+						relaycoretest.SendProtocolError(rp, "provider@test", time.Millisecond*1, fmt.Errorf("connection timeout"))
 					}
 				}
 			}(),
@@ -1057,13 +1058,13 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "123.11")
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 			// Use long ticker to prevent ticker-based retries from interfering
 			stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil, tickerValue: 10 * time.Second}, protocolMessage, nil, false)
 			require.NoError(t, err)
 			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, stateMachine)
 
-			consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}}
+			consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 			relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 			require.NoError(t, err)
@@ -1131,14 +1132,14 @@ func TestSmartRouterStateMachine_ForbidCallerCV(t *testing.T) {
 	}
 
 	t.Run("control: caller headers turn CV on with no forbid policy", func(t *testing.T) {
-		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, buildPM(), nil, false, nil, specId, apiInterface)
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, routersession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, buildPM(), nil, false, nil, specId, apiInterface)
 		require.NoError(t, smErr)
 		require.Equal(t, relaycore.CrossValidation, sm.GetSelection(), "caller CV headers must enable cross-validation when not forbidden")
 	})
 
 	t.Run("forbid policy suppresses caller-driven CV", func(t *testing.T) {
 		resolver := newResolverWith(CrossValidationPolicy{ForbidCallerCV: true})
-		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, buildPM(), nil, false, resolver, specId, apiInterface)
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, routersession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, buildPM(), nil, false, resolver, specId, apiInterface)
 		require.NoError(t, smErr)
 		require.NotEqual(t, relaycore.CrossValidation, sm.GetSelection(), "forbid-caller-cv must disable cross-validation even with caller headers present")
 		require.Nil(t, sm.GetCrossValidationParams(), "no cross-validation params when CV is forbidden")

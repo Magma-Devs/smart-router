@@ -7,13 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestRESTRelay_GET_PathParameters(t *testing.T) {
@@ -47,7 +48,7 @@ func TestRESTRelay_GET_PathParameters(t *testing.T) {
 	require.NoError(t, err)
 
 	nodeUrl := endpoint.NodeUrls[0]
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -99,7 +100,7 @@ func TestRESTRelay_GET_QueryParameters(t *testing.T) {
 	require.NoError(t, err)
 
 	nodeUrl := endpoint.NodeUrls[0]
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -148,7 +149,7 @@ func TestRESTRelay_POST_JSONBody(t *testing.T) {
 	require.NoError(t, err)
 
 	nodeUrl := endpoint.NodeUrls[0]
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -193,7 +194,7 @@ func TestRESTRelay_404_NotFound(t *testing.T) {
 	require.NoError(t, err)
 
 	nodeUrl := endpoint.NodeUrls[0]
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -239,7 +240,7 @@ func TestRESTRelay_429_RateLimit(t *testing.T) {
 	require.NoError(t, err)
 
 	nodeUrl := endpoint.NodeUrls[0]
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -284,7 +285,7 @@ func TestRESTRelay_503_ServiceUnavailable(t *testing.T) {
 	require.NoError(t, err)
 
 	nodeUrl := endpoint.NodeUrls[0]
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -331,7 +332,7 @@ func TestRESTRelay_ResponseHeaders(t *testing.T) {
 	require.NoError(t, err)
 
 	nodeUrl := endpoint.NodeUrls[0]
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -403,24 +404,24 @@ func TestRESTRelay_501_NotImplemented_relayInnerDirect(t *testing.T) {
 	require.NoError(t, err)
 
 	nodeUrl := endpoint.NodeUrls[0]
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	// Minimal smart-router direct session. Endpoint is deliberately left nil so
 	// relayInnerDirect's MarkUnhealthy/metrics blocks (guarded by
 	// `targetEndpoint != nil`) are skipped — smartRouterEndpointMetrics is never
 	// dereferenced, keeping the harness self-contained.
-	cswp := &lavasession.ConsumerSessionsWithProvider{PublicLavaAddress: "test-cosmos-lcd"}
-	session := &lavasession.SingleConsumerSession{
+	cswp := &routersession.ConsumerSessionsWithProvider{PublicAddress: "test-cosmos-lcd"}
+	session := &routersession.SingleConsumerSession{
 		Parent: cswp,
-		Connection: &lavasession.DirectRPCSessionConnection{
+		Connection: &routersession.DirectRPCSessionConnection{
 			DirectConnection: directConn,
 			EndpointAddress:  nodeUrl.Url,
 		},
 	}
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
 	}
 
 	relayResult := &common.RelayResult{}

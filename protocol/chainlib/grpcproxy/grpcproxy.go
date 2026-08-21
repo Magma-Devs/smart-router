@@ -7,8 +7,6 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
@@ -17,6 +15,9 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 const MaxCallRecvMsgSize = 1024 * 1024 * 512 // 512MB for large debug responses
@@ -126,7 +127,7 @@ func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
 		if err != nil {
 			// On error the handler returns no message, so gRPC sends a trailers-only response — SetHeader
 			// metadata is unreliable there, but trailers are always flushed with the status. Attach the
-			// reply metadata (e.g. lava-cross-validation-* failure headers) as trailers so error responses
+			// reply metadata (e.g. smartrouter-cross-validation-* failure headers) as trailers so error responses
 			// still carry it, matching the success path's SetHeader. Skipped when empty, so non-CV errors
 			// are unchanged.
 			if len(md) > 0 {
@@ -136,7 +137,7 @@ func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
 		}
 
 		if err := stream.SetHeader(md); err != nil {
-			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headers", md))
+			utils.FormatError("Got error when setting header", err, utils.LogAttr("headers", md))
 		}
 		return stream.SendMsg(respBytes)
 	}
@@ -147,7 +148,7 @@ type RawBytesCodec struct{}
 func (RawBytesCodec) Marshal(v interface{}) ([]byte, error) {
 	bytes, ok := v.([]byte)
 	if !ok {
-		return nil, utils.LavaFormatError("cannot encode type", nil, utils.Attribute{Key: "v", Value: v})
+		return nil, utils.FormatError("cannot encode type", nil, utils.Attribute{Key: "v", Value: v})
 	}
 	return bytes, nil
 }
@@ -155,14 +156,14 @@ func (RawBytesCodec) Marshal(v interface{}) ([]byte, error) {
 func (RawBytesCodec) Unmarshal(data []byte, v interface{}) error {
 	bufferPtr, ok := v.(*[]byte)
 	if !ok {
-		return utils.LavaFormatDebug("cannot decode into type", utils.LogAttr("v", v), utils.LogAttr("data", data))
+		return utils.FormatDebug("cannot decode into type", utils.LogAttr("v", v), utils.LogAttr("data", data))
 	}
 	*bufferPtr = data
 	return nil
 }
 
 func (RawBytesCodec) Name() string {
-	return "lava/grpc-proxy-codec"
+	return "smartrouter/grpc-proxy-codec"
 }
 
 func (RawBytesCodec) String() string {

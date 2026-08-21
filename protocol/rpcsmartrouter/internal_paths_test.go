@@ -4,8 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // httpOnlyCollections is the probe for a spec whose every internal path is an

@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // fetchFromGitHub fetches all specs from a GitHub repository.
@@ -24,7 +24,7 @@ func (f *Fetcher) fetchFromGitHub(ctx context.Context, info *RepoInfo) (map[stri
 		return specs, nil
 	}
 
-	utils.LavaFormatWarning("GitHub tarball fetch failed, falling back to contents API", tarballErr,
+	utils.FormatWarning("GitHub tarball fetch failed, falling back to contents API", tarballErr,
 		utils.LogAttr("repo", info.ProjectPath))
 
 	specs, apiErr := f.fetchFromGitHubAPI(ctx, info)
@@ -55,14 +55,14 @@ func (f *Fetcher) fetchFromGitHubAPI(ctx context.Context, info *RepoInfo) (map[s
 	// Build the API URL for listing directory contents
 	apiURL := f.buildGitHubAPIURL(info)
 
-	utils.LavaFormatInfo("Fetching spec file list from GitHub",
+	utils.FormatInfo("Fetching spec file list from GitHub",
 		utils.LogAttr("api_url", apiURL))
 
 	if f.config.Token != "" {
-		utils.LavaFormatInfo("Using GitHub token authentication",
+		utils.FormatInfo("Using GitHub token authentication",
 			utils.LogAttr("token_prefix", f.config.Token[:min(4, len(f.config.Token))]))
 	} else {
-		utils.LavaFormatInfo("Using unauthenticated GitHub access",
+		utils.FormatInfo("Using unauthenticated GitHub access",
 			utils.LogAttr("rate_limit", "60 req/hour"))
 	}
 
@@ -91,7 +91,7 @@ func (f *Fetcher) fetchFromGitHubAPI(ctx context.Context, info *RepoInfo) (map[s
 		return nil, fmt.Errorf("no .json spec files found in repository")
 	}
 
-	utils.LavaFormatInfo("Found spec files to fetch",
+	utils.FormatInfo("Found spec files to fetch",
 		utils.LogAttr("file_count", len(fileURLs)))
 
 	// Fetch all spec files in parallel

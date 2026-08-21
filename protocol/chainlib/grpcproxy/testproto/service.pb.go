@@ -6,15 +6,16 @@ package testproto
 import (
 	context "context"
 	fmt "fmt"
+	io "io"
+	math "math"
+	math_bits "math/bits"
+
 	grpc1 "github.com/gogo/protobuf/grpc"
 	proto "github.com/gogo/protobuf/proto"
 	_ "google.golang.org/genproto/googleapis/api/annotations"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
-	io "io"
-	math "math"
-	math_bits "math/bits"
 )
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -117,8 +118,8 @@ func (m *TestResponse) GetResponse() string {
 }
 
 func init() {
-	proto.RegisterType((*TestRequest)(nil), "lavanet.testproto.TestRequest")
-	proto.RegisterType((*TestResponse)(nil), "lavanet.testproto.TestResponse")
+	proto.RegisterType((*TestRequest)(nil), "smartrouter.testproto.TestRequest")
+	proto.RegisterType((*TestResponse)(nil), "smartrouter.testproto.TestResponse")
 }
 
 func init() { proto.RegisterFile("testproto/service.proto", fileDescriptor_84476fd37f14c8c6) }
@@ -168,7 +169,7 @@ func NewTestClient(cc grpc1.ClientConn) TestClient {
 
 func (c *testClient) Test(ctx context.Context, in *TestRequest, opts ...grpc.CallOption) (*TestResponse, error) {
 	out := new(TestResponse)
-	err := c.cc.Invoke(ctx, "/lavanet.testproto.Test/Test", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/smartrouter.testproto.Test/Test", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +203,7 @@ func _Test_Test_Handler(srv interface{}, ctx context.Context, dec func(interface
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/lavanet.testproto.Test/Test",
+		FullMethod: "/smartrouter.testproto.Test/Test",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(TestServer).Test(ctx, req.(*TestRequest))
@@ -211,7 +212,7 @@ func _Test_Test_Handler(srv interface{}, ctx context.Context, dec func(interface
 }
 
 var _Test_serviceDesc = grpc.ServiceDesc{
-	ServiceName: "lavanet.testproto.Test",
+	ServiceName: "smartrouter.testproto.Test",
 	HandlerType: (*TestServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{

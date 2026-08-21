@@ -8,7 +8,7 @@ import (
 )
 
 // TestSeparateAddonsExtensionsArchiveIsExtension documents the classification the
-// lava-extension: archive directive relies on. "archive" is registered only in the extension set
+// smartrouter-extension: archive directive relies on. "archive" is registered only in the extension set
 // (no shipped spec puts it in allowedAddons), so SeparateAddonsExtensions classifies it as an
 // extension instead of swallowing it as an addon — which is why the directive header is honored
 // and resolves to an archive extension rather than being dropped.

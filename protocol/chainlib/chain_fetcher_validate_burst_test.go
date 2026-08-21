@@ -8,7 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/stretchr/testify/require"
@@ -54,7 +54,7 @@ func newEthValidateFetcher(t *testing.T, router ChainRouter) *ChainFetcher {
 	require.NoError(t, err)
 	cp.SetSpec(spec)
 	return &ChainFetcher{
-		endpoint: &lavasession.RPCProviderEndpoint{
+		endpoint: &routersession.RPCProviderEndpoint{
 			ChainID:      "ETH1",
 			ApiInterface: spectypes.APIInterfaceJsonRPC,
 			NodeUrls:     []common.NodeUrl{{Url: "http://node:8545"}},

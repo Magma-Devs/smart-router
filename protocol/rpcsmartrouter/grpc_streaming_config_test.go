@@ -196,9 +196,9 @@ func TestGRPCClientRateLimiter_ConcurrentAccess(t *testing.T) {
 
 func TestGRPCMetadataConstants(t *testing.T) {
 	// Verify metadata header keys are defined correctly
-	assert.Equal(t, "x-lava-grpc-sub-id", MetadataGRPCSubscriptionID)
-	assert.Equal(t, "x-lava-grpc-stream-seq", MetadataGRPCStreamSeq)
-	assert.Equal(t, "x-lava-grpc-client-id", MetadataGRPCClientID)
+	assert.Equal(t, "x-smartrouter-grpc-sub-id", MetadataGRPCSubscriptionID)
+	assert.Equal(t, "x-smartrouter-grpc-stream-seq", MetadataGRPCStreamSeq)
+	assert.Equal(t, "x-smartrouter-grpc-client-id", MetadataGRPCClientID)
 }
 
 func TestGRPCStreamingConfig_VsWebSocketConfig(t *testing.T) {

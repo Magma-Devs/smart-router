@@ -3,8 +3,9 @@ package protocopy
 import (
 	"testing"
 
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
+
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
 func TestCopy(t *testing.T) {

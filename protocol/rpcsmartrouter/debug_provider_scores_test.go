@@ -12,12 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/stretchr/testify/require"
 )
 
 // fixedScoreOptimizer is a metrics.OptimizerInf returning a known score per address, so the handler
@@ -45,7 +46,7 @@ func newScoresMux(t *testing.T) http.Handler {
 	t.Helper()
 	qosClient := metrics.NewConsumerOptimizerQoSClient("consumer", metrics.NoopUsageSink{})
 	qosClient.RegisterOptimizer(&fixedScoreOptimizer{composite: 0.85, availability: 0.99}, "ETH1")
-	qosClient.UpdatePairingListStake(map[string]int64{"lava@provider1": 1000}, "ETH1", 7)
+	qosClient.UpdatePairingListStake(map[string]int64{"provider@provider1": 1000}, "ETH1", 7)
 
 	var offsetNano atomic.Int64
 	return buildDebugMux(debugMuxDeps{
@@ -85,16 +86,18 @@ func TestDebugProviderScores_ReturnsScores(t *testing.T) {
 	require.Len(t, rows, 1)
 	row := rows[0]
 	require.Equal(t, "ETH1", row["ChainID"])
-	require.Equal(t, "lava@provider1", row["ProviderAddress"])
+	require.Equal(t, "provider@provider1", row["ProviderAddress"])
 	require.Equal(t, 0.99, row["AvailabilityScore"], "the raw EWMA availability is exposed")
 	require.Equal(t, 0.85, row["SelectionComposite"], "the composite selection ranks on is exposed")
 	require.Equal(t, float64(1000), row["ProviderStake"])
 	require.Equal(t, float64(7), row["Epoch"])
 	require.NotEmpty(t, row["Timestamp"])
 	require.Equal(t, []any{}, row["NetworkAddresses"], "no session managers wired → empty list, never null")
-	for _, field := range []string{"LatencyScore", "SyncScore", "SelectionAvailability", "SelectionLatency",
+	for _, field := range []string{
+		"LatencyScore", "SyncScore", "SelectionAvailability", "SelectionLatency",
 		"SelectionSync", "SelectionStake", "AvailabilityContribution", "LatencyContribution",
-		"SyncContribution", "StakeContribution", "NodeErrorRate", "SelectionCount", "SelectionRate"} {
+		"SyncContribution", "StakeContribution", "NodeErrorRate", "SelectionCount", "SelectionRate",
+	} {
 		require.Contains(t, row, field, "the row shape is part of the contract")
 	}
 }
@@ -131,7 +134,7 @@ func TestDebugProviderScores_PartlyPopulatedRouterNamesTheEmptyChain(t *testing.
 	qosClient := metrics.NewConsumerOptimizerQoSClient("consumer", metrics.NoopUsageSink{})
 	// ETH1 is populated; SOLANA is registered but has no providers known yet.
 	qosClient.RegisterOptimizer(&fixedScoreOptimizer{composite: 0.85, availability: 0.99}, "ETH1")
-	qosClient.UpdatePairingListStake(map[string]int64{"lava@provider1": 1000}, "ETH1", 7)
+	qosClient.UpdatePairingListStake(map[string]int64{"provider@provider1": 1000}, "ETH1", 7)
 	qosClient.RegisterOptimizer(&fixedScoreOptimizer{}, "SOLANA")
 
 	var offsetNano atomic.Int64
@@ -169,24 +172,24 @@ func TestDebugProviderScores_CarriesEndpointURLsForJoin(t *testing.T) {
 	// declaration order (and that the second does not overwrite the first).
 	const urlA, urlB = "http://127.0.0.1:1/a", "http://127.0.0.2:2/b"
 
-	csm := lavasession.NewConsumerSessionManager(
-		&lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: chainID, ApiInterface: apiInterface, HealthCheckPath: "/"},
+	csm := routersession.NewConsumerSessionManager(
+		&routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: chainID, ApiInterface: apiInterface, HealthCheckPath: "/"},
 		provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID),
-		nil, "lava@test", lavasession.NewActiveSubscriptionProvidersStorage(),
+		nil, "provider@test", routersession.NewActiveSubscriptionProvidersStorage(),
 	)
-	endpoints := make([]*lavasession.Endpoint, 0, 2)
+	endpoints := make([]*routersession.Endpoint, 0, 2)
 	for _, url := range []string{urlB, urlA} { // declared B first, expected back A first
-		conn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, apiInterface)
+		conn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, apiInterface)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
-		endpoints = append(endpoints, &lavasession.Endpoint{
+		endpoints = append(endpoints, &routersession.Endpoint{
 			NetworkAddress:    url,
 			Enabled:           true,
-			DirectConnections: []lavasession.DirectRPCConnection{conn},
+			DirectConnections: []routersession.DirectRPCConnection{conn},
 		})
 	}
-	require.NoError(t, csm.UpdateAllProviders(1, map[uint64]*lavasession.ConsumerSessionsWithProvider{
-		0: lavasession.NewConsumerSessionWithProvider(providerAddr, endpoints, 999999, 1, int64(1)),
+	require.NoError(t, csm.UpdateAllProviders(1, map[uint64]*routersession.ConsumerSessionsWithProvider{
+		0: routersession.NewConsumerSessionWithProvider(providerAddr, endpoints, 999999, 1, int64(1)),
 	}, nil))
 
 	qosClient := metrics.NewConsumerOptimizerQoSClient("consumer", metrics.NoopUsageSink{})
@@ -198,7 +201,7 @@ func TestDebugProviderScores_CarriesEndpointURLsForJoin(t *testing.T) {
 		optimizers: newEmptyOptimizersRouter(),
 		offsetNano: &offsetNano,
 		qosClient:  qosClient,
-		router:     &RPCSmartRouter{sessionManagers: map[string]*lavasession.ConsumerSessionManager{"ETH1-jsonrpc": csm}},
+		router:     &RPCSmartRouter{sessionManagers: map[string]*routersession.ConsumerSessionManager{"ETH1-jsonrpc": csm}},
 	})
 
 	rr := getDebugRouter(mux, "/debug/provider-scores")

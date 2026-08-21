@@ -7,23 +7,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
-	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	"github.com/magma-Devs/smart-router/utils/rand"
 )
 
 // stubStaticSessions builds canned ConsumerSessionsWithProvider for the given
 // configured providers without opening real connections — a stand-in for the
 // per-chain convertProvidersToSessions closure (a func field on
 // chainReverifyInputs), which would otherwise dial DirectRPCConnections.
-func stubStaticSessions(list []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-	out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(list))
+func stubStaticSessions(list []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
+	out := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(list))
 	for i, p := range list {
-		s := lavasession.NewConsumerSessionWithProvider(
+		s := routersession.NewConsumerSessionWithProvider(
 			p.Name,
-			[]*lavasession.Endpoint{{NetworkAddress: p.Name + ":80", Enabled: true}},
+			[]*routersession.Endpoint{{NetworkAddress: p.Name + ":80", Enabled: true}},
 			999999, uint64(1), int64(1),
 		)
 		s.StaticProvider = true
@@ -43,33 +44,33 @@ func TestRebuildPairingFromConfig_ReadmitsDemotedProvider(t *testing.T) {
 	rand.InitRandomSeed()
 
 	const chainID, apiInterface = "ETH1", "jsonrpc"
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface, NetworkAddress: "127.0.0.1:0"}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface, NetworkAddress: "127.0.0.1:0"}
 	chainKey := rpcEndpoint.Key()
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
 
-	mkProvider := func(name string) *lavasession.RPCStaticProviderEndpoint {
-		return &lavasession.RPCStaticProviderEndpoint{Name: name, ChainID: chainID, ApiInterface: apiInterface}
+	mkProvider := func(name string) *routersession.RPCStaticProviderEndpoint {
+		return &routersession.RPCStaticProviderEndpoint{Name: name, ChainID: chainID, ApiInterface: apiInterface}
 	}
 	p1, p2, p3 := mkProvider("simprovider1"), mkProvider("simprovider2"), mkProvider("simprovider3")
 
 	rpsr := &RPCSmartRouter{
-		sessionManagers: map[string]*lavasession.ConsumerSessionManager{
-			chainKey: lavasession.NewConsumerSessionManager(
-				rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage()),
+		sessionManagers: map[string]*routersession.ConsumerSessionManager{
+			chainKey: routersession.NewConsumerSessionManager(
+				rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage()),
 		},
-		providerSessions:       make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider),
-		backupProviderSessions: make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider),
-		failedStaticProviders:  make(map[string][]*lavasession.RPCStaticProviderEndpoint),
+		providerSessions:       make(map[string]map[uint64]*routersession.ConsumerSessionsWithProvider),
+		backupProviderSessions: make(map[string]map[uint64]*routersession.ConsumerSessionsWithProvider),
+		failedStaticProviders:  make(map[string][]*routersession.RPCStaticProviderEndpoint),
 		reverifyInputs:         make(map[string]*chainReverifyInputs),
 		rpcServers:             make(map[string]*RPCSmartRouterServer),
 		epochTimer:             common.NewEpochTimer(15 * time.Minute),
 	}
 	rpsr.reverifyInputs[chainKey] = &chainReverifyInputs{
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{p1, p2, p3},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{p1, p2, p3},
 		convertProvidersToSessions: stubStaticSessions,
 	}
 	// Demoted state: the re-verifier dropped simprovider3 from the live pairing.
-	rpsr.providerSessions[chainKey] = stubStaticSessions([]*lavasession.RPCStaticProviderEndpoint{p1, p2})
+	rpsr.providerSessions[chainKey] = stubStaticSessions([]*routersession.RPCStaticProviderEndpoint{p1, p2})
 
 	restored := rpsr.rebuildPairingFromConfig()
 
@@ -78,7 +79,7 @@ func TestRebuildPairingFromConfig_ReadmitsDemotedProvider(t *testing.T) {
 
 	names := map[string]bool{}
 	for _, s := range rpsr.providerSessions[chainKey] {
-		names[s.PublicLavaAddress] = true
+		names[s.PublicAddress] = true
 	}
 	require.Len(t, rpsr.providerSessions[chainKey], 3, "pairing should hold all three configured providers after rebuild")
 	require.True(t, names["simprovider1"] && names["simprovider2"] && names["simprovider3"],

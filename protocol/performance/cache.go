@@ -6,13 +6,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
+
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 type relayerCacheClientStore struct {
@@ -56,7 +57,7 @@ func (r *relayerCacheClientStore) connectGRPCConnectionToRelayerCacheService() (
 	connectCtx, cancel := context.WithTimeout(r.ctx, 3*time.Second)
 	defer cancel()
 
-	conn, err := lavasession.ConnectGRPCClient(connectCtx, r.address, false, true)
+	conn, err := routersession.ConnectGRPCClient(connectCtx, r.address, false, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -68,7 +69,7 @@ func (r *relayerCacheClientStore) connectGRPCConnectionToRelayerCacheService() (
 func (r *relayerCacheClientStore) connectClient() error {
 	relayerCacheClient, conn, err := r.connectGRPCConnectionToRelayerCacheService()
 	if err == nil {
-		utils.LavaFormatInfo("cache service connected successfully", utils.LogAttr("address", r.address))
+		utils.FormatInfo("cache service connected successfully", utils.LogAttr("address", r.address))
 		func() {
 			r.lock.Lock()
 			defer r.lock.Unlock()
@@ -76,9 +77,9 @@ func (r *relayerCacheClientStore) connectClient() error {
 			// Each *grpc.ClientConn spawns internal goroutines (reader, writer, callback serializers)
 			// that only exit when conn.Close() is called.
 			if r.conn != nil {
-				utils.LavaFormatDebug("closing previous cache gRPC connection before replacing", utils.LogAttr("address", r.address))
+				utils.FormatDebug("closing previous cache gRPC connection before replacing", utils.LogAttr("address", r.address))
 				if err := r.conn.Close(); err != nil {
-					utils.LavaFormatWarning("failed to close previous cache gRPC connection", err, utils.LogAttr("address", r.address))
+					utils.FormatWarning("failed to close previous cache gRPC connection", err, utils.LogAttr("address", r.address))
 				}
 			}
 			r.client = relayerCacheClient
@@ -89,7 +90,7 @@ func (r *relayerCacheClientStore) connectClient() error {
 		return nil // connected
 	}
 
-	utils.LavaFormatDebug("cache service connection attempt failed", utils.LogAttr("address", r.address), utils.LogAttr("error", err))
+	utils.FormatDebug("cache service connection attempt failed", utils.LogAttr("address", r.address), utils.LogAttr("error", err))
 	return err
 }
 
@@ -105,19 +106,19 @@ func (r *relayerCacheClientStore) reconnectClient() {
 		return
 	}
 
-	utils.LavaFormatInfo("cache service reconnection loop started", utils.LogAttr("address", r.address))
+	utils.FormatInfo("cache service reconnection loop started", utils.LogAttr("address", r.address))
 
 	for {
 		// Dial first, sleep only between failed attempts. Otherwise a caller
 		// that just discovered client == nil waits a full reconnectInterval
 		// before any retry happens, leaving the cache silently skipped.
 		if r.connectClient() == nil {
-			utils.LavaFormatInfo("cache service reconnection succeeded, exiting reconnect loop", utils.LogAttr("address", r.address))
+			utils.FormatInfo("cache service reconnection succeeded, exiting reconnect loop", utils.LogAttr("address", r.address))
 			return
 		}
 		select {
 		case <-r.ctx.Done():
-			utils.LavaFormatInfo("cache service reconnection loop exiting (context cancelled)", utils.LogAttr("address", r.address))
+			utils.FormatInfo("cache service reconnection loop exiting (context cancelled)", utils.LogAttr("address", r.address))
 			return
 		case <-time.After(reconnectInterval):
 		}
@@ -134,7 +135,7 @@ func (r *relayerCacheClientStore) resetOnConnectionError(err error) {
 	if code != codes.Unavailable {
 		return
 	}
-	utils.LavaFormatWarning("cache service connection error detected, triggering reconnection", err, utils.LogAttr("address", r.address))
+	utils.FormatWarning("cache service connection error detected, triggering reconnection", err, utils.LogAttr("address", r.address))
 	r.lock.Lock()
 	r.client = nil
 	r.lock.Unlock()

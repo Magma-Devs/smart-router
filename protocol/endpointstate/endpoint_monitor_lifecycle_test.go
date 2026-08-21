@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chaintracker"
-	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+
+	"github.com/magma-Devs/smart-router/protocol/chaintracker"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 )
 
 // ============================================================================

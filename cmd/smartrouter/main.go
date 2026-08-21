@@ -4,17 +4,18 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/spf13/cobra"
+
 	"github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/protocol/performance/connection"
 	"github.com/magma-Devs/smart-router/protocol/rpcsmartrouter"
 	"github.com/magma-Devs/smart-router/version"
-	"github.com/spf13/cobra"
 )
 
 func main() {
 	rootCmd := rpcsmartrouter.CreateRPCSmartRouterCobraCommand()
 	rootCmd.Use = "smartrouter [config-file] | { {listen-ip:listen-port spec-chain-id api-interface} ... }"
-	rootCmd.Short = "Lava Smart Router — centralized RPC routing engine"
+	rootCmd.Short = "Smart Router — centralized RPC routing engine"
 
 	cmdVersion := &cobra.Command{
 		Use:   "version",

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tdigest "github.com/caio/go-tdigest/v5"
+
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -41,7 +42,7 @@ func NewAdaptiveMaxCalculator(halfLife time.Duration, minP10, maxP10, minMax, ma
 
 	digest, err := tdigest.New(tdigest.Compression(compression))
 	if err != nil {
-		utils.LavaFormatFatal("failed to create T-Digest", err)
+		utils.FormatFatal("failed to create T-Digest", err)
 	}
 
 	return &AdaptiveMaxCalculator{
@@ -81,7 +82,7 @@ func (a *AdaptiveMaxCalculator) AddSample(value float64, sampleTime time.Time) e
 
 	// Validate input
 	if value < 0 {
-		return utils.LavaFormatError("cannot add negative sample to adaptive max calculator",
+		return utils.FormatError("cannot add negative sample to adaptive max calculator",
 			nil,
 			utils.LogAttr("value", value),
 		)
@@ -92,7 +93,7 @@ func (a *AdaptiveMaxCalculator) AddSample(value float64, sampleTime time.Time) e
 	if timeDiff < 0 {
 		// Sample is older than last update - this shouldn't happen in normal operation
 		// but we handle it gracefully by not applying decay
-		utils.LavaFormatTrace("adaptive max calculator: sample time is before last update, skipping decay",
+		utils.FormatTrace("adaptive max calculator: sample time is before last update, skipping decay",
 			utils.LogAttr("sampleTime", sampleTime),
 			utils.LogAttr("lastUpdate", a.lastUpdate),
 		)
@@ -106,7 +107,7 @@ func (a *AdaptiveMaxCalculator) AddSample(value float64, sampleTime time.Time) e
 		decayFactor := math.Exp(exponent)
 
 		if decayFactor > 1 {
-			return utils.LavaFormatError("invalid decay factor > 1 in adaptive max calculator",
+			return utils.FormatError("invalid decay factor > 1 in adaptive max calculator",
 				nil,
 				utils.LogAttr("decayFactor", decayFactor),
 				utils.LogAttr("timeDiff", timeDiff),
@@ -121,7 +122,7 @@ func (a *AdaptiveMaxCalculator) AddSample(value float64, sampleTime time.Time) e
 	// Add new sample with weight = 1
 	err := a.digest.AddWeighted(value, 1)
 	if err != nil {
-		return utils.LavaFormatError("failed to add sample to T-Digest",
+		return utils.FormatError("failed to add sample to T-Digest",
 			err,
 			utils.LogAttr("value", value),
 		)
@@ -145,7 +146,7 @@ func (a *AdaptiveMaxCalculator) applyDecayToDigest(decayFactor float64) {
 	// Create a new digest with the same compression
 	newDigest, err := tdigest.New(tdigest.Compression(compression))
 	if err != nil {
-		utils.LavaFormatError("failed to create new T-Digest for decay", err)
+		utils.FormatError("failed to create new T-Digest for decay", err)
 		return
 	}
 
@@ -158,7 +159,7 @@ func (a *AdaptiveMaxCalculator) applyDecayToDigest(decayFactor float64) {
 		weightRounded := uint64(math.Round(newWeight))
 		if weightRounded > 0 {
 			if err := newDigest.AddWeighted(mean, weightRounded); err != nil {
-				utils.LavaFormatWarning("failed to add decayed centroid", err,
+				utils.FormatWarning("failed to add decayed centroid", err,
 					utils.LogAttr("mean", mean),
 					utils.LogAttr("weight", weightRounded),
 				)
@@ -328,7 +329,7 @@ func (a *AdaptiveMaxCalculator) Reset() {
 	compression := a.digest.Compression()
 	newDigest, err := tdigest.New(tdigest.Compression(compression))
 	if err != nil {
-		utils.LavaFormatError("failed to create new T-Digest for reset", err)
+		utils.FormatError("failed to create new T-Digest for reset", err)
 		return
 	}
 	a.digest = newDigest
@@ -388,7 +389,7 @@ func (a *AdaptiveMaxCalculator) LogDistributionStats(parameterName string) {
 	range90 := p90 - p10 // P10-P90 range (used for normalization)
 
 	// Log comprehensive distribution data
-	utils.LavaFormatInfo("[AdaptiveNormalization] Distribution Statistics",
+	utils.FormatInfo("[AdaptiveNormalization] Distribution Statistics",
 		utils.LogAttr("parameter", parameterName),
 		utils.LogAttr("total_weight", totalWeight),
 		utils.LogAttr("centroid_count", centroidCount),

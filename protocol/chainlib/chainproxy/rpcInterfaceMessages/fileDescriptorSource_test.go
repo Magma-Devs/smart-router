@@ -10,10 +10,11 @@ import (
 
 	"github.com/fullstorydev/grpcurl"
 	"github.com/jhump/protoreflect/desc"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 	protov2 "google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // writeTestProtoset builds a one-file FileDescriptorSet declaring pkg.service with a

@@ -9,9 +9,9 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	lavasession "github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	routersession "github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -27,8 +27,8 @@ type UnifiedRelayStateMachine struct {
 	crossValidationParams *common.CrossValidationParams
 	debugRelays           bool
 	batchUpdate           chan error
-	usedProviders         *lavasession.UsedProviders
-	relayRetriesManager   *lavaprotocol.RelayRetriesManager
+	usedProviders         *routersession.UsedProviders
+	relayRetriesManager   *relayprotocol.RelayRetriesManager
 	relayState            []*RelayState
 	protocolMessage       chainlib.ProtocolMessage
 	relayStateLock        sync.RWMutex
@@ -38,7 +38,7 @@ type UnifiedRelayStateMachine struct {
 
 func NewUnifiedRelayStateMachine(
 	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
+	usedProviders *routersession.UsedProviders,
 	relaySender RelaySenderInf,
 	protocolMessage chainlib.ProtocolMessage,
 	analytics *metrics.RelayMetrics,
@@ -50,7 +50,7 @@ func NewUnifiedRelayStateMachine(
 	// must not import it). nil => the legacy header-driven decision below, unchanged.
 	cvOverride *common.CrossValidationParams,
 	// forbidCallerCrossValidation, when true, suppresses the caller-header-driven CrossValidation decision
-	// for this method: the request's lava-cross-validation-* headers are ignored entirely (not even
+	// for this method: the request's smartrouter-cross-validation-* headers are ignored entirely (not even
 	// validated) and the method routes by its normal stateful/stateless category. The rpcsmartrouter layer
 	// sets it from a per-method `forbid-caller-cv` policy. It is moot when cvOverride != nil (an operator
 	// that mandates CV cannot also forbid it — Validate rejects that combination upstream).
@@ -64,7 +64,7 @@ func NewUnifiedRelayStateMachine(
 		// policy-enabled method is never silently routed to Stateful (Finding A).
 		selection = CrossValidation
 		cvParams = cvOverride
-		utils.LavaFormatDebug("[StateMachine] CrossValidation mode enabled (policy-resolved)",
+		utils.FormatDebug("[StateMachine] CrossValidation mode enabled (policy-resolved)",
 			utils.LogAttr("maxParticipants", cvOverride.MaxParticipants),
 			utils.LogAttr("agreementThreshold", cvOverride.AgreementThreshold),
 			utils.LogAttr("minGroups", cvOverride.MinGroups),
@@ -75,7 +75,7 @@ func NewUnifiedRelayStateMachine(
 		// category — exactly as if the request had sent no CV headers. This is what makes `forbid-caller-cv`
 		// truly disable cross-validation for the method; without skipping the header read below, a caller
 		// could still turn CV on via headers.
-		utils.LavaFormatDebug("[StateMachine] caller cross-validation headers ignored (forbidden by per-method policy)",
+		utils.FormatDebug("[StateMachine] caller cross-validation headers ignored (forbidden by per-method policy)",
 			utils.LogAttr("GUID", ctx))
 		if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 			selection = Stateful
@@ -83,11 +83,11 @@ func NewUnifiedRelayStateMachine(
 			selection = Stateless
 		}
 	} else if crossValidationParams, headersPresent, err := protocolMessage.GetCrossValidationParameters(); headersPresent && err != nil {
-		return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
+		return nil, utils.FormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
 	} else if headersPresent {
 		selection = CrossValidation
 		cvParams = &crossValidationParams
-		utils.LavaFormatDebug("[StateMachine] CrossValidation mode enabled",
+		utils.FormatDebug("[StateMachine] CrossValidation mode enabled",
 			utils.LogAttr("maxParticipants", crossValidationParams.MaxParticipants),
 			utils.LogAttr("agreementThreshold", crossValidationParams.AgreementThreshold),
 			utils.LogAttr("GUID", ctx))
@@ -117,7 +117,7 @@ func (sm *UnifiedRelayStateMachine) Initialized() bool {
 	return sm.relayRetriesManager != nil && sm.resultsChecker != nil
 }
 
-func (sm *UnifiedRelayStateMachine) SetRelayRetriesManager(relayRetriesManager *lavaprotocol.RelayRetriesManager) {
+func (sm *UnifiedRelayStateMachine) SetRelayRetriesManager(relayRetriesManager *relayprotocol.RelayRetriesManager) {
 	sm.relayRetriesManager = relayRetriesManager
 }
 
@@ -125,7 +125,7 @@ func (sm *UnifiedRelayStateMachine) SetResultsChecker(resultsChecker ResultsChec
 	sm.resultsChecker = resultsChecker
 }
 
-func (sm *UnifiedRelayStateMachine) GetUsedProviders() *lavasession.UsedProviders {
+func (sm *UnifiedRelayStateMachine) GetUsedProviders() *routersession.UsedProviders {
 	return sm.usedProviders
 }
 
@@ -179,8 +179,8 @@ func (sm *UnifiedRelayStateMachine) stateTransition(relayState *RelayState, numb
 		// by routerKey, so providers already tried under the old key would not be excluded
 		// under the new one and a just-failed provider could be re-selected for the retry.
 		// Carry the exclusion across the toggle.
-		oldRouterKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
-		newRouterKey := lavasession.NewRouterKeyFromExtensions(upgradedProtocolMessage.GetExtensions())
+		oldRouterKey := routersession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
+		newRouterKey := routersession.NewRouterKeyFromExtensions(upgradedProtocolMessage.GetExtensions())
 		if oldRouterKey.String() != newRouterKey.String() {
 			sm.usedProviders.MigrateUnwantedProviders(oldRouterKey, newRouterKey)
 		}
@@ -257,7 +257,7 @@ func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 	}
 
 	userData := sm.GetProtocolMessage().GetUserData()
-	utils.LavaFormatWarning("Relay processing timeout expired",
+	utils.FormatWarning("Relay processing timeout expired",
 		nil,
 		utils.LogAttr("location", location),
 		utils.LogAttr("processingTimeout", processingTimeout),
@@ -275,7 +275,7 @@ func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 
 func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendInstructions, error) {
 	if !sm.Initialized() {
-		return nil, utils.LavaFormatError("UnifiedRelayStateMachine was not initialized properly", nil)
+		return nil, utils.FormatError("UnifiedRelayStateMachine was not initialized properly", nil)
 	}
 
 	relayTaskChannel := make(chan RelayStateSendInstructions, 1)
@@ -283,14 +283,14 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 		gotResults := make(chan bool, 1)
 		processingTimeout, relayTimeout := sm.relaySender.GetProcessingTimeout(sm.GetProtocolMessage())
 		if sm.debugRelays {
-			utils.LavaFormatDebug("Relay initiated with the following timeout schedule", utils.LogAttr("processingTimeout", processingTimeout), utils.LogAttr("newRelayTimeout", relayTimeout), utils.LogAttr("GUID", sm.ctx))
+			utils.FormatDebug("Relay initiated with the following timeout schedule", utils.LogAttr("processingTimeout", processingTimeout), utils.LogAttr("newRelayTimeout", relayTimeout), utils.LogAttr("GUID", sm.ctx))
 		}
 		processingCtx, processingCtxCancel := context.WithTimeout(sm.ctx, processingTimeout)
 		defer processingCtxCancel()
 
 		numberOfNodeErrorsAtomic := atomic.Uint64{}
 		readResultsFromProcessor := func() {
-			utils.LavaFormatTrace("[StateMachine] Waiting for results", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
+			utils.FormatTrace("[StateMachine] Waiting for results", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
 			sm.resultsChecker.WaitForResults(processingCtx)
 			metRequiredNodeResults, numberOfNodeErrors := sm.resultsChecker.HasRequiredNodeResults(sm.usedProviders.BatchNumber())
 			numberOfNodeErrorsAtomic.Store(uint64(numberOfNodeErrors))
@@ -301,9 +301,9 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 		validateReturnCondition := func(err error) {
 			batchOnStart := sm.usedProviders.BatchNumber()
 			time.Sleep(15 * time.Millisecond)
-			utils.LavaFormatTrace("[StateMachine] validating return condition", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
+			utils.FormatTrace("[StateMachine] validating return condition", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
 			if batchOnStart == sm.usedProviders.BatchNumber() && sm.usedProviders.CurrentlyUsed() == 0 {
-				utils.LavaFormatTrace("[StateMachine] return condition triggered", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("err", err), utils.LogAttr("GUID", sm.ctx))
+				utils.FormatTrace("[StateMachine] return condition triggered", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("err", err), utils.LogAttr("GUID", sm.ctx))
 				returnCondition <- err
 			}
 		}
@@ -341,7 +341,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 
 			select {
 			case err := <-sm.batchUpdate:
-				isPairingListEmpty := err != nil && errors.Is(err, lavasession.PairingListEmptyError)
+				isPairingListEmpty := err != nil && errors.Is(err, routersession.PairingListEmptyError)
 				result := sm.policy.OnSendRelayResult(err, isPairingListEmpty, sm.selection)
 
 				switch result {
@@ -349,13 +349,13 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					// continue to select loop
 				case SendStop:
 					if isPairingListEmpty && sm.config.EnableCircuitBreaker {
-						utils.LavaFormatWarning("Circuit breaker triggered: All providers exhausted, stopping retries",
+						utils.FormatWarning("Circuit breaker triggered: All providers exhausted, stopping retries",
 							nil,
 							utils.LogAttr("GUID", sm.ctx),
 							utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
 						)
 					} else if sm.usedProviders.BatchNumber() == 0 && sm.policy.GetConsecutiveBatchErrors() == sm.config.SendRelayAttempts+1 {
-						utils.LavaFormatWarning("Failed Sending First Message", err, utils.LogAttr("consecutive errors", sm.policy.GetConsecutiveBatchErrors()), utils.LogAttr("GUID", sm.ctx))
+						utils.FormatWarning("Failed Sending First Message", err, utils.LogAttr("consecutive errors", sm.policy.GetConsecutiveBatchErrors()), utils.LogAttr("GUID", sm.ctx))
 					}
 					go validateReturnCondition(err)
 				case SendRetry:
@@ -364,14 +364,14 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 							return
 						}
 					}
-					utils.LavaFormatTrace("[StateMachine] batchUpdate - send retry", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
+					utils.FormatTrace("[StateMachine] batchUpdate - send retry", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 				}
 
 			case success := <-gotResults:
-				utils.LavaFormatTrace("[StateMachine] success := <-gotResults", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
+				utils.FormatTrace("[StateMachine] success := <-gotResults", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
 				if success {
-					utils.LavaFormatTrace("[StateMachine] successfully sent message", utils.LogAttr("GUID", sm.ctx))
+					utils.FormatTrace("[StateMachine] successfully sent message", utils.LogAttr("GUID", sm.ctx))
 					relayTaskChannel <- RelayStateSendInstructions{Done: true}
 					return
 				}
@@ -384,7 +384,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 
 				nodeErrors := numberOfNodeErrorsAtomic.Load()
 				output := sm.policy.Decide(sm.buildDecisionInput(nodeErrors, false))
-				utils.LavaFormatDebug("[StateMachine] policy.Decide",
+				utils.FormatDebug("[StateMachine] policy.Decide",
 					utils.LogAttr("GUID", sm.ctx),
 					utils.LogAttr("action", output.Action),
 					utils.LogAttr("reason", output.Reason),
@@ -412,7 +412,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 				nodeErrors := numberOfNodeErrorsAtomic.Load()
 				output := sm.policy.Decide(sm.buildDecisionInput(nodeErrors, true))
 				if output.Action == ActionRetry {
-					utils.LavaFormatTrace("[StateMachine] ticker triggered", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
+					utils.FormatTrace("[StateMachine] ticker triggered", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
 					sm.stateTransition(sm.getLatestState(), nodeErrors, &output.Mutation)
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 					if sm.analytics != nil {
@@ -421,7 +421,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 				}
 
 			case returnErr := <-returnCondition:
-				utils.LavaFormatTrace("[StateMachine] returnErr := <-returnCondition", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
+				utils.FormatTrace("[StateMachine] returnErr := <-returnCondition", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
 				relayTaskChannel <- RelayStateSendInstructions{Err: returnErr, Done: true}
 				return
 
@@ -430,7 +430,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					sm.checkAndHandleTimeout(processingCtx, relayTaskChannel, processingTimeout, "processingCtx_done_backup")
 				} else {
 					userData := sm.GetProtocolMessage().GetUserData()
-					utils.LavaFormatWarning("Relay Got processingCtx timeout", nil,
+					utils.FormatWarning("Relay Got processingCtx timeout", nil,
 						utils.LogAttr("processingTimeout", processingTimeout),
 						utils.LogAttr("dappId", userData.DappId),
 						utils.LogAttr("consumerIp", userData.ConsumerIp),

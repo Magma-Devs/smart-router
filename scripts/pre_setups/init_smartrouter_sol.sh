@@ -113,7 +113,7 @@ echo ""
 
 cat > $CONFIG_FILE <<EOF
 # Smart Router Direct RPC Configuration — Solana (SOLANA)
-# Mode: Direct connections to Solana JSON-RPC endpoints (no Lava providers!)
+# Mode: Direct connections to Solana JSON-RPC endpoints (no provider-relay network — direct upstreams)
 
 endpoints:
   - listen-address: "0.0.0.0:3360"

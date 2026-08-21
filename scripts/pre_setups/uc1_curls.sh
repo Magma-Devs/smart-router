@@ -3,7 +3,7 @@
 # UC-1 curl scenarios — exercise the per-method cross-validation policy by hand
 # against a running smart router (see test_uc1_smartrouter_lava.sh for bring-up).
 #
-# The cross-validation verdict rides in the RESPONSE HEADERS (lava-cross-validation-*),
+# The cross-validation verdict rides in the RESPONSE HEADERS (smartrouter-cross-validation-*),
 # so every call uses `curl -i` and greps for them.
 #
 # Usage:
@@ -42,7 +42,7 @@ note() { echo "    $*"; }
 
 # show <url-or-"POST"> ... runs a curl, prints the command, then the cross-validation
 # response headers (or a clear "none" line). Pass curl args after the first marker.
-cv_grep() { grep -i '^lava-cross-validation' || echo "    (no cross-validation headers)"; }
+cv_grep() { grep -i '^smartrouter-cross-validation' || echo "    (no cross-validation headers)"; }
 
 resolve_height() {
 	if [ -n "$HEIGHT_ARG" ]; then echo "$HEIGHT_ARG"; return; fi
@@ -78,12 +78,12 @@ scenario_3() {
 	hr; echo "[3] '$OTHER_METHOD' + caller headers -> cross-validated (opt-in / 'use the flags')"
 	local payload="{\"jsonrpc\":\"2.0\",\"method\":\"$OTHER_METHOD\",\"params\":[],\"id\":1}"
 	note "curl -is -X POST $BASE/ \\"
-	note "  -H 'lava-cross-validation-max-participants: $CV_MAXPART' \\"
-	note "  -H 'lava-cross-validation-agreement-threshold: $CV_THRESHOLD' -d '$payload'"
+	note "  -H 'smartrouter-cross-validation-max-participants: $CV_MAXPART' \\"
+	note "  -H 'smartrouter-cross-validation-agreement-threshold: $CV_THRESHOLD' -d '$payload'"
 	echo "    expect: status=success (header-driven CV on a non-policy method)"
 	curl -is -X POST "$BASE/" -H 'Content-Type: application/json' \
-		-H "lava-cross-validation-max-participants: $CV_MAXPART" \
-		-H "lava-cross-validation-agreement-threshold: $CV_THRESHOLD" \
+		-H "smartrouter-cross-validation-max-participants: $CV_MAXPART" \
+		-H "smartrouter-cross-validation-agreement-threshold: $CV_THRESHOLD" \
 		-d "$payload" | cv_grep | sed 's/^/    /'
 }
 
@@ -91,12 +91,12 @@ scenario_4() {
 	hr; echo "[4] request more providers than exist -> structured FAILURE"
 	local over=$((CV_MAXPART + 2))
 	local payload="{\"jsonrpc\":\"2.0\",\"method\":\"$OTHER_METHOD\",\"params\":[],\"id\":1}"
-	note "curl -is -X POST $BASE/ -H 'lava-cross-validation-max-participants: $over' \\"
-	note "  -H 'lava-cross-validation-agreement-threshold: $CV_THRESHOLD' -d '$payload'"
+	note "curl -is -X POST $BASE/ -H 'smartrouter-cross-validation-max-participants: $over' \\"
+	note "  -H 'smartrouter-cross-validation-agreement-threshold: $CV_THRESHOLD' -d '$payload'"
 	echo "    expect: status=failed, failure-reason=insufficient-capacity ($over > available providers)"
 	curl -is -X POST "$BASE/" -H 'Content-Type: application/json' \
-		-H "lava-cross-validation-max-participants: $over" \
-		-H "lava-cross-validation-agreement-threshold: $CV_THRESHOLD" \
+		-H "smartrouter-cross-validation-max-participants: $over" \
+		-H "smartrouter-cross-validation-agreement-threshold: $CV_THRESHOLD" \
 		-d "$payload" | cv_grep | sed 's/^/    /'
 }
 

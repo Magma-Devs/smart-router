@@ -11,7 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // ---------------------------------------------------------------------------
@@ -52,18 +52,18 @@ func (m *grpcStatusChainMessage) CheckResponseError(data []byte, httpStatusCode 
 func grpcStatusRelay(t *testing.T, code codes.Code, nodeMessage string) *common.RelayResult {
 	t.Helper()
 
-	body, err := json.Marshal(lavasession.GRPCNodeErrorResponse{
+	body, err := json.Marshal(routersession.GRPCNodeErrorResponse{
 		ErrorMessage: nodeMessage,
 		ErrorCode:    uint32(code),
 	})
 	require.NoError(t, err)
 
 	conn := &fakeDirectConn{
-		resp: &lavasession.DirectRPCResponse{
+		resp: &routersession.DirectRPCResponse{
 			Data:       body,
 			StatusCode: int(code),
 		},
-		err: &lavasession.GRPCStatusError{
+		err: &routersession.GRPCStatusError{
 			Code:    uint32(code),
 			Message: nodeMessage,
 		},

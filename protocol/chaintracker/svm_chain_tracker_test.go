@@ -6,8 +6,9 @@ import (
 	"testing"
 
 	"github.com/dgraph-io/ristretto/v2"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // svmMockChainFetcher is a minimal ChainFetcher whose CustomMessage returns a
@@ -27,8 +28,8 @@ func (m *svmMockChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum 
 	return "", nil
 }
 
-func (m *svmMockChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+func (m *svmMockChainFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
 
 // svmMockDataFetcher stubs IChainTrackerDataFetcher; the slot-vs-block-height

@@ -4,11 +4,12 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/stretchr/testify/require"
 )
 
 // Subscription endpoint refresh (MAG-2525 follow-up).
@@ -20,12 +21,12 @@ import (
 // halves of the fix — the managers accept a new endpoint set, and the router pushes
 // one on every path that mutates the live pairing.
 
-func wsProvider(name string, urls ...string) *lavasession.RPCStaticProviderEndpoint {
+func wsProvider(name string, urls ...string) *routersession.RPCStaticProviderEndpoint {
 	nodeUrls := make([]common.NodeUrl, 0, len(urls))
 	for _, u := range urls {
 		nodeUrls = append(nodeUrls, common.NodeUrl{Url: u})
 	}
-	return &lavasession.RPCStaticProviderEndpoint{
+	return &routersession.RPCStaticProviderEndpoint{
 		Name: name, ChainID: "BSC", ApiInterface: "jsonrpc", NodeUrls: nodeUrls,
 	}
 }
@@ -145,11 +146,11 @@ func TestGRPCSetEndpoints_DarkBootRecoversWithoutRestart(t *testing.T) {
 // activeProviders is the bridge from "what is live in the pairing" back to the
 // configured records that own the NodeUrls.
 func TestActiveProviders_FiltersToPairingAndKeepsConfiguredOrder(t *testing.T) {
-	configured := []*lavasession.RPCStaticProviderEndpoint{
+	configured := []*routersession.RPCStaticProviderEndpoint{
 		wsProvider("A", "wss://a"), wsProvider("B", "wss://b"), wsProvider("C", "wss://c"),
 	}
 	// Session map keys are arbitrary — configured order is what must survive.
-	sessions := map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	sessions := map[uint64]*routersession.ConsumerSessionsWithProvider{
 		7: createTestProviderSession("C", 1),
 		1: createTestProviderSession("A", 1),
 	}
@@ -165,7 +166,7 @@ func TestActiveProviders_FiltersToPairingAndKeepsConfiguredOrder(t *testing.T) {
 
 // newRefreshTestRouter wires the minimum a republish needs: a registered server
 // holding a Direct WS manager, and the configured lists republish filters against.
-func newRefreshTestRouter(t *testing.T, chainKey string, configuredStatic, configuredBackup []*lavasession.RPCStaticProviderEndpoint) (*RPCSmartRouter, *DirectWSSubscriptionManager) {
+func newRefreshTestRouter(t *testing.T, chainKey string, configuredStatic, configuredBackup []*routersession.RPCStaticProviderEndpoint) (*RPCSmartRouter, *DirectWSSubscriptionManager) {
 	t.Helper()
 	rpsr := createTestRPCSmartRouter()
 	rpsr.reverifyInputs = map[string]*chainReverifyInputs{
@@ -185,17 +186,17 @@ func TestRepublishSubscriptionEndpoints_FillsTiersFromLivePairing(t *testing.T) 
 	rand.InitRandomSeed()
 	const chainKey = "BSC-jsonrpc"
 	rpsr, manager := newRefreshTestRouter(t, chainKey,
-		[]*lavasession.RPCStaticProviderEndpoint{wsProvider("primary1", "wss://primary1")},
-		[]*lavasession.RPCStaticProviderEndpoint{wsProvider("backup1", "wss://backup1")},
+		[]*routersession.RPCStaticProviderEndpoint{wsProvider("primary1", "wss://primary1")},
+		[]*routersession.RPCStaticProviderEndpoint{wsProvider("backup1", "wss://backup1")},
 	)
 
 	require.Empty(t, manager.endpointsSnapshot().primary, "dark boot")
 
 	// The pairing recovers, as retryFailedProviders would leave it.
-	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: createTestProviderSession("primary1", 1),
 	}
-	rpsr.backupProviderSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	rpsr.backupProviderSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: createTestProviderSession("backup1", 1),
 	}
 
@@ -217,14 +218,14 @@ func TestRepublishSubscriptionEndpoints_ExcludesProvidersOutsideThePairing(t *te
 	rand.InitRandomSeed()
 	const chainKey = "BSC-jsonrpc"
 	rpsr, manager := newRefreshTestRouter(t, chainKey,
-		[]*lavasession.RPCStaticProviderEndpoint{
+		[]*routersession.RPCStaticProviderEndpoint{
 			wsProvider("primary1", "wss://primary1"),
 			wsProvider("primary2", "wss://primary2"), // configured but still down
 		},
 		nil,
 	)
 
-	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: createTestProviderSession("primary1", 1),
 	}
 
@@ -242,9 +243,9 @@ func TestRepublishSubscriptionEndpoints_DemotionClearsTier(t *testing.T) {
 	rand.InitRandomSeed()
 	const chainKey = "BSC-jsonrpc"
 	rpsr, manager := newRefreshTestRouter(t, chainKey,
-		[]*lavasession.RPCStaticProviderEndpoint{wsProvider("primary1", "wss://primary1")}, nil)
+		[]*routersession.RPCStaticProviderEndpoint{wsProvider("primary1", "wss://primary1")}, nil)
 
-	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: createTestProviderSession("primary1", 1),
 	}
 	rpsr.mu.Lock()
@@ -271,7 +272,7 @@ func TestRepublishSubscriptionEndpoints_ToleratesNoOpAndMissingWiring(t *testing
 	rpsr.rpcServers[chainKey] = &RPCSmartRouterServer{
 		wsSubscriptionManager: NewNoOpWSSubscriptionManager("BSC", "jsonrpc"),
 	}
-	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: createTestProviderSession("primary1", 1),
 	}
 
@@ -290,18 +291,18 @@ func TestUpdateEpoch_RepublishesSubscriptionEndpoints(t *testing.T) {
 	rand.InitRandomSeed()
 	const chainKey = "BSC-jsonrpc"
 	rpsr, manager := newRefreshTestRouter(t, chainKey,
-		[]*lavasession.RPCStaticProviderEndpoint{wsProvider("primary1", "wss://primary1")}, nil)
+		[]*routersession.RPCStaticProviderEndpoint{wsProvider("primary1", "wss://primary1")}, nil)
 
 	sm, _ := createTestSessionManager("BSC", "jsonrpc")
 	rpsr.sessionManagers[chainKey] = sm
-	rpsr.reverifyInputs[chainKey].convertProvidersToSessions = func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-		out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
+	rpsr.reverifyInputs[chainKey].convertProvidersToSessions = func(providers []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
+		out := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(providers))
 		for i, p := range providers {
 			out[uint64(i)] = createTestProviderSession(p.Name, 0)
 		}
 		return out
 	}
-	rpsr.reverifyInputs[chainKey].validateFn = func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
+	rpsr.reverifyInputs[chainKey].validateFn = func(context.Context, *routersession.RPCStaticProviderEndpoint) error {
 		return nil // the provider is back
 	}
 

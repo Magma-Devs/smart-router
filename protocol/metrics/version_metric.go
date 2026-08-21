@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // SetVersionInner encodes a semantic version string onto a protocol-version gauge as
@@ -21,7 +22,7 @@ func SetVersionInner(protocolVersionMetric *prometheus.GaugeVec, version string)
 	var major, minor, patch int
 	_, err := fmt.Sscanf(cleaned, "%d.%d.%d", &major, &minor, &patch)
 	if err != nil {
-		utils.LavaFormatError("Failed parsing version at metrics manager", err, utils.LogAttr("version", version))
+		utils.FormatError("Failed parsing version at metrics manager", err, utils.LogAttr("version", version))
 		protocolVersionMetric.WithLabelValues("version").Set(0)
 		return
 	}

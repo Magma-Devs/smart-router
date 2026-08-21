@@ -17,6 +17,7 @@ func queryKittyGraphics() bool { k, _ := queryGraphics(); return k }
 // terminal). From the reply:
 //   - kitty  = an APC "\x1b_G…;OK\x1b\\" response is present.
 //   - sixel  = the DA1 reply "\x1b[?…c" lists capability "4".
+//
 // Bounded by a timeout so a silent terminal can't hang us. TTY-only.
 func queryGraphics() (kitty, sixel bool) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {

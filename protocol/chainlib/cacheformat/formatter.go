@@ -3,10 +3,11 @@ package cacheformat
 import (
 	"encoding/json"
 
-	"github.com/magma-Devs/smart-router/utils"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 const (
@@ -58,7 +59,7 @@ func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) [
 			}
 			modifiedOut, err := json.Marshal(modifiedInpArray)
 			if err != nil {
-				utils.LavaFormatError("failed to marshal batch", err)
+				utils.FormatError("failed to marshal batch", err)
 				return inpData
 			}
 			return modifiedOut
@@ -82,21 +83,21 @@ func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) [
 			for i, batchData := range batch {
 				modifiedInp, err := sjson.SetBytes(batchData, IDFieldName, extractedIDArray[i])
 				if err != nil {
-					utils.LavaFormatWarning("failed to set id in batch cache", err)
+					utils.FormatWarning("failed to set id in batch cache", err)
 					return inpData
 				}
 				modifiedInpArray = append(modifiedInpArray, modifiedInp)
 			}
 			modifiedOut, err := json.Marshal(modifiedInpArray)
 			if err != nil {
-				utils.LavaFormatError("failed to marshal batch", err)
+				utils.FormatError("failed to marshal batch", err)
 				return inpData
 			}
 			return modifiedOut
 		}
 		modifiedInp, err := sjson.SetBytes(inpData, IDFieldName, extractedID)
 		if err != nil {
-			utils.LavaFormatWarning("failed to set input id in cache", err)
+			utils.FormatWarning("failed to set input id in cache", err)
 			return inpData
 		}
 		return modifiedInp
@@ -117,7 +118,7 @@ func getExtractedIDAndModifyInputForJSON(inpData []byte) (modifiedInp []byte, ex
 	}
 	modifiedInp, err = sjson.SetBytes(inpData, IDFieldName, DefaultIDValue)
 	if err != nil {
-		return inpData, extractedID, utils.LavaFormatWarning("failed to set id in json", err,
+		return inpData, extractedID, utils.FormatWarning("failed to set id in json", err,
 			utils.Attribute{Key: "jsonData", Value: inpData},
 			utils.LogAttr("extractedID", extractedID),
 		)

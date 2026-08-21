@@ -5,8 +5,9 @@ import (
 	"net/http"
 	"testing"
 
-	types "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
+
+	types "github.com/magma-Devs/smart-router/types/spec"
 )
 
 func TestCraftChainMessage(t *testing.T) {

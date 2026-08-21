@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/relaycore"
 )
 
 func TestDecide_ModeChecks(t *testing.T) {

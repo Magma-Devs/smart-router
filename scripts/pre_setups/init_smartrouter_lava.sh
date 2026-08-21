@@ -45,7 +45,7 @@ sleep 2
 # PublicNode upstream endpoints (TLS)
 LAVA_REST_LOCAL="https://lava-rest.publicnode.com:443"
 # gRPC URLs MUST have a scheme prefix; the validator in
-# protocol/lavasession/direct_rpc_connection.go (validateURL) rejects anything
+# protocol/routersession/direct_rpc_connection.go (validateURL) rejects anything
 # else. Use grpcs:// for TLS — it implicitly sets AuthConfig.UseTLS=true.
 LAVA_GRPC_LOCAL="grpcs://YOUR_LAVA_GRPC_KEY-lava.g.w.lavanet.xyz:443"
 LAVA_TENDERMINTRPC_LOCAL="https://lava-rpc.publicnode.com:443"
@@ -228,7 +228,7 @@ echo "Smart Router Tendermint:  http://127.0.0.1:3362"
 echo ""
 echo "🔬 Test Commands (REST):"
 echo "  # Health check (router process)"
-echo "  curl -i http://127.0.0.1:3360/lava/health"
+echo "  curl -i http://127.0.0.1:3360/health"
 echo ""
 echo "  # Query latest block via REST (proxied to the upstream Lava LCD endpoint)"
 echo "  curl http://127.0.0.1:3360/cosmos/base/tendermint/v1beta1/blocks/latest | head"

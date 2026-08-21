@@ -10,11 +10,12 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/itchyny/gojq"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
+	"github.com/magma-Devs/smart-router/utils/sliceutil"
 )
 
 const (
@@ -108,14 +109,14 @@ func ParseRawBlock(rpcInput RPCInput, parsedInput *ParsedInput, defaultValue str
 		if defaultValue != "" {
 			parsedBlock, err = rpcInput.ParseBlock(defaultValue)
 			if err != nil {
-				utils.LavaFormatError("Failed parsing default value, setting to NOT_APPLICABLE", err,
+				utils.FormatError("Failed parsing default value, setting to NOT_APPLICABLE", err,
 					utils.LogAttr("default_value", defaultValue),
 				)
 				parsedBlock = spectypes.NOT_APPLICABLE
 			} else {
 				parsedInput.UsedDefaultValue = true
 			}
-			utils.LavaFormatDebug("Failed parsing block from string, assuming default value",
+			utils.FormatDebug("Failed parsing block from string, assuming default value",
 				utils.LogAttr("params", rpcInput.GetParams()),
 				utils.LogAttr("failed_parsed_value", rawBlock),
 				utils.LogAttr("default_value", defaultValue),
@@ -130,7 +131,7 @@ func ParseRawBlock(rpcInput RPCInput, parsedInput *ParsedInput, defaultValue str
 
 func parseInputWithLegacyBlockParser(rpcInput RPCInput, blockParser spectypes.BlockParser, dataSource int) (string, bool, error) {
 	if rpcInput.GetError() != nil {
-		return "", false, utils.LavaFormatError("blockParsing - rpcInput is error", nil, utils.LogAttr("rpcInput.GetError()", rpcInput.GetError()))
+		return "", false, utils.FormatError("blockParsing - rpcInput is error", nil, utils.LogAttr("rpcInput.GetError()", rpcInput.GetError()))
 	}
 
 	result, usedDefaultValue, err := legacyParse(rpcInput, blockParser, dataSource)
@@ -140,7 +141,7 @@ func parseInputWithLegacyBlockParser(rpcInput RPCInput, blockParser spectypes.Bl
 
 	resString, ok := result[spectypes.DEFAULT_PARSED_RESULT_INDEX].(string)
 	if !ok {
-		return "", usedDefaultValue, utils.LavaFormatDebug("blockParsing - result[0].(string) - type assertion failed", utils.LogAttr("result[0]", result[0]))
+		return "", usedDefaultValue, utils.FormatDebug("blockParsing - result[0].(string) - type assertion failed", utils.LogAttr("result[0]", result[0]))
 	}
 
 	return resString, usedDefaultValue, nil
@@ -182,14 +183,14 @@ func parseBlock(rpcInput RPCInput, blockParser spectypes.BlockParser, genericPar
 func ParseBlockFromParams(rpcInput RPCInput, blockParser spectypes.BlockParser, genericParsers []spectypes.GenericParser) *ParsedInput {
 	parsedInput := parseBlock(rpcInput, blockParser, genericParsers, PARSE_PARAMS)
 	ParseRawBlock(rpcInput, parsedInput, blockParser.DefaultValue)
-	utils.LavaFormatTrace("ParseBlockFromParams result", utils.LogAttr("parsedInput", parsedInput))
+	utils.FormatTrace("ParseBlockFromParams result", utils.LogAttr("parsedInput", parsedInput))
 	return parsedInput
 }
 
 func ParseBlockFromReply(rpcInput RPCInput, blockParser spectypes.BlockParser, genericParsers []spectypes.GenericParser) *ParsedInput {
 	parsedInput := parseBlock(rpcInput, blockParser, genericParsers, PARSE_RESULT)
 	ParseRawBlock(rpcInput, parsedInput, blockParser.DefaultValue)
-	utils.LavaFormatTrace("ParseBlockFromReply result", utils.LogAttr("parsedInput", parsedInput))
+	utils.FormatTrace("ParseBlockFromReply result", utils.LogAttr("parsedInput", parsedInput))
 	return parsedInput
 }
 
@@ -211,14 +212,14 @@ func ParseBlockHashFromReplyAndDecode(rpcInput RPCInput, resultParser spectypes.
 	if parsedInput == nil {
 		parsedBlockHashFromBlockParser, _, err := parseInputWithLegacyBlockParser(rpcInput, resultParser, PARSE_RESULT)
 		if err != nil {
-			parseErrorLogLevel := utils.LAVA_LOG_WARN
+			parseErrorLogLevel := utils.LOG_WARN
 			if parsedSuccessfully {
 				// found a hash, no need to log warning later
-				parseErrorLogLevel = utils.LAVA_LOG_DEBUG
+				parseErrorLogLevel = utils.LOG_DEBUG
 			}
 
-			return "", utils.LavaFormatLog("failed to parse with legacy block parser", err,
-				lavaslices.Slice(
+			return "", utils.FormatLog("failed to parse with legacy block parser", err,
+				sliceutil.Slice(
 					utils.LogAttr("rpcInput", rpcInput),
 					utils.LogAttr("resultParser", resultParser),
 				),
@@ -235,7 +236,7 @@ func ParseBlockHashFromReplyAndDecode(rpcInput RPCInput, resultParser spectypes.
 
 	numberOfParsedHashes := len(parsedBlockHashes)
 	if numberOfParsedHashes != 1 {
-		return "", utils.LavaFormatError("[ParseBlockHashFromReplyAndDecode] expected parsed hashes length 1", nil, utils.LogAttr("rpcInput.GetResult()", rpcInput.GetResult()), utils.LogAttr("hashes_length", numberOfParsedHashes))
+		return "", utils.FormatError("[ParseBlockHashFromReplyAndDecode] expected parsed hashes length 1", nil, utils.LogAttr("rpcInput.GetResult()", rpcInput.GetResult()), utils.LogAttr("hashes_length", numberOfParsedHashes))
 	}
 	return parseResponseByEncoding([]byte(parsedBlockHashes[0]), resultParser.Encoding)
 }
@@ -337,7 +338,7 @@ func parseRawResult(rawResult json.RawMessage) interface{} {
 
 	var result interface{}
 	if err := json.Unmarshal(rawResult, &result); err != nil {
-		utils.LavaFormatError("failed to unmarshal result", err, utils.LogAttr("result", rawResult))
+		utils.FormatError("failed to unmarshal result", err, utils.LogAttr("result", rawResult))
 		return nil
 	}
 
@@ -360,7 +361,7 @@ func ParseWithGenericParsers(rpcInput RPCInput, genericParsers []spectypes.Gener
 	}
 
 	// we didn't find a generic parser that worked
-	err := utils.LavaFormatTrace("failed to parse with generic parsers",
+	err := utils.FormatTrace("failed to parse with generic parsers",
 		utils.LogAttr("parsingMap", parsingMap),
 		utils.LogAttr("genericParsers", genericParsers),
 	)
@@ -400,7 +401,7 @@ func parseRule(rule string, valueInterface interface{}) bool {
 		// case ">":
 		// 	// Handle ">" logic
 		default:
-			utils.LavaFormatError("Unsupported operator", nil, utils.LogAttr("operator", operator), utils.LogAttr("rule", rule), utils.LogAttr("value", value))
+			utils.FormatError("Unsupported operator", nil, utils.LogAttr("operator", operator), utils.LogAttr("rule", rule), utils.LogAttr("value", value))
 			continue
 		}
 	}
@@ -415,10 +416,10 @@ func parseGeneric(input interface{}, genericParser spectypes.GenericParser) (*Pa
 	}
 
 	if !parseRule(genericParser.Rule, value) {
-		return nil, utils.LavaFormatWarning("PARSER_TYPE_DEFAULT_VALUE Did not match any rule", nil, utils.LogAttr("value", value), utils.LogAttr("rules", genericParser.Rule))
+		return nil, utils.FormatWarning("PARSER_TYPE_DEFAULT_VALUE Did not match any rule", nil, utils.LogAttr("value", value), utils.LogAttr("rules", genericParser.Rule))
 	}
 
-	utils.LavaFormatTrace("parsed generic value",
+	utils.FormatTrace("parsed generic value",
 		utils.LogAttr("input", input),
 		utils.LogAttr("genericParser", genericParser),
 		utils.LogAttr("value", value),
@@ -457,7 +458,7 @@ func parseGeneric(input interface{}, genericParser spectypes.GenericParser) (*Pa
 func findGenericParserValue(input interface{}, genericParser spectypes.GenericParser) (interface{}, error) {
 	jqParser, err := gojq.Parse(genericParser.GetParsePath())
 	if err != nil {
-		return "", utils.LavaFormatError("failed to parse generic parser path", err, utils.LogAttr("path", genericParser.GetParsePath()))
+		return "", utils.FormatError("failed to parse generic parser path", err, utils.LogAttr("path", genericParser.GetParsePath()))
 	}
 
 	iter := jqParser.Run(input)
@@ -472,7 +473,7 @@ func findGenericParserValue(input interface{}, genericParser spectypes.GenericPa
 		}
 
 		if err, ok := val.(error); ok {
-			utils.LavaFormatTrace("generic parser path returned an error",
+			utils.FormatTrace("generic parser path returned an error",
 				utils.LogAttr("error", err),
 				utils.LogAttr("input", input),
 				utils.LogAttr("path", genericParser.GetParsePath()),
@@ -484,7 +485,7 @@ func findGenericParserValue(input interface{}, genericParser spectypes.GenericPa
 		return val, nil
 	}
 
-	return "", utils.LavaFormatTrace("generic parser path did not return the expected value",
+	return "", utils.FormatTrace("generic parser path did not return the expected value",
 		utils.LogAttr("input", input),
 		utils.LogAttr("path", genericParser.GetParsePath()),
 	)
@@ -495,10 +496,10 @@ func parseGenericParserBlockHash(value interface{}) (*ParsedInput, error) {
 
 	strVal, ok := value.(string)
 	if !ok {
-		return parsed, utils.LavaFormatDebug("failed to cast generic parser value to string", utils.LogAttr("value", value))
+		return parsed, utils.FormatDebug("failed to cast generic parser value to string", utils.LogAttr("value", value))
 	}
 	if len(strVal) < MinimumHashLength {
-		return parsed, utils.LavaFormatDebug("value length is below minimum hash length", utils.LogAttr("strVal", strVal), utils.LogAttr("len(strVal)", len(strVal)), utils.LogAttr("MinimumHashLength", MinimumHashLength))
+		return parsed, utils.FormatDebug("value length is below minimum hash length", utils.LogAttr("strVal", strVal), utils.LogAttr("len(strVal)", len(strVal)), utils.LogAttr("MinimumHashLength", MinimumHashLength))
 	}
 
 	parsed.parsedHashes = append(parsed.parsedHashes, strVal)
@@ -524,7 +525,7 @@ func parseResponseByEncoding(rawResult []byte, encoding string) (string, error) 
 		}
 		hexBytes, err := hex.DecodeString(hexString)
 		if err != nil {
-			return "", utils.LavaFormatError("tried decoding a hex response in parseResponseByEncoding but failed", err, utils.Attribute{Key: "data", Value: hexString})
+			return "", utils.FormatError("tried decoding a hex response in parseResponseByEncoding but failed", err, utils.Attribute{Key: "data", Value: hexString})
 		}
 		return base64.StdEncoding.EncodeToString(hexBytes), nil
 	default:
@@ -843,7 +844,7 @@ func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int)
 		}
 
 		// Else return not set error)
-		utils.LavaFormatDebug("Failed parsing parseDictionaryOrOrdered",
+		utils.FormatDebug("Failed parsing parseDictionaryOrOrdered",
 			utils.LogAttr("params", rpcInput.GetParams()),
 			utils.LogAttr("propName", propName),
 			utils.LogAttr("inp", inp),

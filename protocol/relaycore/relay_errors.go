@@ -78,7 +78,7 @@ func (r *RelayErrors) GetBestErrorMessageForUser() RelayError {
 		errorMessage := r.sanitizeError(relayError.Err)
 		errorMap[errorMessage] = append(errorMap[errorMessage], idx)
 		currentResult := relayError.ProviderInfo.ProviderReputationSummary * float64(relayError.ProviderInfo.ProviderStake)
-		isExternal := relayError.LavaError != nil && relayError.LavaError.Category == common.CategoryExternal
+		isExternal := relayError.RouterError != nil && relayError.RouterError.Category == common.CategoryExternal
 
 		// Scored candidate: apply external-beats-internal preference, then
 		// score tiebreak. This result is only consulted if step 1 (majority
@@ -105,11 +105,11 @@ func (r *RelayErrors) GetBestErrorMessageForUser() RelayError {
 
 	// Step 2+3: external preference with score tiebreak (populated above).
 	if bestIndex != -1 {
-		utils.LavaFormatDebug("Failed all relays", utils.LogAttr("error_map", errorMap))
+		utils.FormatDebug("Failed all relays", utils.LogAttr("error_map", errorMap))
 		return r.RelayErrors[bestIndex]
 	}
 	// if we didn't manage to find any index return all.
-	utils.LavaFormatError("Failed finding the best error index in GetErrorMessageForUser", nil, utils.LogAttr("relayErrors", r.RelayErrors))
+	utils.FormatError("Failed finding the best error index in GetErrorMessageForUser", nil, utils.LogAttr("relayErrors", r.RelayErrors))
 	if r.OnFailureMergeAll {
 		return RelayError{Err: r.mergeAllErrors()}
 	}
@@ -156,7 +156,7 @@ type RelayError struct {
 	Err          error
 	ProviderInfo common.ProviderInfo
 	Response     *RelayResponse
-	LavaError    *common.LavaError // classified error code (nil if not yet classified)
+	RouterError  *common.RouterError // classified error code (nil if not yet classified)
 }
 
 func (re RelayError) String() string {

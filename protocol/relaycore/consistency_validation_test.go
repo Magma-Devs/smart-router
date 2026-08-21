@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol/protocolerrors"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol/protocolerrors"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 // TestShouldSkipConsistencyValidation tests all cases for skipping validation

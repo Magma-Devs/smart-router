@@ -4,10 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading backfills
@@ -84,6 +85,7 @@ func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
 		})
 	}
 }
+
 // TestParseStaticProviderEndpoints_GroupLabel covers the cross-validation provider-group
 // spine (Phase 0.1): the optional `group-label` YAML key must deserialize into
 // RPCStaticProviderEndpoint.GroupLabel, an absent key must yield the empty string (the

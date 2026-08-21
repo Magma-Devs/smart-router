@@ -4,10 +4,11 @@ import (
 	"net/http"
 	"sync"
 
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 const (
@@ -28,7 +29,7 @@ type CacheMetrics struct {
 
 func NewCacheMetricsServer(listenAddress string) *CacheMetrics {
 	if listenAddress == DisabledFlagOption {
-		utils.LavaFormatWarning("prometheus endpoint inactive, option is disabled", nil)
+		utils.FormatWarning("prometheus endpoint inactive, option is disabled", nil)
 		return nil
 	}
 	totalHits := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -70,7 +71,7 @@ func NewCacheMetricsServer(listenAddress string) *CacheMetrics {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	go func() {
-		utils.LavaFormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: listenAddress})
+		utils.FormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: listenAddress})
 		http.ListenAndServe(listenAddress, mux) //nolint:errcheck
 	}()
 

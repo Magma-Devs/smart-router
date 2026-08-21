@@ -4,12 +4,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/probing"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
-	"github.com/stretchr/testify/require"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // TestProbeVerdictConfigFor_SourcesLagToleranceFromConsistency locks the fix that keeps the probe
@@ -54,9 +55,9 @@ func (r *recordingAppender) AppendProbeData(provider string, availability float6
 	r.calls = append(r.calls, probeCall{provider, availability, latency, hasLatency, syncBlock, hasSync, syncRef})
 }
 
-func ep(url, provider string, enabled bool) *lavasession.EndpointWithDirectConnection {
-	return &lavasession.EndpointWithDirectConnection{
-		Endpoint:        &lavasession.Endpoint{NetworkAddress: url, Enabled: enabled},
+func ep(url, provider string, enabled bool) *routersession.EndpointWithDirectConnection {
+	return &routersession.EndpointWithDirectConnection{
+		Endpoint:        &routersession.Endpoint{NetworkAddress: url, Enabled: enabled},
 		ProviderAddress: provider,
 	}
 }
@@ -79,7 +80,7 @@ func freshObs(block int64, observedAt, pollTime time.Time, latency time.Duration
 // TestProbeCycle_ReEnablesRecoveredEndpoint is the headline O1 + F1 + F2 behavior: a DISABLED endpoint
 // whose telemetry shows DISTINCT successful polls is proactively re-enabled after K cycles, AND the
 // prober restores its provider's routing state (onRecover fires). (The pre-disable / edge-triggered
-// disabledAt cases are pinned in lavasession's endpoint_probe_reenable_test.go, which can drive the
+// disabledAt cases are pinned in routersession's endpoint_probe_reenable_test.go, which can drive the
 // disable instant directly; here we prove the prober→endpoint→routing wiring.)
 func TestProbeCycle_ReEnablesRecoveredEndpoint(t *testing.T) {
 	const url = "http://ep:8545"
@@ -87,7 +88,7 @@ func TestProbeCycle_ReEnablesRecoveredEndpoint(t *testing.T) {
 
 	// Endpoint constructed disabled (disabledAt zero); recovery needs DISTINCT advancing polls.
 	dc := ep(url, "provider1", false)
-	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	endpoints := []*routersession.EndpointWithDirectConnection{dc}
 
 	var recovered []string
 	onRecover := func(p string) { recovered = append(recovered, p) }
@@ -119,7 +120,7 @@ func TestProbeCycle_FailedPollDoesNotReEnable(t *testing.T) {
 	const url = "http://ep:8545"
 	now := time.Unix(1_700_000_000, 0)
 	dc := ep(url, "provider1", false)
-	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	endpoints := []*routersession.EndpointWithDirectConnection{dc}
 	getObs := func(string) (endpointstate.EndpointObservation, bool) {
 		// Fresh block/ObservedAt, but the last poll FAILED.
 		return endpointstate.EndpointObservation{
@@ -143,7 +144,7 @@ func TestProbeCycle_StaleEndpointStaysDisabled(t *testing.T) {
 	const url = "http://ep:8545"
 	now := time.Unix(1_700_000_000, 0)
 	dc := ep(url, "provider1", false)
-	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	endpoints := []*routersession.EndpointWithDirectConnection{dc}
 	getObs := func(string) (endpointstate.EndpointObservation, bool) {
 		// Last observation well past the staleness window and no fresh poll.
 		return endpointstate.EndpointObservation{LatestBlock: 1000, ObservedAt: now.Add(-60 * time.Second)}, true
@@ -169,7 +170,7 @@ func TestProbeCycle_OneSamplePerProvider(t *testing.T) {
 		},
 	}
 	getObs := func(url string) (endpointstate.EndpointObservation, bool) { return obsByURL[url](url) }
-	endpoints := []*lavasession.EndpointWithDirectConnection{
+	endpoints := []*routersession.EndpointWithDirectConnection{
 		ep("http://a:8545", "provider1", true),
 		ep("http://b:8545", "provider1", true),
 		ep("http://c:8545", "provider1", true),
@@ -195,7 +196,7 @@ func TestProbeCycle_NoBaselineOmitsSync(t *testing.T) {
 	getObs := func(string) (endpointstate.EndpointObservation, bool) {
 		return freshObs(1000, now.Add(-time.Second), now.Add(-time.Second), 10*time.Millisecond), true
 	}
-	endpoints := []*lavasession.EndpointWithDirectConnection{ep("http://a:8545", "provider1", true)}
+	endpoints := []*routersession.EndpointWithDirectConnection{ep("http://a:8545", "provider1", true)}
 	rec := &recordingAppender{}
 	// hasBaseline=false → the prober must not set hasSync.
 	runProbeCycleCore(endpoints, getObs, 0, false, provideroptimizer.SyncReference{ConsensusConfigured: true}, now, probeCfg(), rec, nil, nil)
@@ -212,7 +213,7 @@ func TestProbeCycle_CoversBackupsAndMultipleProviders(t *testing.T) {
 	getObs := func(string) (endpointstate.EndpointObservation, bool) {
 		return freshObs(1000, now.Add(-time.Second), now.Add(-time.Second), 10*time.Millisecond), true
 	}
-	endpoints := []*lavasession.EndpointWithDirectConnection{
+	endpoints := []*routersession.EndpointWithDirectConnection{
 		ep("http://a:8545", "regular-provider", true),
 		ep("http://b:8545", "backup-provider", true), // GetAllDirectRPCEndpoints includes backups
 	}
@@ -235,7 +236,7 @@ func TestProbeCycle_NoObservationIsUnhealthy(t *testing.T) {
 	getObs := func(string) (endpointstate.EndpointObservation, bool) {
 		return endpointstate.EndpointObservation{}, false // never observed
 	}
-	endpoints := []*lavasession.EndpointWithDirectConnection{ep("http://a:8545", "provider1", true)}
+	endpoints := []*routersession.EndpointWithDirectConnection{ep("http://a:8545", "provider1", true)}
 	rec := &recordingAppender{}
 	runProbeCycleCore(endpoints, getObs, 0, false, provideroptimizer.SyncReference{}, now, probeCfg(), rec, nil, nil)
 
@@ -253,7 +254,7 @@ func TestProbeCycleCore_ReturnsCycleCounts(t *testing.T) {
 	healthy := func(string) (endpointstate.EndpointObservation, bool) {
 		return freshObs(1000, now.Add(-time.Second), now.Add(-time.Second), 20*time.Millisecond), true
 	}
-	endpoints := []*lavasession.EndpointWithDirectConnection{
+	endpoints := []*routersession.EndpointWithDirectConnection{
 		ep("http://a:8545", "p1", true),
 		ep("http://b:8545", "p2", true),
 	}
@@ -281,7 +282,7 @@ func TestProbeCycleCore_ReturnsCycleCounts(t *testing.T) {
 func TestProbeCycleCore_CountsReEnable(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	dc := ep("http://ep:8545", "provider1", false) // disabled, disabledAt zero
-	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+	endpoints := []*routersession.EndpointWithDirectConnection{dc}
 
 	K := int(probeCfg().ReEnableHysteresis)
 	var lastReEnabled int

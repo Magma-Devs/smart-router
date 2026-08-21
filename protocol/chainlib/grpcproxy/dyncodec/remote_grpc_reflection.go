@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 func NewGRPCReflectionProtoFileRegistryFromConn(conn *grpc.ClientConn) *GRPCReflectionProtoFileRegistry {
@@ -88,7 +89,7 @@ func maybeFileDescriptorResponse(resp *grpc_reflection_v1alpha.ServerReflectionR
 		if convertionSuccessful {
 			return nil, fmt.Errorf("%#v", errorResponse.ErrorResponse.ErrorMessage)
 		}
-		return nil, utils.LavaFormatError("Failed to convert response to ServerReflectionResponse_FileDescriptorResponse and is not an error", nil, utils.Attribute{Key: "resp.MessageResponse", Value: resp.MessageResponse})
+		return nil, utils.FormatError("Failed to convert response to ServerReflectionResponse_FileDescriptorResponse and is not an error", nil, utils.Attribute{Key: "resp.MessageResponse", Value: resp.MessageResponse})
 	}
 	return r, nil
 }

@@ -4,8 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 )
 
 // TestProcessingTimestampLifecycle tests the full lifecycle of ProcessingTimestamp

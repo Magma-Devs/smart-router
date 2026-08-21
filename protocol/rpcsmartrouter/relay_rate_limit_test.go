@@ -7,7 +7,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,9 +48,9 @@ func TestIsRateLimitedRelayOutcome(t *testing.T) {
 func TestReplayFailingRelay_RecordsRateLimitIntoHoldoff(t *testing.T) {
 	reg := withFreshRelayHoldoff(t)
 	rpcss := replayServer()
-	conn := &fakeDirectConn{err: &lavasession.HTTPStatusError{StatusCode: 429, Status: "429", RetryAfter: 5 * time.Minute}}
-	epc := &lavasession.EndpointWithDirectConnection{
-		Endpoint:         &lavasession.Endpoint{NetworkAddress: "http://fake:8545"},
+	conn := &fakeDirectConn{err: &routersession.HTTPStatusError{StatusCode: 429, Status: "429", RetryAfter: 5 * time.Minute}}
+	epc := &routersession.EndpointWithDirectConnection{
+		Endpoint:         &routersession.Endpoint{NetworkAddress: "http://fake:8545"},
 		DirectConnection: conn,
 		ProviderAddress:  "provider1",
 	}
@@ -69,9 +69,9 @@ func TestReplayFailingRelay_SkipsWhileHeldOff(t *testing.T) {
 	reg.RecordRateLimit("provider1", "http://fake:8545", time.Minute)
 
 	rpcss := replayServer()
-	conn := &fakeDirectConn{resp: &lavasession.DirectRPCResponse{StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}}
-	epc := &lavasession.EndpointWithDirectConnection{
-		Endpoint:         &lavasession.Endpoint{NetworkAddress: "http://fake:8545"},
+	conn := &fakeDirectConn{resp: &routersession.DirectRPCResponse{StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}}
+	epc := &routersession.EndpointWithDirectConnection{
+		Endpoint:         &routersession.Endpoint{NetworkAddress: "http://fake:8545"},
 		DirectConnection: conn,
 		ProviderAddress:  "provider1",
 	}
@@ -97,9 +97,9 @@ func TestReplayFailingRelay_RecoveredClearsHoldoff(t *testing.T) {
 	require.False(t, reg.HeldOff("provider1", "http://fake:8545"))
 
 	rpcss := replayServer()
-	conn := &fakeDirectConn{resp: &lavasession.DirectRPCResponse{StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}}
-	epc := &lavasession.EndpointWithDirectConnection{
-		Endpoint:         &lavasession.Endpoint{NetworkAddress: "http://fake:8545"},
+	conn := &fakeDirectConn{resp: &routersession.DirectRPCResponse{StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}}
+	epc := &routersession.EndpointWithDirectConnection{
+		Endpoint:         &routersession.Endpoint{NetworkAddress: "http://fake:8545"},
 		DirectConnection: conn,
 		ProviderAddress:  "provider1",
 	}

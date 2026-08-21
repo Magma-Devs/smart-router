@@ -5,6 +5,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	fiberpprof "github.com/gofiber/fiber/v2/middleware/pprof"
+
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -27,7 +28,7 @@ func StartPprofServer(addr string) error {
 		}
 	}()
 
-	utils.LavaFormatInfo("start pprof HTTP server", utils.Attribute{Key: "IPAddress", Value: addr})
+	utils.FormatInfo("start pprof HTTP server", utils.Attribute{Key: "IPAddress", Value: addr})
 
 	return nil
 }

@@ -2,7 +2,7 @@
 // per-endpoint observed block tip.
 //
 // It is a standard-library-only leaf so both the high layer (endpointstate's poll +
-// relay observers, which write it) and the low layer (lavasession's QoS sync-block,
+// relay observers, which write it) and the low layer (routersession's QoS sync-block,
 // which reads it) can import it without a cycle — sharing ONE store rather than each
 // keeping a divergent copy. It stores the whole {Block, ObservedAt, Source} triple so
 // the guard and the relay-freshness gate see a consistent value.
@@ -161,7 +161,7 @@ func (s *Store) Reset() {
 }
 
 // defaultStore is the process-wide singleton. Both the high layer (endpointstate
-// observers) and the low layer (lavasession QoS) reach the same instance through
+// observers) and the low layer (routersession QoS) reach the same instance through
 // Default(), which is what makes the tip live in exactly one place.
 var defaultStore = NewStore()
 

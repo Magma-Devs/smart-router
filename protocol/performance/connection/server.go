@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 type RelayerConnectionServer struct {
@@ -20,7 +20,7 @@ func (rs *RelayerConnectionServer) Relay(ctx context.Context, request *pairingty
 
 func (rs *RelayerConnectionServer) Probe(ctx context.Context, probeReq *pairingtypes.ProbeRequest) (*pairingtypes.ProbeReply, error) {
 	peerAddress := common.GetIpFromGrpcContext(ctx)
-	utils.LavaFormatInfo("received probe", utils.LogAttr("incoming-ip", peerAddress))
+	utils.FormatInfo("received probe", utils.LogAttr("incoming-ip", peerAddress))
 	return &pairingtypes.ProbeReply{
 		Guid: rs.guid,
 	}, nil

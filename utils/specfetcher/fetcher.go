@@ -1,4 +1,4 @@
-// Package specfetcher provides functionality to fetch Lava specs from remote Git repositories.
+// Package specfetcher provides functionality to fetch chain specs from remote Git repositories.
 // It supports both GitHub and GitLab (including self-hosted instances) with optional authentication.
 package specfetcher
 
@@ -386,7 +386,7 @@ func (f *Fetcher) fetchFilesParallel(ctx context.Context, fileURLs []string, set
 
 	// Log any fetch errors
 	if len(fetchErrors) > 0 {
-		utils.LavaFormatWarning("Some spec files failed to fetch", nil,
+		utils.FormatWarning("Some spec files failed to fetch", nil,
 			utils.LogAttr("error_count", len(fetchErrors)),
 			utils.LogAttr("errors", strings.Join(fetchErrors, "; ")))
 	}
@@ -416,7 +416,7 @@ func logLoadedSpecs(specs map[string]types.Spec) {
 	for id := range specs {
 		specIDs = append(specIDs, id)
 	}
-	utils.LavaFormatInfo("Loaded specs from remote repository",
+	utils.FormatInfo("Loaded specs from remote repository",
 		utils.LogAttr("spec_count", len(specs)),
 		utils.LogAttr("spec_ids", strings.Join(specIDs, ", ")))
 }

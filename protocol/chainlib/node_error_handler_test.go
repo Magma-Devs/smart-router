@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 func TestUnsupportedMethodError(t *testing.T) {
@@ -36,13 +37,13 @@ func TestUnsupportedMethodError(t *testing.T) {
 		require.Contains(t, err.Error(), "eth_call")
 	})
 
-	t.Run("Unwrap returns LavaError", func(t *testing.T) {
+	t.Run("Unwrap returns RouterError", func(t *testing.T) {
 		originalErr := errors.New("original error")
 		err := NewUnsupportedMethodError(originalErr, "method")
 
 		unwrapped := errors.Unwrap(err)
 		require.NotNil(t, unwrapped)
-		require.True(t, errors.Is(err, common.LavaErrorNodeMethodNotFound))
+		require.True(t, errors.Is(err, common.RouterErrorNodeMethodNotFound))
 	})
 
 	t.Run("Error message contains method name when provided", func(t *testing.T) {

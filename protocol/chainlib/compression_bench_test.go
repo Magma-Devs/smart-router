@@ -9,14 +9,15 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
-// LAVA_BENCH_HUGE=1 opts into the huge_* payload buckets (128 MB / 1 GB).
+// SMARTROUTER_BENCH_HUGE=1 opts into the huge_* payload buckets (128 MB / 1 GB).
 // They are skipped by default because a single 1 GB brotli iteration takes
 // ~15–20 s on a single core, and allocating 1 GB on CI is unfriendly.
-const hugeBenchEnvVar = "LAVA_BENCH_HUGE"
+const hugeBenchEnvVar = "SMARTROUTER_BENCH_HUGE"
 
 // compressionBenchSizes defines the payload buckets used by both the benchmark
 // and the companion ratio test. JSON-RPC traffic on ETH routers clusters around
@@ -28,7 +29,7 @@ const hugeBenchEnvVar = "LAVA_BENCH_HUGE"
 var compressionBenchSizes = []struct {
 	name  string
 	bytes int
-	huge  bool // gated behind LAVA_BENCH_HUGE=1
+	huge  bool // gated behind SMARTROUTER_BENCH_HUGE=1
 }{
 	{"small_~256B", 256, false},
 	{"medium_~16KB", 16 * 1024, false},

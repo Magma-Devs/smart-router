@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — Ethereum (ETH1)
-# Mode: Direct connections to public Ethereum JSON-RPC endpoints (no Lava providers!)
+# Mode: Direct connections to public Ethereum JSON-RPC endpoints (no provider-relay network — direct upstreams)
 #
 # 2 upstreams, each HTTP + WebSocket (the ETH1 spec requires ws for
 # subscriptions; http-only providers are excluded at startup):

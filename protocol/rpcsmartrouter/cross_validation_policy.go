@@ -5,9 +5,10 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // Per-method cross-validation policy (Phase 1.1).
@@ -55,7 +56,7 @@ type CrossValidationPolicy struct {
 	// winners must agree. Operator-only bool (no caller override). Requires MinGroups > 1.
 	PerGroupQuorum bool `yaml:"per-group-quorum,omitempty" json:"per-group-quorum,omitempty" mapstructure:"per-group-quorum,omitempty"`
 	// ForbidCallerCV truly disables cross-validation for this method: even if a request sends the
-	// lava-cross-validation-* headers, the router will NOT cross-validate — the method routes by its normal
+	// smartrouter-cross-validation-* headers, the router will NOT cross-validate — the method routes by its normal
 	// stateful/stateless category. This is the explicit "disable cross-validation for specific methods" knob
 	// (PRD UC-1). It is mutually exclusive with Enabled (Enabled mandates CV; ForbidCallerCV forbids it) and
 	// the combination is rejected by Validate. The other knobs are ignored when this is set.

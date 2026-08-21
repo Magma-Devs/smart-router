@@ -8,15 +8,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 // healthVerification is one spec verification's result, as emitted in the JSON report.
@@ -93,7 +94,7 @@ or from inline "address chain-id api-interface" triplets like the rpcsmartrouter
 
 The config argument resolves exactly as the rpcsmartrouter command's does: an absolute path
 names the file outright, while a relative path or a bare name is looked up in the local
-running directory, ./config, then ` + lavaDefaultNodeHome + `.`,
+running directory, ./config, then ` + defaultNodeHome + `.`,
 		Example: `  smartrouter health config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
   smartrouter health https://eth1.lava.build ETH1 jsonrpc --use-static-spec specs/`,
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -178,13 +179,13 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 	if len(args) > 1 {
 		viperEndpoints, err := commonlib.ParseEndpointArgs(args, Yaml_config_properties, commonlib.EndpointsConfigName)
 		if err != nil {
-			return nil, utils.LavaFormatError("invalid inline endpoints", err, utils.Attribute{Key: "args", Value: strings.Join(args, " ")})
+			return nil, utils.FormatError("invalid inline endpoints", err, utils.Attribute{Key: "args", Value: strings.Join(args, " ")})
 		}
 		viper.Reset()
 		viper.MergeConfigMap(viperEndpoints.AllSettings())
 		rpcEndpoints, err := ParseEndpoints(viper.GetViper())
 		if err != nil || len(rpcEndpoints) == 0 {
-			return nil, utils.LavaFormatError("invalid inline endpoints definition", err)
+			return nil, utils.FormatError("invalid inline endpoints definition", err)
 		}
 		providers := make([]healthProvider, 0, len(rpcEndpoints))
 		for _, ep := range rpcEndpoints {
@@ -206,17 +207,17 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 		// This command is what an operator reaches for when a config will not boot, so a
 		// config it cannot even find has to say where it looked, in the terms they used.
 		if isConfigNotFound(err) {
-			return nil, utils.LavaFormatError(configNotFoundMessage(configTarget, configIsFile), err,
+			return nil, utils.FormatError(configNotFoundMessage(configTarget, configIsFile), err,
 				configLocationAttributes(configTarget, configIsFile)...)
 		}
-		return nil, utils.LavaFormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configTarget})
+		return nil, utils.FormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configTarget})
 	}
 
 	keys := []string{commonlib.DirectRPCConfigName}
 	if includeBackup {
 		keys = append(keys, commonlib.BackupDirectRPCConfigName)
 	}
-	lists := make([][]*lavasession.RPCStaticProviderEndpoint, 0, len(keys))
+	lists := make([][]*routersession.RPCStaticProviderEndpoint, 0, len(keys))
 	for _, key := range keys {
 		if !viper.IsSet(key) {
 			continue
@@ -233,8 +234,8 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 	// the collision and probes anyway, rather than refusing the config like the router does. The
 	// same check the router runs, run here for its message and not for its verdict; the rows are
 	// still told apart by their `url`, which is what identifies the broken node.
-	if err := lavasession.ValidateUniqueProviderNames(lists...); err != nil {
-		utils.LavaFormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
+	if err := routersession.ValidateUniqueProviderNames(lists...); err != nil {
+		utils.FormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
 	}
 
 	var providers []healthProvider
@@ -398,7 +399,7 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 	// guard is false — but a cross-endpoint race on that bool is not what `health` hit.
 	chainParser.SetSkipWebsocketVerification(!(verifyWs && providerHasWebSocketURL(provider.nodeUrls)))
 
-	rpcEndpoint := lavasession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
+	rpcEndpoint := routersession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
 	if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, staticSpecPaths, rpcEndpoint, "", ""); err != nil {
 		return rowsFromError(fmt.Errorf("load spec: %w", err))
 	}
@@ -452,7 +453,7 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 		return append(rows, wsSkippedRows()...)
 	}
 
-	providerEndpoint := &lavasession.RPCProviderEndpoint{
+	providerEndpoint := &routersession.RPCProviderEndpoint{
 		ChainID:      provider.chainID,
 		ApiInterface: provider.apiInterface,
 		NodeUrls:     probedUrls,

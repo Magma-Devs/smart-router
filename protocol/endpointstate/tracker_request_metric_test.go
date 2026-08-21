@@ -14,10 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 // recordingPoller captures what the transport hook reports.
@@ -52,7 +53,7 @@ func TestSendRawRequest_CountsRequestsThatReachTheTransport(t *testing.T) {
 	rec := &requestRecorder{}
 	conn := &recordingConnection{url: "http://node.example", respBody: []byte(`{"ok":true}`)}
 	poller := NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: "http://node.example", Enabled: true},
+		&routersession.Endpoint{NetworkAddress: "http://node.example", Enabled: true},
 		conn, nil, "ETH1", spectypes.APIInterfaceJsonRPC,
 	)
 	poller.onTrackerRequest = func(kind string) { rec.record("http://node.example", kind) }
@@ -144,7 +145,7 @@ func TestTrackerRequestCounter_ByKind_EndToEnd(t *testing.T) {
 		defer m.Stop()
 
 		url := "http://eth-ep:8545"
-		_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, &mockDirectRPCConnection{url: url})
+		_, err := m.GetOrCreateTracker(&routersession.Endpoint{NetworkAddress: url, Enabled: true}, &mockDirectRPCConnection{url: url})
 		require.NoError(t, err)
 
 		// Let the poll loop run a few cycles at the 50ms flat cadence (avgBlockTime/2).

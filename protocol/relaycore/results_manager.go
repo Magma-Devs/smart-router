@@ -60,7 +60,7 @@ func NewResultsManager(guid uint64, chainID string) ResultsManager {
 func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
-	// Protocol errors come from the lavasession/protocolerrors packages and carry an sdkerrors ABCI
+	// Protocol errors come from the routersession/protocolerrors packages and carry an sdkerrors ABCI
 	// code — use ClassifyLegacyError to extract it. These errors travel over gRPC (provider →
 	// consumer), so TransportGRPC is used for the message-based fallback path.
 	classified := common.ClassifyLegacyError(response.Err, common.TransportGRPC)
@@ -74,7 +74,7 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 		utils.Attribute{Key: "statusCode", Value: response.RelayResult.StatusCode},
 		utils.Attribute{Key: "providerTrailer", Value: response.RelayResult.ProviderTrailer},
 	)
-	rp.protocolResponseErrors.AddError(RelayError{Err: response.Err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: classified})
+	rp.protocolResponseErrors.AddError(RelayError{Err: response.Err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: classified})
 }
 
 // only when locked
@@ -110,7 +110,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 	}
 
 	if response.RelayResult.Reply == nil {
-		utils.LavaFormatError("got to setValidResponse with nil Reply",
+		utils.FormatError("got to setValidResponse with nil Reply",
 			response.Err,
 			utils.LogAttr("ProviderInfo", response.RelayResult.ProviderInfo),
 			utils.LogAttr("StatusCode", response.RelayResult.StatusCode),
@@ -190,7 +190,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			utils.LogAttr("requestPayload", parser.CapStringLen(reqPayload)),
 			utils.LogAttr("requestHeaders", reqHeaders),
 		)
-		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: nodeClassified})
+		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: nodeClassified})
 		return err
 	}
 	rp.successResults = append(rp.successResults, response.RelayResult)
@@ -250,7 +250,7 @@ func (rp *ResultsManagerInst) RequiredResults(requiredSuccesses int, selection S
 	resultsCount := len(rp.successResults)
 	if resultsCount >= requiredSuccesses {
 		// we have enough successes, we can return
-		utils.LavaFormatDebug("Reached RequiredResults", utils.LogAttr("resultsCount", resultsCount), utils.LogAttr("requiredSuccesses", requiredSuccesses), utils.LogAttr("GUID", rp.guid))
+		utils.FormatDebug("Reached RequiredResults", utils.LogAttr("resultsCount", resultsCount), utils.LogAttr("requiredSuccesses", requiredSuccesses), utils.LogAttr("GUID", rp.guid))
 		return true
 	}
 	// Only count successful results for cross-validation

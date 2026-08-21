@@ -19,7 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// TraceBodyFlag is the only Lava-specific tracing CLI flag.
+// TraceBodyFlag is the only router-specific tracing CLI flag.
 // Everything else comes from the standard OTel SDK environment variables, which
 // are auto-read by the OTel exporter packages and the autoexport contrib package.
 //
@@ -64,7 +64,7 @@ const defaultServiceName = "smartrouter"
 
 const shutdownTimeout = 5 * time.Second
 
-// TraceConfig holds Lava-specific tracing configuration.
+// TraceConfig holds router-specific tracing configuration.
 // Standard OTel knobs are read from environment variables — see TraceBodyFlag doc.
 type TraceConfig struct {
 	// TraceBody enables recording of request/response bodies as span attributes.
@@ -108,7 +108,7 @@ func New(ctx context.Context, cfg TraceConfig) (*TraceManager, error) {
 	// OTEL_EXPORTER_OTLP_* env vars for endpoint, headers, TLS, etc.
 	exporter, err := autoexport.NewSpanExporter(ctx)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to create OTLP span exporter", err)
+		return nil, utils.FormatError("failed to create OTLP span exporter", err)
 	}
 
 	// Operator picked OTEL_TRACES_EXPORTER=none — install noop and warn the
@@ -130,7 +130,7 @@ func New(ctx context.Context, cfg TraceConfig) (*TraceManager, error) {
 		resource.WithFromEnv(), // OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES
 	)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to create OTel resource", err)
+		return nil, utils.FormatError("failed to create OTel resource", err)
 	}
 
 	sampler := buildSamplerFromEnv()
@@ -150,15 +150,15 @@ func New(ctx context.Context, cfg TraceConfig) (*TraceManager, error) {
 	otel.SetTextMapPropagator(propagator)
 
 	// Surface OTel SDK internal errors (export failures, batch drops, etc.) via
-	// the Lava logger. By default the SDK swallows these silently, which makes
+	// the router logger. By default the SDK swallows these silently, which makes
 	// "spans aren't reaching my collector" a frustrating black box to debug.
 	// We deliberately install this AFTER SetTracerProvider so the handler is
 	// not invoked during early SDK setup.
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-		utils.LavaFormatWarning("OTel SDK reported an error", err)
+		utils.FormatWarning("OTel SDK reported an error", err)
 	}))
 
-	utils.LavaFormatInfo("OTel tracing enabled",
+	utils.FormatInfo("OTel tracing enabled",
 		utils.LogAttr("sampler", sampler.Description()),
 		utils.LogAttr("propagator", propagatorDescription(propagator)),
 		utils.LogAttr("trace_body", cfg.TraceBody),
@@ -186,7 +186,7 @@ func (tm *TraceManager) Shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := tm.shutdown(ctx); err != nil {
-		utils.LavaFormatWarning("OTel TracerProvider shutdown did not complete cleanly", err)
+		utils.FormatWarning("OTel TracerProvider shutdown did not complete cleanly", err)
 	}
 }
 
@@ -199,7 +199,7 @@ func (tm *TraceManager) Tracer(name string) trace.Tracer {
 // will be a noop, so operators don't wonder why they aren't seeing bodies.
 func warnIfBodySetButTracingOff(cfg TraceConfig) {
 	if cfg.TraceBody {
-		utils.LavaFormatWarning(
+		utils.FormatWarning(
 			"--"+TraceBodyFlag+" is set but tracing is not enabled "+
 				"(OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none); ignored",
 			nil,
@@ -226,7 +226,7 @@ func isSDKDisabled() bool {
 	case "", "false":
 		return false
 	default:
-		utils.LavaFormatWarning(
+		utils.FormatWarning(
 			"unrecognized OTEL_SDK_DISABLED value; treating as false (per OTel spec, only 'true' enables disable)",
 			nil,
 			utils.LogAttr("value", raw),
@@ -258,7 +258,7 @@ func buildSamplerFromEnv() sdktrace.Sampler {
 		}
 		v, err := strconv.ParseFloat(arg, 64)
 		if err != nil || v < 0 || v > 1 {
-			utils.LavaFormatWarning("invalid OTEL_TRACES_SAMPLER_ARG; using default", err,
+			utils.FormatWarning("invalid OTEL_TRACES_SAMPLER_ARG; using default", err,
 				utils.LogAttr("value", arg),
 				utils.LogAttr("default", defaultValue),
 			)
@@ -281,7 +281,7 @@ func buildSamplerFromEnv() sdktrace.Sampler {
 	case "", "parentbased_always_on":
 		return sdktrace.ParentBased(sdktrace.AlwaysSample())
 	default:
-		utils.LavaFormatWarning("unknown OTEL_TRACES_SAMPLER value; using parentbased_always_on", nil,
+		utils.FormatWarning("unknown OTEL_TRACES_SAMPLER value; using parentbased_always_on", nil,
 			utils.LogAttr("value", name),
 		)
 		return sdktrace.ParentBased(sdktrace.AlwaysSample())
@@ -322,7 +322,7 @@ func buildPropagatorFromEnv() propagation.TextMapPropagator {
 			// Per spec, "none" disables propagation entirely.
 			return propagation.NewCompositeTextMapPropagator()
 		default:
-			utils.LavaFormatWarning("unsupported OTEL_PROPAGATORS value; ignoring", nil,
+			utils.FormatWarning("unsupported OTEL_PROPAGATORS value; ignoring", nil,
 				utils.LogAttr("value", name),
 			)
 		}

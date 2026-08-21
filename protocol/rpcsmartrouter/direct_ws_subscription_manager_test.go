@@ -12,17 +12,18 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	rpcInterfaceMessages "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // mockSubscriptionServer creates a mock WebSocket server for testing subscriptions
@@ -1808,7 +1809,7 @@ func TestSelectEndpoint_WS_StickyOnPrimary_Returns(t *testing.T) {
 	)
 
 	// Manually set a sticky entry pointing at the primary.
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://primary-1.example.com"})
+	manager.stickyStore.Set("client-1", &routersession.StickySession{Provider: "wss://primary-1.example.com"})
 
 	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
 	require.NoError(t, err)
@@ -1829,7 +1830,7 @@ func TestSelectEndpoint_WS_StickyOnBackup_Returns(t *testing.T) {
 		nil,
 	)
 
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://backup-1.example.com"})
+	manager.stickyStore.Set("client-1", &routersession.StickySession{Provider: "wss://backup-1.example.com"})
 
 	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
 	require.NoError(t, err)
@@ -1851,7 +1852,7 @@ func TestSelectEndpoint_WS_StickyIgnored_FallsThroughCascade(t *testing.T) {
 		nil,
 	)
 
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://primary-1.example.com"})
+	manager.stickyStore.Set("client-1", &routersession.StickySession{Provider: "wss://primary-1.example.com"})
 
 	ignored := map[string]struct{}{
 		"wss://primary-1.example.com": {},

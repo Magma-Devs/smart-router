@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/testproto"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -17,6 +15,9 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/testproto"
 )
 
 func TestRemotes(t *testing.T) {

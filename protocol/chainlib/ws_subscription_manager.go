@@ -9,7 +9,7 @@ import (
 
 // WSSubscriptionManager defines the interface for WebSocket subscription management.
 // This interface is implemented by both:
-//   - ConsumerWSSubscriptionManager: routes subscriptions through Lava providers
+//   - ConsumerWSSubscriptionManager: routes subscriptions through relay providers
 //   - DirectWSSubscriptionManager: connects directly to RPC endpoints (for smart router)
 //
 // The interface enables the chain listener to work with either implementation,
@@ -55,4 +55,3 @@ type WSSubscriptionManager interface {
 		metricsData *metrics.RelayMetrics,
 	) error
 }
-

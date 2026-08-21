@@ -32,7 +32,7 @@ func TestPointViperAtConfigResolution(t *testing.T) {
 		setup func(t *testing.T, dir string) (args []string, wantMarker string)
 	}{
 		{
-			// The bug: this failed with "Not Found in [. ./config $HOME/.lava]".
+			// The bug: this failed with "Not Found in [. ./config $HOME/.smartrouter]".
 			name: "absolute path",
 			setup: func(t *testing.T, dir string) ([]string, string) {
 				abs := writeConfig(t, filepath.Join(dir, "elsewhere", "router.yml"), "absolute")
@@ -152,15 +152,15 @@ func TestPointViperAtConfigResolution(t *testing.T) {
 			},
 		},
 		{
-			// The same, for the last search path. lavaDefaultNodeHome is the literal
-			// "$HOME/.lava"; viper expands it through absPathify, so the path branch has to
+			// The same, for the last search path. defaultNodeHome is the literal
+			// "$HOME/.smartrouter"; viper expands it through absPathify, so the path branch has to
 			// expand it too or this resolves against a directory named "$HOME".
-			name: "relative path resolves through the lava home search path",
+			name: "relative path resolves through the router home search path",
 			setup: func(t *testing.T, dir string) ([]string, string) {
 				home := t.TempDir()
 				t.Setenv("HOME", home)
-				writeConfig(t, filepath.Join(home, ".lava", "sub", "router.yml"), "via-lava-home")
-				return []string{"sub/router.yml"}, "via-lava-home"
+				writeConfig(t, filepath.Join(home, ".smartrouter", "sub", "router.yml"), "via-router-home")
+				return []string{"sub/router.yml"}, "via-router-home"
 			},
 		},
 		{
@@ -247,7 +247,7 @@ func TestPointViperAtConfigResolution(t *testing.T) {
 // TestPointViperAtConfigNotFound covers the other half of MAG-2861: the message. Pointing
 // viper at an exact file makes a miss an fs.ErrNotExist rather than a
 // viper.ConfigFileNotFoundError, and the router's clean-error branch keyed only on the
-// latter — so a typo'd path would have taken the LavaFormatFatal stack-dump path instead.
+// latter — so a typo'd path would have taken the FormatFatal stack-dump path instead.
 func TestPointViperAtConfigNotFound(t *testing.T) {
 	t.Run("missing absolute path is a clean not-found naming that path", func(t *testing.T) {
 		dir := t.TempDir()
@@ -336,7 +336,7 @@ func TestPointViperAtConfigNotFound(t *testing.T) {
 
 	t.Run("a path that is a directory is a clean not-found, not a stack dump", func(t *testing.T) {
 		// Pointing viper at a directory fails with EISDIR rather than fs.ErrNotExist, which
-		// classified as "not a not-found" and so took the LavaFormatFatal path — the exact
+		// classified as "not a not-found" and so took the FormatFatal path — the exact
 		// failure mode MAG-2861 exists to remove, reintroduced in a narrow case. Searching
 		// for a *name* never hit this: searchInPath skips directories.
 		dir := t.TempDir()

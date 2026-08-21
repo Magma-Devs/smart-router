@@ -25,7 +25,7 @@ func (m *ProbeRequest) String() string {
 }
 
 func (m *ProbeRequest) Marshal() ([]byte, error) { return json.Marshal(m) }
-func (m *ProbeRequest) Unmarshal(b []byte) error  { return json.Unmarshal(b, m) }
+func (m *ProbeRequest) Unmarshal(b []byte) error { return json.Unmarshal(b, m) }
 
 // ---------------------------------------------------------------------------
 // ProbeReply
@@ -39,7 +39,7 @@ func (m *ProbeReply) String() string {
 }
 
 func (m *ProbeReply) Marshal() ([]byte, error) { return json.Marshal(m) }
-func (m *ProbeReply) Unmarshal(b []byte) error  { return json.Unmarshal(b, m) }
+func (m *ProbeReply) Unmarshal(b []byte) error { return json.Unmarshal(b, m) }
 
 // ---------------------------------------------------------------------------
 // RelayRequest — Marshal/Unmarshal already defined in relay.go; add identity
@@ -75,7 +75,7 @@ func (m *RelayCacheGet) String() string {
 }
 
 func (m *RelayCacheGet) Marshal() ([]byte, error) { return json.Marshal(m) }
-func (m *RelayCacheGet) Unmarshal(b []byte) error  { return json.Unmarshal(b, m) }
+func (m *RelayCacheGet) Unmarshal(b []byte) error { return json.Unmarshal(b, m) }
 
 // ---------------------------------------------------------------------------
 // CacheRelayReply
@@ -89,7 +89,7 @@ func (m *CacheRelayReply) String() string {
 }
 
 func (m *CacheRelayReply) Marshal() ([]byte, error) { return json.Marshal(m) }
-func (m *CacheRelayReply) Unmarshal(b []byte) error  { return json.Unmarshal(b, m) }
+func (m *CacheRelayReply) Unmarshal(b []byte) error { return json.Unmarshal(b, m) }
 
 // ---------------------------------------------------------------------------
 // RelayCacheSet
@@ -103,7 +103,7 @@ func (m *RelayCacheSet) String() string {
 }
 
 func (m *RelayCacheSet) Marshal() ([]byte, error) { return json.Marshal(m) }
-func (m *RelayCacheSet) Unmarshal(b []byte) error  { return json.Unmarshal(b, m) }
+func (m *RelayCacheSet) Unmarshal(b []byte) error { return json.Unmarshal(b, m) }
 
 // ---------------------------------------------------------------------------
 // CacheUsage
@@ -117,4 +117,4 @@ func (m *CacheUsage) String() string {
 }
 
 func (m *CacheUsage) Marshal() ([]byte, error) { return json.Marshal(m) }
-func (m *CacheUsage) Unmarshal(b []byte) error  { return json.Unmarshal(b, m) }
+func (m *CacheUsage) Unmarshal(b []byte) error { return json.Unmarshal(b, m) }

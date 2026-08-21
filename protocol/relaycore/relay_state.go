@@ -11,7 +11,7 @@ import (
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
-	slices "github.com/magma-Devs/smart-router/utils/lavaslices"
+	slices "github.com/magma-Devs/smart-router/utils/sliceutil"
 )
 
 type RetryHashCacheInf interface {
@@ -86,7 +86,7 @@ func GetEmptyRelayState(ctx context.Context, protocolMessage chainlib.ProtocolMe
 func NewRelayState(ctx context.Context, protocolMessage chainlib.ProtocolMessage, stateNumber int, cache RetryHashCacheInf, relayParser RelayParserInf, archiveStatus *ArchiveStatus) *RelayState {
 	relayRequestData := protocolMessage.RelayPrivateData()
 	if archiveStatus == nil {
-		utils.LavaFormatError("misuse detected archiveStatus is nil", nil, utils.Attribute{Key: "protocolMessage.GetApi", Value: protocolMessage.GetApi()})
+		utils.FormatError("misuse detected archiveStatus is nil", nil, utils.Attribute{Key: "protocolMessage.GetApi", Value: protocolMessage.GetApi()})
 		archiveStatus = &ArchiveStatus{}
 	}
 	rs := &RelayState{
@@ -178,7 +178,7 @@ func (rs *RelayState) SetProtocolMessage(protocolMessage chainlib.ProtocolMessag
 func addArchiveExtension(ctx context.Context, protocolMessage chainlib.ProtocolMessage, archiveStatus *ArchiveStatus, relayParser RelayParserInf) chainlib.ProtocolMessage {
 	relayRequestData := protocolMessage.RelayPrivateData()
 	if relayRequestData == nil {
-		utils.LavaFormatError("Relay request data is nil", nil, utils.LogAttr("GUID", ctx))
+		utils.FormatError("Relay request data is nil", nil, utils.LogAttr("GUID", ctx))
 		return protocolMessage
 	}
 	if archiveStatus.isArchive.Load() {
@@ -187,10 +187,10 @@ func addArchiveExtension(ctx context.Context, protocolMessage chainlib.ProtocolM
 	userData := protocolMessage.GetUserData()
 	existingExtensionsPlusArchive := strings.Join(append(relayRequestData.Extensions, extensionslib.ArchiveExtension), ",")
 	metaDataForArchive := []pairingtypes.Metadata{{Name: common.EXTENSION_OVERRIDE_HEADER_NAME, Value: existingExtensionsPlusArchive}}
-	utils.LavaFormatTrace("[Archive] Adding archive extension", utils.LogAttr("extensions", existingExtensionsPlusArchive), utils.LogAttr("GUID", ctx))
+	utils.FormatTrace("[Archive] Adding archive extension", utils.LogAttr("extensions", existingExtensionsPlusArchive), utils.LogAttr("GUID", ctx))
 	newProtocolMessage, err := relayParser.ParseRelay(ctx, relayRequestData.ApiUrl, string(relayRequestData.Data), relayRequestData.ConnectionType, userData.DappId, userData.ConsumerIp, metaDataForArchive)
 	if err != nil {
-		utils.LavaFormatError("Failed adding archive extension", err, utils.LogAttr("apiUrl", relayRequestData.ApiUrl))
+		utils.FormatError("Failed adding archive extension", err, utils.LogAttr("apiUrl", relayRequestData.ApiUrl))
 		return protocolMessage
 	}
 	preserveRetrySafeDirectives(protocolMessage, newProtocolMessage)
@@ -207,7 +207,7 @@ func removeArchiveExtension(ctx context.Context, protocolMessage chainlib.Protoc
 	}
 	relayRequestData := protocolMessage.RelayPrivateData()
 	if relayRequestData == nil {
-		utils.LavaFormatError("Relay request data is nil", nil, utils.LogAttr("GUID", ctx))
+		utils.FormatError("Relay request data is nil", nil, utils.LogAttr("GUID", ctx))
 		return protocolMessage
 	}
 	userData := protocolMessage.GetUserData()
@@ -219,10 +219,10 @@ func removeArchiveExtension(ctx context.Context, protocolMessage chainlib.Protoc
 	}
 	existingExtensions := strings.Join(filteredExtensions, ",")
 	metaDataForArchive := []pairingtypes.Metadata{{Name: common.EXTENSION_OVERRIDE_HEADER_NAME, Value: existingExtensions}}
-	utils.LavaFormatTrace("[Archive] Removing archive extension", utils.LogAttr("GUID", ctx))
+	utils.FormatTrace("[Archive] Removing archive extension", utils.LogAttr("GUID", ctx))
 	newProtocolMessage, err := relayParser.ParseRelay(ctx, relayRequestData.ApiUrl, string(relayRequestData.Data), relayRequestData.ConnectionType, userData.DappId, userData.ConsumerIp, metaDataForArchive)
 	if err != nil {
-		utils.LavaFormatError("Failed removing archive extension", err, utils.LogAttr("apiUrl", relayRequestData.ApiUrl))
+		utils.FormatError("Failed removing archive extension", err, utils.LogAttr("apiUrl", relayRequestData.ApiUrl))
 		return protocolMessage
 	}
 	preserveRetrySafeDirectives(protocolMessage, newProtocolMessage)
@@ -238,13 +238,13 @@ func removeArchiveExtension(ctx context.Context, protocolMessage chainlib.Protoc
 //
 // Both the chainMessage state (runtime source of truth for force-cache-refresh
 // and timeout-override) and the directiveHeaders map (parse-time input surface,
-// where lava-debug-relay lives) are updated so the two stay consistent —
+// where smartrouter-debug-relay lives) are updated so the two stay consistent —
 // otherwise a future caller reaching for the map would silently see the wrong
 // answer.
 //
-// Provider-selection directives (lava-select-provider, lava-stickiness) are
+// Provider-selection directives (smartrouter-select-provider, smartrouter-stickiness) are
 // deliberately NOT copied: the failover path may need to fall through to a
-// different provider on retry. The block-list (lava-providers-block) is also
+// different provider on retry. The block-list (smartrouter-providers-block) is also
 // not handled here because it's already preserved via usedProviders, captured
 // once at the top of ProcessRelaySend from the original protocolMessage.
 func preserveRetrySafeDirectives(src, dst chainlib.ProtocolMessage) {
@@ -282,12 +282,12 @@ func preserveDebugRelay(src, dst chainlib.ProtocolMessage) {
 	if srcHdrs == nil {
 		return
 	}
-	v, ok := srcHdrs[common.LAVA_DEBUG_RELAY]
+	v, ok := srcHdrs[common.DEBUG_RELAY]
 	if !ok {
 		return
 	}
 	if hdrs := dst.GetDirectiveHeaders(); hdrs != nil {
-		hdrs[common.LAVA_DEBUG_RELAY] = v
+		hdrs[common.DEBUG_RELAY] = v
 	}
 }
 
@@ -312,7 +312,7 @@ func UpgradeToArchiveIfNeeded(ctx context.Context, protocolMessage chainlib.Prot
 
 	select {
 	case <-ctx.Done():
-		utils.LavaFormatTrace("Context cancelled at start of archive upgrade", utils.LogAttr("GUID", ctx))
+		utils.FormatTrace("Context cancelled at start of archive upgrade", utils.LogAttr("GUID", ctx))
 		return protocolMessage
 	default:
 	}
@@ -330,4 +330,3 @@ func UpgradeToArchiveIfNeeded(ctx context.Context, protocolMessage chainlib.Prot
 	}
 	return protocolMessage
 }
-

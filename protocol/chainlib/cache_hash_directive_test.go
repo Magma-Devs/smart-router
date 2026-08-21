@@ -3,15 +3,16 @@ package chainlib
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/stretchr/testify/require"
 )
 
 // TestHashCacheRequestExplicitExtensionDirectiveSeparatesLane is the regression guard for the
 // archive-header cache collision: two requests can resolve to the SAME Extensions=["archive"]
-// (one because the client sent lava-extension: archive, the other because the router auto-promoted
+// (one because the client sent smartrouter-extension: archive, the other because the router auto-promoted
 // an old-block request), yet the explicitly-directed request must land in its own cache lane so it
 // does not get served the auto-promoted request's cached response.
 func TestHashCacheRequestExplicitExtensionDirectiveSeparatesLane(t *testing.T) {
@@ -40,12 +41,12 @@ func TestHashCacheRequestExplicitExtensionDirectiveSeparatesLane(t *testing.T) {
 
 	// Bare request (auto-promoted to archive): no directive header.
 	autoPromoted := hashWith(nil)
-	// Explicit request: client sent lava-extension: archive.
+	// Explicit request: client sent smartrouter-extension: archive.
 	explicitArchive := hashWith(map[string]string{common.EXTENSION_OVERRIDE_HEADER_NAME: "archive"})
 
 	// The fix: explicit archive must NOT collide with the auto-promoted lane despite identical Extensions.
 	require.NotEqual(t, autoPromoted, explicitArchive,
-		"explicit lava-extension:archive must produce a different cache key than an auto-promoted request with identical Extensions")
+		"explicit smartrouter-extension:archive must produce a different cache key than an auto-promoted request with identical Extensions")
 
 	// Backward compatibility: the no-directive path must reproduce the legacy package-level hash byte-for-byte,
 	// so existing cache entries and all non-directive traffic are unaffected.

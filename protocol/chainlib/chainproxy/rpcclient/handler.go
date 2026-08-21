@@ -27,6 +27,7 @@ import (
 	"github.com/goccy/go-json"
 
 	"github.com/ethereum/go-ethereum/log"
+
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -63,7 +64,7 @@ type handler struct {
 	log            log.Logger
 	allowSubscribe bool
 
-	subLock    utils.LavaMutex
+	subLock    utils.Mutex
 	serverSubs map[ID]*Subscription
 }
 
@@ -263,7 +264,7 @@ func (h *handler) handleImmediate(msg *JsonrpcMessage) bool {
 func (h *handler) handleSubscriptionResultStarkNetPathfinder(msg *JsonrpcMessage) {
 	var result integerIdSubscriptionResult
 	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		utils.LavaFormatTrace("Dropping invalid starknet pathfinder subscription message",
+		utils.FormatTrace("Dropping invalid starknet pathfinder subscription message",
 			utils.LogAttr("err", err),
 			utils.LogAttr("result", string(msg.Result)),
 		)
@@ -281,7 +282,7 @@ func (h *handler) handleSubscriptionResultStarkNetPathfinder(msg *JsonrpcMessage
 func (h *handler) handleSubscriptionResultEthereum(msg *JsonrpcMessage) {
 	var result ethereumSubscriptionResult
 	if err := json.Unmarshal(msg.Params, &result); err != nil {
-		utils.LavaFormatTrace("Dropping invalid ethereum subscription message",
+		utils.FormatTrace("Dropping invalid ethereum subscription message",
 			utils.LogAttr("err", err),
 			utils.LogAttr("params", string(msg.Params)),
 		)
@@ -296,7 +297,7 @@ func (h *handler) handleSubscriptionResultEthereum(msg *JsonrpcMessage) {
 func (h *handler) handleSubscriptionResultSolana(msg *JsonrpcMessage) {
 	var result integerIdSubscriptionResult
 	if err := json.Unmarshal(msg.Params, &result); err != nil {
-		utils.LavaFormatTrace("Dropping invalid solana subscription message",
+		utils.FormatTrace("Dropping invalid solana subscription message",
 			utils.LogAttr("err", err),
 			utils.LogAttr("params", string(msg.Params)),
 		)
@@ -311,7 +312,7 @@ func (h *handler) handleSubscriptionResultSolana(msg *JsonrpcMessage) {
 func (h *handler) handleSubscriptionResultTendermint(msg *JsonrpcMessage) {
 	var result tendermintSubscriptionResult
 	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		utils.LavaFormatTrace("Dropping invalid tendermint subscription message",
+		utils.FormatTrace("Dropping invalid tendermint subscription message",
 			utils.LogAttr("err", err),
 			utils.LogAttr("result", string(msg.Result)),
 		)
@@ -327,7 +328,7 @@ func (h *handler) handleSubscriptionResultTendermint(msg *JsonrpcMessage) {
 func (h *handler) handleResponse(msg *JsonrpcMessage) {
 	op := h.respWait[string(msg.ID)]
 	if op == nil {
-		utils.LavaFormatWarning("Unsolicited RPC response", nil, utils.LogAttr("req-id", idForLog{msg.ID}.String()))
+		utils.FormatWarning("Unsolicited RPC response", nil, utils.LogAttr("req-id", idForLog{msg.ID}.String()))
 		return
 	}
 	delete(h.respWait, string(msg.ID))

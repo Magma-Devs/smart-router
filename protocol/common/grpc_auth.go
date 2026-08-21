@@ -4,8 +4,9 @@ import (
 	"context"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // MAG-2218: auth-headers were honoured by every transport EXCEPT gRPC — HTTP sets them
@@ -15,7 +16,7 @@ import (
 // Unauthenticated for every call, including the boot-time spec verification.
 //
 // The fix attaches them at DIAL time rather than at each call site: both gRPC stacks
-// (the chainlib GrpcChainProxy used by boot verification, and the lavasession
+// (the chainlib GrpcChainProxy used by boot verification, and the routersession
 // GRPCDirectRPCConnection used by relays and per-endpoint polls) construct their
 // connections through chainproxy.GRPCConnector, and the subscription manager's pool is
 // the only other dialler. Attaching there covers unary calls, server reflection and
@@ -83,7 +84,7 @@ func (url *NodeUrl) GrpcAuthDialOptions() []grpc.DialOption {
 	for name, value := range configured {
 		lowered := strings.ToLower(name)
 		if !isLegalGrpcHeaderName(lowered) {
-			utils.LavaFormatError("dropping illegal gRPC auth-header name", nil,
+			utils.FormatError("dropping illegal gRPC auth-header name", nil,
 				utils.LogAttr("header", name),
 				utils.LogAttr("url", url.UrlStr()),
 				utils.LogAttr("hint", "gRPC metadata keys allow a-z, 0-9, '-', '_', '.' and must not end in -bin"),
@@ -109,7 +110,7 @@ func (url *NodeUrl) TokenOverInsecureWarning(transportIsSecure bool) {
 	if url == nil || transportIsSecure || len(url.GetAuthHeaders()) == 0 {
 		return
 	}
-	utils.LavaFormatWarning("sending gRPC auth headers over an insecure (plaintext) connection", nil,
+	utils.FormatWarning("sending gRPC auth headers over an insecure (plaintext) connection", nil,
 		utils.LogAttr("url", url.UrlStr()),
 		utils.LogAttr("hint", "use grpcs:// or auth-config.use-tls to protect the credential in transit"),
 	)

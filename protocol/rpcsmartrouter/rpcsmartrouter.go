@@ -1,4 +1,4 @@
-// Package rpcsmartrouter provides the RPC routing solution for the Lava protocol.
+// Package rpcsmartrouter provides the RPC routing solution for the Smart Router.
 //
 // # Architecture Overview
 //
@@ -30,16 +30,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
@@ -48,10 +53,6 @@ import (
 	"github.com/magma-Devs/smart-router/utils/rand"
 	scoreutils "github.com/magma-Devs/smart-router/utils/score"
 	"github.com/magma-Devs/smart-router/version"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 const (
@@ -59,10 +60,10 @@ const (
 	DebugRelaysFlagName           = "debug-relays"
 	DebugProbesFlagName           = "debug-probes"
 
-	// lavaAppName is the application name, previously app.Name.
-	lavaAppName = "lava"
-	// lavaDefaultNodeHome is the default home directory, previously lavaDefaultNodeHome (~/.lava).
-	lavaDefaultNodeHome = "$HOME/." + lavaAppName
+	// appName is the application name, used to derive the default config home.
+	appName = "smartrouter"
+	// defaultNodeHome is the default config home directory (~/.smartrouter).
+	defaultNodeHome = "$HOME/." + appName
 )
 
 var (
@@ -72,7 +73,7 @@ var (
 
 	// StaticProviderDummyStake is used for stake-based provider selection weighting.
 	// For static providers that do NOT specify an explicit stake, we keep this at 0 so CalcWeightsByStake
-	// can apply the legacy "static provider boost" behavior (see lavasession package).
+	// can apply the legacy "static provider boost" behavior (see routersession package).
 	StaticProviderDummyStake = int64(0)
 )
 
@@ -155,7 +156,7 @@ func newUsageSinkFromOptions(options *rpcSmartRouterStartOptions) metrics.UsageE
 	}); otelSink != nil {
 		return otelSink
 	}
-	utils.LavaFormatWarning("usage-otel-enabled but OTel sink failed to construct; falling back to no-op sink", nil)
+	utils.FormatWarning("usage-otel-enabled but OTel sink failed to construct; falling back to no-op sink", nil)
 	return metrics.NoopUsageSink{}
 }
 
@@ -175,22 +176,22 @@ type AnalyticsServerAddresses struct {
 type RPCSmartRouter struct {
 	// Smart router doesn't need blockchain state tracking
 	epochTimer             *common.EpochTimer
-	mu                     sync.Mutex                                                      // protects the maps below during parallel endpoint setup and retry
-	sessionManagers        map[string]*lavasession.ConsumerSessionManager                  // key: chainID-apiInterface
-	providerSessions       map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider // key: chainID-apiInterface
-	backupProviderSessions map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider // key: chainID-apiInterface
+	mu                     sync.Mutex                                                        // protects the maps below during parallel endpoint setup and retry
+	sessionManagers        map[string]*routersession.ConsumerSessionManager                  // key: chainID-apiInterface
+	providerSessions       map[string]map[uint64]*routersession.ConsumerSessionsWithProvider // key: chainID-apiInterface
+	backupProviderSessions map[string]map[uint64]*routersession.ConsumerSessionsWithProvider // key: chainID-apiInterface
 
 	// failedStaticProviders holds providers that failed verification at startup,
 	// keyed by sessionManagerKey (chainID-apiInterface). The retry loop reads this
 	// to periodically re-validate and re-register recovered providers.
-	failedStaticProviders map[string][]*lavasession.RPCStaticProviderEndpoint
+	failedStaticProviders map[string][]*routersession.RPCStaticProviderEndpoint
 
 	// failedBackupProviders is the backup-tier counterpart. Backups used to recover
 	// only on the 15m epoch reverification, five times slower than the static tier's
 	// retry loop. That gap did not matter while a chain could never boot on backups
 	// alone; since MAG-2525 it can, so a failed backup may be the only thing standing
 	// between the chain and serving traffic.
-	failedBackupProviders map[string][]*lavasession.RPCStaticProviderEndpoint
+	failedBackupProviders map[string][]*routersession.RPCStaticProviderEndpoint
 
 	// Server references for per-endpoint ChainTracker cleanup on epoch updates
 	rpcServers map[string]*RPCSmartRouterServer // key: chainID-apiInterface
@@ -219,14 +220,14 @@ type RPCSmartRouter struct {
 }
 
 type rpcSmartRouterStartOptions struct {
-	rpcEndpoints             []*lavasession.RPCEndpoint
+	rpcEndpoints             []*routersession.RPCEndpoint
 	cache                    *performance.Cache
 	strategy                 provideroptimizer.Strategy
 	analyticsServerAddresses AnalyticsServerAddresses
 	cmdFlags                 common.ConsumerCmdFlags
 	stateShare               bool
-	staticProvidersList      []*lavasession.RPCStaticProviderEndpoint // define static providers as primary providers
-	backupProvidersList      []*lavasession.RPCStaticProviderEndpoint // define backup providers as emergency fallback when no providers available
+	staticProvidersList      []*routersession.RPCStaticProviderEndpoint // define static providers as primary providers
+	backupProvidersList      []*routersession.RPCStaticProviderEndpoint // define backup providers as emergency fallback when no providers available
 	weightedSelectorConfig   provideroptimizer.WeightedSelectorConfig
 }
 
@@ -242,11 +243,11 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	}
 
 	// Initialize session managers and provider sessions maps for epoch timer callbacks
-	rpsr.sessionManagers = make(map[string]*lavasession.ConsumerSessionManager)
-	rpsr.providerSessions = make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider)
-	rpsr.backupProviderSessions = make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider)
-	rpsr.failedStaticProviders = make(map[string][]*lavasession.RPCStaticProviderEndpoint)
-	rpsr.failedBackupProviders = make(map[string][]*lavasession.RPCStaticProviderEndpoint)
+	rpsr.sessionManagers = make(map[string]*routersession.ConsumerSessionManager)
+	rpsr.providerSessions = make(map[string]map[uint64]*routersession.ConsumerSessionsWithProvider)
+	rpsr.backupProviderSessions = make(map[string]map[uint64]*routersession.ConsumerSessionsWithProvider)
+	rpsr.failedStaticProviders = make(map[string][]*routersession.RPCStaticProviderEndpoint)
+	rpsr.failedBackupProviders = make(map[string][]*routersession.RPCStaticProviderEndpoint)
 	rpsr.rpcServers = make(map[string]*RPCSmartRouterServer)
 	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
 
@@ -260,7 +261,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	currentEpoch := rpsr.epochTimer.GetCurrentEpoch()
 	timeUntilNext := rpsr.epochTimer.GetTimeUntilNextEpoch()
 
-	utils.LavaFormatInfo("RPCSmartRouter: using time-based epochs (standalone mode)",
+	utils.FormatInfo("RPCSmartRouter: using time-based epochs (standalone mode)",
 		utils.LogAttr("epochDuration", epochDuration),
 		utils.LogAttr("currentEpoch", currentEpoch),
 		utils.LogAttr("timeUntilNextEpoch", timeUntilNext),
@@ -301,7 +302,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 
 	rpcSmartRouterMetrics, err := metrics.NewRPCConsumerLogs(smartRouterMetricsManager, usageSink, smartRouterOptimizerQoSClient)
 	if err != nil {
-		utils.LavaFormatFatal("failed creating RPCSmartRouter logs", err)
+		utils.FormatFatal("failed creating RPCSmartRouter logs", err)
 	}
 
 	smartRouterMetricsManager.SetVersion(version.Version)
@@ -321,12 +322,12 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 
 	errCh := make(chan error, parallelJobs)
 
-	utils.LavaFormatInfo("RPCSmartRouter identifier: " + smartRouterIdentifier)
-	utils.LavaFormatInfo("RPCSmartRouter setting up endpoints", utils.Attribute{Key: "length", Value: strconv.Itoa(parallelJobs)})
+	utils.FormatInfo("RPCSmartRouter identifier: " + smartRouterIdentifier)
+	utils.FormatInfo("RPCSmartRouter setting up endpoints", utils.Attribute{Key: "length", Value: strconv.Itoa(parallelJobs)})
 
 	relaysMonitorAggregator := metrics.NewRelaysMonitorAggregator(options.cmdFlags.RelaysHealthIntervalFlag, smartRouterMetricsManager)
 	for _, rpcEndpoint := range options.rpcEndpoints {
-		go func(rpcEndpoint *lavasession.RPCEndpoint) error {
+		go func(rpcEndpoint *routersession.RPCEndpoint) error {
 			defer wg.Done()
 			err := rpsr.CreateSmartRouterEndpoint(ctx, rpcEndpoint, errCh,
 				optimizers, chainMutexes,
@@ -368,7 +369,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	})
 
 	// Log that epoch timer is configured for all session managers
-	utils.LavaFormatInfo("RPCSmartRouter: Registered epoch timer callback for all session managers",
+	utils.FormatInfo("RPCSmartRouter: Registered epoch timer callback for all session managers",
 		utils.LogAttr("sessionManagerCount", len(rpsr.sessionManagers)),
 	)
 
@@ -403,20 +404,20 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 			srv.Shutdown(context.Background()) //nolint:errcheck
 		}()
 		go func() {
-			utils.LavaFormatInfo("Debug HTTP server started", utils.LogAttr("address", options.cmdFlags.DebugAddress))
+			utils.FormatInfo("Debug HTTP server started", utils.LogAttr("address", options.cmdFlags.DebugAddress))
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				utils.LavaFormatError("Debug HTTP server stopped", err)
+				utils.FormatError("Debug HTTP server stopped", err)
 			}
 		}()
 	}
 
-	utils.LavaFormatInfo("RPCSmartRouter done setting up all endpoints, ready for requests")
+	utils.FormatInfo("RPCSmartRouter done setting up all endpoints, ready for requests")
 
 	return nil
 }
 
 func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
-	utils.LavaFormatInfo("RPCSmartRouter: shutdown signal received, draining",
+	utils.FormatInfo("RPCSmartRouter: shutdown signal received, draining",
 		utils.LogAttr("gracePeriod", shutdownGracePeriod),
 	)
 
@@ -436,7 +437,7 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 				return
 			}
 			if err := s.chainListener.Shutdown(shutdownCtx); err != nil {
-				utils.LavaFormatWarning("listener shutdown returned error", err, utils.LogAttr("endpoint", k))
+				utils.FormatWarning("listener shutdown returned error", err, utils.LogAttr("endpoint", k))
 			}
 		}(key, server)
 	}
@@ -462,7 +463,7 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 		rpsr.usageSink.Close()
 	}
 
-	utils.LavaFormatInfo("RPCSmartRouter: graceful shutdown complete")
+	utils.FormatInfo("RPCSmartRouter: graceful shutdown complete")
 }
 
 // debugMuxDeps bundles the state the debug HTTP handlers reach into. Bundling
@@ -604,7 +605,7 @@ func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
 			}
 			ensured++
 			if _, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.Endpoint, ep.DirectConnection); err != nil {
-				utils.LavaFormatWarning("reset-chaintracker-rows: failed to re-register endpoint", err,
+				utils.FormatWarning("reset-chaintracker-rows: failed to re-register endpoint", err,
 					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
 					utils.LogAttr("chainKey", chainKey),
 				)
@@ -689,7 +690,7 @@ type providerScoresResponse struct {
 // so a /debug/provider-scores row can be joined to /debug/endpoint-state (MAG-2707).
 //
 // The two views key on different identities and neither can be derived from the other: the optimizer
-// — and therefore every score — is keyed by provider address (PublicLavaAddress, the same identity
+// — and therefore every score — is keyed by provider address (PublicAddress, the same identity
 // /debug/provider-routing reports), while per-endpoint health is keyed by NetworkAddress. Carrying
 // the URLs on the score row is what lets the automation ask "this provider's score moved, was its
 // endpoint healthy?" from two reads instead of needing a third mapping call.
@@ -798,14 +799,14 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 		if server == nil || server.smartRouterEndpointMetrics == nil || server.listenEndpoint == nil {
 			continue
 		}
-		for _, sessions := range []map[uint64]*lavasession.ConsumerSessionsWithProvider{
+		for _, sessions := range []map[uint64]*routersession.ConsumerSessionsWithProvider{
 			deps.router.providerSessions[chainKey],
 			deps.router.backupProviderSessions[chainKey],
 		} {
 			for _, cswp := range sessions {
 				if cswp != nil {
 					server.smartRouterEndpointMetrics.SetEndpointOverallHealth(
-						server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, cswp.PublicLavaAddress, true)
+						server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, cswp.PublicAddress, true)
 				}
 			}
 		}
@@ -835,7 +836,7 @@ type routerConfigOptimizerWeights struct {
 type routerConfigResponse struct {
 	SchemaVersion int
 
-	// lavasession
+	// routersession
 	MaxConsecutiveConnectionAttempts                 int
 	TimeoutForEstablishingAConnection                int64 // milliseconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession int
@@ -1102,7 +1103,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    Why ResetBlockedProviders runs separately from
 		//    ResetTransientFailureState:
 		//    ResetTransientFailureState deliberately preserves
-		//    currentlyBlockedProviderAddresses because in lava-pairing-network
+		//    currentlyBlockedProviderAddresses because in the pairing network
 		//    mode unblocking is an epoch-boundary operation. In direct-rpc mode
 		//    (this fork's default) there are no epoch transitions, so blocked
 		//    providers can only accumulate across test runs unless we mass-
@@ -1149,7 +1150,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			case err == nil:
 				cacheBeFlushed = true
 			case status.Code(err) == codes.Unimplemented:
-				utils.LavaFormatWarning("cache-be does not implement FlushCache; treating as legacy pod", err)
+				utils.FormatWarning("cache-be does not implement FlushCache; treating as legacy pod", err)
 			default:
 				http.Error(w, fmt.Sprintf("cache-be flush failed: %v", err), http.StatusInternalServerError)
 				return
@@ -1700,7 +1701,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			Rows:              rows,
 			ChainsUnavailable: snapshot.ChainsUnavailable,
 		}); err != nil {
-			utils.LavaFormatWarning("failed encoding provider scores response", err)
+			utils.FormatWarning("failed encoding provider scores response", err)
 		}
 	})
 
@@ -1720,14 +1721,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	//
 	// One row per recorded comparison outcome, oldest first, from both recording paths (Source):
 	//   reply-time  a content outlier seen before the reply — it is in the request's
-	//               lava-cross-validation-disagreeing-providers header.
+	//               smartrouter-cross-validation-disagreeing-providers header.
 	//   straggler   a provider that lost the race to quorum (it is in pending-providers) and whose
 	//               late answer the async watcher resolved. EVERY resolution is recorded, not only
 	//               dissent: an "agreed" row is the positive control a test asserting "no dissent
 	//               happened" anchors on, and node-error / protocol-error / not-received rows say a
 	//               late answer arrived broken or never arrived.
 	//
-	// Filters (all optional, ANDed): request_id (the Lava-Guid response header value — NOT
+	// Filters (all optional, ANDed): request_id (the Smart-Router-Guid response header value — NOT
 	// /debug/logs' request_id, which is the caller's X-Request-Id), chain_id, outcome, limit (keeps
 	// the most recent N). Status codes:
 	//   200  the rows follow, as a flat JSON array; [] means the recorder was live and saw no dissent.
@@ -1770,7 +1771,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		w.Header().Set("X-Cross-Validation-Events-Dropped", strconv.FormatUint(dropped, 10))
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(rows); err != nil {
-			utils.LavaFormatWarning("failed encoding cross-validation events response", err)
+			utils.FormatWarning("failed encoding cross-validation events response", err)
 		}
 	})
 
@@ -1878,9 +1879,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		resp := routerConfigResponse{
 			SchemaVersion: 1,
 
-			MaxConsecutiveConnectionAttempts:                 lavasession.MaxConsecutiveConnectionAttempts,
-			TimeoutForEstablishingAConnection:                lavasession.TimeoutForEstablishingAConnection.Milliseconds(),
-			MaximumNumberOfFailuresAllowedPerConsumerSession: lavasession.MaximumNumberOfFailuresAllowedPerConsumerSession,
+			MaxConsecutiveConnectionAttempts:                 routersession.MaxConsecutiveConnectionAttempts,
+			TimeoutForEstablishingAConnection:                routersession.TimeoutForEstablishingAConnection.Milliseconds(),
+			MaximumNumberOfFailuresAllowedPerConsumerSession: routersession.MaximumNumberOfFailuresAllowedPerConsumerSession,
 
 			RelayRetryLimit:          relaycore.RelayRetryLimit,
 			DisableBatchRequestRetry: relaycore.DisableBatchRequestRetry,
@@ -1970,7 +1971,7 @@ func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
 	sortDebugRows(rows)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(rows); err != nil {
-		utils.LavaFormatWarning("failed encoding debug response", err)
+		utils.FormatWarning("failed encoding debug response", err)
 	}
 }
 
@@ -2116,7 +2117,7 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 
 func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	ctx context.Context,
-	rpcEndpoint *lavasession.RPCEndpoint,
+	rpcEndpoint *routersession.RPCEndpoint,
 	errCh chan error,
 	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer],
 	chainMutexes map[string]*sync.Mutex,
@@ -2129,7 +2130,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 ) error {
 	chainParser, err := chainlib.NewChainParser(rpcEndpoint.ApiInterface)
 	if err != nil {
-		err = utils.LavaFormatError("failed creating chain parser", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		err = utils.FormatError("failed creating chain parser", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err
 		return err
 	}
@@ -2141,12 +2142,12 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		// Load spec from static file/directory/URL sources
 		err = statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, options.cmdFlags.StaticSpecPaths, *rpcEndpoint, options.cmdFlags.GitHubToken, options.cmdFlags.GitLabToken)
 		if err != nil {
-			err = utils.LavaFormatError("failed loading static spec", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+			err = utils.FormatError("failed loading static spec", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 			errCh <- err
 			return err
 		}
 	} else {
-		err = utils.LavaFormatError("no static spec paths configured; smart router requires --static-spec-paths to load chain specs", nil, utils.Attribute{Key: "chainID", Value: chainID})
+		err = utils.FormatError("no static spec paths configured; smart router requires --static-spec-paths to load chain specs", nil, utils.Attribute{Key: "chainID", Value: chainID})
 		errCh <- err
 		return err
 	}
@@ -2158,7 +2159,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// tracker source. The chain tracker would then craft a grpc-shaped GET_BLOCKNUM
 	// message (from the grpc chainParser) but dispatch it through the rest proxy,
 	// which fails with "invalid message type in rest" and aborts startup.
-	relevantStaticProviderList := []*lavasession.RPCStaticProviderEndpoint{}
+	relevantStaticProviderList := []*routersession.RPCStaticProviderEndpoint{}
 	for _, staticProvider := range options.staticProvidersList {
 		if staticProvider.ChainID == rpcEndpoint.ChainID &&
 			staticProvider.ApiInterface == rpcEndpoint.ApiInterface {
@@ -2167,7 +2168,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	}
 
 	// Filter backup providers for this chain+interface (needed for policy derivation)
-	relevantBackupProviderList := []*lavasession.RPCStaticProviderEndpoint{}
+	relevantBackupProviderList := []*routersession.RPCStaticProviderEndpoint{}
 	for _, backupProvider := range options.backupProvidersList {
 		if backupProvider.ChainID == rpcEndpoint.ChainID &&
 			backupProvider.ApiInterface == rpcEndpoint.ApiInterface {
@@ -2176,7 +2177,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	}
 
 	if len(relevantStaticProviderList) == 0 && len(relevantBackupProviderList) == 0 {
-		err = utils.LavaFormatError("no static or backup providers configured for chain", nil,
+		err = utils.FormatError("no static or backup providers configured for chain", nil,
 			utils.Attribute{Key: "chainID", Value: chainID})
 		errCh <- err
 		return err
@@ -2238,11 +2239,11 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		}
 		err = chainParser.SetPolicy(policy, chainID, rpcEndpoint.ApiInterface)
 		if err != nil {
-			utils.LavaFormatWarning("Failed to set auto-derived policy", err,
+			utils.FormatWarning("Failed to set auto-derived policy", err,
 				utils.Attribute{Key: "chainID", Value: chainID},
 				utils.Attribute{Key: "apiInterface", Value: rpcEndpoint.ApiInterface})
 		} else {
-			utils.LavaFormatInfo("Auto-derived policy from static providers",
+			utils.FormatInfo("Auto-derived policy from static providers",
 				utils.Attribute{Key: "chainID", Value: chainID},
 				utils.Attribute{Key: "apiInterface", Value: rpcEndpoint.ApiInterface},
 				utils.Attribute{Key: "addons", Value: addons},
@@ -2266,7 +2267,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	optimizer, loaded, err := optimizers.LoadOrStore(chainID, newOptimizer)
 	if err != nil {
 		errCh <- err
-		return utils.LavaFormatError("failed loading optimizer", err, utils.LogAttr("endpoint", rpcEndpoint.Key()))
+		return utils.FormatError("failed loading optimizer", err, utils.LogAttr("endpoint", rpcEndpoint.Key()))
 	}
 
 	if !loaded && smartRouterOptimizerQoSClient != nil {
@@ -2275,17 +2276,17 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	}
 
 	// Create active subscription provider storage for each unique chain
-	activeSubscriptionProvidersStorage := lavasession.NewActiveSubscriptionProvidersStorage()
-	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
+	activeSubscriptionProvidersStorage := routersession.NewActiveSubscriptionProvidersStorage()
+	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
 
-	// Set callback to get Lava blockchain block height for RelaySession.Epoch
-	// Smart router doesn't connect to blockchain, so calculate approximate block height from epoch
-	// Epoch duration is 15 minutes (900 seconds), and Lava block time is ~15 seconds
-	// So each epoch is approximately 60 blocks (900 / 15)
-	sessionManager.SetLavaBlockHeightCallback(func() int64 {
+	// Set the callback that derives RelaySession.Epoch's block height.
+	// Smart router doesn't connect to a chain, so approximate the block height from the epoch:
+	// epoch duration is 15 minutes (900 seconds) and the assumed block time is ~15 seconds,
+	// so each epoch is approximately 60 blocks (900 / 15).
+	sessionManager.SetBlockHeightCallback(func() int64 {
 		currentEpoch := rpsr.epochTimer.GetCurrentEpoch()
 		// Approximate blocks per epoch: epochDuration / averageBlockTime
-		blocksPerEpoch := int64(rpsr.epochTimer.GetEpochDuration().Seconds() / 15) // 15 second Lava block time
+		blocksPerEpoch := int64(rpsr.epochTimer.GetEpochDuration().Seconds() / 15) // assumed 15-second block time
 		return int64(currentEpoch) * blocksPerEpoch
 	})
 
@@ -2296,18 +2297,18 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	rpsr.mu.Unlock()
 
 	// Helper function to convert provider endpoints to sessions
-	convertProvidersToSessions := func(providerList []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-		sessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
+	convertProvidersToSessions := func(providerList []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
+		sessions := make(map[uint64]*routersession.ConsumerSessionsWithProvider)
 		// Every connection built below, so the readiness step at the end of this
 		// function can run before any of them is reachable by a relay (MAG-2860).
-		createdConnections := []lavasession.DirectRPCConnection{}
+		createdConnections := []routersession.DirectRPCConnection{}
 		for idx, provider := range providerList {
 			// Only process providers matching this endpoint's API interface
 			if provider.ApiInterface != rpcEndpoint.ApiInterface || provider.ChainID != rpcEndpoint.ChainID {
 				continue
 			}
 
-			endpoints := []*lavasession.Endpoint{}
+			endpoints := []*routersession.Endpoint{}
 			for _, url := range expandInternalPaths(provider.NodeUrls, chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
 				extensions := map[string]struct{}{}
 				for _, extension := range url.Addons {
@@ -2317,35 +2318,35 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				// Create DirectRPCConnection for smart router (direct mode)
 				// Use default parallel connections for HTTP connection pooling
 				// Pass ApiInterface for proper protocol detection (bare host:port → gRPC when interface is gRPC)
-				directConn, err := lavasession.NewDirectRPCConnection(
+				directConn, err := routersession.NewDirectRPCConnection(
 					ctx,
 					url,
-					uint(lavasession.MaximumStreamsOverASingleConnection),
+					uint(routersession.MaximumStreamsOverASingleConnection),
 					provider.ApiInterface, // Used for protocol detection when URL has no scheme
 				)
 				if err != nil {
-					utils.LavaFormatWarning("failed to create direct RPC connection", err,
+					utils.FormatWarning("failed to create direct RPC connection", err,
 						utils.LogAttr("url", url.Url),
 						utils.LogAttr("provider", provider.Name),
 					)
 					continue
 				}
 
-				utils.LavaFormatInfo("created direct RPC connection",
+				utils.FormatInfo("created direct RPC connection",
 					utils.LogAttr("url", url.Url),
 					utils.LogAttr("protocol", directConn.GetProtocol()),
 					utils.LogAttr("provider", provider.Name),
 				)
 				createdConnections = append(createdConnections, directConn)
 
-				endpoint := &lavasession.Endpoint{
+				endpoint := &routersession.Endpoint{
 					NetworkAddress:    url.Url,
 					Enabled:           true,
 					Addons:            extensions,
 					Extensions:        extensions,
 					InternalPath:      url.InternalPath,
 					Connections:       nil,
-					DirectConnections: []lavasession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
+					DirectConnections: []routersession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
 				}
 				endpoints = append(endpoints, endpoint)
 
@@ -2365,7 +2366,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			// the session manager: UpdateAllProviders makes it selectable, but any
 			// relay attempt against it fails because there are no endpoints to dial.
 			if len(endpoints) == 0 {
-				utils.LavaFormatWarning("skipping static provider: all URL connections failed, no usable endpoints",
+				utils.FormatWarning("skipping static provider: all URL connections failed, no usable endpoints",
 					nil,
 					utils.LogAttr("provider", provider.Name),
 					utils.LogAttr("chain", rpcEndpoint.ChainID),
@@ -2386,7 +2387,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			if stake > 0 {
 				stakeAmount = stake
 			}
-			providerEntry := lavasession.NewConsumerSessionWithProvider(
+			providerEntry := routersession.NewConsumerSessionWithProvider(
 				provider.Name,
 				endpoints,
 				999999999, // High compute units for availability
@@ -2413,7 +2414,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		//
 		// Bounded and never fatal, in keeping with MAG-2525: a connection that does
 		// not finish is published anyway and falls back to on-demand resolution.
-		lavasession.PrewarmDirectConnections(ctx, createdConnections, lavasession.DirectRPCPrewarmBudget)
+		routersession.PrewarmDirectConnections(ctx, createdConnections, routersession.DirectRPCPrewarmBudget)
 
 		return sessions
 	}
@@ -2450,7 +2451,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 	switch {
 	case !chainServable:
-		utils.LavaFormatWarning("ATTENTION: no healthy providers for endpoint — serving unavailable until one recovers", nil,
+		utils.FormatWarning("ATTENTION: no healthy providers for endpoint — serving unavailable until one recovers", nil,
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("staticConfigured", len(relevantStaticProviderList)),
@@ -2458,7 +2459,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			utils.LogAttr("hint", "endpoint reports unhealthy; providers are retried in the background and adopted when they recover"),
 		)
 	case servingTier == metrics.ServingTierDegraded:
-		utils.LavaFormatWarning("ATTENTION: no healthy static providers — serving from backup providers only", nil,
+		utils.FormatWarning("ATTENTION: no healthy static providers — serving from backup providers only", nil,
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("staticFailed", len(failedStaticSet)),
@@ -2466,7 +2467,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			utils.LogAttr("hint", "degraded: static providers are retried in the background"),
 		)
 	default:
-		utils.LavaFormatInfo("Providers validated for api-interface",
+		utils.FormatInfo("Providers validated for api-interface",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("healthyStatic", healthyStaticCount),
@@ -2499,7 +2500,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// failed providers, so updateEpoch won't recreate sessions for dead nodes.
 	healthyStaticProviders := relevantStaticProviderList
 	if len(failedStaticSet) > 0 {
-		healthyStaticProviders = make([]*lavasession.RPCStaticProviderEndpoint, 0, len(relevantStaticProviderList)-len(failedStaticSet))
+		healthyStaticProviders = make([]*routersession.RPCStaticProviderEndpoint, 0, len(relevantStaticProviderList)-len(failedStaticSet))
 		for _, p := range relevantStaticProviderList {
 			if _, failed := failedStaticSet[p]; !failed {
 				healthyStaticProviders = append(healthyStaticProviders, p)
@@ -2509,7 +2510,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 	healthyBackupProviders := relevantBackupProviderList
 	if len(failedBackupSet) > 0 {
-		healthyBackupProviders = make([]*lavasession.RPCStaticProviderEndpoint, 0, len(relevantBackupProviderList)-len(failedBackupSet))
+		healthyBackupProviders = make([]*routersession.RPCStaticProviderEndpoint, 0, len(relevantBackupProviderList)-len(failedBackupSet))
 		for _, p := range relevantBackupProviderList {
 			if _, failed := failedBackupSet[p]; !failed {
 				healthyBackupProviders = append(healthyBackupProviders, p)
@@ -2520,10 +2521,10 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Convert only healthy providers to ConsumerSessionsWithProvider format
 	providerSessions := convertProvidersToSessions(healthyStaticProviders)
 
-	var backupProviderSessions map[uint64]*lavasession.ConsumerSessionsWithProvider
+	var backupProviderSessions map[uint64]*routersession.ConsumerSessionsWithProvider
 	if len(healthyBackupProviders) > 0 {
 		backupProviderSessions = convertProvidersToSessions(healthyBackupProviders)
-		utils.LavaFormatInfo("Configured backup providers for endpoint",
+		utils.FormatInfo("Configured backup providers for endpoint",
 			utils.Attribute{Key: "chainID", Value: chainID},
 			utils.Attribute{Key: "apiInterface", Value: rpcEndpoint.ApiInterface},
 			utils.Attribute{Key: "backupCount", Value: len(backupProviderSessions)})
@@ -2548,7 +2549,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	err = sessionManager.UpdateAllProviders(currentEpoch, providerSessions, backupProviderSessions)
 	if err != nil {
 		errCh <- err
-		return utils.LavaFormatError("failed updating static providers", err)
+		return utils.FormatError("failed updating static providers", err)
 	}
 
 	// Store provider sessions and failed providers for epoch updates and background retry
@@ -2577,7 +2578,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		for _, p := range failedBackupEndpoints {
 			failedNames = append(failedNames, p.Name)
 		}
-		utils.LavaFormatInfo("Launching background retry goroutine for failed providers",
+		utils.FormatInfo("Launching background retry goroutine for failed providers",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("failedStatic", len(failedStaticEndpoints)),
@@ -2635,7 +2636,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		// Start background cleanup goroutine
 		directWSManager.Start(ctx)
 		wsSubscriptionManager = directWSManager
-		utils.LavaFormatInfo("Using DirectWSSubscriptionManager for direct WebSocket subscriptions",
+		utils.FormatInfo("Using DirectWSSubscriptionManager for direct WebSocket subscriptions",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("wsEndpointCount", len(wsEndpoints)),
@@ -2647,7 +2648,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		// produce a WebSocket endpoint here, so the NoOp manager is permanent by
 		// definition and its error is the honest answer.
 		wsSubscriptionManager = NewNoOpWSSubscriptionManager(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface)
-		utils.LavaFormatInfo("No WebSocket endpoints configured for direct subscriptions",
+		utils.FormatInfo("No WebSocket endpoints configured for direct subscriptions",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("hint", "Add ws:// or wss:// URLs to static-providers-list to enable subscriptions"),
@@ -2681,7 +2682,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		// Start background cleanup goroutine
 		grpcSubManager.Start(ctx)
 		rpcSmartRouterServer.grpcSubscriptionManager = grpcSubManager
-		utils.LavaFormatInfo("Using DirectGRPCSubscriptionManager for gRPC streaming subscriptions",
+		utils.FormatInfo("Using DirectGRPCSubscriptionManager for gRPC streaming subscriptions",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("grpcEndpointCount", len(grpcEndpoints)),
@@ -2695,11 +2696,11 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// relay + poll observations, with strict-majority consensus), constructed inside
 	// ServeRPCRequests. No single-node tip, no fire-and-forget poller per pod.
 
-	utils.LavaFormatInfo("RPCSmartRouter Listening", utils.Attribute{Key: "endpoints", Value: rpcEndpoint.String()})
+	utils.FormatInfo("RPCSmartRouter Listening", utils.Attribute{Key: "endpoints", Value: rpcEndpoint.String()})
 	// Convert smartRouterIdentifier string to empty sdk.AccAddress for smart router
 	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, rpcSmartRouterMetrics, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
 	if err != nil {
-		err = utils.LavaFormatError("failed serving rpc requests", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		err = utils.FormatError("failed serving rpc requests", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err
 		return err
 	}
@@ -2712,10 +2713,10 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	return nil
 }
 
-func ParseEndpoints(viper_endpoints *viper.Viper) (endpoints []*lavasession.RPCEndpoint, err error) {
+func ParseEndpoints(viper_endpoints *viper.Viper) (endpoints []*routersession.RPCEndpoint, err error) {
 	err = viper_endpoints.UnmarshalKey(common.EndpointsConfigName, &endpoints)
 	if err != nil {
-		utils.LavaFormatFatal("could not unmarshal endpoints", err, utils.Attribute{Key: "viper_endpoints", Value: viper_endpoints.AllSettings()})
+		utils.FormatFatal("could not unmarshal endpoints", err, utils.Attribute{Key: "viper_endpoints", Value: viper_endpoints.AllSettings()})
 	}
 	for _, endpoint := range endpoints {
 		if endpoint.HealthCheckPath == "" {
@@ -2735,12 +2736,12 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 		// error line, swamping kubectl logs in a CrashLoopBackOff. Operators need
 		// to see the error, not the flag catalogue.
 		SilenceUsage: true,
-		Long: `rpcsmartrouter sets up a centralized server with static and backup providers to perform api requests through the lava protocol.
+		Long: `rpcsmartrouter sets up a centralized server with static and backup providers to perform api requests through the router.
 		This is the smart router mode that uses pre-configured static providers instead of dynamically discovering providers on-chain.
 		if no arguments are passed, assumes default config file: ` + DefaultRPCSmartRouterFileName + `
 		if one argument is passed, it is the config to load. An absolute path names the file
 		outright; anything else — a relative path, or a bare name — is looked up in the
-		local running directory, ./config, then ` + lavaDefaultNodeHome + `.
+		local running directory, ./config, then ` + defaultNodeHome + `.
 		An argument without a recognized extension has the supported ones appended, so
 		"akash" and "config/akash" both find config/akash.yml.
 		`,
@@ -2761,7 +2762,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			utils.LavaFormatInfo(common.ProcessStartLogText)
+			utils.FormatInfo(common.ProcessStartLogText)
 			common.ValidateAndCapMinRelayTimeout()
 
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -2779,7 +2780,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 
 			// Apply the probe debug toggle to its atomic global once, at startup (after flag parse).
-			lavasession.SetDebugProbes(viper.GetBool(DebugProbesFlagName))
+			routersession.SetDebugProbes(viper.GetBool(DebugProbesFlagName))
 
 			// set log format
 			logFormat := viper.GetString("log-format")
@@ -2788,27 +2789,27 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			closeLoggerOnFinish := common.SetupRollingLogger()
 			defer closeLoggerOnFinish()
 
-			utils.LavaFormatInfo("RPCSmartRouter started:", utils.Attribute{Key: "args", Value: strings.Join(args, ",")})
+			utils.FormatInfo("RPCSmartRouter started:", utils.Attribute{Key: "args", Value: strings.Join(args, ",")})
 
 			// setting the insecure option on provider dial, this should be used in development only!
-			lavasession.AllowInsecureConnectionToProviders = viper.GetBool(lavasession.AllowInsecureConnectionToProvidersFlag)
-			if lavasession.AllowInsecureConnectionToProviders {
-				utils.LavaFormatWarning("AllowInsecureConnectionToProviders is set to true, this should be used only in development", nil, utils.Attribute{Key: lavasession.AllowInsecureConnectionToProvidersFlag, Value: lavasession.AllowInsecureConnectionToProviders})
+			routersession.AllowInsecureConnectionToProviders = viper.GetBool(routersession.AllowInsecureConnectionToProvidersFlag)
+			if routersession.AllowInsecureConnectionToProviders {
+				utils.FormatWarning("AllowInsecureConnectionToProviders is set to true, this should be used only in development", nil, utils.Attribute{Key: routersession.AllowInsecureConnectionToProvidersFlag, Value: routersession.AllowInsecureConnectionToProviders})
 			}
 
-			var rpcEndpoints []*lavasession.RPCEndpoint
+			var rpcEndpoints []*routersession.RPCEndpoint
 			var viper_endpoints *viper.Viper
 			if len(args) > 1 {
 				viper_endpoints, err = common.ParseEndpointArgs(args, Yaml_config_properties, common.EndpointsConfigName)
 				if err != nil {
-					return utils.LavaFormatError("invalid endpoints arguments", err, utils.Attribute{Key: "endpoint_strings", Value: strings.Join(args, "")})
+					return utils.FormatError("invalid endpoints arguments", err, utils.Attribute{Key: "endpoint_strings", Value: strings.Join(args, "")})
 				}
 				viper.MergeConfigMap(viper_endpoints.AllSettings())
 				err := viper.SafeWriteConfigAs(DefaultRPCSmartRouterFileName)
 				if err != nil {
-					utils.LavaFormatInfo("did not create new config file, if it's desired remove the config file", utils.Attribute{Key: "file_name", Value: viper.ConfigFileUsed()})
+					utils.FormatInfo("did not create new config file, if it's desired remove the config file", utils.Attribute{Key: "file_name", Value: viper.ConfigFileUsed()})
 				} else {
-					utils.LavaFormatInfo("created new config file", utils.Attribute{Key: "file_name", Value: DefaultRPCSmartRouterFileName})
+					utils.FormatInfo("created new config file", utils.Attribute{Key: "file_name", Value: DefaultRPCSmartRouterFileName})
 				}
 			} else if err = viper.ReadInConfig(); err != nil {
 				// A missing config file is the most common operator mistake (e.g.
@@ -2817,15 +2818,15 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				// dump — reserve the loud path for genuinely unexpected read
 				// failures like malformed YAML.
 				if isConfigNotFound(err) {
-					return utils.LavaFormatError(
+					return utils.FormatError(
 						configNotFoundMessage(configTarget, configIsFile),
 						err,
 						configLocationAttributes(configTarget, configIsFile)...,
 					)
 				}
-				utils.LavaFormatFatal("could not load config file", err, utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
+				utils.FormatFatal("could not load config file", err, utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
 			} else {
-				utils.LavaFormatInfo("read config file successfully", utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
+				utils.FormatInfo("read config file successfully", utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
 			}
 
 			// consistency-relief: set the process-wide consistency override AFTER the config
@@ -2835,33 +2836,33 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// to the built-in default (not silent clamp).
 			if f := viper.GetInt(relaycore.ConsistencyBlockGapFactorFlagName); f != 0 {
 				if f < 2 || f > 8 {
-					utils.LavaFormatWarning("--"+relaycore.ConsistencyBlockGapFactorFlagName+" out of allowed range [2,8]; reverting to default", nil, utils.LogAttr("provided", f))
+					utils.FormatWarning("--"+relaycore.ConsistencyBlockGapFactorFlagName+" out of allowed range [2,8]; reverting to default", nil, utils.LogAttr("provided", f))
 				} else {
 					relaycore.ConsistencyBlockGapFactorOverride = int64(f)
 				}
 			}
 			if relaycore.ConsistencyBlockGapFactorOverride != 0 {
-				utils.LavaFormatInfo("consistency-relief active",
+				utils.FormatInfo("consistency-relief active",
 					utils.LogAttr("consistencyBlockGapFactor", relaycore.ConsistencyBlockGapFactorOverride))
 			}
 
 			rpcEndpoints, err = ParseEndpoints(viper.GetViper())
 			if err != nil || len(rpcEndpoints) == 0 {
-				return utils.LavaFormatError("invalid endpoints definition", err)
+				return utils.FormatError("invalid endpoints definition", err)
 			}
 
 			// Smart router doesn't need blockchain chain ID
-			utils.LavaFormatInfo("Running Smart Router")
+			utils.FormatInfo("Running Smart Router")
 
 			logLevel, err := cmd.Flags().GetString("log-level")
 			if err != nil {
-				utils.LavaFormatFatal("failed to read log level flag", err)
+				utils.FormatFatal("failed to read log level flag", err)
 			}
 			utils.SetGlobalLoggingLevel(logLevel)
 
 			test_mode, err := cmd.Flags().GetBool(common.TestModeFlagName)
 			if err != nil {
-				utils.LavaFormatFatal("failed to read test_mode flag", err)
+				utils.FormatFatal("failed to read test_mode flag", err)
 			}
 			ctx = context.WithValue(ctx, common.Test_mode_ctx_key{}, test_mode)
 			// check if the command includes --pprof-address
@@ -2870,13 +2871,13 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				// get pprof server ip address (default value: "")
 				pprofServerAddress, err := cmd.Flags().GetString("pprof-address")
 				if err != nil {
-					utils.LavaFormatFatal("failed to read pprof address flag", err)
+					utils.FormatFatal("failed to read pprof address flag", err)
 				}
 
 				// start pprof HTTP server
 				err = performance.StartPprofServer(pprofServerAddress)
 				if err != nil {
-					return utils.LavaFormatError("failed to start pprof HTTP server", err)
+					return utils.FormatError("failed to start pprof HTTP server", err)
 				}
 			}
 			// check if the command includes --pyroscope-address
@@ -2884,7 +2885,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			if pyroscopeAddressFlagUsed {
 				pyroscopeServerAddress, err := cmd.Flags().GetString(performance.PyroscopeAddressFlagName)
 				if err != nil {
-					utils.LavaFormatFatal("failed to read pyroscope address flag", err)
+					utils.FormatFatal("failed to read pyroscope address flag", err)
 				}
 				pyroscopeAppName, err := cmd.Flags().GetString(performance.PyroscopeAppNameFlagName)
 				if err != nil || pyroscopeAppName == "" {
@@ -2902,20 +2903,20 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				tags := performance.ParseTags(tagsStr)
 				err = performance.StartPyroscope(pyroscopeAppName, pyroscopeServerAddress, mutexProfileFraction, blockProfileRate, tags)
 				if err != nil {
-					return utils.LavaFormatError("failed to start pyroscope profiler", err)
+					return utils.FormatError("failed to start pyroscope profiler", err)
 				}
 			}
 
 			// Parse direct RPC endpoints
-			var directRPCEndpoints []*lavasession.RPCStaticProviderEndpoint
+			var directRPCEndpoints []*routersession.RPCStaticProviderEndpoint
 			directRPCConfigKey := common.DirectRPCConfigName
 			if viper.IsSet(directRPCConfigKey) {
 				directRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), directRPCConfigKey)
 				if err != nil {
-					return utils.LavaFormatError("invalid direct-rpc endpoints definition", err)
+					return utils.FormatError("invalid direct-rpc endpoints definition", err)
 				}
 				for _, endpoint := range directRPCEndpoints {
-					utils.LavaFormatInfo("Direct RPC Endpoint:",
+					utils.FormatInfo("Direct RPC Endpoint:",
 						utils.Attribute{Key: "Name", Value: endpoint.Name},
 						utils.Attribute{Key: "Stake", Value: endpoint.Stake},
 						utils.Attribute{Key: "Urls", Value: endpoint.NodeUrls},
@@ -2925,16 +2926,16 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 
 			// Parse backup direct RPC endpoints
-			var backupDirectRPCEndpoints []*lavasession.RPCStaticProviderEndpoint
+			var backupDirectRPCEndpoints []*routersession.RPCStaticProviderEndpoint
 			backupConfigKey := common.BackupDirectRPCConfigName
 			if viper.IsSet(backupConfigKey) {
-				utils.LavaFormatInfo("Backup direct-rpc config found", utils.Attribute{Key: "configKey", Value: backupConfigKey})
+				utils.FormatInfo("Backup direct-rpc config found", utils.Attribute{Key: "configKey", Value: backupConfigKey})
 				backupDirectRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), backupConfigKey)
 				if err != nil {
-					return utils.LavaFormatError("invalid backup-direct-rpc endpoints definition", err)
+					return utils.FormatError("invalid backup-direct-rpc endpoints definition", err)
 				}
 				for _, endpoint := range backupDirectRPCEndpoints {
-					utils.LavaFormatInfo("Backup Direct RPC Endpoint:",
+					utils.FormatInfo("Backup Direct RPC Endpoint:",
 						utils.Attribute{Key: "Name", Value: endpoint.Name},
 						utils.Attribute{Key: "Urls", Value: endpoint.NodeUrls},
 						utils.Attribute{Key: "Chain ID", Value: endpoint.ChainID},
@@ -2953,12 +2954,12 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// between the two is as ambiguous as one shared within either. Failing here means it
 			// fails before any listener binds, and the error names every collision so one edit to
 			// the config fixes it.
-			if err := lavasession.ValidateUniqueProviderNames(directRPCEndpoints, backupDirectRPCEndpoints); err != nil {
-				return utils.LavaFormatError("invalid direct-rpc endpoints definition", err)
+			if err := routersession.ValidateUniqueProviderNames(directRPCEndpoints, backupDirectRPCEndpoints); err != nil {
+				return utils.FormatError("invalid direct-rpc endpoints definition", err)
 			}
 
 			if len(directRPCEndpoints) == 0 {
-				return utils.LavaFormatError(
+				return utils.FormatError(
 					"smart router requires direct-rpc endpoints configuration",
 					nil,
 					utils.Attribute{Key: "hint", Value: "add 'direct-rpc' section to config file"},
@@ -2976,7 +2977,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				}
 
 				if !hasDirectRPC {
-					return utils.LavaFormatError(
+					return utils.FormatError(
 						"no direct-rpc endpoints configured for listener",
 						nil,
 						utils.Attribute{Key: "chainID", Value: endpoint.ChainID},
@@ -2987,7 +2988,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 
 			rpcSmartRouter := RPCSmartRouter{}
-			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version)
+			utils.FormatInfo("smart-router Binary Version: " + version.Version)
 			rand.InitRandomSeed()
 
 			var cache *performance.Cache = nil
@@ -2996,13 +2997,13 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				var err error
 				cache, err = performance.InitCache(ctx, cacheAddr)
 				if err != nil {
-					utils.LavaFormatError("Failed To Connect to cache at address", err, utils.Attribute{Key: "address", Value: cacheAddr})
+					utils.FormatError("Failed To Connect to cache at address", err, utils.Attribute{Key: "address", Value: cacheAddr})
 				} else {
-					utils.LavaFormatInfo("cache service connected", utils.Attribute{Key: "address", Value: cacheAddr})
+					utils.FormatInfo("cache service connected", utils.Attribute{Key: "address", Value: cacheAddr})
 				}
 			}
 			if strategyFlag.Strategy != provideroptimizer.StrategyBalanced {
-				utils.LavaFormatInfo("Working with selection strategy: " + strategyFlag.String())
+				utils.FormatInfo("Working with selection strategy: " + strategyFlag.String())
 			}
 
 			analyticsServerAddresses := AnalyticsServerAddresses{
@@ -3033,7 +3034,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			epochDuration := viper.GetDuration(common.EpochDurationFlag)
 			if epochDuration == 0 {
 				epochDuration = common.StandaloneEpochDuration // 15 minutes default for standalone
-				utils.LavaFormatInfo("RPCSmartRouter: using default epoch duration for standalone mode",
+				utils.FormatInfo("RPCSmartRouter: using default epoch duration for standalone mode",
 					utils.LogAttr("epochDuration", epochDuration),
 				)
 			}
@@ -3102,14 +3103,14 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	}
 
 	// RPCSmartRouter command flags - no blockchain flags needed
-	cmdRPCSmartRouter.Flags().Bool(lavasession.AllowInsecureConnectionToProvidersFlag, false, "allow insecure provider-dialing. used for development and testing")
+	cmdRPCSmartRouter.Flags().Bool(routersession.AllowInsecureConnectionToProvidersFlag, false, "allow insecure provider-dialing. used for development and testing")
 	cmdRPCSmartRouter.Flags().String(common.ResponseCompressionFlag, common.DefaultResponseCompression, "client-facing response compression: gzip (default), brotli, or off")
-	cmdRPCSmartRouter.Flags().Uint64Var(&lavasession.MaximumStreamsOverASingleConnection, lavasession.MaximumStreamsOverASingleConnectionFlag, lavasession.DefaultMaximumStreamsOverASingleConnection, "maximum number of parallel streams over a single provider connection")
+	cmdRPCSmartRouter.Flags().Uint64Var(&routersession.MaximumStreamsOverASingleConnection, routersession.MaximumStreamsOverASingleConnectionFlag, routersession.DefaultMaximumStreamsOverASingleConnection, "maximum number of parallel streams over a single provider connection")
 	cmdRPCSmartRouter.Flags().Bool(common.TestModeFlagName, false, "test mode sends dummy data and prints all metadata in listeners")
 	cmdRPCSmartRouter.Flags().String(performance.PprofAddressFlagName, "", "pprof server address, used for code profiling")
 	cmdRPCSmartRouter.Flags().String("debug-address", "", "debug HTTP server for integration tests, e.g. :9999 — exposes /debug/time-warp (QoS clock) and /debug/chain-state-time-warp (per-chain ChainState TTL/staleness)")
 	if err := viper.BindPFlag("debug-address", cmdRPCSmartRouter.Flags().Lookup("debug-address")); err != nil {
-		utils.LavaFormatFatal("failed binding debug-address flag", err)
+		utils.FormatFatal("failed binding debug-address flag", err)
 	}
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeAddressFlagName, "", "pyroscope server address for continuous profiling (e.g., http://pyroscope:4040)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeAppNameFlagName, "smartrouter", "pyroscope application name for identifying this service")
@@ -3136,19 +3137,19 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerStakeWeight, defaultWeightedConfig.StakeWeight, "weight assigned to provider stake when computing selection scores")
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerMinSelectionChance, defaultWeightedConfig.MinSelectionChance, "minimum selection probability for any provider regardless of score")
 	if err := viper.BindPFlag(common.ProviderOptimizerAvailabilityWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerAvailabilityWeight)); err != nil {
-		utils.LavaFormatFatal("failed binding availability weight flag", err)
+		utils.FormatFatal("failed binding availability weight flag", err)
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerLatencyWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerLatencyWeight)); err != nil {
-		utils.LavaFormatFatal("failed binding latency weight flag", err)
+		utils.FormatFatal("failed binding latency weight flag", err)
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerSyncWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSyncWeight)); err != nil {
-		utils.LavaFormatFatal("failed binding sync weight flag", err)
+		utils.FormatFatal("failed binding sync weight flag", err)
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerStakeWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerStakeWeight)); err != nil {
-		utils.LavaFormatFatal("failed binding stake weight flag", err)
+		utils.FormatFatal("failed binding stake weight flag", err)
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerMinSelectionChance, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerMinSelectionChance)); err != nil {
-		utils.LavaFormatFatal("failed binding min selection chance flag", err)
+		utils.FormatFatal("failed binding min selection chance flag", err)
 	}
 	cmdRPCSmartRouter.Flags().String(metrics.MetricsListenFlagName, metrics.DisabledFlagOption, "the address to expose prometheus metrics (such as localhost:7779)")
 	// Usage telemetry (OTel) — off by default. When enabled, per-relay and
@@ -3170,15 +3171,15 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(common.CorsHeadersFlag, "", "Set up CORS allowed headers, * for all, default simple cors specification headers")
 	cmdRPCSmartRouter.Flags().String(common.CorsOriginFlag, "*", "Set up CORS allowed origin, enabled * by default")
 	cmdRPCSmartRouter.Flags().String(common.CorsMethodsFlag, "GET,POST,PUT,DELETE,OPTIONS", "set up Allowed OPTIONS methods, defaults to: \"GET,POST,PUT,DELETE,OPTIONS\"")
-	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Lava-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
+	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Smart-Router-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
 	cmdRPCSmartRouter.Flags().String(common.CDNCacheDurationFlag, "86400", "set up preflight options response cache duration, default 86400 (24h in seconds)")
 	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share the consumer consistency state with the cache service. this should be used with cache backend enabled if you want to state sync multiple rpc consumers")
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")
-	// Registered as a flagset-owned Bool (NOT BoolVar bound to the lavasession global): BoolVar writes
+	// Registered as a flagset-owned Bool (NOT BoolVar bound to the routersession global): BoolVar writes
 	// the bound global at registration time, which raced probe goroutines reading it. Applied to the
-	// atomic global in RunE via lavasession.SetDebugProbes.
+	// atomic global in RunE via routersession.SetDebugProbes.
 	cmdRPCSmartRouter.Flags().Bool(DebugProbesFlagName, false, "adding information to probes")
 	cmdRPCSmartRouter.Flags().StringArray(common.UseStaticSpecFlag, nil, "load specs from file, directory, or remote URL (GitHub/GitLab). Can be specified multiple times; later sources override earlier ones for same chain ID")
 	cmdRPCSmartRouter.Flags().String(common.GitHubTokenFlag, "", "GitHub personal access token for accessing private repositories (public repos are fetched via unmetered tarball downloads and need no token)")
@@ -3199,15 +3200,15 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerificationDefault, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerificationDefault, "skip websocket verification for chains that require ws/wss endpoints")
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipAllVerifications, common.SkipAllVerificationsFlag, chainlib.SkipAllVerifications, "skip ALL spec verifications for every provider this process serves, healthy ones included. An escape hatch for bringing a router up against upstreams that cannot survive being probed; prefer the per-node-url skip-verifications config (which accepts \"*\") for anything ongoing")
 
-	cmdRPCSmartRouter.Flags().DurationVar(&lavasession.ProbeLoopInterval, common.ProbeLoopIntervalFlagName, lavasession.ProbeLoopInterval, "cadence of the proactive health prober (MAG-2161 Topic D); must be > 0, default 5s")
+	cmdRPCSmartRouter.Flags().DurationVar(&routersession.ProbeLoopInterval, common.ProbeLoopIntervalFlagName, routersession.ProbeLoopInterval, "cadence of the proactive health prober (MAG-2161 Topic D); must be > 0, default 5s")
 	cmdRPCSmartRouter.Flags().Float64(common.ProbeUpdateWeightFlagName, scoreutils.DefaultProbeUpdateWeight, "weight multiplier for provider-optimizer probe updates (liveness/latency); must be > 0")
 	if err := viper.BindPFlag(common.ProbeUpdateWeightFlagName, cmdRPCSmartRouter.Flags().Lookup(common.ProbeUpdateWeightFlagName)); err != nil {
-		utils.LavaFormatFatal("failed binding probe update weight flag", err)
+		utils.FormatFatal("failed binding probe update weight flag", err)
 	}
 
 	cmdRPCSmartRouter.Flags().DurationVar(&common.DefaultTimeout, common.DefaultProcessingTimeoutFlagName, common.DefaultTimeout, "default timeout for relay processing (e.g., 30s, 1m)")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.MinimumTimePerRelayDelay, common.MinRelayTimeoutFlagName, common.MinimumTimePerRelayDelay, "minimum relay timeout floor applied to all methods when CU-based timeout is lower (e.g., 1s, 5s)")
-	cmdRPCSmartRouter.Flags().IntVar(&lavasession.MaxSessionsAllowedPerProvider, common.MaxSessionsPerProviderFlagName, lavasession.MaxSessionsAllowedPerProvider, "max number of sessions allowed per provider")
+	cmdRPCSmartRouter.Flags().IntVar(&routersession.MaxSessionsAllowedPerProvider, common.MaxSessionsPerProviderFlagName, routersession.MaxSessionsAllowedPerProvider, "max number of sessions allowed per provider")
 
 	// batch request size limit
 	cmdRPCSmartRouter.Flags().IntVar(&chainlib.MaxBatchRequestSize, common.MaxBatchRequestSizeFlag, common.DefaultMaxBatchRequestSize, "max number of requests allowed within a batch request, 0 means unlimited")
@@ -3220,13 +3221,13 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// unless OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none; when no OTLP
 	// endpoint is configured the SDK falls back to the spec default
 	// (localhost:4317 for gRPC, localhost:4318 for HTTP).
-	// --otel-trace-body is the only Lava-specific knob, exposed as a CLI flag
+	// --otel-trace-body is the only router-specific knob, exposed as a CLI flag
 	// because it's a per-invocation debug toggle rather than deployment
 	// configuration. Body size is delegated to the SDK via
 	// OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT (SDK default: unlimited).
 	cmdRPCSmartRouter.Flags().Bool(tracing.TraceBodyFlag, false, "record request/response bodies on trace spans (size limit delegated to OTel SDK via OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT)")
 	if err := viper.BindPFlag(tracing.TraceBodyFlag, cmdRPCSmartRouter.Flags().Lookup(tracing.TraceBodyFlag)); err != nil {
-		utils.LavaFormatFatal("failed binding otel-trace-body flag", err)
+		utils.FormatFatal("failed binding otel-trace-body flag", err)
 	}
 
 	common.AddRollingLogConfig(cmdRPCSmartRouter)
@@ -3249,7 +3250,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 	for _, chainKey := range chainKeys {
 		chainKeyLog := chainKey
 
-		utils.LavaFormatInfo("ConsumerSessionManager: Epoch update triggered",
+		utils.FormatInfo("ConsumerSessionManager: Epoch update triggered",
 			utils.LogAttr("epoch", epoch),
 			utils.LogAttr("chainKey", chainKeyLog),
 			utils.LogAttr("time", time.Now().Format("15:04:05 MST")),
@@ -3263,7 +3264,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// SetEndpointOverallHealth(..., true) — which a backup may never receive.
 		var epochMetrics *metrics.SmartRouterMetricsManager
 		var epochChainID, epochApiInterface string
-		// listenEndpoint is a *lavasession.RPCEndpoint — always guard its deref.
+		// listenEndpoint is a *routersession.RPCEndpoint — always guard its deref.
 		// Skipping metric reset for a server with a nil listenEndpoint is preferable
 		// to a nil-deref panic that would kill the whole epoch transition and leave
 		// every endpoint.ResetHealth() undone.
@@ -3284,7 +3285,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// Create FRESH ConsumerSessionsWithProvider objects to avoid session accumulation
 		// This is critical: reusing the same objects causes sessions to accumulate in the Sessions map
 		// until hitting the 1000-session limit, causing "No pairings available" errors
-		freshProviderSessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
+		freshProviderSessions := make(map[uint64]*routersession.ConsumerSessionsWithProvider)
 		for idx, oldSession := range oldProviderSessions {
 			// Reset endpoint health so disabled endpoints get a fresh start each epoch.
 			// Without this, an endpoint disabled by ConnectionRefusals stays disabled
@@ -3295,10 +3296,10 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			// Mirror the struct reset onto the Prometheus gauge so operators see the
 			// provider recover at the epoch boundary rather than remaining stuck at 0.
 			if epochMetrics != nil {
-				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, oldSession.PublicLavaAddress, true)
+				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, oldSession.PublicAddress, true)
 			}
-			freshSession := lavasession.NewConsumerSessionWithProvider(
-				oldSession.PublicLavaAddress,
+			freshSession := routersession.NewConsumerSessionWithProvider(
+				oldSession.PublicAddress,
 				oldSession.Endpoints,
 				oldSession.MaxComputeUnits,
 				epoch,
@@ -3308,14 +3309,14 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			freshSession.GroupLabel = oldSession.GroupLabel // cross-validation group must survive epoch refresh
 			freshProviderSessions[idx] = freshSession
 
-			utils.LavaFormatDebug("Created fresh provider session for epoch",
-				utils.LogAttr("provider", freshSession.PublicLavaAddress),
+			utils.FormatDebug("Created fresh provider session for epoch",
+				utils.LogAttr("provider", freshSession.PublicAddress),
 				utils.LogAttr("epoch", epoch),
 				utils.LogAttr("chainKey", chainKeyLog))
 		}
 
 		// Create fresh backup sessions
-		freshBackupSessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
+		freshBackupSessions := make(map[uint64]*routersession.ConsumerSessionsWithProvider)
 		for idx, oldSession := range oldBackupSessions {
 			for _, endpoint := range oldSession.Endpoints {
 				endpoint.ResetHealth()
@@ -3324,10 +3325,10 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			// unhealthy gauge because they rarely receive the successful relay that
 			// would otherwise toggle it back to 1.
 			if epochMetrics != nil {
-				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, oldSession.PublicLavaAddress, true)
+				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, oldSession.PublicAddress, true)
 			}
-			freshSession := lavasession.NewConsumerSessionWithProvider(
-				oldSession.PublicLavaAddress,
+			freshSession := routersession.NewConsumerSessionWithProvider(
+				oldSession.PublicAddress,
 				oldSession.Endpoints,
 				oldSession.MaxComputeUnits,
 				epoch,
@@ -3337,8 +3338,8 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			freshSession.GroupLabel = oldSession.GroupLabel // cross-validation group must survive epoch refresh
 			freshBackupSessions[idx] = freshSession
 
-			utils.LavaFormatDebug("Created fresh backup provider session for epoch",
-				utils.LogAttr("provider", freshSession.PublicLavaAddress),
+			utils.FormatDebug("Created fresh backup provider session for epoch",
+				utils.LogAttr("provider", freshSession.PublicAddress),
 				utils.LogAttr("epoch", epoch),
 				utils.LogAttr("chainKey", chainKeyLog))
 		}
@@ -3351,10 +3352,10 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// sessions are collected and their direct connections closed *after*
 		// UpdateAllProviders below — closing earlier would race in-flight
 		// relays still holding pointers to the prior pairing.
-		var demotedSessions []*lavasession.ConsumerSessionsWithProvider
+		var demotedSessions []*routersession.ConsumerSessionsWithProvider
 		if inputs := rpsr.reverifyInputs[chainKey]; inputs != nil {
 			reverifyStart := time.Now()
-			var demotedStatic, demotedBackup []*lavasession.ConsumerSessionsWithProvider
+			var demotedStatic, demotedBackup []*routersession.ConsumerSessionsWithProvider
 			var promotedStatic, promotedBackup []string
 			freshProviderSessions, demotedStatic, promotedStatic = applyReverification(ctx, inputs, freshProviderSessions, reverifyTierStatic, epoch)
 			freshBackupSessions, demotedBackup, promotedBackup = applyReverification(ctx, inputs, freshBackupSessions, reverifyTierBackup, epoch)
@@ -3364,7 +3365,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			// invariant rebuildPairingFromConfig enforces. Without this the provider stays
 			// in the failed list, retryFailedProviders revalidates it, succeeds, and
 			// mergeRecoveredSessions appends a SECOND session for it — that helper keys by
-			// index and does not dedupe by PublicLavaAddress. csm.pairing collapses the
+			// index and does not dedupe by PublicAddress. csm.pairing collapses the
 			// duplicate but pairingAddresses and validAddresses do not, so the provider
 			// lands twice in validAddresses with double its selection weight, and the
 			// superseded ConsumerSessionsWithProvider is dropped without its
@@ -3380,7 +3381,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			// gives operators a signal when total tick time approaches epoch length —
 			// the cross-chain bound is Σ ⌈N_chain/conc⌉ × SpecReVerifyAttemptTimeout.
 			if elapsed := time.Since(reverifyStart); elapsed > SpecReVerifyAttemptTimeout {
-				utils.LavaFormatWarning("re-verify: cycle exceeded single-attempt timeout — consider tuning SpecReVerifyConcurrency", nil,
+				utils.FormatWarning("re-verify: cycle exceeded single-attempt timeout — consider tuning SpecReVerifyConcurrency", nil,
 					utils.LogAttr("chainKey", chainKeyLog),
 					utils.LogAttr("elapsed", elapsed.String()),
 					utils.LogAttr("attemptTimeout", SpecReVerifyAttemptTimeout.String()),
@@ -3413,7 +3414,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		rpsr.mu.Unlock()
 
 		if err != nil {
-			utils.LavaFormatError("Failed to update providers on epoch change", err,
+			utils.FormatError("Failed to update providers on epoch change", err,
 				utils.LogAttr("epoch", epoch),
 				utils.LogAttr("chainKey", chainKeyLog),
 			)
@@ -3537,7 +3538,7 @@ func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string
 		primary := collectWSEndpoints(liveStatic, "")
 		backup := collectWSEndpoints(liveBackup, "")
 		if setter.SetEndpoints(primary, backup) {
-			utils.LavaFormatInfo("subscriptions: WebSocket endpoint tiers updated to match live pairing",
+			utils.FormatInfo("subscriptions: WebSocket endpoint tiers updated to match live pairing",
 				utils.LogAttr("chainKey", chainKey),
 				utils.LogAttr("primaryCount", len(primary)),
 				utils.LogAttr("backupCount", len(backup)),
@@ -3549,7 +3550,7 @@ func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string
 		primary := collectGRPCEndpoints(liveStatic, "")
 		backup := collectGRPCEndpoints(liveBackup, "")
 		if server.grpcSubscriptionManager.SetEndpoints(primary, backup) {
-			utils.LavaFormatInfo("subscriptions: gRPC endpoint tiers updated to match live pairing",
+			utils.FormatInfo("subscriptions: gRPC endpoint tiers updated to match live pairing",
 				utils.LogAttr("chainKey", chainKey),
 				utils.LogAttr("primaryCount", len(primary)),
 				utils.LogAttr("backupCount", len(backup)),
@@ -3560,20 +3561,20 @@ func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string
 
 // activeProviders returns the configured providers that are currently in the pairing,
 // in configured order. Sessions are keyed by index and carry the provider name as
-// PublicLavaAddress (see convertProvidersToSessions), so this is the bridge from "what
+// PublicAddress (see convertProvidersToSessions), so this is the bridge from "what
 // is live" back to the RPCStaticProviderEndpoint records that own the NodeUrls.
 func activeProviders(
-	configured []*lavasession.RPCStaticProviderEndpoint,
-	sessions map[uint64]*lavasession.ConsumerSessionsWithProvider,
-) []*lavasession.RPCStaticProviderEndpoint {
+	configured []*routersession.RPCStaticProviderEndpoint,
+	sessions map[uint64]*routersession.ConsumerSessionsWithProvider,
+) []*routersession.RPCStaticProviderEndpoint {
 	if len(configured) == 0 || len(sessions) == 0 {
 		return nil
 	}
 	active := make(map[string]struct{}, len(sessions))
 	for _, s := range sessions {
-		active[s.PublicLavaAddress] = struct{}{}
+		active[s.PublicAddress] = struct{}{}
 	}
-	live := make([]*lavasession.RPCStaticProviderEndpoint, 0, len(active))
+	live := make([]*routersession.RPCStaticProviderEndpoint, 0, len(active))
 	for _, p := range configured {
 		if _, ok := active[p.Name]; ok {
 			live = append(live, p)
@@ -3594,8 +3595,8 @@ func (rpsr *RPCSmartRouter) retryFailedProviders(
 	ctx context.Context,
 	sessionManagerKey string,
 	chainParser chainlib.ChainParser,
-	rpcEndpoint *lavasession.RPCEndpoint,
-	convertProvidersToSessions func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	rpcEndpoint *routersession.RPCEndpoint,
+	convertProvidersToSessions func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider,
 ) {
 	darkBackoff := retryDarkBaseInterval
 	timer := time.NewTimer(retryIntervalFor(rpsr.chainIsDark(sessionManagerKey)))
@@ -3614,14 +3615,14 @@ func (rpsr *RPCSmartRouter) retryFailedProviders(
 		rpsr.mu.Unlock()
 
 		if len(failedStatic) == 0 && len(failedBackup) == 0 {
-			utils.LavaFormatInfo("All failed providers recovered — stopping retry loop",
+			utils.FormatInfo("All failed providers recovered — stopping retry loop",
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			)
 			return
 		}
 
-		utils.LavaFormatInfo("Retrying failed providers",
+		utils.FormatInfo("Retrying failed providers",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("failedStatic", len(failedStatic)),
@@ -3652,7 +3653,7 @@ func (rpsr *RPCSmartRouter) retryFailedProviders(
 // provider. A package-level var purely so tests can substitute a fake without
 // standing up upstreams — production never reassigns it. Mirrors the
 // chainReverifyInputs.validateFn seam applyReverification uses.
-var retryValidateFn = func(ctx context.Context, provider *lavasession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) error {
+var retryValidateFn = func(ctx context.Context, provider *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) error {
 	return validateProvider(ctx, provider, chainParser, BootValidateTimeout)
 }
 
@@ -3660,15 +3661,15 @@ var retryValidateFn = func(ctx context.Context, provider *lavasession.RPCStaticP
 // the recovered and still-failing partitions in configured order.
 func (rpsr *RPCSmartRouter) revalidateTier(
 	ctx context.Context,
-	failed []*lavasession.RPCStaticProviderEndpoint,
+	failed []*routersession.RPCStaticProviderEndpoint,
 	chainParser chainlib.ChainParser,
-	rpcEndpoint *lavasession.RPCEndpoint,
+	rpcEndpoint *routersession.RPCEndpoint,
 	tier reverifyTier,
-) (recovered, stillFailed []*lavasession.RPCStaticProviderEndpoint) {
+) (recovered, stillFailed []*routersession.RPCStaticProviderEndpoint) {
 	for _, provider := range failed {
 		if err := retryValidateFn(ctx, provider, chainParser); err != nil {
 			stillFailed = append(stillFailed, provider)
-			utils.LavaFormatWarning("retry: provider verification still failing", err,
+			utils.FormatWarning("retry: provider verification still failing", err,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("tier", tier.String()),
 				utils.LogAttr("provider", provider.Name),
@@ -3676,7 +3677,7 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 			continue
 		}
 		recovered = append(recovered, provider)
-		utils.LavaFormatInfo("[+] provider recovered and passed verification",
+		utils.FormatInfo("[+] provider recovered and passed verification",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("tier", tier.String()),
 			utils.LogAttr("provider", provider.Name),
@@ -3696,10 +3697,10 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 // recovered providers until the next epoch.
 func (rpsr *RPCSmartRouter) readmitRecoveredProviders(
 	sessionManagerKey string,
-	rpcEndpoint *lavasession.RPCEndpoint,
-	convertProvidersToSessions func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
-	recoveredStatic, stillFailedStatic []*lavasession.RPCStaticProviderEndpoint,
-	recoveredBackup, stillFailedBackup []*lavasession.RPCStaticProviderEndpoint,
+	rpcEndpoint *routersession.RPCEndpoint,
+	convertProvidersToSessions func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider,
+	recoveredStatic, stillFailedStatic []*routersession.RPCStaticProviderEndpoint,
+	recoveredBackup, stillFailedBackup []*routersession.RPCStaticProviderEndpoint,
 ) {
 	rpsr.mu.Lock()
 
@@ -3726,20 +3727,20 @@ func (rpsr *RPCSmartRouter) readmitRecoveredProviders(
 	rpsr.mu.Unlock()
 
 	if err != nil {
-		utils.LavaFormatWarning("retry: failed to re-register recovered providers", err,
+		utils.FormatWarning("retry: failed to re-register recovered providers", err,
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 		)
 		return
 	}
 	for _, tier := range []struct {
 		name      reverifyTier
-		recovered []*lavasession.RPCStaticProviderEndpoint
+		recovered []*routersession.RPCStaticProviderEndpoint
 	}{
 		{reverifyTierStatic, recoveredStatic},
 		{reverifyTierBackup, recoveredBackup},
 	} {
 		for _, p := range tier.recovered {
-			utils.LavaFormatInfo("[+] provider re-registered successfully",
+			utils.FormatInfo("[+] provider re-registered successfully",
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("tier", tier.name.String()),
 				utils.LogAttr("provider", p.Name),
@@ -3763,7 +3764,7 @@ func nameSet(names []string) map[string]struct{} {
 // pruneRestoredFromFailed removes providers named in `restored` from one chain's
 // failed list, deleting the entry entirely once nothing is left pending.
 func pruneRestoredFromFailed(
-	failedByChain map[string][]*lavasession.RPCStaticProviderEndpoint,
+	failedByChain map[string][]*routersession.RPCStaticProviderEndpoint,
 	chainKey string,
 	restored map[string]struct{},
 ) {
@@ -3771,7 +3772,7 @@ func pruneRestoredFromFailed(
 	if len(failed) == 0 {
 		return
 	}
-	var kept []*lavasession.RPCStaticProviderEndpoint
+	var kept []*routersession.RPCStaticProviderEndpoint
 	for _, p := range failed {
 		if _, ok := restored[p.Name]; !ok {
 			kept = append(kept, p)
@@ -3787,16 +3788,16 @@ func pruneRestoredFromFailed(
 // mergeRecoveredSessions returns a new map holding `existing` plus freshly built
 // sessions for `recovered`, appended at indices past the current maximum.
 func mergeRecoveredSessions(
-	existing map[uint64]*lavasession.ConsumerSessionsWithProvider,
-	recovered []*lavasession.RPCStaticProviderEndpoint,
-	convertProvidersToSessions func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	existing map[uint64]*routersession.ConsumerSessionsWithProvider,
+	recovered []*routersession.RPCStaticProviderEndpoint,
+	convertProvidersToSessions func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider,
 	currentEpoch uint64,
-) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+) map[uint64]*routersession.ConsumerSessionsWithProvider {
 	if len(recovered) == 0 {
 		return existing
 	}
 	recoveredSessions := convertProvidersToSessions(recovered)
-	merged := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(existing)+len(recoveredSessions))
+	merged := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(existing)+len(recoveredSessions))
 	maxIdx := uint64(0)
 	for k, v := range existing {
 		merged[k] = v
@@ -3881,13 +3882,13 @@ func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
 		// otherwise a concurrent epoch tick can push to the csm in the opposite
 		// order it wrote providerSessions, silently dropping the restored providers.
 		if err := sessionManager.UpdateAllProviders(currentEpoch, mergedStatic, mergedBackup); err != nil {
-			utils.LavaFormatError("reset-pairing: failed to push rebuilt pairing to session manager", err,
+			utils.FormatError("reset-pairing: failed to push rebuilt pairing to session manager", err,
 				utils.LogAttr("chainKey", chainKey))
 			continue
 		}
 
 		restored[chainKey] = append(restoredStatic, restoredBackup...)
-		utils.LavaFormatInfo("reset-pairing: restored providers from config",
+		utils.FormatInfo("reset-pairing: restored providers from config",
 			utils.LogAttr("chainKey", chainKey),
 			utils.LogAttr("restored", restored[chainKey]),
 			utils.LogAttr("epoch", currentEpoch),
@@ -3904,17 +3905,17 @@ func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
 // skipped by convert and so are not reported restored. Present providers are reused
 // untouched. Returns (current, nil) when nothing is absent.
 func mergeAbsentProviders(
-	current map[uint64]*lavasession.ConsumerSessionsWithProvider,
-	configured []*lavasession.RPCStaticProviderEndpoint,
-	convert func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	current map[uint64]*routersession.ConsumerSessionsWithProvider,
+	configured []*routersession.RPCStaticProviderEndpoint,
+	convert func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider,
 	epoch uint64,
-) (map[uint64]*lavasession.ConsumerSessionsWithProvider, []string) {
+) (map[uint64]*routersession.ConsumerSessionsWithProvider, []string) {
 	active := make(map[string]struct{}, len(current))
 	for _, s := range current {
-		active[s.PublicLavaAddress] = struct{}{}
+		active[s.PublicAddress] = struct{}{}
 	}
 
-	var absent []*lavasession.RPCStaticProviderEndpoint
+	var absent []*routersession.RPCStaticProviderEndpoint
 	for _, p := range configured {
 		if _, ok := active[p.Name]; !ok {
 			absent = append(absent, p)
@@ -3927,7 +3928,7 @@ func mergeAbsentProviders(
 	// Copy-on-write: cleanupStaleTrackers may iterate the old map
 	// without the lock, so never mutate it in place. Re-key appended sessions past
 	// the existing max — convert() keys by its own list index, which would collide.
-	merged := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(current)+len(absent))
+	merged := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(current)+len(absent))
 	maxIdx := uint64(0)
 	for idx, s := range current {
 		merged[idx] = s
@@ -3943,7 +3944,7 @@ func mergeAbsentProviders(
 		session.Lock.Unlock()
 		merged[maxIdx] = session
 		maxIdx++
-		converted[session.PublicLavaAddress] = struct{}{}
+		converted[session.PublicAddress] = struct{}{}
 	}
 
 	var restored []string
@@ -3960,8 +3961,8 @@ func mergeAbsentProviders(
 func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 	chainKey string,
 	server *RPCSmartRouterServer,
-	providerSessions map[uint64]*lavasession.ConsumerSessionsWithProvider,
-	backupSessions map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	providerSessions map[uint64]*routersession.ConsumerSessionsWithProvider,
+	backupSessions map[uint64]*routersession.ConsumerSessionsWithProvider,
 ) {
 	if server.endpointChainTrackerManager == nil {
 		return
@@ -3985,7 +3986,7 @@ func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 	removedCount := 0
 	for _, trackedURL := range trackedEndpoints {
 		if !currentEndpoints[trackedURL] {
-			utils.LavaFormatInfo("removing stale ChainTracker on epoch update",
+			utils.FormatInfo("removing stale ChainTracker on epoch update",
 				utils.LogAttr("endpoint", trackedURL),
 				utils.LogAttr("chainKey", chainKey),
 			)
@@ -3995,7 +3996,7 @@ func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 	}
 
 	if removedCount > 0 {
-		utils.LavaFormatInfo("epoch update: cleaned up stale ChainTrackers",
+		utils.FormatInfo("epoch update: cleaned up stale ChainTrackers",
 			utils.LogAttr("chainKey", chainKey),
 			utils.LogAttr("removed", removedCount),
 			utils.LogAttr("remaining", server.endpointChainTrackerManager.GetEndpointCount()),
@@ -4004,7 +4005,7 @@ func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 }
 
 func testModeWarn(desc string) {
-	utils.LavaFormatWarning("------------------------------test mode --------------------------------\n\t\t\t"+
+	utils.FormatWarning("------------------------------test mode --------------------------------\n\t\t\t"+
 		desc+"\n\t\t\t"+
 		"------------------------------test mode --------------------------------\n", nil)
 }
@@ -4014,7 +4015,7 @@ func testModeWarn(desc string) {
 // endpoint came from; an empty tierLabel suppresses that per-endpoint line. Boot wants
 // the full inventory, but the republish path runs on every pairing change and would
 // otherwise re-log every endpoint of every chain each epoch — it logs deltas instead.
-func collectWSEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, tierLabel string) []*common.NodeUrl {
+func collectWSEndpoints(providers []*routersession.RPCStaticProviderEndpoint, tierLabel string) []*common.NodeUrl {
 	var endpoints []*common.NodeUrl
 	for _, provider := range providers {
 		for i := range provider.NodeUrls {
@@ -4024,7 +4025,7 @@ func collectWSEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, tier
 				if tierLabel == "" {
 					continue
 				}
-				utils.LavaFormatInfo("Found WebSocket endpoint for direct subscriptions",
+				utils.FormatInfo("Found WebSocket endpoint for direct subscriptions",
 					utils.LogAttr("tier", tierLabel),
 					utils.LogAttr("url", provider.NodeUrls[i].Url),
 					utils.LogAttr("provider", provider.Name),
@@ -4039,7 +4040,7 @@ func collectWSEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, tier
 // collectGRPCEndpoints returns every NodeUrl from providers whose ApiInterface is gRPC.
 // tierLabel ("primary" / "backup") is logged for operator visibility; an empty label
 // suppresses that line — see collectWSEndpoints.
-func collectGRPCEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, tierLabel string) []*common.NodeUrl {
+func collectGRPCEndpoints(providers []*routersession.RPCStaticProviderEndpoint, tierLabel string) []*common.NodeUrl {
 	var endpoints []*common.NodeUrl
 	for _, provider := range providers {
 		if provider.ApiInterface != spectypes.APIInterfaceGrpc {
@@ -4050,7 +4051,7 @@ func collectGRPCEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, ti
 			if tierLabel == "" {
 				continue
 			}
-			utils.LavaFormatInfo("Found gRPC endpoint for streaming subscriptions",
+			utils.FormatInfo("Found gRPC endpoint for streaming subscriptions",
 				utils.LogAttr("tier", tierLabel),
 				utils.LogAttr("url", provider.NodeUrls[i].Url),
 				utils.LogAttr("provider", provider.Name),

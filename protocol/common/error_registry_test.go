@@ -59,8 +59,8 @@ func TestRegistry_CodeRanges(t *testing.T) {
 func TestRegistry_AllErrorCodesRegistered(t *testing.T) {
 	// Spot-check that key error codes are in the registry
 	// Verify UNKNOWN_ERROR is registered at code 0
-	assert.Equal(t, LavaErrorUnknown, getLavaError(0))
-	assert.Equal(t, "UNKNOWN_ERROR", getLavaError(0).Name)
+	assert.Equal(t, RouterErrorUnknown, getRouterError(0))
+	assert.Equal(t, "UNKNOWN_ERROR", getRouterError(0).Name)
 
 	codes := []uint32{
 		1001, // CONNECTION_TIMEOUT
@@ -72,23 +72,23 @@ func TestRegistry_AllErrorCodesRegistered(t *testing.T) {
 		4001, // PARSE_ERROR
 	}
 	for _, code := range codes {
-		le := getLavaError(code)
-		assert.NotEqual(t, LavaErrorUnknown, le, "code %d should be registered", code)
+		le := getRouterError(code)
+		assert.NotEqual(t, RouterErrorUnknown, le, "code %d should be registered", code)
 		assert.Equal(t, code, le.Code)
 	}
 }
 
 func TestRegisterError_RejectsReservedCodeZero(t *testing.T) {
 	assert.PanicsWithValue(t,
-		"error code 0 is reserved for LavaErrorUnknown; MY_NEW_ERROR must use a non-zero code",
+		"error code 0 is reserved for RouterErrorUnknown; MY_NEW_ERROR must use a non-zero code",
 		func() {
-			registerError(&LavaError{Code: 0, Name: "MY_NEW_ERROR"})
+			registerError(&RouterError{Code: 0, Name: "MY_NEW_ERROR"})
 		},
 	)
 }
 
 func TestRegisterError_DuplicateCodeMentionsExistingName(t *testing.T) {
-	// LavaErrorConnectionTimeout has code 1001 — re-registering under the same
+	// RouterErrorConnectionTimeout has code 1001 — re-registering under the same
 	// code but a different name must panic with a message that names the existing
 	// owner so the offender can find the collision fast.
 	defer func() {
@@ -104,7 +104,7 @@ func TestRegisterError_DuplicateCodeMentionsExistingName(t *testing.T) {
 		assert.Contains(t, msg, "PROTOCOL_CONNECTION_TIMEOUT") // existing owner
 		assert.Contains(t, msg, "COLLIDING_NAME")              // new entrant
 	}()
-	registerError(&LavaError{Code: 1001, Name: "COLLIDING_NAME"})
+	registerError(&RouterError{Code: 1001, Name: "COLLIDING_NAME"})
 }
 
 func TestRegisterError_DuplicateNameMentionsExistingCode(t *testing.T) {
@@ -120,27 +120,27 @@ func TestRegisterError_DuplicateNameMentionsExistingCode(t *testing.T) {
 		assert.Contains(t, msg, "duplicate error name: PROTOCOL_CONNECTION_TIMEOUT")
 		assert.Contains(t, msg, "existing code 1001")
 	}()
-	registerError(&LavaError{Code: 99999, Name: "PROTOCOL_CONNECTION_TIMEOUT"})
+	registerError(&RouterError{Code: 99999, Name: "PROTOCOL_CONNECTION_TIMEOUT"})
 }
 
 // ---------------------------------------------------------------------------
 // Lookup helper tests
 // ---------------------------------------------------------------------------
 
-func TestErrorRegistry_GetLavaErrorByCode(t *testing.T) {
-	le := getLavaError(1001)
+func TestErrorRegistry_GetRouterErrorByCode(t *testing.T) {
+	le := getRouterError(1001)
 	assert.Equal(t, "PROTOCOL_CONNECTION_TIMEOUT", le.Name)
 
-	le = getLavaError(99999)
-	assert.Equal(t, LavaErrorUnknown, le)
+	le = getRouterError(99999)
+	assert.Equal(t, RouterErrorUnknown, le)
 }
 
-func TestErrorRegistry_GetLavaErrorByName(t *testing.T) {
-	le := getLavaErrorByName("PROTOCOL_CONNECTION_TIMEOUT")
+func TestErrorRegistry_GetRouterErrorByName(t *testing.T) {
+	le := getRouterErrorByName("PROTOCOL_CONNECTION_TIMEOUT")
 	assert.Equal(t, uint32(1001), le.Code)
 
-	le = getLavaErrorByName("NONEXISTENT")
-	assert.Equal(t, LavaErrorUnknown, le)
+	le = getRouterErrorByName("NONEXISTENT")
+	assert.Equal(t, RouterErrorUnknown, le)
 }
 
 func TestErrorRegistry_IsRetryableStates(t *testing.T) {
@@ -163,61 +163,61 @@ func TestErrorRegistry_IsInternalExternalFlags(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// LavaError as error interface + errors.Is tests
+// RouterError as error interface + errors.Is tests
 // ---------------------------------------------------------------------------
 
-func TestLavaError_String(t *testing.T) {
-	assert.Equal(t, "[3001] CHAIN_NONCE_TOO_LOW", LavaErrorChainNonceTooLow.String())
+func TestRouterError_String(t *testing.T) {
+	assert.Equal(t, "[3001] CHAIN_NONCE_TOO_LOW", RouterErrorChainNonceTooLow.String())
 }
 
-func TestLavaError_ABCICode(t *testing.T) {
-	assert.Equal(t, uint32(3001), LavaErrorChainNonceTooLow.ABCICode())
-	assert.Equal(t, uint32(1001), LavaErrorConnectionTimeout.ABCICode())
-	assert.Equal(t, uint32(0), LavaErrorUnknown.ABCICode())
+func TestRouterError_ABCICode(t *testing.T) {
+	assert.Equal(t, uint32(3001), RouterErrorChainNonceTooLow.ABCICode())
+	assert.Equal(t, uint32(1001), RouterErrorConnectionTimeout.ABCICode())
+	assert.Equal(t, uint32(0), RouterErrorUnknown.ABCICode())
 }
 
-func TestLavaError_IsNonMatch(t *testing.T) {
-	// Is returns false for non-LavaError targets
-	assert.False(t, LavaErrorChainNonceTooLow.Is(errors.New("not a LavaError")))
+func TestRouterError_IsNonMatch(t *testing.T) {
+	// Is returns false for non-RouterError targets
+	assert.False(t, RouterErrorChainNonceTooLow.Is(errors.New("not a RouterError")))
 }
 
-func TestLavaWrappedError_EmptyContext(t *testing.T) {
-	wrapped := NewLavaError(LavaErrorChainNonceTooLow, "")
+func TestRouterWrappedError_EmptyContext(t *testing.T) {
+	wrapped := NewRouterError(RouterErrorChainNonceTooLow, "")
 	assert.Contains(t, wrapped.Error(), "CHAIN_NONCE_TOO_LOW")
 }
 
-func TestLavaWrappedError_IsNonMatch(t *testing.T) {
-	wrapped := NewLavaError(LavaErrorChainNonceTooLow, "context")
-	// Is returns false for non-LavaError targets
-	assert.False(t, errors.Is(wrapped, errors.New("not a LavaError")))
+func TestRouterWrappedError_IsNonMatch(t *testing.T) {
+	wrapped := NewRouterError(RouterErrorChainNonceTooLow, "context")
+	// Is returns false for non-RouterError targets
+	assert.False(t, errors.Is(wrapped, errors.New("not a RouterError")))
 }
 
-func TestLavaWrappedError_Unwrap(t *testing.T) {
-	wrapped := NewLavaError(LavaErrorChainNonceTooLow, "context")
+func TestRouterWrappedError_Unwrap(t *testing.T) {
+	wrapped := NewRouterError(RouterErrorChainNonceTooLow, "context")
 	unwrapped := errors.Unwrap(wrapped)
 	require.NotNil(t, unwrapped)
-	assert.Equal(t, LavaErrorChainNonceTooLow, unwrapped)
+	assert.Equal(t, RouterErrorChainNonceTooLow, unwrapped)
 }
 
-func TestLavaError_ErrorInterface(t *testing.T) {
-	var err error = LavaErrorChainNonceTooLow
+func TestRouterError_ErrorInterface(t *testing.T) {
+	var err error = RouterErrorChainNonceTooLow
 	assert.Contains(t, err.Error(), "CHAIN_NONCE_TOO_LOW")
 }
 
-func TestLavaError_ErrorsIs(t *testing.T) {
+func TestRouterError_ErrorsIs(t *testing.T) {
 	// Direct match
-	assert.True(t, errors.Is(LavaErrorChainNonceTooLow, LavaErrorChainNonceTooLow))
-	assert.False(t, errors.Is(LavaErrorChainNonceTooLow, LavaErrorConnectionTimeout))
+	assert.True(t, errors.Is(RouterErrorChainNonceTooLow, RouterErrorChainNonceTooLow))
+	assert.False(t, errors.Is(RouterErrorChainNonceTooLow, RouterErrorConnectionTimeout))
 
-	// Wrapped with NewLavaError
-	wrapped := NewLavaError(LavaErrorChainNonceTooLow, "tx failed")
-	assert.True(t, errors.Is(wrapped, LavaErrorChainNonceTooLow))
-	assert.False(t, errors.Is(wrapped, LavaErrorConnectionTimeout))
+	// Wrapped with NewRouterError
+	wrapped := NewRouterError(RouterErrorChainNonceTooLow, "tx failed")
+	assert.True(t, errors.Is(wrapped, RouterErrorChainNonceTooLow))
+	assert.False(t, errors.Is(wrapped, RouterErrorConnectionTimeout))
 	assert.Contains(t, wrapped.Error(), "tx failed")
 
 	// Wrapped with fmt.Errorf %w
 	doubleWrapped := fmt.Errorf("relay error: %w", wrapped)
-	assert.True(t, errors.Is(doubleWrapped, LavaErrorChainNonceTooLow))
+	assert.True(t, errors.Is(doubleWrapped, RouterErrorChainNonceTooLow))
 }
 
 // ---------------------------------------------------------------------------
@@ -239,8 +239,8 @@ func TestErrorSubCategory_UnsupportedMethodTagging(t *testing.T) {
 	// 2002 (NODE_METHOD_NOT_SUPPORTED) is intentionally excluded: it's retryable on another provider
 	unsupportedCodes := []uint32{2001, 2008, 2009, 2010}
 	for _, code := range unsupportedCodes {
-		le := getLavaError(code)
-		require.NotEqual(t, LavaErrorUnknown, le, "code %d not registered", code)
+		le := getRouterError(code)
+		require.NotEqual(t, RouterErrorUnknown, le, "code %d not registered", code)
 		assert.True(t, le.SubCategory.IsUnsupportedMethod(),
 			"code %d (%s) should be SubCategoryUnsupportedMethod", code, le.Name)
 	}
@@ -248,7 +248,7 @@ func TestErrorSubCategory_UnsupportedMethodTagging(t *testing.T) {
 	// Non-unsupported codes should not be
 	normalCodes := []uint32{1001, 2003, 2005, 3001, 4001}
 	for _, code := range normalCodes {
-		le := getLavaError(code)
+		le := getRouterError(code)
 		assert.False(t, le.SubCategory.IsUnsupportedMethod(),
 			"code %d (%s) should NOT be SubCategoryUnsupportedMethod", code, le.Name)
 	}
@@ -275,10 +275,10 @@ func TestLayerDErrors_NoSpecialSubCategory(t *testing.T) {
 // TestErrorSubCategory_RateLimitTagging enforces that every rate-limit code carries the
 // unified subcategory, and that IsRateLimited() is driven by it.
 func TestErrorSubCategory_RateLimitTagging(t *testing.T) {
-	rateLimitCodes := []*LavaError{
-		LavaErrorRateLimited,       // 1020 protocol
-		LavaErrorNodeRateLimited,   // 2005 node
-		LavaErrorNodeLimitExceeded, // 2011 node limit (eth_getLogs range, etc.)
+	rateLimitCodes := []*RouterError{
+		RouterErrorRateLimited,       // 1020 protocol
+		RouterErrorNodeRateLimited,   // 2005 node
+		RouterErrorNodeLimitExceeded, // 2011 node limit (eth_getLogs range, etc.)
 	}
 	for _, le := range rateLimitCodes {
 		assert.True(t, le.SubCategory.IsRateLimit(),
@@ -288,10 +288,10 @@ func TestErrorSubCategory_RateLimitTagging(t *testing.T) {
 	}
 
 	// Exclusion spot-checks
-	exclusions := []*LavaError{
-		LavaErrorConnectionTimeout, // internal transport
-		LavaErrorNodeInternalError, // retryable but not rate-limit
-		LavaErrorUserParseError,    // user-input, not rate-limit
+	exclusions := []*RouterError{
+		RouterErrorConnectionTimeout, // internal transport
+		RouterErrorNodeInternalError, // retryable but not rate-limit
+		RouterErrorUserParseError,    // user-input, not rate-limit
 	}
 	for _, le := range exclusions {
 		assert.False(t, le.SubCategory.IsRateLimit(),
@@ -308,18 +308,18 @@ func TestClassifyError_UserInputMatchers(t *testing.T) {
 	tests := []struct {
 		name     string
 		message  string
-		expected *LavaError
+		expected *RouterError
 	}{
 		// USER_INVALID_BLOCK_FORMAT
-		{"geth hex without 0x", "hex string without 0x prefix", LavaErrorUserInvalidBlockFormat},
-		{"invalid block number", "invalid block number: expected hex", LavaErrorUserInvalidBlockFormat},
-		{"invalid block hash", "invalid block hash: wrong length", LavaErrorUserInvalidBlockFormat},
+		{"geth hex without 0x", "hex string without 0x prefix", RouterErrorUserInvalidBlockFormat},
+		{"invalid block number", "invalid block number: expected hex", RouterErrorUserInvalidBlockFormat},
+		{"invalid block hash", "invalid block hash: wrong length", RouterErrorUserInvalidBlockFormat},
 		// USER_INVALID_ADDRESS
-		{"bad checksum", "bad address checksum: 0xDEADbeef", LavaErrorUserInvalidAddress},
-		{"bare invalid address", "invalid address: too short", LavaErrorUserInvalidAddress},
+		{"bad checksum", "bad address checksum: 0xDEADbeef", RouterErrorUserInvalidAddress},
+		{"bare invalid address", "invalid address: too short", RouterErrorUserInvalidAddress},
 		// USER_INVALID_HEX
-		{"geth odd length", "hex string has odd length", LavaErrorUserInvalidHex},
-		{"bare invalid hex", "invalid hex encoding in parameter", LavaErrorUserInvalidHex},
+		{"geth odd length", "hex string has odd length", RouterErrorUserInvalidHex},
+		{"bare invalid hex", "invalid hex encoding in parameter", RouterErrorUserInvalidHex},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -335,31 +335,31 @@ func TestClassifyError_UserInputMatchers(t *testing.T) {
 func TestClassifyError_ChainExecutionMatchers(t *testing.T) {
 	t.Run("contract size exceeded (EVM Tier-1)", func(t *testing.T) {
 		result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, "max code size exceeded")
-		assert.Equal(t, LavaErrorChainContractSizeExceeded, result)
+		assert.Equal(t, RouterErrorChainContractSizeExceeded, result)
 	})
 
 	t.Run("account not found (Cosmos Tier-2)", func(t *testing.T) {
 		result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportJsonRPC, 0, "account not found: lava1abc")
-		assert.Equal(t, LavaErrorChainAccountNotFound, result)
+		assert.Equal(t, RouterErrorChainAccountNotFound, result)
 	})
 
 	t.Run("account not found does NOT match on EVM (Cosmos-scoped)", func(t *testing.T) {
 		// Cosmos Tier-2 scoping must not leak into EVM, where "account not
 		// found" would collide with unfunded-address contract calls.
 		result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, "account not found")
-		assert.Equal(t, LavaErrorUnknown, result)
+		assert.Equal(t, RouterErrorUnknown, result)
 	})
 
 	t.Run("zkevm out of counters (generic Tier-1, EVM-routed)", func(t *testing.T) {
 		result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, "batch: out of counters: arithmetic")
-		assert.Equal(t, LavaErrorChainZkEVMOutOfCounters, result)
+		assert.Equal(t, RouterErrorChainZkEVMOutOfCounters, result)
 	})
 
 	t.Run("bitcoin wallet insufficient funds by code", func(t *testing.T) {
 		// Code 3344 is the stable identity; the Name disambiguates from EVM
 		// CHAIN_INSUFFICIENT_FUNDS (3003) which is a tx submission failure.
 		result := ClassifyError(nil, ChainFamilyBitcoin, TransportJsonRPC, -6, "")
-		assert.Equal(t, LavaErrorChainBitcoinWalletInsufficientFunds, result)
+		assert.Equal(t, RouterErrorChainBitcoinWalletInsufficientFunds, result)
 		assert.Equal(t, uint32(3344), result.Code)
 		assert.Equal(t, "CHAIN_BITCOIN_WALLET_INSUFFICIENT_FUNDS", result.Name)
 	})
@@ -376,7 +376,7 @@ func TestClassifyError_NodeSyncingMatcher(t *testing.T) {
 	for _, msg := range cases {
 		t.Run(msg, func(t *testing.T) {
 			result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, msg)
-			assert.Equal(t, LavaErrorNodeSyncing, result)
+			assert.Equal(t, RouterErrorNodeSyncing, result)
 		})
 	}
 }
@@ -386,7 +386,7 @@ func TestClassifyError_NodeSyncingMatcher(t *testing.T) {
 // not a node-level internal error.
 func TestClassifyError_UnexpectedEndOfJSONInputIsConnectionReset(t *testing.T) {
 	result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, "unexpected end of JSON input")
-	assert.Equal(t, LavaErrorConnectionReset, result)
+	assert.Equal(t, RouterErrorConnectionReset, result)
 }
 
 // TestClassifyError_ChainMatchers asserts Layer C (chain) matchers classify
@@ -397,16 +397,16 @@ func TestClassifyError_ChainMatchers(t *testing.T) {
 	evmCases := []struct {
 		name     string
 		message  string
-		expected *LavaError
+		expected *RouterError
 	}{
-		{"geth oversized data", "oversized data", LavaErrorChainTxTooLarge},
-		{"erigon tx size exceeds", "transaction size exceeds 128 kB", LavaErrorChainTxTooLarge},
-		{"tx too large", "tx too large", LavaErrorChainTxTooLarge},
-		{"invalid signature bare", "invalid signature: recovery failed", LavaErrorChainInvalidSignature},
-		{"signature verification failed", "signature verification failed", LavaErrorChainInvalidSignature},
+		{"geth oversized data", "oversized data", RouterErrorChainTxTooLarge},
+		{"erigon tx size exceeds", "transaction size exceeds 128 kB", RouterErrorChainTxTooLarge},
+		{"tx too large", "tx too large", RouterErrorChainTxTooLarge},
+		{"invalid signature bare", "invalid signature: recovery failed", RouterErrorChainInvalidSignature},
+		{"signature verification failed", "signature verification failed", RouterErrorChainInvalidSignature},
 		// Layer C state
-		{"transaction not found", "transaction not found: 0xabcd", LavaErrorChainTxNotFound},
-		{"receipt not found", "receipt not found for hash 0xabcd", LavaErrorChainReceiptNotFound},
+		{"transaction not found", "transaction not found: 0xabcd", RouterErrorChainTxNotFound},
+		{"receipt not found", "receipt not found for hash 0xabcd", RouterErrorChainReceiptNotFound},
 	}
 	for _, tt := range evmCases {
 		t.Run("EVM/"+tt.name, func(t *testing.T) {
@@ -419,11 +419,11 @@ func TestClassifyError_ChainMatchers(t *testing.T) {
 	cosmosCases := []struct {
 		name     string
 		message  string
-		expected *LavaError
+		expected *RouterError
 	}{
-		{"account sequence mismatch", "account sequence mismatch, expected 7, got 5", LavaErrorChainInvalidSequence},
-		{"insufficient fees (plural)", "insufficient fees; got: 100ulava required: 200ulava", LavaErrorChainInsufficientFee},
-		{"insufficient fee (singular)", "insufficient fee for tx", LavaErrorChainInsufficientFee},
+		{"account sequence mismatch", "account sequence mismatch, expected 7, got 5", RouterErrorChainInvalidSequence},
+		{"insufficient fees (plural)", "insufficient fees; got: 100ulava required: 200ulava", RouterErrorChainInsufficientFee},
+		{"insufficient fee (singular)", "insufficient fee for tx", RouterErrorChainInsufficientFee},
 	}
 	for _, tt := range cosmosCases {
 		t.Run("Cosmos/"+tt.name, func(t *testing.T) {
@@ -436,11 +436,11 @@ func TestClassifyError_ChainMatchers(t *testing.T) {
 	btcCases := []struct {
 		name     string
 		message  string
-		expected *LavaError
+		expected *RouterError
 	}{
-		{"already spent", "utxo already spent", LavaErrorChainDoubleSpend},
-		{"double spend", "double spend detected", LavaErrorChainDoubleSpend},
-		{"txn-mempool-conflict", "txn-mempool-conflict: input already spent in mempool", LavaErrorChainDoubleSpend},
+		{"already spent", "utxo already spent", RouterErrorChainDoubleSpend},
+		{"double spend", "double spend detected", RouterErrorChainDoubleSpend},
+		{"txn-mempool-conflict", "txn-mempool-conflict: input already spent in mempool", RouterErrorChainDoubleSpend},
 	}
 	for _, tt := range btcCases {
 		t.Run("Bitcoin/"+tt.name, func(t *testing.T) {
@@ -452,7 +452,7 @@ func TestClassifyError_ChainMatchers(t *testing.T) {
 	// Solana Tier-2 — blockhash expiry
 	t.Run("Solana/blockhash not found", func(t *testing.T) {
 		result := ClassifyError(nil, ChainFamilySolana, TransportJsonRPC, 0, "Blockhash not found")
-		assert.Equal(t, LavaErrorChainSolanaBlockhashNotFound, result)
+		assert.Equal(t, RouterErrorChainSolanaBlockhashNotFound, result)
 	})
 
 	// Cross-family precedence: Solana's own "invalid signature" code (3306) must
@@ -460,7 +460,7 @@ func TestClassifyError_ChainMatchers(t *testing.T) {
 	// "invalid signature" matcher.
 	t.Run("Solana signature code wins over generic message", func(t *testing.T) {
 		result := ClassifyError(nil, ChainFamilySolana, TransportJsonRPC, -32003, "signature verification failed")
-		assert.Equal(t, LavaErrorChainSolanaSignatureVerifyFailed, result,
+		assert.Equal(t, RouterErrorChainSolanaSignatureVerifyFailed, result,
 			"Tier-2 Solana mapping must win over Tier-1 generic 'invalid signature'")
 	})
 }
@@ -510,13 +510,13 @@ func TestClassifyError_LayerDCodesHaveMatchers(t *testing.T) {
 func TestLayerDErrors_AreNonRetryable(t *testing.T) {
 	// JSON-RPC parse error code → USER_PARSE_ERROR → non-retryable
 	le := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32700, "parse error")
-	assert.Equal(t, LavaErrorUserParseError, le)
+	assert.Equal(t, RouterErrorUserParseError, le)
 	assert.False(t, le.Retryable)
 	assert.False(t, le.SubCategory.IsUnsupportedMethod())
 
 	// JSON-RPC invalid params → USER_INVALID_PARAMS → non-retryable
 	le = ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32602, "invalid params")
-	assert.Equal(t, LavaErrorUserInvalidParams, le)
+	assert.Equal(t, RouterErrorUserInvalidParams, le)
 	assert.False(t, le.Retryable)
 	assert.False(t, le.SubCategory.IsUnsupportedMethod())
 }
@@ -727,23 +727,23 @@ func (e *timeoutNetError) Timeout() bool   { return true }
 func (e *timeoutNetError) Temporary() bool { return true }
 
 func TestClassifyError_ConnectionErrorTakesPrecedence(t *testing.T) {
-	result := ClassifyError(LavaErrorConnectionTimeout, ChainFamilyEVM, TransportJsonRPC, -32601, "method not found")
-	assert.Equal(t, LavaErrorConnectionTimeout, result, "connection error should take precedence over message match")
+	result := ClassifyError(RouterErrorConnectionTimeout, ChainFamilyEVM, TransportJsonRPC, -32601, "method not found")
+	assert.Equal(t, RouterErrorConnectionTimeout, result, "connection error should take precedence over message match")
 }
 
 func TestClassifyError_ConnectionErrorNeverUnknown(t *testing.T) {
-	// A non-nil connectionError must NEVER produce LavaErrorUnknown, regardless
+	// A non-nil connectionError must NEVER produce RouterErrorUnknown, regardless
 	// of what the message/code matchers would return for the same input.
-	connectionErrors := []*LavaError{
-		LavaErrorConnectionTimeout,
-		LavaErrorConnectionRefused,
-		LavaErrorContextDeadline,
-		LavaErrorContextCanceled,
+	connectionErrors := []*RouterError{
+		RouterErrorConnectionTimeout,
+		RouterErrorConnectionRefused,
+		RouterErrorContextDeadline,
+		RouterErrorContextCanceled,
 	}
 	for _, connErr := range connectionErrors {
 		result := ClassifyError(connErr, ChainFamilyEVM, TransportJsonRPC, 0, "some unrecognized error message")
-		assert.NotEqual(t, LavaErrorUnknown, result,
-			"ClassifyError with connectionError=%s must not return LavaErrorUnknown", connErr.Name)
+		assert.NotEqual(t, RouterErrorUnknown, result,
+			"ClassifyError with connectionError=%s must not return RouterErrorUnknown", connErr.Name)
 		assert.Equal(t, connErr, result,
 			"ClassifyError must return the connectionError unchanged")
 	}
@@ -751,7 +751,7 @@ func TestClassifyError_ConnectionErrorNeverUnknown(t *testing.T) {
 
 func TestDetectConnectionError_NeverProducesUnknown(t *testing.T) {
 	// For any error that DetectConnectionError recognises, the full classification
-	// pipeline must not produce LavaErrorUnknown.
+	// pipeline must not produce RouterErrorUnknown.
 	testCases := []struct {
 		name string
 		err  error
@@ -771,7 +771,7 @@ func TestDetectConnectionError_NeverProducesUnknown(t *testing.T) {
 			connErr := DetectConnectionError(tc.err)
 			require.NotNil(t, connErr, "DetectConnectionError should recognise this error")
 			result := ClassifyError(connErr, ChainFamilyEVM, TransportJsonRPC, 0, tc.err.Error())
-			assert.NotEqual(t, LavaErrorUnknown, result,
+			assert.NotEqual(t, RouterErrorUnknown, result,
 				"classification pipeline must not produce UNKNOWN_ERROR for a recognised connection error")
 		})
 	}
@@ -779,7 +779,7 @@ func TestDetectConnectionError_NeverProducesUnknown(t *testing.T) {
 
 func TestDetectConnectionError_GOAWAYEnhanceYourCalmNotCaught(t *testing.T) {
 	// ENHANCE_YOUR_CALM GOAWAY is a rate-limit signal — DetectConnectionError must NOT catch it
-	// so that transport-specific matchers can classify it as LavaErrorNodeRateLimited.
+	// so that transport-specific matchers can classify it as RouterErrorNodeRateLimited.
 	err := fmt.Errorf(`http2: server sent GOAWAY and closed the connection; ErrCode=ENHANCE_YOUR_CALM, debug=""`)
 	connErr := DetectConnectionError(err)
 	assert.Nil(t, connErr, "ENHANCE_YOUR_CALM GOAWAY should not be caught by DetectConnectionError")
@@ -787,43 +787,43 @@ func TestDetectConnectionError_GOAWAYEnhanceYourCalmNotCaught(t *testing.T) {
 
 // TestDetectConnectionError_StringFallbackTable exercises every row in
 // stringConnectionFallbacks to lock in precedence order and the carve-outs.
-// Each case lists the input message and the expected LavaError (or nil).
+// Each case lists the input message and the expected RouterError (or nil).
 func TestDetectConnectionError_StringFallbackTable(t *testing.T) {
 	tests := []struct {
 		name     string
 		message  string
-		expected *LavaError
+		expected *RouterError
 	}{
 		// Layer 2 row 1: local context deadline (wrapped without %w)
-		{"local context deadline", "operation failed: context deadline exceeded", LavaErrorContextDeadline},
+		{"local context deadline", "operation failed: context deadline exceeded", RouterErrorContextDeadline},
 		// Layer 2 row 1 carve-out: remote gRPC DeadlineExceeded MUST NOT be caught
 		{"remote grpc deadline exceeded", "rpc error: code = DeadlineExceeded desc = context deadline exceeded", nil},
 		// Layer 2 row 2: local context cancel
-		{"local context canceled", "operation failed: context canceled", LavaErrorContextCanceled},
+		{"local context canceled", "operation failed: context canceled", RouterErrorContextCanceled},
 		// Layer 2 row 2 carve-out: remote gRPC Canceled MUST NOT be caught
 		{"remote grpc canceled", "rpc error: code = Canceled desc = context canceled", nil},
 		// Row 3: HTTP/2 GOAWAY → connection reset
-		{"goaway protocol_error", `http2: server sent goaway and closed the connection; errcode=protocol_error`, LavaErrorConnectionReset},
+		{"goaway protocol_error", `http2: server sent goaway and closed the connection; errcode=protocol_error`, RouterErrorConnectionReset},
 		// Row 3 carve-out: ENHANCE_YOUR_CALM → falls through (rate-limit, not connection)
 		{"goaway enhance_your_calm", `http2: server sent goaway; errcode=enhance_your_calm`, nil},
 		// Row 4: HTTP/2 RST_STREAM
-		{"stream error", "stream error: stream id 77; internal_error; received from peer", LavaErrorConnectionReset},
+		{"stream error", "stream error: stream id 77; internal_error; received from peer", RouterErrorConnectionReset},
 		// Row 5: connection refused (envoy wrap)
-		{"connection refused", "upstream: delayed connect error: connection refused", LavaErrorConnectionRefused},
+		{"connection refused", "upstream: delayed connect error: connection refused", RouterErrorConnectionRefused},
 		// Rows 6–8: network unreachable variants
-		{"network is unreachable", "dial tcp 1.2.3.4:443: connect: network is unreachable", LavaErrorNetworkUnreachable},
-		{"host is unreachable", "dial tcp 1.2.3.4:443: connect: host is unreachable", LavaErrorNetworkUnreachable},
-		{"no route to host", "dial tcp 1.2.3.4:443: connect: no route to host", LavaErrorNetworkUnreachable},
+		{"network is unreachable", "dial tcp 1.2.3.4:443: connect: network is unreachable", RouterErrorNetworkUnreachable},
+		{"host is unreachable", "dial tcp 1.2.3.4:443: connect: host is unreachable", RouterErrorNetworkUnreachable},
+		{"no route to host", "dial tcp 1.2.3.4:443: connect: no route to host", RouterErrorNetworkUnreachable},
 		// Row 9: connection reset (generic)
-		{"connection reset", "read tcp: connection reset by peer", LavaErrorConnectionReset},
+		{"connection reset", "read tcp: connection reset by peer", RouterErrorConnectionReset},
 		// Row 10: envoy connection termination (distinct from refused)
-		{"connection termination", "upstream: connection termination", LavaErrorConnectionReset},
+		{"connection termination", "upstream: connection termination", RouterErrorConnectionReset},
 		// Negative case: nothing matches
 		{"unrelated error", "some unrelated node error", nil},
 
 		// Precedence: "connection refused" and "connection reset" both present —
 		// the "refused" row comes first in the table, so refused wins.
-		{"refused+reset both present", "connection refused; connection reset", LavaErrorConnectionRefused},
+		{"refused+reset both present", "connection refused; connection reset", RouterErrorConnectionRefused},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -837,36 +837,36 @@ func TestDetectConnectionError_StringFallbackTable(t *testing.T) {
 func TestClassifyError_Tier2BeforeTier1(t *testing.T) {
 	// Solana -32005 should match Tier 2 (NODE_SOLANA_UNHEALTHY) not Tier 1 (NODE_LIMIT_EXCEEDED)
 	result := ClassifyError(nil, ChainFamilySolana, TransportJsonRPC, -32005, "Node is unhealthy")
-	assert.Equal(t, LavaErrorNodeSolanaUnhealthy, result)
+	assert.Equal(t, RouterErrorNodeSolanaUnhealthy, result)
 }
 
 func TestClassifyError_Tier1Fallback(t *testing.T) {
 	// Non-Solana chain with -32601 should match Tier 1 generic
 	result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32601, "method not found")
-	assert.Equal(t, LavaErrorNodeMethodNotFound, result)
+	assert.Equal(t, RouterErrorNodeMethodNotFound, result)
 }
 
 func TestClassifyError_UnknownFallback(t *testing.T) {
 	result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, "some random error")
-	assert.Equal(t, LavaErrorUnknown, result)
+	assert.Equal(t, RouterErrorUnknown, result)
 }
 
 func TestClassifyError_TransportScoping(t *testing.T) {
 	// HTTP 429 in JSON-RPC transport should match (we added HTTP matchers to JSON-RPC)
 	result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, "HTTP status 429")
-	assert.Equal(t, LavaErrorNodeRateLimited, result)
+	assert.Equal(t, RouterErrorNodeRateLimited, result)
 
 	// HTTP 429 in REST transport should also match
 	result = ClassifyError(nil, ChainFamilyAptos, TransportREST, 0, "HTTP status 429")
-	assert.Equal(t, LavaErrorNodeRateLimited, result)
+	assert.Equal(t, RouterErrorNodeRateLimited, result)
 
 	// gRPC code 14 (Unavailable) should match in gRPC transport
 	result = ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 14, "service unavailable")
-	assert.Equal(t, LavaErrorNodeServiceUnavailable, result)
+	assert.Equal(t, RouterErrorNodeServiceUnavailable, result)
 
 	// gRPC code should NOT match in JSON-RPC transport
 	result = ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 14, "service unavailable")
-	assert.NotEqual(t, LavaErrorNodeServiceUnavailable, result)
+	assert.NotEqual(t, RouterErrorNodeServiceUnavailable, result)
 }
 
 func TestClassifyError_ChainSpecificMappings(t *testing.T) {
@@ -875,44 +875,44 @@ func TestClassifyError_ChainSpecificMappings(t *testing.T) {
 		family   ChainFamily
 		code     int
 		message  string
-		expected *LavaError
+		expected *RouterError
 	}{
 		// Solana Tier 2 — source: agave rpc-client-api/src/custom_error.rs
-		{"Solana -32009", ChainFamilySolana, -32009, "", LavaErrorChainSolanaMissingLongTerm},
-		{"Solana -32007", ChainFamilySolana, -32007, "", LavaErrorChainSolanaLedgerJump},
-		{"Solana -32005", ChainFamilySolana, -32005, "", LavaErrorNodeSolanaUnhealthy},
-		{"Solana -32004", ChainFamilySolana, -32004, "", LavaErrorChainBlockNotFound},
-		{"Solana -32001", ChainFamilySolana, -32001, "", LavaErrorChainStatePruned},
+		{"Solana -32009", ChainFamilySolana, -32009, "", RouterErrorChainSolanaMissingLongTerm},
+		{"Solana -32007", ChainFamilySolana, -32007, "", RouterErrorChainSolanaLedgerJump},
+		{"Solana -32005", ChainFamilySolana, -32005, "", RouterErrorNodeSolanaUnhealthy},
+		{"Solana -32004", ChainFamilySolana, -32004, "", RouterErrorChainBlockNotFound},
+		{"Solana -32001", ChainFamilySolana, -32001, "", RouterErrorChainStatePruned},
 		// Bitcoin Tier 2 — source: Bitcoin Core src/rpc/protocol.h
-		{"Bitcoin warmup -28", ChainFamilyBitcoin, -28, "", LavaErrorNodeBitcoinWarmup},
-		{"Bitcoin initial download -10", ChainFamilyBitcoin, -10, "", LavaErrorNodeBitcoinInitialDownload},
-		{"Bitcoin not connected -9", ChainFamilyBitcoin, -9, "", LavaErrorNodeBitcoinNotConnected},
-		{"Bitcoin verify error -25", ChainFamilyBitcoin, -25, "", LavaErrorChainBitcoinVerifyError},
-		{"Bitcoin verify rejected -26", ChainFamilyBitcoin, -26, "", LavaErrorChainBitcoinVerifyRejected},
-		{"Bitcoin already in chain -27", ChainFamilyBitcoin, -27, "", LavaErrorChainBitcoinAlreadyInChain},
-		{"Bitcoin wallet insufficient funds -6", ChainFamilyBitcoin, -6, "", LavaErrorChainBitcoinWalletInsufficientFunds},
+		{"Bitcoin warmup -28", ChainFamilyBitcoin, -28, "", RouterErrorNodeBitcoinWarmup},
+		{"Bitcoin initial download -10", ChainFamilyBitcoin, -10, "", RouterErrorNodeBitcoinInitialDownload},
+		{"Bitcoin not connected -9", ChainFamilyBitcoin, -9, "", RouterErrorNodeBitcoinNotConnected},
+		{"Bitcoin verify error -25", ChainFamilyBitcoin, -25, "", RouterErrorChainBitcoinVerifyError},
+		{"Bitcoin verify rejected -26", ChainFamilyBitcoin, -26, "", RouterErrorChainBitcoinVerifyRejected},
+		{"Bitcoin already in chain -27", ChainFamilyBitcoin, -27, "", RouterErrorChainBitcoinAlreadyInChain},
+		{"Bitcoin wallet insufficient funds -6", ChainFamilyBitcoin, -6, "", RouterErrorChainBitcoinWalletInsufficientFunds},
 		// Starknet Tier 2
-		{"Starknet failed to receive tx", ChainFamilyStarknet, 1, "", LavaErrorChainStarknetFailedToReceiveTx},
-		{"Starknet contract not found", ChainFamilyStarknet, 20, "", LavaErrorChainStarknetContractNotFound},
-		{"Starknet block not found", ChainFamilyStarknet, 24, "", LavaErrorChainStarknetBlockNotFound},
-		{"Starknet class not found", ChainFamilyStarknet, 28, "", LavaErrorChainStarknetClassNotFound},
-		{"Starknet tx hash not found", ChainFamilyStarknet, 29, "", LavaErrorChainStarknetTxHashNotFound},
-		{"Starknet contract error", ChainFamilyStarknet, 40, "", LavaErrorChainStarknetContractError},
-		{"Starknet tx exec error", ChainFamilyStarknet, 41, "", LavaErrorChainStarknetTxExecError},
-		{"Starknet class declared", ChainFamilyStarknet, 51, "", LavaErrorChainStarknetClassAlreadyDeclared},
-		{"Starknet invalid nonce", ChainFamilyStarknet, 52, "", LavaErrorChainStarknetInvalidNonce},
-		{"Starknet insufficient fee", ChainFamilyStarknet, 53, "", LavaErrorChainStarknetInsufficientFee},
-		{"Starknet insufficient balance", ChainFamilyStarknet, 54, "", LavaErrorChainStarknetInsufficientBalance},
-		{"Starknet validation failure", ChainFamilyStarknet, 55, "", LavaErrorChainStarknetValidationFailure},
-		{"Starknet compilation", ChainFamilyStarknet, 56, "", LavaErrorChainStarknetCompilationFailed},
-		{"Starknet duplicate tx", ChainFamilyStarknet, 59, "", LavaErrorChainStarknetDuplicateTx},
-		{"Starknet tx version unsupported", ChainFamilyStarknet, 61, "", LavaErrorChainStarknetTxVersionUnsupported},
-		{"Starknet unexpected error", ChainFamilyStarknet, 63, "", LavaErrorChainStarknetUnexpectedError},
+		{"Starknet failed to receive tx", ChainFamilyStarknet, 1, "", RouterErrorChainStarknetFailedToReceiveTx},
+		{"Starknet contract not found", ChainFamilyStarknet, 20, "", RouterErrorChainStarknetContractNotFound},
+		{"Starknet block not found", ChainFamilyStarknet, 24, "", RouterErrorChainStarknetBlockNotFound},
+		{"Starknet class not found", ChainFamilyStarknet, 28, "", RouterErrorChainStarknetClassNotFound},
+		{"Starknet tx hash not found", ChainFamilyStarknet, 29, "", RouterErrorChainStarknetTxHashNotFound},
+		{"Starknet contract error", ChainFamilyStarknet, 40, "", RouterErrorChainStarknetContractError},
+		{"Starknet tx exec error", ChainFamilyStarknet, 41, "", RouterErrorChainStarknetTxExecError},
+		{"Starknet class declared", ChainFamilyStarknet, 51, "", RouterErrorChainStarknetClassAlreadyDeclared},
+		{"Starknet invalid nonce", ChainFamilyStarknet, 52, "", RouterErrorChainStarknetInvalidNonce},
+		{"Starknet insufficient fee", ChainFamilyStarknet, 53, "", RouterErrorChainStarknetInsufficientFee},
+		{"Starknet insufficient balance", ChainFamilyStarknet, 54, "", RouterErrorChainStarknetInsufficientBalance},
+		{"Starknet validation failure", ChainFamilyStarknet, 55, "", RouterErrorChainStarknetValidationFailure},
+		{"Starknet compilation", ChainFamilyStarknet, 56, "", RouterErrorChainStarknetCompilationFailed},
+		{"Starknet duplicate tx", ChainFamilyStarknet, 59, "", RouterErrorChainStarknetDuplicateTx},
+		{"Starknet tx version unsupported", ChainFamilyStarknet, 61, "", RouterErrorChainStarknetTxVersionUnsupported},
+		{"Starknet unexpected error", ChainFamilyStarknet, 63, "", RouterErrorChainStarknetUnexpectedError},
 		// NEAR Tier 2 (message-based)
-		{"NEAR unknown block", ChainFamilyNEAR, 0, "UNKNOWN_BLOCK", LavaErrorChainNEARUnknownBlock},
-		{"NEAR unknown chunk", ChainFamilyNEAR, 0, "UNKNOWN_CHUNK", LavaErrorChainNEARUnknownChunk},
-		{"NEAR invalid shard", ChainFamilyNEAR, 0, "INVALID_SHARD_ID", LavaErrorChainNEARInvalidShardID},
-		{"NEAR not synced", ChainFamilyNEAR, 0, "NOT_SYNCED_YET", LavaErrorChainNEARNotSyncedYet},
+		{"NEAR unknown block", ChainFamilyNEAR, 0, "UNKNOWN_BLOCK", RouterErrorChainNEARUnknownBlock},
+		{"NEAR unknown chunk", ChainFamilyNEAR, 0, "UNKNOWN_CHUNK", RouterErrorChainNEARUnknownChunk},
+		{"NEAR invalid shard", ChainFamilyNEAR, 0, "INVALID_SHARD_ID", RouterErrorChainNEARInvalidShardID},
+		{"NEAR not synced", ChainFamilyNEAR, 0, "NOT_SYNCED_YET", RouterErrorChainNEARNotSyncedYet},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -927,29 +927,29 @@ func TestClassifyError_GenericJsonRPCMappings(t *testing.T) {
 		name     string
 		code     int
 		message  string
-		expected *LavaError
+		expected *RouterError
 	}{
 		// JSON-RPC error codes
-		{"method not found code", -32601, "", LavaErrorNodeMethodNotFound},
-		{"parse error code", -32700, "", LavaErrorUserParseError},
-		{"invalid request code", -32600, "", LavaErrorUserInvalidRequest},
-		{"invalid params code", -32602, "", LavaErrorUserInvalidParams},
-		{"internal error code", -32603, "", LavaErrorNodeInternalError},
-		{"server error code", -32000, "some error", LavaErrorNodeServerError},
-		{"limit exceeded code", -32005, "query limit", LavaErrorNodeLimitExceeded},
+		{"method not found code", -32601, "", RouterErrorNodeMethodNotFound},
+		{"parse error code", -32700, "", RouterErrorUserParseError},
+		{"invalid request code", -32600, "", RouterErrorUserInvalidRequest},
+		{"invalid params code", -32602, "", RouterErrorUserInvalidParams},
+		{"internal error code", -32603, "", RouterErrorNodeInternalError},
+		{"server error code", -32000, "some error", RouterErrorNodeServerError},
+		{"limit exceeded code", -32005, "query limit", RouterErrorNodeLimitExceeded},
 
 		// Message-based matchers
-		{"nonce too low", 0, "nonce too low", LavaErrorChainNonceTooLow},
-		{"nonce too high", 0, "nonce too high", LavaErrorChainNonceTooHigh},
-		{"insufficient funds", 0, "insufficient funds for gas", LavaErrorChainInsufficientFunds},
-		{"execution reverted", 0, "execution reverted", LavaErrorChainExecutionReverted},
-		{"already known", 0, "already known", LavaErrorChainTxAlreadyKnown},
-		{"out of gas", 0, "out of gas", LavaErrorChainOutOfGas},
-		{"rate limit message", 0, "rate limit exceeded", LavaErrorNodeRateLimited},
-		{"missing trie node", 0, "missing trie node abcdef", LavaErrorChainStatePruned},
-		{"block not found", 0, "block not found", LavaErrorChainBlockNotFound},
-		{"underpriced", 0, "transaction underpriced", LavaErrorChainTxUnderpriced},
-		{"replacement underpriced", 0, "replacement transaction underpriced", LavaErrorChainTxReplacementUnderpriced},
+		{"nonce too low", 0, "nonce too low", RouterErrorChainNonceTooLow},
+		{"nonce too high", 0, "nonce too high", RouterErrorChainNonceTooHigh},
+		{"insufficient funds", 0, "insufficient funds for gas", RouterErrorChainInsufficientFunds},
+		{"execution reverted", 0, "execution reverted", RouterErrorChainExecutionReverted},
+		{"already known", 0, "already known", RouterErrorChainTxAlreadyKnown},
+		{"out of gas", 0, "out of gas", RouterErrorChainOutOfGas},
+		{"rate limit message", 0, "rate limit exceeded", RouterErrorNodeRateLimited},
+		{"missing trie node", 0, "missing trie node abcdef", RouterErrorChainStatePruned},
+		{"block not found", 0, "block not found", RouterErrorChainBlockNotFound},
+		{"underpriced", 0, "transaction underpriced", RouterErrorChainTxUnderpriced},
+		{"replacement underpriced", 0, "replacement transaction underpriced", RouterErrorChainTxReplacementUnderpriced},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -966,32 +966,32 @@ func TestClassifyError_UnsupportedMethodMatchersAreNarrow(t *testing.T) {
 	tests := []struct {
 		name     string
 		message  string
-		expected *LavaError
+		expected *RouterError
 	}{
 		// "<keyword> ... is not available" — must match only when a method-ish
 		// keyword is present in the same clause.
-		{"method is not available (bare)", "method eth_getProof is not available", LavaErrorNodeMethodNotSupported},
-		{"rpc is not available", "the rpc method eth_getLogs is not available on this node", LavaErrorNodeMethodNotSupported},
-		{"data is not available — must NOT match", "data is not available for this block", LavaErrorUnknown},
-		{"feature is not available — must NOT match", "feature is not available on this plan", LavaErrorUnknown},
-		{"block is not available (Solana) — must NOT match", "Block is not available for slot 1234567", LavaErrorUnknown},
+		{"method is not available (bare)", "method eth_getProof is not available", RouterErrorNodeMethodNotSupported},
+		{"rpc is not available", "the rpc method eth_getLogs is not available on this node", RouterErrorNodeMethodNotSupported},
+		{"data is not available — must NOT match", "data is not available for this block", RouterErrorUnknown},
+		{"feature is not available — must NOT match", "feature is not available on this plan", RouterErrorUnknown},
+		{"block is not available (Solana) — must NOT match", "Block is not available for slot 1234567", RouterErrorUnknown},
 
 		// "invalid method" — must match only when terminal, colon/quote-followed,
 		// or followed by "name".
-		{"invalid method (bare)", "invalid method", LavaErrorNodeMethodNotFound},
-		{"invalid method colon", "invalid method: eth_foo", LavaErrorNodeMethodNotFound},
-		{"invalid method single-quote", "invalid method 'eth_foo'", LavaErrorNodeMethodNotFound},
-		{"invalid method double-quote", `invalid method "eth_foo"`, LavaErrorNodeMethodNotFound},
-		{"invalid method name", "invalid method name: eth_foo", LavaErrorNodeMethodNotFound},
-		{"invalid method argument — must NOT match", "invalid method argument at position 2", LavaErrorUnknown},
-		{"invalid method parameters — must NOT match", "invalid method parameters for call", LavaErrorUnknown},
-		{"invalid method signature — must NOT match", "invalid method signature: expected 3 got 2", LavaErrorUnknown},
+		{"invalid method (bare)", "invalid method", RouterErrorNodeMethodNotFound},
+		{"invalid method colon", "invalid method: eth_foo", RouterErrorNodeMethodNotFound},
+		{"invalid method single-quote", "invalid method 'eth_foo'", RouterErrorNodeMethodNotFound},
+		{"invalid method double-quote", `invalid method "eth_foo"`, RouterErrorNodeMethodNotFound},
+		{"invalid method name", "invalid method name: eth_foo", RouterErrorNodeMethodNotFound},
+		{"invalid method argument — must NOT match", "invalid method argument at position 2", RouterErrorUnknown},
+		{"invalid method parameters — must NOT match", "invalid method parameters for call", RouterErrorUnknown},
+		{"invalid method signature — must NOT match", "invalid method signature: expected 3 got 2", RouterErrorUnknown},
 
 		// "blocked" provider-tier gating — must require method/rpc proximity.
-		{"blocked method", "method eth_traceCall is blocked on your plan", LavaErrorNodeMethodNotSupported},
-		{"blocked rpc", "blocked rpc eth_traceCall, upgrade required", LavaErrorNodeMethodNotSupported},
-		{"blocked external request — must NOT match", "blocked external request by firewall", LavaErrorUnknown},
-		{"blocked by policy request — must NOT match", "blocked by policy: request denied", LavaErrorUnknown},
+		{"blocked method", "method eth_traceCall is blocked on your plan", RouterErrorNodeMethodNotSupported},
+		{"blocked rpc", "blocked rpc eth_traceCall, upgrade required", RouterErrorNodeMethodNotSupported},
+		{"blocked external request — must NOT match", "blocked external request by firewall", RouterErrorUnknown},
+		{"blocked by policy request — must NOT match", "blocked by policy: request denied", RouterErrorUnknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1005,17 +1005,17 @@ func TestClassifyError_GenericRESTMappings(t *testing.T) {
 	tests := []struct {
 		name     string
 		message  string
-		expected *LavaError
+		expected *RouterError
 	}{
-		{"404 not found", "HTTP 404: Not Found", LavaErrorNodeEndpointNotFound},
-		{"405 method not allowed", "HTTP 405: Method Not Allowed", LavaErrorNodeMethodNotAllowed},
-		{"413 too large", "HTTP 413: Request Entity Too Large", LavaErrorUserRequestTooLarge},
-		{"429 rate limit", "HTTP 429: Too Many Requests", LavaErrorNodeRateLimited},
-		{"500 internal", "HTTP 500: Internal Server Error", LavaErrorNodeInternalError},
-		{"501 not implemented", "HTTP 501: Not Implemented", LavaErrorNodeUnimplemented},
-		{"502 bad gateway", "HTTP 502: Bad Gateway", LavaErrorNodeBadGateway},
-		{"503 unavailable", "HTTP 503: Service Unavailable", LavaErrorNodeServiceUnavailable},
-		{"504 timeout", "HTTP 504: Gateway Timeout", LavaErrorNodeGatewayTimeout},
+		{"404 not found", "HTTP 404: Not Found", RouterErrorNodeEndpointNotFound},
+		{"405 method not allowed", "HTTP 405: Method Not Allowed", RouterErrorNodeMethodNotAllowed},
+		{"413 too large", "HTTP 413: Request Entity Too Large", RouterErrorUserRequestTooLarge},
+		{"429 rate limit", "HTTP 429: Too Many Requests", RouterErrorNodeRateLimited},
+		{"500 internal", "HTTP 500: Internal Server Error", RouterErrorNodeInternalError},
+		{"501 not implemented", "HTTP 501: Not Implemented", RouterErrorNodeUnimplemented},
+		{"502 bad gateway", "HTTP 502: Bad Gateway", RouterErrorNodeBadGateway},
+		{"503 unavailable", "HTTP 503: Service Unavailable", RouterErrorNodeServiceUnavailable},
+		{"504 timeout", "HTTP 504: Gateway Timeout", RouterErrorNodeGatewayTimeout},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1033,7 +1033,7 @@ func TestClassifyError_GenericRESTMappings(t *testing.T) {
 func TestClassifyError_REST501NotImplemented(t *testing.T) {
 	// Code-based path: the REST relay forwards errorCode = HTTP status (501).
 	result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportREST, 501, "Not Implemented")
-	assert.Equal(t, LavaErrorNodeUnimplemented, result,
+	assert.Equal(t, RouterErrorNodeUnimplemented, result,
 		"REST 501 must classify as NODE_UNIMPLEMENTED, got %s", result.Name)
 	assert.False(t, result.Retryable, "NODE_UNIMPLEMENTED must be non-retryable")
 
@@ -1063,17 +1063,17 @@ func TestClassifyError_GenericJsonRPCHTTPStatusMappings(t *testing.T) {
 	tests := []struct {
 		name     string
 		message  string
-		expected *LavaError
+		expected *RouterError
 	}{
-		{"404 not found", "HTTP 404: Not Found", LavaErrorNodeEndpointNotFound},
-		{"405 method not allowed", "HTTP 405: Method Not Allowed", LavaErrorNodeMethodNotAllowed},
-		{"413 too large", "HTTP 413: Request Entity Too Large", LavaErrorUserRequestTooLarge},
-		{"429 rate limit", "HTTP 429: Too Many Requests", LavaErrorNodeRateLimited},
-		{"500 internal", "HTTP 500: Internal Server Error", LavaErrorNodeInternalError},
-		{"501 not implemented", "HTTP 501: Not Implemented", LavaErrorNodeUnimplemented},
-		{"502 bad gateway", "HTTP 502: Bad Gateway", LavaErrorNodeBadGateway},
-		{"503 unavailable", "HTTP 503: Service Unavailable", LavaErrorNodeServiceUnavailable},
-		{"504 timeout", "HTTP 504: Gateway Timeout", LavaErrorNodeGatewayTimeout},
+		{"404 not found", "HTTP 404: Not Found", RouterErrorNodeEndpointNotFound},
+		{"405 method not allowed", "HTTP 405: Method Not Allowed", RouterErrorNodeMethodNotAllowed},
+		{"413 too large", "HTTP 413: Request Entity Too Large", RouterErrorUserRequestTooLarge},
+		{"429 rate limit", "HTTP 429: Too Many Requests", RouterErrorNodeRateLimited},
+		{"500 internal", "HTTP 500: Internal Server Error", RouterErrorNodeInternalError},
+		{"501 not implemented", "HTTP 501: Not Implemented", RouterErrorNodeUnimplemented},
+		{"502 bad gateway", "HTTP 502: Bad Gateway", RouterErrorNodeBadGateway},
+		{"503 unavailable", "HTTP 503: Service Unavailable", RouterErrorNodeServiceUnavailable},
+		{"504 timeout", "HTTP 504: Gateway Timeout", RouterErrorNodeGatewayTimeout},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1090,10 +1090,10 @@ func TestClassifyError_GenericGRPCMappings(t *testing.T) {
 	tests := []struct {
 		name     string
 		code     int
-		expected *LavaError
+		expected *RouterError
 	}{
-		{"unimplemented", 12, LavaErrorNodeUnimplemented},
-		{"unavailable", 14, LavaErrorNodeServiceUnavailable},
+		{"unimplemented", 12, RouterErrorNodeUnimplemented},
+		{"unavailable", 14, RouterErrorNodeServiceUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1131,7 +1131,7 @@ func checkMappingsForShadows(t *testing.T, mappings []errorMapping) {
 			b := mappings[j]
 			// If both matchers would match the same input AND map to different errors,
 			// the later one is shadowed.
-			if a.LavaError == b.LavaError {
+			if a.RouterError == b.RouterError {
 				continue // same target — not a shadow, just redundancy
 			}
 			checkShadow(t, i, j, a, b)
@@ -1152,7 +1152,7 @@ func checkShadow(t *testing.T, i, j int, a, b errorMapping) {
 		if len(aMsg.substring) < len(bMsg.substring) &&
 			strings.Contains(bMsg.substring, aMsg.substring) {
 			t.Errorf("matcher[%d] MessageContains(%q) shadows matcher[%d] MessageContains(%q) → %s would never match",
-				i, aMsg.substring, j, bMsg.substring, b.LavaError.Name)
+				i, aMsg.substring, j, bMsg.substring, b.RouterError.Name)
 		}
 	}
 
@@ -1161,6 +1161,6 @@ func checkShadow(t *testing.T, i, j int, a, b errorMapping) {
 	bCode, bIsCode := b.Matcher.(codeEqualsMatcher)
 	if aIsCode && bIsCode && aCode.code == bCode.code {
 		t.Errorf("matcher[%d] CodeEquals(%d)→%s shadows matcher[%d] CodeEquals(%d)→%s",
-			i, aCode.code, a.LavaError.Name, j, bCode.code, b.LavaError.Name)
+			i, aCode.code, a.RouterError.Name, j, bCode.code, b.RouterError.Name)
 	}
 }

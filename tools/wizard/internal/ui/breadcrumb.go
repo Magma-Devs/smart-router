@@ -8,7 +8,9 @@ import (
 
 // Breadcrumb renders the compact logo plus a step trail with the current step
 // highlighted, e.g.  "SMART ROUTER · config wizard
-//                     chains › endpoints › ▸ backups · cache › save".
+//
+//	chains › endpoints › ▸ backups · cache › save".
+//
 // It's drawn at the top of each step (after clearing the screen) so the user
 // keeps their place when navigating back and forth.
 func Breadcrumb(steps []string, current int) string {

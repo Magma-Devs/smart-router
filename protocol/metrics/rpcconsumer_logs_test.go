@@ -15,9 +15,10 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
 	websocket2 "github.com/gorilla/websocket"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 type WebSocketError struct {
@@ -81,7 +82,7 @@ func TestAnalyzeWebSocketErrorAndWriteMessage(t *testing.T) {
 	}
 	go func() {
 		if err := app.Listener(ln); err != nil {
-			utils.LavaFormatError("can't listen in unitests", err, utils.Attribute{Key: "address", Value: ln.Addr().String()})
+			utils.FormatError("can't listen in unitests", err, utils.Attribute{Key: "address", Value: ln.Addr().String()})
 		}
 	}()
 	defer func() {
@@ -117,7 +118,7 @@ func TestAnalyzeWebSocketErrorAndWriteMessage(t *testing.T) {
 }
 
 // captureStderr swaps os.Stderr with a pipe while fn runs, returning what was
-// written. Required because utils.LavaFormat* logs via the global zerolog
+// written. Required because utils.Format* logs via the global zerolog
 // logger bound to os.Stderr at SetGlobalLoggingLevel() time, and is not safe
 // for parallel tests (os.Stderr is process-global).
 func captureStderr(t *testing.T, fn func()) string {
@@ -145,7 +146,7 @@ func captureStderr(t *testing.T, fn func()) string {
 
 // TestSetGlobalLoggingLevel_VolumeChangesAcrossLevels backfills MAG-1872 item
 // 7: --log-level info/debug/warn parametrization. Existing tests in this file
-// only exercise "fatal". This asserts that LavaFormatLog's early-return
+// only exercise "fatal". This asserts that FormatLog's early-return
 // optimization filters lower-severity messages at higher levels, and emits
 // them at lower levels.
 func TestSetGlobalLoggingLevel_VolumeChangesAcrossLevels(t *testing.T) {
@@ -177,9 +178,9 @@ func TestSetGlobalLoggingLevel_VolumeChangesAcrossLevels(t *testing.T) {
 		t.Run(tc.level, func(t *testing.T) {
 			out := captureStderr(t, func() {
 				utils.SetGlobalLoggingLevel(tc.level)
-				utils.LavaFormatDebug(debugMarker)
-				utils.LavaFormatInfo(infoMarker)
-				utils.LavaFormatWarning(warnMarker, nil)
+				utils.FormatDebug(debugMarker)
+				utils.FormatInfo(infoMarker)
+				utils.FormatWarning(warnMarker, nil)
 			})
 			assert.Equal(t, tc.wantDebug, strings.Contains(out, debugMarker),
 				"debug visibility wrong at level=%s, output=%s", tc.level, out)
@@ -218,7 +219,7 @@ func TestSetGlobalLoggingLevel_TextVsJsonFormat(t *testing.T) {
 			utils.JsonFormat = tc.json
 			out := captureStderr(t, func() {
 				utils.SetGlobalLoggingLevel("info")
-				utils.LavaFormatInfo(marker)
+				utils.FormatInfo(marker)
 			})
 
 			var markerLine string
@@ -245,12 +246,12 @@ func TestSetGlobalLoggingLevel_TextVsJsonFormat(t *testing.T) {
 	}
 }
 
-// TestLavaFormat_GUIDAttachedToNormalLogPaths backfills MAG-1872 item 9: GUID
+// TestFormat_GUIDAttachedToNormalLogPaths backfills MAG-1872 item 9: GUID
 // presence in non-error log lines. Existing tests assert Error_GUID in error
 // JSON only; this asserts that utils.LogAttr("GUID", ctx) on an Info log
 // surfaces the GUID as a top-level field via utils.StrValueForLog's GUID
-// extraction path (utils/lavalog.go:182).
-func TestLavaFormat_GUIDAttachedToNormalLogPaths(t *testing.T) {
+// extraction path (utils/log.go:182).
+func TestFormat_GUIDAttachedToNormalLogPaths(t *testing.T) {
 	origFormat := utils.JsonFormat
 	utils.JsonFormat = true
 	t.Cleanup(func() {
@@ -266,7 +267,7 @@ func TestLavaFormat_GUIDAttachedToNormalLogPaths(t *testing.T) {
 
 	out := captureStderr(t, func() {
 		utils.SetGlobalLoggingLevel("info")
-		utils.LavaFormatInfo(marker, utils.LogAttr("GUID", ctx))
+		utils.FormatInfo(marker, utils.LogAttr("GUID", ctx))
 	})
 
 	var markerLine string

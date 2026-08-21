@@ -1,25 +1,37 @@
 package flow
+
 import (
-	"os";"path/filepath";"strings";"testing"
 	"github.com/magma-Devs/smart-router/tools/wizard/internal/catalog"
 	"github.com/magma-Devs/smart-router/tools/wizard/internal/emit"
 	"github.com/magma-Devs/smart-router/tools/wizard/internal/health"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
 )
+
 func TestAssignListeners(t *testing.T) {
 	chains := []catalog.Chain{
-		{Index:"ETH1", Interfaces:[]string{"jsonrpc"}},
-		{Index:"LAV1", Interfaces:[]string{"grpc","rest","tendermintrpc"}},
+		{Index: "ETH1", Interfaces: []string{"jsonrpc"}},
+		{Index: "LAV1", Interfaces: []string{"grpc", "rest", "tendermintrpc"}},
 	}
 	s := &State{}
 	s.AssignListeners(map[string][]string{
 		"ETH1": {"jsonrpc"},
-		"LAV1": {"rest","grpc"},
+		"LAV1": {"rest", "grpc"},
 	}, chains)
-	if len(s.Listeners) != 3 { t.Fatalf("want 3 listeners, got %d", len(s.Listeners)) }
+	if len(s.Listeners) != 3 {
+		t.Fatalf("want 3 listeners, got %d", len(s.Listeners))
+	}
 	// ports sequential from 3360, ETH1 first (catalog order)
-	if s.Listeners[0].Chain.Index != "ETH1" || s.Listeners[0].Port != 3360 { t.Errorf("L0 = %+v", s.Listeners[0]) }
-	if s.Listeners[2].Port != 3362 { t.Errorf("last port = %d, want 3362", s.Listeners[2].Port) }
+	if s.Listeners[0].Chain.Index != "ETH1" || s.Listeners[0].Port != 3360 {
+		t.Errorf("L0 = %+v", s.Listeners[0])
+	}
+	if s.Listeners[2].Port != 3362 {
+		t.Errorf("last port = %d, want 3362", s.Listeners[2].Port)
+	}
 }
+
 // TestPrevStep locks in Esc/back-navigation after the ws-before-addons reorder:
 // the chain must be pDone → pAddons → pWSAsk → pAuthAsk (pLiveGate/pAuthDetails are
 // never back-targets), with non-applicable steps skipped. (Naming is no longer a
@@ -260,10 +272,10 @@ func TestRoundDefaultBase(t *testing.T) {
 		round       int
 		want        string
 	}{
-		{"ETH1", "primary", 0, "eth1"},        // first primary: no index
-		{"ETH1", "primary", 1, "eth1-2"},      // second primary: -2
-		{"ETH1", "primary", 2, "eth1-3"},      // third: -3
-		{"ETH1", "backup", 0, "eth1-backup"},  // first backup: stem only
+		{"ETH1", "primary", 0, "eth1"},       // first primary: no index
+		{"ETH1", "primary", 1, "eth1-2"},     // second primary: -2
+		{"ETH1", "primary", 2, "eth1-3"},     // third: -3
+		{"ETH1", "backup", 0, "eth1-backup"}, // first backup: stem only
 		{"ETH1", "backup", 1, "eth1-backup-2"},
 		{"ETH1", "backup", 2, "eth1-backup-3"},
 	}
@@ -305,27 +317,42 @@ func TestListenerGroups(t *testing.T) {
 }
 
 func TestComposeFiles(t *testing.T) {
-	cases := []struct{ cache, dash bool; want string }{
-		{false,false,"-f docker/docker-compose.yml"},
-		{true,false,"-f docker/docker-compose.yml -f docker/docker-compose.cache.yml"},
-		{false,true,"-f docker/docker-compose.dashboard.yml"},
-		{true,true,"-f docker/docker-compose.dashboard.yml -f docker/docker-compose.cache.yml"},
+	cases := []struct {
+		cache, dash bool
+		want        string
+	}{
+		{false, false, "-f docker/docker-compose.yml"},
+		{true, false, "-f docker/docker-compose.yml -f docker/docker-compose.cache.yml"},
+		{false, true, "-f docker/docker-compose.dashboard.yml"},
+		{true, true, "-f docker/docker-compose.dashboard.yml -f docker/docker-compose.cache.yml"},
 	}
 	for _, c := range cases {
-		s := &State{Cache:c.cache, Dashboard:c.dash}
-		got := strings.Join(s.composeFiles()," ")
-		if got != c.want { t.Errorf("cache=%v dash=%v: got %q want %q", c.cache, c.dash, got, c.want) }
+		s := &State{Cache: c.cache, Dashboard: c.dash}
+		got := strings.Join(s.composeFiles(), " ")
+		if got != c.want {
+			t.Errorf("cache=%v dash=%v: got %q want %q", c.cache, c.dash, got, c.want)
+		}
 	}
 }
 func TestPlan(t *testing.T) {
-	s := &State{Cache:true}
+	s := &State{Cache: true}
 	p := s.Plan("config/local/x.yml")
-	if !strings.Contains(p.UpCommand, "SR_CONFIG=config/local/x.yml") { t.Error("up missing SR_CONFIG") }
-	if !strings.Contains(p.UpCommand, "cache.yml") { t.Error("up missing cache overlay") }
-	if !strings.Contains(p.RenderStep, "envsubst") { t.Error("render missing envsubst") }
-	if !strings.Contains(p.DownCommand, "down") { t.Error("down missing") }
+	if !strings.Contains(p.UpCommand, "SR_CONFIG=config/local/x.yml") {
+		t.Error("up missing SR_CONFIG")
+	}
+	if !strings.Contains(p.UpCommand, "cache.yml") {
+		t.Error("up missing cache overlay")
+	}
+	if !strings.Contains(p.RenderStep, "envsubst") {
+		t.Error("render missing envsubst")
+	}
+	if !strings.Contains(p.DownCommand, "down") {
+		t.Error("down missing")
+	}
 	// local catalog (default) → no SR_SPEC prefix (matches compose default)
-	if strings.Contains(p.UpCommand, "SR_SPEC=") { t.Error("local catalog should not set SR_SPEC") }
+	if strings.Contains(p.UpCommand, "SR_SPEC=") {
+		t.Error("local catalog should not set SR_SPEC")
+	}
 }
 
 func TestSpecArg(t *testing.T) {
@@ -334,16 +361,22 @@ func TestSpecArg(t *testing.T) {
 		{"gh", health.SpecsGitHubURL}, {"raw", health.SpecsGitHubURL},
 	}
 	for _, c := range cases {
-		if got := (&State{Source:c.src}).specArg(); got != c.want {
+		if got := (&State{Source: c.src}).specArg(); got != c.want {
 			t.Errorf("source %q: got %q want %q", c.src, got, c.want)
 		}
 	}
 }
 
 func TestMetricsPort(t *testing.T) {
-	if got := (&State{}).metricsPort(); got != "7779" { t.Errorf("default metrics port = %q, want 7779", got) }
-	if got := (&State{Metrics:"disabled"}).metricsPort(); got != "" { t.Errorf("disabled metrics port = %q, want empty", got) }
-	if got := (&State{Metrics:"0.0.0.0:9999"}).metricsPort(); got != "9999" { t.Errorf("custom metrics port = %q, want 9999", got) }
+	if got := (&State{}).metricsPort(); got != "7779" {
+		t.Errorf("default metrics port = %q, want 7779", got)
+	}
+	if got := (&State{Metrics: "disabled"}).metricsPort(); got != "" {
+		t.Errorf("disabled metrics port = %q, want empty", got)
+	}
+	if got := (&State{Metrics: "0.0.0.0:9999"}).metricsPort(); got != "9999" {
+		t.Errorf("custom metrics port = %q, want 9999", got)
+	}
 }
 
 // Remote catalog → SR_SPEC prefix points at the GitHub URL, and the generated
@@ -352,24 +385,34 @@ func TestMetricsPort(t *testing.T) {
 func TestPlanRemoteSpecAndOverride(t *testing.T) {
 	dir := t.TempDir()
 	rendered := filepath.Join(dir, "config", "local", "x.yml")
-	if err := os.MkdirAll(filepath.Dir(rendered), 0o755); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(filepath.Dir(rendered), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	s := &State{
 		RepoRoot: dir, Source: "gh", RenderedPath: rendered,
 		Listeners: []Listener{
-			{Chain: catalog.Chain{Index:"ETH1"}, Iface:"jsonrpc", Port:3360},
-			{Chain: catalog.Chain{Index:"LAV1"}, Iface:"tendermintrpc", Port:3363},
+			{Chain: catalog.Chain{Index: "ETH1"}, Iface: "jsonrpc", Port: 3360},
+			{Chain: catalog.Chain{Index: "LAV1"}, Iface: "tendermintrpc", Port: 3363},
 		},
 	}
 	rel, _ := filepath.Rel(dir, rendered)
 	p := s.Plan(filepath.ToSlash(rel))
 
-	if !strings.Contains(p.UpCommand, "SR_SPEC="+health.SpecsGitHubURL) { t.Errorf("up missing SR_SPEC GitHub URL: %s", p.UpCommand) }
-	if !strings.Contains(p.UpCommand, "x.compose.override.yml") { t.Errorf("up missing -f override: %s", p.UpCommand) }
+	if !strings.Contains(p.UpCommand, "SR_SPEC="+health.SpecsGitHubURL) {
+		t.Errorf("up missing SR_SPEC GitHub URL: %s", p.UpCommand)
+	}
+	if !strings.Contains(p.UpCommand, "x.compose.override.yml") {
+		t.Errorf("up missing -f override: %s", p.UpCommand)
+	}
 
 	ov := strings.TrimSuffix(rendered, ".yml") + ".compose.override.yml"
 	b, err := os.ReadFile(ov)
-	if err != nil { t.Fatalf("override not written: %v", err) }
+	if err != nil {
+		t.Fatalf("override not written: %v", err)
+	}
 	for _, want := range []string{`"3360:3360"`, `"3363:3363"`, `"7779:7779"`, "ETH1 jsonrpc", "LAV1 tendermintrpc"} {
-		if !strings.Contains(string(b), want) { t.Errorf("override missing %q in:\n%s", want, b) }
+		if !strings.Contains(string(b), want) {
+			t.Errorf("override missing %q in:\n%s", want, b)
+		}
 	}
 }

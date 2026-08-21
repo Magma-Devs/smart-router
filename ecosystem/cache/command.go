@@ -3,10 +3,11 @@ package cache
 import (
 	"context"
 
-	"github.com/magma-Devs/smart-router/protocol/performance"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
+
+	"github.com/magma-Devs/smart-router/protocol/performance"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 const (
@@ -28,7 +29,7 @@ longer DefaultExpirationForNonFinalized will reduce sync QoS for "latest" reques
 			ctx := context.Background()
 			logLevel, err := cmd.Flags().GetString(FlagLogLevel)
 			if err != nil {
-				utils.LavaFormatFatal("failed to read log level flag", err)
+				utils.FormatFatal("failed to read log level flag", err)
 			}
 			utils.SetGlobalLoggingLevel(logLevel)
 
@@ -36,7 +37,7 @@ longer DefaultExpirationForNonFinalized will reduce sync QoS for "latest" reques
 			if pyroscopeAddressFlagUsed {
 				pyroscopeServerAddress, err := cmd.Flags().GetString(performance.PyroscopeAddressFlagName)
 				if err != nil {
-					utils.LavaFormatFatal("failed to read pyroscope address flag", err)
+					utils.FormatFatal("failed to read pyroscope address flag", err)
 				}
 				pyroscopeAppName, err := cmd.Flags().GetString(performance.PyroscopeAppNameFlagName)
 				if err != nil || pyroscopeAppName == "" {
@@ -54,13 +55,13 @@ longer DefaultExpirationForNonFinalized will reduce sync QoS for "latest" reques
 				tags := performance.ParseTags(tagsStr)
 				err = performance.StartPyroscope(pyroscopeAppName, pyroscopeServerAddress, mutexProfileFraction, blockProfileRate, tags)
 				if err != nil {
-					return utils.LavaFormatError("failed to start pyroscope profiler", err)
+					return utils.FormatError("failed to start pyroscope profiler", err)
 				}
 			}
 
 			metricsAddress, err := cmd.Flags().GetString(FlagMetricsAddress)
 			if err != nil {
-				utils.LavaFormatFatal("failed to read metrics address flag", err)
+				utils.FormatFatal("failed to read metrics address flag", err)
 			}
 			Server(ctx, address, metricsAddress, cmd.Flags())
 			return nil

@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 func NewRegistry(remote ProtoFileRegistry) *Registry {
@@ -58,7 +59,7 @@ func (r *Registry) FindExtensionByName(field protoreflect.FullName) (protoreflec
 
 	xdExtensionDescriptor, ok := xd.(protoreflect.ExtensionDescriptor)
 	if !ok {
-		return nil, utils.LavaFormatError("Failed converting xd.(protoreflect.ExtensionDescriptor)", nil, utils.Attribute{Key: "xd", Value: xd})
+		return nil, utils.FormatError("Failed converting xd.(protoreflect.ExtensionDescriptor)", nil, utils.Attribute{Key: "xd", Value: xd})
 	}
 
 	xt = dynamicpb.NewExtensionType(xdExtensionDescriptor)
@@ -84,7 +85,7 @@ func (r *Registry) FindMessageByName(message protoreflect.FullName) (protoreflec
 	}
 	messageDescriptor, ok := md.(protoreflect.MessageDescriptor)
 	if !ok {
-		return nil, utils.LavaFormatError("Failed converting md.(protoreflect.MessageDescriptor)", nil, utils.Attribute{Key: "md", Value: md})
+		return nil, utils.FormatError("Failed converting md.(protoreflect.MessageDescriptor)", nil, utils.Attribute{Key: "md", Value: md})
 	}
 
 	mt = dynamicpb.NewMessageType(messageDescriptor)
@@ -109,7 +110,7 @@ func (r *Registry) FindMessageByURL(url string) (protoreflect.MessageType, error
 
 	messageDescriptor, ok := md.(protoreflect.MessageDescriptor)
 	if !ok {
-		return nil, utils.LavaFormatError("Failed converting md.(protoreflect.MessageDescriptor)", nil, utils.Attribute{Key: "md", Value: md})
+		return nil, utils.FormatError("Failed converting md.(protoreflect.MessageDescriptor)", nil, utils.Attribute{Key: "md", Value: md})
 	}
 
 	mt = dynamicpb.NewMessageType(messageDescriptor)

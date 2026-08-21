@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 func TestGRPCParseBlock(t *testing.T) {
@@ -78,7 +79,7 @@ func TestReflectionSupport(t *testing.T) {
 		{
 			name: "unimplemented error",
 			err:  status.Error(codes.Unimplemented, "unimplemented"),
-			result: utils.LavaFormatError("server does not support the reflection API",
+			result: utils.FormatError("server does not support the reflection API",
 				status.Error(codes.Unimplemented, "unimplemented")),
 		},
 	}

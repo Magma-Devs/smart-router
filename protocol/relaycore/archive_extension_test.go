@@ -6,12 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/stretchr/testify/require"
 )
 
 // passthroughRelayParser implements RelayParserInf by re-parsing through the
@@ -35,7 +36,7 @@ func (p *passthroughRelayParser) ParseRelay(
 	directiveHeaders := map[string]string{}
 	filtered := make([]pairingtypes.Metadata, 0, len(metadata))
 	for _, m := range metadata {
-		if _, ok := common.SPECIAL_LAVA_DIRECTIVE_HEADERS[m.Name]; ok {
+		if _, ok := common.SPECIAL_DIRECTIVE_HEADERS[m.Name]; ok {
 			directiveHeaders[m.Name] = m.Value
 		} else {
 			filtered = append(filtered, m)
@@ -96,7 +97,7 @@ func newTestProtocolMessage(t *testing.T, opts testProtocolMessageOpts) (chainli
 
 // TestArchiveAddPreservesForceCacheRefresh is a regression for MAG-1653 Bug #1:
 // addArchiveExtension previously rebuilt metadata from scratch with only the
-// extension override, silently dropping lava-force-cache-refresh. The user-set
+// extension override, silently dropping smartrouter-force-cache-refresh. The user-set
 // directive must survive into the post-upgrade protocol message — both on the
 // chainMessage flag (runtime check) and in the directiveHeaders map (parse-time
 // input surface), so the two stay consistent.
@@ -111,7 +112,7 @@ func TestArchiveAddPreservesForceCacheRefresh(t *testing.T) {
 
 	require.Equal(t, 1, relayParser.calls)
 	require.NotSame(t, pm, upgraded, "upgrade should produce a new protocol message")
-	require.True(t, upgraded.GetForceCacheRefresh(), "lava-force-cache-refresh must be preserved through archive add")
+	require.True(t, upgraded.GetForceCacheRefresh(), "smartrouter-force-cache-refresh must be preserved through archive add")
 	require.Equal(t, "true", upgraded.GetDirectiveHeaders()[common.FORCE_CACHE_REFRESH_HEADER_NAME],
 		"directiveHeaders map must stay in sync with the chainMessage flag")
 }
@@ -134,7 +135,7 @@ func TestArchiveRemovePreservesForceCacheRefresh(t *testing.T) {
 
 	require.Equal(t, 1, relayParser.calls)
 	require.NotSame(t, pm, downgraded)
-	require.True(t, downgraded.GetForceCacheRefresh(), "lava-force-cache-refresh must be preserved through archive remove")
+	require.True(t, downgraded.GetForceCacheRefresh(), "smartrouter-force-cache-refresh must be preserved through archive remove")
 	require.Equal(t, "true", downgraded.GetDirectiveHeaders()[common.FORCE_CACHE_REFRESH_HEADER_NAME],
 		"directiveHeaders map must stay in sync with the chainMessage flag")
 }
@@ -151,7 +152,7 @@ func TestArchiveAddDoesNotInventForceCacheRefresh(t *testing.T) {
 }
 
 // TestArchiveAddPreservesRelayTimeout is the same MAG-1653 shape applied to
-// lava-relay-timeout: a client-set per-attempt timeout override must survive
+// smartrouter-relay-timeout: a client-set per-attempt timeout override must survive
 // the rebuild, otherwise post-upgrade attempts fall back to the chain default
 // instead of the user's value.
 func TestArchiveAddPreservesRelayTimeout(t *testing.T) {
@@ -163,7 +164,7 @@ func TestArchiveAddPreservesRelayTimeout(t *testing.T) {
 
 	upgraded := addArchiveExtension(context.Background(), pm, &ArchiveStatus{}, relayParser)
 
-	require.Equal(t, 12*time.Second, upgraded.TimeoutOverride(), "lava-relay-timeout override must be preserved")
+	require.Equal(t, 12*time.Second, upgraded.TimeoutOverride(), "smartrouter-relay-timeout override must be preserved")
 	require.Equal(t, (12 * time.Second).String(), upgraded.GetDirectiveHeaders()[common.RELAY_TIMEOUT_HEADER_NAME],
 		"directiveHeaders map must stay in sync with the chainMessage timeout override")
 }
@@ -184,29 +185,29 @@ func TestArchiveAddDoesNotInventRelayTimeout(t *testing.T) {
 // headers (rpcsmartrouter_server.go:2339).
 func TestArchiveAddPreservesDebugRelay(t *testing.T) {
 	pm, parser := newTestProtocolMessage(t, testProtocolMessageOpts{
-		directiveHeaders: map[string]string{common.LAVA_DEBUG_RELAY: "true"},
+		directiveHeaders: map[string]string{common.DEBUG_RELAY: "true"},
 	})
 	relayParser := &passthroughRelayParser{chainParser: parser}
 
 	upgraded := addArchiveExtension(context.Background(), pm, &ArchiveStatus{}, relayParser)
 
-	require.Contains(t, upgraded.GetDirectiveHeaders(), common.LAVA_DEBUG_RELAY,
-		"lava-debug-relay must be preserved through archive add")
+	require.Contains(t, upgraded.GetDirectiveHeaders(), common.DEBUG_RELAY,
+		"smartrouter-debug-relay must be preserved through archive add")
 }
 
 // TestArchiveAddDoesNotPreserveSelectProvider is a guard rail: the failover
 // path may need to fall through to a different provider on retry, so the pin
 // must NOT survive the rebuild. If this test ever fails, double-check the
-// preserve helper hasn't grown a copy of lava-select-provider — that would
+// preserve helper hasn't grown a copy of smartrouter-select-provider — that would
 // regress test_2_1_one_provider_down_retry_to_next.
 func TestArchiveAddDoesNotPreserveSelectProvider(t *testing.T) {
 	pm, parser := newTestProtocolMessage(t, testProtocolMessageOpts{
-		directiveHeaders: map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "lava@p1"},
+		directiveHeaders: map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "provider@p1"},
 	})
 	relayParser := &passthroughRelayParser{chainParser: parser}
 
 	upgraded := addArchiveExtension(context.Background(), pm, &ArchiveStatus{}, relayParser)
 
 	require.NotContains(t, upgraded.GetDirectiveHeaders(), common.SELECT_PROVIDER_HEADER_NAME,
-		"lava-select-provider must reset on retry so failover can choose a different provider")
+		"smartrouter-select-provider must reset on retry so failover can choose a different provider")
 }

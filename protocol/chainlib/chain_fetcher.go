@@ -12,9 +12,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/protocol/performance"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -22,20 +22,20 @@ import (
 )
 
 const (
-	ChainFetcherHeaderName = "X-LAVA-Provider"
+	ChainFetcherHeaderName = "X-Smart-Router-Provider"
 )
 
 type IChainFetcher interface {
 	FetchLatestBlockNum(ctx context.Context) (int64, error)
 	FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error)
-	FetchEndpoint() lavasession.RPCProviderEndpoint
+	FetchEndpoint() routersession.RPCProviderEndpoint
 	Validate(ctx context.Context) error
 	GetVerificationsStatus() []*pairingtypes.Verification
 	CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error)
 }
 
 type ChainFetcher struct {
-	endpoint            *lavasession.RPCProviderEndpoint
+	endpoint            *routersession.RPCProviderEndpoint
 	chainRouter         ChainRouter
 	chainParser         ChainParser
 	cache               *performance.Cache
@@ -52,7 +52,7 @@ func (cf *ChainFetcher) GetVerificationsStatus() []*pairingtypes.Verification {
 		if ok {
 			return value
 		} else {
-			utils.LavaFormatError("invalid usage of cachedVerifications, could not cast result into []*pairingtypes.Verification type", nil, utils.Attribute{Key: "cachedVerifications", Value: cf.cachedVerifications.Load()})
+			utils.FormatError("invalid usage of cachedVerifications, could not cast result into []*pairingtypes.Verification type", nil, utils.Attribute{Key: "cachedVerifications", Value: cf.cachedVerifications.Load()})
 		}
 	}
 
@@ -77,7 +77,7 @@ func (cf *ChainFetcher) invalidateVerificationsCache() {
 	cf.cacheValid.Store(false)
 }
 
-func (cf *ChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
+func (cf *ChainFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
 	return *cf.endpoint
 }
 
@@ -132,14 +132,14 @@ func stopValidateRetries(err error) bool {
 
 func (cf *ChainFetcher) Validate(ctx context.Context) error {
 	for _, url := range cf.endpoint.NodeUrls {
-		utils.LavaFormatInfo("starting validation for url", utils.LogAttr("url", url.String()))
+		utils.FormatInfo("starting validation for url", utils.LogAttr("url", url.String()))
 		addons := url.Addons
 		verifications, err := cf.chainParser.GetVerifications(addons, url.InternalPath, cf.endpoint.ApiInterface)
 		if err != nil {
 			return err
 		}
 		if len(verifications) == 0 {
-			utils.LavaFormatWarning("no verifications for url", nil, utils.LogAttr("url", url.String()))
+			utils.FormatWarning("no verifications for url", nil, utils.LogAttr("url", url.String()))
 		}
 
 		var latestBlock int64
@@ -151,7 +151,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 				}
 			}
 			if err != nil {
-				utils.LavaFormatError("failed to fetch latest block number", err)
+				utils.FormatError("failed to fetch latest block number", err)
 				return err
 			}
 		}
@@ -159,7 +159,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		defer cf.invalidateVerificationsCache()
 		for _, verification := range verifications {
 			if skipVerification(url, verification.Name) {
-				utils.LavaFormatInfo("Skipping Verification due to provider configuration (skip-verifications setting)", utils.LogAttr("verification", verification.Name))
+				utils.FormatInfo("Skipping Verification due to provider configuration (skip-verifications setting)", utils.LogAttr("verification", verification.Name))
 				continue
 			}
 			// we give several chances for starting up
@@ -172,9 +172,9 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 			}
 			if err != nil {
 				cf.verificationsStatus.Store(cf.getVerificationsKey(verification, cf.endpoint.ApiInterface, cf.endpoint.ChainID), false)
-				utils.LavaFormatWarning("failed verification on provider startup", err, utils.LogAttr("verification", verification.Name))
+				utils.FormatWarning("failed verification on provider startup", err, utils.LogAttr("verification", verification.Name))
 				if verification.Severity == spectypes.ParseValue_Fail {
-					return utils.LavaFormatError("invalid Verification on provider startup", err, utils.Attribute{Key: "Addons", Value: addons}, utils.Attribute{Key: "verification", Value: verification.Name})
+					return utils.FormatError("invalid Verification on provider startup", err, utils.Attribute{Key: "Addons", Value: addons}, utils.Attribute{Key: "verification", Value: verification.Name})
 				}
 			} else {
 				cf.verificationsStatus.Store(cf.getVerificationsKey(verification, cf.endpoint.ApiInterface, cf.endpoint.ChainID), true)
@@ -274,7 +274,7 @@ func (cf *ChainFetcher) populateCache(relayData *pairingtypes.RelayPrivateData, 
 
 		hash, _, err := HashCacheRequest(relayData, cf.endpoint.ChainID)
 		if err != nil {
-			utils.LavaFormatError("populateCache Failed getting Hash for request", err)
+			utils.FormatError("populateCache Failed getting Hash for request", err)
 			return
 		}
 
@@ -292,7 +292,7 @@ func (cf *ChainFetcher) populateCache(relayData *pairingtypes.RelayPrivateData, 
 			AverageBlockTime: int64(averageBlockTime),
 		})
 		if err != nil {
-			utils.LavaFormatWarning("chain fetcher error updating cache with new entry", err)
+			utils.FormatWarning("chain fetcher error updating cache with new entry", err)
 		}
 	}
 }
@@ -325,7 +325,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 	data := []byte(parsing.FunctionTemplate)
 
 	if !verification.IsActive() {
-		utils.LavaFormatDebug("skipping disabled verification", []utils.Attribute{
+		utils.FormatDebug("skipping disabled verification", []utils.Attribute{
 			{Key: "Extension", Value: verification.Extension},
 			{Key: "Addon", Value: verification.Addon},
 			utils.LogAttr("name", verification.Name),
@@ -342,7 +342,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 			if latestBlock >= verification.LatestDistance {
 				data = []byte(fmt.Sprintf(parsing.FunctionTemplate, latestBlock-verification.LatestDistance))
 			} else {
-				return utils.LavaFormatWarning("[-] verify failed getting non-earliest block for chainMessage", fmt.Errorf("latestBlock is smaller than latestDistance"),
+				return utils.FormatWarning("[-] verify failed getting non-earliest block for chainMessage", fmt.Errorf("latestBlock is smaller than latestDistance"),
 					utils.LogAttr("path", path),
 					utils.LogAttr("latest_block", latestBlock),
 					utils.LogAttr("latest_distance", verification.LatestDistance),
@@ -351,11 +351,11 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 		} else if verification.Value != "" {
 			expectedValue, err := strconv.ParseInt(verification.Value, 10, 64)
 			if err != nil {
-				return utils.LavaFormatError("failed converting expected value to number", err, utils.LogAttr("value", verification.Value))
+				return utils.FormatError("failed converting expected value to number", err, utils.LogAttr("value", verification.Value))
 			}
 			data = []byte(fmt.Sprintf(parsing.FunctionTemplate, expectedValue))
 		} else {
-			return utils.LavaFormatWarning("[-] verification misconfiguration", fmt.Errorf("FUNCTION_TAG_GET_BLOCK_BY_NUM defined without LatestDistance or LatestBlock or a proper expected value"),
+			return utils.FormatWarning("[-] verification misconfiguration", fmt.Errorf("FUNCTION_TAG_GET_BLOCK_BY_NUM defined without LatestDistance or LatestBlock or a proper expected value"),
 				utils.LogAttr("latest_block", latestBlock),
 				utils.LogAttr("latest_distance", verification.LatestDistance),
 				utils.LogAttr("expected_value", verification.Value),
@@ -366,21 +366,21 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 	craftData := &CraftData{Path: path, Data: data, ConnectionType: collectionType, InternalPath: verification.InternalPath}
 	chainMessage, err := CraftChainMessage(parsing, collectionType, cf.chainParser, craftData, cf.ChainFetcherMetadata())
 	if err != nil {
-		return utils.LavaFormatError("[-] verify failed creating chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
+		return utils.FormatError("[-] verify failed creating chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 
 	extensions := getExtensionsForVerification(verification, cf.chainParser)
 
 	reply, _, _, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, extensions)
 	if err != nil {
-		return utils.LavaFormatWarning("[-] verify failed sending chainMessage", err,
+		return utils.FormatWarning("[-] verify failed sending chainMessage", err,
 			utils.LogAttr("chainID", cf.endpoint.ChainID),
 			utils.LogAttr("APIInterface", cf.endpoint.ApiInterface),
 			utils.LogAttr("extensions", extensions),
 		)
 	}
 	if reply == nil || reply.RelayReply == nil {
-		return utils.LavaFormatWarning("[-] verify failed sending chainMessage, reply or reply.RelayReply are nil", nil,
+		return utils.FormatWarning("[-] verify failed sending chainMessage, reply or reply.RelayReply are nil", nil,
 			utils.LogAttr("chainID", cf.endpoint.ChainID),
 			utils.LogAttr("APIInterface", cf.endpoint.ApiInterface),
 		)
@@ -388,7 +388,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 
 	parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 	if err != nil {
-		return utils.LavaFormatWarning("[-] verify failed to parse result", err,
+		return utils.FormatWarning("[-] verify failed to parse result", err,
 			utils.LogAttr("chain_id", chainId),
 			utils.LogAttr("Api_interface", cf.endpoint.ApiInterface),
 			utils.LogAttr("function_template", parsing.FunctionTemplate),
@@ -397,7 +397,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 
 	parsedInput := parser.ParseBlockFromReply(parserInput, parsing.ResultParsing, parsing.Parsers)
 	if parsedInput.GetRawParsedData() == "" {
-		return utils.LavaFormatWarning("[-] verify failed to parse result", nil,
+		return utils.FormatWarning("[-] verify failed to parse result", nil,
 			utils.LogAttr("chainId", chainId),
 			utils.LogAttr("nodeUrl", proxyUrl.Url),
 			utils.LogAttr("Method", parsing.GetApiName()),
@@ -407,7 +407,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 
 	parserError := parsedInput.GetParserError()
 	if parserError != "" {
-		return utils.LavaFormatWarning("[-] parser returned an error", nil,
+		return utils.FormatWarning("[-] parser returned an error", nil,
 			utils.LogAttr("error", parserError),
 			utils.LogAttr("chainId", chainId),
 			utils.LogAttr("nodeUrl", proxyUrl.Url),
@@ -418,7 +418,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 	if verification.LatestDistance != 0 && latestBlock != 0 && verification.ParseDirective.FunctionTag != spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM {
 		parsedResultAsNumber := parsedInput.GetBlock()
 		if parsedResultAsNumber == spectypes.NOT_APPLICABLE {
-			return utils.LavaFormatWarning("[-] verify failed to parse result as number", nil,
+			return utils.FormatWarning("[-] verify failed to parse result as number", nil,
 				utils.LogAttr("chainId", chainId),
 				utils.LogAttr("nodeUrl", proxyUrl.Url),
 				utils.LogAttr("Method", parsing.GetApiName()),
@@ -428,7 +428,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 		}
 		uint64ParsedResultAsNumber := uint64(parsedResultAsNumber)
 		if uint64ParsedResultAsNumber > latestBlock {
-			return utils.LavaFormatWarning("[-] verify failed parsed result is greater than latestBlock", nil,
+			return utils.FormatWarning("[-] verify failed parsed result is greater than latestBlock", nil,
 				utils.LogAttr("chainId", chainId),
 				utils.LogAttr("nodeUrl", proxyUrl.Url),
 				utils.LogAttr("Method", parsing.GetApiName()),
@@ -437,7 +437,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 			)
 		}
 		if latestBlock-uint64ParsedResultAsNumber < verification.LatestDistance {
-			return utils.LavaFormatWarning("[-] verify failed expected block distance is not sufficient", nil,
+			return utils.FormatWarning("[-] verify failed expected block distance is not sufficient", nil,
 				utils.LogAttr("chainId", chainId),
 				utils.LogAttr("nodeUrl", proxyUrl.Url),
 				utils.LogAttr("Method", parsing.GetApiName()),
@@ -451,7 +451,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 	if verification.Value != "*" && verification.Value != "" && verification.ParseDirective.FunctionTag != spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM {
 		rawData := parsedInput.GetRawParsedData()
 		if rawData != verification.Value {
-			return utils.LavaFormatWarning("[-] verify failed expected and received are different", nil,
+			return utils.FormatWarning("[-] verify failed expected and received are different", nil,
 				utils.LogAttr("chainId", chainId),
 				utils.LogAttr("nodeUrl", proxyUrl.Url),
 				utils.LogAttr("rawParsedBlock", rawData),
@@ -464,7 +464,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 		}
 	}
 
-	utils.LavaFormatInfo("[+] verified successfully",
+	utils.FormatInfo("[+] verified successfully",
 		utils.LogAttr("chainId", chainId),
 		utils.LogAttr("nodeUrl", proxyUrl.Url),
 		utils.LogAttr("verification", verification.Name),
@@ -485,7 +485,7 @@ func (cf *ChainFetcher) ChainFetcherMetadata() []pairingtypes.Metadata {
 }
 
 func (cf *ChainFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
-	utils.LavaFormatTrace("Sending CustomMessage", utils.Attribute{Key: "path", Value: path}, utils.Attribute{Key: "data", Value: data}, utils.Attribute{Key: "connectionType", Value: connectionType}, utils.Attribute{Key: "apiName", Value: apiName})
+	utils.FormatTrace("Sending CustomMessage", utils.Attribute{Key: "path", Value: path}, utils.Attribute{Key: "data", Value: data}, utils.Attribute{Key: "connectionType", Value: connectionType}, utils.Attribute{Key: "apiName", Value: apiName})
 	craftData := &CraftData{Path: path, Data: data, ConnectionType: connectionType}
 	parsing := &spectypes.ParseDirective{
 		ApiName:          apiName,
@@ -498,7 +498,7 @@ func (cf *ChainFetcher) CustomMessage(ctx context.Context, path string, data []b
 		return nil, err
 	}
 	reply, _, _, _, _, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
-	utils.LavaFormatTrace("CustomMessage", utils.Attribute{Key: "reply", Value: reply})
+	utils.FormatTrace("CustomMessage", utils.Attribute{Key: "reply", Value: reply})
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +509,7 @@ func (cf *ChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) 
 	parsing, apiCollection, ok := cf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCKNUM.String()
 	if !ok {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" tag function not found", nil, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
+		return spectypes.NOT_APPLICABLE, utils.FormatError(tagName+" tag function not found", nil, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 	collectionData := apiCollection.CollectionData
 	var craftData *CraftData
@@ -520,15 +520,15 @@ func (cf *ChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) 
 	}
 	chainMessage, err := CraftChainMessage(parsing, collectionData.Type, cf.chainParser, craftData, cf.ChainFetcherMetadata())
 	if err != nil {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" failed creating chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
+		return spectypes.NOT_APPLICABLE, utils.FormatError(tagName+" failed creating chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 	reply, _, _, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
 	if err != nil {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" failed sending chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
+		return spectypes.NOT_APPLICABLE, utils.FormatDebugErr(tagName+" failed sending chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 	parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 	if err != nil {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebug(tagName+" Failed formatResponseForParsing", []utils.Attribute{
+		return spectypes.NOT_APPLICABLE, utils.FormatDebug(tagName+" Failed formatResponseForParsing", []utils.Attribute{
 			{Key: "chainId", Value: chainId},
 			{Key: "nodeUrl", Value: proxyUrl.Url},
 			{Key: "Method", Value: parsing.ApiName},
@@ -539,7 +539,7 @@ func (cf *ChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) 
 	parsedInput := parser.ParseBlockFromReply(parserInput, parsing.ResultParsing, parsing.Parsers)
 	blockNum := parsedInput.GetBlock()
 	if blockNum == spectypes.NOT_APPLICABLE {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebug(tagName+" Failed to parse Response", []utils.Attribute{
+		return spectypes.NOT_APPLICABLE, utils.FormatDebug(tagName+" Failed to parse Response", []utils.Attribute{
 			{Key: "chainId", Value: chainId},
 			{Key: "nodeUrl", Value: proxyUrl.Url},
 			{Key: "Method", Value: parsing.ApiName},
@@ -570,16 +570,16 @@ func (cf *ChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64)
 	parsing, apiCollection, ok := cf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM.String()
 	if !ok {
-		return "", utils.LavaFormatError(tagName+" tag function not found", nil, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
+		return "", utils.FormatError(tagName+" tag function not found", nil, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 	collectionData := apiCollection.CollectionData
 
 	if parsing.FunctionTemplate == "" {
-		return "", utils.LavaFormatError(tagName+" missing function template", nil, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
+		return "", utils.FormatError(tagName+" missing function template", nil, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 
 	if blockNum < 0 {
-		return "", utils.LavaFormatError(tagName+" invalid negative block number", nil,
+		return "", utils.FormatError(tagName+" invalid negative block number", nil,
 			[]utils.Attribute{{Key: "blockNum", Value: blockNum}, {Key: "chainID", Value: cf.endpoint.ChainID}}...)
 	}
 
@@ -593,13 +593,13 @@ func (cf *ChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64)
 	}
 	hash, fetchedBlock, err := FetchBlockHashWithSolanaRetry(ctx, blockNum, SameSlotRetryDelay, fetchFn)
 	if err != nil {
-		return "", utils.LavaFormatError(tagName+" all block-not-available retries exhausted", err,
+		return "", utils.FormatError(tagName+" all block-not-available retries exhausted", err,
 			utils.LogAttr("originalBlock", blockNum),
 			utils.LogAttr("chainID", cf.endpoint.ChainID),
 		)
 	}
 	if fetchedBlock != blockNum {
-		utils.LavaFormatWarning("Chain Tracker fetched previous slot after block-not-available",
+		utils.FormatWarning("Chain Tracker fetched previous slot after block-not-available",
 			nil,
 			utils.LogAttr("originalBlock", blockNum),
 			utils.LogAttr("fetchedBlock", fetchedBlock),
@@ -616,20 +616,20 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 	data := []byte(fmt.Sprintf(parsing.FunctionTemplate, blockNum))
 	chainMessage, err := CraftChainMessage(parsing, collectionData.Type, cf.chainParser, &CraftData{Path: path, Data: data, ConnectionType: collectionData.Type}, cf.ChainFetcherMetadata())
 	if err != nil {
-		return "", nil, utils.LavaFormatError(tagName+" failed CraftChainMessage on function template", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
+		return "", nil, utils.FormatError(tagName+" failed CraftChainMessage on function template", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 	start := time.Now()
 	reply, _, _, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
 	if err != nil {
 		timeTaken := time.Since(start)
-		return "", nil, utils.LavaFormatDebugErr(tagName+" failed sending chainMessage", err, []utils.Attribute{{Key: "sendTime", Value: timeTaken}, {Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
+		return "", nil, utils.FormatDebugErr(tagName+" failed sending chainMessage", err, []utils.Attribute{{Key: "sendTime", Value: timeTaken}, {Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 
 	responseData := reply.RelayReply.Data
 
 	parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 	if err != nil {
-		return "", responseData, utils.LavaFormatDebug(tagName+" Failed formatResponseForParsing", []utils.Attribute{
+		return "", responseData, utils.FormatDebug(tagName+" Failed formatResponseForParsing", []utils.Attribute{
 			{Key: "error", Value: err},
 			{Key: "chainId", Value: chainId},
 			{Key: "nodeUrl", Value: proxyUrl.Url},
@@ -640,7 +640,7 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 
 	res, err := parser.ParseBlockHashFromReplyAndDecode(parserInput, parsing.ResultParsing, parsing.Parsers)
 	if err != nil {
-		return "", responseData, utils.LavaFormatDebug(tagName+" Failed ParseMessageResponse", []utils.Attribute{
+		return "", responseData, utils.FormatDebug(tagName+" Failed ParseMessageResponse", []utils.Attribute{
 			{Key: "error", Value: err},
 			{Key: "chainId", Value: chainId},
 			{Key: "nodeUrl", Value: proxyUrl.Url},
@@ -663,7 +663,7 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 type ChainFetcherOptions struct {
 	ChainRouter ChainRouter
 	ChainParser ChainParser
-	Endpoint    *lavasession.RPCProviderEndpoint
+	Endpoint    *routersession.RPCProviderEndpoint
 	Cache       *performance.Cache
 }
 
@@ -680,13 +680,13 @@ func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage Chain
 	var parserInput parser.RPCInput
 	respData := reply.Data
 	if len(respData) == 0 {
-		return nil, utils.LavaFormatDebug("result (reply.Data) is empty, can't be formatted for parsing", utils.Attribute{Key: "error", Value: err})
+		return nil, utils.FormatDebug("result (reply.Data) is empty, can't be formatted for parsing", utils.Attribute{Key: "error", Value: err})
 	}
 	rpcMessage := chainMessage.GetRPCMessage()
 	if customParsingMessage, ok := rpcMessage.(chainproxy.CustomParsingMessage); ok {
 		parserInput, err = customParsingMessage.NewParsableRPCInput(respData)
 		if err != nil {
-			return nil, utils.LavaFormatError("failed creating NewParsableRPCInput from CustomParsingMessage", err, utils.Attribute{Key: "data", Value: string(respData)})
+			return nil, utils.FormatError("failed creating NewParsableRPCInput from CustomParsingMessage", err, utils.Attribute{Key: "data", Value: string(respData)})
 		}
 	} else {
 		parserInput = chainproxy.DefaultParsableRPCInput(respData)
@@ -701,7 +701,7 @@ func HashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId string) 
 }
 
 // hashCacheRequest derives the cache key for a relay. explicitExtensionDirective carries the
-// normalized value of the client's lava-extension directive header (empty when absent). When
+// normalized value of the client's smartrouter-extension directive header (empty when absent). When
 // present it is folded into the hash so an explicitly requested extension (e.g. "archive") lands
 // in its own cache lane and cannot collide with a request that was only auto-promoted to the same
 // resolved Extensions. Passing "" reproduces the historical hash, keeping existing entries valid.
@@ -746,13 +746,13 @@ func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explici
 	}
 	cashHashBytes, err := json.Marshal(cashHash)
 	if err != nil {
-		return nil, outputFormatter, utils.LavaFormatError("Failed marshalling cash hash in HashCacheRequest", err)
+		return nil, outputFormatter, utils.FormatError("Failed marshalling cash hash in HashCacheRequest", err)
 	}
 
-	// Fold an explicit lava-extension directive into the key so explicitly-requested extensions
+	// Fold an explicit smartrouter-extension directive into the key so explicitly-requested extensions
 	// get a dedicated cache lane, separate from requests auto-promoted to the same Extensions.
 	if explicitExtensionDirective != "" {
-		cashHashBytes = append(cashHashBytes, []byte("\x00lava-extension="+explicitExtensionDirective)...)
+		cashHashBytes = append(cashHashBytes, []byte("\x00smartrouter-extension="+explicitExtensionDirective)...)
 	}
 
 	// return the value

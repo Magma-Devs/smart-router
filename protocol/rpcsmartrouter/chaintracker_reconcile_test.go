@@ -6,12 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/stretchr/testify/require"
 )
 
 // reconcileFixture is the minimum wiring reconcileChainTrackers touches: a real EndpointMonitor
@@ -20,7 +21,7 @@ import (
 type reconcileFixture struct {
 	server  *RPCSmartRouterServer
 	monitor *endpointstate.EndpointMonitor
-	csm     *lavasession.ConsumerSessionManager
+	csm     *routersession.ConsumerSessionManager
 	epoch   uint64
 }
 
@@ -43,13 +44,13 @@ func newReconcileFixture(t *testing.T, ctx context.Context) *reconcileFixture {
 	})
 	t.Cleanup(monitor.Stop)
 
-	rpcEndpoint := &lavasession.RPCEndpoint{
+	rpcEndpoint := &routersession.RPCEndpoint{
 		NetworkAddress: "127.0.0.1:0", ChainID: chainID, ApiInterface: apiInterface, HealthCheckPath: "/",
 	}
-	csm := lavasession.NewConsumerSessionManager(
+	csm := routersession.NewConsumerSessionManager(
 		rpcEndpoint,
 		provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID),
-		nil, "lava@test", lavasession.NewActiveSubscriptionProvidersStorage(),
+		nil, "provider@test", routersession.NewActiveSubscriptionProvidersStorage(),
 	)
 
 	return &reconcileFixture{
@@ -73,16 +74,16 @@ func newReconcileFixture(t *testing.T, ctx context.Context) *reconcileFixture {
 // carries a usable connection object while the upstream itself is unreachable.
 func (f *reconcileFixture) admit(t *testing.T, ctx context.Context, urls ...string) {
 	t.Helper()
-	pairing := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(urls))
+	pairing := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(urls))
 	for i, url := range urls {
-		conn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "jsonrpc")
+		conn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "jsonrpc")
 		require.NoError(t, err)
-		pairing[uint64(i)] = lavasession.NewConsumerSessionWithProvider(
+		pairing[uint64(i)] = routersession.NewConsumerSessionWithProvider(
 			fmt.Sprintf("provider-%d", i),
-			[]*lavasession.Endpoint{{
+			[]*routersession.Endpoint{{
 				NetworkAddress:    url,
 				Enabled:           true,
-				DirectConnections: []lavasession.DirectRPCConnection{conn},
+				DirectConnections: []routersession.DirectRPCConnection{conn},
 			}},
 			999999, f.epoch, int64(1),
 		)

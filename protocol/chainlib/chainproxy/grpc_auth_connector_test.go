@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/jhump/protoreflect/grpcreflect"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // MAG-2218 regression cover. The defect was that auth-headers reached every transport

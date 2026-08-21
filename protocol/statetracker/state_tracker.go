@@ -5,11 +5,11 @@ import (
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	speckeeper "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/specfetcher"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 // expandCommaSeparatedPaths takes a slice of paths (from StringArray flag) and expands
@@ -62,9 +62,9 @@ func expandCommaSeparatedPaths(specPaths []string) []string {
 //
 // For remote repositories, the appropriate token (githubToken or gitlabToken) is used for authentication.
 // smart-router loads specs statically; empty specPaths is an error (there is no live blockchain fallback).
-func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint lavasession.RPCEndpoint, githubToken string, gitlabToken string) error {
+func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint routersession.RPCEndpoint, githubToken string, gitlabToken string) error {
 	if len(specPaths) == 0 {
-		return utils.LavaFormatError("no spec paths provided", nil,
+		return utils.FormatError("no spec paths provided", nil,
 			utils.LogAttr("chain_id", rpcEndpoint.ChainID))
 	}
 
@@ -72,7 +72,7 @@ func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainP
 	expandedPaths := expandCommaSeparatedPaths(specPaths)
 
 	if len(expandedPaths) == 0 {
-		return utils.LavaFormatError("no valid spec paths after expansion", nil,
+		return utils.FormatError("no valid spec paths after expansion", nil,
 			utils.LogAttr("chain_id", rpcEndpoint.ChainID))
 	}
 
@@ -80,14 +80,14 @@ func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainP
 	aggregatedSpecs := make(map[string]spectypes.Spec)
 
 	for i, specPath := range expandedPaths {
-		utils.LavaFormatInfo("Loading specs from source",
+		utils.FormatInfo("Loading specs from source",
 			utils.LogAttr("source_index", i+1),
 			utils.LogAttr("total_sources", len(expandedPaths)),
 			utils.LogAttr("source", specPath))
 
 		specs, err := loadAllSpecsFromSource(ctx, specPath, githubToken, gitlabToken)
 		if err != nil {
-			return utils.LavaFormatError("failed loading specs from source", err,
+			return utils.FormatError("failed loading specs from source", err,
 				utils.LogAttr("source_index", i+1),
 				utils.LogAttr("source", specPath))
 		}
@@ -95,7 +95,7 @@ func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainP
 		// Merge into aggregated specs (later sources override earlier)
 		for chainID, spec := range specs {
 			if _, exists := aggregatedSpecs[chainID]; exists {
-				utils.LavaFormatInfo("Overriding spec from later source",
+				utils.FormatInfo("Overriding spec from later source",
 					utils.LogAttr("chain_id", chainID),
 					utils.LogAttr("source", specPath))
 			}
@@ -104,19 +104,19 @@ func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainP
 	}
 
 	if len(aggregatedSpecs) == 0 {
-		return utils.LavaFormatError("no specs loaded from any source", nil,
+		return utils.FormatError("no specs loaded from any source", nil,
 			utils.LogAttr("sources", expandedPaths))
 	}
 
 	// Expand the requested spec with its dependencies
 	spec, err := speckeeper.ExpandSpecWithDependencies(aggregatedSpecs, rpcEndpoint.ChainID)
 	if err != nil {
-		return utils.LavaFormatError("failed expanding spec", err,
+		return utils.FormatError("failed expanding spec", err,
 			utils.LogAttr("chain_id", rpcEndpoint.ChainID),
 			utils.LogAttr("available_specs", len(aggregatedSpecs)))
 	}
 
-	utils.LavaFormatInfo("Successfully loaded and expanded spec from aggregated sources",
+	utils.FormatInfo("Successfully loaded and expanded spec from aggregated sources",
 		utils.LogAttr("chain_id", spec.Index),
 		utils.LogAttr("total_sources", len(specPaths)),
 		utils.LogAttr("total_specs_loaded", len(aggregatedSpecs)))
@@ -149,10 +149,9 @@ func loadAllSpecsFromRemoteRepo(ctx context.Context, repoURL, githubToken, gitla
 
 	specs, err := specfetcher.FetchAllSpecsFromRemote(ctx, repoURL, token)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed fetching specs from remote repository", err,
+		return nil, utils.FormatError("failed fetching specs from remote repository", err,
 			utils.LogAttr("repo_url", repoURL))
 	}
 
 	return specs, nil
 }
-

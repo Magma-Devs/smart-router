@@ -6,16 +6,17 @@ import (
 	"net/http"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"google.golang.org/grpc"
 )
 
 const (
@@ -38,7 +39,7 @@ func NewChainParser(apiInterface string) (chainParser ChainParser, err error) {
 
 func NewChainListener(
 	ctx context.Context,
-	listenEndpoint *lavasession.RPCEndpoint,
+	listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender,
 	healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
@@ -47,7 +48,7 @@ func NewChainListener(
 	wsSubscriptionManager WSSubscriptionManager,
 ) (ChainListener, error) {
 	if listenEndpoint.NetworkAddress == INTERNAL_ADDRESS {
-		utils.LavaFormatDebug("skipping chain listener for internal address")
+		utils.FormatDebug("skipping chain listener for internal address")
 		return NewEmptyChainListener(), nil
 	}
 	switch listenEndpoint.ApiInterface {
@@ -199,8 +200,8 @@ type ChainProxy interface {
 	SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
 }
 
-func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainRouter, error) {
-	var proxyConstructor func(context.Context, uint, lavasession.RPCProviderEndpoint, ChainParser) (ChainProxy, error)
+func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainRouter, error) {
+	var proxyConstructor func(context.Context, uint, routersession.RPCProviderEndpoint, ChainParser) (ChainProxy, error)
 	switch rpcProviderEndpoint.ApiInterface {
 	case spectypes.APIInterfaceJsonRPC:
 		proxyConstructor = NewJrpcChainProxy

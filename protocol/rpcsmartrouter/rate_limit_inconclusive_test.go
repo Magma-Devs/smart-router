@@ -10,7 +10,7 @@ import (
 )
 
 // Detection is structural wherever a status code exists: ValidateStatusCodes mints
-// common.StatusCodeError429 and every HTTP-family proxy propagates it as LavaFormat's cause,
+// common.StatusCodeError429 and every HTTP-family proxy propagates it as the Format wrapper's cause,
 // so errors.Is finds it through the wrapping. The cases below drive each transport the way
 // production produces it, so a path that starts discarding its typed error fails here rather
 // than silently demoting a healthy provider.
@@ -26,20 +26,20 @@ func TestIsRateLimitFailure_ProductionShapes(t *testing.T) {
 		{
 			// jsonrpc over http: ValidateStatusCodes mints the sentinel, the proxy wraps it.
 			"jsonrpc over http, one wrap",
-			utils.LavaFormatWarning("Received invalid status code", common.StatusCodeError429),
+			utils.FormatWarning("Received invalid status code", common.StatusCodeError429),
 		},
 		{
 			// rest / tendermint: same sentinel, reached through HandleStatusError. These two
 			// proxies used to pass nil here and render the code into an attribute instead,
 			// which left nothing for errors.Is to find.
 			"rest, sentinel through the full verify stack",
-			utils.LavaFormatWarning("[-] verify failed sending chainMessage",
-				utils.LavaFormatWarning("Received invalid status code", common.StatusCodeError429)),
+			utils.FormatWarning("[-] verify failed sending chainMessage",
+				utils.FormatWarning("Received invalid status code", common.StatusCodeError429)),
 		},
 		{
 			// The latest-block path, which used to drop the cause into an attribute.
 			"wrapped sentinel via the GET_BLOCKNUM path",
-			utils.LavaFormatWarning("GET_BLOCKNUM failed sending chainMessage", common.StatusCodeError429),
+			utils.FormatWarning("GET_BLOCKNUM failed sending chainMessage", common.StatusCodeError429),
 		},
 		{
 			// grpc is the one transport with no status code to check: grpc-go reports
@@ -80,7 +80,7 @@ func TestIsRateLimitFailure_ProductionShapes(t *testing.T) {
 		{
 			// A different status code must not ride the same path.
 			"504 sentinel, wrapped the same way",
-			utils.LavaFormatWarning("Received invalid status code", common.StatusCodeError504),
+			utils.FormatWarning("Received invalid status code", common.StatusCodeError504),
 		},
 	}
 	for _, tc := range notRateLimited {

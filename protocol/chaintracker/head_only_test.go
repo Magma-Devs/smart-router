@@ -8,11 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	chaintracker "github.com/magma-Devs/smart-router/protocol/chaintracker"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/stretchr/testify/require"
 )
 
 // MAG-2218 head-only mode. No shipped spec exercises this path — the audit behind the ticket
@@ -29,8 +30,8 @@ type headlessFetcher struct {
 	latestCalls atomic.Int64
 }
 
-func (f *headlessFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+func (f *headlessFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
 
 func (f *headlessFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
@@ -46,11 +47,11 @@ func (f *headlessFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int6
 }
 
 func (f *headlessFetcher) FetchChainID(ctx context.Context) (string, string, error) {
-	return "", "", utils.LavaFormatError("FetchChainID not supported", nil)
+	return "", "", utils.FormatError("FetchChainID not supported", nil)
 }
 
 func (f *headlessFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
-	return nil, utils.LavaFormatError("not implemented", nil)
+	return nil, utils.FormatError("not implemented", nil)
 }
 
 func (f *headlessFetcher) advance() {

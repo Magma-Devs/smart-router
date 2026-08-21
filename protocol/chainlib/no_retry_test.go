@@ -4,8 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 func TestShouldRetryError(t *testing.T) {
@@ -204,8 +205,8 @@ func TestSolanaNonRetryableError_ErrorMessage(t *testing.T) {
 
 	require.Contains(t, wrappedErr.Error(), "missing in long-term storage")
 
-	// Test Unwrap returns the underlying LavaError
+	// Test Unwrap returns the underlying RouterError
 	unwrapped := errors.Unwrap(wrappedErr)
 	require.NotNil(t, unwrapped)
-	require.True(t, errors.Is(wrappedErr, common.LavaErrorChainSolanaMissingLongTerm))
+	require.True(t, errors.Is(wrappedErr, common.RouterErrorChainSolanaMissingLongTerm))
 }

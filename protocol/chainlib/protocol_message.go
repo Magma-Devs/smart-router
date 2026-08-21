@@ -46,7 +46,7 @@ func (bpm *BaseProtocolMessage) HashCacheRequest(chainId string) ([]byte, func([
 	return hashCacheRequest(bpm.relayRequestData, chainId, bpm.explicitExtensionDirective())
 }
 
-// explicitExtensionDirective returns the normalized value of the client's lava-extension directive
+// explicitExtensionDirective returns the normalized value of the client's smartrouter-extension directive
 // header, or "" when absent. Normalization makes equivalent directives such as "Archive",
 // " archive " and "archive,debug"/"debug,archive" collapse to the same cache lane.
 func (bpm *BaseProtocolMessage) explicitExtensionDirective() string {
@@ -99,12 +99,12 @@ func (bpm *BaseProtocolMessage) UpdateEarliestAndValidateExtensionRules(extensio
 			extensionParser.ExtensionParsing(addon, bpm, uint64(seenBlock))
 			updatedProtocolExtensions := bpm.GetExtensions()
 			currentPrivateDataExtensions := bpm.RelayPrivateData().Extensions
-			utils.LavaFormatTrace("[Archive Debug] Trying to add extensions", utils.LogAttr("currentProtocolExtensions", updatedProtocolExtensions), utils.LogAttr("currentPrivateDataExtensions", currentPrivateDataExtensions))
+			utils.FormatTrace("[Archive Debug] Trying to add extensions", utils.LogAttr("currentProtocolExtensions", updatedProtocolExtensions), utils.LogAttr("currentPrivateDataExtensions", currentPrivateDataExtensions))
 			if len(updatedProtocolExtensions) > len(currentPrivateDataExtensions) {
 				// we need to add the missing extension to the private data.
 				currentPrivateDataExtensions = bpm.addMissingExtensions(updatedProtocolExtensions, currentPrivateDataExtensions)
 				bpm.RelayPrivateData().Extensions = currentPrivateDataExtensions
-				utils.LavaFormatTrace("[Archive Debug] After Swap", utils.LogAttr("bpm.RelayPrivateData().Extensions", bpm.RelayPrivateData().Extensions))
+				utils.FormatTrace("[Archive Debug] After Swap", utils.LogAttr("bpm.RelayPrivateData().Extensions", bpm.RelayPrivateData().Extensions))
 				return true
 			}
 		}
@@ -177,7 +177,7 @@ func (bpm *BaseProtocolMessage) GetCrossValidationParameters() (common.CrossVali
 		return common.CrossValidationParams{}, true, errors.New("cross-validation agreement-threshold cannot be greater than max-participants")
 	}
 
-	utils.LavaFormatInfo("CrossValidation parameters parsed",
+	utils.FormatInfo("CrossValidation parameters parsed",
 		utils.LogAttr("maxParticipants", maxParticipants),
 		utils.LogAttr("agreementThreshold", agreementThreshold))
 

@@ -5,10 +5,10 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -55,7 +55,7 @@ func SmartRouterPolicyConfig() relaypolicy.PolicyConfig {
 // policy resolver.
 func NewSmartRouterRelayStateMachine(
 	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
+	usedProviders *routersession.UsedProviders,
 	relaySender SmartRouterRelaySender,
 	protocolMessage chainlib.ProtocolMessage,
 	analytics *metrics.RelayMetrics,
@@ -71,7 +71,7 @@ func NewSmartRouterRelayStateMachine(
 // case behavior is identical to the header-driven path.
 func NewSmartRouterRelayStateMachineWithPolicy(
 	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
+	usedProviders *routersession.UsedProviders,
 	relaySender SmartRouterRelaySender,
 	protocolMessage chainlib.ProtocolMessage,
 	analytics *metrics.RelayMetrics,
@@ -92,12 +92,12 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		if !forbidCallerCV {
 			caller, callerPresent, err := protocolMessage.GetCrossValidationParameters()
 			if callerPresent && err != nil {
-				return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
+				return nil, utils.FormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
 			}
 			if eff, applies := resolver.Resolve(chainID, apiInterface, method, caller, callerPresent); applies {
 				cvOverride = &eff
 				if debugRelays {
-					utils.LavaFormatDebug("[CrossValidation] per-method policy resolved",
+					utils.FormatDebug("[CrossValidation] per-method policy resolved",
 						utils.LogAttr("chainID", chainID),
 						utils.LogAttr("apiInterface", apiInterface),
 						utils.LogAttr("method", method),
@@ -109,7 +109,7 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 				}
 			}
 		} else if debugRelays {
-			utils.LavaFormatDebug("[CrossValidation] per-method policy forbids caller-driven cross-validation",
+			utils.FormatDebug("[CrossValidation] per-method policy forbids caller-driven cross-validation",
 				utils.LogAttr("chainID", chainID),
 				utils.LogAttr("apiInterface", apiInterface),
 				utils.LogAttr("method", method),
