@@ -2,11 +2,14 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -85,6 +88,59 @@ type chainReverifyInputs struct {
 	// holds that lock across both tier calls. Lazily allocated so test fixtures that build
 	// chainReverifyInputs by hand need not.
 	demoteFailStreak map[string]int
+	// rateLimitHoldoff holds off providers that answered a probe with a rate-limit, so the
+	// pass stops adding load to an upstream that just told us it is over its limit. Nil
+	// falls back to the process-wide holdoff.Shared, so one vendor's cap slows every
+	// chain this process probes through it; tests inject their own.
+	rateLimitHoldoff *holdoff.Registry
+}
+
+// holdoffURLKey is the URL tier's key for a probed provider: its first node URL, so two
+// providers sharing a vendor name but hitting different endpoints are held off apart.
+func holdoffURLKey(p *routersession.RPCStaticProviderEndpoint) string {
+	if len(p.NodeUrls) > 0 && p.NodeUrls[0].Url != "" {
+		return p.NodeUrls[0].Url
+	}
+	return p.Name
+}
+
+// rateLimitTextSignatures covers the one transport where no status code exists to check.
+//
+// Every HTTP-family transport reaches us as common.StatusCodeError429 — ValidateStatusCodes
+// mints it, each proxy propagates it as the Format wrapper's cause, so Unwrap survives and errors.Is
+// below is the real check. gRPC is different in kind: there is no HTTP status in the error at
+// all. grpc-go reports codes.Unavailable and the vendor's 429 survives only inside the status
+// description, so there is nothing structural to match on.
+//
+// Verbatim from a production failure. Keep this list minimal — a new entry here is usually a
+// signal that some path is discarding a typed error, which is worth fixing at the source
+// instead.
+var rateLimitTextSignatures = []string{
+	"429 (Too Many Requests)", // grpc transport: no status code, only the status description
+}
+
+// isRateLimitFailure reports whether a failed validation was the upstream refusing us for
+// asking too fast, rather than the upstream being unable to serve what it declares.
+//
+// The distinction is already settled elsewhere in this codebase — see the IsRateLimited
+// comment on common.RelayResult: "the endpoint is healthy but busy. Callers back off but
+// must not mark it unhealthy, which is why the direct-RPC availability gate excludes it."
+// The relay path honours that; re-verification did not, and a rate-limited probe demoted
+// providers that were serving traffic perfectly well.
+func isRateLimitFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, common.StatusCodeError429) {
+		return true
+	}
+	msg := err.Error()
+	for _, sig := range rateLimitTextSignatures {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // applyReverification revalidates configured providers for one tier and
@@ -138,11 +194,44 @@ func applyReverification(
 	if len(configured) == 0 {
 		return fresh, nil, nil
 	}
-	validate := inputs.validateFn
-	if validate == nil {
-		validate = func(c context.Context, p *routersession.RPCStaticProviderEndpoint) error {
+	probe := inputs.validateFn
+	if probe == nil {
+		probe = func(c context.Context, p *routersession.RPCStaticProviderEndpoint) error {
 			return validateProvider(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
 		}
+	}
+	if inputs.rateLimitHoldoff == nil {
+		inputs.rateLimitHoldoff = holdoff.Shared
+	}
+
+	// A provider that answered with a rate-limit is held off rather than re-probed. The
+	// skip returns the rate-limit error itself, so the reconciliation below reaches the
+	// same inconclusive verdict it would have from a fresh 429 — membership unchanged,
+	// streak untouched — without spending a request to learn it. Any other outcome clears
+	// the penalty: an upstream that is answering us again, even to report a genuine
+	// capability failure, is no longer refusing us for load.
+	validate := func(c context.Context, p *routersession.RPCStaticProviderEndpoint) error {
+		urlKey := holdoffURLKey(p)
+		if inputs.rateLimitHoldoff.HeldOff(p.Name, urlKey) {
+			utils.FormatDebug("re-verify: provider held off after a rate-limit, skipping probe",
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+			)
+			return common.StatusCodeError429
+		}
+		err := probe(c, p)
+		if isRateLimitFailure(err) {
+			retryAfter, _ := common.RetryAfterFrom(err)
+			delay := inputs.rateLimitHoldoff.RecordRateLimit(p.Name, urlKey, retryAfter)
+			utils.FormatWarning("re-verify: provider rate-limited, backing off", err,
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+				utils.LogAttr("holdoff", delay.String()),
+			)
+			return err
+		}
+		inputs.rateLimitHoldoff.RecordAnswer(p.Name, urlKey)
+		return err
 	}
 
 	// WaitGroup + buffered-channel semaphore. Replaces an earlier errgroup —
@@ -185,6 +274,22 @@ func applyReverification(
 					utils.LogAttr("provider", p.Name),
 				)
 			}
+			continue
+		}
+		if isRateLimitFailure(err) {
+			// Inconclusive, not failed: the upstream refused us for asking too fast and told
+			// us nothing about whether it can serve. Leave the streak untouched — advancing it
+			// would let a busy vendor demote a healthy provider — and leave membership as-is:
+			// an active provider stays paired, an inactive one is not promoted on no evidence.
+			if wasActive {
+				healthyNames[p.Name] = struct{}{}
+			}
+			utils.FormatWarning("re-verify: "+tier.String()+" rate-limited, treating as inconclusive", err,
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+				utils.LogAttr("active", wasActive),
+				utils.LogAttr("consecutiveFailures", inputs.demoteFailStreak[streakKey]),
+			)
 			continue
 		}
 		if !wasActive {

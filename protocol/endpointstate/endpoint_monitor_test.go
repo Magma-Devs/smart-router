@@ -19,9 +19,13 @@ import (
 type mockDirectRPCConnection struct {
 	url       string
 	responses map[string][]byte // request -> response
+	sendErr   error             // when set, SendRequest fails with it instead of answering
 }
 
 func (m *mockDirectRPCConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*routersession.DirectRPCResponse, error) {
+	if m.sendErr != nil {
+		return nil, m.sendErr
+	}
 	// Return mock response based on request
 	if response, ok := m.responses[string(data)]; ok {
 		return &routersession.DirectRPCResponse{

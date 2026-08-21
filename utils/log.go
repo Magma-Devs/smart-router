@@ -633,6 +633,14 @@ func FormatDebug(description string, attributes ...Attribute) error {
 	return FormatLog(description, nil, attributes, LOG_DEBUG)
 }
 
+// FormatDebugErr logs at debug severity while keeping err as the returned error's
+// cause, so errors.Is/As still see it through the wrap. Passing err as an Attribute to
+// FormatDebug instead severs the chain: the attribute form returns a plain
+// fmt.Errorf with no Unwrap, and typed errors (rate limits above all) become unreadable.
+func FormatDebugErr(description string, err error, attributes ...Attribute) error {
+	return FormatLog(description, err, attributes, LOG_DEBUG)
+}
+
 func FormatTrace(description string, attributes ...Attribute) error {
 	return FormatLog(description, nil, attributes, LOG_TRACE)
 }

@@ -90,7 +90,11 @@ never as a non-zero exit. Only a fatal setup error (bad config, missing --use-st
 exits non-zero, and even then a JSON envelope with a populated "error" is printed first.
 
 Endpoints can come from a smartrouter config file (probes every node-url under direct-rpc),
-or from inline "address chain-id api-interface" triplets like the rpcsmartrouter command.`,
+or from inline "address chain-id api-interface" triplets like the rpcsmartrouter command.
+
+The config argument resolves exactly as the rpcsmartrouter command's does: an absolute path
+names the file outright, while a relative path or a bare name is looked up in the local
+running directory, ./config, then ` + defaultNodeHome + `.`,
 		Example: `  smartrouter health config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
   smartrouter health https://eth1.lava.build ETH1 jsonrpc --use-static-spec specs/`,
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -195,19 +199,18 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 		return providers, nil
 	}
 
-	// Config-file mode.
-	configName := DefaultRPCSmartRouterFileName
-	if len(args) == 1 {
-		configName = args[0]
-	}
+	// Config-file mode. The argument is a config file path (absolute or relative) or a
+	// bare name resolved against the search paths; see config_source.go.
 	viper.Reset()
-	viper.SetConfigName(configName)
-	viper.SetConfigType("yml")
-	viper.AddConfigPath(".")
-	viper.AddConfigPath("./config")
-	viper.AddConfigPath(defaultNodeHome)
+	configTarget, configIsFile := pointViperAtConfig(args)
 	if err := viper.ReadInConfig(); err != nil {
-		return nil, utils.FormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configName})
+		// This command is what an operator reaches for when a config will not boot, so a
+		// config it cannot even find has to say where it looked, in the terms they used.
+		if isConfigNotFound(err) {
+			return nil, utils.FormatError(configNotFoundMessage(configTarget, configIsFile), err,
+				configLocationAttributes(configTarget, configIsFile)...)
+		}
+		return nil, utils.FormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configTarget})
 	}
 
 	keys := []string{commonlib.DirectRPCConfigName}

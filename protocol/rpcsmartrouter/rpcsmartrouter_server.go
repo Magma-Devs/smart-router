@@ -19,6 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/performance"
@@ -1940,6 +1941,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			statusCode := localRelayResult.StatusCode
 			shouldFailSession := shouldFailSessionForResult(err, localRelayResult)
 
+			// Hold-off registry keys for this attempt (docs/RATE-LIMIT-HOLDOFF.md): the
+			// provider name and the node URL actually dialed.
+			holdoffProvider := singleConsumerSession.Parent.PublicAddress
+			holdoffURL := endpointAddress
+			if targetEndpoint != nil {
+				holdoffURL = targetEndpoint.NetworkAddress
+			}
+
 			if isClientCancel {
 				// We cancelled it, so the endpoint's availability was never actually tested —
 				// release the session and return its CU without a QoS penalty (MAG-2648).
@@ -1954,7 +1963,34 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
+			} else if isRateLimitedRelayOutcome(err, localRelayResult) {
+				// A rate-limit is neither failure nor success — the upstream is healthy but
+				// busy, and both scoring directions get it wrong: OnSessionFailure lets a
+				// busy vendor hard-block a healthy endpoint after 15 consecutive failures,
+				// OnSessionDone rewards the fast rejection with a latency sample that ranks
+				// the limiter above endpoints doing real work. Release without a QoS sample
+				// either way, and hold the endpoint off so the in-request retry and
+				// subsequent requests prefer somewhere else (docs/RATE-LIMIT-HOLDOFF.md).
+				retryAfter, _ := common.RetryAfterFrom(err)
+				heldFor := relayHoldoff.RecordRateLimit(holdoffProvider, holdoffURL, retryAfter)
+				releaseErr := err
+				if releaseErr == nil {
+					releaseErr = fmt.Errorf("upstream rate-limited the relay (HTTP %d)", statusCode)
+				}
+				utils.FormatDebug("relay rate-limited by upstream, holding endpoint off",
+					utils.LogAttr("endpoint", endpointAddress),
+					utils.LogAttr("holdoff", heldFor.String()),
+					utils.LogAttr("GUID", goroutineCtx),
+				)
+				if errSession := rpcss.sessionManager.OnSessionRateLimited(singleConsumerSession, releaseErr); errSession != nil {
+					utils.FormatWarning("OnSessionRateLimited failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
 			} else if !shouldFailSession {
+				// The endpoint answered for real — success or a plain client error — so any
+				// standing rate-limit hold-off for it is stale.
+				relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
 				// Success or client error (4xx except 429) - update session as success.
 				// targetEndpoint / directConn were resolved and the tracker ensured before
 				// dispatch (above), so harvestGen is the generation captured pre-relay.
@@ -3954,8 +3990,20 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			)
 		}
 
-		// Return error to trigger backoff (but preserve result for client)
-		return relayLatency, fmt.Errorf("HTTP %d", statusCode), needsBackoff
+		// Copy the classifier's verdict into relayResult before failing the relay — the
+		// fault-axis flags (IsRateLimited above all) are only readable downstream through
+		// relayResult, and dying here left the rate-limit carve-out unreachable for real
+		// HTTP 429s. StatusCode is deliberately NOT copied: listeners surface a non-zero
+		// relayResult.StatusCode to the client, and what the client sees on a failed relay
+		// is the hot-path ticket's decision, not this propagation fix's.
+		relayResult.IsNodeError = result.IsNodeError
+		relayResult.IsNonRetryable = result.IsNonRetryable
+		relayResult.IsUnsupportedMethod = result.IsUnsupportedMethod
+		relayResult.IsRateLimited = result.IsRateLimited
+		relayResult.IsDataScope = result.IsDataScope
+		relayResult.ProviderInfo = result.ProviderInfo
+
+		return relayLatency, httpStatusRelayError(statusCode, result.Reply), needsBackoff
 	}
 
 	// Success - reset endpoint health. A node error the QoS path is scoring against this endpoint
@@ -4782,4 +4830,36 @@ func classifyHTTPStatus(code int) (shouldMarkUnhealthy, needsBackoff bool) {
 	default:
 		return false, false
 	}
+}
+
+// relayHoldoff is the hot path's and recovery probe's handle on the process-wide
+// rate-limit hold-off registry (docs/RATE-LIMIT-HOLDOFF.md). A package variable rather
+// than a server field so tests can swap in a clock-pinned registry and restore it.
+var relayHoldoff = holdoff.Shared
+
+// isRateLimitedRelayOutcome reports whether the relay attempt was refused for rate, in
+// either shape it arrives: a typed HTTP 429 error, or a 2xx-body / gRPC classification
+// that set IsRateLimited.
+func isRateLimitedRelayOutcome(err error, relayResult *common.RelayResult) bool {
+	if relayResult != nil && relayResult.IsRateLimited {
+		return true
+	}
+	return err != nil && errors.Is(err, common.StatusCodeError429)
+}
+
+// httpStatusRelayError is the error relayInnerDirect fails a relay with when the upstream
+// answered a >=500/429 status. A 429 travels as the typed sentinel with the upstream's
+// Retry-After attached, so errors.Is(err, common.StatusCodeError429) and
+// common.RetryAfterFrom read the same on the relay path as on every other transport.
+func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error {
+	if statusCode != 429 {
+		return fmt.Errorf("HTTP %d", statusCode)
+	}
+	header := http.Header{}
+	if reply != nil {
+		for _, md := range reply.Metadata {
+			header.Add(md.Name, md.Value)
+		}
+	}
+	return common.WithRetryAfter(fmt.Errorf("HTTP %d: %w", statusCode, common.StatusCodeError429), header, time.Now())
 }

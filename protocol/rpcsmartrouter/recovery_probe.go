@@ -178,6 +178,16 @@ func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *routersession.Endpoint
 	if ep == nil || ep.DirectConnection == nil || len(payload) == 0 {
 		return relayProbeInconclusive
 	}
+	holdoffProvider := ep.ProviderAddress
+	holdoffURL := ""
+	if ep.Endpoint != nil {
+		holdoffURL = ep.Endpoint.NetworkAddress
+	}
+	if relayHoldoff.HeldOff(holdoffProvider, holdoffURL) {
+		// The vendor said slow down; a replay now would spend probe budget to learn
+		// nothing. Inconclusive keeps the gate's evidence untouched, same as a fresh 429.
+		return relayProbeInconclusive
+	}
 	if relayTimeout < minRelayProbeTimeout {
 		relayTimeout = minRelayProbeTimeout
 	}
@@ -198,7 +208,10 @@ func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *routersession.Endpoint
 		if httpErr, ok := err.(*routersession.HTTPStatusError); ok {
 			switch {
 			case httpErr.StatusCode == http.StatusTooManyRequests:
-				return relayProbeInconclusive // busy: the failing handler was never exercised
+				// busy: the failing handler was never exercised. Hold the endpoint off so
+				// the next replays skip it instead of re-asking on the probe cadence.
+				relayHoldoff.RecordRateLimit(holdoffProvider, holdoffURL, httpErr.RetryAfter)
+				return relayProbeInconclusive
 			case httpErr.StatusCode == http.StatusNotImplemented:
 				return relayProbeRecovered // capability answer, not a fault
 			default:
@@ -210,6 +223,7 @@ func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *routersession.Endpoint
 		}
 		classified, _ := classifyDirectRPCError(err, chainFamily, common.TransportJsonRPC)
 		if classified.IsRateLimited() {
+			relayHoldoff.RecordRateLimit(holdoffProvider, holdoffURL, 0)
 			return relayProbeInconclusive
 		}
 		if unhealthy, _ := classifyEndpointHealth(classified, false); unhealthy {
@@ -217,6 +231,7 @@ func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *routersession.Endpoint
 		}
 		// The relay path would not have disabled on this error — the health-affecting failure is
 		// gone, which is exactly what the gate needs to know.
+		relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
 		return relayProbeRecovered
 	}
 	if resp == nil {
@@ -239,11 +254,13 @@ func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *routersession.Endpoint
 	if nodeErr.Error != nil {
 		classified := common.ClassifyError(nil, chainFamily, common.TransportJsonRPC, nodeErr.Error.Code, nodeErr.Error.Message)
 		if classified.IsRateLimited() {
+			relayHoldoff.RecordRateLimit(holdoffProvider, holdoffURL, 0)
 			return relayProbeInconclusive
 		}
 		if unhealthy, _ := classifyEndpointHealth(classified, false); unhealthy {
 			return relayProbeStillFailing
 		}
 	}
+	relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
 	return relayProbeRecovered
 }

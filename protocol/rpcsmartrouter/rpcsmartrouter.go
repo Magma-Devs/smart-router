@@ -18,7 +18,6 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -2739,15 +2738,18 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 		SilenceUsage: true,
 		Long: `rpcsmartrouter sets up a centralized server with static and backup providers to perform api requests through the router.
 		This is the smart router mode that uses pre-configured static providers instead of dynamically discovering providers on-chain.
-		all configs should be located in the local running directory /config or ` + defaultNodeHome + `
 		if no arguments are passed, assumes default config file: ` + DefaultRPCSmartRouterFileName + `
-		if one argument is passed, its assumed the config file name
+		if one argument is passed, it is the config to load. An absolute path names the file
+		outright; anything else — a relative path, or a bare name — is looked up in the
+		local running directory, ./config, then ` + defaultNodeHome + `.
+		An argument without a recognized extension has the supported ones appended, so
+		"akash" and "config/akash" both find config/akash.yml.
 		`,
 		Example: `required: --direct-rpc ...
 rpcsmartrouter <flags>
 rpcsmartrouter rpcsmartrouter_conf <flags>
 rpcsmartrouter 127.0.0.1:3333 OSMOSIS tendermintrpc 127.0.0.1:3334 OSMOSIS rest <flags>
-rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127.0.0.1:7778" [--debug-relays] --log_level <debug|warn|...>`,
+rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:7778" [--debug-relays] --log_level <debug|warn|...>`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			// Optionally run one of the validators provided by cobra
 			if err := cobra.RangeArgs(0, 1)(cmd, args); err == nil {
@@ -2767,16 +2769,9 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 			defer cancel()
 
 			var err error
-			// set viper
-			config_name := DefaultRPCSmartRouterFileName
-			if len(args) == 1 {
-				config_name = args[0] // name of config file (without extension)
-			}
-			viper.SetConfigName(config_name)
-			viper.SetConfigType("yml")
-			viper.AddConfigPath(".")
-			viper.AddConfigPath("./config")
-			viper.AddConfigPath(defaultNodeHome)
+			// set viper — the argument is a config file path (absolute or relative) or a
+			// bare name resolved against the search paths; see config_source.go.
+			configTarget, configIsFile := pointViperAtConfig(args)
 
 			// Bind all cobra flags to viper so viper.GetString/GetBool works.
 			// Previously Cosmos SDK's AddTxFlagsToCmd did this automatically.
@@ -2822,12 +2817,11 @@ rpcsmartrouter smartrouter_examples/full_smartrouter_example.yml --cache-be "127
 				// it as a clean, actionable error instead of a fatal stack-trace
 				// dump — reserve the loud path for genuinely unexpected read
 				// failures like malformed YAML.
-				var notFound viper.ConfigFileNotFoundError
-				if errors.As(err, &notFound) {
+				if isConfigNotFound(err) {
 					return utils.FormatError(
-						"no config file found — pass a config file as an argument (e.g. `smartrouter <config-file>.yml`), or place "+DefaultRPCSmartRouterFileName+" in one of the search paths",
+						configNotFoundMessage(configTarget, configIsFile),
 						err,
-						utils.Attribute{Key: "config_name", Value: DefaultRPCSmartRouterFileName},
+						configLocationAttributes(configTarget, configIsFile)...,
 					)
 				}
 				utils.FormatFatal("could not load config file", err, utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})

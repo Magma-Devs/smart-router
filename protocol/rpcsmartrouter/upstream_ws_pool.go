@@ -348,6 +348,16 @@ func (p *UpstreamWSPool) maybeScaleDown() {
 	}
 }
 
+// reconnectDelay floors the backoff ladder's delay with a rate-limited dial's
+// Retry-After: an upstream that named its own wait must not be re-dialed at the
+// 100ms–30s cadence. Any other failure keeps the ladder's delay.
+func reconnectDelay(base time.Duration, err error) time.Duration {
+	if retryAfter, ok := common.RetryAfterFrom(err); ok && retryAfter > base {
+		return retryAfter
+	}
+	return base
+}
+
 // ReconnectWithBackoff attempts to reconnect all unhealthy connections using exponential backoff.
 // This should be called when a connection error is detected.
 // Returns nil on success, or an error if max retries exceeded or context cancelled.
@@ -429,6 +439,8 @@ func (p *UpstreamWSPool) ReconnectWithBackoff(ctx context.Context) error {
 			return fmt.Errorf("max retries (%d) exceeded for endpoint %s: %w",
 				WebSocketMaxRetries, p.sanitizedURL, err)
 		}
+
+		delay = reconnectDelay(delay, err)
 
 		utils.FormatDebug("WebSocket pool: reconnect failed, retrying",
 			utils.LogAttr("endpoint", p.sanitizedURL),

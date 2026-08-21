@@ -304,6 +304,9 @@ func replayServer() *RPCSmartRouterServer {
 
 func replayWith(t *testing.T, conn *fakeDirectConn) relayProbeVerdict {
 	t.Helper()
+	// Hermetic hold-off state: a 429 case records into the registry, and without the
+	// reset it would make every later case skip the probe as held-off.
+	withFreshRelayHoldoff(t)
 	rpcss := replayServer()
 	epc := &routersession.EndpointWithDirectConnection{
 		Endpoint:         &routersession.Endpoint{NetworkAddress: "http://fake:8545"},

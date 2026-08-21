@@ -137,6 +137,12 @@ type SmartRouterMetricsManager struct {
 	// batchSignatures bounds how many distinct batch signatures may become label values.
 	batchSignatures *batchSignatureRegistry
 
+	// Unmatched-API ("Default-*") method names are bounded the same way (see
+	// default_method_label.go) — defaultMethodOverflow reports when the cap binds.
+	defaultMethodOverflow *prometheus.CounterVec
+	// defaultMethods bounds how many distinct Default-* names may become label values.
+	defaultMethods *batchSignatureRegistry
+
 	// Internal state
 	lock                    sync.RWMutex
 	endpointsHealthChecksOk uint64
@@ -533,6 +539,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_batch_signature_overflow_total",
 		Help: `Label normalizations that fell into method="batch:other". reason="cap": the spec exhausted its distinct-signature budget. reason="wide": one batch spanned more distinct methods than a signature may name. Non-zero means per-batch-type breakdowns are lossy — raise the cap or accept the aggregation.`,
 	}, []string{"spec", "reason"})
+	defaultMethodOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_default_method_overflow_total",
+		Help: `Label normalizations that fell into method="Default-other": the spec exhausted its distinct unmatched-API name budget. Sustained growth means clients are hitting URLs the spec does not match — concrete IDs in the path mint a new name per request — which usually indicates a spec gap (e.g. a path variant the templates miss).`,
+	}, []string{"spec"})
 
 	cacheLabels := []string{"spec", "apiInterface", "method"}
 	cacheRequestsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -596,6 +606,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerRequestsBatch = registerOrReuse(routerRequestsBatch)
 	batchSize = registerOrReuse(batchSize)
 	batchSignatureOverflow = registerOrReuse(batchSignatureOverflow)
+	defaultMethodOverflow = registerOrReuse(defaultMethodOverflow)
 	cacheRequestsTotalMetric = registerOrReuse(cacheRequestsTotalMetric)
 	cacheSuccessTotalMetric = registerOrReuse(cacheSuccessTotalMetric)
 	cacheFailedTotalMetric = registerOrReuse(cacheFailedTotalMetric)
@@ -681,6 +692,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		batchSize:              batchSize,
 		batchSignatureOverflow: batchSignatureOverflow,
 		batchSignatures:        newBatchSignatureRegistry(),
+
+		// Unmatched-API method bounding
+		defaultMethodOverflow: defaultMethodOverflow,
+		defaultMethods:        newDefaultMethodRegistry(),
 
 		// Cache group
 		cacheRequestsTotalMetric: cacheRequestsTotalMetric,
@@ -1384,6 +1399,7 @@ func (m *SmartRouterMetricsManager) SetCrossValidationStragglerMetric(chainId, a
 	if m == nil || outcome == "" {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.crossValidationStragglerTotalMetric.WithLabelValues(chainId, apiInterface, method, outcome).Inc()
 }
 

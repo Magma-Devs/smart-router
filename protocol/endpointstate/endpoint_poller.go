@@ -143,11 +143,10 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 	responseData, err := ecf.sendRawRequest(ctx, requestData, collectionData.Type, parsing.ApiName, metrics.TrackerRequestKindLatestBlock)
 	pollLatency = time.Since(reqStart)
 	if err != nil {
-		return spectypes.NOT_APPLICABLE, utils.FormatDebug(tagName+" failed sending request",
+		return spectypes.NOT_APPLICABLE, utils.FormatDebugErr(tagName+" failed sending request", err,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 			utils.LogAttr("endpoint", ecf.endpointURL),
-			utils.LogAttr("error", err),
 		)
 	}
 
@@ -278,9 +277,8 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 	responseData, err := ecf.sendRawRequest(ctx, requestData, connectionType, parsing.ApiName, metrics.TrackerRequestKindBlockHash)
 	if err != nil {
 		timeTaken := time.Since(start)
-		return "", nil, utils.FormatDebug(tagName+" failed sending request",
+		return "", nil, utils.FormatDebugErr(tagName+" failed sending request", err,
 			utils.LogAttr("sendTime", timeTaken),
-			utils.LogAttr("error", err),
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
 		)

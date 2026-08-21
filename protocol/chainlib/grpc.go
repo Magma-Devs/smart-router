@@ -686,6 +686,19 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	defer cancel()
 	err = conn.Invoke(connectCtx, "/"+nodeMessage.Path, msg, response, grpc.Header(&respHeaders))
 	if err != nil {
+		// A corroborated rate limit fails the send with the typed sentinel — matching the
+		// HTTP transports — instead of being converted into a node-error reply. gRPC has
+		// no status code to check, so common.RateLimitFromGRPC keys on the known texts,
+		// or on RESOURCE_EXHAUSTED corroborated by a retry delay in the metadata.
+		if st, ok := status.FromError(err); ok {
+			if retryAfter, limited := common.RateLimitFromGRPC(uint32(st.Code()), st.Message(), respHeaders); limited {
+				return nil, "", nil, utils.FormatWarning("gRPC node rate-limited the request", common.RateLimited(err, retryAfter),
+					utils.Attribute{Key: "GUID", Value: ctx},
+					utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID},
+					utils.Attribute{Key: "apiName", Value: nodeMessage.Path},
+				)
+			}
+		}
 		// Validate if the error is related to the provider connection to the node or it is a valid error
 		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
 		if parsedError := cp.HandleNodeError(ctx, err); parsedError != nil {

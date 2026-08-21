@@ -16,6 +16,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	metrics "github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
@@ -69,6 +70,11 @@ type ConsumerSessionManager struct {
 	validAddresses []string
 	// provider addresses that were given a second chance instead of reporting them immediately
 	secondChanceGivenToAddresses map[string]struct{}
+
+	// rateLimitHoldoff is consulted at provider selection so requests prefer providers
+	// that are not currently held off after a 429 (docs/RATE-LIMIT-HOLDOFF.md).
+	// Production uses the process-wide holdoff.Shared; tests inject a clock-pinned one.
+	rateLimitHoldoff *holdoff.Registry
 
 	// contains a sorted list of blocked addresses, sorted by their cu used this epoch for higher chance of response
 	currentlyBlockedProviderAddresses []string
@@ -1258,6 +1264,59 @@ func resolveSelectedProviderAddress(selectedProvider string, addresses []string)
 }
 
 // Get a valid provider address.
+// filterRateLimitedProviders drops providers currently held off after a rate limit —
+// unless that would leave nothing choosable: the request must still be served (the
+// Retry-After stays internal, a customer is never answered with a synthesized 429), so
+// when every candidate is held off the soonest-to-expire one stays in.
+func (csm *ConsumerSessionManager) filterRateLimitedProviders(ctx context.Context, validAddresses []string, ignoredProvidersList map[string]struct{}) []string {
+	reg := csm.rateLimitHoldoff
+	if reg == nil {
+		return validAddresses
+	}
+	ready := make([]string, 0, len(validAddresses))
+	soonest := ""
+	var soonestAt time.Time
+	heldCount := 0
+	readyChoosable := 0
+	for _, addr := range validAddresses {
+		readyAt, held := reg.ProviderReadyAt(addr)
+		if !held {
+			ready = append(ready, addr)
+			if _, ignored := ignoredProvidersList[addr]; !ignored {
+				readyChoosable++
+			}
+			continue
+		}
+		heldCount++
+		if _, ignored := ignoredProvidersList[addr]; ignored {
+			continue // already out of this request — cannot be the fallback either
+		}
+		if soonest == "" || readyAt.Before(soonestAt) {
+			soonest, soonestAt = addr, readyAt
+		}
+	}
+	if heldCount == 0 {
+		return validAddresses
+	}
+	if readyChoosable > 0 {
+		utils.FormatDebug("rate-limit hold-off: skipping held-off providers",
+			utils.LogAttr("held", heldCount),
+			utils.LogAttr("ready", readyChoosable),
+			utils.LogAttr("GUID", ctx),
+		)
+		return ready
+	}
+	if soonest == "" {
+		return ready // every held candidate is also ignored this request — nothing to add
+	}
+	utils.FormatDebug("rate-limit hold-off: every candidate held off, keeping the soonest to expire",
+		utils.LogAttr("provider", soonest),
+		utils.LogAttr("readyAt", soonestAt),
+		utils.LogAttr("GUID", ctx),
+	)
+	return append(ready, soonest)
+}
+
 func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context, wantedProviders int, ignoredProvidersList map[string]struct{}, cu uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, stickiness string, selectedProvider string) (addresses []string, err error) {
 	// cs.Lock must be Rlocked here.
 	ignoredProvidersListLength := len(ignoredProvidersList)
@@ -1368,6 +1427,11 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 			return addresses, err
 		}
 	}
+	// Rate-limit hold-off (docs/RATE-LIMIT-HOLDOFF.md): prefer providers that are not
+	// currently held off after a 429. A header-pinned provider and an existing sticky
+	// session bypass this above on purpose — an explicit ask outranks the hold-off.
+	validAddresses = csm.filterRateLimitedProviders(ctx, validAddresses, ignoredProvidersList)
+
 	var providers []string
 	if stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS && csm.providerOptimizer.Strategy() != provideroptimizer.StrategyCost {
 		providers = csm.getTopTenProvidersForStatefulCalls(validAddresses, ignoredProvidersList)
@@ -1998,6 +2062,14 @@ func (csm *ConsumerSessionManager) OnSessionCancelled(consumerSession *SingleCon
 	return csm.releaseWithoutPenalty(consumerSession, reason, "OnSessionCancelled")
 }
 
+// OnSessionRateLimited releases a session whose relay the upstream refused for rate. A
+// rate-limit is neither failure nor success — the endpoint is healthy but busy, and it
+// was not exercised — so no QoS sample lands in either direction. The hold-off registry,
+// not session scoring, is what keeps traffic away from it (docs/RATE-LIMIT-HOLDOFF.md).
+func (csm *ConsumerSessionManager) OnSessionRateLimited(consumerSession *SingleConsumerSession, reason error) error {
+	return csm.releaseWithoutPenalty(consumerSession, reason, "OnSessionRateLimited")
+}
+
 // Report session failure, mark it as blocked from future usages, report if timeout happened.
 func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsumerSession, errorReceived error) error {
 	// consumerSession must be locked when getting here.
@@ -2506,6 +2578,7 @@ func NewConsumerSessionManager(
 		qosManager:             qos.NewQoSManager(),
 		getBlockHeight:         func() int64 { return 0 }, // default to 0, should be set by caller
 		blockedBackupProviders: make(map[string]struct{}),
+		rateLimitHoldoff:       holdoff.Shared,
 	}
 	csm.rpcEndpoint = rpcEndpoint
 	csm.providerOptimizer = providerOptimizer
