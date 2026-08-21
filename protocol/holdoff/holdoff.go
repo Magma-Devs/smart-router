@@ -142,6 +142,7 @@ func (r *Registry) RecordRateLimit(provider, url string, retryAfter time.Duratio
 	}
 	e.readyAt = now.Add(d)
 	e.lastSeen = now
+	metricRecorded(provider, d)
 
 	// Escalate when enough distinct URLs of this provider are held off at once. The
 	// provider-wide hold-off ends when its longest-held member does — and any answered
@@ -157,6 +158,9 @@ func (r *Registry) RecordRateLimit(provider, url string, retryAfter time.Duratio
 		}
 	}
 	if held >= EscalationDistinctURLs {
+		if !ps.escalatedUntil.After(now) {
+			metricEscalated(provider) // counted on the transition, not per refresh
+		}
 		ps.escalatedUntil = latest
 	}
 	return d
@@ -171,6 +175,10 @@ func (r *Registry) RecordAnswer(provider, url string) {
 	ps := r.providers[provider]
 	if ps == nil {
 		return
+	}
+	_, hadEntry := ps.urls[url]
+	if hadEntry || ps.escalatedUntil.After(r.now()) {
+		metricCleared(provider) // only when the answer actually dropped a penalty
 	}
 	delete(ps.urls, url)
 	ps.escalatedUntil = time.Time{}
