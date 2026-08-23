@@ -273,14 +273,20 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// Log only the non-default cadence: an operator who tuned polling has to be able to
 	// confirm from the logs that the value survived validation, while the default needs no
 	// line of its own (it is already visible as PollIntervalMs on /debug/endpoint-state).
-	if pollDivisor != DefaultPollDivisor {
-		utils.LavaFormatInfo("per-endpoint chain tracker poll cadence overridden",
-			utils.LogAttr("chainID", config.ChainID),
-			utils.LogAttr("apiInterface", config.ApiInterface),
-			utils.LogAttr("divisor", pollDivisor),
-			utils.LogAttr("pollInterval", flatPollInterval),
-		)
-	}
+	// Logged unconditionally, once per chain+interface, the same way the fork-detection
+	// decision above is. Reporting only the overridden case left the default silent, so an
+	// operator reading a log could not tell "the flag did nothing" from "the flag never
+	// arrived" — and the failure mode this knob actually has is a value that silently reverts
+	// (out of range, or truncated to the unset sentinel by an older binary). The resolved
+	// interval, not the requested divisor, is the thing worth stating.
+	utils.LavaFormatInfo("per-endpoint chain tracker poll cadence resolved",
+		utils.LogAttr("chainID", config.ChainID),
+		utils.LogAttr("apiInterface", config.ApiInterface),
+		utils.LogAttr("averageBlockTime", avgBlockTime),
+		utils.LogAttr("divisor", pollDivisor),
+		utils.LogAttr("pollInterval", flatPollInterval),
+		utils.LogAttr("overridden", pollDivisor != DefaultPollDivisor),
+	)
 
 	return manager
 }
