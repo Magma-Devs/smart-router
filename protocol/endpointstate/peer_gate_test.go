@@ -229,6 +229,81 @@ func TestFreshPeerTip_MissErrorOrUnwiredMeansPoll(t *testing.T) {
 	})
 }
 
+// A served relay is first-hand contact with the node, so it publishes on the same terms as a poll.
+// Without this the pods that know an endpoint best publish least: relay traffic is exactly what
+// suppresses the poll that would have published.
+func TestRecordRelayObservation_PublishesLikeAPoll(t *testing.T) {
+	const url = "http://ep:8545"
+	freshness := 400 * time.Millisecond
+	store := &fakePeerStore{}
+	m := newPeerGatedMonitor(t, freshness, store)
+	gen := m.registerGenForTest(url)
+
+	require.True(t, m.RecordRelayObservation(url, gen, 7000, time.Now()))
+	require.Eventually(t, func() bool { return store.publishes.Load() == 1 }, time.Second, 5*time.Millisecond)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	require.Equal(t, EndpointID(url), store.lastPublish.endpointID, "published under the digest, never the URL")
+	require.Equal(t, m.podID, store.lastPublish.podID)
+	require.Equal(t, int64(7000), store.lastPublish.block)
+	require.Equal(t, freshness*peerObservationTTLMultiplier, store.lastPublish.ttl)
+}
+
+// The invariant that keeps a note from circulating without anyone contacting the node: a borrowed
+// value is second-hand, so it must never be republished. Were it, each pod's republish would look
+// like someone else's work to every other pod and refresh the fleet note's stamp, so a stale block
+// would read as permanently fresh across the whole fleet.
+func TestRecordPeerObservation_NeverPublishes(t *testing.T) {
+	const url = "http://ep:8545"
+	store := &fakePeerStore{}
+	m := newPeerGatedMonitor(t, 400*time.Millisecond, store)
+	now := time.Now()
+	gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
+	require.Eventually(t, func() bool { return store.publishes.Load() == 1 }, time.Second, 5*time.Millisecond)
+
+	store.set(5000, "other-pod/abcd", 10*time.Millisecond)
+	_, ok := m.freshPeerTip(url, gen, now)
+	require.True(t, ok, "the borrow happened")
+	o, _ := m.GetObservation(url)
+	require.Equal(t, ObservationSourcePeer, o.Source)
+
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int32(1), store.publishes.Load(), "adopting a peer value must publish nothing")
+}
+
+// Both first-hand paths share ONE per-endpoint throttle, so a busy endpoint cannot publish once per
+// served relay. The window is half the freshness horizon, which keeps the note continuously
+// borrowable with margin.
+func TestShouldPublish_ThrottledAcrossBothLocalPaths(t *testing.T) {
+	const url = "http://ep:8545"
+	freshness := 400 * time.Millisecond
+	store := &fakePeerStore{}
+	m := newPeerGatedMonitor(t, freshness, store)
+	gen := m.registerGenForTest(url)
+	now := time.Now()
+
+	m.recordPollObservation(url, gen, 7000, time.Millisecond, nil, now)
+	require.Eventually(t, func() bool { return store.publishes.Load() == 1 }, time.Second, 5*time.Millisecond)
+
+	// A relay 1ms later is throttled by the poll's publish — the throttle is per endpoint, not
+	// per path.
+	m.RecordRelayObservation(url, gen, 7001, now.Add(time.Millisecond))
+	// ...and so is a burst of further relays inside the window.
+	for i := 2; i < 20; i++ {
+		m.RecordRelayObservation(url, gen, 7000+int64(i), now.Add(time.Duration(i)*time.Millisecond))
+	}
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int32(1), store.publishes.Load(), "everything inside freshness/2 shares one publish")
+
+	// Past the window, the next first-hand observation publishes again — from either path.
+	m.RecordRelayObservation(url, gen, 7100, now.Add(freshness/2))
+	require.Eventually(t, func() bool { return store.publishes.Load() == 2 }, time.Second, 5*time.Millisecond)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	require.Equal(t, int64(7100), store.lastPublish.block)
+}
+
 // The gate's precondition as a cycle: a healthy pod borrows, one failed local poll withdraws the
 // borrow (without spending a cache round-trip), and the next successful poll restores it — so a
 // transient failure costs one extra poll, not a sustained cadence change.
@@ -313,10 +388,14 @@ func TestRecordPollObservation_PublishesSuccessOnly(t *testing.T) {
 	require.Equal(t, freshness*peerObservationTTLMultiplier, store.lastPublish.ttl)
 }
 
-// TestRecordPollObservation_PublishesEvenWhenLocalStoreRejects: a poll that returns a block
-// lower than a fresh peer-fed tip is a straggler for the LOCAL store but still a genuine
-// "I saw this endpoint just now" for the fleet; the fleet store applies its own rule.
-func TestRecordPollObservation_PublishesEvenWhenLocalStoreRejects(t *testing.T) {
+// A first-hand observation BEHIND our own fresh tip — a straggler, routine when relays complete out
+// of order — publishes nothing and burns no throttle window. The fleet store applies the same
+// monotonic rule, so the write would be rejected there too; what it would really cost is the next
+// publish's window, and losing one is enough to reopen the gap freshness/2 exists to prevent.
+//
+// This replaces a test asserting the opposite. Publishing regardless was right while a wasted
+// publish cost one RPC and nothing else; adding the throttle repriced it.
+func TestRecordPollObservation_StragglerDoesNotPublishOrBurnTheWindow(t *testing.T) {
 	const url = "http://ep:8545"
 	store := &fakePeerStore{}
 	m := newPeerGatedMonitor(t, 400*time.Millisecond, store)
@@ -328,10 +407,34 @@ func TestRecordPollObservation_PublishesEvenWhenLocalStoreRejects(t *testing.T) 
 
 	o, _ := m.GetObservation(url)
 	require.Equal(t, int64(9000), o.LatestBlock, "the local tip keeps the fresher, higher peer block")
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int32(0), store.publishes.Load(), "a rejected write publishes nothing")
+
+	// And because it burned no window, the next ACCEPTED observation still publishes immediately.
+	m.recordPollObservation(url, gen, 9001, time.Millisecond, nil, now.Add(2*time.Millisecond))
 	require.Eventually(t, func() bool { return store.publishes.Load() == 1 }, time.Second, 5*time.Millisecond)
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	require.Equal(t, int64(8990), store.lastPublish.block)
+	require.Equal(t, int64(9001), store.lastPublish.block)
+}
+
+// The gate is Set's RETURN, not "the block advanced": Set accepts an equal block unconditionally, so
+// an endpoint parked on one block keeps publishing every window. Tying publishing to block movement
+// instead would stop feeding the fleet exactly when a chain stalls — while it is still being checked.
+func TestRecordPollObservation_UnchangedBlockStillPublishes(t *testing.T) {
+	const url = "http://ep:8545"
+	freshness := 400 * time.Millisecond
+	store := &fakePeerStore{}
+	m := newPeerGatedMonitor(t, freshness, store)
+	gen := m.registerGenForTest(url)
+	now := time.Now()
+
+	m.recordPollObservation(url, gen, 7000, time.Millisecond, nil, now)
+	require.Eventually(t, func() bool { return store.publishes.Load() == 1 }, time.Second, 5*time.Millisecond)
+
+	m.recordPollObservation(url, gen, 7000, time.Millisecond, nil, now.Add(freshness/2))
+	require.Eventually(t, func() bool { return store.publishes.Load() == 2 }, time.Second, 5*time.Millisecond,
+		"the same block a window later still refreshes the fleet note")
 }
 
 // TestGate_RelayBeforePeer: a fresh relay tip answers the gate without touching the store,

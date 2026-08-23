@@ -86,16 +86,16 @@ type EndpointObservation struct {
 func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, block int64, latency time.Duration, err error, at time.Time) {
 	// Feed the per-chain tip AFTER releasing obsMu (registered before the unlock defer, so LIFO
 	// runs it last) — SetLatestBlock takes the ChainState lock, which must never nest inside
-	// obsMu. tipBlock stays 0 unless this poll recorded a positive block. polledBlock is every
-	// successful poll's block, store-accepted or not: the fleet gate publishes "I saw this
-	// endpoint at this block just now", and the store's own monotonic rule decides if it lands.
-	var tipBlock, polledBlock int64
+	// obsMu. tipBlock stays 0 unless this poll recorded a positive block, and publishBlock unless
+	// the tip store ACCEPTED it — a block behind our own fresh tip is a straggler the fleet store
+	// would reject too, and publishing it would burn a throttle window for nothing.
+	var tipBlock, publishBlock int64
 	defer func() {
 		if tipBlock > 0 && m.onTipObservation != nil {
 			m.onTipObservation(tipBlock)
 		}
-		if polledBlock > 0 {
-			m.publishPollObservation(endpointURL, polledBlock)
+		if publishBlock > 0 {
+			m.publishLocalObservation(endpointURL, publishBlock)
 		}
 	}()
 
@@ -126,7 +126,6 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		o.LastPollLatency = latency
 		o.LastPollError = ""
 		o.ConsecutivePollFailures = 0
-		polledBlock = block
 		// The block triple lives in the single-source-of-truth endpointtip store, not on
 		// this record. Set applies the block-monotonic guard (T4) and reports whether it
 		// advanced the tip — only then do we feed the per-chain consensus tip. Called under
@@ -138,6 +137,9 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 			Source:     endpointtip.SourcePoll,
 		}, m.tipStaleAfter) {
 			tipBlock = block // feed the per-chain tip after unlock
+			if m.shouldPublishLocked(endpointURL, at) {
+				publishBlock = block
+			}
 		}
 	} else {
 		if err != nil {
@@ -179,12 +181,15 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 		return false
 	}
 
-	// Feed the per-chain tip after releasing obsMu (see recordPollObservation). tipBlock stays
-	// 0 unless the relay write is accepted (generation + monotonic guards pass).
-	var tipBlock int64
+	// Feed the per-chain tip after releasing obsMu (see recordPollObservation). Both tipBlock and
+	// publishBlock stay 0 unless the write is accepted (generation + monotonic guards pass).
+	var tipBlock, publishBlock int64
 	defer func() {
 		if tipBlock > 0 && m.onTipObservation != nil {
 			m.onTipObservation(tipBlock)
+		}
+		if publishBlock > 0 {
+			m.publishLocalObservation(endpointURL, publishBlock)
 		}
 	}()
 
@@ -218,6 +223,12 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 		Source:     endpointtip.SourceRelay,
 	}, m.tipStaleAfter) {
 		tipBlock = block // feed the per-chain tip after unlock
+		// A served relay is first-hand contact with the node, so it feeds the fleet store on the
+		// same terms as a poll — otherwise the pods that know an endpoint best publish least,
+		// because the traffic that gives them that knowledge is what suppresses their poll.
+		if m.shouldPublishLocked(endpointURL, at) {
+			publishBlock = block
+		}
 		return true
 	}
 	return false

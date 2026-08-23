@@ -165,9 +165,33 @@ func (c *cachePeerObservations) Fetch(ctx context.Context, chainID, apiInterface
 	return reply.GetBlock(), reply.GetPodId(), time.Duration(reply.GetAgeMs()) * time.Millisecond, true, nil
 }
 
-// publishPollObservation pushes a successful local poll to the fleet store off the poll
-// goroutine. Skipped entirely when no store is wired.
-func (m *EndpointMonitor) publishPollObservation(endpointURL string, block int64) {
+// shouldPublishLocked reports whether to publish this pod's observation of endpointURL to the
+// fleet store, and stamps the attempt when it says yes. Caller holds obsMu, and calls this ONLY for
+// an observation the tip store accepted — a straggler the local store rejected would be rejected by
+// the fleet store's identical monotonic rule as well, so publishing it spends a window for nothing.
+//
+// Throttled to one publish per half freshness window: the note only has to stay continuously
+// borrowable, while a busy endpoint observes far more often than that — on Solana most served
+// relays carry a tip. Half the window rather than the whole one so jitter cannot reopen the gap
+// this publishing exists to close: a note published at t is borrowable until t+freshness, and the
+// next publish lands at t+freshness/2.
+func (m *EndpointMonitor) shouldPublishLocked(endpointURL string, at time.Time) bool {
+	if m.peerObservations == nil {
+		return false
+	}
+	if last, ok := m.lastPublished[endpointURL]; ok && at.Sub(last) < m.relayGateFreshness/2 {
+		return false
+	}
+	m.lastPublished[endpointURL] = at
+	return true
+}
+
+// publishLocalObservation pushes what this pod learned by contacting the node ITSELF — a
+// successful poll or a served relay — to the fleet store, off the calling goroutine. A borrowed
+// (SourcePeer) value must never reach here: republishing one refreshes the fleet note's timestamp
+// without anyone having contacted the node, so a stale block would look permanently fresh to every
+// pod. Skipped entirely when no store is wired.
+func (m *EndpointMonitor) publishLocalObservation(endpointURL string, block int64) {
 	if m.peerObservations == nil || block <= 0 {
 		return
 	}
@@ -176,7 +200,7 @@ func (m *EndpointMonitor) publishPollObservation(endpointURL string, block int64
 		defer cancel()
 		err := m.peerObservations.Publish(ctx, m.chainID, m.apiInterface, EndpointID(endpointURL), m.podID, block, m.relayGateFreshness*peerObservationTTLMultiplier)
 		if err != nil && m.ctx.Err() == nil {
-			utils.LavaFormatDebug("fleet gate: publishing poll observation failed",
+			utils.LavaFormatDebug("fleet gate: publishing local observation failed",
 				utils.LogAttr("chainID", m.chainID),
 				utils.LogAttr("apiInterface", m.apiInterface),
 				utils.LogAttr("endpoint", endpointURL),
@@ -240,6 +264,9 @@ func (m *EndpointMonitor) freshPeerTip(endpointURL string, gen uint64, now time.
 // (Source = Peer). Like RecordRelayObservation it never touches the poll-health fields, is
 // generation-gated, goes through the store's block-monotonic guard, and feeds the per-chain
 // ChainState tip only when the write advanced the stored tip.
+//
+// It deliberately does NOT publish: this pod learned nothing first-hand. See
+// publishLocalObservation.
 func (m *EndpointMonitor) recordPeerObservation(endpointURL string, gen uint64, block int64, at time.Time) bool {
 	if block <= 0 {
 		return false
