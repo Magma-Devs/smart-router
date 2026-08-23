@@ -53,7 +53,8 @@ off" means on its path. This table is the catalog; add a row when wiring a new c
 
 ## Metrics
 
-The registry emits its own events, so every consumer is covered without wiring:
+The registry emits its own events, so every consumer is covered without wiring
+(labels, buckets, and PromQL recipes in [METRICS.md](METRICS.md#rate-limit-hold-off)):
 
 - `smartrouter_rate_limit_holdoffs_total{provider, event}` — `recorded` (a 429 held an
   endpoint off), `escalated` (counted on the transition to a provider-wide hold-off),

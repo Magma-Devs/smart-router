@@ -1,7 +1,9 @@
 # Smart Router — Metrics Reference
 
 Every metric the Smart Router exposes over Prometheus, with its type, labels, and
-meaning. All metrics are defined under [`protocol/metrics/`](../protocol/metrics/).
+meaning. Metrics are defined under [`protocol/metrics/`](../protocol/metrics/), except the
+[rate-limit hold-off](#rate-limit-hold-off) pair, which the registry that owns the events
+emits itself from [`protocol/holdoff/metrics.go`](../protocol/holdoff/metrics.go).
 
 ## Exposition
 
@@ -232,6 +234,36 @@ Once it is non-zero they are lossy — some batch types are being merged into `b
 | `smartrouter_retries_success_total` | Counter | `spec`, `apiInterface`, `method` | Retried requests that succeeded. |
 | `smartrouter_retries_failed_total` | Counter | `spec`, `apiInterface`, `method` | Retried requests that failed. |
 | `smartrouter_retry_attempts` | Histogram | `spec`, `apiInterface`, `method` | Attempts per retried request (buckets 1…10). |
+
+#### Rate-limit hold-off
+
+Emitted by the [hold-off registry](RATE-LIMIT-HOLDOFF.md) itself, so every consumer path
+(re-verify, hot path, recovery probe, ws subscriptions) is covered without wiring. A
+rate-limited relay releases its session with no QoS sample in either direction, so a
+vendor cap does not show up in `rpc_endpoint_selection_score` — this pair is the direct
+signal that an upstream is refusing us for load.
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_rate_limit_holdoffs_total` | Counter | `provider`, `event` | Registry events. `event` is the closed set `recorded` (a 429 held an endpoint off), `escalated` (the hold-off widened to the whole provider name — counted once on the transition, not per refresh), `cleared` (an answer dropped a standing penalty — not counted when there was nothing to clear). |
+| `smartrouter_rate_limit_holdoff_seconds` | Histogram | `provider` | Applied hold-off duration per `recorded` event, in **seconds** (buckets `15, 30, 60, 120, 300, 600, 1800, 3600` — not the shared millisecond latency buckets). Shows upstream `Retry-After` magnitudes against the exponential default. |
+
+`provider` is the configured provider name on the relay / probe / re-verify paths. The
+ws-subscription path has no provider name and keys the registry by node URL; those keys
+are reduced to `scheme://host` before they become a label, because node URLs can embed
+API keys in their path or query and a credential must never reach a Prometheus series.
+
+```promql
+# upstreams currently tripping their caps
+sum by (provider) (increase(smartrouter_rate_limit_holdoffs_total{event="recorded"}[15m])) > 0
+
+# a vendor-wide cap: the hold-off escalated across a provider's URLs
+increase(smartrouter_rate_limit_holdoffs_total{event="escalated"}[1h]) > 0
+
+# how long upstreams are telling us to wait (p90)
+histogram_quantile(0.9,
+  sum by (provider, le) (rate(smartrouter_rate_limit_holdoff_seconds_bucket[1h])))
+```
 
 #### Consistency
 
