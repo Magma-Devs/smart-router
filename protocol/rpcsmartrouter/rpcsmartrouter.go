@@ -22,6 +22,7 @@ import (
 	"math"
 	"net/http"
 	"os/signal"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -3378,7 +3379,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			var promotedStatic, promotedBackup []string
 			freshProviderSessions, demotedStatic, promotedStatic = applyReverification(ctx, inputs, freshProviderSessions, reverifyTierStatic, epoch)
 			freshBackupSessions, demotedBackup, promotedBackup = applyReverification(ctx, inputs, freshBackupSessions, reverifyTierBackup, epoch)
-			demotedSessions = append(demotedStatic, demotedBackup...)
+			demotedSessions = slices.Concat(demotedStatic, demotedBackup)
 
 			// A promoted provider supersedes any pending failed-init retry, the same
 			// invariant rebuildPairingFromConfig enforces. Without this the provider stays
