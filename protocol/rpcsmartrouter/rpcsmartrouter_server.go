@@ -1454,9 +1454,9 @@ func promoteConsistencyFallback(
 	failedSessions lavasession.ConsumerSessionsMap,
 	filterErr error,
 	state *consistencyFallbackState,
-) (lavasession.ConsumerSessionsMap, lavasession.ConsumerSessionsMap, error, int) {
+) (lavasession.ConsumerSessionsMap, lavasession.ConsumerSessionsMap, int, error) {
 	if state == nil || !errors.Is(filterErr, lavasession.ConsistencyPreValidationError) {
-		return validSessions, failedSessions, filterErr, 0
+		return validSessions, failedSessions, 0, filterErr
 	}
 
 	if validSessions == nil {
@@ -1473,7 +1473,7 @@ func promoteConsistencyFallback(
 	if promoted > 0 {
 		filterErr = nil
 	}
-	return validSessions, failedSessions, filterErr, promoted
+	return validSessions, failedSessions, promoted, filterErr
 }
 
 // shouldFailSessionForResult decides whether a completed direct-RPC relay is reported to the
@@ -1601,7 +1601,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 
 	// Pre-request consistency validation: filter out endpoints that are too far behind
 	validSessions, failedSessions, filterErr := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMessage)
-	validSessions, failedSessions, filterErr, promotedFallbacks := promoteConsistencyFallback(
+	validSessions, failedSessions, promotedFallbacks, filterErr := promoteConsistencyFallback(
 		validSessions,
 		failedSessions,
 		filterErr,
@@ -4606,7 +4606,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	// we still need to return early as there's no way to attach headers to the error response.
 	// The cross-validation info is included in the error message and metrics have been emitted.
 	if relayResult == nil {
-		return
+		return pendingProviders
 	}
 
 	// Add selection stats header if feature is enabled

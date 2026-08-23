@@ -3070,7 +3070,7 @@ func TestPromoteConsistencyFallback(t *testing.T) {
 		"previously-rejected": &lavasession.SessionInfo{},
 		"new-stale-provider":  &lavasession.SessionInfo{},
 	}
-	valid, remainingFailed, err, promoted := promoteConsistencyFallback(
+	valid, remainingFailed, promoted, err := promoteConsistencyFallback(
 		nil,
 		failed,
 		lavasession.ConsistencyPreValidationError,

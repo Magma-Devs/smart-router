@@ -122,15 +122,23 @@ func _Relayer_Relay_Handler(srv interface{}, ctx context.Context, dec func(inter
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	server, ok := srv.(RelayerServer)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "unexpected server type %T for Relay", srv)
+	}
 	if interceptor == nil {
-		return srv.(RelayerServer).Relay(ctx, in)
+		return server.Relay(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.Relayer/Relay",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayerServer).Relay(ctx, req.(*RelayRequest))
+		typed, ok := req.(*RelayRequest)
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "unexpected request type %T for Relay", req)
+		}
+		return server.Relay(ctx, typed)
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -140,15 +148,23 @@ func _Relayer_Probe_Handler(srv interface{}, ctx context.Context, dec func(inter
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	server, ok := srv.(RelayerServer)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "unexpected server type %T for Probe", srv)
+	}
 	if interceptor == nil {
-		return srv.(RelayerServer).Probe(ctx, in)
+		return server.Probe(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.Relayer/Probe",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayerServer).Probe(ctx, req.(*ProbeRequest))
+		typed, ok := req.(*ProbeRequest)
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "unexpected request type %T for Probe", req)
+		}
+		return server.Probe(ctx, typed)
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -158,7 +174,11 @@ func _Relayer_RelaySubscribe_Handler(srv interface{}, stream grpc.ServerStream) 
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(RelayerServer).RelaySubscribe(m, &relayerRelaySubscribeServer{stream})
+	server, ok := srv.(RelayerServer)
+	if !ok {
+		return status.Errorf(codes.Internal, "unexpected server type %T for RelaySubscribe", srv)
+	}
+	return server.RelaySubscribe(m, &relayerRelaySubscribeServer{stream})
 }
 
 type relayerRelaySubscribeServer struct {
@@ -326,15 +346,23 @@ func _RelayerCache_GetRelay_Handler(srv interface{}, ctx context.Context, dec fu
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	server, ok := srv.(RelayerCacheServer)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "unexpected server type %T for GetRelay", srv)
+	}
 	if interceptor == nil {
-		return srv.(RelayerCacheServer).GetRelay(ctx, in)
+		return server.GetRelay(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/GetRelay",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayerCacheServer).GetRelay(ctx, req.(*RelayCacheGet))
+		typed, ok := req.(*RelayCacheGet)
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "unexpected request type %T for GetRelay", req)
+		}
+		return server.GetRelay(ctx, typed)
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -344,15 +372,23 @@ func _RelayerCache_SetRelay_Handler(srv interface{}, ctx context.Context, dec fu
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	server, ok := srv.(RelayerCacheServer)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "unexpected server type %T for SetRelay", srv)
+	}
 	if interceptor == nil {
-		return srv.(RelayerCacheServer).SetRelay(ctx, in)
+		return server.SetRelay(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/SetRelay",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayerCacheServer).SetRelay(ctx, req.(*RelayCacheSet))
+		typed, ok := req.(*RelayCacheSet)
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "unexpected request type %T for SetRelay", req)
+		}
+		return server.SetRelay(ctx, typed)
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -362,15 +398,23 @@ func _RelayerCache_Health_Handler(srv interface{}, ctx context.Context, dec func
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	server, ok := srv.(RelayerCacheServer)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "unexpected server type %T for Health", srv)
+	}
 	if interceptor == nil {
-		return srv.(RelayerCacheServer).Health(ctx, in)
+		return server.Health(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/Health",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayerCacheServer).Health(ctx, req.(*emptypb.Empty))
+		typed, ok := req.(*emptypb.Empty)
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "unexpected request type %T for Health", req)
+		}
+		return server.Health(ctx, typed)
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -380,15 +424,23 @@ func _RelayerCache_FlushCache_Handler(srv interface{}, ctx context.Context, dec 
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	server, ok := srv.(RelayerCacheServer)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "unexpected server type %T for FlushCache", srv)
+	}
 	if interceptor == nil {
-		return srv.(RelayerCacheServer).FlushCache(ctx, in)
+		return server.FlushCache(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/FlushCache",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayerCacheServer).FlushCache(ctx, req.(*emptypb.Empty))
+		typed, ok := req.(*emptypb.Empty)
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "unexpected request type %T for FlushCache", req)
+		}
+		return server.FlushCache(ctx, typed)
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -398,15 +450,23 @@ func _RelayerCache_SetEndpointObservation_Handler(srv interface{}, ctx context.C
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	server, ok := srv.(RelayerCacheServer)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "unexpected server type %T for SetEndpointObservation", srv)
+	}
 	if interceptor == nil {
-		return srv.(RelayerCacheServer).SetEndpointObservation(ctx, in)
+		return server.SetEndpointObservation(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/SetEndpointObservation",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayerCacheServer).SetEndpointObservation(ctx, req.(*EndpointObservationSet))
+		typed, ok := req.(*EndpointObservationSet)
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "unexpected request type %T for SetEndpointObservation", req)
+		}
+		return server.SetEndpointObservation(ctx, typed)
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -416,15 +476,23 @@ func _RelayerCache_GetEndpointObservation_Handler(srv interface{}, ctx context.C
 	if err := dec(in); err != nil {
 		return nil, err
 	}
+	server, ok := srv.(RelayerCacheServer)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "unexpected server type %T for GetEndpointObservation", srv)
+	}
 	if interceptor == nil {
-		return srv.(RelayerCacheServer).GetEndpointObservation(ctx, in)
+		return server.GetEndpointObservation(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/GetEndpointObservation",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayerCacheServer).GetEndpointObservation(ctx, req.(*EndpointObservationGet))
+		typed, ok := req.(*EndpointObservationGet)
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "unexpected request type %T for GetEndpointObservation", req)
+		}
+		return server.GetEndpointObservation(ctx, typed)
 	}
 	return interceptor(ctx, in, info, handler)
 }
