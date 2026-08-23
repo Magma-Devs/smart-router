@@ -92,6 +92,10 @@ type EndpointMonitor struct {
 	// tracker's record for the same URL. Guarded by obsMu alongside observations.
 	generations map[string]uint64
 	nextObsGen  uint64
+	// lastPublished throttles what this pod publishes to the fleet store, per endpoint. Both
+	// first-hand record paths would otherwise publish on every observation, and a busy endpoint
+	// observes far more often than the fleet needs. See shouldPublishLocked. Guarded by obsMu.
+	lastPublished map[string]time.Time
 	// stopped is set by Stop. Once set, no further observation writes are accepted, so a
 	// late in-flight poll cannot resurrect an observation after shutdown.
 	stopped bool
@@ -252,6 +256,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		trackerLastErrors: make(map[string]string),
 		observations:      make(map[string]EndpointObservation),
 		generations:       make(map[string]uint64),
+		lastPublished:     make(map[string]time.Time),
 		chainParser:       config.ChainParser,
 		chainID:           config.ChainID,
 		apiInterface:      config.ApiInterface,
@@ -858,6 +863,7 @@ func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	m.obsMu.Lock()
 	delete(m.observations, endpointURL)
 	delete(m.generations, endpointURL)
+	delete(m.lastPublished, endpointURL)
 	m.obsMu.Unlock()
 
 	// Drop this endpoint's tip from the shared store too, so a removed endpoint leaves no
@@ -936,6 +942,7 @@ func (m *EndpointMonitor) Stop() {
 	}
 	m.observations = make(map[string]EndpointObservation)
 	m.generations = make(map[string]uint64)
+	m.lastPublished = make(map[string]time.Time)
 	m.obsMu.Unlock()
 
 	utils.LavaFormatInfo("stopped EndpointMonitor",
