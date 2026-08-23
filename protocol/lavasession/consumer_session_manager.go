@@ -2296,8 +2296,13 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		if drsc, ok := consumerSession.Connection.(*DirectRPCSessionConnection); ok && drsc.Endpoint != nil {
 			// Read the per-endpoint tip from the shared single-source-of-truth store (keyed
 			// by chain+apiInterface+url). This used to read drsc.Endpoint.LatestBlock, a
-			// second copy written ungated; the store is fed only through the gated poll/relay
+			// second copy written ungated; the store is fed through the gated poll/relay
 			// observers, so a lagging provider is demoted against a consistent tip.
+			//
+			// It can also carry a PEER pod's observation (the fleet tracker gate), i.e. a height
+			// this pod did not itself serve. Accepted deliberately — block height is a property
+			// of the endpoint, not of the path to it — but it means a provider lagging only on
+			// THIS pod's path may not be demoted.
 			info := csm.RPCEndpoint()
 			tipKey := endpointtip.Key(info.ChainID, info.ApiInterface, drsc.Endpoint.NetworkAddress)
 			if endpointBlock := endpointtip.Default().Block(tipKey); endpointBlock > 0 {
