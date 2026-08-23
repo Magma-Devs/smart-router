@@ -12,6 +12,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -134,6 +135,11 @@ type EndpointMonitor struct {
 	// fresher than either bound.
 	relayGateFreshness time.Duration
 
+	// peerObservations is the fleet half of the traffic gate (MAG-2981): nil disables it. podID
+	// is what this pod publishes under and refuses to borrow from. See peer_observations.go.
+	peerObservations PeerObservationStore
+	podID            string
+
 	// Callbacks for events (optional)
 	onFork        func(endpointURL string, blockNum int64)
 	onNewBlock    func(endpointURL string, fromBlock, toBlock int64)
@@ -144,6 +150,9 @@ type EndpointMonitor struct {
 	// per-chain ChainState tip (SetLatestBlock). Fired AFTER obsMu is released so the tip lock
 	// is never taken while holding the observation lock. Set once at construction; immutable.
 	onTipObservation func(block int64)
+	// onGateSkip, if set, is invoked once per poll cycle the traffic gate suppressed, with the
+	// source that made the poll redundant (metrics.TrackerGateSkipSource*).
+	onGateSkip func(endpointURL, source string)
 	// onTrackerRequest counts upstream tracker requests. Deliberately NOT generation-gated
 	// the way observations are: a late request from a replaced tracker still reached the
 	// node, so dropping it would under-report real load.
@@ -182,6 +191,15 @@ type EndpointChainTrackerConfig struct {
 	// OnTipObservation, if set, feeds every positive poll/relay block into the per-chain
 	// ChainState tip (MAG-2160). See EndpointMonitor.onTipObservation.
 	OnTipObservation func(block int64)
+
+	// PeerObservations, when set, enables the fleet half of the traffic gate (MAG-2981): this
+	// pod publishes its successful polls to the store and borrows fresh observations from
+	// other pods instead of polling. Leave nil on a single-replica deployment.
+	PeerObservations PeerObservationStore
+
+	// OnGateSkip, if set, is invoked once per poll cycle the traffic gate suppressed, with
+	// the source ("relay" or "peer"). Backs rpc_endpoint_tracker_gate_skips_total.
+	OnGateSkip func(endpointURL, source string)
 
 	// OnTrackerRequest, if set, is invoked once per upstream request a tracker actually sends,
 	// with the endpoint URL and the request kind (metrics.TrackerRequestKind*). It backs the
@@ -250,7 +268,10 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		onConsistency:      config.OnConsistency,
 		onFetchError:       config.OnFetchError,
 		onTipObservation:   config.OnTipObservation,
+		onGateSkip:         config.OnGateSkip,
 		onTrackerRequest:   config.OnTrackerRequest,
+		peerObservations:   config.PeerObservations,
+		podID:              LocalPodID(),
 		ctx:                ctxWithCancel,
 		cancel:             cancel,
 	}
@@ -269,6 +290,15 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		utils.LogAttr("enabled", !manager.hashPolling.HeadOnly()),
 		utils.LogAttr("reason", manager.hashPolling.String()),
 	)
+
+	if manager.peerObservations != nil {
+		utils.LavaFormatInfo("fleet tracker gate enabled: borrowing peer poll observations from the cache backend",
+			utils.LogAttr("chainID", config.ChainID),
+			utils.LogAttr("apiInterface", config.ApiInterface),
+			utils.LogAttr("podID", manager.podID),
+			utils.LogAttr("freshness", manager.relayGateFreshness),
+		)
+	}
 
 	// Log only the non-default cadence: an operator who tuned polling has to be able to
 	// confirm from the logs that the value survived validation, while the default needs no
@@ -377,12 +407,22 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
 		// (above the generic/SVM wrapper split) so it suppresses Solana polls too — the old
-		// per-poller hook could only ever see the generic path. The gate fires only on a fresh
-		// RELAY observation (freshRelayTip), so an idle endpoint with no fresh relays still
-		// polls; a bounded number of consecutive skips then forces a verifying real poll.
+		// per-poller hook could only ever see the generic path. The gate fires on a fresh
+		// RELAY observation (freshRelayTip) or, when the fleet gate is wired, on a fresh PEER
+		// observation (freshPeerTip, MAG-2981) — never on this pod's own poll, so an idle
+		// endpoint on a single pod still polls; a bounded number of consecutive skips then
+		// forces a verifying real poll. Relay is checked first: it is a local read, and a
+		// busy endpoint's relay tip is fresher than any peer poll.
 		RelayTipFresh: func(now time.Time) bool {
-			_, ok := m.freshRelayTip(endpointURL, now)
-			return ok
+			if _, ok := m.freshRelayTip(endpointURL, now); ok {
+				m.noteGateSkip(endpointURL, metrics.TrackerGateSkipSourceRelay)
+				return true
+			}
+			if _, ok := m.freshPeerTip(endpointURL, gen, now); ok {
+				m.noteGateSkip(endpointURL, metrics.TrackerGateSkipSourcePeer)
+				return true
+			}
+			return false
 		},
 	}
 

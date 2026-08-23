@@ -118,3 +118,45 @@ func (m *CacheUsage) String() string {
 
 func (m *CacheUsage) Marshal() ([]byte, error) { return json.Marshal(m) }
 func (m *CacheUsage) Unmarshal(b []byte) error  { return json.Unmarshal(b, m) }
+
+// ---------------------------------------------------------------------------
+// EndpointObservationSet
+// ---------------------------------------------------------------------------
+
+func (m *EndpointObservationSet) Reset()        { *m = EndpointObservationSet{} }
+func (m *EndpointObservationSet) ProtoMessage() {}
+func (m *EndpointObservationSet) String() string {
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+func (m *EndpointObservationSet) Marshal() ([]byte, error) { return json.Marshal(m) }
+func (m *EndpointObservationSet) Unmarshal(b []byte) error  { return json.Unmarshal(b, m) }
+
+// ---------------------------------------------------------------------------
+// EndpointObservationGet
+// ---------------------------------------------------------------------------
+
+func (m *EndpointObservationGet) Reset()        { *m = EndpointObservationGet{} }
+func (m *EndpointObservationGet) ProtoMessage() {}
+func (m *EndpointObservationGet) String() string {
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+func (m *EndpointObservationGet) Marshal() ([]byte, error) { return json.Marshal(m) }
+func (m *EndpointObservationGet) Unmarshal(b []byte) error  { return json.Unmarshal(b, m) }
+
+// ---------------------------------------------------------------------------
+// EndpointObservationReply
+// ---------------------------------------------------------------------------
+
+func (m *EndpointObservationReply) Reset()        { *m = EndpointObservationReply{} }
+func (m *EndpointObservationReply) ProtoMessage() {}
+func (m *EndpointObservationReply) String() string {
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+func (m *EndpointObservationReply) Marshal() ([]byte, error) { return json.Marshal(m) }
+func (m *EndpointObservationReply) Unmarshal(b []byte) error  { return json.Unmarshal(b, m) }

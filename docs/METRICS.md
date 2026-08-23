@@ -56,6 +56,8 @@ name and the `disabled` sentinel live in
   - `method` — RPC method name.
   - `kind` — closed-set request classifier (`rpc_endpoint_tracker_requests_total` only):
     `latest_block` or `block_hash`. Never a raw method name — that would be unbounded.
+  - `source` — closed-set gate classifier (`rpc_endpoint_tracker_gate_skips_total` only):
+    `relay` or `peer`.
   - `function` — relay function class; the `function` label lets one metric serve both
     the per-function breakdown and (via `sum by (...)`) the aggregate.
 - **Boolean gauges** encode `1 = true / healthy / present`, `0 = false / unhealthy / absent`.
@@ -91,6 +93,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `rpc_endpoint_fetch_latest_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | New-block **detections** by the chain tracker, not successful requests — see the note below. |
 | `rpc_endpoint_fetch_block_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | Successful specific-block fetches. |
 | `rpc_endpoint_tracker_requests_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `kind` | Upstream requests the per-endpoint chain tracker actually sent, by `kind` (`latest_block`, `block_hash`). The only metric that measures tracker **request volume** — see the note below. |
+| `rpc_endpoint_tracker_gate_skips_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `source` | Poll cycles the tracker's traffic gate suppressed (no upstream request sent), by `source`: `relay` (served traffic kept the tip fresh) or `peer` (another pod's poll, borrowed through the cache backend — needs `--shared-state` + `--cache-be`). The other half of the tracker's cadence next to `rpc_endpoint_tracker_requests_total`. |
 
 > **Tracker requests vs. fetch events.** `rpc_endpoint_fetch_latest_success` counts NEW BLOCK
 > detections and `rpc_endpoint_fetch_latest_fails` counts latest-block fetch failures. Neither
@@ -106,6 +109,17 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 > with `--enable-fork-detection`, and the drop to zero is what makes the traffic reduction
 > provable. `/debug/endpoint-state` reports the matching `HashPolling` reason per endpoint
 > (`on`, `off-operator-choice`, or `off-spec-no-block-by-num`).
+>
+> `rpc_endpoint_tracker_gate_skips_total` is the complement: one increment per poll tick the gate
+> suppressed, labelled by what made the poll redundant. `source="relay"` is the relay traffic gate
+> (served traffic kept the endpoint's tip fresh). `source="peer"` is the fleet gate: with
+> `--shared-state` and a cache backend, every pod publishes its successful polls to the cache and
+> borrows a fresh observation from another pod instead of polling, so an endpoint is polled about
+> once per interval fleet-wide rather than once per pod. A pod never borrows its own observation,
+> and the gate's skip budget still forces a local poll every few ticks, so `requests_total` never
+> drops to zero on a live endpoint. On a multi-replica deployment, `peer` skips climbing while
+> `requests_total{kind="latest_block"}` flattens is the feature working; `peer` stuck at zero with
+> shared state on means the pods are not reaching the same cache.
 >
 > Turning fork detection off can make `rpc_endpoint_fetch_latest_success` **increase** on
 > endpoints with flaky hash fetches. With it on, a failed hash fetch aborts the poll cycle before
