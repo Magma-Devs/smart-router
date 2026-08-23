@@ -29,6 +29,10 @@ const (
 	SourcePoll
 	// SourceRelay is a tip harvested from a served relay response.
 	SourceRelay
+	// SourcePeer is a tip adopted from another router pod's poll observation, read from the
+	// shared cache backend (the fleet tracker gate, MAG-2981). It carries the block and its
+	// age, never a latency: a peer's round-trip says nothing about this pod's path.
+	SourcePeer
 )
 
 func (s Source) String() string {
@@ -37,6 +41,8 @@ func (s Source) String() string {
 		return "poll"
 	case SourceRelay:
 		return "relay"
+	case SourcePeer:
+		return "peer"
 	default:
 		return "unknown"
 	}

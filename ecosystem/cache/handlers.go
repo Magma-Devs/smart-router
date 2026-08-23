@@ -411,6 +411,9 @@ func (s *RelayerCacheServer) FlushCache(ctx context.Context, req *emptypb.Empty)
 		c.Clear()
 		c.Wait()
 	}
+	if s.CacheServer.endpointObservations != nil {
+		s.CacheServer.endpointObservations.clear()
+	}
 	utils.LavaFormatInfo("cache server flushed by FlushCache RPC")
 	return &emptypb.Empty{}, nil
 }

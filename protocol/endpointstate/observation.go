@@ -21,6 +21,9 @@ const (
 	ObservationSourcePoll = endpointtip.SourcePoll
 	// ObservationSourceRelay is a block harvested from a served relay response.
 	ObservationSourceRelay = endpointtip.SourceRelay
+	// ObservationSourcePeer is a block adopted from another pod's poll through the cache backend
+	// (the fleet tracker gate, MAG-2981 — see peer_observations.go).
+	ObservationSourcePeer = endpointtip.SourcePeer
 )
 
 // EndpointObservation is the per-endpoint observation contract (Topic A / MAG-2158).
@@ -83,11 +86,16 @@ type EndpointObservation struct {
 func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, block int64, latency time.Duration, err error, at time.Time) {
 	// Feed the per-chain tip AFTER releasing obsMu (registered before the unlock defer, so LIFO
 	// runs it last) — SetLatestBlock takes the ChainState lock, which must never nest inside
-	// obsMu. tipBlock stays 0 unless this poll recorded a positive block.
-	var tipBlock int64
+	// obsMu. tipBlock stays 0 unless this poll recorded a positive block. polledBlock is every
+	// successful poll's block, store-accepted or not: the fleet gate publishes "I saw this
+	// endpoint at this block just now", and the store's own monotonic rule decides if it lands.
+	var tipBlock, polledBlock int64
 	defer func() {
 		if tipBlock > 0 && m.onTipObservation != nil {
 			m.onTipObservation(tipBlock)
+		}
+		if polledBlock > 0 {
+			m.publishPollObservation(endpointURL, polledBlock)
 		}
 	}()
 
@@ -118,6 +126,7 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		o.LastPollLatency = latency
 		o.LastPollError = ""
 		o.ConsecutivePollFailures = 0
+		polledBlock = block
 		// The block triple lives in the single-source-of-truth endpointtip store, not on
 		// this record. Set applies the block-monotonic guard (T4) and reports whether it
 		// advanced the tip — only then do we feed the per-chain consensus tip. Called under

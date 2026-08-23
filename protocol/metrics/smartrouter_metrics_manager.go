@@ -61,6 +61,7 @@ type SmartRouterMetricsManager struct {
 	endpointFetchLatestSuccess     *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_success
 	endpointFetchBlockSuccess      *MappedLabelsCounterVec // rpc_endpoint_fetch_block_success
 	endpointTrackerRequests        *MappedLabelsCounterVec // rpc_endpoint_tracker_requests_total
+	endpointTrackerGateSkips       *MappedLabelsCounterVec // rpc_endpoint_tracker_gate_skips_total
 
 	// Router-scoped metrics (labels: spec, apiInterface, function)
 	routerTotalRelaysServiced *prometheus.CounterVec   // smartrouter_total_relays_serviced
@@ -279,6 +280,18 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name:       "rpc_endpoint_tracker_requests_total",
 		Help:       "Total upstream requests sent by the per-endpoint chain tracker, by kind (latest_block, block_hash).",
 		Labels:     []string{"spec", "apiInterface", "endpoint_id", "kind"},
+		Registerer: prometheus.DefaultRegisterer,
+	})
+
+	// Counts the poll cycles the tracker's traffic gate suppressed, split by what made the
+	// poll redundant: source="relay" (served traffic kept the tip fresh) or source="peer"
+	// (another pod's poll, borrowed through the cache backend — the fleet gate, MAG-2981).
+	// Together with rpc_endpoint_tracker_requests_total this shows both halves of the
+	// tracker's cadence: requests sent, and ticks that sent nothing and why.
+	endpointTrackerGateSkips := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_tracker_gate_skips_total",
+		Help:       "Total per-endpoint tracker poll cycles suppressed by the traffic gate, by source (relay, peer).",
+		Labels:     []string{"spec", "apiInterface", "endpoint_id", "source"},
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
@@ -635,6 +648,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		endpointFetchLatestSuccess:     endpointFetchLatestSuccess,
 		endpointFetchBlockSuccess:      endpointFetchBlockSuccess,
 		endpointTrackerRequests:        endpointTrackerRequests,
+		endpointTrackerGateSkips:       endpointTrackerGateSkips,
 
 		// Router-scoped (with function)
 		routerTotalRelaysServiced: routerTotalRelaysServiced,
@@ -1233,6 +1247,28 @@ func (m *SmartRouterMetricsManager) AddEndpointTrackerRequest(spec, apiInterface
 	}
 	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "kind": kind}
 	m.endpointTrackerRequests.WithLabelValues(labels).Inc()
+}
+
+// TrackerGateSkipSource values for RecordTrackerGateSkip. A closed set of two, mirroring the
+// two signals that can make a dedicated poll redundant.
+const (
+	// TrackerGateSkipSourceRelay — served relay traffic kept this endpoint's tip fresh.
+	TrackerGateSkipSourceRelay = "relay"
+	// TrackerGateSkipSourcePeer — another pod polled this endpoint and published the result
+	// to the cache backend (MAG-2981).
+	TrackerGateSkipSourcePeer = "peer"
+)
+
+// RecordTrackerGateSkip records ONE poll cycle the traffic gate suppressed for an endpoint,
+// fanned out across every provider sharing the URL like RecordTrackerRequest.
+func (m *SmartRouterMetricsManager) RecordTrackerGateSkip(spec, apiInterface, endpointID, source string) {
+	if m == nil || m.endpointTrackerGateSkips == nil {
+		return
+	}
+	for _, providerName := range m.resolveProviderNames(endpointID) {
+		labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": providerName, "source": source}
+		m.endpointTrackerGateSkips.WithLabelValues(labels).Inc()
+	}
 }
 
 // RecordTrackerRequest records ONE upstream request sent by the per-endpoint chain tracker.

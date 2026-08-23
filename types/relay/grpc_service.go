@@ -204,6 +204,8 @@ type RelayerCacheClient interface {
 	SetRelay(ctx context.Context, in *RelayCacheSet, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Health(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*CacheUsage, error)
 	FlushCache(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	SetEndpointObservation(ctx context.Context, in *EndpointObservationSet, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	GetEndpointObservation(ctx context.Context, in *EndpointObservationGet, opts ...grpc.CallOption) (*EndpointObservationReply, error)
 }
 
 // RelayerCacheServer is the server API for the RelayerCache service.
@@ -214,6 +216,12 @@ type RelayerCacheServer interface {
 	// FlushCache drops every entry across the cache server's stores. Intended
 	// for /debug/reset-all on the smart router; never called on the hot path.
 	FlushCache(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
+	// SetEndpointObservation stores one pod's poll observation of an upstream endpoint and
+	// GetEndpointObservation reads the freshest one back, both keyed by chain + api interface
+	// + endpoint digest. They back the fleet tracker gate (MAG-2981): peer pods borrow a fresh
+	// observation instead of each polling the same upstream.
+	SetEndpointObservation(context.Context, *EndpointObservationSet) (*emptypb.Empty, error)
+	GetEndpointObservation(context.Context, *EndpointObservationGet) (*EndpointObservationReply, error)
 }
 
 // UnimplementedRelayerCacheServer must be embedded to satisfy RelayerCacheServer
@@ -234,6 +242,14 @@ func (UnimplementedRelayerCacheServer) Health(_ context.Context, _ *emptypb.Empt
 
 func (UnimplementedRelayerCacheServer) FlushCache(_ context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method FlushCache not implemented")
+}
+
+func (UnimplementedRelayerCacheServer) SetEndpointObservation(_ context.Context, _ *EndpointObservationSet) (*emptypb.Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetEndpointObservation not implemented")
+}
+
+func (UnimplementedRelayerCacheServer) GetEndpointObservation(_ context.Context, _ *EndpointObservationGet) (*EndpointObservationReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetEndpointObservation not implemented")
 }
 
 // relayerCacheClient wraps a grpc.ClientConnInterface for the RelayerCache service.
@@ -276,6 +292,24 @@ func (c *relayerCacheClient) Health(ctx context.Context, in *emptypb.Empty, opts
 func (c *relayerCacheClient) FlushCache(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, "/smartrouter.pairing.RelayerCache/FlushCache", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayerCacheClient) SetEndpointObservation(ctx context.Context, in *EndpointObservationSet, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, "/smartrouter.pairing.RelayerCache/SetEndpointObservation", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayerCacheClient) GetEndpointObservation(ctx context.Context, in *EndpointObservationGet, opts ...grpc.CallOption) (*EndpointObservationReply, error) {
+	out := new(EndpointObservationReply)
+	err := c.cc.Invoke(ctx, "/smartrouter.pairing.RelayerCache/GetEndpointObservation", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -359,6 +393,42 @@ func _RelayerCache_FlushCache_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RelayerCache_SetEndpointObservation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EndpointObservationSet)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayerCacheServer).SetEndpointObservation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/smartrouter.pairing.RelayerCache/SetEndpointObservation",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayerCacheServer).SetEndpointObservation(ctx, req.(*EndpointObservationSet))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RelayerCache_GetEndpointObservation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EndpointObservationGet)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayerCacheServer).GetEndpointObservation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/smartrouter.pairing.RelayerCache/GetEndpointObservation",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayerCacheServer).GetEndpointObservation(ctx, req.(*EndpointObservationGet))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var _RelayerCache_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "smartrouter.pairing.RelayerCache",
 	HandlerType: (*RelayerCacheServer)(nil),
@@ -378,6 +448,14 @@ var _RelayerCache_serviceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FlushCache",
 			Handler:    _RelayerCache_FlushCache_Handler,
+		},
+		{
+			MethodName: "SetEndpointObservation",
+			Handler:    _RelayerCache_SetEndpointObservation_Handler,
+		},
+		{
+			MethodName: "GetEndpointObservation",
+			Handler:    _RelayerCache_GetEndpointObservation_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

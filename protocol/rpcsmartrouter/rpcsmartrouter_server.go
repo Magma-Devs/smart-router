@@ -238,6 +238,15 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
+		// Fleet tracker gate (MAG-2981): with --shared-state AND a cache backend, pods share
+		// their poll observations so an endpoint is polled about once per interval fleet-wide.
+		// Gated on the same flag as the chain-level shared tip — it is the operator's "this
+		// chain runs on several replicas behind one cache" signal, already set by the helm
+		// chart when maxReplicas > 1. nil (single replica or no cache) leaves the gate off.
+		PeerObservations: rpcss.peerObservationStore(),
+		OnGateSkip: func(endpointURL, source string) {
+			rpcss.smartRouterEndpointMetrics.RecordTrackerGateSkip(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, source)
+		},
 		// Count the tracker's upstream requests by kind. This is the series that makes the
 		// effect of --enable-fork-detection visible: rpc_endpoint_fetch_latest_{success,fails}
 		// count EVENTS (new block detected / latest-block fetch failed), not requests, so
@@ -3208,6 +3217,15 @@ func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlo
 		latest = trackedLatestBlock
 	}
 	return spectypes.IsFinalizedBlock(requestedBlock, latest, finalizationDistance)
+}
+
+// peerObservationStore returns the fleet observation store for the per-endpoint tracker gate,
+// or nil when shared state is off or no cache backend is configured (MAG-2981).
+func (rpcss *RPCSmartRouterServer) peerObservationStore() endpointstate.PeerObservationStore {
+	if !rpcss.sharedState || rpcss.cache == nil {
+		return nil
+	}
+	return endpointstate.NewCachePeerObservations(rpcss.cache)
 }
 
 // adoptSharedStateTip feeds a peer pod's chain tip — read from the shared cache under the

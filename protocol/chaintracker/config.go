@@ -58,9 +58,10 @@ type ChainTrackerConfig struct {
 	FlatPollInterval time.Duration
 
 	// RelayTipFresh, when set, is the traffic gate (MAG-2159 / Topic B): it reports whether a
-	// FRESH relay-harvested tip already covers this endpoint. When it returns true the dedicated
+	// FRESH observation already covers this endpoint — a relay-harvested tip, or a peer pod's
+	// poll borrowed through the cache backend (MAG-2981). When it returns true the dedicated
 	// poll skips the ENTIRE cycle — no FetchLatestBlockNum and no fork-check FetchBlockHashByNum
-	// — because served traffic is keeping the tip current. The gate lives here, ABOVE the
+	// — because something else is keeping the tip current. The gate lives here, ABOVE the
 	// generic/SVM iChainFetcherWrapper split, so it suppresses both EVM and Solana polls (the
 	// per-poller hook could only ever see the generic path). A skip touches nothing: no upstream
 	// call, no poll-health write, and no SVM cache mutation. Per-endpoint trackers set this; the
@@ -69,7 +70,8 @@ type ChainTrackerConfig struct {
 
 	// MaxRelaySkipsBeforePoll bounds consecutive gate skips: after this many skipped cycles the
 	// tracker forces one real poll for independent fork/liveness verification, so relay traffic
-	// reporting a stable-but-wrong tip cannot suppress the dedicated poll forever. 0 selects
+	// (or a peer pod) reporting a stable-but-wrong tip cannot suppress the dedicated poll
+	// forever — and every pod keeps proving its OWN path to the upstream. 0 selects
 	// DefaultMaxRelaySkipsBeforePoll. Only meaningful when RelayTipFresh is set.
 	MaxRelaySkipsBeforePoll int
 }
