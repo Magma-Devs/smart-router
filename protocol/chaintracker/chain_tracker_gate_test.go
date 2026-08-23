@@ -146,7 +146,7 @@ func TestTrafficGate_BoundedVerification(t *testing.T) {
 // the legacy behavior is untouched.
 func TestTrafficGate_NilGate_GlobalTrackerAlwaysPolls(t *testing.T) {
 	fetcher := &countingGateFetcher{}
-	ct := newGateTracker(t, "ETH1", fetcher, nil, defaultMaxRelaySkipsBeforePoll)
+	ct := newGateTracker(t, "ETH1", fetcher, nil, DefaultMaxRelaySkipsBeforePoll)
 	for i := 0; i < 5; i++ {
 		skipped, _ := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 		require.False(t, skipped, "an ungated tracker never skips")
