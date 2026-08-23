@@ -157,6 +157,10 @@ type EndpointMonitor struct {
 	// onGateSkip, if set, is invoked once per poll cycle the traffic gate suppressed, with the
 	// source that made the poll redundant (metrics.TrackerGateSkipSource*).
 	onGateSkip func(endpointURL, source string)
+	// onGateError, if set, is invoked whenever a fleet-store call fails, with the operation
+	// (metrics.TrackerGateOp*). Without it a broken cache backend and a fleet with nothing to
+	// share look identical: both report zero peer skips.
+	onGateError func(endpointURL, op string)
 	// onTrackerRequest counts upstream tracker requests. Deliberately NOT generation-gated
 	// the way observations are: a late request from a replaced tracker still reached the
 	// node, so dropping it would under-report real load.
@@ -204,6 +208,10 @@ type EndpointChainTrackerConfig struct {
 	// OnGateSkip, if set, is invoked once per poll cycle the traffic gate suppressed, with
 	// the source ("relay" or "peer"). Backs rpc_endpoint_tracker_gate_skips_total.
 	OnGateSkip func(endpointURL, source string)
+
+	// OnGateError, if set, is invoked on every failed fleet-store call, with the operation
+	// ("fetch" or "publish"). Backs rpc_endpoint_tracker_gate_errors_total.
+	OnGateError func(endpointURL, op string)
 
 	// OnTrackerRequest, if set, is invoked once per upstream request a tracker actually sends,
 	// with the endpoint URL and the request kind (metrics.TrackerRequestKind*). It backs the
@@ -274,6 +282,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		onFetchError:       config.OnFetchError,
 		onTipObservation:   config.OnTipObservation,
 		onGateSkip:         config.OnGateSkip,
+		onGateError:        config.OnGateError,
 		onTrackerRequest:   config.OnTrackerRequest,
 		peerObservations:   config.PeerObservations,
 		podID:              LocalPodID(),
