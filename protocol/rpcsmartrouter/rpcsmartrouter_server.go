@@ -1146,10 +1146,37 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	// Get cross-validation parameters from the state machine (nil for Stateless/Stateful)
 	crossValidationParams := stateMachine.GetCrossValidationParams()
 
+	// Validate the requested fan-out against the live candidate-endpoint count BEFORE constructing the
+	// processor. The processor sizes its response channel from that fan-out, and this check is the only
+	// thing that bounds MaxParticipants by the endpoints that actually exist, so a rejected request must
+	// never reach the constructor. This matches the ordering already used on the initial/health relay path
+	// in sendRelayWithRetries (MAG-2796).
+	if reason, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
+		// Nothing will be relayed on this path, so the processor exists only to carry the structured reason
+		// back to SendParsedRelay. Build it with the single-relay defaults rather than the caller's params:
+		// a request rejected for asking too many endpoints must not size an allocation from the very value
+		// that was just rejected. validateCrossValidationCapacity only errors when selection is
+		// CrossValidation, so the processor still needs non-nil params here.
+		failFastParams := common.DefaultCrossValidationParams
+		relayProcessor := relaycore.NewRelayProcessor(
+			ctx,
+			&failFastParams,
+			rpcss.rpcSmartRouterLogs,
+			rpcss,
+			rpcss.relayRetriesManager,
+			stateMachine,
+		)
+		if reason != "" {
+			relayProcessor.SetCrossValidationFailFastReason(reason)
+		}
+		tracing.RecordError(span, err)
+		// Return the processor (not nil) so SendParsedRelay can read the fail-fast reason and surface the
+		// failure-reason header to the client.
+		return relayProcessor, err
+	}
+
 	// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
 	// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
-	// Created before the capacity check so a request-time fail-fast can carry its structured reason back on
-	// the shared processor (the check aborts before any RelayResult exists).
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx,
 		crossValidationParams,
@@ -1165,16 +1192,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	var consistencyFallback *consistencyFallbackState
 	if stateMachine.GetSelection() != relaycore.CrossValidation {
 		consistencyFallback = newConsistencyFallbackState()
-	}
-
-	if reason, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
-		if reason != "" {
-			relayProcessor.SetCrossValidationFailFastReason(reason)
-		}
-		tracing.RecordError(span, err)
-		// Return the processor (not nil) so SendParsedRelay can read the fail-fast reason and surface the
-		// failure-reason header to the client.
-		return relayProcessor, err
 	}
 
 	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()

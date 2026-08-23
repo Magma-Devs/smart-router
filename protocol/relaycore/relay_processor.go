@@ -65,6 +65,21 @@ type quorumStat struct {
 	groupCounts map[string]int
 }
 
+// responseBufferSize is the capacity of a processor's response channel. It mirrors the state machine's own
+// fan-out decision (see NewUnifiedRelayStateMachine's initial batch): a cross-validation request launches
+// MaxParticipants relays at once, every other selection launches one at a time. Sizing the buffer to the
+// real fan-out means the buffer can never be what limits a request — the only meaningful bound on
+// MaxParticipants is the number of candidate endpoints that actually exist, which
+// validateCrossValidationCapacity checks per request before this processor is constructed. RelayRetryLimit
+// of headroom covers a retry landing before the previous batch's response has been drained.
+func responseBufferSize(selection Selection, crossValidationParams *common.CrossValidationParams) int {
+	fanOut := 1
+	if selection == CrossValidation && crossValidationParams != nil {
+		fanOut = crossValidationParams.MaxParticipants
+	}
+	return fanOut + RelayRetryLimit
+}
+
 func NewRelayProcessor(
 	ctx context.Context,
 	crossValidationParams *common.CrossValidationParams, // nil for Stateless/Stateful
@@ -90,18 +105,12 @@ func NewRelayProcessor(
 			utils.LavaFormatFatal("invalid cross-validation MaxParticipants", nil,
 				utils.LogAttr("MaxParticipants", crossValidationParams.MaxParticipants))
 		}
-		if crossValidationParams.MaxParticipants > MaxCallsPerRelay {
-			utils.LavaFormatFatal("cross-validation MaxParticipants exceeds maximum allowed",
-				nil,
-				utils.LogAttr("MaxParticipants", crossValidationParams.MaxParticipants),
-				utils.LogAttr("MaxCallsPerRelay", MaxCallsPerRelay))
-		}
 	}
 
 	chainID, _ := chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
 	relayProcessor := &RelayProcessor{
 		crossValidationParams:        crossValidationParams,
-		responses:                    make(chan *RelayResponse, MaxCallsPerRelay), // buffered to prevent blocking
+		responses:                    make(chan *RelayResponse, responseBufferSize(selection, crossValidationParams)), // buffered to prevent blocking
 		ResultsManager:               NewResultsManager(guid, chainID),
 		guid:                         guid,
 		debugRelay:                   relayStateMachine.GetDebugState(),
