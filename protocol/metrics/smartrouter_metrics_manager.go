@@ -62,6 +62,7 @@ type SmartRouterMetricsManager struct {
 	endpointFetchBlockSuccess      *MappedLabelsCounterVec // rpc_endpoint_fetch_block_success
 	endpointTrackerRequests        *MappedLabelsCounterVec // rpc_endpoint_tracker_requests_total
 	endpointTrackerGateSkips       *MappedLabelsCounterVec // rpc_endpoint_tracker_gate_skips_total
+	endpointTrackerGateErrors      *MappedLabelsCounterVec // rpc_endpoint_tracker_gate_errors_total
 
 	// Router-scoped metrics (labels: spec, apiInterface, function)
 	routerTotalRelaysServiced *prometheus.CounterVec   // smartrouter_total_relays_serviced
@@ -292,6 +293,16 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name:       "rpc_endpoint_tracker_gate_skips_total",
 		Help:       "Total per-endpoint tracker poll cycles suppressed by the traffic gate, by source (relay, peer).",
 		Labels:     []string{"spec", "apiInterface", "endpoint_id", "source"},
+		Registerer: prometheus.DefaultRegisterer,
+	})
+
+	// Counts FAILED calls to the fleet observation store, by operation. Without it a broken
+	// cache backend and a fleet with nothing to share are indistinguishable — both leave
+	// rpc_endpoint_tracker_gate_skips_total{source="peer"} at zero.
+	endpointTrackerGateErrors := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_tracker_gate_errors_total",
+		Help:       "Total failed fleet-observation-store calls made by the per-endpoint tracker gate, by op (fetch, publish).",
+		Labels:     []string{"spec", "apiInterface", "endpoint_id", "op"},
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
@@ -649,6 +660,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		endpointFetchBlockSuccess:      endpointFetchBlockSuccess,
 		endpointTrackerRequests:        endpointTrackerRequests,
 		endpointTrackerGateSkips:       endpointTrackerGateSkips,
+		endpointTrackerGateErrors:      endpointTrackerGateErrors,
 
 		// Router-scoped (with function)
 		routerTotalRelaysServiced: routerTotalRelaysServiced,
@@ -1258,6 +1270,28 @@ const (
 	// to the cache backend (MAG-2981).
 	TrackerGateSkipSourcePeer = "peer"
 )
+
+// TrackerGateOp values for RecordTrackerGateError: the two calls the gate makes to the fleet
+// observation store.
+const (
+	// TrackerGateOpFetch — reading a peer's observation before polling failed, so the pod polled.
+	TrackerGateOpFetch = "fetch"
+	// TrackerGateOpPublish — publishing this pod's own observation to the fleet store failed.
+	TrackerGateOpPublish = "publish"
+)
+
+// RecordTrackerGateError records ONE failed fleet-store call, fanned out like RecordTrackerGateSkip.
+// It is what separates "the cache backend is unreachable or slow" from "no peer has anything to
+// share": both otherwise present only as peer skips sitting at zero.
+func (m *SmartRouterMetricsManager) RecordTrackerGateError(spec, apiInterface, endpointID, op string) {
+	if m == nil || m.endpointTrackerGateErrors == nil {
+		return
+	}
+	for _, providerName := range m.resolveProviderNames(endpointID) {
+		labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": providerName, "op": op}
+		m.endpointTrackerGateErrors.WithLabelValues(labels).Inc()
+	}
+}
 
 // RecordTrackerGateSkip records ONE poll cycle the traffic gate suppressed for an endpoint,
 // fanned out across every provider sharing the URL like RecordTrackerRequest.

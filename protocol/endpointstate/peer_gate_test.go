@@ -11,6 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -24,14 +25,15 @@ import (
 // fakePeerStore is an in-memory PeerObservationStore with one live observation and a
 // counter per method, so tests can assert what the monitor asked of it.
 type fakePeerStore struct {
-	mu        sync.Mutex
-	block     int64
-	podID     string
-	age       time.Duration
-	found     bool
-	fetchErr  error
-	fetches   atomic.Int32
-	publishes atomic.Int32
+	mu         sync.Mutex
+	block      int64
+	podID      string
+	age        time.Duration
+	found      bool
+	fetchErr   error
+	publishErr error
+	fetches    atomic.Int32
+	publishes  atomic.Int32
 
 	lastPublish struct {
 		chainID, apiInterface, endpointID, podID string
@@ -46,7 +48,7 @@ func (f *fakePeerStore) Publish(ctx context.Context, chainID, apiInterface, endp
 	f.publishes.Add(1)
 	f.lastPublish.chainID, f.lastPublish.apiInterface, f.lastPublish.endpointID, f.lastPublish.podID = chainID, apiInterface, endpointID, podID
 	f.lastPublish.block, f.lastPublish.ttl = block, ttl
-	return nil
+	return f.publishErr
 }
 
 func (f *fakePeerStore) Fetch(ctx context.Context, chainID, apiInterface, endpointID string) (int64, string, time.Duration, bool, error) {
@@ -302,6 +304,66 @@ func TestShouldPublish_ThrottledAcrossBothLocalPaths(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	require.Equal(t, int64(7100), store.lastPublish.block)
+}
+
+// The cache read sits on the poll goroutine and the next tick is scheduled only after the cycle
+// returns, so its timeout is ADDED to the poll interval. Bounding it at a quarter of the interval
+// keeps a slow-but-reachable cache backend from costing more than the upstream request the gate
+// exists to avoid — on a 200ms-interval chain the flat 200ms ceiling would double the cycle time.
+func TestPeerFetchBudget_NeverExceedsAQuarterOfTheInterval(t *testing.T) {
+	// Ethereum-ish: 12s blocks → 6s interval. The flat ceiling is already far below a quarter.
+	eth := newPeerGatedMonitor(t, 12*time.Second, &fakePeerStore{})
+	require.Equal(t, 6*time.Second, eth.flatPollInterval)
+	require.Equal(t, peerFetchTimeout, eth.peerFetchBudget(), "a slow chain keeps the flat ceiling")
+
+	// Solana-ish: 400ms blocks → 200ms interval, where the flat ceiling IS the whole interval.
+	svm := newPeerGatedMonitor(t, 400*time.Millisecond, &fakePeerStore{})
+	require.Equal(t, 200*time.Millisecond, svm.flatPollInterval)
+	require.Equal(t, 50*time.Millisecond, svm.peerFetchBudget(), "a fast chain scales the budget down")
+	require.Less(t, svm.peerFetchBudget(), svm.flatPollInterval/2, "the gate can never dominate its own cycle")
+
+	// A monitor with no flat cadence (not a per-endpoint tracker) falls back to the ceiling.
+	bare := &EndpointMonitor{}
+	require.Equal(t, peerFetchTimeout, bare.peerFetchBudget())
+}
+
+// A failing fleet store is reported, per operation. Without this a broken cache backend and a fleet
+// with nothing to share look the same from outside: both leave peer skips at zero.
+func TestGateErrors_FetchAndPublishAreReported(t *testing.T) {
+	const url = "http://ep:8545"
+	var mu sync.Mutex
+	errs := map[string]int{}
+	store := &fakePeerStore{fetchErr: errors.New("cache unavailable"), publishErr: errors.New("cache unavailable")}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
+		ChainID:          "ETH1",
+		ApiInterface:     spectypes.APIInterfaceJsonRPC,
+		AverageBlockTime: 400 * time.Millisecond,
+		BlocksToSave:     1,
+		PeerObservations: store,
+		OnGateError: func(_ string, op string) {
+			mu.Lock()
+			defer mu.Unlock()
+			errs[op]++
+		},
+	})
+	t.Cleanup(m.Stop)
+
+	now := time.Now()
+	gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return errs[metrics.TrackerGateOpPublish] == 1
+	}, time.Second, 5*time.Millisecond, "a failed publish is reported")
+
+	_, ok := m.freshPeerTip(url, gen, now)
+	require.False(t, ok, "a fetch error still degrades to a local poll")
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, errs[metrics.TrackerGateOpFetch], "a failed fetch is reported")
 }
 
 // The gate's precondition as a cycle: a healthy pod borrows, one failed local poll withdraws the

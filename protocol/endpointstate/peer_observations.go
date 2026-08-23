@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
@@ -61,6 +62,26 @@ func (m *EndpointMonitor) noteGateSkip(endpointURL, source string) {
 	if m.onGateSkip != nil {
 		m.onGateSkip(endpointURL, source)
 	}
+}
+
+// noteGateError forwards a failed fleet-store call to the OnGateError consumer, if any.
+func (m *EndpointMonitor) noteGateError(endpointURL, op string) {
+	if m.onGateError != nil {
+		m.onGateError(endpointURL, op)
+	}
+}
+
+// peerFetchBudget bounds the gate's cache read against THIS monitor's cadence: never more than a
+// quarter of the poll interval. The read sits on the poll goroutine, and the next tick is scheduled
+// only after the cycle returns, so its latency is ADDED to the interval rather than overlapped with
+// it. At the flat 200ms ceiling alone, a slow-but-reachable cache backend would double the cycle
+// time of a 200ms-interval chain — the gate would then cost more than the upstream request it
+// exists to avoid. A cache that cannot answer within a quarter of the cycle is one to poll past.
+func (m *EndpointMonitor) peerFetchBudget() time.Duration {
+	if m.flatPollInterval <= 0 {
+		return peerFetchTimeout
+	}
+	return min(peerFetchTimeout, m.flatPollInterval/4)
 }
 
 const (
@@ -200,6 +221,7 @@ func (m *EndpointMonitor) publishLocalObservation(endpointURL string, block int6
 		defer cancel()
 		err := m.peerObservations.Publish(ctx, m.chainID, m.apiInterface, EndpointID(endpointURL), m.podID, block, m.relayGateFreshness*peerObservationTTLMultiplier)
 		if err != nil && m.ctx.Err() == nil {
+			m.noteGateError(endpointURL, metrics.TrackerGateOpPublish)
 			utils.LavaFormatDebug("fleet gate: publishing local observation failed",
 				utils.LogAttr("chainID", m.chainID),
 				utils.LogAttr("apiInterface", m.apiInterface),
@@ -240,11 +262,12 @@ func (m *EndpointMonitor) freshPeerTip(endpointURL string, gen uint64, now time.
 	if !m.localPollHealthy(endpointURL) {
 		return 0, false
 	}
-	ctx, cancel := context.WithTimeout(m.ctx, peerFetchTimeout)
+	ctx, cancel := context.WithTimeout(m.ctx, m.peerFetchBudget())
 	defer cancel()
 	block, podID, age, found, err := m.peerObservations.Fetch(ctx, m.chainID, m.apiInterface, EndpointID(endpointURL))
 	if err != nil {
 		if m.ctx.Err() == nil {
+			m.noteGateError(endpointURL, metrics.TrackerGateOpFetch)
 			utils.LavaFormatDebug("fleet gate: fetching peer observation failed, polling locally",
 				utils.LogAttr("chainID", m.chainID),
 				utils.LogAttr("endpoint", endpointURL),

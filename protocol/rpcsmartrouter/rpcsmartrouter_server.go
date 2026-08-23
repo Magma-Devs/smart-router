@@ -247,6 +247,9 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		OnGateSkip: func(endpointURL, source string) {
 			rpcss.smartRouterEndpointMetrics.RecordTrackerGateSkip(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, source)
 		},
+		OnGateError: func(endpointURL, op string) {
+			rpcss.smartRouterEndpointMetrics.RecordTrackerGateError(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, op)
+		},
 		// Count the tracker's upstream requests by kind. This is the series that makes the
 		// effect of --enable-fork-detection visible: rpc_endpoint_fetch_latest_{success,fails}
 		// count EVENTS (new block detected / latest-block fetch failed), not requests, so
