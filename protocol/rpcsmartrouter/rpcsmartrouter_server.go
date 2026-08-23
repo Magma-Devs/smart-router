@@ -2312,7 +2312,12 @@ func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavases
 // has ever been written; a non-positive store value means "unknown", so we defer to the atomic.
 //
 // Safe to return a lower block: the sole caller is consistency pre-validation, where a lower tip
-// means "more likely behind" → a conservative reject, never an over-optimistic pass.
+// means "more likely behind" → a conservative reject.
+//
+// The tip may also be a PEER pod's observation borrowed through the cache backend (the fleet
+// tracker gate), which can read higher than this pod has seen. Accepted deliberately: the
+// reference it is compared against is the guarded chain tip, so a too-high endpoint value can
+// only mask that ONE endpoint's lag — it can never reject an honest one.
 func endpointTipPreferStore(pollAtomic, storeTip int64) int64 {
 	if storeTip > 0 {
 		return storeTip

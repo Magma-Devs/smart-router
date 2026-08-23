@@ -83,6 +83,16 @@ func newPeerGatedMonitor(t *testing.T, freshness time.Duration, store PeerObserv
 	return m
 }
 
+// registerHealthyGenForTest registers a generation and records one successful poll — the state a
+// live tracker is in by the time the gate runs. freshPeerTip borrows only on proven local
+// reachability, so a test that wants a borrow must say the pod is healthy first. Seed a low block
+// and an `at` older than the peer observation, so the peer's block still wins the monotonic guard.
+func (m *EndpointMonitor) registerHealthyGenForTest(url string, block int64, at time.Time) uint64 {
+	gen := m.registerGenForTest(url)
+	m.recordPollObservation(url, gen, block, time.Millisecond, nil, at)
+	return gen
+}
+
 func TestEndpointID_IsStableAndOpaque(t *testing.T) {
 	const url = "https://rpc.example/v1/SECRET-API-KEY"
 	id := EndpointID(url)
@@ -99,12 +109,15 @@ func TestFreshPeerTip_PeerObservationSuppressesAndIsAdopted(t *testing.T) {
 	freshness := 400 * time.Millisecond
 	store := &fakePeerStore{}
 	m := newPeerGatedMonitor(t, freshness, store)
-	gen := m.registerGenForTest(url)
+
+	now := time.Now()
+	gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
+	before, _ := m.GetObservation(url)
+	require.False(t, before.LastSuccessfulPoll.IsZero(), "the seed poll is the pod's own reachability evidence")
 
 	var fedTip atomic.Int64
 	m.onTipObservation = func(block int64) { fedTip.Store(block) }
 
-	now := time.Now()
 	store.set(5000, "other-pod/abcd", 100*time.Millisecond)
 
 	block, ok := m.freshPeerTip(url, gen, now)
@@ -116,7 +129,8 @@ func TestFreshPeerTip_PeerObservationSuppressesAndIsAdopted(t *testing.T) {
 	require.Equal(t, int64(5000), o.LatestBlock)
 	require.Equal(t, ObservationSourcePeer, o.Source, "adopted under SourcePeer")
 	require.WithinDuration(t, now.Add(-100*time.Millisecond), o.ObservedAt, time.Millisecond, "ObservedAt is now minus the store-measured age")
-	require.True(t, o.LastSuccessfulPoll.IsZero(), "a peer observation never touches poll-health")
+	require.Equal(t, before.LastSuccessfulPoll, o.LastSuccessfulPoll, "a peer observation never touches poll-health")
+	require.Zero(t, o.ConsecutivePollFailures)
 	require.Equal(t, int64(5000), fedTip.Load(), "an adopted peer block feeds the per-chain tip")
 }
 
@@ -124,13 +138,16 @@ func TestFreshPeerTip_NeverBorrowsOwnObservation(t *testing.T) {
 	const url = "http://ep:8545"
 	store := &fakePeerStore{}
 	m := newPeerGatedMonitor(t, 400*time.Millisecond, store)
-	gen := m.registerGenForTest(url)
+	now := time.Now()
+	gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
 
 	store.set(5000, m.podID, 10*time.Millisecond)
-	_, ok := m.freshPeerTip(url, gen, time.Now())
+	_, ok := m.freshPeerTip(url, gen, now)
 	require.False(t, ok, "a pod's own published poll must never suppress its next poll")
-	_, exists := m.GetObservation(url)
-	require.False(t, exists, "nothing adopted")
+	require.Equal(t, int32(1), store.fetches.Load(), "the pod is locally healthy, so it got as far as the pod-id check")
+	o, _ := m.GetObservation(url)
+	require.Equal(t, int64(1), o.LatestBlock, "nothing adopted — the tip is still the pod's own poll")
+	require.Equal(t, ObservationSourcePoll, o.Source)
 }
 
 func TestFreshPeerTip_FreshnessBoundary(t *testing.T) {
@@ -138,7 +155,7 @@ func TestFreshPeerTip_FreshnessBoundary(t *testing.T) {
 	freshness := 400 * time.Millisecond
 	store := &fakePeerStore{}
 	m := newPeerGatedMonitor(t, freshness, store)
-	gen := m.registerGenForTest(url)
+	gen := m.registerHealthyGenForTest(url, 1, time.Now().Add(-time.Second))
 
 	store.set(5000, "other-pod/abcd", freshness)
 	_, ok := m.freshPeerTip(url, gen, time.Now())
@@ -156,7 +173,7 @@ func TestFreshPeerTip_MissErrorOrUnwiredMeansPoll(t *testing.T) {
 	t.Run("miss", func(t *testing.T) {
 		store := &fakePeerStore{}
 		m := newPeerGatedMonitor(t, 400*time.Millisecond, store)
-		gen := m.registerGenForTest(url)
+		gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
 		_, ok := m.freshPeerTip(url, gen, now)
 		require.False(t, ok)
 		require.Equal(t, int32(1), store.fetches.Load())
@@ -165,28 +182,111 @@ func TestFreshPeerTip_MissErrorOrUnwiredMeansPoll(t *testing.T) {
 	t.Run("fetch error", func(t *testing.T) {
 		store := &fakePeerStore{fetchErr: errors.New("cache unavailable")}
 		m := newPeerGatedMonitor(t, 400*time.Millisecond, store)
-		gen := m.registerGenForTest(url)
+		gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
 		_, ok := m.freshPeerTip(url, gen, now)
 		require.False(t, ok, "a store error must degrade to a local poll, never a skip")
+		require.Equal(t, int32(1), store.fetches.Load())
 	})
 
 	t.Run("no store wired", func(t *testing.T) {
 		m := newPeerGatedMonitor(t, 400*time.Millisecond, nil)
-		gen := m.registerGenForTest(url)
+		gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
 		_, ok := m.freshPeerTip(url, gen, now)
 		require.False(t, ok)
+	})
+
+	t.Run("local polls failing", func(t *testing.T) {
+		store := &fakePeerStore{}
+		m := newPeerGatedMonitor(t, 400*time.Millisecond, store)
+		gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
+		store.set(5000, "other-pod/abcd", 10*time.Millisecond)
+		m.recordPollObservation(url, gen, 0, 0, errors.New("connection refused"), now.Add(-500*time.Millisecond))
+		_, ok := m.freshPeerTip(url, gen, now)
+		require.False(t, ok, "a pod that cannot reach the endpoint must not borrow evidence that it can")
+		require.Equal(t, int32(0), store.fetches.Load(), "the health guard runs BEFORE the cache round-trip")
+	})
+
+	t.Run("never polled", func(t *testing.T) {
+		store := &fakePeerStore{}
+		m := newPeerGatedMonitor(t, 400*time.Millisecond, store)
+		gen := m.registerGenForTest(url) // generation only: no observation record at all
+		store.set(5000, "other-pod/abcd", 10*time.Millisecond)
+		_, ok := m.freshPeerTip(url, gen, now)
+		require.False(t, ok, "no local evidence yet → no borrow")
+		require.Equal(t, int32(0), store.fetches.Load())
 	})
 
 	t.Run("stale generation is not adopted", func(t *testing.T) {
 		store := &fakePeerStore{}
 		m := newPeerGatedMonitor(t, 400*time.Millisecond, store)
-		gen := m.registerGenForTest(url)
+		gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
 		store.set(5000, "other-pod/abcd", 10*time.Millisecond)
 		_, ok := m.freshPeerTip(url, gen+1, now)
 		require.True(t, ok, "the cycle is still redundant")
-		_, exists := m.GetObservation(url)
-		require.False(t, exists, "a replaced tracker's generation writes nothing")
+		o, _ := m.GetObservation(url)
+		require.Equal(t, int64(1), o.LatestBlock, "a replaced tracker's generation writes nothing")
+		require.Equal(t, ObservationSourcePoll, o.Source)
 	})
+}
+
+// The gate's precondition as a cycle: a healthy pod borrows, one failed local poll withdraws the
+// borrow (without spending a cache round-trip), and the next successful poll restores it — so a
+// transient failure costs one extra poll, not a sustained cadence change.
+func TestFreshPeerTip_LocalFailureWithdrawsAndRestoresTheBorrow(t *testing.T) {
+	const url = "http://ep:8545"
+	store := &fakePeerStore{}
+	m := newPeerGatedMonitor(t, 400*time.Millisecond, store)
+	now := time.Now()
+	gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
+	store.set(5000, "other-pod/abcd", 10*time.Millisecond)
+
+	_, ok := m.freshPeerTip(url, gen, now)
+	require.True(t, ok, "a healthy pod borrows")
+	require.Equal(t, int32(1), store.fetches.Load())
+
+	m.recordPollObservation(url, gen, 0, 0, errors.New("dial tcp: connect: connection refused"), now.Add(time.Millisecond))
+	_, ok = m.freshPeerTip(url, gen, now.Add(2*time.Millisecond))
+	require.False(t, ok, "one failed local poll withdraws the borrow")
+	require.Equal(t, int32(1), store.fetches.Load(), "and skips the cache round-trip entirely")
+
+	m.recordPollObservation(url, gen, 6000, time.Millisecond, nil, now.Add(3*time.Millisecond))
+	_, ok = m.freshPeerTip(url, gen, now.Add(4*time.Millisecond))
+	require.True(t, ok, "a successful local poll restores the borrow")
+	require.Equal(t, int32(2), store.fetches.Load())
+}
+
+// The F1 regression: probing.Verdict computes `alive` from LatestBlock + ObservedAt, and a failed
+// poll moves neither. So while this pod cannot reach the endpoint nothing may refresh ObservedAt,
+// or the staleness window never expires and the endpoint reads ALIVE forever on borrowed evidence.
+func TestFreshPeerTip_FailingPodStopsRefreshingObservedAt(t *testing.T) {
+	const url = "http://ep:8545"
+	store := &fakePeerStore{}
+	m := newPeerGatedMonitor(t, 400*time.Millisecond, store)
+	now := time.Now()
+	gen := m.registerHealthyGenForTest(url, 1, now.Add(-time.Second))
+
+	// Healthy pod, fresh peer note: the borrow is adopted and stamps the endpoint's tip.
+	store.set(5000, "other-pod/abcd", 10*time.Millisecond)
+	_, ok := m.freshPeerTip(url, gen, now)
+	require.True(t, ok)
+	adopted, _ := m.GetObservation(url)
+	require.Equal(t, int64(5000), adopted.LatestBlock)
+
+	// The pod's path breaks: its own polls fail while peers keep publishing newer observations.
+	for i := 1; i <= 5; i++ {
+		at := now.Add(time.Duration(i) * 10 * time.Millisecond)
+		m.recordPollObservation(url, gen, 0, 0, errors.New("connection refused"), at)
+		store.set(5000+int64(i), "other-pod/abcd", 10*time.Millisecond)
+		_, ok := m.freshPeerTip(url, gen, at.Add(time.Millisecond))
+		require.False(t, ok, "tick %d: a pod that cannot reach the endpoint must not borrow", i)
+	}
+
+	o, _ := m.GetObservation(url)
+	require.True(t, adopted.ObservedAt.Equal(o.ObservedAt),
+		"ObservedAt must be frozen at the last observation made while the pod was healthy: was %s, now %s", adopted.ObservedAt, o.ObservedAt)
+	require.Equal(t, int64(5000), o.LatestBlock, "no peer block is adopted while local polls fail")
+	require.Equal(t, 5, o.ConsecutivePollFailures)
+	require.Equal(t, int32(1), store.fetches.Load(), "only the one healthy tick reached the cache")
 }
 
 func TestRecordPollObservation_PublishesSuccessOnly(t *testing.T) {

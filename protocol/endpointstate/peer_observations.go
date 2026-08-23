@@ -26,12 +26,16 @@ import (
 // successful poll to the cache backend, and before polling it asks the backend whether a peer
 // polled the same endpoint recently. If one did, the cycle is skipped and the peer's block is
 // adopted into this pod's tip store under SourcePeer, which keeps the ALIVE / keeping-up
-// verdicts and the QoS sync reference fed. Latency is never shared: a peer's round-trip says
-// nothing about this pod's path to the endpoint.
+// verdicts and the QoS sync reference fed — but only for an endpoint this pod is itself still
+// reaching (invariant 2). Latency is never shared: a peer's round-trip says nothing about this
+// pod's path to the endpoint.
 //
-// Three invariants keep it safe:
+// Four invariants keep it safe:
 //   - A pod never borrows its OWN observation (PodId check) — otherwise one poll would throttle
 //     every subsequent poll, the self-throttle the relay gate's Source==Relay rule forbids.
+//   - A pod only borrows while its OWN last poll SUCCEEDED (localPollHealthy) — an adopted block
+//     refreshes ObservedAt, which probing.Verdict reads as `alive`, so a pod that lost its path
+//     to an endpoint would otherwise read it ALIVE forever on borrowed evidence.
 //   - The tracker's skip budget (chaintracker.maxRelaySkipsBeforePoll) counts peer skips too,
 //     so every pod still polls every endpoint locally on a bounded cadence — a pod-local
 //     connectivity fault or a lying upstream stays detectable.
@@ -182,13 +186,34 @@ func (m *EndpointMonitor) publishPollObservation(endpointURL string, block int64
 	}()
 }
 
+// localPollHealthy reports whether THIS pod's last poll of the endpoint succeeded — the gate's
+// precondition. An adopted peer block refreshes ObservedAt, which is all probing.Verdict reads
+// for `alive` (a failed poll moves neither it nor LatestBlock), so without this a pod that lost
+// its path would read the endpoint ALIVE forever instead of disabling it after one staleness
+// window. ConsecutivePollFailures does climb, but nothing reads it for liveness.
+//
+// No record means unhealthy: a live tracker always has one (the init fetch records before the
+// poll loop starts), so absence is unexpected and costs one local poll.
+func (m *EndpointMonitor) localPollHealthy(endpointURL string) bool {
+	m.obsMu.RLock()
+	defer m.obsMu.RUnlock()
+	o, ok := m.observations[endpointURL]
+	return ok && o.ConsecutivePollFailures == 0
+}
+
 // freshPeerTip is the peer half of the traffic gate. It reports true — and adopts the peer's
-// block into this endpoint's tip under SourcePeer — only when a live observation exists, it was
-// published by ANOTHER pod, and it is younger than the gate freshness window (the same
-// "~one block of staleness" horizon the relay gate uses). Any error or miss means "poll
-// locally". gen is the tracker's observation generation (see recordPollObservation).
+// block into this endpoint's tip under SourcePeer — only when this pod's own last poll of the
+// endpoint succeeded, a live observation exists, it was published by ANOTHER pod, and it is
+// younger than the gate freshness window (the same "~one block of staleness" horizon the relay
+// gate uses). Any error or miss means "poll locally". gen is the tracker's observation
+// generation (see recordPollObservation).
 func (m *EndpointMonitor) freshPeerTip(endpointURL string, gen uint64, now time.Time) (int64, bool) {
 	if m.peerObservations == nil {
+		return 0, false
+	}
+	// Before the fetch: a failing pod must not spend a cache round-trip on an answer it cannot
+	// use, and dropping the gate returns it to full-cadence local polling.
+	if !m.localPollHealthy(endpointURL) {
 		return 0, false
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, peerFetchTimeout)
