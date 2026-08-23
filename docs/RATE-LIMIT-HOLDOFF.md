@@ -47,9 +47,9 @@ off" means on its path. This table is the catalog; add a row when wiring a new c
 | Spec re-verification (`spec_reverifier.go`) | Skip the probe, return the rate-limit error so reconciliation stays inconclusive — membership unchanged, streak untouched — without spending a request | 429 from `Validate` | live |
 | Hot relay path (endpoint selection) | A rate-limited relay releases its session with no QoS sample in either direction, and selection prefers providers that are not held off; when every candidate is held off, the soonest-to-expire one stays in — the customer is never answered with a synthesized 429 | 429 relay results, both shapes (typed HTTP error, 2xx-body/gRPC classification) | live |
 | Recovery probe (`recovery_probe.go`) | Skip the replay while held off (verdict stays inconclusive), instead of burning replay-attempt budget on a vendor that said stop | 429 probe responses (Retry-After floor honoured) | live |
-| Chain tracker / endpoint poller | The poll backoff takes the upstream's Retry-After as a floor instead of guessing with the fail-count doubling | 429 poll responses | lands with MAG-2949 |
+| Chain tracker / endpoint poller | The poll backoff takes the upstream's Retry-After as a floor instead of guessing with the fail-count doubling | 429 poll responses | live |
 | WS subscriptions (`direct_ws_subscription_manager.go`) | A rate-limited connect/subscribe is held off instead of scored (no availability sample), selection skips held endpoints while something ready remains, and the pool's reconnect ladder is floored by the dial's Retry-After. Keyed per WS URL — no provider name exists on this path, so vendor-tier escalation does not apply | 429 handshakes and subscribe failures | live |
-| WS / gRPC transports | Recognition first: a 429 on the WS upgrade or a corroborated gRPC rate limit produces the typed sentinel these consumers key on | handshake / metadata 429s | lands with MAG-2949 |
+| WS / gRPC transports | Recognition first: a 429 on the WS upgrade or a corroborated gRPC rate limit produces the typed sentinel these consumers key on | handshake / metadata 429s | live |
 
 ## Metrics
 
