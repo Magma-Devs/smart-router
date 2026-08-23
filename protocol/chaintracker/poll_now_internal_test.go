@@ -111,7 +111,7 @@ func TestChainTracker_PollNow_LeavesCadenceUntouched(t *testing.T) {
 // budget, since a real poll did happen.
 func TestChainTracker_PollNow_BypassesTrafficGate(t *testing.T) {
 	fetcher := &countingGateFetcher{}
-	ct := newGateTracker(t, "ETH1", fetcher, func(time.Time) bool { return true }, defaultMaxRelaySkipsBeforePoll)
+	ct := newGateTracker(t, "ETH1", fetcher, func(time.Time) bool { return true }, DefaultMaxRelaySkipsBeforePoll)
 
 	skipped, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 	require.True(t, skipped, "a fresh relay tip skips the ordinary cycle")

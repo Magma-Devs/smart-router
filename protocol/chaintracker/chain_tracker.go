@@ -73,7 +73,7 @@ const (
 	maxFails               = 10
 	GoodStabilityThreshold = 0.3
 	PollingUpdateLength    = 10
-	// defaultMaxRelaySkipsBeforePoll bounds how many consecutive poll cycles the traffic gate
+	// DefaultMaxRelaySkipsBeforePoll bounds how many consecutive poll cycles the traffic gate
 	// (MAG-2159) may skip before forcing one real poll for independent fork/liveness
 	// verification. Deliberately small: store-#2 staleness (the tracker atomic that consistency
 	// pre-validation reads) scales linearly as N * FlatPollInterval, so at N=4 with the default
@@ -83,7 +83,7 @@ const (
 	// slower cadence would need this bound revisited. The exposure is in any case narrower than
 	// it reads: consistency pre-validation prefers the relay-fed tip store and only falls back
 	// to this atomic when the store is empty — precisely when the gate never skips.
-	defaultMaxRelaySkipsBeforePoll = 4
+	DefaultMaxRelaySkipsBeforePoll = 4
 	// MostFrequentPollingMultiplier is the fixed multiplier the legacy adaptive cadence uses
 	// (global tracker only — per-endpoint trackers run a fixed FlatPollInterval and never reach
 	// the adaptive tiers). It is the SOLE feeder of cs.pollingTimeMultiplier. The adaptive tiers
@@ -1031,7 +1031,7 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 	// Traffic-gate skip bound (MAG-2159): default when the caller leaves it 0.
 	maxRelaySkips := config.MaxRelaySkipsBeforePoll
 	if maxRelaySkips <= 0 {
-		maxRelaySkips = defaultMaxRelaySkipsBeforePoll
+		maxRelaySkips = DefaultMaxRelaySkipsBeforePoll
 	}
 
 	if chainFetcher == nil {

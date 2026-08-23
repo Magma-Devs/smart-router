@@ -70,7 +70,7 @@ type ChainTrackerConfig struct {
 	// MaxRelaySkipsBeforePoll bounds consecutive gate skips: after this many skipped cycles the
 	// tracker forces one real poll for independent fork/liveness verification, so relay traffic
 	// reporting a stable-but-wrong tip cannot suppress the dedicated poll forever. 0 selects
-	// defaultMaxRelaySkipsBeforePoll. Only meaningful when RelayTipFresh is set.
+	// DefaultMaxRelaySkipsBeforePoll. Only meaningful when RelayTipFresh is set.
 	MaxRelaySkipsBeforePoll int
 }
 
