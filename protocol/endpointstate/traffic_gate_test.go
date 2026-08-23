@@ -176,7 +176,7 @@ func TestEndpointMonitor_SolanaTrafficGate_SuppressesUpstreamPoll(t *testing.T) 
 	}()
 
 	// Run across many flat-poll ticks (~600ms / 50ms ≈ 12 ticks). With the gate engaged the
-	// tracker forces only ~1 real poll per (defaultMaxRelaySkipsBeforePoll+1)=5 ticks, plus a
+	// tracker forces only ~1 real poll per (DefaultMaxRelaySkipsBeforePoll+1)=5 ticks, plus a
 	// couple of init polls. Without the gate wired it would poll on every tick (≥10).
 	time.Sleep(600 * time.Millisecond)
 	close(stop)

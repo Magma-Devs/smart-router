@@ -230,7 +230,10 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// Dedicated-poll cadence, read from viper for the same reason as the flag above (an
 		// embedded server with no flags bound gets 0, which IS the default). endpointstate
 		// validates the value and reverts an out-of-range one.
-		PollIntervalDivisor: viper.GetInt(endpointstate.PollDivisorFlagName),
+		// GetFloat64, not GetInt: the divisor is fractional at the low end, and GetInt would
+		// truncate 0.25 to 0 — which is the "unset" sentinel, so an operator asking for the
+		// largest relief would silently receive the default instead.
+		PollIntervalDivisor: viper.GetFloat64(endpointstate.PollDivisorFlagName),
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,

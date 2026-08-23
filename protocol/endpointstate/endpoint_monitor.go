@@ -163,10 +163,10 @@ type EndpointChainTrackerConfig struct {
 	BlocksToSave     uint64
 
 	// PollIntervalDivisor sets the dedicated-poll cadence to AverageBlockTime/divisor.
-	// 0 (the default) means DefaultPollDivisor — two polls per block time. Lowering it to 1
-	// halves the tracker's upstream request volume. Out-of-range values warn and revert to
-	// the default rather than clamping. See PollDivisorFlagName.
-	PollIntervalDivisor int
+	// Fractional values are meaningful and are the point of the low end: 0.25 is one poll per
+	// four block times. 0 selects DefaultPollDivisor; see poll_cadence.go for the bounds and
+	// for what actually constrains the slow end.
+	PollIntervalDivisor float64
 
 	// EnableForkDetection turns block-hash polling on. Off by default: the tracker then
 	// asks each endpoint only "what is your latest block?" and never fetches a hash. See
@@ -222,6 +222,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// is reported once per chain rather than per tracker.
 	pollDivisor := resolvePollDivisor(config.PollIntervalDivisor, config.ChainID, config.ApiInterface)
 	flatPollInterval := resolveFlatPollInterval(avgBlockTime, pollDivisor)
+	warnIfCadenceOutrunsStaleness(flatPollInterval, avgBlockTime, config.ChainID, config.ApiInterface)
 
 	ctxWithCancel, cancel := context.WithCancel(ctx)
 

@@ -2,6 +2,7 @@ package endpointstate
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -17,11 +18,14 @@ import (
 func TestResolvePollDivisor(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		provided int
-		want     int
+		provided float64
+		want     float64
 	}{
 		{name: "absent (0) takes the built-in default", provided: 0, want: DefaultPollDivisor},
-		{name: "1 is the slowest supported cadence: one poll per block time", provided: 1, want: 1},
+		{name: "1 is one poll per block time", provided: 1, want: 1},
+		{name: "the lower bound is inclusive: one poll per four block times", provided: MinPollDivisor, want: MinPollDivisor},
+		{name: "a fractional value between the bounds is kept as given", provided: 0.5, want: 0.5},
+		{name: "below the range reverts, it does not clamp to Min", provided: 0.1, want: DefaultPollDivisor},
 		{name: "the default may be passed explicitly", provided: DefaultPollDivisor, want: DefaultPollDivisor},
 		{name: "the upper bound is inclusive", provided: MaxPollDivisor, want: MaxPollDivisor},
 		{name: "above the range reverts, it does not clamp to Max", provided: MaxPollDivisor + 1, want: DefaultPollDivisor},
@@ -29,6 +33,11 @@ func TestResolvePollDivisor(t *testing.T) {
 		// A negative divisor would produce a negative interval, which time.NewTimer fires
 		// immediately on — a hot loop against the upstream. It must never reach the tracker.
 		{name: "negative reverts", provided: -1, want: DefaultPollDivisor},
+		// NaN fails every ordinary comparison, so without an explicit check it would pass the
+		// range test and make the interval NaN — which time.Duration renders as a huge negative,
+		// i.e. a timer that fires immediately and hot-loops the upstream.
+		{name: "NaN reverts", provided: math.NaN(), want: DefaultPollDivisor},
+		{name: "+Inf reverts", provided: math.Inf(1), want: DefaultPollDivisor},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, resolvePollDivisor(tc.provided, "ETH1", spectypes.APIInterfaceJsonRPC))
@@ -43,7 +52,7 @@ func TestResolveFlatPollInterval(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		avgBlockTime time.Duration
-		divisor      int
+		divisor      float64
 		want         time.Duration
 	}{
 		{name: "ethereum at the default divisor", avgBlockTime: 12 * time.Second, divisor: DefaultPollDivisor, want: 6 * time.Second},
@@ -65,13 +74,17 @@ func TestNewEndpointMonitor_ResolvesFlatPollInterval(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		avgBlockTime time.Duration
-		divisor      int
+		divisor      float64
 		want         time.Duration
 	}{
 		{name: "default divisor", avgBlockTime: 12 * time.Second, divisor: 0, want: 6 * time.Second},
 		{name: "divisor 1", avgBlockTime: 12 * time.Second, divisor: 1, want: 12 * time.Second},
 		{name: "rejected divisor falls back to the default cadence", avgBlockTime: 12 * time.Second, divisor: 99, want: 6 * time.Second},
 		{name: "spec omits average_block_time: divides the floored default", avgBlockTime: 0, divisor: 1, want: DefaultAverageBlockTime},
+		// The point of the fractional low end: an interval LONGER than the chain's block time.
+		{name: "divisor 0.25 gives four block times", avgBlockTime: 12 * time.Second, divisor: 0.25, want: 48 * time.Second},
+		{name: "divisor 0.5 gives two block times", avgBlockTime: 12 * time.Second, divisor: 0.5, want: 24 * time.Second},
+		{name: "a fast chain stays sub-second at the slowest divisor", avgBlockTime: 400 * time.Millisecond, divisor: 0.25, want: 1600 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -103,11 +116,12 @@ func TestNewEndpointMonitor_ResolvesFlatPollInterval(t *testing.T) {
 func TestEndpointMonitor_PollDivisor_ReachesLiveTracker(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		divisor int
+		divisor float64
 		want    time.Duration
 	}{
 		{name: "default divisor gives half the block time", divisor: 0, want: 30 * time.Second},
 		{name: "divisor 1 gives a full block time", divisor: 1, want: time.Minute},
+		{name: "divisor 0.25 gives four block times", divisor: 0.25, want: 4 * time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
