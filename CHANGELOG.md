@@ -8,6 +8,26 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.3.3 — 2026-08-23
+
+### Highlights
+
+Smart Router v1.3.3 hands operators direct control over how often the router polls its upstreams, and over whether it spends requests detecting forks at all. The per-endpoint chain tracker's cadence is now set with `--chain-tracker-poll-divisor`, which polls every average block time divided by the given value; the range spans [0.25, 8], so a router can now poll as slowly as once per four block times — eight times less often than the built-in cadence, and four times less than the previous floor of one poll per block. The resolved interval is logged once per chain and interface at startup whether or not the flag was passed, so a value that silently reverted to the default is visible in the log rather than inferred from upstream traffic. Fork detection, which accounts for roughly a third of upstream requests on Solana and two thirds on EVM chains, is now opt-in behind `--enable-fork-detection` and off by default.
+
+### Changes
+
+#### New Features
+- feat(chaintracker): make fork detection opt-in behind a flag (MAG-2920) [`ab2a3ba`]
+- feat(smart-router): make the per-endpoint poll cadence configurable [`a382961`]
+- feat(smart-router): allow a poll cadence slower than the chain's block time (MAG-2985) ([#323]) [`a2aaf21`]
+- feat(smart-router): log the resolved poll cadence unconditionally (MAG-2985) ([#323]) [`cd837bf`]
+
+[#323]: https://github.com/magma-Devs/smart-router/pull/323
+[`a2aaf21`]: https://github.com/magma-Devs/smart-router/commit/a2aaf214861b0f530c1d8c3ce43923abefed7652
+[`a382961`]: https://github.com/magma-Devs/smart-router/commit/a3829613b6adefb68f66edc60cef54902dd936bf
+[`ab2a3ba`]: https://github.com/magma-Devs/smart-router/commit/ab2a3ba7cfbec44e5e978fff10243cccb3eed55b
+[`cd837bf`]: https://github.com/magma-Devs/smart-router/commit/cd837bf62aee86a6382a39f92adf574056f1b762
+
 ## v1.3.2 — 2026-08-12
 
 ### Highlights
