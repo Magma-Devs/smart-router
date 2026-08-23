@@ -128,20 +128,27 @@ type cachePeerObservations struct {
 	cache *performance.Cache
 	// unimplementedOnce rate-limits the warning for a cache backend that predates the
 	// observation RPCs (a rolling upgrade window): every call would otherwise log, on every
-	// poll tick, for every endpoint. The gate degrades to "poll locally" either way.
+	// poll tick, for every endpoint. One adapter is built per chain+interface, so the warning
+	// is once per listen endpoint, not once per process. The gate degrades to "poll locally"
+	// either way; only the LOG is rate-limited, never the error (see warnIfUnimplemented).
 	unimplementedOnce sync.Once
 }
 
-// unimplemented reports whether err is the cache backend refusing an RPC it does not know,
-// warning once per process.
-func (c *cachePeerObservations) unimplemented(err error) bool {
+// warnIfUnimplemented logs once per chain+interface when the cache backend refuses an RPC it does
+// not know — the rolling-upgrade window.
+//
+// It does NOT swallow the error. Every error already degrades to a local poll, so returning it
+// changes no behaviour; what it changes is visibility. Swallowed, an out-of-date backend produced
+// zero gate errors AND zero peer skips, which reads exactly like a healthy fleet with nothing to
+// share — the one state rpc_endpoint_tracker_gate_errors_total was added to expose. Surfaced, it is
+// a steady climb at full tick rate, which nothing else looks like.
+func (c *cachePeerObservations) warnIfUnimplemented(err error) {
 	if status.Code(err) != codes.Unimplemented {
-		return false
+		return
 	}
 	c.unimplementedOnce.Do(func() {
 		utils.LavaFormatWarning("fleet tracker gate: the cache backend does not implement endpoint observations; polling locally until it is upgraded", err)
 	})
-	return true
 }
 
 // NewCachePeerObservations wraps the cache backend client as the fleet observation store.
@@ -162,9 +169,7 @@ func (c *cachePeerObservations) Publish(ctx context.Context, chainID, apiInterfa
 		Block:        block,
 		TtlMs:        ttl.Milliseconds(),
 	})
-	if c.unimplemented(err) {
-		return nil
-	}
+	c.warnIfUnimplemented(err)
 	return err
 }
 
@@ -175,9 +180,7 @@ func (c *cachePeerObservations) Fetch(ctx context.Context, chainID, apiInterface
 		EndpointId:   endpointID,
 	})
 	if err != nil {
-		if c.unimplemented(err) {
-			return 0, "", 0, false, nil
-		}
+		c.warnIfUnimplemented(err)
 		return 0, "", 0, false, err
 	}
 	if !reply.GetFound() {

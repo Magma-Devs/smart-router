@@ -123,11 +123,16 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 > drops to zero on a live endpoint. On a multi-replica deployment, `peer` skips climbing while
 > `requests_total{kind="latest_block"}` flattens is the feature working.
 >
-> `peer` stuck at zero has three unrelated causes, and only `rpc_endpoint_tracker_gate_errors_total`
-> tells them apart: the cache backend is unreachable or slow (`op="fetch"` climbing); no peer has
-> anything to share, which on one replica is expected since a pod never borrows its own observation
-> (errors flat at zero); or the published TTL is clamped below the freshness window, which happens on
-> chains whose block time exceeds a few minutes (also errors flat at zero, but `publish` succeeding).
+> `peer` stuck at zero has several unrelated causes, and only `rpc_endpoint_tracker_gate_errors_total`
+> tells them apart:
+>
+> | Reading | Cause |
+> |---|---|
+> | `op="fetch"` climbing intermittently | the cache backend is unreachable or slow |
+> | both ops climbing steadily at full tick rate | the cache backend predates the observation RPCs (a rolling upgrade); a one-off warning is also logged |
+> | errors flat at zero | no peer has anything to share — expected on a single replica, since a pod never borrows its own observation |
+> | errors flat at zero, `publish` succeeding | the published TTL is clamped below the freshness window, on chains whose block time exceeds a few minutes |
+>
 > Errors are advisory — every failure degrades to a local poll — so a low, steady rate costs cadence
 > and nothing else.
 >
