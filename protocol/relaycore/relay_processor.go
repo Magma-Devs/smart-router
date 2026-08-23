@@ -455,6 +455,7 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		HasUnsupportedMethod:      hasUnsupportedMethod,
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,
+		OnlyRateLimited:           rp.onlyRateLimitedLocked(),
 		HashErr:                   hashErr,
 	}
 }
@@ -1229,6 +1230,27 @@ func (rp *RelayProcessor) processNonCrossValidationResult(
 	return rp.buildFailureResult(nodeErrorCount, protocolErrorCount)
 }
 
+// onlyRateLimitedLocked reports whether at least one attempt failed and every failure was an
+// upstream rate limit — a typed 429 protocol error, or a node error the classifier flagged
+// IsRateLimited. Caller must hold rp.lock.
+func (rp *RelayProcessor) onlyRateLimitedLocked() bool {
+	_, nodeErrorResults, protocolErrorResults := rp.GetResultsData()
+	failures := 0
+	for _, result := range nodeErrorResults {
+		failures++
+		if !result.IsRateLimited {
+			return false
+		}
+	}
+	for _, protocolError := range protocolErrorResults {
+		failures++
+		if !errors.Is(protocolError.GetError(), common.StatusCodeError429) {
+			return false
+		}
+	}
+	return failures > 0
+}
+
 // buildFailureResult constructs an error result when no consensus can be reached. It returns the best
 // node/protocol error's own RelayResult, whose ProviderInfo.ProviderAddress is a SINGLE provider — the
 // source of the error body being returned. It must never be a comma-joined list: packing the whole
@@ -1257,6 +1279,13 @@ func (rp *RelayProcessor) buildFailureResult(
 		if protocolErr.Response != nil {
 			returnedResult = &protocolErr.Response.RelayResult
 		}
+	}
+
+	// Every attempt was refused for rate: the chain is temporarily unservable, not broken.
+	// 503 is the honest status and what well-behaved clients back off on; no Retry-After
+	// is surfaced — the hold-off registry owns that, internally.
+	if rp.onlyRateLimitedLocked() {
+		returnedResult.StatusCode = http.StatusServiceUnavailable
 	}
 
 	// Log with classified error code for metrics/observability

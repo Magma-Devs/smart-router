@@ -1102,6 +1102,13 @@ func (dgm *DirectGRPCSubscriptionManager) selectFromTier(ctx context.Context, ti
 		return nil, fmt.Errorf("tier is empty")
 	}
 
+	// Rate-limit hold-off: prefer endpoints that are not currently held off after a 429.
+	// Only narrows the tier when something ready remains — a subscription must still be
+	// served when every endpoint is held off, so the full tier stays in that case.
+	if ready := notHeldOff(tier); len(ready) > 0 && len(ready) < len(tier) {
+		tier = ready
+	}
+
 	// Single endpoint or no optimizer: first-non-ignored.
 	if len(tier) == 1 || dgm.optimizer == nil {
 		for _, ep := range tier {

@@ -23,7 +23,11 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	if input.Selection == relaycore.CrossValidation {
 		return DecisionOutput{Action: Stop, Reason: "CrossValidation"}
 	}
-	if input.Selection == relaycore.Stateful {
+	// A stateful relay is not retried because a possibly-executed write must not run
+	// twice. A rate limit is the one failure that concern does not cover: the upstream
+	// refused before executing anything, so the retry lands on a different endpoint
+	// with nothing at risk. The limit checks below still bound it.
+	if input.Selection == relaycore.Stateful && !input.Summary.OnlyRateLimited {
 		return DecisionOutput{Action: Stop, Reason: "Stateful"}
 	}
 
@@ -41,7 +45,8 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	if input.AttemptNumber >= p.config.MaxRetries {
 		return DecisionOutput{Action: Stop, Reason: "MaxRetriesReached"}
 	}
-	if input.IsBatch && p.config.DisableBatchRetry {
+	// Same reasoning for batches: a rate-limited batch executed nothing.
+	if input.IsBatch && p.config.DisableBatchRetry && !input.Summary.OnlyRateLimited {
 		return DecisionOutput{Action: Stop, Reason: "BatchDisabled"}
 	}
 
