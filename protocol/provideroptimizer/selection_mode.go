@@ -17,9 +17,10 @@ const (
 	// SelectionWeight (WRS). This is the zero value and the historical behaviour.
 	SelectionModeWeightedRandom SelectionMode = iota
 
-	// SelectionModeBest always picks the highest-scoring provider, breaking ties
-	// uniformly at random. Deterministic given the scores, so all organic traffic
-	// concentrates on the current leader.
+	// SelectionModeBest always picks the highest-scoring provider, breaking ties in favour
+	// of the earliest candidate. Fully deterministic given the scores — two identical
+	// requests reach the same upstream — so all organic traffic concentrates on the
+	// current leader. See pickBestIndex for why the tie-break is not randomised.
 	SelectionModeBest
 )
 
