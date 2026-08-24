@@ -2695,7 +2695,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// relay + poll observations, with strict-majority consensus), constructed inside
 	// ServeRPCRequests. No single-node tip, no fire-and-forget poller per pod.
 
-	utils.LavaFormatInfo("RPCSmartRouter Listening", utils.Attribute{Key: "endpoints", Value: rpcEndpoint.String()})
 	// Convert smartRouterIdentifier string to empty sdk.AccAddress for smart router
 	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, rpcSmartRouterMetrics, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
 	if err != nil {
@@ -2703,6 +2702,17 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		errCh <- err
 		return err
 	}
+
+	// Logged AFTER ServeRPCRequests returns, not before it (MAG-3022). Everything ServeRPCRequests
+	// validates synchronously — the cross-validation startup guards, the chain listener construction —
+	// happens before this line now, so the message is only written once the endpoint has actually been
+	// brought up. Previously it was written first, which meant any synchronous failure inside
+	// ServeRPCRequests produced a router that announced itself and then exited.
+	//
+	// Not a bind confirmation: ServeRPCRequests starts the listener with `go chainListener.Serve(...)`,
+	// so the socket may still be a moment away. It does mean the endpoint was accepted and serving is
+	// underway, which is what the line is read as.
+	utils.LavaFormatInfo("RPCSmartRouter Listening", utils.Attribute{Key: "endpoints", Value: rpcEndpoint.String()})
 
 	// Store server reference for per-endpoint ChainTracker cleanup on epoch updates
 	rpsr.mu.Lock()
@@ -2848,6 +2858,16 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			rpcEndpoints, err = ParseEndpoints(viper.GetViper())
 			if err != nil || len(rpcEndpoints) == 0 {
 				return utils.LavaFormatError("invalid endpoints definition", err)
+			}
+
+			// Reject a self-contradictory cross-validation config here, alongside the endpoints check,
+			// rather than per-endpoint inside ServeRPCRequests (MAG-3022). Both are pure config-shape
+			// checks and both are decidable from viper alone. Doing it here means the process exits
+			// before the metrics port binds, before any provider is dialed, and before the router logs
+			// that it is listening — so a bad config is a clean startup error instead of a crash loop
+			// from a router that has already announced itself.
+			if err := PreflightValidateCrossValidationConfig(viper.GetViper()); err != nil {
+				return utils.LavaFormatError("invalid cross-validation configuration", err)
 			}
 
 			// Smart router doesn't need blockchain chain ID
