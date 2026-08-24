@@ -586,7 +586,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 			Replies: apil.forwardSubscriptionReplies(ctx, repliesChan, subscriptionFields, snapshotMetricsHeaders(metadataValues)),
 			// firstReply's payload is a JSON acknowledgement, which would not decode as
 			// the method's output type — only its subscription id is carried, as headers.
-			Metadata: convertRelayMetaDataToMDMetaData(firstReply.GetMetadata()),
+			Metadata: streamResponseHeaders(firstReply.GetMetadata()),
 			Close: func() {
 				if err := subscriptionManager.UnsubscribeAll(context.Background(), clientKey); err != nil {
 					utils.LavaFormatWarning("failed to release gRPC subscription on stream close", err,
@@ -634,6 +634,37 @@ func (apil *GrpcChainListener) forwardSubscriptionReplies(ctx context.Context, r
 		}
 	}()
 	return payloads
+}
+
+// transportOwnedGRPCHeaders are response headers the HTTP/2 gRPC transport writes
+// itself. Relay metadata describes a relay payload, so on a streaming response — where
+// the payload never goes on the wire at all — these would either duplicate or contradict
+// what grpc-go already emitted. content-type is the live case: the acknowledgement is
+// JSON and says so, while every frame the client actually receives is application/grpc.
+var transportOwnedGRPCHeaders = map[string]struct{}{
+	"content-type":         {},
+	"content-length":       {},
+	"grpc-encoding":        {},
+	"grpc-accept-encoding": {},
+	"grpc-status":          {},
+	"grpc-message":         {},
+	"te":                   {},
+}
+
+// streamResponseHeaders converts the acknowledgement's relay metadata into gRPC response
+// headers, dropping the ones the transport owns. In practice what survives is the
+// subscription id — the one value that has to reach the client, since the ack body it
+// would otherwise have arrived in cannot be sent.
+func streamResponseHeaders(md []pairingtypes.Metadata) metadata.MD {
+	headers := make(metadata.MD, len(md))
+	for _, entry := range md {
+		key := strings.ToLower(entry.Name)
+		if _, reserved := transportOwnedGRPCHeaders[key]; reserved {
+			continue
+		}
+		headers[key] = append(headers[key], entry.Value)
+	}
+	return headers
 }
 
 // snapshotMetricsHeaders detaches the headers AddMetricForGrpc reads from the request
