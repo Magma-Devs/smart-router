@@ -12,7 +12,62 @@ links collected at the bottom of each section.
 
 ### Highlights
 
-Smart Router v1.4.0 introduces a breaking change by removing the dead `--chain-tracker-polling-multiplier` flag; operators must delete this argument from their startup configurations to ensure the router boots successfully. To improve upstream stability, this release introduces a shared rate-limit hold-off registry that captures `Retry-After` headers from 429 responses across REST, WebSocket, and gRPC transports, automatically flooring the tracker poll cadence and returning a 503 status when endpoints are fully capped. Polling behavior is now highly configurable, allowing SREs to set a per-endpoint poll cadence slower than the chain's block time, while a new fleet tracker gate shares first-hand endpoint observations across pods to reduce redundant health checks. Protocol support expands to serve gRPC server-streaming methods, accompanied by lifecycle fixes that prevent reconnects from tearing down active subscriptions, correctly classify gRPC status errors to avoid penalizing availability scores, and cap response sizes on the block-extraction path. Finally, operators gain deeper visibility and control through the new `GET /debug/cross-validation-events` HTTP endpoint, an opt-in fork detection flag, and a `--skip-all-verifications` argument that mirrors existing WebSocket bypasses for strict upstream testing.
+v1.4.0 is a stability and upstream-load release. The router now acts on what a rate-limited upstream tells it, polls customer nodes a fraction as often, serves gRPC server-streaming end to end, and survives several boot and config conditions that used to take a pod down. 103 commits across 45 pull requests.
+
+**Upgrade notes — read before rolling out**
+
+- **`--chain-tracker-polling-multiplier` is removed** ([#309]). It has been a no-op since the global chain tracker went away; the router now rejects it at startup with `unknown flag`. Remove it from hand-rolled launch args (systemd units, compose files, scripts). Helm users are covered by chart 5.19.0 or later, which no longer renders it. The live replacements are `--chain-tracker-poll-divisor` and `--enable-fork-detection`.
+- **Two providers sharing one name refuse to boot** ([#275]). A provider's `name` is its routing identity, so two nodes sharing one on the same chain and api-interface collapsed into a single entry and served at half capacity. The router now exits with a message naming every collision; `smartrouter health` still loads such a config and warns. Reusing a name across chains stays legal.
+- **Block-hash polling (fork detection) is off by default** ([#307]). It was the tracker's largest source of upstream requests, and nothing in the router consumed its result. `--enable-fork-detection` turns it back on. `/debug/endpoint-state` reports the live state as `HashPolling`, distinguishing `off-operator-choice` from `off-spec-no-block-by-num`.
+- **Internal-path routing** ([#297]). On chains whose spec declares `internal-path` collections (AVAX / AVALANCHE C, P and X chains, MONERO, TON v2/v3, STRK versioned RPC), a relay now dials the node-url that serves the api's path instead of whichever endpoint selection picked. A url that already ends in the path is that path's endpoint. Chains with no internal paths are untouched.
+- **`lava-select-provider` error sentinels split** ([#286]). `SelectedProviderUnavailableError` now reads "…is not a valid provider for this request"; the already-failed case is `SelectedProviderAlreadyFailedError`. Anything matching the old sentinel text needs updating. The client-facing descriptions are unchanged.
+- **A per-node-url `timeout:` on a gRPC node is now honoured** ([#293]); it previously read as zero on the gRPC provider path.
+
+**Rate limits: the router backs off when told to** ([#313], [#314], [#316], [#317], [#318], [#319], [#320], [#321], [#325])
+
+Until now the router parsed `Retry-After` and then discarded it: a 429 counted as an availability failure, demoted providers that were merely busy, and was re-asked at the same cadence — often by every pod at once. This release adds a shared, tiered hold-off registry (`protocol/holdoff`, documented in `docs/RATE-LIMIT-HOLDOFF.md`) and wires every upstream-facing path into it.
+
+- A 429 holds off the URL that returned it, with the upstream's `Retry-After` as the floor (otherwise 30s doubling per strike, capped at 30m, plus up to 20% jitter, never more than 1h). Two held-off URLs of one provider escalate to a provider-wide hold-off, because vendor caps are account-wide. Any answered request clears it.
+- Rate limits are recognised on every transport: HTTP status, rate-limit texts inside a 2xx body, WebSocket upgrade rejections, and gRPC (`RESOURCE_EXHAUSTED` backed by a pushback delay, or the known rate-limit texts a vendor's HTTP edge leaves inside `Unavailable`).
+- A rate-limited relay is neither a failure nor a success: no QoS sample, no health verdict, and selection prefers providers that are not held off. Spec re-verification treats a 429 as inconclusive instead of a demotion, and `Validate` ends its three-attempt retry burst on the first 429.
+- Stateful relays and batches retry on a rate limit — the upstream refused before executing anything — and a chain whose every attempt was refused answers 503 instead of 500. `Retry-After` is never surfaced to the client.
+- The chain tracker floors its poll backoff with `Retry-After`; WebSocket subscription reconnects and gRPC streaming selection skip held-off endpoints.
+- New metrics: `smartrouter_rate_limit_holdoffs_total{provider, event="recorded|escalated|cleared"}` and `smartrouter_rate_limit_holdoff_seconds{provider}`.
+
+**Tracker load on customer nodes**
+
+- `--enable-fork-detection` (default off) removes the block-hash request from every tracker tick: 87.6 → 7.3 requests/min per endpoint measured on a 15s chain, 65–82% fewer on EVM chains ([#307]).
+- `--chain-tracker-poll-divisor` makes the per-endpoint poll cadence configurable as a ratio of block time, `avgBlockTime/divisor`, range `[0.25, 8]`, default `2` (unchanged). At `0.25` the tracker polls once per four block times. The router warns once per chain at startup when the chosen cadence combined with the traffic gate's skip budget could outrun the staleness window ([#308], [#323]).
+- Fleet tracker gate: with `--shared-state` and `--cache-be`, every successful poll is published to the cache backend, and a pod skips its own poll when a peer polled the endpoint within the freshness window, adopting the peer's block as a `peer` tip source. Fleet-wide this converges to about one real poll per interval; each pod still polls locally every fifth tick, so pod-local faults stay detectable. `rpc_endpoint_tracker_gate_skips_total{source="relay"|"peer"}` shows it working ([#322]).
+- `rpc_endpoint_tracker_requests_total{kind="latest_block"|"block_hash"}` counts what the tracker actually sends ([#307]).
+
+**gRPC**
+
+- Server-streaming methods are served end to end. Streaming is decided from the spec's `SUBSCRIBE` directive rather than a reflection lookup, a shared upstream stream survives the first client's disconnect, and a joining client gets its own subscription id ([#292]).
+- The gRPC connector has a coherent lifecycle: no nil-connector panic after `Close`, no per-relay teardown, a failed initialisation is retried instead of poisoning the endpoint, and pool capacity is per instance rather than a racy process-wide global ([#289], [#294]).
+- gRPC status errors carry their real code, so `INVALID_ARGUMENT` and `NOT_FOUND` replies are no longer recorded (and cached) as successes, and a relay the router itself cancelled is no longer booked against endpoint health with a latency sample that was never taken ([#288]).
+- A reconnect no longer tears down its own subscription and double-decrements the subscription count ([#290]).
+- Descriptor lookups run on grpc-config's `reflection-timeout`, rooted at the connection's lifetime, and connections are prewarmed before the endpoint is published — cross-validation over gRPC can reach quorum against a slow-reflection endpoint ([#300]). `descriptor-source: file|hybrid` with `descriptor-set-path` is consulted on every request path, so chains whose nodes serve no reflection can boot ([#293]).
+- `grpcs://` dial addresses are normalised on the pool-refill path, which previously never grew the pool ([#295]). Block extraction is capped at 32 MB on both transports, above any legal block ([#303]).
+
+**Boot and configuration**
+
+- The router boots on any usable provider instead of exiting when every primary fails verification: healthy backups serve (degraded), and an all-dark chain boots, returns 5xx, and retries from about 2s. The new gauge `smartrouter_endpoint_serving_tier` (2 = primaries, 1 = backups only, 0 = dark) replaces the crash as the signal to alert on ([#265]).
+- `smartrouter /abs/path/config.yml` works: an argument that names a path is resolved as a path, and a bare name still searches `.`, `./config` and `~/.lava` ([#298]).
+- A self-contradictory cross-validation policy is rejected before any provider is dialed rather than one line after `RPCSmartRouter Listening` ([#327]), and a `lava-cross-validation-max-participants` header above 50 no longer ends the process — it is refused against the live endpoint count ([#326]).
+- `skip-verifications` actually skips: it still fired the latest-block probe on a skipped verification's behalf, which demoted providers on a 429. `skip-verifications: ["*"]` skips everything for one node-url, and `--skip-all-verifications` does so process-wide — the flag is for getting a router up now, the wildcard for anything ongoing ([#296]).
+- The blocked-provider list is released only after primary and backup are both exhausted, so "every primary is blocked" serves the backup tier instead of a just-blocked primary ([#328]). `lava-select-provider` matches case-insensitively and returns the canonical name ([#285]).
+
+**REST routing and metric cardinality**
+
+- REST api matching ignores a trailing slash on either side and picks the most specific api when several match a path. 43% of live TEZOS traffic was falling through to a synthetic `Default-*` api at a flat 20 CU with block parsing pinned to latest ([#312], [#315]).
+- Unmatched `Default-*` method labels fold concrete ids to a shape (`/blocks/{}/header`) and are capped at 32 per spec, with `smartrouter_default_method_overflow_total{spec}` when the cap binds. The `method` label that had grown to 46k values is bounded ([#269]).
+
+**Operator visibility**
+
+- `GET /debug/cross-validation-events` is a per-request record of cross-validation dissent — reply-time outliers and straggler resolutions — with the `lava-guid`, provider, both hashes, and whether the row is the one that moved `smartrouter_cross_validation_mismatch_total`. Debug mode only (`--debug-address`), bounded ring of 4096 ([#284]).
+- The cache write for `earliest`, `pending`, `safe` and `finalized` block tags is skipped instead of failing with a warning on every relay ([#291]).
+- Go 1.26.6 clears six stdlib advisories; dependabot is exempt from the Jira gate and OpenTelemetry bumps move as one group ([#276], [#277]).
 
 ### Changes
 
