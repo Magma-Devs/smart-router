@@ -672,9 +672,18 @@ func (ws *UpstreamSelector) SelectUpstreamWithStats(
 	}
 
 	if totalScore <= 0 {
-		// Fallback to uniform random selection if all scores are zero. SelectionModeBest
-		// lands here too: with no signal to rank on, an argmax would be an arbitrary
-		// N-way tie, so uniform is the honest answer for both modes.
+		// Defensive only — unreachable at any sane configuration, in BOTH modes.
+		//
+		// CalculateScore floors every candidate at ws.minSelectionChance (default 0.01),
+		// including the availability-dead collapse, so a score reaching this function is
+		// never below that floor and totalScore is never zero. The single way in is
+		// --qos-min-selection-chance 0, which NewUpstreamSelector does not reject: it
+		// validates the four weights but leaves MinSelectionChance untouched.
+		//
+		// So this guard is NOT what keeps a degraded chain sane. Once availability
+		// collapses, every candidate ties at exactly minSelectionChance and the pick is
+		// resolved by pickBestIndex (first-wins) or pickWeightedIndex (a flat draw) —
+		// not here. Do not reason about the dead-chain case from this branch.
 		utils.LavaFormatWarning("all provider scores are zero, using uniform selection", nil)
 		return ws.buildSelectionResult(ctx, providerScores, scoreDetails, ws.rng.Intn(len(providerScores)), 0.0, totalScore)
 	}
@@ -716,26 +725,42 @@ func (ws *UpstreamSelector) pickWeightedIndex(providerScores []UpstreamScore, to
 	return len(providerScores) - 1, randomValue
 }
 
-// pickBestIndex returns the index of the highest-scoring provider.
+// pickBestIndex returns the index of the highest-scoring provider. Ties go to the earliest
+// candidate — first-wins, with no randomness and no RNG draw at all.
 //
-// Ties are broken uniformly at random via one-pass reservoir sampling rather than
-// first-wins. This is not defensive polish: CalculateScore collapses every provider whose
-// availability has fallen below score.MinAcceptableAvailability to exactly
-// minSelectionChance, so exact N-way ties are routine on a degraded chain — a first-wins
-// scan would pin all traffic onto whichever address happens to sort first in the pairing
-// list, which is precisely the starvation the floor exists to prevent.
+// That is the whole point of the mode: FAILOVER-TASKS section 1 asks for "the order is
+// fixed, not random ... the answer does not change between two identical requests". A
+// random tie-break would break exactly that, and would break it on a degraded chain, which
+// is precisely when an operator most needs the routing to be explainable.
+//
+// The tempting objection is MAG-2237 starvation: CalculateScore collapses every provider
+// below score.MinAcceptableAvailability to exactly minSelectionChance, so exact N-way ties
+// are routine once a chain degrades, and first-wins then pins every first attempt onto one
+// address. That objection does not survive contact with this mode. minSelectionChance is a
+// *lottery* mechanism — it buys a floored provider a slice of the weighted draw. Under
+// SelectionModeBest there is no draw, so a floored provider sitting beside any
+// higher-scoring peer already receives exactly zero traffic. The floor stopped protecting
+// anyone the moment the operator asked for "always the best"; randomising the all-tied case
+// does not give that protection back, it only removes the determinism the mode exists to
+// provide.
+//
+// Two consequences worth knowing, neither of which is a regression from this choice:
+//
+//   - When every provider is floored they are all equally dead, and the wantedProviders
+//     loop in getValidProviderAddresses walks the whole list anyway, so each one is still
+//     tried within a single request. Only the *first* attempt concentrates.
+//   - A provider that receives no organic traffic recovers via the proactive prober, not
+//     via routing. That is already true of any non-leader under this mode.
+//
+// "Earliest" carries no ranking meaning: validAddresses is built by iterating
+// csm.pairingAddresses, a Go map, so the order is an arbitrary permutation fixed at reset
+// time. It is stable within an epoch — which is what determinism requires — and differs
+// between pods, so a fleet still spreads the all-tied case across routers.
 func (ws *UpstreamSelector) pickBestIndex(providerScores []UpstreamScore) int {
-	best, tied := 0, 1
+	best := 0
 	for i := 1; i < len(providerScores); i++ {
-		switch {
-		case providerScores[i].SelectionWeight > providerScores[best].SelectionWeight:
-			best, tied = i, 1
-		case providerScores[i].SelectionWeight == providerScores[best].SelectionWeight:
-			tied++
-			// Replace with probability 1/tied → uniform across all maxima
-			if ws.rng.Intn(tied) == 0 {
-				best = i
-			}
+		if providerScores[i].SelectionWeight > providerScores[best].SelectionWeight {
+			best = i
 		}
 	}
 

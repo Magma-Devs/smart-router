@@ -780,15 +780,19 @@ func TestSelectUpstreamBestMode(t *testing.T) {
 	}
 }
 
-// TestSelectUpstreamBestModeTieBreak verifies that exact ties are broken uniformly at
-// random rather than always landing on the first candidate. This is the degraded-chain
-// case: CalculateScore collapses every unhealthy provider to exactly minSelectionChance,
-// so a first-wins argmax would pin all traffic onto one address.
-func TestSelectUpstreamBestModeTieBreak(t *testing.T) {
+// TestSelectUpstreamBestModeTieBreakIsDeterministic pins the property the mode exists to
+// provide: FAILOVER-TASKS section 1 asks that "the answer does not change between two
+// identical requests". The degraded-chain case is where that is hardest and matters most —
+// CalculateScore collapses every unhealthy provider to exactly minSelectionChance, so an
+// all-tied candidate list is the routine state once a chain goes bad, not a corner case.
+//
+// A randomised tie-break would make every one of those picks a coin toss and turn Best back
+// into a lottery precisely when an operator needs the routing to be explainable. So the tie
+// goes to the earliest candidate, every time, with no RNG draw at all.
+func TestSelectUpstreamBestModeTieBreakIsDeterministic(t *testing.T) {
 	config := DefaultUpstreamSelectorConfig()
 	config.SelectionMode = SelectionModeBest
 	ws := NewUpstreamSelector(config)
-	ws.SetDeterministicSeed(1234567)
 
 	// All tied at the starvation floor, as CalculateScore would leave them
 	providers := []UpstreamScore{
@@ -797,16 +801,37 @@ func TestSelectUpstreamBestModeTieBreak(t *testing.T) {
 		{Address: "dead3", CompositeScore: 0.01, SelectionWeight: 0.01},
 	}
 
-	selections := make(map[string]int)
-	iterations := 9000
-	for i := 0; i < iterations; i++ {
-		selections[ws.SelectUpstream(context.Background(), providers)]++
+	for i := 0; i < 1000; i++ {
+		require.Equal(t, "dead1", ws.SelectUpstream(context.Background(), providers),
+			"an all-tied list must resolve to the same upstream on every call")
 	}
 
-	// Uniform across the three maxima (~33.3% each)
-	for _, addr := range []string{"dead1", "dead2", "dead3"} {
-		share := float64(selections[addr]) / float64(iterations)
-		require.InDelta(t, 1.0/3.0, share, 0.03, "tie-break not uniform for %s", addr)
+	// Deliberately NOT seeded above: a deterministic pick must hold against the live
+	// global RNG, not only against a seeded one. Seeding here would hide a regression that
+	// reintroduced a draw.
+	unseeded := NewUpstreamSelector(config)
+	require.Equal(t, "dead1", unseeded.SelectUpstream(context.Background(), providers))
+}
+
+// TestSelectUpstreamBestModeTieBreakPrefersEarliestMaximum guards the argmax comparison
+// itself: only a STRICTLY higher score may displace the incumbent. A `>=` would walk the
+// choice to the last tied element and quietly make the pick depend on list length.
+func TestSelectUpstreamBestModeTieBreakPrefersEarliestMaximum(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	config.SelectionMode = SelectionModeBest
+	ws := NewUpstreamSelector(config)
+
+	// A tie among non-maxima must not disturb the winner, and the winner is the FIRST
+	// element holding the maximum, not the last.
+	providers := []UpstreamScore{
+		{Address: "mid_a", CompositeScore: 0.5, SelectionWeight: 0.5},
+		{Address: "top_first", CompositeScore: 0.9, SelectionWeight: 0.9},
+		{Address: "mid_b", CompositeScore: 0.5, SelectionWeight: 0.5},
+		{Address: "top_last", CompositeScore: 0.9, SelectionWeight: 0.9},
+	}
+
+	for i := 0; i < 100; i++ {
+		require.Equal(t, "top_first", ws.SelectUpstream(context.Background(), providers))
 	}
 }
 
