@@ -2,7 +2,9 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1"
 )
 
@@ -77,6 +80,231 @@ func TestGRPCJoinExistingSubscription_MintsPerClientAck(t *testing.T) {
 	require.Equal(t, joinerRouterID, ackSubscriptionID,
 		"the acknowledgement must carry the joiner's own id, not the creator's")
 	require.Contains(t, string(ack.GetData()), joinerRouterID)
+}
+
+// TestGRPCJoinExistingSubscription_RefusesSubscriptionBeingTornDown covers the join
+// side of the sharing hot path: same params means a departing client and an arriving one
+// meet on the same subscription object. StartSubscription reads it out of
+// activeSubscriptions under dgm.lock and drops that lock before joining, so the whole
+// teardown can happen in the gap.
+//
+// Both outcomes were bad. Against a subscription cleanup had finished with,
+// connectedClients is nil and the join assigned to a nil map — an unrecoverable panic
+// that kills the router. Against one whose last client had just left, the join succeeded
+// and the cleanup still in flight closed the joiner's brand-new channel: a clean EOF
+// one message into a subscription, which is the silent truncation this path exists to
+// remove.
+func TestGRPCJoinExistingSubscription_RefusesSubscriptionBeingTornDown(t *testing.T) {
+	tests := []struct {
+		name string
+		// tearDown puts the fixture's subscription into one of the states a joiner can
+		// find it in, each reached through the production path that produces it.
+		tearDown func(t *testing.T, fixture grpcSubFixture)
+	}{
+		{
+			name: "cleanup already released it",
+			tearDown: func(t *testing.T, fixture grpcSubFixture) {
+				fixture.manager.cleanupSubscription(fixture.hashedParams, fixture.sub)
+			},
+		},
+		{
+			name: "last client left, cleanup still pending",
+			tearDown: func(t *testing.T, fixture grpcSubFixture) {
+				require.NoError(t, fixture.manager.removeClientFromSubscription(fixture.sub, fixture.hashedParams, testGRPCClientKey))
+				require.True(t, fixture.isRegistered(t),
+					"the subscription must still be registered, or this is not the window a joiner sees")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			fixture := newTestGRPCManagerWithSub(t, ctx, cancel)
+			fixture.sub.methodPath = streamingMethodPath
+			tt.tearDown(t, fixture)
+
+			var (
+				ack     *pairingtypes.RelayReply
+				replies <-chan *pairingtypes.RelayReply
+				err     error
+			)
+			require.NotPanics(t, func() {
+				ack, replies, err = fixture.manager.joinExistingSubscription(ctx, fixture.sub, "dapp:5.6.7.8:conn-2", fixture.hashedParams)
+			}, "joining a subscription being torn down must not write to a nil map")
+
+			require.ErrorIs(t, err, errSubscriptionUnavailable,
+				"the joiner must be sent to the create-new path, not handed a dying subscription")
+			require.Nil(t, ack)
+			require.Nil(t, replies)
+
+			fixture.sub.lock.RLock()
+			_, joined := fixture.sub.connectedClients["dapp:5.6.7.8:conn-2"]
+			fixture.sub.lock.RUnlock()
+			require.False(t, joined, "a refused joiner must leave nothing behind on the subscription")
+		})
+	}
+}
+
+// TestGRPCManager_JoinAndUnsubscribeRespectLockOrder drives the manager's two locks from
+// both sides at once. Unsubscribe scans under dgm.lock and reaches for sub.lock inside
+// it; join and remove used to hold sub.lock and reach for dgm.lock through
+// track/untrackClientSubscription. That is a plain AB-BA inversion, and dgm.lock is an
+// RWMutex — a single pending writer blocks every later reader, so it takes the whole
+// manager with it rather than the two goroutines involved.
+//
+// A deadlock has no assertion of its own, so the workload runs in its own goroutine and
+// the timeout is the failure: the fixed ordering finishes this in milliseconds.
+func TestGRPCManager_JoinAndUnsubscribeRespectLockOrder(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fixture := newTestGRPCManagerWithSub(t, ctx, cancel)
+	fixture.sub.methodPath = streamingMethodPath
+
+	const (
+		workers = 8
+		rounds  = 100
+	)
+
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+
+		var wg sync.WaitGroup
+		for worker := 0; worker < workers; worker++ {
+			wg.Add(1)
+			go func(worker int) {
+				defer wg.Done()
+				for round := 0; round < rounds; round++ {
+					// A fresh key per round, as gRPC mints one per stream — so the
+					// rate limiter admits every call and the loop keeps exercising
+					// both lock paths rather than short-circuiting.
+					clientKey := fmt.Sprintf("dapp:1.2.3.4:worker-%d-round-%d", worker, round)
+
+					ack, _, err := fixture.manager.joinExistingSubscription(ctx, fixture.sub, clientKey, fixture.hashedParams)
+					if err != nil {
+						return
+					}
+					_ = fixture.manager.Unsubscribe(context.Background(), ackSubscriptionID(ack), clientKey)
+				}
+			}(worker)
+		}
+		wg.Wait()
+	}()
+
+	select {
+	case <-finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("join and Unsubscribe deadlocked: dgm.lock and sub.lock were taken in both orders")
+	}
+
+	// The fixture's original client never leaves, so the subscription must have survived
+	// — otherwise the workers stopped early and proved nothing.
+	require.True(t, fixture.isRegistered(t), "the workload must have run against a live subscription")
+	fixture.sub.lock.RLock()
+	remaining := len(fixture.sub.connectedClients)
+	fixture.sub.lock.RUnlock()
+	require.Equal(t, 1, remaining, "every joiner unsubscribed; only the fixture's own client remains")
+}
+
+func ackSubscriptionID(ack *pairingtypes.RelayReply) string {
+	for _, entry := range ack.GetMetadata() {
+		if entry.Name == MetadataGRPCSubscriptionID {
+			return entry.Value
+		}
+	}
+	return ""
+}
+
+// TestGRPCStartSubscription_ReplacesSubscriptionThatDiedBeforeJoin is the other half:
+// being refused by joinExistingSubscription must cost the client nothing. It opens its
+// own stream instead, so the race resolves into a working subscription rather than an
+// error the caller never asked for.
+func TestGRPCStartSubscription_ReplacesSubscriptionThatDiedBeforeJoin(t *testing.T) {
+	upstream := startFakeStreamingUpstream(t)
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	defer manager.Stop()
+
+	message := newGrpcSubscriptionMessage(t)
+
+	// One client comes and goes, purely to learn the key these params share under —
+	// hashSubscriptionParams hashes the parsed request, not the raw bytes handed in.
+	_, _, err := manager.StartSubscription(context.Background(), message, "dapp", "0.0.0.0", "probe-conn", nil)
+	require.NoError(t, err)
+	requireUpstreamStreamOpened(t, upstream)
+	hashedParams := onlyRegisteredSubscriptionKey(t, manager)
+	require.NoError(t, manager.UnsubscribeAll(context.Background(), manager.ClientKey("dapp", "0.0.0.0", "probe-conn")))
+	<-upstream.streamEnded
+
+	// Now leave a released subscription registered under that key. That is the state
+	// between a last client leaving and the listener — parked in RecvMsg, which only
+	// checks ctx.Done() between receives — getting round to releasing it. On a quiet
+	// stream it is not a narrow window.
+	deadCtx, deadCancel := context.WithCancel(context.Background())
+	deadCancel()
+	dead, _ := newTestGRPCSub(deadCtx, deadCancel, "dapp:9.9.9.9:departed")
+	dead.hashedParams = hashedParams
+	dead.cleanedUp.Store(true)
+	dead.connectedClients = nil
+
+	manager.lock.Lock()
+	manager.activeSubscriptions[hashedParams] = dead
+	manager.lock.Unlock()
+
+	_, replies, err := manager.StartSubscription(context.Background(), message, "dapp", "1.1.1.1", "joiner-conn", nil)
+	require.NoError(t, err, "finding a dead subscription must not fail the subscribe")
+	requireUpstreamStreamOpened(t, upstream)
+
+	upstream.messages <- marshalStreamPayload(t, "checkpoint-1")
+	require.Equal(t, "checkpoint-1", awaitStreamPayload(t, replies),
+		"the client must land on a live stream of its own, not the released one")
+}
+
+// TestGRPCStartSubscription_ReleasesClientStateOnFailure bounds two maps that nothing
+// else reaps. Client keys are minted per gRPC stream and never seen again, and the only
+// other release path — UnsubscribeAll, from the listener's stream Close — runs solely
+// for a stream that was actually established. So every *failed* subscribe used to strand
+// a rate-limiter entry, plus a sticky-session entry once it got past the connect. With
+// endpoints down and a client retrying, both grew without bound.
+//
+// The failure is staged at the descriptor check on purpose: it is the last thing
+// createNewSubscription does before the stream exists, and it is past the point where
+// the sticky entry has already been written.
+func TestGRPCStartSubscription_ReleasesClientStateOnFailure(t *testing.T) {
+	upstream := startFakeStreamingUpstream(t)
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	defer manager.Stop()
+
+	// Same method, described as unary — createNewSubscription refuses it after it has
+	// connected and pinned the client to the endpoint.
+	connectionForUpstream(t, manager).descriptorsCache.Store(
+		"grpc.reflection.v1.ServerReflection.ServerReflectionInfo", unaryMethodDescriptor(t))
+
+	message := newGrpcSubscriptionMessage(t)
+	const retries = 5
+	clientKeys := make([]string, 0, retries)
+
+	for attempt := 0; attempt < retries; attempt++ {
+		connectionUniqueId := fmt.Sprintf("conn-%d", attempt)
+		clientKeys = append(clientKeys, manager.ClientKey("dapp", "1.1.1.1", connectionUniqueId))
+
+		_, _, err := manager.StartSubscription(context.Background(), message, "dapp", "1.1.1.1", connectionUniqueId, nil)
+		require.Error(t, err, "a non-streaming method must not open a subscription")
+	}
+
+	manager.rateLimiter.lock.Lock()
+	strandedLimiters := len(manager.rateLimiter.subscribeLimiters)
+	manager.rateLimiter.lock.Unlock()
+	require.Zero(t, strandedLimiters,
+		"a failed subscribe must not strand a rate-limiter entry under a key that will never be seen again")
+
+	for _, clientKey := range clientKeys {
+		_, pinned := manager.stickyStore.Get(clientKey)
+		require.False(t, pinned, "a failed subscribe must not leave the client pinned to an endpoint")
+	}
 }
 
 // TestGRPCSubscription_RoutesUpstreamMessagesToClient is the end-to-end proof that
@@ -282,6 +510,41 @@ func newManagerAgainstUpstream(t *testing.T, addr string) *DirectGRPCSubscriptio
 	return manager
 }
 
+// connectionForUpstream returns the single pooled connection newManagerAgainstUpstream
+// created, so a test can re-seed its descriptor cache. GetConnectionForStream reuses a
+// healthy connection until streamsPerConn is reached, so this is the same one the
+// manager will pick up.
+func connectionForUpstream(t *testing.T, manager *DirectGRPCSubscriptionManager) *UpstreamGRPCStreamConnection {
+	t.Helper()
+
+	manager.lock.RLock()
+	require.Len(t, manager.upstreamPools, 1, "the harness points the manager at exactly one endpoint")
+	var pool *UpstreamGRPCPool
+	for _, only := range manager.upstreamPools {
+		pool = only
+	}
+	manager.lock.RUnlock()
+
+	conn, err := pool.GetConnectionForStream(context.Background())
+	require.NoError(t, err)
+	return conn
+}
+
+// onlyRegisteredSubscriptionKey reads back the hashedParams a subscribe registered
+// under, so a test never has to reproduce hashSubscriptionParams' inputs by hand.
+func onlyRegisteredSubscriptionKey(t *testing.T, manager *DirectGRPCSubscriptionManager) string {
+	t.Helper()
+
+	manager.lock.RLock()
+	defer manager.lock.RUnlock()
+
+	require.Len(t, manager.activeSubscriptions, 1)
+	for hashedParams := range manager.activeSubscriptions {
+		return hashedParams
+	}
+	return ""
+}
+
 func streamingMethodDescriptor(t *testing.T) *desc.MethodDescriptor {
 	t.Helper()
 
@@ -292,6 +555,22 @@ func streamingMethodDescriptor(t *testing.T) *desc.MethodDescriptor {
 	method := service.FindMethodByName("ServerReflectionInfo")
 	require.NotNil(t, method)
 	require.True(t, method.IsServerStreaming(), "the harness relies on this being a server-streaming method")
+	return method
+}
+
+// unaryMethodDescriptor is any linked non-streaming method, borrowed the same way
+// streamingMethodDescriptor borrows a streaming one — it exists so a test can make
+// createNewSubscription fail its IsServerStreaming check without going near the network.
+func unaryMethodDescriptor(t *testing.T) *desc.MethodDescriptor {
+	t.Helper()
+
+	messageDescriptor, err := desc.LoadMessageDescriptorForMessage(&grpc_health_v1.HealthCheckRequest{})
+	require.NoError(t, err)
+	service := messageDescriptor.GetFile().FindService("grpc.health.v1.Health")
+	require.NotNil(t, service)
+	method := service.FindMethodByName("Check")
+	require.NotNil(t, method)
+	require.False(t, method.IsServerStreaming(), "the harness relies on this NOT being a server-streaming method")
 	return method
 }
 
