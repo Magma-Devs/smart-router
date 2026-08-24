@@ -123,15 +123,30 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 > drops to zero on a live endpoint. On a multi-replica deployment, `peer` skips climbing while
 > `requests_total{kind="latest_block"}` flattens is the feature working.
 >
-> `peer` stuck at zero has several unrelated causes, and only `rpc_endpoint_tracker_gate_errors_total`
-> tells them apart:
+> `peer` stuck at zero has several unrelated causes. `rpc_endpoint_tracker_gate_errors_total`
+> narrows it to two groups, and the log separates the pair that share a metric shape:
 >
 > | Reading | Cause |
 > |---|---|
-> | `op="fetch"` climbing intermittently | the cache backend is unreachable or slow |
-> | both ops climbing steadily at full tick rate | the cache backend predates the observation RPCs (a rolling upgrade); a one-off warning is also logged |
+> | `op="fetch"` climbing, `publish` flat | the cache backend is **slow** — reachable, but answering the gate's read past its budget (`min(200ms, pollInterval/4)`) while still inside `publish`'s 1s timeout |
+> | **both** ops climbing steadily at full tick rate | either the backend is **unreachable** or it **predates the observation RPCs** — these two are indistinguishable by metric; see the log line below |
 > | errors flat at zero | no peer has anything to share — expected on a single replica, since a pod never borrows its own observation |
-> | errors flat at zero, `publish` succeeding | the published TTL is clamped below the freshness window, on chains whose block time exceeds a few minutes |
+> | errors flat at zero, `publish` succeeding | the published TTL is clamped below the freshness window. The TTL is `min(2 × avgBlockTime, MaxEndpointObservationTTL=5m)` and must outlive a freshness window of `avgBlockTime`, so this bites only above a **5-minute** block time |
+>
+> Both ops climbing at full tick rate is ambiguous **by design** — `op` names the operation, not the
+> outcome — so use the log to tell the two apart:
+>
+> - **unreachable**: `cache service connection error detected, triggering reconnection` with
+>   `code = Unavailable`, followed by a reconnect loop that recovers on its own.
+> - **out of date**: `fleet tracker gate: the cache backend does not implement endpoint observations`,
+>   logged **once per listen endpoint** (one adapter is built per chain+interface), and it will not
+>   clear until the backend is upgraded.
+>
+> A URL mismatch between pods presents as `peer` at zero with errors **also** at zero, exactly like a
+> healthy single replica: observations are keyed by `chain | apiInterface | sha256(url)`, so pods that
+> disagree about an endpoint's URL by even one character publish into separate keys and never see each
+> other. If peers should be sharing and are not, confirm every pod polls the byte-identical URL before
+> suspecting the cache.
 >
 > Errors are advisory — every failure degrades to a local poll — so a low, steady rate costs cadence
 > and nothing else.
