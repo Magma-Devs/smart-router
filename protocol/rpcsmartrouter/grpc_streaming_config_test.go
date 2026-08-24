@@ -1,6 +1,8 @@
 package rpcsmartrouter
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -172,26 +174,40 @@ func TestGRPCClientRateLimiter_CleanupClient(t *testing.T) {
 	assert.False(t, existsUnsubscribe)
 }
 
+// TestGRPCClientRateLimiter_ConcurrentAccess drives the limiter the way the gRPC
+// listener does, which is the shape MAG-2643 made reachable: each incoming stream calls
+// AllowSubscribe on its own handler goroutine, and stream teardown calls CleanupClient
+// from another. Keys are distinct because gRPC mints one per stream, so every call
+// inserts rather than just reading.
+//
+// This must be run under -race to mean anything. Unsynchronised, the failure is `fatal
+// error: concurrent map read and map write` — a runtime abort, not a panic a test could
+// recover from — so the detector's report is the only signal that arrives in one piece.
+// Its predecessor looped sequentially and documented the missing synchronisation as a
+// known limitation, which is why the crash survived to production callers.
 func TestGRPCClientRateLimiter_ConcurrentAccess(t *testing.T) {
-	// Note: The current GRPCClientRateLimiter implementation uses plain maps
-	// which are not thread-safe. This test verifies sequential access works correctly.
-	// For production use with concurrent access, the limiter would need synchronization.
-	config := DefaultGRPCStreamingConfig()
-	limiter := NewGRPCClientRateLimiter(config)
+	limiter := NewGRPCClientRateLimiter(DefaultGRPCStreamingConfig())
 
-	// Test sequential access for multiple clients
-	numClients := 10
-	numOperations := 10
+	const concurrentStreams = 50
 
-	for i := 0; i < numClients; i++ {
-		clientKey := "grpc-client-" + string(rune('A'+i))
-		for j := 0; j < numOperations; j++ {
-			limiter.AllowSubscribe(clientKey)
-			limiter.AllowUnsubscribe(clientKey)
-		}
-		limiter.CleanupClient(clientKey)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrentStreams; i++ {
+		wg.Add(1)
+		go func(stream int) {
+			defer wg.Done()
+
+			clientKey := fmt.Sprintf("dapp:1.2.3.4:conn-%d", stream)
+			assert.True(t, limiter.AllowSubscribe(clientKey), "a freshly keyed client must be admitted")
+			assert.True(t, limiter.AllowUnsubscribe(clientKey))
+			limiter.CleanupClient(clientKey)
+		}(i)
 	}
-	// Test passes if no panic occurs
+	wg.Wait()
+
+	limiter.lock.Lock()
+	defer limiter.lock.Unlock()
+	assert.Empty(t, limiter.subscribeLimiters, "every stream released its own entry")
+	assert.Empty(t, limiter.unsubscribeLimiters)
 }
 
 func TestGRPCMetadataConstants(t *testing.T) {
