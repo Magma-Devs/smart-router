@@ -124,6 +124,29 @@ func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidati
 	return r, nil
 }
 
+// PreflightValidateCrossValidationConfig runs the context-free half of cross-validation config
+// validation — everything decidable from the config text alone: the enabled/forbid-caller-cv
+// contradiction, missing chain-id/api-interface/method, duplicate policies, and out-of-range bounds.
+//
+// This exists to run at process start, before the router boots anything (MAG-3022). The same parse and
+// resolver construction happen again per endpoint inside ServeRPCRequests, which is where the resolver
+// the relay path uses is actually built — but by then the router has dialed every provider and logged
+// that it is listening, so a config error there surfaces as a crash loop from an apparently-started
+// router. Rejecting the config here costs a few milliseconds and one extra parse, and means a
+// contradictory policy never gets that far.
+//
+// The checks that need spec or provider context (the stateful-write guard, the min-groups capacity
+// bound) cannot move here — they need a chainParser and registered providers. They stay in
+// validateCrossValidationStartup.
+func PreflightValidateCrossValidationConfig(v *viper.Viper) error {
+	cfg, err := ParseCrossValidationConfig(v)
+	if err != nil {
+		return err
+	}
+	_, err = NewCrossValidationPolicyResolver(cfg)
+	return err
+}
+
 // HasPolicies reports whether any policy is configured (used to keep the no-policy path identical to today).
 func (r *CrossValidationPolicyResolver) HasPolicies() bool {
 	return r != nil && len(r.policies) > 0
