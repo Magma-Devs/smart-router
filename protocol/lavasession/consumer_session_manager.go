@@ -911,17 +911,54 @@ func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions 
 	return result
 }
 
+// releaseCouldServeThisRequest reports whether releasing the blocked list could hand THIS request a
+// provider it has not already tried. A release refills validAddresses from the whole pairing pool,
+// so the question is whether any of those providers is both absent from this request's ignored set
+// and able to serve the addon and extensions asked for.
+//
+// When the answer is no, releasing cannot rescue the request and only destroys standing state that
+// every other relay depends on. That happens whenever the pool empties *during* a request rather
+// than before it: each provider is blocked as it fails, and by the time the last one goes the
+// request has already tried them all.
+func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[string]struct{}, addon string, extensions []string, ctx context.Context) bool {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+
+	for _, address := range csm.pairingAddresses {
+		if _, alreadyTried := ignored[address]; alreadyTried {
+			continue
+		}
+		provider, ok := csm.pairing[address]
+		if !ok || provider == nil {
+			continue
+		}
+		if provider.IsSupportingAddon(addon) && provider.IsSupportingExtensions(extensions, ctx) {
+			return true
+		}
+	}
+	return false
+}
+
 // releaseBlockedProvidersIfPoolEmpty releases the standing blocked list and retries selection once,
 // as the last resort of the failover cascade.
 //
-// It is a no-op unless the valid pool is genuinely empty. That guard is the whole subtlety: the
-// errors that bring us here also cover "every valid address is already ignored by this request",
-// which is ordinary retry exhaustion, and releasing on that would let one retried relay wipe the
-// blocked list for every other relay in the process.
+// Two guards, and both matter. The pool must be genuinely empty: the errors that bring us here also
+// cover "every valid address is already ignored by this request", which is ordinary retry
+// exhaustion, and releasing on that would let one retried relay wipe the blocked list for every
+// other relay in the process. And the release must be able to help the request making it — see
+// releaseCouldServeThisRequest — because GetSessions runs this chain more than once per relay, so a
+// request whose providers are blocked one by one arrives here a second time with nothing left to
+// try. Releasing then leaves the pool looking healthy while nothing in it can serve.
 //
 // Returns ok=false when nothing was released, or when the retry after a release still found nothing.
 func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx context.Context, wantedProviderNumber int, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int) (SessionWithProviderMap, bool) {
 	if len(csm.cacheAddonAddresses(addon, extensionNames, ctx)) != 0 {
+		return nil, false
+	}
+
+	if !csm.releaseCouldServeThisRequest(tempIgnoredProviders.providers, addon, extensionNames, ctx) {
+		utils.LavaFormatDebug("every provider has already been tried by this request, leaving the blocked list standing",
+			utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensionNames), utils.LogAttr("GUID", ctx))
 		return nil, false
 	}
 
