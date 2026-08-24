@@ -815,10 +815,6 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 	return total
 }
 
-// routerConfigOptimizerWeights is the JSON shape for a single provider-optimizer's
-// active selection weights, used for each per-chain entry in the PerChainOptimizer map
-// returned by GET /debug/runtime-config. Fields carry no json tags, so each key marshals
-// as the bare Go identifier — tests grep the same string in test code and router source.
 // resolveSelectionWeights turns --qos-selection-priority plus the individual
 // --qos-*-weight flags into the four QoS weights the endpoint selector scores on.
 //
@@ -870,6 +866,10 @@ func resolveSelectionWeights(flags *pflag.FlagSet) (provideroptimizer.UpstreamSe
 	return config, nil
 }
 
+// routerConfigOptimizerWeights is the JSON shape for a single provider-optimizer's
+// active selection weights, used for each per-chain entry in the PerChainOptimizer map
+// returned by GET /debug/runtime-config. Fields carry no json tags, so each key marshals
+// as the bare Go identifier — tests grep the same string in test code and router source.
 type routerConfigOptimizerWeights struct {
 	AvailabilityWeight float64
 	LatencyWeight      float64
