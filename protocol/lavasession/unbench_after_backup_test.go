@@ -138,6 +138,43 @@ func TestAllPrimariesBlocked_NoBackupReleasesTheBlockAsBefore(t *testing.T) {
 	require.Len(t, csm.validAddresses, 2)
 }
 
+// GetSessions runs the failover chain more than once per relay — once up front, and again from the
+// "fetch more sessions" loop. So a relay whose providers are blocked one at a time as they fail
+// arrives at the release a SECOND time, by which point it has already tried all of them. Releasing
+// then cannot rescue the relay and only wipes the standing block, leaving the pool reading healthy
+// while nothing in it can serve — the exact opposite of what this change is for.
+//
+// This is the realistic shape of an outage: providers are blocked because their endpoints went
+// down, and the release does not re-enable endpoints (see HEALTH-STORE-PLAN.md), so every released
+// provider fails again immediately.
+func TestProvidersBlockedMidRelay_DoNotReleaseTheBlockAgain(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, false)
+
+	// Endpoints are down underneath the providers, which is why they were blocked.
+	csm.lock.Lock()
+	for _, address := range csm.validAddresses {
+		for _, endpoint := range csm.pairing[address].Endpoints {
+			endpoint.Enabled = false
+		}
+	}
+	csm.lock.Unlock()
+	blockEveryPrimary(csm)
+
+	for relay := 1; relay <= 3; relay++ {
+		_, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+		require.Error(t, err, "relay %d: nothing can serve, so the relay must fail", relay)
+
+		// The standing state has to keep telling the truth: these providers are blocked.
+		require.Empty(t, csm.validAddresses, "relay %d: the pool must not be left looking healthy", relay)
+		require.Len(t, csm.currentlyBlockedProviderAddresses, 2, "relay %d: both providers must stay blocked", relay)
+
+		// One release per relay, not two. numberOfResets scales the blocklisted-session allowance,
+		// so a double release loosens that cap twice as fast as it should.
+		require.Equal(t, uint64(relay), csm.numberOfResets, "relay %d: exactly one release per relay", relay)
+	}
+}
+
 // The release is guarded on the pool being genuinely empty. "No pairings available" also covers
 // ordinary retry exhaustion — every healthy provider already tried by THIS request — and that must
 // not release anyone's block, or a single retried relay would wipe the state for every other one.
