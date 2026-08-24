@@ -36,3 +36,38 @@ func TestDecide_OnlyRateLimitedRetriesStatefulAndBatch(t *testing.T) {
 		require.Equal(t, "ErrorToleranceExceeded", out.Reason)
 	})
 }
+
+// The carve-out is a claim about attempts that have COMPLETED. A ticker hedge fires on a
+// timer with a relay still in flight — one that may already have broadcast — so
+// OnlyRateLimited says nothing about it and the carve-out must not extend there.
+func TestDecide_TickerHedgeKeepsTheStatefulAndBatchStops(t *testing.T) {
+	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3, DisableBatchRetry: true})
+
+	t.Run("stateful stops on a hedge even when every failure was a rate limit", func(t *testing.T) {
+		out := policy.Decide(DecisionInput{
+			Selection:     relaycore.Stateful,
+			IsTickerHedge: true,
+			Summary:       ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
+		})
+		require.Equal(t, Stop, out.Action)
+		require.Equal(t, "Stateful", out.Reason)
+	})
+	t.Run("batch stops on a hedge even when every failure was a rate limit", func(t *testing.T) {
+		out := policy.Decide(DecisionInput{
+			Selection:     relaycore.Stateless,
+			IsBatch:       true,
+			IsTickerHedge: true,
+			Summary:       ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
+		})
+		require.Equal(t, Stop, out.Action)
+		require.Equal(t, "BatchDisabled", out.Reason)
+	})
+	t.Run("a stateless non-batch hedge is unaffected", func(t *testing.T) {
+		out := policy.Decide(DecisionInput{
+			Selection:     relaycore.Stateless,
+			IsTickerHedge: true,
+			Summary:       ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
+		})
+		require.Equal(t, Retry, out.Action)
+	})
+}

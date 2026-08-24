@@ -455,7 +455,7 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		HasUnsupportedMethod:      hasUnsupportedMethod,
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,
-		OnlyRateLimited:           rp.onlyRateLimitedLocked(),
+		OnlyRateLimited:           onlyRateLimited(nodeErrorResults, protocolErrorResults),
 		HashErr:                   hashErr,
 	}
 }
@@ -1153,7 +1153,7 @@ func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult
 	case Stateful, Stateless:
 		// Stateful (fan-out, no retries) and Stateless (sequential retries) differ only in the state
 		// machine; result selection here is identical for both.
-		return rp.processNonCrossValidationResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, protocolErrorCount)
+		return rp.processNonCrossValidationResult(successResults, nodeErrors, protocolErrors)
 
 	default:
 		return nil, utils.LavaFormatError("unknown selection mode", nil, utils.LogAttr("selection", rp.selection))
@@ -1212,43 +1212,47 @@ func (rp *RelayProcessor) processCrossValidationResult(
 // difference lives in the state machine, not here.)
 func (rp *RelayProcessor) processNonCrossValidationResult(
 	successResults, nodeErrors []common.RelayResult,
-	successResultsCount, nodeErrorCount, protocolErrorCount int,
+	protocolErrors []RelayError,
 ) (*common.RelayResult, error) {
 	// Return first success if available
-	if successResultsCount > 0 {
+	if len(successResults) > 0 {
 		result := successResults[0]
 		return &result, nil
 	}
 
 	// No successes, return first node error if available
-	if nodeErrorCount > 0 {
+	if len(nodeErrors) > 0 {
 		result := nodeErrors[0]
 		return &result, nil
 	}
 
 	// No node responses at all - build a failure result from the best node/protocol error.
-	return rp.buildFailureResult(nodeErrorCount, protocolErrorCount)
+	return rp.buildFailureResult(nodeErrors, protocolErrors)
 }
 
-// onlyRateLimitedLocked reports whether at least one attempt failed and every failure was an
+// onlyRateLimited reports whether at least one attempt failed and every failure was an
 // upstream rate limit — a typed 429 protocol error, or a node error the classifier flagged
-// IsRateLimited. Caller must hold rp.lock.
-func (rp *RelayProcessor) onlyRateLimitedLocked() bool {
-	_, nodeErrorResults, protocolErrorResults := rp.GetResultsData()
-	failures := 0
+// IsRateLimited.
+//
+// Pure over the slices handed to it: it takes no lock of its own, and it does not depend on
+// rp.lock. Callers pass the results they already read via GetResultsData, which snapshots
+// them under the results manager's own rm.lock — a different mutex from rp.lock, and the one
+// that actually guards this memory.
+func onlyRateLimited(nodeErrorResults []common.RelayResult, protocolErrorResults []RelayError) bool {
+	if len(nodeErrorResults)+len(protocolErrorResults) == 0 {
+		return false
+	}
 	for _, result := range nodeErrorResults {
-		failures++
 		if !result.IsRateLimited {
 			return false
 		}
 	}
 	for _, protocolError := range protocolErrorResults {
-		failures++
 		if !errors.Is(protocolError.GetError(), common.StatusCodeError429) {
 			return false
 		}
 	}
-	return failures > 0
+	return true
 }
 
 // buildFailureResult constructs an error result when no consensus can be reached. It returns the best
@@ -1258,13 +1262,13 @@ func (rp *RelayProcessor) onlyRateLimitedLocked() bool {
 // append it after the per-attempt names, so on the all-transport-errors path Lava-Provider-Address
 // listed ~2x the providers and disagreed with Lava-Retries (MAG-2351).
 func (rp *RelayProcessor) buildFailureResult(
-	nodeErrorCount, protocolErrorCount int,
+	nodeErrors []common.RelayResult, protocolErrors []RelayError,
 ) (*common.RelayResult, error) {
 	returnedResult := &common.RelayResult{StatusCode: http.StatusInternalServerError}
 	var processingError error
 
 	var bestLavaError *common.LavaError
-	if nodeErrorCount > 0 {
+	if len(nodeErrors) > 0 {
 		// Prefer node errors over protocol errors
 		nodeErr := rp.GetBestNodeErrorMessageForUser()
 		processingError = nodeErr.Err
@@ -1272,7 +1276,7 @@ func (rp *RelayProcessor) buildFailureResult(
 		if nodeErr.Response != nil {
 			returnedResult = &nodeErr.Response.RelayResult
 		}
-	} else if protocolErrorCount > 0 {
+	} else if len(protocolErrors) > 0 {
 		protocolErr := rp.GetBestProtocolErrorMessageForUser()
 		processingError = protocolErr.Err
 		bestLavaError = protocolErr.LavaError
@@ -1284,8 +1288,14 @@ func (rp *RelayProcessor) buildFailureResult(
 	// Every attempt was refused for rate: the chain is temporarily unservable, not broken.
 	// 503 is the honest status and what well-behaved clients back off on; no Retry-After
 	// is surfaced — the hold-off registry owns that, internally.
-	if rp.onlyRateLimitedLocked() {
-		returnedResult.StatusCode = http.StatusServiceUnavailable
+	if onlyRateLimited(nodeErrors, protocolErrors) {
+		// Copy before stamping: returnedResult aliases the STORED RelayResult (the two
+		// assignments above take its address), and this runs under a read lock holding
+		// nothing of rm.lock. Mutating in place would write shared state without the write
+		// lock and make the 503 permanent for every later ProcessingResult call.
+		stamped := *returnedResult
+		stamped.StatusCode = http.StatusServiceUnavailable
+		returnedResult = &stamped
 	}
 
 	// Log with classified error code for metrics/observability

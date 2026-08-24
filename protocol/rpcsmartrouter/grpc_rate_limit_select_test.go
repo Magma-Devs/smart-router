@@ -24,5 +24,5 @@ func TestGRPCSelectFromTier_SkipsHeldOffEndpoints(t *testing.T) {
 	reg.RecordRateLimit("grpc-b.example:443", "grpc-b.example:443", time.Minute)
 	ep, err = dgm.selectFromTier(context.Background(), tier, nil, nil)
 	require.NoError(t, err)
-	require.NotNil(t, ep, "with everything held off the tier still serves")
+	require.Equal(t, "grpc-a.example:443", ep.Url, "with everything held off the full tier stays, so the first endpoint serves")
 }
