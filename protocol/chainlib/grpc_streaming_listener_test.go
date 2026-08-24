@@ -14,6 +14,7 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/metadata"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -250,6 +251,56 @@ func TestStreamRelayCallback_StreamsSubscription(t *testing.T) {
 	close(manager.replies)
 	_, open := <-response.Replies
 	require.False(t, open, "closing the manager's channel must close the forwarded channel")
+}
+
+// TestStreamRelayCallback_DropsTransportOwnedHeaders keeps the acknowledgement's own
+// framing off the wire. createStreamAcknowledgement tags its payload
+// `content-type: application/json`, which is true of that payload and false of every
+// frame the client actually receives — those are application/grpc, a header the HTTP/2
+// transport writes itself. Forwarding the ack's metadata wholesale sent both.
+func TestStreamRelayCallback_DropsTransportOwnedHeaders(t *testing.T) {
+	sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+	listener := newStreamingListener(t, sender)
+	manager := newStubGRPCSubscriptionManager()
+
+	// Byte-for-byte what createStreamAcknowledgement mints, content-type included.
+	manager.firstReply = &pairingtypes.RelayReply{
+		Data: []byte(`{"subscription_id":"router-1","status":"STREAMING"}`),
+		Metadata: []pairingtypes.Metadata{
+			{Name: "x-lava-grpc-sub-id", Value: "router-1"},
+			{Name: "content-type", Value: "application/json"},
+		},
+	}
+
+	response, err := listener.makeStreamRelayCallback(manager)(context.Background(), streamingApiName, []byte("{}"))
+	require.NoError(t, err)
+	require.NotNil(t, response)
+
+	require.Equal(t, []string{"router-1"}, response.Metadata.Get("x-lava-grpc-sub-id"),
+		"the subscription id is the one value that has to reach the client")
+	require.Empty(t, response.Metadata.Get("content-type"),
+		"the transport owns content-type; a second one on the wire is at best redundant and at worst rejected")
+}
+
+// TestStreamResponseHeaders_FiltersReservedKeys pins the filter itself, so the set stays
+// honest as headers are added — the callback test above only exercises the live case.
+func TestStreamResponseHeaders_FiltersReservedKeys(t *testing.T) {
+	headers := streamResponseHeaders([]pairingtypes.Metadata{
+		{Name: "x-lava-grpc-sub-id", Value: "router-1"},
+		{Name: "Content-Type", Value: "application/json"},
+		{Name: "content-length", Value: "42"},
+		{Name: "GRPC-Status", Value: "0"},
+		{Name: "grpc-message", Value: "ok"},
+		{Name: "grpc-encoding", Value: "gzip"},
+		{Name: "grpc-accept-encoding", Value: "gzip"},
+		{Name: "TE", Value: "trailers"},
+		{Name: "X-Custom", Value: "kept"},
+	})
+
+	require.Equal(t, metadata.MD{
+		"x-lava-grpc-sub-id": []string{"router-1"},
+		"x-custom":           []string{"kept"},
+	}, headers, "only transport-owned keys are dropped, and matching is case-insensitive")
 }
 
 // TestStreamRelayCallback_UnaryFallsThrough proves ordinary gRPC queries are untouched:
