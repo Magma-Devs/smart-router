@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -69,7 +70,17 @@ func DefaultGRPCStreamingConfig() *GRPCStreamingConfig {
 
 // GRPCClientRateLimiter manages per-client rate limiting for gRPC streaming operations.
 // This is similar to ClientRateLimiter but can be extended for gRPC-specific needs.
+//
+// Every method is safe for concurrent use. It has to be: each incoming gRPC stream runs
+// on its own handler goroutine and calls AllowSubscribe there, while stream teardown
+// calls CleanupClient from another. Unsynchronised, that is a concurrent read and write
+// of the same Go map — which is not a caught panic but `fatal error: concurrent map read
+// and map write`, an unrecoverable runtime fault that takes the router down.
 type GRPCClientRateLimiter struct {
+	// Guards the two limiter maps. rate.Limiter is itself goroutine-safe, so this only
+	// covers lookup-and-insert; it is a leaf lock and takes no other lock underneath.
+	lock sync.Mutex
+
 	// subscribeLimiters tracks subscription creation rate per client
 	subscribeLimiters map[string]*rate.Limiter
 	// unsubscribeLimiters tracks unsubscription rate per client
@@ -99,26 +110,37 @@ func NewGRPCClientRateLimiter(config *GRPCStreamingConfig) *GRPCClientRateLimite
 
 // AllowSubscribe checks if the client is allowed to create a gRPC subscription
 func (crl *GRPCClientRateLimiter) AllowSubscribe(clientKey string) bool {
+	crl.lock.Lock()
 	limiter, exists := crl.subscribeLimiters[clientKey]
 	if !exists {
 		limiter = rate.NewLimiter(crl.subscribeRate, crl.subscribeBurst)
 		crl.subscribeLimiters[clientKey] = limiter
 	}
+	crl.lock.Unlock()
+
+	// Allow outside the lock: rate.Limiter has its own, and holding both would serialise
+	// every stream's admission behind one mutex for no gain.
 	return limiter.Allow()
 }
 
 // AllowUnsubscribe checks if the client is allowed to unsubscribe from a gRPC stream
 func (crl *GRPCClientRateLimiter) AllowUnsubscribe(clientKey string) bool {
+	crl.lock.Lock()
 	limiter, exists := crl.unsubscribeLimiters[clientKey]
 	if !exists {
 		limiter = rate.NewLimiter(crl.unsubscribeRate, crl.unsubscribeBurst)
 		crl.unsubscribeLimiters[clientKey] = limiter
 	}
+	crl.lock.Unlock()
+
 	return limiter.Allow()
 }
 
 // CleanupClient removes rate limiters for a disconnected client
 func (crl *GRPCClientRateLimiter) CleanupClient(clientKey string) {
+	crl.lock.Lock()
+	defer crl.lock.Unlock()
+
 	delete(crl.subscribeLimiters, clientKey)
 	delete(crl.unsubscribeLimiters, clientKey)
 }
