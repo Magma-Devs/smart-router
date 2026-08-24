@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -131,6 +132,15 @@ type DirectGRPCSubscriptionManager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// Guards the maps and endpoint tiers above.
+	//
+	// Lock order: dgm.lock is the OUTER lock of the (dgm.lock, sub.lock) pair. Taking
+	// grpcActiveSubscription.lock while holding it is fine — Unsubscribe does, scanning
+	// for a client's subscription — but nothing may take dgm.lock while holding a
+	// sub.lock. That is why joinExistingSubscription, removeClientFromSubscription and
+	// cleanupSubscription all finish their sub.lock section before calling
+	// track/untrackClientSubscription. Both directions at once deadlocks: this is an
+	// RWMutex, so one pending writer is enough to block every subsequent reader.
 	lock sync.RWMutex
 }
 
@@ -383,6 +393,11 @@ func (dgm *DirectGRPCSubscriptionManager) IsStreamingMethod(ctx context.Context,
 	return methodDesc.IsServerStreaming(), methodDesc, nil
 }
 
+// errSubscriptionUnavailable reports that the subscription picked for sharing was
+// released between the activeSubscriptions lookup and the join, so the caller must
+// create a fresh one instead. Never returned to callers of StartSubscription.
+var errSubscriptionUnavailable = errors.New("subscription was released before the join completed")
+
 // StartSubscription starts a new gRPC streaming subscription or joins an existing one
 func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 	ctx context.Context,
@@ -391,14 +406,29 @@ func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 	consumerIp string,
 	connectionUniqueId string,
 	metricsData *metrics.RelayMetrics,
-) (*pairingtypes.RelayReply, <-chan *pairingtypes.RelayReply, error) {
+) (firstReply *pairingtypes.RelayReply, repliesChan <-chan *pairingtypes.RelayReply, err error) {
 	// Create client key for tracking
 	clientKey := dgm.createClientKey(dappID, consumerIp, connectionUniqueId)
 
-	// Rate limiting check
+	// Rate limiting check.
+	//
+	// Deliberately ahead of the release defer below: a rejection is the limiter
+	// remembering that this client just spent a token, so its entry must survive. That
+	// keeps no entry alive on the gRPC path, where the key is minted per stream and a
+	// fresh limiter always admits its first call — this branch cannot fire here at all.
 	if !dgm.rateLimiter.AllowSubscribe(clientKey) {
 		return nil, nil, fmt.Errorf("subscription rate limit exceeded for client %s", clientKey)
 	}
+
+	// Past the rate check, every failure must leave no trace of this client behind.
+	// Written as a defer rather than at each return so a failure path added later gets
+	// it for free — the leak this closes was exactly a return that predated the
+	// bookkeeping it needed to undo.
+	defer func() {
+		if err != nil {
+			dgm.releaseClientStateIfIdle(clientKey)
+		}
+	}()
 
 	// Get method path and request data
 	grpcMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
@@ -421,16 +451,26 @@ func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 	dgm.lock.RUnlock()
 
 	if exists && dgm.config.SubscriptionSharingEnabled {
-		return dgm.joinExistingSubscription(ctx, existingSub, clientKey, hashedParams)
+		ack, replies, joinErr := dgm.joinExistingSubscription(ctx, existingSub, clientKey, hashedParams)
+		if !errors.Is(joinErr, errSubscriptionUnavailable) {
+			return ack, replies, joinErr
+		}
+		// The subscription died between the lookup above and the join — its last client
+		// left, or its upstream ended. Fall through and open a new one rather than hand
+		// this client a stream that is already being torn down.
+		utils.LavaFormatDebug("DirectGRPC: shared subscription vanished before join, creating a new one",
+			utils.LogAttr("clientKey", clientKey),
+			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+		)
 	}
 
 	// Check client subscription limit
-	if err := dgm.checkClientSubscriptionLimit(clientKey); err != nil {
+	if err = dgm.checkClientSubscriptionLimit(clientKey); err != nil {
 		return nil, nil, err
 	}
 
 	// Check global subscription limit
-	if err := dgm.checkGlobalSubscriptionLimit(); err != nil {
+	if err = dgm.checkGlobalSubscriptionLimit(); err != nil {
 		return nil, nil, err
 	}
 
@@ -438,7 +478,30 @@ func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 	return dgm.createNewSubscription(ctx, chainMessage, methodPath, requestData, hashedParams, clientKey)
 }
 
-// joinExistingSubscription adds a client to an existing subscription
+// releaseClientStateIfIdle drops the per-client bookkeeping a failed subscribe would
+// otherwise strand — but only while the client holds no subscription at all, so a client
+// with a live stream keeps its endpoint affinity and its limiter.
+//
+// It is needed because the only other release path, UnsubscribeAll, runs from the
+// listener's stream Close — which happens solely for a stream that was established. A
+// subscribe that fails leaves a rate-limiter entry and, once past the connect step, a
+// sticky-session entry, both keyed by a per-stream GUID that will never be seen again.
+// Against a dead endpoint with a client in a retry loop, those maps grow without bound.
+func (dgm *DirectGRPCSubscriptionManager) releaseClientStateIfIdle(clientKey string) {
+	dgm.lock.RLock()
+	_, stillSubscribed := dgm.clientSubscriptions[clientKey]
+	dgm.lock.RUnlock()
+
+	if stillSubscribed {
+		return
+	}
+
+	dgm.stickyStore.Delete(clientKey)
+	dgm.rateLimiter.CleanupClient(clientKey)
+}
+
+// joinExistingSubscription adds a client to an existing subscription, or reports
+// errSubscriptionUnavailable when that subscription is already going away.
 func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 	ctx context.Context,
 	sub *grpcActiveSubscription,
@@ -446,7 +509,25 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 	hashedParams string,
 ) (*pairingtypes.RelayReply, <-chan *pairingtypes.RelayReply, error) {
 	sub.lock.Lock()
-	defer sub.lock.Unlock()
+
+	// Liveness, under the same lock cleanupSubscription nils connectedClients beneath —
+	// StartSubscription reads the subscription out of the map under dgm.lock and then
+	// releases it, so the last client can leave in the gap. This is the sharing hot path:
+	// same params, so a departing client and an arriving one meet on the same object.
+	//
+	// Without the check the joiner either assigns to a nil map, which is an unrecoverable
+	// panic, or slips in ahead of a cleanup already in flight and has its brand-new
+	// channel closed underneath it — a clean EOF one message into a subscription, which
+	// is the silent-truncation failure this whole path exists to remove.
+	//
+	// Three conditions because teardown has three entry points and they set different
+	// things first: cleanupSubscription latches cleanedUp before anything else,
+	// removeClientFromSubscription and Stop cancel without latching, and connectedClients
+	// is nil only once cleanup's own critical section has run.
+	if sub.cleanedUp.Load() || sub.connectedClients == nil || sub.ctx.Err() != nil {
+		sub.lock.Unlock()
+		return nil, nil, errSubscriptionUnavailable
+	}
 
 	// Generate unique router ID for this client
 	routerID := dgm.idMapper.GenerateRouterID(clientKey)
@@ -458,8 +539,12 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 
 	sub.clientRouterIDs[clientKey] = routerID
 	sub.connectedClients[clientKey] = sender
+	methodPath := sub.methodPath
+	sub.lock.Unlock()
 
-	// Track subscription for this client
+	// Track subscription for this client. Outside sub.lock: trackClientSubscription takes
+	// dgm.lock, and dgm.lock is the outer lock of the pair everywhere else — see the
+	// ordering note on the manager's lock field.
 	dgm.trackClientSubscription(clientKey, hashedParams)
 
 	utils.LavaFormatDebug("DirectGRPC: client joined existing subscription",
@@ -472,7 +557,7 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 	// id this client must quote to unsubscribe, and clientRouterIDs holds a distinct
 	// one per client — handing a joiner the creator's copy would tell it to
 	// unsubscribe using an id that is not its own.
-	return dgm.createStreamAcknowledgement(routerID, sub.methodPath), replyChan, nil
+	return dgm.createStreamAcknowledgement(routerID, methodPath), replyChan, nil
 }
 
 // createNewSubscription creates a new upstream subscription
@@ -919,7 +1004,13 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupSubscription(hashedParams strin
 	)
 }
 
-// Unsubscribe handles unsubscribe request from a client
+// Unsubscribe handles unsubscribe request from a client.
+//
+// No production caller today — a gRPC client has no unsubscribe frame, so the listener
+// releases through UnsubscribeAll when the stream ends — but it is kept as the
+// single-subscription counterpart and is safe for the first caller that needs it: the
+// dgm.lock → sub.lock nesting below is the manager's declared order, and the scan drops
+// dgm.lock before removeClientFromSubscription reaches for it again.
 func (dgm *DirectGRPCSubscriptionManager) Unsubscribe(
 	ctx context.Context,
 	routerSubID string,
@@ -1001,7 +1092,6 @@ func (dgm *DirectGRPCSubscriptionManager) removeClientFromSubscription(
 	clientKey string,
 ) error {
 	sub.lock.Lock()
-	defer sub.lock.Unlock()
 
 	// Remove client
 	if sender, exists := sub.connectedClients[clientKey]; exists {
@@ -1011,16 +1101,22 @@ func (dgm *DirectGRPCSubscriptionManager) removeClientFromSubscription(
 
 	routerID := sub.clientRouterIDs[clientKey]
 	delete(sub.clientRouterIDs, clientKey)
-	dgm.idMapper.RemoveMapping(routerID)
 
-	// Untrack from client
-	dgm.untrackClientSubscription(clientKey, hashedParams)
-
-	// If last client, close the subscription
+	// If last client, close the subscription. Inside the lock so it is decided against
+	// the same client set the removal above just produced — a joiner racing this either
+	// got in before it and keeps the subscription alive, or arrives after and is turned
+	// away by the liveness check in joinExistingSubscription.
 	if len(sub.connectedClients) == 0 {
 		sub.cancel()
 		sub.signalClose()
 	}
+	sub.lock.Unlock()
+
+	// Both of these take a lock of their own — untrackClientSubscription takes dgm.lock,
+	// which is the outer lock of that pair everywhere else, so neither may run while
+	// sub.lock is held. cleanupSubscription orders its own teardown the same way.
+	dgm.idMapper.RemoveMapping(routerID)
+	dgm.untrackClientSubscription(clientKey, hashedParams)
 
 	return nil
 }
