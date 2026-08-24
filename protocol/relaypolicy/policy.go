@@ -27,7 +27,13 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	// twice. A rate limit is the one failure that concern does not cover: the upstream
 	// refused before executing anything, so the retry lands on a different endpoint
 	// with nothing at risk. The limit checks below still bound it.
-	if input.Selection == relaycore.Stateful && !input.Summary.OnlyRateLimited {
+	//
+	// That is a claim about attempts that have COMPLETED, and only the gotResults path
+	// guarantees it — the ticker fires on a timer with a relay still in flight, which may
+	// already have broadcast. So the carve-out does not extend to a hedge.
+	rateLimitRetrySafe := input.Summary.OnlyRateLimited && !input.IsTickerHedge
+
+	if input.Selection == relaycore.Stateful && !rateLimitRetrySafe {
 		return DecisionOutput{Action: Stop, Reason: "Stateful"}
 	}
 
@@ -45,8 +51,9 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	if input.AttemptNumber >= p.config.MaxRetries {
 		return DecisionOutput{Action: Stop, Reason: "MaxRetriesReached"}
 	}
-	// Same reasoning for batches: a rate-limited batch executed nothing.
-	if input.IsBatch && p.config.DisableBatchRetry && !input.Summary.OnlyRateLimited {
+	// Same reasoning for batches: a rate-limited batch executed nothing — and the same
+	// in-flight caveat, since a batch can carry an eth_sendRawTransaction.
+	if input.IsBatch && p.config.DisableBatchRetry && !rateLimitRetrySafe {
 		return DecisionOutput{Action: Stop, Reason: "BatchDisabled"}
 	}
 

@@ -26,10 +26,13 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   reclaimed lazily on the next recorded 429 anywhere in the registry.
 - **Internal only.** The registry and the Retry-After values drive internal retry and
   scheduling decisions. Nothing here is surfaced to the customer.
-- **A rate limit is safe to retry, always.** The upstream refused before executing
-  anything, so the retry policy retries a stateful relay or a batch when every failure so
-  far was a rate limit — the one exception to "never retry a possibly-executed write".
-  The normal retry limits still bound it.
+- **A rate limit is safe to retry once the attempt has completed.** The upstream refused
+  before executing anything, so the retry policy retries a stateful relay or a batch when
+  every failure so far was a rate limit — the one exception to "never retry a
+  possibly-executed write". The normal retry limits still bound it. The exception does not
+  extend to a ticker hedge: that fires on a timer with a relay still in flight, and an
+  in-flight attempt may already have broadcast, so a hedged stateful relay or batch stops
+  exactly as before.
 - **A fully capped chain answers 503.** When every attempt was refused for rate, the
   client gets 503 Service Unavailable — temporarily unservable, not broken — with no
   Retry-After (that stays internal). Any other failure mix keeps its usual shape.
