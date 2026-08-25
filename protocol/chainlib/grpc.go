@@ -811,7 +811,10 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 
 	msgFactory := dynamic.NewMessageFactoryWithDefaults()
 
-	var reader io.Reader
+	// grpcurl hands this reader straight to json.NewDecoder, which panics on a
+	// nil io.Reader (encoding/json is v2-backed since Go 1.27). An empty request
+	// message therefore gets an empty reader rather than a nil one.
+	var reader io.Reader = bytes.NewReader(nil)
 	msg := msgFactory.NewMessage(methodDescriptor.GetInputType())
 	formatMessage := false
 	if len(nodeMessage.Msg) > 0 {
