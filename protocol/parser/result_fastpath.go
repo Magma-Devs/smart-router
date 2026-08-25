@@ -10,42 +10,39 @@ import (
 
 // fastPathScalarFromResult resolves a canonical key path directly against the
 // raw result bytes and returns the value formatted the way
-// blockInterfaceToString formats the decoded equivalent. It is the allocation-free
-// front of parseCanonical / parseByArg for PARSE_RESULT: a gjson forward scan
-// over the bytes instead of decoding the whole result (a full block, a receipt,
-// a logs array) into interface{} to read one field.
+// blockInterfaceToString formats the decoded equivalent. It is the
+// allocation-free front of parseCanonical for PARSE_RESULT: a gjson forward
+// scan over the bytes instead of decoding the whole result (a full block, a
+// receipt) into interface{} to read one field.
 //
-// Only a string or number hit is served here. Everything else — the path is
-// missing, the value is an object / array / bool / null, the result is not an
-// object or array — reports ok=false so the caller falls through to the decode
-// path, which owns the error wording and the remaining type semantics. The two
-// paths agree on the served cases: strings come back unescaped, numbers go
-// through the same float64 → strconv 'f' formatting.
+// It serves a value only when parseCanonicalDecoded would serve the same one.
+// That path wraps an object result in a one-element array, so the walk is:
+// the first key must be an index equal to 0; every further key selects an
+// object member by name or an array element by base-10 index; a missing
+// member, an out-of-range index, or a scalar met before the last key is an
+// error. gjson resolves a dotted path with exactly those rules, so the
+// remaining keys become one escaped path. Refused outright, so the decode path
+// owns them: results that are not an object (the wrapper holds their raw
+// bytes, which the walk can never index into), a leading key other than 0, an
+// empty key, and any leaf that is not a string or number (the decode path
+// formats those with fmt, which the fast path does not reproduce).
+//
+// Strings come back unescaped, numbers go through the same float64 →
+// strconv 'f' formatting as the decode path. One accepted difference from a
+// full decode: duplicate member names resolve to the first occurrence rather
+// than the last.
 func fastPathScalarFromResult(rawResult json.RawMessage, keys []string) (string, bool) {
-	if len(keys) == 0 || len(rawResult) == 0 {
+	if len(keys) < 2 || len(rawResult) == 0 || firstNonSpace(rawResult) != '{' {
 		return "", false
 	}
-	first := firstNonSpace(rawResult)
-	switch first {
-	case '{':
-		// A leading numeric index is meaningless on an object; the decode path
-		// drops it too (parseCanonical, map case).
-		if _, err := strconv.ParseUint(keys[0], 10, 32); err == nil {
-			keys = keys[1:]
-		}
-	case '[':
-		if _, err := strconv.ParseUint(keys[0], 10, 32); err != nil {
+	if index, err := strconv.ParseUint(keys[0], 10, 32); err != nil || index != 0 {
+		return "", false
+	}
+	var path strings.Builder
+	for i, key := range keys[1:] {
+		if key == "" {
 			return "", false
 		}
-	default:
-		return "", false
-	}
-	if len(keys) == 0 {
-		return "", false
-	}
-
-	var path strings.Builder
-	for i, key := range keys {
 		if i > 0 {
 			path.WriteByte('.')
 		}
@@ -62,17 +59,18 @@ func fastPathScalarFromResult(rawResult json.RawMessage, keys []string) (string,
 	}
 }
 
-// gjsonEscapeKey escapes a single object key for use as one component of a
-// gjson path, so keys containing path syntax are matched literally.
+// gjsonEscapeKey escapes a single object key for use as a gjson path, so keys
+// containing path syntax are matched literally. '!' is included because gjson
+// reads a path starting with it as a literal value rather than a key.
 func gjsonEscapeKey(key string) string {
-	if !strings.ContainsAny(key, `.*?|#@\`) {
+	if !strings.ContainsAny(key, `.*?|#@!\`) {
 		return key
 	}
 	var b strings.Builder
 	b.Grow(len(key) + 4)
 	for i := 0; i < len(key); i++ {
 		switch key[i] {
-		case '.', '*', '?', '|', '#', '@', '\\':
+		case '.', '*', '?', '|', '#', '@', '!', '\\':
 			b.WriteByte('\\')
 		}
 		b.WriteByte(key[i])
