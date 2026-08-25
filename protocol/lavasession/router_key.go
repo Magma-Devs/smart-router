@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils/lavaslices"
 )
 
 const (

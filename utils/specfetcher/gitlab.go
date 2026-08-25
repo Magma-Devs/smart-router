@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // fetchFromGitLab fetches all specs from a GitLab repository.

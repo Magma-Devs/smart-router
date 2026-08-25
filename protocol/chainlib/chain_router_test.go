@@ -829,7 +829,7 @@ func (m *chainProxyMock) GetChainProxyInformation() (common.NodeUrl, string) {
 }
 
 func (m *chainProxyMock) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
-	return nil, nil
+	return nil, nil //nolint:nilnil // mock: the tests using it never read the reply
 }
 
 type PolicySt struct {

@@ -768,13 +768,13 @@ func newRestApiContainer(api *spectypes.Api, collectionKey CollectionKey) (ApiKe
 		return ApiKey{}, ApiContainer{}, err
 	}
 	return ApiKey{
-			Name:           apiPattern,
-			ConnectionType: collectionKey.ConnectionType,
-		}, ApiContainer{
-			api:           api,
-			collectionKey: collectionKey,
-			restMatcher:   matcher,
-		}, nil
+		Name:           apiPattern,
+		ConnectionType: collectionKey.ConnectionType,
+	}, ApiContainer{
+		api:           api,
+		collectionKey: collectionKey,
+		restMatcher:   matcher,
+	}, nil
 }
 
 // restApiMatcher holds everything matchSpecApiByName needs for one REST api. It is built

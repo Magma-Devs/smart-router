@@ -49,7 +49,7 @@ func TestRecordProbeVerdict_ReEnablesAfterKDistinctPostDisablePolls(t *testing.T
 	require.True(t, e.Enabled)
 
 	e.mu.RLock()
-	require.Equal(t, uint64(MaxConsecutiveConnectionAttempts-probeReenableTrialBudget), e.ConnectionRefusals,
+	require.Equal(t, MaxConsecutiveConnectionAttempts-probeReenableTrialBudget, e.ConnectionRefusals,
 		"a probe-granted re-enable carries only a TRIAL refusal budget, not the full threshold (MAG-2550)")
 	require.Equal(t, uint64(0), e.consecutiveHealthyProbes, "the hysteresis streak resets after re-enable")
 	require.True(t, e.disabledAt.IsZero(), "disabledAt cleared on re-enable")
