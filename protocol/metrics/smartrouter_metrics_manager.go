@@ -115,6 +115,8 @@ type SmartRouterMetricsManager struct {
 	// black-box internal state so integration tests can verify /debug/reset-all
 	// emptied each store. See MAG-1762.
 	csmBlockedProvidersCount       *prometheus.GaugeVec // smartrouter_csm_blocked_providers
+	csmPrevEpochBlockedProviders   *prometheus.GaugeVec // smartrouter_csm_previous_epoch_blocked_providers
+	csmProviderBlocked             *prometheus.GaugeVec // smartrouter_csm_provider_blocked
 	csmBlockedBackupProvidersCount *prometheus.GaugeVec // smartrouter_csm_blocked_backup_providers
 	endpointServingTier            *prometheus.GaugeVec // smartrouter_endpoint_serving_tier
 	csmStickySessionsCount         *prometheus.GaugeVec // smartrouter_csm_sticky_sessions
@@ -494,8 +496,16 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	csmStateLabels := []string{"spec", "apiInterface"}
 	csmBlockedProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_providers",
-		Help: "Size of ConsumerSessionManager.previousEpochBlockedProviders (cross-epoch known-bad provider memory). Goes to 0 after /debug/reset-all.",
+		Help: "Number of providers currently blocked and receiving no traffic (ConsumerSessionManager.currentlyBlockedProviderAddresses). Non-zero means the chain is degraded. Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels)
+	csmPrevEpochBlockedProviders := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_csm_previous_epoch_blocked_providers",
+		Help: "Size of ConsumerSessionManager.previousEpochBlockedProviders (cross-epoch known-bad provider memory, briefly populated at an epoch boundary and cleared once the re-block pass runs). Goes to 0 after /debug/reset-all. This is what smartrouter_csm_blocked_providers reported before the metric was corrected.",
+	}, csmStateLabels)
+	csmProviderBlocked := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_csm_provider_blocked",
+		Help: "Whether this specific provider is currently blocked (1=blocked, 0=serving). Companion to the smartrouter_csm_blocked_providers count, for identifying WHICH provider went out.",
+	}, []string{"spec", "apiInterface", "provider", "provider_endpoint"})
 	csmBlockedBackupProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_backup_providers",
 		Help: "Size of ConsumerSessionManager.blockedBackupProviders (per-epoch backup-provider failure memory). Goes to 0 after /debug/reset-all.",
@@ -635,6 +645,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	cacheFailedTotalMetric = registerOrReuse(cacheFailedTotalMetric)
 	cacheLatencyHistogram = registerOrReuse(cacheLatencyHistogram)
 	csmBlockedProvidersCount = registerOrReuse(csmBlockedProvidersCount)
+	csmPrevEpochBlockedProviders = registerOrReuse(csmPrevEpochBlockedProviders)
+	csmProviderBlocked = registerOrReuse(csmProviderBlocked)
 	csmBlockedBackupProvidersCount = registerOrReuse(csmBlockedBackupProvidersCount)
 	csmStickySessionsCount = registerOrReuse(csmStickySessionsCount)
 	csmReportedProvidersCount = registerOrReuse(csmReportedProvidersCount)
@@ -730,6 +742,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 
 		// CSM state-store gauges
 		csmBlockedProvidersCount:       csmBlockedProvidersCount,
+		csmPrevEpochBlockedProviders:   csmPrevEpochBlockedProviders,
+		csmProviderBlocked:             csmProviderBlocked,
 		csmBlockedBackupProvidersCount: csmBlockedBackupProvidersCount,
 		csmStickySessionsCount:         csmStickySessionsCount,
 		csmReportedProvidersCount:      csmReportedProvidersCount,
@@ -1501,7 +1515,21 @@ func (m *SmartRouterMetricsManager) SetProviderSelected(chainId string, apiInter
 	}
 }
 
-func (m *SmartRouterMetricsManager) SetBlockedProvider(string, string, string, string, bool) {}
+// SetBlockedProvider publishes whether one specific provider is blocked. The aggregate count in
+// SetCSMBlockedProvidersCount says how many went out; this says which.
+//
+// Was an empty stub, so every blockProvider / restore call site published nothing and the smart
+// router had no per-provider blocked signal at all.
+func (m *SmartRouterMetricsManager) SetBlockedProvider(chainId, apiInterface, providerAddress, providerEndpoint string, isBlocked bool) {
+	if m == nil {
+		return
+	}
+	value := 0.0
+	if isBlocked {
+		value = 1.0
+	}
+	m.csmProviderBlocked.WithLabelValues(chainId, apiInterface, providerAddress, providerEndpoint).Set(value)
+}
 
 func (m *SmartRouterMetricsManager) SetQOSMetrics(chainId string, apiInterface string, _ string, _ string, _ *pairingtypes.QualityOfServiceReport, _ *pairingtypes.QualityOfServiceReport, _ int64, _ uint64, _ time.Duration, _ bool) {
 }
@@ -1511,13 +1539,24 @@ func (m *SmartRouterMetricsManager) ResetSessionRelatedMetrics() {}
 func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(string, string, map[string]string) {
 }
 
-// SetCSMBlockedProvidersCount publishes the size of csm.previousEpochBlockedProviders.
-// Used by integration tests to verify /debug/reset-all emptied the store (MAG-1762).
+// SetCSMBlockedProvidersCount publishes the number of providers currently blocked — the operator-
+// facing "is this chain degraded" signal, and the post-condition integration tests assert against
+// /metrics after /debug/reset-all (MAG-1762).
 func (m *SmartRouterMetricsManager) SetCSMBlockedProvidersCount(chainId, apiInterface string, count int) {
 	if m == nil {
 		return
 	}
 	m.csmBlockedProvidersCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
+}
+
+// SetCSMPreviousEpochBlockedProvidersCount publishes the size of csm.previousEpochBlockedProviders,
+// the cross-epoch carry-over set. Split out from the gauge above, which now reports the thing its
+// name promises.
+func (m *SmartRouterMetricsManager) SetCSMPreviousEpochBlockedProvidersCount(chainId, apiInterface string, count int) {
+	if m == nil {
+		return
+	}
+	m.csmPrevEpochBlockedProviders.WithLabelValues(chainId, apiInterface).Set(float64(count))
 }
 
 // SetCSMBlockedBackupProvidersCount publishes the size of csm.blockedBackupProviders.

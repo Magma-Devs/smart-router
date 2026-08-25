@@ -357,7 +357,9 @@ assert `/debug/reset-all` emptied each store (see MAG-1762). All drop to `0` aft
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_csm_blocked_providers` | Gauge | `spec`, `apiInterface` | Size of the previous-epoch blocked-providers store. |
+| `smartrouter_csm_blocked_providers` | Gauge | `spec`, `apiInterface` | Providers currently blocked and receiving no traffic. **Non-zero means the chain is degraded.** Before v1.4.1 this reported the previous-epoch store instead and read 0 during outages. |
+| `smartrouter_csm_previous_epoch_blocked_providers` | Gauge | `spec`, `apiInterface` | Size of the previous-epoch blocked-providers store (cross-epoch carry-over, briefly populated at an epoch boundary). This is what `smartrouter_csm_blocked_providers` reported before it was corrected. |
+| `smartrouter_csm_provider_blocked` | Gauge | `spec`, `apiInterface`, `provider`, `provider_endpoint` | Whether one specific provider is blocked (1=blocked, 0=serving) — which provider went out, versus how many. |
 | `smartrouter_csm_blocked_backup_providers` | Gauge | `spec`, `apiInterface` | Size of the blocked-backup-providers store. |
 | `smartrouter_csm_sticky_sessions` | Gauge | `spec`, `apiInterface` | Live sticky-session affinities. |
 | `smartrouter_csm_reported_providers` | Gauge | `spec`, `apiInterface` | Size of the reported-providers register. |

@@ -2843,7 +2843,12 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	}
 
 	csm.lock.RLock()
-	blockedCount := len(csm.previousEpochBlockedProviders)
+	// currentlyBlockedProviderAddresses is the standing block: these providers receive no traffic
+	// until they recover. previousEpochBlockedProviders is only the cross-epoch carry-over set,
+	// populated at an epoch boundary and cleared moments later by the re-block pass — publishing
+	// that as "blocked providers" reported 0 through entire outages.
+	blockedCount := len(csm.currentlyBlockedProviderAddresses)
+	prevEpochBlockedCount := len(csm.previousEpochBlockedProviders)
 	blockedBackupCount := len(csm.blockedBackupProviders)
 	csm.lock.RUnlock()
 
@@ -2858,6 +2863,7 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	chainID := csm.rpcEndpoint.ChainID
 	apiInterface := csm.rpcEndpoint.ApiInterface
 	csm.consumerMetricsManager.SetCSMBlockedProvidersCount(chainID, apiInterface, blockedCount)
+	csm.consumerMetricsManager.SetCSMPreviousEpochBlockedProvidersCount(chainID, apiInterface, prevEpochBlockedCount)
 	csm.consumerMetricsManager.SetCSMBlockedBackupProvidersCount(chainID, apiInterface, blockedBackupCount)
 	csm.consumerMetricsManager.SetCSMStickySessionsCount(chainID, apiInterface, stickyCount)
 	csm.consumerMetricsManager.SetCSMReportedProvidersCount(chainID, apiInterface, reportedCount)

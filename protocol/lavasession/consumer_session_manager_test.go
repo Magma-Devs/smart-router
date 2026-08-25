@@ -2772,9 +2772,16 @@ type stateSizeRecorder struct {
 	metrics.NoOpConsumerMetrics
 	mu                  sync.Mutex
 	blockedProviders    int
+	prevEpochBlocked    int
 	blockedBackup       int
 	stickySessionsCount int
 	reportedProviders   int
+}
+
+func (r *stateSizeRecorder) SetCSMPreviousEpochBlockedProvidersCount(_, _ string, c int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prevEpochBlocked = c
 }
 
 func (r *stateSizeRecorder) SetCSMBlockedProvidersCount(_, _ string, c int) {
@@ -2801,6 +2808,18 @@ func (r *stateSizeRecorder) SetCSMReportedProvidersCount(_, _ string, c int) {
 	r.reportedProviders = c
 }
 
+func (r *stateSizeRecorder) blockedProvidersCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.blockedProviders
+}
+
+func (r *stateSizeRecorder) prevEpochBlockedCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.prevEpochBlocked
+}
+
 func (r *stateSizeRecorder) snapshot() (int, int, int, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2818,8 +2837,12 @@ func createConsumerSessionManagerWithMetrics(m metrics.ConsumerMetricsManagerInf
 
 // TestPublishStateSizes_PopulateThenReset verifies that publishStateSizes
 // reflects the current size of every observed store, and that
-// ResetTransientFailureState drives all four counts back to zero — the
+// ResetTransientFailureState drives the transient counts back to zero — the
 // post-condition integration tests assert against /metrics (MAG-1762).
+//
+// currentlyBlockedProviderAddresses is deliberately NOT zeroed here:
+// ResetTransientFailureState preserves it by design, and /debug/reset-all
+// clears it by also calling ResetBlockedProviders. See the sibling test below.
 func TestPublishStateSizes_PopulateThenReset(t *testing.T) {
 	rec := &stateSizeRecorder{}
 	csm := createConsumerSessionManagerWithMetrics(rec)
@@ -2835,7 +2858,8 @@ func TestPublishStateSizes_PopulateThenReset(t *testing.T) {
 
 	csm.publishStateSizes()
 	blocked, blockedBackup, sticky, reported := rec.snapshot()
-	require.Equal(t, 2, blocked, "previousEpochBlockedProviders count must equal map size")
+	require.Equal(t, 2, rec.prevEpochBlockedCount(), "previousEpochBlockedProviders count must equal map size")
+	require.Equal(t, 0, blocked, "no provider is blocked, so the blocked-providers gauge must read 0")
 	require.Equal(t, 1, blockedBackup, "blockedBackupProviders count must equal map size")
 	require.Equal(t, 3, sticky, "stickySessions count must equal store size")
 	require.Equal(t, 1, reported, "reportedProviders count must equal register size")
@@ -2843,7 +2867,8 @@ func TestPublishStateSizes_PopulateThenReset(t *testing.T) {
 	csm.ResetTransientFailureState()
 
 	blocked, blockedBackup, sticky, reported = rec.snapshot()
-	require.Equal(t, 0, blocked, "ResetTransientFailureState must zero previousEpochBlockedProviders gauge")
+	require.Equal(t, 0, rec.prevEpochBlockedCount(), "ResetTransientFailureState must zero previousEpochBlockedProviders gauge")
+	require.Equal(t, 0, blocked, "blocked-providers gauge stays 0 — nothing was blocked in this test")
 	require.Equal(t, 0, blockedBackup, "ResetTransientFailureState must zero blockedBackupProviders gauge")
 	require.Equal(t, 0, sticky, "ResetTransientFailureState must zero stickySessions gauge")
 	require.Equal(t, 0, reported, "ResetTransientFailureState must zero reportedProviders gauge")
