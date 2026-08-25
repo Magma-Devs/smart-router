@@ -360,14 +360,10 @@ func ParseWithGenericParsers(rpcInput RPCInput, genericParsers []spectypes.Gener
 	}
 
 	// we didn't find a generic parser that worked
-	err := utils.LavaFormatTrace("failed to parse with generic parsers",
+	return nil, utils.LavaFormatTrace("failed to parse with generic parsers",
 		utils.LogAttr("parsingMap", parsingMap),
 		utils.LogAttr("genericParsers", genericParsers),
 	)
-	if err == nil {
-		err = fmt.Errorf("failed to parse with generic parsers")
-	}
-	return nil, err
 }
 
 func parseRule(rule string, valueInterface any) bool {
@@ -587,12 +583,6 @@ func parseByArg(rpcInput RPCInput, input []string, dataSource int) ([]any, error
 		return nil, fmt.Errorf("invalid input format, input isn't an unsigned index. input=%s error=%w", inp, err)
 	}
 
-	if dataSource == PARSE_RESULT {
-		if value, ok := fastPathScalarFromResult(rpcInput.GetResult(), input); ok {
-			return []any{value}, nil
-		}
-	}
-
 	unmarshalledData, err := getDataToParse(rpcInput, dataSource)
 	if err != nil {
 		return nil, fmt.Errorf("invalid input format, data is not json. data=%s err=%w", unmarshalledData, err)
@@ -635,7 +625,15 @@ func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]any, e
 			return []any{value}, nil
 		}
 	}
+	return parseCanonicalDecoded(rpcInput, input, dataSource)
+}
 
+// parseCanonicalDecoded is the decode path behind parseCanonical: the data
+// source is decoded into a tree and walked key by key. fastPathScalarFromResult
+// serves the common PARSE_RESULT hits without this decode and must agree with
+// it on every value it serves; the parity test in result_fastpath_test.go pins
+// that against this function.
+func parseCanonicalDecoded(rpcInput RPCInput, input []string, dataSource int) ([]any, error) {
 	unmarshalledData, err := getDataToParse(rpcInput, dataSource)
 	if err != nil {
 		return nil, fmt.Errorf("invalid input format, data is not json: %s, error: %s", unmarshalledData, err)
