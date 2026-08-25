@@ -384,7 +384,15 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 
 				nodeErrors := numberOfNodeErrorsAtomic.Load()
 				output := sm.policy.Decide(sm.buildDecisionInput(nodeErrors, false))
-				utils.LavaFormatDebug("[StateMachine] policy.Decide",
+				// A retry is the exceptional path — the common case is a single attempt that
+				// stops — and it is the one an operator needs in order to explain a slow or
+				// multi-provider relay from production INFO logs. Log those at INFO; leave the
+				// ordinary Stop at DEBUG so steady-state traffic stays quiet.
+				logDecision := utils.LavaFormatDebug
+				if output.Action != ActionStop {
+					logDecision = utils.LavaFormatInfo
+				}
+				logDecision("[StateMachine] policy.Decide",
 					utils.LogAttr("GUID", sm.ctx),
 					utils.LogAttr("action", output.Action),
 					utils.LogAttr("reason", output.Reason),

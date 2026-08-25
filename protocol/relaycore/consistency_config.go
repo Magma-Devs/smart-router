@@ -95,7 +95,7 @@ func NewConsistencyValidationConfig(
 		MaxWaitTime:          maxWaitTime,
 	}
 
-	utils.LavaFormatDebug("created consistency validation config",
+	utils.LavaFormatInfo("created consistency validation config",
 		utils.LogAttr("endpointLagThreshold", config.EndpointLagThreshold),
 		utils.LogAttr("maxWaitTime", config.MaxWaitTime),
 		utils.LogAttr("blockLagForQosSync", blockLagForQosSync),

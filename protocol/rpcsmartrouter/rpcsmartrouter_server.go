@@ -1950,7 +1950,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// Handle response
 			if err != nil {
 				tracing.RecordError(provSpan, err)
-				utils.LavaFormatDebug("direct RPC relay failed in goroutine",
+				// A relay WE cancelled is not an endpoint failure: on a stateful broadcast the
+				// first answer cancels the rest, so promoting this unconditionally would emit
+				// N-1 INFO lines per request for endpoints that did nothing wrong — the same
+				// mis-attribution MAG-2648 removed from scoring. Keep those at DEBUG; a genuine
+				// endpoint failure is the exceptional path an operator needs at INFO.
+				logRelayFailure := utils.LavaFormatInfo
+				if isClientCancel {
+					logRelayFailure = utils.LavaFormatDebug
+				}
+				logRelayFailure("direct RPC relay failed in goroutine",
 					utils.LogAttr("endpoint", endpointAddress),
 					utils.LogAttr("error", err.Error()),
 					utils.LogAttr("latency", relayLatency),
@@ -2018,7 +2027,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				if releaseErr == nil {
 					releaseErr = fmt.Errorf("upstream rate-limited the relay (HTTP %d)", statusCode)
 				}
-				utils.LavaFormatDebug("relay rate-limited by upstream, holding endpoint off",
+				utils.LavaFormatInfo("relay rate-limited by upstream, holding endpoint off",
 					utils.LogAttr("endpoint", endpointAddress),
 					utils.LogAttr("holdoff", heldFor.String()),
 					utils.LogAttr("GUID", goroutineCtx),
@@ -2210,7 +2219,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 			if rpcss.endpointChainTrackerManager != nil && endpointURL != "" {
 				trackerState, trackerLastError, _ = rpcss.endpointChainTrackerManager.GetTrackerState(endpointURL)
 			}
-			utils.LavaFormatDebug("skipping consistency validation because endpoint latest block is unknown",
+			utils.LavaFormatInfo("skipping consistency validation because endpoint latest block is unknown",
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("endpointURL", endpointURL),
 				utils.LogAttr("chainTip", chainTip),
@@ -2232,10 +2241,21 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		)
 		if err != nil {
 			// Endpoint is too far behind - add to failed sessions
-			utils.LavaFormatDebug("skipping endpoint due to consistency check",
+			// lag + threshold are what an operator actually needs here, and they were being
+			// dropped: ValidateEndpointCapability logs them at DEBUG and this caller discards
+			// its err. Recompute them rather than promote the inner line as well — one INFO
+			// line per rejected endpoint, carrying the endpoint identity the inner line lacks.
+			lag := chainTip - endpointLatest
+			threshold := int64(0)
+			if rpcss.consistencyConfig != nil {
+				threshold = rpcss.consistencyConfig.EndpointLagThreshold
+			}
+			utils.LavaFormatInfo("skipping endpoint due to consistency check",
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("endpointLatest", endpointLatest),
 				utils.LogAttr("chainTip", chainTip),
+				utils.LogAttr("lag", lag),
+				utils.LogAttr("threshold", threshold),
 				// Report which source produced the value: the store wins whenever it holds a
 				// positive tip (prefer-store), else the poll atomic is the bootstrap fallback.
 				utils.LogAttr("source", func() string {
@@ -2263,15 +2283,21 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 			utils.LogAttr("chainTip", chainTip),
 			utils.LogAttr("GUID", ctx),
 		)
+		// The error below carries the same sentinel and is visible at every level, so this
+		// stays at DEBUG rather than WARN — two records of one event made anything counting
+		// the sentinel double-count it. skippedCount and GUID moved onto the error so the
+		// single surviving line still carries them.
 		return nil, failedSessions, utils.LavaFormatError("all endpoints failed consistency pre-validation",
 			lavasession.ConsistencyPreValidationError,
 			utils.LogAttr("totalEndpoints", len(sessions)),
+			utils.LogAttr("skippedCount", skippedCount),
 			utils.LogAttr("chainTip", chainTip),
+			utils.LogAttr("GUID", ctx),
 		)
 	}
 
 	if skippedCount > 0 {
-		utils.LavaFormatDebug("filtered endpoints by consistency",
+		utils.LavaFormatInfo("filtered endpoints by consistency",
 			utils.LogAttr("totalEndpoints", len(sessions)),
 			utils.LogAttr("validEndpoints", len(validSessions)),
 			utils.LogAttr("skippedCount", skippedCount),

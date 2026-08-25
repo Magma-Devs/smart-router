@@ -1377,7 +1377,7 @@ func (csm *ConsumerSessionManager) filterRateLimitedProviders(ctx context.Contex
 		return validAddresses
 	}
 	if readyChoosable > 0 {
-		utils.LavaFormatDebug("rate-limit hold-off: skipping held-off providers",
+		utils.LavaFormatInfo("rate-limit hold-off: skipping held-off providers",
 			utils.LogAttr("held", heldCount),
 			utils.LogAttr("ready", readyChoosable),
 			utils.LogAttr("GUID", ctx),
@@ -1387,7 +1387,7 @@ func (csm *ConsumerSessionManager) filterRateLimitedProviders(ctx context.Contex
 	if soonest == "" {
 		return ready // every held candidate is also ignored this request — nothing to add
 	}
-	utils.LavaFormatDebug("rate-limit hold-off: every candidate held off, keeping the soonest to expire",
+	utils.LavaFormatWarning("rate-limit hold-off: every candidate held off, keeping the soonest to expire", nil,
 		utils.LogAttr("provider", soonest),
 		utils.LogAttr("readyAt", soonestAt),
 		utils.LogAttr("GUID", ctx),
@@ -1606,7 +1606,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 
 	// make sure we have at least 1 valid provider
 	if len(providers) == 0 || providers[0] == "" {
-		utils.LavaFormatDebug("No providers returned by the optimizer", utils.Attribute{Key: "Provider list", Value: validAddresses}, utils.Attribute{Key: "IgnoredProviderList", Value: ignoredProvidersList}, utils.LogAttr("GUID", ctx))
+		utils.LavaFormatInfo("No providers returned by the optimizer", utils.Attribute{Key: "Provider list", Value: validAddresses}, utils.Attribute{Key: "IgnoredProviderList", Value: ignoredProvidersList}, utils.LogAttr("GUID", ctx))
 		err = PairingListEmptyError
 		return addresses, err
 	}
@@ -2198,7 +2198,7 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 	allowSecondChance := false
 	// if this session failed more than MaximumNumberOfFailuresAllowedPerConsumerSession times or session went out of sync we block it.
 	if len(consumerSession.ConsecutiveErrors) > MaximumNumberOfFailuresAllowedPerConsumerSession || IsSessionSyncLoss(errorReceived) {
-		utils.LavaFormatDebug("Blocking consumer session",
+		utils.LavaFormatInfo("Blocking consumer session",
 			utils.LogAttr("ConsecutiveErrors", consumerSession.ConsecutiveErrors),
 			utils.LogAttr("errorsCount", consumerSession.errorsCount),
 			utils.LogAttr("id", consumerSession.SessionId),
@@ -2502,7 +2502,7 @@ func (csm *ConsumerSessionManager) GenerateReconnectCallback(consumerSessionsWit
 		ctx := utils.WithUniqueIdentifier(context.Background(), utils.GenerateUniqueIdentifier()) // unique identifier for retries
 		_, providerAddress, err := csm.probeProvider(ctx, consumerSessionsWithProvider, csm.atomicReadCurrentEpoch(), true)
 		if err == nil {
-			utils.LavaFormatDebug("Reconnecting provider succeeded returning provider to valid addresses list", utils.LogAttr("provider", providerAddress))
+			utils.LavaFormatInfo("Reconnecting provider succeeded returning provider to valid addresses list", utils.LogAttr("provider", providerAddress))
 			// csm.pairing and csm.backupProviders are built from separate inputs by
 			// UpdateAllProviders with no dedup, so a provider address can legitimately
 			// appear in both. The old "if backup else primary" branching silently dropped
