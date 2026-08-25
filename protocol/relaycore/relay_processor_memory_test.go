@@ -207,6 +207,16 @@ func BenchmarkHashVsCanonicalForm(b *testing.B) {
 			_, _ = json.Marshal(temp)
 		}
 	})
+
+	// The canonical hash the cross-validation path actually computes:
+	// jsontext streaming canonicalization into a pooled buffer, then SHA256.
+	b.Run("CanonicalResponseHash", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = canonicalResponseHash(responseData)
+		}
+	})
 }
 
 // createLargeSolanaBatchResponse creates a large Solana-like batch response for testing
