@@ -45,6 +45,7 @@ func (NoOpConsumerMetrics) SetQOSMetrics(string, string, string, string, *pairin
 func (NoOpConsumerMetrics) ResetSessionRelatedMetrics()                                    {}
 func (NoOpConsumerMetrics) ResetBlockedProvidersMetrics(string, string, map[string]string) {}
 func (NoOpConsumerMetrics) SetCSMBlockedProvidersCount(string, string, int)                {}
+func (NoOpConsumerMetrics) SetCSMPreviousEpochBlockedProvidersCount(string, string, int)   {}
 func (NoOpConsumerMetrics) SetCSMBlockedBackupProvidersCount(string, string, int)          {}
 func (NoOpConsumerMetrics) SetCSMStickySessionsCount(string, string, int)                  {}
 func (NoOpConsumerMetrics) SetCSMReportedProvidersCount(string, string, int)               {}
@@ -106,9 +107,12 @@ type ConsumerMetricsManagerInf interface {
 
 	// --- CSM state-store sizes (ConsumerSessionManager) ---
 	// Gauges that expose the current size of black-box state stores so
-	// integration tests can verify /debug/reset-all actually emptied them.
-	// All four go to zero after ResetTransientFailureState (MAG-1762).
+	// integration tests can verify /debug/reset-all actually emptied them
+	// (MAG-1762). Note ResetTransientFailureState deliberately preserves
+	// currentlyBlockedProviderAddresses, so SetCSMBlockedProvidersCount is
+	// zeroed by ResetBlockedProviders — /debug/reset-all calls both.
 	SetCSMBlockedProvidersCount(chainId, apiInterface string, count int)
+	SetCSMPreviousEpochBlockedProvidersCount(chainId, apiInterface string, count int)
 	SetCSMBlockedBackupProvidersCount(chainId, apiInterface string, count int)
 	SetCSMStickySessionsCount(chainId, apiInterface string, count int)
 	SetCSMReportedProvidersCount(chainId, apiInterface string, count int)

@@ -2843,8 +2843,30 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	}
 
 	csm.lock.RLock()
-	blockedCount := len(csm.previousEpochBlockedProviders)
+	// currentlyBlockedProviderAddresses is the standing block: these providers receive no traffic
+	// until they recover. previousEpochBlockedProviders is only the cross-epoch carry-over set,
+	// populated at an epoch boundary and cleared moments later by the re-block pass — publishing
+	// that as "blocked providers" reported 0 through entire outages.
+	blockedCount := len(csm.currentlyBlockedProviderAddresses)
+	prevEpochBlockedCount := len(csm.previousEpochBlockedProviders)
 	blockedBackupCount := len(csm.blockedBackupProviders)
+
+	// Snapshot the per-provider blocked state for the whole pairing, not just the addresses that
+	// changed. The per-provider gauge MUST be level-triggered: the blocked list is also drained
+	// wholesale by setValidAddressesToDefaultValue — on every epoch transition, and on the
+	// pool-empty release in releaseBlockedProvidersIfPoolEmpty — and neither drain publishes
+	// anything per provider. Edge-triggered publishing alone therefore left every series it
+	// emptied stuck at 1 for a provider that was back in rotation and serving fine (MAG-3106).
+	// Republishing the full truth each tick makes the gauge self-correcting instead.
+	blockedSet := make(map[string]struct{}, blockedCount)
+	for _, address := range csm.currentlyBlockedProviderAddresses {
+		blockedSet[address] = struct{}{}
+	}
+	providerBlocked := make(map[string]bool, len(csm.pairing))
+	for address := range csm.pairing {
+		_, blocked := blockedSet[address]
+		providerBlocked[address] = blocked
+	}
 	csm.lock.RUnlock()
 
 	var stickyCount, reportedCount int
@@ -2858,9 +2880,15 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	chainID := csm.rpcEndpoint.ChainID
 	apiInterface := csm.rpcEndpoint.ApiInterface
 	csm.consumerMetricsManager.SetCSMBlockedProvidersCount(chainID, apiInterface, blockedCount)
+	csm.consumerMetricsManager.SetCSMPreviousEpochBlockedProvidersCount(chainID, apiInterface, prevEpochBlockedCount)
 	csm.consumerMetricsManager.SetCSMBlockedBackupProvidersCount(chainID, apiInterface, blockedBackupCount)
 	csm.consumerMetricsManager.SetCSMStickySessionsCount(chainID, apiInterface, stickyCount)
 	csm.consumerMetricsManager.SetCSMReportedProvidersCount(chainID, apiInterface, reportedCount)
+	// The endpoint argument is unused by the smart router (a node URL can carry an API key and
+	// must never become a label) but is fixed by the shared interface.
+	for address, blocked := range providerBlocked {
+		csm.consumerMetricsManager.SetBlockedProvider(chainID, apiInterface, address, "", blocked)
+	}
 }
 
 // startStateSizesPublisher kicks off the periodic gauge tick. Per-CSM
