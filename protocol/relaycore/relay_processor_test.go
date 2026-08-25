@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -2340,6 +2341,54 @@ func TestCanonicalResponseHash(t *testing.T) {
 		b := []byte(`{"id":1,"result":"abc"}TRAILING-B`)
 		require.NotEqual(t, canonicalResponseHash(a), canonicalResponseHash(b),
 			"trailing bytes must keep payloads in distinct buckets")
+	})
+
+	t.Run("string escaping invariance", func(t *testing.T) {
+		// The same string spelled with a \u escape and literally is one value.
+		a := []byte(`{"id":1,"result":"\u0041bc"}`)
+		b := []byte(`{"id":1,"result":"Abc"}`)
+		require.Equal(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"equivalent string escapes must hash equally")
+	})
+
+	t.Run("nested key order invariance", func(t *testing.T) {
+		a := []byte(`{"result":{"b":[{"y":1,"x":2}],"a":"v"},"id":1}`)
+		b := []byte(`{"id":1,"result":{"a":"v","b":[{"x":2,"y":1}]}}`)
+		require.Equal(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"key order must not matter at any depth")
+	})
+
+	t.Run("array order is significant", func(t *testing.T) {
+		a := []byte(`{"id":1,"result":[1,2]}`)
+		b := []byte(`{"id":1,"result":[2,1]}`)
+		require.NotEqual(t, canonicalResponseHash(a), canonicalResponseHash(b),
+			"arrays are ordered; reordering elements changes the value")
+	})
+
+	t.Run("duplicate member names are hashed, not rejected", func(t *testing.T) {
+		// A response is hashed, never refused: duplicate names go through the
+		// canonical form (in encounter order) rather than the raw-byte fallback,
+		// so whitespace around them still does not matter.
+		a := []byte(`{"id":1,"a":1,"a":2}`)
+		b := []byte("{ \"id\": 1, \"a\": 1, \"a\": 2 }")
+		require.Equal(t, canonicalResponseHash(a), canonicalResponseHash(b))
+		require.NotEqual(t, sha256.Sum256(a), canonicalResponseHash(a),
+			"duplicate names must not force the raw-byte fallback")
+	})
+
+	t.Run("invalid UTF-8 in a string is hashed, not rejected", func(t *testing.T) {
+		a := []byte("{\"id\":1,\"result\":\"\xff\"}")
+		b := []byte("{ \"id\": 1, \"result\": \"\xff\" }")
+		require.Equal(t, canonicalResponseHash(a), canonicalResponseHash(b))
+	})
+
+	t.Run("large payloads do not pin the scratch pool", func(t *testing.T) {
+		big := []byte(`{"id":1,"result":"` + strings.Repeat("x", 2<<20) + `"}`)
+		require.NotEqual(t, [32]byte{}, canonicalResponseHash(big))
+		buf := canonicalScratch.Get().(*[]byte)
+		require.LessOrEqual(t, cap(*buf), canonicalScratchMaxRetain,
+			"a buffer grown past the retain cap must not be returned to the pool")
+		canonicalScratch.Put(buf)
 	})
 
 	t.Run("multi-document bodies do not falsely agree", func(t *testing.T) {
