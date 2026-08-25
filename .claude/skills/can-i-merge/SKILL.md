@@ -187,7 +187,7 @@ history — extend the table as your repo ships its own false readies:
 |---|---|
 | CI green | CI ran unit tests; the changed behaviour only shows on a deployed router, and nothing deployed ran it |
 | The binary was built and copied to the server | the Helm chart still passes a flag this binary does not know — the pod CrashLoops on the next rollout |
-| The deployed version string matches the release | the version subcommand prints the semver tag, not the commit; only `strings <binary> | grep <commit-hash>` confirms the running build |
+| The deployed version string matches the release | the version subcommand prints the semver tag, not the commit; only `strings <binary> \| grep <commit-hash>` confirms the running build |
 | The binary was replaced in place on the pod | pods do not pick up an in-place replacement; until a rollout restart, the old code is still serving |
 | `go test ./...` passed | an assertion silently did nothing — a mock that always answers, an empty set compared to an empty set (`make test` runs `-count=1`, so at least caching is not the trap) |
 | "All tests pass" in the PR body | an interrupted run was forgotten between writing that line and now |
@@ -375,6 +375,12 @@ d() { git diff "$BASE...HEAD" "$@"; }   # a function, not a string — a string
                                         # check below prints nothing, which reads
                                         # exactly like clean
 ```
+
+**Re-paste those two lines at the top of every block below.** A shell function
+does not survive between tool calls — each one starts a fresh shell — so a later
+block run on its own opens with `d: command not found` and has run none of its
+checks. That failure is loud, unlike the ones this gate is chasing, but it still
+costs you the block.
 
 ### Does what landed meanwhile interact with this
 
