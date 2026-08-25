@@ -88,6 +88,19 @@ const (
 	ActionStop
 )
 
+// String makes Action readable in logs. Without it the retry decision line renders the
+// bare iota — every entry read "action=0", which is worse than not logging it at all.
+func (a Action) String() string {
+	switch a {
+	case ActionRetry:
+		return "retry"
+	case ActionStop:
+		return "stop"
+	default:
+		return "unknown"
+	}
+}
+
 // SendResult represents the pre-relay send result decision.
 type SendResult int
 

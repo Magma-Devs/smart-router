@@ -1500,7 +1500,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 			}
 		}
 		if validAddressesLength-ignoredProvidersListLength <= 0 {
-			utils.LavaFormatInfo("Pairing list empty", utils.Attribute{Key: "Provider list", Value: validAddresses}, utils.Attribute{Key: "IgnoredProviderList", Value: ignoredProvidersList}, utils.Attribute{Key: "addon", Value: addon}, utils.Attribute{Key: "extensions", Value: extensions}, utils.LogAttr("GUID", ctx))
+			utils.LavaFormatDebug("Pairing list empty", utils.Attribute{Key: "Provider list", Value: validAddresses}, utils.Attribute{Key: "IgnoredProviderList", Value: ignoredProvidersList}, utils.Attribute{Key: "addon", Value: addon}, utils.Attribute{Key: "extensions", Value: extensions}, utils.LogAttr("GUID", ctx))
 			err = PairingListEmptyError
 			return addresses, err
 		}
