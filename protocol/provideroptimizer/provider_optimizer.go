@@ -36,8 +36,8 @@ type ConcurrentBlockStore struct {
 }
 
 type cacheInf interface {
-	Get(key string) (interface{}, bool)
-	Set(key string, value interface{}, cost int64) bool
+	Get(key string) (any, bool)
+	Set(key string, value any, cost int64) bool
 	// Clear empties the cache. Used by ResetState to discard future-dated entries
 	// after a debug clock reset so that real-time samples are no longer rejected.
 	Clear()
@@ -144,10 +144,7 @@ func (s *providerSyncFloor) applyLocked(provider string, observed uint64, provid
 	if s.floor == nil {
 		s.floor = make(map[string]uint64)
 	}
-	f := s.floor[provider]
-	if providerData.SyncBlock > f {
-		f = providerData.SyncBlock
-	}
+	f := max(providerData.SyncBlock, s.floor[provider])
 	if observed > f {
 		f = observed
 	}

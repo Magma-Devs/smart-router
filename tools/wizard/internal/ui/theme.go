@@ -38,9 +38,9 @@ var (
 	// SectionHeader — "▎ 1 · Supported chains" rule above each step.
 	SectionBar = lipgloss.NewStyle().Foreground(Brand).Bold(true)
 
-	OK   = lipgloss.NewStyle().Foreground(Good)
-	Wn   = lipgloss.NewStyle().Foreground(Warn)
-	Er   = lipgloss.NewStyle().Foreground(Bad)
+	OK     = lipgloss.NewStyle().Foreground(Good)
+	Wn     = lipgloss.NewStyle().Foreground(Warn)
+	Er     = lipgloss.NewStyle().Foreground(Bad)
 	Accent = lipgloss.NewStyle().Foreground(Ember1).Bold(true)
 
 	// Comment — orange (not bold) for the "# …" annotation lines above commands.
@@ -67,7 +67,9 @@ var (
 func Clear() { fmt.Print("\x1b[2J\x1b[3J\x1b[H") }
 
 // RuleTop draws the TOP of an open box with an inline label, e.g.
-//   ┌── run command ───────────────────────────────┐
+//
+//	┌── run command ───────────────────────────────┐
+//
 // It's a box (corners + top border) but has NO vertical side walls on the
 // content lines below — so copy-pasting any command line grabs no box chars.
 func RuleTop(label string, width int) string {
@@ -75,20 +77,14 @@ func RuleTop(label string, width int) string {
 	lead := "┌── "
 	tail := " "
 	used := lipgloss.Width(lead) + lipgloss.Width(label) + lipgloss.Width(tail) + 1 // +1 for ┐
-	pad := width - used
-	if pad < 0 {
-		pad = 0
-	}
+	pad := max(width-used, 0)
 	return bar.Render(lead) + Title.Render(label) + bar.Render(tail+strings.Repeat("─", pad)+"┐")
 }
 
 // RuleBottom draws the BOTTOM of the open box (corners + bottom border).
 func RuleBottom(width int) string {
 	bar := lipgloss.NewStyle().Foreground(Brand)
-	pad := width - 2
-	if pad < 0 {
-		pad = 0
-	}
+	pad := max(width-2, 0)
 	return bar.Render("└" + strings.Repeat("─", pad) + "┘")
 }
 

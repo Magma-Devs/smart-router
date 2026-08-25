@@ -2379,10 +2379,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			// Create provider session with static configuration.
 			// If stake is specified in the static provider config, use it (ulava).
 			// Otherwise keep stake=0 so CalcWeightsByStake applies the legacy static-provider boost.
-			stake := provider.Stake
-			if stake < 0 {
-				stake = 0
-			}
+			stake := max(provider.Stake, 0)
 			stakeAmount := StaticProviderDummyStake
 			if stake > 0 {
 				stakeAmount = stake

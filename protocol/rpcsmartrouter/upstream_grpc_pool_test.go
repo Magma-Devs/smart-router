@@ -319,16 +319,14 @@ func TestUpstreamGRPCStreamConnection_ConcurrentStreamOperations(t *testing.T) {
 	numOperations := 100
 
 	// Concurrently increment and decrement streams
-	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < numOperations; j++ {
+	for range numGoroutines {
+		wg.Go(func() {
+			for range numOperations {
 				conn.IncrementStreams()
 				conn.StreamCount()
 				conn.DecrementStreams()
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

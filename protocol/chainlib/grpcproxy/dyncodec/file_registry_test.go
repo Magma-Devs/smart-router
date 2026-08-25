@@ -32,15 +32,15 @@ func TestFileDescriptorSetRegistry(t *testing.T) {
 	t.Run("FileDescriptorSetRegistry with proto file", func(t *testing.T) {
 		// Create a minimal FileDescriptorSet with a test proto
 		testFile := &descriptorpb.FileDescriptorProto{
-			Name:    strPtr("test.proto"),
-			Package: strPtr("test.package"),
+			Name:    new("test.proto"),
+			Package: new("test.package"),
 			MessageType: []*descriptorpb.DescriptorProto{
 				{
-					Name: strPtr("TestMessage"),
+					Name: new("TestMessage"),
 					Field: []*descriptorpb.FieldDescriptorProto{
 						{
-							Name:   strPtr("id"),
-							Number: int32Ptr(1),
+							Name:   new("id"),
+							Number: new(int32(1)),
 							Type:   descriptorpb.FieldDescriptorProto_TYPE_INT64.Enum(),
 						},
 					},
@@ -48,12 +48,12 @@ func TestFileDescriptorSetRegistry(t *testing.T) {
 			},
 			Service: []*descriptorpb.ServiceDescriptorProto{
 				{
-					Name: strPtr("TestService"),
+					Name: new("TestService"),
 					Method: []*descriptorpb.MethodDescriptorProto{
 						{
-							Name:       strPtr("GetTest"),
-							InputType:  strPtr(".test.package.TestMessage"),
-							OutputType: strPtr(".test.package.TestMessage"),
+							Name:       new("GetTest"),
+							InputType:  new(".test.package.TestMessage"),
+							OutputType: new(".test.package.TestMessage"),
 						},
 					},
 				},
@@ -118,10 +118,10 @@ func TestFileDescriptorSetRegistry(t *testing.T) {
 
 	t.Run("Symbol lookup with leading dot", func(t *testing.T) {
 		testFile := &descriptorpb.FileDescriptorProto{
-			Name:    strPtr("test.proto"),
-			Package: strPtr("test"),
+			Name:    new("test.proto"),
+			Package: new("test"),
 			MessageType: []*descriptorpb.DescriptorProto{
-				{Name: strPtr("Msg")},
+				{Name: new("Msg")},
 			},
 		}
 
@@ -141,10 +141,13 @@ func TestFileDescriptorSetRegistry(t *testing.T) {
 }
 
 // Helper functions for creating pointers
+//
+//go:fix inline
 func strPtr(s string) *string {
-	return &s
+	return new(s)
 }
 
+//go:fix inline
 func int32Ptr(i int32) *int32 {
-	return &i
+	return new(i)
 }

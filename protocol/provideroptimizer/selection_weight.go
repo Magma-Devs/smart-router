@@ -1,6 +1,7 @@
 package provideroptimizer
 
 import (
+	"maps"
 	"sync"
 )
 
@@ -42,7 +43,5 @@ func (psc *providerStakeCacheInst) getStakeInner(address string) int64 {
 func (psc *providerStakeCacheInst) UpdateStakes(stakes map[string]int64) {
 	psc.lock.Lock()
 	defer psc.lock.Unlock()
-	for address, stake := range stakes {
-		psc.stakes[address] = stake
-	}
+	maps.Copy(psc.stakes, stakes)
 }

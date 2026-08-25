@@ -25,7 +25,7 @@ type EndpointPoller struct {
 	chainParser      chainlib.ChainParser
 	chainID          string
 	apiInterface     string
-	latestBlock      int64
+	latestBlock      atomic.Int64
 
 	// Metadata for requests
 	endpointURL string
@@ -196,7 +196,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 		)
 	}
 
-	atomic.StoreInt64(&ecf.latestBlock, blockNum)
+	ecf.latestBlock.Store(blockNum)
 	return blockNum, nil
 }
 
@@ -473,5 +473,5 @@ func (ecf *EndpointPoller) chainFetcherMetadata() []pairingtypes.Metadata {
 
 // GetLatestBlock returns the last known latest block number.
 func (ecf *EndpointPoller) GetLatestBlock() int64 {
-	return atomic.LoadInt64(&ecf.latestBlock)
+	return ecf.latestBlock.Load()
 }

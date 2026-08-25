@@ -54,7 +54,7 @@ type SVMChainTracker struct {
 	chainFetcher ChainFetcher
 	slotCache    *ristretto.Cache[int64, int64]  // cache for block to slot. (a few slots can point the same block, but we don't really care about that so overwrite is ok)
 	hashCache    *ristretto.Cache[int64, string] // cache for block to hash.
-	seenBlock    int64
+	seenBlock    atomic.Int64
 	// headOnly mirrors the tracker's mode. Both caches exist ONLY to serve
 	// FetchBlockHashByNum, which head-only never calls (the tracker returns right after
 	// publishing the head), so in that mode they are left nil: no allocation, and no
@@ -97,7 +97,7 @@ func (cs *SVMChainTracker) fetchLatestBlockNumInner(ctx context.Context) (int64,
 	slot := response.Result.Context.Slot
 	blockHash := response.Result.Value.BlockHash
 
-	atomic.StoreInt64(&cs.seenBlock, slot)
+	cs.seenBlock.Store(slot)
 	if !cs.headOnly {
 		cs.slotCache.SetWithTTL(slot, slot, 1, slotCacheTTL)
 		cs.hashCache.SetWithTTL(slot, blockHash, 1, hashCacheTTL)
@@ -164,7 +164,7 @@ func (cs *SVMChainTracker) FetchBlockHashByNum(ctx context.Context, slot int64) 
 // waitForSlotVisible blocks briefly until the tracker has observed `slot` at least once.
 // Handles the bootstrap race where a hash lookup can arrive before the tracker has seen that slot.
 func (cs *SVMChainTracker) waitForSlotVisible(slot int64) error {
-	if slot <= atomic.LoadInt64(&cs.seenBlock) {
+	if slot <= cs.seenBlock.Load() {
 		for range getSlotFromCacheMaxRetries {
 			if _, ok := cs.slotCache.Get(slot); ok {
 				return nil

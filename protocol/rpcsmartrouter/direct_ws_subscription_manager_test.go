@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -70,9 +71,9 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 
 		// Parse JSON-RPC request
 		var req struct {
-			ID     interface{} `json:"id"`
-			Method string      `json:"method"`
-			Params interface{} `json:"params"`
+			ID     any    `json:"id"`
+			Method string `json:"method"`
+			Params any    `json:"params"`
 		}
 		if err := json.Unmarshal(message, &req); err != nil {
 			continue
@@ -83,7 +84,7 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 			subID := ms.createSubscription()
 
 			// Send subscription confirmation
-			response := map[string]interface{}{
+			response := map[string]any{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
 				"result":  subID,
@@ -95,14 +96,14 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 			go ms.sendSubscriptionMessages(conn, subID)
 		} else if strings.HasSuffix(req.Method, "_unsubscribe") || strings.HasPrefix(req.Method, "eth_unsubscribe") {
 			// Get subscription ID from params
-			params, ok := req.Params.([]interface{})
+			params, ok := req.Params.([]any)
 			if ok && len(params) > 0 {
 				if subID, ok := params[0].(string); ok {
 					ms.closeSubscription(subID)
 				}
 			}
 
-			response := map[string]interface{}{
+			response := map[string]any{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
 				"result":  true,
@@ -151,12 +152,12 @@ func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn,
 		case <-ticker.C:
 			counter++
 			// Send subscription notification
-			notification := map[string]interface{}{
+			notification := map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "eth_subscription",
-				"params": map[string]interface{}{
+				"params": map[string]any{
 					"subscription": subID,
-					"result": map[string]interface{}{
+					"result": map[string]any{
 						"number": counter,
 					},
 				},
@@ -187,7 +188,7 @@ func (ms *mockSubscriptionServer) URL() string {
 // mockWSProtocolMessage implements chainlib.ProtocolMessage for WebSocket subscription tests
 type mockWSProtocolMessage struct {
 	method string
-	params interface{}
+	params any
 }
 
 func (m *mockWSProtocolMessage) GetApi() *spectypes.Api {
@@ -207,7 +208,7 @@ func (m *mockWSProtocolMessage) GetRPCMessage() rpcInterfaceMessages.GenericMess
 }
 
 func (m *mockWSProtocolMessage) RelayPrivateData() *pairingtypes.RelayPrivateData {
-	data, _ := json.Marshal(map[string]interface{}{
+	data, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  m.method,
@@ -259,12 +260,12 @@ func (m *mockWSProtocolMessage) GetCrossValidationParameters() (common.CrossVali
 
 type mockWSGenericMessage struct {
 	method string
-	params interface{}
+	params any
 }
 
 func (m *mockWSGenericMessage) GetHeaders() []pairingtypes.Metadata { return nil }
 func (m *mockWSGenericMessage) DisableErrorHandling()               {}
-func (m *mockWSGenericMessage) GetParams() interface{}              { return m.params }
+func (m *mockWSGenericMessage) GetParams() any                      { return m.params }
 func (m *mockWSGenericMessage) GetMethod() string                   { return m.method }
 func (m *mockWSGenericMessage) GetResult() json.RawMessage          { return nil }
 func (m *mockWSGenericMessage) GetID() json.RawMessage              { return []byte("1") }
@@ -393,7 +394,7 @@ func TestDirectWSSubscriptionManager_Unsubscribe_NoSubscriptions(t *testing.T) {
 	ctx := context.Background()
 	protocolMessage := &mockWSProtocolMessage{
 		method: "eth_unsubscribe",
-		params: []interface{}{"0x123"},
+		params: []any{"0x123"},
 	}
 
 	_, err := manager.Unsubscribe(ctx, protocolMessage, "dapp1", "192.168.1.1", "ws-uid-123", nil)
@@ -426,7 +427,7 @@ func TestDirectWSSubscriptionManager_StartSubscription_ConnectionFailure(t *test
 
 	protocolMessage := &mockWSProtocolMessage{
 		method: "eth_subscribe",
-		params: []interface{}{"newHeads"},
+		params: []any{"newHeads"},
 	}
 
 	reply, repliesChan, err := manager.StartSubscription(ctx, protocolMessage, "dapp1", "192.168.1.1", "ws-uid-123", nil)
@@ -629,10 +630,10 @@ func TestUnsubscribeRateLimiting(t *testing.T) {
 	ctx := context.Background()
 
 	// First two unsubscribes should succeed (within burst limit)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		protocolMessage := &mockWSProtocolMessage{
 			method: "eth_unsubscribe",
-			params: []interface{}{fmt.Sprintf("0x%d", i)},
+			params: []any{fmt.Sprintf("0x%d", i)},
 		}
 
 		_, err := manager.Unsubscribe(ctx, protocolMessage, "dapp1", "192.168.1.1", "ws-uid-123", nil)
@@ -644,7 +645,7 @@ func TestUnsubscribeRateLimiting(t *testing.T) {
 	// Third unsubscribe should be rate limited
 	protocolMessage := &mockWSProtocolMessage{
 		method: "eth_unsubscribe",
-		params: []interface{}{"0x999"},
+		params: []any{"0x999"},
 	}
 
 	_, err := manager.Unsubscribe(ctx, protocolMessage, "dapp1", "192.168.1.1", "ws-uid-123", nil)
@@ -687,7 +688,7 @@ func TestUnsubscribeAllNotRateLimited(t *testing.T) {
 	ctx := context.Background()
 
 	// Multiple UnsubscribeAll calls should all succeed (not rate limited)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		err := manager.UnsubscribeAll(ctx, "dapp1", "192.168.1.1", fmt.Sprintf("ws-uid-%d", i), nil)
 		assert.NoError(t, err, "UnsubscribeAll %d should not be rate limited", i+1)
 	}
@@ -738,7 +739,7 @@ func TestMultiClientJoinExistingSubscription(t *testing.T) {
 	client1Sender := common.NewSafeChannelSender(subCtx, client1ReplyChan)
 
 	// Create first reply data
-	firstReplyData, _ := json.Marshal(map[string]interface{}{
+	firstReplyData, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"result":  client1RouterID,
@@ -788,7 +789,7 @@ func TestMultiClientJoinExistingSubscription(t *testing.T) {
 		"Client 2's router ID should be different from Client 1's")
 
 	// Verify the reply contains client 2's unique router ID and correct request ID
-	var replyData map[string]interface{}
+	var replyData map[string]any
 	err := json.Unmarshal(reply.Data, &replyData)
 	require.NoError(t, err)
 	assert.Equal(t, client2RouterID, replyData["result"],
@@ -894,7 +895,7 @@ func TestMultiClientIndependentUnsubscribe(t *testing.T) {
 	// This simulates: eth_unsubscribe(client2RouterID)
 	protocolMessage := &mockWSProtocolMessage{
 		method: "eth_unsubscribe",
-		params: []interface{}{client2RouterID},
+		params: []any{client2RouterID},
 	}
 	_, err := manager.Unsubscribe(ctx, protocolMessage, "dapp2", "10.0.0.2", "ws-2", nil)
 	assert.NoError(t, err, "Client 2 unsubscribe should succeed")
@@ -930,7 +931,7 @@ func TestMultiClientIndependentUnsubscribe(t *testing.T) {
 	// CLIENT 3 UNSUBSCRIBES
 	protocolMessage3 := &mockWSProtocolMessage{
 		method: "eth_unsubscribe",
-		params: []interface{}{client3RouterID},
+		params: []any{client3RouterID},
 	}
 	_, err = manager.Unsubscribe(ctx, protocolMessage3, "dapp3", "10.0.0.3", "ws-3", nil)
 	assert.NoError(t, err, "Client 3 unsubscribe should succeed")
@@ -1015,10 +1016,10 @@ func TestRouteMessageToClientsPerClientID(t *testing.T) {
 	// Verify client 1 received message with their router ID
 	select {
 	case reply1 := <-client1Chan:
-		var msg1 map[string]interface{}
+		var msg1 map[string]any
 		err := json.Unmarshal(reply1.Data, &msg1)
 		require.NoError(t, err)
-		params1, ok := msg1["params"].(map[string]interface{})
+		params1, ok := msg1["params"].(map[string]any)
 		require.True(t, ok, "params should be a map")
 		assert.Equal(t, client1RouterID, params1["subscription"],
 			"Client 1 should receive message with their router ID")
@@ -1029,10 +1030,10 @@ func TestRouteMessageToClientsPerClientID(t *testing.T) {
 	// Verify client 2 received message with their router ID
 	select {
 	case reply2 := <-client2Chan:
-		var msg2 map[string]interface{}
+		var msg2 map[string]any
 		err := json.Unmarshal(reply2.Data, &msg2)
 		require.NoError(t, err)
-		params2, ok := msg2["params"].(map[string]interface{})
+		params2, ok := msg2["params"].(map[string]any)
 		require.True(t, ok, "params should be a map")
 		assert.Equal(t, client2RouterID, params2["subscription"],
 			"Client 2 should receive message with their router ID")
@@ -1197,8 +1198,7 @@ func TestUnsubscribeRouterIDOwnershipValidation(t *testing.T) {
 	manager.idMapper.RegisterMapping(client2RouterID, upstreamID)
 
 	// Create an active subscription with both clients
-	subCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	subCtx := t.Context()
 
 	client1ReplyChan := make(chan *pairingtypes.RelayReply, 10)
 	client2ReplyChan := make(chan *pairingtypes.RelayReply, 10)
@@ -1228,7 +1228,7 @@ func TestUnsubscribeRouterIDOwnershipValidation(t *testing.T) {
 	// Create a protocol message with client 1's router ID
 	protocolMessage1 := &mockWSProtocolMessage{
 		method: "eth_unsubscribe",
-		params: []interface{}{client1RouterID},
+		params: []any{client1RouterID},
 	}
 
 	// Client 2 attempts to unsubscribe client 1's subscription (should be rejected)
@@ -1252,7 +1252,7 @@ func TestUnsubscribeRouterIDOwnershipValidation(t *testing.T) {
 	// Test 2: Client 1 tries to unsubscribe using their own router ID (should succeed)
 	protocolMessage2 := &mockWSProtocolMessage{
 		method: "eth_unsubscribe",
-		params: []interface{}{client1RouterID},
+		params: []any{client1RouterID},
 	}
 
 	_, err = manager.Unsubscribe(ctx, protocolMessage2, "dapp1", "192.168.1.1", "ws-1", nil)
@@ -1912,10 +1912,8 @@ func TestSelectEndpoint_WS_OptimizerOverBackup(t *testing.T) {
 			// When invoked over the backup tier, return backup-2.
 			// When invoked over the primary tier (with both primaries ignored),
 			// return nothing so the cascade falls through.
-			for _, addr := range addresses {
-				if addr == "wss://backup-2.example.com" {
-					return []string{"wss://backup-2.example.com"}
-				}
+			if slices.Contains(addresses, "wss://backup-2.example.com") {
+				return []string{"wss://backup-2.example.com"}
 			}
 			return nil
 		},
@@ -2097,19 +2095,17 @@ func TestUnsubscribe_AcceptsUpstreamIDFallback(t *testing.T) {
 
 	// Client sends back the UPSTREAM id, not the router id — historically this would have
 	// produced "subscription not found".
-	body, err := json.Marshal(map[string]interface{}{
+	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "eth_unsubscribe",
-		"params":  []interface{}{upstreamID},
+		"params":  []any{upstreamID},
 		"id":      "client-uuid-1",
 	})
 	require.NoError(t, err)
 
 	pm := &mockWSProtocolMessageWithRawData{
-		mockWSProtocolMessage: mockWSProtocolMessage{
-			method: "eth_unsubscribe",
-			params: []interface{}{upstreamID},
-		},
+		method:  "eth_unsubscribe",
+		params:  []any{upstreamID},
 		rawData: body,
 	}
 
@@ -2142,16 +2138,16 @@ func TestUnsubscribe_AcceptsUpstreamIDFallback(t *testing.T) {
 	manager.activeSubscriptions[hashedParams2] = activeSub2
 	manager.lock.Unlock()
 
-	body2, err := json.Marshal(map[string]interface{}{
+	body2, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "eth_unsubscribe",
-		"params":  []interface{}{routerID2},
+		"params":  []any{routerID2},
 		"id":      2,
 	})
 	require.NoError(t, err)
 	pm2 := &mockWSProtocolMessageWithRawData{
-		mockWSProtocolMessage: mockWSProtocolMessage{method: "eth_unsubscribe", params: []interface{}{routerID2}},
-		rawData:               body2,
+		method: "eth_unsubscribe", params: []any{routerID2},
+		rawData: body2,
 	}
 	_, err = manager.Unsubscribe(context.Background(), pm2, "dapp2", "192.168.2.2", "ws-2", nil)
 	assert.NoError(t, err, "router-id unsubscribe path must still work")
@@ -2182,19 +2178,17 @@ func TestEndToEnd_SubscribeUnsubscribeRoundTrip(t *testing.T) {
 	defer cancel()
 
 	// 1. Subscribe with a STRING id like the bug report's "client-uuid-1".
-	subscribeBody, err := json.Marshal(map[string]interface{}{
+	subscribeBody, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "eth_subscribe",
-		"params":  []interface{}{"newHeads"},
+		"params":  []any{"newHeads"},
 		"id":      "client-uuid-1",
 	})
 	require.NoError(t, err)
 
 	subscribeMsg := &mockWSProtocolMessageWithRawData{
-		mockWSProtocolMessage: mockWSProtocolMessage{
-			method: "eth_subscribe",
-			params: []interface{}{"newHeads"},
-		},
+		method:  "eth_subscribe",
+		params:  []any{"newHeads"},
 		rawData: subscribeBody,
 	}
 
@@ -2232,19 +2226,17 @@ func TestEndToEnd_SubscribeUnsubscribeRoundTrip(t *testing.T) {
 	// 3. Unsubscribe using the just-issued router id — the bug's primary symptom is that
 	// this returns SubscriptionNotFoundError. After the fix it must succeed and the node's
 	// response (with the caller's id and result:true) must be returned.
-	unsubBody, err := json.Marshal(map[string]interface{}{
+	unsubBody, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "eth_unsubscribe",
-		"params":  []interface{}{routerSubID},
+		"params":  []any{routerSubID},
 		"id":      "client-uuid-2",
 	})
 	require.NoError(t, err)
 
 	unsubMsg := &mockWSProtocolMessageWithRawData{
-		mockWSProtocolMessage: mockWSProtocolMessage{
-			method: "eth_unsubscribe",
-			params: []interface{}{routerSubID},
-		},
+		method:  "eth_unsubscribe",
+		params:  []any{routerSubID},
 		rawData: unsubBody,
 	}
 
@@ -2475,12 +2467,12 @@ func TestUnsubscribe_StillRejectsForeignSubscription(t *testing.T) {
 
 	// A second client (different dappID/ip/wsUID) tries to unsubscribe using the upstream id.
 	// The fallback must still require clientRouterIDs[attacker] to exist — which it does not.
-	body, _ := json.Marshal(map[string]interface{}{
-		"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": []interface{}{upstreamID}, "id": 5,
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": []any{upstreamID}, "id": 5,
 	})
 	pm := &mockWSProtocolMessageWithRawData{
-		mockWSProtocolMessage: mockWSProtocolMessage{method: "eth_unsubscribe", params: []interface{}{upstreamID}},
-		rawData:               body,
+		method: "eth_unsubscribe", params: []any{upstreamID},
+		rawData: body,
 	}
 	_, err := manager.Unsubscribe(context.Background(), pm, "evil", "10.0.0.1", "ws-evil", nil)
 	assert.Equal(t, common.SubscriptionNotFoundError, err,

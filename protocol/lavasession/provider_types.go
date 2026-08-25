@@ -17,7 +17,7 @@ type NetworkAddressData struct {
 }
 
 type RPCProviderEndpoint struct {
-	NetworkAddress NetworkAddressData `yaml:"network-address,omitempty" json:"network-address,omitempty" mapstructure:"network-address,omitempty"`
+	NetworkAddress NetworkAddressData `yaml:"network-address,omitempty" json:"network-address" mapstructure:"network-address,omitempty"`
 	ChainID        string             `yaml:"chain-id,omitempty" json:"chain-id,omitempty" mapstructure:"chain-id"` // spec chain identifier
 	ApiInterface   string             `yaml:"api-interface,omitempty" json:"api-interface,omitempty" mapstructure:"api-interface"`
 	NodeUrls       []common.NodeUrl   `yaml:"node-urls,omitempty" json:"node-urls,omitempty" mapstructure:"node-urls"`
@@ -27,7 +27,7 @@ type RPCProviderEndpoint struct {
 // RPCStaticProviderEndpoint extends RPCProviderEndpoint with additional fields for static providers
 // This allows us to add functionality without modifying the original protobuf-derived type
 type RPCStaticProviderEndpoint struct {
-	NetworkAddress NetworkAddressData `yaml:"network-address,omitempty" json:"network-address,omitempty" mapstructure:"network-address,omitempty"`
+	NetworkAddress NetworkAddressData `yaml:"network-address,omitempty" json:"network-address" mapstructure:"network-address,omitempty"`
 	ChainID        string             `yaml:"chain-id,omitempty" json:"chain-id,omitempty" mapstructure:"chain-id"` // spec chain identifier
 	ApiInterface   string             `yaml:"api-interface,omitempty" json:"api-interface,omitempty" mapstructure:"api-interface"`
 	NodeUrls       []common.NodeUrl   `yaml:"node-urls,omitempty" json:"node-urls,omitempty" mapstructure:"node-urls"`

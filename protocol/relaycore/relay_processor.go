@@ -27,7 +27,7 @@ type RelayProcessor struct {
 	guid                         uint64
 	selection                    Selection
 	debugRelay                   bool
-	allowSessionDegradation      uint32 // used in the scenario where extension was previously used.
+	allowSessionDegradation      atomic.Uint32 // used in the scenario where extension was previously used.
 	metricsInf                   MetricsInterface
 	chainIdAndApiInterfaceGetter ChainIdAndApiInterfaceGetter
 	relayRetriesManager          *lavaprotocol.RelayRetriesManager
@@ -240,12 +240,12 @@ func quorumGroupOf(result common.RelayResult) string {
 
 // true if we never got an extension. (default value)
 func (rp *RelayProcessor) GetAllowSessionDegradation() bool {
-	return atomic.LoadUint32(&rp.allowSessionDegradation) == 0
+	return rp.allowSessionDegradation.Load() == 0
 }
 
 // in case we had an extension and managed to get a session successfully, we prevent session degradation.
 func (rp *RelayProcessor) SetDisallowDegradation() {
-	atomic.StoreUint32(&rp.allowSessionDegradation, 1)
+	rp.allowSessionDegradation.Store(1)
 }
 
 // SetStatefulRelayTargets stores the list of providers that received a stateful relay

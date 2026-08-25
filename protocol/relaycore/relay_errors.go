@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
@@ -133,16 +134,16 @@ func (r *RelayErrors) getAllUniqueErrors() []error {
 }
 
 func (r *RelayErrors) mergeAllErrors() error {
-	mergedMessage := ""
+	var mergedMessage strings.Builder
 	allErrors := r.getAllUniqueErrors()
 	allErrorsLength := len(allErrors)
 	for idx, message := range allErrors {
-		mergedMessage += strconv.Itoa(idx) + ". " + message.Error()
+		mergedMessage.WriteString(strconv.Itoa(idx) + ". " + message.Error())
 		if idx < allErrorsLength-1 {
-			mergedMessage += ", "
+			mergedMessage.WriteString(", ")
 		}
 	}
-	return fmt.Errorf("%s", mergedMessage)
+	return fmt.Errorf("%s", mergedMessage.String())
 }
 
 // RelayResponse represents a response from a relay operation

@@ -117,7 +117,7 @@ func RegisterRelayerServer(s *grpc.Server, srv RelayerServer) {
 	s.RegisterService(&_Relayer_serviceDesc, srv)
 }
 
-func _Relayer_Relay_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Relayer_Relay_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(RelayRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -133,7 +133,7 @@ func _Relayer_Relay_Handler(srv interface{}, ctx context.Context, dec func(inter
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.Relayer/Relay",
 	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+	handler := func(ctx context.Context, req any) (any, error) {
 		typed, ok := req.(*RelayRequest)
 		if !ok {
 			return nil, status.Errorf(codes.Internal, "unexpected request type %T for Relay", req)
@@ -143,7 +143,7 @@ func _Relayer_Relay_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Relayer_Probe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Relayer_Probe_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(ProbeRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -159,7 +159,7 @@ func _Relayer_Probe_Handler(srv interface{}, ctx context.Context, dec func(inter
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.Relayer/Probe",
 	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+	handler := func(ctx context.Context, req any) (any, error) {
 		typed, ok := req.(*ProbeRequest)
 		if !ok {
 			return nil, status.Errorf(codes.Internal, "unexpected request type %T for Probe", req)
@@ -169,7 +169,7 @@ func _Relayer_Probe_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Relayer_RelaySubscribe_Handler(srv interface{}, stream grpc.ServerStream) error {
+func _Relayer_RelaySubscribe_Handler(srv any, stream grpc.ServerStream) error {
 	m := new(RelayRequest)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
@@ -341,7 +341,7 @@ func RegisterRelayerCacheServer(s *grpc.Server, srv RelayerCacheServer) {
 	s.RegisterService(&_RelayerCache_serviceDesc, srv)
 }
 
-func _RelayerCache_GetRelay_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _RelayerCache_GetRelay_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(RelayCacheGet)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -357,7 +357,7 @@ func _RelayerCache_GetRelay_Handler(srv interface{}, ctx context.Context, dec fu
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/GetRelay",
 	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+	handler := func(ctx context.Context, req any) (any, error) {
 		typed, ok := req.(*RelayCacheGet)
 		if !ok {
 			return nil, status.Errorf(codes.Internal, "unexpected request type %T for GetRelay", req)
@@ -367,7 +367,7 @@ func _RelayerCache_GetRelay_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
-func _RelayerCache_SetRelay_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _RelayerCache_SetRelay_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(RelayCacheSet)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -383,7 +383,7 @@ func _RelayerCache_SetRelay_Handler(srv interface{}, ctx context.Context, dec fu
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/SetRelay",
 	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+	handler := func(ctx context.Context, req any) (any, error) {
 		typed, ok := req.(*RelayCacheSet)
 		if !ok {
 			return nil, status.Errorf(codes.Internal, "unexpected request type %T for SetRelay", req)
@@ -393,7 +393,7 @@ func _RelayerCache_SetRelay_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
-func _RelayerCache_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _RelayerCache_Health_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(emptypb.Empty)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -409,7 +409,7 @@ func _RelayerCache_Health_Handler(srv interface{}, ctx context.Context, dec func
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/Health",
 	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+	handler := func(ctx context.Context, req any) (any, error) {
 		typed, ok := req.(*emptypb.Empty)
 		if !ok {
 			return nil, status.Errorf(codes.Internal, "unexpected request type %T for Health", req)
@@ -419,7 +419,7 @@ func _RelayerCache_Health_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
-func _RelayerCache_FlushCache_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _RelayerCache_FlushCache_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(emptypb.Empty)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -435,7 +435,7 @@ func _RelayerCache_FlushCache_Handler(srv interface{}, ctx context.Context, dec 
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/FlushCache",
 	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+	handler := func(ctx context.Context, req any) (any, error) {
 		typed, ok := req.(*emptypb.Empty)
 		if !ok {
 			return nil, status.Errorf(codes.Internal, "unexpected request type %T for FlushCache", req)
@@ -445,7 +445,7 @@ func _RelayerCache_FlushCache_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _RelayerCache_SetEndpointObservation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _RelayerCache_SetEndpointObservation_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(EndpointObservationSet)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -461,7 +461,7 @@ func _RelayerCache_SetEndpointObservation_Handler(srv interface{}, ctx context.C
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/SetEndpointObservation",
 	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+	handler := func(ctx context.Context, req any) (any, error) {
 		typed, ok := req.(*EndpointObservationSet)
 		if !ok {
 			return nil, status.Errorf(codes.Internal, "unexpected request type %T for SetEndpointObservation", req)
@@ -471,7 +471,7 @@ func _RelayerCache_SetEndpointObservation_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
-func _RelayerCache_GetEndpointObservation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _RelayerCache_GetEndpointObservation_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(EndpointObservationGet)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -487,7 +487,7 @@ func _RelayerCache_GetEndpointObservation_Handler(srv interface{}, ctx context.C
 		Server:     srv,
 		FullMethod: "/smartrouter.pairing.RelayerCache/GetEndpointObservation",
 	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+	handler := func(ctx context.Context, req any) (any, error) {
 		typed, ok := req.(*EndpointObservationGet)
 		if !ok {
 			return nil, status.Errorf(codes.Internal, "unexpected request type %T for GetEndpointObservation", req)

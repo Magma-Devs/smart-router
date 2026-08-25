@@ -222,7 +222,7 @@ func TestSetGlobalLoggingLevel_TextVsJsonFormat(t *testing.T) {
 			})
 
 			var markerLine string
-			for _, line := range strings.Split(out, "\n") {
+			for line := range strings.SplitSeq(out, "\n") {
 				if strings.Contains(line, marker) {
 					markerLine = line
 					break
@@ -230,7 +230,7 @@ func TestSetGlobalLoggingLevel_TextVsJsonFormat(t *testing.T) {
 			}
 			require.NotEmpty(t, markerLine, "marker line not captured, output=%s", out)
 
-			var parsed map[string]interface{}
+			var parsed map[string]any
 			err := json.Unmarshal([]byte(markerLine), &parsed)
 			if tc.json {
 				require.NoError(t, err, "json format must produce parseable JSON, line=%s", markerLine)
@@ -270,7 +270,7 @@ func TestLavaFormat_GUIDAttachedToNormalLogPaths(t *testing.T) {
 	})
 
 	var markerLine string
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if strings.Contains(line, marker) {
 			markerLine = line
 			break
@@ -278,7 +278,7 @@ func TestLavaFormat_GUIDAttachedToNormalLogPaths(t *testing.T) {
 	}
 	require.NotEmpty(t, markerLine, "marker line not captured, output=%s", out)
 
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	require.NoError(t, json.Unmarshal([]byte(markerLine), &parsed),
 		"info log must be JSON parseable, line=%s", markerLine)
 

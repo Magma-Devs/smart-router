@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -266,7 +267,7 @@ func createPairingList(providerPrefixAddress string, enabled bool) map[uint64]*C
 	pairingEndpointsWithAddon := []*Endpoint{{Connections: []*EndpointConnection{}, NetworkAddress: grpcListener, Enabled: enabled, ConnectionRefusals: 0, Addons: map[string]struct{}{"addon": {}}}}
 	pairingEndpointsWithExtension := []*Endpoint{{Connections: []*EndpointConnection{}, NetworkAddress: grpcListener, Enabled: enabled, ConnectionRefusals: 0, Addons: map[string]struct{}{"addon": {}}, Extensions: map[string]struct{}{"ext1": {}}}}
 	pairingEndpointsWithExtensions := []*Endpoint{{Connections: []*EndpointConnection{}, NetworkAddress: grpcListener, Enabled: enabled, ConnectionRefusals: 0, Addons: map[string]struct{}{"addon": {}}, Extensions: map[string]struct{}{"ext1": {}, "ext2": {}}}}
-	for p := 0; p < numberOfProviders; p++ {
+	for p := range numberOfProviders {
 		var endpoints []*Endpoint
 		switch p {
 		case 0, 1:
@@ -382,7 +383,7 @@ func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
 
 	// (a) Asking for more providers than exist must still never surface the backup; repeat to defeat
 	// any selection nondeterminism.
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		css, err := csm.GetSessions(ctx, 5, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
 		require.NoError(t, err, "i #%d", i)
 		for provider := range css {
@@ -970,7 +971,7 @@ func TestPairingResetWithMultipleFailures(t *testing.T) {
 	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil) // update the providers.
 	require.NoError(t, err)
 
-	for numberOfResets := 0; numberOfResets < numberOfResetsToTest; numberOfResets++ {
+	for numberOfResets := range numberOfResetsToTest {
 		for {
 			utils.LavaFormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
 			if len(csm.validAddresses) == 0 { // wait for all pairings to be blocked.
@@ -1035,7 +1036,7 @@ func TestSuccessAndFailureOfSessionWithUpdatePairingsInTheMiddle(t *testing.T) {
 	}
 	sessionList := make([]session, numberOfAllowedSessionsPerConsumer)
 	sessionListData := make([]SessTestData, numberOfAllowedSessionsPerConsumer)
-	for i := 0; i < numberOfAllowedSessionsPerConsumer; i++ {
+	for i := range numberOfAllowedSessionsPerConsumer {
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 		require.NoError(t, err)
 
@@ -1047,7 +1048,7 @@ func TestSuccessAndFailureOfSessionWithUpdatePairingsInTheMiddle(t *testing.T) {
 		}
 	}
 
-	for j := 0; j < numberOfAllowedSessionsPerConsumer/2; j++ {
+	for j := range numberOfAllowedSessionsPerConsumer / 2 {
 		cs := sessionList[j].cs
 		require.NotNil(t, cs)
 		epoch := sessionList[j].epoch
@@ -1071,7 +1072,7 @@ func TestSuccessAndFailureOfSessionWithUpdatePairingsInTheMiddle(t *testing.T) {
 		}
 	}
 
-	for i := 0; i < numberOfAllowedSessionsPerConsumer; i++ {
+	for range numberOfAllowedSessionsPerConsumer {
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 		require.NoError(t, err)
 
@@ -1140,7 +1141,7 @@ func TestHappyFlowMultiThreaded(t *testing.T) {
 	require.NoError(t, err)
 	ch1 := make(chan int)
 	ch2 := make(chan int)
-	for p := 0; p < parallelGoRoutines; p++ { // we have x amount of successful sessions and x amount of failed. validate compute units
+	for p := range parallelGoRoutines { // we have x amount of successful sessions and x amount of failed. validate compute units
 		go successfulSession(ctx, csm, t, p, ch1)
 		go failedSession(ctx, csm, t, p, ch2)
 	}
@@ -1185,7 +1186,7 @@ func TestHappyFlowMultiThreadedWithUpdateSession(t *testing.T) {
 	require.NoError(t, err)
 	ch1 := make(chan int)
 	ch2 := make(chan int)
-	for p := 0; p < parallelGoRoutines; p++ { // we have x amount of successful sessions and x amount of failed. validate compute units
+	for p := range parallelGoRoutines { // we have x amount of successful sessions and x amount of failed. validate compute units
 		go successfulSession(ctx, csm, t, p, ch1)
 
 		go failedSession(ctx, csm, t, p, ch2)
@@ -1304,7 +1305,7 @@ func TestUpdateAllProviders(t *testing.T) {
 	require.Equal(t, len(csm.validAddresses), numberOfProviders) // checking there are 2 valid addresses
 	require.Equal(t, len(csm.pairingAddresses), numberOfProviders)
 	require.Equal(t, csm.currentEpoch, uint64(firstEpochHeight)) // verify epoch
-	for p := 0; p < numberOfProviders; p++ {
+	for p := range numberOfProviders {
 		require.Contains(t, csm.pairing, providerStr+strconv.Itoa(p)) // verify pairings
 	}
 }
@@ -1321,7 +1322,7 @@ func TestUpdateAllProvidersWithSameEpoch(t *testing.T) {
 	require.Equal(t, len(csm.validAddresses), numberOfProviders) // checking there are 2 valid addresses
 	require.Equal(t, len(csm.pairingAddresses), numberOfProviders)
 	require.Equal(t, csm.currentEpoch, uint64(firstEpochHeight)) // verify epoch
-	for p := 0; p < numberOfProviders; p++ {
+	for p := range numberOfProviders {
 		require.Contains(t, csm.pairing, providerStr+strconv.Itoa(p)) // verify pairings
 	}
 }
@@ -1377,7 +1378,7 @@ func TestPairingWithAddons(t *testing.T) {
 			require.NotEqual(t, 0, len(csm.getValidAddresses(addon, nil, ctx)), "valid addresses: %#v addonAddresses %#v", csm.getValidAddresses(addon, nil, ctx), csm.addonAddresses)
 			// block all providers
 			initialProvidersLen := len(csm.getValidAddresses(addon, nil, ctx))
-			for i := 0; i < initialProvidersLen; i++ {
+			for i := range initialProvidersLen {
 				css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, addon, nil, common.NO_STATE, 0, "", "") // get a session
 				require.NoError(t, err, i)
 				for _, cs := range css {
@@ -1452,7 +1453,7 @@ func TestPairingWithExtensions(t *testing.T) {
 				extensionsList = append(extensionsList, ext)
 			}
 			initialProvidersLen := len(csm.getValidAddresses(extensionOpt.addon, extensionOpt.extensions, ctx))
-			for i := 0; i < initialProvidersLen; i++ {
+			for i := range initialProvidersLen {
 				css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, extensionOpt.addon, extensionsList, common.NO_STATE, 0, "", "") // get a session
 				require.NoError(t, err, i)
 				for _, cs := range css {
@@ -2409,10 +2410,8 @@ func TestUpdateAllProviders_NormalProviderBlockedAsBackupInNextEpoch(t *testing.
 
 	csm.lock.RLock()
 	_, inBlockedList := func() (int, bool) {
-		for _, addr := range csm.currentlyBlockedProviderAddresses {
-			if addr == normalAddr {
-				return 0, true
-			}
+		if slices.Contains(csm.currentlyBlockedProviderAddresses, normalAddr) {
+			return 0, true
 		}
 		return 0, false
 	}()
@@ -2594,13 +2593,7 @@ func TestGenerateReconnectCallback_NonBackupUsesValidAddressesPath(t *testing.T)
 
 	// blockProvider removes from validAddresses and adds to currentlyBlockedProviderAddresses.
 	csm.lock.RLock()
-	wasInBlockedList := false
-	for _, addr := range csm.currentlyBlockedProviderAddresses {
-		if addr == regularAddr {
-			wasInBlockedList = true
-			break
-		}
-	}
+	wasInBlockedList := slices.Contains(csm.currentlyBlockedProviderAddresses, regularAddr)
 	csm.lock.RUnlock()
 	require.True(t, wasInBlockedList, "regular provider should be in currentlyBlockedProviderAddresses")
 
@@ -2616,13 +2609,7 @@ func TestGenerateReconnectCallback_NonBackupUsesValidAddressesPath(t *testing.T)
 
 	// After a successful reconnect for a non-backup, the provider is returned to validAddresses.
 	csm.lock.RLock()
-	restored := false
-	for _, addr := range csm.validAddresses {
-		if addr == regularAddr {
-			restored = true
-			break
-		}
-	}
+	restored := slices.Contains(csm.validAddresses, regularAddr)
 	csm.lock.RUnlock()
 	require.True(t, restored,
 		"non-backup successful reconnect must restore provider to validAddresses")
@@ -2659,13 +2646,7 @@ func TestGenerateReconnectCallback_OverlapBothPairingAndBackup(t *testing.T) {
 
 	csm.lock.RLock()
 	_, stillBlockedBackup := csm.blockedBackupProviders[overlapAddr]
-	restoredToValid := false
-	for _, addr := range csm.validAddresses {
-		if addr == overlapAddr {
-			restoredToValid = true
-			break
-		}
-	}
+	restoredToValid := slices.Contains(csm.validAddresses, overlapAddr)
 	csm.lock.RUnlock()
 
 	require.False(t, stillBlockedBackup,
@@ -2737,8 +2718,7 @@ func TestGetAllDirectRPCEndpoints_IncludesBackupProviders(t *testing.T) {
 // backup that the relay path has already confirmed is down. This is the only
 // remaining health signal the probe honours now that the per-socket bool is gone.
 func TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	nodeUrl := common.NodeUrl{Url: "https://backup.example/"}
 	directConn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")

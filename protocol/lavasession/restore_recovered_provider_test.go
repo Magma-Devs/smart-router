@@ -113,7 +113,7 @@ func TestRestoreRecoveredProvider_Idempotent(t *testing.T) {
 	addr := pairingList[0].PublicLavaAddress
 	require.NoError(t, csm.blockProvider(context.Background(), addr, false, firstEpochHeight, 0, 0, false, nil))
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		csm.RestoreRecoveredProvider(addr)
 	}
 	// Also safe on a provider that was never blocked.
@@ -140,9 +140,7 @@ func TestEndpointEnabled_NoRaceUnderConcurrentProbeAndRelay(t *testing.T) {
 	stop := make(chan struct{})
 
 	// Reader: the (now synchronized) Enabled read on the relay/probe-routability path.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -151,12 +149,10 @@ func TestEndpointEnabled_NoRaceUnderConcurrentProbeAndRelay(t *testing.T) {
 				_ = e.IsEnabled()
 			}
 		}
-	}()
+	})
 
 	// Writer A: relay disabler.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -165,14 +161,12 @@ func TestEndpointEnabled_NoRaceUnderConcurrentProbeAndRelay(t *testing.T) {
 				e.MarkUnhealthy()
 			}
 		}
-	}()
+	})
 
 	// Writer B: probe re-enabler.
 	base := probeBase
 	i := 0
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -182,7 +176,7 @@ func TestEndpointEnabled_NoRaceUnderConcurrentProbeAndRelay(t *testing.T) {
 				e.RecordProbeVerdict(base.Add(time.Duration(i)*time.Second), true, 3)
 			}
 		}
-	}()
+	})
 
 	time.Sleep(50 * time.Millisecond)
 	close(stop)

@@ -72,7 +72,7 @@ func TestProviderOptimizer_SyncBlockNeverDecreasesUnderConcurrency(t *testing.T)
 	// Relay writer: the high block (200).
 	go func() {
 		defer wg.Done()
-		for i := 0; i < rounds; i++ {
+		for range rounds {
 			po.AppendRelayDataConsensus(provider, TEST_BASE_WORLD_LATENCY, 10, 200, freshRef(200))
 			// Immediately after this writer floored to 200 under the stripe lock, no concurrent
 			// probe (150) or legacy write can pull it back below 200 — assert that mid-race.
@@ -83,7 +83,7 @@ func TestProviderOptimizer_SyncBlockNeverDecreasesUnderConcurrency(t *testing.T)
 	// Probe writer: the LOW block (150) — the would-be clobberer.
 	go func() {
 		defer wg.Done()
-		for i := 0; i < rounds; i++ {
+		for range rounds {
 			po.AppendProbeData(provider, 1, TEST_BASE_WORLD_LATENCY, true, 150, true, freshRef(150))
 		}
 	}()
@@ -91,7 +91,7 @@ func TestProviderOptimizer_SyncBlockNeverDecreasesUnderConcurrency(t *testing.T)
 	// providerData, incl. SyncBlock — the shape that could regress the floor.
 	go func() {
 		defer wg.Done()
-		for i := 0; i < rounds; i++ {
+		for range rounds {
 			po.AppendProbeData(provider, 1, TEST_BASE_WORLD_LATENCY, true, 0, false, SyncReference{})
 		}
 	}()
@@ -109,7 +109,7 @@ func TestProviderOptimizerProviderDataSetGet(t *testing.T) {
 	providerOptimizer := setupProviderOptimizer(1)
 	providersGen := (&providersGenerator{}).setupProvidersForTest(1)
 	providerAddress := providersGen.providersAddresses[0]
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		providerData := ProviderData{SyncBlock: uint64(i)}
 		address := providerAddress + strconv.Itoa(i)
 		set := providerOptimizer.providersStorage.Set(address, providerData, 1)
@@ -118,7 +118,7 @@ func TestProviderOptimizerProviderDataSetGet(t *testing.T) {
 		}
 	}
 	time.Sleep(4 * time.Millisecond)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		address := providerAddress + strconv.Itoa(i)
 		providerData, found := providerOptimizer.getProviderData(address)
 		require.Equal(t, uint64(i), providerData.SyncBlock, "failed getting entry %s", address)
@@ -168,7 +168,7 @@ func TestProviderOptimizerBasicProbeData(t *testing.T) {
 //   - results: map of provider address to the number of times it was picked
 func runChooseManyTimesAndReturnResults(t *testing.T, providerOptimizer *ProviderOptimizer, providers []string, ignoredProviders map[string]struct{}, times int, cu uint64, requestBlock int64) map[string]int {
 	results := make(map[string]int)
-	for i := 0; i < times; i++ {
+	for range times {
 		returnedProviders := providerOptimizer.ChooseProvider(context.Background(), providers, ignoredProviders, cu, requestBlock)
 		require.Equal(t, 1, len(returnedProviders))
 		results[returnedProviders[0]]++
@@ -280,7 +280,7 @@ func TestProviderOptimizerAvailabilityRelayData(t *testing.T) {
 		// A single failure isn't necessarily enough to materially lower availability due to
 		// decaying weighted averages (and min selection chance). Apply multiple failures to
 		// create a clear selection gap for this test.
-		for j := 0; j < 8; j++ {
+		for range 8 {
 			providerOptimizer.AppendRelayFailure(providersGen.providersAddresses[i])
 			time.Sleep(time.Microsecond) // ensure monotonic sample times per provider
 		}
@@ -377,7 +377,7 @@ func TestProviderOptimizerUpdatingLatency(t *testing.T) {
 	time.Sleep(4 * time.Millisecond)
 
 	// add good latency probes, score should improve
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		// get current score
 		qos, _ := providerOptimizer.GetReputationReportForProvider(providerAddress)
 		require.NotNil(t, qos)
@@ -402,7 +402,7 @@ func TestProviderOptimizerUpdatingLatency(t *testing.T) {
 	time.Sleep(4 * time.Millisecond)
 
 	// add good latency relays, score should improve
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		// get current score
 		qos, _ := providerOptimizer.GetReputationReportForProvider(providerAddress)
 		require.NotNil(t, qos)
@@ -449,7 +449,7 @@ func TestProviderOptimizerSyncScore(t *testing.T) {
 
 	chosenIndex := rand.Intn(len(providersGen.providersAddresses))
 	sampleTime := time.Now()
-	for j := 0; j < 3; j++ { // repeat several times because a sync score is only correct after all providers sent their first block otherwise its giving favor to the first one
+	for range 3 { // repeat several times because a sync score is only correct after all providers sent their first block otherwise its giving favor to the first one
 		for i := range providersGen.providersAddresses {
 			time.Sleep(4 * time.Millisecond)
 			if i == chosenIndex {
@@ -510,7 +510,7 @@ func TestReputation(t *testing.T) {
 	syncBlock := uint64(1000)
 	// set a basic state for all of them
 	sampleTime := time.Now()
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		for _, address := range providersGen.providersAddresses {
 			providerOptimizer.appendRelayData(address, TEST_BASE_WORLD_LATENCY*2, true, cu, syncBlock, SyncReference{}, sampleTime)
 		}
@@ -540,7 +540,7 @@ func TestProviderOptimizerProvidersCount(t *testing.T) {
 	requestBlock := int64(1000)
 	syncBlock := uint64(1000)
 	sampleTime := time.Now()
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		for _, address := range providersGen.providersAddresses {
 			providerOptimizer.appendRelayData(address, TEST_BASE_WORLD_LATENCY*2, true, cu, syncBlock, SyncReference{}, sampleTime)
 		}
@@ -562,7 +562,7 @@ func TestProviderOptimizerProvidersCount(t *testing.T) {
 	}
 	for _, play := range playbook {
 		t.Run(play.name, func(t *testing.T) {
-			for i := 0; i < 10; i++ {
+			for range 10 {
 				returnedProviders := providerOptimizer.ChooseProvider(context.Background(), providersGen.providersAddresses[:play.providers], nil, cu, requestBlock)
 				require.Greater(t, len(returnedProviders), 0)
 			}
@@ -590,7 +590,7 @@ func TestProviderOptimizerWeights(t *testing.T) {
 	improvedBlock := syncBlock + 10
 
 	providerOptimizer.UpdateWeights(weights, 1)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		for idx, address := range providersGen.providersAddresses {
 			if idx == 0 {
 				providerOptimizer.appendRelayData(address, normalLatency, true, cu, improvedBlock, SyncReference{}, time.Now())
@@ -634,7 +634,7 @@ func TestProviderOptimizerChooseProvider(t *testing.T) {
 	highStake := 5 * normalStake
 	highStakeProviderIndex := 2
 	weights := map[string]int64{}
-	for i := 0; i < providersCount; i++ {
+	for i := range providersCount {
 		if i == highStakeProviderIndex {
 			weights[providersGen.providersAddresses[i]] = highStake
 		} else {
@@ -688,7 +688,7 @@ func TestProviderOptimizerChooseProvider(t *testing.T) {
 		"excellent latency/sync providers should get more selections than terrible latency providers")
 
 	// All providers should be selected (minimum selection chance)
-	for i := 0; i < providersCount; i++ {
+	for i := range providersCount {
 		require.Greater(t, results[providersGen.providersAddresses[i]], 0,
 			"provider %d should be selected at least once", i)
 	}
@@ -715,7 +715,7 @@ func TestProviderOptimizerRetriesWithReducedProvidersSet(t *testing.T) {
 	highStake := 5 * normalStake
 	highStakeProviderIndexes := []int{1, 3, 5}
 	weights := map[string]int64{}
-	for i := 0; i < providersCount; i++ {
+	for i := range providersCount {
 		if lavaslices.Contains(highStakeProviderIndexes, i) {
 			weights[providersGen.providersAddresses[i]] = highStake
 		} else {
@@ -730,7 +730,7 @@ func TestProviderOptimizerRetriesWithReducedProvidersSet(t *testing.T) {
 
 	// Use EXTREME latency differences for deterministic results
 	// Latency gets exponentially worse for increasing index
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		for j, address := range providersGen.providersAddresses {
 			// Exponential latency degradation on a scale that matches the selector normalization.
 			// WeightedSelector normalizes latency against score.WorstLatencyScore (=30s), so we need
@@ -813,7 +813,7 @@ func TestProviderOptimizerChoiceSimulationBasedOnLatency(t *testing.T) {
 	p3Availability := true
 
 	sampleTime := time.Now()
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		// Provider 0: excellent latency (10-15ms)
 		p1Latency := 10*time.Millisecond + time.Duration(i%5)*time.Millisecond
 		// Provider 1: poor latency (200-300ms) - 20x worse than provider 0
@@ -850,7 +850,7 @@ func TestProviderOptimizerChoiceSimulationBasedOnLatency(t *testing.T) {
 		"best latency provider should get more selections than worst latency provider")
 
 	// All providers should get some selections (minimum selection chance ensures this)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		require.Greater(t, res[providersGen.providersAddresses[i]], 0, "each provider should be selected at least once")
 	}
 }
@@ -876,7 +876,7 @@ func TestProviderOptimizerChoiceSimulationBasedOnSync(t *testing.T) {
 	p3Availability := true
 
 	sampleTime := time.Now()
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		// All providers have same latency
 		latency := 50 * time.Millisecond
 
@@ -937,7 +937,7 @@ func TestProviderOptimizerLatencySyncScore(t *testing.T) {
 
 	// set a basic state for all providers
 	sampleTime := time.Now()
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		for _, address := range providersGen.providersAddresses {
 			providerOptimizer.appendRelayData(address, TEST_BASE_WORLD_LATENCY*2, true, cu, syncBlock, SyncReference{}, sampleTime)
 		}
@@ -984,7 +984,7 @@ func TestCalculateBlockAvailability(t *testing.T) {
 		sum := 0.0
 		pow := 1.0
 		fact := 1.0
-		for i := uint64(0); i < distanceRequired; i++ {
+		for i := range distanceRequired {
 			if i > 0 {
 				pow *= lambda
 				fact *= float64(i)
@@ -1265,7 +1265,7 @@ func TestProviderOptimizer_ResetState_AllowsRealTimeSamplesAfterClockReset(t *te
 	// ── Step 1: simulate a +24 h clock warp ────────────────────────────────────
 	// Record relays at the shifted time so ScoreStore.Time = "tomorrow" in cache.
 	po.NowFunc = func() time.Time { return realNow.Add(24 * time.Hour) }
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		po.appendRelayData(addr, TEST_BASE_WORLD_LATENCY, true, cu, syncBlock, SyncReference{}, po.now())
 	}
 	time.Sleep(4 * time.Millisecond) // wait for ristretto async write

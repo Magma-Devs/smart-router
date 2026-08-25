@@ -46,7 +46,7 @@ func (tm *TendermintrpcMessage) GetRawRequestHash() ([]byte, error) {
 	return sigs.HashMsg(append(append(methodByteArray, paramsByteArray...), headersByteArray...)), nil
 }
 
-func (cp TendermintrpcMessage) GetParams() interface{} {
+func (cp TendermintrpcMessage) GetParams() any {
 	return cp.Params
 }
 
@@ -56,7 +56,7 @@ type TendermintMessageResponseBody struct {
 }
 
 type TendermintMessageResponse struct {
-	Response TendermintMessageResponseBody `json:"response,omitempty"`
+	Response TendermintMessageResponseBody `json:"response"`
 }
 
 // CheckResponseError classifies a Tendermint JSON-RPC response. The envelope
@@ -149,7 +149,7 @@ func (JSONRPCIntID) isJSONRPCID()      {}
 func (id JSONRPCIntID) String() string { return fmt.Sprintf("%d", id) }
 
 func IdFromRawMessage(rawID json.RawMessage) (jsonrpcId, error) {
-	var idInterface interface{}
+	var idInterface any
 	err := json.Unmarshal(rawID, &idInterface)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal id from response: %w (id: %s)", err, string(rawID))

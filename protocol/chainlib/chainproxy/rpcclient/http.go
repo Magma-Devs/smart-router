@@ -44,7 +44,7 @@ type httpConn struct {
 	client    *http.Client
 	url       string
 	closeOnce sync.Once
-	closeCh   chan interface{}
+	closeCh   chan any
 	mu        utils.LavaMutex // protects headers
 	headers   http.Header
 }
@@ -53,7 +53,7 @@ type httpConn struct {
 // and some methods don't work. The panic() stubs here exist to ensure
 // this special treatment is correct.
 
-func (hc *httpConn) writeJSON(context.Context, interface{}) error {
+func (hc *httpConn) writeJSON(context.Context, any) error {
 	panic("writeJSON called on httpConn")
 }
 
@@ -74,7 +74,7 @@ func (hc *httpConn) close() {
 	hc.closeOnce.Do(func() { close(hc.closeCh) })
 }
 
-func (hc *httpConn) closed() <-chan interface{} {
+func (hc *httpConn) closed() <-chan any {
 	return hc.closeCh
 }
 
@@ -128,7 +128,7 @@ func DialHTTPWithClient(endpoint string, client *http.Client) (*Client, error) {
 			client:  client,
 			headers: headers,
 			url:     endpoint,
-			closeCh: make(chan interface{}),
+			closeCh: make(chan any),
 		}
 		return hc, nil
 	})
@@ -144,7 +144,7 @@ func DialHTTP(endpoint string) (*Client, error) {
 	return DialHTTPWithClient(endpoint, optimizedClient)
 }
 
-func (c *Client) sendHTTP(ctx context.Context, op *requestOp, msg interface{}, isJsonRPC bool, strict bool) error {
+func (c *Client) sendHTTP(ctx context.Context, op *requestOp, msg any, isJsonRPC bool, strict bool) error {
 	hc, ok := c.writeConn.(*httpConn)
 	if !ok {
 		return fmt.Errorf("sendHTTP - c.writeConn.(*httpConn) - type assertion failed %s", c.writeConn)
@@ -210,7 +210,7 @@ func (c *Client) sendBatchHTTP(ctx context.Context, op *requestOp, msgs []*Jsonr
 	return nil
 }
 
-func (hc *httpConn) doRequest(ctx context.Context, msg interface{}, isJsonRPC bool, strict bool) (io.ReadCloser, error) {
+func (hc *httpConn) doRequest(ctx context.Context, msg any, isJsonRPC bool, strict bool) (io.ReadCloser, error) {
 	body, err := encodeRequestBody(msg)
 	if err != nil {
 		return nil, err
@@ -279,7 +279,7 @@ func ValidateStatusCodes(statusCode int, strict bool) error {
 // encodeRequestBody serializes the outgoing request. JSON-RPC messages —
 // single or batched — are spliced from their raw members (see
 // JsonrpcMessage.AppendJSON); anything else goes through json.Marshal.
-func encodeRequestBody(msg interface{}) ([]byte, error) {
+func encodeRequestBody(msg any) ([]byte, error) {
 	switch m := msg.(type) {
 	case *JsonrpcMessage:
 		return m.MarshalReply()

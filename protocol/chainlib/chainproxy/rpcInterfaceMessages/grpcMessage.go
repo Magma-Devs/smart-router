@@ -62,10 +62,10 @@ func (jm GrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 
 // GetParams will be deprecated after we remove old client
 // Currently needed because of parser.RPCInput interface
-func (gm GrpcMessage) GetParams() interface{} {
+func (gm GrpcMessage) GetParams() any {
 	if len(gm.Msg) > 0 {
 		if gm.Msg[0] == '{' || gm.Msg[0] == '[' {
-			var parsedData interface{}
+			var parsedData any
 			err := json.Unmarshal(gm.Msg, &parsedData)
 			if err != nil {
 				utils.LavaFormatError("failed to unmarshal GetParams", err)
@@ -89,7 +89,7 @@ func (gm *GrpcMessage) UpdateLatestBlockInMessage(latestBlock uint64, modifyCont
 	// when !done: we need a different setter
 }
 
-func (gm GrpcMessage) dynamicResolve() (interface{}, error) {
+func (gm GrpcMessage) dynamicResolve() (any, error) {
 	md, err := gm.Registry.FindDescriptorByName(protoreflect.FullName(strings.ReplaceAll(gm.Path, "/", ".")))
 	if err != nil {
 		return nil, err
@@ -103,7 +103,7 @@ func (gm GrpcMessage) dynamicResolve() (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	var parsedData interface{}
+	var parsedData any
 	err = json.Unmarshal(jsonMsg, &parsedData)
 	if err != nil {
 		return nil, err

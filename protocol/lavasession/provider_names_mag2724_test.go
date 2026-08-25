@@ -59,7 +59,7 @@ func TestValidateUniqueProviderNames_ReportsEveryCollisionDeterministically(t *t
 	require.Contains(t, err.Error(), "beta")
 	require.Contains(t, err.Error(), "gamma")
 
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		require.Equal(t, err.Error(), ValidateUniqueProviderNames(endpoints).Error(),
 			"same config must produce the same message on every run")
 	}

@@ -609,11 +609,11 @@ func (apic *ApiCollection) CombineWithOthers(others []*ApiCollection, combineWit
 		return fmt.Errorf("CombineWithOthers: API collection is nil")
 	}
 
-	mergedApis := map[string]interface{}{}
-	mergedHeaders := map[string]interface{}{}
-	mergedParsers := map[string]interface{}{}
-	mergedExtensions := map[string]interface{}{}
-	mergedVerifications := map[string]interface{}{}
+	mergedApis := map[string]any{}
+	mergedHeaders := map[string]any{}
+	mergedParsers := map[string]any{}
+	mergedExtensions := map[string]any{}
+	mergedVerifications := map[string]any{}
 
 	mergedApisList := []*Api{}
 	mergedHeadersList := []*Header{}

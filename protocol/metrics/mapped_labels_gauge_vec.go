@@ -15,9 +15,7 @@ type MappedLabelsGaugeVec struct {
 
 func NewMappedLabelsGaugeVec(opts MappedLabelsMetricOpts) *MappedLabelsGaugeVec {
 	metric := &MappedLabelsGaugeVec{
-		MappedLabelsMetricBase: MappedLabelsMetricBase{
-			labels: opts.Labels,
-		},
+		labels: opts.Labels,
 		GaugeVec: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: opts.Name,
 			Help: opts.Help,

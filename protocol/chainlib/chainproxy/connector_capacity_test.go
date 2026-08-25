@@ -110,9 +110,7 @@ func TestConnectorConstructionDoesNotRaceReturnRpc(t *testing.T) {
 
 	// Borrowers: keep ReturnRpc reading the trim threshold throughout.
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range rounds {
 				rpc, err := serving.GetRpc(ctx, true)
 				if err != nil {
@@ -120,13 +118,11 @@ func TestConnectorConstructionDoesNotRaceReturnRpc(t *testing.T) {
 				}
 				serving.ReturnRpc(rpc)
 			}
-		}()
+		})
 	}
 
 	// Builders: construct and tear down connectors alongside those returns.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := range rounds {
 			transient, err := NewGRPCConnector(ctx, ctx, uint(1+i%3), url)
 			if err != nil {
@@ -134,11 +130,9 @@ func TestConnectorConstructionDoesNotRaceReturnRpc(t *testing.T) {
 			}
 			transient.Close()
 		}
-	}()
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range rounds {
 			httpConnector, err := NewConnector(ctx, 7, common.NodeUrl{Url: listenerAddressTcp})
 			if err != nil {
@@ -146,7 +140,7 @@ func TestConnectorConstructionDoesNotRaceReturnRpc(t *testing.T) {
 			}
 			httpConnector.Close()
 		}
-	}()
+	})
 
 	wg.Wait()
 

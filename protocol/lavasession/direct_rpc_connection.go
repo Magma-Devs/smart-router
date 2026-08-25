@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -769,9 +770,7 @@ func (w *WebSocketDirectRPCConnection) ensureClient(ctx context.Context) (*rpccl
 	}
 
 	headers := make(map[string]string)
-	for k, v := range w.nodeUrl.GetAuthHeaders() {
-		headers[k] = v
-	}
+	maps.Copy(headers, w.nodeUrl.GetAuthHeaders())
 	endpoint := w.nodeUrl.AuthConfig.AddAuthPath(w.nodeUrl.Url)
 
 	client, err := rpcclient.DialWebsocket(ctx, endpoint, headers)

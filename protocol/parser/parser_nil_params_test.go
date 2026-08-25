@@ -11,13 +11,13 @@ import (
 
 // MockRPCInput for testing
 type MockRPCInput struct {
-	params interface{}
+	params any
 	result json.RawMessage
 	error  *rpcclient.JsonError
 	method string
 }
 
-func (m *MockRPCInput) GetParams() interface{}         { return m.params }
+func (m *MockRPCInput) GetParams() any                 { return m.params }
 func (m *MockRPCInput) GetResult() json.RawMessage     { return m.result }
 func (m *MockRPCInput) GetError() *rpcclient.JsonError { return m.error }
 func (m *MockRPCInput) ParseBlock(block string) (int64, error) {
@@ -46,14 +46,14 @@ func TestParseByArg_NilParams(t *testing.T) {
 		{
 			name:          "empty array should work",
 			input:         []string{"0"},
-			rpcInput:      &MockRPCInput{params: []interface{}{}, method: "test"},
+			rpcInput:      &MockRPCInput{params: []any{}, method: "test"},
 			expectedError: ValueNotSetError,
 			description:   "Empty array has no index 0, should return ValueNotSetError",
 		},
 		{
 			name:          "valid array index should work",
 			input:         []string{"0"},
-			rpcInput:      &MockRPCInput{params: []interface{}{"value1"}, method: "test"},
+			rpcInput:      &MockRPCInput{params: []any{"value1"}, method: "test"},
 			expectedError: nil,
 			description:   "Valid index should return the value",
 		},
@@ -95,14 +95,14 @@ func TestParseCanonical_NilParams(t *testing.T) {
 		{
 			name:          "empty array should return error",
 			input:         []string{"0", "key"},
-			rpcInput:      &MockRPCInput{params: []interface{}{}, method: "test"},
+			rpcInput:      &MockRPCInput{params: []any{}, method: "test"},
 			expectedError: ValueNotSetError,
 			description:   "Empty array has no index 0",
 		},
 		{
 			name:          "valid object in array should work",
 			input:         []string{"0", "key"},
-			rpcInput:      &MockRPCInput{params: []interface{}{map[string]interface{}{"key": "value"}}, method: "test"},
+			rpcInput:      &MockRPCInput{params: []any{map[string]any{"key": "value"}}, method: "test"},
 			expectedError: nil,
 			description:   "Valid index with nested key should return value",
 		},
@@ -144,14 +144,14 @@ func TestParseDictionary_NilParams(t *testing.T) {
 		{
 			name:          "empty array should return error",
 			input:         []string{"key", "|"},
-			rpcInput:      &MockRPCInput{params: []interface{}{}, method: "test"},
+			rpcInput:      &MockRPCInput{params: []any{}, method: "test"},
 			expectedError: ValueNotSetError,
 			description:   "Empty array can't find property",
 		},
 		{
 			name:          "valid object should work",
 			input:         []string{"key", "|"},
-			rpcInput:      &MockRPCInput{params: map[string]interface{}{"key": "value"}, method: "test"},
+			rpcInput:      &MockRPCInput{params: map[string]any{"key": "value"}, method: "test"},
 			expectedError: nil,
 			description:   "Valid object with key should return value",
 		},
@@ -193,14 +193,14 @@ func TestParseDictionaryOrOrdered_NilParams(t *testing.T) {
 		{
 			name:          "empty array should return error",
 			input:         []string{"key", "|", "0"},
-			rpcInput:      &MockRPCInput{params: []interface{}{}, method: "test"},
+			rpcInput:      &MockRPCInput{params: []any{}, method: "test"},
 			expectedError: ValueNotSetError,
 			description:   "Empty array has no index 0",
 		},
 		{
 			name:          "valid array with value should work",
 			input:         []string{"key", "|", "0"},
-			rpcInput:      &MockRPCInput{params: []interface{}{"value"}, method: "test"},
+			rpcInput:      &MockRPCInput{params: []any{"value"}, method: "test"},
 			expectedError: nil,
 			description:   "Valid array with fallback index should return value",
 		},
@@ -231,19 +231,19 @@ func TestParameterTransformation(t *testing.T) {
 		// All parser functions should handle nil consistently
 		testFuncs := []struct {
 			name string
-			fn   func(*MockRPCInput, []string) ([]interface{}, error)
+			fn   func(*MockRPCInput, []string) ([]any, error)
 			args []string
 		}{
-			{"parseByArg", func(r *MockRPCInput, s []string) ([]interface{}, error) {
+			{"parseByArg", func(r *MockRPCInput, s []string) ([]any, error) {
 				return parseByArg(r, s, PARSE_PARAMS)
 			}, []string{"0"}},
-			{"parseCanonical", func(r *MockRPCInput, s []string) ([]interface{}, error) {
+			{"parseCanonical", func(r *MockRPCInput, s []string) ([]any, error) {
 				return parseCanonical(r, s, PARSE_PARAMS)
 			}, []string{"0", "key"}},
-			{"parseDictionary", func(r *MockRPCInput, s []string) ([]interface{}, error) {
+			{"parseDictionary", func(r *MockRPCInput, s []string) ([]any, error) {
 				return parseDictionary(r, s, PARSE_PARAMS)
 			}, []string{"key", "|"}},
-			{"parseDictionaryOrOrdered", func(r *MockRPCInput, s []string) ([]interface{}, error) {
+			{"parseDictionaryOrOrdered", func(r *MockRPCInput, s []string) ([]any, error) {
 				return parseDictionaryOrOrdered(r, s, PARSE_PARAMS)
 			}, []string{"key", "|", "0"}},
 		}
@@ -259,7 +259,7 @@ func TestParameterTransformation(t *testing.T) {
 
 	t.Run("empty params vs nil params behavior", func(t *testing.T) {
 		// Empty array should behave differently than nil
-		emptyArrayInput := &MockRPCInput{params: []interface{}{}}
+		emptyArrayInput := &MockRPCInput{params: []any{}}
 		nilInput := &MockRPCInput{params: nil}
 
 		// parseByArg with empty array

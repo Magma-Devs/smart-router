@@ -10,8 +10,7 @@ import (
 // extractLavaError extracts the *common.LavaError from a LavaWrappedError,
 // or returns nil if the error is not (or does not wrap) a LavaWrappedError.
 func extractLavaError(err error) *common.LavaError {
-	var wrapped *common.LavaWrappedError
-	if errors.As(err, &wrapped) {
+	if wrapped, ok := errors.AsType[*common.LavaWrappedError](err); ok {
 		return wrapped.LavaErr
 	}
 	return nil

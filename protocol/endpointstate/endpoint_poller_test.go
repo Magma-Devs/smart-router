@@ -87,8 +87,7 @@ func TestEndpointPoller_CustomMessage_POSTDelegatesToConnection(t *testing.T) {
 // and on every Solana-family chain those fetches fail with "slot not found in cache",
 // killing the tracker before OnNewBlock can fire.
 func TestEndpointMonitor_ForcesBlocksToSave1ForSolana(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	for _, tc := range []struct {
 		chainID  string

@@ -68,7 +68,7 @@ func registerTestQueryServer(s *grpc.Server, srv testQueryServer) {
 		Methods: []grpc.MethodDesc{
 			{
 				MethodName: "ShowChainInfo",
-				Handler: func(srvIface interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+				Handler: func(srvIface any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 					in := new(testRequest)
 					if err := dec(in); err != nil {
 						return nil, err
@@ -77,7 +77,7 @@ func registerTestQueryServer(s *grpc.Server, srv testQueryServer) {
 						return srvIface.(testQueryServer).ShowChainInfo(ctx, in)
 					}
 					info := &grpc.UnaryServerInfo{Server: srvIface, FullMethod: testServiceMethod}
-					return interceptor(ctx, in, info, func(ctx context.Context, req interface{}) (interface{}, error) {
+					return interceptor(ctx, in, info, func(ctx context.Context, req any) (any, error) {
 						return srvIface.(testQueryServer).ShowChainInfo(ctx, req.(*testRequest))
 					})
 				},
@@ -164,7 +164,7 @@ func TestConnectorConcurrentAccess(t *testing.T) {
 	const numGoroutines = 50
 	errCh := make(chan error, numGoroutines)
 
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		go func() {
 			client, err := conn.GetRpc(ctx, true)
 			if err != nil {
@@ -181,7 +181,7 @@ func TestConnectorConcurrentAccess(t *testing.T) {
 	}
 
 	// Wait for all goroutines to complete and check for errors
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		err := <-errCh
 		require.NoError(t, err)
 	}
@@ -220,13 +220,13 @@ func TestConnectorGrpc(t *testing.T) {
 	require.Equal(t, conn.numberOfFreeClients(), numberOfClients)
 	increasedClients := numberOfClients * 2 // increase to double the number of clients
 	rpcList := make([]*grpc.ClientConn, increasedClients)
-	for i := 0; i < increasedClients; i++ {
+	for i := range increasedClients {
 		rpc, err := conn.GetRpc(ctx, true)
 		require.NoError(t, err)
 		rpcList[i] = rpc
 	}
 	require.Equal(t, increasedClients, conn.numberOfUsedClients()) // checking we have used clients
-	for i := 0; i < increasedClients; i++ {
+	for i := range increasedClients {
 		conn.ReturnRpc(rpcList[i])
 	}
 	require.Equal(t, conn.numberOfUsedClients(), 0)                // checking we dont have clients used
@@ -247,7 +247,7 @@ func TestConnectorGrpcAndInvoke(t *testing.T) {
 	// require.Equal(t, conn.numberOfFreeClients(), numberOfClients)
 	increasedClients := numberOfClients * 2 // increase to double the number of clients
 	rpcList := make([]*grpc.ClientConn, increasedClients)
-	for i := 0; i < increasedClients; i++ {
+	for i := range increasedClients {
 		rpc, err := conn.GetRpc(ctx, true)
 		require.NoError(t, err)
 		rpcList[i] = rpc
@@ -257,7 +257,7 @@ func TestConnectorGrpcAndInvoke(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Equal(t, increasedClients, conn.numberOfUsedClients()) // checking we have used clients
-	for i := 0; i < increasedClients; i++ {
+	for i := range increasedClients {
 		conn.ReturnRpc(rpcList[i])
 	}
 	require.Equal(t, conn.numberOfUsedClients(), 0) // checking we dont have clients used
@@ -423,7 +423,7 @@ func TestConnectorWebsocket(t *testing.T) {
 	require.NotNil(t, client)
 
 	// Test sending a message using CallContext
-	params := map[string]interface{}{
+	params := map[string]any{
 		"test": "value",
 	}
 	id := json.RawMessage(`1`)

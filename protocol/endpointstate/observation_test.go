@@ -399,31 +399,31 @@ func TestEndpointMonitor_GetObservation_ConcurrentSnapshot(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		for i := 0; i < iters; i++ {
+		for i := range iters {
 			m.recordPollObservation(url, gen, int64(1000+i), time.Duration(i)*time.Microsecond, nil, base.Add(time.Duration(i)*time.Millisecond))
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		for i := 0; i < iters; i++ {
+		for i := range iters {
 			m.RecordRelayObservation(url, gen, int64(2000+i), base.Add(time.Duration(i)*time.Millisecond))
 		}
 	}()
-	var torn int32
+	var torn atomic.Int32
 	go func() {
 		defer wg.Done()
-		for i := 0; i < iters; i++ {
+		for range iters {
 			// Snapshot must be internally consistent: any recorded block is > 0
 			// (a torn/half-updated read would surface a zero block alongside ok=true).
 			// Don't call require from a non-test goroutine — flag and assert after.
 			if o, ok := m.GetObservation(url); ok && o.LatestBlock <= 0 {
-				atomic.AddInt32(&torn, 1)
+				torn.Add(1)
 			}
 		}
 	}()
 
 	wg.Wait()
-	require.Zero(t, atomic.LoadInt32(&torn), "GetObservation must never return a torn/half-updated snapshot")
+	require.Zero(t, torn.Load(), "GetObservation must never return a torn/half-updated snapshot")
 	o, ok := m.GetObservation(url)
 	require.True(t, ok)
 	require.NotZero(t, o.LatestBlock)

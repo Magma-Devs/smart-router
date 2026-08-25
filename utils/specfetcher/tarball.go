@@ -6,12 +6,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"path"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // MaxTarballDecompressedBytes caps how much decompressed tarball data is read
@@ -90,9 +91,7 @@ func extractSpecsFromTarGz(r io.Reader, pathInRepo string) (map[string]types.Spe
 			parseErrors = append(parseErrors, fmt.Sprintf("%s: failed to parse JSON: %v", relPath, err))
 			continue
 		}
-		for k, v := range fileSpecs {
-			specs[k] = v
-		}
+		maps.Copy(specs, fileSpecs)
 	}
 
 	if len(specs) == 0 {

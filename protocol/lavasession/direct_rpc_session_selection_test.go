@@ -229,7 +229,7 @@ func TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal(t *testing.T) {
 
 	// (1) + (2a): one short of the threshold the endpoint is still enabled and is
 	// offered for relay despite the unreachable upstream.
-	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
+	for range MaxConsecutiveConnectionAttempts - 1 {
 		endpoint.MarkUnhealthy()
 	}
 	require.True(t, endpoint.Enabled, "endpoint must stay enabled below the consecutive-failure threshold")

@@ -62,12 +62,12 @@ func TestEndpointPoller_FetchLatestBlockNum_RecordsExactlyOneObservation(t *test
 		spectypes.APIInterfaceJsonRPC,
 	)
 
-	var calls int32
-	var gotBlock int64
+	var calls atomic.Int32
+	var gotBlock atomic.Int64
 	var gotErr error
 	poller.onPollObservation = func(block int64, latency time.Duration, pollErr error, at time.Time) {
-		atomic.AddInt32(&calls, 1)
-		atomic.StoreInt64(&gotBlock, block)
+		calls.Add(1)
+		gotBlock.Store(block)
 		gotErr = pollErr
 	}
 
@@ -75,8 +75,8 @@ func TestEndpointPoller_FetchLatestBlockNum_RecordsExactlyOneObservation(t *test
 	require.NoError(t, err)
 	require.Equal(t, int64(256), block, "0x100 parses to 256")
 
-	require.Equal(t, int32(1), atomic.LoadInt32(&calls), "exactly one observation per poll")
-	require.Equal(t, int64(256), atomic.LoadInt64(&gotBlock))
+	require.Equal(t, int32(1), calls.Load(), "exactly one observation per poll")
+	require.Equal(t, int64(256), gotBlock.Load())
 	require.NoError(t, gotErr)
 }
 
@@ -88,8 +88,7 @@ func TestEndpointPoller_FetchLatestBlockNum_RecordsExactlyOneObservation(t *test
 // → observation chain under test fires on every init attempt.
 func TestEndpointMonitor_RealPoll_NonSVM_PopulatesObservation(t *testing.T) {
 	ensureRandSeeded()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	chainParser := newRealChainParser(t, "ETH1", spectypes.APIInterfaceJsonRPC)
 
@@ -130,8 +129,7 @@ func TestEndpointMonitor_RealPoll_NonSVM_PopulatesObservation(t *testing.T) {
 // pass proves the real SVM execution path was exercised.
 func TestEndpointMonitor_RealPoll_SVM_PopulatesObservation(t *testing.T) {
 	ensureRandSeeded()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	const slot = int64(123456789)
 	url := "https://solana-ep:443/"
@@ -176,8 +174,7 @@ func TestEndpointMonitor_RealPoll_SVM_PopulatesObservation(t *testing.T) {
 // response, so the real SVM poll fails to parse a block.
 func TestEndpointMonitor_RealPoll_SVM_FailureRecordsFailure(t *testing.T) {
 	ensureRandSeeded()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	url := "https://solana-bad:443/"
 	conn := &mockDirectRPCConnection{url: url} // no getLatestBlockhash mapping → unparseable as SVM

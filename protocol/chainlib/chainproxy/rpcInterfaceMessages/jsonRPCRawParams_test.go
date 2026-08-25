@@ -15,7 +15,7 @@ type plainDecode struct {
 	Version string               `json:"jsonrpc,omitempty"`
 	ID      json.RawMessage      `json:"id,omitempty"`
 	Method  string               `json:"method,omitempty"`
-	Params  interface{}          `json:"params,omitempty"`
+	Params  any                  `json:"params,omitempty"`
 	Error   *rpcclient.JsonError `json:"error,omitempty"`
 	Result  json.RawMessage      `json:"result,omitempty"`
 }
@@ -66,7 +66,7 @@ func TestJsonrpcMessage_UnmarshalJSON_Batch(t *testing.T) {
 	require.True(t, isBatch)
 	require.Len(t, msgs, 2)
 	require.Equal(t, `[1]`, string(msgs[0].ParamsJSON()))
-	require.Equal(t, []interface{}{float64(1)}, msgs[0].Params)
+	require.Equal(t, []any{float64(1)}, msgs[0].Params)
 	require.Nil(t, msgs[1].ParamsJSON())
 	require.Nil(t, msgs[1].Params)
 }
@@ -100,7 +100,7 @@ func TestJsonrpcMessage_MarshalReply(t *testing.T) {
 		require.Equal(t, `{"jsonrpc":"2.0","id":1,"method":"m","params":{"z":1,"a":2}}`, string(got))
 	})
 	t.Run("message built in code with a params tree falls back to marshal", func(t *testing.T) {
-		msg := JsonrpcMessage{Version: "2.0", ID: json.RawMessage(`1`), Method: "m", Params: []interface{}{"a", float64(1)}}
+		msg := JsonrpcMessage{Version: "2.0", ID: json.RawMessage(`1`), Method: "m", Params: []any{"a", float64(1)}}
 		got, err := msg.MarshalReply()
 		require.NoError(t, err)
 		want, err := goccy.Marshal(&msg)
@@ -118,7 +118,7 @@ func TestJsonrpcMessage_MarshalReply(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, string(want), string(got))
 
-		withTree := append(msgs, JsonrpcMessage{Version: "2.0", ID: json.RawMessage(`3`), Method: "m", Params: []interface{}{"x"}})
+		withTree := append(msgs, JsonrpcMessage{Version: "2.0", ID: json.RawMessage(`3`), Method: "m", Params: []any{"x"}})
 		got, err = MarshalBatchReply(withTree)
 		require.NoError(t, err)
 		want, err = goccy.Marshal(withTree)

@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"context"
+	"maps"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -51,9 +52,7 @@ func InjectHTTP(ctx context.Context, headers []pairingtypes.Metadata) []pairingt
 func InjectGRPC(ctx context.Context, headers map[string]string) {
 	carrier := propagation.MapCarrier{}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
-	for k, v := range carrier {
-		headers[k] = v
-	}
+	maps.Copy(headers, carrier)
 }
 
 // ExtractHTTP reads W3C trace context from a Metadata slice into ctx,

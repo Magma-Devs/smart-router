@@ -1125,7 +1125,7 @@ func TestClassifyError_NoShadowedMatchers(t *testing.T) {
 
 func checkMappingsForShadows(t *testing.T, mappings []errorMapping) {
 	t.Helper()
-	for i := 0; i < len(mappings); i++ {
+	for i := range mappings {
 		for j := i + 1; j < len(mappings); j++ {
 			a := mappings[i]
 			b := mappings[j]

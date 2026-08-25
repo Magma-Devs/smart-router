@@ -76,7 +76,7 @@ func TestEndpointObservationStore_ExpiryAndReorgAfterExpiry(t *testing.T) {
 
 func TestEndpointObservationStore_SweepDropsExpiredEntries(t *testing.T) {
 	s, now := newClockedStore(time.Unix(1_000_000, 0))
-	for i := 0; i < endpointObservationSweepEvery-1; i++ {
+	for i := range endpointObservationSweepEvery - 1 {
 		require.True(t, s.set("old-"+string(rune('a'+i%26))+string(rune('a'+i/26)), 1, "p", time.Second))
 	}
 	before := s.len()

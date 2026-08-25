@@ -13,7 +13,7 @@ import (
 func BenchmarkExtractBlockHeightFromEVMResponse(b *testing.B) {
 	var logs strings.Builder
 	logs.WriteString(`{"jsonrpc":"2.0","id":1,"result":[`)
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		if i > 0 {
 			logs.WriteByte(',')
 		}
@@ -23,7 +23,7 @@ func BenchmarkExtractBlockHeightFromEVMResponse(b *testing.B) {
 
 	var block strings.Builder
 	block.WriteString(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x12a7b5c","hash":"0x` + strings.Repeat("ab", 32) + `","transactions":[`)
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		if i > 0 {
 			block.WriteByte(',')
 		}
@@ -54,7 +54,7 @@ func BenchmarkExtractBlockHeightFromEVMResponse(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				var resp struct {
-					Result interface{} `json:"result"`
+					Result any `json:"result"`
 				}
 				if err := json.Unmarshal(tc.body, &resp); err != nil {
 					b.Fatal(err)

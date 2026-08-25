@@ -36,7 +36,7 @@ func (scs *SafeChannelSender[T]) sendInner(msg T) {
 	}
 
 	shouldBreak := false
-	for retry := 0; retry < retryAttemptsForChannelWrite; retry++ {
+	for retry := range retryAttemptsForChannelWrite {
 		select {
 		case <-scs.ctx.Done():
 		// trying to write to the channel, if the channel is not ready this will fail and retry again up to retryAttemptsForChannelWrite times

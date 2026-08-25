@@ -630,10 +630,8 @@ func DetectConnectionError(err error) *LavaError {
 	}
 
 	// Layer 3: net.OpError with a raw syscall errno.
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		var syscallErr *syscall.Errno
-		if errors.As(opErr.Err, &syscallErr) {
+	if opErr, ok := errors.AsType[*net.OpError](err); ok {
+		if syscallErr, ok := errors.AsType[*syscall.Errno](opErr.Err); ok {
 			switch *syscallErr {
 			case syscall.ECONNREFUSED:
 				return LavaErrorConnectionRefused

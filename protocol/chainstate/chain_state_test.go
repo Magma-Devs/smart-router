@@ -195,7 +195,7 @@ func TestSetLatestBlock_EqualBlockRefreshesFreshness(t *testing.T) {
 	cs.SetLatestBlock(800)
 
 	// Walk right up to the TTL boundary, re-confirming the SAME block each step.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		clk.advance(9 * time.Second) // < TTL since the last confirmation
 		_, _, advanced := cs.SetLatestBlock(800)
 		require.False(t, advanced, "an equal-block confirmation is not an advance")

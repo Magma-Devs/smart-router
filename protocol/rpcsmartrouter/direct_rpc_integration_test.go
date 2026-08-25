@@ -758,7 +758,7 @@ func (m *mockGenericMessage) GetHeaders() []pairingtypes.Metadata {
 
 func (m *mockGenericMessage) DisableErrorHandling() {}
 
-func (m *mockGenericMessage) GetParams() interface{} {
+func (m *mockGenericMessage) GetParams() any {
 	return nil
 }
 

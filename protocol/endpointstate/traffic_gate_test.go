@@ -130,16 +130,13 @@ func TestFreshRelayTip_FreshnessBoundary(t *testing.T) {
 // every steady tick would poll and the upper bound below would be exceeded.
 func TestEndpointMonitor_SolanaTrafficGate_SuppressesUpstreamPoll(t *testing.T) {
 	ensureRandSeeded()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	const url = "https://solana-ep:443/"
 	conn := &countingDirectRPCConnection{
-		mockDirectRPCConnection: mockDirectRPCConnection{
-			url: url,
-			responses: map[string][]byte{
-				svmLatestBlockRequest: []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":250000000},"value":{"blockhash":"solhash"}}}`),
-			},
+		url: url,
+		responses: map[string][]byte{
+			svmLatestBlockRequest: []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":250000000},"value":{"blockhash":"solhash"}}}`),
 		},
 		matchSubstr: "getLatestBlockhash", // count only the latest-block poll upstream calls
 	}

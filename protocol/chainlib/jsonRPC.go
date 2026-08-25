@@ -86,11 +86,11 @@ func (apip *JsonRPCChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 	}
 
 	msg := &rpcInterfaceMessages.JsonrpcMessage{
-		Version:     "2.0",
-		ID:          []byte("1"),
-		Method:      parsing.ApiName,
-		Params:      nil,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata},
+		Version: "2.0",
+		ID:      []byte("1"),
+		Method:  parsing.ApiName,
+		Params:  nil,
+		Headers: metadata,
 	}
 	apiCont, err := apip.getSupportedApi(parsing.ApiName, connectionType, "")
 	if err != nil {
@@ -598,13 +598,11 @@ func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	nodeUrl := rpcProviderEndpoint.NodeUrls[0]
 
 	cp := &JrpcChainProxy{
-		BaseChainProxy: BaseChainProxy{
-			averageBlockTime: averageBlockTime,
-			NodeUrl:          nodeUrl,
-			ErrorHandler:     &JsonRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID},
-			ChainID:          rpcProviderEndpoint.ChainID,
-		},
-		conn: nil,
+		averageBlockTime: averageBlockTime,
+		NodeUrl:          nodeUrl,
+		ErrorHandler:     &JsonRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID},
+		ChainID:          rpcProviderEndpoint.ChainID,
+		conn:             nil,
 	}
 
 	validateEndpoints(rpcProviderEndpoint.NodeUrls, spectypes.APIInterfaceJsonRPC)

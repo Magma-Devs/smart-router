@@ -78,7 +78,7 @@ type DefaultRPCInput struct {
 	BaseMessage
 }
 
-func (dri DefaultRPCInput) GetParams() interface{} {
+func (dri DefaultRPCInput) GetParams() any {
 	return nil
 }
 

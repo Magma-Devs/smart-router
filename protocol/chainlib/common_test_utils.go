@@ -3,6 +3,7 @@ package chainlib
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -152,9 +153,7 @@ func (s mockBlockServiceImpl) GetLatestBlock(ctx context.Context, _ *dynamicpb.M
 	req := &http.Request{}
 	if exists {
 		headers := map[string][]string{}
-		for key, val := range md {
-			headers[key] = val
-		}
+		maps.Copy(headers, md)
 		req = &http.Request{Header: headers}
 	}
 	num := 5
@@ -212,27 +211,27 @@ func genericWebSocketHandler() http.HandlerFunc {
 // CreateMockSpec returns a minimal spectypes.Spec suitable for unit tests.
 func CreateMockSpec() spectypes.Spec {
 	specName := "mockspec"
-	spec := spectypes.Spec{}
-	spec.Name = specName
-	spec.Index = specName
-	spec.Enabled = true
-	spec.BlockDistanceForFinalizedData = 0
-	spec.ApiCollections = []*spectypes.ApiCollection{
-		{
-			Enabled: true,
-			CollectionData: spectypes.CollectionData{
-				ApiInterface: "stub",
-				Type:         "GET",
-			},
-			Apis: []*spectypes.Api{
-				{
-					Name:         specName + "API",
-					ComputeUnits: 100,
-					Enabled:      true,
+	spec := spectypes.Spec{
+		Name:                          specName,
+		Index:                         specName,
+		Enabled:                       true,
+		BlockDistanceForFinalizedData: 0,
+		ApiCollections: []*spectypes.ApiCollection{
+			{
+				Enabled: true,
+				CollectionData: spectypes.CollectionData{
+					ApiInterface: "stub",
+					Type:         "GET",
+				},
+				Apis: []*spectypes.Api{
+					{
+						Name:         specName + "API",
+						ComputeUnits: 100,
+						Enabled:      true,
+					},
 				},
 			},
-		},
-	}
+		}}
 	return spec
 }
 

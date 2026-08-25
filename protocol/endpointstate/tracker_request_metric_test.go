@@ -10,6 +10,7 @@ package endpointstate
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"testing"
 	"time"
@@ -57,7 +58,7 @@ func TestSendRawRequest_CountsRequestsThatReachTheTransport(t *testing.T) {
 	)
 	poller.onTrackerRequest = func(kind string) { rec.record("http://node.example", kind) }
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_, err := poller.sendRawRequest(context.Background(), []byte("{}"), "POST", "eth_blockNumber", metrics.TrackerRequestKindLatestBlock)
 		require.NoError(t, err)
 	}
@@ -153,9 +154,7 @@ func TestTrackerRequestCounter_ByKind_EndToEnd(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		out := map[string]int{}
-		for k, v := range counts {
-			out[k] = v
-		}
+		maps.Copy(out, counts)
 		return out
 	}
 

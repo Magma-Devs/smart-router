@@ -36,8 +36,7 @@ func TestStartSelectionStatsUpdater_WritesToOptimizerMetric(t *testing.T) {
 
 	m := newSmartRouterForOptimizerTest(coqc)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m.StartSelectionStatsUpdater(ctx, 10*time.Millisecond)
 
@@ -63,8 +62,7 @@ func TestStartSelectionStatsUpdater_DoesNotWriteToEndpointMetric(t *testing.T) {
 
 	m := newSmartRouterForOptimizerTest(coqc)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m.StartSelectionStatsUpdater(ctx, 10*time.Millisecond)
 

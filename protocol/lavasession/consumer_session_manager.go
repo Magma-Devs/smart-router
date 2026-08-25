@@ -3,6 +3,7 @@ package lavasession
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -426,9 +427,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	// (backups only appear in the backup fallback path), so their weights only affect within-tier ranking.
 	weights := CalcWeightsByStake(pairingList)
 	backupWeights := CalcWeightsByStake(backupProviderList)
-	for addr, w := range backupWeights {
-		weights[addr] = w
-	}
+	maps.Copy(weights, backupWeights)
 	csm.providerOptimizer.UpdateWeights(weights, epoch)
 	go csm.consumerMetricsManager.ResetBlockedProvidersMetrics(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, providerAddressToEndpoint)
 
@@ -1545,10 +1544,8 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 	} else {
 		// Make a copy of ignoredProvidersList to avoid modifying the original
 		ignoredProvidersListCopy := make(map[string]struct{}, len(ignoredProvidersList))
-		for k, v := range ignoredProvidersList {
-			ignoredProvidersListCopy[k] = v
-		}
-		for i := 0; i < wantedProviders; i++ {
+		maps.Copy(ignoredProvidersListCopy, ignoredProvidersList)
+		for i := range wantedProviders {
 			provider, selectionStats := csm.providerOptimizer.ChooseProviderWithStats(ctx, validAddresses, ignoredProvidersListCopy, cu, requestedBlock)
 			if len(provider) == 0 {
 				break

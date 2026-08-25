@@ -14,9 +14,9 @@ import (
 // the leaf with blockInterfaceToString.
 func decodePathScalar(t *testing.T, raw []byte, keys []string) (string, bool) {
 	t.Helper()
-	var v interface{}
+	var v any
 	require.NoError(t, json.Unmarshal(raw, &v))
-	if m, ok := v.(map[string]interface{}); ok && len(keys) > 0 {
+	if m, ok := v.(map[string]any); ok && len(keys) > 0 {
 		var n int
 		if _, err := fmt.Sscanf(keys[0], "%d", &n); err == nil {
 			keys = keys[1:]
@@ -25,13 +25,13 @@ func decodePathScalar(t *testing.T, raw []byte, keys []string) (string, bool) {
 	}
 	for _, key := range keys {
 		switch c := v.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			next, ok := c[key]
 			if !ok {
 				return "", false
 			}
 			v = next
-		case []interface{}:
+		case []any:
 			var idx int
 			if _, err := fmt.Sscanf(key, "%d", &idx); err != nil || idx >= len(c) {
 				return "", false
@@ -119,13 +119,13 @@ func TestParseCanonical_ResultFastPathMatchesDecode(t *testing.T) {
 
 	got, err := parseCanonical(input, []string{"0", "number"}, PARSE_RESULT)
 	require.NoError(t, err)
-	require.Equal(t, []interface{}{"0x12a7b5c"}, got)
+	require.Equal(t, []any{"0x12a7b5c"}, got)
 
 	// PARSE_PARAMS is untouched by the fast path.
-	input.Params = []interface{}{"0x5", true}
+	input.Params = []any{"0x5", true}
 	got, err = parseCanonical(input, []string{"0"}, PARSE_PARAMS)
 	require.NoError(t, err)
-	require.Equal(t, []interface{}{"0x5"}, got)
+	require.Equal(t, []any{"0x5"}, got)
 }
 
 func TestGjsonEscapeKey(t *testing.T) {
@@ -140,7 +140,7 @@ func TestGjsonEscapeKey(t *testing.T) {
 func BenchmarkParseCanonicalResult_Block(b *testing.B) {
 	var sb strings.Builder
 	sb.WriteString(`{"number":"0x12a7b5c","hash":"0x` + strings.Repeat("ab", 32) + `","transactions":[`)
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
@@ -165,7 +165,7 @@ func BenchmarkParseCanonicalResult_Block(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			m := data.([]interface{})[0].(map[string]interface{})
+			m := data.([]any)[0].(map[string]any)
 			if blockInterfaceToString(m["number"]) != "0x12a7b5c" {
 				b.Fatal("unexpected number")
 			}

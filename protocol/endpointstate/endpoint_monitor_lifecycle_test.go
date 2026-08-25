@@ -1,7 +1,6 @@
 package endpointstate
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"sync"
@@ -25,8 +24,7 @@ import (
 // TestEndpointMonitor_RemoveTrackerCallsCancel tests that RemoveTracker
 // properly invokes the cancel function for per-tracker context cancellation.
 func TestEndpointMonitor_RemoveTrackerCallsCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	t.Run("RemoveTracker invokes cancel function", func(t *testing.T) {
 		trackerManager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
@@ -91,13 +89,13 @@ func TestEndpointMonitor_RemoveTrackerCallsCancel(t *testing.T) {
 		const numGoroutines = 50
 
 		// Add many cancel functions
-		for i := 0; i < numGoroutines; i++ {
+		for i := range numGoroutines {
 			endpoint := fmt.Sprintf("http://endpoint%d:8545", i)
 			trackerManager.cancelFuncs[endpoint] = func() {}
 		}
 
 		// Simulate concurrent removal operations
-		for i := 0; i < numGoroutines; i++ {
+		for i := range numGoroutines {
 			wg.Add(1)
 			go func(id int) {
 				defer wg.Done()
@@ -153,8 +151,7 @@ func (r *recordingChainTracker) CurrentPollInterval() time.Duration {
 // invokes ResetLatestBlock on every registered tracker exactly once and returns
 // the number of trackers reset.
 func TestEndpointMonitor_ResetAllLatestBlocks(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -190,8 +187,7 @@ func TestEndpointMonitor_ResetAllLatestBlocks(t *testing.T) {
 // until the next poll happens to overwrite it. ResetAllLatestBlocks must clear the store entry
 // too, so BOTH sources read 0 (unknown) after a reset.
 func TestEndpointMonitor_ResetAllLatestBlocks_ClearsEndpointTipStore(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// A dedicated chain/interface keeps this case isolated on the process-wide store singleton.
 	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{

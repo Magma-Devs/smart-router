@@ -111,7 +111,7 @@ func (n *Notifier) CreateSubscription() *Subscription {
 
 // Notify sends a notification to the client with the given data as payload.
 // If an error occurs the RPC connection is closed and the error is returned.
-func (n *Notifier) Notify(id ID, data interface{}) error {
+func (n *Notifier) Notify(id ID, data any) error {
 	enc, err := json.Marshal(data)
 	if err != nil {
 		return err
@@ -134,7 +134,7 @@ func (n *Notifier) Notify(id ID, data interface{}) error {
 
 // Closed returns a channel that is closed when the RPC connection is closed.
 // Deprecated: use subscription error channel
-func (n *Notifier) Closed() <-chan interface{} {
+func (n *Notifier) Closed() <-chan any {
 	return n.h.conn.closed()
 }
 

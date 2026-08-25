@@ -115,14 +115,14 @@ type UserData struct {
 type NodeUrl struct {
 	Url               string        `yaml:"url,omitempty" json:"url,omitempty" mapstructure:"url"`
 	InternalPath      string        `yaml:"internal-path,omitempty" json:"internal-path,omitempty" mapstructure:"internal-path"`
-	AuthConfig        AuthConfig    `yaml:"auth-config,omitempty" json:"auth-config,omitempty" mapstructure:"auth-config"`
+	AuthConfig        AuthConfig    `yaml:"auth-config,omitempty" json:"auth-config" mapstructure:"auth-config"`
 	IpForwarding      bool          `yaml:"ip-forwarding,omitempty" json:"ip-forwarding,omitempty" mapstructure:"ip-forwarding"`
 	Timeout           time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty" mapstructure:"timeout"`
 	Addons            []string      `yaml:"addons,omitempty" json:"addons,omitempty" mapstructure:"addons"`
 	SkipVerifications []string      `yaml:"skip-verifications,omitempty" json:"skip-verifications,omitempty" mapstructure:"skip-verifications"`
 	Methods           []string      `yaml:"methods,omitempty" json:"methods,omitempty" mapstructure:"methods"`
 	// GrpcConfig holds gRPC-specific configuration for direct gRPC connections (smart router)
-	GrpcConfig GrpcConfig `yaml:"grpc-config,omitempty" json:"grpc-config,omitempty" mapstructure:"grpc-config"`
+	GrpcConfig GrpcConfig `yaml:"grpc-config,omitempty" json:"grpc-config" mapstructure:"grpc-config"`
 }
 
 // SkipVerificationsWildcard is the sentinel a node-url's skip-verifications list can carry
