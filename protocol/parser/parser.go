@@ -587,6 +587,12 @@ func parseByArg(rpcInput RPCInput, input []string, dataSource int) ([]interface{
 		return nil, fmt.Errorf("invalid input format, input isn't an unsigned index. input=%s error=%w", inp, err)
 	}
 
+	if dataSource == PARSE_RESULT {
+		if value, ok := fastPathScalarFromResult(rpcInput.GetResult(), input); ok {
+			return []interface{}{value}, nil
+		}
+	}
+
 	unmarshalledData, err := getDataToParse(rpcInput, dataSource)
 	if err != nil {
 		return nil, fmt.Errorf("invalid input format, data is not json. data=%s err=%w", unmarshalledData, err)
@@ -624,6 +630,12 @@ func parseByArg(rpcInput RPCInput, input []string, dataSource int) ([]interface{
 //
 // should output an interface array with "wanted result" in first index 0
 func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]interface{}, error) {
+	if dataSource == PARSE_RESULT {
+		if value, ok := fastPathScalarFromResult(rpcInput.GetResult(), input); ok {
+			return []interface{}{value}, nil
+		}
+	}
+
 	unmarshalledData, err := getDataToParse(rpcInput, dataSource)
 	if err != nil {
 		return nil, fmt.Errorf("invalid input format, data is not json: %s, error: %s", unmarshalledData, err)
