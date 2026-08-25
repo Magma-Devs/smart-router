@@ -183,6 +183,28 @@ func NewUpstreamSelector(config UpstreamSelectorConfig) *UpstreamSelector {
 		totalWeight = 1.0 // default weights sum to 1.0
 	}
 
+	// MinSelectionChance is a floor applied to every composite, so it only makes sense as
+	// a score in [0, 1]. Nothing validated it before, and out-of-range values fail in ways
+	// that look like a scoring bug rather than a config error:
+	//
+	//   > 1  — CalculateScore floors every candidate above 1.0 and then clamps back to
+	//          1.0, so EVERY upstream scores exactly 1.0. Ranking is switched off entirely
+	//          and silently: a 10ms upstream and a 25s upstream come out identical.
+	//   < 0  — the floor stops floor-ing; a negative composite is meaningless and would
+	//          drag totalScore below zero, diverting live traffic into the all-zero guard.
+	//
+	// 0 stays legal — it is the deliberate "no floor at all" choice — and is safe now that
+	// the all-zero guard keeps SelectionModeBest deterministic.
+	if math.IsNaN(config.MinSelectionChance) || math.IsInf(config.MinSelectionChance, 0) ||
+		config.MinSelectionChance < 0 || config.MinSelectionChance > 1 {
+		defaultChance := DefaultUpstreamSelectorConfig().MinSelectionChance
+		utils.LavaFormatWarning("invalid min selection chance, must be finite and within [0, 1], using default", nil,
+			utils.LogAttr("minSelectionChance", config.MinSelectionChance),
+			utils.LogAttr("usingInstead", defaultChance),
+		)
+		config.MinSelectionChance = defaultChance
+	}
+
 	if math.Abs(totalWeight-1.0) > 0.001 {
 		utils.LavaFormatWarning("endpoint selector weights do not sum to 1.0, normalizing",
 			nil,
@@ -672,20 +694,32 @@ func (ws *UpstreamSelector) SelectUpstreamWithStats(
 	}
 
 	if totalScore <= 0 {
-		// Defensive only — unreachable at any sane configuration, in BOTH modes.
+		// Reachable only when minSelectionChance is 0. CalculateScore floors every
+		// candidate at ws.minSelectionChance — including the availability-dead collapse —
+		// so with the default floor a score arriving here is never below it and totalScore
+		// is never zero. Set --qos-min-selection-chance 0 and that stops being true: on a
+		// chain where every upstream has gone unhealthy, every composite collapses to 0.
 		//
-		// CalculateScore floors every candidate at ws.minSelectionChance (default 0.01),
-		// including the availability-dead collapse, so a score reaching this function is
-		// never below that floor and totalScore is never zero. The single way in is
-		// --qos-min-selection-chance 0, which NewUpstreamSelector does not reject: it
-		// validates the four weights but leaves MinSelectionChance untouched.
+		// An all-zero list is an N-way tie with no signal to rank on, so each mode answers
+		// it the way it answers every other tie. SelectionModeBest must NOT draw here: it
+		// is sold on "the answer does not change between two identical requests", and a
+		// draw would break that silently — the log line still says selection_mode=best.
+		// Reported by @avitenzer, who reproduced it as 300 identical requests splitting
+		// roughly evenly across three candidates.
 		//
-		// So this guard is NOT what keeps a degraded chain sane. Once availability
-		// collapses, every candidate ties at exactly minSelectionChance and the pick is
-		// resolved by pickBestIndex (first-wins) or pickWeightedIndex (a flat draw) —
-		// not here. Do not reason about the dead-chain case from this branch.
-		utils.LavaFormatWarning("all provider scores are zero, using uniform selection", nil)
-		return ws.buildSelectionResult(ctx, providerScores, scoreDetails, ws.rng.Intn(len(providerScores)), 0.0, totalScore)
+		// This guard is still not what keeps a degraded chain sane at the DEFAULT floor.
+		// There every candidate ties at exactly minSelectionChance, totalScore is positive,
+		// and the pick is resolved by pickBestIndex or pickWeightedIndex — not here.
+		selectedIndex := 0
+		if ws.selectionMode != SelectionModeBest {
+			selectedIndex = ws.rng.Intn(len(providerScores))
+		}
+		utils.LavaFormatWarning("all provider scores are zero, falling back to a flat pick", nil,
+			utils.LogAttr("selectionMode", ws.selectionMode.String()),
+			utils.LogAttr("numCandidates", len(providerScores)),
+			utils.LogAttr("hint", "every upstream scored zero — reachable only with --qos-min-selection-chance 0"),
+		)
+		return ws.buildSelectionResult(ctx, providerScores, scoreDetails, selectedIndex, 0.0, totalScore)
 	}
 
 	var (
@@ -739,10 +773,18 @@ func (ws *UpstreamSelector) pickWeightedIndex(providerScores []UpstreamScore, to
 // address. That objection does not survive contact with this mode. minSelectionChance is a
 // *lottery* mechanism — it buys a floored provider a slice of the weighted draw. Under
 // SelectionModeBest there is no draw, so a floored provider sitting beside any
-// higher-scoring peer already receives exactly zero traffic. The floor stopped protecting
-// anyone the moment the operator asked for "always the best"; randomising the all-tied case
+// higher-scoring peer already receives exactly zero traffic. Randomising the all-tied case
 // does not give that protection back, it only removes the determinism the mode exists to
 // provide.
+//
+// That reasoning is about the TIE-BREAK, and it is not an argument for turning the floor
+// off. Do not read it as one, and do not set --qos-min-selection-chance 0 on the strength
+// of it: the floor is what keeps every composite positive, and at 0 a fully degraded chain
+// scores zero across the board and lands in the all-zero guard in SelectUpstreamWithStats.
+// An earlier revision of this comment did read as such an argument, and @avitenzer pointed
+// out it walks the operator into the one branch that used to reintroduce a draw. That guard
+// is deterministic under Best now, so the trap is closed — but the floor still earns its
+// keep under weighted_random, where it is the whole anti-starvation mechanism.
 //
 // Two consequences worth knowing, neither of which is a regression from this choice:
 //
