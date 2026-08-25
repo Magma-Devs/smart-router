@@ -183,16 +183,12 @@ func extractBlockHeightFromEVMResponse(responseData []byte, method string) int64
 	case "eth_getLogs":
 		// Response: {"result": [{"blockNumber": "0x12a7b5c"}, ...]}
 		path = "result.0.blockNumber"
-	default:
-		utils.LavaFormatDebug("EVM fallback: no block height for method",
-			utils.LogAttr("method", method),
-			utils.LogAttr("response_size", len(responseData)),
-		)
-		return 0
 	}
 
-	if block, ok := hexQuantityAtPath(responseData, path); ok {
-		return block
+	if path != "" {
+		if block, ok := hexQuantityAtPath(responseData, path); ok {
+			return block
+		}
 	}
 	utils.LavaFormatDebug("EVM fallback: no block height for method",
 		utils.LogAttr("method", method),
