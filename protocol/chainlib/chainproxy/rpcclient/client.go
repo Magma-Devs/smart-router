@@ -73,10 +73,10 @@ type BatchElemWithId struct {
 }
 
 func NewBatchElementWithId(method string, args interface{}, result interface{}, iD json.RawMessage) (BatchElemWithId, error) {
-	_, ok := args.([]interface{})
-	_, ok2 := args.(map[string]interface{})
-	if !ok && !ok2 && args != nil {
-		return BatchElemWithId{}, fmt.Errorf("invalid args supported types are []interface{} or map[string]interface{}")
+	switch args.(type) {
+	case []interface{}, map[string]interface{}, json.RawMessage, nil:
+	default:
+		return BatchElemWithId{}, fmt.Errorf("invalid args supported types are []interface{}, map[string]interface{} or json.RawMessage")
 	}
 	return BatchElemWithId{
 		Method: method,
@@ -287,6 +287,8 @@ func (c *Client) CallContext(ctx context.Context, id json.RawMessage, method str
 	var msg *JsonrpcMessage
 	var err error
 	switch p := params.(type) {
+	case json.RawMessage:
+		msg = c.newMessageRawWithID(method, id, p)
 	case []interface{}, string:
 		msg, err = c.newMessageArrayWithID(method, id, p)
 	case map[string]interface{}:
@@ -356,6 +358,8 @@ func (c *Client) BatchCallContext(ctx context.Context, b []BatchElemWithId, stri
 		var msg *JsonrpcMessage
 		var err error
 		switch args := elem.args.(type) {
+		case json.RawMessage:
+			msg = c.newMessageRawWithID(elem.Method, elem.ID, args)
 		case []interface{}:
 			msg, err = c.newMessageArray(elem.Method, args...)
 		case map[string]interface{}:
@@ -544,6 +548,19 @@ func (c *Client) newMessageArrayWithID(method string, id json.RawMessage, params
 		}
 	}
 	return msg, nil
+}
+
+// newMessageRawWithID builds a request whose params are already encoded —
+// the client's wire bytes, forwarded as they are. No marshal step.
+func (c *Client) newMessageRawWithID(method string, id json.RawMessage, params json.RawMessage) *JsonrpcMessage {
+	if id == nil {
+		id = c.nextID()
+	}
+	msg := &JsonrpcMessage{Version: Vsn, ID: id, Method: method}
+	if len(params) > 0 {
+		msg.Params = params
+	}
+	return msg
 }
 
 func (c *Client) newMessageArray(method string, paramsIn ...interface{}) (*JsonrpcMessage, error) {

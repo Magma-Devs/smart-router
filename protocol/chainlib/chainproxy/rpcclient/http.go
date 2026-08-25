@@ -211,7 +211,7 @@ func (c *Client) sendBatchHTTP(ctx context.Context, op *requestOp, msgs []*Jsonr
 }
 
 func (hc *httpConn) doRequest(ctx context.Context, msg interface{}, isJsonRPC bool, strict bool) (io.ReadCloser, error) {
-	body, err := json.Marshal(msg)
+	body, err := encodeRequestBody(msg)
 	if err != nil {
 		return nil, err
 	}
@@ -274,4 +274,18 @@ func ValidateStatusCodes(statusCode int, strict bool) error {
 		}
 	}
 	return nil
+}
+
+// encodeRequestBody serializes the outgoing request. JSON-RPC messages —
+// single or batched — are spliced from their raw members (see
+// JsonrpcMessage.AppendJSON); anything else goes through json.Marshal.
+func encodeRequestBody(msg interface{}) ([]byte, error) {
+	switch m := msg.(type) {
+	case *JsonrpcMessage:
+		return m.MarshalReply()
+	case []*JsonrpcMessage:
+		return MarshalBatchReply(m)
+	default:
+		return json.Marshal(msg)
+	}
 }

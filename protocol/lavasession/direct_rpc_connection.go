@@ -728,7 +728,7 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 	// the client's id→response map, then restore the caller's id on the reply.
 	wireID := json.RawMessage(strconv.FormatUint(w.wireID.Add(1), 10))
 
-	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
+	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.SendableParams(), w.isJsonRPC, false)
 	if err != nil {
 		return nil, err
 	}
@@ -740,7 +740,7 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 	out := *reply
 	out.ID = reqMsg.ID // caller's id (omitted/empty for notifications)
 
-	respBytes, err := json.Marshal(&out)
+	respBytes, err := out.MarshalReply()
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal WebSocket response for %s: %w", w.nodeUrl.Url, err)
 	}
