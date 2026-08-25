@@ -165,8 +165,12 @@ func BenchmarkParseCanonicalResult_Block(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			m := data.([]any)[0].(map[string]any)
-			if blockInterfaceToString(m["number"]) != "0x12a7b5c" {
+			arr, ok := data.([]any)
+			if !ok || len(arr) == 0 {
+				b.Fatal("unexpected data shape")
+			}
+			m, ok := arr[0].(map[string]any)
+			if !ok || blockInterfaceToString(m["number"]) != "0x12a7b5c" {
 				b.Fatal("unexpected number")
 			}
 		}

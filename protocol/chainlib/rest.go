@@ -115,7 +115,8 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 		Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective,
 
 		// add spec path to rest message so we can extract the requested block.
-		SpecPath: apiCont.api.Name}
+		SpecPath: apiCont.api.Name,
+	}
 	parsedInput := parser.NewParsedInput()
 	if overwriteReqBlock == "" {
 		// Fetch requested block, it is used for data reliability

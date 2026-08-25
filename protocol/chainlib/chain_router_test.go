@@ -374,8 +374,10 @@ func TestChainRouterWithDisabledWebSocketInSpec(t *testing.T) {
 		t.Run(play.name, func(t *testing.T) {
 			nodeUrls := []common.NodeUrl{}
 			for _, service := range play.services {
-				nodeUrl := common.NodeUrl{Url: listenerAddressHttp,
-					Addons: service.services}
+				nodeUrl := common.NodeUrl{
+					Url:    listenerAddressHttp,
+					Addons: service.services,
+				}
 				nodeUrls = append(nodeUrls, nodeUrl)
 			}
 
@@ -795,8 +797,10 @@ func TestChainRouterWithEnabledWebSocketInSpec(t *testing.T) {
 		t.Run(play.name, func(t *testing.T) {
 			nodeUrls := []common.NodeUrl{}
 			for _, service := range play.services {
-				nodeUrl := common.NodeUrl{Url: listenerAddressHttp,
-					Addons: service.services}
+				nodeUrl := common.NodeUrl{
+					Url:    listenerAddressHttp,
+					Addons: service.services,
+				}
 				nodeUrls = append(nodeUrls, nodeUrl)
 				nodeUrl.Url = listenerAddressWs
 				nodeUrls = append(nodeUrls, nodeUrl)
