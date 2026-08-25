@@ -107,13 +107,11 @@ func TestNewWeightedSelectorNegativeWeightFallsBackToDefaultWeightsButKeepsOther
 func TestNewWeightedSelectorNaNWeightFallsBackToDefaultWeightsButKeepsOtherConfig(t *testing.T) {
 	config := WeightedSelectorConfig{
 		AvailabilityWeight: 0.3,
-		LatencyWeight:      0.3,
 		SyncWeight:         0.2,
 		StakeWeight:        0.2,
 		MinSelectionChance: 0.333,
 		Strategy:           StrategyAccuracy,
-	}
-	config.LatencyWeight = stdmath.NaN()
+		LatencyWeight:      stdmath.NaN()}
 
 	ws := NewWeightedSelector(config)
 
@@ -132,12 +130,10 @@ func TestNewWeightedSelectorInfWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 	config := WeightedSelectorConfig{
 		AvailabilityWeight: 0.3,
 		LatencyWeight:      0.3,
-		SyncWeight:         0.2,
 		StakeWeight:        0.2,
 		MinSelectionChance: 0.444,
 		Strategy:           StrategyDistributed,
-	}
-	config.SyncWeight = stdmath.Inf(1)
+		SyncWeight:         stdmath.Inf(1)}
 
 	ws := NewWeightedSelector(config)
 
@@ -321,7 +317,7 @@ func TestSelectProviderDistribution(t *testing.T) {
 	selections := make(map[string]int)
 	iterations := 10000
 
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		selected := ws.SelectProvider(context.Background(), providers)
 		selections[selected]++
 	}
@@ -365,7 +361,7 @@ func TestMinSelectionChanceIsAWeightFloorNotAProbabilityGuarantee(t *testing.T) 
 
 	const iterations = 100000
 	countMin := 0
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		if ws.SelectProvider(context.Background(), providers) == "min_floor" {
 			countMin++
 		}
@@ -410,10 +406,10 @@ func TestSelectProviderConcurrentDoesNotPanicAndReturnsValidProvider(t *testing.
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for g := 0; g < goroutines; g++ {
+	for range goroutines {
 		go func() {
 			defer wg.Done()
-			for i := 0; i < perG; i++ {
+			for range perG {
 				selected := ws.SelectProvider(context.Background(), providers)
 				total.Add(1)
 				switch selected {
@@ -446,7 +442,7 @@ func TestSelectProviderEqualScores(t *testing.T) {
 	selections := make(map[string]int)
 	iterations := 3000
 
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		selected := ws.SelectProvider(context.Background(), providers)
 		selections[selected]++
 	}
@@ -651,7 +647,7 @@ func BenchmarkSelectProvider(b *testing.B) {
 	ws.SetDeterministicSeed(1234567) // Use fixed seed for deterministic benchmark
 
 	providers := make([]ProviderScore, 50)
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		providers[i] = ProviderScore{
 			Address:         "provider" + string(rune(i)),
 			CompositeScore:  0.5 + float64(i)*0.01,
@@ -674,7 +670,7 @@ func BenchmarkCalculateProviderScores(b *testing.B) {
 	providerData := make(map[string]*pairingtypes.QualityOfServiceReport)
 	stakes := make(map[string]int64)
 
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		addr := "provider" + string(rune(i))
 		allAddresses[i] = addr
 		providerData[addr] = createQoSReport(0.9, 0.2, 3.0)

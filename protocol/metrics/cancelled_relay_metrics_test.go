@@ -19,7 +19,7 @@ func cancelledTestLabels() map[string]string {
 // for cancelled relays — the naive fix — leaks the gauge one per race loser.
 func TestCancelledRelay_InFlightGaugeReturnsToZero(t *testing.T) {
 	m := newSmartRouterForRequestGroupTest()
-	for i := 0; i < 25; i++ {
+	for range 25 {
 		m.RecordDirectRelayStart("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction")
 		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeCancelled, &RelayMetrics{IsWrite: true})
 	}
@@ -41,7 +41,7 @@ func TestCancelledRelay_DoesNotCountAsErrored(t *testing.T) {
 	m := newSmartRouterForRequestGroupTest()
 	labels := cancelledTestLabels()
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeCancelled, &RelayMetrics{IsWrite: true})
 	}
 
@@ -85,7 +85,7 @@ func TestCancelledRelay_PreservesRequestGroupInvariant(t *testing.T) {
 
 	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeSuccess, &RelayMetrics{IsWrite: true})
 	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeError, &RelayMetrics{IsWrite: true})
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeCancelled, &RelayMetrics{IsWrite: true})
 	}
 

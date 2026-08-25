@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -712,32 +713,26 @@ func TestGracefulFailure_ConcurrentEpochAndRetry(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Goroutine 1: simulate retry merging a recovered provider (copy-on-write)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 50; i++ {
+	wg.Go(func() {
+		for i := range 50 {
 			rpsr.mu.Lock()
 			oldSessions := rpsr.providerSessions[chainKey]
 			newSessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(oldSessions)+1)
-			for k, v := range oldSessions {
-				newSessions[k] = v
-			}
+			maps.Copy(newSessions, oldSessions)
 			newSessions[uint64(100+i)] = createTestProviderSession("recovered", uint64(i))
 			rpsr.providerSessions[chainKey] = newSessions
 			rpsr.mu.Unlock()
 			time.Sleep(time.Millisecond)
 		}
-	}()
+	})
 
 	// Goroutine 2: simulate epoch updates
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 50; i++ {
+	wg.Go(func() {
+		for i := range 50 {
 			rpsr.updateEpoch(context.Background(), uint64(10+i))
 			time.Sleep(time.Millisecond)
 		}
-	}()
+	})
 
 	wg.Wait()
 
@@ -764,9 +759,7 @@ func TestGracefulFailure_CopyOnWriteDoesNotMutateOldMap(t *testing.T) {
 	recoveredSession := createTestProviderSession("providerB", 1)
 
 	mergedSessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(oldSessions)+1)
-	for k, v := range oldSessions {
-		mergedSessions[k] = v
-	}
+	maps.Copy(mergedSessions, oldSessions)
 	maxIdx := uint64(0)
 	for idx := range mergedSessions {
 		if idx >= maxIdx {

@@ -39,7 +39,7 @@ func resolveSyncScore(t *testing.T, po *ProviderOptimizer, addr string) float64 
 // of first picks each provider won.
 func firstPickShare(po *ProviderOptimizer, providers []string, n int) map[string]float64 {
 	counts := map[string]int{}
-	for i := 0; i < n; i++ {
+	for range n {
 		pick := po.ChooseProvider(context.Background(), providers, nil, 10, spectypes.LATEST_BLOCK)
 		if len(pick) > 0 {
 			counts[pick[0]]++
@@ -59,7 +59,7 @@ func feedRounds(po *ProviderOptimizer, lagging string, providers []string, head,
 	base := time.Now()
 	const cu = uint64(10)
 	latency := 50 * time.Millisecond
-	for r := 0; r < rounds; r++ {
+	for r := range rounds {
 		st := base.Add(time.Duration(r) * 100 * time.Millisecond)
 		for _, p := range providers {
 			block := head

@@ -103,7 +103,7 @@ func TestTrafficGate_FullCycle_UpstreamCallCounts(t *testing.T) {
 				t.Run(sc.name, func(t *testing.T) {
 					fetcher := &countingGateFetcher{}
 					ct := newGateTracker(t, chain.chainID, fetcher, sc.relayFresh, maxSkips)
-					for i := 0; i < cycles; i++ {
+					for range cycles {
 						_, _ = ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 					}
 					require.Equal(t, sc.wantUpstream, fetcher.upstreamCalls(),
@@ -125,7 +125,7 @@ func TestTrafficGate_BoundedVerification(t *testing.T) {
 
 	// First maxSkips cycles skip — zero upstream, and each reports skipped=true so the caller
 	// can preserve (not reset) the poll-failure backoff.
-	for i := 0; i < maxSkips; i++ {
+	for i := range maxSkips {
 		skipped, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 		require.NoError(t, err)
 		require.True(t, skipped, "cycle %d is a gate skip, reported as such (not a successful poll)", i)
@@ -147,7 +147,7 @@ func TestTrafficGate_BoundedVerification(t *testing.T) {
 func TestTrafficGate_NilGate_GlobalTrackerAlwaysPolls(t *testing.T) {
 	fetcher := &countingGateFetcher{}
 	ct := newGateTracker(t, "ETH1", fetcher, nil, DefaultMaxRelaySkipsBeforePoll)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		skipped, _ := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 		require.False(t, skipped, "an ungated tracker never skips")
 	}
@@ -201,7 +201,7 @@ func TestFlatTracker_SkipsBlockGapMachinery(t *testing.T) {
 	// on a NON-flat tracker. The flat tracker must append none.
 	_, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 	require.NoError(t, err)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		fetcher.block.Add(1)
 		_, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 		require.NoError(t, err)

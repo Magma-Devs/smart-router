@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -279,7 +281,7 @@ func containsReservedGitLabSegment(parts []string) bool {
 // splitPath splits a URL path into non-empty components.
 func splitPath(path string) []string {
 	var parts []string
-	for _, part := range strings.Split(path, "/") {
+	for part := range strings.SplitSeq(path, "/") {
 		if part != "" {
 			parts = append(parts, part)
 		}
@@ -289,12 +291,7 @@ func splitPath(path string) []string {
 
 // containsGitLabSeparator checks if the path contains the GitLab "/-/" separator.
 func containsGitLabSeparator(parts []string) bool {
-	for _, part := range parts {
-		if part == "-" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(parts, "-")
 }
 
 // fetchResult holds the result of fetching a single spec file.
@@ -369,11 +366,9 @@ func (f *Fetcher) fetchFilesParallel(ctx context.Context, fileURLs []string, set
 	specs := make(map[string]types.Spec)
 	var fetchErrors []string
 
-	for i := 0; i < len(fileURLs); i++ {
+	for range fileURLs {
 		result := <-resultChan
-		for k, v := range result.specs {
-			specs[k] = v
-		}
+		maps.Copy(specs, result.specs)
 		fetchErrors = append(fetchErrors, result.errors...)
 	}
 

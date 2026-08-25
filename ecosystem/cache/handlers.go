@@ -39,8 +39,8 @@ const (
 type RelayerCacheServer struct {
 	relaytypes.UnimplementedRelayerCacheServer
 	CacheServer *CacheServer
-	cacheHits   uint64
-	cacheMisses uint64
+	cacheHits   atomic.Uint64
+	cacheMisses atomic.Uint64
 }
 
 type CacheValue struct {
@@ -306,7 +306,7 @@ func (s *RelayerCacheServer) performInt64WriteWithValidationAndRetry(
 	if existingInfo <= newInfo {
 		setBlockCallback()
 		go func() {
-			for i := 0; i < DbValueConfirmationAttempts; i++ {
+			for range DbValueConfirmationAttempts {
 				time.Sleep(time.Millisecond)
 				currentInfo := getBlockCallback()
 				if currentInfo > newInfo {
@@ -419,12 +419,12 @@ func (s *RelayerCacheServer) FlushCache(ctx context.Context, req *emptypb.Empty)
 }
 
 func (s *RelayerCacheServer) cacheHit(ctx context.Context) {
-	atomic.AddUint64(&s.cacheHits, 1)
+	s.cacheHits.Add(1)
 	s.PrintCacheStats(ctx, "[+] cache hit")
 }
 
 func (s *RelayerCacheServer) cacheMiss(ctx context.Context, errPrint error) {
-	atomic.AddUint64(&s.cacheMisses, 1)
+	s.cacheMisses.Add(1)
 	errMsg := "nil"
 	if errPrint != nil {
 		errMsg = errPrint.Error()
@@ -433,8 +433,8 @@ func (s *RelayerCacheServer) cacheMiss(ctx context.Context, errPrint error) {
 }
 
 func (s *RelayerCacheServer) PrintCacheStats(ctx context.Context, desc string) {
-	hits := atomic.LoadUint64(&s.cacheHits)
-	misses := atomic.LoadUint64(&s.cacheMisses)
+	hits := s.cacheHits.Load()
+	misses := s.cacheMisses.Load()
 	_ = utils.LavaFormatDebug(desc,
 		utils.Attribute{Key: "misses", Value: strconv.FormatUint(misses, 10)},
 		utils.Attribute{Key: "hits", Value: strconv.FormatUint(hits, 10)},
@@ -481,7 +481,7 @@ func (s *RelayerCacheServer) getExpirationForChain(averageBlockTimeForChain time
 	return s.CacheServer.ExpirationForChain(averageBlockTimeForChain)
 }
 
-func getNonExpiredFromCache(c *ristretto.Cache[string, any], key string) (value interface{}, found bool) {
+func getNonExpiredFromCache(c *ristretto.Cache[string, any], key string) (value any, found bool) {
 	value, found = c.Get(key)
 	if found {
 		return value, true
@@ -490,7 +490,7 @@ func getNonExpiredFromCache(c *ristretto.Cache[string, any], key string) (value 
 }
 
 func (s *RelayerCacheServer) findInAllCaches(finalized bool, cacheKey []byte) (retVal CacheValue, cacheSource string, found bool) {
-	inner := func(finalized bool, cacheKey []byte) (interface{}, string, bool) {
+	inner := func(finalized bool, cacheKey []byte) (any, string, bool) {
 		if finalized {
 			cache := s.CacheServer.finalizedCache
 			value, found := getNonExpiredFromCache(cache, string(cacheKey))

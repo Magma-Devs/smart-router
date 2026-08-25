@@ -62,9 +62,9 @@ func (apip *RestChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 	}
 
 	restMessage := &rpcInterfaceMessages.RestMessage{
-		Msg:         nil,
-		Path:        parsing.ApiName,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata},
+		Msg:     nil,
+		Path:    parsing.ApiName,
+		Headers: metadata,
 	}
 
 	apiCont, err := apip.getSupportedApi(parsing.ApiName, connectionType)
@@ -110,12 +110,12 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 	settingHeaderDirective, _, _ := apip.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
 	// Construct restMessage
 	restMessage := rpcInterfaceMessages.RestMessage{
-		Msg:         data,
-		Path:        urlPath,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective},
-	}
-	// add spec path to rest message so we can extract the requested block.
-	restMessage.SpecPath = apiCont.api.Name
+		Msg:     data,
+		Path:    urlPath,
+		Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective,
+
+		// add spec path to rest message so we can extract the requested block.
+		SpecPath: apiCont.api.Name}
 	parsedInput := parser.NewParsedInput()
 	if overwriteReqBlock == "" {
 		// Fetch requested block, it is used for data reliability
@@ -452,7 +452,7 @@ func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	nodeUrl := rpcProviderEndpoint.NodeUrls[0]
 	nodeUrl.Url = strings.TrimSuffix(rpcProviderEndpoint.NodeUrls[0].Url, "/")
 	rcp := &RestChainProxy{
-		BaseChainProxy: BaseChainProxy{averageBlockTime: averageBlockTime, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(nodeUrl.Url), ErrorHandler: &RestErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID}, ChainID: rpcProviderEndpoint.ChainID},
+		averageBlockTime: averageBlockTime, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(nodeUrl.Url), ErrorHandler: &RestErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID}, ChainID: rpcProviderEndpoint.ChainID,
 	}
 	return rcp, nil
 }

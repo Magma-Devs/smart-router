@@ -108,15 +108,15 @@ func setJSONFieldRaw(data []byte, field string, rawValue []byte) ([]byte, error)
 // #######
 
 type RestError struct {
-	Code    int           `json:"code"`
-	Message string        `json:"message"`
-	Details []interface{} `json:"details"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Details []any  `json:"details"`
 }
 
 var RestMethodNotFoundError = RestError{
 	Code:    12,
 	Message: "Not Implemented",
-	Details: []interface{}{},
+	Details: []any{},
 }
 
 // #######
@@ -124,9 +124,9 @@ var RestMethodNotFoundError = RestError{
 // #######
 
 type RestAptosError struct {
-	Message     string      `json:"message"`
-	ErrorCode   string      `json:"error_code"`
-	VmErrorCode interface{} `json:"vm_error_code"`
+	Message     string `json:"message"`
+	ErrorCode   string `json:"error_code"`
+	VmErrorCode any    `json:"vm_error_code"`
 }
 
 var RestAptosMethodNotFoundError = RestAptosError{

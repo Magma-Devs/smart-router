@@ -23,7 +23,7 @@ func (pri ParsableRPCInput) ParseBlock(inp string) (int64, error) {
 	return parser.ParseDefaultBlockParameter(inp)
 }
 
-func (pri ParsableRPCInput) GetParams() interface{} {
+func (pri ParsableRPCInput) GetParams() any {
 	return nil
 }
 
@@ -46,5 +46,5 @@ func (pri ParsableRPCInput) GetError() *rpcclient.JsonError {
 type GenericMessage interface {
 	GetHeaders() []pairingtypes.Metadata
 	DisableErrorHandling()
-	GetParams() interface{}
+	GetParams() any
 }

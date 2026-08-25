@@ -195,8 +195,7 @@ func TestRecordRelayBlockObservation_GenerationPassThrough(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	parser := newRealChainParserForHarvest(t, "ETH1")
 	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
@@ -324,8 +323,7 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	chainParser := newRealChainParserForHarvest(t, "ETH1")
 	parse := func(body string) chainlib.ChainMessage {
@@ -411,8 +409,7 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
 		ChainParser:      newRealChainParserForHarvest(t, "ETH1"),
@@ -532,8 +529,7 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
 		ChainParser:      newRealChainParserForHarvest(t, "ETH1"),

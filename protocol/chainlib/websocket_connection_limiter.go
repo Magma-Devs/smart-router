@@ -17,7 +17,7 @@ import (
 type WebsocketConnection interface {
 	// Add only the methods you need to mock
 	RemoteAddr() net.Addr
-	Locals(key string) interface{}
+	Locals(key string) any
 	WriteMessage(messageType int, data []byte) error
 }
 
@@ -133,8 +133,8 @@ func (wcl *WebsocketConnectionLimiter) getKey(ip string, forwardedIp string, use
 			returnedKey = ipPart
 		}
 	}
-	ips := strings.Split(forwardedIp, ",")
-	for _, ipStr := range ips {
+	ips := strings.SplitSeq(forwardedIp, ",")
+	for ipStr := range ips {
 		ipParsed := net.ParseIP(strings.TrimSpace(ipStr))
 		if ipParsed != nil {
 			returnedKey += SEP + ipParsed.String()

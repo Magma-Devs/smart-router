@@ -151,7 +151,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// Log node error payload and headers for troubleshooting
 		// also log the original request payload and request headers if available
 		reqPayload := ""
-		var reqHeaders interface{}
+		var reqHeaders any
 		if response.RelayResult.Request != nil && response.RelayResult.Request.RelayData != nil {
 			reqPayload = string(response.RelayResult.Request.RelayData.Data)
 			reqHeaders = response.RelayResult.Request.RelayData.Metadata

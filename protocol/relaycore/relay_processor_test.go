@@ -368,7 +368,7 @@ func TestRelayProcessorStatefulApi(t *testing.T) {
 		go SendSuccessResp(relayProcessor, "lava4@test", time.Millisecond*100)
 		ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond*300)
 		defer cancel()
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			err := relayProcessor.WaitForResults(ctx)
 			require.NoError(t, err)
 			// Decide if we need to resend or not
@@ -422,7 +422,7 @@ func TestRelayProcessorStatefulApiErr(t *testing.T) {
 		go SendNodeError(relayProcessor, "lava3@test", time.Millisecond*25)
 		ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond*50)
 		defer cancel()
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			relayProcessor.WaitForResults(ctx)
 		}
 		resultsOk := relayProcessor.HasResults()
@@ -2202,7 +2202,7 @@ func TestHasRequiredNodeResults_RelayRetryLimitMixed(t *testing.T) {
 
 			totalErrors := tc.nodeErrorsToSend + tc.protocolErrorsToSend
 			// Send node errors first, then protocol errors
-			for i := 0; i < totalErrors; i++ {
+			for i := range totalErrors {
 				provider := fmt.Sprintf("lava@test%d", i)
 				ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
 				canUse := usedProviders.TryLockSelection(ctx)

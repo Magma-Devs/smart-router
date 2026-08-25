@@ -226,8 +226,7 @@ func TestEndpointMonitor_PollNow_ForcesPastAFreshRelayTip(t *testing.T) {
 // polled" rather than an empty success, so the debug handler can answer 404/504 honestly instead of
 // handing back a zero record that reads like a fresh poll.
 func TestEndpointMonitor_PollNow_UnknownEndpoint(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH1",
@@ -249,8 +248,7 @@ func TestEndpointMonitor_PollNow_UnknownEndpoint(t *testing.T) {
 // of being handed a bare timeout.
 func TestEndpointMonitor_PollNow_TrackerNotPolling_NamesTheState(t *testing.T) {
 	ensureRandSeeded()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainParser:      newRealChainParser(t, "ETH1", spectypes.APIInterfaceJsonRPC),

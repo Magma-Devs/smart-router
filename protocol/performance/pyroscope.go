@@ -33,8 +33,8 @@ func ParseTags(tagsStr string) map[string]string {
 	if tagsStr == "" {
 		return tags
 	}
-	pairs := strings.Split(tagsStr, ",")
-	for _, pair := range pairs {
+	pairs := strings.SplitSeq(tagsStr, ",")
+	for pair := range pairs {
 		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
 		if len(kv) == 2 {
 			tags[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])

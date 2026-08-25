@@ -15,9 +15,7 @@ type MappedLabelsCounterVec struct {
 
 func NewMappedLabelsCounterVec(opts MappedLabelsMetricOpts) *MappedLabelsCounterVec {
 	metric := &MappedLabelsCounterVec{
-		MappedLabelsMetricBase: MappedLabelsMetricBase{
-			labels: opts.Labels,
-		},
+		labels: opts.Labels,
 		CounterVec: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: opts.Name,
 			Help: opts.Help,

@@ -416,28 +416,24 @@ func TestSendRequest_ConcurrentWithClose_NeverPanics(t *testing.T) {
 		attempts   = 20
 	)
 
-	for attempt := 0; attempt < attempts; attempt++ {
+	for range attempts {
 		g := newInitializedGRPCConn(newFakeGRPCConnector())
 
 		var wg sync.WaitGroup
 		start := make(chan struct{})
 
-		for i := 0; i < goroutines; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range goroutines {
+			wg.Go(func() {
 				<-start
 				// Any error is acceptable; a panic is not.
 				_, _ = g.SendRequest(context.Background(), []byte("{}"), grpcTestHeaders())
-			}()
+			})
 		}
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			_ = g.Close()
-		}()
+		})
 
 		close(start) // release everything at once to widen the race window
 		wg.Wait()
@@ -453,7 +449,7 @@ func TestInitialization_ConcurrentWithClose_NeverLeaksConnector(t *testing.T) {
 		attempts   = 20
 	)
 
-	for attempt := 0; attempt < attempts; attempt++ {
+	for range attempts {
 		var (
 			mu    sync.Mutex
 			built []*fakeGRPCConnector
@@ -469,21 +465,17 @@ func TestInitialization_ConcurrentWithClose_NeverLeaksConnector(t *testing.T) {
 		var wg sync.WaitGroup
 		start := make(chan struct{})
 
-		for i := 0; i < goroutines; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range goroutines {
+			wg.Go(func() {
 				<-start
 				_, _ = g.SendRequest(context.Background(), []byte("{}"), grpcTestHeaders())
-			}()
+			})
 		}
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			_ = g.Close()
-		}()
+		})
 
 		close(start)
 		wg.Wait()

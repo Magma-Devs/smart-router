@@ -7,8 +7,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -382,7 +382,7 @@ func populateRequiredForAddon(addon string, extensions []string, required map[st
 	}
 
 	required[requirementKey] = struct{}{}
-	for i := 0; i < len(extensions); i++ {
+	for i := range extensions {
 		extensionsWithoutI := make([]string, len(extensions)-1)
 		copy(extensionsWithoutI[:i], extensions[:i])
 		copy(extensionsWithoutI[i:], extensions[i+1:])

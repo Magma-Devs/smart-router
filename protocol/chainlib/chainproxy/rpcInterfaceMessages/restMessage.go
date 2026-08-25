@@ -90,7 +90,7 @@ func checkCosmosTxError(data []byte) (bool, string) {
 // Tries common fields in order: "message", "error", raw body (truncated), or fallback to status
 func extractErrorMessage(data []byte, httpStatusCode int) string {
 	// Try to parse as JSON and extract error message
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal(data, &result); err == nil {
 		// Try common error field names
 		if msg, ok := result["message"].(string); ok && msg != "" {
@@ -100,7 +100,7 @@ func extractErrorMessage(data []byte, httpStatusCode int) string {
 			return msg
 		}
 		// Try nested error.message
-		if errorObj, ok := result["error"].(map[string]interface{}); ok {
+		if errorObj, ok := result["error"].(map[string]any); ok {
 			if msg, ok := errorObj["message"].(string); ok && msg != "" {
 				return msg
 			}
@@ -122,7 +122,7 @@ func extractErrorMessage(data []byte, httpStatusCode int) string {
 
 // GetParams will be deprecated after we remove old client
 // Currently needed because of parser.RPCInput interface
-func (rm RestMessage) GetParams() interface{} {
+func (rm RestMessage) GetParams() any {
 	urlObj, err := url.Parse(rm.Path)
 	if err != nil {
 		return nil
@@ -131,7 +131,7 @@ func (rm RestMessage) GetParams() interface{} {
 	objectSpec := strings.Split(rm.SpecPath, "/")
 	objectPath := strings.Split(parsedMethod, "/")
 
-	parameters := map[string]interface{}{}
+	parameters := map[string]any{}
 
 	for index, element := range objectSpec {
 		if strings.Contains(element, "{") {

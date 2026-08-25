@@ -11,9 +11,9 @@ import (
 
 	chaintracker "github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -121,7 +121,7 @@ func (mcf *MockChainFetcher) Shrink(newSize int) {
 
 func NewMockChainFetcher(startBlock, blocksToSave int64, callback func()) *MockChainFetcher {
 	mockCHainFetcher := MockChainFetcher{callBack: callback}
-	for i := int64(0); i < blocksToSave; i++ {
+	for i := range blocksToSave {
 		mockCHainFetcher.SetBlock(startBlock + i)
 	}
 	return &mockCHainFetcher
@@ -171,7 +171,7 @@ func TestChainTracker(t *testing.T) {
 				for i := 0; i < int(advancement); i++ {
 					currentLatestBlockInMock = mockChainFetcher.AdvanceBlock()
 				}
-				for sleepChunk := 0; sleepChunk < SleepChunks; sleepChunk++ {
+				for range SleepChunks {
 					time.Sleep(SleepTime) // stateTracker polls asynchronously
 					latestBlock := chainTracker.GetAtomicLatestBlockNum()
 					if latestBlock >= currentLatestBlockInMock {
@@ -229,7 +229,7 @@ func TestChainTrackerRangeOnly(t *testing.T) {
 				for i := 0; i < int(advancement); i++ {
 					currentLatestBlockInMock = mockChainFetcher.AdvanceBlock()
 				}
-				for sleepChunk := 0; sleepChunk < SleepChunks; sleepChunk++ {
+				for range SleepChunks {
 					time.Sleep(SleepTime) // stateTracker polls asynchronously
 					latestBlock := chainTracker.GetAtomicLatestBlockNum()
 					if latestBlock >= currentLatestBlockInMock {
@@ -327,7 +327,7 @@ func TestChainTrackerCallbacks(t *testing.T) {
 				currentLatestBlockInMock = mockChainFetcher.AdvanceBlock()
 			}
 			mockChainFetcher.Fork(tt.fork)
-			for sleepChunk := 0; sleepChunk < SleepChunks; sleepChunk++ {
+			for range SleepChunks {
 				time.Sleep(SleepTime) // stateTracker polls asynchronously
 				latestBlock := chainTracker.GetAtomicLatestBlockNum()
 				if latestBlock >= currentLatestBlockInMock && tt.shouldFork == false {
@@ -387,7 +387,7 @@ func TestChainTrackerFetchSpreadAcrossPollingTime(t *testing.T) {
 		require.NoError(t, err)
 		tracker.StartAndServe(context.Background())
 		// fool the tracker so it thinks blocks will come every localTimeForPollingMock (ms), and not adjust it's polling timers
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			tracker.AddBlockGap(localTimeForPollingMock, 1)
 		}
 		// initially we start with 1/16 block probing
@@ -585,7 +585,7 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 			if tt.shrink {
 				mockChainFetcher.Shrink(50) // do not allow previous block fetches
 			}
-			for sleepChunk := 0; sleepChunk < SleepChunks; sleepChunk++ {
+			for range SleepChunks {
 				time.Sleep(SleepTime) // stateTracker polls asynchronously
 				latestBlock := chainTracker.GetAtomicLatestBlockNum()
 				if latestBlock >= currentLatestBlockInMock && tt.shrink == false {
@@ -631,21 +631,21 @@ func TestFindRequestedBlockHash(t *testing.T) {
 	latestBlock, onlyLatestBlockData, _, err := chainTracker.GetLatestBlockData(spectypes.LATEST_BLOCK, spectypes.LATEST_BLOCK, spectypes.NOT_APPLICABLE)
 	require.NoError(t, err)
 	require.Equal(t, currentLatestBlockInMock, latestBlock)
-	requestedHash, hashesMap := chaintracker.FindRequestedBlockHash(onlyLatestBlockData, latestBlock, spectypes.LATEST_BLOCK, spectypes.LATEST_BLOCK, map[int64]interface{}{})
+	requestedHash, hashesMap := chaintracker.FindRequestedBlockHash(onlyLatestBlockData, latestBlock, spectypes.LATEST_BLOCK, spectypes.LATEST_BLOCK, map[int64]any{})
 	require.NotNil(t, requestedHash)
 	require.Len(t, hashesMap, 1)
 
 	latestBlock, onlyLatestBlockData, _, err = chainTracker.GetLatestBlockData(spectypes.LATEST_BLOCK-3, spectypes.LATEST_BLOCK, spectypes.NOT_APPLICABLE)
 	require.NoError(t, err)
 	require.Equal(t, currentLatestBlockInMock, latestBlock)
-	requestedHash, hashesMap = chaintracker.FindRequestedBlockHash(onlyLatestBlockData, latestBlock, spectypes.LATEST_BLOCK, spectypes.LATEST_BLOCK-3, map[int64]interface{}{})
+	requestedHash, hashesMap = chaintracker.FindRequestedBlockHash(onlyLatestBlockData, latestBlock, spectypes.LATEST_BLOCK, spectypes.LATEST_BLOCK-3, map[int64]any{})
 	require.NotNil(t, requestedHash)
 	require.Len(t, hashesMap, 4)
 
 	latestBlock, onlyLatestBlockData, _, err = chainTracker.GetLatestBlockData(currentLatestBlockInMock-3, currentLatestBlockInMock, currentLatestBlockInMock)
 	require.NoError(t, err)
 	require.Equal(t, currentLatestBlockInMock, latestBlock)
-	requestedHash, hashesMap = chaintracker.FindRequestedBlockHash(onlyLatestBlockData, latestBlock, currentLatestBlockInMock, currentLatestBlockInMock-3, map[int64]interface{}{})
+	requestedHash, hashesMap = chaintracker.FindRequestedBlockHash(onlyLatestBlockData, latestBlock, currentLatestBlockInMock, currentLatestBlockInMock-3, map[int64]any{})
 	require.NotNil(t, requestedHash)
 	require.Len(t, hashesMap, 4)
 }
@@ -677,7 +677,7 @@ func TestChainTrackerTickerCleanup(t *testing.T) {
 	time.Sleep(TimeForPollingMock * 5)
 
 	// Advance some blocks
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		mockChainFetcher.AdvanceBlock()
 		time.Sleep(SleepTime)
 	}
@@ -706,7 +706,7 @@ func TestChainTrackerMultipleInstancesNoLeaks(t *testing.T) {
 	mockBlocks := int64(20)
 	fetcherBlocks := 5
 
-	for i := 0; i < numInstances; i++ {
+	for i := range numInstances {
 		// Create a new instance for each iteration
 		mockChainFetcher := NewMockChainFetcher(1000+int64(i*100), mockBlocks, nil)
 		mockChainFetcher.AdvanceBlock()
@@ -730,7 +730,7 @@ func TestChainTrackerMultipleInstancesNoLeaks(t *testing.T) {
 		time.Sleep(TimeForPollingMock * 2)
 
 		// Advance a few blocks
-		for j := 0; j < 3; j++ {
+		for range 3 {
 			mockChainFetcher.AdvanceBlock()
 		}
 
@@ -780,7 +780,7 @@ func TestChainTrackerResetLatestBlock(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, chainTracker.StartAndServe(ctx))
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		mockChainFetcher.AdvanceBlock()
 	}
 	require.Eventually(t, func() bool {

@@ -227,7 +227,7 @@ func TestRelayProbe_ConfirmIsIdempotentAgainstRaces(t *testing.T) {
 // which is exactly the permanent-park bug this file's escape-hatch tests exist to prevent.
 func earnReplayCandidacy(t *testing.T, e *Endpoint, k uint64, pollSec *int) {
 	t.Helper()
-	for polls := 0; polls < 64; polls++ {
+	for range 64 {
 		*pollSec++
 		require.False(t, healthyPoll(e, probeBase.Add(time.Duration(*pollSec)*time.Second), k),
 			"polls alone must never re-enable while evidence is recorded")

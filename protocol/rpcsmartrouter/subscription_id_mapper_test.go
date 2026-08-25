@@ -221,11 +221,11 @@ func TestSubscriptionIDMapper_ConcurrentAccess(t *testing.T) {
 	numOperations := 100
 
 	// Concurrent registrations
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		wg.Add(1)
 		go func(clientNum int) {
 			defer wg.Done()
-			for j := 0; j < numOperations; j++ {
+			for range numOperations {
 				routerID := mapper.GenerateRouterID("client" + string(rune(clientNum)))
 				mapper.RegisterMapping(routerID, "upstream_"+routerID)
 			}

@@ -19,7 +19,7 @@ import (
 func TestConnectionPoolingUnderLoad(t *testing.T) {
 	// Track unique connections established
 	var connectionCount int64
-	var activeConnections int64
+	var activeConnections atomic.Int64
 	connectionsMutex := &sync.Mutex{}
 	connections := make(map[string]bool)
 
@@ -37,8 +37,8 @@ func TestConnectionPoolingUnderLoad(t *testing.T) {
 		}
 		connectionsMutex.Unlock()
 
-		atomic.AddInt64(&activeConnections, 1)
-		defer atomic.AddInt64(&activeConnections, -1)
+		activeConnections.Add(1)
+		defer activeConnections.Add(-1)
 
 		// Simulate blockchain node latency (realistic: 5-20ms for fast queries)
 		time.Sleep(10 * time.Millisecond)
@@ -63,7 +63,7 @@ func TestConnectionPoolingUnderLoad(t *testing.T) {
 	requestChan := make(chan int, numRequests)
 
 	// Fill request channel
-	for i := 0; i < numRequests; i++ {
+	for i := range numRequests {
 		requestChan <- i
 	}
 	close(requestChan)
@@ -78,10 +78,8 @@ func TestConnectionPoolingUnderLoad(t *testing.T) {
 
 	// Start concurrent workers
 	startTime := time.Now()
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range concurrency {
+		wg.Go(func() {
 			for reqNum := range requestChan {
 				reqStart := time.Now()
 				resp, err := client.Get(server.URL)
@@ -95,7 +93,7 @@ func TestConnectionPoolingUnderLoad(t *testing.T) {
 
 				latencyResults <- latencyResult{index: reqNum, duration: reqDuration}
 			}
-		}()
+		})
 	}
 
 	// Close latency channel when all workers are done
@@ -228,7 +226,7 @@ func TestConnectionPoolingOverhead(t *testing.T) {
 	var wg sync.WaitGroup
 	requestChan := make(chan int, numRequests)
 
-	for i := 0; i < numRequests; i++ {
+	for i := range numRequests {
 		requestChan <- i
 	}
 	close(requestChan)
@@ -240,10 +238,8 @@ func TestConnectionPoolingOverhead(t *testing.T) {
 	latencyResults := make(chan latencyResult, numRequests)
 
 	startTime := time.Now()
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range concurrency {
+		wg.Go(func() {
 			for reqNum := range requestChan {
 				reqStart := time.Now()
 				resp, err := client.Get(server.URL)
@@ -256,7 +252,7 @@ func TestConnectionPoolingOverhead(t *testing.T) {
 
 				latencyResults <- latencyResult{index: reqNum, duration: reqDuration}
 			}
-		}()
+		})
 	}
 
 	go func() {
@@ -382,16 +378,14 @@ func runLoadTest(t *testing.T, client *http.Client, url string, numRequests, con
 	var wg sync.WaitGroup
 	requestChan := make(chan int, numRequests)
 
-	for i := 0; i < numRequests; i++ {
+	for i := range numRequests {
 		requestChan <- i
 	}
 	close(requestChan)
 
 	startTime := time.Now()
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range concurrency {
+		wg.Go(func() {
 			for range requestChan {
 				resp, err := client.Get(url)
 				if err != nil {
@@ -400,7 +394,7 @@ func runLoadTest(t *testing.T, client *http.Client, url string, numRequests, con
 				io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -428,7 +422,7 @@ func TestConnectionPoolIdleTimeout(t *testing.T) {
 	}
 
 	// Make initial requests to establish connections
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		resp, err := client.Get(server.URL)
 		if err != nil {
 			t.Fatalf("Request failed: %v", err)
@@ -442,7 +436,7 @@ func TestConnectionPoolIdleTimeout(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	// Make new requests - should work even after idle timeout
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		resp, err := client.Get(server.URL)
 		if err != nil {
 			t.Errorf("Request after idle timeout failed: %v", err)
@@ -461,7 +455,7 @@ func TestConcurrentRequestsToMultipleHosts(t *testing.T) {
 	servers := make([]*httptest.Server, numServers)
 
 	// Create multiple test servers
-	for i := 0; i < numServers; i++ {
+	for i := range numServers {
 		serverID := i
 		servers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(5 * time.Millisecond)
@@ -482,10 +476,8 @@ func TestConcurrentRequestsToMultipleHosts(t *testing.T) {
 
 	for _, server := range servers {
 		serverURL := server.URL
-		for i := 0; i < numRequestsPerServer; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range numRequestsPerServer {
+			wg.Go(func() {
 				resp, err := client.Get(serverURL)
 				if err != nil {
 					atomic.AddInt64(&errorCount, 1)
@@ -493,7 +485,7 @@ func TestConcurrentRequestsToMultipleHosts(t *testing.T) {
 				}
 				io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
-			}()
+			})
 		}
 	}
 
@@ -509,8 +501,8 @@ func TestConcurrentRequestsToMultipleHosts(t *testing.T) {
 
 // TestKeepAliveConnections verifies that keep-alive connections are maintained
 func TestKeepAliveConnections(t *testing.T) {
-	var connectionCounter int64
-	var activeConnections int64
+	var connectionCounter atomic.Int64
+	var activeConnections atomic.Int64
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -527,10 +519,10 @@ func TestKeepAliveConnections(t *testing.T) {
 		ConnState: func(conn net.Conn, state http.ConnState) {
 			switch state {
 			case http.StateNew:
-				atomic.AddInt64(&connectionCounter, 1)
-				atomic.AddInt64(&activeConnections, 1)
+				connectionCounter.Add(1)
+				activeConnections.Add(1)
 			case http.StateClosed:
-				atomic.AddInt64(&activeConnections, -1)
+				activeConnections.Add(-1)
 			}
 		},
 	}
@@ -547,7 +539,7 @@ func TestKeepAliveConnections(t *testing.T) {
 
 	// Make sequential requests (should reuse the same connection)
 	numRequests := 10
-	for i := 0; i < numRequests; i++ {
+	for i := range numRequests {
 		resp, err := client.Get(serverURL)
 		if err != nil {
 			t.Fatalf("Request %d failed: %v", i, err)
@@ -559,7 +551,7 @@ func TestKeepAliveConnections(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	totalConnections := atomic.LoadInt64(&connectionCounter)
+	totalConnections := connectionCounter.Load()
 	t.Logf("Total connections created: %d for %d requests", totalConnections, numRequests)
 
 	// With keep-alive, we should reuse connections
@@ -576,9 +568,9 @@ func TestHighConcurrencyStressTest(t *testing.T) {
 		t.Skip("Skipping stress test in short mode")
 	}
 
-	var requestCount int64
+	var requestCount atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		count := atomic.AddInt64(&requestCount, 1)
+		count := requestCount.Add(1)
 		// Simulate variable latency
 		time.Sleep(time.Duration(5+count%10) * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
@@ -598,7 +590,7 @@ func TestHighConcurrencyStressTest(t *testing.T) {
 	var wg sync.WaitGroup
 	requestChan := make(chan int, numRequests)
 
-	for i := 0; i < numRequests; i++ {
+	for i := range numRequests {
 		requestChan <- i
 	}
 	close(requestChan)
@@ -607,10 +599,8 @@ func TestHighConcurrencyStressTest(t *testing.T) {
 	var errorCount int64
 
 	startTime := time.Now()
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range concurrency {
+		wg.Go(func() {
 			for range requestChan {
 				resp, err := client.Get(server.URL)
 				if err != nil {
@@ -621,7 +611,7 @@ func TestHighConcurrencyStressTest(t *testing.T) {
 				resp.Body.Close()
 				atomic.AddInt64(&successCount, 1)
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -653,10 +643,10 @@ func TestHighConcurrencyStressTest(t *testing.T) {
 
 // TestConnectionPoolingWithTimeout verifies that timeouts don't break connection pooling
 func TestConnectionPoolingWithTimeout(t *testing.T) {
-	var slowRequests int64
+	var slowRequests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Every 10th request is slow
-		count := atomic.AddInt64(&slowRequests, 1)
+		count := slowRequests.Add(1)
 		if count%10 == 0 {
 			time.Sleep(200 * time.Millisecond) // Will timeout
 		}
@@ -674,10 +664,8 @@ func TestConnectionPoolingWithTimeout(t *testing.T) {
 	var timeoutCount int64
 
 	var wg sync.WaitGroup
-	for i := 0; i < numRequests; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range numRequests {
+		wg.Go(func() {
 			resp, err := client.Get(server.URL)
 			if err != nil {
 				atomic.AddInt64(&timeoutCount, 1)
@@ -686,7 +674,7 @@ func TestConnectionPoolingWithTimeout(t *testing.T) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			atomic.AddInt64(&successCount, 1)
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -784,10 +772,10 @@ func BenchmarkDefaultTransportVsOptimized(b *testing.B) {
 
 // TestConnectionPoolingWithContext verifies that context cancellation works properly
 func TestConnectionPoolingWithContext(t *testing.T) {
-	var activeRequests int64
+	var activeRequests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt64(&activeRequests, 1)
-		defer atomic.AddInt64(&activeRequests, -1)
+		activeRequests.Add(1)
+		defer activeRequests.Add(-1)
 
 		// Wait for context cancellation or 1 second
 		select {
@@ -810,10 +798,8 @@ func TestConnectionPoolingWithContext(t *testing.T) {
 	var wg sync.WaitGroup
 	numRequests := 20
 
-	for i := 0; i < numRequests; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range numRequests {
+		wg.Go(func() {
 			req, _ := http.NewRequestWithContext(ctx, "GET", server.URL, nil)
 			resp, err := client.Do(req)
 			if err != nil {
@@ -824,7 +810,7 @@ func TestConnectionPoolingWithContext(t *testing.T) {
 				io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -833,7 +819,7 @@ func TestConnectionPoolingWithContext(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify no requests are still active
-	active := atomic.LoadInt64(&activeRequests)
+	active := activeRequests.Load()
 	if active != 0 {
 		t.Errorf("Still have %d active requests after context cancellation", active)
 	}

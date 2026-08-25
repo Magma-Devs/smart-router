@@ -21,7 +21,7 @@ type Combinable interface {
 	GetEnabled() bool
 
 	// Equal reports deep equality against another Combinable of the same type.
-	Equal(interface{}) bool
+	Equal(any) bool
 
 	// Overwrite is called when this Combinable is the survivor of a conflict
 	// with other. It may mutate the receiver to merge data from other and
@@ -100,7 +100,7 @@ func (v *Verification) Overwrite(other Combinable) (Combinable, bool) {
 // Equal implementations
 // ---------------------------------------------------------------------------
 
-func (api *Api) Equal(that interface{}) bool {
+func (api *Api) Equal(that any) bool {
 	if that == nil {
 		return api == nil
 	}
@@ -124,7 +124,7 @@ func (api *Api) Equal(that interface{}) bool {
 		api.ComputeUnits == other.ComputeUnits
 }
 
-func (h *Header) Equal(that interface{}) bool {
+func (h *Header) Equal(that any) bool {
 	if that == nil {
 		return h == nil
 	}
@@ -146,7 +146,7 @@ func (h *Header) Equal(that interface{}) bool {
 	return h.Name == other.Name && h.Kind == other.Kind && h.FunctionTag == other.FunctionTag && h.Value == other.Value
 }
 
-func (parsing *ParseDirective) Equal(that interface{}) bool {
+func (parsing *ParseDirective) Equal(that any) bool {
 	if that == nil {
 		return parsing == nil
 	}
@@ -170,7 +170,7 @@ func (parsing *ParseDirective) Equal(that interface{}) bool {
 		parsing.ApiName == other.ApiName
 }
 
-func (e *Extension) Equal(that interface{}) bool {
+func (e *Extension) Equal(that any) bool {
 	if that == nil {
 		return e == nil
 	}
@@ -192,7 +192,7 @@ func (e *Extension) Equal(that interface{}) bool {
 	return e.Name == other.Name && e.CuMultiplier == other.CuMultiplier
 }
 
-func (v *Verification) Equal(that interface{}) bool {
+func (v *Verification) Equal(that any) bool {
 	if that == nil {
 		return v == nil
 	}
@@ -233,10 +233,10 @@ func GetCurrentFromCombinable[T Combinable](current []T) map[string]CurrentConta
 func CombineFields[T Combinable](
 	childCombinables map[string]CurrentContainer,
 	parentCombinables []T,
-	mergedMap map[string]interface{},
+	mergedMap map[string]any,
 	mergedCombinables []T,
 	allowOverwrite bool,
-) ([]T, map[string]interface{}, error) {
+) ([]T, map[string]any, error) {
 	for _, c := range parentCombinables {
 		if !c.GetEnabled() {
 			continue

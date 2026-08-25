@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,9 +55,7 @@ func (c *UpstreamWSConnection) connect(ctx context.Context) error {
 
 	// Build headers from nodeUrl auth config
 	headers := make(map[string]string)
-	for k, v := range c.nodeUrl.GetAuthHeaders() {
-		headers[k] = v
-	}
+	maps.Copy(headers, c.nodeUrl.GetAuthHeaders())
 
 	// Add auth path if configured
 	endpoint := c.nodeUrl.AuthConfig.AddAuthPath(c.endpoint)

@@ -392,9 +392,9 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 		require.NoError(t, err)
 		return r
 	}
-	readPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}}
-	writePolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}}
-	groupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(3)}, MinGroups: Bound{Floor: new(3)}}}
+	readPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}
+	writePolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}
+	groupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(3)}, MinGroups: Bound{Floor: new(3)}}
 
 	t.Run("no policies -> ok", func(t *testing.T) {
 		require.NoError(t, validateCrossValidationStartup(mkResolver(t), realParser, "ETH1", "jsonrpc", 5, nil))
@@ -421,7 +421,7 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 	})
 
 	// Per-group-quorum capacity (2.3): needs MinGroups groups that EACH have >= AgreementThreshold providers.
-	perGroupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(4)}, MinGroups: Bound{Floor: new(2)}}}
+	perGroupPolicy := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(4)}, MinGroups: Bound{Floor: new(2)}}
 	t.Run("per-group: two groups with >= threshold providers -> ok", func(t *testing.T) {
 		require.NoError(t, validateCrossValidationStartup(mkResolver(t, perGroupPolicy), realParser, "ETH1", "jsonrpc", 2, map[string]int{"A": 3, "B": 2}))
 	})
@@ -458,8 +458,8 @@ func TestGroupsBelowThreshold(t *testing.T) {
 // TestMinGroupsRequirements_DisjointFromPerGroup pins the comment claim that a policy is reported by
 // exactly one of MinGroupsRequirements / PerGroupRequirements, keyed on the PerGroupQuorum flag.
 func TestMinGroupsRequirements_DisjointFromPerGroup(t *testing.T) {
-	defaultPolicy := CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(3)}, MinGroups: Bound{Floor: intPtr(2)}}
-	perGroupPolicy := CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}, MinGroups: Bound{Floor: intPtr(2)}}
+	defaultPolicy := CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(3)}, MinGroups: Bound{Floor: new(2)}}
+	perGroupPolicy := CrossValidationPolicy{Enabled: true, PerGroupQuorum: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(4)}, MinGroups: Bound{Floor: new(2)}}
 
 	dr := newResolver(t, "eth_getBalance", defaultPolicy)
 	require.Len(t, dr.MinGroupsRequirements("ETH1", "jsonrpc"), 1, "a default-mode policy is reported by MinGroupsRequirements")
@@ -471,7 +471,9 @@ func TestMinGroupsRequirements_DisjointFromPerGroup(t *testing.T) {
 }
 
 // intPtr returns a pointer to v, for building Bound floors in tests.
-func intPtr(v int) *int { return &v }
+//
+//go:fix inline
+func intPtr(v int) *int { return new(v) }
 
 // TestPolicyKeyPrefix_ApiBoundary locks in the trailing-separator property the HasPrefix-based endpoint
 // filtering relies on: api-interface "json" must NOT prefix-match policies registered under "jsonrpc".
@@ -479,8 +481,8 @@ func intPtr(v int) *int { return &v }
 // policy and return its (higher) min-groups.
 func TestPolicyKeyPrefix_ApiBoundary(t *testing.T) {
 	r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: []CrossValidationPolicyEntry{
-		{ChainID: "ETH1", ApiInterface: "json", Method: "eth_call", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(3)}, MinGroups: Bound{Floor: intPtr(2)}}},
-		{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: intPtr(2)}, MaxParticipants: Bound{Floor: intPtr(4)}, MinGroups: Bound{Floor: intPtr(4)}}},
+		{ChainID: "ETH1", ApiInterface: "json", Method: "eth_call", Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(3)}, MinGroups: Bound{Floor: new(2)}},
+		{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(4)}, MinGroups: Bound{Floor: new(4)}},
 	}})
 	require.NoError(t, err)
 
@@ -658,12 +660,12 @@ func TestCrossValidationPolicy_StatefulGuard_ProductionParser(t *testing.T) {
 		return checker.ApiHasStatefulCategory(method)
 	}
 
-	writePolicy := []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}}}
+	writePolicy := []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}}
 	rWrite, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: writePolicy})
 	require.NoError(t, err)
 	require.Error(t, rWrite.ValidateNoStatefulPolicies(isStateful), "enabled CV policy on a write method must be rejected at startup")
 
-	readPolicy := []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}}}
+	readPolicy := []CrossValidationPolicyEntry{{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}}}
 	rRead, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: readPolicy})
 	require.NoError(t, err)
 	require.NoError(t, rRead.ValidateNoStatefulPolicies(isStateful), "CV policy on a read method must be allowed")
@@ -709,9 +711,9 @@ func TestGroupLabel_ConfigToSession_InertWithoutPolicy(t *testing.T) {
 func TestCrossValidationPolicyResolver_StatefulGuard(t *testing.T) {
 	r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{
 		Policies: []CrossValidationPolicyEntry{
-			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}}},
-			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}}},
-			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_disabledWrite", CrossValidationPolicy: CrossValidationPolicy{Enabled: false}}, // disabled write policy is allowed
+			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", Enabled: true, AgreementThreshold: Bound{Floor: new(2)}},
+			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_sendRawTransaction", Enabled: true, AgreementThreshold: Bound{Floor: new(2)}},
+			{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_disabledWrite", Enabled: false}, // disabled write policy is allowed
 		},
 	})
 	require.NoError(t, err)
@@ -775,7 +777,7 @@ func TestCrossValidationPolicyResolver_ForbidCallerCV(t *testing.T) {
 	t.Run("enabled + forbid-caller-cv is a config error", func(t *testing.T) {
 		_, err := NewCrossValidationPolicyResolver(CrossValidationConfig{
 			Policies: []CrossValidationPolicyEntry{
-				{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true, ForbidCallerCV: true}},
+				{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", Enabled: true, ForbidCallerCV: true},
 			},
 		})
 		require.Error(t, err)

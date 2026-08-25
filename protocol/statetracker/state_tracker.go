@@ -6,10 +6,10 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	speckeeper "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/specfetcher"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 // expandCommaSeparatedPaths takes a slice of paths (from StringArray flag) and expands
@@ -36,8 +36,8 @@ func expandCommaSeparatedPaths(specPaths []string) []string {
 		}
 
 		// Split by comma for local paths
-		parts := strings.Split(path, ",")
-		for _, part := range parts {
+		parts := strings.SplitSeq(path, ",")
+		for part := range parts {
 			trimmed := strings.TrimSpace(part)
 			if trimmed != "" {
 				expanded = append(expanded, trimmed)
@@ -155,4 +155,3 @@ func loadAllSpecsFromRemoteRepo(ctx context.Context, repoURL, githubToken, gitla
 
 	return specs, nil
 }
-

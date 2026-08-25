@@ -62,8 +62,7 @@ func newPollNowTracker(t *testing.T, ctx context.Context, fetcher ChainFetcher) 
 // and it lands through the real cycle (the tracker's own latest-block state moves, which only
 // fetchAllPreviousBlocksIfNecessary does), not through some fetch-only shortcut.
 func TestChainTracker_PollNow_RunsRealCycleWithoutWaitingForTimer(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	fetcher := &advancingFetcher{}
 	fetcher.block.Store(1000)
@@ -84,8 +83,7 @@ func TestChainTracker_PollNow_RunsRealCycleWithoutWaitingForTimer(t *testing.T) 
 // FAILED forced poll must not stretch the poll interval, because a timer-driven failure would, and
 // tests that measure backoff growth have to stay able to measure it.
 func TestChainTracker_PollNow_LeavesCadenceUntouched(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	fetcher := &failableFetcher{}
 	fetcher.block.Store(1000)
@@ -293,10 +291,10 @@ func TestChainTracker_PollNow_ConcurrentTriggersAllComplete(t *testing.T) {
 
 	const callers = 4
 	errs := make(chan error, callers)
-	for i := 0; i < callers; i++ {
+	for range callers {
 		go func() { errs <- ct.PollNow(ctx) }()
 	}
-	for i := 0; i < callers; i++ {
+	for range callers {
 		select {
 		case err := <-errs:
 			require.NoError(t, err)

@@ -26,7 +26,7 @@
 package chainstate
 
 import (
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -629,7 +629,7 @@ func computeMajorityBaseline(obs []BlockObservation, now time.Time, cfg Config) 
 	for _, o := range latestByURL {
 		blocks = append(blocks, o.Block)
 	}
-	sort.Slice(blocks, func(i, j int) bool { return blocks[i] < blocks[j] })
+	slices.Sort(blocks)
 
 	// Distance-aware clustering: slide a window [i..j] over the sorted blocks, keeping it no
 	// wider than BucketWidth. The widest such window is the largest set of endpoints that agree

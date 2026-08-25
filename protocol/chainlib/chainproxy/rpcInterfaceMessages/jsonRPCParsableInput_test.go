@@ -76,7 +76,7 @@ func TestJsonrpcMessage_NewParsableRPCInput(t *testing.T) {
 func BenchmarkNewParsableRPCInput(b *testing.B) {
 	var sb strings.Builder
 	sb.WriteString(`{"jsonrpc":"2.0","id":1,"result":[`)
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		if i > 0 {
 			sb.WriteByte(',')
 		}

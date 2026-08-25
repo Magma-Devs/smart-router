@@ -14,10 +14,8 @@ import (
 
 func TestTendermintrpcMessage(t *testing.T) {
 	tendermintMessage := TendermintrpcMessage{
-		JsonrpcMessage: JsonrpcMessage{
-			Params: []int{1, 2, 3},
-			Result: json.RawMessage(`"test_result"`),
-		},
+		Params: []int{1, 2, 3},
+		Result: json.RawMessage(`"test_result"`),
 	}
 
 	// Test GetParams method

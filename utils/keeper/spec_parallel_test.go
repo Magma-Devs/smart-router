@@ -32,9 +32,9 @@ func TestGetAllSpecsWithToken_ParallelFetching(t *testing.T) {
 
 		if r.URL.Path == "/repos/test/repo/contents/" {
 			// Return list of spec files
-			files := []map[string]interface{}{}
+			files := []map[string]any{}
 			for i := 1; i <= 20; i++ {
-				files = append(files, map[string]interface{}{
+				files = append(files, map[string]any{
 					"name": fmt.Sprintf("spec%d.json", i),
 					"type": "file",
 				})
@@ -50,10 +50,10 @@ func TestGetAllSpecsWithToken_ParallelFetching(t *testing.T) {
 			fmt.Sscanf(r.URL.Path, "/test/repo/main/spec%s.json", &specIndex)
 
 			// Return a simple spec JSON structure
-			specData := map[string]interface{}{
-				"proposal": map[string]interface{}{
-					"specs": []interface{}{
-						map[string]interface{}{
+			specData := map[string]any{
+				"proposal": map[string]any{
+					"specs": []any{
+						map[string]any{
 							"index":   fmt.Sprintf("SPEC%s", specIndex),
 							"name":    fmt.Sprintf("Test Spec %s", specIndex),
 							"enabled": true,
@@ -85,7 +85,7 @@ func TestGetAllSpecsWithToken_ParallelFetching(t *testing.T) {
 	}
 
 	// Collect results
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		<-resultChan
 	}
 
@@ -105,7 +105,7 @@ func TestGetAllSpecsWithToken_ParallelFetching(t *testing.T) {
 func TestGetAllSpecsWithToken_ParallelErrorHandling(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/repos/test/repo/contents/" {
-			files := []map[string]interface{}{
+			files := []map[string]any{
 				{"name": "good1.json", "type": "file"},
 				{"name": "bad.json", "type": "file"},
 				{"name": "good2.json", "type": "file"},
@@ -117,10 +117,10 @@ func TestGetAllSpecsWithToken_ParallelErrorHandling(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		} else {
 			// Success
-			specData := map[string]interface{}{
-				"proposal": map[string]interface{}{
-					"specs": []interface{}{
-						map[string]interface{}{
+			specData := map[string]any{
+				"proposal": map[string]any{
+					"specs": []any{
+						map[string]any{
 							"index":   "TEST",
 							"enabled": true,
 						},
@@ -156,7 +156,7 @@ func TestParallelFetching_WorkerPoolLimit(t *testing.T) {
 	semaphore := make(chan struct{}, 10) // Max 10 concurrent
 	done := make(chan bool, 30)
 
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		go func() {
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
@@ -173,7 +173,7 @@ func TestParallelFetching_WorkerPoolLimit(t *testing.T) {
 	}
 
 	// Wait for all to complete
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		<-done
 	}
 

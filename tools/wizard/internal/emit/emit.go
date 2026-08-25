@@ -2,7 +2,9 @@
 // state, plus the secret scaffold (.env + ${VAR} template + render).
 //
 // Mirrors scripts/wizard/lib/emit.sh. Schema (per protocol/common/endpoints.go):
-//   metrics-listen-address, cache-be?, endpoints[], direct-rpc[], backup-direct-rpc[]
+//
+//	metrics-listen-address, cache-be?, endpoints[], direct-rpc[], backup-direct-rpc[]
+//
 // Each provider: name/chain-id/api-interface/node-urls[{url, addons?, auth-config?}].
 // The router reads YAML literally (no ${ENV} expansion), so auth uses ${VAR}
 // placeholders rendered from a .env via Render (an envsubst equivalent).
@@ -274,7 +276,7 @@ func LoadEnv(path string) (map[string]string, error) {
 		return nil, err
 	}
 	out := map[string]string{}
-	for _, line := range strings.Split(string(b), "\n") {
+	for line := range strings.SplitSeq(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue

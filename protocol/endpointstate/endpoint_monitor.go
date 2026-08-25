@@ -604,13 +604,7 @@ func (m *EndpointMonitor) specRequiresHeadOnly() bool {
 }
 
 func (m *EndpointMonitor) trackerStartRetryDelay(attempt int) time.Duration {
-	delay := m.averageBlockTime
-	if delay < m.retryMinDelay {
-		delay = m.retryMinDelay
-	}
-	if delay > m.retryMaxDelay {
-		delay = m.retryMaxDelay
-	}
+	delay := min(max(m.averageBlockTime, m.retryMinDelay), m.retryMaxDelay)
 
 	for i := 0; i < attempt && delay < m.retryMaxDelay; i++ {
 		delay *= 2

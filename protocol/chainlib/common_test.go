@@ -426,7 +426,7 @@ func (m *mockRPCInput) GetRawRequestHash() ([]byte, error) {
 	return nil, fmt.Errorf("test")
 }
 
-func (m *mockRPCInput) GetParams() interface{} {
+func (m *mockRPCInput) GetParams() any {
 	return nil
 }
 
@@ -512,7 +512,7 @@ func TestCheckUTXOResponseAndFixReply(t *testing.T) {
 		input := `{"jsonrpc":"2.0","id":"1","result":"abc","error":null}`
 		result := checkUTXOResponseAndFixReply("DOGE", []byte(input))
 		// Should preserve error:null and strip jsonrpc (BTC uses JSON-RPC 1.0)
-		var parsed map[string]interface{}
+		var parsed map[string]any
 		require.NoError(t, json.Unmarshal(result, &parsed))
 		_, hasError := parsed["error"]
 		require.True(t, hasError, "error field must be present (even when null)")
@@ -524,7 +524,7 @@ func TestCheckUTXOResponseAndFixReply(t *testing.T) {
 		// Multi-element batch: relay pipeline reconstructs with jsonrpc:"2.0" and omitempty on error
 		input := `[{"jsonrpc":"2.0","id":"1","result":"hash1"},{"jsonrpc":"2.0","id":"2","result":"hash2"}]`
 		result := checkUTXOResponseAndFixReply("DOGE", []byte(input))
-		var parsed []map[string]interface{}
+		var parsed []map[string]any
 		require.NoError(t, json.Unmarshal(result, &parsed))
 		require.Len(t, parsed, 2)
 		for i, elem := range parsed {
@@ -539,7 +539,7 @@ func TestCheckUTXOResponseAndFixReply(t *testing.T) {
 		// Single-element batch must stay as array
 		input := `[{"jsonrpc":"2.0","id":"1773768178254-0","result":"23699c7e"}]`
 		result := checkUTXOResponseAndFixReply("DOGE", []byte(input))
-		var parsed []map[string]interface{}
+		var parsed []map[string]any
 		require.NoError(t, json.Unmarshal(result, &parsed), "single-element batch must remain an array")
 		require.Len(t, parsed, 1)
 		require.Equal(t, "1773768178254-0", parsed[0]["id"])
@@ -563,7 +563,7 @@ func TestCheckUTXOResponseAndFixReply(t *testing.T) {
 	t.Run("btc_with_actual_error", func(t *testing.T) {
 		input := `{"id":"1","error":{"code":-8,"message":"Block height out of range"},"result":null}`
 		result := checkUTXOResponseAndFixReply("BTC", []byte(input))
-		var parsed map[string]interface{}
+		var parsed map[string]any
 		require.NoError(t, json.Unmarshal(result, &parsed))
 		errorField := parsed["error"]
 		require.NotNil(t, errorField, "error field must be preserved when not null")
@@ -1155,7 +1155,7 @@ func TestMatchSpecApiByNameTrailingSlash(t *testing.T) {
 
 			// Repeated to catch an order-dependent answer: serverApis is a map, so a case
 			// with two candidates would otherwise pass or fail at random.
-			for i := 0; i < 32; i++ {
+			for range 32 {
 				api, ok := matchSpecApiByName(testCase.inputName, connectionType, restApis(t, connectionType, testCase.apiNames...))
 				require.Equal(t, testCase.expectedOk, ok)
 				if testCase.expectedOk {
@@ -1263,7 +1263,7 @@ func TestMatchSpecApiByNameRanksMostSpecific(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			for i := 0; i < 32; i++ {
+			for range 32 {
 				api, ok := matchSpecApiByName(testCase.inputName, connectionType, restApis(t, connectionType, testCase.apiNames...))
 				require.True(t, ok)
 				require.Equal(t, testCase.expectedName, api.api.Name)
@@ -1287,7 +1287,7 @@ func TestRestApiKeyCollapsesNamesWithTheSameShape(t *testing.T) {
 	)
 	require.Len(t, serverApis, 1)
 
-	for i := 0; i < 32; i++ {
+	for range 32 {
 		api, ok := matchSpecApiByName("/cosmos/auth/v1beta1/bech32/lava@1abc/", "GET", serverApis)
 		require.True(t, ok)
 		require.Equal(t, "/cosmos/auth/v1beta1/bech32/{address_bytes}", api.api.Name)
@@ -1348,7 +1348,7 @@ func TestRestApiMatcherOrdering(t *testing.T) {
 	require.False(t, crossA.moreSpecificThan(true, crossB, true))
 
 	// And end to end: the winner is the same on every one of 32 map iteration orders.
-	for i := 0; i < 32; i++ {
+	for range 32 {
 		api, ok := matchSpecApiByName("/a/b/c", "GET", restApis(t, "GET", "/a/{x}/c", "/a/b/{y}"))
 		require.True(t, ok)
 		require.Equal(t, "/a/b/{y}", api.api.Name)
@@ -1392,7 +1392,7 @@ func TestMatchSpecApiByNameTrailingSlashConnectionType(t *testing.T) {
 // lookup.
 func BenchmarkMatchSpecApiByName(b *testing.B) {
 	apiNames := make([]string, 0, 200)
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		apiNames = append(apiNames, fmt.Sprintf("/chains/main/blocks/{block_id}/pad%d/header", i))
 	}
 	serverApis := restApis(b, "GET", apiNames...)

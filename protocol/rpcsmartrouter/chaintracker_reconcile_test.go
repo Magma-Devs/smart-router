@@ -160,8 +160,7 @@ func TestInitializeChainTrackers_RegistersEndpointAdmittedAfterStartup(t *testin
 // loop cheap enough to run on a short interval, and it is also what the "success" figure in the
 // startup log now means (created + alreadyPresent, not "attempted").
 func TestReconcileChainTrackers_IdempotentAndCounts(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	f := newReconcileFixture(t, ctx)
 	urls := []string{"http://127.0.0.1:1/a", "http://127.0.0.1:1/b", "http://127.0.0.1:1/c"}
@@ -190,8 +189,7 @@ func TestReconcileChainTrackers_IdempotentAndCounts(t *testing.T) {
 // An empty pairing is a no-op, not a panic — the state a router sits in when every configured
 // upstream failed boot verification, which is exactly the scenario this loop exists to recover from.
 func TestReconcileChainTrackers_EmptyPairingIsNoOp(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	f := newReconcileFixture(t, ctx)
 

@@ -243,14 +243,11 @@ func applyReverification(
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, SpecReVerifyConcurrency)
 	for i, p := range configured {
-		i, p := i, p
 		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			results[i] = validate(ctx, p)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -463,12 +460,10 @@ func validateProviderTier(
 	sem := make(chan struct{}, SpecReVerifyConcurrency)
 	for i, p := range providers {
 		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			results[i] = validate(ctx, p)
-		}()
+		})
 	}
 	wg.Wait()
 

@@ -47,9 +47,9 @@ type Bound struct {
 // CrossValidationPolicy is a per-method cross-validation policy.
 type CrossValidationPolicy struct {
 	Enabled            bool  `yaml:"enabled,omitempty" json:"enabled,omitempty" mapstructure:"enabled,omitempty"`
-	MaxParticipants    Bound `yaml:"max-participants,omitempty" json:"max-participants,omitempty" mapstructure:"max-participants,omitempty"`
-	AgreementThreshold Bound `yaml:"agreement-threshold,omitempty" json:"agreement-threshold,omitempty" mapstructure:"agreement-threshold,omitempty"`
-	MinGroups          Bound `yaml:"min-groups,omitempty" json:"min-groups,omitempty" mapstructure:"min-groups,omitempty"`
+	MaxParticipants    Bound `yaml:"max-participants,omitempty" json:"max-participants" mapstructure:"max-participants,omitempty"`
+	AgreementThreshold Bound `yaml:"agreement-threshold,omitempty" json:"agreement-threshold" mapstructure:"agreement-threshold,omitempty"`
+	MinGroups          Bound `yaml:"min-groups,omitempty" json:"min-groups" mapstructure:"min-groups,omitempty"`
 	// PerGroupQuorum upgrades the MinGroups diversity requirement to per-group quorum (2.3): each of
 	// MinGroups groups must independently reach AgreementThreshold matching responses and the per-group
 	// winners must agree. Operator-only bool (no caller override). Requires MinGroups > 1.
@@ -286,8 +286,8 @@ func ParseCrossValidationConfig(v *viper.Viper) (CrossValidationConfig, error) {
 // float tolerance was a leftover from the percentage-quorum era (when a fractional `0.66` was meaningful)
 // and is no longer valid now that the threshold is an integer count.
 func boundScalarShorthandHook() mapstructure.DecodeHookFuncType {
-	boundType := reflect.TypeOf(Bound{})
-	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+	boundType := reflect.TypeFor[Bound]()
+	return func(from reflect.Type, to reflect.Type, data any) (any, error) {
 		if to != boundType {
 			return data, nil
 		}
@@ -309,7 +309,7 @@ func boundScalarShorthandHook() mapstructure.DecodeHookFuncType {
 
 // scalarToInt converts a YAML integer scalar to an int for the Bound shorthand. Cross-validation knobs are
 // whole-number counts; only integer kinds reach here (the hook rejects float/string scalars upstream).
-func scalarToInt(data interface{}) (int, error) {
+func scalarToInt(data any) (int, error) {
 	switch x := data.(type) {
 	case int:
 		return x, nil

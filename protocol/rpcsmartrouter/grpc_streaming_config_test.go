@@ -102,7 +102,7 @@ func TestGRPCClientRateLimiter_AllowSubscribe(t *testing.T) {
 	assert.True(t, limiter.AllowSubscribe(clientKey))
 
 	// Multiple rapid requests should be allowed up to burst limit
-	for i := 0; i < 59; i++ {
+	for i := range 59 {
 		allowed := limiter.AllowSubscribe(clientKey)
 		if !allowed {
 			t.Logf("Request %d was rate limited (expected after burst)", i+2)
@@ -122,7 +122,7 @@ func TestGRPCClientRateLimiter_AllowUnsubscribe(t *testing.T) {
 	assert.True(t, limiter.AllowUnsubscribe(clientKey))
 
 	// Multiple rapid requests should be allowed up to burst limit
-	for i := 0; i < 59; i++ {
+	for i := range 59 {
 		allowed := limiter.AllowUnsubscribe(clientKey)
 		if !allowed {
 			t.Logf("Request %d was rate limited (expected after burst)", i+2)
@@ -191,7 +191,7 @@ func TestGRPCClientRateLimiter_ConcurrentAccess(t *testing.T) {
 	const concurrentStreams = 50
 
 	var wg sync.WaitGroup
-	for i := 0; i < concurrentStreams; i++ {
+	for i := range concurrentStreams {
 		wg.Add(1)
 		go func(stream int) {
 			defer wg.Done()

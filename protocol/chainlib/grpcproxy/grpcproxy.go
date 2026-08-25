@@ -135,7 +135,7 @@ func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFla
 }
 
 func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) grpc.StreamHandler {
-	return func(srv interface{}, stream grpc.ServerStream) error {
+	return func(srv any, stream grpc.ServerStream) error {
 		// currently the callback function does not account for headers.
 		methodName, ok := grpc.MethodFromServerStream(stream)
 		if !ok {
@@ -232,7 +232,7 @@ func lowercaseMetadata(md metadata.MD) metadata.MD {
 
 type RawBytesCodec struct{}
 
-func (RawBytesCodec) Marshal(v interface{}) ([]byte, error) {
+func (RawBytesCodec) Marshal(v any) ([]byte, error) {
 	bytes, ok := v.([]byte)
 	if !ok {
 		return nil, utils.LavaFormatError("cannot encode type", nil, utils.Attribute{Key: "v", Value: v})
@@ -240,7 +240,7 @@ func (RawBytesCodec) Marshal(v interface{}) ([]byte, error) {
 	return bytes, nil
 }
 
-func (RawBytesCodec) Unmarshal(data []byte, v interface{}) error {
+func (RawBytesCodec) Unmarshal(data []byte, v any) error {
 	bufferPtr, ok := v.(*[]byte)
 	if !ok {
 		return utils.LavaFormatDebug("cannot decode into type", utils.LogAttr("v", v), utils.LogAttr("data", data))

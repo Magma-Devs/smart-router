@@ -70,9 +70,7 @@ func TestTendermintChainParser_NilGuard(t *testing.T) {
 func TestTendermintGetSupportedApi(t *testing.T) {
 	// Test case 1: Successful scenario, returns a supported API
 	apip := &TendermintChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
-		},
+		serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
 	}
 	api, err := apip.getSupportedApi("API1", connectionType_test)
 	assert.NoError(t, err)
@@ -80,9 +78,7 @@ func TestTendermintGetSupportedApi(t *testing.T) {
 
 	// Test case 2: Returns error if the API does not exist
 	apip = &TendermintChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
-		},
+		serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
 	}
 	apiCont, err := apip.getSupportedApi("API2", connectionType_test)
 	if err == nil {
@@ -93,9 +89,7 @@ func TestTendermintGetSupportedApi(t *testing.T) {
 
 	// Test case 3: Returns error if the API is disabled
 	apip = &TendermintChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: false}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
-		},
+		serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: false}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
 	}
 	_, err = apip.getSupportedApi("API1", connectionType_test)
 	assert.Error(t, err)
@@ -103,26 +97,22 @@ func TestTendermintGetSupportedApi(t *testing.T) {
 
 func TestTendermintParseMessage(t *testing.T) {
 	apip := &TendermintChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{
-					Name:    "API1",
-					Enabled: true,
-					BlockParsing: spectypes.BlockParser{
-						ParserArg:  []string{"latest"},
-						ParserFunc: spectypes.PARSER_FUNC_DEFAULT,
-					},
-				}, collectionKey: CollectionKey{ConnectionType: connectionType_test}},
-			},
-			apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceTendermintRPC}}},
+		serverApis: map[ApiKey]ApiContainer{
+			{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{
+				Name:    "API1",
+				Enabled: true,
+				BlockParsing: spectypes.BlockParser{
+					ParserArg:  []string{"latest"},
+					ParserFunc: spectypes.PARSER_FUNC_DEFAULT,
+				},
+			}, collectionKey: CollectionKey{ConnectionType: connectionType_test}},
 		},
+		apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceTendermintRPC}}},
 	}
 
 	data := rpcInterfaceMessages.TendermintrpcMessage{
-		JsonrpcMessage: rpcInterfaceMessages.JsonrpcMessage{
-			Method: "API1",
-		},
-		Path: "",
+		Method: "API1",
+		Path:   "",
 	}
 
 	marshalledData, _ := json.Marshal(data)
@@ -372,7 +362,7 @@ func TestTendermintURIRPC(t *testing.T) {
 	nodeMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.TendermintrpcMessage)
 	require.True(t, ok)
 	params := nodeMessage.GetParams()
-	casted, ok := params.(map[string]interface{})
+	casted, ok := params.(map[string]any)
 	require.True(t, ok)
 	_, ok = casted["query"]
 	require.True(t, ok)
@@ -385,11 +375,9 @@ func TestTendermintRpcChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
 	listener := &TendermintRpcChainListener{
 		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
 	}
-	listener.wsWG.Add(1)
-	go func() {
+	listener.wsWG.Go(func() {
 		time.Sleep(100 * time.Millisecond)
-		listener.wsWG.Done()
-	}()
+	})
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

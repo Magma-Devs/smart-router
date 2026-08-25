@@ -123,7 +123,7 @@ func TestSVMChainTracker_FetchLatestBlockNum_SameSlotRecordsEachPoll(t *testing.
 	svm := newTestSVMChainTracker(t, fetcher)
 
 	const polls = 3
-	for i := 0; i < polls; i++ {
+	for range polls {
 		_, err := svm.FetchLatestBlockNum(context.Background())
 		require.NoError(t, err)
 	}

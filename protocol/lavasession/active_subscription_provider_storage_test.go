@@ -34,7 +34,7 @@ func TestConcurrentAccess(t *testing.T) {
 	numProviders := 100
 	var wg sync.WaitGroup
 	wg.Add(numProviders * 2)
-	for i := 0; i < numProviders; i++ {
+	for i := range numProviders {
 		providerSpecificWg := sync.WaitGroup{}
 		providerSpecificWg.Add(1)
 		go func(providerIndex int) {
@@ -57,7 +57,7 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 
 	// Check if all providers were added and removed
-	for i := 0; i < numProviders; i++ {
+	for i := range numProviders {
 		providerAddress := "provider" + strconv.Itoa(i)
 		isCurrentlyActive := acps.IsProviderCurrentlyUsed(providerAddress)
 		require.False(t, isCurrentlyActive)

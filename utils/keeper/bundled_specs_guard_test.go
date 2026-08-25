@@ -23,16 +23,16 @@ var removedSpecFields = map[string]struct{}{
 	"extra_compute_units": {}, "local": {}, "subscription": {},
 }
 
-func collectRemovedKeys(v interface{}, path string, hits *[]string) {
+func collectRemovedKeys(v any, path string, hits *[]string) {
 	switch node := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		for k, child := range node {
 			if _, bad := removedSpecFields[k]; bad {
 				*hits = append(*hits, path+"."+k)
 			}
 			collectRemovedKeys(child, path+"."+k, hits)
 		}
-	case []interface{}:
+	case []any:
 		for i, item := range node {
 			collectRemovedKeys(item, fmt.Sprintf("%s[%d]", path, i), hits)
 		}
@@ -56,7 +56,7 @@ func TestBundledSpecsHaveNoRemovedFields(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
-		var doc interface{}
+		var doc any
 		if err := json.Unmarshal(data, &doc); err != nil {
 			t.Fatalf("%s: invalid JSON: %v", e.Name(), err)
 		}

@@ -19,9 +19,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -374,8 +374,8 @@ func TestChainRouterWithDisabledWebSocketInSpec(t *testing.T) {
 		t.Run(play.name, func(t *testing.T) {
 			nodeUrls := []common.NodeUrl{}
 			for _, service := range play.services {
-				nodeUrl := common.NodeUrl{Url: listenerAddressHttp}
-				nodeUrl.Addons = service.services
+				nodeUrl := common.NodeUrl{Url: listenerAddressHttp,
+					Addons: service.services}
 				nodeUrls = append(nodeUrls, nodeUrl)
 			}
 
@@ -795,8 +795,8 @@ func TestChainRouterWithEnabledWebSocketInSpec(t *testing.T) {
 		t.Run(play.name, func(t *testing.T) {
 			nodeUrls := []common.NodeUrl{}
 			for _, service := range play.services {
-				nodeUrl := common.NodeUrl{Url: listenerAddressHttp}
-				nodeUrl.Addons = service.services
+				nodeUrl := common.NodeUrl{Url: listenerAddressHttp,
+					Addons: service.services}
 				nodeUrls = append(nodeUrls, nodeUrl)
 				nodeUrl.Url = listenerAddressWs
 				nodeUrls = append(nodeUrls, nodeUrl)

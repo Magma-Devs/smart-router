@@ -102,7 +102,7 @@ func TestHeadOnlySVM_NeverFetchesBlockHashes(t *testing.T) {
 	defer cancel()
 	require.NoError(t, tracker.StartAndServe(ctx), "head-only must start without any hash fetch")
 
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		fetcher.slot.Add(1)
 		time.Sleep(TimeForPollingMock * 2)
 	}
@@ -122,8 +122,7 @@ func TestHeadOnlySVM_HeadAdvancesAndIsPublished(t *testing.T) {
 	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	require.NoError(t, tracker.StartAndServe(ctx))
 
 	require.Equal(t, int64(300_000_000), tracker.GetAtomicLatestBlockNum(), "init must publish the head")
@@ -150,8 +149,7 @@ func TestHeadOnlySVM_RecordsPollObservations(t *testing.T) {
 	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	require.NoError(t, tracker.StartAndServe(ctx))
 
 	before := fetcher.observedCalls.Load()
@@ -175,8 +173,7 @@ func TestHeadOnlySVM_LatestBlockDataHasNoHashes(t *testing.T) {
 	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	require.NoError(t, tracker.StartAndServe(ctx))
 
 	latest, hashes, _, err := tracker.GetLatestBlockData(spectypes.NOT_APPLICABLE, spectypes.NOT_APPLICABLE, spectypes.NOT_APPLICABLE)

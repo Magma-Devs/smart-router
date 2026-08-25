@@ -28,7 +28,7 @@ type JsonrpcMessage struct {
 	Version                string               `json:"jsonrpc,omitempty"`
 	ID                     json.RawMessage      `json:"id,omitempty"`
 	Method                 string               `json:"method,omitempty"`
-	Params                 interface{}          `json:"params,omitempty"`
+	Params                 any                  `json:"params,omitempty"`
 	Error                  *rpcclient.JsonError `json:"error,omitempty"`
 	Result                 json.RawMessage      `json:"result,omitempty"`
 	chainproxy.BaseMessage `json:"-"`
@@ -87,7 +87,7 @@ func (jm *JsonrpcMessage) ParamsJSON() json.RawMessage {
 
 // SendableParams returns what should be forwarded to the node: the wire bytes
 // when available, otherwise the decoded Params tree.
-func (jm *JsonrpcMessage) SendableParams() interface{} {
+func (jm *JsonrpcMessage) SendableParams() any {
 	if jm.rawParams != nil {
 		return jm.rawParams
 	}
@@ -318,7 +318,7 @@ func rawMemberSlice(data []byte, r gjson.Result) json.RawMessage {
 	return json.RawMessage([]byte(r.Raw))
 }
 
-func (jm JsonrpcMessage) GetParams() interface{} {
+func (jm JsonrpcMessage) GetParams() any {
 	return jm.Params
 }
 
@@ -429,7 +429,7 @@ func (jbm *JsonrpcBatchMessage) GetBatch() []rpcclient.BatchElemWithId {
 	return jbm.batch
 }
 
-func (jbm JsonrpcBatchMessage) GetParams() interface{} {
+func (jbm JsonrpcBatchMessage) GetParams() any {
 	return [][]byte{}
 }
 
@@ -437,7 +437,7 @@ func NewBatchMessage(msgs []JsonrpcMessage) (JsonrpcBatchMessage, error) {
 	batch := make([]rpcclient.BatchElemWithId, len(msgs))
 	for idx, msg := range msgs {
 		switch params := msg.Params.(type) {
-		case []interface{}, map[string]interface{}, nil:
+		case []any, map[string]any, nil:
 		default:
 			return JsonrpcBatchMessage{}, fmt.Errorf("invalid params in batch, batching only supports empty, ordered or dictionary arguments  %s %+v", msg.Method, params)
 		}

@@ -89,8 +89,7 @@ func (b *blockingDummyChainTracker) StartAndServe(context.Context) error {
 }
 
 func TestEndpointMonitor_GetOrCreateTracker(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// Create manager with minimal config
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
@@ -110,8 +109,7 @@ func TestEndpointMonitor_GetOrCreateTracker(t *testing.T) {
 }
 
 func TestEndpointMonitor_GetLatestBlockNum(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -130,8 +128,7 @@ func TestEndpointMonitor_GetLatestBlockNum(t *testing.T) {
 }
 
 func TestEndpointMonitor_GetTrackerState(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -149,8 +146,7 @@ func TestEndpointMonitor_GetTrackerState(t *testing.T) {
 }
 
 func TestEndpointMonitor_StartTrackerRetriesAfterStartupFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -201,8 +197,7 @@ func TestEndpointMonitor_StartTrackerRetriesAfterStartupFailure(t *testing.T) {
 }
 
 func TestEndpointMonitor_RemoveTrackerClearsTrackerStates(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -239,8 +234,7 @@ func TestEndpointMonitor_RemoveTrackerClearsTrackerStates(t *testing.T) {
 }
 
 func TestEndpointMonitor_LateStateWriteAfterRemoveIsDropped(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -300,8 +294,7 @@ func TestEndpointMonitor_LateStateWriteAfterRemoveIsDropped(t *testing.T) {
 }
 
 func TestEndpointMonitor_GetAllEndpoints(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -320,8 +313,7 @@ func TestEndpointMonitor_GetAllEndpoints(t *testing.T) {
 }
 
 func TestEndpointMonitor_RemoveTracker(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -342,8 +334,7 @@ func TestEndpointMonitor_RemoveTracker(t *testing.T) {
 }
 
 func TestEndpointMonitor_Callbacks(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	forkCalled := false
 	newBlockCalled := false
@@ -371,8 +362,7 @@ func TestEndpointMonitor_Callbacks(t *testing.T) {
 }
 
 func TestEndpointChainTrackerConfig_DefaultValues(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// Create with minimal config (should use defaults)
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
@@ -392,8 +382,7 @@ func TestEndpointChainTrackerConfig_DefaultValues(t *testing.T) {
 // TestEndpointMonitor_LifecyclePerTrackerContext verifies that each tracker
 // gets its own cancellable context, enabling individual tracker shutdown.
 func TestEndpointMonitor_LifecyclePerTrackerContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -412,8 +401,7 @@ func TestEndpointMonitor_LifecyclePerTrackerContext(t *testing.T) {
 // TestEndpointMonitor_RemoveTrackerCancelsContext verifies that RemoveTracker
 // properly cancels the tracker's context before removing it from maps.
 func TestEndpointMonitor_RemoveTrackerCancelsContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -441,8 +429,7 @@ func TestEndpointMonitor_RemoveTrackerCancelsContext(t *testing.T) {
 // TestEndpointMonitor_StopCancelsAllTrackers verifies that Stop()
 // properly cancels all individual tracker contexts.
 func TestEndpointMonitor_StopCancelsAllTrackers(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -475,8 +462,7 @@ func TestEndpointMonitor_StopCancelsAllTrackers(t *testing.T) {
 // TestEndpointMonitor_ConcurrentCreateRemove tests that concurrent
 // create and remove operations are thread-safe.
 func TestEndpointMonitor_ConcurrentCreateRemove(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	manager := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -490,7 +476,7 @@ func TestEndpointMonitor_ConcurrentCreateRemove(t *testing.T) {
 	// Simulate concurrent operations (without actual trackers, just testing map access)
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			manager.GetAllEndpoints()
 			manager.GetEndpointCount()
 			manager.RemoveTracker("http://test:8545")
@@ -498,7 +484,7 @@ func TestEndpointMonitor_ConcurrentCreateRemove(t *testing.T) {
 		close(done)
 	}()
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		manager.GetLatestBlockNum("http://test:8545")
 		manager.GetTracker("http://test:8545")
 	}

@@ -41,7 +41,6 @@ func TestMarshalJsonRPCErrorWithRequestID_EchoesAllIDTypes(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := MarshalJsonRPCErrorWithRequestID(JsonRpcSubscriptionNotFoundError, []byte(tc.request))
 			require.NoError(t, err, "tc #%s", tc.name)

@@ -127,7 +127,7 @@ type ignoredProviders struct {
 type EndpointConnection struct {
 	Client                              pairingtypes.RelayerClient
 	connection                          *grpc.ClientConn
-	numberOfSessionsUsingThisConnection uint64
+	numberOfSessionsUsingThisConnection atomic.Uint64
 	// blockListed - currently unused, use it carefully as it will block this provider's endpoint until next epoch without forgiveness.
 	// Can be used in cases of data reliability, self provider conflict etc..
 	blockListed atomic.Bool
@@ -142,14 +142,14 @@ func (ec *EndpointConnection) GetLbUniqueId() string {
 }
 
 func (ec *EndpointConnection) addSessionUsingConnection() {
-	atomic.AddUint64(&ec.numberOfSessionsUsingThisConnection, 1)
+	ec.numberOfSessionsUsingThisConnection.Add(1)
 }
 
 func (ec *EndpointConnection) decreaseSessionUsingConnection() {
 	for {
 		knownValue := ec.getNumberOfLiveSessionsUsingThisConnection()
 		if knownValue >= 1 {
-			swapped := atomic.CompareAndSwapUint64(&ec.numberOfSessionsUsingThisConnection, knownValue, knownValue-1)
+			swapped := ec.numberOfSessionsUsingThisConnection.CompareAndSwap(knownValue, knownValue-1)
 			if swapped {
 				return
 			}
@@ -161,7 +161,7 @@ func (ec *EndpointConnection) decreaseSessionUsingConnection() {
 }
 
 func (ec *EndpointConnection) getNumberOfLiveSessionsUsingThisConnection() uint64 {
-	return atomic.LoadUint64(&ec.numberOfSessionsUsingThisConnection)
+	return ec.numberOfSessionsUsingThisConnection.Load()
 }
 
 type EndpointAndChosenConnection struct {
@@ -238,7 +238,7 @@ type Endpoint struct {
 	// it does not serve, and the vendor's 404 then reads as a verdict on the
 	// request.
 	InternalPath string
-	mu                 sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload, relayProbeTimeout, relayProbeAttempts
+	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload, relayProbeTimeout, relayProbeAttempts
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
 	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
@@ -747,8 +747,8 @@ type ConsumerSessionsWithProvider struct {
 	UsedComputeUnits  uint64
 	PairingEpoch      uint64
 	// whether we already reported this provider this epoch, we can only report one conflict per provider per epoch
-	conflictFoundAndReported uint32 // 0 == not reported, 1 == reported
-	stakeSize                int64  // the stake size the provider staked (ulava)
+	conflictFoundAndReported atomic.Uint32 // 0 == not reported, 1 == reported
+	stakeSize                int64         // the stake size the provider staked (ulava)
 
 	// blocked provider recovery status if 0 currently not used, if 1 a session has tried resume communication with this provider
 	// if the provider is not blocked at all this field is irrelevant
@@ -798,11 +798,11 @@ func (cswp *ConsumerSessionsWithProvider) atomicTryClearSecondChanceProbation() 
 }
 
 func (cswp *ConsumerSessionsWithProvider) atomicReadConflictReported() bool {
-	return atomic.LoadUint32(&cswp.conflictFoundAndReported) == 1
+	return cswp.conflictFoundAndReported.Load() == 1
 }
 
 func (cswp *ConsumerSessionsWithProvider) atomicWriteConflictReported() {
-	atomic.StoreUint32(&cswp.conflictFoundAndReported, 1) // we can only set conflict to "reported".
+	cswp.conflictFoundAndReported.Store(1) // we can only set conflict to "reported".
 }
 
 // checking if this provider was reported this epoch already, as we can only report once per epoch

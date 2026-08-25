@@ -117,7 +117,7 @@ func TestAppendProbeData_FractionalAvailabilityDecaysScore(t *testing.T) {
 	now := time.Now()
 	ref := freshRef(1000, now)
 
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		po.AppendProbeData("healthy", 1.0, 10*time.Millisecond, true, 1000, true, ref)
 		po.AppendProbeData("degraded", 0.5, 10*time.Millisecond, true, 1000, true, ref)
 	}

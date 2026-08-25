@@ -92,7 +92,7 @@ func TestExponentialBackoff_JitterAddsRandomness(t *testing.T) {
 	// JitterFactor is 0.3 by default
 
 	delays := make([]time.Duration, 100)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		backoff.Reset()
 		delays[i], _ = backoff.NextBackoff()
 	}
@@ -124,7 +124,7 @@ func TestExponentialBackoff_UnlimitedRetries(t *testing.T) {
 	}
 
 	// Should never return false
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		_, ok := backoff.NextBackoff()
 		assert.True(t, ok, "unlimited retries should never exceed max")
 	}
@@ -181,9 +181,9 @@ func TestExponentialBackoff_ConcurrentAccess(t *testing.T) {
 
 	// Run multiple goroutines accessing the backoff
 	done := make(chan bool, 10)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		go func() {
-			for j := 0; j < 100; j++ {
+			for j := range 100 {
 				backoff.NextBackoff()
 				backoff.Attempt()
 				if j%10 == 0 {
@@ -195,7 +195,7 @@ func TestExponentialBackoff_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Wait for all goroutines to complete
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		<-done
 	}
 	// If we reach here without panic, concurrent access is safe

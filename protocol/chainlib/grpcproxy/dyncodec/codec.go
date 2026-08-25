@@ -102,7 +102,7 @@ type grpcCodec struct {
 	u proto.UnmarshalOptions
 }
 
-func (g *grpcCodec) Marshal(v interface{}) ([]byte, error) {
+func (g *grpcCodec) Marshal(v any) ([]byte, error) {
 	msg, ok := v.(proto.Message)
 	if !ok {
 		return nil, fmt.Errorf("dynamic cosmos grpcCodec client can only work with proto.Message")
@@ -111,7 +111,7 @@ func (g *grpcCodec) Marshal(v interface{}) ([]byte, error) {
 	return g.m.Marshal(msg)
 }
 
-func (g *grpcCodec) Unmarshal(data []byte, v interface{}) error {
+func (g *grpcCodec) Unmarshal(data []byte, v any) error {
 	msg, ok := v.(proto.Message)
 	if !ok {
 		return fmt.Errorf("dynamic cosmos grpcCodec client can only work with proto.Message")

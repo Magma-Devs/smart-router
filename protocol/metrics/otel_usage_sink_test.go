@@ -92,7 +92,7 @@ func TestOTelUsageSink_BadEndpoint_DoesNotPanic(t *testing.T) {
 		ComputeUnits: 1,
 	}
 	require.NotPanics(t, func() {
-		for i := 0; i < 16; i++ {
+		for range 16 {
 			sink.Emit(NewRelayUsageEvent(rm))
 		}
 	})
@@ -106,7 +106,7 @@ func TestOTelUsageSink_BadEndpoint_DoesNotPanic(t *testing.T) {
 		Epoch:            1234,
 	}
 	require.NotPanics(t, func() {
-		for i := 0; i < 16; i++ {
+		for range 16 {
 			sink.EmitOptimizerQoS(report)
 		}
 	})

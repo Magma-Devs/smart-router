@@ -30,10 +30,10 @@ import (
 )
 
 var (
-	contextType      = reflect.TypeOf((*context.Context)(nil)).Elem()
-	errorType        = reflect.TypeOf((*error)(nil)).Elem()
-	subscriptionType = reflect.TypeOf(Subscription{})
-	stringType       = reflect.TypeOf("")
+	contextType      = reflect.TypeFor[context.Context]()
+	errorType        = reflect.TypeFor[error]()
+	subscriptionType = reflect.TypeFor[Subscription]()
+	stringType       = reflect.TypeFor[string]()
 )
 
 type serviceRegistry struct {
@@ -58,7 +58,7 @@ type callback struct {
 	isSubscribe bool           // true if this is a subscription callback
 }
 
-func (r *serviceRegistry) registerName(name string, rcvr interface{}) error {
+func (r *serviceRegistry) registerName(name string, rcvr any) error {
 	rcvrVal := reflect.ValueOf(rcvr)
 	if name == "" {
 		return fmt.Errorf("no service name for type %s", rcvrVal.Type().String())
@@ -116,8 +116,7 @@ func (r *serviceRegistry) subscription(service, name string) *callback {
 func suitableCallbacks(receiver reflect.Value) map[string]*callback {
 	typ := receiver.Type()
 	callbacks := make(map[string]*callback)
-	for m := 0; m < typ.NumMethod(); m++ {
-		method := typ.Method(m)
+	for method := range typ.Methods() {
 		if method.PkgPath != "" {
 			continue // method not exported
 		}
@@ -181,7 +180,7 @@ func (c *callback) makeArgTypes() {
 }
 
 // call invokes the callback.
-func (c *callback) call(ctx context.Context, method string, args []reflect.Value) (res interface{}, errRes error) {
+func (c *callback) call(ctx context.Context, method string, args []reflect.Value) (res any, errRes error) {
 	// Create the argument slice.
 	fullargs := make([]reflect.Value, 0, 2+len(args))
 	if c.rcvr.IsValid() {
@@ -205,7 +204,7 @@ func (c *callback) call(ctx context.Context, method string, args []reflect.Value
 	// Run the callback.
 	results := c.fn.Call(fullargs)
 	if len(results) == 0 {
-		var ret interface{}
+		var ret any
 		return ret, nil
 	}
 	if c.errPos >= 0 && !results[c.errPos].IsNil() {
@@ -223,7 +222,7 @@ func (c *callback) call(ctx context.Context, method string, args []reflect.Value
 
 // Is t context.Context or *context.Context?
 func isContextType(t reflect.Type) bool {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return t == contextType
@@ -231,7 +230,7 @@ func isContextType(t reflect.Type) bool {
 
 // Does t satisfy the error interface?
 func isErrorType(t reflect.Type) bool {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return t.Implements(errorType)
@@ -239,7 +238,7 @@ func isErrorType(t reflect.Type) bool {
 
 // Is t Subscription or *Subscription?
 func isSubscriptionType(t reflect.Type) bool {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return t == subscriptionType

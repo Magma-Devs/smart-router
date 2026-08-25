@@ -14,7 +14,7 @@ import (
 )
 
 type RPCInputTest struct {
-	Params         interface{}
+	Params         any
 	Result         json.RawMessage
 	Headers        []pairingtypes.Metadata
 	ParseBlockFunc func(block string) (int64, error)
@@ -25,7 +25,7 @@ func (rpcInputTest *RPCInputTest) GetMethod() string {
 	return ""
 }
 
-func (rpcInputTest *RPCInputTest) GetParams() interface{} {
+func (rpcInputTest *RPCInputTest) GetParams() any {
 	return rpcInputTest.Params
 }
 
@@ -56,23 +56,23 @@ func (rpcInputTest *RPCInputTest) GetHeaders() []pairingtypes.Metadata {
 func TestAppendInterfaceToInterfaceArray(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    interface{}
-		expected []interface{}
+		input    any
+		expected []any
 	}{
 		{
 			name:     "Test with int value",
 			input:    1,
-			expected: []interface{}{1},
+			expected: []any{1},
 		},
 		{
 			name:     "Test with string value",
 			input:    "hello",
-			expected: []interface{}{"hello"},
+			expected: []any{"hello"},
 		},
 		{
 			name:     "Test with struct value",
 			input:    struct{ name string }{name: "John Doe"},
-			expected: []interface{}{struct{ name string }{name: "John Doe"}},
+			expected: []any{struct{ name string }{name: "John Doe"}},
 		},
 	}
 	for _, test := range tests {
@@ -91,38 +91,38 @@ func TestAppendInterfaceToInterfaceArray(t *testing.T) {
 func TestParseArrayOfInterfaces(t *testing.T) {
 	tests := []struct {
 		name     string
-		data     []interface{}
+		data     []any
 		propName string
 		sep      string
-		expected []interface{}
+		expected []any
 	}{
 		{
 			name:     "Test with matching prop name",
-			data:     []interface{}{"name:John Doe", "age:30", "gender:male"},
+			data:     []any{"name:John Doe", "age:30", "gender:male"},
 			propName: "name",
 			sep:      ":",
-			expected: []interface{}{"John Doe"},
+			expected: []any{"John Doe"},
 		},
 		{
 			name:     "Test with non-matching prop name",
-			data:     []interface{}{"name:John Doe", "age:30", "gender:male"},
+			data:     []any{"name:John Doe", "age:30", "gender:male"},
 			propName: "address",
 			sep:      ":",
 			expected: nil,
 		},
 		{
 			name:     "Test with empty data array",
-			data:     []interface{}{},
+			data:     []any{},
 			propName: "name",
 			sep:      ":",
 			expected: nil,
 		},
 		{
 			name:     "Test with non-string value in data array",
-			data:     []interface{}{"name:John Doe", 30, "gender:male"},
+			data:     []any{"name:John Doe", 30, "gender:male"},
 			propName: "name",
 			sep:      ":",
-			expected: []interface{}{"John Doe"},
+			expected: []any{"John Doe"},
 		},
 	}
 	for _, test := range tests {
@@ -233,7 +233,7 @@ func TestParseBlockFromParamsHappyFlow(t *testing.T) {
 		{
 			name: "ParseByArg",
 			message: RPCInputTest{
-				Params: []interface{}{"1"},
+				Params: []any{"1"},
 			},
 			blockParser: spectypes.BlockParser{
 				ParserArg:  []string{"0"},
@@ -244,9 +244,9 @@ func TestParseBlockFromParamsHappyFlow(t *testing.T) {
 		{
 			name: "ParseCanonical__[]interface{}__Case",
 			message: RPCInputTest{
-				Params: []interface{}{
-					map[string]interface{}{"block": int64(6)},
-					map[string]interface{}{"block": int64(25)},
+				Params: []any{
+					map[string]any{"block": int64(6)},
+					map[string]any{"block": int64(25)},
 				},
 			},
 			blockParser: spectypes.BlockParser{
@@ -258,8 +258,8 @@ func TestParseBlockFromParamsHappyFlow(t *testing.T) {
 		{
 			name: "ParseCanonical__map[string]interface{}__Case",
 			message: RPCInputTest{
-				Params: map[string]interface{}{
-					"data": map[string]interface{}{"block": int64(1234234)},
+				Params: map[string]any{
+					"data": map[string]any{"block": int64(1234234)},
 				},
 			},
 			blockParser: spectypes.BlockParser{
@@ -271,7 +271,7 @@ func TestParseBlockFromParamsHappyFlow(t *testing.T) {
 		{
 			name: "ParseDictionary__[]interface{}__Case",
 			message: RPCInputTest{
-				Params: []interface{}{
+				Params: []any{
 					"block=10000",
 				},
 			},
@@ -284,7 +284,7 @@ func TestParseBlockFromParamsHappyFlow(t *testing.T) {
 		{
 			name: "ParseDictionary__map[string]interface{}__Case",
 			message: RPCInputTest{
-				Params: map[string]interface{}{
+				Params: map[string]any{
 					"block": "6",
 				},
 			},
@@ -297,7 +297,7 @@ func TestParseBlockFromParamsHappyFlow(t *testing.T) {
 		{
 			name: "ParseDictionaryOrOrdered__[]interface{}__PropName__Case",
 			message: RPCInputTest{
-				Params: []interface{}{
+				Params: []any{
 					"block=99",
 				},
 			},
@@ -310,7 +310,7 @@ func TestParseBlockFromParamsHappyFlow(t *testing.T) {
 		{
 			name: "ParseDictionaryOrOrdered__[]interface{}__PropIndex__Case",
 			message: RPCInputTest{
-				Params: []interface{}{
+				Params: []any{
 					"765",
 				},
 			},
@@ -323,7 +323,7 @@ func TestParseBlockFromParamsHappyFlow(t *testing.T) {
 		{
 			name: "ParseDictionaryOrOrdered__map[string]interface{}__PropName__Case",
 			message: RPCInputTest{
-				Params: map[string]interface{}{
+				Params: map[string]any{
 					"block": "101",
 				},
 			},
@@ -336,7 +336,7 @@ func TestParseBlockFromParamsHappyFlow(t *testing.T) {
 		{
 			name: "ParseDictionaryOrOrdered__map[string]interface{}__KeyIndex__Case",
 			message: RPCInputTest{
-				Params: map[string]interface{}{
+				Params: map[string]any{
 					"0": "103",
 				},
 			},
@@ -426,10 +426,10 @@ func TestParseBlockFromParams(t *testing.T) {
 		{
 			name: "generic_parser_happy_flow_default_value",
 			rpcInput: &RPCInputTest{
-				Params: map[string]interface{}{
-					"foo": map[string]interface{}{
-						"bar": []interface{}{
-							map[string]interface{}{
+				Params: map[string]any{
+					"foo": map[string]any{
+						"bar": []any{
+							map[string]any{
 								"baz": 123,
 							},
 						},
@@ -449,10 +449,10 @@ func TestParseBlockFromParams(t *testing.T) {
 		{
 			name: "generic_parser_happy_flow_value",
 			rpcInput: &RPCInputTest{
-				Params: map[string]interface{}{
-					"foo": map[string]interface{}{
-						"bar": []interface{}{
-							map[string]interface{}{
+				Params: map[string]any{
+					"foo": map[string]any{
+						"bar": []any{
+							map[string]any{
 								"baz": 123,
 							},
 						},
@@ -482,7 +482,7 @@ func TestParseBlockFromParams(t *testing.T) {
 		{
 			name: "generic_parser_fail_with_nil_var",
 			rpcInput: &RPCInputTest{
-				Params: map[string]interface{}{
+				Params: map[string]any{
 					"bar": 123,
 				},
 			},
@@ -498,7 +498,7 @@ func TestParseBlockFromParams(t *testing.T) {
 		{
 			name: "generic_parser_fail_with_iter_error",
 			rpcInput: &RPCInputTest{
-				Params: map[string]interface{}{
+				Params: map[string]any{
 					"bar": 123,
 				},
 			},
@@ -514,7 +514,7 @@ func TestParseBlockFromParams(t *testing.T) {
 		{
 			name: "generic_parser_wrong_jq_path_no_default",
 			rpcInput: &RPCInputTest{
-				Params: map[string]interface{}{
+				Params: map[string]any{
 					"bar": 123,
 				},
 			},
@@ -530,7 +530,7 @@ func TestParseBlockFromParams(t *testing.T) {
 		{
 			name: "generic_parser_wrong_jq_path_with_parser_func_default",
 			rpcInput: &RPCInputTest{
-				Params: map[string]interface{}{
+				Params: map[string]any{
 					"bar": 123,
 				},
 			},
@@ -550,7 +550,7 @@ func TestParseBlockFromParams(t *testing.T) {
 		{
 			name: "generic_parser_and_block_parser_fail",
 			rpcInput: &RPCInputTest{
-				Params: map[string]interface{}{},
+				Params: map[string]any{},
 			},
 			genericParsers: []spectypes.GenericParser{
 				{
@@ -570,7 +570,7 @@ func TestParseBlockFromParams(t *testing.T) {
 		{
 			name: "generic_parser_no_generic_parser",
 			rpcInput: &RPCInputTest{
-				Params: []interface{}{
+				Params: []any{
 					"block=10000",
 				},
 			},
@@ -700,7 +700,7 @@ func TestParseBlockFromReply(t *testing.T) {
 		{
 			name: "generic_parser_wrong_jq_path_with_parser_func_default",
 			rpcInput: &RPCInputTest{
-				Params: map[string]interface{}{
+				Params: map[string]any{
 					"bar": 123,
 				},
 			},
@@ -808,7 +808,7 @@ func TestParseBlockFromParamsHash(t *testing.T) {
 		{
 			name: "generic_parser_hash",
 			rpcInput: &RPCInputTest{
-				Params: []interface{}{"a3f1c5e6b8d3e7f9c9d3b7c5e2f9d6e7f9c9a3b7c8d3e7f9c9d3b7c5e2f9d6e7"},
+				Params: []any{"a3f1c5e6b8d3e7f9c9d3b7c5e2f9d6e7f9c9a3b7c8d3e7f9c9d3b7c5e2f9d6e7"},
 			},
 			genericParsers: []spectypes.GenericParser{
 				{
@@ -827,7 +827,7 @@ func TestParseBlockFromParamsHash(t *testing.T) {
 		{
 			name: "generic_parser_hash_bad_hash",
 			rpcInput: &RPCInputTest{
-				Params: []interface{}{"a3f1c5e6b8"},
+				Params: []any{"a3f1c5e6b8"},
 			},
 			genericParsers: []spectypes.GenericParser{
 				{
@@ -886,11 +886,11 @@ func TestParseRule(t *testing.T) {
 }
 
 func TestParseGeneric(t *testing.T) {
-	jsonMap := map[string]interface{}{
+	jsonMap := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      "nil",
 		"method":  "block",
-		"params": map[string]interface{}{
+		"params": map[string]any{
 			"finality": "final",
 		},
 	}

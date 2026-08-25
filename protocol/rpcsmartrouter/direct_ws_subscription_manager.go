@@ -916,11 +916,11 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	unsubscribeMethod := getUnsubscribeMethod(subscribeMethod)
 	requestID := extractRequestID(protocolMessage.RelayPrivateData().Data)
 
-	var unsubscribeParams interface{}
+	var unsubscribeParams any
 	if dwsm.apiInterface == "tendermintrpc" {
-		unsubscribeParams = map[string]interface{}{"query": upstreamID}
+		unsubscribeParams = map[string]any{"query": upstreamID}
 	} else {
-		unsubscribeParams = []interface{}{upstreamID}
+		unsubscribeParams = []any{upstreamID}
 	}
 
 	dwsm.lock.Unlock()
@@ -1259,7 +1259,7 @@ func (dwsm *DirectWSSubscriptionManager) createUpstreamSubscription(
 	msgChan := make(chan *rpcclient.JsonrpcMessage, 100)
 
 	// Parse params back to interface for the Subscribe call
-	var subscriptionParams interface{}
+	var subscriptionParams any
 	if err := json.Unmarshal(params, &subscriptionParams); err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to unmarshal params: %w", err)
 	}
@@ -1680,7 +1680,7 @@ func extractTendermintSubscriptionID(params []byte) string {
 	if params == nil {
 		return ""
 	}
-	var paramsMap map[string]interface{}
+	var paramsMap map[string]any
 	if err := json.Unmarshal(params, &paramsMap); err != nil {
 		return ""
 	}
@@ -1729,7 +1729,7 @@ func createSubscriptionReply(routerID string, requestID json.RawMessage, origina
 	}
 
 	// For EVM: response carries the router ID (not the upstream hex) and the caller's id.
-	response := map[string]interface{}{
+	response := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      requestID,
 		"result":  routerID,
@@ -1746,7 +1746,7 @@ func createSubscriptionReplyFromRouterID(routerID string, requestID json.RawMess
 	// For Tendermint: preserve the original result format {"query":"..."}
 	// Tendermint clients expect the query object back, not a router ID
 	if apiInterface == "tendermintrpc" && originalResult != nil {
-		response := map[string]interface{}{
+		response := map[string]any{
 			"jsonrpc": "2.0",
 			"id":      requestID,
 			"result":  originalResult,
@@ -1756,7 +1756,7 @@ func createSubscriptionReplyFromRouterID(routerID string, requestID json.RawMess
 
 	// For EVM: create response with the client's unique router ID and their original request ID
 	// JSON-RPC 2.0 requires the response ID to match the request ID exactly
-	response := map[string]interface{}{
+	response := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      requestID,
 		"result":  routerID,

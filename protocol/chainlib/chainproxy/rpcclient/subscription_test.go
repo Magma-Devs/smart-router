@@ -21,7 +21,7 @@ func TestClientSubscription_UnsubscribeBeforeRun(t *testing.T) {
 	}
 
 	// Create a channel for subscription results
-	resultCh := make(chan interface{}, 1)
+	resultCh := make(chan any, 1)
 	resultValue := reflect.ValueOf(resultCh)
 
 	// Create the subscription but DON'T start sub.run()
@@ -63,7 +63,7 @@ func TestClientSubscription_UnsubscribeRace(t *testing.T) {
 		idgen: func() ID { return ID("test-id") },
 	}
 
-	resultCh := make(chan interface{}, 1)
+	resultCh := make(chan any, 1)
 	sub := newClientSubscription(client, "test", reflect.ValueOf(resultCh))
 
 	// Call Unsubscribe from multiple goroutines simultaneously
@@ -71,7 +71,7 @@ func TestClientSubscription_UnsubscribeRace(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
 
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		go func() {
 			defer wg.Done()
 			sub.Unsubscribe()
@@ -105,12 +105,10 @@ func TestClientSubscription_UnsubscribeWithRunning(t *testing.T) {
 
 	// Start the subscription forwarding goroutine
 	var runComplete sync.WaitGroup
-	runComplete.Add(1)
 
-	go func() {
-		defer runComplete.Done()
+	runComplete.Go(func() {
 		sub.run()
-	}()
+	})
 
 	// Give the goroutine time to start
 	time.Sleep(50 * time.Millisecond)
@@ -145,7 +143,7 @@ func TestClientSubscription_BufferedQuitChannelPreventsDeadlock(t *testing.T) {
 		idgen: func() ID { return ID("test-id") },
 	}
 
-	resultCh := make(chan interface{}, 1)
+	resultCh := make(chan any, 1)
 	sub := newClientSubscription(client, "test", reflect.ValueOf(resultCh))
 
 	// Scenario: Unsubscribe called during connection setup, before run() starts
@@ -188,7 +186,7 @@ func TestClientSubscription_ErrChannelBehavior(t *testing.T) {
 		idgen: func() ID { return ID("test-id") },
 	}
 
-	resultCh := make(chan interface{}, 1)
+	resultCh := make(chan any, 1)
 	sub := newClientSubscription(client, "test", reflect.ValueOf(resultCh))
 
 	// Initially, error channel should block (no errors, not closed)

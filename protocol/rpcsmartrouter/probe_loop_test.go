@@ -130,7 +130,7 @@ func TestProbeCycle_FailedPollDoesNotReEnable(t *testing.T) {
 		}, true
 	}
 	var recovered []string
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, func(p string) { recovered = append(recovered, p) }, nil)
 	}
 	require.False(t, dc.Endpoint.Enabled, "a failed last poll must never re-enable")
@@ -148,7 +148,7 @@ func TestProbeCycle_StaleEndpointStaysDisabled(t *testing.T) {
 		// Last observation well past the staleness window and no fresh poll.
 		return endpointstate.EndpointObservation{LatestBlock: 1000, ObservedAt: now.Add(-60 * time.Second)}, true
 	}
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, nil, nil)
 	}
 	require.False(t, dc.Endpoint.Enabled, "a still-stale endpoint must not be re-enabled")

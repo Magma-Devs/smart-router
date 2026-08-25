@@ -58,7 +58,7 @@ func (bpm *BaseProtocolMessage) explicitExtensionDirective() string {
 
 func normalizeExtensionDirective(raw string) string {
 	cleaned := make([]string, 0)
-	for _, part := range strings.Split(strings.ToLower(raw), ",") {
+	for part := range strings.SplitSeq(strings.ToLower(raw), ",") {
 		if part = strings.TrimSpace(part); part != "" {
 			cleaned = append(cleaned, part)
 		}

@@ -84,21 +84,11 @@ func Stability[T Number](slice []T, compare T) float64 {
 }
 
 func Contains[T comparable](slice []T, elem T) bool {
-	for _, e := range slice {
-		if e == elem {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(slice, elem)
 }
 
 func ContainsPredicate[T comparable](slice []T, predicate func(elem T) bool) bool {
-	for _, e := range slice {
-		if predicate(e) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(slice, predicate)
 }
 
 func Map[T, V any](slice []T, filter func(T) V) []V {

@@ -123,7 +123,7 @@ func NewBlockRange(fromBlock, toBlock, earliestBlockSaved, latestBlock int64) (b
 
 func (br *BlockRange) IterationIndexes() []int {
 	indexes := make([]int, br.endIndexFromEarliest-br.startIndexFromEarliest+1)
-	for i := 0; i < len(indexes); i++ {
+	for i := range indexes {
 		indexes[i] = int(br.startIndexFromEarliest) + i
 	}
 	return indexes

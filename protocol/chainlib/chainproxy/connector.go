@@ -58,7 +58,7 @@ type Connector struct {
 	client        *rpcclient.Client // Single shared client - goroutine safe
 	nodeUrl       common.NodeUrl
 	hashedNodeUrl string
-	closed        int32 // atomic flag to track if connector is closed
+	closed        atomic.Int32 // atomic flag to track if connector is closed
 }
 
 func HashURL(url string) string {
@@ -154,7 +154,7 @@ func (connector *Connector) connectorLoop(ctx context.Context) {
 // Close closes the connector and its underlying client.
 func (connector *Connector) Close() {
 	// Use atomic to ensure we only close once
-	if !atomic.CompareAndSwapInt32(&connector.closed, 0, 1) {
+	if !connector.closed.CompareAndSwap(0, 1) {
 		return // Already closed
 	}
 
@@ -173,7 +173,7 @@ func (connector *Connector) GetUrlHash() string {
 // so no locking or pool management is needed.
 // The 'block' parameter is kept for API compatibility but is not used.
 func (connector *Connector) GetRpc(ctx context.Context, block bool) (*rpcclient.Client, error) {
-	if atomic.LoadInt32(&connector.closed) == 1 {
+	if connector.closed.Load() == 1 {
 		return nil, errors.New("connector is closed")
 	}
 	return connector.client, nil
@@ -335,8 +335,8 @@ func (connector *GRPCConnector) getTransportCredentials() grpc.DialOption {
 // one-connection pool whose single client is held for reflection, that is every relay
 // (MAG-2333).
 func grpcDialAddress(url string) (addr string, impliesTLS bool) {
-	if strings.HasPrefix(url, "grpcs://") {
-		return strings.TrimPrefix(url, "grpcs://"), true
+	if after, ok := strings.CutPrefix(url, "grpcs://"); ok {
+		return after, true
 	}
 	return strings.TrimPrefix(url, "grpc://"), false
 }
@@ -349,7 +349,7 @@ func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, num
 	}
 	var grpcClient *grpc.ClientConn
 	var err error
-	for connectionAttempt := 0; connectionAttempt < MaximumNumberOfParallelConnectionsAttempts; connectionAttempt++ {
+	for connectionAttempt := range MaximumNumberOfParallelConnectionsAttempts {
 		nctx, cancel := connector.nodeUrl.LowerContextTimeoutWithDuration(ctx, common.AverageWorldLatency*2)
 		dialAddr, _ := grpcDialAddress(connector.nodeUrl.Url)
 		grpcClient, err = grpc.DialContext(nctx, dialAddr, connector.grpcDialOptions(connector.getTransportCredentials())...)
@@ -496,7 +496,7 @@ func (connector *GRPCConnector) Close() {
 // has moved on, and connectorLoop parked on a caller's context is precisely the
 // bug MAG-2808 fixed.
 func addClientsAsynchronouslyGrpc(lifetimeCtx context.Context, connector *GRPCConnector, nConns uint, nodeUrl common.NodeUrl) {
-	for i := uint(0); i < nConns; i++ {
+	for range nConns {
 		if connector.isClosed() {
 			break // Close is draining; further dials would only be thrown away
 		}

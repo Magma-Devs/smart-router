@@ -23,21 +23,21 @@ func writeTestDescriptorSet(t *testing.T, dir, fileName, pkg, service string) st
 	raw, err := proto.Marshal(&descriptorpb.FileDescriptorSet{
 		File: []*descriptorpb.FileDescriptorProto{
 			{
-				Name:    proto.String(fileName + ".proto"),
-				Package: proto.String(pkg),
-				Syntax:  proto.String("proto3"),
+				Name:    new(fileName + ".proto"),
+				Package: new(pkg),
+				Syntax:  new("proto3"),
 				MessageType: []*descriptorpb.DescriptorProto{
-					{Name: proto.String("PingRequest")},
-					{Name: proto.String("PingResponse")},
+					{Name: new("PingRequest")},
+					{Name: new("PingResponse")},
 				},
 				Service: []*descriptorpb.ServiceDescriptorProto{
 					{
-						Name: proto.String(service),
+						Name: new(service),
 						Method: []*descriptorpb.MethodDescriptorProto{
 							{
-								Name:       proto.String("Ping"),
-								InputType:  proto.String("." + pkg + ".PingRequest"),
-								OutputType: proto.String("." + pkg + ".PingResponse"),
+								Name:       new("Ping"),
+								InputType:  new("." + pkg + ".PingRequest"),
+								OutputType: new("." + pkg + ".PingResponse"),
 							},
 						},
 					},
@@ -68,7 +68,7 @@ func (c *countingRegistry) ProtoFileByPath(path string) (*descriptorpb.FileDescr
 		return nil, c.forcedErr
 	}
 	if name, ok := c.answers[path]; ok {
-		return &descriptorpb.FileDescriptorProto{Name: proto.String(name)}, nil
+		return &descriptorpb.FileDescriptorProto{Name: new(name)}, nil
 	}
 	return nil, errors.New("proto file not found")
 }
@@ -79,7 +79,7 @@ func (c *countingRegistry) ProtoFileContainingSymbol(name protoreflect.FullName)
 		return nil, c.forcedErr
 	}
 	if fileName, ok := c.answers[string(name)]; ok {
-		return &descriptorpb.FileDescriptorProto{Name: proto.String(fileName)}, nil
+		return &descriptorpb.FileDescriptorProto{Name: new(fileName)}, nil
 	}
 	return nil, errors.New("symbol not found")
 }

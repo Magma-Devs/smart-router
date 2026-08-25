@@ -154,10 +154,10 @@ func TestHighConcurrencyScenario(t *testing.T) {
 	wg.Add(numGoroutines * 3) // 3 different operation types
 
 	// Launch multiple goroutines for CalculateQoS
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(routineID int) {
 			defer wg.Done()
-			for j := 0; j < operationsPerGoroutine; j++ {
+			for j := range operationsPerGoroutine {
 				qosManager.CalculateQoS(
 					uint64(routineID),
 					int64(j),
@@ -173,20 +173,20 @@ func TestHighConcurrencyScenario(t *testing.T) {
 	}
 
 	// Launch multiple goroutines for AddFailedRelay
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(routineID int) {
 			defer wg.Done()
-			for j := 0; j < operationsPerGoroutine; j++ {
+			for j := range operationsPerGoroutine {
 				qosManager.AddFailedRelay(uint64(routineID), int64(j))
 			}
 		}(i)
 	}
 
 	// Launch multiple goroutines for SetLastReputationQoSReport
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(routineID int) {
 			defer wg.Done()
-			for j := 0; j < operationsPerGoroutine; j++ {
+			for j := range operationsPerGoroutine {
 				report := &pairingtypes.QualityOfServiceReport{
 					Latency:      95,
 					Availability: 100,
@@ -199,8 +199,8 @@ func TestHighConcurrencyScenario(t *testing.T) {
 	wg.Wait()
 
 	// Verify some results
-	for i := 0; i < numGoroutines; i++ {
-		for j := 0; j < operationsPerGoroutine; j++ {
+	for i := range numGoroutines {
+		for j := range operationsPerGoroutine {
 			totalRelays := qosManager.GetTotalRelays(uint64(i), int64(j))
 			require.Equal(t, uint64(2), totalRelays) // 1 successful + 1 failed relay
 			require.NotNil(t, qosManager.GetLastReputationQoSReport(uint64(i), int64(j)))

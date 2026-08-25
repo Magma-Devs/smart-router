@@ -18,7 +18,7 @@ func TestJsonrpcMessage_AppendJSON_ParityWithMarshal(t *testing.T) {
 		{"string id", JsonrpcMessage{Version: Vsn, ID: json.RawMessage(`"client-uuid-1"`), Result: json.RawMessage(`"0x1"`)}},
 		{"null result", JsonrpcMessage{Version: Vsn, ID: json.RawMessage(`7`), Result: json.RawMessage(`null`)}},
 		{"error", JsonrpcMessage{Version: Vsn, ID: json.RawMessage(`null`), Error: &JsonError{Code: -32000, Message: "execution reverted", Data: "0x08c379a0"}}},
-		{"error with name and cause", JsonrpcMessage{Version: Vsn, ID: json.RawMessage(`2`), Error: &JsonError{Code: 1, Message: "m", Name: "n", Cause: map[string]interface{}{"k": "v"}}}},
+		{"error with name and cause", JsonrpcMessage{Version: Vsn, ID: json.RawMessage(`2`), Error: &JsonError{Code: 1, Message: "m", Name: "n", Cause: map[string]any{"k": "v"}}}},
 		{"request with array params", JsonrpcMessage{Version: Vsn, ID: json.RawMessage(`3`), Method: "eth_getBalance", Params: json.RawMessage(`["0xabc","latest"]`)}},
 		{"request with object params", JsonrpcMessage{Version: Vsn, ID: json.RawMessage(`4`), Method: "getBlock", Params: json.RawMessage(`{"height":"10"}`)}},
 		{"notification without id", JsonrpcMessage{Version: Vsn, Method: "eth_subscription", Params: json.RawMessage(`{"subscription":"0x1","result":{}}`)}},

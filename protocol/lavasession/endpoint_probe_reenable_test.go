@@ -19,7 +19,7 @@ var probeBase = time.Unix(1_700_000_000, 0)
 // disabledAt is deterministic (edge-triggered on the actual Enabled→false transition).
 func disableAt(t *testing.T, e *Endpoint, at time.Time) {
 	t.Helper()
-	for i := 0; i < MaxConsecutiveConnectionAttempts; i++ {
+	for range MaxConsecutiveConnectionAttempts {
 		e.markUnhealthyAt(at)
 	}
 	require.False(t, e.Enabled, "endpoint must be disabled after the relay disable threshold")
@@ -78,7 +78,7 @@ func TestRecordProbeVerdict_RepeatedPreDisablePollNeverReEnables(t *testing.T) {
 	prePoll := probeBase
 	disableAt(t, e, probeBase.Add(10*time.Second))
 
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		require.False(t, healthyPoll(e, prePoll, k), "repeated pre-disable observation must never re-enable")
 	}
 	require.False(t, e.Enabled)
@@ -120,7 +120,7 @@ func TestRecordProbeVerdict_SamePollNotCountedTwice(t *testing.T) {
 	poll := probeBase.Add(1 * time.Second)
 	require.False(t, healthyPoll(e, poll, k)) // streak 1 (counts this poll)
 	// Same poll seen again across faster probe cycles: holds at 1, does NOT advance to K.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		require.False(t, healthyPoll(e, poll, k), "the same poll must not advance the streak")
 	}
 	require.False(t, e.Enabled)
@@ -135,12 +135,12 @@ func TestRecordProbeVerdict_NeverTouchesEnabledEndpoint(t *testing.T) {
 	const k = 3
 	e := &Endpoint{NetworkAddress: "http://ep:8545", Enabled: true}
 
-	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
+	for range MaxConsecutiveConnectionAttempts - 1 {
 		e.markUnhealthyAt(probeBase)
 	}
 	require.True(t, e.Enabled)
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		require.False(t, e.RecordProbeVerdict(probeBase.Add(time.Duration(i)*time.Second), true, k),
 			"the probe never re-enables an already-enabled endpoint")
 	}
@@ -170,7 +170,7 @@ func TestRecordProbeVerdict_TrialBudgetOnProbeReEnable(t *testing.T) {
 	require.True(t, healthyPoll(e, probeBase.Add(2*time.Second), k), "re-enabled after K distinct healthy polls")
 
 	// The trial tolerates budget-1 failures without re-disabling…
-	for i := uint64(0); i < probeReenableTrialBudget-1; i++ {
+	for range probeReenableTrialBudget - 1 {
 		e.markUnhealthyAt(probeBase.Add(3 * time.Second))
 	}
 	require.True(t, e.Enabled, "a re-enabled endpoint isn't one failure from disabling — the trial budget absorbs blips")
@@ -180,12 +180,12 @@ func TestRecordProbeVerdict_TrialBudgetOnProbeReEnable(t *testing.T) {
 
 	// A successful real relay during a trial restores the FULL consecutive-failure budget. The
 	// failed trial was a probe-grant flap, so the second re-enable needs the escalated k<<1 polls.
-	for i := 0; i < 2*k-1; i++ {
+	for i := range 2*k - 1 {
 		require.False(t, healthyPoll(e, probeBase.Add(time.Duration(4+i)*time.Second), k))
 	}
 	require.True(t, healthyPoll(e, probeBase.Add(time.Duration(3+2*k)*time.Second), k))
 	require.True(t, e.ResetHealth(), "a successful relay validates the trial")
-	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
+	for range MaxConsecutiveConnectionAttempts - 1 {
 		e.markUnhealthyAt(probeBase.Add(6 * time.Second))
 	}
 	require.True(t, e.Enabled, "after relay validation the endpoint has the full failure budget again")

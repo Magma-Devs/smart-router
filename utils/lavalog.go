@@ -243,10 +243,10 @@ func ReadDebugLogBuffer(requestID string, from, to time.Time, limit int) [][]byt
 
 type Attribute struct {
 	Key   string
-	Value interface{}
+	Value any
 }
 
-func LogAttr(key string, value interface{}) Attribute {
+func LogAttr(key string, value any) Attribute {
 	return Attribute{Key: key, Value: value}
 }
 
@@ -347,7 +347,7 @@ func RollingLoggerSetup(rollingLogLevel string, filePath string, maxSize string,
 	return func() { rollingLogOutput.Close() }
 }
 
-func StrValueForLog(val interface{}, key string, idx int, attributes []Attribute) string {
+func StrValueForLog(val any, key string, idx int, attributes []Attribute) string {
 	st_val := ""
 	switch value := val.(type) {
 	case context.Context:
@@ -394,7 +394,7 @@ func StrValueForLog(val interface{}, key string, idx int, attributes []Attribute
 	return st_val
 }
 
-func StrValue(val interface{}) string {
+func StrValue(val any) string {
 	st_val := ""
 	switch value := val.(type) {
 	case context.Context:

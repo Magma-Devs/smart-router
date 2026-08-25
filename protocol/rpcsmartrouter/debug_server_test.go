@@ -173,8 +173,7 @@ func TestDebugResetScores_SmartRouter_DoesNotChangeOffset(t *testing.T) {
 func TestDebugResetScores_SmartRouter_WalksChainTrackerManagers(t *testing.T) {
 	var offsetNano atomic.Int64
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	managed := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -545,8 +544,7 @@ func TestDebugProviderRouting_ReportsPerCSMShape(t *testing.T) {
 // observation↔health join is covered by the lavasession/endpointstate accessor tests.
 func TestDebugEndpointState_WiringSafe(t *testing.T) {
 	var offsetNano atomic.Int64
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	monitor := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
 		ChainID: "ETH1", ApiInterface: "jsonrpc", AverageBlockTime: 12 * time.Second, BlocksToSave: 10,
 	})

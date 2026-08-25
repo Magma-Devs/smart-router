@@ -175,7 +175,7 @@ func TestProviderOptimizer_ScoreDecayAfterClockForward(t *testing.T) {
 			// non-deterministic (the decay assertion below flaked). Settle the cache after every append
 			// so the next iteration's read-modify-write observes it — making oldNum deterministic.
 			prevNum := 0.0
-			for i := 0; i < numRelays; i++ {
+			for range numRelays {
 				po.appendRelayData(provider, oldLatency, true, cu, syncBlock, SyncReference{}, fixedBase)
 				require.Eventually(t, func() bool {
 					d, ok := po.getProviderData(provider)
@@ -252,7 +252,7 @@ func TestProviderOptimizer_ScoreDecayAfterClockForward(t *testing.T) {
 
 // requireInEpsilonOrZero is like require.InEpsilon but also passes when both values
 // are effectively zero (avoids divide-by-zero in relative-error checks).
-func requireInEpsilonOrZero(t *testing.T, expected, actual, epsilon float64, msgAndArgs ...interface{}) {
+func requireInEpsilonOrZero(t *testing.T, expected, actual, epsilon float64, msgAndArgs ...any) {
 	t.Helper()
 	if math.Abs(expected) < 1e-30 && math.Abs(actual) < 1e-30 {
 		return // both effectively zero — pass

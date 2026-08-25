@@ -23,21 +23,21 @@ func writeTestProtoset(t *testing.T, dir, fileName, pkg, service string) string 
 	t.Helper()
 
 	fileDescriptor := &descriptorpb.FileDescriptorProto{
-		Name:    protov2.String(fileName + ".proto"),
-		Package: protov2.String(pkg),
-		Syntax:  protov2.String("proto3"),
+		Name:    new(fileName + ".proto"),
+		Package: new(pkg),
+		Syntax:  new("proto3"),
 		MessageType: []*descriptorpb.DescriptorProto{
-			{Name: protov2.String("PingRequest")},
-			{Name: protov2.String("PingResponse")},
+			{Name: new("PingRequest")},
+			{Name: new("PingResponse")},
 		},
 		Service: []*descriptorpb.ServiceDescriptorProto{
 			{
-				Name: protov2.String(service),
+				Name: new(service),
 				Method: []*descriptorpb.MethodDescriptorProto{
 					{
-						Name:       protov2.String("Ping"),
-						InputType:  protov2.String("." + pkg + ".PingRequest"),
-						OutputType: protov2.String("." + pkg + ".PingResponse"),
+						Name:       new("Ping"),
+						InputType:  new("." + pkg + ".PingRequest"),
+						OutputType: new("." + pkg + ".PingResponse"),
 					},
 				},
 			},

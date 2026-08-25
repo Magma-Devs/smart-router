@@ -104,7 +104,7 @@ func TestClientRateLimiter_AllowSubscribe(t *testing.T) {
 
 	// Multiple rapid requests should be allowed up to burst limit
 	// With 60/minute rate and burst equal to that, we can make 60 requests immediately
-	for i := 0; i < 59; i++ {
+	for i := range 59 {
 		allowed := limiter.AllowSubscribe(clientKey)
 		if !allowed {
 			t.Logf("Request %d was rate limited (expected after burst)", i+2)
@@ -124,7 +124,7 @@ func TestClientRateLimiter_AllowUnsubscribe(t *testing.T) {
 	assert.True(t, limiter.AllowUnsubscribe(clientKey))
 
 	// Multiple rapid requests should be allowed up to burst limit
-	for i := 0; i < 59; i++ {
+	for i := range 59 {
 		allowed := limiter.AllowUnsubscribe(clientKey)
 		if !allowed {
 			t.Logf("Request %d was rate limited (expected after burst)", i+2)
@@ -187,9 +187,9 @@ func TestClientRateLimiter_ConcurrentAccess(t *testing.T) {
 	numClients := 10
 	numOperations := 10
 
-	for i := 0; i < numClients; i++ {
+	for i := range numClients {
 		clientKey := "client-" + string(rune('A'+i))
-		for j := 0; j < numOperations; j++ {
+		for range numOperations {
 			limiter.AllowSubscribe(clientKey)
 			limiter.AllowUnsubscribe(clientKey)
 		}

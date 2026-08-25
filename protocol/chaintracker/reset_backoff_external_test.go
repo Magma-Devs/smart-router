@@ -41,8 +41,7 @@ func TestChainTracker_ResetBackoff_ReturnsToBaseCadence(t *testing.T) {
 	// Blocks 1000..1019 with hashes, so init (FetchLatestBlockNum + recent hashes) succeeds.
 	f := &togglableFailFetcher{MockChainFetcher: NewMockChainFetcher(1000, 20, nil)}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	tracker, err := chaintracker.NewChainTracker(ctx, f, chaintracker.ChainTrackerConfig{
 		BlocksToSave:          10,

@@ -317,10 +317,11 @@ func (rpccl *RPCConsumerLogs) SendMetrics(data *RelayMetrics) {
 
 func (rpccl *RPCConsumerLogs) LogTestMode(fiberCtx *fiber.Ctx) {
 	headers := fiberCtx.GetReqHeaders()
-	st := "Test Mode Log: new request\n"
-	st += "Full URI: " + fiberCtx.Request().URI().String() + "\n"
+	var st strings.Builder
+	st.WriteString("Test Mode Log: new request\n")
+	st.WriteString("Full URI: " + fiberCtx.Request().URI().String() + "\n")
 	for header, HeaderVal := range headers {
-		st += fmt.Sprintf("Header %16s HeaderVal: %s\n", header, HeaderVal)
+		st.WriteString(fmt.Sprintf("Header %16s HeaderVal: %s\n", header, HeaderVal))
 	}
-	utils.LavaFormatInfo(st)
+	utils.LavaFormatInfo(st.String())
 }

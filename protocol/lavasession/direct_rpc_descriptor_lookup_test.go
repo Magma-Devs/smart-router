@@ -210,13 +210,11 @@ func TestMAG2860_ConcurrentRelaysShareOneLookup(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, relays)
 	for i := range relays {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_, errs[i] = g.SendRequest(ctx, []byte("{}"), healthCheckHeaders())
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -323,11 +321,9 @@ func TestMAG2860_PrewarmIsIdempotentAndSweepsOnce(t *testing.T) {
 	// Concurrent prewarms, plus relays racing them, plus a repeat afterwards.
 	var wg sync.WaitGroup
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			require.NoError(t, g.Prewarm(context.Background()))
-		}()
+		})
 	}
 	wg.Wait()
 

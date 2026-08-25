@@ -129,13 +129,7 @@ func (r *Registry) RecordRateLimit(provider, url string, retryAfter time.Duratio
 	}
 
 	e.strikes++
-	d := exponentialFor(e.strikes)
-	if retryAfter > d {
-		d = retryAfter
-	}
-	if d > maxUpstreamHoldoff {
-		d = maxUpstreamHoldoff
-	}
+	d := min(max(retryAfter, exponentialFor(e.strikes)), maxUpstreamHoldoff)
 	d += time.Duration(r.randFloat() * JitterFactor * float64(d))
 	if d > maxUpstreamHoldoff {
 		d = maxUpstreamHoldoff

@@ -2,7 +2,8 @@ package health
 
 import "testing"
 
-func strptr(s string) *string { return &s }
+//go:fix inline
+func strptr(s string) *string { return new(s) }
 
 // TestWSLive verifies the ws-row-specific verdict used by the wizard's ws gate.
 // A base+ws config is probed to verify a ws url; WSLive must judge the ws row
@@ -52,7 +53,7 @@ func TestWSLive(t *testing.T) {
 	})
 
 	t.Run("envelope-level error", func(t *testing.T) {
-		env := &Envelope{Error: strptr("spec load failed")}
+		env := &Envelope{Error: new("spec load failed")}
 		ok, detail := env.WSLive()
 		if ok || detail != "spec load failed" {
 			t.Errorf("WSLive() = (%v, %q), want (false, spec load failed)", ok, detail)

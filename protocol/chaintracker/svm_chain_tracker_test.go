@@ -2,7 +2,6 @@ package chaintracker
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 
 	"github.com/dgraph-io/ristretto/v2"
@@ -87,6 +86,6 @@ func TestSVMChainTracker_TracksSlotNotLastValidBlockHeight(t *testing.T) {
 
 	// seenBlock is the consistency floor filterEndpointsByConsistency reads; it must
 	// also be the slot, not the block height.
-	require.Equal(t, slot, atomic.LoadInt64(&tracker.seenBlock),
+	require.Equal(t, slot, tracker.seenBlock.Load(),
 		"the consistency-floor seenBlock must be the slot, not the block height")
 }

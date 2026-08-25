@@ -276,9 +276,9 @@ func TestReadmitRecoveredProviders_RestoresBothTiers(t *testing.T) {
 	rpsr.failedBackupProviders[chainKey] = backupProviders
 	require.True(t, rpsr.chainIsDark(chainKey))
 
-	var convertCalls int32
+	var convertCalls atomic.Int32
 	convert := func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-		atomic.AddInt32(&convertCalls, 1)
+		convertCalls.Add(1)
 		out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
 		for i, p := range providers {
 			out[uint64(i)] = createTestProviderSession(p.Name, 0)
@@ -333,9 +333,9 @@ func TestRetryFailedProviders_DarkChainAdoptsProviderWhenItReturns(t *testing.T)
 	require.True(t, rpsr.chainIsDark(chainKey), "boots dark")
 
 	// The upstream stays down for the first few attempts, then recovers.
-	var attempts int32
+	var attempts atomic.Int32
 	restoreValidate := swapBootValidate(func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
-		if atomic.AddInt32(&attempts, 1) < 3 {
+		if attempts.Add(1) < 3 {
 			return errors.New("still down")
 		}
 		return nil
@@ -371,7 +371,7 @@ func TestRetryFailedProviders_DarkChainAdoptsProviderWhenItReturns(t *testing.T)
 		t.Fatal("retry loop should self-terminate once every provider has recovered")
 	}
 
-	require.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(3))
+	require.GreaterOrEqual(t, attempts.Load(), int32(3))
 }
 
 func TestRetryFailedProviders_StopsWhenNothingIsPending(t *testing.T) {

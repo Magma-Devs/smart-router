@@ -77,7 +77,7 @@ func TestNodeErrorProviderIsDemoted_MAG2156(t *testing.T) {
 		po.SetDeterministicSeed(seed)
 		share = map[string]int{}
 
-		for i := 0; i < relays; i++ {
+		for i := range relays {
 			picked := po.ChooseProvider(context.Background(), providers, nil, 10, spectypes.LATEST_BLOCK)
 			require.NotEmpty(t, picked, "optimizer must always return a candidate")
 			first := picked[0]

@@ -290,7 +290,7 @@ func TestScoreStoreUpdateIdenticalSamples(t *testing.T) {
 	iterations := 50
 	sampleTime := timestamp
 	sample := float64(20)
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		sampleTime = sampleTime.Add(time.Duration(rand.Int63n(500)) * time.Millisecond)
 		err = store.Update(sample, sampleTime)
 		require.NoError(t, err)
@@ -318,7 +318,7 @@ func TestScoreStoreUpdateIdenticalSamplesThenBetter(t *testing.T) {
 	iterations := 50
 	sampleTime := timestamp
 	sample := float64(20)
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		sampleTime = sampleTime.Add(time.Duration(rand.Int63n(500)) * time.Millisecond)
 		err = store.Update(sample, sampleTime)
 		require.NoError(t, err)
@@ -332,7 +332,7 @@ func TestScoreStoreUpdateIdenticalSamplesThenBetter(t *testing.T) {
 
 	// update the ScoreStore with many better identical samples
 	betterSample := float64(3)
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		sampleTime = sampleTime.Add(time.Duration(rand.Int63n(500)) * time.Millisecond)
 		err = store.Update(betterSample, sampleTime)
 		require.NoError(t, err)
@@ -393,7 +393,7 @@ func TestScoreStoreStaysWithinRange(t *testing.T) {
 	// decay factors
 	iterations := 1000
 	sampleTime := timestamp
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		sampleTime = sampleTime.Add(time.Duration(rand.Int63n(500)) * time.Millisecond)
 		store.UpdateConfig(score.WithWeight(float64(rand.Int63n(int64(maxRangeValue)))))
 		err = store.Update(float64(rand.Int63n(int64(maxRangeValue))), sampleTime)
