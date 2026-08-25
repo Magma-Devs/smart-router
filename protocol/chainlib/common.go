@@ -204,8 +204,36 @@ func drainHTTPThenWS(ctx context.Context, app *fiber.App, wg *sync.WaitGroup, na
 	return httpErr
 }
 
+// utxoFamilyChainIDs is the set of chain ids whose reply bodies need the JSON-RPC 1.0
+// fixup below. Membership is not a judgement call: it is exactly "the chain's spec
+// transitively imports BTC", which is what makes the node a Bitcoin Core derivative
+// speaking JSON-RPC 1.0. Resolved against the lava-specs catalog (255 specs), 14 enabled
+// specs reach BTC through their imports chain, and all 14 are listed here.
+//
+// MAG-3077: six of them — BTCT4, BTCS, DASH, DASHT, ZCASH, ZCASHT — were missing, so
+// those chains took the non-UTXO path and returned bodies with "jsonrpc":"2.0" injected
+// and a null "error" stripped. That is precisely the mangling checkUTXOResponseAndFixReply
+// exists to undo, and it breaks Bitcoin-derived clients that read resp["error"]
+// unconditionally.
+//
+// MONERO/MONEROT are deliberately absent and are not an oversight: monero.json declares no
+// imports and monerod speaks JSON-RPC 2.0, so it needs no 1.0 fixup. Lookup is
+// case-sensitive because spec indexes are upper-case by construction.
+//
+// A new BTC-derived spec must be added here. TestIsUTXOFamily pins the membership so that
+// stays a deliberate edit rather than silent drift.
+var utxoFamilyChainIDs = map[string]struct{}{
+	"BTC": {}, "BTCT": {}, "BTCT4": {}, "BTCS": {}, // btc.json
+	"LTC": {}, "LTCT": {}, // litecoin.json -> BTC
+	"DOGE": {}, "DOGET": {}, // doge.json     -> BTC
+	"BCH": {}, "BCHT": {}, // bch.json      -> BTC
+	"DASH": {}, "DASHT": {}, // dash.json     -> BTC
+	"ZCASH": {}, "ZCASHT": {}, // zcash.json    -> BTC
+}
+
 func isUTXOFamily(chainID string) bool {
-	return chainID == "BTC" || chainID == "BTCT" || chainID == "LTC" || chainID == "LTCT" || chainID == "DOGE" || chainID == "DOGET" || chainID == "BCH" || chainID == "BCHT"
+	_, ok := utxoFamilyChainIDs[chainID]
+	return ok
 }
 
 // checkUTXOResponseAndFixReply returns the reply body for UTXO-family chains after

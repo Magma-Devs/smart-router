@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -510,9 +511,53 @@ func TestGetServiceApis(t *testing.T) {
 	}
 }
 
-// utxoFamilyChainIDsForTest lists every chain ID isUTXOFamily accepts, so the null-body
-// regression below is asserted against all of them rather than a hand-picked sample.
-var utxoFamilyChainIDsForTest = []string{"BTC", "BTCT", "LTC", "LTCT", "DOGE", "DOGET", "BCH", "BCHT"}
+// utxoFamilyChainIDsForTest lists every chain id isUTXOFamily accepts. Derived from the
+// production set rather than restated, so the null-body regression below cannot silently
+// stop covering a chain that gets added later. TestIsUTXOFamily pins what that set is
+// allowed to contain.
+var utxoFamilyChainIDsForTest = func() []string {
+	ids := make([]string, 0, len(utxoFamilyChainIDs))
+	for id := range utxoFamilyChainIDs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}()
+
+func TestIsUTXOFamily(t *testing.T) {
+	// Membership is exactly "the chain's spec transitively imports BTC", which is what makes
+	// the node a Bitcoin Core derivative speaking JSON-RPC 1.0. Resolved against the
+	// lava-specs catalog (255 specs): these 14 enabled specs reach BTC via imports, and
+	// nothing else does (MAG-3077).
+	btcDerived := []string{
+		"BTC", "BTCT", "BTCT4", "BTCS", // btc.json
+		"LTC", "LTCT", // litecoin.json -> BTC
+		"DOGE", "DOGET", // doge.json     -> BTC
+		"BCH", "BCHT", // bch.json      -> BTC
+		"DASH", "DASHT", // dash.json     -> BTC
+		"ZCASH", "ZCASHT", // zcash.json    -> BTC
+	}
+	for _, chainID := range btcDerived {
+		require.True(t, isUTXOFamily(chainID),
+			"%s derives from the BTC spec and needs the JSON-RPC 1.0 fixup", chainID)
+	}
+	require.Len(t, utxoFamilyChainIDs, len(btcDerived),
+		"the UTXO set must hold exactly the BTC-derived chains — adding one that is not, or "+
+			"dropping one that is, changes response formatting on a live chain")
+
+	notBTCDerived := map[string]string{
+		"MONERO":  "monero.json declares no imports and monerod speaks JSON-RPC 2.0",
+		"MONEROT": "inherits MONERO, not BTC",
+		"ETH1":    "EVM chains are JSON-RPC 2.0",
+		"SOLANA":  "not a Bitcoin Core derivative",
+		"btc":     "spec indexes are upper-case; the lookup is deliberately case-sensitive",
+		"BTC1":    "not a real index — a prefix match must not be enough",
+		"":        "an empty chain id must never take the UTXO path",
+	}
+	for chainID, why := range notBTCDerived {
+		require.False(t, isUTXOFamily(chainID), "%q must not take the UTXO path: %s", chainID, why)
+	}
+}
 
 func TestCheckUTXOResponseAndFixReply(t *testing.T) {
 	t.Run("single_response_preserves_error_null", func(t *testing.T) {
