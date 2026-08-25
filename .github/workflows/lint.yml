@@ -21,11 +21,12 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      # golangci-lint is currently advisory on this repo: the fork is on
-      # Go 1.26 and earlier golangci-lint releases refuse to lint a newer
-      # toolchain than they were built with. Once a stable v2.x is pinned
-      # and known to produce a clean run against this codebase, drop the
-      # continue-on-error flags on the retries.
+      # golangci-lint is currently advisory on this repo: the fork tracks the
+      # current Go release (1.27) and golangci-lint releases refuse to lint a
+      # newer toolchain than they were built with (v2.13.0 is the first with
+      # go1.27 support). Once a stable v2.x is pinned and known to produce a
+      # clean run against this codebase, drop the continue-on-error flags on
+      # the retries.
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         continue-on-error: true
