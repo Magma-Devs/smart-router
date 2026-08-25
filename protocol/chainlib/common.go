@@ -220,6 +220,18 @@ func checkUTXOResponseAndFixReply(chainID string, replyData []byte) []byte {
 	// Try single response first
 	var jsonMsg *rpcclient.JsonrpcMessage
 	if err := json.Unmarshal(replyData, &jsonMsg); err == nil {
+		// MAG-3077: err == nil does NOT imply jsonMsg != nil. The target is a *pointer*,
+		// and JSON `null` is a legal value for one, so a reply body of `null` unmarshals
+		// as (nil pointer, nil error) — the one input that reaches here non-convertible.
+		// Every other scalar body (`5`, `true`, `"s"`) fails to unmarshal into the struct
+		// and takes the batch path below instead. Dereferencing the nil in
+		// convertToUTXOResponse panicked, and with no recover middleware on the fiber
+		// request path that ended the process for every in-flight caller, not just this
+		// relay. Hand the node's bytes back unchanged, as this function already does for
+		// every other body it cannot convert.
+		if jsonMsg == nil {
+			return replyData
+		}
 		if marshaledRes, err := json.Marshal(convertToUTXOResponse(jsonMsg)); err == nil {
 			return marshaledRes
 		}
@@ -248,6 +260,14 @@ func checkUTXOResponseAndFixReply(chainID string, replyData []byte) []byte {
 // includes the "error" field (even when null). The relay pipeline may add "jsonrpc":"2.0"
 // and strip null errors during response reconstruction — this undoes those changes.
 func convertToUTXOResponse(msg *rpcclient.JsonrpcMessage) *rpcclient.BTCResponse {
+	if msg == nil {
+		// Unreachable from both current call sites: the single-response path filters nil
+		// above, and the batch path passes &jsonMsgs[i], which is never nil. Kept so the
+		// helper is total on its own signature rather than relying on a caller invariant —
+		// the caller-side guard is the real fix, this only bounds a future third caller to
+		// an empty response instead of a process exit.
+		return &rpcclient.BTCResponse{}
+	}
 	return &rpcclient.BTCResponse{
 		// Omit Version: UTXO-family nodes use JSON-RPC 1.0 which doesn't include the "jsonrpc" field.
 		// The relay pipeline may inject "2.0" during reconstruction; leaving Version empty strips it

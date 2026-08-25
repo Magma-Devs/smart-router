@@ -510,6 +510,10 @@ func TestGetServiceApis(t *testing.T) {
 	}
 }
 
+// utxoFamilyChainIDsForTest lists every chain ID isUTXOFamily accepts, so the null-body
+// regression below is asserted against all of them rather than a hand-picked sample.
+var utxoFamilyChainIDsForTest = []string{"BTC", "BTCT", "LTC", "LTCT", "DOGE", "DOGET", "BCH", "BCHT"}
+
 func TestCheckUTXOResponseAndFixReply(t *testing.T) {
 	t.Run("single_response_preserves_error_null", func(t *testing.T) {
 		// BTC-family nodes return "error":null; the relay pipeline uses omitempty which strips it
@@ -571,6 +575,54 @@ func TestCheckUTXOResponseAndFixReply(t *testing.T) {
 		require.NoError(t, json.Unmarshal(result, &parsed))
 		errorField := parsed["error"]
 		require.NotNil(t, errorField, "error field must be preserved when not null")
+	})
+
+	// MAG-3077: a whole-body `null` unmarshals into a *JsonrpcMessage as (nil, nil error),
+	// and dereferencing that nil ended the router process — no recover middleware sits on
+	// the fiber request path, so one bad reply dropped every concurrent caller. Every
+	// pre-existing case in this suite used null only as a *field* value ("error":null),
+	// which is why none of them caught it.
+	t.Run("whole_body_null_is_returned_unchanged", func(t *testing.T) {
+		for _, chainID := range utxoFamilyChainIDsForTest {
+			t.Run(chainID, func(t *testing.T) {
+				require.NotPanics(t, func() {
+					result := checkUTXOResponseAndFixReply(chainID, []byte("null"))
+					require.Equal(t, "null", string(result),
+						"an unconvertible body must pass through untouched, not be replaced by a synthesized response")
+				})
+			})
+		}
+	})
+
+	t.Run("whole_body_null_with_surrounding_whitespace", func(t *testing.T) {
+		// The decoder skips leading/trailing whitespace, so this takes the same
+		// (nil, nil) path as a bare `null` rather than failing to unmarshal.
+		input := "  null\n"
+		require.NotPanics(t, func() {
+			result := checkUTXOResponseAndFixReply("BTC", []byte(input))
+			require.Equal(t, input, string(result))
+		})
+	})
+
+	t.Run("batch_with_null_element_does_not_panic", func(t *testing.T) {
+		// The batch branch converts &jsonMsgs[i], which is never nil, so a null element
+		// decodes to a zero-value message instead of panicking. Pinned so the single and
+		// batch branches cannot diverge on this input if either is refactored.
+		require.NotPanics(t, func() {
+			result := checkUTXOResponseAndFixReply("BTC", []byte(`[null]`))
+			var parsed []map[string]interface{}
+			require.NoError(t, json.Unmarshal(result, &parsed))
+			require.Len(t, parsed, 1)
+		})
+	})
+
+	t.Run("non_utxo_chain_null_body_passthrough", func(t *testing.T) {
+		// Control: non-UTXO chains never entered the conversion branch, which is why this
+		// only ever crashed Bitcoin-family routers.
+		require.NotPanics(t, func() {
+			result := checkUTXOResponseAndFixReply("ETH1", []byte("null"))
+			require.Equal(t, "null", string(result))
+		})
 	})
 }
 
