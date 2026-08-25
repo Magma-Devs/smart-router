@@ -2776,6 +2776,7 @@ type stateSizeRecorder struct {
 	blockedBackup       int
 	stickySessionsCount int
 	reportedProviders   int
+	providerBlocked     map[string]bool
 }
 
 func (r *stateSizeRecorder) SetCSMPreviousEpochBlockedProvidersCount(_, _ string, c int) {
@@ -2806,6 +2807,26 @@ func (r *stateSizeRecorder) SetCSMReportedProvidersCount(_, _ string, c int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reportedProviders = c
+}
+
+func (r *stateSizeRecorder) SetBlockedProvider(_, _, providerAddress, _ string, isBlocked bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.providerBlocked == nil {
+		r.providerBlocked = map[string]bool{}
+	}
+	r.providerBlocked[providerAddress] = isBlocked
+}
+
+// providerBlockedSnapshot returns the last value published for each provider.
+func (r *stateSizeRecorder) providerBlockedSnapshot() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]bool, len(r.providerBlocked))
+	for address, isBlocked := range r.providerBlocked {
+		out[address] = isBlocked
+	}
+	return out
 }
 
 func (r *stateSizeRecorder) blockedProvidersCount() int {

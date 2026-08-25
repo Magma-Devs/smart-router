@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,14 +27,18 @@ func TestBlockedProvidersGauge_ReflectsARealBlock(t *testing.T) {
 	csm := createConsumerSessionManagerWithMetrics(rec)
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
 
+	// Capture both up front. blockProvider removes the address from validAddresses, so reading
+	// validAddresses[0] twice would silently mean two different providers.
+	first, second := csm.validAddresses[0], csm.validAddresses[1]
+
 	csm.publishStateSizes()
 	require.Equal(t, 0, rec.blockedProvidersCount(), "nothing blocked yet")
 
-	blockOneProvider(t, csm, csm.validAddresses[0])
+	blockOneProvider(t, csm, first)
 	csm.publishStateSizes()
 	require.Equal(t, 1, rec.blockedProvidersCount(), "a blocked provider must show in the gauge")
 
-	blockOneProvider(t, csm, csm.validAddresses[0])
+	blockOneProvider(t, csm, second)
 	csm.publishStateSizes()
 	require.Equal(t, 2, rec.blockedProvidersCount(), "the gauge tracks the size of the blocked list")
 
@@ -63,15 +66,39 @@ func TestBlockedProvidersGauge_ZeroedByResetBlockedProviders(t *testing.T) {
 		"ResetBlockedProviders clears the standing block, so the gauge must follow")
 }
 
-// The per-provider signal was an empty function body in the smart router, so no call site
-// published anything. Assert the real manager writes a value for both directions.
-func TestSetBlockedProvider_IsNotAStub(t *testing.T) {
-	m := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
-	if m == nil {
-		t.Skip("metrics manager unavailable in this environment")
+// The per-provider gauge must survive a wholesale drain of the blocked list.
+//
+// setValidAddressesToDefaultValue empties currentlyBlockedProviderAddresses in one move and
+// publishes nothing per provider. It runs on the pool-empty release — the last resort of the
+// failover cascade, i.e. exactly the all-providers-down case this metric exists for — and on
+// every epoch transition. Publishing only on the block/unblock edges therefore left every
+// series it emptied stuck at 1 for a provider that was back in rotation and serving fine, so
+// the aggregate count and the per-provider gauge disagreed on the dashboard.
+func TestPerProviderGauge_ClearedByThePoolEmptyRelease(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
+
+	// An all-providers-down outage: block every provider in the pairing.
+	for len(csm.validAddresses) > 0 {
+		blockOneProvider(t, csm, csm.validAddresses[0])
 	}
-	require.NotPanics(t, func() {
-		m.SetBlockedProvider("LAVA", "tendermintrpc", "provider-1", "http://127.0.0.1:1", true)
-		m.SetBlockedProvider("LAVA", "tendermintrpc", "provider-1", "http://127.0.0.1:1", false)
-	})
+	csm.publishStateSizes()
+
+	duringOutage := rec.providerBlockedSnapshot()
+	require.NotEmpty(t, duringOutage, "every provider should have been published")
+	for address, isBlocked := range duringOutage {
+		require.True(t, isBlocked, "%s must read blocked during the outage", address)
+	}
+
+	// The last resort of the failover cascade: release the whole blocked list so the pool has
+	// something left to serve from.
+	csm.resetValidAddresses("", nil)
+	csm.publishStateSizes()
+
+	require.Equal(t, 0, rec.blockedProvidersCount(), "the release drained the standing block")
+	for address, isBlocked := range rec.providerBlockedSnapshot() {
+		require.False(t, isBlocked,
+			"%s is back in rotation and serving, so its per-provider gauge must not still read blocked", address)
+	}
 }

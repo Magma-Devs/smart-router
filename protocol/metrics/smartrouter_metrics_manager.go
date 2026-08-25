@@ -504,8 +504,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	csmProviderBlocked := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_provider_blocked",
-		Help: "Whether this specific provider is currently blocked (1=blocked, 0=serving). Companion to the smartrouter_csm_blocked_providers count, for identifying WHICH provider went out.",
-	}, []string{"spec", "apiInterface", "provider", "provider_endpoint"})
+		Help: "Whether this specific provider is currently blocked (1=blocked, 0=serving). Companion to the smartrouter_csm_blocked_providers count, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
+	}, []string{"spec", "apiInterface", "provider_address"})
 	csmBlockedBackupProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_backup_providers",
 		Help: "Size of ConsumerSessionManager.blockedBackupProviders (per-epoch backup-provider failure memory). Goes to 0 after /debug/reset-all.",
@@ -1520,7 +1520,20 @@ func (m *SmartRouterMetricsManager) SetProviderSelected(chainId string, apiInter
 //
 // Was an empty stub, so every blockProvider / restore call site published nothing and the smart
 // router had no per-provider blocked signal at all.
-func (m *SmartRouterMetricsManager) SetBlockedProvider(chainId, apiInterface, providerAddress, providerEndpoint string, isBlocked bool) {
+//
+// providerEndpoint is deliberately NOT a label, and the parameter is ignored. Two reasons:
+//
+//  1. It would be a credential leak. Callers pass Endpoints[0].NetworkAddress, which is the raw
+//     configured node URL — and node URLs embed API keys in their path or query. The relay path
+//     already labels by provider name for exactly this reason ("use provider name (configured
+//     name) instead of raw URL to avoid leaking API keys"), and docs/METRICS.md states the rule
+//     outright: a credential must never reach a Prometheus series.
+//  2. It would go stale. Blocking is a per-provider decision, but Endpoints[0] is one arbitrary
+//     endpoint of several. If that value changes between the block and the unblock, the 0 lands
+//     on a new series and the old one is orphaned at 1 forever.
+//
+// The signature keeps the parameter because it is fixed by ConsumerMetricsManagerInf.
+func (m *SmartRouterMetricsManager) SetBlockedProvider(chainId, apiInterface, providerAddress, _ string, isBlocked bool) {
 	if m == nil {
 		return
 	}
@@ -1528,7 +1541,7 @@ func (m *SmartRouterMetricsManager) SetBlockedProvider(chainId, apiInterface, pr
 	if isBlocked {
 		value = 1.0
 	}
-	m.csmProviderBlocked.WithLabelValues(chainId, apiInterface, providerAddress, providerEndpoint).Set(value)
+	m.csmProviderBlocked.WithLabelValues(chainId, apiInterface, providerAddress).Set(value)
 }
 
 func (m *SmartRouterMetricsManager) SetQOSMetrics(chainId string, apiInterface string, _ string, _ string, _ *pairingtypes.QualityOfServiceReport, _ *pairingtypes.QualityOfServiceReport, _ int64, _ uint64, _ time.Duration, _ bool) {
@@ -1536,7 +1549,25 @@ func (m *SmartRouterMetricsManager) SetQOSMetrics(chainId string, apiInterface s
 
 func (m *SmartRouterMetricsManager) ResetSessionRelatedMetrics() {}
 
-func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(string, string, map[string]string) {
+// ResetBlockedProvidersMetrics rebases the per-provider blocked gauge onto a new pairing.
+// UpdateAllProviders calls it on every epoch transition with the new epoch's provider set.
+//
+// Without this, a provider that was blocked and then dropped from the pairing leaves a series
+// stuck at 1 that nothing can ever clear: the unblock path only publishes for addresses it finds
+// in the standing block list, and that provider is no longer in it. Over many epochs those
+// phantoms accumulate — a slow cardinality leak that also reads as a permanent outage.
+//
+// Drop every series for this chain first, then seed 0 for each provider in the new pairing, so
+// providers that left are gone rather than frozen. A provider that the re-block pass immediately
+// re-blocks is corrected by the next publishStateSizes tick, which republishes the full truth.
+func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(chainId, apiInterface string, providerAddressToEndpoint map[string]string) {
+	if m == nil {
+		return
+	}
+	m.csmProviderBlocked.DeletePartialMatch(prometheus.Labels{"spec": chainId, "apiInterface": apiInterface})
+	for providerAddress := range providerAddressToEndpoint {
+		m.csmProviderBlocked.WithLabelValues(chainId, apiInterface, providerAddress).Set(0)
+	}
 }
 
 // SetCSMBlockedProvidersCount publishes the number of providers currently blocked — the operator-

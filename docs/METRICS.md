@@ -355,14 +355,34 @@ histogram_quantile(0.9,
 Expose otherwise black-box Consumer-Session-Manager state so integration tests can
 assert `/debug/reset-all` emptied each store (see MAG-1762). All drop to `0` after a reset.
 
+The two blocked-provider gauges are also operator-facing — they answer "how many providers
+went out, and which" — so read the alerting note under the table before building on them.
+
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_csm_blocked_providers` | Gauge | `spec`, `apiInterface` | Providers currently blocked and receiving no traffic. **Non-zero means the chain is degraded.** Before v1.4.1 this reported the previous-epoch store instead and read 0 during outages. |
+| `smartrouter_csm_blocked_providers` | Gauge | `spec`, `apiInterface` | Providers currently blocked. **Non-zero means the chain is degraded** — but zero does not prove it is healthy; see the sampling note below. Previously this reported the previous-epoch store instead and read 0 during outages. |
 | `smartrouter_csm_previous_epoch_blocked_providers` | Gauge | `spec`, `apiInterface` | Size of the previous-epoch blocked-providers store (cross-epoch carry-over, briefly populated at an epoch boundary). This is what `smartrouter_csm_blocked_providers` reported before it was corrected. |
-| `smartrouter_csm_provider_blocked` | Gauge | `spec`, `apiInterface`, `provider`, `provider_endpoint` | Whether one specific provider is blocked (1=blocked, 0=serving) — which provider went out, versus how many. |
-| `smartrouter_csm_blocked_backup_providers` | Gauge | `spec`, `apiInterface` | Size of the blocked-backup-providers store. |
+| `smartrouter_csm_provider_blocked` | Gauge | `spec`, `apiInterface`, `provider_address` | Whether one specific provider is blocked (1=blocked, 0=serving) — which provider went out, versus how many. Labelled by provider name only: a node URL can embed an API key and must never reach a series. |
+| `smartrouter_csm_blocked_backup_providers` | Gauge | `spec`, `apiInterface` | Size of the blocked-backup-providers store. Backups are tracked here only — they never appear in `smartrouter_csm_provider_blocked`. |
 | `smartrouter_csm_sticky_sessions` | Gauge | `spec`, `apiInterface` | Live sticky-session affinities. |
 | `smartrouter_csm_reported_providers` | Gauge | `spec`, `apiInterface` | Size of the reported-providers register. |
+
+**Alert on the maximum over a window, not the instant value.** When every provider is blocked
+the failover cascade releases the whole blocked list so the pool has something left to serve
+from, which drains the count to `0` until the providers fail again. During a sustained total
+outage the gauge therefore sawtooths between `0` and the pool size rather than sitting high, and
+a rule that requires the value to stay non-zero `for: 30s` can sample the trough and miss it.
+
+```promql
+# a chain that has had providers blocked at any point in the last 5 minutes
+max_over_time(smartrouter_csm_blocked_providers[5m]) > 0
+
+# which provider — the same window, per provider
+max_over_time(smartrouter_csm_provider_blocked[5m]) > 0
+```
+
+For "is this chain serving at all", prefer `smartrouter_endpoint_serving_tier` (below): it is not
+drained by the release path, and `0` means dark unambiguously.
 
 #### Serving tier (availability)
 
