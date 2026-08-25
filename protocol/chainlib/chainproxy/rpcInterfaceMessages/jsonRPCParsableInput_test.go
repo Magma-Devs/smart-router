@@ -1,9 +1,10 @@
 package rpcInterfaceMessages
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
+
+	goccy "github.com/goccy/go-json"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/stretchr/testify/require"
@@ -64,6 +65,18 @@ func TestJsonrpcMessage_NewParsableRPCInput(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("array body is an error", func(t *testing.T) {
+		// A batch reply or any other non-object body is not a response
+		// envelope; a struct decode rejected it and so does the scan.
+		_, err := jm.NewParsableRPCInput([]byte(`[{"jsonrpc":"2.0","id":1,"result":"0x1"}]`))
+		require.Error(t, err)
+	})
+
+	t.Run("scalar body is an error", func(t *testing.T) {
+		_, err := jm.NewParsableRPCInput([]byte(`"0x1"`))
+		require.Error(t, err)
+	})
+
 	t.Run("malformed error member is an error", func(t *testing.T) {
 		_, err := jm.NewParsableRPCInput([]byte(`{"jsonrpc":"2.0","error":"not an object"}`))
 		require.Error(t, err)
@@ -71,8 +84,9 @@ func TestJsonrpcMessage_NewParsableRPCInput(t *testing.T) {
 }
 
 // BenchmarkNewParsableRPCInput measures exposing the result of a large
-// JSON-RPC body: the zero-copy slice against a full decode of the envelope
-// (which copies the result into its own RawMessage).
+// JSON-RPC body: the zero-copy slice against the full goccy decode of the
+// envelope it replaced (plainDecode is the struct without the custom
+// UnmarshalJSON; the decode copies the result into its own RawMessage).
 func BenchmarkNewParsableRPCInput(b *testing.B) {
 	var sb strings.Builder
 	sb.WriteString(`{"jsonrpc":"2.0","id":1,"result":[`)
@@ -97,8 +111,8 @@ func BenchmarkNewParsableRPCInput(b *testing.B) {
 	b.Run("decode", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			var msg JsonrpcMessage
-			if err := json.Unmarshal(input, &msg); err != nil {
+			var msg plainDecode
+			if err := goccy.Unmarshal(input, &msg); err != nil {
 				b.Fatal(err)
 			}
 			_ = ParsableRPCInput{Result: msg.Result, Error: msg.Error}
