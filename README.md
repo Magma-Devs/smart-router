@@ -45,7 +45,7 @@ The fastest way to start: install the binary, point it at a YAML config, run.
 
 ### Prerequisites
 
-- [Go 1.26+](https://go.dev/dl/)
+- [Go 1.27+](https://go.dev/dl/)
 
 ### Build & run
 
