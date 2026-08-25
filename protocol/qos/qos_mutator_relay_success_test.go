@@ -12,7 +12,8 @@ func TestCalculateAvailabilityScore(t *testing.T) {
 
 	qosReport := QoSReport{
 		totalRelays:    precision,
-		answeredRelays: precision - uint64(avialabilityAsFloat*float64(precision))}
+		answeredRelays: precision - uint64(avialabilityAsFloat*float64(precision)),
+	}
 	qoSMutatorRelaySuccess := QoSMutatorRelaySuccess{}
 	downTime, availabilityScore := qoSMutatorRelaySuccess.calculateAvailabilityScore(&qosReport)
 	require.Equal(t, downTime, avialabilityAsFloat)

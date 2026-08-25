@@ -231,7 +231,8 @@ func CreateMockSpec() spectypes.Spec {
 					},
 				},
 			},
-		}}
+		},
+	}
 	return spec
 }
 

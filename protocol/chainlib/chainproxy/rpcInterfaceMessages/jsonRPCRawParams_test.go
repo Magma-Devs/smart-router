@@ -2,6 +2,7 @@ package rpcInterfaceMessages
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	goccy "github.com/goccy/go-json"
@@ -118,7 +119,7 @@ func TestJsonrpcMessage_MarshalReply(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, string(want), string(got))
 
-		withTree := append(msgs, JsonrpcMessage{Version: "2.0", ID: json.RawMessage(`3`), Method: "m", Params: []any{"x"}})
+		withTree := slices.Concat(msgs, []JsonrpcMessage{{Version: "2.0", ID: json.RawMessage(`3`), Method: "m", Params: []any{"x"}}})
 		got, err = MarshalBatchReply(withTree)
 		require.NoError(t, err)
 		want, err = goccy.Marshal(withTree)

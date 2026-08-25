@@ -2385,7 +2385,8 @@ func TestCanonicalResponseHash(t *testing.T) {
 	t.Run("large payloads do not pin the scratch pool", func(t *testing.T) {
 		big := []byte(`{"id":1,"result":"` + strings.Repeat("x", 2<<20) + `"}`)
 		require.NotEqual(t, [32]byte{}, canonicalResponseHash(big))
-		buf := canonicalScratch.Get().(*[]byte)
+		buf, ok := canonicalScratch.Get().(*[]byte)
+		require.True(t, ok)
 		require.LessOrEqual(t, cap(*buf), canonicalScratchMaxRetain,
 			"a buffer grown past the retain cap must not be returned to the pool")
 		canonicalScratch.Put(buf)

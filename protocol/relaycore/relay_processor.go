@@ -570,7 +570,11 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 // byte-different payloads (e.g. "{...}A" vs "{...}B") never collapse into one
 // bucket — a false agreement the raw-byte hash would otherwise have caught.
 func canonicalResponseHash(data []byte) [32]byte {
-	bufp := canonicalScratch.Get().(*[]byte)
+	bufp, ok := canonicalScratch.Get().(*[]byte)
+	if !ok {
+		b := make([]byte, 0, 4096)
+		bufp = &b
+	}
 	defer func() {
 		// Keep the pool bounded: a multi-MB straggler must not pin its buffer
 		// for the lifetime of the process.

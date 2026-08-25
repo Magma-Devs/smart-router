@@ -111,7 +111,8 @@ func TestNewWeightedSelectorNaNWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 		StakeWeight:        0.2,
 		MinSelectionChance: 0.333,
 		Strategy:           StrategyAccuracy,
-		LatencyWeight:      stdmath.NaN()}
+		LatencyWeight:      stdmath.NaN(),
+	}
 
 	ws := NewWeightedSelector(config)
 
@@ -133,7 +134,8 @@ func TestNewWeightedSelectorInfWeightFallsBackToDefaultWeightsButKeepsOtherConfi
 		StakeWeight:        0.2,
 		MinSelectionChance: 0.444,
 		Strategy:           StrategyDistributed,
-		SyncWeight:         stdmath.Inf(1)}
+		SyncWeight:         stdmath.Inf(1),
+	}
 
 	ws := NewWeightedSelector(config)
 
