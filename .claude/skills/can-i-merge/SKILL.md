@@ -474,11 +474,12 @@ moved | wc -l   # positive control: zero, on a diff that changed Go, means
 d -U0 -- '*.go' | grep -nE '^[-+].*(Flags\(\)\.[A-Za-z]+|yaml:"|mapstructure:"|Name:[[:space:]]*")'
 
 # tests this diff removed and did not add back
+GONE=$(mktemp)   # not a fixed path — two reviews running at once must not share it
 d -U0 -- '*_test.go' | grep -E '^-func (Test|Benchmark|Fuzz)' \
-  | grep -oE '(Test|Benchmark|Fuzz)[A-Za-z0-9_]*' | sort -u > /tmp/gone_tests
+  | grep -oE '(Test|Benchmark|Fuzz)[A-Za-z0-9_]*' | sort -u > "$GONE"
 d -U0 -- '*_test.go' | grep -E '^\+func (Test|Benchmark|Fuzz)' \
   | grep -oE '(Test|Benchmark|Fuzz)[A-Za-z0-9_]*' | sort -u \
-  | comm -23 /tmp/gone_tests -
+  | comm -23 "$GONE" -
 ```
 
 `-U0` puts the enclosing `func` in most hunk headers, which is where `moved`
@@ -490,10 +491,13 @@ that misses one looks exactly like a scan that found nothing.
 old name, in every file type, in every repo that consumes it.**
 
 ```bash
-refs() { git grep -nw -e "$1" HEAD -- ':!*.pb.go'; }
+refs() { git grep -nw -e "$1" HEAD -- ':!*.pb.go' ':!.claude'; }
+# ^ .claude excluded on purpose: this skill's own example text mentions real flag
+#   names, and without the exclusion every future rename sweep hits it as noise
 
 refs <old-flag-or-key>                    # this repo: docs, scripts, workflows, values
-git -C <helm-chart-checkout> grep -nw -e "<old-flag-or-key>"   # the chart that deploys this
+git -C <chart-checkout> grep -nw -e "<old-flag-or-key>"   # the chart that deploys this
+                                          # (chart repo: Magma-Devs/smart-router-helm-chart)
 ```
 
 **Search every file type, not only `*.go` — and not only this repo.** A flag
@@ -508,7 +512,10 @@ matches whole words, so `debug-address` does not also report
 this PR did not touch. This is the step that finds it.**
 
 ```bash
-callers()   { git grep -lw -e "$1" HEAD -- '*.go' ':!*_test.go' ':!*.pb.go'; }
+callers()   { git grep -lw -e "$1" HEAD -- '*.go' ':!*_test.go' ':!*.pb.go' | sed 's|^HEAD:||'; }
+# ^ do not drop the sed: git grep prefixes every path with HEAD:, and without
+#   stripping it untouched() subtracts nothing and sites() greps a pathspec that
+#   matches no file — printing nothing, for every symbol, which reads exactly like clean
 untouched() { comm -23 <(callers "$1" | sort) <(d --name-only | sort); }
 sites()     { untouched "$1" | while read -r f; do git grep -n -A3 -w -e "$1" HEAD -- "$f"; done; }
 
