@@ -62,7 +62,13 @@ config/health_examples/health_template_gen.yml
 agent_docs/
 /readme-docs/
 mock-node-server/
-.claude/
+# .claude/ stays local except skills published on purpose, one un-ignore per skill.
+# The parent chain must be opened level by level: git never descends into an
+# ignored directory, so a bare !.claude/skills/<name>/ line would do nothing.
+.claude/*
+!.claude/skills
+.claude/skills/*
+!.claude/skills/can-i-merge
 Claude.md
 # Built smartrouter binary at the repo root (e.g. from `make build`). Anchored with a leading slash so it
 # does NOT ignore the cmd/smartrouter/ source package.
