@@ -2241,10 +2241,21 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		)
 		if err != nil {
 			// Endpoint is too far behind - add to failed sessions
+			// lag + threshold are what an operator actually needs here, and they were being
+			// dropped: ValidateEndpointCapability logs them at DEBUG and this caller discards
+			// its err. Recompute them rather than promote the inner line as well — one INFO
+			// line per rejected endpoint, carrying the endpoint identity the inner line lacks.
+			lag := chainTip - endpointLatest
+			threshold := int64(0)
+			if rpcss.consistencyConfig != nil {
+				threshold = rpcss.consistencyConfig.EndpointLagThreshold
+			}
 			utils.LavaFormatInfo("skipping endpoint due to consistency check",
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("endpointLatest", endpointLatest),
 				utils.LogAttr("chainTip", chainTip),
+				utils.LogAttr("lag", lag),
+				utils.LogAttr("threshold", threshold),
 				// Report which source produced the value: the store wins whenever it holds a
 				// positive tip (prefer-store), else the poll atomic is the bootstrap fallback.
 				utils.LogAttr("source", func() string {
@@ -2266,16 +2277,22 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 
 	// If ALL endpoints failed validation, return error to trigger retry
 	if len(validSessions) == 0 && skippedCount > 0 {
-		utils.LavaFormatWarning("all endpoints failed consistency pre-validation, triggering retry", nil,
+		utils.LavaFormatDebug("all endpoints failed consistency pre-validation, triggering retry",
 			utils.LogAttr("totalEndpoints", len(sessions)),
 			utils.LogAttr("skippedCount", skippedCount),
 			utils.LogAttr("chainTip", chainTip),
 			utils.LogAttr("GUID", ctx),
 		)
+		// The error below carries the same sentinel and is visible at every level, so this
+		// stays at DEBUG rather than WARN — two records of one event made anything counting
+		// the sentinel double-count it. skippedCount and GUID moved onto the error so the
+		// single surviving line still carries them.
 		return nil, failedSessions, utils.LavaFormatError("all endpoints failed consistency pre-validation",
 			lavasession.ConsistencyPreValidationError,
 			utils.LogAttr("totalEndpoints", len(sessions)),
+			utils.LogAttr("skippedCount", skippedCount),
 			utils.LogAttr("chainTip", chainTip),
+			utils.LogAttr("GUID", ctx),
 		)
 	}
 
