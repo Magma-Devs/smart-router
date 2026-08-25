@@ -100,6 +100,19 @@ func TestJsonrpcMessage_MarshalReply(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, `{"jsonrpc":"2.0","id":1,"method":"m","params":{"z":1,"a":2}}`, string(got))
 	})
+	t.Run("reply converted from the node with raw params splices", func(t *testing.T) {
+		// ConvertJsonRPCMsg copies the node's params member (a json.RawMessage)
+		// into Params; that is encoded, so the splice path serves it.
+		converted, err := ConvertJsonRPCMsg(&rpcclient.JsonrpcMessage{Version: "2.0", Method: "eth_subscription", Params: json.RawMessage(`{"subscription":"0x1","result":{"z":1,"a":2}}`)})
+		require.NoError(t, err)
+		require.Equal(t, json.RawMessage(`{"subscription":"0x1","result":{"z":1,"a":2}}`), converted.SendableParams())
+		got, err := converted.MarshalReply()
+		require.NoError(t, err)
+		require.Equal(t, `{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0x1","result":{"z":1,"a":2}}}`, string(got))
+		got, err = MarshalBatchReply([]JsonrpcMessage{*converted})
+		require.NoError(t, err)
+		require.Equal(t, `[{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0x1","result":{"z":1,"a":2}}}]`, string(got))
+	})
 	t.Run("message built in code with a params tree falls back to marshal", func(t *testing.T) {
 		msg := JsonrpcMessage{Version: "2.0", ID: json.RawMessage(`1`), Method: "m", Params: []any{"a", float64(1)}}
 		got, err := msg.MarshalReply()

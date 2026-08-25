@@ -1,14 +1,13 @@
 package rpcInterfaceMessages
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unsafe"
 
 	"github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
-
-	"errors"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
@@ -56,6 +55,12 @@ type jsonrpcWire struct {
 // UnmarshalJSON decodes the envelope and keeps the raw params alongside the
 // decoded Params tree. The tree is built with the same decoder as before, so
 // its shape ([]interface{}, map[string]interface{}, float64, ...) is unchanged.
+//
+// Because this method exists, a struct that embeds JsonrpcMessage inherits it:
+// json.Unmarshal into such a struct decodes only the embedded envelope and
+// leaves the outer fields zero. TendermintrpcMessage is built by struct copy
+// for that reason; do not decode JSON directly into a type that embeds this
+// one.
 func (jm *JsonrpcMessage) UnmarshalJSON(data []byte) error {
 	var wire jsonrpcWire
 	if err := json.Unmarshal(data, &wire); err != nil {
@@ -85,11 +90,33 @@ func (jm *JsonrpcMessage) ParamsJSON() json.RawMessage {
 	return jm.rawParams
 }
 
-// SendableParams returns what should be forwarded to the node: the wire bytes
-// when available, otherwise the decoded Params tree.
-func (jm *JsonrpcMessage) SendableParams() any {
+// wireParams returns the params member as encoded JSON when one is at hand:
+// the bytes the message arrived with, or a json.RawMessage placed in Params by
+// code that already holds encoded params (ConvertJsonRPCMsg copies the node's
+// raw params into a reply that way). ok is false when only a decoded tree
+// exists, or there are no params at all.
+func (jm *JsonrpcMessage) wireParams() (raw json.RawMessage, ok bool) {
 	if jm.rawParams != nil {
-		return jm.rawParams
+		return jm.rawParams, true
+	}
+	if raw, isRaw := jm.Params.(json.RawMessage); isRaw {
+		return raw, true
+	}
+	return nil, false
+}
+
+// SendableParams returns what should be forwarded to the node: the encoded
+// params when available, otherwise the decoded Params tree.
+//
+// Forwarding the wire bytes means the node receives exactly what the client
+// sent — its number literals, member order, and any params shape at all. A
+// scalar params member (`"params": 5`) therefore reaches the node and is
+// rejected there with -32602, where re-encoding the tree used to fail inside
+// the router before the call; an object with duplicate member names reaches
+// the node with both, while the Params tree the router parsed kept the last.
+func (jm *JsonrpcMessage) SendableParams() any {
+	if raw, ok := jm.wireParams(); ok {
+		return raw
 	}
 	return jm.Params
 }
@@ -99,7 +126,7 @@ func (jm *JsonrpcMessage) SendableParams() any {
 // rpcclient.JsonrpcMessage.AppendJSON); a message carrying a Params tree
 // falls back to json.Marshal.
 func (jm *JsonrpcMessage) MarshalReply() ([]byte, error) {
-	if jm.Params != nil && jm.rawParams == nil {
+	if jm.needsTreeMarshal() {
 		return json.Marshal(jm)
 	}
 	return jm.wire().MarshalReply()
@@ -111,7 +138,7 @@ func (jm *JsonrpcMessage) MarshalReply() ([]byte, error) {
 func MarshalBatchReply(msgs []JsonrpcMessage) ([]byte, error) {
 	wires := make([]*rpcclient.JsonrpcMessage, len(msgs))
 	for i := range msgs {
-		if msgs[i].Params != nil && msgs[i].rawParams == nil {
+		if msgs[i].needsTreeMarshal() {
 			return json.Marshal(msgs)
 		}
 		wires[i] = msgs[i].wire()
@@ -119,12 +146,23 @@ func MarshalBatchReply(msgs []JsonrpcMessage) ([]byte, error) {
 	return rpcclient.MarshalBatchReply(wires)
 }
 
+// needsTreeMarshal reports whether the message carries params that exist only
+// as a decoded tree, which the splice encoder cannot emit.
+func (jm *JsonrpcMessage) needsTreeMarshal() bool {
+	if jm.Params == nil {
+		return false
+	}
+	_, ok := jm.wireParams()
+	return !ok
+}
+
 func (jm *JsonrpcMessage) wire() *rpcclient.JsonrpcMessage {
+	raw, _ := jm.wireParams()
 	return &rpcclient.JsonrpcMessage{
 		Version: jm.Version,
 		ID:      jm.ID,
 		Method:  jm.Method,
-		Params:  jm.rawParams,
+		Params:  raw,
 		Error:   jm.Error,
 		Result:  jm.Result,
 	}
@@ -158,6 +196,20 @@ func (jm *JsonrpcMessage) GetRawRequestHash() ([]byte, error) {
 // length+content check is correct without TrimSpace overhead.
 func isJSONNull(data []byte) bool {
 	return len(data) == 4 && string(data) == "null"
+}
+
+// leadingByte returns the first byte of data that is not JSON whitespace, or
+// 0 when there is none.
+func leadingByte(data []byte) byte {
+	for _, c := range data {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			return c
+		}
+	}
+	return 0
 }
 
 // maxLoggedBodyBytes caps the size of the malformed-response body included in
@@ -284,17 +336,36 @@ func (jm *JsonrpcMessage) UpdateLatestBlockInMessage(latestBlock uint64, modifyC
 }
 
 // NewParsableRPCInput exposes the result and error members of a JSON-RPC
-// response body for the block parsers. Both members are located in one gjson
-// pass and sliced out of the input by offset, so a multi-MB block or logs
-// array is neither copied nor decoded here; only the small error object, when
-// present, is decoded.
+// response body for the block parsers. One gjson pass over the top-level
+// members locates both (stopping once it has seen them) and they are sliced
+// out of the input by offset, so a multi-MB block or logs array is neither
+// copied nor decoded here; only the small error object, when present, is
+// decoded. The first occurrence of a duplicated member wins. The body must be a JSON object, as a JSON-RPC response
+// envelope is — an array or scalar body is rejected the way a struct decode
+// rejected it.
 func (jm JsonrpcMessage) NewParsableRPCInput(input json.RawMessage) (parser.RPCInput, error) {
 	if !gjson.ValidBytes(input) {
 		return nil, utils.LavaFormatError("failed unmarshaling JsonrpcMessage", errors.New("invalid JSON"), utils.Attribute{Key: "input", Value: input})
 	}
-	members := gjson.GetMany(unsafe.String(unsafe.SliceData(input), len(input)), "result", "error")
-	parsable := ParsableRPCInput{Result: rawMemberSlice(input, members[0])}
-	if errRaw := rawMemberSlice(input, members[1]); len(errRaw) > 0 && !isJSONNull(errRaw) {
+	if leadingByte(input) != '{' {
+		return nil, utils.LavaFormatError("failed unmarshaling JsonrpcMessage", errors.New("response body is not a JSON object"), utils.Attribute{Key: "input", Value: input})
+	}
+	var resultMember, errorMember gjson.Result
+	gjson.Parse(unsafe.String(unsafe.SliceData(input), len(input))).ForEach(func(key, value gjson.Result) bool {
+		switch key.Str {
+		case "result":
+			if !resultMember.Exists() {
+				resultMember = value
+			}
+		case "error":
+			if !errorMember.Exists() {
+				errorMember = value
+			}
+		}
+		return !(resultMember.Exists() && errorMember.Exists())
+	})
+	parsable := ParsableRPCInput{Result: rawMemberSlice(input, resultMember)}
+	if errRaw := rawMemberSlice(input, errorMember); len(errRaw) > 0 && !isJSONNull(errRaw) {
 		var jsonErr rpcclient.JsonError
 		if err := json.Unmarshal(errRaw, &jsonErr); err != nil {
 			return nil, utils.LavaFormatError("failed unmarshaling JsonrpcMessage", err, utils.Attribute{Key: "input", Value: input})

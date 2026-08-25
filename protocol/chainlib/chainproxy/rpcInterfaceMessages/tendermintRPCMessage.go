@@ -14,6 +14,10 @@ import (
 	"github.com/magma-Devs/smart-router/utils/sigs"
 )
 
+// TendermintrpcMessage wraps a decoded JsonrpcMessage with the URI path it
+// arrived on. Build it by struct copy from an already-decoded JsonrpcMessage:
+// the embedded type's UnmarshalJSON is promoted, so json.Unmarshal into this
+// struct would decode the envelope and leave Path empty.
 type TendermintrpcMessage struct {
 	JsonrpcMessage
 	Path string
@@ -104,7 +108,7 @@ func GetTendermintRPCError(jsonError *rpcclient.JsonError) (*tenderminttypes.RPC
 
 	// Make sure jsonError.Data exists
 	if jsonError.Data != nil {
-		errData, ok = (jsonError.Data).(string)
+		errData, ok = jsonError.Data.(string)
 		if !ok {
 			return nil, utils.LavaFormatError("(rpcMsg.Error.Data).(string) conversion failed", nil, utils.Attribute{Key: "data", Value: jsonError.Data})
 		}
