@@ -1707,16 +1707,16 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	// Return the error response with metadata
 	// The caller can inspect the response to determine if it's an error
 	return &DirectRPCResponse{
-			Data:       respBytes,
-			Metadata:   respHeaders, // Include any headers received before the error
-			StatusCode: int(errorCode),
-		}, &GRPCStatusError{
-			Code:        errorCode,
-			Message:     errorMessage,
-			cause:       err,
-			rateLimited: rateLimited,
-			retryAfter:  retryAfter,
-		}
+		Data:       respBytes,
+		Metadata:   respHeaders, // Include any headers received before the error
+		StatusCode: int(errorCode),
+	}, &GRPCStatusError{
+		Code:        errorCode,
+		Message:     errorMessage,
+		cause:       err,
+		rateLimited: rateLimited,
+		retryAfter:  retryAfter,
+	}
 }
 
 // GRPCStatusError represents a gRPC status error.

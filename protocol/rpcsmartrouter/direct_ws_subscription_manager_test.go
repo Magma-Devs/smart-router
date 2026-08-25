@@ -229,10 +229,12 @@ func (m *mockWSProtocolMessage) AppendHeader(metadata []pairingtypes.Metadata) {
 func (m *mockWSProtocolMessage) GetExtensions() []*spectypes.Extension         { return nil }
 func (m *mockWSProtocolMessage) OverrideExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser) {
 }
-func (m *mockWSProtocolMessage) DisableErrorHandling()                               {}
-func (m *mockWSProtocolMessage) TimeoutOverride(...time.Duration) time.Duration      { return 0 }
-func (m *mockWSProtocolMessage) GetForceCacheRefresh() bool                          { return false }
-func (m *mockWSProtocolMessage) SetForceCacheRefresh(force bool) bool                { return false }
+func (m *mockWSProtocolMessage) DisableErrorHandling()                          {}
+func (m *mockWSProtocolMessage) TimeoutOverride(...time.Duration) time.Duration { return 0 }
+func (m *mockWSProtocolMessage) GetForceCacheRefresh() bool                     { return false }
+
+func (m *mockWSProtocolMessage) SetForceCacheRefresh(force bool) bool { return false }
+
 func (m *mockWSProtocolMessage) GetRawRequestHash() ([]byte, error)                  { return nil, nil }
 func (m *mockWSProtocolMessage) GetRequestedBlocksHashes() []string                  { return nil }
 func (m *mockWSProtocolMessage) UpdateEarliestInMessage(incomingEarliest int64) bool { return false }
@@ -240,6 +242,7 @@ func (m *mockWSProtocolMessage) SetExtension(extension *spectypes.Extension)    
 func (m *mockWSProtocolMessage) GetUsedDefaultValue() bool                           { return false }
 func (m *mockWSProtocolMessage) GetParseDirective() *spectypes.ParseDirective        { return nil }
 func (m *mockWSProtocolMessage) IsBatch() bool                                       { return false }
+
 func (m *mockWSProtocolMessage) CheckResponseError(data []byte, httpStatusCode int) (bool, string) {
 	return false, ""
 }
@@ -2397,12 +2400,12 @@ func TestListenForUpstreamMessages_NilUpstreamSubDoesNotPanic(t *testing.T) {
 
 	// A typed nil, exactly as createUpstreamSubscription used to hand back.
 	var nilSub *rpcclient.ClientSubscription
-	var upstreamSub upstreamErrSource = nilSub
+	var upstreamSub upstreamErrSource = nilSub //nolint:staticcheck // SA4023: the typed nil is the trap this test documents
 	// Plain `== nil` is the check a caller would naturally reach for, and it does NOT catch
 	// this — the interface carries a type, so it compares non-nil even though the pointer
 	// inside is nil. (testify's NotNil disagrees: it unwraps via reflection. The Go-level
 	// comparison below is the semantics that actually let the nil through to Err().)
-	require.False(t, upstreamSub == nil,
+	require.False(t, upstreamSub == nil, //nolint:staticcheck // SA4023: the never-true comparison is the trap this test documents
 		"a typed nil yields an interface that `== nil` reports as non-nil — precisely why a nil guard cannot catch this")
 
 	// A panic here crashes the test binary, which is the assertion. Before the fix this

@@ -84,6 +84,7 @@ func TestParseStaticProviderEndpoints_BackupProvidersYAMLLoading(t *testing.T) {
 		})
 	}
 }
+
 // TestParseStaticProviderEndpoints_GroupLabel covers the cross-validation provider-group
 // spine (Phase 0.1): the optional `group-label` YAML key must deserialize into
 // RPCStaticProviderEndpoint.GroupLabel, an absent key must yield the empty string (the

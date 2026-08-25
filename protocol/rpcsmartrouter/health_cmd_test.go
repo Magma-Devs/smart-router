@@ -245,9 +245,11 @@ func TestHealthReport_JSONShape(t *testing.T) {
 	assert.Contains(t, decoded, "results")
 	assert.Nil(t, decoded["error"]) // null, not omitted — uniform envelope
 
-	results := decoded["results"].([]any)
+	results, ok := decoded["results"].([]any)
+	require.True(t, ok, "results must be an array, got %T", decoded["results"])
 	require.Len(t, results, 1)
-	row := results[0].(map[string]any)
+	row, ok := results[0].(map[string]any)
+	require.True(t, ok, "result row must be an object, got %T", results[0])
 	for _, key := range []string{"name", "chainId", "apiInterface", "url", "transport", "addons", "extensions", "specValid", "latestBlock", "ok", "verifications"} {
 		assert.Containsf(t, row, key, "result row must carry %q", key)
 	}

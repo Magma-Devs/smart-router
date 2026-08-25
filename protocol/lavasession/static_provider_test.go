@@ -74,7 +74,7 @@ func TestRPCStaticProviderEndpoint_ToBase(t *testing.T) {
 		NodeUrls: []common.NodeUrl{
 			{Url: "https://example.com"},
 		},
-		Name:        "TestProvider",
+		Name: "TestProvider",
 	}
 
 	baseEndpoint := staticEndpoint.ToBase()
@@ -136,7 +136,7 @@ func TestRPCStaticProviderEndpoint_CompleteConfig(t *testing.T) {
 			{Url: "https://primary.example.com"},
 			{Url: "https://backup.example.com"},
 		},
-		Name:        "EthereumMainnetProvider",
+		Name: "EthereumMainnetProvider",
 	}
 
 	// Should pass validation

@@ -330,4 +330,3 @@ func UpgradeToArchiveIfNeeded(ctx context.Context, protocolMessage chainlib.Prot
 	}
 	return protocolMessage
 }
-

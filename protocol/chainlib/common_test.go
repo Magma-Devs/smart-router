@@ -189,7 +189,7 @@ func TestConvertToJsonRpcError_FallbackOnUnparseable(t *testing.T) {
 	if !ok {
 		t.Fatalf("error must be an Object, got %T", parsed["error"])
 	}
-	if int(errObj["code"].(float64)) != -32000 {
+	if code, ok := errObj["code"].(float64); !ok || int(code) != -32000 {
 		t.Errorf("expected error.code=-32000, got %v", errObj["code"])
 	}
 	if msg, _ := errObj["message"].(string); msg != "plain text error, not JSON" {

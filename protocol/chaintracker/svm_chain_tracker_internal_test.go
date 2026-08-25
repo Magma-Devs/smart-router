@@ -159,9 +159,11 @@ func (f *plainSVMFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error
 func (f *plainSVMFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
 	return "", nil
 }
+
 func (f *plainSVMFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
 	return lavasession.RPCProviderEndpoint{}
 }
+
 func (f *plainSVMFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType, apiName string) ([]byte, error) {
 	return f.response, nil
 }

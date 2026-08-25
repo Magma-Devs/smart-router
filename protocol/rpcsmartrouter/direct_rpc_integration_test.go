@@ -723,9 +723,11 @@ func (m *mockChainMessage) GetApiCollection() *spectypes.ApiCollection {
 
 // Implement remaining ChainMessage interface methods (stubs for testing)
 func (m *mockChainMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string { return "" }
+
 func (m *mockChainMessage) RequestedBlock() (latest int64, earliest int64) {
 	return m.requestedBlock, m.requestedBlock
 }
+
 func (m *mockChainMessage) UpdateLatestBlockInMessage(latestBlock int64, modifyContent bool) bool {
 	return false
 }

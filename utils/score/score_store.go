@@ -367,6 +367,7 @@ func (ls *LatencyScoreStore) Update(sample float64, sampleTime time.Time) error 
 }
 
 // GetAdaptiveMax returns the adaptive max value if enabled, otherwise returns 0
+//
 // Deprecated: Use GetAdaptiveBounds() for the P10-P90 approach (Phase 2 hybrid).
 func (ls *LatencyScoreStore) GetAdaptiveMax() float64 {
 	if ls == nil || ls.adaptiveMax == nil {

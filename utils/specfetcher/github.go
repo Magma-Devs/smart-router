@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // fetchFromGitHub fetches all specs from a GitHub repository.

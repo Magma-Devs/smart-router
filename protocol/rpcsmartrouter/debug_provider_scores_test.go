@@ -92,9 +92,11 @@ func TestDebugProviderScores_ReturnsScores(t *testing.T) {
 	require.Equal(t, float64(7), row["Epoch"])
 	require.NotEmpty(t, row["Timestamp"])
 	require.Equal(t, []any{}, row["NetworkAddresses"], "no session managers wired → empty list, never null")
-	for _, field := range []string{"LatencyScore", "SyncScore", "SelectionAvailability", "SelectionLatency",
+	for _, field := range []string{
+		"LatencyScore", "SyncScore", "SelectionAvailability", "SelectionLatency",
 		"SelectionSync", "SelectionStake", "AvailabilityContribution", "LatencyContribution",
-		"SyncContribution", "StakeContribution", "NodeErrorRate", "SelectionCount", "SelectionRate"} {
+		"SyncContribution", "StakeContribution", "NodeErrorRate", "SelectionCount", "SelectionRate",
+	} {
 		require.Contains(t, row, field, "the row shape is part of the contract")
 	}
 }

@@ -73,12 +73,20 @@ func registerTestQueryServer(s *grpc.Server, srv testQueryServer) {
 					if err := dec(in); err != nil {
 						return nil, err
 					}
+					srv, ok := srvIface.(testQueryServer)
+					if !ok {
+						return nil, fmt.Errorf("unexpected server type %T", srvIface)
+					}
 					if interceptor == nil {
-						return srvIface.(testQueryServer).ShowChainInfo(ctx, in)
+						return srv.ShowChainInfo(ctx, in)
 					}
 					info := &grpc.UnaryServerInfo{Server: srvIface, FullMethod: testServiceMethod}
 					return interceptor(ctx, in, info, func(ctx context.Context, req any) (any, error) {
-						return srvIface.(testQueryServer).ShowChainInfo(ctx, req.(*testRequest))
+						typedReq, ok := req.(*testRequest)
+						if !ok {
+							return nil, fmt.Errorf("unexpected request type %T", req)
+						}
+						return srv.ShowChainInfo(ctx, typedReq)
 					})
 				},
 			},

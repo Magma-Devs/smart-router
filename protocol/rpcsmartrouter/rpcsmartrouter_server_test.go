@@ -3119,9 +3119,11 @@ func (m *cvGuardStateMachine) GetRelayTaskChannel() (chan relaycore.RelayStateSe
 }
 func (m *cvGuardStateMachine) UpdateBatch(err error)             {}
 func (m *cvGuardStateMachine) GetSelection() relaycore.Selection { return relaycore.CrossValidation }
+
 func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidationParams {
 	return m.cvParams
 }
+
 func (m *cvGuardStateMachine) GetUsedProviders() *lavasession.UsedProviders                { return m.usedProviders }
 func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf)            {}
 func (m *cvGuardStateMachine) SetRelayRetriesManager(rm *lavaprotocol.RelayRetriesManager) {}
