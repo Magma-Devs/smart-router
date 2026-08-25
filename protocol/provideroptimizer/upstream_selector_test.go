@@ -963,3 +963,105 @@ func TestFormatSelectionStatsIncludesMode(t *testing.T) {
 	var nilStats *SelectionStats
 	require.Equal(t, "", nilStats.FormatSelectionStats())
 }
+
+// TestSelectUpstreamBestModeAllZeroIsDeterministic closes the hole @avitenzer reported: the
+// all-zero-scores guard used to draw from the RNG regardless of mode, so SelectionModeBest
+// silently became a lottery — with selection_mode=best still on the log line.
+//
+// The branch is reachable only at MinSelectionChance 0. With the default floor every
+// composite is positive and totalScore can never be zero, which is why nothing caught this:
+// TestSelectionStatsCarriesMode/best/all_zero walks the same branch but asserts only
+// stats.Mode, never the address it picked.
+//
+// Deliberately unseeded. A seeded selector swaps the crypto RNG for math/rand, which would
+// still be deterministic per seed and would hide a reintroduced draw completely.
+func TestSelectUpstreamBestModeAllZeroIsDeterministic(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	config.SelectionMode = SelectionModeBest
+	config.MinSelectionChance = 0
+	ws := NewUpstreamSelector(config)
+	require.Equal(t, 0.0, ws.GetConfig().MinSelectionChance, "0 must survive validation — it is the legal 'no floor' choice")
+
+	// Every composite collapsed to zero, exactly as CalculateScore leaves a fully degraded
+	// chain once the floor is switched off.
+	providers := []UpstreamScore{
+		{Address: "zero_a", CompositeScore: 0, SelectionWeight: 0},
+		{Address: "zero_b", CompositeScore: 0, SelectionWeight: 0},
+		{Address: "zero_c", CompositeScore: 0, SelectionWeight: 0},
+	}
+
+	for i := 0; i < 300; i++ {
+		require.Equal(t, "zero_a", ws.SelectUpstream(context.Background(), providers),
+			"Best must stay deterministic when every score is zero (iteration %d)", i)
+	}
+}
+
+// TestSelectUpstreamWeightedModeAllZeroStaysRandom is the other half of the same guard: the
+// fix above must not quietly turn the weighted-random fallback into first-wins, which would
+// pin a fully degraded chain onto one address.
+func TestSelectUpstreamWeightedModeAllZeroStaysRandom(t *testing.T) {
+	config := DefaultUpstreamSelectorConfig()
+	config.MinSelectionChance = 0
+	ws := NewUpstreamSelector(config)
+	ws.SetDeterministicSeed(1234567)
+
+	providers := []UpstreamScore{
+		{Address: "zero_a", CompositeScore: 0, SelectionWeight: 0},
+		{Address: "zero_b", CompositeScore: 0, SelectionWeight: 0},
+		{Address: "zero_c", CompositeScore: 0, SelectionWeight: 0},
+	}
+
+	selections := map[string]int{}
+	for i := 0; i < 3000; i++ {
+		selections[ws.SelectUpstream(context.Background(), providers)]++
+	}
+	require.Len(t, selections, 3, "weighted_random must still spread an all-zero list across every candidate")
+}
+
+// TestNewUpstreamSelectorValidatesMinSelectionChance covers the second half of the report.
+// MinSelectionChance is a floor applied to every composite, so it is only meaningful in
+// [0, 1] — but nothing validated it, and the failure mode is invisible rather than loud.
+func TestNewUpstreamSelectorValidatesMinSelectionChance(t *testing.T) {
+	defaultChance := DefaultUpstreamSelectorConfig().MinSelectionChance
+
+	for _, tc := range []struct {
+		name string
+		in   float64
+		want float64
+	}{
+		{"above_one_flattens_all_scoring", 2, defaultChance},
+		{"exactly_one_is_the_boundary", 1, 1},
+		{"negative", -0.5, defaultChance},
+		{"nan", stdmath.NaN(), defaultChance},
+		{"positive_infinity", stdmath.Inf(1), defaultChance},
+		{"zero_is_legal_no_floor", 0, 0},
+		{"ordinary_value_survives", 0.07, 0.07},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := DefaultUpstreamSelectorConfig()
+			config.MinSelectionChance = tc.in
+			require.Equal(t, tc.want, NewUpstreamSelector(config).GetConfig().MinSelectionChance)
+		})
+	}
+}
+
+// TestMinSelectionChanceAboveOneWouldFlattenScoring documents WHY the validation above
+// matters, by driving the real scorer. At a floor of 2 every composite is pushed above 1.0
+// and then clamped back to 1.0, so a fast upstream and a hopeless one become
+// indistinguishable — ranking is switched off with no error anywhere. The validation is what
+// stops that reaching CalculateScore.
+func TestMinSelectionChanceAboveOneWouldFlattenScoring(t *testing.T) {
+	excellent := &pairingtypes.QualityOfServiceReport{Availability: 1.0, Latency: 0.01, Sync: 0.1}
+	terrible := &pairingtypes.QualityOfServiceReport{Availability: 0.99, Latency: 25.0, Sync: 500}
+
+	unvalidated := NewUpstreamSelector(DefaultUpstreamSelectorConfig())
+	unvalidated.minSelectionChance = 2 // bypass the constructor, as the old code effectively did
+	require.Equal(t, unvalidated.CalculateScore(excellent, 0, 0, "fast"), unvalidated.CalculateScore(terrible, 0, 0, "slow"),
+		"precondition: a floor above 1.0 really does collapse every score onto 1.0")
+
+	config := DefaultUpstreamSelectorConfig()
+	config.MinSelectionChance = 2
+	validated := NewUpstreamSelector(config)
+	require.Greater(t, validated.CalculateScore(excellent, 0, 0, "fast"), validated.CalculateScore(terrible, 0, 0, "slow"),
+		"with validation the floor falls back to the default and ranking survives")
+}
