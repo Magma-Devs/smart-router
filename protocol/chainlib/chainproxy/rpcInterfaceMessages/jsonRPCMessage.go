@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/goccy/go-json"
+	"github.com/tidwall/gjson"
 
 	"errors"
 
@@ -185,14 +186,37 @@ func (jm *JsonrpcMessage) UpdateLatestBlockInMessage(latestBlock uint64, modifyC
 	return false
 }
 
+// NewParsableRPCInput exposes the result and error members of a JSON-RPC
+// response body for the block parsers. The result is sliced out of the input
+// in place (gjson reports the member's offset), so a multi-MB block or logs
+// array is never copied or decoded here; only the small error object, when
+// present, is decoded.
 func (jm JsonrpcMessage) NewParsableRPCInput(input json.RawMessage) (parser.RPCInput, error) {
-	msg := &JsonrpcMessage{}
-	err := json.Unmarshal(input, msg)
-	if err != nil {
-		return nil, utils.LavaFormatError("failed unmarshaling JsonrpcMessage", err, utils.Attribute{Key: "input", Value: input})
+	if !gjson.ValidBytes(input) {
+		return nil, utils.LavaFormatError("failed unmarshaling JsonrpcMessage", errors.New("invalid JSON"), utils.Attribute{Key: "input", Value: input})
 	}
+	parsable := ParsableRPCInput{Result: rawMemberSlice(input, "result")}
+	if errRaw := rawMemberSlice(input, "error"); len(errRaw) > 0 && !isJSONNull(errRaw) {
+		var jsonErr rpcclient.JsonError
+		if err := json.Unmarshal(errRaw, &jsonErr); err != nil {
+			return nil, utils.LavaFormatError("failed unmarshaling JsonrpcMessage", err, utils.Attribute{Key: "input", Value: input})
+		}
+		parsable.Error = &jsonErr
+	}
+	return parsable, nil
+}
 
-	return ParsableRPCInput{Result: msg.Result, Error: msg.Error}, nil
+// rawMemberSlice returns the raw bytes of the top-level object member `name`
+// as a sub-slice of data — no copy. Nil when the member is absent.
+func rawMemberSlice(data []byte, name string) json.RawMessage {
+	r := gjson.GetBytes(data, name)
+	if !r.Exists() {
+		return nil
+	}
+	if r.Index > 0 && r.Index+len(r.Raw) <= len(data) {
+		return json.RawMessage(data[r.Index : r.Index+len(r.Raw)])
+	}
+	return json.RawMessage(r.Raw)
 }
 
 func (jm JsonrpcMessage) GetParams() interface{} {
