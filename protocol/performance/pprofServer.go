@@ -21,8 +21,11 @@ const (
 // its own handler on the standard net/http/pprof path.
 const goroutineLeakProfile = "goroutineleak"
 
-func StartPprofServer(addr string) error {
-	// Set up the Fiber app
+// newPprofApp builds the pprof HTTP app. The goroutineleak route is registered
+// before the fiber pprof middleware on purpose: the middleware answers every
+// /debug/pprof/* path itself and redirects names it does not know to the
+// index, so a route registered after it would never be reached.
+func newPprofApp() *fiber.App {
 	app := fiber.New()
 
 	app.Get("/debug/pprof/"+goroutineLeakProfile, func(c *fiber.Ctx) error {
@@ -32,6 +35,11 @@ func StartPprofServer(addr string) error {
 
 	// Let the fiber HTTP server use pprof
 	app.Use(fiberpprof.New())
+	return app
+}
+
+func StartPprofServer(addr string) error {
+	app := newPprofApp()
 
 	// Start the HTTP server in a goroutine
 	go func() {
