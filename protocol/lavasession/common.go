@@ -95,9 +95,9 @@ func ConnectGRPCClient(ctx context.Context, address string, allowInsecure bool, 
 
 	opts = append(opts, grpc.WithBlock(), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(chainproxy.MaxCallRecvMsgSize)))
 
-	if strings.HasPrefix(address, unixPrefix) {
+	if after, ok := strings.CutPrefix(address, unixPrefix); ok {
 		// Unix socket
-		socketPath := strings.TrimPrefix(address, unixPrefix)
+		socketPath := after
 		opts = append(opts, grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
 			return net.Dial("unix", socketPath)
 		}))

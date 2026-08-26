@@ -13,7 +13,7 @@
 
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
 [![Release](https://img.shields.io/badge/release-v1.3.2-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
-[![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Go](https://img.shields.io/badge/go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-source--available-orange.svg)](LICENSE.md)
 
 </div>
@@ -45,7 +45,7 @@ The fastest way to start: install the binary, point it at a YAML config, run.
 
 ### Prerequisites
 
-- [Go 1.26+](https://go.dev/dl/)
+- [Go 1.27+](https://go.dev/dl/)
 
 ### Build & run
 

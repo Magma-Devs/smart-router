@@ -55,7 +55,7 @@ func TestRelayProbe_GatesReEnableUntilConfirmed(t *testing.T) {
 	require.True(t, e.ConfirmRelayRecovery())
 	require.True(t, e.Enabled)
 	e.mu.RLock()
-	require.Equal(t, uint64(MaxConsecutiveConnectionAttempts-probeReenableTrialBudget), e.ConnectionRefusals,
+	require.Equal(t, MaxConsecutiveConnectionAttempts-probeReenableTrialBudget, e.ConnectionRefusals,
 		"a replay-confirmed re-enable still carries only the trial budget — one replayed request is not real traffic")
 	require.True(t, e.probeReenabled, "a replay-confirmed re-enable is still probe-granted until real traffic validates it")
 	e.mu.RUnlock()
@@ -227,7 +227,7 @@ func TestRelayProbe_ConfirmIsIdempotentAgainstRaces(t *testing.T) {
 // which is exactly the permanent-park bug this file's escape-hatch tests exist to prevent.
 func earnReplayCandidacy(t *testing.T, e *Endpoint, k uint64, pollSec *int) {
 	t.Helper()
-	for polls := 0; polls < 64; polls++ {
+	for range 64 {
 		*pollSec++
 		require.False(t, healthyPoll(e, probeBase.Add(time.Duration(*pollSec)*time.Second), k),
 			"polls alone must never re-enable while evidence is recorded")
@@ -271,7 +271,7 @@ func TestRelayProbe_EvidenceDroppedAfterMaxFailedReplays(t *testing.T) {
 	}
 	require.True(t, e.IsEnabled(), "after the evidence is dropped, poll hysteresis alone must re-enable the endpoint")
 	e.mu.RLock()
-	require.Equal(t, uint64(MaxConsecutiveConnectionAttempts-probeReenableTrialBudget), e.ConnectionRefusals,
+	require.Equal(t, MaxConsecutiveConnectionAttempts-probeReenableTrialBudget, e.ConnectionRefusals,
 		"the fallback re-enable still carries only the trial budget")
 	e.mu.RUnlock()
 }

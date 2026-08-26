@@ -110,25 +110,23 @@ func NewGrpcChainParser() (chainParser *GrpcChainParser, err error) {
 // within that set.
 func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 	return &GrpcChainParser{
-		BaseChainParser: BaseChainParser{
-			internalPaths:     apip.internalPaths,
-			taggedApis:        apip.taggedApis,
-			spec:              apip.spec,
-			serverApis:        apip.serverApis,
-			apiCollections:    apip.apiCollections,
-			headers:           apip.headers,
-			verifications:     apip.verifications,
-			allowedAddons:     apip.allowedAddons,
-			allowedExtensions: apip.allowedExtensions,
-			extensionParser:   apip.extensionParser,
-			active:            apip.active,
+		internalPaths:     apip.internalPaths,
+		taggedApis:        apip.taggedApis,
+		spec:              apip.spec,
+		serverApis:        apip.serverApis,
+		apiCollections:    apip.apiCollections,
+		headers:           apip.headers,
+		verifications:     apip.verifications,
+		allowedAddons:     apip.allowedAddons,
+		allowedExtensions: apip.allowedExtensions,
+		extensionParser:   apip.extensionParser,
+		active:            apip.active,
 
-			// Carried, not re-seeded from the package default: the clone must verify
-			// under the same ws policy as the parser it stands in for.
-			skipWebsocketVerification: apip.SkipWebsocketVerification(),
-		},
-		registry: apip.registry,
-		codec:    apip.codec,
+		// Carried, not re-seeded from the package default: the clone must verify
+		// under the same ws policy as the parser it stands in for.
+		skipWebsocketVerification: apip.SkipWebsocketVerification(),
+		registry:                  apip.registry,
+		codec:                     apip.codec,
 	}
 }
 
@@ -200,9 +198,9 @@ func (apip *GrpcChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 	}
 
 	grpcMessage := &rpcInterfaceMessages.GrpcMessage{
-		Msg:         nil,
-		Path:        parsing.ApiName,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata},
+		Msg:     nil,
+		Path:    parsing.ApiName,
+		Headers: metadata,
 	}
 	apiCont, err := apip.getSupportedApi(parsing.ApiName, connectionType)
 	if err != nil {
@@ -279,11 +277,11 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 
 	// Construct grpcMessage
 	grpcMessage := rpcInterfaceMessages.GrpcMessage{
-		Msg:         data,
-		Path:        url,
-		Codec:       apip.codec,
-		Registry:    apip.registry,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective},
+		Msg:      data,
+		Path:     url,
+		Codec:    apip.codec,
+		Registry: apip.registry,
+		Headers:  metadata, LatestBlockHeaderSetter: settingHeaderDirective,
 	}
 
 	// // Fetch requested block, it is used for data reliability
@@ -721,7 +719,7 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 		// NodeUrl is what carries grpc-config onto the request path; without it
 		// cp.NodeUrl.GrpcConfig is the zero value and descriptor-source is invisible
 		// here no matter what the config says (MAG-2350).
-		BaseChainProxy:   BaseChainProxy{averageBlockTime: averageBlockTime, ErrorHandler: &GRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID}, ChainID: rpcProviderEndpoint.ChainID, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(rpcProviderEndpoint.NodeUrls[0].Url)},
+		averageBlockTime: averageBlockTime, ErrorHandler: &GRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID}, ChainID: rpcProviderEndpoint.ChainID, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(rpcProviderEndpoint.NodeUrls[0].Url),
 		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
 	}
 	cp.conn = conn
@@ -811,7 +809,10 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 
 	msgFactory := dynamic.NewMessageFactoryWithDefaults()
 
-	var reader io.Reader
+	// grpcurl hands this reader straight to json.NewDecoder, which panics on a
+	// nil io.Reader (encoding/json is v2-backed since Go 1.27). An empty request
+	// message therefore gets an empty reader rather than a nil one.
+	var reader io.Reader = bytes.NewReader(nil)
 	msg := msgFactory.NewMessage(methodDescriptor.GetInputType())
 	formatMessage := false
 	if len(nodeMessage.Msg) > 0 {

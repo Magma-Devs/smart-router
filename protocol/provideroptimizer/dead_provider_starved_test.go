@@ -82,7 +82,7 @@ func TestDeadProviderStarvedFromOrganicTraffic(t *testing.T) {
 			// 1) Warm ALL providers healthy: good latency + perfect sync + availability≈1. This is the
 			//    crux — the dead provider WAS healthy, so its latency/sync freeze at good values.
 			for _, addr := range gen.providersAddresses {
-				for j := 0; j < 6; j++ {
+				for range 6 {
 					po.AppendRelayData(addr, goodLatency, cu, syncBlock)
 					time.Sleep(time.Microsecond)
 				}
@@ -92,7 +92,7 @@ func TestDeadProviderStarvedFromOrganicTraffic(t *testing.T) {
 			// 2) Kill provider[0]: continuous organic relay failures (availability→0 only) + probe
 			//    failures (the redesign's prober also feeds availability=0 for a dead node). Keep the
 			//    healthy peers fresh with successes.
-			for round := 0; round < 60; round++ {
+			for round := range 60 {
 				po.AppendRelayFailure(dead)
 				po.AppendProbeData(dead, 0 /*availability*/, 0, false /*hasLatency*/, 0, false /*hasSync*/, SyncReference{})
 				time.Sleep(time.Microsecond)
@@ -144,11 +144,11 @@ func TestSingleDeadProviderNotHalted(t *testing.T) {
 	requestBlock := int64(1000)
 
 	// Warm it healthy, then kill it with continuous failures.
-	for j := 0; j < 6; j++ {
+	for range 6 {
 		po.AppendRelayData(only, TEST_BASE_WORLD_LATENCY, cu, 1000)
 		time.Sleep(time.Microsecond)
 	}
-	for round := 0; round < 60; round++ {
+	for range 60 {
 		po.AppendRelayFailure(only)
 		time.Sleep(time.Microsecond)
 	}
@@ -173,12 +173,12 @@ func TestAllProvidersDeadStillSelects(t *testing.T) {
 	requestBlock := int64(1000)
 
 	for _, addr := range gen.providersAddresses {
-		for j := 0; j < 6; j++ {
+		for range 6 {
 			po.AppendRelayData(addr, TEST_BASE_WORLD_LATENCY, cu, 1000)
 			time.Sleep(time.Microsecond)
 		}
 	}
-	for round := 0; round < 60; round++ {
+	for range 60 {
 		for _, addr := range gen.providersAddresses {
 			po.AppendRelayFailure(addr)
 			time.Sleep(time.Microsecond)

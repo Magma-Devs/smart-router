@@ -14,6 +14,10 @@ import (
 	"github.com/magma-Devs/smart-router/utils/sigs"
 )
 
+// TendermintrpcMessage wraps a decoded JsonrpcMessage with the URI path it
+// arrived on. Build it by struct copy from an already-decoded JsonrpcMessage:
+// the embedded type's UnmarshalJSON is promoted, so json.Unmarshal into this
+// struct would decode the envelope and leave Path empty.
 type TendermintrpcMessage struct {
 	JsonrpcMessage
 	Path string
@@ -46,7 +50,7 @@ func (tm *TendermintrpcMessage) GetRawRequestHash() ([]byte, error) {
 	return sigs.HashMsg(append(append(methodByteArray, paramsByteArray...), headersByteArray...)), nil
 }
 
-func (cp TendermintrpcMessage) GetParams() interface{} {
+func (cp TendermintrpcMessage) GetParams() any {
 	return cp.Params
 }
 
@@ -56,7 +60,7 @@ type TendermintMessageResponseBody struct {
 }
 
 type TendermintMessageResponse struct {
-	Response TendermintMessageResponseBody `json:"response,omitempty"`
+	Response TendermintMessageResponseBody `json:"response"`
 }
 
 // CheckResponseError classifies a Tendermint JSON-RPC response. The envelope
@@ -104,7 +108,7 @@ func GetTendermintRPCError(jsonError *rpcclient.JsonError) (*tenderminttypes.RPC
 
 	// Make sure jsonError.Data exists
 	if jsonError.Data != nil {
-		errData, ok = (jsonError.Data).(string)
+		errData, ok = jsonError.Data.(string)
 		if !ok {
 			return nil, utils.LavaFormatError("(rpcMsg.Error.Data).(string) conversion failed", nil, utils.Attribute{Key: "data", Value: jsonError.Data})
 		}
@@ -149,7 +153,7 @@ func (JSONRPCIntID) isJSONRPCID()      {}
 func (id JSONRPCIntID) String() string { return fmt.Sprintf("%d", id) }
 
 func IdFromRawMessage(rawID json.RawMessage) (jsonrpcId, error) {
-	var idInterface interface{}
+	var idInterface any
 	err := json.Unmarshal(rawID, &idInterface)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal id from response: %w (id: %s)", err, string(rawID))

@@ -331,7 +331,7 @@ func TestWebSocketSendRequest_ConcurrentSameID(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, n)
 	got := make([]string, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -348,7 +348,7 @@ func TestWebSocketSendRequest_ConcurrentSameID(t *testing.T) {
 	}
 	wg.Wait()
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		require.NoErrorf(t, errs[i], "request %d failed", i)
 		assert.Containsf(t, got[i], fmt.Sprintf(`"result":"v%d"`, i),
 			"request %d got a misrouted response: %s", i, got[i])

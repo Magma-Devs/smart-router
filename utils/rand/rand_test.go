@@ -15,7 +15,7 @@ func isUniformlyDistributed(t *testing.T, f func(n int64) int64) {
 
 	numberToCount := make(map[int64]int64, maxValue)
 
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		out := f(maxValue)
 		numberToCount[out]++
 	}
@@ -23,7 +23,7 @@ func isUniformlyDistributed(t *testing.T, f func(n int64) int64) {
 	target := iterations / maxValue
 	const maxPercentDivergence = 0.07
 
-	for i := 0; i < maxValue; i++ {
+	for i := range maxValue {
 		count := numberToCount[int64(i)]
 		require.InEpsilon(t, target, count, maxPercentDivergence, "slot "+strconv.Itoa(i))
 	}
@@ -35,7 +35,7 @@ func TestDeterminism(t *testing.T) {
 
 	rng := New([]byte("pre-determined-data"))
 
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		random := rng.Int63n(100)
 		require.Equal(t, expected[i], random, "item "+strconv.Itoa(i))
 	}
@@ -43,7 +43,7 @@ func TestDeterminism(t *testing.T) {
 	Seed(rng, []byte("other-determined-data"))
 
 	count := 0
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		random := rng.Int63n(100)
 		if expected[i] == random {
 			count++

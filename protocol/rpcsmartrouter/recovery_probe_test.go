@@ -327,7 +327,8 @@ func TestReplayFailingRelay_JudgesByHealthClassification(t *testing.T) {
 		want relayProbeVerdict
 	}{
 		{"clean 200 result", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}}, relayProbeRecovered},
+			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`),
+		}}, relayProbeRecovered},
 		{"5xx still failing", &fakeDirectConn{err: &lavasession.HTTPStatusError{StatusCode: 503, Status: "503"}}, relayProbeStillFailing},
 		{"429 proves nothing", &fakeDirectConn{err: &lavasession.HTTPStatusError{StatusCode: 429, Status: "429"}}, relayProbeInconclusive},
 		{"501 is a capability answer, not a fault", &fakeDirectConn{err: &lavasession.HTTPStatusError{StatusCode: 501, Status: "501"}}, relayProbeRecovered},
@@ -335,15 +336,20 @@ func TestReplayFailingRelay_JudgesByHealthClassification(t *testing.T) {
 		{"401 proves nothing", &fakeDirectConn{err: &lavasession.HTTPStatusError{StatusCode: 401, Status: "401"}}, relayProbeInconclusive},
 		{"transport error still failing", &fakeDirectConn{err: context.DeadlineExceeded}, relayProbeStillFailing},
 		{"node internal error rides HTTP 200", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}`)}}, relayProbeStillFailing},
+			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}`),
+		}}, relayProbeStillFailing},
 		{"unsupported method in body is not a fault", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`)}}, relayProbeRecovered},
+			StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`),
+		}}, relayProbeRecovered},
 		{"unparseable 200 body (proxy HTML page) proves nothing", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: []byte(`<html><body>Bad Gateway</body></html>`)}}, relayProbeInconclusive},
+			StatusCode: 200, Data: []byte(`<html><body>Bad Gateway</body></html>`),
+		}}, relayProbeInconclusive},
 		{"empty 200 body proves nothing", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: nil}}, relayProbeInconclusive},
+			StatusCode: 200, Data: nil,
+		}}, relayProbeInconclusive},
 		{"batch reply (JSON array) cannot be judged", &fakeDirectConn{resp: &lavasession.DirectRPCResponse{
-			StatusCode: 200, Data: []byte(`[{"jsonrpc":"2.0","id":1,"result":"0x1"}]`)}}, relayProbeInconclusive},
+			StatusCode: 200, Data: []byte(`[{"jsonrpc":"2.0","id":1,"result":"0x1"}]`),
+		}}, relayProbeInconclusive},
 		{"nil response with nil error proves nothing", &fakeDirectConn{}, relayProbeInconclusive},
 	}
 	for _, tc := range cases {
@@ -433,10 +439,14 @@ func TestRecordRelayProbeEvidence_Eligibility(t *testing.T) {
 		{"hanging api never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, hanging, nil), testEvidence, false},
 		{"subscription never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, subscribe, subscribeDirective), testEvidence, false},
 		{"non-jsonrpc interface never recorded", spectypes.APIInterfaceRest, mockMessage(t, readOnly, nil), testEvidence, false},
-		{"batch (JSON array body) never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, batched, nil),
-			[]byte(`[{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[]}]`), false},
-		{"batch with leading whitespace never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, batched, nil),
-			[]byte("  \n\t[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[]}]"), false},
+		{
+			"batch (JSON array body) never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, batched, nil),
+			[]byte(`[{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[]}]`), false,
+		},
+		{
+			"batch with leading whitespace never recorded", spectypes.APIInterfaceJsonRPC, mockMessage(t, batched, nil),
+			[]byte("  \n\t[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[]}]"), false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
@@ -34,12 +33,10 @@ func TestHydrateGrpcResponseParsing_Guards(t *testing.T) {
 	// Sanity: a real crafted gRPC message exposes a *GrpcMessage via GetRPCMessage — the concrete type
 	// the helper type-asserts to attach the descriptor (the relay path asserts the same type).
 	grpcParser := &GrpcChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}},
-			},
-			apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGrpc}}},
+		serverApis: map[ApiKey]ApiContainer{
+			{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}},
 		},
+		apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGrpc}}},
 	}
 	grpcMsg, err := grpcParser.ParseMsg("API1", []byte("x"), connectionType_test, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
@@ -99,9 +96,7 @@ func TestGRPChainParser_NilGuard(t *testing.T) {
 func TestGRPCGetSupportedApi(t *testing.T) {
 	// Test case 1: Successful scenario, returns a supported API
 	apip := &GrpcChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
-		},
+		serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
 	}
 	apiCont, err := apip.getSupportedApi("API1", connectionType_test)
 	assert.NoError(t, err)
@@ -109,9 +104,7 @@ func TestGRPCGetSupportedApi(t *testing.T) {
 
 	// Test case 2: Returns error if the API does not exist
 	apip = &GrpcChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
-		},
+		serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
 	}
 	apiCont, err = apip.getSupportedApi("API2", connectionType_test)
 	if err == nil {
@@ -122,9 +115,7 @@ func TestGRPCGetSupportedApi(t *testing.T) {
 
 	// Test case 3: Returns error if the API is disabled
 	apip = &GrpcChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: false}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
-		},
+		serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: false}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
 	}
 	_, err = apip.getSupportedApi("API1", connectionType_test)
 	assert.Error(t, err)
@@ -133,12 +124,10 @@ func TestGRPCGetSupportedApi(t *testing.T) {
 
 func TestGRPCParseMessage(t *testing.T) {
 	apip := &GrpcChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}},
-			},
-			apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGrpc}}},
+		serverApis: map[ApiKey]ApiContainer{
+			{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}},
 		},
+		apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGrpc}}},
 	}
 
 	msg, err := apip.ParseMsg("API1", []byte("test message"), connectionType_test, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
@@ -148,9 +137,9 @@ func TestGRPCParseMessage(t *testing.T) {
 	assert.Equal(t, msg.GetApiCollection().CollectionData.ApiInterface, spectypes.APIInterfaceGrpc)
 
 	grpcMessage := rpcInterfaceMessages.GrpcMessage{
-		Msg:         []byte("test message"),
-		Path:        "API1",
-		BaseMessage: chainproxy.BaseMessage{Headers: []pairingtypes.Metadata{}},
+		Msg:     []byte("test message"),
+		Path:    "API1",
+		Headers: []pairingtypes.Metadata{},
 	}
 	grpcMsg, ok := msg.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
 	require.True(t, ok)

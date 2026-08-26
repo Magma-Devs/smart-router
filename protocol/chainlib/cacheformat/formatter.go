@@ -3,8 +3,8 @@ package cacheformat
 import (
 	"encoding/json"
 
-	"github.com/magma-Devs/smart-router/utils"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -35,8 +35,8 @@ func IdentityFormatter() (inputFormatter func([]byte) []byte, outputFormatter fu
 // FormatterForRelayRequestAndResponseJsonRPC returns formatters that remove the JSON-RPC id from
 // requests (so cache keys are id-independent) and restore the original id in responses.
 func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) []byte, outputFormatter func([]byte) []byte) {
-	var extractedID interface{} = "-1"
-	extractedIDArray := []interface{}{}
+	var extractedID any = "-1"
+	extractedIDArray := []any{}
 
 	inputFormatter = func(inpData []byte) []byte {
 		if len(inpData) < 3 {
@@ -47,7 +47,7 @@ func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) [
 		if err == nil && len(batch) >= 1 {
 			modifiedInpArray := []json.RawMessage{}
 			for _, batchData := range batch {
-				var extractedIDForBatch interface{}
+				var extractedIDForBatch any
 				var modifiedInp []byte
 				modifiedInp, extractedIDForBatch, err = getExtractedIDAndModifyInputForJSON(batchData)
 				if err != nil {
@@ -105,7 +105,7 @@ func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) [
 	return inputFormatter, outputFormatter
 }
 
-func getExtractedIDAndModifyInputForJSON(inpData []byte) (modifiedInp []byte, extractedID interface{}, err error) {
+func getExtractedIDAndModifyInputForJSON(inpData []byte) (modifiedInp []byte, extractedID any, err error) {
 	result := gjson.GetBytes(inpData, IDFieldName)
 	switch result.Type {
 	case gjson.Number:

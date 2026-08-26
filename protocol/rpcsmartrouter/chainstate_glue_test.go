@@ -1,7 +1,6 @@
 package rpcsmartrouter
 
 import (
-	"context"
 	"sync"
 	"testing"
 	"time"
@@ -224,8 +223,7 @@ func TestRecomputeChainStateConsensus_PopulatedSnapshotSetsBaseline(t *testing.T
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	parser := newRealChainParserForHarvest(t, "ETH1")
 	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
@@ -269,8 +267,7 @@ func TestSiteB_ObservationFresherThanTrackerAtomic(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	parser := newRealChainParserForHarvest(t, "ETH1")
 	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
@@ -361,8 +358,7 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// Empty options => metrics registered on the default registry, no HTTP server started.
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
@@ -535,8 +531,7 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
 	parser := newRealChainParserForHarvest(t, "ETH1")

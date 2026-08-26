@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -68,9 +67,7 @@ func TestRestChainParser_NilGuard(t *testing.T) {
 func TestRestGetSupportedApi(t *testing.T) {
 	// Test case 1: Successful scenario, returns a supported API
 	apip := &RestChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
-		},
+		serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
 	}
 	api, err := apip.getSupportedApi("API1", connectionType_test)
 	assert.NoError(t, err)
@@ -78,9 +75,7 @@ func TestRestGetSupportedApi(t *testing.T) {
 
 	// Test case 2: Returns error if the API does not exist
 	apip = &RestChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
-		},
+		serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
 	}
 	apiCont, err := apip.getSupportedApi("API2", connectionType_test)
 	if err == nil {
@@ -91,9 +86,7 @@ func TestRestGetSupportedApi(t *testing.T) {
 
 	// Test case 3: Returns error if the API is disabled
 	apip = &RestChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: false}),
-		},
+		serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: false}),
 	}
 	_, err = apip.getSupportedApi("API1", connectionType_test)
 	assert.Error(t, err)
@@ -102,10 +95,8 @@ func TestRestGetSupportedApi(t *testing.T) {
 
 func TestRestParseMessage(t *testing.T) {
 	apip := &RestChainParser{
-		BaseChainParser: BaseChainParser{
-			serverApis:     restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
-			apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceRest}}},
-		},
+		serverApis:     restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
+		apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceRest}}},
 	}
 
 	msg, err := apip.ParseMsg("API1", []byte("test message"), connectionType_test, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
@@ -114,10 +105,10 @@ func TestRestParseMessage(t *testing.T) {
 	assert.Equal(t, msg.GetApi().Name, apip.serverApis[ApiKey{Name: "API1", ConnectionType: connectionType_test}].api.Name)
 
 	restMessage := rpcInterfaceMessages.RestMessage{
-		Msg:         []byte("test message"),
-		Path:        "API1",
-		SpecPath:    "API1",
-		BaseMessage: chainproxy.BaseMessage{Headers: []pairingtypes.Metadata{}},
+		Msg:      []byte("test message"),
+		Path:     "API1",
+		SpecPath: "API1",
+		Headers:  []pairingtypes.Metadata{},
 	}
 
 	assert.Equal(t, &restMessage, msg.GetRPCMessage())
@@ -339,7 +330,7 @@ func TestRegexParsing(t *testing.T) {
 		"/cosmos/base/tendermint/v1beta1/blocks/latest",
 		"/cosmos/base/tendermint/v1beta1/blocks/latest/",
 	} {
-		for i := 0; i < 32; i++ {
+		for range 32 {
 			chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
 			require.Equal(t, "/cosmos/base/tendermint/v1beta1/blocks/latest", chainMessage.GetApi().GetName())

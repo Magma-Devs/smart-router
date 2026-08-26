@@ -56,12 +56,12 @@ func startRecordingGRPCServer(t *testing.T) (addr string, rec *mdRecorder) {
 	}
 	rec = &mdRecorder{}
 	srv := grpc.NewServer(
-		grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 			md, _ := metadata.FromIncomingContext(ctx)
 			rec.recordUnary(md)
 			return handler(ctx, req)
 		}),
-		grpc.StreamInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		grpc.StreamInterceptor(func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 			md, _ := metadata.FromIncomingContext(ss.Context())
 			rec.recordStream(md)
 			return handler(srv, ss)

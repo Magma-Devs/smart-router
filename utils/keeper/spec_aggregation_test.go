@@ -1,6 +1,7 @@
 package keeper
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -295,12 +296,9 @@ func TestSpecAggregation_OverrideBehavior(t *testing.T) {
 
 	// Aggregate: source2 should override source1
 	aggregated := make(map[string]types.Spec)
-	for k, v := range specs1 {
-		aggregated[k] = v
-	}
-	for k, v := range specs2 {
-		aggregated[k] = v // This simulates the override behavior
-	}
+	maps.Copy(aggregated, specs1)
+	// This simulates the override behavior
+	maps.Copy(aggregated, specs2)
 
 	// Verify aggregation
 	require.Len(t, aggregated, 3) // SHARED, SOURCE1_ONLY, SOURCE2_ONLY
@@ -453,12 +451,9 @@ func TestSpecAggregation_FullReplacement(t *testing.T) {
 
 	// Aggregate: source2 should COMPLETELY replace source1
 	aggregated := make(map[string]types.Spec)
-	for k, v := range specs1 {
-		aggregated[k] = v
-	}
-	for k, v := range specs2 {
-		aggregated[k] = v // Full replacement, not merge
-	}
+	maps.Copy(aggregated, specs1)
+	// Full replacement, not merge
+	maps.Copy(aggregated, specs2)
 
 	// Verify the aggregated spec is COMPLETELY from source2
 	finalSpec := aggregated["ETH1"]
@@ -611,9 +606,8 @@ func TestSpecAggregation_MultipleLocalFiles(t *testing.T) {
 	for _, source := range sources {
 		specs, err := GetAllSpecsFromPath(source)
 		require.NoError(t, err)
-		for chainID, spec := range specs {
-			aggregated[chainID] = spec // Last wins
-		}
+		// Last wins
+		maps.Copy(aggregated, specs)
 	}
 
 	// Verify we have 3 chains: ETH1, COSMOS, SOL
@@ -703,12 +697,9 @@ func TestSpecAggregation_RemoteAndLocalFile(t *testing.T) {
 	// Aggregate: remote first, then local override
 	// This simulates: --use-static-spec https://github.com/... --use-static-spec ./local.json
 	aggregated := make(map[string]types.Spec)
-	for k, v := range remoteSpecs {
-		aggregated[k] = v
-	}
-	for k, v := range localSpecs {
-		aggregated[k] = v // Local wins over remote
-	}
+	maps.Copy(aggregated, remoteSpecs)
+	// Local wins over remote
+	maps.Copy(aggregated, localSpecs)
 
 	// Verify: ETH1 should be completely from local, AVAX from remote
 	require.Len(t, aggregated, 2)
@@ -822,12 +813,9 @@ func TestSpecAggregation_RemoteAndLocalDirectory(t *testing.T) {
 
 	// Aggregate: remote first, then local directory overrides
 	aggregated := make(map[string]types.Spec)
-	for k, v := range remoteSpecs {
-		aggregated[k] = v
-	}
-	for k, v := range localSpecs {
-		aggregated[k] = v // Local directory wins over remote
-	}
+	maps.Copy(aggregated, remoteSpecs)
+	// Local directory wins over remote
+	maps.Copy(aggregated, localSpecs)
 
 	// Verify we have 4 chains: ETH1, AVAX, SOL, MATIC
 	require.Len(t, aggregated, 4)
@@ -916,19 +904,13 @@ func TestSpecAggregation_MultipleRemoteSources(t *testing.T) {
 	aggregated := make(map[string]types.Spec)
 
 	// First: GitHub
-	for k, v := range githubSpecs {
-		aggregated[k] = v
-	}
+	maps.Copy(aggregated, githubSpecs)
 
 	// Second: GitLab (overrides GitHub)
-	for k, v := range gitlabSpecs {
-		aggregated[k] = v
-	}
+	maps.Copy(aggregated, gitlabSpecs)
 
 	// Third: Local (overrides both)
-	for k, v := range localSpecs {
-		aggregated[k] = v
-	}
+	maps.Copy(aggregated, localSpecs)
 
 	// Verify we have 3 chains: ETH1, AVAX, COSMOS
 	require.Len(t, aggregated, 3)
@@ -993,9 +975,7 @@ func aggregateSpecsInOrder(t *testing.T, sources []string) map[string]types.Spec
 	for _, source := range sources {
 		specs, err := GetAllSpecsFromPath(source)
 		require.NoError(t, err)
-		for k, v := range specs {
-			aggregated[k] = v
-		}
+		maps.Copy(aggregated, specs)
 	}
 	return aggregated
 }
@@ -1057,9 +1037,7 @@ func TestSpecAggregation_CommaSeparatedPaths(t *testing.T) {
 		for _, path := range expanded {
 			specs, err := GetAllSpecsFromPath(path)
 			require.NoError(t, err)
-			for k, v := range specs {
-				aggregated[k] = v
-			}
+			maps.Copy(aggregated, specs)
 		}
 
 		// ETH1 should be from file3 (last wins)
@@ -1085,9 +1063,7 @@ func TestSpecAggregation_CommaSeparatedPaths(t *testing.T) {
 		for _, path := range allPaths {
 			specs, err := GetAllSpecsFromPath(path)
 			require.NoError(t, err)
-			for k, v := range specs {
-				aggregated[k] = v
-			}
+			maps.Copy(aggregated, specs)
 		}
 
 		// ETH1 should be from file3 (last wins)
@@ -1099,8 +1075,8 @@ func TestSpecAggregation_CommaSeparatedPaths(t *testing.T) {
 // of state_tracker.expandCommaSeparatedPaths for local paths only.
 func expandCommaSeparatedLocalPaths(path string) []string {
 	var expanded []string
-	parts := strings.Split(path, ",")
-	for _, part := range parts {
+	parts := strings.SplitSeq(path, ",")
+	for part := range parts {
 		trimmed := strings.TrimSpace(part)
 		if trimmed != "" {
 			expanded = append(expanded, trimmed)

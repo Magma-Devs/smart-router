@@ -173,6 +173,7 @@ func (a *AdaptiveMaxCalculator) applyDecayToDigest(decayFactor float64) {
 
 // GetAdaptiveMax returns the 95th percentile from the T-Digest as the adaptive max,
 // clamped to the configured [minMax, maxMax] range.
+//
 // Deprecated: Use GetAdaptiveBounds() for the P10-P90 approach (Phase 2 hybrid).
 func (a *AdaptiveMaxCalculator) GetAdaptiveMax() float64 {
 	if a == nil {
@@ -250,9 +251,9 @@ func (a *AdaptiveMaxCalculator) GetAdaptiveBounds() (p10, p90 float64) {
 }
 
 // GetStats returns statistics about the adaptive max calculator for debugging
-func (a *AdaptiveMaxCalculator) GetStats() map[string]interface{} {
+func (a *AdaptiveMaxCalculator) GetStats() map[string]any {
 	if a == nil {
-		return map[string]interface{}{"enabled": false}
+		return map[string]any{"enabled": false}
 	}
 
 	a.mu.RLock()
@@ -297,7 +298,7 @@ func (a *AdaptiveMaxCalculator) GetStats() map[string]interface{} {
 		return true
 	})
 
-	return map[string]interface{}{
+	return map[string]any{
 		"enabled":           true,
 		"adaptive_max_p95":  a.digest.Quantile(0.95),
 		"adaptive_p10":      p10,

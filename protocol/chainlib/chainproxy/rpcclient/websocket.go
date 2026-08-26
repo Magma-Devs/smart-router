@@ -170,7 +170,7 @@ func (wc *websocketCodec) peerInfo() PeerInfo {
 	return wc.info
 }
 
-func (wc *websocketCodec) writeJSON(ctx context.Context, v interface{}) error {
+func (wc *websocketCodec) writeJSON(ctx context.Context, v any) error {
 	err := wc.jsonCodec.writeJSON(ctx, v)
 	if err == nil {
 		// Notify pingLoop to delay the next idle ping.

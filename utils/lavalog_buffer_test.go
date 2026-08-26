@@ -27,7 +27,7 @@ func TestDebugRingWriter_EvictsOldestAtCapacity(t *testing.T) {
 
 	// Write cap+N records; only the newest `cap` must survive.
 	const extra = 6
-	for i := 0; i < cap+extra; i++ {
+	for i := range cap + extra {
 		if _, err := ring.Write([]byte{byte('A' + i)}); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
@@ -114,7 +114,7 @@ func TestReadDebugLogBuffer_LimitKeepsTail(t *testing.T) {
 	defer resetDebugBuffer()
 
 	EnableDebugLogBuffer(100)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		LavaFormatInfo("msg", LogAttr("i", i))
 	}
 	got := ReadDebugLogBuffer("", time.Time{}, time.Time{}, 3)
@@ -168,7 +168,7 @@ func TestDebugBuffer_ConcurrentEnableAndLog(t *testing.T) {
 
 	// Concurrently swap the buffer in/out under the loggers.
 	go func() {
-		for i := 0; i < iterations; i++ {
+		for range iterations {
 			EnableDebugLogBuffer(100)
 			ClearDebugLogBuffer()
 		}
@@ -176,15 +176,13 @@ func TestDebugBuffer_ConcurrentEnableAndLog(t *testing.T) {
 	}()
 
 	var wg sync.WaitGroup
-	for w := 0; w < writers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < iterations; i++ {
+	for range writers {
+		wg.Go(func() {
+			for range iterations {
 				LavaFormatInfo("concurrent line", LogAttr(KEY_REQUEST_ID, "race"))
 				_ = ReadDebugLogBuffer("race", time.Time{}, time.Time{}, 0)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	<-done

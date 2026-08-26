@@ -22,6 +22,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
+	"github.com/tidwall/gjson"
 )
 
 // DirectRPCRelaySender handles sending relay requests directly to RPC endpoints
@@ -164,68 +165,31 @@ func extractSolanaContextSlot(data []byte) (int64, bool) {
 //
 // Only methods known to return block height info are parsed. All other methods
 // (e.g. debug_traceTransaction, trace_replayBlockTransactions) return 0 immediately
-// without any JSON parsing, avoiding expensive full
+// without any JSON parsing. The methods that are parsed read one field by path
+// with gjson — a forward scan over the raw bytes that stops at the field, with no
+// decode of the surrounding block / receipt / log array into interface{}.
 func extractBlockHeightFromEVMResponse(responseData []byte, method string) int64 {
+	var path string
 	switch method {
 	case "eth_blockNumber":
-		result, err := unmarshalEVMResponseData(responseData)
-		if err != nil {
-			return 0
-		}
 		// Response: {"result": "0x12a7b5c"}
-		if hexStr, ok := result.(string); ok {
-			if len(hexStr) > 2 && hexStr[:2] == "0x" {
-				if block, err := strconv.ParseInt(hexStr[2:], 16, 64); err == nil {
-					return block
-				}
-			}
-		}
-
+		path = "result"
 	case "eth_getBlockByNumber", "eth_getBlockByHash":
-		result, err := unmarshalEVMResponseData(responseData)
-		if err != nil {
-			return 0
-		}
 		// Response: {"result": {"number": "0x12a7b5c", ...}}
-		if blockObj, ok := result.(map[string]interface{}); ok {
-			if numberHex, ok := blockObj["number"].(string); ok && len(numberHex) > 2 {
-				if block, err := strconv.ParseInt(numberHex[2:], 16, 64); err == nil {
-					return block
-				}
-			}
-		}
-
+		path = "result.number"
 	case "eth_getTransactionReceipt":
-		result, err := unmarshalEVMResponseData(responseData)
-		if err != nil {
-			return 0
-		}
 		// Response: {"result": {"blockNumber": "0x12a7b5c", ...}}
-		if receiptObj, ok := result.(map[string]interface{}); ok {
-			if blockNumHex, ok := receiptObj["blockNumber"].(string); ok && len(blockNumHex) > 2 {
-				if block, err := strconv.ParseInt(blockNumHex[2:], 16, 64); err == nil {
-					return block
-				}
-			}
-		}
-
+		path = "result.blockNumber"
 	case "eth_getLogs":
 		// Response: {"result": [{"blockNumber": "0x12a7b5c"}, ...]}
-		result, err := unmarshalEVMResponseData(responseData)
-		if err != nil {
-			return 0
-		}
-		if logsArray, ok := result.([]interface{}); ok && len(logsArray) > 0 {
-			if firstLog, ok := logsArray[0].(map[string]interface{}); ok {
-				if blockNumHex, ok := firstLog["blockNumber"].(string); ok && len(blockNumHex) > 2 {
-					if block, err := strconv.ParseInt(blockNumHex[2:], 16, 64); err == nil {
-						return block
-					}
-				}
-			}
-		}
+		path = "result.0.blockNumber"
 	}
 
+	if path != "" {
+		if block, ok := hexQuantityAtPath(responseData, path); ok {
+			return block
+		}
+	}
 	utils.LavaFormatDebug("EVM fallback: no block height for method",
 		utils.LogAttr("method", method),
 		utils.LogAttr("response_size", len(responseData)),
@@ -233,14 +197,19 @@ func extractBlockHeightFromEVMResponse(responseData []byte, method string) int64
 	return 0
 }
 
-func unmarshalEVMResponseData(responseData []byte) (interface{}, error) {
-	var jsonResponse struct {
-		Result interface{} `json:"result"`
+// hexQuantityAtPath reads the JSON string at path and parses it as a 0x-prefixed
+// hex quantity. Anything that is not a string longer than the prefix, or does
+// not parse as hex, reports false.
+func hexQuantityAtPath(data []byte, path string) (int64, bool) {
+	r := gjson.GetBytes(data, path)
+	if r.Type != gjson.String || len(r.Str) <= 2 || r.Str[:2] != "0x" {
+		return 0, false
 	}
-	if err := json.Unmarshal(responseData, &jsonResponse); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response data: %w", err)
+	block, err := strconv.ParseInt(r.Str[2:], 16, 64)
+	if err != nil {
+		return 0, false
 	}
-	return jsonResponse.Result, nil
+	return block, true
 }
 
 // extractBlockHeightFromGRPCResponse extracts block height from gRPC response using spec-driven parsing.

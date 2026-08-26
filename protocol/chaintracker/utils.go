@@ -27,14 +27,11 @@ func exponentialBackoff(baseTime time.Duration, fails uint64) time.Duration {
 		fails = maxFails
 	}
 	maxIncrease := BACKOFF_MAX_TIME
-	backoff := baseTime * (1 << fails)
-	if backoff > maxIncrease {
-		backoff = maxIncrease
-	}
+	backoff := min(baseTime*(1<<fails), maxIncrease)
 	return backoff
 }
 
-func FindRequestedBlockHash(requestedHashes []*BlockStore, requestBlock, toBlock, fromBlock int64, finalizedBlockHashes map[int64]interface{}) (requestedBlockHash []byte, finalizedBlockHashesMapRet map[int64]interface{}) {
+func FindRequestedBlockHash(requestedHashes []*BlockStore, requestBlock, toBlock, fromBlock int64, finalizedBlockHashes map[int64]any) (requestedBlockHash []byte, finalizedBlockHashesMapRet map[int64]any) {
 	for _, block := range requestedHashes {
 		if block.Block == requestBlock {
 			requestedBlockHash = []byte(block.Hash)

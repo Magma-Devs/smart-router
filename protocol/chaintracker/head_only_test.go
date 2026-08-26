@@ -86,8 +86,7 @@ func TestHeadOnly_StartSucceedsWhenHashFetchAlwaysFails(t *testing.T) {
 	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, headOnlyConfig(true))
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	require.NoError(t, tracker.StartAndServe(ctx), "head-only must start cleanly so the endpoint never parks in RetryingStart")
 	require.Equal(t, int64(100), tracker.GetAtomicLatestBlockNum(), "the head fetched during init must be published")
@@ -98,11 +97,10 @@ func TestHeadOnly_NeverFetchesBlockHashes(t *testing.T) {
 	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, headOnlyConfig(true))
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	require.NoError(t, tracker.StartAndServe(ctx))
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		fetcher.advance()
 		time.Sleep(SleepTime)
 	}
@@ -115,11 +113,10 @@ func TestHeadOnly_HeadAdvancesAcrossPolls(t *testing.T) {
 	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, headOnlyConfig(true))
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	require.NoError(t, tracker.StartAndServe(ctx))
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		fetcher.advance()
 	}
 
@@ -136,8 +133,7 @@ func TestHeadOnly_KeepsPolling(t *testing.T) {
 	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, headOnlyConfig(true))
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	require.NoError(t, tracker.StartAndServe(ctx))
 
 	after := fetcher.latestCalls.Load()
@@ -151,8 +147,7 @@ func TestHeadOnly_GetLatestBlockDataReturnsNoHashes(t *testing.T) {
 	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, headOnlyConfig(true))
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	require.NoError(t, tracker.StartAndServe(ctx))
 
 	latest, hashes, _, err := tracker.GetLatestBlockData(spectypes.NOT_APPLICABLE, spectypes.NOT_APPLICABLE, spectypes.NOT_APPLICABLE)

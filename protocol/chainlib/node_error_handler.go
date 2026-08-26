@@ -154,8 +154,7 @@ func IsUnsupportedMethodError(nodeError error) bool {
 
 // unwrapLavaError extracts the *LavaError from a LavaWrappedError, or returns nil.
 func unwrapLavaError(err error) *common.LavaError {
-	var wrapped *common.LavaWrappedError
-	if errors.As(err, &wrapped) {
+	if wrapped, ok := errors.AsType[*common.LavaWrappedError](err); ok {
 		return wrapped.LavaErr
 	}
 	return nil

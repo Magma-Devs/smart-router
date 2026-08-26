@@ -61,22 +61,22 @@ const (
 // BatchElem is an element in a batch request.
 type BatchElemWithId struct {
 	Method string
-	args   interface{}
+	args   any
 	// The result is unmarshaled into this field. Result must be set to a
 	// non-nil pointer value of the desired type, otherwise the response will be
 	// discarded.
-	Result interface{}
+	Result any
 	// Error is set if the server returns an error for this request, or if
 	// unmarshaling into Result fails. It is not set for I/O errors.
 	Error error
 	ID    json.RawMessage // added an ID field because we build our messages with built in ID, this is optional and can be set to nil
 }
 
-func NewBatchElementWithId(method string, args interface{}, result interface{}, iD json.RawMessage) (BatchElemWithId, error) {
-	_, ok := args.([]interface{})
-	_, ok2 := args.(map[string]interface{})
-	if !ok && !ok2 && args != nil {
-		return BatchElemWithId{}, fmt.Errorf("invalid args supported types are []interface{} or map[string]interface{}")
+func NewBatchElementWithId(method string, args any, result any, iD json.RawMessage) (BatchElemWithId, error) {
+	switch args.(type) {
+	case []any, map[string]any, json.RawMessage, nil:
+	default:
+		return BatchElemWithId{}, fmt.Errorf("invalid args supported types are []interface{}, map[string]interface{} or json.RawMessage")
 	}
 	return BatchElemWithId{
 		Method: method,
@@ -225,7 +225,7 @@ func initClient(conn ServerCodec, idgen func() ID, services *serviceRegistry) *C
 // methods on the given receiver match the criteria to be either a RPC method or a
 // subscription an error is returned. Otherwise a new service is created and added to the
 // service collection this client provides to the server.
-func (c *Client) RegisterName(name string, receiver interface{}) error {
+func (c *Client) RegisterName(name string, receiver any) error {
 	return c.services.registerName(name, receiver)
 }
 
@@ -283,13 +283,15 @@ func (c *Client) DelHeader(key string) {
 //
 // The result must be a pointer so that package json can unmarshal into it. You
 // can also pass nil, in which case the result is ignored.
-func (c *Client) CallContext(ctx context.Context, id json.RawMessage, method string, params interface{}, isJsonRPC bool, strict bool) (*JsonrpcMessage, error) {
+func (c *Client) CallContext(ctx context.Context, id json.RawMessage, method string, params any, isJsonRPC bool, strict bool) (*JsonrpcMessage, error) {
 	var msg *JsonrpcMessage
 	var err error
 	switch p := params.(type) {
-	case []interface{}, string:
+	case json.RawMessage:
+		msg = c.newMessageRawWithID(method, id, p)
+	case []any, string:
 		msg, err = c.newMessageArrayWithID(method, id, p)
-	case map[string]interface{}:
+	case map[string]any:
 		msg, err = c.newMessageMapWithID(method, id, p)
 	case nil:
 		msg, err = c.newMessageArrayWithID(method, id, nil) // pass nil to let omitempty tag handle field omission
@@ -356,9 +358,11 @@ func (c *Client) BatchCallContext(ctx context.Context, b []BatchElemWithId, stri
 		var msg *JsonrpcMessage
 		var err error
 		switch args := elem.args.(type) {
-		case []interface{}:
+		case json.RawMessage:
+			msg = c.newMessageRawWithID(elem.Method, elem.ID, args)
+		case []any:
 			msg, err = c.newMessageArray(elem.Method, args...)
-		case map[string]interface{}:
+		case map[string]any:
 			msg, err = c.newMessageMapWithID(elem.Method, elem.ID, args)
 		case nil:
 			msg, err = c.newMessageArrayWithID(elem.Method, elem.ID, nil)
@@ -440,7 +444,7 @@ func (c *Client) BatchCallContext(ctx context.Context, b []BatchElemWithId, stri
 }
 
 // Notify sends a notification, i.e. a method call that doesn't expect a response.
-func (c *Client) Notify(ctx context.Context, method string, args ...interface{}) error {
+func (c *Client) Notify(ctx context.Context, method string, args ...any) error {
 	op := new(requestOp)
 	msg, err := c.newMessageArray(method, args...)
 	if err != nil {
@@ -466,7 +470,7 @@ func (c *Client) Notify(ctx context.Context, method string, args ...interface{})
 // before considering the subscriber dead. The subscription Err channel will receive
 // ErrSubscriptionQueueOverflow. Use a sufficiently large buffer on the channel or ensure
 // that the channel usually has at least one reader to prevent this issue.
-func (c *Client) Subscribe(ctx context.Context, id json.RawMessage, method string, channel, params interface{}) (*ClientSubscription, *JsonrpcMessage, error) {
+func (c *Client) Subscribe(ctx context.Context, id json.RawMessage, method string, channel, params any) (*ClientSubscription, *JsonrpcMessage, error) {
 	// Check type of channel first.
 	chanVal := reflect.ValueOf(channel)
 	if chanVal.Kind() != reflect.Chan || chanVal.Type().ChanDir()&reflect.SendDir == 0 {
@@ -483,9 +487,9 @@ func (c *Client) Subscribe(ctx context.Context, id json.RawMessage, method strin
 	var subId string
 	var ok bool
 	switch p := params.(type) {
-	case []interface{}:
+	case []any:
 		msg, err = c.newMessageArrayWithID(method, id, p)
-	case map[string]interface{}:
+	case map[string]any:
 		msg, err = c.newMessageMapWithID(method, id, p)
 		subId, ok = p["query"].(string)
 		if !ok {
@@ -530,7 +534,7 @@ func (c *Client) Subscribe(ctx context.Context, id json.RawMessage, method strin
 	return op.sub, resp, nil
 }
 
-func (c *Client) newMessageArrayWithID(method string, id json.RawMessage, paramsIn interface{}) (*JsonrpcMessage, error) {
+func (c *Client) newMessageArrayWithID(method string, id json.RawMessage, paramsIn any) (*JsonrpcMessage, error) {
 	var msg *JsonrpcMessage
 	if id == nil {
 		msg = &JsonrpcMessage{Version: Vsn, ID: c.nextID(), Method: method}
@@ -546,7 +550,20 @@ func (c *Client) newMessageArrayWithID(method string, id json.RawMessage, params
 	return msg, nil
 }
 
-func (c *Client) newMessageArray(method string, paramsIn ...interface{}) (*JsonrpcMessage, error) {
+// newMessageRawWithID builds a request whose params are already encoded —
+// the client's wire bytes, forwarded as they are. No marshal step.
+func (c *Client) newMessageRawWithID(method string, id json.RawMessage, params json.RawMessage) *JsonrpcMessage {
+	if id == nil {
+		id = c.nextID()
+	}
+	msg := &JsonrpcMessage{Version: Vsn, ID: id, Method: method}
+	if len(params) > 0 {
+		msg.Params = params
+	}
+	return msg
+}
+
+func (c *Client) newMessageArray(method string, paramsIn ...any) (*JsonrpcMessage, error) {
 	msg := &JsonrpcMessage{Version: Vsn, ID: c.nextID(), Method: method}
 	if paramsIn != nil { // prevent sending "params":null
 		var err error
@@ -557,7 +574,7 @@ func (c *Client) newMessageArray(method string, paramsIn ...interface{}) (*Jsonr
 	return msg, nil
 }
 
-func (c *Client) newMessageMapWithID(method string, id json.RawMessage, paramsIn map[string]interface{}) (*JsonrpcMessage, error) {
+func (c *Client) newMessageMapWithID(method string, id json.RawMessage, paramsIn map[string]any) (*JsonrpcMessage, error) {
 	var msg *JsonrpcMessage
 	if id == nil {
 		msg = &JsonrpcMessage{Version: Vsn, ID: c.nextID(), Method: method}
@@ -589,7 +606,7 @@ func (c *Client) newMessageMapWithID(method string, id json.RawMessage, paramsIn
 
 // send registers op with the dispatch loop, then sends msg on the connection.
 // if sending fails, op is deregistered.
-func (c *Client) send(ctx context.Context, op *requestOp, msg interface{}) error {
+func (c *Client) send(ctx context.Context, op *requestOp, msg any) error {
 	select {
 	case c.reqInit <- op:
 		err := c.write(ctx, msg, false)
@@ -604,7 +621,7 @@ func (c *Client) send(ctx context.Context, op *requestOp, msg interface{}) error
 	}
 }
 
-func (c *Client) write(ctx context.Context, msg interface{}, retry bool) error {
+func (c *Client) write(ctx context.Context, msg any, retry bool) error {
 	if c.writeConn == nil {
 		// The previous write failed. Try to establish a new connection.
 		if err := c.reconnect(ctx); err != nil {

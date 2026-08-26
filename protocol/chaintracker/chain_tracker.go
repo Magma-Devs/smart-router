@@ -891,7 +891,7 @@ func (cs *ChainTracker) floorWithRetryAfter(interval time.Duration) time.Duratio
 
 func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) {
 	var newLatestBlock int64
-	for idx := 0; idx < initRetriesCount+1; idx++ {
+	for idx := range initRetriesCount + 1 {
 		newLatestBlock, err = cs.iChainFetcherWrapper.FetchLatestBlockNum(ctx)
 		if err == nil {
 			break
@@ -932,7 +932,7 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 		return nil
 	}
 
-	for idx := 0; idx < initRetriesCount; idx++ {
+	for idx := range initRetriesCount {
 		_, err = cs.fetchAllPreviousBlocks(ctx, newLatestBlock)
 		if err == nil {
 			break

@@ -503,8 +503,7 @@ func TestRecordPollObservation_UnchangedBlockStillPublishes(t *testing.T) {
 // and the skip source reported to OnGateSkip names the half that fired.
 func TestGate_RelayBeforePeer(t *testing.T) {
 	ensureRandSeeded()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	const url = "https://solana-ep:443/"
 	store := &fakePeerStore{}
@@ -526,11 +525,9 @@ func TestGate_RelayBeforePeer(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	conn := &countingDirectRPCConnection{
-		mockDirectRPCConnection: mockDirectRPCConnection{
-			url: url,
-			responses: map[string][]byte{
-				svmLatestBlockRequest: []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":250000000},"value":{"blockhash":"solhash"}}}`),
-			},
+		url: url,
+		responses: map[string][]byte{
+			svmLatestBlockRequest: []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":250000000},"value":{"blockhash":"solhash"}}}`),
 		},
 		matchSubstr: "getLatestBlockhash",
 	}
@@ -570,19 +567,16 @@ func TestGate_RelayBeforePeer(t *testing.T) {
 // peer block under SourcePeer. Without the gate wired it would poll on every tick (>=10).
 func TestEndpointMonitor_PeerGate_SuppressesUpstreamPoll(t *testing.T) {
 	ensureRandSeeded()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	const url = "https://solana-ep:443/"
 	store := &fakePeerStore{}
 	store.set(250000005, "other-pod/abcd", 10*time.Millisecond) // always fresh vs the 100ms window
 
 	conn := &countingDirectRPCConnection{
-		mockDirectRPCConnection: mockDirectRPCConnection{
-			url: url,
-			responses: map[string][]byte{
-				svmLatestBlockRequest: []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":250000000},"value":{"blockhash":"solhash"}}}`),
-			},
+		url: url,
+		responses: map[string][]byte{
+			svmLatestBlockRequest: []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":250000000},"value":{"blockhash":"solhash"}}}`),
 		},
 		matchSubstr: "getLatestBlockhash",
 	}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -728,7 +729,7 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 	// the client's id→response map, then restore the caller's id on the reply.
 	wireID := json.RawMessage(strconv.FormatUint(w.wireID.Add(1), 10))
 
-	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
+	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.SendableParams(), w.isJsonRPC, false)
 	if err != nil {
 		return nil, err
 	}
@@ -740,7 +741,7 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 	out := *reply
 	out.ID = reqMsg.ID // caller's id (omitted/empty for notifications)
 
-	respBytes, err := json.Marshal(&out)
+	respBytes, err := out.MarshalReply()
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal WebSocket response for %s: %w", w.nodeUrl.Url, err)
 	}
@@ -769,9 +770,7 @@ func (w *WebSocketDirectRPCConnection) ensureClient(ctx context.Context) (*rpccl
 	}
 
 	headers := make(map[string]string)
-	for k, v := range w.nodeUrl.GetAuthHeaders() {
-		headers[k] = v
-	}
+	maps.Copy(headers, w.nodeUrl.GetAuthHeaders())
 	endpoint := w.nodeUrl.AuthConfig.AddAuthPath(w.nodeUrl.Url)
 
 	client, err := rpcclient.DialWebsocket(ctx, endpoint, headers)
@@ -1707,17 +1706,19 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 
 	// Return the error response with metadata
 	// The caller can inspect the response to determine if it's an error
-	return &DirectRPCResponse{
-			Data:       respBytes,
-			Metadata:   respHeaders, // Include any headers received before the error
-			StatusCode: int(errorCode),
-		}, &GRPCStatusError{
-			Code:        errorCode,
-			Message:     errorMessage,
-			cause:       err,
-			rateLimited: rateLimited,
-			retryAfter:  retryAfter,
-		}
+	response := &DirectRPCResponse{
+		Data:       respBytes,
+		Metadata:   respHeaders, // Include any headers received before the error
+		StatusCode: int(errorCode),
+	}
+	statusErr := &GRPCStatusError{
+		Code:        errorCode,
+		Message:     errorMessage,
+		cause:       err,
+		rateLimited: rateLimited,
+		retryAfter:  retryAfter,
+	}
+	return response, statusErr
 }
 
 // GRPCStatusError represents a gRPC status error.

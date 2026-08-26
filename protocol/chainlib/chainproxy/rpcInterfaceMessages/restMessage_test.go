@@ -37,38 +37,38 @@ func TestRestMessageGetParamsTrailingSlash(t *testing.T) {
 		name     string
 		specPath string
 		path     string
-		expected map[string]interface{}
+		expected map[string]any
 	}{
 		{
 			name:     "request carries a slash the spec name omits",
 			specPath: "/chains/main/blocks/{block_id}/header",
 			path:     "/chains/main/blocks/9427283/header/",
-			expected: map[string]interface{}{"block_id": "9427283"},
+			expected: map[string]any{"block_id": "9427283"},
 		},
 		{
 			name:     "trailing placeholder with a trailing slash",
 			specPath: "/cosmos/base/tendermint/v1beta1/blocks/{height}",
 			path:     "/cosmos/base/tendermint/v1beta1/blocks/244590/",
-			expected: map[string]interface{}{"height": "244590"},
+			expected: map[string]any{"height": "244590"},
 		},
 		{
 			// The STACKS direction: the spec name carries the slash, the request does not.
 			name:     "spec name carries a slash after the placeholder",
 			specPath: "/extended/v1/address/{principal}/balances/",
 			path:     "/extended/v1/address/SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7/balances",
-			expected: map[string]interface{}{"principal": "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7"},
+			expected: map[string]any{"principal": "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7"},
 		},
 		{
 			name:     "several placeholders with a trailing slash",
 			specPath: "/cosmos/gov/v1/proposals/{proposal_id}/votes/{voter}",
 			path:     "/cosmos/gov/v1/proposals/7/votes/lava@1abc/",
-			expected: map[string]interface{}{"proposal_id": "7", "voter": "lava@1abc"},
+			expected: map[string]any{"proposal_id": "7", "voter": "lava@1abc"},
 		},
 		{
 			name:     "a query string survives the trailing slash",
 			specPath: "/cosmos/base/tendermint/v1beta1/blocks/{height}",
 			path:     "/cosmos/base/tendermint/v1beta1/blocks/244590/?pretty=true",
-			expected: map[string]interface{}{"height": "244590", "pretty": "true"},
+			expected: map[string]any{"height": "244590", "pretty": "true"},
 		},
 	}
 

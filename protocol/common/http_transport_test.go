@@ -112,8 +112,8 @@ func TestOptimizedHttpClient(t *testing.T) {
 func TestDefaultConstants(t *testing.T) {
 	tests := []struct {
 		name     string
-		got      interface{}
-		want     interface{}
+		got      any
+		want     any
 		critical bool // Mark if this value is critical for preventing connection exhaustion
 	}{
 		{

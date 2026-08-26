@@ -87,8 +87,7 @@ func TestNewEndpointMonitor_ResolvesFlatPollInterval(t *testing.T) {
 		{name: "a fast chain stays sub-second at the slowest divisor", avgBlockTime: 400 * time.Millisecond, divisor: 0.25, want: 1600 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 
 			m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 				ChainID:             "ETH1",

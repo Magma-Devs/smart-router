@@ -26,7 +26,7 @@ func BenchmarkMemoryUsageOnBatchRequests(b *testing.B) {
 		// Process 1000 requests with the same large data
 		// In the old implementation, this would create 1000 copies of canonical string forms
 		// In the new implementation, it only stores 1000 hashes (32 bytes each)
-		for j := 0; j < 1000; j++ {
+		for range 1000 {
 			hash := sha256.Sum256(responseData)
 			crossValidationMap[hash]++
 		}
@@ -73,7 +73,7 @@ func TestCrossValidationMapHashCollisions(t *testing.T) {
 	crossValidationMap := make(map[[32]byte]int)
 
 	// Create 1000 different responses
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		response := createLargeSolanaBatchResponse(10)
 		response["unique_id"] = i // Make each response unique
 		responseData, err := json.Marshal(response)
@@ -202,20 +202,30 @@ func BenchmarkHashVsCanonicalForm(b *testing.B) {
 	b.Run("JSONUnmarshalMarshal", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			var temp interface{}
+			var temp any
 			_ = json.Unmarshal(responseData, &temp)
 			_, _ = json.Marshal(temp)
+		}
+	})
+
+	// The canonical hash the cross-validation path actually computes:
+	// jsontext streaming canonicalization into a pooled buffer, then SHA256.
+	b.Run("CanonicalResponseHash", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = canonicalResponseHash(responseData)
 		}
 	})
 }
 
 // createLargeSolanaBatchResponse creates a large Solana-like batch response for testing
 // This simulates the type of responses that were causing memory leaks
-func createLargeSolanaBatchResponse(numItems int) map[string]interface{} {
-	results := make([]map[string]interface{}, numItems)
+func createLargeSolanaBatchResponse(numItems int) map[string]any {
+	results := make([]map[string]any, numItems)
 
 	for i := range numItems {
-		results[i] = map[string]interface{}{
+		results[i] = map[string]any{
 			"lamports":   999999999,
 			"owner":      "11111111111111111111111111111111",
 			"executable": false,
@@ -227,11 +237,11 @@ func createLargeSolanaBatchResponse(numItems int) map[string]interface{} {
 		}
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
-		"result": map[string]interface{}{
-			"context": map[string]interface{}{
+		"result": map[string]any{
+			"context": map[string]any{
 				"slot": 12345678,
 			},
 			"value": results,

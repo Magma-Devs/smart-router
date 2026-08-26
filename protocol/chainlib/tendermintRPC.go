@@ -78,11 +78,11 @@ func (apip *TendermintChainParser) CraftMessage(parsing *spectypes.ParseDirectiv
 	}
 
 	msg := rpcInterfaceMessages.JsonrpcMessage{
-		Version:     "2.0",
-		ID:          []byte("1"),
-		Method:      parsing.ApiName,
-		Params:      nil,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata},
+		Version: "2.0",
+		ID:      []byte("1"),
+		Method:  parsing.ApiName,
+		Params:  nil,
+		Headers: metadata,
 	}
 
 	apiCont, err := apip.getSupportedApi(parsing.ApiName, connectionType)
@@ -130,7 +130,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 			Version: "2.0",
 			Method:  urlObj.Path,
 		}
-		params := make(map[string]interface{})
+		params := make(map[string]any)
 		queryValues := urlObj.Query()
 		for key, values := range queryValues {
 			params[key] = strings.Join(values, ",")
@@ -639,15 +639,11 @@ func NewtendermintRpcChainProxy(ctx context.Context, nConns uint, rpcProviderEnd
 
 	nodeUrl := rpcProviderEndpoint.NodeUrls[0]
 	cp := &tendermintRpcChainProxy{
-		JrpcChainProxy: JrpcChainProxy{
-			BaseChainProxy: BaseChainProxy{
-				averageBlockTime: averageBlockTime,
-				NodeUrl:          nodeUrl,
-				ErrorHandler:     &TendermintRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID},
-				ChainID:          rpcProviderEndpoint.ChainID,
-			},
-			conn: nil,
-		},
+		averageBlockTime: averageBlockTime,
+		NodeUrl:          nodeUrl,
+		ErrorHandler:     &TendermintRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID},
+		ChainID:          rpcProviderEndpoint.ChainID,
+		conn:             nil,
 	}
 
 	return cp, cp.start(ctx, nConns, nodeUrl)
@@ -785,7 +781,7 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 
 	cp.NodeUrl.SetIpForwardingIfNecessary(ctx, rpc.SetHeader)
 	// perform the rpc call
-	rpcMessage, nodeErr := rpc.CallContext(connectCtx, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, false, nodeMessage.GetDisableErrorHandling())
+	rpcMessage, nodeErr := rpc.CallContext(connectCtx, nodeMessage.ID, nodeMessage.Method, nodeMessage.SendableParams(), false, nodeMessage.GetDisableErrorHandling())
 	if nodeErr != nil {
 		if errors.Is(nodeErr, common.StatusCodeError504) || errors.Is(nodeErr, common.StatusCodeError429) || errors.Is(nodeErr, common.StatusCodeErrorStrict) {
 			return nil, utils.LavaFormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})

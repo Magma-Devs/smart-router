@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1012,13 +1013,7 @@ func (m *SmartRouterMetricsManager) RegisterEndpoint(spec, apiInterface, endpoin
 	// Append with dedup: multiple providers can share a URL, and the same (URL, provider)
 	// pair can be registered more than once (e.g. a provider with duplicate node-urls).
 	existing := m.urlToProviderNames[endpointID]
-	alreadyRegistered := false
-	for _, name := range existing {
-		if name == providerName {
-			alreadyRegistered = true
-			break
-		}
-	}
+	alreadyRegistered := slices.Contains(existing, providerName)
 	if !alreadyRegistered {
 		m.urlToProviderNames[endpointID] = append(existing, providerName)
 	}

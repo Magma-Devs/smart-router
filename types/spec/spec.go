@@ -2,6 +2,7 @@ package spec
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 )
 
@@ -115,9 +116,9 @@ func (spec *Spec) CombineCollections(parentsCollections map[CollectionData][]*Ap
 
 		var combined *ApiCollection
 		var others []*ApiCollection
-		for i := 0; i < len(collectionsToCombine); i++ {
+		for i := range collectionsToCombine {
 			combined = collectionsToCombine[i]
-			others = append(collectionsToCombine[:i:i], collectionsToCombine[i+1:]...)
+			others = slices.Concat(collectionsToCombine[:i], collectionsToCombine[i+1:])
 			if combined.Enabled {
 				break
 			}

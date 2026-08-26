@@ -6,7 +6,7 @@
 # `docker compose -f docker/docker-compose.yml up` builds and runs router +
 # cache from the same image. Not used by CI/release.
 
-FROM golang:1.26 AS build
+FROM golang:1.27 AS build
 WORKDIR /src
 
 # Cache module downloads on an unchanged go.mod/go.sum.

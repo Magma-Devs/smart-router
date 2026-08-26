@@ -810,7 +810,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		stateMachine,
 	)
 	usedEndpointsResets := 1
-	for i := 0; i < retries; i++ {
+	for i := range retries {
 		// Check if we even have enough endpoints to communicate with them all.
 		// If we have 1 endpoint we will reset the used endpoints always.
 		// Instead of spamming no pairing available on bootstrap
@@ -1834,6 +1834,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		relayProcessor.SetCrossValidationRelayDeadline(time.Now().Add(2*relayTimeout + maxNodeTimeout + crossValidationStragglerGrace))
 	}
 
+	// Method name for goroutine labels (nil api on crafted relays).
+	relayApiName := ""
+	if api := chainMessage.GetApi(); api != nil {
+		relayApiName = api.Name
+	}
+
 	// Launch goroutines for each direct RPC endpoint (parallel relay pattern)
 	for endpointAddress, sessionInfo := range sessions {
 		go func(endpointAddress string, sessionInfo *lavasession.SessionInfo, relayParentCtx context.Context) {
@@ -1844,6 +1850,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			if found {
 				goroutineCtx = utils.WithUniqueIdentifier(goroutineCtx, guid)
 			}
+
+			// Label this relay goroutine so the Go 1.27 goroutineleak profile and
+			// tracebacks attribute a stuck/leaked provider relay to its chain,
+			// interface and endpoint rather than an anonymous stack.
+			goroutineCtx = utils.WithGoroutineLabels(goroutineCtx,
+				"chain", rpcss.listenEndpoint.ChainID,
+				"api_interface", rpcss.listenEndpoint.ApiInterface,
+				"provider", endpointAddress,
+				"method", relayApiName,
+			)
 
 			// StartInternalSpan declines to create a span when there is no
 			// recording parent in context, which protects against orphan root
@@ -2441,10 +2457,7 @@ const minChainStateRecomputeInterval = time.Second
 // baseline (MAG-2160 / Topic C) until ctx is cancelled. The cadence is the chain's average
 // block time, floored at minChainStateRecomputeInterval.
 func (rpcss *RPCSmartRouterServer) runChainStateConsensusLoop(ctx context.Context, averageBlockTime time.Duration) {
-	interval := averageBlockTime
-	if interval < minChainStateRecomputeInterval {
-		interval = minChainStateRecomputeInterval
-	}
+	interval := max(averageBlockTime, minChainStateRecomputeInterval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -3256,10 +3269,7 @@ func (rpcss *RPCSmartRouterServer) reconcileChainTrackers(ctx context.Context, f
 // production, restoring the baseline HERE — as a documented exception to the
 // single-reader rule — is the intended remedy.
 func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlock, finalizationDistance int64) bool {
-	latest := replyLatestBlock
-	if trackedLatestBlock > latest {
-		latest = trackedLatestBlock
-	}
+	latest := max(trackedLatestBlock, replyLatestBlock)
 	return spectypes.IsFinalizedBlock(requestedBlock, latest, finalizationDistance)
 }
 
@@ -4357,7 +4367,19 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 
 	// WithoutCancel: the reply has already been sent, so the watcher must outlive the request context;
 	// it is bounded by maxWait. Values (GUID) are preserved for log correlation.
-	go relayProcessor.WatchCrossValidationStragglers(context.WithoutCancel(ctx), pendingProviders, consensusHash, maxWait, record)
+	watchCtx := context.WithoutCancel(ctx)
+	go func() {
+		// Label inside the goroutine (SetGoroutineLabels applies to the running
+		// goroutine) so a leaked straggler watcher is attributable in the
+		// goroutineleak profile.
+		lctx := utils.WithGoroutineLabels(watchCtx,
+			"chain", chainId,
+			"api_interface", apiInterface,
+			"method", apiName,
+			"goroutine", "cross_validation_straggler_watcher",
+		)
+		relayProcessor.WatchCrossValidationStragglers(lctx, pendingProviders, consensusHash, maxWait, record)
+	}()
 }
 
 // RelayProcessorForHeaders interface for methods used by appendHeadersToRelayResult
@@ -4796,14 +4818,14 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 
 		nodeErrors := relayProcessor.NodeErrors()
 		if len(nodeErrors) > 0 {
-			nodeErrorHeaderString := ""
+			var nodeErrorHeaderString strings.Builder
 			for _, nodeError := range nodeErrors {
-				nodeErrorHeaderString += fmt.Sprintf("%s: %s,", nodeError.GetProvider(), string(nodeError.Reply.Data))
+				nodeErrorHeaderString.WriteString(fmt.Sprintf("%s: %s,", nodeError.GetProvider(), string(nodeError.Reply.Data)))
 			}
 			relayResult.Reply.Metadata = append(relayResult.Reply.Metadata,
 				pairingtypes.Metadata{
 					Name:  common.NODE_ERRORS_PROVIDERS_HEADER_NAME,
-					Value: nodeErrorHeaderString,
+					Value: nodeErrorHeaderString.String(),
 				})
 		}
 

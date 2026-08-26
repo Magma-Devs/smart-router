@@ -21,7 +21,7 @@ func TestClientCallContext_NilParameterHandling(t *testing.T) {
 
 	testCases := []struct {
 		name        string
-		inputParams interface{}
+		inputParams any
 		routeTaken  string
 		description string
 	}{
@@ -33,25 +33,25 @@ func TestClientCallContext_NilParameterHandling(t *testing.T) {
 		},
 		{
 			name:        "empty slice params route",
-			inputParams: []interface{}{},
+			inputParams: []any{},
 			routeTaken:  "case []interface{}: unchanged",
 			description: "empty slice is handled by existing logic",
 		},
 		{
 			name:        "slice with args",
-			inputParams: []interface{}{"arg1", "arg2"},
+			inputParams: []any{"arg1", "arg2"},
 			routeTaken:  "case []interface{}: unchanged",
 			description: "slice with values is handled by existing logic",
 		},
 		{
 			name:        "empty map params route",
-			inputParams: map[string]interface{}{},
+			inputParams: map[string]any{},
 			routeTaken:  "case map[string]interface{}: unchanged",
 			description: "empty map is handled by existing logic",
 		},
 		{
 			name:        "map with data",
-			inputParams: map[string]interface{}{"key": "value"},
+			inputParams: map[string]any{"key": "value"},
 			routeTaken:  "case map[string]interface{}: unchanged",
 			description: "map with values is handled by existing logic",
 		},
@@ -64,9 +64,9 @@ func TestClientCallContext_NilParameterHandling(t *testing.T) {
 
 			// Verify type switch behavior
 			switch tc.inputParams.(type) {
-			case []interface{}, string:
+			case []any, string:
 				t.Logf("Matched array/string case - unchanged behavior")
-			case map[string]interface{}:
+			case map[string]any:
 				t.Logf("Matched map case - unchanged behavior")
 			case nil:
 				t.Logf("Matched nil case - THE FIX: now passes nil instead of make([]interface{}, 0)")
@@ -92,21 +92,21 @@ func TestOmitemptyBehavior_WhenNilReachesMessage(t *testing.T) {
 
 	t.Run("nil will cause omitempty to skip the field", func(t *testing.T) {
 		// This is the expected behavior after our fix
-		var params interface{} = nil
+		var params any = nil
 		// When marshal happens, if params is nil and has omitempty tag, field will be skipped
 		assert.Nil(t, params, "nil params demonstrates omitempty condition")
 	})
 
 	t.Run("empty array will NOT cause omitempty to skip", func(t *testing.T) {
 		// Empty array is a valid value, so omitempty does not apply
-		params := make([]interface{}, 0)
+		params := make([]any, 0)
 		assert.NotNil(t, params, "empty array is a real value, not nil")
 		assert.Empty(t, params, "but it's empty")
 	})
 
 	t.Run("empty map will NOT cause omitempty to skip", func(t *testing.T) {
 		// Empty map is a valid value, so omitempty does not apply
-		params := make(map[string]interface{})
+		params := make(map[string]any)
 		assert.NotNil(t, params, "empty map is a real value, not nil")
 		assert.Empty(t, params, "but it's empty")
 	})

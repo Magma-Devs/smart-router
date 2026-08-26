@@ -1,13 +1,11 @@
 package relaycore
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -29,7 +27,7 @@ type RelayProcessor struct {
 	guid                         uint64
 	selection                    Selection
 	debugRelay                   bool
-	allowSessionDegradation      uint32 // used in the scenario where extension was previously used.
+	allowSessionDegradation      atomic.Uint32 // used in the scenario where extension was previously used.
 	metricsInf                   MetricsInterface
 	chainIdAndApiInterfaceGetter ChainIdAndApiInterfaceGetter
 	relayRetriesManager          *lavaprotocol.RelayRetriesManager
@@ -242,12 +240,12 @@ func quorumGroupOf(result common.RelayResult) string {
 
 // true if we never got an extension. (default value)
 func (rp *RelayProcessor) GetAllowSessionDegradation() bool {
-	return atomic.LoadUint32(&rp.allowSessionDegradation) == 0
+	return rp.allowSessionDegradation.Load() == 0
 }
 
 // in case we had an extension and managed to get a session successfully, we prevent session degradation.
 func (rp *RelayProcessor) SetDisallowDegradation() {
-	atomic.StoreUint32(&rp.allowSessionDegradation, 1)
+	rp.allowSessionDegradation.Store(1)
 }
 
 // SetStatefulRelayTargets stores the list of providers that received a stateful relay
@@ -552,35 +550,56 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 // round to the same float64 and produce a *false agreement*, which is worse
 // than the false negative this fixes.
 //
-// Canonicalization normalizes structure only (key order, whitespace), never
-// values: json.Number keeps numeric literals distinct, so the same value sent
-// as 1.0 vs 1, or 100 vs 1e2, still hashes differently. That is intentional —
-// the alternative (collapsing numerics) would risk a false agreement.
+// Canonicalization normalizes structure only (key order, whitespace, string
+// escaping), never values: numeric literals are kept verbatim, so the same
+// value sent as 1.0 vs 1, or 100 vs 1e2, still hashes differently. That is
+// intentional — the alternative (collapsing numerics) would risk a false
+// agreement.
 //
-// If the data is not valid JSON (e.g. binary gRPC payloads), is not exactly one
-// JSON value (trailing bytes or multiple concatenated documents), or fails to
-// re-marshal, it falls back to hashing the raw bytes. The single-value check
-// matters for safety: json.Decoder.Decode reads only the first value and
-// silently ignores any trailing data, so without it two byte-different payloads
-// (e.g. "{...}A" vs "{...}B") would collapse into one bucket — a false agreement
-// that the raw-byte hash would otherwise have caught.
+// The canonical form is produced by jsontext.AppendFormat with ReorderRawObjects,
+// which sorts object members and re-encodes strings minimally while streaming
+// the raw bytes into a pooled scratch buffer — no decode into interface{}, no
+// re-marshal, so the cost is a scan plus the hash. Duplicate member names and
+// invalid UTF-8 are tolerated on the way in (a response is hashed, never
+// rejected, and the old decode-based path accepted both).
+//
+// If the data is not valid JSON (e.g. binary gRPC payloads) or is not exactly
+// one JSON value (trailing bytes or multiple concatenated documents), it falls
+// back to hashing the raw bytes. AppendFormat enforces the single-value rule
+// itself: anything after the first value is a formatting error, so two
+// byte-different payloads (e.g. "{...}A" vs "{...}B") never collapse into one
+// bucket — a false agreement the raw-byte hash would otherwise have caught.
 func canonicalResponseHash(data []byte) [32]byte {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	var v interface{}
-	if err := dec.Decode(&v); err != nil {
-		return sha256.Sum256(data)
+	bufp, ok := canonicalScratch.Get().(*[]byte)
+	if !ok {
+		b := make([]byte, 0, 4096)
+		bufp = &b
 	}
-	// Reject trailing data: a canonical response must be exactly one JSON value.
-	if _, err := dec.Token(); err != io.EOF {
-		return sha256.Sum256(data)
-	}
-	canonical, err := json.Marshal(v)
+	defer func() {
+		// Keep the pool bounded: a multi-MB straggler must not pin its buffer
+		// for the lifetime of the process.
+		if cap(*bufp) <= canonicalScratchMaxRetain {
+			canonicalScratch.Put(bufp)
+		}
+	}()
+	canonical, err := jsontext.AppendFormat((*bufp)[:0], data,
+		jsontext.ReorderRawObjects(true),
+		jsontext.AllowDuplicateNames(true),
+		jsontext.AllowInvalidUTF8(true),
+	)
+	*bufp = canonical
 	if err != nil {
 		return sha256.Sum256(data)
 	}
 	return sha256.Sum256(canonical)
 }
+
+// canonicalScratch recycles the canonical-form buffers across relays; the
+// formatted copy is only needed for the duration of the hash.
+var canonicalScratch = sync.Pool{New: func() any { b := make([]byte, 0, 4096); return &b }}
+
+// canonicalScratchMaxRetain caps the buffer size the pool holds on to.
+const canonicalScratchMaxRetain = 1 << 20
 
 // responseContentHash is the single content-hash rule for every cross-validation comparison:
 // the canonical hash for non-empty data, the zero sentinel for empty/nil (so an empty reply only

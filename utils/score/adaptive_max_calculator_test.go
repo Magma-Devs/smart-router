@@ -56,7 +56,7 @@ func TestAdaptiveMaxCalculator_ExponentialDecay(t *testing.T) {
 	baseTime := time.Now()
 
 	// Add high samples at time 0
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		err := calc.AddSample(10.0, baseTime.Add(time.Duration(i)*time.Millisecond))
 		require.NoError(t, err)
 	}
@@ -68,7 +68,7 @@ func TestAdaptiveMaxCalculator_ExponentialDecay(t *testing.T) {
 	// Add even more low samples several hours later
 	// so that the weight ratio heavily favors the new values
 	futureTime := baseTime.Add(5 * time.Hour) // 5 half-lives = weight 1/32
-	for i := 0; i < 200; i++ {                // 4x more samples
+	for i := range 200 {                      // 4x more samples
 		err := calc.AddSample(2.0, futureTime.Add(time.Duration(i)*time.Millisecond))
 		require.NoError(t, err)
 	}
@@ -92,7 +92,7 @@ func TestAdaptiveMaxCalculator_Clamping(t *testing.T) {
 	baseTime := time.Now()
 
 	// Add very low samples (below minMax)
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		err := calc.AddSample(0.5, baseTime.Add(time.Duration(i)*time.Second))
 		require.NoError(t, err)
 	}
@@ -103,7 +103,7 @@ func TestAdaptiveMaxCalculator_Clamping(t *testing.T) {
 
 	// Reset and add very high samples (above maxMax)
 	calc.Reset()
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		err := calc.AddSample(20.0, baseTime.Add(time.Duration(i)*time.Second))
 		require.NoError(t, err)
 	}
@@ -234,21 +234,21 @@ func TestAdaptiveMaxCalculator_LargeDataset(t *testing.T) {
 
 	// Simulate 3 providers with different latency distributions
 	// Provider A: avg 0.5s
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		sample := 0.5 + (float64(i%20) / 100.0) // 0.5 ± 0.2s
 		err := calc.AddSample(sample, baseTime.Add(time.Duration(i)*time.Millisecond))
 		require.NoError(t, err)
 	}
 
 	// Provider B: avg 1.0s
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		sample := 1.0 + (float64(i%20) / 100.0) // 1.0 ± 0.2s
 		err := calc.AddSample(sample, baseTime.Add(time.Duration(300+i)*time.Millisecond))
 		require.NoError(t, err)
 	}
 
 	// Provider C: avg 2.0s
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		sample := 2.0 + (float64(i%20) / 100.0) // 2.0 ± 0.2s
 		err := calc.AddSample(sample, baseTime.Add(time.Duration(600+i)*time.Millisecond))
 		require.NoError(t, err)
@@ -275,7 +275,7 @@ func TestAdaptiveMaxCalculator_Reset(t *testing.T) {
 	baseTime := time.Now()
 
 	// Add samples
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		err := calc.AddSample(5.0, baseTime.Add(time.Duration(i)*time.Second))
 		require.NoError(t, err)
 	}
@@ -327,21 +327,21 @@ func TestAdaptiveMaxCalculator_GetAdaptiveBounds(t *testing.T) {
 
 	// Add samples representing 3 providers with different latencies
 	// Provider A: 0.3s (300 samples)
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		sample := 0.3 + (float64(i%10) / 100.0) // 0.3 ± 0.1s
 		err := calc.AddSample(sample, baseTime.Add(time.Duration(i)*time.Millisecond))
 		require.NoError(t, err)
 	}
 
 	// Provider B: 1.0s (300 samples)
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		sample := 1.0 + (float64(i%10) / 100.0) // 1.0 ± 0.1s
 		err := calc.AddSample(sample, baseTime.Add(time.Duration(300+i)*time.Millisecond))
 		require.NoError(t, err)
 	}
 
 	// Provider C: 2.0s (300 samples)
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		sample := 2.0 + (float64(i%10) / 100.0) // 2.0 ± 0.1s
 		err := calc.AddSample(sample, baseTime.Add(time.Duration(600+i)*time.Millisecond))
 		require.NoError(t, err)
@@ -377,7 +377,7 @@ func TestAdaptiveMaxCalculator_GetAdaptiveBounds_Clamping(t *testing.T) {
 	baseTime := time.Now()
 
 	// Add very low samples (P10 would be below minimum)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		err := calc.AddSample(0.05, baseTime.Add(time.Duration(i)*time.Millisecond))
 		require.NoError(t, err)
 	}
@@ -397,7 +397,7 @@ func TestAdaptiveMaxCalculator_GetAdaptiveBounds_Clamping(t *testing.T) {
 	calc.Reset()
 
 	// Add very high samples (P90 would be above maximum)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		err := calc.AddSample(50.0, baseTime.Add(time.Duration(i)*time.Millisecond))
 		require.NoError(t, err)
 	}
@@ -427,7 +427,7 @@ func TestAdaptiveMaxCalculator_Stats_IncludesBounds(t *testing.T) {
 	baseTime := time.Now()
 
 	// Add samples
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		sample := float64(i) / 10.0 // 0.0 to 10.0
 		err := calc.AddSample(sample, baseTime.Add(time.Duration(i)*time.Millisecond))
 		require.NoError(t, err)

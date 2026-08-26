@@ -10,7 +10,7 @@ import (
 func TestNoopUsageSink_IsZeroCost(t *testing.T) {
 	var sink UsageEventSink = NoopUsageSink{}
 	// Each call must return immediately and mutate no shared state.
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		sink.Emit(RelayUsageEvent{
 			TimestampNs:  time.Now().UnixNano(),
 			ProjectHash:  "p",
@@ -35,7 +35,7 @@ func TestNoopUsageSink_NilSafetyByValue(t *testing.T) {
 
 func TestNoopUsageSink_OptimizerQoSIsZeroCost(t *testing.T) {
 	var sink UsageEventSink = NoopUsageSink{}
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		sink.EmitOptimizerQoS(OptimizerQoSReportToSend{
 			Timestamp:       time.Now(),
 			ProviderAddress: "lava@p",

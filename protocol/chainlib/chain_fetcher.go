@@ -39,7 +39,7 @@ type ChainFetcher struct {
 	chainRouter         ChainRouter
 	chainParser         ChainParser
 	cache               *performance.Cache
-	latestBlock         int64
+	latestBlock         atomic.Int64
 	verificationsStatus common.SafeSyncMap[string, bool]
 	cachedVerifications atomic.Value // holds []*pairingtypes.Verification for faster access
 	cacheValid          atomic.Bool
@@ -144,7 +144,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 
 		var latestBlock int64
 		if needsLatestBlock(url, verifications) {
-			for attempts := 0; attempts < 3; attempts++ {
+			for range 3 {
 				latestBlock, err = cf.FetchLatestBlockNum(ctx)
 				if stopValidateRetries(err) {
 					break
@@ -164,7 +164,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 			}
 			// we give several chances for starting up
 			var err error
-			for attempts := 0; attempts < 3; attempts++ {
+			for range 3 {
 				err = cf.Verify(ctx, verification, uint64(latestBlock))
 				if stopValidateRetries(err) {
 					break
@@ -229,7 +229,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 
 		var latestBlock int64
 		if needsLatestBlock(url, verifications) {
-			for attempts := 0; attempts < 3; attempts++ {
+			for range 3 {
 				latestBlock, err = cf.FetchLatestBlockNum(ctx)
 				if stopValidateRetries(err) {
 					break
@@ -243,7 +243,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 				continue
 			}
 			var verifyErr error
-			for attempts := 0; attempts < 3; attempts++ {
+			for range 3 {
 				verifyErr = cf.Verify(ctx, verification, uint64(latestBlock))
 				if stopValidateRetries(verifyErr) {
 					break
@@ -547,7 +547,7 @@ func (cf *ChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) 
 			{Key: "error", Value: err},
 		}...)
 	}
-	atomic.StoreInt64(&cf.latestBlock, blockNum)
+	cf.latestBlock.Store(blockNum)
 	return blockNum, nil
 }
 
@@ -649,7 +649,7 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 		}...)
 	}
 	_, _, blockDistanceToFinalization, _ := cf.chainParser.ChainBlockStats()
-	latestBlock := atomic.LoadInt64(&cf.latestBlock) // assuming FetchLatestBlockNum is called before this one it's always true
+	latestBlock := cf.latestBlock.Load() // assuming FetchLatestBlockNum is called before this one it's always true
 	if latestBlock > 0 {
 		finalized := spectypes.IsFinalizedBlock(blockNum, latestBlock, int64(blockDistanceToFinalization))
 		isNodeError, _ := chainMessage.CheckResponseError(reply.RelayReply.Data, reply.StatusCode)

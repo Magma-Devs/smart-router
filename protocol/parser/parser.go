@@ -27,7 +27,7 @@ const (
 var ValueNotSetError = errors.New("when trying to parse, the value that we attempted to parse did not exist")
 
 type RPCInput interface {
-	GetParams() interface{}
+	GetParams() any
 	GetResult() json.RawMessage
 	GetError() *rpcclient.JsonError
 	ParseBlock(block string) (int64, error)
@@ -240,8 +240,8 @@ func ParseBlockHashFromReplyAndDecode(rpcInput RPCInput, resultParser spectypes.
 	return parseResponseByEncoding([]byte(parsedBlockHashes[0]), resultParser.Encoding)
 }
 
-func legacyParse(rpcInput RPCInput, blockParser spectypes.BlockParser, dataSource int) ([]interface{}, bool, error) {
-	var retval []interface{}
+func legacyParse(rpcInput RPCInput, blockParser spectypes.BlockParser, dataSource int) ([]any, bool, error) {
+	var retval []any
 	var err error
 	var usedDefaultValue bool
 	switch blockParser.ParserFunc {
@@ -321,21 +321,21 @@ func (p *ParsedInput) GetBlockHashes() ([]string, error) {
 	return p.parsedHashes, nil
 }
 
-func getMapForParse(rpcInput RPCInput) map[string]interface{} {
+func getMapForParse(rpcInput RPCInput) map[string]any {
 	result := parseRawResult(rpcInput.GetResult())
-	return map[string]interface{}{
+	return map[string]any{
 		"params": rpcInput.GetParams(),
 		"result": result,
 		"error":  rpcInput.GetError().ToMap(),
 	}
 }
 
-func parseRawResult(rawResult json.RawMessage) interface{} {
+func parseRawResult(rawResult json.RawMessage) any {
 	if rawResult == nil {
 		return nil
 	}
 
-	var result interface{}
+	var result any
 	if err := json.Unmarshal(rawResult, &result); err != nil {
 		utils.LavaFormatError("failed to unmarshal result", err, utils.LogAttr("result", rawResult))
 		return nil
@@ -360,17 +360,13 @@ func ParseWithGenericParsers(rpcInput RPCInput, genericParsers []spectypes.Gener
 	}
 
 	// we didn't find a generic parser that worked
-	err := utils.LavaFormatTrace("failed to parse with generic parsers",
+	return nil, utils.LavaFormatTrace("failed to parse with generic parsers",
 		utils.LogAttr("parsingMap", parsingMap),
 		utils.LogAttr("genericParsers", genericParsers),
 	)
-	if err == nil {
-		err = fmt.Errorf("failed to parse with generic parsers")
-	}
-	return nil, err
 }
 
-func parseRule(rule string, valueInterface interface{}) bool {
+func parseRule(rule string, valueInterface any) bool {
 	// Split the rule by "||" to handle OR conditions
 	if rule == "" {
 		return true
@@ -378,9 +374,9 @@ func parseRule(rule string, valueInterface interface{}) bool {
 
 	// convert to string
 	value := blockInterfaceToString(valueInterface)
-	conditions := strings.Split(rule, "||")
+	conditions := strings.SplitSeq(rule, "||")
 
-	for _, condition := range conditions {
+	for condition := range conditions {
 		condition = strings.TrimSpace(condition)
 		if len(condition) <= 1 {
 			continue
@@ -408,7 +404,7 @@ func parseRule(rule string, valueInterface interface{}) bool {
 	return false
 }
 
-func parseGeneric(input interface{}, genericParser spectypes.GenericParser) (*ParsedInput, error) {
+func parseGeneric(input any, genericParser spectypes.GenericParser) (*ParsedInput, error) {
 	value, err := findGenericParserValue(input, genericParser)
 	if err != nil {
 		return nil, err
@@ -454,7 +450,7 @@ func parseGeneric(input interface{}, genericParser spectypes.GenericParser) (*Pa
 	}
 }
 
-func findGenericParserValue(input interface{}, genericParser spectypes.GenericParser) (interface{}, error) {
+func findGenericParserValue(input any, genericParser spectypes.GenericParser) (any, error) {
 	jqParser, err := gojq.Parse(genericParser.GetParsePath())
 	if err != nil {
 		return "", utils.LavaFormatError("failed to parse generic parser path", err, utils.LogAttr("path", genericParser.GetParsePath()))
@@ -490,7 +486,7 @@ func findGenericParserValue(input interface{}, genericParser spectypes.GenericPa
 	)
 }
 
-func parseGenericParserBlockHash(value interface{}) (*ParsedInput, error) {
+func parseGenericParserBlockHash(value any) (*ParsedInput, error) {
 	parsed := NewParsedInput()
 
 	strVal, ok := value.(string)
@@ -505,8 +501,8 @@ func parseGenericParserBlockHash(value interface{}) (*ParsedInput, error) {
 	return parsed, nil
 }
 
-func parseDefault(input []string) []interface{} {
-	retArr := make([]interface{}, 0)
+func parseDefault(input []string) []any {
+	retArr := make([]any, 0)
 	retArr = append(retArr, input[0])
 	return retArr
 }
@@ -533,13 +529,13 @@ func parseResponseByEncoding(rawResult []byte, encoding string) (string, error) 
 }
 
 // Move to RPCInput
-func getDataToParse(rpcInput RPCInput, dataSource int) (interface{}, error) {
+func getDataToParse(rpcInput RPCInput, dataSource int) (any, error) {
 	switch dataSource {
 	case PARSE_PARAMS:
 		return rpcInput.GetParams(), nil
 	case PARSE_RESULT:
-		interfaceArr := []interface{}{}
-		var data map[string]interface{}
+		interfaceArr := []any{}
+		var data map[string]any
 		unmarshalled := rpcInput.GetResult()
 		if len(unmarshalled) == 0 {
 			return nil, fmt.Errorf("GetDataToParse failure Get.Result is empty")
@@ -558,7 +554,7 @@ func getDataToParse(rpcInput RPCInput, dataSource int) (interface{}, error) {
 	}
 }
 
-func blockInterfaceToString(block interface{}) string {
+func blockInterfaceToString(block any) string {
 	switch castedBlock := block.(type) {
 	case string:
 		return castedBlock
@@ -575,7 +571,7 @@ func blockInterfaceToString(block interface{}) string {
 	}
 }
 
-func parseByArg(rpcInput RPCInput, input []string, dataSource int) ([]interface{}, error) {
+func parseByArg(rpcInput RPCInput, input []string, dataSource int) ([]any, error) {
 	// specified block is one of the direct parameters, input should be one string defining the location of the block
 	if len(input) != 1 {
 		return nil, fmt.Errorf("invalid input format, input length: %d and needs to be 1", len(input))
@@ -593,14 +589,14 @@ func parseByArg(rpcInput RPCInput, input []string, dataSource int) ([]interface{
 	}
 
 	switch unmarshaledDataTyped := unmarshalledData.(type) {
-	case []interface{}:
+	case []any:
 		if uint64(len(unmarshaledDataTyped)) <= param_index {
 			return nil, ValueNotSetError
 		}
 		block := unmarshaledDataTyped[param_index]
 		// TODO: turn this into type assertion instead
 
-		retArr := make([]interface{}, 0)
+		retArr := make([]any, 0)
 		retArr = append(retArr, blockInterfaceToString(block))
 		return retArr, nil
 	case nil:
@@ -623,14 +619,28 @@ func parseByArg(rpcInput RPCInput, input []string, dataSource int) ([]interface{
 //	}
 //
 // should output an interface array with "wanted result" in first index 0
-func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]interface{}, error) {
+func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]any, error) {
+	if dataSource == PARSE_RESULT {
+		if value, ok := fastPathScalarFromResult(rpcInput.GetResult(), input); ok {
+			return []any{value}, nil
+		}
+	}
+	return parseCanonicalDecoded(rpcInput, input, dataSource)
+}
+
+// parseCanonicalDecoded is the decode path behind parseCanonical: the data
+// source is decoded into a tree and walked key by key. fastPathScalarFromResult
+// serves the common PARSE_RESULT hits without this decode and must agree with
+// it on every value it serves; the parity test in result_fastpath_test.go pins
+// that against this function.
+func parseCanonicalDecoded(rpcInput RPCInput, input []string, dataSource int) ([]any, error) {
 	unmarshalledData, err := getDataToParse(rpcInput, dataSource)
 	if err != nil {
 		return nil, fmt.Errorf("invalid input format, data is not json: %s, error: %s", unmarshalledData, err)
 	}
 
 	switch unmarshalledDataTyped := unmarshalledData.(type) {
-	case []interface{}:
+	case []any:
 		inp := input[0]
 		param_index, err := strconv.ParseUint(inp, 10, 32)
 		if err != nil {
@@ -642,7 +652,7 @@ func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]interf
 		blockContainer := unmarshalledDataTyped[param_index]
 		for _, key := range input[1:] {
 			// Check if blockContainer is an array and key is a numeric index
-			if blockContainerArray, ok := blockContainer.([]interface{}); ok {
+			if blockContainerArray, ok := blockContainer.([]any); ok {
 				arrayIndex, err := strconv.ParseUint(key, 10, 32)
 				if err != nil {
 					return nil, fmt.Errorf("invalid parser input format, expected numeric array index but got: %s, error: %s", key, err)
@@ -656,23 +666,23 @@ func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]interf
 			}
 
 			// type assertion for blockContainer
-			if blockContainer, ok := blockContainer.(map[string]interface{}); !ok {
+			if blockContainer, ok := blockContainer.(map[string]any); !ok {
 				return nil, fmt.Errorf("invalid parser input format, blockContainer is not map[string]interface{}. params=%v method=%v blockContainer=%v key=%s unmarshaledDataTyped=%v: %w",
 					rpcInput.GetParams(), rpcInput.GetMethod(), blockContainer, key, unmarshalledDataTyped, ValueNotSetError)
 			}
 
 			// assertion for key
-			if container, ok := blockContainer.(map[string]interface{})[key]; ok {
+			if container, ok := blockContainer.(map[string]any)[key]; ok {
 				blockContainer = container
 			} else {
 				return nil, fmt.Errorf("invalid parser input format, blockContainer does not have the field searched inside. params=%v method=%v blockContainer=%v key=%s unmarshaledDataTyped=%v: %w",
 					rpcInput.GetParams(), rpcInput.GetMethod(), blockContainer, key, unmarshalledDataTyped, ValueNotSetError)
 			}
 		}
-		retArr := make([]interface{}, 0)
+		retArr := make([]any, 0)
 		retArr = append(retArr, blockInterfaceToString(blockContainer))
 		return retArr, nil
-	case map[string]interface{}:
+	case map[string]any:
 		inp := input[0]
 		_, err := strconv.ParseUint(inp, 10, 32)
 		var relevantInput []string
@@ -685,15 +695,15 @@ func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]interf
 			key := relevantInput[idx]
 			if val, ok := unmarshalledDataTyped[key]; ok {
 				if idx == (len(relevantInput) - 1) {
-					retArr := make([]interface{}, 0)
+					retArr := make([]any, 0)
 					retArr = append(retArr, blockInterfaceToString(val))
 					return retArr, nil
 				}
 				// if we didn't get to the last element continue deeper by changing unmarshaledDataTyped
 				switch v := val.(type) {
-				case map[string]interface{}:
+				case map[string]any:
 					unmarshalledDataTyped = v
-				case []interface{}:
+				case []any:
 					// Handle array indexing in the middle of the path
 					if idx+1 >= len(relevantInput) {
 						return nil, fmt.Errorf("array found but no index provided in path")
@@ -709,12 +719,12 @@ func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]interf
 					// Get the element from array and check if it's the last element
 					arrayElement := v[arrayIndex]
 					if idx+1 == (len(relevantInput) - 1) {
-						retArr := make([]interface{}, 0)
+						retArr := make([]any, 0)
 						retArr = append(retArr, blockInterfaceToString(arrayElement))
 						return retArr, nil
 					}
 					// Continue with the array element as a map
-					if mapElement, ok := arrayElement.(map[string]interface{}); ok {
+					if mapElement, ok := arrayElement.(map[string]any); ok {
 						unmarshalledDataTyped = mapElement
 						// Skip the next key since we already processed the array index
 						idx++
@@ -742,7 +752,7 @@ func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]interf
 
 // parseDictionary return a value of prop specified in args if exists in dictionary
 // if not return an error
-func parseDictionary(rpcInput RPCInput, input []string, dataSource int) ([]interface{}, error) {
+func parseDictionary(rpcInput RPCInput, input []string, dataSource int) ([]any, error) {
 	// Validate number of arguments
 	// The number of arguments should be 2
 	// [prop_name,separator]
@@ -761,7 +771,7 @@ func parseDictionary(rpcInput RPCInput, input []string, dataSource int) ([]inter
 	innerSeparator := input[1]
 
 	switch unmarshalledDataTyped := unmarshalledData.(type) {
-	case []interface{}:
+	case []any:
 		// If value attribute with propName exists in array return it
 		value := parseArrayOfInterfaces(unmarshalledDataTyped, propName, innerSeparator)
 		if value != nil {
@@ -770,7 +780,7 @@ func parseDictionary(rpcInput RPCInput, input []string, dataSource int) ([]inter
 
 		// Else return an error
 		return nil, ValueNotSetError
-	case map[string]interface{}:
+	case map[string]any:
 		// If attribute with key propName exists return value
 		if val, ok := unmarshalledDataTyped[propName]; ok {
 			return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(val))
@@ -790,7 +800,7 @@ func parseDictionary(rpcInput RPCInput, input []string, dataSource int) ([]inter
 
 // parseDictionaryOrOrdered return a value of prop specified in args if exists in dictionary
 // if not return an item from specified index
-func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int) ([]interface{}, error) {
+func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int) ([]any, error) {
 	// Validate number of arguments
 	// The number of arguments should be 3
 	// [prop_name,separator,parameter order if not found]
@@ -816,7 +826,7 @@ func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int)
 	}
 
 	switch unmarshalledDataTyped := unmarshalledData.(type) {
-	case []interface{}:
+	case []any:
 		// If value attribute with propName exists in array return it
 		value := parseArrayOfInterfaces(unmarshalledDataTyped, propName, innerSeparator)
 		if value != nil {
@@ -831,7 +841,7 @@ func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int)
 		// Fetch value using prop index
 		block := unmarshalledDataTyped[propIndex]
 		return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(block))
-	case map[string]interface{}:
+	case map[string]any:
 		// If attribute with key propName exists return value
 		if val, ok := unmarshalledDataTyped[propName]; ok {
 			return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(val))
@@ -865,7 +875,7 @@ func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int)
 
 // parseArrayOfInterfaces returns value of item with specified prop name
 // If it doesn't exist return nil
-func parseArrayOfInterfaces(data []interface{}, propName, innerSeparator string) []interface{} {
+func parseArrayOfInterfaces(data []any, propName, innerSeparator string) []any {
 	// Iterate over unmarshalled data
 	for _, val := range data {
 		if prop, ok := val.(string); ok {
@@ -881,7 +891,7 @@ func parseArrayOfInterfaces(data []interface{}, propName, innerSeparator string)
 				return appendInterfaceToInterfaceArray(valueArr[1])
 			}
 		}
-		if m, ok := val.(map[string]interface{}); ok {
+		if m, ok := val.(map[string]any); ok {
 			if propValue, foundProp := m[propName]; foundProp {
 				return appendInterfaceToInterfaceArray(blockInterfaceToString(propValue))
 			}
@@ -892,15 +902,15 @@ func parseArrayOfInterfaces(data []interface{}, propName, innerSeparator string)
 }
 
 // appendInterfaceToInterfaceArray appends interface to interface array
-func appendInterfaceToInterfaceArray(value interface{}) []interface{} {
-	retArr := make([]interface{}, 0)
+func appendInterfaceToInterfaceArray(value any) []any {
+	retArr := make([]any, 0)
 	retArr = append(retArr, value)
 	return retArr
 }
 
 // appendInterfaceToInterfaceArrayWithError appends interface to interface array
 // returns a valueNotSetError if the value is an empty string
-func appendInterfaceToInterfaceArrayWithError(value string) ([]interface{}, error) {
+func appendInterfaceToInterfaceArrayWithError(value string) ([]any, error) {
 	if value == "" || value == "0" || value == "%!s(<nil>)" {
 		return nil, ValueNotSetError
 	}

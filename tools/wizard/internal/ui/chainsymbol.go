@@ -25,10 +25,7 @@ func visible(c lipgloss.Color) lipgloss.Color {
 	}
 	// scale up toward white, preserving hue
 	boost := func(v int) int {
-		v = v + (floor - lum) + 40
-		if v > 255 {
-			v = 255
-		}
+		v = min(v+(floor-lum)+40, 255)
 		return v
 	}
 	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", boost(r), boost(g), boost(b)))
@@ -149,7 +146,7 @@ func baseName(name string) string {
 		"nova": true, "shadownet": true, "net": true, "main": true, "test": true,
 	}
 	var keep []string
-	for _, w := range strings.Fields(strings.ToLower(name)) {
+	for w := range strings.FieldsSeq(strings.ToLower(name)) {
 		if !drop[w] {
 			keep = append(keep, w)
 		}

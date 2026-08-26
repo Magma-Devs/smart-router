@@ -174,11 +174,11 @@ func TestGRPCManager_JoinAndUnsubscribeRespectLockOrder(t *testing.T) {
 		defer close(finished)
 
 		var wg sync.WaitGroup
-		for worker := 0; worker < workers; worker++ {
+		for worker := range workers {
 			wg.Add(1)
 			go func(worker int) {
 				defer wg.Done()
-				for round := 0; round < rounds; round++ {
+				for round := range rounds {
 					// A fresh key per round, as gRPC mints one per stream — so the
 					// rate limiter admits every call and the loop keeps exercising
 					// both lock paths rather than short-circuiting.
@@ -287,7 +287,7 @@ func TestGRPCStartSubscription_ReleasesClientStateOnFailure(t *testing.T) {
 	const retries = 5
 	clientKeys := make([]string, 0, retries)
 
-	for attempt := 0; attempt < retries; attempt++ {
+	for attempt := range retries {
 		connectionUniqueId := fmt.Sprintf("conn-%d", attempt)
 		clientKeys = append(clientKeys, manager.ClientKey("dapp", "1.1.1.1", connectionUniqueId))
 
@@ -455,7 +455,7 @@ func startFakeStreamingUpstream(t *testing.T) *fakeStreamingUpstream {
 		streamEnded: make(chan struct{}, 4),
 	}
 
-	handler := func(srv interface{}, stream grpc.ServerStream) error {
+	handler := func(srv any, stream grpc.ServerStream) error {
 		var request []byte
 		if err := stream.RecvMsg(&request); err != nil {
 			return err

@@ -2128,7 +2128,7 @@ func TestWaitForPairingRapidStartStop(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 	// Run 50 rapid start/stop cycles
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		rpcss := &RPCSmartRouterServer{
 			sessionManager: &lavasession.ConsumerSessionManager{},
 		}
@@ -2242,7 +2242,7 @@ func TestWaitForPairingConcurrentCalls(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(concurrentCalls)
 
-	for i := 0; i < concurrentCalls; i++ {
+	for range concurrentCalls {
 		go func() {
 			defer wg.Done()
 			rpcss := &RPCSmartRouterServer{
@@ -2424,7 +2424,7 @@ func TestSmartRouterSessionLeakPrevention_ConcurrentSessions(t *testing.T) {
 
 		numGoroutines := 100
 
-		for i := 0; i < numGoroutines; i++ {
+		for i := range numGoroutines {
 			wg.Add(1)
 			go func(id int) {
 				defer wg.Done()
@@ -2478,7 +2478,7 @@ func TestSmartRouterSessionLeakPrevention_HighConcurrency(t *testing.T) {
 		// Simulate 500 concurrent relay requests (high load scenario)
 		numRequests := 500
 
-		for i := 0; i < numRequests; i++ {
+		for i := range numRequests {
 			wg.Add(1)
 			go func(requestId int) {
 				defer wg.Done()
@@ -2548,7 +2548,7 @@ func TestSmartRouterSessionLeakPrevention_SingleProvider(t *testing.T) {
 		var wg sync.WaitGroup
 		numRequests := 2000 // More than max sessions to verify no leak
 
-		for i := 0; i < numRequests; i++ {
+		for i := range numRequests {
 			wg.Add(1)
 			go func(requestId int) {
 				defer wg.Done()
@@ -3119,9 +3119,11 @@ func (m *cvGuardStateMachine) GetRelayTaskChannel() (chan relaycore.RelayStateSe
 }
 func (m *cvGuardStateMachine) UpdateBatch(err error)             {}
 func (m *cvGuardStateMachine) GetSelection() relaycore.Selection { return relaycore.CrossValidation }
+
 func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidationParams {
 	return m.cvParams
 }
+
 func (m *cvGuardStateMachine) GetUsedProviders() *lavasession.UsedProviders                { return m.usedProviders }
 func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf)            {}
 func (m *cvGuardStateMachine) SetRelayRetriesManager(rm *lavaprotocol.RelayRetriesManager) {}

@@ -367,6 +367,7 @@ func (ls *LatencyScoreStore) Update(sample float64, sampleTime time.Time) error 
 }
 
 // GetAdaptiveMax returns the adaptive max value if enabled, otherwise returns 0
+//
 // Deprecated: Use GetAdaptiveBounds() for the P10-P90 approach (Phase 2 hybrid).
 func (ls *LatencyScoreStore) GetAdaptiveMax() float64 {
 	if ls == nil || ls.adaptiveMax == nil {
@@ -407,9 +408,9 @@ func (ls *LatencyScoreStore) IsAdaptiveMaxEnabled() bool {
 }
 
 // GetAdaptiveMaxStats returns statistics about the adaptive max calculator
-func (ls *LatencyScoreStore) GetAdaptiveMaxStats() map[string]interface{} {
+func (ls *LatencyScoreStore) GetAdaptiveMaxStats() map[string]any {
 	if ls == nil || ls.adaptiveMax == nil {
-		return map[string]interface{}{"enabled": false}
+		return map[string]any{"enabled": false}
 	}
 	return ls.adaptiveMax.GetStats()
 }
@@ -481,9 +482,9 @@ func (ss *SyncScoreStore) IsAdaptiveMaxEnabled() bool {
 }
 
 // GetAdaptiveMaxStats returns statistics about the adaptive max calculator
-func (ss *SyncScoreStore) GetAdaptiveMaxStats() map[string]interface{} {
+func (ss *SyncScoreStore) GetAdaptiveMaxStats() map[string]any {
 	if ss == nil || ss.adaptiveMax == nil {
-		return map[string]interface{}{"enabled": false}
+		return map[string]any{"enabled": false}
 	}
 	return ss.adaptiveMax.GetStats()
 }

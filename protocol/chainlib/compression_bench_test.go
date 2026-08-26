@@ -150,10 +150,7 @@ func TestCompressionRatios(t *testing.T) {
 func generateJSONRPCPayload(targetBytes int) []byte {
 	// Small bucket: a single eth_chainId / eth_blockNumber–shaped payload.
 	if targetBytes <= 512 {
-		pad := targetBytes - 36
-		if pad < 0 {
-			pad = 0
-		}
+		pad := max(targetBytes-36, 0)
 		return []byte(`{"jsonrpc":"2.0","id":1,"result":"0x` + strings.Repeat("a", pad) + `"}`)
 	}
 

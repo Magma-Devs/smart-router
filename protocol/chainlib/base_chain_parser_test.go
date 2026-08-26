@@ -109,8 +109,9 @@ func TestGetVerifications(t *testing.T) {
 		verifications:     verifications,
 		allowedAddons:     map[string]bool{"addon1": true},
 		allowedExtensions: map[string]struct{}{"ext1": {}},
+
+		extensionParser: extensionslib.NewExtensionParser(nil),
 	}
-	baseChainParser.extensionParser = extensionslib.NewExtensionParser(nil)
 
 	for idx, play := range playBook {
 		for _, apiInterface := range []string{spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC, spectypes.APIInterfaceRest, spectypes.APIInterfaceGrpc} {

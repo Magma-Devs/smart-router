@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // Mutator for relay success

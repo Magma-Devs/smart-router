@@ -1,7 +1,6 @@
 package endpointstate
 
 import (
-	"context"
 	"strconv"
 	"testing"
 	"time"
@@ -14,8 +13,7 @@ import (
 // dispatch. Uses injected fakes (in-package) so no real poll goroutines are spun; the per-tracker
 // backoff-clear behavior itself is covered in chaintracker's reset_backoff_internal_test.go.
 func TestEndpointMonitor_ResetAllBackoff(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",
@@ -43,8 +41,7 @@ func TestEndpointMonitor_ResetAllBackoff(t *testing.T) {
 // TestEndpointMonitor_BackoffSnapshot verifies BackoffSnapshot reports each tracker's current poll
 // interval keyed by URL — the data /debug/endpoint-state emits as PollIntervalMs (MAG-2395).
 func TestEndpointMonitor_BackoffSnapshot(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
 		ChainID:          "ETH",

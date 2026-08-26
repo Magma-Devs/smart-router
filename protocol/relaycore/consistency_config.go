@@ -73,21 +73,16 @@ func NewConsistencyValidationConfig(
 	if blockGapFactor != 0 {
 		gapFactor = blockGapFactor
 	}
-	endpointLagThreshold := blockLagForQosSync * gapFactor
-	// Apply a minimum of 10 blocks
-	if endpointLagThreshold < 10 {
-		endpointLagThreshold = 10
-	}
+	endpointLagThreshold := max(
+		// Apply a minimum of 10 blocks
+		blockLagForQosSync*gapFactor, 10)
 
 	// Calculate max wait time: up to 2 average block times
-	maxWaitTime := averageBlockTime * 2
-	// Ensure minimum of 500ms and maximum of 5s
-	if maxWaitTime < 500*time.Millisecond {
-		maxWaitTime = 500 * time.Millisecond
-	}
-	if maxWaitTime > 5*time.Second {
-		maxWaitTime = 5 * time.Second
-	}
+	maxWaitTime := min(
+		// Ensure minimum of 500ms and maximum of 5s
+		max(
+
+			averageBlockTime*2, 500*time.Millisecond), 5*time.Second)
 
 	config := &ConsistencyValidationConfig{
 		EndpointLagThreshold: endpointLagThreshold,
