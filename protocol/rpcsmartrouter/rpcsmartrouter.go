@@ -1524,6 +1524,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"ValidAddresses":                    s.ValidAddresses,
 					"CurrentlyBlockedProviderAddresses": s.CurrentlyBlockedProviderAddresses,
 					"BlockedBackupProviders":            s.BlockedBackupProviders,
+					// Blocked answers WHY each of the above is out (MAG-2599); HeldOff covers the
+					// providers that are eligible and healthy but are not being asked yet because
+					// they rate-limited us. The three original keys are unchanged on purpose — the
+					// MAG-2202 suite reads them by name.
+					"Blocked": s.Blocked,
+					"HeldOff": s.HeldOff,
 				})
 			}
 			deps.router.mu.Unlock()
