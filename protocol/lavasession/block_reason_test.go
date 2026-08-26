@@ -932,3 +932,43 @@ func TestEpochTransition_BackupAlwaysFacesTheProbeWhateverItsReportState(t *test
 	require.True(t, stillBlocked,
 		"a backup is routed to the probe regardless of report state, and this one cannot pass it")
 }
+
+// The end-to-end consequence of the above: after two ordinary blocks in one epoch, the provider must
+// still face the probe.
+func TestEpochTransition_AProviderReportedByARepeatBlockStillFacesTheProbe(t *testing.T) {
+	const address = "provider-blocked-twice"
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, false), nil))
+	epoch := csm.atomicReadCurrentEpoch()
+
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonTooManyDeadSessions,
+		false, epoch, 0, 0, false, nil))
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
+		true, epoch, MaxConsecutiveConnectionAttempts, 0, false, nil))
+
+	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, epochPairing(t, address, false), nil))
+	awaitEpochReleasePass(t, csm)
+
+	require.False(t, isValidAddress(csm, address),
+		"it was reported, so it owes a probe — a stale record here is a working bypass of the fix")
+}
+
+// The dead-session cap on its own is the other half, and it was untested in either direction. It is
+// released without a probe, and that is correct rather than a gap: the epoch rebuilds every session
+// object, so the blocklisted-session count that caused this block is already back at zero. There is
+// nothing left for a probe to find.
+func TestEpochTransition_DeadSessionCapIsReleasedWithoutAProbe(t *testing.T) {
+	const address = "provider-dead-sessions"
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, false), nil))
+
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonTooManyDeadSessions,
+		false, csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
+	require.False(t, blockedRecord(t, csm, address).Reported, "this path blocks quietly by design")
+
+	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, epochPairing(t, address, false), nil))
+	awaitEpochReleasePass(t, csm)
+
+	require.True(t, isValidAddress(csm, address),
+		"nothing was recorded against it, and the condition it was blocked on is reset by the epoch itself")
+}
