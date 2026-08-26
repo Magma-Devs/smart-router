@@ -2632,14 +2632,25 @@ func (csm *ConsumerSessionManager) validateAndReturnBlockedProviderToValidAddres
 	// if we didn't find it, we might had two sessions in parallel and thats ok. the first one dealt with it we can just return
 }
 
-// blockRecordOrUnknownLocked returns a blocked provider's record, or a placeholder naming the epoch
-// carry-over when none is stored. The placeholder should be unreachable — every block writes a
-// record — so seeing it in a log means a block path forgot to. csm.lock must be held.
+// blockRecordOrUnknownLocked returns a blocked provider's record, or a placeholder when none is
+// stored. csm.lock must be held.
+//
+// The placeholder fails CLOSED: Reported is true, so an unknown block faces the epoch's probe rather
+// than being waved through. That field decides whether a re-blocked provider has to prove itself,
+// and its zero value would read as "never reported, no evidence against it, let it back in" — which
+// is precisely the free clean slate the re-block exists to prevent. When we do not know why a
+// provider is out, the safe answer is to make it prove itself, not to assume the best.
+//
+// Reaching this means a block path did not record a reason, which is a bug in that path rather than
+// a state to tolerate quietly — hence the warning.
 func (csm *ConsumerSessionManager) blockRecordOrUnknownLocked(providerAddress string) BlockRecord {
 	if record, ok := csm.blockedProviderRecords[providerAddress]; ok {
 		return record
 	}
-	return BlockRecord{Reason: BlockReasonPreviousEpoch, Since: time.Now()}
+	utils.LavaFormatWarning("blocked provider carried no block record at the epoch boundary", nil,
+		utils.LogAttr("address", providerAddress),
+	)
+	return BlockRecord{Reason: BlockReasonPreviousEpoch, Since: time.Now(), Reported: true}
 }
 
 // blockedTotalLocked is how many providers are out across both pools — the number an operator wants
@@ -3052,7 +3063,10 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 				utils.LogAttr("GUID", ctx),
 			)
 			csm.validateAndReturnBlockedProviderToValidAddressesListLocked(blockedAddr, ReleaseEpochNotReported)
-			csm.reportedProviders.RemoveReport(blockedAddr)
+			// No RemoveReport here. UpdateAllProviders resets the register in its body before this
+			// pass runs, so there has never been anything to remove — and this branch no longer
+			// consults it at all. Leaving the call in would suggest the register is meaningful on
+			// this path, which is the assumption that produced the bug above.
 		} else {
 			// Either a backup provider (always routed here by the short-circuit above),
 			// or a non-backup that was reported for relay failures.
