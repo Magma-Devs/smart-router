@@ -406,6 +406,18 @@ func (e *Endpoint) reenableFromProbeLocked() {
 	e.clearRecoveryTrackingLocked()
 }
 
+// endpointApproachingDisable reports whether a just-recorded failure leaves the endpoint still
+// enabled but inside the last endpointDisableWarningWindow of its refusal budget — the window in
+// which the run-up to a disable is worth a breadcrumb (MAG-2599).
+//
+// Extracted so the boundedness claim in common.go ("at most this many lines per disable episode")
+// is testable without capturing log output; it is the load-bearing property of the whole breadcrumb.
+// wasEnabled && !transitioned is what rules out both an underflow and a line on an already-disabled
+// endpoint: an enabled endpoint that did not transition has refusals < MaxConsecutiveConnectionAttempts.
+func endpointApproachingDisable(wasEnabled, transitioned bool, refusals uint64) bool {
+	return wasEnabled && !transitioned && refusals+endpointDisableWarningWindow >= MaxConsecutiveConnectionAttempts
+}
+
 // MarkUnhealthy increments connection refusals and disables endpoint if threshold exceeded.
 func (e *Endpoint) MarkUnhealthy() {
 	e.markUnhealthyAt(time.Now())
@@ -436,10 +448,7 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 		transitioned = true
 	}
 	addr, refusals, isDirect := e.NetworkAddress, e.ConnectionRefusals, e.IsDirectRPC()
-	// Still enabled, but inside the last stretch of the budget. Logged so the approach to a disable
-	// — and to the provider block that follows once every endpoint is out — leaves a trail instead
-	// of appearing without warning (MAG-2599).
-	approaching := wasEnabled && !transitioned && refusals+endpointDisableWarningWindow >= MaxConsecutiveConnectionAttempts
+	approaching := endpointApproachingDisable(wasEnabled, transitioned, refusals)
 	e.mu.Unlock()
 
 	if transitioned {
