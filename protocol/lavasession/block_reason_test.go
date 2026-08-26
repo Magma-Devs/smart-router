@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 // nothing attached. These tests pin the reason each real trigger records (MAG-2599).
 //
 // The discipline throughout: drive the PRODUCT path — a probe that finds no usable endpoint, a
-// session that runs out of error budget, a sentinel error — and then read csm.blockedProviderReasons.
+// session that runs out of error budget, a sentinel error — and then read csm.blockedProviderRecords.
 // Never write that map directly. A test that seeds the map only proves the map exists; it would
 // have passed just as happily against the bug where a call site forgot to name a reason.
 
@@ -27,7 +28,7 @@ func blockedRecord(t *testing.T, csm *ConsumerSessionManager, address string) Bl
 	t.Helper()
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
-	record, ok := csm.blockedProviderReasons[address]
+	record, ok := csm.blockedProviderRecords[address]
 	require.Truef(t, ok, "provider %q is not blocked, so it has no reason recorded", address)
 	return record
 }
@@ -36,8 +37,8 @@ func blockedRecord(t *testing.T, csm *ConsumerSessionManager, address string) Bl
 func blockedRecordCount(csm *ConsumerSessionManager) []string {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
-	addresses := make([]string, 0, len(csm.blockedProviderReasons))
-	for address := range csm.blockedProviderReasons {
+	addresses := make([]string, 0, len(csm.blockedProviderRecords))
+	for address := range csm.blockedProviderRecords {
 		addresses = append(addresses, address)
 	}
 	return addresses
@@ -239,7 +240,7 @@ func TestBlockRelease_ClearsTheRecord(t *testing.T) {
 	csm.validateAndReturnBlockedProviderToValidAddressesList(address, ReleaseHealthProbe)
 
 	csm.lock.RLock()
-	_, stillRecorded := csm.blockedProviderReasons[address]
+	_, stillRecorded := csm.blockedProviderRecords[address]
 	csm.lock.RUnlock()
 	require.False(t, stillRecorded, "releasing a provider must drop its block record")
 	require.Contains(t, csm.validAddresses, address)
@@ -480,7 +481,7 @@ func TestBlockRecords_BackupDroppedFromConfigLeavesNoPhantom(t *testing.T) {
 	defer csm.lock.RUnlock()
 	_, backupBlocked := csm.blockedBackupProviders["backup-b"]
 	require.False(t, backupBlocked, "it is not in the backup pool any more")
-	require.Empty(t, csm.blockedProviderReasons,
+	require.Empty(t, csm.blockedProviderRecords,
 		"a provider that is blocked nowhere must carry no record — a level-triggered gauge would "+
 			"report the phantom forever")
 	for reason, count := range csm.blockedCountsByReasonLocked() {
@@ -503,7 +504,7 @@ func TestBlockRecords_BulkReleaseKeepsTheRecordOfAStillStandingBlock(t *testing.
 		defer csm.lock.RUnlock()
 		_, backupBlocked := csm.blockedBackupProviders[address]
 		require.True(t, backupBlocked, "the backup block was never released")
-		record, ok := csm.blockedProviderReasons[address]
+		record, ok := csm.blockedProviderRecords[address]
 		require.True(t, ok, "the still-standing backup block must keep its reason")
 		require.Equal(t, BlockReasonNeverServed, record.Reason)
 		require.True(t, record.Backup, "scope must now name the block that is still standing")
@@ -521,7 +522,7 @@ func TestBlockRecords_BulkReleaseKeepsTheRecordOfAStillStandingBlock(t *testing.
 		csm.lock.RLock()
 		defer csm.lock.RUnlock()
 		require.Contains(t, csm.currentlyBlockedProviderAddresses, address, "the regular block is preserved by design")
-		record, ok := csm.blockedProviderReasons[address]
+		record, ok := csm.blockedProviderRecords[address]
 		require.True(t, ok, "the still-standing regular block must keep its reason")
 		require.Equal(t, BlockReasonTooManyDeadSessions, record.Reason)
 		require.False(t, record.Backup, "scope must now name the regular block")
@@ -631,4 +632,43 @@ func TestEndpointApproachingDisable_IsBoundedToTheEndOfTheBudget(t *testing.T) {
 		"the transition itself is the WARN, not a breadcrumb")
 	require.False(t, endpointApproachingDisable(true, false, 1),
 		"an endpoint at the start of its budget is not approaching anything")
+}
+
+// The two blocked stores gate different traffic: the regular list keeps a provider out of ordinary
+// selection, the backup set only gates the backup fallback. So releasing the regular block of a
+// dual-pool provider genuinely returns it to service, even while its backup block stands — and that
+// has to be announced. Staying silent there would hide a real return to service, which is the gap
+// this reporting exists to close.
+func TestBlockRelease_EachEndingBlockIsAnnouncedWithItsOwnScope(t *testing.T) {
+	const address = "provider-in-both-pools"
+	csm, _ := dualPoolCSM(t, address)
+	blockInBothPools(t, csm, address, BlockReasonNeverServed)
+
+	// Release the REGULAR block only — the store mutation first, as the helper requires. The backup
+	// block still stands.
+	csm.lock.Lock()
+	csm.currentlyBlockedProviderAddresses = slices.DeleteFunc(csm.currentlyBlockedProviderAddresses,
+		func(a string) bool { return a == address })
+	ended, released := csm.releaseBlockRecordLocked(address, false)
+	csm.lock.Unlock()
+
+	require.True(t, released, "a block ended, so it must be announced — the provider is serving again")
+	require.False(t, ended.Backup, "the line names the block that ENDED, not the one that remains")
+	require.Equal(t, BlockReasonNeverServed, ended.Reason)
+
+	csm.lock.RLock()
+	kept, ok := csm.blockedProviderRecords[address]
+	csm.lock.RUnlock()
+	require.True(t, ok, "the still-standing backup block keeps the record")
+	require.True(t, kept.Backup, "and the kept record now names the block that remains")
+
+	// Releasing the backup block too ends the last one and drops the record.
+	csm.lock.Lock()
+	delete(csm.blockedBackupProviders, address)
+	endedBackup, releasedBackup := csm.releaseBlockRecordLocked(address, true)
+	csm.lock.Unlock()
+
+	require.True(t, releasedBackup)
+	require.True(t, endedBackup.Backup)
+	require.Empty(t, blockedRecordCount(csm), "nothing is blocked now, so no record survives")
 }
