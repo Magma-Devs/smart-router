@@ -509,7 +509,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, []string{"spec", "apiInterface", "provider_address"})
 	csmBlockedProvidersByReason := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_providers_by_reason",
-		Help: "How many providers are currently blocked, split by WHY (MAG-2599): all-endpoints-disabled, too-many-dead-sessions, never-served-successfully, explicit-block-signal, blocked-in-previous-epoch, unspecified. Deliberately carries no provider label — every reason is republished on every state-size tick, including the zeros, which is what keeps the series self-correcting; a provider label would leave the previous reason's series stuck at 1 after a provider is re-blocked for a different reason. Use smartrouter_csm_provider_blocked or /debug/provider-routing for WHICH provider.",
+		Help: "How many providers are currently blocked, split by WHY (MAG-2599): all-endpoints-disabled, too-many-dead-sessions, never-served-successfully, explicit-block-signal, blocked-in-previous-epoch, unspecified. Counts both the regular and the backup pool, so it sums to smartrouter_csm_blocked_providers + smartrouter_csm_blocked_backup_providers. Deliberately carries no provider label — every reason is republished on every state-size tick, including the zeros, which is what keeps the series self-correcting; a provider label would leave the previous reason's series stuck at 1 after a provider is re-blocked for a different reason. Use smartrouter_csm_provider_blocked or /debug/provider-routing for WHICH provider.",
 	}, []string{"spec", "apiInterface", "reason"})
 	csmBlockedBackupProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_backup_providers",

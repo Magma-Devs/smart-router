@@ -1,9 +1,6 @@
 package lavasession
 
-import (
-	"strconv"
-	"time"
-)
+import "time"
 
 // BlockReason names WHY a provider was removed from routing (MAG-2599).
 //
@@ -52,21 +49,26 @@ const (
 	BlockReasonUnspecified BlockReason = "unspecified"
 )
 
+// allBlockReasons is the shared backing array. A package-level var rather than a fresh slice per
+// call because the state-size publisher reads it on every tick, per chain and api-interface.
+var allBlockReasons = []BlockReason{
+	BlockReasonAllEndpointsDisabled,
+	BlockReasonTooManyDeadSessions,
+	BlockReasonNeverServed,
+	BlockReasonExplicitSignal,
+	BlockReasonPreviousEpoch,
+	BlockReasonUnspecified,
+}
+
 // AllBlockReasons lists every reason a block can carry, so the per-reason gauge can publish a zero
 // for the ones not currently in use and stay self-correcting. Order is stable for test readability.
 //
 // Keep in sync with the constants above — a reason missing here is a series that never returns to 0
-// once it has fired.
-func AllBlockReasons() []BlockReason {
-	return []BlockReason{
-		BlockReasonAllEndpointsDisabled,
-		BlockReasonTooManyDeadSessions,
-		BlockReasonNeverServed,
-		BlockReasonExplicitSignal,
-		BlockReasonPreviousEpoch,
-		BlockReasonUnspecified,
-	}
-}
+// once it has fired, which is the exact failure the gauge is shaped to avoid.
+// TestBlockReasons_ListCoversEveryDeclaredConstant guards that.
+//
+// The returned slice is shared; callers must not mutate it.
+func AllBlockReasons() []BlockReason { return allBlockReasons }
 
 // ReleaseRoute names WHO returned a blocked provider to routing (MAG-2599).
 //
@@ -143,8 +145,13 @@ type BlockRecord struct {
 	SecondChanceGranted bool
 	// Backup is true when the provider was blocked as a backup (blockedBackupProviders) rather than
 	// as a regular provider (currentlyBlockedProviderAddresses). A provider configured in both
-	// pools can be blocked in either.
+	// pools can be blocked in either — and when one of the two is released, this is updated to
+	// describe the block that still stands.
 	Backup bool
+	// Carries counts how many epoch transitions this block has survived. A counter rather than a
+	// trail appended to Detail: a long-lived block would otherwise grow that string without bound,
+	// and it is rendered in /debug/provider-routing.
+	Carries uint32
 }
 
 // blockedFor reports how long the provider has been blocked as of now. Zero when Since is unset,
@@ -160,14 +167,15 @@ func (r BlockRecord) blockedFor(now time.Time) time.Duration {
 // original Reason and Since are preserved: the provider has been out since it was first blocked,
 // and saying "blocked-in-previous-epoch" would replace the real answer with a description of the
 // bookkeeping.
-func (r BlockRecord) withCarryOver(epoch uint64) BlockRecord {
+//
+// Detail is deliberately left alone. An earlier version appended "carried into epoch N" here, which
+// grows without bound for a long-lived block — currently masked only because the epoch releases
+// almost everything within ~500ms, so nothing carries twice. Fixing that (the epoch clean-slate
+// defect) would have turned the growth on. Carries answers the same question in fixed space.
+func (r BlockRecord) withCarryOver() BlockRecord {
 	if r.Reason == "" {
 		r.Reason = BlockReasonPreviousEpoch
 	}
-	if r.Detail == "" {
-		r.Detail = "carried into epoch " + strconv.FormatUint(epoch, 10)
-	} else {
-		r.Detail += "; carried into epoch " + strconv.FormatUint(epoch, 10)
-	}
+	r.Carries++
 	return r
 }

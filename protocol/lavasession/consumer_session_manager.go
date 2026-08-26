@@ -203,7 +203,10 @@ type BlockedProviderInfo struct {
 	Detail              string
 	Reported            bool
 	SecondChanceGranted bool
-	// Scope is "primary" or "backup".
+	// Carries is how many epoch transitions this block has survived.
+	Carries uint32
+	// Scope is "primary" or "backup". For a provider blocked in both pools it names the block that
+	// is still standing, so it stays truthful after one of the two is released.
 	Scope string
 }
 
@@ -252,6 +255,7 @@ func (csm *ConsumerSessionManager) blockedProviderInfoLocked(now time.Time) []Bl
 			Detail:              record.Detail,
 			Reported:            record.Reported,
 			SecondChanceGranted: record.SecondChanceGranted,
+			Carries:             record.Carries,
 			Scope:               blockScope(record.Backup),
 		})
 	}
@@ -495,7 +499,19 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 			utils.Attribute{Key: "toEpoch", Value: epoch},
 		)
 	}
+	// Drop the records for the backup blocks being torn down here. Without this a backup that was
+	// blocked and is then absent from the new backup list leaks its record permanently: the re-block
+	// loop below only re-seeds records for backups still present, and no other path deletes them.
+	// The per-reason gauge is level-triggered, so a leaked record is a phantom block that never
+	// self-corrects — the same shape as the MAG-3106 bug this package just fixed.
+	//
+	// Cleared first so releaseBlockRecordLocked sees the store as it now is; a provider also blocked
+	// as regular keeps its record, re-pointed at that block.
+	previouslyBlockedBackups := csm.blockedBackupProviders
 	csm.blockedBackupProviders = make(map[string]struct{})
+	for blockedAddr := range previouslyBlockedBackups {
+		csm.releaseBlockRecordLocked(blockedAddr)
+	}
 
 	csm.secondChanceGivenToAddresses = make(map[string]struct{})
 
@@ -525,7 +541,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	// This prevents users from hitting known-bad providers at epoch transition
 	for blockedAddr, carried := range csm.previousEpochBlockedProviders {
 		if _, exists := csm.pairing[blockedAddr]; exists {
-			record := carried.withCarryOver(epoch)
+			record := carried.withCarryOver()
 			utils.LavaFormatDebug("UpdateAllProviders: Re-blocking provider from previous epoch",
 				utils.Attribute{Key: "provider", Value: blockedAddr},
 				utils.Attribute{Key: "epoch", Value: epoch},
@@ -563,7 +579,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	for blockedAddr, carried := range csm.previousEpochBlockedProviders {
 		if _, exists := csm.backupProviders[blockedAddr]; exists {
 			csm.blockedBackupProviders[blockedAddr] = struct{}{}
-			record := carried.withCarryOver(epoch)
+			record := carried.withCarryOver()
 			record.Backup = true
 			csm.blockedProviderReasons[blockedAddr] = record
 			utils.LavaFormatDebug("UpdateAllProviders: Re-blocking backup provider from previous epoch",
@@ -924,15 +940,26 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 // Backup blocks are NOT touched here, so their reason records deliberately survive.
 func (csm *ConsumerSessionManager) setValidAddressesToDefaultValue(addon string, extensions []string, ctx context.Context, route ReleaseRoute) {
 	released := csm.currentlyBlockedProviderAddresses
-	for _, address := range released {
-		delete(csm.blockedProviderReasons, address)
-	}
 	csm.currentlyBlockedProviderAddresses = make([]string, 0) // reset currently blocked provider addresses
-	if len(released) > 0 {
+	// Emptied first, then the records: releaseBlockRecordLocked answers "is this provider still
+	// blocked anywhere", and it has to see the store as it now is. A provider whose BACKUP block
+	// still stands keeps its record — deleting it here would leave a genuinely blocked provider with
+	// no reason, absent from the gauge, and eventually released with no log line.
+	backInRotation := make([]string, 0, len(released))
+	for _, address := range released {
+		if _, freed := csm.releaseBlockRecordLocked(address); freed {
+			backInRotation = append(backInRotation, address)
+		}
+	}
+	// ReleaseEpochRebuild is not a decision about any of these providers: UpdateAllProviders drains
+	// the list and then immediately re-blocks whatever carried over. Announcing a release there
+	// claims a recovery that did not happen, on the field that exists to make recovery diagnosable.
+	// The epoch's genuine releases are logged per provider by checkAndUnblockHealthyReBlockedProviders.
+	if len(backInRotation) > 0 && route != ReleaseEpochRebuild {
 		utils.LavaFormatInfo("blocked provider list released",
 			utils.LogAttr("released_by", route),
-			utils.LogAttr("released", released),
-			utils.LogAttr("count", len(released)),
+			utils.LogAttr("released", backInRotation),
+			utils.LogAttr("count", len(backInRotation)),
 			utils.LogAttr("addon", addon),
 			utils.LogAttr("extensions", extensions),
 			utils.LogAttr("GUID", ctx),
@@ -2256,10 +2283,18 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 		if errors.Is(err, AddressIndexWasNotFoundError) {
 			// Address not in validAddresses — check if it's a backup provider and block it there.
 			if _, isBackup := csm.backupProviders[address]; isBackup {
-				csm.blockedBackupProviders[address] = struct{}{}
-				record.Backup = true
-				csm.blockedProviderReasons[address] = record
-				blocked = &record
+				// Already out — leave the first reason and Since standing, and emit nothing. The
+				// regular path gets this for free (removeAddressFromValidAddresses returns
+				// AddressIndexWasNotFoundError once the address has left validAddresses); backups
+				// had no equivalent, so a failing backup re-fired the INFO on every block-triggering
+				// failure, reset its Since so blocked_for never grew, and overwrote the reason that
+				// actually took it out with whatever failed last.
+				if _, alreadyBlocked := csm.blockedBackupProviders[address]; !alreadyBlocked {
+					csm.blockedBackupProviders[address] = struct{}{}
+					record.Backup = true
+					csm.blockedProviderReasons[address] = record
+					blocked = &record
+				}
 			} else {
 				utils.LavaFormatDebug("address was not found in valid addresses list", utils.Attribute{Key: "address", Value: address}, utils.Attribute{Key: "error", Value: err}, utils.Attribute{Key: "validAddresses", Value: csm.validAddresses}, utils.LogAttr("GUID", ctx))
 			}
@@ -2494,10 +2529,7 @@ func (csm *ConsumerSessionManager) validateAndReturnBlockedProviderToValidAddres
 		if addr == providerAddress {
 			// Remove it from the csm.currentlyBlockedProviderAddresses
 			csm.currentlyBlockedProviderAddresses = append(csm.currentlyBlockedProviderAddresses[:idx], csm.currentlyBlockedProviderAddresses[idx+1:]...)
-			// Logged whether or not a record was found: this address WAS in the blocked list, so a
-			// missing record means a block path failed to name itself, and an unspecified reason in
-			// the log is how that becomes visible.
-			record, _ := csm.takeBlockRecordLocked(providerAddress)
+			record, backInRotation := csm.releaseBlockRecordLocked(providerAddress)
 			// Reapply it to the valid addresses — but never duplicate (an address blocked once is
 			// absent from validAddresses, yet a concurrent restore path makes the guard cheap insurance).
 			if !slices.Contains(csm.validAddresses, addr) {
@@ -2513,7 +2545,9 @@ func (csm *ConsumerSessionManager) validateAndReturnBlockedProviderToValidAddres
 					csm.consumerMetricsManager.SetBlockedProvider(chainId, apiInterface, providerAddress, networkAddress, false)
 				}(provider.Endpoints[0].NetworkAddress, info.ChainID, info.ApiInterface, providerAddress)
 			}
-			csm.logProviderReleased(providerAddress, record, route, csm.blockedTotalLocked())
+			if backInRotation {
+				csm.logProviderReleased(providerAddress, record, route, csm.blockedTotalLocked())
+			}
 			return
 		}
 	}
@@ -2536,21 +2570,55 @@ func (csm *ConsumerSessionManager) blockedTotalLocked() int {
 	return len(csm.currentlyBlockedProviderAddresses) + len(csm.blockedBackupProviders)
 }
 
-// takeBlockRecordLocked removes and returns a released provider's record, reporting whether there
-// was one.
+// releaseBlockRecordLocked is called after an address has been removed from ONE of the two blocked
+// stores. It reports whether the provider is now genuinely back in rotation, and hands back the
+// record describing the block that just ended.
 //
-// found=false is not an error. A provider configured as both regular and backup is blocked in two
-// stores but carries ONE record, and the paths that restore it (RestoreRecoveredProvider, the
-// reconnect callback) walk both stores — so whichever runs second legitimately finds nothing. Its
-// caller stays silent rather than emitting a second release line for the same event with no reason
-// attached. csm.lock must be held.
-func (csm *ConsumerSessionManager) takeBlockRecordLocked(providerAddress string) (BlockRecord, bool) {
-	record, ok := csm.blockedProviderReasons[providerAddress]
-	if !ok {
-		return BlockRecord{Reason: BlockReasonUnspecified}, false
+// The two stores hold one record between them, so a release has to ask about both. A provider
+// configured as regular AND backup can be blocked in each — the epoch re-block pass does exactly
+// that — and dropping the record on the first release would strip the reason from a block that is
+// still standing, leaving a genuinely blocked provider with no reason on /debug/provider-routing,
+// missing from the per-reason gauge, and eventually released with no log line at all.
+//
+// Returning false means "not back yet, the other pool still holds it": the caller must not announce
+// a release, because the provider is still receiving no traffic. The surviving record is re-pointed
+// at whichever block remains, so scope stays truthful.
+//
+// Call it ONLY after actually removing the address from a store — a missing record then means a
+// block path failed to write one, which is why that case warns. csm.lock must be held.
+func (csm *ConsumerSessionManager) releaseBlockRecordLocked(providerAddress string) (BlockRecord, bool) {
+	record, hadRecord := csm.blockedProviderReasons[providerAddress]
+
+	if backupRemains, stillBlocked := csm.remainingBlockScopeLocked(providerAddress); stillBlocked {
+		if hadRecord {
+			record.Backup = backupRemains
+			csm.blockedProviderReasons[providerAddress] = record
+		}
+		return record, false
 	}
+
 	delete(csm.blockedProviderReasons, providerAddress)
+	if !hadRecord {
+		// The invariant is that a record exists for every blocked address. Reaching here means some
+		// block path did not write one — worth surfacing rather than quietly logging "unspecified".
+		utils.LavaFormatWarning("released a blocked provider that carried no block record", nil,
+			utils.LogAttr("address", providerAddress),
+		)
+		return BlockRecord{Reason: BlockReasonUnspecified}, true
+	}
 	return record, true
+}
+
+// remainingBlockScopeLocked reports whether the address is still held by either blocked store, and
+// if so whether the remaining hold is the backup one. csm.lock must be held.
+func (csm *ConsumerSessionManager) remainingBlockScopeLocked(providerAddress string) (backup, stillBlocked bool) {
+	if _, ok := csm.blockedBackupProviders[providerAddress]; ok {
+		return true, true
+	}
+	if slices.Contains(csm.currentlyBlockedProviderAddresses, providerAddress) {
+		return false, true
+	}
+	return false, false
 }
 
 // logProviderReleased emits the one operator-facing line for a provider returning to routing.
@@ -2600,7 +2668,7 @@ func (csm *ConsumerSessionManager) RestoreRecoveredProvider(providerAddress stri
 	// regular pool — a provider overlapping both is restored in both.
 	if _, blocked := csm.blockedBackupProviders[providerAddress]; blocked {
 		delete(csm.blockedBackupProviders, providerAddress)
-		if record, found := csm.takeBlockRecordLocked(providerAddress); found {
+		if record, backInRotation := csm.releaseBlockRecordLocked(providerAddress); backInRotation {
 			csm.logProviderReleased(providerAddress, record, ReleaseHealthProbe, csm.blockedTotalLocked())
 		}
 	}
@@ -2815,7 +2883,7 @@ func (csm *ConsumerSessionManager) GenerateReconnectCallback(consumerSessionsWit
 			if _, inBackup := csm.backupProviders[providerAddress]; inBackup {
 				if _, blocked := csm.blockedBackupProviders[providerAddress]; blocked {
 					delete(csm.blockedBackupProviders, providerAddress)
-					if record, found := csm.takeBlockRecordLocked(providerAddress); found {
+					if record, backInRotation := csm.releaseBlockRecordLocked(providerAddress); backInRotation {
 						csm.logProviderReleased(providerAddress, record, ReleaseReconnectLoop, csm.blockedTotalLocked())
 					}
 				}
@@ -2931,10 +2999,10 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 			if info.isBackup {
 				csm.lock.Lock()
 				delete(csm.blockedBackupProviders, providerAddress)
-				record, found := csm.takeBlockRecordLocked(providerAddress)
+				record, backInRotation := csm.releaseBlockRecordLocked(providerAddress)
 				blockedCount := csm.blockedTotalLocked()
 				csm.lock.Unlock()
-				if found {
+				if backInRotation {
 					csm.logProviderReleased(providerAddress, record, ReleaseEpochProbe, blockedCount)
 				}
 			} else {
@@ -3010,11 +3078,13 @@ func (csm *ConsumerSessionManager) ResetTransientFailureState() {
 	csm.previousEpochBlockedProviders = make(map[string]BlockRecord)
 	csm.secondChanceGivenToAddresses = make(map[string]struct{})
 	// Backup blocks are cleared here, so their reason records go with them. Regular blocks are
-	// deliberately preserved (see the doc comment above), and so are their records.
-	for address := range csm.blockedBackupProviders {
-		delete(csm.blockedProviderReasons, address)
-	}
+	// deliberately preserved (see the doc comment above), and so are their records — including for a
+	// provider blocked in BOTH pools, whose regular block survives this reset.
+	clearedBackups := csm.blockedBackupProviders
 	csm.blockedBackupProviders = make(map[string]struct{})
+	for address := range clearedBackups {
+		csm.releaseBlockRecordLocked(address)
+	}
 	csm.lock.Unlock()
 
 	// stickySessions and reportedProviders carry their own locks; do not hold
@@ -3212,8 +3282,9 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 // that stops applying must be actively set to 0, or its series stays at its last value forever and
 // a sum() over the gauge double-counts. csm.lock must be held (read lock is enough).
 func (csm *ConsumerSessionManager) blockedCountsByReasonLocked() map[string]int {
-	counts := make(map[string]int, len(AllBlockReasons()))
-	for _, reason := range AllBlockReasons() {
+	reasons := AllBlockReasons()
+	counts := make(map[string]int, len(reasons))
+	for _, reason := range reasons {
 		counts[string(reason)] = 0
 	}
 	for _, record := range csm.blockedProviderReasons {

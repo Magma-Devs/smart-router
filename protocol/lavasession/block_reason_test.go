@@ -3,6 +3,8 @@ package lavasession
 import (
 	"context"
 	"fmt"
+	"os"
+	"regexp"
 	"testing"
 	"time"
 
@@ -194,7 +196,8 @@ func TestBlockReason_SurvivesTheEpochTransition(t *testing.T) {
 	record := blockedRecord(t, csm, address)
 	require.Equal(t, BlockReasonTooManyDeadSessions, record.Reason, "the original reason must survive, not be replaced by the bookkeeping")
 	require.Equal(t, blockedAt, record.Since, "age is measured from the original block, not from the epoch tick")
-	require.Contains(t, record.Detail, "carried into epoch", "the carry-over is recorded as detail, not as the reason")
+	require.Equal(t, uint32(1), record.Carries, "the carry-over is counted, not appended to Detail")
+	require.NotContains(t, record.Detail, "carried", "Detail stays the call site's number — see TestBlockRecord_CarryOverIsBounded")
 }
 
 // Reported means the provider is actually in the reported-providers register, not that reporting was
@@ -402,12 +405,10 @@ func TestBlockRelease_OverlapProviderReleasesOnceAndLeavesNoRecord(t *testing.T)
 	csm.lock.RUnlock()
 	require.False(t, stillBackupBlocked)
 
-	// The second walk over an already-taken record reports not-found, which is what keeps it from
-	// logging a duplicate release.
-	csm.lock.Lock()
-	_, found := csm.takeBlockRecordLocked(address)
-	csm.lock.Unlock()
-	require.False(t, found)
+	csm.lock.RLock()
+	_, stillBlocked := csm.remainingBlockScopeLocked(address)
+	csm.lock.RUnlock()
+	require.False(t, stillBlocked, "neither store may still hold it after a full restore")
 }
 
 // An empty manager must still encode as [] rather than null, the same contract the existing
@@ -418,4 +419,216 @@ func TestProviderRoutingSnapshot_EmptyManagerEncodesAsEmptyLists(t *testing.T) {
 	require.NotNil(t, snapshot.HeldOff)
 	require.Empty(t, snapshot.Blocked)
 	require.Empty(t, snapshot.HeldOff)
+}
+
+// ---------------------------------------------------------------------------
+// Two stores, one record.
+//
+// The block record lives beside currentlyBlockedProviderAddresses and blockedBackupProviders rather
+// than inside either, so every mutation of those two has to keep it in step. Four did not. These
+// tests cover the dual-pool and cross-epoch cases the original suite missed — it only ever exercised
+// a single pool, which is why the gap was systematic rather than incidental.
+// ---------------------------------------------------------------------------
+
+// dualPoolCSM registers the same provider in both the regular and the backup pool. UpdateAllProviders
+// builds the two from separate inputs with no dedup, so this is a legitimate configuration.
+func dualPoolCSM(t *testing.T, address string) (*ConsumerSessionManager, *ConsumerSessionsWithProvider) {
+	t.Helper()
+	provider := &ConsumerSessionsWithProvider{
+		PublicLavaAddress: address,
+		Endpoints:         []*Endpoint{{Connections: []*EndpointConnection{}, NetworkAddress: grpcListener, Enabled: true}},
+		Sessions:          map[int64]*SingleConsumerSession{},
+		MaxComputeUnits:   200,
+		PairingEpoch:      firstEpochHeight,
+	}
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight,
+		map[uint64]*ConsumerSessionsWithProvider{0: provider},
+		map[uint64]*ConsumerSessionsWithProvider{0: provider}))
+	return csm, provider
+}
+
+// blockInBothPools puts the provider in both blocked stores, the way the epoch re-block pass does.
+func blockInBothPools(t *testing.T, csm *ConsumerSessionManager, address string, reason BlockReason) {
+	t.Helper()
+	require.NoError(t, csm.blockProvider(context.Background(), address, reason, false,
+		csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
+	csm.lock.Lock()
+	csm.blockedBackupProviders[address] = struct{}{}
+	csm.lock.Unlock()
+	require.Len(t, blockedRecordCount(csm), 1, "two stores share one record")
+}
+
+// A backup blocked in one epoch and absent from the backup config in the next used to leave a record
+// nothing ever deleted: the wholesale clear did not touch the records, and the re-block loop only
+// re-seeds those still present. Because the per-reason gauge is level-triggered, that phantom never
+// self-corrects — the same shape as the MAG-3106 bug this package just fixed.
+func TestBlockRecords_BackupDroppedFromConfigLeavesNoPhantom(t *testing.T) {
+	regular := createNamedPairingList("regular-a")
+	backup := createNamedPairingList("backup-b")
+
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, regular, backup))
+	require.NoError(t, csm.blockProvider(context.Background(), "backup-b", BlockReasonAllEndpointsDisabled,
+		false, csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
+	require.Len(t, blockedRecordCount(csm), 1)
+
+	// New epoch, and backup-b is no longer configured as a backup at all.
+	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, createNamedPairingList("regular-a"), nil))
+
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	_, backupBlocked := csm.blockedBackupProviders["backup-b"]
+	require.False(t, backupBlocked, "it is not in the backup pool any more")
+	require.Empty(t, csm.blockedProviderReasons,
+		"a provider that is blocked nowhere must carry no record — a level-triggered gauge would "+
+			"report the phantom forever")
+	for reason, count := range csm.blockedCountsByReasonLocked() {
+		require.Zerof(t, count, "nothing is blocked, so %s must be 0", reason)
+	}
+}
+
+// The bulk releases drain ONE store. A provider blocked in both keeps its record until the other
+// block is released too — otherwise a genuinely blocked provider ends up with no reason on
+// /debug/provider-routing, missing from the gauge, and eventually released with no log line at all.
+func TestBlockRecords_BulkReleaseKeepsTheRecordOfAStillStandingBlock(t *testing.T) {
+	t.Run("regular drained, backup block stands", func(t *testing.T) {
+		const address = "provider-in-both-pools"
+		csm, _ := dualPoolCSM(t, address)
+		blockInBothPools(t, csm, address, BlockReasonNeverServed)
+
+		csm.resetValidAddresses("", nil) // the pool-empty last resort
+
+		csm.lock.RLock()
+		defer csm.lock.RUnlock()
+		_, backupBlocked := csm.blockedBackupProviders[address]
+		require.True(t, backupBlocked, "the backup block was never released")
+		record, ok := csm.blockedProviderReasons[address]
+		require.True(t, ok, "the still-standing backup block must keep its reason")
+		require.Equal(t, BlockReasonNeverServed, record.Reason)
+		require.True(t, record.Backup, "scope must now name the block that is still standing")
+		require.Equal(t, 1, csm.blockedCountsByReasonLocked()[string(BlockReasonNeverServed)])
+	})
+
+	t.Run("backup drained, regular block stands", func(t *testing.T) {
+		const address = "provider-in-both-pools"
+		csm, _ := dualPoolCSM(t, address)
+		blockInBothPools(t, csm, address, BlockReasonTooManyDeadSessions)
+
+		// ResetTransientFailureState clears backup blocks and deliberately preserves regular ones.
+		csm.ResetTransientFailureState()
+
+		csm.lock.RLock()
+		defer csm.lock.RUnlock()
+		require.Contains(t, csm.currentlyBlockedProviderAddresses, address, "the regular block is preserved by design")
+		record, ok := csm.blockedProviderReasons[address]
+		require.True(t, ok, "the still-standing regular block must keep its reason")
+		require.Equal(t, BlockReasonTooManyDeadSessions, record.Reason)
+		require.False(t, record.Backup, "scope must now name the regular block")
+	})
+}
+
+// A backup that is already blocked must not be blocked again: the regular path gets that for free
+// once the address has left validAddresses, backups had no equivalent. Without it a failing backup
+// re-fired the INFO on every block-triggering failure, reset Since so blocked_for never grew past a
+// few milliseconds, and overwrote the reason that actually took it out.
+func TestBlockRecords_ReBlockingABlockedBackupIsANoOp(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight,
+		createNamedPairingList("regular-a"), createNamedPairingList("backup-b")))
+	epoch := csm.atomicReadCurrentEpoch()
+
+	require.NoError(t, csm.blockProvider(context.Background(), "backup-b", BlockReasonAllEndpointsDisabled,
+		false, epoch, MaxConsecutiveConnectionAttempts, 0, false, nil))
+	first := blockedRecord(t, csm, "backup-b")
+
+	require.NoError(t, csm.blockProvider(context.Background(), "backup-b", BlockReasonTooManyDeadSessions,
+		false, epoch, 0, 0, false, nil))
+	second := blockedRecord(t, csm, "backup-b")
+
+	require.Equal(t, first.Reason, second.Reason, "the reason that took it out wins, not whatever failed last")
+	require.Equal(t, first.Since, second.Since, "Since must not move, or blocked_for never grows")
+	require.Equal(t, first.Detail, second.Detail)
+	require.Len(t, blockedRecordCount(csm), 1)
+}
+
+// The documented identity. Stated in docs/METRICS.md and in the Prometheus Help string, so it is
+// read by operators who cannot check it against the code — this test is what stops the two drifting.
+func TestBlockedByReasonGauge_SumsToBothPools(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight,
+		createNamedPairingList("regular-a"), createNamedPairingList("backup-b")))
+	epoch := csm.atomicReadCurrentEpoch()
+
+	require.NoError(t, csm.blockProvider(context.Background(), "regular-a", BlockReasonAllEndpointsDisabled, false, epoch, 0, 0, false, nil))
+	require.NoError(t, csm.blockProvider(context.Background(), "backup-b", BlockReasonTooManyDeadSessions, false, epoch, 0, 0, false, nil))
+
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	sum := 0
+	for _, count := range csm.blockedCountsByReasonLocked() {
+		sum += count
+	}
+	require.Equal(t, len(csm.currentlyBlockedProviderAddresses)+len(csm.blockedBackupProviders), sum,
+		"sum(by_reason) == csm_blocked_providers + csm_blocked_backup_providers")
+	require.NotEqual(t, len(csm.currentlyBlockedProviderAddresses), sum,
+		"and it is NOT the regular count alone — the claim the docs used to make")
+}
+
+// A block that survives many epochs must not grow its record. Detail used to accumulate
+// "; carried into epoch N" once per transition, unbounded, and Detail is rendered in
+// /debug/provider-routing.
+func TestBlockRecord_CarryOverIsBounded(t *testing.T) {
+	record := BlockRecord{Reason: BlockReasonNeverServed, Detail: "consecutiveErrors=16"}
+	before := record.Detail
+	for range 40 {
+		record = record.withCarryOver()
+	}
+	require.Equal(t, before, record.Detail, "Detail stays the call site's number, however long the block lasts")
+	require.Equal(t, uint32(40), record.Carries, "the count is what grows, in fixed space")
+	require.Equal(t, BlockReasonNeverServed, record.Reason, "and the original reason still answers the question")
+}
+
+// The per-reason gauge stays self-correcting only while AllBlockReasons lists every declared
+// constant: a missing one is a series that never returns to 0. Asserting the published map against
+// that same list is circular and would pass with one missing, so this reads the declarations.
+func TestBlockReasons_ListCoversEveryDeclaredConstant(t *testing.T) {
+	source, err := os.ReadFile("block_reason.go")
+	require.NoError(t, err)
+
+	declared := regexp.MustCompile(`BlockReason\s*=\s*"([^"]+)"`).FindAllStringSubmatch(string(source), -1)
+	require.NotEmpty(t, declared, "the declarations must be findable, or this guard is silently useless")
+
+	listed := make(map[BlockReason]struct{}, len(AllBlockReasons()))
+	for _, reason := range AllBlockReasons() {
+		listed[reason] = struct{}{}
+	}
+	for _, match := range declared {
+		_, ok := listed[BlockReason(match[1])]
+		require.Truef(t, ok, "BlockReason %q is declared but missing from AllBlockReasons() — its gauge "+
+			"series would never return to 0", match[1])
+	}
+	require.Len(t, listed, len(declared), "AllBlockReasons() lists a reason that is not declared")
+}
+
+// The breadcrumb's whole justification is that it is bounded — one line per failure would make it
+// noise on a busy router. Asserted on the predicate rather than by capturing log output, so the
+// boundary is pinned exactly.
+func TestEndpointApproachingDisable_IsBoundedToTheEndOfTheBudget(t *testing.T) {
+	lines := 0
+	for refusals := uint64(1); refusals <= MaxConsecutiveConnectionAttempts; refusals++ {
+		transitioned := refusals >= MaxConsecutiveConnectionAttempts // the disable itself
+		if endpointApproachingDisable(true, transitioned, refusals) {
+			lines++
+		}
+	}
+	require.EqualValues(t, endpointDisableWarningWindow, lines,
+		"a full disable episode must produce exactly the window's worth of breadcrumbs")
+
+	require.False(t, endpointApproachingDisable(false, false, MaxConsecutiveConnectionAttempts),
+		"an already-disabled endpoint stays silent")
+	require.False(t, endpointApproachingDisable(true, true, MaxConsecutiveConnectionAttempts),
+		"the transition itself is the WARN, not a breadcrumb")
+	require.False(t, endpointApproachingDisable(true, false, 1),
+		"an endpoint at the start of its budget is not approaching anything")
 }
