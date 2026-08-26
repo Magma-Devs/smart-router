@@ -95,9 +95,22 @@ resp-cache:
   topology: sentinel
   addresses: ["sentinel-1:26379", "sentinel-2:26379", "sentinel-3:26379"]
   master-name: "mymaster"
-  password-file: /etc/smartrouter/resp-cache.pw
-  sentinel-password-file: /etc/smartrouter/resp-sentinel.pw
+  password-file: /etc/smartrouter/resp-cache.pw # data nodes
+  sentinel-password-file: /etc/smartrouter/resp-sentinel.pw # sentinels
 ```
+
+The two credentials are independent: the first authenticates against the data
+nodes, the second against the sentinels. Supplying only the data-node
+credential is the common misconfiguration — a hardened sentinel set fails
+*discovery*, before any data node is reached.
+
+The `*-password-file` keys are shown deliberately. The inline `password` /
+`sentinel-password` keys accept the credential as a literal string and are
+mutually exclusive with their file counterparts; the file form keeps the
+credential out of the config file and rotates live (see [Credential
+rotation](#credential-rotation-iam-style-tokens)). Note that config values are
+**not** environment-expanded — a `${VAR}` written here is read literally as the
+credential.
 
 **Cluster** — sharded. Point at the **configuration endpoint** (e.g. the
 ElastiCache cluster configuration endpoint); node membership, slots, and
