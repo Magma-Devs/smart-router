@@ -396,7 +396,16 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 			cache:      options.cache,
 			qosClient:  smartRouterOptimizerQoSClient,
 		})
-		srv := &http.Server{Addr: options.cmdFlags.DebugAddress, Handler: debugMux}
+		srv := &http.Server{
+			Addr:    options.cmdFlags.DebugAddress,
+			Handler: debugMux,
+			// Go 1.27 applies DefaultMaxHeaderValueCount to every net/http server
+			// automatically; the operator-facing debug/pprof surface takes a tighter
+			// explicit bound as defense-in-depth against header flooding. The other
+			// net/http servers (cache, grpcproxy, connection prober) inherit the
+			// default. The main relay listener is fasthttp and unaffected either way.
+			MaxHeaderValueCount: 512,
+		}
 		// Watcher goroutine: shuts the server down gracefully when ctx is cancelled
 		// (i.e. when the caller cancels — typically on SIGINT/SIGTERM via NotifyContext).
 		go func() {
