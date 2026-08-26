@@ -759,6 +759,56 @@ func TestBlockRecord_CarriedRecordTakesTheScopeItIsReBlockedIn(t *testing.T) {
 	require.Equal(t, uint32(1), row.Carries)
 }
 
+// epochPairing builds a single direct-RPC provider for the epoch-transition tests.
+//
+// usable decides whether probeDirectRPCEndpoints — the gate the epoch's release pass runs — passes
+// or fails. It is a routability check: at least one ENABLED endpoint carrying a connection object.
+//
+// Both shapes are genuinely direct-RPC (IsDirectRPC() is len(DirectConnections) > 0), which matters:
+// an endpoint with no DirectConnections at all is skipped one branch earlier, failing with "no
+// direct RPC endpoints found" — a misconfiguration, not the gate under test. Failing on the wrong
+// branch would still make these tests pass, while proving reachability through a provider shape
+// that cannot occur in a correctly configured deployment.
+func epochPairing(t *testing.T, address string, usable bool) map[uint64]*ConsumerSessionsWithProvider {
+	t.Helper()
+	// A connection object, not a live connection — NewDirectRPCConnection builds an HTTP client
+	// lazily and dials nothing, and the gate only asks whether one is present.
+	conn, err := NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: "https://example.invalid:443/"}, 5, "")
+	require.NoError(t, err)
+	return map[uint64]*ConsumerSessionsWithProvider{
+		0: {
+			PublicLavaAddress: address,
+			Endpoints: []*Endpoint{{
+				NetworkAddress:    "https://example.invalid:443/",
+				Enabled:           usable, // an endpoint that is present but disabled fails the gate
+				DirectConnections: []DirectRPCConnection{conn},
+			}},
+			Sessions:        map[int64]*SingleConsumerSession{},
+			MaxComputeUnits: 200,
+			PairingEpoch:    firstEpochHeight,
+			StaticProvider:  true,
+		},
+	}
+}
+
+// awaitEpochReleasePass waits for the release pass to have run. It is spawned from a defer that
+// sleeps up to 500ms, and its own cleanup empties previousEpochBlockedProviders last.
+func awaitEpochReleasePass(t *testing.T, csm *ConsumerSessionManager) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		csm.lock.RLock()
+		defer csm.lock.RUnlock()
+		return len(csm.previousEpochBlockedProviders) == 0
+	}, 15*time.Second, 50*time.Millisecond, "the epoch release pass never ran")
+}
+
+// isValidAddress reports whether the provider is back in routing.
+func isValidAddress(csm *ConsumerSessionManager, address string) bool {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	return slices.Contains(csm.validAddresses, address)
+}
+
 // The epoch re-blocks the previous epoch's blocked providers "to prevent known-bad providers from
 // getting a clean slate", then releases the ones it has no evidence against. It decided that by
 // asking csm.reportedProviders — but UpdateAllProviders empties that register in its body, while
@@ -768,28 +818,14 @@ func TestBlockRecord_CarriedRecordTakesTheScopeItIsReBlockedIn(t *testing.T) {
 // with no health check at all.
 //
 // The decision now reads the carried block record, which holds what the register held before it was
-// reset.
+// reset. That is equivalent by construction, not merely a reasonable snapshot: ReportProvider is
+// called from exactly two sites, both inside blockProvider, and every RemoveReport site also
+// unblocks the provider — so nothing can change a provider's report state while its block stands.
 //
-// Both cases are asserted, because "keep everything blocked" would pass a one-sided test while
-// being just as wrong as the bug. The provider's endpoint is deliberately unreachable so the two
-// branches have different outcomes: probe → stays blocked, no-probe → released regardless.
+// Both directions are asserted, because "keep everything blocked" would satisfy a one-sided test
+// while being just as wrong as the bug.
 func TestEpochTransition_ProbeIsRequiredOnlyForAReportedProvider(t *testing.T) {
-	// A direct-RPC provider with no usable connection. probeDirectRPCEndpoints is a routability
-	// gate, so it fails here — unlike the gRPC probe, which dials lazily and reports success
-	// against a dead address.
-	deadPairing := func() map[uint64]*ConsumerSessionsWithProvider {
-		return map[uint64]*ConsumerSessionsWithProvider{
-			0: {
-				PublicLavaAddress: "provider-unreachable",
-				Endpoints:         []*Endpoint{{NetworkAddress: "127.0.0.1:1", Enabled: true}},
-				Sessions:          map[int64]*SingleConsumerSession{},
-				MaxComputeUnits:   200,
-				PairingEpoch:      firstEpochHeight,
-				StaticProvider:    true,
-			},
-		}
-	}
-
+	const address = "provider-unreachable"
 	for _, tc := range []struct {
 		name           string
 		reportProvider bool
@@ -800,8 +836,8 @@ func TestEpochTransition_ProbeIsRequiredOnlyForAReportedProvider(t *testing.T) {
 		{
 			name: "reported provider must earn its way back", reportProvider: true, wantReported: true,
 			stillBlocked: true,
-			why: "it was reported, so the epoch owes it a probe — and the probe cannot pass against " +
-				"an unreachable endpoint. Releasing it anyway is the clean slate the re-block exists to prevent",
+			why: "it was reported, so the epoch owes it a probe — and the probe cannot pass while its " +
+				"only endpoint is disabled. Releasing it anyway is the clean slate the re-block exists to prevent",
 		},
 		{
 			name: "unreported provider is released without one", reportProvider: false, wantReported: false,
@@ -811,32 +847,88 @@ func TestEpochTransition_ProbeIsRequiredOnlyForAReportedProvider(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			csm := CreateConsumerSessionManager()
-			require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, deadPairing(), nil))
-			const address = "provider-unreachable"
+			require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, false), nil))
 
 			require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
 				tc.reportProvider, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, false, nil))
 			require.Equal(t, tc.wantReported, blockedRecord(t, csm, address).Reported)
-			require.NotContains(t, csm.validAddresses, address)
+			require.False(t, isValidAddress(csm, address))
 
-			// Roll the epoch: copies the block forward, re-blocks it, resets the reported register,
-			// and schedules the release pass.
-			require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, deadPairing(), nil))
+			require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, epochPairing(t, address, false), nil))
+			awaitEpochReleasePass(t, csm)
 
-			// That pass is a deferred goroutine that sleeps up to 500ms, so wait for it to have run.
-			require.Eventually(t, func() bool {
-				csm.lock.RLock()
-				defer csm.lock.RUnlock()
-				return len(csm.previousEpochBlockedProviders) == 0
-			}, 15*time.Second, 50*time.Millisecond, "the epoch release pass never ran")
-
-			csm.lock.RLock()
-			defer csm.lock.RUnlock()
-			if tc.stillBlocked {
-				require.NotContains(t, csm.validAddresses, address, tc.why)
-			} else {
-				require.Contains(t, csm.validAddresses, address, tc.why)
-			}
+			require.Equal(t, !tc.stillBlocked, isValidAddress(csm, address), tc.why)
 		})
 	}
+}
+
+// The other half of the gate: a reported provider that CAN pass its probe is released, through
+// ReleaseEpochProbe. Without this the fix is only shown to keep providers out, and the open question
+// on the PR — whether restoring the gate changes anything in production or locks providers out —
+// stays unfalsifiable.
+func TestEpochTransition_AReportedProviderThatPassesItsProbeIsReleased(t *testing.T) {
+	const address = "provider-healthy"
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, true), nil))
+
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
+		true, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, false, nil))
+	require.True(t, blockedRecord(t, csm, address).Reported)
+	require.False(t, isValidAddress(csm, address))
+
+	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, epochPairing(t, address, true), nil))
+	awaitEpochReleasePass(t, csm)
+
+	require.True(t, isValidAddress(csm, address),
+		"the gate is a routability check, not a quarantine: a provider that can serve must come back")
+}
+
+// An unknown record must not be read as "never reported". That field decides whether a provider has
+// to prove itself, and its zero value would hand a free pass to exactly the case where we have lost
+// track of why the provider is out.
+func TestEpochTransition_AMissingRecordStillFacesTheProbe(t *testing.T) {
+	const address = "provider-record-lost"
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, false), nil))
+
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
+		true, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, false, nil))
+
+	// Strand the block: the record is gone while the provider stays blocked. The store paths that
+	// could do this are fixed, so this is the defensive case — which is the one worth pinning,
+	// because a fail-open default is silent by definition.
+	csm.lock.Lock()
+	delete(csm.blockedProviderRecords, address)
+	csm.lock.Unlock()
+
+	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, epochPairing(t, address, false), nil))
+	awaitEpochReleasePass(t, csm)
+
+	require.False(t, isValidAddress(csm, address),
+		"an unknown block must fail closed — 'we do not know why it is out' is not evidence of health")
+}
+
+// Backups are the load-bearing exception the rewritten comment leans on: !isBackup short-circuits
+// ahead of the report check, so a backup's report state is never consulted and a backup always
+// faces the probe. Nothing asserted that.
+func TestEpochTransition_BackupAlwaysFacesTheProbeWhateverItsReportState(t *testing.T) {
+	const address = "backup-unreachable"
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight,
+		createNamedPairingList("regular-a"), epochPairing(t, address, false)))
+
+	// reportProvider=false: on the regular path this would mean "no evidence, release immediately".
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonTooManyDeadSessions,
+		false, csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
+	require.False(t, blockedRecord(t, csm, address).Reported)
+
+	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight,
+		createNamedPairingList("regular-a"), epochPairing(t, address, false)))
+	awaitEpochReleasePass(t, csm)
+
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	_, stillBlocked := csm.blockedBackupProviders[address]
+	require.True(t, stillBlocked,
+		"a backup is routed to the probe regardless of report state, and this one cannot pass it")
 }
