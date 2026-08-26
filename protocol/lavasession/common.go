@@ -65,7 +65,18 @@ const (
 	// rotation until the epoch reset even though it is healthy for everything else. The trial
 	// budget still caps client exposure after the fallback re-enable, so giving up on the evidence
 	// keeps the anti-flap protection while guaranteeing a bounded escape (MAG-2550 review).
-	maxRelayProbeAttempts                            uint64 = 3
+	maxRelayProbeAttempts uint64 = 3
+	// endpointDisableWarningWindow is how close to MaxConsecutiveConnectionAttempts an endpoint has
+	// to be before each further failure leaves a breadcrumb (MAG-2599). Disabling every endpoint of
+	// a provider is what blocks the provider, and before this the approach was silent: the first
+	// sign was the disable itself, then the block, with nothing in between to explain them.
+	//
+	// Bounded on purpose — at most this many lines per disable episode, at DEBUG — so a busy router
+	// with one failing endpoint does not pay a line per failed relay. 10 of a 50-failure budget is
+	// the last fifth, and it also covers the whole trial budget a probe re-enable grants
+	// (probeReenableTrialBudget leaves the counter at 47), so a flapping endpoint is visible from
+	// its first post-probe failure.
+	endpointDisableWarningWindow                     uint64 = 10
 	TimeoutForEstablishingAConnection                       = 1500 * time.Millisecond // 1.5 seconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession        = 15
 	RelayNumberIncrement                                    = 1

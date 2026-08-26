@@ -22,7 +22,7 @@ func TestRestoreRecoveredProvider_RegularBecomesSelectable(t *testing.T) {
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
 
 	addr := pairingList[0].PublicLavaAddress
-	require.NoError(t, csm.blockProvider(context.Background(), addr, false, firstEpochHeight, 0, 0, false, nil))
+	require.NoError(t, csm.blockProvider(context.Background(), addr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil))
 
 	csm.lock.RLock()
 	require.True(t, lavaslices.Contains(csm.currentlyBlockedProviderAddresses, addr), "precondition: blocked")
@@ -88,7 +88,7 @@ func TestRestoreRecoveredProvider_OverlapBothPools(t *testing.T) {
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
 
 	addr := pairingList[0].PublicLavaAddress
-	require.NoError(t, csm.blockProvider(context.Background(), addr, false, firstEpochHeight, 0, 0, false, nil))
+	require.NoError(t, csm.blockProvider(context.Background(), addr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil))
 	csm.lock.Lock()
 	csm.blockedBackupProviders[addr] = struct{}{} // also blocked in the backup pool
 	csm.lock.Unlock()
@@ -111,7 +111,7 @@ func TestRestoreRecoveredProvider_Idempotent(t *testing.T) {
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
 
 	addr := pairingList[0].PublicLavaAddress
-	require.NoError(t, csm.blockProvider(context.Background(), addr, false, firstEpochHeight, 0, 0, false, nil))
+	require.NoError(t, csm.blockProvider(context.Background(), addr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil))
 
 	for i := 0; i < 3; i++ {
 		csm.RestoreRecoveredProvider(addr)

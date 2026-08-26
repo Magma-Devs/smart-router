@@ -117,6 +117,7 @@ type SmartRouterMetricsManager struct {
 	csmBlockedProvidersCount       *prometheus.GaugeVec // smartrouter_csm_blocked_providers
 	csmPrevEpochBlockedProviders   *prometheus.GaugeVec // smartrouter_csm_previous_epoch_blocked_providers
 	csmProviderBlocked             *prometheus.GaugeVec // smartrouter_csm_provider_blocked
+	csmBlockedProvidersByReason    *prometheus.GaugeVec // smartrouter_csm_blocked_providers_by_reason
 	csmBlockedBackupProvidersCount *prometheus.GaugeVec // smartrouter_csm_blocked_backup_providers
 	endpointServingTier            *prometheus.GaugeVec // smartrouter_endpoint_serving_tier
 	csmStickySessionsCount         *prometheus.GaugeVec // smartrouter_csm_sticky_sessions
@@ -506,6 +507,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_csm_provider_blocked",
 		Help: "Whether this specific provider is currently blocked (1=blocked, 0=serving). Companion to the smartrouter_csm_blocked_providers count, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
 	}, []string{"spec", "apiInterface", "provider_address"})
+	csmBlockedProvidersByReason := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_csm_blocked_providers_by_reason",
+		Help: "How many providers are currently blocked, split by WHY (MAG-2599): all-endpoints-disabled, too-many-dead-sessions, never-served-successfully, explicit-block-signal, blocked-in-previous-epoch, unspecified. Deliberately carries no provider label — every reason is republished on every state-size tick, including the zeros, which is what keeps the series self-correcting; a provider label would leave the previous reason's series stuck at 1 after a provider is re-blocked for a different reason. Use smartrouter_csm_provider_blocked or /debug/provider-routing for WHICH provider.",
+	}, []string{"spec", "apiInterface", "reason"})
 	csmBlockedBackupProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_backup_providers",
 		Help: "Size of ConsumerSessionManager.blockedBackupProviders (per-epoch backup-provider failure memory). Goes to 0 after /debug/reset-all.",
@@ -647,6 +652,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	csmBlockedProvidersCount = registerOrReuse(csmBlockedProvidersCount)
 	csmPrevEpochBlockedProviders = registerOrReuse(csmPrevEpochBlockedProviders)
 	csmProviderBlocked = registerOrReuse(csmProviderBlocked)
+	csmBlockedProvidersByReason = registerOrReuse(csmBlockedProvidersByReason)
 	csmBlockedBackupProvidersCount = registerOrReuse(csmBlockedBackupProvidersCount)
 	csmStickySessionsCount = registerOrReuse(csmStickySessionsCount)
 	csmReportedProvidersCount = registerOrReuse(csmReportedProvidersCount)
@@ -744,6 +750,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		csmBlockedProvidersCount:       csmBlockedProvidersCount,
 		csmPrevEpochBlockedProviders:   csmPrevEpochBlockedProviders,
 		csmProviderBlocked:             csmProviderBlocked,
+		csmBlockedProvidersByReason:    csmBlockedProvidersByReason,
 		csmBlockedBackupProvidersCount: csmBlockedBackupProvidersCount,
 		csmStickySessionsCount:         csmStickySessionsCount,
 		csmReportedProvidersCount:      csmReportedProvidersCount,
@@ -1567,6 +1574,21 @@ func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(chainId, apiInt
 	m.csmProviderBlocked.DeletePartialMatch(prometheus.Labels{"spec": chainId, "apiInterface": apiInterface})
 	for providerAddress := range providerAddressToEndpoint {
 		m.csmProviderBlocked.WithLabelValues(chainId, apiInterface, providerAddress).Set(0)
+	}
+}
+
+// SetCSMBlockedProvidersByReason publishes how many providers are blocked for each reason.
+//
+// The caller passes a complete map — every known reason, zeros included — and this writes all of
+// them. That is what makes the series self-correcting: a reason that stops applying is actively set
+// to 0 rather than left at its last value. Silently dropping the zeros would reintroduce exactly the
+// stale-series bug MAG-3106 fixed for the per-provider gauge.
+func (m *SmartRouterMetricsManager) SetCSMBlockedProvidersByReason(chainId, apiInterface string, countsByReason map[string]int) {
+	if m == nil {
+		return
+	}
+	for reason, count := range countsByReason {
+		m.csmBlockedProvidersByReason.WithLabelValues(chainId, apiInterface, reason).Set(float64(count))
 	}
 }
 

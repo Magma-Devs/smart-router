@@ -236,7 +236,7 @@ type Endpoint struct {
 	// it does not serve, and the vendor's 404 then reads as a verdict on the
 	// request.
 	InternalPath string
-	mu                 sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload, relayProbeTimeout, relayProbeAttempts
+	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload, relayProbeTimeout, relayProbeAttempts
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
 	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
@@ -436,12 +436,24 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 		transitioned = true
 	}
 	addr, refusals, isDirect := e.NetworkAddress, e.ConnectionRefusals, e.IsDirectRPC()
+	// Still enabled, but inside the last stretch of the budget. Logged so the approach to a disable
+	// — and to the provider block that follows once every endpoint is out — leaves a trail instead
+	// of appearing without warning (MAG-2599).
+	approaching := wasEnabled && !transitioned && refusals+endpointDisableWarningWindow >= MaxConsecutiveConnectionAttempts
 	e.mu.Unlock()
 
 	if transitioned {
 		utils.LavaFormatWarning("disabled unhealthy endpoint", nil,
 			utils.LogAttr("endpoint", addr),
 			utils.LogAttr("refusals", refusals),
+			utils.LogAttr("is_direct_rpc", isDirect),
+		)
+	} else if approaching {
+		utils.LavaFormatDebug("endpoint approaching the disable threshold",
+			utils.LogAttr("endpoint", addr),
+			utils.LogAttr("refusals", refusals),
+			utils.LogAttr("threshold", uint64(MaxConsecutiveConnectionAttempts)),
+			utils.LogAttr("remaining", MaxConsecutiveConnectionAttempts-refusals),
 			utils.LogAttr("is_direct_rpc", isDirect),
 		)
 	}
