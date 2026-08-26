@@ -113,8 +113,10 @@ func TestBlockReason_NeverServedSuccessfully_ViaSessionErrors(t *testing.T) {
 
 	record := blockedRecord(t, csm, address)
 	require.Equal(t, BlockReasonNeverServed, record.Reason)
-	require.True(t, record.Reported)
 	require.True(t, record.SecondChanceGranted, "a first offence earns the timer rather than a hard block")
+	require.False(t, record.Reported,
+		"a first offence takes the second chance INSTEAD of being reported — claiming otherwise would "+
+			"promise a reported-providers entry that does not exist")
 	require.Contains(t, record.Detail, "consecutiveErrors=", "the error count is the discriminating number here")
 }
 
@@ -193,6 +195,32 @@ func TestBlockReason_SurvivesTheEpochTransition(t *testing.T) {
 	require.Equal(t, BlockReasonTooManyDeadSessions, record.Reason, "the original reason must survive, not be replaced by the bookkeeping")
 	require.Equal(t, blockedAt, record.Since, "age is measured from the original block, not from the epoch tick")
 	require.Contains(t, record.Detail, "carried into epoch", "the carry-over is recorded as detail, not as the reason")
+}
+
+// Reported means the provider is actually in the reported-providers register, not that reporting was
+// requested. The two diverge on a first offence, and the epoch's release pass consumes this field —
+// so a Reported=true that promises an entry which does not exist would send a provider down the
+// wrong recovery branch.
+func TestBlockReason_ReportedMeansActuallyReported(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
+	address := csm.validAddresses[0]
+	epoch := csm.atomicReadCurrentEpoch()
+
+	// First offence: reporting requested, second chance taken instead.
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonNeverServed, true, epoch, 0, 16, true, nil))
+	first := blockedRecord(t, csm, address)
+	require.True(t, first.SecondChanceGranted)
+	require.False(t, first.Reported)
+	require.False(t, csm.reportedProviders.IsReported(address), "the record must agree with the register")
+
+	// Second offence: the chance is spent, so this one really is reported.
+	csm.validateAndReturnBlockedProviderToValidAddressesList(address, ReleaseSecondChanceTimer)
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonNeverServed, true, epoch, 0, 16, true, nil))
+	second := blockedRecord(t, csm, address)
+	require.False(t, second.SecondChanceGranted)
+	require.True(t, second.Reported)
+	require.True(t, csm.reportedProviders.IsReported(address), "the record must agree with the register")
 }
 
 // A release must clear the record, or a provider back in rotation would still read as blocked on
@@ -299,8 +327,8 @@ func TestProviderRoutingSnapshot_CarriesTheReason(t *testing.T) {
 	require.Equal(t, address, blocked.Address)
 	require.Equal(t, BlockReasonNeverServed, blocked.Reason)
 	require.Equal(t, "primary", blocked.Scope)
-	require.True(t, blocked.Reported)
 	require.True(t, blocked.SecondChanceGranted)
+	require.False(t, blocked.Reported, "reporting was requested but the second chance was taken instead")
 	require.GreaterOrEqual(t, blocked.BlockedForSeconds, 0.0)
 
 	// Held-off is a different question and must not be conflated with blocked: nothing here has

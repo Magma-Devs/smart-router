@@ -133,7 +133,9 @@ type BlockRecord struct {
 	// "consecutiveErrors=16"), plus a carry-over marker when the block survived an epoch. Free-form
 	// and for humans — never parse it.
 	Detail string
-	// Reported records whether the provider was also added to the reported-providers list.
+	// Reported records whether the provider was ACTUALLY added to the reported-providers register —
+	// not merely whether reporting was requested. A first offence that takes a second chance is not
+	// reported, so the two differ, and Reported and SecondChanceGranted are mutually exclusive.
 	Reported bool
 	// SecondChanceGranted records whether a second-chance timer was actually started — not merely
 	// whether one was allowed. A provider that had already used its second chance is reported
