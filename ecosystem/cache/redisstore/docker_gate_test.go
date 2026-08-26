@@ -11,9 +11,9 @@ import (
 //
 // Not opting in skips, as usual. Opting in WITHOUT a reachable docker daemon
 // is a hard failure rather than a skip: these lanes are the evidence behind
-// checklist items in docs/TEMP-RESP-CACHE-MANUAL-TESTING.md, and `go test`
-// exits 0 on a skipped test. An operator running the documented command with
-// docker down would otherwise see PASS and tick a box that verified nothing.
+// the "Local testing lanes" section of docs/RESP-CACHE.md, and `go test` exits
+// 0 on a skipped test. An operator running a documented command with docker
+// down would otherwise see PASS and tick a box that verified nothing.
 func requireDockerLane(t *testing.T, envVar, lane string) {
 	t.Helper()
 	if os.Getenv(envVar) != "1" {

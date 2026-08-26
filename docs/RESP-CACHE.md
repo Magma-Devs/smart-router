@@ -56,7 +56,7 @@ invalid combination below — the router never starts half-configured.
 | --- | --- | --- |
 | `topology` | `standalone` | `standalone` \| `sentinel` \| `cluster`. |
 | `addresses` | — (required) | Standalone: the node address. Sentinel: the **sentinel** addresses. Cluster: the **configuration endpoint** used as the discovery seed — never a node list; the client discovers topology itself. |
-| `read-addresses` | *(unset)* | Optional separate endpoint(s) for **reads** (replica/reader endpoints). Writes stay on `addresses`. See the multi-region note below. |
+| `read-addresses` | *(unset)* | Optional separate endpoint(s) for **reads** (reader endpoints). Writes stay on `addresses`. Selects an *endpoint*, not a replica role — read the topology caveat in the multi-region note below before using it with `sentinel` or `cluster`. |
 | `master-name` | — | Sentinel only (required there): the monitored master set name. |
 | `username` / `password` | *(unset)* | Static data-node credentials (AUTH / ACL). |
 | `password-file` | *(unset)* | Rotation-capable credentials: the file is polled and changes are pushed to **live connections**, which re-authenticate in place — no restart, no connection loss. The file holds the password, or `username:password` to rotate the ACL user too. Mutually exclusive with `password`. |
@@ -125,6 +125,19 @@ Reads go to `read-addresses`, writes (including cache population and flush) to
 replicated yet is a plain cache miss, and the router's block-freshness
 validation (seen-block rules) runs on every hit — a lagging replica can never
 serve data older than what the client has already seen.
+
+**Topology caveat — this selects an endpoint, not a replica role.** Under
+`standalone` the addresses are dialled exactly as given, so a managed reader
+endpoint really does serve the reads; that is the shape this feature is for.
+Under `sentinel` and `cluster` the read client runs its **own discovery** from
+the seeds you give it and resolves to the master(s) of whatever topology they
+front — so pointing it at replicas of the *same* deployment routes your reads
+straight back to the primary and buys nothing. It is still meaningful when it
+points at a **separate replicated deployment** (a regional cluster or sentinel
+set that the infrastructure replicates into), which is why the router logs a
+warning here rather than rejecting the config. If you want replica reads
+within one sentinel set or cluster, that is not currently supported — use the
+managed reader endpoint in `standalone` shape instead.
 
 ## Credential rotation (IAM-style tokens)
 

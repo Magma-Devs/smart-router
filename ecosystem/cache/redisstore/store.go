@@ -47,8 +47,10 @@ const (
 var keyPrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // Store implements core.KVStore over a RESP backend. Reads and writes may be
-// routed to distinct clients (D8: replica/reader endpoints in multi-region
-// deployments); with no read addresses both fields hold the same client.
+// routed to distinct clients (D8: reader endpoints in multi-region
+// deployments — see warnIfReadSplitIsDiscoveryScoped for what that does and
+// does not mean per topology); with no read addresses both fields hold the
+// same client.
 type Store struct {
 	write  redis.UniversalClient
 	read   redis.UniversalClient
@@ -85,6 +87,7 @@ func New(cfg Config) (*Store, error) {
 	}
 	readClient := writeClient
 	if len(cfg.ReadAddresses) > 0 {
+		warnIfReadSplitIsDiscoveryScoped(cfg)
 		readClient, err = cfg.buildClient(cfg.ReadAddresses, tlsCfg, provider)
 		if err != nil {
 			_ = writeClient.Close()
@@ -105,6 +108,28 @@ func New(cfg Config) (*Store, error) {
 		go watchCredentials(provider, cfg.refreshInterval(), store.stopWatcher)
 	}
 	return store, nil
+}
+
+// warnIfReadSplitIsDiscoveryScoped flags the one read-split shape that does
+// not do what its name suggests.
+//
+// read-addresses selects a separate ENDPOINT, not a replica ROLE. Under
+// standalone that is the whole story — the addresses are dialled as given, so
+// a managed reader endpoint really does serve the reads. Under sentinel and
+// cluster the read client runs its OWN discovery from those seeds and lands on
+// the master(s) of whatever topology they front: pointing it at the replicas
+// of the same deployment routes the reads straight back to the primary. It is
+// still meaningful when it points at a DIFFERENT replicated deployment (a
+// regional cluster or sentinel set fed by the infrastructure's replication),
+// which is why this warns rather than rejecting.
+func warnIfReadSplitIsDiscoveryScoped(cfg Config) {
+	if cfg.topology() == TopologyStandalone {
+		return
+	}
+	utils.LavaFormatWarning("resp-cache read-addresses under a discovering topology: the read client performs its own discovery and resolves to the master(s) of the topology those addresses front — it yields replica reads only when it points at a separate replicated deployment (e.g. a regional cluster), not at replicas of the write topology", nil,
+		utils.LogAttr("topology", cfg.topology()),
+		utils.LogAttr("read-addresses", cfg.ReadAddresses),
+	)
 }
 
 // NewWithClient wraps an externally constructed client for both reads and

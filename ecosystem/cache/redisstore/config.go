@@ -39,8 +39,11 @@ type Config struct {
 	// seeds. Never empty.
 	Addresses []string `mapstructure:"addresses"`
 	// ReadAddresses optionally builds a SECOND client of the same topology for
-	// reads (replica/reader endpoints in multi-region deployments). Empty =
-	// reads and writes share one client.
+	// reads (reader endpoints in multi-region deployments). Empty = reads and
+	// writes share one client. This selects an ENDPOINT, not a replica role:
+	// under sentinel/cluster the read client discovers and resolves to the
+	// master(s) those seeds front, so it only yields replica reads when it
+	// points at a separate replicated deployment (warned about in New).
 	ReadAddresses []string `mapstructure:"read-addresses"`
 	// MasterName is the sentinel-monitored master set name (sentinel only).
 	MasterName string `mapstructure:"master-name"`
