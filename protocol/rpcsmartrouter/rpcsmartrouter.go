@@ -827,6 +827,24 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 //
 // Only the four weights are decided here. Every other field is left at its default for
 // the caller to fill in, so a priority can never move something it does not own.
+//
+// The weights are normalised to sum to 1.0 before returning. A preset sums to 1.0 by
+// construction, so ANY partial override breaks the sum — --qos-selection-priority fastest
+// with --qos-latency-weight 0.5 gives 0.80 — and NewUpstreamSelector would then rescale it
+// while logging "weights do not sum to 1.0, normalizing" at WARN. That reads as the
+// operator's mistake on a combination this flag explicitly advertises, and it left three
+// disagreeing accounts of one config: this Info line reported the typed 0.5, the WARN said
+// the config was wrong, and the selector ran 0.625.
+//
+// Normalising here does the identical arithmetic one step earlier, in the code that knows
+// the override was deliberate, so the selector receives a set that already sums to 1.0 and
+// stays quiet. Nothing about routing changes: scaling preserves ratios, so 0.5/0.8 and
+// 0.625/1.0 are the same share. Reported by @avitenzer.
+//
+// Genuinely broken input is deliberately NOT handled here — negative, NaN, Inf, or an
+// all-zero set falls through untouched so NewUpstreamSelector's existing validation still
+// rejects it loudly and falls back to defaults. This only quiets the case we decided is
+// legitimate: correct proportions that happen not to total 1.
 func resolveSelectionWeights(flags *pflag.FlagSet) (provideroptimizer.UpstreamSelectorConfig, error) {
 	config := provideroptimizer.DefaultUpstreamSelectorConfig()
 
@@ -852,7 +870,12 @@ func resolveSelectionWeights(flags *pflag.FlagSet) (provideroptimizer.UpstreamSe
 		}
 	}
 
-	// Stay quiet on the default path so an untouched deployment logs nothing new.
+	rescaled := normalizeSelectionWeights(&config)
+
+	// Stay quiet on the default path so an untouched deployment logs nothing new. The
+	// weights logged are the EFFECTIVE ones — what the selector will actually score on,
+	// after any rescale — because the typed number is not what runs and an operator who
+	// reads this line should not have to work that out.
 	if priority != provideroptimizer.SelectionPriorityBalanced || len(overridden) > 0 {
 		utils.LavaFormatInfo("Working with provider selection priority: "+priority.String(),
 			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
@@ -860,10 +883,46 @@ func resolveSelectionWeights(flags *pflag.FlagSet) (provideroptimizer.UpstreamSe
 			utils.LogAttr("syncWeight", config.SyncWeight),
 			utils.LogAttr("stakeWeight", config.StakeWeight),
 			utils.LogAttr("manuallyOverridden", strings.Join(overridden, ",")),
+			utils.LogAttr("rescaledToSumToOne", rescaled),
 		)
 	}
 
 	return config, nil
+}
+
+// normalizeSelectionWeights scales the four QoS weights so they sum to 1.0, and reports
+// whether it had to. Returns false when the set is already normalised or when it is invalid
+// and must be left for NewUpstreamSelector to reject.
+//
+// The 0.001 tolerance mirrors NewUpstreamSelector's own check exactly. That is the point:
+// matching it is what guarantees the selector's "weights do not sum to 1.0" warning cannot
+// fire on a set that came through here.
+func normalizeSelectionWeights(config *provideroptimizer.UpstreamSelectorConfig) bool {
+	weights := []*float64{
+		&config.AvailabilityWeight,
+		&config.LatencyWeight,
+		&config.SyncWeight,
+		&config.StakeWeight,
+	}
+
+	total := 0.0
+	for _, w := range weights {
+		// A negative or non-finite weight is a config error, not a scaling problem. Leave
+		// the whole set alone so the selector's validation still sees it as handed in.
+		if math.IsNaN(*w) || math.IsInf(*w, 0) || *w < 0 {
+			return false
+		}
+		total += *w
+	}
+
+	if total <= 0 || math.Abs(total-1.0) <= 0.001 {
+		return false
+	}
+
+	for _, w := range weights {
+		*w /= total
+	}
+	return true
 }
 
 // routerConfigOptimizerWeights is the JSON shape for a single provider-optimizer's
