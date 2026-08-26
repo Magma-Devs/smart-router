@@ -1834,6 +1834,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		relayProcessor.SetCrossValidationRelayDeadline(time.Now().Add(2*relayTimeout + maxNodeTimeout + crossValidationStragglerGrace))
 	}
 
+	// Method name for goroutine labels (nil api on crafted relays).
+	relayApiName := ""
+	if api := chainMessage.GetApi(); api != nil {
+		relayApiName = api.Name
+	}
+
 	// Launch goroutines for each direct RPC endpoint (parallel relay pattern)
 	for endpointAddress, sessionInfo := range sessions {
 		go func(endpointAddress string, sessionInfo *lavasession.SessionInfo, relayParentCtx context.Context) {
@@ -1844,6 +1850,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			if found {
 				goroutineCtx = utils.WithUniqueIdentifier(goroutineCtx, guid)
 			}
+
+			// Label this relay goroutine so the Go 1.27 goroutineleak profile and
+			// tracebacks attribute a stuck/leaked provider relay to its chain,
+			// interface and endpoint rather than an anonymous stack.
+			goroutineCtx = utils.WithGoroutineLabels(goroutineCtx,
+				"chain", rpcss.listenEndpoint.ChainID,
+				"api_interface", rpcss.listenEndpoint.ApiInterface,
+				"provider", endpointAddress,
+				"method", relayApiName,
+			)
 
 			// StartInternalSpan declines to create a span when there is no
 			// recording parent in context, which protects against orphan root
@@ -4325,7 +4341,19 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 
 	// WithoutCancel: the reply has already been sent, so the watcher must outlive the request context;
 	// it is bounded by maxWait. Values (GUID) are preserved for log correlation.
-	go relayProcessor.WatchCrossValidationStragglers(context.WithoutCancel(ctx), pendingProviders, consensusHash, maxWait, record)
+	watchCtx := context.WithoutCancel(ctx)
+	go func() {
+		// Label inside the goroutine (SetGoroutineLabels applies to the running
+		// goroutine) so a leaked straggler watcher is attributable in the
+		// goroutineleak profile.
+		lctx := utils.WithGoroutineLabels(watchCtx,
+			"chain", chainId,
+			"api_interface", apiInterface,
+			"method", apiName,
+			"goroutine", "cross_validation_straggler_watcher",
+		)
+		relayProcessor.WatchCrossValidationStragglers(lctx, pendingProviders, consensusHash, maxWait, record)
+	}()
 }
 
 // RelayProcessorForHeaders interface for methods used by appendHeadersToRelayResult
