@@ -23,8 +23,11 @@ import (
 )
 
 const (
-	authTestUser     = "cacheuser"
-	authTestPassword = "sup3r-s3cret-value"
+	authTestUser = "cacheuser"
+	// A deliberately placeholder-shaped value: it still has to be distinctive
+	// for the NotContains assertions below to mean anything, but it must not
+	// read as a real credential to a secret scanner.
+	authTestPassword = "placeholder-not-a-real-credential"
 )
 
 // pingErr returns the error the health probe would observe for a given client.

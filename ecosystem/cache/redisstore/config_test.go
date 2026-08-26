@@ -48,7 +48,7 @@ func TestConfigValidateMatrix(t *testing.T) {
 // the mapping must carry BOTH credential sets, or discovery against hardened
 // sentinels fails before a data connection is ever attempted.
 func TestFailoverOptionsMapping(t *testing.T) {
-	sentinelPwFile := writeTempFile(t, "sentinel-pass", "sentinel-secret\n")
+	sentinelPwFile := writeTempFile(t, "sentinel-pass", "placeholder-sentinel-credential\n")
 	cfg := Config{
 		Topology:             TopologySentinel,
 		Addresses:            []string{"s1:26379", "s2:26379", "s3:26379"},
@@ -70,7 +70,7 @@ func TestFailoverOptionsMapping(t *testing.T) {
 	require.Equal(t, "mymaster", opts.MasterName)
 	require.Equal(t, cfg.Addresses, opts.SentinelAddrs)
 	require.Equal(t, "sentineluser", opts.SentinelUsername)
-	require.Equal(t, "sentinel-secret", opts.SentinelPassword, "control-plane password comes from the file, trimmed")
+	require.Equal(t, "placeholder-sentinel-credential", opts.SentinelPassword, "control-plane password comes from the file, trimmed")
 	require.Equal(t, 1, opts.DB)
 	require.Equal(t, 7, opts.PoolSize)
 

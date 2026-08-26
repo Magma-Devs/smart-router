@@ -42,12 +42,12 @@ func (r *recordingListener) recorded() []string {
 }
 
 func TestFileCredentialsParsing(t *testing.T) {
-	passwordOnly := writeTempFile(t, "pw", "secret\n")
+	passwordOnly := writeTempFile(t, "pw", "placeholder-credential\n")
 	src := &FileCredentials{Username: "fixed-user", Path: passwordOnly}
 	user, pass, err := src.Credentials()
 	require.NoError(t, err)
 	require.Equal(t, "fixed-user", user)
-	require.Equal(t, "secret", pass)
+	require.Equal(t, "placeholder-credential", pass)
 
 	userAndPass := writeTempFile(t, "userpw", "rotated-user:rotated-pass\n")
 	src = &FileCredentials{Username: "ignored", Path: userAndPass}
