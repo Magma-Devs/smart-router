@@ -2241,11 +2241,14 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 		return EpochMismatchError
 	}
 
+	// Reported is filled in after the report flow below, not from reportProvider: asking to report
+	// and actually reporting are different outcomes. A first offence with allowSecondChance set
+	// takes the second chance INSTEAD of being reported, so reportProvider=true would claim a
+	// register entry that does not exist — and the epoch's release pass reads that field.
 	record := BlockRecord{
-		Reason:   reason,
-		Since:    time.Now(),
-		Detail:   blockDetail(disconnections, consecutiveErrors),
-		Reported: reportProvider,
+		Reason: reason,
+		Since:  time.Now(),
+		Detail: blockDetail(disconnections, consecutiveErrors),
 	}
 
 	err := csm.removeAddressFromValidAddresses(address, record)
@@ -2267,11 +2270,13 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 		blocked = &record
 	}
 
+	reportedNow := false
 	if reportProvider { // Report provider flow
 		if allowSecondChance { // on epoch change, we don't report providers immediately we allow them a recovery phase.
 			if _, ok := csm.secondChanceGivenToAddresses[address]; ok {
 				// already exists in second chance, need to block.
 				csm.reportedProviders.ReportProvider(address, consecutiveErrors, disconnections, reconnectCallback)
+				reportedNow = true
 			} else {
 				// first time reported, allowing a second chance.
 				csm.secondChanceGivenToAddresses[address] = struct{}{}
@@ -2290,6 +2295,7 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 			}
 		} else {
 			csm.reportedProviders.ReportProvider(address, consecutiveErrors, disconnections, reconnectCallback)
+			reportedNow = true
 		}
 	}
 
@@ -2297,6 +2303,7 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 	// returns on its own in three minutes and one that does not — so the stored record and the log
 	// both have to wait for it.
 	if blocked != nil {
+		blocked.Reported = reportedNow
 		blocked.SecondChanceGranted = runSecondChance
 		csm.blockedProviderReasons[address] = *blocked
 		blockedCount = csm.blockedTotalLocked()
