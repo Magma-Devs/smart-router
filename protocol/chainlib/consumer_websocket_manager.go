@@ -84,10 +84,6 @@ func NewConsumerWebsocketManager(options ConsumerWebsocketManagerOptions) *Consu
 	return cwm
 }
 
-func (cwm *ConsumerWebsocketManager) GetWebSocketConnectionUniqueId(dappId, userIp string) string {
-	return dappId + "__" + userIp + "__" + cwm.WebsocketConnectionUID
-}
-
 func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]byte, error) {
 	rateLimitError := common.JsonRpcRateLimitError
 	id := 0
@@ -322,10 +318,10 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					}
 				} else {
 					if responseData == nil {
-						// Legacy provider-relay path: Unsubscribe returns (nil, nil) on
-						// success because the provider's relay stream has no synchronous
-						// ack frame to forward. Synthesize a §4.2-compliant reply so
-						// clients don't hang on recv() until they time out (~15s). The
+						// An implementation may report success with no payload, having no
+						// synchronous ack frame from the node to forward. Synthesize a
+						// §4.2-compliant reply so clients don't hang on recv() until they
+						// time out (~15s). The
 						// JSON-RPC envelope is safe here: ConsumerWebsocketManager is
 						// only constructed by jsonRPC.go and tendermintRPC.go, both
 						// JSON-RPC-shaped. Mirrors lavanet/lava#2296.

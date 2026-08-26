@@ -10,13 +10,6 @@ func WithRequestId(ctx context.Context, reqId string) context.Context {
 	return context.WithValue(ctx, request_id_ctx_key{}, reqId)
 }
 
-func AppendRequestId(ctx context.Context, reqId string) context.Context {
-	if ctx.Value(request_id_ctx_key{}) != nil || reqId == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, request_id_ctx_key{}, reqId)
-}
-
 func GetRequestId(ctx context.Context) (reqId string, found bool) {
 	reqId, found = ctx.Value(request_id_ctx_key{}).(string)
 	return reqId, found
@@ -28,13 +21,6 @@ func WithTaskId(ctx context.Context, taskId string) context.Context {
 	return context.WithValue(ctx, task_id_ctx_key{}, taskId)
 }
 
-func AppendTaskId(ctx context.Context, taskId string) context.Context {
-	if ctx.Value(task_id_ctx_key{}) != nil || taskId == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, task_id_ctx_key{}, taskId)
-}
-
 func GetTaskId(ctx context.Context) (taskId string, found bool) {
 	taskId, found = ctx.Value(task_id_ctx_key{}).(string)
 	return taskId, found
@@ -43,13 +29,6 @@ func GetTaskId(ctx context.Context) (taskId string, found bool) {
 type tx_id_ctx_key struct{}
 
 func WithTxId(ctx context.Context, txId string) context.Context {
-	return context.WithValue(ctx, tx_id_ctx_key{}, txId)
-}
-
-func AppendTxId(ctx context.Context, txId string) context.Context {
-	if ctx.Value(tx_id_ctx_key{}) != nil || txId == "" {
-		return ctx
-	}
 	return context.WithValue(ctx, tx_id_ctx_key{}, txId)
 }
 

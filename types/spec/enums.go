@@ -7,50 +7,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// EXTENSION
-// ---------------------------------------------------------------------------
-
-type EXTENSION int32
-
-const (
-	EXTENSION_NONE    EXTENSION = 0
-	EXTENSION_ARCHIVE EXTENSION = 1
-)
-
-var EXTENSION_name = map[int32]string{
-	0: "NONE",
-	1: "ARCHIVE",
-}
-
-var EXTENSION_value = map[string]int32{
-	"NONE":    0,
-	"ARCHIVE": 1,
-}
-
-func (x EXTENSION) String() string {
-	if name, ok := EXTENSION_name[int32(x)]; ok {
-		return name
-	}
-	return fmt.Sprintf("EXTENSION(%d)", int32(x))
-}
-
-func (s EXTENSION) MarshalJSON() ([]byte, error) {
-	buf := bytes.NewBufferString(`"`)
-	buf.WriteString(s.String())
-	buf.WriteString(`"`)
-	return buf.Bytes(), nil
-}
-
-func (s *EXTENSION) UnmarshalJSON(b []byte) error {
-	var j string
-	if err := json.Unmarshal(b, &j); err != nil {
-		return err
-	}
-	*s = EXTENSION(EXTENSION_value[j])
-	return nil
-}
-
-// ---------------------------------------------------------------------------
 // FUNCTION_TAG
 // ---------------------------------------------------------------------------
 

@@ -271,8 +271,57 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 
 	TransportGRPC: {
 		// gRPC status code matchers (codes from google.golang.org/grpc/codes)
+		//
+		// A code earns a row here only when its verdict is the SAME at every
+		// endpoint. Rows are what let the direct-RPC availability gate
+		// (rpcsmartrouter.shouldFailSessionForResult) exempt a status from
+		// demoting the endpoint, and an unregistered code scores — which is the
+		// right default for "we have not catalogued this failure".
+		//
+		// codes.InvalidArgument is the one caller-fault code in the set: gRPC
+		// defines it as arguments "problematic regardless of the state of the
+		// system", so every endpoint rejects the same malformed request
+		// identically. Left unregistered it classified UNKNOWN_ERROR, and a burst
+		// of malformed client requests demoted the whole healthy pairing toward
+		// the selection floor — blocklisting on the 16th consecutive one
+		// (MAG-2549). USER_INVALID_PARAMS is Retryable=false, which both stops the
+		// pointless retry and keeps the gate off the endpoint.
+		//
+		// Reach: this table is keyed by TRANSPORT, not by relay path, so the row also
+		// applies on the provider-based gRPC path via chainlib.GrpcErrorHandler
+		// .HandleNodeError — an INVALID_ARGUMENT becomes non-retryable there too. That
+		// is intended and follows from gRPC's own definition of the code, but it is
+		// wider than "direct RPC only" and should be read as such.
+		{GRPCCodeEquals(3), LavaErrorUserInvalidParams}, // codes.InvalidArgument
+		// codes.NotFound and codes.OutOfRange are the ordinary "I do not have this"
+		// outcomes of a Cosmos or Sui gRPC query — a missing object, an account that
+		// was never funded, a height below the node's pruning window. They are the
+		// most COMMON non-OK codes on those chains, not a failure mode.
+		//
+		// They need a row for a reason the other two do not: sendGRPCRelay marks every
+		// non-OK status IsNodeError, so without one they fall through to UNKNOWN_ERROR
+		// and the availability gate scores them — one demotion per retry, on every
+		// endpoint asked, for a query whose answer is simply "no". NODE_DATA_NOT_HELD
+		// is Retryable=true so the pruned-node-to-archive-node retry survives, and
+		// SubCategoryDataScope is what keeps the gate off an endpoint that answered
+		// truthfully about its own data scope.
+		{GRPCCodeEquals(5), LavaErrorNodeDataNotHeld},         // codes.NotFound
+		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},        // codes.OutOfRange
 		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented},      // codes.Unimplemented
 		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
+		// Deliberately NOT registered, each for its own reason — do not add them
+		// as a block, which is how `Code >= 13` went wrong in the first place:
+		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
+		//                          Demoting it is the correct signal.
+		//   7  PermissionDenied  - credentials are configured per endpoint, so one
+		//   16 Unauthenticated     rejecting ours is unusable to us and should demote.
+		//   8  ResourceExhausted - ambiguous in the gRPC spec (per-user quota vs.
+		//                          out of disk). The "rate limit" message row below
+		//                          catches the quota case without asserting the code
+		//                          alone means "healthy but busy".
+		//   1  Canceled          - a LOCAL cancellation never reaches this table;
+		//                          handleGRPCError resolves it structurally. One that
+		//                          does reach here is remote and unproven.
 		// Message-based matchers for gRPC errors conveyed without status codes
 		{MessageContains("rate limit"), LavaErrorNodeRateLimited},
 		{MessageContains("enhance_your_calm"), LavaErrorNodeRateLimited}, // HTTP/2 GOAWAY ENHANCE_YOUR_CALM
@@ -437,14 +486,36 @@ func IsNonRetryableNodeErrorWithContext(family ChainFamily, transport TransportT
 //   - IsNonRetryable: registry entry is Retryable=false (hard stop for retries).
 //   - IsUnsupportedMethod: SubCategory-based predicate used by the consumer
 //     to apply the zero-CU carve-out and response caching.
+//   - IsRateLimited: SubCategoryRateLimit, i.e. "the endpoint is healthy but
+//     busy". Health- and QoS-tracking callers must apply backoff but must NOT
+//     mark the endpoint unhealthy — see ErrorSubCategory's declaration.
+//
+// The three are orthogonal axes, not a hierarchy. IsNonRetryable answers
+// "would retrying elsewhere help", the SubCategory flags answer "whose fault
+// is this". NODE_RATE_LIMITED (2005) is retryable AND rate-limited;
+// NODE_LIMIT_EXCEEDED (2011) is non-retryable AND rate-limited. A caller that
+// needs "is this the node's fault" must read the fault axis, not infer it from
+// retryability.
 type NodeErrorClassification struct {
 	IsNonRetryable      bool
 	IsUnsupportedMethod bool
+	IsRateLimited       bool
+	// IsDataScope is the third fault axis: the endpoint does not hold the
+	// requested data. Independent of IsNonRetryable — these errors ARE retryable
+	// (an archive node may answer) but must not demote the endpoint that told us
+	// the truth. See ErrorSubCategory.IsDataScope.
+	IsDataScope bool
 }
 
 // ClassifyNodeErrorForRetry runs ClassifyError exactly once and derives the
-// policy flags consumed by the consumer's retry decision and CU/caching
-// carve-outs.
+// policy flags consumed by the consumer's retry decision, its CU/caching
+// carve-outs, and the direct-RPC availability-scoring gate.
+//
+// An unmatched error yields the zero value — every flag false. That is a
+// deliberate absence of information, not a positive "retryable, node's fault"
+// verdict: retrying unknowns is the documented default (see error_codes.go),
+// and callers that treat a false flag as an affirmative classification will
+// misread every novel error body.
 func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, errorCode int, message string) NodeErrorClassification {
 	c := ClassifyError(nil, family, transport, errorCode, message)
 	if c == nil || c == LavaErrorUnknown {
@@ -453,6 +524,8 @@ func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, erro
 	return NodeErrorClassification{
 		IsNonRetryable:      !c.Retryable,
 		IsUnsupportedMethod: c.SubCategory.IsUnsupportedMethod(),
+		IsRateLimited:       c.SubCategory.IsRateLimit(),
+		IsDataScope:         c.SubCategory.IsDataScope(),
 	}
 }
 
@@ -621,6 +694,24 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 	// Remote gRPC status errors start with "rpc error"; those carry a *remote*
 	// deadline/cancel and must not be classified as a local context error.
 	// The guard is encoded as a mustNotContain on the rpc-error prefix marker.
+	//
+	// The guard is deliberately the BARE substring "rpc error", not the fuller
+	// "rpc error: code =" prefix. Widening it to the full prefix was tried and
+	// reverted (MAG-2687): lavasession.GRPCStatusError renders as
+	// "gRPC error 1: context canceled", which lowercased contains "rpc error"
+	// inside the word "gRPC" but NOT "rpc error: code =". That wrapper is built
+	// for REMOTE statuses — a cancel the *endpoint* reported — so admitting it
+	// here labels an upstream fault as local orchestration and, because
+	// PROTOCOL_CONTEXT_CANCELED is Retryable=false, silently suppresses the
+	// retry that would have reached a healthy endpoint.
+	//
+	// Nothing is lost by keeping the guard broad. A cancellation the router
+	// itself caused never depends on this table: GRPCDirectRPCConnection
+	// .handleGRPCError returns a nil response and an error wrapping the real
+	// context.Canceled sentinel, which DetectConnectionError resolves in its
+	// layer-1 errors.Is check well before the string fallback runs. This table
+	// only ever sees errors whose sentinel chain was already lost, and for those
+	// "contains an rpc-error marker" is the conservative read.
 	{
 		mustContain:    []string{"context deadline exceeded"},
 		mustNotContain: []string{"rpc error"},

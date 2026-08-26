@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -33,14 +32,17 @@ type healthVerification struct {
 // One provider with multiple node-urls (e.g. an https + a wss endpoint) yields one
 // row per url, distinguished by `url`/`transport`.
 type healthEndpointResult struct {
-	Name          string               `json:"name"`
-	ChainID       string               `json:"chainId"`
-	APIInterface  string               `json:"apiInterface"`
-	URL           string               `json:"url"`
-	Transport     string               `json:"transport"`
-	Addons        []string             `json:"addons"`
-	Extensions    []string             `json:"extensions"`
-	SpecValid     bool                 `json:"specValid"`
+	Name         string   `json:"name"`
+	ChainID      string   `json:"chainId"`
+	APIInterface string   `json:"apiInterface"`
+	URL          string   `json:"url"`
+	Transport    string   `json:"transport"`
+	Addons       []string `json:"addons"`
+	Extensions   []string `json:"extensions"`
+	SpecValid    bool     `json:"specValid"`
+	// LatestBlock is this URL's own height when a verification measured one. When it was
+	// backfilled instead (see backfillLatestBlock) it is the ENDPOINT's height, obtained
+	// through the router spanning every probed URL. Reporting only — never a verdict.
 	LatestBlock   int64                `json:"latestBlock"`
 	Ok            bool                 `json:"ok"`
 	Error         string               `json:"error,omitempty"`
@@ -87,7 +89,11 @@ never as a non-zero exit. Only a fatal setup error (bad config, missing --use-st
 exits non-zero, and even then a JSON envelope with a populated "error" is printed first.
 
 Endpoints can come from a smartrouter config file (probes every node-url under direct-rpc),
-or from inline "address chain-id api-interface" triplets like the rpcsmartrouter command.`,
+or from inline "address chain-id api-interface" triplets like the rpcsmartrouter command.
+
+The config argument resolves exactly as the rpcsmartrouter command's does: an absolute path
+names the file outright, while a relative path or a bare name is looked up in the local
+running directory, ./config, then ` + lavaDefaultNodeHome + `.`,
 		Example: `  smartrouter health config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
   smartrouter health https://eth1.lava.build ETH1 jsonrpc --use-static-spec specs/`,
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -143,8 +149,9 @@ or from inline "address chain-id api-interface" triplets like the rpcsmartrouter
 			// sanity check, or when ws nodes are known-unreachable and you don't want them probed).
 			skipWs, _ := cmd.Flags().GetBool(commonlib.SkipWebsocketVerificationFlag)
 			verifyWs := !skipWs
-			// chainlib.SkipWebsocketVerification is set per-provider inside probeProvider
-			// (a provider with no ws URL can't have ws verified) — see the note there.
+			// This is only the run-wide default; probeProvider narrows it per endpoint on
+			// that endpoint's own parser (an endpoint with no ws URL can't have ws
+			// verified) — see the note there.
 
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			results := runHealthProbes(ctx, providers, staticSpecPaths, timeout, verifyWs)
@@ -191,26 +198,25 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 		return providers, nil
 	}
 
-	// Config-file mode.
-	configName := DefaultRPCSmartRouterFileName
-	if len(args) == 1 {
-		configName = args[0]
-	}
+	// Config-file mode. The argument is a config file path (absolute or relative) or a
+	// bare name resolved against the search paths; see config_source.go.
 	viper.Reset()
-	viper.SetConfigName(configName)
-	viper.SetConfigType("yml")
-	viper.AddConfigPath(".")
-	viper.AddConfigPath("./config")
-	viper.AddConfigPath(lavaDefaultNodeHome)
+	configTarget, configIsFile := pointViperAtConfig(args)
 	if err := viper.ReadInConfig(); err != nil {
-		return nil, utils.LavaFormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configName})
+		// This command is what an operator reaches for when a config will not boot, so a
+		// config it cannot even find has to say where it looked, in the terms they used.
+		if isConfigNotFound(err) {
+			return nil, utils.LavaFormatError(configNotFoundMessage(configTarget, configIsFile), err,
+				configLocationAttributes(configTarget, configIsFile)...)
+		}
+		return nil, utils.LavaFormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configTarget})
 	}
 
 	keys := []string{commonlib.DirectRPCConfigName}
 	if includeBackup {
 		keys = append(keys, commonlib.BackupDirectRPCConfigName)
 	}
-	var providers []healthProvider
+	lists := make([][]*lavasession.RPCStaticProviderEndpoint, 0, len(keys))
 	for _, key := range keys {
 		if !viper.IsSet(key) {
 			continue
@@ -219,6 +225,20 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 		if err != nil {
 			return nil, err
 		}
+		lists = append(lists, static)
+	}
+
+	// A duplicate provider name stops the router from starting (MAG-2724), and this command is
+	// exactly what an operator reaches for to work out why a config will not boot — so it reports
+	// the collision and probes anyway, rather than refusing the config like the router does. The
+	// same check the router runs, run here for its message and not for its verdict; the rows are
+	// still told apart by their `url`, which is what identifies the broken node.
+	if err := lavasession.ValidateUniqueProviderNames(lists...); err != nil {
+		utils.LavaFormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
+	}
+
+	var providers []healthProvider
+	for _, static := range lists {
 		for _, ep := range static {
 			providers = append(providers, healthProvider{
 				name:         ep.Name,
@@ -355,6 +375,29 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 		return rowsFromError(fmt.Errorf("create chain parser: %w", err))
 	}
 
+	// Per-endpoint websocket gating. For a chain whose spec supports subscriptions every
+	// verification is augmented with the websocket extension — which can only route if this
+	// endpoint actually has a ws:// URL. An http-only endpoint (e.g. an inline
+	// `address chain-id api-interface` probe) would otherwise fail EVERY check with
+	// "no chain proxy supporting requested extensions {websocket}".
+	//
+	// This is set on our own parser, which nothing else shares. It used to be a package
+	// global flipped under a mutex held around ValidateCollect, and that lock is what
+	// produced the reported symptom: it serialized every endpoint's verification phase
+	// while each endpoint's own timeout kept running from goroutine launch, so late
+	// endpoints entered ValidateCollect with most of their budget gone, their context
+	// expired mid-probe, and connectorLoop closed the connector out from under the
+	// remaining relays ("connector is closed" on healthy nodes, MAG-2333).
+	//
+	// The global's other reader, newChainRouter (chain_router.go:328), was NOT part of
+	// that symptom under `health`: this command sets IgnoreWsEnforcementForTestCommands
+	// before any probing, and that guard is the first operand of the same &&, so the ws
+	// check short-circuits before SkipWebsocketVerification is ever evaluated there.
+	// Per-parser state is still the right shape — it removes the shared cell instead of
+	// synchronizing it, and newChainRouter does read it on the serving path, where the
+	// guard is false — but a cross-endpoint race on that bool is not what `health` hit.
+	chainParser.SetSkipWebsocketVerification(!(verifyWs && providerHasWebSocketURL(provider.nodeUrls)))
+
 	rpcEndpoint := lavasession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
 	if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, staticSpecPaths, rpcEndpoint, "", ""); err != nil {
 		return rowsFromError(fmt.Errorf("load spec: %w", err))
@@ -438,19 +481,9 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 	// provider can list the same URL twice with different addons (e.g. a base URL and an
 	// `addons:[archive]` URL), which would otherwise collide in a url-keyed map.
 	//
-	// Per-provider websocket gating: for a chain whose spec supports subscriptions, every
-	// verification is augmented with the websocket extension — which can only route if this
-	// provider actually has a ws:// URL. A provider with only http URLs (e.g. an inline
-	// `address chain-id api-interface` probe) would otherwise fail EVERY check with
-	// "no chain proxy supporting requested extensions {websocket}". So we disable ws
-	// augmentation for providers that have no ws URL, even when ws is globally on.
-	// chainlib.SkipWebsocketVerification is a package global read inside ValidateCollect,
-	// so set it under a mutex around the call to stay correct under concurrent providers.
-	wsForThisProvider := verifyWs && providerHasWebSocketURL(provider.nodeUrls)
-	wsVerificationMu.Lock()
-	chainlib.SkipWebsocketVerification = !wsForThisProvider
+	// ws gating for this endpoint was applied to chainParser above, so nothing here is
+	// shared with the endpoints probed concurrently alongside it.
 	validations := chainFetcher.ValidateCollect(ctx)
-	wsVerificationMu.Unlock()
 
 	rows := make([]healthEndpointResult, 0, len(provider.nodeUrls))
 	for i, url := range probedUrls {
@@ -465,7 +498,51 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 		applyValidation(&row, validations[i])
 		rows = append(rows, row)
 	}
+
+	backfillLatestBlock(rows, func() (int64, error) { return chainFetcher.FetchLatestBlockNum(ctx) })
+
 	return append(rows, wsSkippedRows()...)
+}
+
+// backfillLatestBlock gives rows that came back without a block height a reporting-only
+// value from fetch.
+//
+// ValidateCollect fetches the latest block only when some verification needs it to
+// compute a LatestDistance. A spec with no such verification therefore reports
+// latestBlock 0 on legs that passed every check, which reads as a dead node — the
+// "known related quirk" in MAG-2333.
+//
+// fetch is called at most once per endpoint and only if some row actually needs it, so
+// a spec that already reports a height costs no extra relay. A fetch failure leaves the
+// rows untouched: this is a reporting field and must never change a leg's ok verdict.
+//
+// Two limits follow from the value being ENDPOINT-level while the rows are per-URL:
+//
+//   - Only rows that passed are filled. fetch cannot say anything about a leg that failed
+//     its checks, and a plausible height printed beside those failures reads as if the URL
+//     were reachable. This also matches what the change set out to do — report a real
+//     height on passing legs.
+//   - fetch routes through the router built over ALL of this endpoint's probed URLs, so
+//     the height belongs to the endpoint, not necessarily to the row it lands on. That is
+//     acceptable for a field that never feeds a verdict, but it is not a per-URL
+//     measurement and must not be read as one.
+func backfillLatestBlock(rows []healthEndpointResult, fetch func() (int64, error)) {
+	var block int64
+	fetched := false
+	for i := range rows {
+		if !rows[i].Ok || rows[i].LatestBlock > 0 {
+			continue
+		}
+		if !fetched {
+			fetched = true
+			if fetchedBlock, err := fetch(); err == nil {
+				block = fetchedBlock
+			}
+		}
+		if block > 0 {
+			rows[i].LatestBlock = block
+		}
+	}
 }
 
 // applyValidation folds one node-URL's spec-verification results into its result row:
@@ -534,11 +611,6 @@ func emitFatal(err error) error {
 	writeHealthReport(buildHealthReport(nil, err))
 	return err
 }
-
-// wsVerificationMu serializes the per-provider mutation of the package-global
-// chainlib.SkipWebsocketVerification (read inside ValidateCollect) so concurrent provider
-// probes don't race on it.
-var wsVerificationMu sync.Mutex
 
 // providerHasWebSocketURL reports whether any of the provider's node URLs is ws://wss://.
 func providerHasWebSocketURL(urls []commonlib.NodeUrl) bool {

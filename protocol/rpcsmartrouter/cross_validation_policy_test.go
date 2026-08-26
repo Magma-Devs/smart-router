@@ -306,6 +306,75 @@ func TestParseCrossValidationConfig_RejectsNonInteger(t *testing.T) {
 	}
 }
 
+// TestPreflightValidateCrossValidationConfig covers the context-free config gate that runs at process
+// start, before the router boots anything (MAG-3022). The contradiction it catches was already rejected
+// by NewCrossValidationPolicyResolver, but only from inside ServeRPCRequests — after every provider had
+// been dialed and after the router had logged "RPCSmartRouter Listening". These cases pin the rejection
+// to the preflight entry point, which is what makes the ordering structural rather than something you
+// have to read the logs to confirm.
+func TestPreflightValidateCrossValidationConfig(t *testing.T) {
+	preflight := func(t *testing.T, yamlBody string) error {
+		t.Helper()
+		v := viper.New()
+		v.SetConfigType("yaml")
+		require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
+		return PreflightValidateCrossValidationConfig(v)
+	}
+
+	const policyHeader = "cross-validation:\n" +
+		"  policies:\n" +
+		"    - chain-id: ETH1\n" +
+		"      api-interface: jsonrpc\n" +
+		"      method: eth_feeHistory\n"
+
+	t.Run("enabled + forbid-caller-cv is rejected before boot", func(t *testing.T) {
+		// The exact shape from the MAG-3022 report.
+		err := preflight(t, policyHeader+"      enabled: true\n      forbid-caller-cv: true\n")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mutually exclusive")
+		assert.Contains(t, err.Error(), "ETH1/jsonrpc/eth_feeHistory",
+			"the error must name the offending policy so an operator can find it without a debugger")
+	})
+
+	t.Run("either knob alone is accepted", func(t *testing.T) {
+		require.NoError(t, preflight(t, policyHeader+"      enabled: true\n"))
+		require.NoError(t, preflight(t, policyHeader+"      forbid-caller-cv: true\n"))
+	})
+
+	t.Run("no cross-validation key at all is accepted", func(t *testing.T) {
+		// The overwhelmingly common config. Preflight must be a no-op for it.
+		require.NoError(t, preflight(t, "direct-rpc:\n  - name: x\n"))
+	})
+
+	t.Run("the other context-free errors are caught too", func(t *testing.T) {
+		for _, tc := range []struct {
+			desc, body, wantSubstring string
+		}{
+			{
+				desc:          "missing method",
+				body:          "cross-validation:\n  policies:\n    - chain-id: ETH1\n      api-interface: jsonrpc\n",
+				wantSubstring: "must set chain-id, api-interface, and method",
+			},
+			{
+				desc:          "duplicate policy",
+				body:          policyHeader + "      enabled: true\n" + policyHeader[len("cross-validation:\n  policies:\n"):] + "      enabled: true\n",
+				wantSubstring: "duplicate cross-validation policy",
+			},
+			{
+				desc:          "non-integer knob",
+				body:          policyHeader + "      enabled: true\n      agreement-threshold: 2.5\n",
+				wantSubstring: "cross-validation",
+			},
+		} {
+			t.Run(tc.desc, func(t *testing.T) {
+				err := preflight(t, tc.body)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantSubstring)
+			})
+		}
+	})
+}
+
 // TestValidateCrossValidationStartup covers the startup guards: the stateful-write guard (with a real
 // parser and the fail-closed path when the parser cannot classify) and the min-groups capacity bound.
 func TestValidateCrossValidationStartup(t *testing.T) {

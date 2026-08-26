@@ -65,6 +65,21 @@ type quorumStat struct {
 	groupCounts map[string]int
 }
 
+// responseBufferSize is the capacity of a processor's response channel. It mirrors the state machine's own
+// fan-out decision (see NewUnifiedRelayStateMachine's initial batch): a cross-validation request launches
+// MaxParticipants relays at once, every other selection launches one at a time. Sizing the buffer to the
+// real fan-out means the buffer can never be what limits a request — the only meaningful bound on
+// MaxParticipants is the number of candidate endpoints that actually exist, which
+// validateCrossValidationCapacity checks per request before this processor is constructed. RelayRetryLimit
+// of headroom covers a retry landing before the previous batch's response has been drained.
+func responseBufferSize(selection Selection, crossValidationParams *common.CrossValidationParams) int {
+	fanOut := 1
+	if selection == CrossValidation && crossValidationParams != nil {
+		fanOut = crossValidationParams.MaxParticipants
+	}
+	return fanOut + RelayRetryLimit
+}
+
 func NewRelayProcessor(
 	ctx context.Context,
 	crossValidationParams *common.CrossValidationParams, // nil for Stateless/Stateful
@@ -90,18 +105,12 @@ func NewRelayProcessor(
 			utils.LavaFormatFatal("invalid cross-validation MaxParticipants", nil,
 				utils.LogAttr("MaxParticipants", crossValidationParams.MaxParticipants))
 		}
-		if crossValidationParams.MaxParticipants > MaxCallsPerRelay {
-			utils.LavaFormatFatal("cross-validation MaxParticipants exceeds maximum allowed",
-				nil,
-				utils.LogAttr("MaxParticipants", crossValidationParams.MaxParticipants),
-				utils.LogAttr("MaxCallsPerRelay", MaxCallsPerRelay))
-		}
 	}
 
 	chainID, _ := chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
 	relayProcessor := &RelayProcessor{
 		crossValidationParams:        crossValidationParams,
-		responses:                    make(chan *RelayResponse, MaxCallsPerRelay), // buffered to prevent blocking
+		responses:                    make(chan *RelayResponse, responseBufferSize(selection, crossValidationParams)), // buffered to prevent blocking
 		ResultsManager:               NewResultsManager(guid, chainID),
 		guid:                         guid,
 		debugRelay:                   relayStateMachine.GetDebugState(),
@@ -446,6 +455,7 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		HasUnsupportedMethod:      hasUnsupportedMethod,
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,
+		OnlyRateLimited:           onlyRateLimited(nodeErrorResults, protocolErrorResults),
 		HashErr:                   hashErr,
 	}
 }
@@ -659,6 +669,11 @@ type CrossValidationStragglerResult struct {
 	ProviderGroup   string        // "" folds to common.DefaultProviderGroup at the metric layer
 	Outcome         string        // one of common.CrossValidationStragglerOutcome*
 	Delay           time.Duration // how long after the reply the straggler resolved (watch duration for not-received)
+	// ResponseHash is the late response's own content hash, the value compared against the consensus
+	// to produce Outcome. Zero when there was no content to hash (node-error, protocol-error,
+	// not-received), which the debug event surface renders as "no hash" rather than as a differing
+	// one (MAG-2772).
+	ResponseHash [32]byte
 }
 
 // WatchCrossValidationStragglers consumes responses that arrive on the processor's channel AFTER the
@@ -698,11 +713,13 @@ func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pe
 			return
 		}
 		delete(pending, addr)
+		outcome, responseHash := classifyStragglerResponse(response, consensusHash, protocolMessage)
 		record(CrossValidationStragglerResult{
 			ProviderAddress: addr,
 			ProviderGroup:   response.RelayResult.ProviderInfo.ProviderGroup,
-			Outcome:         classifyStragglerResponse(response, consensusHash, protocolMessage),
+			Outcome:         outcome,
 			Delay:           time.Since(start),
+			ResponseHash:    responseHash,
 		})
 	}
 	// resolveFromRecorded resolves pending providers whose response never reaches this watcher's
@@ -718,7 +735,8 @@ func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pe
 		}
 		// resolveOne records a watched provider from its stored result and drops it from pending;
 		// a no-op for providers not in the pending set (already resolved, or never watched).
-		resolveOne := func(addr, group, outcome string) {
+		// responseHash is the stored content hash, zero for the outcomes with nothing to hash.
+		resolveOne := func(addr, group, outcome string, responseHash [32]byte) {
 			if _, watched := pending[addr]; !watched {
 				return
 			}
@@ -728,6 +746,7 @@ func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pe
 				ProviderGroup:   group,
 				Outcome:         outcome,
 				Delay:           time.Since(start),
+				ResponseHash:    responseHash,
 			})
 		}
 		successResults, nodeErrorResults, protocolErrorResults := rp.GetResultsData()
@@ -738,13 +757,13 @@ func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pe
 			if result.ResponseHash == consensusHash {
 				outcome = common.CrossValidationStragglerOutcomeAgreed
 			}
-			resolveOne(result.ProviderInfo.ProviderAddress, result.ProviderInfo.ProviderGroup, outcome)
+			resolveOne(result.ProviderInfo.ProviderAddress, result.ProviderInfo.ProviderGroup, outcome, result.ResponseHash)
 		}
 		for _, result := range nodeErrorResults {
-			resolveOne(result.ProviderInfo.ProviderAddress, result.ProviderInfo.ProviderGroup, common.CrossValidationStragglerOutcomeNodeError)
+			resolveOne(result.ProviderInfo.ProviderAddress, result.ProviderInfo.ProviderGroup, common.CrossValidationStragglerOutcomeNodeError, [32]byte{})
 		}
 		for _, relayError := range protocolErrorResults {
-			resolveOne(relayError.ProviderInfo.ProviderAddress, relayError.ProviderInfo.ProviderGroup, common.CrossValidationStragglerOutcomeProtocolError)
+			resolveOne(relayError.ProviderInfo.ProviderAddress, relayError.ProviderInfo.ProviderGroup, common.CrossValidationStragglerOutcomeProtocolError, [32]byte{})
 		}
 	}
 	// giveUp runs on deadline/cancel. It first drains responses already sitting in the buffered
@@ -786,26 +805,32 @@ func (rp *RelayProcessor) WatchCrossValidationStragglers(ctx context.Context, pe
 	}
 }
 
-// classifyStragglerResponse maps a late cross-validation response to its straggler outcome. Hashing
-// goes through responseContentHash — the same rule as handleResponse — so a late empty reply only
-// "agrees" with a nil-fallback consensus, exactly as it would have at quorum time.
-func classifyStragglerResponse(response *RelayResponse, consensusHash [32]byte, protocolMessage chainlib.ProtocolMessage) string {
+// classifyStragglerResponse maps a late cross-validation response to its straggler outcome, and
+// returns the content hash that decision was made on. Hashing goes through responseContentHash — the
+// same rule as handleResponse — so a late empty reply only "agrees" with a nil-fallback consensus,
+// exactly as it would have at quorum time.
+//
+// The returned hash is zero for the outcomes where no content was hashed (protocol error, node
+// error), so a caller can tell "this provider's answer differed" from "this provider had no answer"
+// rather than reading a zero hash as a differing one.
+func classifyStragglerResponse(response *RelayResponse, consensusHash [32]byte, protocolMessage chainlib.ProtocolMessage) (outcome string, responseHash [32]byte) {
 	if response.Err != nil {
-		return common.CrossValidationStragglerOutcomeProtocolError
+		return common.CrossValidationStragglerOutcomeProtocolError, [32]byte{}
 	}
 	reply := response.RelayResult.GetReply()
 	if reply == nil {
-		return common.CrossValidationStragglerOutcomeProtocolError
+		return common.CrossValidationStragglerOutcomeProtocolError, [32]byte{}
 	}
 	if protocolMessage != nil {
 		if foundError, _ := protocolMessage.CheckResponseError(reply.Data, response.RelayResult.StatusCode); foundError {
-			return common.CrossValidationStragglerOutcomeNodeError
+			return common.CrossValidationStragglerOutcomeNodeError, [32]byte{}
 		}
 	}
-	if responseContentHash(reply.Data) == consensusHash {
-		return common.CrossValidationStragglerOutcomeAgreed
+	responseHash = responseContentHash(reply.Data)
+	if responseHash == consensusHash {
+		return common.CrossValidationStragglerOutcomeAgreed, responseHash
 	}
-	return common.CrossValidationStragglerOutcomeDisagreed
+	return common.CrossValidationStragglerOutcomeDisagreed, responseHash
 }
 
 // this function waits for the processing results, they are written by multiple go routines and read by this go routine
@@ -1128,7 +1153,7 @@ func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult
 	case Stateful, Stateless:
 		// Stateful (fan-out, no retries) and Stateless (sequential retries) differ only in the state
 		// machine; result selection here is identical for both.
-		return rp.processNonCrossValidationResult(successResults, nodeErrors, successResultsCount, nodeErrorCount, protocolErrorCount)
+		return rp.processNonCrossValidationResult(successResults, nodeErrors, protocolErrors)
 
 	default:
 		return nil, utils.LavaFormatError("unknown selection mode", nil, utils.LogAttr("selection", rp.selection))
@@ -1187,22 +1212,47 @@ func (rp *RelayProcessor) processCrossValidationResult(
 // difference lives in the state machine, not here.)
 func (rp *RelayProcessor) processNonCrossValidationResult(
 	successResults, nodeErrors []common.RelayResult,
-	successResultsCount, nodeErrorCount, protocolErrorCount int,
+	protocolErrors []RelayError,
 ) (*common.RelayResult, error) {
 	// Return first success if available
-	if successResultsCount > 0 {
+	if len(successResults) > 0 {
 		result := successResults[0]
 		return &result, nil
 	}
 
 	// No successes, return first node error if available
-	if nodeErrorCount > 0 {
+	if len(nodeErrors) > 0 {
 		result := nodeErrors[0]
 		return &result, nil
 	}
 
 	// No node responses at all - build a failure result from the best node/protocol error.
-	return rp.buildFailureResult(nodeErrorCount, protocolErrorCount)
+	return rp.buildFailureResult(nodeErrors, protocolErrors)
+}
+
+// onlyRateLimited reports whether at least one attempt failed and every failure was an
+// upstream rate limit — a typed 429 protocol error, or a node error the classifier flagged
+// IsRateLimited.
+//
+// Pure over the slices handed to it: it takes no lock of its own, and it does not depend on
+// rp.lock. Callers pass the results they already read via GetResultsData, which snapshots
+// them under the results manager's own rm.lock — a different mutex from rp.lock, and the one
+// that actually guards this memory.
+func onlyRateLimited(nodeErrorResults []common.RelayResult, protocolErrorResults []RelayError) bool {
+	if len(nodeErrorResults)+len(protocolErrorResults) == 0 {
+		return false
+	}
+	for _, result := range nodeErrorResults {
+		if !result.IsRateLimited {
+			return false
+		}
+	}
+	for _, protocolError := range protocolErrorResults {
+		if !errors.Is(protocolError.GetError(), common.StatusCodeError429) {
+			return false
+		}
+	}
+	return true
 }
 
 // buildFailureResult constructs an error result when no consensus can be reached. It returns the best
@@ -1212,13 +1262,13 @@ func (rp *RelayProcessor) processNonCrossValidationResult(
 // append it after the per-attempt names, so on the all-transport-errors path Lava-Provider-Address
 // listed ~2x the providers and disagreed with Lava-Retries (MAG-2351).
 func (rp *RelayProcessor) buildFailureResult(
-	nodeErrorCount, protocolErrorCount int,
+	nodeErrors []common.RelayResult, protocolErrors []RelayError,
 ) (*common.RelayResult, error) {
 	returnedResult := &common.RelayResult{StatusCode: http.StatusInternalServerError}
 	var processingError error
 
 	var bestLavaError *common.LavaError
-	if nodeErrorCount > 0 {
+	if len(nodeErrors) > 0 {
 		// Prefer node errors over protocol errors
 		nodeErr := rp.GetBestNodeErrorMessageForUser()
 		processingError = nodeErr.Err
@@ -1226,13 +1276,26 @@ func (rp *RelayProcessor) buildFailureResult(
 		if nodeErr.Response != nil {
 			returnedResult = &nodeErr.Response.RelayResult
 		}
-	} else if protocolErrorCount > 0 {
+	} else if len(protocolErrors) > 0 {
 		protocolErr := rp.GetBestProtocolErrorMessageForUser()
 		processingError = protocolErr.Err
 		bestLavaError = protocolErr.LavaError
 		if protocolErr.Response != nil {
 			returnedResult = &protocolErr.Response.RelayResult
 		}
+	}
+
+	// Every attempt was refused for rate: the chain is temporarily unservable, not broken.
+	// 503 is the honest status and what well-behaved clients back off on; no Retry-After
+	// is surfaced — the hold-off registry owns that, internally.
+	if onlyRateLimited(nodeErrors, protocolErrors) {
+		// Copy before stamping: returnedResult aliases the STORED RelayResult (the two
+		// assignments above take its address), and this runs under a read lock holding
+		// nothing of rm.lock. Mutating in place would write shared state without the write
+		// lock and make the 503 permanent for every later ProcessingResult call.
+		stamped := *returnedResult
+		stamped.StatusCode = http.StatusServiceUnavailable
+		returnedResult = &stamped
 	}
 
 	// Log with classified error code for metrics/observability

@@ -19,6 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -222,9 +223,40 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		ApiInterface:     listenEndpoint.ApiInterface,
 		AverageBlockTime: effectiveBlockTime,
 		BlocksToSave:     endpointstate.DefaultBlocksToSave,
+		// Block-hash polling / fork detection is OFF unless the operator turns it on. Read
+		// straight from viper (flags are bound in the command's RunE) rather than through a
+		// package global, so an embedded server with no flags set gets the same default.
+		// The key is absent in that case and GetBool returns false, which IS the default.
+		EnableForkDetection: viper.GetBool(endpointstate.EnableForkDetectionFlagName),
+		// Dedicated-poll cadence, read from viper for the same reason as the flag above (an
+		// embedded server with no flags bound gets 0, which IS the default). endpointstate
+		// validates the value and reverts an out-of-range one.
+		// GetFloat64, not GetInt: the divisor is fractional at the low end, and GetInt would
+		// truncate 0.25 to 0 — which is the "unset" sentinel, so an operator asking for the
+		// largest relief would silently receive the default instead.
+		PollIntervalDivisor: viper.GetFloat64(endpointstate.PollDivisorFlagName),
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
+		// Fleet tracker gate (MAG-2981): with --shared-state AND a cache backend, pods share
+		// their poll observations so an endpoint is polled about once per interval fleet-wide.
+		// Gated on the same flag as the chain-level shared tip — it is the operator's "this
+		// chain runs on several replicas behind one cache" signal, already set by the helm
+		// chart when maxReplicas > 1. nil (single replica or no cache) leaves the gate off.
+		PeerObservations: rpcss.peerObservationStore(),
+		OnGateSkip: func(endpointURL, source string) {
+			rpcss.smartRouterEndpointMetrics.RecordTrackerGateSkip(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, source)
+		},
+		OnGateError: func(endpointURL, op string) {
+			rpcss.smartRouterEndpointMetrics.RecordTrackerGateError(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, op)
+		},
+		// Count the tracker's upstream requests by kind. This is the series that makes the
+		// effect of --enable-fork-detection visible: rpc_endpoint_fetch_latest_{success,fails}
+		// count EVENTS (new block detected / latest-block fetch failed), not requests, so
+		// neither of them moves when request volume changes.
+		OnTrackerRequest: func(endpointURL, kind string) {
+			rpcss.smartRouterEndpointMetrics.RecordTrackerRequest(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, kind)
+		},
 		OnNewBlock: func(endpointURL string, fromBlock, toBlock int64) {
 			utils.LavaFormatTrace("endpoint ChainTracker detected new block",
 				utils.LogAttr("endpoint", endpointURL),
@@ -256,16 +288,15 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 
 	// Proactive health prober (MAG-2160 / Topic D): on its own cadence, score EVERY direct-RPC
 	// endpoint from stored telemetry + the consensus baseline (zero upstream calls), proactively
-	// re-enable recovered endpoints, and feed one QoS sample per provider. Replaces the synthetic
-	// direct-RPC probe (the legacy AppendProbeRelayData feed is gated off for static providers).
+	// re-enable recovered endpoints, and feed one QoS sample per provider. It is the single source of
+	// truth for direct-RPC endpoint health and probe-fed QoS.
 	// effectiveBlockTime, NOT the raw spec value (see probeVerdictConfigFor): the verdict's alive
 	// horizon must share the SAME staleness horizon as ChainState and the monitor's poll cadence,
 	// and the "keeping up" tolerance must match consistency pre-validation's per-chain threshold.
 	go rpcss.runProbeLoop(ctx, validatedProbeCadence(lavasession.ProbeLoopInterval), probeVerdictConfigFor(effectiveBlockTime, rpcss.consistencyConfig))
 
-	// NewChainListener now accepts WSSubscriptionManager interface, which is implemented
-	// by both ConsumerWSSubscriptionManager (provider-relay mode) and
-	// DirectWSSubscriptionManager (direct RPC mode for smart router).
+	// wsSubscriptionManager is DirectWSSubscriptionManager, or the NoOp one when the
+	// chain has no WebSocket endpoint configured.
 	rpcss.chainListener, err = chainlib.NewChainListener(ctx, listenEndpoint, rpcss, rpcss, rpcSmartRouterLogs, chainParser, nil, wsSubscriptionManager)
 	if err != nil {
 		return err
@@ -310,6 +341,17 @@ func (rpcss *RPCSmartRouterServer) GetGRPCReflectionConnection(ctx context.Conte
 	}
 
 	return rpcss.grpcSubscriptionManager.GetReflectionConnection(ctx)
+}
+
+// GetGRPCSubscriptionManager implements chainlib.GRPCSubscriptionProvider, which is how
+// the gRPC listener picks up server-streaming support (MAG-2643).
+func (rpcss *RPCSmartRouterServer) GetGRPCSubscriptionManager() chainlib.GRPCSubscriptionManager {
+	if rpcss.grpcSubscriptionManager == nil {
+		// Untyped nil on purpose: returning the nil *DirectGRPCSubscriptionManager
+		// would box into a non-nil interface and defeat the listener's nil check.
+		return nil
+	}
+	return rpcss.grpcSubscriptionManager
 }
 
 func (rpcss *RPCSmartRouterServer) sendCraftedRelaysWrapper(ctx context.Context, initialRelays bool) (bool, error) {
@@ -1126,10 +1168,37 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	// Get cross-validation parameters from the state machine (nil for Stateless/Stateful)
 	crossValidationParams := stateMachine.GetCrossValidationParams()
 
+	// Validate the requested fan-out against the live candidate-endpoint count BEFORE constructing the
+	// processor. The processor sizes its response channel from that fan-out, and this check is the only
+	// thing that bounds MaxParticipants by the endpoints that actually exist, so a rejected request must
+	// never reach the constructor. This matches the ordering already used on the initial/health relay path
+	// in sendRelayWithRetries (MAG-2796).
+	if reason, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
+		// Nothing will be relayed on this path, so the processor exists only to carry the structured reason
+		// back to SendParsedRelay. Build it with the single-relay defaults rather than the caller's params:
+		// a request rejected for asking too many endpoints must not size an allocation from the very value
+		// that was just rejected. validateCrossValidationCapacity only errors when selection is
+		// CrossValidation, so the processor still needs non-nil params here.
+		failFastParams := common.DefaultCrossValidationParams
+		relayProcessor := relaycore.NewRelayProcessor(
+			ctx,
+			&failFastParams,
+			rpcss.rpcSmartRouterLogs,
+			rpcss,
+			rpcss.relayRetriesManager,
+			stateMachine,
+		)
+		if reason != "" {
+			relayProcessor.SetCrossValidationFailFastReason(reason)
+		}
+		tracing.RecordError(span, err)
+		// Return the processor (not nil) so SendParsedRelay can read the fail-fast reason and surface the
+		// failure-reason header to the client.
+		return relayProcessor, err
+	}
+
 	// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
 	// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
-	// Created before the capacity check so a request-time fail-fast can carry its structured reason back on
-	// the shared processor (the check aborts before any RelayResult exists).
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx,
 		crossValidationParams,
@@ -1145,16 +1214,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	var consistencyFallback *consistencyFallbackState
 	if stateMachine.GetSelection() != relaycore.CrossValidation {
 		consistencyFallback = newConsistencyFallbackState()
-	}
-
-	if reason, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
-		if reason != "" {
-			relayProcessor.SetCrossValidationFailFastReason(reason)
-		}
-		tracing.RecordError(span, err)
-		// Return the processor (not nil) so SendParsedRelay can read the fail-fast reason and surface the
-		// failure-reason header to the client.
-		return relayProcessor, err
 	}
 
 	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
@@ -1408,9 +1467,9 @@ func promoteConsistencyFallback(
 	failedSessions lavasession.ConsumerSessionsMap,
 	filterErr error,
 	state *consistencyFallbackState,
-) (lavasession.ConsumerSessionsMap, lavasession.ConsumerSessionsMap, error, int) {
+) (lavasession.ConsumerSessionsMap, lavasession.ConsumerSessionsMap, int, error) {
 	if state == nil || !errors.Is(filterErr, lavasession.ConsistencyPreValidationError) {
-		return validSessions, failedSessions, filterErr, 0
+		return validSessions, failedSessions, 0, filterErr
 	}
 
 	if validSessions == nil {
@@ -1427,7 +1486,105 @@ func promoteConsistencyFallback(
 	if promoted > 0 {
 		filterErr = nil
 	}
-	return validSessions, failedSessions, filterErr, promoted
+	return validSessions, failedSessions, promoted, filterErr
+}
+
+// shouldFailSessionForResult decides whether a completed direct-RPC relay is reported to the
+// session manager as a failure (OnSessionFailure -> AppendRelayFailure, an availability sample of
+// 0) or as a success (OnSessionDone -> AppendRelayDataConsensus, a sample of 1). It is the ONLY
+// gate feeding the optimizer's availability dimension, so anything it calls a success is, to the
+// optimizer, indistinguishable from a healthy relay.
+//
+// MAG-2156: this used to test only `err != nil || statusCode >= 500 || statusCode == 429`. A
+// JSON-RPC node error is HTTP 200 with {"error":...} in the body, so none of those fired and the
+// relay landed on OnSessionDone — scoring a failed response as a success. A provider erroring on
+// 90% of relays therefore held availability 1.0, identical to a healthy peer, and stayed
+// first-picked ~1/3 of the time no matter how long it kept failing. The classification itself was
+// never the problem: direct_rpc_relay.go tags these IsNodeError=true, the gate just didn't read it.
+//
+// The three carve-outs are load-bearing, not defensive, and they exclude on DIFFERENT axes:
+//
+//   - IsNonRetryable — "retrying elsewhere would not help". Deterministic caller-fault errors
+//     (unsupported method, invalid params, execution reverted) come back from EVERY endpoint for
+//     the same request, so scoring them would drive the whole pairing below
+//     score.MinAcceptableAvailability on a burst of malformed client requests and collapse every
+//     endpoint to the selection floor — punishing healthy nodes for a bad request instead of
+//     identifying a bad node. All four SubCategoryUnsupportedMethod codes are Retryable=false, so
+//     this also preserves that subcategory's "no provider scoring" contract.
+//   - IsRateLimited — "the endpoint is healthy but busy". SubCategoryRateLimit is contractually
+//     backoff-without-marking-unhealthy (common/error_registry.go), and it does NOT follow from
+//     retryability: NODE_RATE_LIMITED (2005) is Retryable=true, NODE_LIMIT_EXCEEDED (2011) is
+//     Retryable=false, and both must stay out of the availability signal.
+//   - IsDataScope — "the endpoint does not hold this data, and said so". SubCategoryDataScope
+//     (gRPC NOT_FOUND / OUT_OF_RANGE) is the case neither axis above can express: retrying IS
+//     worthwhile because a pruned node and an archive node genuinely disagree, yet the endpoint
+//     that answered did nothing wrong. Without this carve-out the most COMMON non-OK code on a
+//     Cosmos or Sui gRPC chain demotes every endpoint asked, once per retry (MAG-2549 review).
+//
+// KNOWN AND ACCEPTED — an unclassified error body scores. ClassifyNodeErrorForRetry returns all
+// flags false when nothing in the registry matches, and a false flag is an absence of information,
+// not a verdict of "the node's fault". Two consequences, both deliberate:
+//
+//  1. A novel/vendor error body is scored against availability. This is the behaviour the ticket
+//     asks for — an endpoint failing in a way we have not catalogued is still failing — and
+//     narrowing the gate to positively-classified errors would silently exempt exactly the novel
+//     failures we most want to catch.
+//  2. Errors that ARE classified retryable but are request-shaped rather than node-shaped
+//     (CHAIN_BLOCK_NOT_FOUND 3201, CHAIN_TX_NOT_FOUND 3202, CHAIN_RECEIPT_NOT_FOUND 3203,
+//     CHAIN_DATA_NOT_AVAILABLE 3205, NODE_RESOURCE_NOT_FOUND 2012, NODE_RESOURCE_UNAVAILABLE 2013)
+//     are scored. Retryable=true is defined as "another endpoint has a chance of succeeding", so
+//     the endpoint IS the differentiator and demoting it is defensible; when it is not — every
+//     endpoint lacks the tx — all of them demote equally and weighted_selector collapses to uniform
+//     random rather than starving. Tag these with a fault-axis SubCategory if that proves wrong in
+//     production — SubCategoryDataScope is exactly that escape hatch being used, and the JSON-RPC
+//     and REST codes listed here are deliberately left on the scoring side for now: only the gRPC
+//     status codes were shown to be a routine query outcome rather than an error the node raised.
+//
+// Every relay through this gate also feeds ConsecutiveErrors. An endpoint with ZERO successful
+// relays is blocklisted on its 16th consecutive failure (consumer_session_manager.go), so a
+// sustained burst of scored node errors can drain the pairing pool before it resets. That is the
+// intended escalation for a genuinely dead endpoint, and the reason the carve-outs above are
+// exclusions rather than mere score adjustments.
+func shouldFailSessionForResult(err error, relayResult *common.RelayResult) bool {
+	if err != nil {
+		return true
+	}
+	if relayResult == nil {
+		// Unreachable from the current call site, which dereferences relayResult first. Kept so
+		// the helper is total on its own signature rather than relying on a caller invariant.
+		return false
+	}
+	// REST/HTTP transport failures: err == nil but the status still means the node failed us.
+	//
+	// Deliberately NOT extended to gRPC status codes even though RelayResult.StatusCode now
+	// carries them (0-16, so nothing here can fire on a gRPC relay). Every gRPC status reaches
+	// this gate through the IsNodeError branch below, where the carve-outs apply; teaching this
+	// clause that 13/14/15 are "gRPC 5xx" and 8 is "gRPC 429" would re-score them ahead of the
+	// carve-outs and undo the rate-limit exemption that direct_rpc_relay.go just classified.
+	if relayResult.StatusCode >= 500 || relayResult.StatusCode == 429 {
+		return true
+	}
+	// Node error delivered inside a 2xx body — scoreable unless a carve-out claims it.
+	return relayResult.IsNodeError &&
+		!relayResult.IsNonRetryable &&
+		!relayResult.IsRateLimited &&
+		!relayResult.IsDataScope
+}
+
+// shouldResetEndpointHealth reports whether a completed direct-RPC relay is proof that the endpoint
+// is working — the condition relayInnerDirect calls Endpoint.ResetHealth on.
+//
+// Defined as the exact negation of shouldFailSessionForResult so the endpoint-health path and the
+// QoS path cannot form different opinions about the same relay. They could before: relayInnerDirect
+// gated only on `statusCode >= 500 || == 429`, which no gRPC status can satisfy (the codes are
+// 0-16), so every gRPC node error fell through to "success — reset health" at the same moment
+// shouldFailSessionForResult was reporting it to the session manager as an availability failure.
+//
+// Keeping it a negation rather than a second rule is deliberate: a carve-out added to one gate is
+// then automatically honoured by the other, which is how a rate-limited or data-scope answer keeps
+// restoring health while an UNAVAILABLE one stops.
+func shouldResetEndpointHealth(relayResult *common.RelayResult) bool {
+	return !shouldFailSessionForResult(nil, relayResult)
 }
 
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
@@ -1457,7 +1614,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 
 	// Pre-request consistency validation: filter out endpoints that are too far behind
 	validSessions, failedSessions, filterErr := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMessage)
-	validSessions, failedSessions, filterErr, promotedFallbacks := promoteConsistencyFallback(
+	validSessions, failedSessions, promotedFallbacks, filterErr := promoteConsistencyFallback(
 		validSessions,
 		failedSessions,
 		filterErr,
@@ -1758,17 +1915,34 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				analytics,
 			)
 
+			// Did WE stop this relay? On a stateful broadcast every endpoint is queried and the
+			// first answer cancels the rest, so N-1 goroutines land here holding context.Canceled
+			// through no fault of their endpoint. Same for a client that hung up. Resolved once,
+			// here, and reused by both the metric outcome and the session release below so the two
+			// can never disagree about what happened (MAG-2648).
+			//
+			// goroutineCtx is the right context to ask: for cross-validation it is derived from a
+			// WithoutCancel parent, so a detached straggler is correctly NOT seen as cancelled.
+			isClientCancel := err != nil && common.IsClientCancellation(err, goroutineCtx)
+
 			if rpcss.smartRouterEndpointMetrics != nil {
 				// analytics is read-only here (classification flags set once pre-launch, Success set
 				// once in SendParsedRelay), so this per-endpoint metric is safe from a detached
-				// straggler goroutine; per-relay success is passed explicitly (err == nil).
+				// straggler goroutine; the per-relay outcome is passed explicitly.
+				outcome := metrics.RelayOutcomeSuccess
+				switch {
+				case isClientCancel:
+					outcome = metrics.RelayOutcomeCancelled
+				case err != nil:
+					outcome = metrics.RelayOutcomeError
+				}
 				rpcss.smartRouterEndpointMetrics.RecordDirectRelayEnd(
 					rpcss.listenEndpoint.ChainID,
 					rpcss.listenEndpoint.ApiInterface,
 					endpointAddress,
 					apiMethod,
 					float64(relayLatency.Milliseconds()),
-					err == nil,
+					outcome,
 					analytics,
 				)
 			}
@@ -1776,7 +1950,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// Handle response
 			if err != nil {
 				tracing.RecordError(provSpan, err)
-				utils.LavaFormatDebug("direct RPC relay failed in goroutine",
+				// A relay WE cancelled is not an endpoint failure: on a stateful broadcast the
+				// first answer cancels the rest, so promoting this unconditionally would emit
+				// N-1 INFO lines per request for endpoints that did nothing wrong — the same
+				// mis-attribution MAG-2648 removed from scoring. Keep those at DEBUG; a genuine
+				// endpoint failure is the exceptional path an operator needs at INFO.
+				logRelayFailure := utils.LavaFormatInfo
+				if isClientCancel {
+					logRelayFailure = utils.LavaFormatDebug
+				}
+				logRelayFailure("direct RPC relay failed in goroutine",
 					utils.LogAttr("endpoint", endpointAddress),
 					utils.LogAttr("error", err.Error()),
 					utils.LogAttr("latency", relayLatency),
@@ -1806,9 +1989,58 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// Check status code to determine if session should fail
 			// For REST 5xx/429, err == nil but we still want to fail the session for QoS/retry
 			statusCode := localRelayResult.StatusCode
-			shouldFailSession := err != nil || statusCode >= 500 || statusCode == 429
+			shouldFailSession := shouldFailSessionForResult(err, localRelayResult)
 
-			if !shouldFailSession {
+			// Hold-off registry keys for this attempt (docs/RATE-LIMIT-HOLDOFF.md): the
+			// provider name and the node URL actually dialed.
+			holdoffProvider := singleConsumerSession.Parent.PublicLavaAddress
+			holdoffURL := endpointAddress
+			if targetEndpoint != nil {
+				holdoffURL = targetEndpoint.NetworkAddress
+			}
+
+			if isClientCancel {
+				// We cancelled it, so the endpoint's availability was never actually tested —
+				// release the session and return its CU without a QoS penalty (MAG-2648).
+				// Routing this through OnSessionFailure is the bug: it feeds AddFailedRelay and
+				// the optimizer an availability sample of 0, and on a broadcast that lands on
+				// every healthy node except the single fastest one.
+				//
+				// This branch precedes the shouldFailSession test on purpose — a cancelled relay
+				// always has err != nil, so it would otherwise be swallowed by the failure arm.
+				if errSession := rpcss.sessionManager.OnSessionCancelled(singleConsumerSession, err); errSession != nil {
+					utils.LavaFormatWarning("OnSessionCancelled failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if isRateLimitedRelayOutcome(err, localRelayResult) {
+				// A rate-limit is neither failure nor success — the upstream is healthy but
+				// busy, and both scoring directions get it wrong: OnSessionFailure lets a
+				// busy vendor hard-block a healthy endpoint after 15 consecutive failures,
+				// OnSessionDone rewards the fast rejection with a latency sample that ranks
+				// the limiter above endpoints doing real work. Release without a QoS sample
+				// either way, and hold the endpoint off so the in-request retry and
+				// subsequent requests prefer somewhere else (docs/RATE-LIMIT-HOLDOFF.md).
+				retryAfter, _ := common.RetryAfterFrom(err)
+				heldFor := relayHoldoff.RecordRateLimit(holdoffProvider, holdoffURL, retryAfter)
+				releaseErr := err
+				if releaseErr == nil {
+					releaseErr = fmt.Errorf("upstream rate-limited the relay (HTTP %d)", statusCode)
+				}
+				utils.LavaFormatInfo("relay rate-limited by upstream, holding endpoint off",
+					utils.LogAttr("endpoint", endpointAddress),
+					utils.LogAttr("holdoff", heldFor.String()),
+					utils.LogAttr("GUID", goroutineCtx),
+				)
+				if errSession := rpcss.sessionManager.OnSessionRateLimited(singleConsumerSession, releaseErr); errSession != nil {
+					utils.LavaFormatWarning("OnSessionRateLimited failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if !shouldFailSession {
+				// The endpoint answered for real — success or a plain client error — so any
+				// standing rate-limit hold-off for it is stale.
+				relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
 				// Success or client error (4xx except 429) - update session as success.
 				// targetEndpoint / directConn were resolved and the tracker ensured before
 				// dispatch (above), so harvestGen is the generation captured pre-relay.
@@ -1876,11 +2108,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					)
 				}
 			} else {
-				// Failure case: err != nil OR status >= 500 OR status == 429
+				// Failure case: err != nil OR status >= 500 OR status == 429 OR a scoreable node error
 				failureErr := err
 				if failureErr == nil {
-					// REST 5xx/429 with err == nil - create descriptive error
-					failureErr = fmt.Errorf("upstream returned HTTP %d", statusCode)
+					// err == nil - create descriptive error. Either a REST 5xx/429, or a node
+					// error the upstream delivered inside an HTTP 200 body (MAG-2156).
+					if localRelayResult.IsNodeError {
+						failureErr = fmt.Errorf("upstream returned a node error (HTTP %d)", statusCode)
+					} else {
+						failureErr = fmt.Errorf("upstream returned HTTP %d", statusCode)
+					}
 				}
 				rpcss.sessionManager.OnSessionFailure(singleConsumerSession, failureErr)
 			}
@@ -1982,7 +2219,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 			if rpcss.endpointChainTrackerManager != nil && endpointURL != "" {
 				trackerState, trackerLastError, _ = rpcss.endpointChainTrackerManager.GetTrackerState(endpointURL)
 			}
-			utils.LavaFormatDebug("skipping consistency validation because endpoint latest block is unknown",
+			utils.LavaFormatInfo("skipping consistency validation because endpoint latest block is unknown",
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("endpointURL", endpointURL),
 				utils.LogAttr("chainTip", chainTip),
@@ -2004,10 +2241,21 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		)
 		if err != nil {
 			// Endpoint is too far behind - add to failed sessions
-			utils.LavaFormatDebug("skipping endpoint due to consistency check",
+			// lag + threshold are what an operator actually needs here, and they were being
+			// dropped: ValidateEndpointCapability logs them at DEBUG and this caller discards
+			// its err. Recompute them rather than promote the inner line as well — one INFO
+			// line per rejected endpoint, carrying the endpoint identity the inner line lacks.
+			lag := chainTip - endpointLatest
+			threshold := int64(0)
+			if rpcss.consistencyConfig != nil {
+				threshold = rpcss.consistencyConfig.EndpointLagThreshold
+			}
+			utils.LavaFormatInfo("skipping endpoint due to consistency check",
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("endpointLatest", endpointLatest),
 				utils.LogAttr("chainTip", chainTip),
+				utils.LogAttr("lag", lag),
+				utils.LogAttr("threshold", threshold),
 				// Report which source produced the value: the store wins whenever it holds a
 				// positive tip (prefer-store), else the poll atomic is the bootstrap fallback.
 				utils.LogAttr("source", func() string {
@@ -2035,15 +2283,21 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 			utils.LogAttr("chainTip", chainTip),
 			utils.LogAttr("GUID", ctx),
 		)
+		// The error below carries the same sentinel and is visible at every level, so this
+		// stays at DEBUG rather than WARN — two records of one event made anything counting
+		// the sentinel double-count it. skippedCount and GUID moved onto the error so the
+		// single surviving line still carries them.
 		return nil, failedSessions, utils.LavaFormatError("all endpoints failed consistency pre-validation",
 			lavasession.ConsistencyPreValidationError,
 			utils.LogAttr("totalEndpoints", len(sessions)),
+			utils.LogAttr("skippedCount", skippedCount),
 			utils.LogAttr("chainTip", chainTip),
+			utils.LogAttr("GUID", ctx),
 		)
 	}
 
 	if skippedCount > 0 {
-		utils.LavaFormatDebug("filtered endpoints by consistency",
+		utils.LavaFormatInfo("filtered endpoints by consistency",
 			utils.LogAttr("totalEndpoints", len(sessions)),
 			utils.LogAttr("validEndpoints", len(validSessions)),
 			utils.LogAttr("skippedCount", skippedCount),
@@ -2097,7 +2351,12 @@ func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavases
 // has ever been written; a non-positive store value means "unknown", so we defer to the atomic.
 //
 // Safe to return a lower block: the sole caller is consistency pre-validation, where a lower tip
-// means "more likely behind" → a conservative reject, never an over-optimistic pass.
+// means "more likely behind" → a conservative reject.
+//
+// The tip may also be a PEER pod's observation borrowed through the cache backend (the fleet
+// tracker gate), which can read higher than this pod has seen. Accepted deliberately: the
+// reference it is compared against is the guarded chain tip, so a too-high endpoint value can
+// only mask that ONE endpoint's lag — it can never reject an honest one.
 func endpointTipPreferStore(pollAtomic, storeTip int64) int64 {
 	if storeTip > 0 {
 		return storeTip
@@ -2232,9 +2491,8 @@ type probeQoSAppender interface {
 // no QoS feed) if AppendProbeData's signature ever drifts — a regression no test would catch.
 var _ probeQoSAppender = (*provideroptimizer.ProviderOptimizer)(nil)
 
-// defaultProbeCadence is the prober's own polling period — distinct from the legacy synthetic
-// probe's PeriodicProbeProvidersInterval. It floors runProbeLoop's cadence so time.NewTicker can
-// never be handed a non-positive duration (which panics).
+// defaultProbeCadence is the prober's polling period. It floors runProbeLoop's cadence so
+// time.NewTicker can never be handed a non-positive duration (which panics).
 const defaultProbeCadence = 5 * time.Second
 
 // validatedProbeCadence validates the operator-configured probe cadence (MAG-2161 D5): a non-positive
@@ -2361,8 +2619,8 @@ func (s *probeLoopStats) snapshot() probeLoopSnapshot {
 // effectiveBlockTime (the floored block time), NOT the raw spec value, drives DefaultVerdictConfig:
 // the alive horizon (StalenessMultiplier × block time, floored at minProbeStaleness) must share the
 // SAME staleness horizon as ChainState and the monitor's poll cadence. With the raw 0 the horizon
-// floors to ~5s while the poll cadence is effectiveBlockTime/2 (~6s), so every healthy endpoint's
-// newest observation would routinely be "too old" at probe time — scoring the whole pod not-alive
+// floors to ~5s while the poll cadence is effectiveBlockTime/divisor (~6-12s), so every healthy
+// endpoint's newest observation would routinely be "too old" at probe time — scoring the pod not-alive
 // and decaying availability QoS on any chain whose spec omits average_block_time.
 //
 // The "keeping up" tolerance is sourced from the SAME per-chain threshold consistency pre-validation
@@ -2781,7 +3039,7 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 
 // chainTrackerReconcileInterval is how often initializeChainTrackers re-walks the live pairing
 // looking for direct-RPC endpoints that have no ChainTracker. It is deliberately short relative to
-// the paths that ADMIT an endpoint after startup (retryFailedStaticProviders' 3m ticker, the ~15m
+// the paths that ADMIT an endpoint after startup (retryFailedProviders' 2s–3m retry, the ~15m
 // epoch re-verify), because it is the only thing standing between a late-admitted endpoint and
 // permanent silence — a reconcile pass is a map lookup per endpoint when nothing is missing, so the
 // cost of running it often is nil. Package-level var, not a const, so tests can shorten it.
@@ -2794,7 +3052,7 @@ var chainTrackerReconcileInterval = 15 * time.Second
 // MAG-2622 — why this is a LOOP and not the one-shot it used to be. Endpoints enter the pairing at
 // three points AFTER this function's first pass, and none of them registered a tracker:
 //
-//	retryFailedStaticProviders   an upstream that failed boot verification recovers (3m ticker)
+//	retryFailedProviders   an upstream that failed boot verification recovers (2s–3m adaptive retry)
 //	applyReverification promote  a demoted provider passes re-verification (epoch tick)
 //	rebuildPairingFromConfig     /debug/reset-pairing re-admits cold
 //
@@ -3005,6 +3263,32 @@ func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlo
 	return spectypes.IsFinalizedBlock(requestedBlock, latest, finalizationDistance)
 }
 
+// peerObservationStore returns the fleet observation store for the per-endpoint tracker gate,
+// or nil when shared state is off or no cache backend is configured (MAG-2981).
+//
+// Endpoint observations are a cache-be RPC, not a cache-engine behaviour: the cache server keeps
+// them in a dedicated in-memory store alongside the relay caches, so they do not travel through
+// the KVStore seam the RESP backend implements. A router on the RESP backend therefore gets no
+// peer gate and polls locally — the same degradation this store already applies to a cache-be
+// that predates the RPC (see cachePeerObservations.warnIfUnimplemented). Called once per listen
+// endpoint, so the warning matches that granularity rather than firing per tick.
+func (rpcss *RPCSmartRouterServer) peerObservationStore() endpointstate.PeerObservationStore {
+	if !rpcss.sharedState || rpcss.cache == nil {
+		return nil
+	}
+	// Typed-nil *Cache (no --cache-be) is handled inside NewCachePeerObservations.
+	grpcCache, isGRPCCache := rpcss.cache.(*performance.Cache)
+	if !isGRPCCache {
+		utils.LavaFormatWarning("fleet tracker gate: the configured cache backend does not implement endpoint observations; polling locally", nil,
+			utils.LogAttr("backend", fmt.Sprintf("%T", rpcss.cache)),
+			utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
+			utils.LogAttr("apiInterface", rpcss.listenEndpoint.ApiInterface),
+		)
+		return nil
+	}
+	return endpointstate.NewCachePeerObservations(grpcCache)
+}
+
 // adoptSharedStateTip feeds a peer pod's chain tip — read from the shared cache under the
 // chain-level key, so it is the fleet-max of every pod's guarded tip — into this pod's
 // ChainState, but only when it is ahead of our local view. SetLatestBlock applies the same
@@ -3039,6 +3323,7 @@ func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peer
 // - Quorum is enabled (quorum requires fresh endpoint validation)
 // - Response is a node error
 // - Requested block is NOT_APPLICABLE
+// - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	ctx context.Context,
 	protocolMessage chainlib.ProtocolMessage,
@@ -3151,6 +3436,19 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 		}
 	}
 
+	// EARLIEST (-3), PENDING (-4), SAFE (-5) and FINALIZED (-6) are never resolved to a
+	// height above, so they would reach SetRelay as a negative RequestedBlock, which it
+	// rejects outright — one "cache write failed" warning per relay for no possible gain.
+	// Skipping loses nothing: SetRelay's guard returns before it publishes the chain tip,
+	// so that side effect is already forgone today. NOT_APPLICABLE (-1) is filtered above.
+	if requestedBlockForCache < 0 {
+		utils.LavaFormatDebug("cache write skipped: unresolved block tag",
+			utils.LogAttr("requestedBlock", requestedBlockForCache),
+			utils.LogAttr("GUID", ctx),
+		)
+		return
+	}
+
 	// Get seen block
 	seenBlock := relayData.SeenBlock
 
@@ -3211,7 +3509,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 // honored only on the first attempt. On a retry (firstAttempt == false) both are returned
 // empty so the relay falls through to a different provider instead of re-pinning the one
 // that just failed — otherwise a pinned provider that returned a retryable node error gets
-// re-selected, or the retry dead-ends on "Selected provider already failed in this request"
+// re-selected, or the retry dead-ends on "Selected provider cannot be retried"
 // (MAG-2228). firstAttempt is BatchNumber()==0, which stays 0 when attempt 1 never reached a
 // provider (e.g. PairingListEmpty), so the pin is correctly re-honored in that case. Mirrors
 // preserveRetrySafeDirectives, which omits both directives on a rebuilt archive retry.
@@ -3492,6 +3790,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// per-group quorum (2.3), also front-load AgreementThreshold providers per group so each group can
 	// independently reach its internal quorum — otherwise QoS-skewed selection starves the smaller groups.
 	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1, PerGroupTarget: 1}
+	// Which internal path this api is served under, so selection can pick the
+	// endpoint whose URL is that path's root. In direct mode the path lives in
+	// the upstream url — one node-url per API version — and dialing the wrong
+	// one returns the vendor's 404 as if it were the chain's answer.
+	if apiCollection := protocolMessage.GetApiCollection(); apiCollection != nil {
+		resolvedInternalPath := apiCollection.CollectionData.InternalPath
+		sessionOpts.InternalPath = &resolvedInternalPath
+	}
 	if cvp := relayProcessor.GetCrossValidationParams(); cvp != nil && cvp.MinGroups > 1 {
 		sessionOpts.MinGroups = cvp.MinGroups
 		if cvp.PerGroupQuorum {
@@ -3622,26 +3928,56 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		)
 	}
 
-	// Check for gRPC streaming method - currently not supported in Direct RPC mode
-	// TODO: Full streaming support requires ChainListener changes to maintain client connections
-	// and route repliesChan messages back to the client. For now, we refuse streaming RPCs
-	// to avoid resource leaks (upstream subscriptions left running without consumers).
-	if rpcss.grpcSubscriptionManager != nil && directConnection.GetProtocol() == "grpc" {
+	// Backstop against invoking a server-streaming method as a unary call (MAG-2643).
+	//
+	// Streaming methods are served by the gRPC listener now, which recognises them from
+	// the spec and routes them to DirectGRPCSubscriptionManager before they ever reach
+	// a relay. Anything that arrives here is therefore either a spec-declared
+	// subscription that slipped past the listener — a wiring bug — or a method that is
+	// server-streaming upstream but not declared as one in the spec.
+	//
+	// Both are refused. A unary Invoke on a server-streaming method reads the first
+	// message and then fails the response-must-be-single check, so the caller gets a
+	// truncated stream after waiting out the (typically generous, hanging_api) timeout.
+	// A refusal is a worse-looking but far more honest answer.
+	if directConnection.GetProtocol() == lavasession.DirectRPCProtocolGRPC {
 		methodPath := chainMessage.GetApi().Name
-		// Bound the reflection lookup explicitly: it dials + queries the upstream's reflection
-		// service, and detached CV relay contexts carry no deadline — an upstream that accepts the
-		// connection but never answers would otherwise block this goroutine (and leak its session)
-		// forever, since the relay-timeout bound is only applied later inside SendDirectRelay.
-		streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
-		isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
-		streamCheckCancel()
-		if streamErr == nil && isStreaming {
-			utils.LavaFormatWarning("gRPC streaming methods not yet supported in Direct RPC mode",
-				nil,
+
+		// The spec check comes first and is deliberately independent of both the
+		// manager and reflection: it is the one signal that is always available. When
+		// reflection was the only classifier, a throttled reflection endpoint (normal
+		// on public gRPC gateways) skipped the guard entirely and dropped the call into
+		// the unary path — silently.
+		if chainlib.IsGrpcSubscription(chainMessage) {
+			utils.LavaFormatWarning("gRPC subscription reached the unary relay path", nil,
 				utils.LogAttr("method", methodPath),
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+				utils.LogAttr("GUID", ctx),
 			)
-			return 0, fmt.Errorf("gRPC streaming method %q not supported in Direct RPC mode; use provider-based relay for streaming", methodPath), false
+			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath), false
+		}
+
+		// Second line of defence for methods the spec does not declare as
+		// subscriptions. Reflection may be unavailable, in which case we have nothing
+		// left to check and the call proceeds as unary, which is the correct handling
+		// for the overwhelming majority of gRPC methods.
+		if rpcss.grpcSubscriptionManager != nil {
+			// Bound the reflection lookup explicitly: it dials + queries the upstream's reflection
+			// service, and detached CV relay contexts carry no deadline — an upstream that accepts the
+			// connection but never answers would otherwise block this goroutine (and leak its session)
+			// forever, since the relay-timeout bound is only applied later inside SendDirectRelay.
+			streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
+			isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
+			streamCheckCancel()
+			if streamErr == nil && isStreaming {
+				utils.LavaFormatWarning("gRPC method is server-streaming upstream but carries no SUBSCRIBE directive in the spec", nil,
+					utils.LogAttr("method", methodPath),
+					utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
+					utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
+					utils.LogAttr("GUID", ctx),
+				)
+				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID), false
+			}
 		}
 	}
 
@@ -3782,12 +4118,25 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			)
 		}
 
-		// Return error to trigger backoff (but preserve result for client)
-		return relayLatency, fmt.Errorf("HTTP %d", statusCode), needsBackoff
+		// Copy the classifier's verdict into relayResult before failing the relay — the
+		// fault-axis flags (IsRateLimited above all) are only readable downstream through
+		// relayResult, and dying here left the rate-limit carve-out unreachable for real
+		// HTTP 429s. StatusCode is deliberately NOT copied: listeners surface a non-zero
+		// relayResult.StatusCode to the client, and what the client sees on a failed relay
+		// is the hot-path ticket's decision, not this propagation fix's.
+		relayResult.IsNodeError = result.IsNodeError
+		relayResult.IsNonRetryable = result.IsNonRetryable
+		relayResult.IsUnsupportedMethod = result.IsUnsupportedMethod
+		relayResult.IsRateLimited = result.IsRateLimited
+		relayResult.IsDataScope = result.IsDataScope
+		relayResult.ProviderInfo = result.ProviderInfo
+
+		return relayLatency, httpStatusRelayError(statusCode, result.Reply), needsBackoff
 	}
 
-	// Success - reset endpoint health
-	if targetEndpoint != nil {
+	// Success - reset endpoint health. A node error the QoS path is scoring against this endpoint
+	// is not a success and must not certify it healthy; see shouldResetEndpointHealth.
+	if targetEndpoint != nil && shouldResetEndpointHealth(result) {
 		if targetEndpoint.ResetHealth() {
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, true)
 		}
@@ -3799,6 +4148,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	relayResult.StatusCode = result.StatusCode
 	relayResult.IsNodeError = result.IsNodeError
 	relayResult.IsNonRetryable = result.IsNonRetryable
+	// IsUnsupportedMethod, IsRateLimited and IsDataScope are the fault-axis flags
+	// direct_rpc_relay.go classifies alongside IsNonRetryable. The first two were dropped here, so
+	// the zero-CU/caching carve-out and the availability gate's rate-limit exclusion could never see
+	// them on the direct path; IsDataScope would have the same fate if it were not copied too.
+	relayResult.IsUnsupportedMethod = result.IsUnsupportedMethod
+	relayResult.IsRateLimited = result.IsRateLimited
+	relayResult.IsDataScope = result.IsDataScope
 	relayResult.ProviderInfo = result.ProviderInfo
 	if relayResult.Reply != nil {
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{
@@ -3969,22 +4325,49 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			utils.LogAttr("method", apiName),
 			utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
 		)
+		group := straggler.ProviderGroup
+		if group == "" {
+			group = common.DefaultProviderGroup
+		}
+		// Decide admission to the mismatch alerting surface FIRST, so the decision is recorded on the
+		// debug event even on a fixture with no metrics manager wired. Shared admission rule with the
+		// reply-time outlier path — see crossValidationMismatchEligible — plus the once-per-distinct-
+		// group-per-request dedup this closure carries across stragglers.
+		mismatchCounted := false
+		if straggler.Outcome == common.CrossValidationStragglerOutcomeDisagreed && crossValidationMismatchEligible(deterministic, consensusHash) {
+			if _, counted := emittedMismatchGroups[group]; !counted {
+				emittedMismatchGroups[group] = struct{}{}
+				// The flag means the counter MOVED, so it stays false on a fixture with no metrics
+				// manager — matching the reply-time path rather than claiming an increment that
+				// never happened.
+				mismatchCounted = rpcss.smartRouterEndpointMetrics != nil
+			}
+		}
+		// Record the debug event BEFORE either metric, so the straggler counter remains the LAST side
+		// effect of record(): a caller (or test) that observes the straggler count reaching N is then
+		// guaranteed both the mismatch decision AND the event for those N have already landed
+		// (MAG-2772). Recording is a no-op unless the router runs with --debug-address.
+		recordCrossValidationEvent(crossValidationEvent{
+			Source:          crossValidationEventSourceStraggler,
+			ChainID:         chainId,
+			ApiInterface:    apiInterface,
+			RequestID:       crossValidationRequestID(ctx),
+			Method:          apiName,
+			ProviderAddress: straggler.ProviderAddress,
+			ProviderGroup:   group,
+			Outcome:         straggler.Outcome,
+			Finality:        finality,
+			ConsensusHash:   consensusHash,
+			OutlierHash:     straggler.ResponseHash,
+			MismatchCounted: mismatchCounted,
+			DelayMs:         straggler.Delay.Milliseconds(),
+		})
 		if rpcss.smartRouterEndpointMetrics == nil {
 			return
 		}
-		// Emit the mismatch metric BEFORE the straggler metric so the straggler counter is the LAST
-		// side effect of record(): a caller (or test) that observes the straggler count reaching N
-		// is then guaranteed record()'s mismatch decision for those N has already completed.
-		// Shared admission rule with the reply-time outlier path — see crossValidationMismatchEligible.
-		if straggler.Outcome == common.CrossValidationStragglerOutcomeDisagreed && crossValidationMismatchEligible(deterministic, consensusHash) {
-			group := straggler.ProviderGroup
-			if group == "" {
-				group = common.DefaultProviderGroup
-			}
-			if _, counted := emittedMismatchGroups[group]; !counted {
-				emittedMismatchGroups[group] = struct{}{}
-				rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
-			}
+		// Mismatch before straggler, for the same last-side-effect reason.
+		if mismatchCounted {
+			rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
 		}
 		rpcss.smartRouterEndpointMetrics.SetCrossValidationStragglerMetric(chainId, apiInterface, apiName, straggler.Outcome)
 	}
@@ -4098,16 +4481,24 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			consensusHash = relayResult.ResponseHash
 		}
 		successOutliers := crossValidationSuccessOutliers(successResults, consensusHash, cvSuccess, deterministic)
-		if len(successOutliers) > 0 && rpcss.smartRouterEndpointMetrics != nil && rpcss.listenEndpoint != nil {
+		// listenEndpoint is still required — it is where the chain identity comes from, and both the
+		// metric labels and the self-describing debug row are meaningless without it. The metrics
+		// manager is NOT required: a router that cannot count the dissent can still record it.
+		if len(successOutliers) > 0 && rpcss.listenEndpoint != nil {
 			chainId, apiInterface := rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 			finality := rpcss.crossValidationFinalityLabel(protocolMessage)
-			outlierGroups := map[string]struct{}{}
+			requestID := crossValidationRequestID(ctx)
+			// One pass, so the debug event can say WHICH outlier carried the group's single increment.
+			// The metric contract is unchanged — once per distinct outlier group — and emitting in
+			// outlier order rather than map order makes it deterministic as a side benefit.
+			countedGroups := map[string]struct{}{}
 			for _, outlier := range successOutliers {
 				group := outlier.ProviderInfo.ProviderGroup
 				if group == "" {
 					group = common.DefaultProviderGroup
 				}
-				outlierGroups[group] = struct{}{}
+				_, alreadyCounted := countedGroups[group]
+				countedGroups[group] = struct{}{}
 				utils.LavaFormatInfo("cross-validation outlier detected",
 					utils.LogAttr("GUID", ctx),
 					utils.LogAttr("provider", outlier.ProviderInfo.ProviderAddress),
@@ -4117,9 +4508,28 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
 					utils.LogAttr("outlierHashHex", fmt.Sprintf("%x", outlier.ResponseHash[:8])),
 				)
-			}
-			for group := range outlierGroups {
-				rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
+				// The debug read surface for the same dissent the log and the counter describe, keyed
+				// by request so the automation can assert per-request facts a counter cannot carry
+				// (MAG-2772). No-op unless the router runs with --debug-address.
+				recordCrossValidationEvent(crossValidationEvent{
+					Source:          crossValidationEventSourceReplyTime,
+					ChainID:         chainId,
+					ApiInterface:    apiInterface,
+					RequestID:       requestID,
+					Method:          apiName,
+					ProviderAddress: outlier.ProviderInfo.ProviderAddress,
+					ProviderGroup:   group,
+					// A reply-time content outlier is by construction a dissent: crossValidationSuccessOutliers
+					// only returns successful responses whose hash differs from a reached consensus.
+					Outcome:         common.CrossValidationStragglerOutcomeDisagreed,
+					Finality:        finality,
+					ConsensusHash:   consensusHash,
+					OutlierHash:     outlier.ResponseHash,
+					MismatchCounted: !alreadyCounted && rpcss.smartRouterEndpointMetrics != nil,
+				})
+				if !alreadyCounted && rpcss.smartRouterEndpointMetrics != nil {
+					rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
+				}
 			}
 		}
 
@@ -4287,7 +4697,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	// we still need to return early as there's no way to attach headers to the error response.
 	// The cross-validation info is included in the error message and metrics have been emitted.
 	if relayResult == nil {
-		return
+		return pendingProviders
 	}
 
 	// Add selection stats header if feature is enabled
@@ -4548,4 +4958,36 @@ func classifyHTTPStatus(code int) (shouldMarkUnhealthy, needsBackoff bool) {
 	default:
 		return false, false
 	}
+}
+
+// relayHoldoff is the hot path's and recovery probe's handle on the process-wide
+// rate-limit hold-off registry (docs/RATE-LIMIT-HOLDOFF.md). A package variable rather
+// than a server field so tests can swap in a clock-pinned registry and restore it.
+var relayHoldoff = holdoff.Shared
+
+// isRateLimitedRelayOutcome reports whether the relay attempt was refused for rate, in
+// either shape it arrives: a typed HTTP 429 error, or a 2xx-body / gRPC classification
+// that set IsRateLimited.
+func isRateLimitedRelayOutcome(err error, relayResult *common.RelayResult) bool {
+	if relayResult != nil && relayResult.IsRateLimited {
+		return true
+	}
+	return err != nil && errors.Is(err, common.StatusCodeError429)
+}
+
+// httpStatusRelayError is the error relayInnerDirect fails a relay with when the upstream
+// answered a >=500/429 status. A 429 travels as the typed sentinel with the upstream's
+// Retry-After attached, so errors.Is(err, common.StatusCodeError429) and
+// common.RetryAfterFrom read the same on the relay path as on every other transport.
+func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error {
+	if statusCode != 429 {
+		return fmt.Errorf("HTTP %d", statusCode)
+	}
+	header := http.Header{}
+	if reply != nil {
+		for _, md := range reply.Metadata {
+			header.Add(md.Name, md.Value)
+		}
+	}
+	return common.WithRetryAfter(fmt.Errorf("HTTP %d: %w", statusCode, common.StatusCodeError429), header, time.Now())
 }

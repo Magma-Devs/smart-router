@@ -22,14 +22,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"strings"
 	"sync"
 	"time"
 
-	mapset "github.com/deckarep/golang-set"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/gorilla/websocket"
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 const (
@@ -43,75 +40,11 @@ const (
 
 var wsBufferPool = new(sync.Pool)
 
-// WebsocketHandler returns a handler that serves JSON-RPC to WebSocket connections.
-//
-// allowedOrigins should be a comma-separated list of allowed origin URLs.
-// To allow connections with any origin, pass "*".
-func (s *Server) WebsocketHandler(allowedOrigins []string) http.Handler {
-	upgrader := websocket.Upgrader{
-		ReadBufferSize:  wsReadBuffer,
-		WriteBufferSize: wsWriteBuffer,
-		WriteBufferPool: wsBufferPool,
-		CheckOrigin:     wsHandshakeValidator(allowedOrigins),
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			log.Debug("WebSocket upgrade failed", "err", err)
-			return
-		}
-		codec := newWebsocketCodec(conn, r.Host, r.Header)
-		s.ServeCodec(codec, 0)
-	})
-}
-
-// wsHandshakeValidator returns a handler that verifies the origin during the
-// websocket upgrade process. When a '*' is specified as an allowed origins all
-// connections are accepted.
-func wsHandshakeValidator(allowedOrigins []string) func(*http.Request) bool {
-	origins := mapset.NewSet()
-	allowAllOrigins := false
-
-	for _, origin := range allowedOrigins {
-		if origin == "*" {
-			allowAllOrigins = true
-		}
-		if origin != "" {
-			origins.Add(origin)
-		}
-	}
-	// allow localhost if no allowedOrigins are specified.
-	if len(origins.ToSlice()) == 0 {
-		origins.Add("http://localhost")
-		if hostname, err := os.Hostname(); err == nil {
-			origins.Add("http://" + hostname)
-		}
-	}
-	log.Debug(fmt.Sprintf("Allowed origin(s) for WS RPC interface %v", origins.ToSlice()))
-
-	f := func(req *http.Request) bool {
-		// Skip origin verification if no Origin header is present. The origin check
-		// is supposed to protect against browser based attacks. Browsers always set
-		// Origin. Non-browser software can put anything in origin and checking it doesn't
-		// provide additional security.
-		if _, ok := req.Header["Origin"]; !ok {
-			return true
-		}
-		// Verify origin against allow list.
-		origin := strings.ToLower(req.Header.Get("Origin"))
-		if allowAllOrigins || originIsAllowed(origins, origin) {
-			return true
-		}
-		log.Warn("Rejected WebSocket connection", "origin", origin)
-		return false
-	}
-
-	return f
-}
-
 type wsHandshakeError struct {
-	err    error
-	status string
+	err        error
+	status     string
+	statusCode int
+	retryAfter time.Duration
 }
 
 func (e wsHandshakeError) Error() string {
@@ -122,67 +55,15 @@ func (e wsHandshakeError) Error() string {
 	return s
 }
 
-func originIsAllowed(allowedOrigins mapset.Set, browserOrigin string) bool {
-	it := allowedOrigins.Iterator()
-	for origin := range it.C {
-		originString, ok := origin.(string)
-		if !ok {
-			panic("originIsAllowed - origin.(string) - type assertion failed: " + fmt.Sprintf("%s", origin))
-		}
-		if ruleAllowsOrigin(originString, browserOrigin) {
-			return true
-		}
+// Unwrap presents a 429 upgrade rejection as the typed rate-limit error, so
+// errors.Is(err, common.StatusCodeError429) and common.RetryAfterFrom read the same on a
+// refused WS handshake as on every HTTP transport. Any other status unwraps to the dial
+// error itself.
+func (e wsHandshakeError) Unwrap() error {
+	if e.statusCode == http.StatusTooManyRequests {
+		return &common.RateLimitedError{RetryAfter: e.retryAfter}
 	}
-	return false
-}
-
-func ruleAllowsOrigin(allowedOrigin, browserOrigin string) bool {
-	var (
-		allowedScheme, allowedHostname, allowedPort string
-		browserScheme, browserHostname, browserPort string
-		err                                         error
-	)
-	allowedScheme, allowedHostname, allowedPort, err = parseOriginURL(allowedOrigin)
-	if err != nil {
-		log.Warn("Error parsing allowed origin specification", "spec", allowedOrigin, "error", err)
-		return false
-	}
-	browserScheme, browserHostname, browserPort, err = parseOriginURL(browserOrigin)
-	if err != nil {
-		log.Warn("Error parsing browser 'Origin' field", "Origin", browserOrigin, "error", err)
-		return false
-	}
-	if allowedScheme != "" && allowedScheme != browserScheme {
-		return false
-	}
-	if allowedHostname != "" && allowedHostname != browserHostname {
-		return false
-	}
-	if allowedPort != "" && allowedPort != browserPort {
-		return false
-	}
-	return true
-}
-
-func parseOriginURL(origin string) (string, string, string, error) {
-	parsedURL, err := url.Parse(strings.ToLower(origin))
-	if err != nil {
-		return "", "", "", err
-	}
-	var scheme, hostname, port string
-	if strings.Contains(origin, "://") {
-		scheme = parsedURL.Scheme
-		hostname = parsedURL.Hostname()
-		port = parsedURL.Port()
-	} else {
-		scheme = ""
-		hostname = parsedURL.Scheme
-		port = parsedURL.Opaque
-		if hostname == "" {
-			hostname = origin
-		}
-	}
-	return scheme, hostname, port, nil
+	return e.err
 }
 
 // DialWebsocketWithDialer creates a new RPC client that communicates with a JSON-RPC server
@@ -197,7 +78,11 @@ func DialWebsocketWithDialer(ctx context.Context, endpoint string, dialer websoc
 		if err != nil {
 			hErr := wsHandshakeError{err: err}
 			if resp != nil {
+				// Capture the rejection while the response is in scope — the status code
+				// types a 429 (see Unwrap), and Retry-After is what any backoff needs.
 				hErr.status = resp.Status
+				hErr.statusCode = resp.StatusCode
+				hErr.retryAfter, _ = common.ParseRetryAfter(resp.Header, time.Now())
 			}
 			return nil, hErr
 		}

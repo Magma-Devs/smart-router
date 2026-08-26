@@ -181,3 +181,12 @@ func TestStore_RemoveAndReset(t *testing.T) {
 func TestDefault_Singleton(t *testing.T) {
 	require.Same(t, Default(), Default())
 }
+
+func TestSource_String_Peer(t *testing.T) {
+	if got := SourcePeer.String(); got != "peer" {
+		t.Fatalf("SourcePeer.String() = %q, want %q", got, "peer")
+	}
+	if got := Source(99).String(); got != "unknown" {
+		t.Fatalf("unknown source = %q", got)
+	}
+}

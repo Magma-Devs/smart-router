@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -73,8 +74,8 @@ func (psbm *pendingSubscriptionsBroadcastManager) broadcastToChannelList(value b
 // DirectWSSubscriptionManager manages WebSocket subscriptions directly to upstream endpoints
 // without going through Lava providers. It implements chainlib.WSSubscriptionManager.
 //
-// This follows the same patterns as ConsumerWSSubscriptionManager but connects directly
-// to RPC endpoints instead of routing through providers.
+// The gRPC counterpart is DirectGRPCSubscriptionManager, which follows the same shape:
+// one upstream stream per distinct subscription, fanned out to per-client channels.
 type DirectWSSubscriptionManager struct {
 	// Client-facing (reuse existing patterns)
 	connectedClients map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]
@@ -101,6 +102,11 @@ type DirectWSSubscriptionManager struct {
 	// Upstream endpoint configuration - two-tier separation matches HTTP backup model.
 	// Primary tier serves all selections; backup tier is only consulted when primary is
 	// exhausted (analogous to ConsumerSessionManager's pairing/backupProviders split).
+	//
+	// These three are mutable: SetEndpoints swaps them (copy-on-write) whenever the live
+	// pairing changes, so a provider that was down at boot joins the tier once it
+	// recovers. All three are guarded by `lock` — read them via endpointsSnapshot, never
+	// directly, or selection races the swap.
 	wsEndpoints       []*common.NodeUrl          // Primary tier — selected first
 	wsBackupEndpoints []*common.NodeUrl          // Backup tier — used only when primary exhausted
 	endpointsByURL    map[string]*common.NodeUrl // Quick lookup by URL across both tiers (sticky-session uniformity)
@@ -181,6 +187,84 @@ func NewDirectWSSubscriptionManager(
 		config:               config,
 		rateLimiter:          NewClientRateLimiter(config),
 	}
+}
+
+// wsEndpointsSnapshot is an immutable view of both tiers plus the URL index,
+// taken under the read lock. SetEndpoints replaces the manager's slices and map
+// wholesale rather than mutating them, so a snapshot stays coherent for the
+// duration of a selection — including across the optimizer call, which must not
+// run while the lock is held.
+type wsEndpointsSnapshot struct {
+	primary []*common.NodeUrl
+	backup  []*common.NodeUrl
+	byURL   map[string]*common.NodeUrl
+}
+
+func (dwsm *DirectWSSubscriptionManager) endpointsSnapshot() wsEndpointsSnapshot {
+	dwsm.lock.RLock()
+	defer dwsm.lock.RUnlock()
+	return wsEndpointsSnapshot{
+		primary: dwsm.wsEndpoints,
+		backup:  dwsm.wsBackupEndpoints,
+		byURL:   dwsm.endpointsByURL,
+	}
+}
+
+// SetEndpoints replaces both tiers with the currently-serving WebSocket endpoints
+// and reports whether anything actually changed.
+//
+// The tiers are built once at boot from the providers that passed verification, so
+// without this the set is frozen for the process lifetime: a chain that booted dark
+// would keep the empty tiers forever and every eth_subscribe would fail even after
+// every provider recovered, and a chain that booted on backups alone would never
+// promote a recovered primary back into tier 1 (MAG-2525).
+//
+// Callers pass only endpoints that are live in the pairing. Seeding a tier with
+// configured-but-dead endpoints would be worse than an empty tier: selectEndpoint is
+// called once per subscription with no ignore set and no retry loop, so a dead entry
+// is handed straight to the client, and a non-empty primary tier suppresses the
+// primary→backup cascade entirely.
+func (dwsm *DirectWSSubscriptionManager) SetEndpoints(wsEndpoints, wsBackupEndpoints []*common.NodeUrl) (changed bool) {
+	byURL := make(map[string]*common.NodeUrl, len(wsEndpoints)+len(wsBackupEndpoints))
+	for _, ep := range wsEndpoints {
+		byURL[ep.Url] = ep
+	}
+	for _, ep := range wsBackupEndpoints {
+		byURL[ep.Url] = ep
+	}
+
+	dwsm.lock.Lock()
+	defer dwsm.lock.Unlock()
+
+	if sameEndpointURLs(dwsm.wsEndpoints, wsEndpoints) && sameEndpointURLs(dwsm.wsBackupEndpoints, wsBackupEndpoints) {
+		return false
+	}
+
+	// Copy-on-write: in-flight selections hold a snapshot of the old slices.
+	dwsm.wsEndpoints = wsEndpoints
+	dwsm.wsBackupEndpoints = wsBackupEndpoints
+	dwsm.endpointsByURL = byURL
+
+	// Existing upstream pools are deliberately left alone. A pool keyed by a URL that
+	// just left the tier still serves its live subscriptions until they close, and
+	// performCleanup reaps it once it is idle; tearing it down here would kill working
+	// subscriptions on a provider that merely failed spec re-verification.
+	return true
+}
+
+// sameEndpointURLs reports whether two tiers hold the same URLs in the same order.
+// Order matters: it is the fallback selection order when the optimizer is absent
+// or returns nothing.
+func sameEndpointURLs(a, b []*common.NodeUrl) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Url != b[i].Url {
+			return false
+		}
+	}
+	return true
 }
 
 // Start starts the background cleanup goroutine for the DirectWSSubscriptionManager.
@@ -298,10 +382,15 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 // Backup-tier consultation mirrors ConsumerSessionManager.getSessionWithProviderOrError
 // (see protocol/lavasession/consumer_session_manager.go:820-852).
 func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+	// One snapshot for the whole cascade: SetEndpoints can swap the tiers underneath
+	// us, and re-reading between tiers could see primary from before the swap and
+	// backup from after.
+	snapshot := dwsm.endpointsSnapshot()
+
 	// Tier 0: sticky session for this client (resolves across both tiers).
 	if clientKey != "" {
 		if stickySession, exists := dwsm.stickyStore.Get(clientKey); exists {
-			stickyEndpoint, found := dwsm.endpointsByURL[stickySession.Provider]
+			stickyEndpoint, found := snapshot.byURL[stickySession.Provider]
 			if found {
 				// Check if sticky endpoint is not ignored
 				if ignoredEndpoints == nil {
@@ -329,7 +418,7 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 	}
 
 	// Tier 1: primary endpoints.
-	ep, primaryErr := dwsm.selectFromTier(ctx, dwsm.wsEndpoints, ignoredEndpoints)
+	ep, primaryErr := dwsm.selectFromTier(ctx, snapshot.primary, snapshot.byURL, ignoredEndpoints)
 	if primaryErr == nil {
 		return ep, nil
 	}
@@ -337,9 +426,9 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 	// Tier 2: backup endpoints (only when primary is exhausted).
 	utils.LavaFormatDebug("DirectWS: primary endpoints exhausted, falling back to backup",
 		utils.LogAttr("primaryReason", primaryErr.Error()),
-		utils.LogAttr("backupCount", len(dwsm.wsBackupEndpoints)),
+		utils.LogAttr("backupCount", len(snapshot.backup)),
 	)
-	ep, backupErr := dwsm.selectFromTier(ctx, dwsm.wsBackupEndpoints, ignoredEndpoints)
+	ep, backupErr := dwsm.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints)
 	if backupErr == nil {
 		return ep, nil
 	}
@@ -350,9 +439,51 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 // selectFromTier picks one endpoint from the given tier's endpoint slice using
 // the optimizer when available, falling back to first-non-ignored. The caller is
 // responsible for cascade ordering — this helper is tier-agnostic.
-func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tier []*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+//
+// tier and byURL come from one endpointsSnapshot so the optimizer's chosen URL is
+// resolved against the same generation of the index it was offered from.
+// notHeldOff returns the endpoints of tier that are not currently rate-limit held off.
+func notHeldOff(tier []*common.NodeUrl) []*common.NodeUrl {
+	ready := make([]*common.NodeUrl, 0, len(tier))
+	for _, ep := range tier {
+		if !relayHoldoff.HeldOff(ep.Url, ep.Url) {
+			ready = append(ready, ep)
+		}
+	}
+	return ready
+}
+
+// noteSubscribeFailure applies a failed connect/subscribe attempt's consequences. A
+// rate-limited attempt is held off instead of scored — the endpoint is busy, not broken,
+// and an availability sample of 0 is the demotion the rate-limit contract forbids
+// (docs/RATE-LIMIT-HOLDOFF.md). Anything else penalizes the optimizer as before. The WS
+// path works on bare node URLs with no provider name in scope, so the URL keys both
+// registry tiers — WS hold-offs are per-URL and do not escalate across a vendor.
+func (dwsm *DirectWSSubscriptionManager) noteSubscribeFailure(url string, err error) {
+	if errors.Is(err, common.StatusCodeError429) {
+		retryAfter, _ := common.RetryAfterFrom(err)
+		heldFor := relayHoldoff.RecordRateLimit(url, url, retryAfter)
+		utils.LavaFormatDebug("DirectWS: subscribe rate-limited by upstream, holding endpoint off",
+			utils.LogAttr("endpoint", sanitizeEndpointURL(url)),
+			utils.LogAttr("holdoff", heldFor.String()),
+		)
+		return
+	}
+	if dwsm.optimizer != nil {
+		dwsm.optimizer.AppendRelayFailure(url)
+	}
+}
+
+func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tier []*common.NodeUrl, byURL map[string]*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
 	if len(tier) == 0 {
 		return nil, fmt.Errorf("tier is empty")
+	}
+
+	// Rate-limit hold-off: prefer endpoints that are not currently held off after a 429.
+	// Only narrows the tier when something ready remains — a subscription must still be
+	// served when every endpoint is held off, so the full tier stays in that case.
+	if ready := notHeldOff(tier); len(ready) > 0 && len(ready) < len(tier) {
+		tier = ready
 	}
 
 	// Single endpoint or no optimizer: first-non-ignored.
@@ -391,7 +522,7 @@ func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tie
 	}
 
 	selectedURL := selectedURLs[0]
-	selectedEndpoint, exists := dwsm.endpointsByURL[selectedURL]
+	selectedEndpoint, exists := byURL[selectedURL]
 	if !exists {
 		return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", selectedURL)
 	}
@@ -433,7 +564,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	webSocketConnectionUniqueId string,
 	metricsData *metrics.RelayMetrics,
 ) (firstReply *pairingtypes.RelayReply, repliesChan <-chan *pairingtypes.RelayReply, err error) {
-	// Extract hashed params from protocol message (same as ConsumerWSSubscriptionManager)
+	// Extract hashed params from protocol message
 	hashedParams, subscriptionParams, err := dwsm.getHashedParams(protocolMessage)
 	if err != nil {
 		return nil, nil, utils.LavaFormatError("could not marshal params", err)
@@ -574,10 +705,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// Get connection
 	conn, err := pool.GetConnection(ctx)
 	if err != nil {
-		// Report failure to optimizer
-		if dwsm.optimizer != nil {
-			dwsm.optimizer.AppendRelayFailure(selectedEndpoint.Url)
-		}
+		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
 		dwsm.failPendingSubscription(hashedParams)
 		go dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
 		return nil, nil, fmt.Errorf("failed to get WebSocket connection: %w", err)
@@ -586,16 +714,15 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// Create upstream subscription
 	upstreamSub, firstMsg, msgChan, err := dwsm.createUpstreamSubscription(ctx, conn, subscriptionParams, subscribeMethod)
 	if err != nil {
-		// Report failure to optimizer
-		if dwsm.optimizer != nil {
-			dwsm.optimizer.AppendRelayFailure(selectedEndpoint.Url)
-		}
+		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
 		dwsm.failPendingSubscription(hashedParams)
 		go dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
 		return nil, nil, fmt.Errorf("failed to create upstream subscription: %w", err)
 	}
 
-	// Report success to optimizer
+	// Report success to optimizer. The endpoint answered, so any standing rate-limit
+	// hold-off for it is stale.
+	relayHoldoff.RecordAnswer(selectedEndpoint.Url, selectedEndpoint.Url)
 	if dwsm.optimizer != nil {
 		latency := time.Since(startTime)
 		dwsm.optimizer.AppendRelayData(selectedEndpoint.Url, latency, 1, 0) // cu=1, syncBlock=0 (unknown)
@@ -1146,6 +1273,20 @@ func (dwsm *DirectWSSubscriptionManager) createUpstreamSubscription(
 	sub, firstMsg, err := client.Subscribe(ctx, nil, subscribeMethod, msgChan, subscriptionParams)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("upstream subscribe failed: %w", err)
+	}
+
+	// Subscribe reports "upstream answered with a JSON-RPC error object" as (nil, resp, nil)
+	// — a nil subscription with a NIL error, so the check above does not catch it. That is a
+	// failed subscribe, not a successful one: returning it would hand a nil
+	// *rpcclient.ClientSubscription to listenForUpstreamMessages, which stores it in an
+	// upstreamErrSource interface (non-nil interface, nil pointer) and dereferences it on
+	// upstreamSub.Err() — panicking and taking the process down. Surface the node's error
+	// to the caller instead. See MAG-2685.
+	if sub == nil {
+		if firstMsg != nil && firstMsg.Error != nil {
+			return nil, nil, nil, fmt.Errorf("upstream rejected subscribe: %w", firstMsg.Error)
+		}
+		return nil, nil, nil, fmt.Errorf("upstream subscribe returned no subscription")
 	}
 
 	return sub, firstMsg, msgChan, nil

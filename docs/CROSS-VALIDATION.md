@@ -56,6 +56,33 @@ cross-validation:
       min-groups: 2              # the quorum must span both groups (publicnode + tenderly)
 ```
 
+### How caller headers compose with a policy
+
+Each numeric knob resolves as `clamp(caller, floor, cap)`. The scalar shorthand above
+(`agreement-threshold: 2`) means `{floor: 2}` — a **floor** is an operator *minimum* the
+caller may exceed, so on that policy a caller asking for a stricter quorum gets it. A **cap**
+is an operator *maximum*, and it bounds how strict a caller may ask to be: a request above the
+cap is clamped down to it, and a knob written with `floor == cap` is pinned to that value
+whatever the caller sends.
+
+```yaml
+      max-participants: { floor: 3, cap: 3 }     # pinned: a caller asking for 6 gets 3
+      agreement-threshold: { floor: 2, cap: 3 }  # caller may raise 2 -> 3, and no further
+```
+
+So the shorthand "a caller may make cross-validation stricter, never weaker" holds only **up
+to the configured cap**. The cap is the one mechanism by which the router validates less
+strictly than a caller asked, and it is an explicit operator decision — an operator who wants
+a method's fan-out pinned regardless of caller headers sets `floor == cap`, and one who wants
+the headers ignored outright sets `forbid-caller-cv: true`.
+
+With no policy for a method the caller's headers are the only authority, and any
+self-consistent shape is honored — including the degenerate `max-participants: 1` with
+`agreement-threshold: 1`, which returns `lava-cross-validation-status: success` after a
+single response because the requested quorum of one was met. Nothing is compared in that
+case; `…-all-providers` and `…-agreeing-providers` each list the one provider queried, so a
+client that needs real corroboration should read those lists rather than `status` alone.
+
 ## Worked examples
 
 Two bundled example configs demonstrate the full setup end to end:
@@ -90,6 +117,11 @@ and the straggler's late answer is still compared against the consensus asynchro
 failure — the structured signal lets the client decide whether to retry (quorum-time reasons) or
 fall back (structural reasons). Header names, the closed failure-reason enum, and the gRPC-trailer
 caveat are tabulated in the [in-package reference](../protocol/rpcsmartrouter/README.md#response-headers).
+
+A router started with `--debug-address` additionally serves `GET /debug/cross-validation-events`, a
+read-only per-request record of the dissent it observed (which provider, which group, which
+recording path) for test suites that cannot scrape the metrics port — see
+[Reading recorded dissent](../protocol/rpcsmartrouter/README.md#reading-recorded-dissent).
 
 ## Caveats
 

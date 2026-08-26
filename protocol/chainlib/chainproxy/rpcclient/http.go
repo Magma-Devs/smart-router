@@ -19,10 +19,8 @@ package rpcclient
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -41,9 +39,6 @@ const (
 	maxRequestContentLength = 1024 * 1024 * 5
 	contentType             = "application/json"
 )
-
-// https://www.jsonrpc.org/historical/json-rpc-over-http.html#id13
-var acceptedContentTypes = []string{contentType, "application/json-rpc", "application/jsonrequest"}
 
 type httpConn struct {
 	client    *http.Client
@@ -246,7 +241,9 @@ func (hc *httpConn) doRequest(ctx context.Context, msg interface{}, isJsonRPC bo
 
 	err = ValidateStatusCodes(resp.StatusCode, strict)
 	if err != nil {
-		return nil, err
+		// Attach the upstream's Retry-After while the response is still in scope. Passes
+		// through untouched for anything that is not a rate-limit.
+		return nil, common.WithRetryAfter(err, resp.Header, time.Now())
 	}
 
 	if isJsonRPC && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
@@ -277,85 +274,4 @@ func ValidateStatusCodes(statusCode int, strict bool) error {
 		}
 	}
 	return nil
-}
-
-// httpServerConn turns a HTTP connection into a Conn.
-type httpServerConn struct {
-	io.Reader
-	io.Writer
-	r *http.Request
-}
-
-func newHTTPServerConn(r *http.Request, w http.ResponseWriter) ServerCodec {
-	body := io.LimitReader(r.Body, maxRequestContentLength)
-	conn := &httpServerConn{Reader: body, Writer: w, r: r}
-	return NewCodec(conn)
-}
-
-// Close does nothing and always returns nil.
-func (t *httpServerConn) Close() error { return nil }
-
-// RemoteAddr returns the peer address of the underlying connection.
-func (t *httpServerConn) RemoteAddr() string {
-	return t.r.RemoteAddr
-}
-
-// SetWriteDeadline does nothing and always returns nil.
-func (t *httpServerConn) SetWriteDeadline(time.Time) error { return nil }
-
-// ServeHTTP serves JSON-RPC requests over HTTP.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Permit dumb empty requests for remote health-checks (AWS)
-	if r.Method == http.MethodGet && r.ContentLength == 0 && r.URL.RawQuery == "" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	if code, err := validateRequest(r); err != nil {
-		http.Error(w, err.Error(), code)
-		return
-	}
-
-	// Create request-scoped context.
-	connInfo := PeerInfo{Transport: "http", RemoteAddr: r.RemoteAddr}
-	connInfo.HTTP.Version = r.Proto
-	connInfo.HTTP.Host = r.Host
-	connInfo.HTTP.Origin = r.Header.Get("Origin")
-	connInfo.HTTP.UserAgent = r.Header.Get("User-Agent")
-	ctx := r.Context()
-	ctx = context.WithValue(ctx, peerInfoContextKey{}, connInfo)
-
-	// All checks passed, create a codec that reads directly from the request body
-	// until EOF, writes the response to w, and orders the server to process a
-	// single request.
-	w.Header().Set("content-type", contentType)
-	codec := newHTTPServerConn(r, w)
-	defer codec.close()
-	s.serveSingleRequest(ctx, codec)
-}
-
-// validateRequest returns a non-zero response code and error message if the
-// request is invalid.
-func validateRequest(r *http.Request) (int, error) {
-	if r.Method == http.MethodPut || r.Method == http.MethodDelete {
-		return http.StatusMethodNotAllowed, errors.New("method not allowed")
-	}
-	if r.ContentLength > maxRequestContentLength {
-		err := fmt.Errorf("content length too large (%d>%d)", r.ContentLength, maxRequestContentLength)
-		return http.StatusRequestEntityTooLarge, err
-	}
-	// Allow OPTIONS (regardless of content-type)
-	if r.Method == http.MethodOptions {
-		return 0, nil
-	}
-	// Check content-type
-	if mt, _, err := mime.ParseMediaType(r.Header.Get("content-type")); err == nil {
-		for _, accepted := range acceptedContentTypes {
-			if accepted == mt {
-				return 0, nil
-			}
-		}
-	}
-	// Invalid content-type
-	err := fmt.Errorf("invalid content type, only %s is supported", contentType)
-	return http.StatusUnsupportedMediaType, err
 }

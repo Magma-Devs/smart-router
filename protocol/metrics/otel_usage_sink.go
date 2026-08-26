@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -152,23 +153,23 @@ func (s *OTelUsageSink) Emit(event RelayUsageEvent) {
 
 	var rec otellog.Record
 	rec.SetTimestamp(time.Unix(0, event.TimestampNs))
-	rec.SetBody(otellog.StringValue("relay_usage"))
+	rec.SetBody(attribute.StringValue("relay_usage"))
 	rec.AddAttributes(
-		otellog.String("project", event.ProjectHash),
-		otellog.String("chain", event.ChainID),
-		otellog.String("api_interface", event.APIInterface),
-		otellog.String("api_method", event.APIMethod),
-		otellog.Int64("cu", int64(event.ComputeUnits)),
-		otellog.Int64("latency_ms", event.LatencyMs),
-		otellog.Bool("success", event.Success),
-		otellog.Bool("cache_hit", event.CacheHit),
-		otellog.Bool("is_write", event.IsWrite),
-		otellog.Bool("is_archive", event.IsArchive),
-		otellog.Bool("is_batch", event.IsBatch),
-		otellog.Bool("is_debug_trace", event.IsDebugTrace),
-		otellog.Int64("hedge_count", int64(event.HedgeCount)),
-		otellog.String("provider", event.ProviderAddress),
-		otellog.String("origin", event.Origin),
+		attribute.String("project", event.ProjectHash),
+		attribute.String("chain", event.ChainID),
+		attribute.String("api_interface", event.APIInterface),
+		attribute.String("api_method", event.APIMethod),
+		attribute.Int64("cu", int64(event.ComputeUnits)),
+		attribute.Int64("latency_ms", event.LatencyMs),
+		attribute.Bool("success", event.Success),
+		attribute.Bool("cache_hit", event.CacheHit),
+		attribute.Bool("is_write", event.IsWrite),
+		attribute.Bool("is_archive", event.IsArchive),
+		attribute.Bool("is_batch", event.IsBatch),
+		attribute.Bool("is_debug_trace", event.IsDebugTrace),
+		attribute.Int64("hedge_count", int64(event.HedgeCount)),
+		attribute.String("provider", event.ProviderAddress),
+		attribute.String("origin", event.Origin),
 	)
 
 	s.logger.Emit(context.Background(), rec)
@@ -189,26 +190,26 @@ func (s *OTelUsageSink) EmitOptimizerQoS(r OptimizerQoSReportToSend) {
 
 	var rec otellog.Record
 	rec.SetTimestamp(r.Timestamp)
-	rec.SetBody(otellog.StringValue("optimizer_qos"))
+	rec.SetBody(attribute.StringValue("optimizer_qos"))
 	rec.AddAttributes(
-		otellog.String("provider", r.ProviderAddress),
-		otellog.String("consumer_hostname", r.ConsumerHostname),
-		otellog.String("consumer_pub_address", r.ConsumerAddress),
-		otellog.String("chain_id", r.ChainId),
-		otellog.Int64("epoch", int64(r.Epoch)),
-		otellog.Int64("entry_index", int64(r.EntryIndex)),
-		otellog.Int64("provider_stake", r.ProviderStake),
+		attribute.String("provider", r.ProviderAddress),
+		attribute.String("consumer_hostname", r.ConsumerHostname),
+		attribute.String("consumer_pub_address", r.ConsumerAddress),
+		attribute.String("chain_id", r.ChainId),
+		attribute.Int64("epoch", int64(r.Epoch)),
+		attribute.Int64("entry_index", int64(r.EntryIndex)),
+		attribute.Int64("provider_stake", r.ProviderStake),
 		// WRS normalized scores
-		otellog.Float64("selection_availability", r.SelectionAvailability),
-		otellog.Float64("selection_latency", r.SelectionLatency),
-		otellog.Float64("selection_sync", r.SelectionSync),
-		otellog.Float64("selection_stake", r.SelectionStake),
-		otellog.Float64("selection_composite", r.SelectionComposite),
+		attribute.Float64("selection_availability", r.SelectionAvailability),
+		attribute.Float64("selection_latency", r.SelectionLatency),
+		attribute.Float64("selection_sync", r.SelectionSync),
+		attribute.Float64("selection_stake", r.SelectionStake),
+		attribute.Float64("selection_composite", r.SelectionComposite),
 		// Weighted contributions
-		otellog.Float64("availability_contribution", r.AvailabilityContribution),
-		otellog.Float64("latency_contribution", r.LatencyContribution),
-		otellog.Float64("sync_contribution", r.SyncContribution),
-		otellog.Float64("stake_contribution", r.StakeContribution),
+		attribute.Float64("availability_contribution", r.AvailabilityContribution),
+		attribute.Float64("latency_contribution", r.LatencyContribution),
+		attribute.Float64("sync_contribution", r.SyncContribution),
+		attribute.Float64("stake_contribution", r.StakeContribution),
 	)
 
 	s.logger.Emit(context.Background(), rec)

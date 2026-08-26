@@ -39,6 +39,7 @@ const (
 	SubCategoryNone              ErrorSubCategory = iota
 	SubCategoryUnsupportedMethod                  // zero retries, zero CU, cached response, no provider scoring
 	SubCategoryRateLimit                          // rate-limit signal: endpoint is healthy but busy, apply backoff, do not mark unhealthy
+	SubCategoryDataScope                          // endpoint does not hold the data: retry elsewhere may help, but it is not unhealthy
 )
 
 func (sc ErrorSubCategory) String() string {
@@ -47,6 +48,8 @@ func (sc ErrorSubCategory) String() string {
 		return "unsupported_method"
 	case SubCategoryRateLimit:
 		return "rate_limit"
+	case SubCategoryDataScope:
+		return "data_scope"
 	default:
 		return "none"
 	}
@@ -61,6 +64,27 @@ func (sc ErrorSubCategory) IsUnsupportedMethod() bool {
 // but NOT mark the endpoint unhealthy — it's working, just busy.
 func (sc ErrorSubCategory) IsRateLimit() bool {
 	return sc == SubCategoryRateLimit
+}
+
+// IsDataScope reports whether this subcategory represents "the endpoint answered
+// authoritatively that it does not hold the requested data" — pruned history, an
+// object that was never created, a height outside its retained range.
+//
+// It is a third fault axis, independent of the other two, and it exists because
+// neither of them can express this case:
+//
+//   - Retryable stays TRUE. A pruned node and an archive node genuinely disagree,
+//     so another endpoint can still answer. Marking these non-retryable to keep
+//     them out of the availability signal would buy the exemption by killing the
+//     archive fallback.
+//   - The endpoint is nonetheless HEALTHY. It did its job and reported the truth
+//     about its own data scope, so charging it an availability failure demotes it
+//     for the shape of the request rather than for anything it did wrong.
+//
+// Health-tracking callers should therefore keep retrying elsewhere but leave the
+// endpoint's availability score untouched.
+func (sc ErrorSubCategory) IsDataScope() bool {
+	return sc == SubCategoryDataScope
 }
 
 // LavaError is the central error definition — a classification struct, not a Go error.
@@ -528,9 +552,27 @@ func isRetryable(code uint32) bool {
 type LavaWrappedError struct {
 	LavaErr *LavaError
 	Context string
+	// cause is the error this classification was derived from, retained so sentinel
+	// checks (errors.Is(err, context.Canceled), net.Error, syscall errnos) still work
+	// on the far side of classification. Constructing with NewLavaError leaves it nil
+	// and only the Context string survives — which is exactly how the relay-race
+	// cancellation carve-out silently died (MAG-2648). Prefer NewLavaErrorWrapping
+	// whenever the original error is in hand.
+	cause error
 }
 
+// Every method below guards e.LavaErr. The constructors always set it today, so these are
+// latent — but a nil there fails in three different ways (Error panics inside a logging
+// call, Is silently mismatches, As hands back a nil AND halts the walk), and this type's
+// whole reason for existing is that a quietly unreachable resolution path is expensive.
+
 func (e *LavaWrappedError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.LavaErr == nil {
+		return e.Context
+	}
 	if e.Context != "" {
 		return fmt.Sprintf("%s: %s", e.Context, e.LavaErr.Description)
 	}
@@ -538,20 +580,76 @@ func (e *LavaWrappedError) Error() string {
 }
 
 func (e *LavaWrappedError) Is(target error) bool {
+	if e == nil || e.LavaErr == nil {
+		return false
+	}
 	if t, ok := target.(*LavaError); ok {
 		return e.LavaErr.Code == t.Code
 	}
 	return false
 }
 
+// Unwrap returns the original cause when one was retained, else the classification.
+//
+// Returning e.LavaErr unconditionally was the MAG-2648 bug: the cause's sentinel
+// (context.Canceled) became unreachable, so the relay-race carve-out could never fire.
+//
+// The multi-error form (Unwrap() []error) looks like the tidier fix and is NOT used
+// here on purpose: errors.Unwrap — the singular one — is documented to return nil for
+// multi-unwrap types, which would silently break every caller walking a chain with it,
+// including the sentinel walker in utils/score/score_errors.go. Keeping the singular
+// form preserves that traversal; the LavaErr branch it displaces stays reachable
+// through Is and As below, so nothing loses a path.
 func (e *LavaWrappedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	if e.cause != nil {
+		return e.cause
+	}
+	if e.LavaErr == nil {
+		// Returning a typed nil here would hand back a non-nil error interface holding a
+		// nil *LavaError, and the next errors.Is would call LavaError.Is on a nil receiver.
+		return nil
+	}
 	return e.LavaErr
+}
+
+// As keeps the *LavaError reachable via errors.As even when Unwrap yields the cause
+// instead. Without this, retaining a cause would quietly remove a resolution path that
+// worked before — the same species of silent reachability loss this fix exists to undo.
+// Guarding on nil is load-bearing, not defensive noise: returning true with a nil
+// *LavaError would both hand the caller a nil AND stop errors.As walking to a real one
+// deeper in the chain — strictly worse than never matching.
+func (e *LavaWrappedError) As(target any) bool {
+	if e == nil || e.LavaErr == nil {
+		return false
+	}
+	if t, ok := target.(**LavaError); ok {
+		*t = e.LavaErr
+		return true
+	}
+	return false
 }
 
 // NewLavaError creates an error that wraps a LavaError with optional context.
 // Supports errors.Is(err, LavaErrorSomething) matching by code.
+//
+// This constructor keeps no cause, so sentinel checks against the underlying error
+// will NOT match. Use NewLavaErrorWrapping when the original error is available.
 func NewLavaError(lavaErr *LavaError, context string) error {
 	return &LavaWrappedError{LavaErr: lavaErr, Context: context}
+}
+
+// NewLavaErrorWrapping is NewLavaError that retains the original error, so both
+// errors.Is(err, LavaErrorSomething) and errors.Is(err, <sentinel of the cause>)
+// resolve. The Context string is derived from the cause, preserving the message
+// shape NewLavaError(classified, err.Error()) produced.
+func NewLavaErrorWrapping(lavaErr *LavaError, cause error) error {
+	if cause == nil {
+		return &LavaWrappedError{LavaErr: lavaErr}
+	}
+	return &LavaWrappedError{LavaErr: lavaErr, Context: cause.Error(), cause: cause}
 }
 
 func IsInternal(code uint32) bool {

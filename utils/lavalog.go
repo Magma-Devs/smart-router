@@ -246,14 +246,6 @@ type Attribute struct {
 	Value interface{}
 }
 
-func StringMapToAttributes(details map[string]string) []Attribute {
-	var attrs []Attribute
-	for key, val := range details {
-		attrs = append(attrs, Attribute{Key: key, Value: val})
-	}
-	return attrs
-}
-
 func LogAttr(key string, value interface{}) Attribute {
 	return Attribute{Key: key, Value: value}
 }
@@ -296,10 +288,6 @@ func SetGlobalLoggingLevel(logLevel string) {
 		zerologlog.Logger = zerologlog.Output(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: NoColor, TimeFormat: time.Stamp}).Level(defaultGlobalLogLevel)
 	}
 	LavaFormatInfo("setting log level", Attribute{Key: "loglevel", Value: logLevel})
-}
-
-func SetLogLevelFieldName(fieldName string) {
-	zerolog.LevelFieldName = fieldName
 }
 
 // IsDebugEnabled reports whether debug-level logging is currently active.
@@ -619,11 +607,6 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 	return fmt.Errorf("%s", output)
 }
 
-func LavaFormatPanic(description string, err error, attributes ...Attribute) {
-	attributes = append(attributes, Attribute{Key: "StackTrace", Value: debug.Stack()})
-	LavaFormatLog(description, err, attributes, LAVA_LOG_PANIC)
-}
-
 func LavaFormatFatal(description string, err error, attributes ...Attribute) {
 	attributes = append(attributes, Attribute{Key: "StackTrace", Value: debug.Stack()})
 	LavaFormatLog(description, err, attributes, LAVA_LOG_FATAL)
@@ -650,21 +633,16 @@ func LavaFormatDebug(description string, attributes ...Attribute) error {
 	return LavaFormatLog(description, nil, attributes, LAVA_LOG_DEBUG)
 }
 
+// LavaFormatDebugErr logs at debug severity while keeping err as the returned error's
+// cause, so errors.Is/As still see it through the wrap. Passing err as an Attribute to
+// LavaFormatDebug instead severs the chain: the attribute form returns a plain
+// fmt.Errorf with no Unwrap, and typed errors (rate limits above all) become unreadable.
+func LavaFormatDebugErr(description string, err error, attributes ...Attribute) error {
+	return LavaFormatLog(description, err, attributes, LAVA_LOG_DEBUG)
+}
+
 func LavaFormatTrace(description string, attributes ...Attribute) error {
 	return LavaFormatLog(description, nil, attributes, LAVA_LOG_TRACE)
-}
-
-func IsTraceLogLevelEnabled() bool {
-	return defaultGlobalLogLevel == zerolog.TraceLevel
-}
-
-func FormatStringerList[T fmt.Stringer](description string, listToPrint []T, separator string) string {
-	st := ""
-	for _, printable := range listToPrint {
-		st = st + separator + printable.String() + "\n"
-	}
-	st = fmt.Sprintf(description+"\n\t%s", st)
-	return st
 }
 
 func FormatLongString(msg string, maxCharacters int) string {

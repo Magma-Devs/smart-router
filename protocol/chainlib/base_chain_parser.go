@@ -22,8 +22,26 @@ import (
 )
 
 var (
-	SkipWebsocketVerification = false
-	DefaultApiName            = "Default-"
+	// SkipWebsocketVerificationDefault seeds every parser built by NewChainParser and
+	// is bound to --skip-websocket-verification. It is written once during flag parsing,
+	// before any parser or goroutine exists, and is read-only from then on.
+	//
+	// It is deliberately NOT consulted at the point of use. The `health` command probes
+	// each direct-rpc entry concurrently and needs a different answer per entry (ws
+	// augmentation only routes for an entry that actually has a ws:// URL), so it used to
+	// flip a package global under a mutex around ValidateCollect. That missed the second
+	// reader — newChainRouter — which runs outside that mutex, so entries raced each other
+	// into the wrong ws enforcement and healthy legs reported red (MAG-2333). Per-parser
+	// state removes the shared cell entirely.
+	SkipWebsocketVerificationDefault = false
+
+	// SkipAllVerifications is the process-wide off switch behind --skip-all-verifications.
+	// Read through chainlib.skipVerification, so it suppresses the latest-block probe as well
+	// as the verifications themselves. Bound by the rpcsmartrouter command only — the health
+	// command deliberately does not expose it, since reporting verification results is its job.
+	SkipAllVerifications = false
+
+	DefaultApiName = "Default-"
 )
 
 type PolicyInf interface {
@@ -52,6 +70,30 @@ type BaseChainParser struct {
 	allowedExtensions map[string]struct{}
 	extensionParser   extensionslib.ExtensionParser
 	active            bool
+
+	// skipWebsocketVerification is this parser's own answer to "should verifications be
+	// augmented with the websocket extension, and should the router enforce ws support".
+	// Seeded from SkipWebsocketVerificationDefault; overridden per-endpoint by callers
+	// that probe several endpoints concurrently. Guarded by rwLock like every other
+	// mutable field here.
+	skipWebsocketVerification bool
+}
+
+// SkipWebsocketVerification reports whether this parser's endpoint opts out of
+// websocket augmentation and enforcement.
+func (bcp *BaseChainParser) SkipWebsocketVerification() bool {
+	bcp.rwLock.RLock()
+	defer bcp.rwLock.RUnlock()
+	return bcp.skipWebsocketVerification
+}
+
+// SetSkipWebsocketVerification overrides the process default for this parser only.
+// Callers probing multiple endpoints concurrently must build one parser per endpoint
+// and set it here rather than reaching for the package-level default.
+func (bcp *BaseChainParser) SetSkipWebsocketVerification(skip bool) {
+	bcp.rwLock.Lock()
+	defer bcp.rwLock.Unlock()
+	bcp.skipWebsocketVerification = skip
 }
 
 func (bcp *BaseChainParser) Activate() {
@@ -595,20 +637,13 @@ func getServiceApis(
 					continue
 				}
 
-				// TODO: find a better spot for this (more optimized, precompile regex, etc)
 				if rpcInterface == spectypes.APIInterfaceRest {
-					re := regexp.MustCompile(`{[^}]+}`)
-					processedName := string(re.ReplaceAll([]byte(api.Name), []byte("replace-me-with-regex")))
-					processedName = regexp.QuoteMeta(processedName)
-					processedName = strings.ReplaceAll(processedName, "replace-me-with-regex/", `[^\/\s]+/`)
-					processedName = strings.ReplaceAll(processedName, "replace-me-with-regex", `[^\/\s]*`)
-					serverApis[ApiKey{
-						Name:           processedName,
-						ConnectionType: collectionKey.ConnectionType,
-					}] = ApiContainer{
-						api:           api,
-						collectionKey: collectionKey,
+					apiKey, apiContainer, err := newRestApiContainer(api, collectionKey)
+					if err != nil {
+						utils.LavaFormatError("regex Compile api", err, utils.Attribute{Key: "apiName", Value: api.Name})
+						continue
 					}
+					serverApis[apiKey] = apiContainer
 				} else {
 					// add another internal path entry so it can specifically be referenced
 					if apiCollection.CollectionData.InternalPath != "" {
@@ -694,23 +729,191 @@ func (bcp *BaseChainParser) ExtensionsParser() *extensionslib.ExtensionParser {
 	return &bcp.extensionParser
 }
 
-// matchSpecApiByName returns service api which match given name
-func matchSpecApiByName(name, connectionType string, serverApis map[ApiKey]ApiContainer) (*ApiContainer, bool) {
-	// TODO: make it faster and better by not doing a regex instead using a better algorithm
-	foundNameOnDifferentConnectionType := ""
-	for apiName, api := range serverApis {
-		re, err := regexp.Compile("^" + apiName.Name + "$")
+// restPlaceholderRegex finds the {placeholder} segments of a REST spec api name, and the
+// two patterns each one compiles into: an inner segment must not be empty, a trailing one may.
+var restPlaceholderRegex = regexp.MustCompile(`{[^}]+}`)
+
+const (
+	restSegmentPattern = `[^\/\s]+`
+	restTailPattern    = `[^\/\s]*`
+)
+
+// restApiNameToRegex turns a REST spec api name into the pattern stored on its ApiKey:
+// each {placeholder} becomes a single path segment, everything else is literal. A trailing
+// placeholder may match empty, an inner one may not.
+func restApiNameToRegex(apiName string) string {
+	processedName := string(restPlaceholderRegex.ReplaceAll([]byte(apiName), []byte("replace-me-with-regex")))
+	processedName = regexp.QuoteMeta(processedName)
+	processedName = strings.ReplaceAll(processedName, "replace-me-with-regex/", restSegmentPattern+"/")
+	processedName = strings.ReplaceAll(processedName, "replace-me-with-regex", restTailPattern)
+	return processedName
+}
+
+// trimOptionalTrailingSlash drops one trailing slash, leaving a bare "/" untouched —
+// several specs (ARWEAVE, APT1, XLM) name a real api exactly "/".
+func trimOptionalTrailingSlash(path string) string {
+	if len(path) > 1 && strings.HasSuffix(path, "/") {
+		return path[:len(path)-1]
+	}
+	return path
+}
+
+// newRestApiContainer keys a REST api by the pattern its name compiles to — the name is a
+// path template, so it is matched per request rather than looked up — and precompiles that
+// pattern so a lookup never calls regexp.Compile.
+func newRestApiContainer(api *spectypes.Api, collectionKey CollectionKey) (ApiKey, ApiContainer, error) {
+	apiPattern := restApiNameToRegex(api.Name)
+	matcher, err := buildRestApiMatcher(api.Name, apiPattern)
+	if err != nil {
+		return ApiKey{}, ApiContainer{}, err
+	}
+	return ApiKey{
+			Name:           apiPattern,
+			ConnectionType: collectionKey.ConnectionType,
+		}, ApiContainer{
+			api:           api,
+			collectionKey: collectionKey,
+			restMatcher:   matcher,
+		}, nil
+}
+
+// restApiMatcher holds everything matchSpecApiByName needs for one REST api. It is built
+// once per api at spec load, so a lookup costs matches rather than compiles, and it carries
+// the rank that decides between apis whose patterns both cover the requested path.
+type restApiMatcher struct {
+	name         string
+	pattern      *regexp.Regexp // ^name$
+	trimmed      *regexp.Regexp // ^name without its trailing slash$, or pattern when it has none
+	placeholders int            // {…} segments in the spec name — fewer is more specific
+	literalLen   int            // characters outside those segments — longer is more specific
+}
+
+// buildRestApiMatcher compiles the patterns for one REST spec api name.
+func buildRestApiMatcher(apiName, apiPattern string) (*restApiMatcher, error) {
+	pattern, err := regexp.Compile("^" + apiPattern + "$")
+	if err != nil {
+		return nil, err
+	}
+	trimmed := pattern
+	if trimmedPattern := trimOptionalTrailingSlash(apiPattern); trimmedPattern != apiPattern {
+		trimmed, err = regexp.Compile("^" + trimmedPattern + "$")
 		if err != nil {
-			utils.LavaFormatError("regex Compile api", err, utils.Attribute{Key: "apiName", Value: apiName})
+			return nil, err
+		}
+	}
+	// Ranked off the compiled pattern rather than the spec name: a serverApis map built by
+	// hand carries only the pattern, and ranking both the same way keeps the two paths from
+	// disagreeing.
+	literal := strings.ReplaceAll(apiPattern, restSegmentPattern, "")
+	literal = strings.ReplaceAll(literal, restTailPattern, "")
+	return &restApiMatcher{
+		name:         apiName,
+		pattern:      pattern,
+		trimmed:      trimmed,
+		placeholders: strings.Count(apiPattern, restSegmentPattern) + strings.Count(apiPattern, restTailPattern),
+		literalLen:   len(literal),
+	}, nil
+}
+
+// moreSpecificThan orders two apis that both cover the requested path.
+//
+// A match on the path exactly as sent beats a slash-insensitive one, so relaxing the slash
+// can never re-route a request that resolves today. Beyond that the most specific name
+// wins: a literal segment describes a path better than a {placeholder} that happens to
+// swallow it, which is what keeps ARWEAVE /info on the 10-CU /info instead of the 20-CU
+// /{id}.
+//
+// Two distinct names can still rank equal: /a/{x}/c and /a/b/{y} both cover /a/b/c with one
+// placeholder and five literal characters, and they compile to different patterns, so they
+// do not collapse into one ApiKey the way {address_bytes} and {address_string} do. No shape
+// in the catalog reaches that today, but it is reachable, so the last resort is the api name
+// — without a total order the winner is Go map iteration order: a coin flip per call between
+// apis that can carry different compute units and different block parsing.
+//
+// Comparing names lexicographically is also the right answer rather than merely a stable one:
+// '{' sorts above every character a path segment holds, so it reads as "literal beats
+// placeholder at the first segment where the two names differ" — the precedence an HTTP
+// router applies.
+func (m *restApiMatcher) moreSpecificThan(exact bool, other *restApiMatcher, otherExact bool) bool {
+	if exact != otherExact {
+		return exact
+	}
+	if m.placeholders != other.placeholders {
+		return m.placeholders < other.placeholders
+	}
+	if m.literalLen != other.literalLen {
+		return m.literalLen > other.literalLen
+	}
+	return m.name < other.name
+}
+
+// matchSpecApiByName returns the service api that best matches the given name.
+//
+// A trailing slash is optional on both sides: specs name apis both ways (TEZOS omits it,
+// STACKS carries it) and clients send either form, while the compiled name is anchored
+// "^...$" so the slash alone used to decide the match. A path that misses here falls
+// through to defaultApiContainer, which bills a flat 20 compute units and pins block
+// parsing to latest, so a miss is a routing error and not only a metrics one.
+//
+// More than one api can cover the same path — a literal name and the {placeholder} sibling
+// that swallows it, or two placeholders over one path — so every candidate is ranked and
+// the most specific one wins (see moreSpecificThan). The scan only stops early on a literal
+// name matching the path as sent, which nothing else can outrank.
+func matchSpecApiByName(name, connectionType string, serverApis map[ApiKey]ApiContainer) (*ApiContainer, bool) {
+	foundNameOnDifferentConnectionType := ""
+	trimmedName := trimOptionalTrailingSlash(name)
+	// Whether the request carried a trailing slash at all. When it did not, trimmedName is
+	// name, so for an api whose own name carries none either the slash-insensitive match in
+	// the loop is the exact match re-run against the same string — see below.
+	requestHadTrailingSlash := trimmedName != name
+
+	var best *ApiContainer
+	var bestMatcher *restApiMatcher
+	bestExact := false
+
+	for apiKey, apiCont := range serverApis {
+		matcher := apiCont.restMatcher
+		if matcher == nil {
+			// Every REST api is keyed through newRestApiContainer, which always compiles a
+			// matcher, so this is unreachable. Matching without one would mean compiling in
+			// the loop — the per-lookup cost the precompilation exists to remove — so an
+			// entry that arrived some other way is dropped loudly rather than absorbed.
+			utils.LavaFormatError("REST api container has no compiled matcher", nil, utils.Attribute{Key: "apiKey", Value: apiKey})
 			continue
 		}
-		if re.MatchString(name) {
-			if apiName.ConnectionType == connectionType {
-				return &api, true
-			} else {
-				foundNameOnDifferentConnectionType = apiName.ConnectionType
+		exact := matcher.pattern.MatchString(name)
+		if !exact {
+			// With a slash on neither side, trimmed is pattern and trimmedName is name, so
+			// the match below is the one above against the same string and can only fail
+			// again. That is the common case — most requests arrive without a trailing
+			// slash, and only STACKS names apis with one — so it is skipped rather than
+			// paid for on every candidate of every lookup.
+			if !requestHadTrailingSlash && matcher.trimmed == matcher.pattern {
+				continue
+			}
+			if !matcher.trimmed.MatchString(trimmedName) {
+				continue
 			}
 		}
+		if apiKey.ConnectionType != connectionType {
+			// its hard to notice when we have an API on only one connection type.
+			foundNameOnDifferentConnectionType = apiKey.ConnectionType
+			continue
+		}
+		if exact && matcher.placeholders == 0 {
+			// A literal name matching the path as sent cannot be beaten: two distinct
+			// literal names cannot match one string, and every other candidate ranks lower.
+			matched := apiCont
+			return &matched, true
+		}
+		if best == nil || matcher.moreSpecificThan(exact, bestMatcher, bestExact) {
+			matched := apiCont
+			best, bestMatcher, bestExact = &matched, matcher, exact
+		}
+	}
+
+	if best != nil {
+		return best, true
 	}
 	if foundNameOnDifferentConnectionType != "" { // its hard to notice when we have an API on only one connection type.
 		utils.LavaFormatWarning("API was found on a different connection type", nil,

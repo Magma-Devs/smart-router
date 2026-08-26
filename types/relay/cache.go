@@ -246,3 +246,65 @@ func (c *CacheHash) GetChainId() string {
 	}
 	return ""
 }
+
+// EndpointObservationSet publishes one pod's successful poll of one upstream endpoint to the
+// cache backend so peer pods can borrow it (the fleet tracker gate, MAG-2981). EndpointId is an
+// opaque, stable digest of the endpoint URL computed by the router — the raw URL carries the
+// provider API key and never crosses this wire. PodId names the publishing router instance so
+// a reader can ignore its own observation (a pod's own poll must never suppress its next poll).
+// Ttl bounds how long the server keeps the observation; the server stamps its own receipt time
+// and never trusts a writer clock.
+type EndpointObservationSet struct {
+	ChainId      string `json:"chain_id"`
+	ApiInterface string `json:"api_interface"`
+	EndpointId   string `json:"endpoint_id"`
+	PodId        string `json:"pod_id"`
+	Block        int64  `json:"block"`
+	TtlMs        int64  `json:"ttl_ms"`
+}
+
+// EndpointObservationGet asks the cache backend for the freshest peer observation of one endpoint.
+type EndpointObservationGet struct {
+	ChainId      string `json:"chain_id"`
+	ApiInterface string `json:"api_interface"`
+	EndpointId   string `json:"endpoint_id"`
+}
+
+// EndpointObservationReply carries a peer observation back to a router. Found=false means no
+// live observation exists (never published, or expired). AgeMs is measured on the SERVER clock
+// between the stored receipt stamp and this read, so two pods with skewed clocks still agree on
+// how old the observation is.
+type EndpointObservationReply struct {
+	Found bool   `json:"found"`
+	Block int64  `json:"block"`
+	AgeMs int64  `json:"age_ms"`
+	PodId string `json:"pod_id"`
+}
+
+func (r *EndpointObservationReply) GetPodId() string {
+	if r != nil {
+		return r.PodId
+	}
+	return ""
+}
+
+func (r *EndpointObservationReply) GetFound() bool {
+	if r != nil {
+		return r.Found
+	}
+	return false
+}
+
+func (r *EndpointObservationReply) GetBlock() int64 {
+	if r != nil {
+		return r.Block
+	}
+	return 0
+}
+
+func (r *EndpointObservationReply) GetAgeMs() int64 {
+	if r != nil {
+		return r.AgeMs
+	}
+	return 0
+}

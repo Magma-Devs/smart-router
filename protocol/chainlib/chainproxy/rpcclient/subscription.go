@@ -42,15 +42,8 @@ var (
 	ErrSubscriptionNotFound = errors.New("subscription not found")
 )
 
-var globalGen = randomIDGenerator()
-
 // ID defines a pseudo random number that is used to identify RPC subscriptions.
 type ID string
-
-// NewID returns a new, random ID.
-func NewID() ID {
-	return globalGen()
-}
 
 // randomIDGenerator returns a function generates a random IDs.
 func randomIDGenerator() func() ID {
@@ -85,12 +78,6 @@ func encodeID(b []byte) ID {
 }
 
 type notifierKey struct{}
-
-// NotifierFromContext returns the Notifier value stored in ctx, if any.
-func NotifierFromContext(ctx context.Context) (*Notifier, bool) {
-	n, ok := ctx.Value(notifierKey{}).(*Notifier)
-	return n, ok
-}
 
 // Notifier is tied to a RPC connection that supports subscriptions.
 // Server callbacks use the notifier to send notifications.
@@ -256,13 +243,25 @@ func newClientSubscription(c *Client, namespace string, channel reflect.Value) *
 // error has occurred.
 //
 // The error channel is closed when Unsubscribe is called on the subscription.
+//
+// A nil receiver yields a nil channel rather than panicking. Subscribe can hand back a nil
+// subscription alongside a nil error when the upstream answers with a JSON-RPC error object,
+// and callers routinely park this in an interface — where a nil check on the interface value
+// cannot detect it. Receiving from the nil channel simply never fires, which is the correct
+// behaviour for a subscription that was never established. See MAG-2685.
 func (sub *ClientSubscription) Err() <-chan error {
+	if sub == nil {
+		return nil
+	}
 	return sub.err
 }
 
 // Unsubscribe unsubscribes the notification and closes the error channel.
-// It can safely be called more than once.
+// It can safely be called more than once, and is a no-op on a nil receiver (see Err).
 func (sub *ClientSubscription) Unsubscribe() {
+	if sub == nil {
+		return
+	}
 	sub.errOnce.Do(func() {
 		// IMPORTANT: must never block forever.
 		// If Unsubscribe is called before the subscription forwarding goroutine (sub.run) is started,

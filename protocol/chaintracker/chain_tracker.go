@@ -47,6 +47,16 @@ type IChainTracker interface {
 	// only (MAG-2395).
 	CurrentPollInterval() time.Duration
 
+	// PollNow runs ONE dedicated poll cycle immediately — the same cycle the cadence timer runs —
+	// and returns once its result has been recorded (debug trigger for /debug/poll-now, MAG-2649).
+	// Cadence is untouched: it neither consumes nor advances the failure backoff.
+	PollNow(ctx context.Context) error
+
+	// PollNowWithDeliveryDeadline is PollNow with a separate, usually shorter, bound on the wait for
+	// the poll goroutine to take the request — for a caller that suspects there is no goroutine to
+	// take it. resultCtx still bounds the cycle itself (MAG-2649).
+	PollNowWithDeliveryDeadline(deliveryCtx, resultCtx context.Context) error
+
 	// StartAndServe starts the chain tracker and serves gRPC if configured
 	StartAndServe(ctx context.Context) error
 
@@ -63,20 +73,23 @@ const (
 	maxFails               = 10
 	GoodStabilityThreshold = 0.3
 	PollingUpdateLength    = 10
-	// defaultMaxRelaySkipsBeforePoll bounds how many consecutive poll cycles the traffic gate
+	// DefaultMaxRelaySkipsBeforePoll bounds how many consecutive poll cycles the traffic gate
 	// (MAG-2159) may skip before forcing one real poll for independent fork/liveness
 	// verification. Deliberately small: store-#2 staleness (the tracker atomic that consistency
-	// pre-validation reads) scales linearly as N * FlatPollInterval, so at N=4 with a
+	// pre-validation reads) scales linearly as N * FlatPollInterval, so at N=4 with the default
 	// FlatPollInterval of avgBlockTime/2 the atomic is at most ~2 blocks stale — far inside the
-	// default 10-block EndpointLagThreshold.
-	defaultMaxRelaySkipsBeforePoll = 4
+	// default 10-block EndpointLagThreshold. endpointstate.MinPollDivisor floors the operator's
+	// cadence knob at one poll per block time, which keeps that worst case at ~5 blocks; a
+	// slower cadence would need this bound revisited. The exposure is in any case narrower than
+	// it reads: consistency pre-validation prefers the relay-fed tip store and only falls back
+	// to this atomic when the store is empty — precisely when the gate never skips.
+	DefaultMaxRelaySkipsBeforePoll = 4
 	// MostFrequentPollingMultiplier is the fixed multiplier the legacy adaptive cadence uses
 	// (global tracker only — per-endpoint trackers run a fixed FlatPollInterval and never reach
 	// the adaptive tiers). It is the SOLE feeder of cs.pollingTimeMultiplier. The adaptive tiers
 	// compute base/(multiplier/4), so the multiplier must stay >= 4 to avoid a divide-by-zero;
-	// 16 satisfies that by construction. MAG-2160 removed the --chain-tracker-polling-multiplier
-	// runtime override (it only ever tuned the now-deleted global tracker), so there is no longer
-	// any operator-supplied value to range-validate.
+	// 16 satisfies that by construction. It is a fixed built-in with no operator-supplied
+	// value to range-validate.
 	MostFrequentPollingMultiplier = 16
 )
 
@@ -156,10 +169,29 @@ type ChainTracker struct {
 	// surfaced by /debug/endpoint-state as PollIntervalMs (MAG-2395). Written only by the poll
 	// goroutine (updateTimer), read by any goroutine.
 	currentPollIntervalNanos atomic.Int64
+	// rateLimitedUntil (unix nanos, 0 = none) is the instant the polled upstream asked us to
+	// stay away until, taken from the typed rate-limit error's Retry-After. computePollInterval
+	// floors the next interval with it, so a 429 with "Retry-After: 300" is not re-polled at the
+	// generic backoff's 60s ceiling. Written on each real poll outcome, cleared by any answer.
+	rateLimitedUntil atomic.Int64
 	// resetBackoffCh signals the poll goroutine to clear the failure backoff — zero fetchFails and
 	// reschedule the next poll at base cadence. Buffered(1) with a non-blocking send in
 	// ResetBackoff, so /debug/reset-probe-backoff never blocks on the poll goroutine (MAG-2395).
 	resetBackoffCh chan struct{}
+	// pollNowCh hands an out-of-band "poll right now" request to the poll goroutine, which runs the
+	// ordinary cycle and replies when its result is recorded (MAG-2649 / /debug/poll-now). It is
+	// UNBUFFERED and handled by the same select as the timer, which is the point: the cycle keeps
+	// exactly ONE writer, so the unlocked single-goroutine state it mutates (relaySkipsSinceRealPoll
+	// here, blockCheckpoint in fetchAllPreviousBlocks) is never raced by a debug caller.
+	pollNowCh chan pollNowRequest
+}
+
+// pollNowRequest is one PollNow trigger in flight to the poll goroutine. resp is buffered(1) so
+// the goroutine's reply never blocks it, even when the requester has already abandoned the wait
+// on a cancelled context. There is no context here on purpose: the poll goroutine bounds the
+// fetch with the TRACKER's context (see the pollNowCh case in start), exactly as the timer does.
+type pollNowRequest struct {
+	resp chan error
 }
 
 func (cs *ChainTracker) IsDummy() bool {
@@ -435,7 +467,13 @@ func (cs *ChainTracker) gotNewBlock(ctx context.Context, newLatestBlock int64) (
 // backoff (MAG-2159 follow-up). Conflating the two (skip → err==nil → "success") let every gated
 // cycle cancel a broken poll path's backoff, so a doomed poll never backed off and its recovery
 // evidence never accrued.
-func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (skipped bool, err error) {
+//
+// force skips the traffic-gate check so the cycle always reaches upstream. Only PollNow
+// (/debug/poll-now, MAG-2649) passes true: an on-demand trigger that silently no-ops because a
+// relay tip happens to be fresh would be useless to the caller waiting on its result. The cadence
+// timer passes false and is unaffected. It is a parameter rather than a second copy of this
+// function deliberately — one body means the forced poll IS the production poll.
+func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context, force bool) (skipped bool, err error) {
 	// Traffic gate (MAG-2159 / Topic B). When a fresh relay-harvested tip already covers this
 	// endpoint, the whole poll cycle is redundant — skip it: no FetchLatestBlockNum AND no
 	// fork-check FetchBlockHashByNum (forkChanged fetches a hash every tick, even when the block
@@ -446,7 +484,7 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 	// maxRelaySkipsBeforePoll consecutive skips we force one real poll for independent
 	// fork/liveness verification. relaySkipsSinceRealPoll is touched only by this single poll
 	// goroutine. The global tracker leaves relayTipFresh nil and never skips.
-	if cs.relayTipFresh != nil && cs.relaySkipsSinceRealPoll < cs.maxRelaySkipsBeforePoll && cs.relayTipFresh(time.Now()) {
+	if !force && cs.relayTipFresh != nil && cs.relaySkipsSinceRealPoll < cs.maxRelaySkipsBeforePoll && cs.relayTipFresh(time.Now()) {
 		cs.relaySkipsSinceRealPoll++
 		return true, nil
 	}
@@ -497,7 +535,7 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context) (
 	gotNewBlock := cs.gotNewBlock(ctx, newLatestBlock)
 	forked, err := cs.forkChanged(ctx, newLatestBlock)
 	if err != nil {
-		return false, utils.LavaFormatDebug("could not fetchLatestBlock Hash in ChainTracker", utils.Attribute{Key: "error", Value: err}, utils.Attribute{Key: "block", Value: newLatestBlock}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
+		return false, utils.LavaFormatDebugErr("could not fetchLatestBlock Hash in ChainTracker", err, utils.Attribute{Key: "block", Value: newLatestBlock}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
 	}
 	prev_latest := cs.GetAtomicLatestBlockNum()
 	if gotNewBlock || forked {
@@ -627,13 +665,18 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 			case <-cs.timer.C:
 				fetchTimeout := max(10*time.Second, common.MinimumTimePerRelayDelay)
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout) // protect this flow from hanging code
-				skipped, err := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx)
+				skipped, err := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx, false)
 				cancel()
 				// A gate skip PRESERVES fetchFails (see nextFetchFails): it proved nothing about poll
 				// health, so it must not cancel a broken poll path's backoff. The reschedule uses the
 				// resulting counter uniformly — a healthy endpoint (fetchFails==0) keeps the normal
 				// cadence; a failing one stays backed off between the bounded forced verification polls.
 				fetchFails = nextFetchFails(fetchFails, skipped, err != nil)
+				if !skipped {
+					// A gate skip contacted nobody, so it can neither set nor clear the
+					// rate-limit floor; a real poll's outcome does both.
+					cs.noteFetchOutcome(err)
+				}
 				cs.updateTimer(pollingTime, fetchFails)
 				if err != nil {
 					if fetchFails > maxFails {
@@ -650,6 +693,37 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 				if enoughSamples {
 					blockGapTicker.Reset(pollingTime * 10)
 				}
+			case req := <-cs.pollNowCh:
+				// /debug/poll-now (MAG-2649): run the SAME cycle the timer case above runs, right
+				// now, on this same goroutine. The caller therefore observes the real production
+				// poll — same parse, same observation/failure-streak/tip writes — with only the wait
+				// for the timer removed, and the cycle's unlocked state keeps a single writer.
+				// force=true bypasses the traffic gate (see fetchAllPreviousBlocksIfNecessary); the
+				// cycle still resets relaySkipsSinceRealPoll, because a real poll genuinely happened.
+				//
+				// Cadence is deliberately NOT touched: fetchFails is left alone and updateTimer is
+				// not called, so a forced poll never moves the schedule the cadence tests measure.
+				// This is the mirror of ResetBackoff (cadence only, data untouched). The poll's own
+				// failure counter — the observation record's ConsecutivePollFailures — is still
+				// updated, by the shared record path, exactly as on a timer-driven poll.
+				//
+				// If the timer fires while this fetch is in flight its tick is buffered and runs
+				// immediately after, producing two back-to-back polls. That is already true of any
+				// poll slower than the cadence and is harmless: each is a real, separately recorded
+				// poll.
+				//
+				// The fetch is bounded by the TRACKER's context and timeout, not the requester's:
+				// same bound as the timer case (fidelity), and a shutdown still cancels the fetch
+				// promptly. The requester's context governs only how long IT waits — a caller that
+				// gives up leaves the poll to finish and record, which is honest: it did happen.
+				fetchTimeout := max(10*time.Second, common.MinimumTimePerRelayDelay)
+				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+				_, pollErr := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx, true)
+				cancel()
+				// The schedule itself is untouched (see above), but the poll was real, so it
+				// still informs the rate-limit floor the NEXT timer-driven reschedule reads.
+				cs.noteFetchOutcome(pollErr)
+				req.resp <- pollErr // buffered(1): never blocks, even if the requester gave up
 			case <-cs.resetBackoffCh:
 				// /debug/reset-probe-backoff (MAG-2395): clear the failure backoff and reschedule the
 				// next poll at base cadence. Cadence only — block data, observations, and the
@@ -689,6 +763,66 @@ func (cs *ChainTracker) ResetBackoff() {
 	}
 }
 
+// PollNow runs one dedicated poll cycle immediately and returns once that poll's result has been
+// recorded — the synchronous test trigger behind /debug/poll-now (MAG-2649). It removes the wait
+// for the cadence timer and nothing else: the cycle it runs IS
+// fetchAllPreviousBlocksIfNecessary, the same function the timer calls, executed on the same poll
+// goroutine, so the parse, the observation write (block, source, failure streak, last-successful
+// stamp) and the tip update are the production ones. All of those complete before the reply is
+// sent, which is what makes "poll now, then read the result" race-free for the caller.
+//
+// The returned error is the poll's own error (a failed poll is a legitimate, recorded outcome —
+// callers that need to tell "the poll failed" from "no poll ran" should test the sentinels below
+// with errors.Is). Each sentinel says something different about whether the caller may trust a
+// record it reads afterwards:
+//   - ErrorPollNowNotDelivered — the poll goroutine never took the request before ctx expired:
+//     the tracker has not finished starting, is retrying its init, or has been stopped. NOTHING
+//     was polled and no observation was written.
+//   - ErrorPollNowUnsupported — this tracker cannot poll at all (DummyChainTracker).
+//   - ErrorPollNowResultNotAwaited — the request WAS taken and the cycle is running, but ctx
+//     expired before it recorded. The poll completes and writes regardless; this caller simply did
+//     not witness it, so anything it reads back is the PRE-poll record. Never report this as a
+//     completed poll.
+//
+// Deliberately NOT for cadence tests: it neither resets nor deepens the failure backoff and never
+// reschedules the timer. It does reset the traffic gate's skip budget, because it performs a real
+// poll — so it must not be called inside a test measuring the skip ceiling (MAG-2159).
+func (cs *ChainTracker) PollNow(ctx context.Context) error {
+	return cs.pollNow(ctx, ctx)
+}
+
+// PollNowWithDeliveryDeadline is PollNow with the two waits bounded separately: deliveryCtx caps
+// only how long we wait for the poll goroutine to TAKE the request, and resultCtx caps the wait
+// for the cycle it then runs.
+//
+// The split exists because those two waits have unrelated natural lengths. Delivery either happens
+// in microseconds (the goroutine is at its select) or never (there is no goroutine yet), so a
+// caller that suspects the latter wants a short deadline. The cycle itself is bounded by the
+// tracker's own fetch timeout — max(10s, MinimumTimePerRelayDelay) — so applying that same short
+// deadline to the result would routinely abandon a poll that was proceeding normally, and the
+// caller would then read a pre-poll record. See EndpointMonitor.PollNow, the one caller.
+func (cs *ChainTracker) PollNowWithDeliveryDeadline(deliveryCtx, resultCtx context.Context) error {
+	return cs.pollNow(deliveryCtx, resultCtx)
+}
+
+func (cs *ChainTracker) pollNow(deliveryCtx, resultCtx context.Context) error {
+	req := pollNowRequest{resp: make(chan error, 1)}
+	select {
+	case cs.pollNowCh <- req:
+	case <-deliveryCtx.Done():
+		return fmt.Errorf("%w: %w", ErrorPollNowNotDelivered, deliveryCtx.Err())
+	}
+	select {
+	case err := <-req.resp:
+		return err
+	case <-resultCtx.Done():
+		// The poll was accepted and is still running; it will finish and record on its own. Sentinel,
+		// not a bare error: the caller has to be able to tell this from a poll that ran and failed,
+		// because the observation it can read right now is the one from BEFORE this poll.
+		return fmt.Errorf("%w: %w", ErrorPollNowResultNotAwaited, resultCtx.Err())
+	}
+}
+
 // CurrentPollInterval returns the dedicated-poll interval most recently scheduled: base cadence when
 // healthy, exponentialBackoff-stretched when the endpoint has been failing. Debug telemetry only
 // (surfaced by /debug/endpoint-state as PollIntervalMs, MAG-2395) — never a decision-plane signal.
@@ -699,7 +833,7 @@ func (cs *ChainTracker) CurrentPollInterval() time.Duration {
 // computePollInterval returns the next dedicated-poll interval.
 //
 // When flatPollInterval > 0 (per-endpoint trackers, MAG-2159 / Topic B) the cadence is
-// FIXED: exactly flatPollInterval (avgBlockTime/2), slowed only by failure backoff. The
+// FIXED: exactly flatPollInterval (avgBlockTime/divisor), slowed only by failure backoff. The
 // old adaptive /4, /2, /16 tiers are gone and the block-gap recalibration (which mutates
 // tickerBaseTime) is deliberately ignored here — relay harvest is the primary block
 // signal, so the dedicated poll is a sparse, predictable fallback. Because nothing consumes
@@ -711,7 +845,7 @@ func (cs *ChainTracker) CurrentPollInterval() time.Duration {
 // adaptive tiers are preserved, since its readers are not yet harvest-fed.
 func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchFails uint64) time.Duration {
 	if cs.flatPollInterval > 0 {
-		return exponentialBackoff(cs.flatPollInterval, fetchFails)
+		return cs.floorWithRetryAfter(exponentialBackoff(cs.flatPollInterval, fetchFails))
 	}
 
 	var newPollingTime time.Duration
@@ -724,7 +858,35 @@ func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchF
 	} else {
 		newPollingTime = tickerBaseTime / cs.pollingTimeMultiplier
 	}
-	return exponentialBackoff(newPollingTime, fetchFails)
+	return cs.floorWithRetryAfter(exponentialBackoff(newPollingTime, fetchFails))
+}
+
+// noteFetchOutcome keeps the rate-limit floor current: a poll that failed with the typed
+// rate-limit error records how long the upstream asked us to stay away; any other real
+// poll outcome — success or a different failure — clears it, because the upstream
+// answered and its Retry-After is spent.
+func (cs *ChainTracker) noteFetchOutcome(err error) {
+	if d, ok := common.RetryAfterFrom(err); ok {
+		cs.rateLimitedUntil.Store(time.Now().Add(d).UnixNano())
+		return
+	}
+	cs.rateLimitedUntil.Store(0)
+}
+
+// floorWithRetryAfter stretches the computed poll interval to honour an upstream's
+// Retry-After when it named a longer wait than the generic failure backoff — a 429 with
+// "Retry-After: 300" must not be re-polled at the backoff's 60s ceiling. It never
+// shortens an interval.
+func (cs *ChainTracker) floorWithRetryAfter(interval time.Duration) time.Duration {
+	until := cs.rateLimitedUntil.Load()
+	if until == 0 {
+		return interval
+	}
+	wait := time.Until(time.Unix(0, until))
+	if wait <= interval {
+		return interval
+	}
+	return wait
 }
 
 func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) {
@@ -756,6 +918,15 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 	// error" below — which start() propagates, leaving startTrackerWithRetry looping forever on a
 	// chain that is in fact healthy. Publish the head we just fetched and finish init.
 	if cs.headOnly {
+		// A reply can parse cleanly and still carry no usable height: an SVM result object with
+		// no context.slot unmarshals to slot 0 with a nil error. Nothing below this branch would
+		// catch it, so reject it here — publishing head 0 and reporting the tracker started
+		// leaves an endpoint whose tip reads as "unknown" to consistency pre-validation.
+		if newLatestBlock <= 0 {
+			return utils.LavaFormatError("critical -- node reported no usable latest block, chain tracker creation error", nil,
+				utils.Attribute{Key: "latestBlock", Value: newLatestBlock},
+				utils.Attribute{Key: "endpoint", Value: cs.endpoint})
+		}
 		cs.advanceHeadOnly(newLatestBlock)
 		cs.setLatestChangeTime(time.Now())
 		return nil
@@ -852,16 +1023,15 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 
 	// The legacy adaptive cadence (global tracker only — per-endpoint trackers set
 	// FlatPollInterval and never reach the adaptive tiers) uses the fixed built-in
-	// MostFrequentPollingMultiplier (16, >= the divide-by-zero floor of 4). MAG-2160 removed
-	// the --chain-tracker-polling-multiplier runtime override along with the global tracker it
-	// tuned; the old per-tracker config.PollingTimeMultiplier knob was set by nobody and was
+	// MostFrequentPollingMultiplier (16, >= the divide-by-zero floor of 4). There is no runtime
+	// override: the old per-tracker config.PollingTimeMultiplier knob was set by nobody and was
 	// removed in the MAG-2159 knob consolidation.
 	pollingTime := MostFrequentPollingMultiplier
 
 	// Traffic-gate skip bound (MAG-2159): default when the caller leaves it 0.
 	maxRelaySkips := config.MaxRelaySkipsBeforePoll
 	if maxRelaySkips <= 0 {
-		maxRelaySkips = defaultMaxRelaySkipsBeforePoll
+		maxRelaySkips = DefaultMaxRelaySkipsBeforePoll
 	}
 
 	if chainFetcher == nil {
@@ -891,6 +1061,7 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		maxRelaySkipsBeforePoll: maxRelaySkips,
 		endpoint:                endpoint,
 		resetBackoffCh:          make(chan struct{}, 1),
+		pollNowCh:               make(chan pollNowRequest), // unbuffered: handled by the poll goroutine only
 	}
 	// Publish the base cadence up front so /debug/endpoint-state reports a sensible PollIntervalMs
 	// before the first poll reschedules it (0 for the legacy global tracker, which is not a
@@ -901,21 +1072,28 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 	// TODO: we can do it better by creating a spec fields for custom trackers.
 	// By applying a name SVM for example
 	case "SOLANA", "SOLANAT", "KOII", "KOIIT":
-		utils.LavaFormatInfo("using SVMChainTracker", utils.Attribute{Key: "chainID", Value: config.ChainId})
-		slotCache, err := ristretto.NewCache(&ristretto.Config[int64, int64]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
-		if err != nil {
-			utils.LavaFormatFatal("could not create cache", err)
-		}
-		hashCache, err := ristretto.NewCache(&ristretto.Config[int64, string]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
-		if err != nil {
-			utils.LavaFormatFatal("could not create cache", err)
-		}
-		chainTracker.iChainFetcherWrapper = &SVMChainTracker{
-			slotCache:    slotCache,
-			hashCache:    hashCache,
+		utils.LavaFormatInfo("using SVMChainTracker", utils.Attribute{Key: "chainID", Value: config.ChainId}, utils.Attribute{Key: "headOnly", Value: config.HeadOnlyTracking})
+		svm := &SVMChainTracker{
 			dataFetcher:  chainTracker,
 			chainFetcher: chainFetcher,
+			headOnly:     config.HeadOnlyTracking,
 		}
+		// Both caches serve FetchBlockHashByNum only, which head-only never calls. Skip the
+		// allocation entirely in that mode — each is sized for 100k entries and there is one
+		// pair PER ENDPOINT.
+		if !config.HeadOnlyTracking {
+			slotCache, err := ristretto.NewCache(&ristretto.Config[int64, int64]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
+			if err != nil {
+				utils.LavaFormatFatal("could not create cache", err)
+			}
+			hashCache, err := ristretto.NewCache(&ristretto.Config[int64, string]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
+			if err != nil {
+				utils.LavaFormatFatal("could not create cache", err)
+			}
+			svm.slotCache = slotCache
+			svm.hashCache = hashCache
+		}
+		chainTracker.iChainFetcherWrapper = svm
 	default:
 		chainTracker.iChainFetcherWrapper = &DefaultChainTrackerFetcher{
 			dataFetcher:  chainTracker,

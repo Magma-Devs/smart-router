@@ -3,12 +3,14 @@ package endpointstate
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -33,6 +35,14 @@ type EndpointPoller struct {
 	// poll error (nil on success), and the completion time. The EndpointMonitor sets it
 	// to record the per-endpoint observation (Topic A). Nil in standalone/test use.
 	onPollObservation func(block int64, latency time.Duration, err error, at time.Time)
+
+	// onTrackerRequest, if set, is invoked ONCE for every upstream request this poller
+	// actually sends, with the request's kind (metrics.TrackerRequestKind*). The
+	// EndpointMonitor wires it to the tracker request counter. Called from sendRawRequest —
+	// the single transport chokepoint all three request paths funnel through — so it counts
+	// requests the node received, never poll ticks that returned early or were gated away.
+	// Nil in standalone/test use.
+	onTrackerRequest func(kind string)
 }
 
 // NewEndpointPoller creates a new ChainFetcher for a direct RPC endpoint.
@@ -130,14 +140,13 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 
 	// Send request via direct RPC connection (measure the transport round-trip)
 	reqStart := time.Now()
-	responseData, err := ecf.sendRawRequest(ctx, requestData, collectionData.Type, parsing.ApiName)
+	responseData, err := ecf.sendRawRequest(ctx, requestData, collectionData.Type, parsing.ApiName, metrics.TrackerRequestKindLatestBlock)
 	pollLatency = time.Since(reqStart)
 	if err != nil {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebug(tagName+" failed sending request",
+		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" failed sending request", err,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("apiInterface", ecf.apiInterface),
 			utils.LogAttr("endpoint", ecf.endpointURL),
-			utils.LogAttr("error", err),
 		)
 	}
 
@@ -265,12 +274,11 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 	requestData := []byte(fmt.Sprintf(parsing.FunctionTemplate, blockNum))
 
 	start := time.Now()
-	responseData, err := ecf.sendRawRequest(ctx, requestData, connectionType, parsing.ApiName)
+	responseData, err := ecf.sendRawRequest(ctx, requestData, connectionType, parsing.ApiName, metrics.TrackerRequestKindBlockHash)
 	if err != nil {
 		timeTaken := time.Since(start)
-		return "", nil, utils.LavaFormatDebug(tagName+" failed sending request",
+		return "", nil, utils.LavaFormatDebugErr(tagName+" failed sending request", err,
 			utils.LogAttr("sendTime", timeTaken),
-			utils.LogAttr("error", err),
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
 		)
@@ -348,7 +356,10 @@ func (ecf *EndpointPoller) CustomMessage(ctx context.Context, path string, data 
 	if path != "" && connectionType != "GET" && ecf.apiInterface == spectypes.APIInterfaceRest {
 		apiName = path
 	}
-	return ecf.sendRawRequest(ctx, data, connectionType, apiName)
+	// CustomMessage has exactly one production caller: SVMChainTracker's getLatestBlockhash
+	// poll (the Solana latest-slot read). Counting it as a latest-block request is therefore
+	// accurate today; a second caller with different semantics would need its own kind.
+	return ecf.sendRawRequest(ctx, data, connectionType, apiName, metrics.TrackerRequestKindLatestBlock)
 }
 
 // ObserveLatestBlockPoll records a single latest-block poll observation for this
@@ -372,9 +383,16 @@ func (ecf *EndpointPoller) ObserveLatestBlockPoll(block int64, transportLatency 
 // For REST/GET requests, requestData is a URL path that must be appended to the base URL.
 // For REST/POST requests, requestData is the JSON body and apiName is the URL path.
 // For JSON-RPC/POST requests, requestData is the JSON body.
-func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string) ([]byte, error) {
+func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string, kind string) ([]byte, error) {
 	if ecf.directConnection == nil {
 		return nil, fmt.Errorf("no direct connection for endpoint %s", ecf.endpointURL)
+	}
+	// Counted once the request is about to go out, so the number matches what the upstream
+	// node was actually asked for. Deliberately AFTER the no-connection guard above (nothing
+	// was sent, so nothing is counted) and BEFORE the send itself (a request that fails or
+	// times out still reached the node and still cost it work).
+	if ecf.onTrackerRequest != nil {
+		ecf.onTrackerRequest(kind)
 	}
 
 	// REST GET: requestData is a URL path (e.g. "/cosmos/base/tendermint/v1beta1/blocks/latest")
@@ -437,10 +455,12 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
+		retryAfter, _ := common.ParseRetryAfter(http.Header(resp.Headers), time.Now())
 		return nil, &lavasession.HTTPStatusError{
 			StatusCode: resp.StatusCode,
 			Status:     fmt.Sprintf("%d", resp.StatusCode),
 			Body:       resp.Body,
+			RetryAfter: retryAfter,
 		}
 	}
 	return resp.Body, nil

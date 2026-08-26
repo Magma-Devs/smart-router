@@ -157,6 +157,20 @@ reconnects and failovers rather than being pushed to idle connections. Keep
 the previous credential valid for a rotation grace window (standard ACL
 dual-credential practice) and rotation is seamless there too.
 
+## Not carried over from the cache sidecar
+
+**Fleet tracker gate / endpoint observations (MAG-2981).** The per-endpoint
+chain-tracker gate lets pods borrow each other's successful upstream polls.
+It is a cache-be *RPC* backed by a dedicated in-memory store on the cache
+server, not a cache-engine behaviour, so it does not travel through the
+key/value seam this backend implements. A router on the RESP backend logs a
+warning once per listen endpoint and **polls locally** — the same degradation
+already applied to a cache-be that predates the RPC. Everything else the
+sidecar caches (relay entries, chain tip, shared-state seen-block,
+block-hash→height) works identically here.
+
+If you need the peer gate today, stay on `cache-be`.
+
 ## Flush semantics
 
 The router's `/debug/reset-all` flushes the RESP backend **prefix-scoped**:

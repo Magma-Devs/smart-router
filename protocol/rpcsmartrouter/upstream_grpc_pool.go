@@ -12,6 +12,7 @@ import (
 
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/grpcreflect"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
@@ -103,9 +104,11 @@ func (c *UpstreamGRPCStreamConnection) connect(ctx context.Context, timeout time
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	// 512MB for large responses
+	// Large responses. The shared constant rather than a repeated literal: this pool and
+	// chainproxy.GRPCConnector dial the same upstreams, so a divergence between them would
+	// mean the same endpoint accepted a response on one path and rejected it on the other.
 	dialOpts = append(dialOpts,
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(512*1024*1024)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(chainproxy.MaxCallRecvMsgSize)),
 	)
 
 	// MAG-2218: attach the endpoint's configured auth-headers. This pool backs
@@ -228,7 +231,8 @@ func (c *UpstreamGRPCStreamConnection) StreamCount() int32 {
 	return c.activeStreams.Load()
 }
 
-// GetMethodDescriptor retrieves a method descriptor, using cache or reflection
+// GetMethodDescriptor retrieves a method descriptor from cache, or resolves it
+// through the node's configured descriptor source (reflection, file, or hybrid).
 func (c *UpstreamGRPCStreamConnection) GetMethodDescriptor(
 	ctx context.Context,
 	service, methodName string,
@@ -248,16 +252,22 @@ func (c *UpstreamGRPCStreamConnection) GetMethodDescriptor(
 		return nil, fmt.Errorf("connection not available")
 	}
 
-	// Use reflection to get descriptor
+	// Resolve through the node's configured descriptor source. Streaming methods are
+	// exactly the ones a partial reflection service tends to omit, so this path needs
+	// the file escape hatch as much as the unary one does (MAG-2350).
 	cl := grpcreflect.NewClientAuto(ctx, conn)
 	defer cl.Reset()
 
-	descriptorSource := rpcInterfaceMessages.DescriptorSourceFromServer(cl)
+	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&c.nodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
+	if err != nil {
+		return nil, err
+	}
 
 	descriptor, err := descriptorSource.FindSymbol(service)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to find service via reflection", err,
-			utils.LogAttr("service", service))
+		return nil, utils.LavaFormatError("failed to find service descriptor", err,
+			utils.LogAttr("service", service),
+			utils.LogAttr("descriptor-source", c.nodeUrl.GrpcConfig.GetDescriptorSource()))
 	}
 
 	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)

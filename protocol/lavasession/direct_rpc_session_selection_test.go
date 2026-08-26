@@ -169,6 +169,7 @@ func TestFetchEndpointConnection_DirectRPC(t *testing.T) {
 		false, // getAllEndpoints (get one endpoint)
 		"",    // addon
 		nil,   // extensionNames
+		nil,   // internalPath
 	)
 
 	// Verify connection succeeded
@@ -222,7 +223,7 @@ func TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal(t *testing.T) {
 	}
 
 	fetch := func() (bool, []*EndpointAndChosenConnection, error) {
-		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, "", nil)
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, "", nil, nil)
 		return connected, endpoints, err
 	}
 
@@ -253,4 +254,107 @@ func TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, connected, "the endpoint must be selectable again after self-heal")
 	require.Len(t, endpoints, 1)
+}
+
+// TestFetchEndpointConnection_InternalPath is the regression guard for the TON
+// v2/v3 misroute: a chain serving two API versions over two node-urls had one
+// endpoint per version, but selection never looked at which. Whichever endpoint
+// the session picked answered every api, so v3 calls came back as the v2
+// upstream's 404 — indistinguishable from the chain not supporting them.
+func TestFetchEndpointConnection_InternalPath(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx := context.Background()
+
+	newEndpoint := func(t *testing.T, url, internalPath string) *Endpoint {
+		t.Helper()
+		nodeUrl := common.NodeUrl{Url: url, InternalPath: internalPath}
+		directConn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+		require.NoError(t, err)
+		return &Endpoint{
+			NetworkAddress:    url,
+			Enabled:           true,
+			InternalPath:      internalPath,
+			DirectConnections: []DirectRPCConnection{directConn},
+		}
+	}
+	newProvider := func(endpoints ...*Endpoint) *ConsumerSessionsWithProvider {
+		return &ConsumerSessionsWithProvider{
+			Sessions:          make(map[int64]*SingleConsumerSession),
+			PairingEpoch:      100,
+			StaticProvider:    true,
+			PublicLavaAddress: "ton-provider",
+			Endpoints:         endpoints,
+		}
+	}
+	fetchAll := func(cswp *ConsumerSessionsWithProvider, internalPath *string) []*EndpointAndChosenConnection {
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(
+			ctx, false, true, "", nil, internalPath)
+		require.NoError(t, err)
+		require.True(t, connected)
+		return endpoints
+	}
+	path := func(p string) *string { return &p }
+
+	root := newEndpoint(t, "https://ton.example/api", "")
+	v2 := newEndpoint(t, "https://ton.example/api/v2", "/v2")
+	v3 := newEndpoint(t, "https://ton.example/api/v3", "/v3")
+	cswp := newProvider(root, v2, v3)
+
+	t.Run("a versioned api reaches only its own upstream", func(t *testing.T) {
+		got := fetchAll(cswp, path("/v3"))
+		require.Len(t, got, 1)
+		assert.Equal(t, "https://ton.example/api/v3", got[0].endpoint.NetworkAddress)
+
+		got = fetchAll(cswp, path("/v2"))
+		require.Len(t, got, 1)
+		assert.Equal(t, "https://ton.example/api/v2", got[0].endpoint.NetworkAddress)
+	})
+
+	t.Run("a root-collection api stays on the root url", func(t *testing.T) {
+		// STRK enables a root collection carrying the whole method set AND
+		// versioned collections carrying it again. Expansion generates a url
+		// per version, and a root relay must not drift onto one of them —
+		// least of all onto a /ws/... door generated over an http url.
+		got := fetchAll(cswp, path(""))
+		require.Len(t, got, 1)
+		assert.Equal(t, "https://ton.example/api", got[0].endpoint.NetworkAddress)
+	})
+
+	t.Run("no collection to match on keeps every endpoint eligible", func(t *testing.T) {
+		// Probes measure the provider, not one api collection.
+		assert.Len(t, fetchAll(cswp, nil), 3)
+	})
+
+	t.Run("a chain with no internal paths is unaffected", func(t *testing.T) {
+		// Every endpoint is "" and every relay asks for "" — the filter matches
+		// everything, which is the same list as before it existed.
+		plain := newProvider(
+			newEndpoint(t, "https://eth.example", ""),
+			newEndpoint(t, "https://eth-2.example", ""),
+		)
+		assert.Len(t, fetchAll(plain, path("")), 2)
+	})
+
+	t.Run("a provider with no matching endpoint is not filtered to nothing", func(t *testing.T) {
+		// Provider-relay pools carry the path on the provider's side, not in
+		// our url. Dropping the whole pool would turn a routing refinement into
+		// an outage.
+		plain := newProvider(newEndpoint(t, "https://eth.example", ""))
+		assert.Len(t, fetchAll(plain, path("/v2")), 1)
+	})
+
+	t.Run("AVAX shape: no root collection, so the root url is never chosen", func(t *testing.T) {
+		// AVAX disables its root collections and serves from /C/rpc, /P, /X.
+		// Every relay carries a path, so the unpinned url the expansion kept
+		// stays unused rather than swallowing platform.* calls.
+		avax := newProvider(
+			newEndpoint(t, "https://avax.example/ext/bc", ""),
+			newEndpoint(t, "https://avax.example/ext/bc/C/rpc", "/C/rpc"),
+			newEndpoint(t, "https://avax.example/ext/bc/P", "/P"),
+			newEndpoint(t, "https://avax.example/ext/bc/X", "/X"),
+		)
+		got := fetchAll(avax, path("/P"))
+		require.Len(t, got, 1)
+		assert.Equal(t, "https://avax.example/ext/bc/P", got[0].endpoint.NetworkAddress)
+	})
 }

@@ -32,8 +32,6 @@ type mockSubscriptionServer struct {
 	subscriptions   map[string]chan struct{} // subscription ID -> close channel
 	lock            sync.RWMutex
 	writeMu         sync.Mutex // serializes conn.WriteMessage — gorilla requires a single concurrent writer
-	onSubscribe     func(method string, params interface{}) (string, error)
-	onUnsubscribe   func(subID string) error
 	messageInterval time.Duration
 }
 
@@ -2364,6 +2362,75 @@ func TestListenForUpstreamMessages_ReconnectSkipsCleanup(t *testing.T) {
 type fakeUpstreamErrSource struct{ ch chan error }
 
 func (f fakeUpstreamErrSource) Err() <-chan error { return f.ch }
+
+// TestListenForUpstreamMessages_NilUpstreamSubDoesNotPanic is the regression for MAG-2685.
+//
+// rpcclient.Client.Subscribe returns (nil subscription, response, NIL error) when the upstream
+// answers a subscribe with a JSON-RPC error object — e.g. author_submitAndWatchExtrinsic with an
+// invalid extrinsic. createUpstreamSubscription only checked the error, so the nil subscription
+// reached listenForUpstreamMessages, which parks it in an upstreamErrSource interface. That is a
+// NON-nil interface wrapping a nil pointer, so no `== nil` check catches it, and the select's
+// upstreamSub.Err() dereferenced the nil receiver: the router panicked and the container exited
+// with code 2. Remote-triggerable by any client sending a subscribe the upstream rejects.
+//
+// createUpstreamSubscription now rejects a nil subscription, and Err() tolerates a nil receiver.
+// This test drives the second layer directly: the listener must survive a typed-nil subscription
+// and exit cleanly through its context rather than panicking.
+func TestListenForUpstreamMessages_NilUpstreamSubDoesNotPanic(t *testing.T) {
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "ETH", "jsonrpc",
+		[]*common.NodeUrl{{Url: "wss://test.example.com"}},
+		nil, nil, nil,
+	)
+
+	subCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const hp = "hp-nil-upstream-sub"
+	activeSub := &directActiveSubscription{
+		upstreamID:       "0xnil-sub",
+		hashedParams:     hp,
+		connectedClients: map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]{},
+		clientRouterIDs:  map[string]string{},
+		ctx:              subCtx,
+		cancel:           cancel,
+		closeSubChan:     make(chan struct{}),
+		messagesChan:     make(chan *rpcclient.JsonrpcMessage, 1),
+	}
+
+	manager.lock.Lock()
+	manager.activeSubscriptions[hp] = activeSub
+	manager.lock.Unlock()
+
+	// A typed nil, exactly as createUpstreamSubscription used to hand back.
+	var nilSub *rpcclient.ClientSubscription
+	var upstreamSub upstreamErrSource = nilSub
+	// Plain `== nil` is the check a caller would naturally reach for, and it does NOT catch
+	// this — the interface carries a type, so it compares non-nil even though the pointer
+	// inside is nil. (testify's NotNil disagrees: it unwraps via reflection. The Go-level
+	// comparison below is the semantics that actually let the nil through to Err().)
+	require.False(t, upstreamSub == nil,
+		"a typed nil yields an interface that `== nil` reports as non-nil — precisely why a nil guard cannot catch this")
+
+	// A panic here crashes the test binary, which is the assertion. Before the fix this
+	// panicked immediately on upstreamSub.Err().
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.listenForUpstreamMessages(subCtx, hp, activeSub, upstreamSub)
+	}()
+
+	// Err() on a nil receiver yields a nil channel, so that select case never fires and the
+	// listener parks on its other cases. Cancelling the context must still unwind it.
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listenForUpstreamMessages did not return within 2s after context cancel")
+	}
+}
 
 // TestUnsubscribe_StillRejectsForeignSubscription confirms the upstream-id fallback does NOT
 // open a hole that lets one client unsubscribe another client's shared subscription.

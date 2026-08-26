@@ -69,7 +69,7 @@ func TestRestGetSupportedApi(t *testing.T) {
 	// Test case 1: Successful scenario, returns a supported API
 	apip := &RestChainParser{
 		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
+			serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
 		},
 	}
 	api, err := apip.getSupportedApi("API1", connectionType_test)
@@ -79,7 +79,7 @@ func TestRestGetSupportedApi(t *testing.T) {
 	// Test case 2: Returns error if the API does not exist
 	apip = &RestChainParser{
 		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
+			serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
 		},
 	}
 	apiCont, err := apip.getSupportedApi("API2", connectionType_test)
@@ -92,7 +92,7 @@ func TestRestGetSupportedApi(t *testing.T) {
 	// Test case 3: Returns error if the API is disabled
 	apip = &RestChainParser{
 		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: false}, collectionKey: CollectionKey{ConnectionType: connectionType_test}}},
+			serverApis: restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: false}),
 		},
 	}
 	_, err = apip.getSupportedApi("API1", connectionType_test)
@@ -103,9 +103,7 @@ func TestRestGetSupportedApi(t *testing.T) {
 func TestRestParseMessage(t *testing.T) {
 	apip := &RestChainParser{
 		BaseChainParser: BaseChainParser{
-			serverApis: map[ApiKey]ApiContainer{
-				{Name: "API1", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "API1", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}},
-			},
+			serverApis:     restApiContainers(t, connectionType_test, &spectypes.Api{Name: "API1", Enabled: true}),
 			apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceRest}}},
 		},
 	}
@@ -207,7 +205,7 @@ func TestParsingRequestedBlocksHeadersRest(t *testing.T) {
 			require.NoError(t, err)
 			latestReqBlock, _ := chainMessage.RequestedBlock()
 			require.Equal(t, test.requestedBlock, latestReqBlock)
-			reply, _, _, _, _, err := chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+			reply, _, _, err := chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 			require.NoError(t, err)
 			parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 			require.NoError(t, err)
@@ -281,7 +279,7 @@ func TestSettingRequestedBlocksHeadersRest(t *testing.T) {
 			chainMessage.UpdateLatestBlockInMessage(test.block, true) // will update the block only if it's a latest request
 			latestReqBlock, _ = chainMessage.RequestedBlock()
 			require.Equal(t, test.block, latestReqBlock) // expected behavior is that it doesn't change the original requested block
-			reply, _, _, _, _, err := chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+			reply, _, _, err := chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 			require.NoError(t, err)
 			parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 			require.NoError(t, err)
@@ -307,8 +305,52 @@ func TestRegexParsing(t *testing.T) {
 		_, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
 	}
+	// A trailing slash is optional: the spec names this api without one, and the request
+	// resolves to it rather than falling through to the synthetic Default- api.
+	for api, expectedApiName := range map[string]string{
+		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2":  "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
+		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2/": "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
+	} {
+		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, err)
+		require.Equal(t, expectedApiName, chainMessage.GetApi().GetName())
+	}
+
+	// The point of matching the templated api is not the metric label: the synthetic
+	// Default- api bills a flat 20 compute units and parses no block at all, so a request
+	// that falls through is billed wrong and routed to the latest block. With the api
+	// resolved, the height in the path is the requested block again.
 	for _, api := range []string{
-		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2/",
+		"/cosmos/base/tendermint/v1beta1/blocks/244590",
+		"/cosmos/base/tendermint/v1beta1/blocks/244590/",
+	} {
+		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, err)
+		require.Equal(t, "/cosmos/base/tendermint/v1beta1/blocks/{height}", chainMessage.GetApi().GetName())
+		require.EqualValues(t, 10, chainMessage.GetApi().ComputeUnits)
+		requestedBlock, _ := chainMessage.RequestedBlock()
+		require.EqualValues(t, 244590, requestedBlock)
+	}
+
+	// The spec names /blocks/latest next to /blocks/{height}, so both cover this path and
+	// the answer used to depend on map iteration order — with or without the slash. Repeated
+	// because a single call passes at random.
+	for _, api := range []string{
+		"/cosmos/base/tendermint/v1beta1/blocks/latest",
+		"/cosmos/base/tendermint/v1beta1/blocks/latest/",
+	} {
+		for i := 0; i < 32; i++ {
+			chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+			require.NoError(t, err)
+			require.Equal(t, "/cosmos/base/tendermint/v1beta1/blocks/latest", chainMessage.GetApi().GetName())
+		}
+	}
+
+	// Only the slash is relaxed — a path the spec genuinely does not describe still falls
+	// through, which is what keeps Default-* a usable spec-gap signal.
+	for _, api := range []string{
+		"/not/a/real/lava/path",
+		"/not/a/real/lava/path/",
 	} {
 		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		if err == nil {

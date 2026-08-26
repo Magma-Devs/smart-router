@@ -81,6 +81,31 @@ func TestValidateCrossValidationCapacity_Reasons(t *testing.T) {
 	})
 }
 
+// TestValidateCrossValidationCapacity_NoParticipantCeiling is the MAG-2796 regression. A caller-supplied
+// max-participants above the old hard-coded 50 used to reach a LavaFormatFatal in NewRelayProcessor and end
+// the router process for every caller. There is now no fixed ceiling anywhere: this check is the only bound,
+// and it rejects against the endpoints that actually exist. A realistic deployment holds a handful of nodes,
+// so 51 is refused for the same reason 4 is — not because it crossed an invented constant.
+func TestValidateCrossValidationCapacity_NoParticipantCeiling(t *testing.T) {
+	// Three nodes: what a real centralised deployment looks like.
+	srv := newCapacityTestServer(t, map[string]string{"lava@p0": "g1", "lava@p1": "g1", "lava@p2": "g1"})
+	ctx := context.Background()
+
+	for _, maxParticipants := range []int{4, 51, 1_000_000} {
+		params := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: maxParticipants, MinGroups: 1}
+		reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
+		require.Error(t, err, "max-participants %d exceeds the 3 candidate endpoints", maxParticipants)
+		require.Equal(t, common.CrossValidationReasonInsufficientCapacity, reason,
+			"max-participants %d must be refused for exceeding real capacity", maxParticipants)
+	}
+
+	// The whole candidate set is still usable: the rejection above is about capacity, not a ceiling.
+	params := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 3, MinGroups: 1}
+	reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
+	require.NoError(t, err)
+	require.Empty(t, reason)
+}
+
 // TestValidateCrossValidationCapacity_PerGroup covers the 2.3 runtime per-group capacity guards in
 // validateCrossValidationCapacity: the self-consistency check (max >= minGroups*threshold, catching
 // caller-induced impossible effective params) and the adequately-staffed-group check (>= minGroups

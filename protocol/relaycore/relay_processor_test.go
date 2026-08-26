@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/http"
-	"sync"
 	"testing"
 	"time"
 
@@ -1430,22 +1429,6 @@ func TestIsValidResponse(t *testing.T) {
 	}
 }
 
-// Mock metrics tracker for testing error recovery metrics
-type MockMetricsTracker struct {
-	mu sync.Mutex
-}
-
-func NewMockMetricsTracker() *MockMetricsTracker {
-	return &MockMetricsTracker{}
-}
-
-func (m *MockMetricsTracker) SetRelayNodeErrorMetric(providerAddress string, chainId string, apiInterface string, method string) {
-}
-
-func (m *MockMetricsTracker) GetChainIdAndApiInterface() (string, string) {
-	return "TEST_CHAIN", "rest"
-}
-
 // TestGetAgreementThreshold tests the getAgreementThreshold function behavior
 func TestGetAgreementThreshold(t *testing.T) {
 	tests := []struct {
@@ -1890,11 +1873,13 @@ func TestCrossValidationUniformBehaviorDeterministicAndNonDeterministic(t *testi
 	}
 }
 
-// TestCrossValidationMaxParticipantsLimit tests that MaxParticipants cannot exceed MaxCallsPerRelay
-func TestCrossValidationMaxParticipantsLimit(t *testing.T) {
-	// This test verifies the constant value and that valid params work
-	require.Equal(t, 50, MaxCallsPerRelay, "MaxCallsPerRelay should be 50")
-
+// TestCrossValidationMaxParticipantsFanOut asserts that the processor accepts whatever fan-out it is
+// given and sizes its response buffer from it. There is deliberately no fixed participant ceiling: the
+// only real bound is the live candidate-endpoint count, enforced per request by
+// validateCrossValidationCapacity before this constructor runs (MAG-2796). Before that fix a fan-out
+// above a hard-coded 50 called LavaFormatFatal here, ending the router process — so a caller could stop
+// the router with one header, and this case could not be tested at all without killing the test binary.
+func TestCrossValidationMaxParticipantsFanOut(t *testing.T) {
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1912,13 +1897,13 @@ func TestCrossValidationMaxParticipantsLimit(t *testing.T) {
 
 	usedProviders := lavasession.NewUsedProviders(nil)
 
-	// Valid case: MaxParticipants <= MaxCallsPerRelay
+	// A fan-out far above any realistic endpoint count (deployments run a handful of nodes) must be
+	// accepted here and left for the capacity check to reject. 51 is the value that used to be fatal.
 	cvParams := &common.CrossValidationParams{
 		AgreementThreshold: 2,
-		MaxParticipants:    MaxCallsPerRelay, // Max allowed
+		MaxParticipants:    51,
 	}
 
-	// This should not panic
 	relayProcessor := NewRelayProcessor(
 		ctx,
 		cvParams,
@@ -1928,6 +1913,33 @@ func TestCrossValidationMaxParticipantsLimit(t *testing.T) {
 		newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation),
 	)
 	require.NotNil(t, relayProcessor)
+	require.Equal(t, 51, relayProcessor.GetCrossValidationParams().MaxParticipants,
+		"params must reach the processor unchanged; bounding them is the capacity check's job")
+	require.Equal(t, 51, cvParams.MaxParticipants, "caller's params must not be mutated in place")
+}
+
+// TestResponseBufferSize pins the response channel to the request's real fan-out. The buffer must never
+// be smaller than the number of relays launched at once, or a sender blocks on a channel whose reader may
+// already have exited; and it is deliberately not a fixed constant, so it cannot be mistaken for a
+// participant limit (MAG-2796).
+func TestResponseBufferSize(t *testing.T) {
+	cv := &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2}
+
+	// Cross-validation fans out to MaxParticipants at once.
+	require.Equal(t, 3+RelayRetryLimit, responseBufferSize(CrossValidation, cv))
+
+	// Every other selection launches one relay at a time (NumOfProviders: 1 in the state machine), so the
+	// fan-out does not depend on the cross-validation params even when they are present.
+	require.Equal(t, 1+RelayRetryLimit, responseBufferSize(Stateless, nil))
+	require.Equal(t, 1+RelayRetryLimit, responseBufferSize(Stateful, nil))
+	require.Equal(t, 1+RelayRetryLimit, responseBufferSize(Stateless, cv))
+
+	// CrossValidation with nil params cannot read MaxParticipants; fall back to a single relay rather
+	// than panicking (NewRelayProcessor rejects that combination separately).
+	require.Equal(t, 1+RelayRetryLimit, responseBufferSize(CrossValidation, nil))
+
+	// The buffer tracks the request rather than a constant: a larger fan-out gets a larger buffer.
+	require.Equal(t, 51+RelayRetryLimit, responseBufferSize(CrossValidation, &common.CrossValidationParams{MaxParticipants: 51, AgreementThreshold: 2}))
 }
 
 // TestCrossValidationRequiresNonNilParams tests that Stateless mode works with nil params

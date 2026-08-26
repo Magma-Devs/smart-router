@@ -70,6 +70,8 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2013 | `NODE_RESOURCE_UNAVAILABLE` | Resource exists but unavailable | Yes | JSON-RPC -32002 |
 | 2014 | `NODE_GATEWAY_TIMEOUT` | Gateway timeout (HTTP 504 from provider) | Yes | HTTP 504 |
 | 2015 | `NODE_BAD_GATEWAY` | Bad gateway (HTTP 502 from provider) | Yes | HTTP 502 |
+| 2016 | `NODE_UNAUTHORIZED` | Upstream rejected router credentials (HTTP 401) | No | HTTP 401 |
+| 2017 | `NODE_DATA_NOT_HELD` | Endpoint does not hold the requested data — pruned or never existed (SubCategoryDataScope) | Yes | gRPC 5, gRPC 11 |
 | **Bitcoin/UTXO Node Errors (2100-2149)** |||||
 | 2101 | `NODE_BITCOIN_WARMUP` | Node still warming up (Bitcoin -28 / RPC_IN_WARMUP) | Yes | — |
 | 2102 | `NODE_BITCOIN_INITIAL_DOWNLOAD` | Node in initial block download (Bitcoin -10 / RPC_CLIENT_IN_INITIAL_DOWNLOAD) | Yes | — |
@@ -411,10 +413,12 @@ const (
     SubCategoryNone              ErrorSubCategory = iota
     SubCategoryUnsupportedMethod                         // zero retries, zero CU, cached response, no provider scoring
     SubCategoryRateLimit                                 // endpoint is healthy but busy; apply backoff, do not mark unhealthy
+    SubCategoryDataScope                                 // endpoint does not hold the data; keep retrying elsewhere, but do not score it
 )
 
 func (sc ErrorSubCategory) IsUnsupportedMethod() bool { return sc == SubCategoryUnsupportedMethod }
 func (sc ErrorSubCategory) IsRateLimit() bool         { return sc == SubCategoryRateLimit }
+func (sc ErrorSubCategory) IsDataScope() bool         { return sc == SubCategoryDataScope }
 
 
 // LavaError is the central error definition
@@ -594,7 +598,7 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 
 9. **Transparent hop: original errors pass through unchanged.** The router/consumer is a transparent hop — the user always receives the original error from the node, unmodified. `LavaError` classification is metadata for internal use only (logging, metrics, endpoint health). Unknown/unmatched errors default to `CategoryExternal` because they are node pass-throughs. _(Clarification added in Phase 7: `handleAndClassify` wraps classified errors in `LavaWrappedError` on the **Go error return path** — this is internal plumbing for retry/health decisions and never reaches the user. The actual node response body travels separately and is always returned unmodified to the user. The "transparent hop" principle applies to the response body, not the internal Go error return.)_
 
-10. **Retryable is the primary retry signal, not SubCategory.** The consumer and smart-router retry state machines short-circuit on `LavaError.Retryable=false` via `RelayResult.IsNonRetryable`, populated at classification time on both paths (consumer: `rpcconsumer_server.go`; smart-router: `direct_rpc_relay.go` / `rpcsmartrouter_server.go`). This covers every terminal classification — `CHAIN_EXECUTION_REVERTED`, `CHAIN_OUT_OF_GAS`, `CHAIN_DOUBLE_SPEND`, `CHAIN_INVALID_SIGNATURE`, all of 3000-range — not only unsupported methods. SubCategory continues to govern adjacent policy: `SubCategoryUnsupportedMethod` triggers the zero-CU carve-out and caching, and `SubCategoryRateLimit` drives backoff without marking the endpoint unhealthy. Layer D user-input errors are non-retryable but charge normal CU — the provider does real work because responses are not cached. `relay_processor.HasNonRetryableUserFacingErrors` keys off the `IsNonRetryable` flag rather than re-classifying, so adding a new non-retryable error type requires no state-machine changes.
+10. **Retryable is the primary retry signal, not SubCategory.** The consumer and smart-router retry state machines short-circuit on `LavaError.Retryable=false` via `RelayResult.IsNonRetryable`, populated at classification time on both paths (consumer: `rpcconsumer_server.go`; smart-router: `direct_rpc_relay.go` / `rpcsmartrouter_server.go`). This covers every terminal classification — `CHAIN_EXECUTION_REVERTED`, `CHAIN_OUT_OF_GAS`, `CHAIN_DOUBLE_SPEND`, `CHAIN_INVALID_SIGNATURE`, all of 3000-range — not only unsupported methods. SubCategory continues to govern adjacent policy: `SubCategoryUnsupportedMethod` triggers the zero-CU carve-out and caching, and `SubCategoryRateLimit` drives backoff without marking the endpoint unhealthy. `SubCategoryDataScope` is the third such axis and the one Retryable cannot express: the errors are retryable (a pruned endpoint's miss is an archive endpoint's hit) yet must stay out of the availability signal, because the endpoint answered truthfully about its own data scope. `rpcsmartrouter.shouldFailSessionForResult` reads all three. Layer D user-input errors are non-retryable but charge normal CU — the provider does real work because responses are not cached. `relay_processor.HasNonRetryableUserFacingErrors` keys off the `IsNonRetryable` flag rather than re-classifying, so adding a new non-retryable error type requires no state-machine changes.
 
 ## 8. Chains Analyzed
 

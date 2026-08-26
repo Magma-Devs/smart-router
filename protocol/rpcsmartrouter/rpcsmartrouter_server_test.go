@@ -1916,57 +1916,6 @@ func TestSendParsedRelayIntegration(t *testing.T) {
 	})
 }
 
-// MockResultsManager implements the relaycore.ResultsManager interface for testing
-type MockResultsManager struct {
-	successResults []common.RelayResult
-	nodeErrorsList []common.RelayResult
-	protocolErrors []relaycore.RelayError
-}
-
-func (m *MockResultsManager) GetResultsData() (successResults []common.RelayResult, nodeErrors []common.RelayResult, protocolErrors []relaycore.RelayError) {
-	return m.successResults, m.nodeErrorsList, m.protocolErrors
-}
-
-func (m *MockResultsManager) String() string {
-	return "MockResultsManager"
-}
-
-func (m *MockResultsManager) NodeResults() []common.RelayResult {
-	return append(m.successResults, m.nodeErrorsList...)
-}
-
-func (m *MockResultsManager) RequiredResults(requiredSuccesses int, selection relaycore.Selection) bool {
-	return len(m.successResults) >= requiredSuccesses
-}
-
-func (m *MockResultsManager) ProtocolErrors() uint64 {
-	return uint64(len(m.protocolErrors))
-}
-
-func (m *MockResultsManager) HasResults() bool {
-	return len(m.successResults) > 0 || len(m.nodeErrorsList) > 0
-}
-
-func (m *MockResultsManager) GetResults() (success int, nodeErrors int, specialNodeErrors int, protocolErrors int) {
-	return len(m.successResults), len(m.nodeErrorsList), 0, len(m.protocolErrors)
-}
-
-func (m *MockResultsManager) SetResponse(response *relaycore.RelayResponse, protocolMessage chainlib.ProtocolMessage) (nodeError error) {
-	return nil
-}
-
-func (m *MockResultsManager) GetBestNodeErrorMessageForUser() relaycore.RelayError {
-	return relaycore.RelayError{}
-}
-
-func (m *MockResultsManager) GetBestProtocolErrorMessageForUser() relaycore.RelayError {
-	return relaycore.RelayError{}
-}
-
-func (m *MockResultsManager) NodeErrors() (ret []common.RelayResult) {
-	return m.nodeErrorsList
-}
-
 // MockProtocolMessage implements the ProtocolMessage interface for testing
 type MockProtocolMessage struct {
 	api            *spectypes.Api
@@ -3121,7 +3070,7 @@ func TestPromoteConsistencyFallback(t *testing.T) {
 		"previously-rejected": &lavasession.SessionInfo{},
 		"new-stale-provider":  &lavasession.SessionInfo{},
 	}
-	valid, remainingFailed, err, promoted := promoteConsistencyFallback(
+	valid, remainingFailed, promoted, err := promoteConsistencyFallback(
 		nil,
 		failed,
 		lavasession.ConsistencyPreValidationError,
@@ -3405,7 +3354,7 @@ func TestIsFinalizedForCacheWrite(t *testing.T) {
 // filtered. With one endpoint that means an all-failed result -> ConsistencyError ->
 // the "No pairings available" the customer saw.
 //
-// The numbers are the real incident values from the GK8 logs:
+// The numbers are the real values from the incident logs:
 // seenBlock=424549212, block-height tip=403165980, gap=21383232.
 func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *testing.T) {
 	ctx := context.Background()

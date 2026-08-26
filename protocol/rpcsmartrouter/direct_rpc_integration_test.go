@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
@@ -677,6 +678,13 @@ type mockChainMessage struct {
 	// spectypes.LATEST_BLOCK for a latest-requesting method, or a concrete height for a
 	// historical request (used by the MAG-2159 tip-eligibility tests).
 	requestedBlock int64
+	// parseDirective is returned by GetParseDirective(); the nil default preserves
+	// the "no spec parsing" behaviour older tests rely on.
+	parseDirective *spectypes.ParseDirective
+	// parseDirectiveCalls counts GetParseDirective() calls. The MAG-2557 size-guard
+	// tests read it to prove extraction bailed out before touching the parse
+	// machinery — the return value alone can't tell a skip from a failed parse.
+	parseDirectiveCalls int
 }
 
 func (m *mockChainMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
@@ -734,8 +742,11 @@ func (m *mockChainMessage) GetRequestedBlocksHashes() []string                  
 func (m *mockChainMessage) UpdateEarliestInMessage(incomingEarliest int64) bool { return false }
 func (m *mockChainMessage) SetExtension(extension *spectypes.Extension)         {}
 func (m *mockChainMessage) GetUsedDefaultValue() bool                           { return false }
-func (m *mockChainMessage) GetParseDirective() *spectypes.ParseDirective        { return nil }
-func (m *mockChainMessage) IsBatch() bool                                       { return false }
+func (m *mockChainMessage) GetParseDirective() *spectypes.ParseDirective {
+	m.parseDirectiveCalls++
+	return m.parseDirective
+}
+func (m *mockChainMessage) IsBatch() bool { return false }
 
 type mockGenericMessage struct {
 	data []byte
@@ -850,4 +861,85 @@ func TestExtractBlockHeightFromJSONResponse_EVMFallback(t *testing.T) {
 
 	// Should fallback to EVM-specific parsing
 	assert.Equal(t, int64(4096), result, "EVM methods should work via fallback parsing")
+}
+
+// TestBlockExtractionResponseSizeGuard covers MAG-2557: the gRPC block-height
+// extraction path had no response-size cap while the JSON-RPC path capped at 1 MB,
+// so an oversized gRPC response was unmarshalled into a dynamic.Message, re-marshalled
+// to JSON and copied — several full-size allocations off one upstream reply.
+//
+// Both paths are asserted together, driven by the SAME constant, because that is the
+// claim: one cap for block extraction, not one per transport. The encoding differs
+// between JSON-RPC and gRPC; the size of the block we want to read does not. Threading
+// both extractors through maxResponseSizeForBlockExtraction is what makes a future
+// re-split of the constant fail here rather than pass quietly.
+//
+// The assertion is parseDirectiveCalls, not the returned height. Extraction returns 0
+// whether it skipped the response or parsed it and found nothing, so the return value
+// alone cannot distinguish a guard that fired from one that never existed — a call
+// count of 0 proves the function bailed out before reaching the parse machinery.
+func TestBlockExtractionResponseSizeGuard(t *testing.T) {
+	// A parse directive has to be present for the "guard did not fire" arm to be
+	// meaningful: without one, extraction returns early for its own reasons.
+	newMsg := func() *mockChainMessage {
+		return &mockChainMessage{
+			api:            &spectypes.Api{Name: "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"},
+			parseDirective: &spectypes.ParseDirective{},
+		}
+	}
+
+	extractors := []struct {
+		name    string
+		extract func([]byte, chainlib.ChainMessage) int64
+	}{
+		{"grpc", extractBlockHeightFromGRPCResponse},
+		{"jsonrpc", extractBlockHeightFromJSONResponse},
+	}
+
+	for _, extractor := range extractors {
+		t.Run(extractor.name+"/over cap is skipped without parsing", func(t *testing.T) {
+			msg := newMsg()
+			oversized := make([]byte, maxResponseSizeForBlockExtraction+1)
+
+			assert.Equal(t, int64(0), extractor.extract(oversized, msg))
+			assert.Zero(t, msg.parseDirectiveCalls,
+				"response over the %d byte cap must be skipped before any parsing work",
+				maxResponseSizeForBlockExtraction)
+		})
+
+		// Boundary: the guard is `>`, so a response of exactly the cap still parses.
+		// Pinning this keeps a later refactor from silently turning it into `>=` and
+		// dropping block tracking for responses that are within budget.
+		t.Run(extractor.name+"/exactly at cap still parses", func(t *testing.T) {
+			msg := newMsg()
+			atCap := make([]byte, maxResponseSizeForBlockExtraction)
+
+			// The payload is zero bytes, so parsing yields no height — the point is
+			// that extraction was attempted at all.
+			extractor.extract(atCap, msg)
+			assert.NotZero(t, msg.parseDirectiveCalls,
+				"response exactly at the cap must not be skipped")
+		})
+	}
+
+	// The regression this whole test exists to prevent is not "the guard is missing" but
+	// "the guard is set too low". On both transports the biggest response IS the block
+	// source — GetLatestBlock on gRPC, eth_getBlockByNumber on JSON-RPC — so a cap below
+	// the chain's consensus block.max_bytes fires only on full blocks, during congestion,
+	// silently, exactly when tip accuracy matters most. Tendermint's default max_bytes is
+	// the ceiling to clear; the 1 MB this constant used to carry lands far under it.
+	t.Run("cap clears the consensus block ceiling", func(t *testing.T) {
+		const tendermintDefaultMaxBytes = 22020096 // 21 MB, Tendermint's default block.max_bytes
+		assert.Greater(t, maxResponseSizeForBlockExtraction, tendermintDefaultMaxBytes,
+			"block-extraction cap must exceed the largest block a chain can legally produce")
+	})
+
+	// The other half of the sizing claim: a cap at the transport's own receive limit could
+	// never fire, because gRPC refuses to decode a message above it before extraction is
+	// reached. Pinning strict inequality keeps "just reuse the overall limit" from turning
+	// the guard into a branch no input can take.
+	t.Run("cap stays below the transport receive limit", func(t *testing.T) {
+		assert.Less(t, maxResponseSizeForBlockExtraction, chainproxy.MaxCallRecvMsgSize,
+			"a cap at or above MaxCallRecvMsgSize is unreachable — the transport rejects first")
+	})
 }

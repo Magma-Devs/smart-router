@@ -23,21 +23,54 @@ const MaxCallRecvMsgSize = 1024 * 1024 * 512 // 512MB for large debug responses
 
 type ProxyCallBack = func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error)
 
+// StreamProxyCallBack is the server-streaming counterpart of ProxyCallBack. It is
+// called before the unary callback for every incoming request.
+//
+// Returning a nil *StreamResponse together with a nil error means "not a
+// server-streaming method" — the proxy then serves the call through the unary
+// ProxyCallBack, so wiring streaming up leaves ordinary unary traffic untouched.
+type StreamProxyCallBack = func(ctx context.Context, method string, reqBody []byte) (*StreamResponse, error)
+
+// StreamResponse is the producer half of a server-streaming call, handed back by a
+// StreamProxyCallBack for the proxy to pump at the client.
+type StreamResponse struct {
+	// Replies carries already-encoded response messages, each one a marshalled
+	// instance of the method's output type. The producer closes the channel when
+	// the upstream stream ends; the proxy then closes the client stream with OK.
+	Replies <-chan []byte
+
+	// Metadata is sent as response headers ahead of the first message. This is
+	// where the router-assigned subscription id belongs: a gRPC stream has no room
+	// for an out-of-band acknowledgement frame, because every message on the wire
+	// must decode as the method's output type.
+	Metadata metadata.MD
+
+	// Close is invoked exactly once when the client stream ends for any reason —
+	// client cancellation, upstream EOF, or a failed send. It must drop this client
+	// from the upstream subscription; without it a disconnected client leaves the
+	// upstream stream running with nobody reading it.
+	Close func()
+}
+
 type HealthReporter interface {
 	IsHealthy() bool
 }
 
 func NewGRPCProxy(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter) (*grpc.Server, *http.Server, error) {
-	return NewGRPCProxyWithReflection(cb, healthCheckPath, cmdFlags, healthReporter, nil)
+	return NewGRPCProxyWithReflection(cb, healthCheckPath, cmdFlags, healthReporter, nil, nil)
 }
 
 // NewGRPCProxyWithReflection creates a gRPC proxy with optional reflection support.
 // If reflectionCallback is provided, a separate gRPC server is created for reflection
 // that uses standard protobuf codec (not RawBytesCodec), allowing proper serialization.
 // This enables tools like grpcurl to work with the smart router.
-func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionCallback ReflectionProxyCallback) (*grpc.Server, *http.Server, error) {
+//
+// streamCallback is optional too; when non-nil the proxy offers every request to it
+// first, so server-streaming methods are served as streams instead of being forced
+// through the single-message unary path.
+func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionCallback ReflectionProxyCallback, streamCallback StreamProxyCallBack) (*grpc.Server, *http.Server, error) {
 	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(MaxCallRecvMsgSize) // setting receive size to 32mb instead of 4mb default
-	s := grpc.NewServer(grpc.UnknownServiceHandler(makeProxyFunc(cb)), grpc.ForceServerCodec(RawBytesCodec{}), serverReceiveMaxMessageSize)
+	s := grpc.NewServer(grpc.UnknownServiceHandler(makeProxyFunc(cb, streamCallback)), grpc.ForceServerCodec(RawBytesCodec{}), serverReceiveMaxMessageSize)
 	grpc_health_v1.RegisterHealthServer(s, health.NewServer())
 
 	wrappedServer := grpcweb.WrapServer(s)
@@ -101,7 +134,7 @@ func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFla
 	return s, httpServer, nil
 }
 
-func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
+func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) grpc.StreamHandler {
 	return func(srv interface{}, stream grpc.ServerStream) error {
 		// currently the callback function does not account for headers.
 		methodName, ok := grpc.MethodFromServerStream(stream)
@@ -113,15 +146,23 @@ func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
 		if err != nil {
 			return err
 		}
-		respBytes, md, err := callBack(stream.Context(), methodName[1:], reqBytes) // strip first '/' of the method name
+		method := methodName[1:] // strip first '/' of the method name
 
-		// Convert metadata keys to lowercase
-		lowercaseMD := metadata.New(map[string]string{})
-		for k, v := range md {
-			lowerKey := strings.ToLower(k)
-			lowercaseMD[lowerKey] = v
+		if streamCallBack != nil {
+			streamResponse, streamErr := streamCallBack(stream.Context(), method, reqBytes)
+			if streamErr != nil {
+				return streamErr
+			}
+			if streamResponse != nil {
+				return serveServerStream(stream, streamResponse)
+			}
+			// nil response with nil error: not a server-streaming method. Fall through
+			// to the unary path, which is the whole of the pre-streaming behaviour.
 		}
-		md = lowercaseMD
+
+		respBytes, md, err := callBack(stream.Context(), method, reqBytes)
+
+		md = lowercaseMetadata(md)
 
 		if err != nil {
 			// On error the handler returns no message, so gRPC sends a trailers-only response — SetHeader
@@ -140,6 +181,53 @@ func makeProxyFunc(callBack ProxyCallBack) grpc.StreamHandler {
 		}
 		return stream.SendMsg(respBytes)
 	}
+}
+
+// serveServerStream holds the client stream open and forwards upstream messages onto
+// it until the upstream ends or the client goes away. This is the listener half the
+// Direct RPC gRPC path was missing: the subscription manager could already open an
+// upstream stream and fan it out to per-client channels, but nothing on the serving
+// side kept a client connection alive to read one (MAG-2643).
+//
+// Returns nil on upstream end-of-stream, which closes the client stream with OK.
+func serveServerStream(stream grpc.ServerStream, response *StreamResponse) error {
+	// Runs on every exit path, so a client that disconnects mid-stream is dropped
+	// from the upstream subscription rather than leaving it running unread.
+	if response.Close != nil {
+		defer response.Close()
+	}
+
+	if len(response.Metadata) > 0 {
+		if err := stream.SetHeader(lowercaseMetadata(response.Metadata)); err != nil {
+			utils.LavaFormatError("Got error when setting stream header", err, utils.LogAttr("headers", response.Metadata))
+		}
+	}
+
+	ctx := stream.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			// Client cancelled or the connection dropped. Report it as the client's
+			// own status (Canceled / DeadlineExceeded) rather than a server fault.
+			return status.FromContextError(ctx.Err()).Err()
+		case msg, open := <-response.Replies:
+			if !open {
+				return nil
+			}
+			if err := stream.SendMsg(msg); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// lowercaseMetadata normalizes header keys, which gRPC requires to be lowercase.
+func lowercaseMetadata(md metadata.MD) metadata.MD {
+	lowercased := metadata.New(map[string]string{})
+	for k, v := range md {
+		lowercased[strings.ToLower(k)] = v
+	}
+	return lowercased
 }
 
 type RawBytesCodec struct{}

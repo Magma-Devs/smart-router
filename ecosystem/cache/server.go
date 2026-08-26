@@ -49,6 +49,9 @@ type CacheServer struct {
 	finalizedCache             *ristretto.Cache[string, any]
 	tempCache                  *ristretto.Cache[string, any] // cache for temporary inputs, such as latest blocks
 	blocksHashesToHeightsCache *ristretto.Cache[string, any]
+	// endpointObservations holds the fleet's per-endpoint poll observations for the fleet
+	// tracker gate (MAG-2981). See endpoint_observations.go for why it is not a ristretto store.
+	endpointObservations *endpointObservationStore
 
 	ExpirationFinalized             time.Duration
 	ExpirationNonFinalized          time.Duration
@@ -114,6 +117,8 @@ func (cs *CacheServer) InitCache(
 	if err != nil {
 		utils.LavaFormatFatal("could not create blocks hashes to heights cache", err)
 	}
+
+	cs.endpointObservations = newEndpointObservationStore()
 
 	go cs.periodicCacheSizeUpdate(ctx)
 }

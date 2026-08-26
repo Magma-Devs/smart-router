@@ -12,6 +12,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -234,7 +235,7 @@ func TestParsingRequestedBlocksHeadersGrpc(t *testing.T) {
 
 			requestedBlock, _ := chainMessage.RequestedBlock()
 			require.Equal(t, test.requestedBlock, requestedBlock)
-			reply, _, _, _, _, err := chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+			reply, _, _, err := chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 			require.NoError(t, err)
 			parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 			require.NoError(t, err)
@@ -303,7 +304,7 @@ func TestSettingBlocksHeadersGrpc(t *testing.T) {
 			chainMessage.UpdateLatestBlockInMessage(test.block, true) // will update the request only if it's latest
 			requestedBlock, _ = chainMessage.RequestedBlock()
 			require.Equal(t, test.block, requestedBlock)
-			reply, _, _, _, _, err := chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+			reply, _, _, err := chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 			require.NoError(t, err)
 			parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 			require.NoError(t, err)
@@ -380,4 +381,150 @@ func TestCloneChainParserForValidation_NonGrpcReturnsOriginal(t *testing.T) {
 	tmParser, err := NewTendermintRpcChainParser()
 	require.NoError(t, err)
 	require.Same(t, ChainParser(tmParser), CloneChainParserForValidation(tmParser), "non-gRPC parser must be returned as-is")
+}
+
+// TestSetupForProvider_RejectsConflictingDescriptorSource pins the per-chain /
+// per-node-url mismatch that wiring descriptor-source into setupForProvider creates.
+//
+// newChainRouter builds one proxy per node-url batch entry and passes THIS parser to
+// every one of them, so each setupForProvider call overwrites registry/codec. The
+// batch is a map, so before this guard the winner was whatever Go's randomized
+// iteration order picked that boot — a chain with one "file" node-url and one
+// reflection node-url would parse blocks against a different descriptor set on each
+// restart. Refusing the config is the only outcome that is the same every boot.
+func TestSetupForProvider_RejectsConflictingDescriptorSource(t *testing.T) {
+	protosetPath := "/tmp/does-not-need-to-exist.pb"
+
+	t.Run("second node-url disagreeing is rejected", func(t *testing.T) {
+		parser := &GrpcChainParser{}
+		// reflectionConnection is nil throughout: the conflict is decided from config
+		// alone, before any registry is built, so no descriptor lookup happens here.
+		require.NoError(t, parser.setupForProvider(nil, &common.GrpcConfig{}))
+		registryAfterFirst := parser.registry
+
+		err := parser.setupForProvider(nil, &common.GrpcConfig{
+			DescriptorSource:  common.GrpcDescriptorSourceFile,
+			DescriptorSetPath: protosetPath,
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "conflicting gRPC descriptor-source")
+		require.Same(t, registryAfterFirst, parser.registry,
+			"a rejected node-url must not have replaced the registry on its way out")
+	})
+
+	t.Run("the reverse direction is rejected too", func(t *testing.T) {
+		parser := &GrpcChainParser{}
+		require.NoError(t, parser.setupForProvider(nil, &common.GrpcConfig{
+			DescriptorSource:  common.GrpcDescriptorSourceHybrid,
+			DescriptorSetPath: protosetPath,
+		}))
+		require.Error(t, parser.setupForProvider(nil, &common.GrpcConfig{}))
+	})
+
+	t.Run("same path, different mode is rejected", func(t *testing.T) {
+		parser := &GrpcChainParser{}
+		require.NoError(t, parser.setupForProvider(nil, &common.GrpcConfig{
+			DescriptorSource:  common.GrpcDescriptorSourceHybrid,
+			DescriptorSetPath: protosetPath,
+		}))
+		require.Error(t, parser.setupForProvider(nil, &common.GrpcConfig{
+			DescriptorSource:  common.GrpcDescriptorSourceFile,
+			DescriptorSetPath: protosetPath,
+		}))
+	})
+
+	// The guard must stay invisible to every config that is actually consistent —
+	// above all the overwhelmingly common one, where no node-url mentions grpc-config
+	// at all and each batch entry builds an equivalent reflection registry.
+	t.Run("agreeing node-urls are accepted", func(t *testing.T) {
+		for _, agreeing := range [][2]common.GrpcConfig{
+			{{}, {}},
+			// An omitted descriptor-source and an explicit "reflection" are the same
+			// request; GetDescriptorSource normalizes before they are compared.
+			{{}, {DescriptorSource: common.GrpcDescriptorSourceReflection}},
+			{
+				{DescriptorSource: common.GrpcDescriptorSourceFile, DescriptorSetPath: protosetPath},
+				{DescriptorSource: common.GrpcDescriptorSourceFile, DescriptorSetPath: protosetPath},
+			},
+			// Fields the registry does not depend on must not read as a conflict.
+			{{}, {AllowInsecure: true, ReflectionTimeout: time.Second}},
+		} {
+			parser := &GrpcChainParser{}
+			first, second := agreeing[0], agreeing[1]
+			// "file" mode with a path that does not exist fails in the loader, not in
+			// the conflict guard — which is the distinction being asserted.
+			firstErr := parser.setupForProvider(nil, &first)
+			secondErr := parser.setupForProvider(nil, &second)
+			for _, err := range []error{firstErr, secondErr} {
+				if err != nil {
+					require.NotContains(t, err.Error(), "conflicting gRPC descriptor-source")
+				}
+			}
+		}
+	})
+
+	// cloneForValidation starts a fresh record on purpose: the clone serves whatever
+	// node-url subset the re-verification loop hands it, and must not inherit a
+	// conflict with a set it was never given.
+	t.Run("validation clone does not inherit the record", func(t *testing.T) {
+		live := &GrpcChainParser{}
+		require.NoError(t, live.setupForProvider(nil, &common.GrpcConfig{}))
+
+		clone := live.cloneForValidation()
+		require.NoError(t, clone.setupForProvider(nil, &common.GrpcConfig{
+			DescriptorSource:  common.GrpcDescriptorSourceHybrid,
+			DescriptorSetPath: protosetPath,
+		}))
+		require.NotNil(t, live.registry, "the clone must not have disturbed the live parser")
+	})
+}
+
+// TestCloneChainParserForValidation_AbsorbsRealSetupForProvider is the other half
+// of MAG-2538, and the half TestCloneChainParserForValidation_GrpcIsolation cannot
+// cover: that one stands in for the mutation by assigning registry/codec directly,
+// so it proves the clone is a distinct struct but not that the clone actually
+// absorbs what NewGrpcChainProxy does to it.
+//
+// The distinction matters for anyone editing cloneForValidation. It aliases most of
+// BaseChainParser deliberately; the invariant is that nothing setupForProvider
+// touches is shared. A field added to the clone that aliases mutable state would
+// sail past the simulated version and be caught here, because this drives the real
+// GetChainRouter -> newGrpcChainProxy -> setupForProvider path against a live
+// reflection server.
+func TestCloneChainParserForValidation_AbsorbsRealSetupForProvider(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	noop := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	chainParser, _, _, closeServer, endpoint, err := CreateChainLibMocks(
+		ctx, "GRPCTEST", spectypes.APIInterfaceGrpc, noop, nil, "../../", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if closeServer != nil {
+			closeServer()
+		}
+	})
+
+	live, ok := chainParser.(*GrpcChainParser)
+	require.True(t, ok)
+	// CreateChainLibMocks builds the parser through GetChainRouter, so it arrives
+	// bound the way boot leaves it — which is the state recovery has to preserve.
+	servingRegistry, servingCodec := live.registry, live.codec
+	require.NotNil(t, servingRegistry)
+	require.NotNil(t, servingCodec)
+
+	_, err = GetChainRouter(ctx, 1, endpoint, CloneChainParserForValidation(live))
+	require.NoError(t, err)
+
+	require.Same(t, servingRegistry, live.registry,
+		"MAG-2538: a verification pass through the clone must not rebind the live registry")
+	require.Same(t, servingCodec, live.codec, "nor the live codec")
+
+	// Control, last so it cannot disturb the assertions above: the same call without
+	// the clone does rebind the live parser. Without this the test would still pass
+	// if GetChainRouter had stopped reaching setupForProvider at all.
+	_, err = GetChainRouter(ctx, 1, endpoint, live)
+	require.NoError(t, err)
+	require.NotSame(t, servingRegistry, live.registry,
+		"control: an unprotected GetChainRouter must rebind the live registry")
 }

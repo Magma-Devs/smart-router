@@ -2,6 +2,7 @@ package endpointstate
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -28,6 +30,18 @@ const (
 	defaultTrackerStartRetryMin = time.Second
 	defaultTrackerStartRetryMax = 30 * time.Second
 	trackerStartRetryJitterDiv  = 5
+
+	// pollNowUnstartedGrace bounds how long PollNow waits for a tracker that is not yet Polling to
+	// TAKE the trigger (MAG-2649). Such a tracker has no poll goroutine to receive it, so waiting out
+	// the caller's full budget only delays a verdict that will not change. Comfortably longer than
+	// the microseconds a live goroutine needs to take the send, so it never cuts short a tracker
+	// whose state merely lagged.
+	//
+	// Delivery only. It deliberately does NOT bound the poll cycle that follows: that is bounded by
+	// the tracker's own fetch timeout, max(10s, MinimumTimePerRelayDelay), which is several times
+	// this grace. Capping both with this value would abandon healthy polls mid-flight and leave the
+	// caller reading a pre-poll record.
+	pollNowUnstartedGrace = 2 * time.Second
 )
 
 type EndpointChainTrackerState string
@@ -78,6 +92,10 @@ type EndpointMonitor struct {
 	// tracker's record for the same URL. Guarded by obsMu alongside observations.
 	generations map[string]uint64
 	nextObsGen  uint64
+	// lastPublished throttles what this pod publishes to the fleet store, per endpoint. Both
+	// first-hand record paths would otherwise publish on every observation, and a busy endpoint
+	// observes far more often than the fleet needs. See shouldPublishLocked. Guarded by obsMu.
+	lastPublished map[string]time.Time
 	// stopped is set by Stop. Once set, no further observation writes are accepted, so a
 	// late in-flight poll cannot resurrect an observation after shutdown.
 	stopped bool
@@ -89,6 +107,11 @@ type EndpointMonitor struct {
 
 	// Chain-specific timing
 	averageBlockTime time.Duration
+	// flatPollInterval is the FIXED dedicated-poll cadence handed to every tracker this
+	// monitor creates (chaintracker.ChainTrackerConfig.FlatPollInterval):
+	// averageBlockTime/divisor, resolved ONCE at construction from the operator's
+	// PollIntervalDivisor. See poll_cadence.go for the knob and the bounds on it.
+	flatPollInterval time.Duration
 	// tipStaleAfter is the per-endpoint tip staleness horizon (T4/C-D): the shared
 	// chainstate.StalenessWindow, derived once and passed to every endpointtip.Store.Set to
 	// gate downward (reorg) moves.
@@ -97,14 +120,29 @@ type EndpointMonitor struct {
 	retryMinDelay time.Duration
 	retryMaxDelay time.Duration
 
+	// hashPolling is resolved ONCE at construction (it depends only on the chain spec and
+	// the operator flag, both fixed by then) and reused for every tracker this monitor
+	// creates, so all endpoints of a chain agree and /debug can report a stable reason.
+	hashPolling HashPollingReason
+
 	// relayGateFreshness is the maximum age of a relay-harvested tip that still suppresses
 	// a dedicated poll (MAG-2159 Topic B / Pass 2 — the "gate freshness threshold"). A
 	// relay observation younger than this means served traffic kept the tip at most ~one
 	// block stale, so this tick's dedicated poll is redundant and is borrowed instead of
-	// sent upstream (see freshRelayTip / EndpointPoller.relayGate). Defaults to
-	// averageBlockTime: ~1 block of staleness, conveniently 2x the flat poll interval
-	// (avgBlockTime/2), enough margin to suppress consecutive ticks without flapping.
+	// sent upstream (see freshRelayTip / EndpointPoller.relayGate). Always averageBlockTime:
+	// "~one block of staleness" is a property of the CHAIN, so it deliberately does NOT follow
+	// the poll divisor (poll_cadence.go). At the default divisor that is 2x the poll interval,
+	// ample margin to suppress consecutive ticks without flapping; at divisor 1 the margin is
+	// 1x, so an endpoint whose relays arrive around once per block time alternates skip/poll
+	// instead of reliably skipping. That costs one extra poll on a quiet endpoint, never
+	// correctness — the gate reads the RELAY tip's age, and a busy endpoint's tip is far
+	// fresher than either bound.
 	relayGateFreshness time.Duration
+
+	// peerObservations is the fleet half of the traffic gate (MAG-2981): nil disables it. podID
+	// is what this pod publishes under and refuses to borrow from. See peer_observations.go.
+	peerObservations PeerObservationStore
+	podID            string
 
 	// Callbacks for events (optional)
 	onFork        func(endpointURL string, blockNum int64)
@@ -116,6 +154,17 @@ type EndpointMonitor struct {
 	// per-chain ChainState tip (SetLatestBlock). Fired AFTER obsMu is released so the tip lock
 	// is never taken while holding the observation lock. Set once at construction; immutable.
 	onTipObservation func(block int64)
+	// onGateSkip, if set, is invoked once per poll cycle the traffic gate suppressed, with the
+	// source that made the poll redundant (metrics.TrackerGateSkipSource*).
+	onGateSkip func(endpointURL, source string)
+	// onGateError, if set, is invoked whenever a fleet-store call fails, with the operation
+	// (metrics.TrackerGateOp*). Without it a broken cache backend and a fleet with nothing to
+	// share look identical: both report zero peer skips.
+	onGateError func(endpointURL, op string)
+	// onTrackerRequest counts upstream tracker requests. Deliberately NOT generation-gated
+	// the way observations are: a late request from a replaced tracker still reached the
+	// node, so dropping it would under-report real load.
+	onTrackerRequest func(endpointURL, kind string)
 
 	// Context for managing goroutines (parent context for all trackers)
 	ctx    context.Context
@@ -130,6 +179,18 @@ type EndpointChainTrackerConfig struct {
 	AverageBlockTime time.Duration
 	BlocksToSave     uint64
 
+	// PollIntervalDivisor sets the dedicated-poll cadence to AverageBlockTime/divisor.
+	// Fractional values are meaningful and are the point of the low end: 0.25 is one poll per
+	// four block times. 0 selects DefaultPollDivisor; see poll_cadence.go for the bounds and
+	// for what actually constrains the slow end.
+	PollIntervalDivisor float64
+
+	// EnableForkDetection turns block-hash polling on. Off by default: the tracker then
+	// asks each endpoint only "what is your latest block?" and never fetches a hash. See
+	// EnableForkDetectionFlagName for why that is the default, and resolveHashPolling for
+	// how this combines with a spec that cannot serve hashes at all.
+	EnableForkDetection bool
+
 	// Optional callbacks
 	OnFork        func(endpointURL string, blockNum int64)
 	OnNewBlock    func(endpointURL string, fromBlock, toBlock int64)
@@ -138,6 +199,24 @@ type EndpointChainTrackerConfig struct {
 	// OnTipObservation, if set, feeds every positive poll/relay block into the per-chain
 	// ChainState tip (MAG-2160). See EndpointMonitor.onTipObservation.
 	OnTipObservation func(block int64)
+
+	// PeerObservations, when set, enables the fleet half of the traffic gate (MAG-2981): this
+	// pod publishes its successful polls to the store and borrows fresh observations from
+	// other pods instead of polling. Leave nil on a single-replica deployment.
+	PeerObservations PeerObservationStore
+
+	// OnGateSkip, if set, is invoked once per poll cycle the traffic gate suppressed, with
+	// the source ("relay" or "peer"). Backs rpc_endpoint_tracker_gate_skips_total.
+	OnGateSkip func(endpointURL, source string)
+
+	// OnGateError, if set, is invoked on every failed fleet-store call, with the operation
+	// ("fetch" or "publish"). Backs rpc_endpoint_tracker_gate_errors_total.
+	OnGateError func(endpointURL, op string)
+
+	// OnTrackerRequest, if set, is invoked once per upstream request a tracker actually sends,
+	// with the endpoint URL and the request kind (metrics.TrackerRequestKind*). It backs the
+	// only metric that measures tracker REQUEST VOLUME — see RecordTrackerRequest.
+	OnTrackerRequest func(endpointURL, kind string)
 }
 
 // NewEndpointMonitor creates a new manager for per-endpoint ChainTrackers.
@@ -168,6 +247,13 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		avgBlockTime = DefaultAverageBlockTime
 	}
 
+	// Dedicated-poll cadence (poll_cadence.go). Validated and derived ONCE here so every
+	// tracker this monitor creates shares one interval, and so a rejected out-of-range value
+	// is reported once per chain rather than per tracker.
+	pollDivisor := resolvePollDivisor(config.PollIntervalDivisor, config.ChainID, config.ApiInterface)
+	flatPollInterval := resolveFlatPollInterval(avgBlockTime, pollDivisor)
+	warnIfCadenceOutrunsStaleness(flatPollInterval, avgBlockTime, config.ChainID, config.ApiInterface)
+
 	ctxWithCancel, cancel := context.WithCancel(ctx)
 
 	manager := &EndpointMonitor{
@@ -178,10 +264,12 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		trackerLastErrors: make(map[string]string),
 		observations:      make(map[string]EndpointObservation),
 		generations:       make(map[string]uint64),
+		lastPublished:     make(map[string]time.Time),
 		chainParser:       config.ChainParser,
 		chainID:           config.ChainID,
 		apiInterface:      config.ApiInterface,
 		averageBlockTime:  avgBlockTime,
+		flatPollInterval:  flatPollInterval,
 		tipStaleAfter:     chainstate.StalenessWindow(avgBlockTime),
 		blocksToSave:      blocksToSave,
 		retryMinDelay:     defaultTrackerStartRetryMin,
@@ -193,9 +281,56 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		onConsistency:      config.OnConsistency,
 		onFetchError:       config.OnFetchError,
 		onTipObservation:   config.OnTipObservation,
+		onGateSkip:         config.OnGateSkip,
+		onGateError:        config.OnGateError,
+		onTrackerRequest:   config.OnTrackerRequest,
+		peerObservations:   config.PeerObservations,
+		podID:              LocalPodID(),
 		ctx:                ctxWithCancel,
 		cancel:             cancel,
 	}
+
+	// Resolved after the struct exists because it reads manager.chainParser. Both inputs are
+	// immutable from here on, so one resolution serves every tracker this monitor creates.
+	manager.hashPolling = manager.resolveHashPolling(config.EnableForkDetection)
+	// Logged in BOTH directions. An operator who passes --enable-fork-detection needs to be
+	// able to confirm from the log that it took effect on this chain — a line that only ever
+	// appears when the answer is "off" leaves them with nothing to read when it is "on", and
+	// the spec reason can override the flag on some chains of a multichain process but not
+	// others. The reason attribute distinguishes the two ways it can be off.
+	utils.LavaFormatInfo("block-hash polling (fork detection) resolved",
+		utils.LogAttr("chainID", config.ChainID),
+		utils.LogAttr("apiInterface", config.ApiInterface),
+		utils.LogAttr("enabled", !manager.hashPolling.HeadOnly()),
+		utils.LogAttr("reason", manager.hashPolling.String()),
+	)
+
+	if manager.peerObservations != nil {
+		utils.LavaFormatInfo("fleet tracker gate enabled: borrowing peer poll observations from the cache backend",
+			utils.LogAttr("chainID", config.ChainID),
+			utils.LogAttr("apiInterface", config.ApiInterface),
+			utils.LogAttr("podID", manager.podID),
+			utils.LogAttr("freshness", manager.relayGateFreshness),
+		)
+	}
+
+	// Log only the non-default cadence: an operator who tuned polling has to be able to
+	// confirm from the logs that the value survived validation, while the default needs no
+	// line of its own (it is already visible as PollIntervalMs on /debug/endpoint-state).
+	// Logged unconditionally, once per chain+interface, the same way the fork-detection
+	// decision above is. Reporting only the overridden case left the default silent, so an
+	// operator reading a log could not tell "the flag did nothing" from "the flag never
+	// arrived" — and the failure mode this knob actually has is a value that silently reverts
+	// (out of range, or truncated to the unset sentinel by an older binary). The resolved
+	// interval, not the requested divisor, is the thing worth stating.
+	utils.LavaFormatInfo("per-endpoint chain tracker poll cadence resolved",
+		utils.LogAttr("chainID", config.ChainID),
+		utils.LogAttr("apiInterface", config.ApiInterface),
+		utils.LogAttr("averageBlockTime", avgBlockTime),
+		utils.LogAttr("divisor", pollDivisor),
+		utils.LogAttr("pollInterval", flatPollInterval),
+		utils.LogAttr("overridden", pollDivisor != DefaultPollDivisor),
+	)
 
 	return manager
 }
@@ -254,6 +389,14 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.recordPollObservation(endpointURL, gen, block, latency, pollErr, at)
 	}
 
+	// Count every upstream request this tracker sends. Set only when a consumer is wired, so
+	// the transport pays nothing (a nil check) otherwise.
+	if m.onTrackerRequest != nil {
+		fetcher.onTrackerRequest = func(kind string) {
+			m.onTrackerRequest(endpointURL, kind)
+		}
+	}
+
 	// Configure the ChainTracker
 	config := chaintracker.ChainTrackerConfig{
 		BlocksToSave:             m.blocksToSave,
@@ -262,25 +405,38 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		BlocksCheckpointDistance: chaintracker.DefaultBlockCheckpointDistance,
 		ChainId:                  m.chainID,
 		ParseDirectiveEnabled:    true, // Always enabled for direct RPC
-		// MAG-2218: a spec with a head but no usable GET_BLOCK_BY_NUM runs head-only rather
-		// than failing every hash fetch forever. ParseDirectiveEnabled stays true — turning it
-		// off would swap in a DummyChainTracker, which polls nothing at all.
-		HeadOnlyTracking: m.headOnlyTracking(),
+		// Head-only drops every block-hash fetch, so the tracker asks only for the latest
+		// block. Two reasons lead here (see resolveHashPolling): the operator left fork
+		// detection off (the default), or the spec has a head but no usable GET_BLOCK_BY_NUM
+		// and hashes are impossible anyway (MAG-2218). ParseDirectiveEnabled stays true —
+		// turning it off would swap in a DummyChainTracker, which polls nothing at all.
+		HeadOnlyTracking: m.hashPolling.HeadOnly(),
 		// MAG-2159 (Topic B): per-endpoint trackers use a FIXED flat cadence — the
-		// dedicated poll runs at exactly avgBlockTime/2 (slowed only by failure backoff),
-		// because relay harvest is the primary block signal and the poll is a sparse
-		// fallback. (The global tracker leaves this 0 and keeps its legacy adaptive
-		// cadence until Topic C.)
-		FlatPollInterval: m.averageBlockTime / 2,
+		// dedicated poll runs at exactly avgBlockTime/divisor (slowed only by failure
+		// backoff), because relay harvest is the primary block signal and the poll is a
+		// sparse fallback. The divisor defaults to DefaultPollDivisor and is operator-tunable
+		// (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The global tracker
+		// leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
+		FlatPollInterval: m.flatPollInterval,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
 		// (above the generic/SVM wrapper split) so it suppresses Solana polls too — the old
-		// per-poller hook could only ever see the generic path. The gate fires only on a fresh
-		// RELAY observation (freshRelayTip), so an idle endpoint with no fresh relays still
-		// polls; a bounded number of consecutive skips then forces a verifying real poll.
+		// per-poller hook could only ever see the generic path. The gate fires on a fresh
+		// RELAY observation (freshRelayTip) or, when the fleet gate is wired, on a fresh PEER
+		// observation (freshPeerTip, MAG-2981) — never on this pod's own poll, so an idle
+		// endpoint on a single pod still polls; a bounded number of consecutive skips then
+		// forces a verifying real poll. Relay is checked first: it is a local read, and a
+		// busy endpoint's relay tip is fresher than any peer poll.
 		RelayTipFresh: func(now time.Time) bool {
-			_, ok := m.freshRelayTip(endpointURL, now)
-			return ok
+			if _, ok := m.freshRelayTip(endpointURL, now); ok {
+				m.noteGateSkip(endpointURL, metrics.TrackerGateSkipSourceRelay)
+				return true
+			}
+			if _, ok := m.freshPeerTip(endpointURL, gen, now); ok {
+				m.noteGateSkip(endpointURL, metrics.TrackerGateSkipSourcePeer)
+				return true
+			}
+			return false
 		},
 	}
 
@@ -395,16 +551,40 @@ func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTrack
 	}
 }
 
-// headOnlyTracking reports whether this chain can be tracked by head alone: it exposes a
+// resolveHashPolling decides whether this monitor's trackers do block-hash work, and records
+// WHY. Two independent causes disable it and they must stay distinguishable (see
+// HashPollingReason): a spec that cannot serve hashes at all, and the operator's flag.
+//
+// The spec reason wins when both apply. It is the immutable one — turning the flag on would
+// not give a Canton-shaped chain hashes — so reporting it is what stops an operator chasing
+// a flag that cannot help.
+func (m *EndpointMonitor) resolveHashPolling(enableForkDetection bool) HashPollingReason {
+	if m.specRequiresHeadOnly() {
+		return HashPollingOffSpecUnsupported
+	}
+	if !enableForkDetection {
+		return HashPollingOffOperatorChoice
+	}
+	return HashPollingOn
+}
+
+// HashPollingMode reports why block-hash polling is or is not running for this chain. Read
+// by /debug/endpoint-state; the value is fixed at construction.
+func (m *EndpointMonitor) HashPollingMode() HashPollingReason {
+	return m.hashPolling
+}
+
+// specRequiresHeadOnly reports whether this chain can ONLY be tracked by head: it exposes a
 // current block/offset (GET_BLOCKNUM) but has no usable "fetch block N" (GET_BLOCK_BY_NUM).
 // Canton is the case that forced this (MAG-2218) — its Ledger API reads are party-scoped and
 // not addressable by block number, so a generic per-block fetch cannot be expressed.
 //
 // Deliberately keyed on the directives the spec actually declares rather than on a chain
 // allowlist, and it mirrors the graceful degradation resolveTipApiNames already does for the
-// same tag. A chain declaring both tags is unaffected — as of MAG-2218 every shipped spec
-// declares both, so this returns false for all of them.
-func (m *EndpointMonitor) headOnlyTracking() bool {
+// same tag. A chain declaring both tags returns false here — as of MAG-2218 every shipped spec
+// declares both — which is why this is only HALF the decision: such a chain still ends up
+// head-only unless the operator turns fork detection on. See resolveHashPolling.
+func (m *EndpointMonitor) specRequiresHeadOnly() bool {
 	if m.chainParser == nil {
 		return false
 	}
@@ -578,6 +758,92 @@ func (m *EndpointMonitor) BackoffSnapshot() map[string]time.Duration {
 	return out
 }
 
+// PollNow forces ONE endpoint's ChainTracker to run its dedicated poll immediately and returns
+// that endpoint's observation record once the poll's result has been written (MAG-2649, behind
+// /debug/poll-now). It exists so a test can set a provider's state, trigger the poll, and read the
+// result — instead of waiting out the per-endpoint cadence (avgBlockTime/divisor).
+//
+// polled reports whether THE RETURNED OBSERVATION IS THIS POLL'S. It is the caller's licence to
+// trust the record, and it separates outcomes that must never be conflated:
+//   - polled=true with a non-nil err — a real poll reached (or tried to reach) upstream and
+//     failed. The observation records that failure, exactly as a timer-driven failure would:
+//     ConsecutivePollFailures incremented, LastSuccessfulPoll untouched.
+//   - polled=false — the observation predates this call and says nothing about now. Either no poll
+//     happened at all (no tracker for this URL, the tracker is still starting/retrying its init, or
+//     it is a non-polling dummy), or one was started and outlived the caller's budget. err
+//     distinguishes them; both mean the same thing about the record.
+//
+// That second case is why polled is phrased around the RECORD rather than around the cycle. A poll
+// whose result was not awaited did run — it finishes and writes on its own — but this call cannot
+// say what it wrote, and the record available now is the one from before it. Reporting that as
+// polled=true would hand a harness a pre-poll block and a pre-poll failure streak while telling it
+// both were fresh, which is precisely the confusion this endpoint exists to remove.
+//
+// The tracker's poll goroutine takes m.mu during a block-advancing cycle (newLatestCallback →
+// setTrackerState), so the lock is released BEFORE the trigger — holding it across the wait would
+// deadlock the monitor against its own poll loop the first time a poll observed a new block.
+func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (observation EndpointObservation, polled bool, err error) {
+	m.mu.RLock()
+	tracker, exists := m.trackers[endpointURL]
+	stateBefore := m.trackerStates[endpointURL]
+	m.mu.RUnlock()
+
+	if !exists {
+		return EndpointObservation{}, false, utils.LavaFormatError("poll-now: no ChainTracker for endpoint", nil,
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+		)
+	}
+
+	// A tracker that is not yet Polling has no poll goroutine to take the request — start() spawns
+	// it only after the init fetch succeeds — so an endpoint stuck retrying a dead upstream would
+	// otherwise burn the caller's whole budget waiting for a receiver that does not exist. Cap that
+	// wait instead. Deliberately a shorter DEADLINE and not a rejection: the state can lag the
+	// goroutine by a hair (it flips to Polling just after start returns), and in that window the
+	// send is taken instantly anyway, so nothing that could have succeeded is refused.
+	//
+	// The grace bounds DELIVERY ONLY. Once the goroutine has the request, the cycle it runs is
+	// bounded by the tracker's own fetch timeout — several times this grace — and is awaited on the
+	// caller's full budget, exactly as for a tracker that was already Polling. Bounding both with
+	// the grace would turn the lagging-state window into the worst outcome of all: the send taken,
+	// the poll running, and the caller timing out on a healthy cycle with a pre-poll record in hand.
+	deliveryCtx := ctx
+	if stateBefore != EndpointChainTrackerPolling {
+		var cancelDelivery context.CancelFunc
+		deliveryCtx, cancelDelivery = context.WithTimeout(ctx, pollNowUnstartedGrace)
+		defer cancelDelivery()
+	}
+
+	pollErr := tracker.PollNowWithDeliveryDeadline(deliveryCtx, ctx)
+	// Report the record either way: on a failed poll it carries the failure the caller came to
+	// observe, and otherwise it is the prior state, flagged as such by polled=false.
+	observation, _ = m.GetObservation(endpointURL)
+
+	// Three ways to end up holding a record this call cannot vouch for. Undelivered/unsupported mean
+	// no cycle ran; not-awaited means one is running but wrote after we read. All three must report
+	// polled=false — the caller's question is "may I trust this record", not "did a goroutine move".
+	// Name the tracker's lifecycle state in the error: "retrying_start" is a diagnosis, a bare
+	// timeout is not.
+	if errors.Is(pollErr, chaintracker.ErrorPollNowNotDelivered) || errors.Is(pollErr, chaintracker.ErrorPollNowUnsupported) ||
+		errors.Is(pollErr, chaintracker.ErrorPollNowResultNotAwaited) {
+		// Read the state HERE, not before the attempt: what matters to whoever is diagnosing is the
+		// tracker's state at the moment the attempt gave out.
+		state, _, _ := m.GetTrackerState(endpointURL)
+		message := "poll-now: no poll ran"
+		if errors.Is(pollErr, chaintracker.ErrorPollNowResultNotAwaited) {
+			// Distinct message because the operator response is distinct: nothing is wrong with the
+			// tracker, the budget was too short for this upstream.
+			message = "poll-now: a poll is running but its result was not awaited; the record below predates it"
+		}
+		return observation, false, utils.LavaFormatError(message, pollErr,
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+			utils.LogAttr("trackerState", string(state)),
+		)
+	}
+	return observation, true, pollErr
+}
+
 // RemoveTracker removes and stops a ChainTracker for an endpoint.
 // It cancels the tracker's context first, which signals the goroutine to exit cleanly.
 func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
@@ -606,6 +872,7 @@ func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	m.obsMu.Lock()
 	delete(m.observations, endpointURL)
 	delete(m.generations, endpointURL)
+	delete(m.lastPublished, endpointURL)
 	m.obsMu.Unlock()
 
 	// Drop this endpoint's tip from the shared store too, so a removed endpoint leaves no
@@ -684,6 +951,7 @@ func (m *EndpointMonitor) Stop() {
 	}
 	m.observations = make(map[string]EndpointObservation)
 	m.generations = make(map[string]uint64)
+	m.lastPublished = make(map[string]time.Time)
 	m.obsMu.Unlock()
 
 	utils.LavaFormatInfo("stopped EndpointMonitor",

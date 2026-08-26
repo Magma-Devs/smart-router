@@ -20,5 +20,12 @@ func ParseStaticProviderEndpoints(viperEndpoints *viper.Viper, endpointsConfigNa
 				utils.Attribute{Key: "apiInterface", Value: endpoint.ApiInterface})
 		}
 	}
+	// Deliberately NOT checked here: duplicate provider names (MAG-2724). A name collision is a
+	// property of the whole set of lists a router loads, not of one list — static and backup are
+	// looked up against each other by address, so only a check over both together is complete, and
+	// the boot path runs exactly that (see ValidateUniqueProviderNames in CreateSmartRouterCobraCommand).
+	// Keeping this function purely a parser also keeps `smart-router health` usable: it is the tool
+	// an operator reaches for to diagnose a config that will not boot, so it must be able to load
+	// one.
 	return endpoints, err
 }

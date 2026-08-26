@@ -37,7 +37,6 @@ func (NoOpConsumerMetrics) SetCrossValidationMetric(string, string, string, bool
 func (NoOpConsumerMetrics) SetCrossValidationFailureMetric(string, string, string, string) {}
 func (NoOpConsumerMetrics) UpdateHealthCheckStatus(bool)                                   {}
 func (NoOpConsumerMetrics) UpdateHealthcheckStatusBreakdown(string, string, bool)          {}
-func (NoOpConsumerMetrics) SetProviderLiveness(string, string, string, bool)               {}
 func (NoOpConsumerMetrics) SetProviderSelected(string, string, string, []ProviderSelectionScores, float64) {
 }
 func (NoOpConsumerMetrics) SetBlockedProvider(string, string, string, string, bool) {}
@@ -46,6 +45,7 @@ func (NoOpConsumerMetrics) SetQOSMetrics(string, string, string, string, *pairin
 func (NoOpConsumerMetrics) ResetSessionRelatedMetrics()                                    {}
 func (NoOpConsumerMetrics) ResetBlockedProvidersMetrics(string, string, map[string]string) {}
 func (NoOpConsumerMetrics) SetCSMBlockedProvidersCount(string, string, int)                {}
+func (NoOpConsumerMetrics) SetCSMPreviousEpochBlockedProvidersCount(string, string, int)   {}
 func (NoOpConsumerMetrics) SetCSMBlockedBackupProvidersCount(string, string, int)          {}
 func (NoOpConsumerMetrics) SetCSMStickySessionsCount(string, string, int)                  {}
 func (NoOpConsumerMetrics) SetCSMReportedProvidersCount(string, string, int)               {}
@@ -97,7 +97,6 @@ type ConsumerMetricsManagerInf interface {
 	UpdateHealthcheckStatusBreakdown(chainId, apiInterface string, status bool)
 
 	// --- Provider state (ConsumerSessionManager) ---
-	SetProviderLiveness(chainId string, providerAddress string, providerEndpoint string, isAlive bool)
 	SetProviderSelected(chainId string, apiInterface string, providerAddress string, allProviderScores []ProviderSelectionScores, rngValue float64)
 	SetBlockedProvider(chainId, apiInterface, providerAddress, providerEndpoint string, isBlocked bool)
 	SetQOSMetrics(chainId string, apiInterface string, providerAddress string, providerEndpoint string, qos *pairingtypes.QualityOfServiceReport, reputation *pairingtypes.QualityOfServiceReport, latestBlock int64, relays uint64, relayLatency time.Duration, sessionSuccessful bool)
@@ -108,9 +107,12 @@ type ConsumerMetricsManagerInf interface {
 
 	// --- CSM state-store sizes (ConsumerSessionManager) ---
 	// Gauges that expose the current size of black-box state stores so
-	// integration tests can verify /debug/reset-all actually emptied them.
-	// All four go to zero after ResetTransientFailureState (MAG-1762).
+	// integration tests can verify /debug/reset-all actually emptied them
+	// (MAG-1762). Note ResetTransientFailureState deliberately preserves
+	// currentlyBlockedProviderAddresses, so SetCSMBlockedProvidersCount is
+	// zeroed by ResetBlockedProviders — /debug/reset-all calls both.
 	SetCSMBlockedProvidersCount(chainId, apiInterface string, count int)
+	SetCSMPreviousEpochBlockedProvidersCount(chainId, apiInterface string, count int)
 	SetCSMBlockedBackupProvidersCount(chainId, apiInterface string, count int)
 	SetCSMStickySessionsCount(chainId, apiInterface string, count int)
 	SetCSMReportedProvidersCount(chainId, apiInterface string, count int)

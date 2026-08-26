@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -124,6 +125,25 @@ type NodeUrl struct {
 	GrpcConfig GrpcConfig `yaml:"grpc-config,omitempty" json:"grpc-config,omitempty" mapstructure:"grpc-config"`
 }
 
+// SkipVerificationsWildcard is the sentinel a node-url's skip-verifications list can carry
+// to suppress every verification the spec defines for that url, without enumerating
+// each name. Follows the wildcard idiom the cors-* flags already use.
+//
+// It must be quoted in YAML (`skip-verifications: ["*"]`) — a bare * opens an alias.
+const SkipVerificationsWildcard = "*"
+
+// ShouldSkipVerification reports whether this node-url's skip-verifications list
+// suppresses the named verification, honouring the SkipVerificationsWildcard wildcard.
+//
+// Callers must consult this before doing ANY work on behalf of a verification —
+// including the shared latest-block fetch that several verifications depend on.
+// Probing an upstream for a verification that is about to be skipped is what made
+// skip-verifications fail to actually skip.
+func (nurl NodeUrl) ShouldSkipVerification(name string) bool {
+	return slices.Contains(nurl.SkipVerifications, SkipVerificationsWildcard) ||
+		slices.Contains(nurl.SkipVerifications, name)
+}
+
 type ChainMessageGetApiInterface interface {
 	GetApi() *spectypes.Api
 }
@@ -242,13 +262,25 @@ type GrpcConfig struct {
 	// DescriptorSource specifies how to obtain protobuf descriptors for dynamic message handling.
 	// Options:
 	//   - "reflection" (default): Use gRPC server reflection to auto-discover proto definitions
-	//   - "file": Load from a pre-compiled FileDescriptorSet (.pb file)
-	//   - "hybrid": Try reflection first, fallback to file if reflection is unavailable
+	//   - "file": Load from a pre-compiled FileDescriptorSet (.pb file). Reflection is
+	//     never queried, so this works against nodes that do not serve it at all.
+	//   - "hybrid": Resolve from the file first, fall back to reflection for symbols the
+	//     descriptor set does not contain.
+	//
+	// Hybrid is file-first, not reflection-first: the deployments that need it are the
+	// ones whose upstream reflection is absent, partial, or rate-limited, so asking the
+	// node first would pay that cost on every lookup before arriving at an answer that
+	// was on local disk the whole time.
 	DescriptorSource string `yaml:"descriptor-source,omitempty" json:"descriptor-source,omitempty" mapstructure:"descriptor-source"`
 
 	// DescriptorSetPath is the path to a FileDescriptorSet file (.pb or .prototxt).
 	// Required when DescriptorSource is "file" or "hybrid".
 	// Can be absolute path or relative to the working directory.
+	//
+	// The descriptor set is static — it describes the API as of the commit it was built
+	// from. If a node upgrade adds rpcs or fields the spec starts using, rebuild it, or
+	// those methods fail with "symbol not found" in "file" mode. Record the source repo
+	// and commit when building, and version the file next to the config referencing it.
 	DescriptorSetPath string `yaml:"descriptor-set-path,omitempty" json:"descriptor-set-path,omitempty" mapstructure:"descriptor-set-path"`
 
 	// ReflectionTimeout is the timeout for gRPC reflection queries.
@@ -318,17 +350,40 @@ func (gc *GrpcConfig) Validate() error {
 	}
 
 	// Validate reflection timeout bounds
-	if gc.ReflectionTimeout > 0 {
-		if gc.ReflectionTimeout < 100*time.Millisecond {
-			return utils.LavaFormatError("reflection-timeout too short", nil,
-				utils.LogAttr("timeout", gc.ReflectionTimeout),
-				utils.LogAttr("min", "100ms"))
-		}
-		if gc.ReflectionTimeout > 30*time.Second {
-			return utils.LavaFormatError("reflection-timeout too long", nil,
-				utils.LogAttr("timeout", gc.ReflectionTimeout),
-				utils.LogAttr("max", "30s"))
-		}
+	if err := gc.ValidateReflectionTimeout(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ValidateReflectionTimeout checks the reflection-timeout bounds on their own.
+//
+// Split out of Validate because the request path needs exactly this check and
+// nothing else. GetReflectionTimeout is what budgets gRPC descriptor lookups, so
+// an out-of-bounds value there is not cosmetic: a nanosecond timeout fails every
+// lookup on the endpoint, and a multi-minute one holds a pooled client for that
+// long. Validate as a whole cannot stand in — it also requires a descriptor-set
+// path for "hybrid", which DescriptorSourceForNode deliberately tolerates by
+// degrading to reflection, so calling it from the connection path would reject
+// configurations that work today.
+func (gc *GrpcConfig) ValidateReflectionTimeout() error {
+	// Bound what GetReflectionTimeout will actually return, which is the 5s default
+	// for anything <= 0. Rejecting a value the getter never yields would make a
+	// config invalid and harmless at the same time.
+	if gc == nil || gc.ReflectionTimeout <= 0 {
+		return nil
+	}
+
+	if gc.ReflectionTimeout < 100*time.Millisecond {
+		return utils.LavaFormatError("reflection-timeout too short", nil,
+			utils.LogAttr("timeout", gc.ReflectionTimeout),
+			utils.LogAttr("min", "100ms"))
+	}
+	if gc.ReflectionTimeout > 30*time.Second {
+		return utils.LavaFormatError("reflection-timeout too long", nil,
+			utils.LogAttr("timeout", gc.ReflectionTimeout),
+			utils.LogAttr("max", "30s"))
 	}
 
 	return nil
@@ -442,6 +497,36 @@ type RelayResult struct {
 	// IsUnsupportedMethod is an independent subset flag derived from the
 	// SubCategory and used to gate the zero-CU carve-out and caching policy.
 	IsNonRetryable bool
+	// IsRateLimited is true when the node error carries SubCategoryRateLimit:
+	// the endpoint is healthy but busy. Callers back off but must not mark it
+	// unhealthy, which is why the direct-RPC availability gate excludes it.
+	// Orthogonal to IsNonRetryable — NODE_RATE_LIMITED (2005) is retryable,
+	// NODE_LIMIT_EXCEEDED (2011) is not, and both set this flag.
+	IsRateLimited bool
+	// IsDataScope is true when the node error carries SubCategoryDataScope: the
+	// endpoint answered truthfully that it does not hold the requested data
+	// (pruned height, object that never existed). Retryable — an archive node may
+	// hold it — but the endpoint is healthy, so the direct-RPC availability gate
+	// excludes it. Orthogonal to both flags above.
+	IsDataScope bool
+}
+
+// ApplyNodeErrorClassification stamps every registry-derived policy flag onto a node-error
+// result in one call.
+//
+// Deliberately a single method rather than three assignments at each transport's call site: the
+// flags are a set, and setting them individually is how IsUnsupportedMethod ended up classified
+// but never assigned on the direct-RPC path — reachable in the registry, dead in production.
+// Adding a flag to the set means adding it here, once, and every transport picks it up.
+func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transport TransportType, errorCode int, message string) {
+	if rr == nil {
+		return
+	}
+	classification := ClassifyNodeErrorForRetry(family, transport, errorCode, message)
+	rr.IsNonRetryable = classification.IsNonRetryable
+	rr.IsUnsupportedMethod = classification.IsUnsupportedMethod
+	rr.IsRateLimited = classification.IsRateLimited
+	rr.IsDataScope = classification.IsDataScope
 }
 
 func (rr *RelayResult) GetReplyServer() pairingtypes.Relayer_RelaySubscribeClient {

@@ -165,20 +165,6 @@ func (op *requestOp) wait(ctx context.Context, c *Client) (*JsonrpcMessage, erro
 	}
 }
 
-// Dial creates a new client for the given URL.
-//
-// The currently supported URL schemes are "http", "https", "ws" and "wss". If rawurl is a
-// file name with no URL scheme, a local socket connection is established using UNIX
-// domain sockets on supported platforms and named pipes on Windows. If you want to
-// configure transport options, use DialHTTP, DialWebsocket or DialIPC instead.
-//
-// For websocket connections, the origin is set to the local host name.
-//
-// The client reconnects automatically if the connection is lost.
-func Dial(rawurl string) (*Client, error) {
-	return DialContext(context.Background(), rawurl, nil)
-}
-
 // DialContext creates a new RPC client, just like Dial.
 //
 // The context is used to cancel or time out the initial connection establishment. It does
@@ -200,13 +186,6 @@ func DialContext(ctx context.Context, rawurl string, wsHeaders map[string]string
 	default:
 		return nil, fmt.Errorf("no known transport for URL scheme %q", u.Scheme)
 	}
-}
-
-// ClientFromContext retrieves the client from the context, if any. This can be used to perform
-// 'reverse calls' in a handler method.
-func ClientFromContext(ctx context.Context) (*Client, bool) {
-	client, ok := ctx.Value(clientContextKey{}).(*Client)
-	return client, ok
 }
 
 func newClient(initctx context.Context, connect reconnectFunc) (*Client, error) {

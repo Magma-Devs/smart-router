@@ -2,11 +2,14 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -85,6 +88,59 @@ type chainReverifyInputs struct {
 	// holds that lock across both tier calls. Lazily allocated so test fixtures that build
 	// chainReverifyInputs by hand need not.
 	demoteFailStreak map[string]int
+	// rateLimitHoldoff holds off providers that answered a probe with a rate-limit, so the
+	// pass stops adding load to an upstream that just told us it is over its limit. Nil
+	// falls back to the process-wide holdoff.Shared, so one vendor's cap slows every
+	// chain this process probes through it; tests inject their own.
+	rateLimitHoldoff *holdoff.Registry
+}
+
+// holdoffURLKey is the URL tier's key for a probed provider: its first node URL, so two
+// providers sharing a vendor name but hitting different endpoints are held off apart.
+func holdoffURLKey(p *lavasession.RPCStaticProviderEndpoint) string {
+	if len(p.NodeUrls) > 0 && p.NodeUrls[0].Url != "" {
+		return p.NodeUrls[0].Url
+	}
+	return p.Name
+}
+
+// rateLimitTextSignatures covers the one transport where no status code exists to check.
+//
+// Every HTTP-family transport reaches us as common.StatusCodeError429 — ValidateStatusCodes
+// mints it, each proxy propagates it as LavaFormat's cause, so Unwrap survives and errors.Is
+// below is the real check. gRPC is different in kind: there is no HTTP status in the error at
+// all. grpc-go reports codes.Unavailable and the vendor's 429 survives only inside the status
+// description, so there is nothing structural to match on.
+//
+// Verbatim from a production failure. Keep this list minimal — a new entry here is usually a
+// signal that some path is discarding a typed error, which is worth fixing at the source
+// instead.
+var rateLimitTextSignatures = []string{
+	"429 (Too Many Requests)", // grpc transport: no status code, only the status description
+}
+
+// isRateLimitFailure reports whether a failed validation was the upstream refusing us for
+// asking too fast, rather than the upstream being unable to serve what it declares.
+//
+// The distinction is already settled elsewhere in this codebase — see the IsRateLimited
+// comment on common.RelayResult: "the endpoint is healthy but busy. Callers back off but
+// must not mark it unhealthy, which is why the direct-RPC availability gate excludes it."
+// The relay path honours that; re-verification did not, and a rate-limited probe demoted
+// providers that were serving traffic perfectly well.
+func isRateLimitFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, common.StatusCodeError429) {
+		return true
+	}
+	msg := err.Error()
+	for _, sig := range rateLimitTextSignatures {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // applyReverification revalidates configured providers for one tier and
@@ -117,13 +173,17 @@ type chainReverifyInputs struct {
 // Configured lists are pre-filtered by chain+ApiInterface at startup (see
 // relevantStaticProviderList in rpcsmartrouter.go), so no further filter is
 // needed here.
+//
+// The third return is the names promoted this cycle. updateEpoch needs them to drop
+// those providers from the failed lists — promoting here while leaving them pending
+// for retryFailedProviders produces two sessions for one provider.
 func applyReverification(
 	ctx context.Context,
 	inputs *chainReverifyInputs,
 	fresh map[uint64]*lavasession.ConsumerSessionsWithProvider,
 	tier reverifyTier,
 	epoch uint64,
-) (map[uint64]*lavasession.ConsumerSessionsWithProvider, []*lavasession.ConsumerSessionsWithProvider) {
+) (map[uint64]*lavasession.ConsumerSessionsWithProvider, []*lavasession.ConsumerSessionsWithProvider, []string) {
 	var configured []*lavasession.RPCStaticProviderEndpoint
 	switch tier {
 	case reverifyTierStatic:
@@ -132,13 +192,46 @@ func applyReverification(
 		configured = inputs.configuredBackup
 	}
 	if len(configured) == 0 {
-		return fresh, nil
+		return fresh, nil, nil
 	}
-	validate := inputs.validateFn
-	if validate == nil {
-		validate = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+	probe := inputs.validateFn
+	if probe == nil {
+		probe = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
 			return validateProvider(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
 		}
+	}
+	if inputs.rateLimitHoldoff == nil {
+		inputs.rateLimitHoldoff = holdoff.Shared
+	}
+
+	// A provider that answered with a rate-limit is held off rather than re-probed. The
+	// skip returns the rate-limit error itself, so the reconciliation below reaches the
+	// same inconclusive verdict it would have from a fresh 429 — membership unchanged,
+	// streak untouched — without spending a request to learn it. Any other outcome clears
+	// the penalty: an upstream that is answering us again, even to report a genuine
+	// capability failure, is no longer refusing us for load.
+	validate := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+		urlKey := holdoffURLKey(p)
+		if inputs.rateLimitHoldoff.HeldOff(p.Name, urlKey) {
+			utils.LavaFormatDebug("re-verify: provider held off after a rate-limit, skipping probe",
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+			)
+			return common.StatusCodeError429
+		}
+		err := probe(c, p)
+		if isRateLimitFailure(err) {
+			retryAfter, _ := common.RetryAfterFrom(err)
+			delay := inputs.rateLimitHoldoff.RecordRateLimit(p.Name, urlKey, retryAfter)
+			utils.LavaFormatWarning("re-verify: provider rate-limited, backing off", err,
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+				utils.LogAttr("holdoff", delay.String()),
+			)
+			return err
+		}
+		inputs.rateLimitHoldoff.RecordAnswer(p.Name, urlKey)
+		return err
 	}
 
 	// WaitGroup + buffered-channel semaphore. Replaces an earlier errgroup —
@@ -181,6 +274,22 @@ func applyReverification(
 					utils.LogAttr("provider", p.Name),
 				)
 			}
+			continue
+		}
+		if isRateLimitFailure(err) {
+			// Inconclusive, not failed: the upstream refused us for asking too fast and told
+			// us nothing about whether it can serve. Leave the streak untouched — advancing it
+			// would let a busy vendor demote a healthy provider — and leave membership as-is:
+			// an active provider stays paired, an inactive one is not promoted on no evidence.
+			if wasActive {
+				healthyNames[p.Name] = struct{}{}
+			}
+			utils.LavaFormatWarning("re-verify: "+tier.String()+" rate-limited, treating as inconclusive", err,
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+				utils.LogAttr("active", wasActive),
+				utils.LogAttr("consecutiveFailures", inputs.demoteFailStreak[streakKey]),
+			)
 			continue
 		}
 		if !wasActive {
@@ -234,6 +343,7 @@ func applyReverification(
 
 	// Promote: append fresh sessions for healthy providers absent from `fresh`.
 	// Pick keys that don't collide with surviving entries.
+	var promoted []string
 	if len(toAdmit) > 0 {
 		nextIdx := uint64(0)
 		for k := range next {
@@ -248,9 +358,13 @@ func applyReverification(
 			next[nextIdx] = s
 			nextIdx++
 		}
+		promoted = make([]string, 0, len(toAdmit))
+		for _, p := range toAdmit {
+			promoted = append(promoted, p.Name)
+		}
 	}
 
-	return next, demoted
+	return next, demoted, promoted
 }
 
 // byName builds a name → session lookup so callers can answer
@@ -290,6 +404,93 @@ func closeDemotedDirectConnections(demoted []*lavasession.ConsumerSessionsWithPr
 			}
 		}
 	}
+}
+
+// BootValidateTimeout bounds a single provider validation during startup.
+// Before MAG-2525 the two boot tiers disagreed: static providers got a 30s
+// timeout while backups got a bare context.WithCancel, so one blackholed backup
+// URL could hang bring-up indefinitely. Both tiers share this now.
+var BootValidateTimeout = 30 * time.Second
+
+// validateProviderTier validates one configured tier at startup, in parallel and
+// bounded by SpecReVerifyConcurrency. It is the boot-time counterpart to
+// applyReverification: same validateProvider primitive, same semaphore, but no
+// promote/demote bookkeeping — at boot there is no prior pairing to reconcile
+// against, only a pass/fail partition.
+//
+// Parallelism here is an availability property, not just a speed one. The tiers
+// validate in sequence, so a serial static tier of N dead providers delayed the
+// backup tier — and therefore bring-up on backups — by up to N × the timeout.
+// Three dead primaries cost 90s before a healthy backup was even dialled.
+//
+// Returns failures twice: as a set for filtering, and as a slice in configured
+// order. The slice seeds the retry loop, which must not vary with the order
+// goroutines happen to finish in.
+//
+// `providers` is pre-filtered by chain + api-interface at the call site (see
+// relevantStaticProviderList in rpcsmartrouter.go), so nothing is filtered here.
+//
+// `validate` is nil in production and falls back to the real network probe; tests
+// inject a fake to exercise the partitioning and ordering without upstreams, the
+// same seam chainReverifyInputs.validateFn provides for applyReverification.
+func validateProviderTier(
+	ctx context.Context,
+	providers []*lavasession.RPCStaticProviderEndpoint,
+	rpcEndpoint *lavasession.RPCEndpoint,
+	chainParser chainlib.ChainParser,
+	tier reverifyTier,
+	validate func(context.Context, *lavasession.RPCStaticProviderEndpoint) error,
+) (map[*lavasession.RPCStaticProviderEndpoint]struct{}, []*lavasession.RPCStaticProviderEndpoint) {
+	failedSet := make(map[*lavasession.RPCStaticProviderEndpoint]struct{})
+	if len(providers) == 0 {
+		return failedSet, nil
+	}
+	if validate == nil {
+		validate = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+			return validateProvider(c, p, chainParser, BootValidateTimeout)
+		}
+	}
+
+	utils.LavaFormatInfo("Validating providers",
+		utils.LogAttr("chain", rpcEndpoint.ChainID),
+		utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
+		utils.LogAttr("tier", tier.String()),
+		utils.LogAttr("providerCount", len(providers)),
+	)
+
+	results := make([]error, len(providers))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, SpecReVerifyConcurrency)
+	for i, p := range providers {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = validate(ctx, p)
+		}()
+	}
+	wg.Wait()
+
+	var failedOrdered []*lavasession.RPCStaticProviderEndpoint
+	for i, p := range providers {
+		if err := results[i]; err != nil {
+			failedSet[p] = struct{}{}
+			failedOrdered = append(failedOrdered, p)
+			utils.LavaFormatWarning("provider validation failed — excluding from provider list", err,
+				utils.LogAttr("chain", rpcEndpoint.ChainID),
+				utils.LogAttr("tier", tier.String()),
+				utils.LogAttr("provider", p.Name),
+			)
+			continue
+		}
+		utils.LavaFormatInfo("Provider validated successfully",
+			utils.LogAttr("chain", rpcEndpoint.ChainID),
+			utils.LogAttr("tier", tier.String()),
+			utils.LogAttr("provider", p.Name),
+		)
+	}
+	return failedSet, failedOrdered
 }
 
 // validateProvider runs a single spec-verification pass against one provider.

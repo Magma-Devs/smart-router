@@ -36,7 +36,19 @@ const (
 	MaxCallRecvMsgSize                         = 1024 * 1024 * 512 // setting receive size to 512mb for large debug responses
 )
 
-var NumberOfParallelConnections uint = 10
+// NumberOfParallelConnections is the DEFAULT pool size — the default value of the
+// --parallel-connections flag. It is configuration, not state, and const is what
+// makes that a guarantee rather than a convention: no future caller can reintroduce
+// the write below, because the assignment no longer compiles.
+//
+// It used to be both. NewConnector and NewGRPCConnector each wrote it with their own
+// nConns, and GRPCConnector.ReturnRpc read it back as "the number we started with",
+// so a connector's idle-trim threshold was whichever connector happened to be built
+// last, process-wide. With one connector that is invisible; with two it is a data
+// race (MAG-2538 tears a verification connector down while the next is constructed),
+// and across differing nConns it trims the wrong pool. Capacity belongs to a
+// connector, so it now lives on the connector.
+const NumberOfParallelConnections uint = 10
 
 // Connector manages HTTP/JSON-RPC connections to blockchain nodes.
 // For HTTP connections, a single shared rpcclient.Client is used since
@@ -66,7 +78,11 @@ func HashURL(url string) string {
 // pooling internally). The parameter is kept for API compatibility with
 // gRPC connector which still uses connection pooling.
 func NewConnector(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (*Connector, error) {
-	NumberOfParallelConnections = nConns // used by gRPC connector, ignored for HTTP
+	// nConns is deliberately not recorded anywhere: HTTP pools inside http.Transport.
+	// This used to assign NumberOfParallelConnections "for the gRPC connector", which
+	// made building an HTTP connector silently reset an unrelated gRPC connector's
+	// idle-trim threshold — and race its ReturnRpc. That constant is now const, so
+	// the assignment cannot come back.
 	connector := &Connector{
 		nodeUrl:       nodeUrl,
 		hashedNodeUrl: HashURL(nodeUrl.Url),
@@ -177,25 +193,65 @@ type GRPCConnector struct {
 	usedClients int64
 	credentials credentials.TransportCredentials
 	nodeUrl     common.NodeUrl
+
+	// capacity is the pool size this connector was built with — the nConns its
+	// caller asked for, not whatever the last-constructed connector asked for.
+	// ReturnRpc trims idle clients against it.
+	//
+	// Written once in NewGRPCConnector before the connector is published and never
+	// again, so readers need no synchronization beyond the happens-before that
+	// publishing already gives them.
+	capacity uint
+
+	// closed is set by Close and never cleared. Unlike the HTTP Connector's atomic
+	// flag it is guarded by lock, because every reader already holds lock: that
+	// makes "is the pool alive" and "take a client" a single atomic step, which a
+	// separate atomic could not guarantee.
+	closed bool
 }
 
-func NewGRPCConnector(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (*GRPCConnector, error) {
-	NumberOfParallelConnections = nConns // set number of parallel connections requested by user (or default.)
+// ErrGRPCConnectorClosed is returned by GetRpc once Close has run. The HTTP
+// Connector has always reported this; GRPCConnector had no closed state at all,
+// so callers racing a Close either blocked forever on a pool that would never
+// refill or had their retry goroutines repopulate it (MAG-2808).
+var ErrGRPCConnectorClosed = errors.New("grpc connector is closed")
+
+// NewGRPCConnector builds a pooled gRPC connector.
+//
+// The two contexts are deliberately separate, because a single one was three
+// different things at once and callers could only get two of them right
+// (MAG-2808):
+//
+//	lifetimeCtx  owns the pool. connectorLoop parks on it and closes the connector
+//	             when it ends, and the async fill dials under it — that fill is
+//	             background work which should finish, not work that belongs to
+//	             whoever happened to call this.
+//	dialCtx      bounds ONLY the initial blocking dial below, which runs in the
+//	             caller's critical path. It is the caller's own deadline, so a
+//	             relay does not wait materially past the point it would have given
+//	             up anyway.
+//
+// Callers with nothing to distinguish (a startup path, where the process's
+// context is both) pass the same context twice. Callers building a pool inside a
+// request — the direct-RPC path — must NOT: passing the request's context as
+// lifetimeCtx tears the pool down the moment that request returns.
+func NewGRPCConnector(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl common.NodeUrl) (*GRPCConnector, error) {
 	connector := &GRPCConnector{
 		freeClients: make([]*grpc.ClientConn, 0, nConns),
 		nodeUrl:     nodeUrl,
+		capacity:    nConns,
 	}
 
 	// MAG-2218: warn once per connector, not per dial. createConnection may still upgrade an
 	// unconfigured endpoint to TLS on retry, so this reflects the configured intent.
 	nodeUrl.TokenOverInsecureWarning(nodeUrl.AuthConfig.GetUseTls() || strings.HasPrefix(nodeUrl.Url, "grpcs://"))
 
-	rpcClient, err := connector.createConnection(ctx, nodeUrl, connector.numberOfFreeClients())
+	rpcClient, err := connector.createConnection(dialCtx, nodeUrl, connector.numberOfFreeClients())
 	if err != nil {
 		return nil, utils.LavaFormatError("grpc failed to create the first connection", err, utils.Attribute{Key: "address", Value: nodeUrl.UrlStr()})
 	}
 	connector.addClient(rpcClient)
-	go addClientsAsynchronouslyGrpc(ctx, connector, nConns-1, nodeUrl)
+	go addClientsAsynchronouslyGrpc(lifetimeCtx, connector, nConns-1, nodeUrl)
 	return connector, nil
 }
 
@@ -265,14 +321,38 @@ func (connector *GRPCConnector) getTransportCredentials() grpc.DialOption {
 	return grpc.WithTransportCredentials(insecure.NewCredentials())
 }
 
+// grpcDialAddress converts a configured node URL into what grpc.DialContext expects.
+// DialContext takes host:port; the grpc:// / grpcs:// prefixes are a config-time
+// convention enforced by the direct-RPC validator (see
+// protocol/lavasession/direct_rpc_connection.go validateURL). The grpcs:// form also
+// implies TLS.
+//
+// EVERY dial site must go through this. increaseNumberOfClients used to dial the raw
+// configured URL while createConnection stripped the scheme locally, so a grpcs://
+// endpoint opened its first connection and then could never refill its pool: GetRpc
+// spawns a refill every 50ms while a caller waits, each one failed on the unresolvable
+// scheme-prefixed target, and the caller blocked until its context expired. On a
+// one-connection pool whose single client is held for reflection, that is every relay
+// (MAG-2333).
+func grpcDialAddress(url string) (addr string, impliesTLS bool) {
+	if strings.HasPrefix(url, "grpcs://") {
+		return strings.TrimPrefix(url, "grpcs://"), true
+	}
+	return strings.TrimPrefix(url, "grpc://"), false
+}
+
 func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, numberOfFreeClients int) {
 	utils.LavaFormatDebug("increasing number of clients", utils.Attribute{Key: "numberOfFreeClients", Value: numberOfFreeClients},
 		utils.Attribute{Key: "url", Value: connector.nodeUrl.Url})
+	if connector.isClosed() {
+		return // the pool is being torn down; dialing now would only resurrect it
+	}
 	var grpcClient *grpc.ClientConn
 	var err error
 	for connectionAttempt := 0; connectionAttempt < MaximumNumberOfParallelConnectionsAttempts; connectionAttempt++ {
 		nctx, cancel := connector.nodeUrl.LowerContextTimeoutWithDuration(ctx, common.AverageWorldLatency*2)
-		grpcClient, err = grpc.DialContext(nctx, connector.nodeUrl.Url, connector.grpcDialOptions(connector.getTransportCredentials())...)
+		dialAddr, _ := grpcDialAddress(connector.nodeUrl.Url)
+		grpcClient, err = grpc.DialContext(nctx, dialAddr, connector.grpcDialOptions(connector.getTransportCredentials())...)
 		if err != nil {
 			utils.LavaFormatDebug("increaseNumberOfClients, Could not connect to the node, retrying", []utils.Attribute{{Key: "err", Value: err.Error()}, {Key: "Number Of Attempts", Value: connectionAttempt}, {Key: "nodeUrl", Value: connector.nodeUrl.UrlStr()}}...)
 			cancel()
@@ -282,6 +362,13 @@ func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, num
 
 		connector.lock.Lock() // add connection to free list.
 		defer connector.lock.Unlock()
+		if connector.closed {
+			// Close drained the pool while this dial was in flight. Appending now
+			// would hand a live client to a closed connector that nobody will ever
+			// borrow from again, so close it here instead.
+			grpcClient.Close()
+			return
+		}
 		connector.freeClients = append(connector.freeClients, grpcClient)
 		return
 	}
@@ -292,6 +379,10 @@ func (connector *GRPCConnector) GetRpc(ctx context.Context, block bool) (*grpc.C
 	connector.lock.Lock()
 	defer connector.lock.Unlock()
 
+	if connector.closed {
+		return nil, ErrGRPCConnectorClosed
+	}
+
 	numberOfFreeClients := len(connector.freeClients)
 	if numberOfFreeClients <= int(connector.usedClients) { // if we reached half of the free clients start creating new connections
 		go connector.increaseNumberOfClients(ctx, numberOfFreeClients) // increase asynchronously the free list.
@@ -300,18 +391,35 @@ func (connector *GRPCConnector) GetRpc(ctx context.Context, block bool) (*grpc.C
 	if numberOfFreeClients == 0 {
 		if !block {
 			return nil, errors.New("out of clients")
-		} else {
-			for {
-				connector.lock.Unlock()
-				// if we reached 0 connections we need to create more connections
-				// before sleeping, increase asynchronously the free list.
-				go connector.increaseNumberOfClients(ctx, numberOfFreeClients)
-				time.Sleep(50 * time.Millisecond)
-				connector.lock.Lock()
-				numberOfFreeClients = len(connector.freeClients)
-				if numberOfFreeClients != 0 {
-					break
-				}
+		}
+		// Wait for the async fill to produce a client. Both exits below are new:
+		// this loop used to spin unconditionally, so a caller waiting on a pool
+		// that would never refill was stuck forever even after its context was
+		// cancelled, and the goroutines it kept spawning could repopulate a pool
+		// Close had just drained (MAG-2808).
+		for {
+			connector.lock.Unlock()
+			// if we reached 0 connections we need to create more connections
+			// before sleeping, increase asynchronously the free list.
+			go connector.increaseNumberOfClients(ctx, numberOfFreeClients)
+
+			var ctxDone bool
+			select {
+			case <-ctx.Done():
+				ctxDone = true
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			connector.lock.Lock()
+			if ctxDone {
+				return nil, fmt.Errorf("waiting for a free grpc client: %w", ctx.Err())
+			}
+			if connector.closed {
+				return nil, ErrGRPCConnectorClosed
+			}
+			numberOfFreeClients = len(connector.freeClients)
+			if numberOfFreeClients != 0 {
+				break
 			}
 		}
 	}
@@ -327,8 +435,23 @@ func (connector *GRPCConnector) ReturnRpc(rpc *grpc.ClientConn) {
 	connector.lock.Lock()
 	defer connector.lock.Unlock()
 
+	// The decrement happens on every path below, including the nil handback: Close
+	// is blocked waiting for usedClients to reach zero, so skipping it would leave
+	// teardown spinning forever.
 	connector.usedClients--
-	if len(connector.freeClients) > (int(connector.usedClients) + int(NumberOfParallelConnections) /* the number we started with */) {
+	if rpc == nil {
+		// Defensive — a successful GetRpc never yields nil, and callers must not
+		// hand back what they did not borrow. Checked once here so no path below
+		// dereferences it.
+		return
+	}
+	if connector.closed {
+		// Drop the conn rather than appending it to a pool that is being torn down,
+		// which would leave a live client behind.
+		rpc.Close()
+		return
+	}
+	if len(connector.freeClients) > (int(connector.usedClients) + int(connector.capacity) /* the number THIS connector started with */) {
 		rpc.Close() // close connection
 		return      // return without appending back to decrease idle connections
 	}
@@ -344,6 +467,11 @@ func (connector *GRPCConnector) connectorLoop(ctx context.Context) {
 func (connector *GRPCConnector) Close() {
 	for i := 0; ; i++ {
 		connector.lock.Lock()
+		// Mark closed under the same lock GetRpc, ReturnRpc and
+		// increaseNumberOfClients take. From here on no client can be handed out
+		// and no in-flight dial can refill the pool we are about to drain, so the
+		// usedClients wait below is guaranteed to make progress.
+		connector.closed = true
 		for i := 0; i < len(connector.freeClients); i++ {
 			connector.freeClients[i].Close()
 		}
@@ -362,20 +490,35 @@ func (connector *GRPCConnector) Close() {
 	}
 }
 
-func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector, nConns uint, nodeUrl common.NodeUrl) {
+// addClientsAsynchronouslyGrpc fills the pool behind the caller and then hands the
+// connector to connectorLoop. Both halves run under lifetimeCtx, never the dial
+// context: the fill is background work that should finish even after the caller
+// has moved on, and connectorLoop parked on a caller's context is precisely the
+// bug MAG-2808 fixed.
+func addClientsAsynchronouslyGrpc(lifetimeCtx context.Context, connector *GRPCConnector, nConns uint, nodeUrl common.NodeUrl) {
 	for i := uint(0); i < nConns; i++ {
-		rpcClient, err := connector.createConnection(ctx, nodeUrl, connector.numberOfFreeClients())
+		if connector.isClosed() {
+			break // Close is draining; further dials would only be thrown away
+		}
+		rpcClient, err := connector.createConnection(lifetimeCtx, nodeUrl, connector.numberOfFreeClients())
 		if err != nil {
 			break
 		}
 		connector.addClient(rpcClient)
 	}
 	if (connector.numberOfFreeClients() + connector.numberOfUsedClients()) == 0 {
-		if ctx.Err() != nil {
+		if connector.isClosed() {
+			// A connector closed this early legitimately has no clients — Close
+			// drained them. Reaching the fatal below would turn an ordinary
+			// teardown during startup into a process exit.
+			utils.LavaFormatWarning("gRPC connector closed before the async fill finished", nil,
+				utils.LogAttr("address", nodeUrl.UrlStr()),
+			)
+		} else if lifetimeCtx.Err() != nil {
 			// Probe-scoped ctx (validateProvider, etc.) was cancelled before
 			// the async fill produced any client. Caller will treat the
 			// returned error as a probe failure; the process must not exit.
-			utils.LavaFormatWarning("gRPC connector aborted before any connection was built", ctx.Err(),
+			utils.LavaFormatWarning("gRPC connector aborted before any connection was built", lifetimeCtx.Err(),
 				utils.LogAttr("address", nodeUrl.UrlStr()),
 			)
 		} else {
@@ -387,13 +530,26 @@ func addClientsAsynchronouslyGrpc(ctx context.Context, connector *GRPCConnector,
 	// Read the count through the locked accessor: addClient / GetRpc mutate freeClients under the lock
 	// concurrently, so a bare len(connector.freeClients) here is a data race.
 	utils.LavaFormatInfo("Finished adding clients asynchronously", utils.LogAttr("count", connector.numberOfFreeClients()))
-	go connector.connectorLoop(ctx)
+	go connector.connectorLoop(lifetimeCtx)
 }
 
 func (connector *GRPCConnector) addClient(client *grpc.ClientConn) {
 	connector.lock.Lock()
 	defer connector.lock.Unlock()
+	if connector.closed {
+		// The startup fill is still running while Close drains. Appending here
+		// would refill the pool behind Close's back, exactly as the retry path in
+		// increaseNumberOfClients could (MAG-2808).
+		client.Close()
+		return
+	}
 	connector.freeClients = append(connector.freeClients, client)
+}
+
+func (connector *GRPCConnector) isClosed() bool {
+	connector.lock.RLock()
+	defer connector.lock.RUnlock()
+	return connector.closed
 }
 
 func (connector *GRPCConnector) numberOfFreeClients() int {
@@ -413,17 +569,11 @@ func (connector *GRPCConnector) numberOfUsedClients() int {
 }
 
 func (connector *GRPCConnector) createConnection(ctx context.Context, nodeUrl common.NodeUrl, currentNumberOfConnections int) (*grpc.ClientConn, error) {
-	// grpc.DialContext expects host:port, not a URL with scheme. The grpc:// /
-	// grpcs:// prefixes are a config-time convention enforced by the direct-RPC
-	// validator (see protocol/lavasession/direct_rpc_connection.go validateURL).
-	// When the grpcs:// prefix is present, also auto-enable TLS on the local
-	// nodeUrl copy so config can rely on the scheme alone.
-	addr := nodeUrl.Url
-	if strings.HasPrefix(addr, "grpcs://") {
-		addr = strings.TrimPrefix(addr, "grpcs://")
+	// Auto-enable TLS on the local nodeUrl copy when the scheme implies it, so config
+	// can rely on the scheme alone.
+	addr, impliesTLS := grpcDialAddress(nodeUrl.Url)
+	if impliesTLS {
 		nodeUrl.AuthConfig.UseTLS = true
-	} else if strings.HasPrefix(addr, "grpc://") {
-		addr = strings.TrimPrefix(addr, "grpc://")
 	}
 	var rpcClient *grpc.ClientConn
 	var err error

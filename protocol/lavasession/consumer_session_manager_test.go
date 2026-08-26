@@ -163,85 +163,14 @@ func TestEndpointHealthRecovery(t *testing.T) {
 	// The fix: ResetEndpointHealth re-enables the endpoints, and that is the ONLY external
 	// ingredient recovery needs. ResetBlockedProviders alone just failed above; re-enabling the
 	// endpoints was the missing piece. The blocked-provider state then self-heals on the very next
-	// GetSessions: with validAddresses empty it runs validatePairingListNotEmpty → resetValidAddresses
-	// → setValidAddressesToDefaultValue, which clears the blocked list and refills validAddresses from
+	// GetSessions: with validAddresses empty, selection fails, no backup tier is configured, and the
+	// cascade's last resort runs releaseBlockedProvidersIfPoolEmpty → resetValidAddresses →
+	// setValidAddressesToDefaultValue, which clears the blocked list and refills validAddresses from
 	// the pairing pool, so the now-enabled endpoints get selected. No explicit ResetBlockedProviders
 	// is required here — which is exactly why /debug/reset-endpoint-health re-enables endpoints and
 	// nothing else.
 	require.Equal(t, 3, csm.ResetEndpointHealth(), "all three providers' endpoints should be re-enabled")
 	require.NoError(t, getSessions(), "ResetEndpointHealth alone must recover: the next GetSessions self-heals the blocked list")
-}
-
-func getDelayedAddress() string {
-	delayedServerAddress := "127.0.0.1:3335"
-	// because grpcListener is random we might have overlap. in that case just change the port.
-	if grpcListener == delayedServerAddress {
-		delayedServerAddress = "127.0.0.1:3336"
-	}
-	utils.LavaFormatDebug("delayedAddress Chosen", utils.LogAttr("address", delayedServerAddress))
-	return delayedServerAddress
-}
-
-func TestEndpointSortingFlow(t *testing.T) {
-	delayedAddress := getDelayedAddress()
-	err := createGRPCServer(delayedAddress, 300*time.Millisecond)
-	csp := &ConsumerSessionsWithProvider{}
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _, err := csp.ConnectRawClientWithTimeout(ctx, delayedAddress)
-		if err != nil {
-			utils.LavaFormatDebug("delayedAddress - waiting for grpc server to launch")
-			continue
-		}
-		utils.LavaFormatDebug("delayedAddress - grpc server is live", utils.LogAttr("address", delayedAddress))
-		cancel()
-		break
-	}
-
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _, err := csp.ConnectRawClientWithTimeout(ctx, grpcListener)
-		if err != nil {
-			utils.LavaFormatDebug("grpcListener - waiting for grpc server to launch")
-			continue
-		}
-		utils.LavaFormatDebug("grpcListener - grpc server is live", utils.LogAttr("address", grpcListener))
-		cancel()
-		break
-	}
-
-	require.NoError(t, err)
-	csm := CreateConsumerSessionManager()
-	pairingList := createPairingList("", true)
-	pairingList[0].Endpoints = append(pairingList[0].Endpoints, &Endpoint{NetworkAddress: delayedAddress, Enabled: true, Connections: []*EndpointConnection{}, ConnectionRefusals: 0})
-	// swap locations so that the endpoint of the delayed will be first
-	pairingList[0].Endpoints[0], pairingList[0].Endpoints[1] = pairingList[0].Endpoints[1], pairingList[0].Endpoints[0]
-
-	// update the pairing and wait for the routine to send all requests
-	err = csm.UpdateAllProviders(firstEpochHeight, pairingList, nil) // update the providers.
-	require.NoError(t, err)
-
-	_, ok := csm.pairing[pairingList[0].PublicLavaAddress]
-	require.True(t, ok)
-
-	// because probing is in a routine we need to wait for the sorting and probing to end asynchronously.
-	// The probe goroutine reorders Endpoints under pairingList[0].Lock, so read the slice under that
-	// lock — an unsynchronized read here races the sort (data race under -race).
-	swapped := false
-	for i := 0; i < 20; i++ {
-		pairingList[0].Lock.RLock()
-		firstEndpoint := pairingList[0].Endpoints[0].NetworkAddress
-		pairingList[0].Lock.RUnlock()
-		if firstEndpoint == grpcListener {
-			fmt.Println("Endpoints Are Sorted!", i)
-			swapped = true
-			break
-		}
-		time.Sleep(1 * time.Second)
-		fmt.Println("Endpoints did not swap yet, attempt:", i)
-	}
-	require.True(t, swapped)
-	// after creating all the sessions
 }
 
 func CreateConsumerSessionManager() *ConsumerSessionManager {
@@ -253,7 +182,7 @@ func CreateConsumerSessionManager() *ConsumerSessionManager {
 
 func TestMain(m *testing.M) {
 	AllowInsecureConnectionToProviders = true
-	err := createGRPCServer("", time.Microsecond)
+	_, err := createGRPCServer("", time.Microsecond)
 	if err != nil {
 		fmt.Println("Failed create server", err)
 		os.Exit(-1)
@@ -276,14 +205,17 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func createGRPCServer(changeListener string, probeDelay time.Duration) error {
+// createGRPCServer binds a test relayer server and returns the address it is
+// actually listening on. Callers should pass a port-0 address (or "" to use the
+// shared grpcListener, itself port 0) so the kernel assigns a free port.
+func createGRPCServer(changeListener string, probeDelay time.Duration) (string, error) {
 	listenAddress := grpcListener
 	if changeListener != "" {
 		listenAddress = changeListener
 	}
 	lis, err := net.Listen("tcp", listenAddress)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// Update the grpcListener with the actual address
 	if changeListener == "" {
@@ -303,7 +235,7 @@ func createGRPCServer(changeListener string, probeDelay time.Duration) error {
 			os.Exit(-1)
 		}
 	}()
-	return nil
+	return lis.Addr().String(), nil
 }
 
 const providerStr = "provider"
@@ -350,6 +282,22 @@ func createPairingList(providerPrefixAddress string, enabled bool) map[uint64]*C
 		cswpList[uint64(p)] = &ConsumerSessionsWithProvider{
 			PublicLavaAddress: providerStr + providerPrefixAddress + strconv.Itoa(p),
 			Endpoints:         endpoints,
+			Sessions:          map[int64]*SingleConsumerSession{},
+			MaxComputeUnits:   200,
+			PairingEpoch:      firstEpochHeight,
+		}
+	}
+	return cswpList
+}
+
+// createNamedPairingList builds a pairing from exact provider names, for the cases where
+// the name itself is what is under test rather than the count of providers.
+func createNamedPairingList(names ...string) map[uint64]*ConsumerSessionsWithProvider {
+	cswpList := make(map[uint64]*ConsumerSessionsWithProvider, len(names))
+	for i, name := range names {
+		cswpList[uint64(i)] = &ConsumerSessionsWithProvider{
+			PublicLavaAddress: name,
+			Endpoints:         []*Endpoint{{Connections: []*EndpointConnection{}, NetworkAddress: grpcListener, Enabled: true, ConnectionRefusals: 0}},
 			Sessions:          map[int64]*SingleConsumerSession{},
 			MaxComputeUnits:   200,
 			PairingEpoch:      firstEpochHeight,
@@ -1404,7 +1352,7 @@ func TestContext(t *testing.T) {
 
 func TestGrpcClientHang(t *testing.T) {
 	ctx := context.Background()
-	conn, err := ConnectGRPCClient(ctx, grpcListener, true, false, false)
+	conn, err := ConnectGRPCClient(ctx, grpcListener, true, false)
 	require.NoError(t, err)
 	client := pairingtypes.NewRelayerClient(conn)
 	err = conn.Close()
@@ -1565,8 +1513,172 @@ func TestSelectedProviderAlreadyFailedReturnsError(t *testing.T) {
 	ignored := map[string]struct{}{pinned: {}}
 	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, 10, 100, "", nil, common.NO_STATE, "", pinned)
 	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
+		"expected SelectedProviderAlreadyFailedError, got: %v", err)
+	// A provider that failed is not one that was never valid — must not alias.
+	require.False(t, errors.Is(err, SelectedProviderUnavailableError))
+}
+
+// An unknown pinned name reported itself as "already failed", sending whoever
+// read the message looking for an outage that had not happened.
+func TestSelectedProviderUnknownNameIsNotReportedAsAFailure(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairingList := createPairingList("", true)
+	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "no-such-provider")
+	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
 		"expected SelectedProviderUnavailableError, got: %v", err)
+	require.False(t, errors.Is(err, SelectedProviderAlreadyFailedError))
+	require.NotContains(t, err.Error(), "already failed")
+}
+
+// The header naming the right provider in the wrong case: `lava-select-provider:
+// Lava` and a registered `lava` are the same provider. A case-sensitive match
+// rejected the relay outright rather than falling back.
+func TestSelectedProviderMatchesCaseInsensitively(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairingList := createPairingList("", true)
+	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	validAddresses := csm.getValidAddresses("", nil, context.Background())
+	require.NotEmpty(t, validAddresses)
+	pinned := validAddresses[0]
+
+	for _, requested := range []string{
+		strings.ToUpper(pinned),
+		strings.ToLower(pinned),
+		strings.ToUpper(pinned[:1]) + pinned[1:], // "Provider0"
+	} {
+		got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", requested)
+		require.NoError(t, err, "header %q should resolve to %q", requested, pinned)
+		// The canonical address comes back, not the caller's spelling.
+		require.Equal(t, []string{pinned}, got, "header %q must resolve to the registered address", requested)
+	}
+}
+
+// The ignored list is keyed by canonical address, so a differently-cased header
+// must still be recognised — otherwise the re-selection spin comes back.
+func TestSelectedProviderAlreadyFailedIsCaseInsensitive(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairingList := createPairingList("", true)
+	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	validAddresses := csm.getValidAddresses("", nil, context.Background())
+	require.NotEmpty(t, validAddresses)
+	pinned := validAddresses[0]
+
+	ignored := map[string]struct{}{pinned: {}}
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, 10, 100, "", nil, common.NO_STATE, "", strings.ToUpper(pinned))
+	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
+		"expected SelectedProviderAlreadyFailedError, got: %v", err)
+}
+
+// With two providers whose names differ only in case, the in-request ignored set has to be
+// consulted by the resolved address rather than by a case-fold. `lava` having failed says
+// nothing about `Lava` — they are two different upstreams — so folding here would reject a
+// provider that is healthy and was never tried.
+func TestSelectedProviderIgnoredSetDoesNotFoldOntoACaseTwin(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	err := csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("Lava", "lava"), nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	require.ElementsMatch(t, []string{"Lava", "lava"}, csm.getValidAddresses("", nil, context.Background()))
+
+	// `lava` failed earlier in this request; the header pins `Lava`, which did not.
+	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"lava": {}}, 10, 100, "", nil, common.NO_STATE, "", "Lava")
+	require.NoError(t, err, "Lava never failed — its case-twin's failure must not reject it")
+	require.Equal(t, []string{"Lava"}, got)
+
+	// ...and the reverse, so neither spelling is privileged.
+	got, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, 10, 100, "", nil, common.NO_STATE, "", "lava")
+	require.NoError(t, err)
+	require.Equal(t, []string{"lava"}, got)
+
+	// The spin bound still holds when it is the pinned provider itself that failed.
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, 10, 100, "", nil, common.NO_STATE, "", "Lava")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
+		"expected SelectedProviderAlreadyFailedError, got: %v", err)
+}
+
+// A header matching two case-colliding providers and neither of them exactly is refused,
+// not guessed: pinning exists so a request is never served by a provider the caller did
+// not ask for, and validAddresses has no stable order to break the tie with anyway.
+func TestSelectedProviderAmbiguousCaseIsRejected(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	err := csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("Lava", "lava"), nil)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // let probes finish
+
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "LAVA")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
+		"expected SelectedProviderUnavailableError, got: %v", err)
+	// The operator has to be able to see which names collided to know what to rename.
+	require.Contains(t, err.Error(), "matches more than one provider")
+	require.Contains(t, err.Error(), "Lava")
+	require.Contains(t, err.Error(), "lava")
+}
+
+func TestResolveSelectedProviderAddress(t *testing.T) {
+	addresses := []string{"lava", "blockdaemon", "my-node-co"}
+
+	for _, tt := range []struct {
+		requested string
+		want      string
+	}{
+		{"lava", "lava"},
+		{"Lava", "lava"},
+		{"LAVA", "lava"},
+		{"BlockDaemon", "blockdaemon"},
+		{"My-Node-Co", "my-node-co"},
+		{"tatum", ""},
+		{"", ""},
+	} {
+		got, ambiguous := resolveSelectedProviderAddress(tt.requested, addresses)
+		require.Equal(t, tt.want, got, "requested %q", tt.requested)
+		require.Empty(t, ambiguous, "requested %q is not a collision", tt.requested)
+	}
+}
+
+func TestResolveSelectedProviderAddressPrefersTheExactSpelling(t *testing.T) {
+	// Two names differing only in case is legal config — ValidateUniqueProviderNames
+	// groups by exact name — so an exact hit has to win outright.
+	addresses := []string{"Lava", "lava"}
+
+	got, ambiguous := resolveSelectedProviderAddress("lava", addresses)
+	require.Empty(t, ambiguous)
+	require.Equal(t, "lava", got)
+
+	got, ambiguous = resolveSelectedProviderAddress("Lava", addresses)
+	require.Empty(t, ambiguous)
+	require.Equal(t, "Lava", got)
+}
+
+// Absent an exact hit, a fold matching two providers resolves to neither. Which one the
+// caller meant is unknowable, and there is no stable order to break the tie with:
+// validAddresses is built by ranging a map and is reordered as providers are blocked and
+// recovered, so picking by position would serve the same pinned name from a different
+// upstream run to run.
+func TestResolveSelectedProviderAddressRefusesAnAmbiguousFold(t *testing.T) {
+	got, ambiguous := resolveSelectedProviderAddress("LAVA", []string{"Lava", "lava"})
+	require.Empty(t, got)
+	require.Equal(t, []string{"Lava", "lava"}, ambiguous)
+
+	// Reported sorted, so one bad config reads the same way on every run whatever order
+	// the reset happened to leave validAddresses in.
+	_, ambiguous = resolveSelectedProviderAddress("LAVA", []string{"lava", "Lava"})
+	require.Equal(t, []string{"Lava", "lava"}, ambiguous)
 }
 
 func TestPairingWithStateful(t *testing.T) {
@@ -1696,6 +1808,7 @@ func TestDeadConnectionCleanup(t *testing.T) {
 		false, // getAllEndpoints
 		"",    // addon
 		nil,   // extensionNames
+		nil,   // internalPath
 	)
 
 	// Should successfully connect (we have one valid connection)
@@ -1834,119 +1947,6 @@ func TestConnectRawClientWithTimeoutSuccessfulConnection(t *testing.T) {
 
 	// Give goroutines a moment to clean up
 	time.Sleep(50 * time.Millisecond)
-}
-
-// TestPeriodicProbeProvidersTickerCleanup tests that the ticker in PeriodicProbeProviders
-// is properly stopped when the context is cancelled. This was a bug where the ticker
-// was not stopped, causing a goroutine leak.
-func TestPeriodicProbeProvidersTickerCleanup(t *testing.T) {
-	t.Run("function exits promptly when context is cancelled", func(t *testing.T) {
-		csm := CreateConsumerSessionManager()
-
-		// Create a cancellable context
-		ctx, cancel := context.WithCancel(context.Background())
-
-		// Track when the function exits
-		done := make(chan struct{})
-
-		go func() {
-			defer close(done)
-			csm.PeriodicProbeProviders(ctx, 10*time.Millisecond)
-		}()
-
-		// Let it run for a few ticks to ensure ticker is active
-		time.Sleep(50 * time.Millisecond)
-
-		// Cancel the context
-		cancel()
-
-		// The function should exit promptly after context cancellation
-		select {
-		case <-done:
-			// Success - function exited after context cancellation
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("PeriodicProbeProviders did not exit after context cancellation - possible ticker leak")
-		}
-	})
-
-	t.Run("multiple probe sessions all exit on cancellation", func(t *testing.T) {
-		numSessions := 5
-		csms := make([]*ConsumerSessionManager, numSessions)
-		ctxs := make([]context.Context, numSessions)
-		cancels := make([]context.CancelFunc, numSessions)
-		dones := make([]chan struct{}, numSessions)
-
-		// Start multiple probe sessions
-		for i := 0; i < numSessions; i++ {
-			csms[i] = CreateConsumerSessionManager()
-			ctxs[i], cancels[i] = context.WithCancel(context.Background())
-			dones[i] = make(chan struct{})
-
-			go func(idx int) {
-				defer close(dones[idx])
-				csms[idx].PeriodicProbeProviders(ctxs[idx], 10*time.Millisecond)
-			}(i)
-		}
-
-		// Let them run briefly to ensure tickers are active
-		time.Sleep(30 * time.Millisecond)
-
-		// Cancel all contexts
-		for i := 0; i < numSessions; i++ {
-			cancels[i]()
-		}
-
-		// Wait for all to exit - they should all exit promptly
-		for i := 0; i < numSessions; i++ {
-			select {
-			case <-dones[i]:
-				// Success
-			case <-time.After(500 * time.Millisecond):
-				t.Fatalf("PeriodicProbeProviders %d did not exit after context cancellation - possible ticker leak", i)
-			}
-		}
-	})
-
-	t.Run("ticker fires expected number of times before cancellation", func(t *testing.T) {
-		// This test verifies the ticker is actually working and then properly cleaned up
-		tickerInterval := 20 * time.Millisecond
-		runDuration := 100 * time.Millisecond
-
-		ctx, cancel := context.WithCancel(context.Background())
-
-		started := make(chan struct{})
-		done := make(chan struct{})
-
-		go func() {
-			close(started)
-			// We can't easily count ticks in the real function, but we can verify
-			// the function runs for the expected duration and then exits cleanly
-			ticker := time.NewTicker(tickerInterval)
-			defer ticker.Stop() // This is what we added in the fix
-
-			for {
-				select {
-				case <-ticker.C:
-					// Tick occurred
-				case <-ctx.Done():
-					close(done)
-					return
-				}
-			}
-		}()
-
-		<-started
-		time.Sleep(runDuration)
-		cancel()
-
-		// Function should exit promptly
-		select {
-		case <-done:
-			// Success - function exited and ticker.Stop() was called
-		case <-time.After(200 * time.Millisecond):
-			t.Fatal("Function did not exit promptly after context cancellation")
-		}
-	})
 }
 
 // TestBackupProviderOptimizerSelection verifies that when all static providers are exhausted,
@@ -2270,6 +2270,7 @@ func TestCanceledContextDoesNotPenalizeEndpoint(t *testing.T) {
 		false, // getAllEndpoints
 		"",    // addon
 		nil,   // extensionNames
+		nil,   // internalPath
 	)
 
 	// Connection should fail (context canceled), but the endpoint must not be penalized.
@@ -2440,12 +2441,14 @@ func TestUpdateAllProviders_NormalProviderBlockedAsBackupInNextEpoch(t *testing.
 }
 
 // TestCheckAndUnblock_BackupRoutedToComprehensiveProbe verifies the `!isBackup && !IsReported`
-// guard in checkAndUnblockHealthyReBlockedProviders. probeProviders only probes pairingList, so
-// backup providers are never added to reportedProviders — without the guard, every backup would
-// match `!IsReported` and take the immediate-unblock branch, skipping any real health check.
-// This test confirms a backup lands in the comprehensive-probe branch instead: we assert the
-// backup is absent from reportedProviders (guard precondition) and that the immediate-unblock
-// path leaves blockedBackupProviders intact (since that path only touches validAddresses).
+// guard in checkAndUnblockHealthyReBlockedProviders. `!isBackup` short-circuits, so a backup
+// never has its report state consulted and always takes the comprehensive-probe branch. Without
+// the guard, a backup absent from reportedProviders — as this fixture's is, having never served
+// traffic — would match `!IsReported` and take the immediate-unblock branch, skipping any real
+// health check. This test confirms it lands in the comprehensive-probe branch instead: we assert
+// the backup is absent from reportedProviders (the fixture state the guard protects against) and
+// that the immediate-unblock path leaves blockedBackupProviders intact (since that path only
+// touches validAddresses).
 func TestCheckAndUnblock_BackupRoutedToComprehensiveProbe(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	// Point at an unreachable endpoint so the comprehensive probe's eventual outcome
@@ -2470,9 +2473,11 @@ func TestCheckAndUnblock_BackupRoutedToComprehensiveProbe(t *testing.T) {
 	csm.blockedBackupProviders[backupAddr] = struct{}{}
 	csm.lock.Unlock()
 
-	// Guard precondition: backups are never reported (probeProviders skips them).
+	// Fixture state the guard protects against: this backup never served traffic, so it was
+	// never reported. (A backup that DID fail a relay can be reported — blockProvider falls
+	// through to the reportProvider block — but then the guard is not what saves us.)
 	require.False(t, csm.reportedProviders.IsReported(backupAddr),
-		"backup provider should never appear in reportedProviders")
+		"this backup never served traffic, so it must not be in reportedProviders")
 
 	// The immediate-unblock branch calls validateAndReturnBlockedProviderToValidAddressesListLocked,
 	// which is a no-op for backups (they're not in validAddresses). So if the guard is missing and
@@ -2514,11 +2519,23 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 	err = csm.UpdateAllProviders(secondEpochHeight, nil, backupListEpoch2)
 	require.NoError(t, err)
 
-	// Precondition: re-blocked after epoch transition (comes from the previousEpoch merge).
-	csm.lock.RLock()
-	_, reblocked := csm.blockedBackupProviders[backupAddr]
-	csm.lock.RUnlock()
-	require.True(t, reblocked, "backup should be re-blocked immediately after epoch transition")
+	// UpdateAllProviders schedules its own unblock pass on a randomised delay, and against this
+	// live listener that pass SUCCEEDS — so the re-blocked state the epoch merge produces cannot be
+	// observed from here without racing it. (The sibling
+	// TestUpdateAllProviders_BlockedBackupProviderPersistedAcrossEpoch pins that merge
+	// deterministically by pointing epoch 2 at a dead endpoint, which this test cannot do since a
+	// successful probe is the thing under test.) So let the background pass finish first, then set
+	// up the state this test is actually about, leaving the manual pass below the only actor on it.
+	require.Eventually(t, func() bool {
+		csm.lock.RLock()
+		defer csm.lock.RUnlock()
+		return len(csm.previousEpochBlockedProviders) == 0
+	}, 5*time.Second, 10*time.Millisecond, "background unblock pass spawned by UpdateAllProviders should have run")
+
+	csm.lock.Lock()
+	csm.blockedBackupProviders[backupAddr] = struct{}{}
+	csm.previousEpochBlockedProviders[backupAddr] = struct{}{}
+	csm.lock.Unlock()
 
 	// Run the unblock pass. Comprehensive probe against grpcListener should succeed → unblock.
 	csm.checkAndUnblockHealthyReBlockedProviders(context.Background(), secondEpochHeight)
@@ -2755,9 +2772,17 @@ type stateSizeRecorder struct {
 	metrics.NoOpConsumerMetrics
 	mu                  sync.Mutex
 	blockedProviders    int
+	prevEpochBlocked    int
 	blockedBackup       int
 	stickySessionsCount int
 	reportedProviders   int
+	providerBlocked     map[string]bool
+}
+
+func (r *stateSizeRecorder) SetCSMPreviousEpochBlockedProvidersCount(_, _ string, c int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prevEpochBlocked = c
 }
 
 func (r *stateSizeRecorder) SetCSMBlockedProvidersCount(_, _ string, c int) {
@@ -2784,6 +2809,38 @@ func (r *stateSizeRecorder) SetCSMReportedProvidersCount(_, _ string, c int) {
 	r.reportedProviders = c
 }
 
+func (r *stateSizeRecorder) SetBlockedProvider(_, _, providerAddress, _ string, isBlocked bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.providerBlocked == nil {
+		r.providerBlocked = map[string]bool{}
+	}
+	r.providerBlocked[providerAddress] = isBlocked
+}
+
+// providerBlockedSnapshot returns the last value published for each provider.
+func (r *stateSizeRecorder) providerBlockedSnapshot() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]bool, len(r.providerBlocked))
+	for address, isBlocked := range r.providerBlocked {
+		out[address] = isBlocked
+	}
+	return out
+}
+
+func (r *stateSizeRecorder) blockedProvidersCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.blockedProviders
+}
+
+func (r *stateSizeRecorder) prevEpochBlockedCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.prevEpochBlocked
+}
+
 func (r *stateSizeRecorder) snapshot() (int, int, int, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2801,8 +2858,12 @@ func createConsumerSessionManagerWithMetrics(m metrics.ConsumerMetricsManagerInf
 
 // TestPublishStateSizes_PopulateThenReset verifies that publishStateSizes
 // reflects the current size of every observed store, and that
-// ResetTransientFailureState drives all four counts back to zero — the
+// ResetTransientFailureState drives the transient counts back to zero — the
 // post-condition integration tests assert against /metrics (MAG-1762).
+//
+// currentlyBlockedProviderAddresses is deliberately NOT zeroed here:
+// ResetTransientFailureState preserves it by design, and /debug/reset-all
+// clears it by also calling ResetBlockedProviders. See the sibling test below.
 func TestPublishStateSizes_PopulateThenReset(t *testing.T) {
 	rec := &stateSizeRecorder{}
 	csm := createConsumerSessionManagerWithMetrics(rec)
@@ -2818,7 +2879,8 @@ func TestPublishStateSizes_PopulateThenReset(t *testing.T) {
 
 	csm.publishStateSizes()
 	blocked, blockedBackup, sticky, reported := rec.snapshot()
-	require.Equal(t, 2, blocked, "previousEpochBlockedProviders count must equal map size")
+	require.Equal(t, 2, rec.prevEpochBlockedCount(), "previousEpochBlockedProviders count must equal map size")
+	require.Equal(t, 0, blocked, "no provider is blocked, so the blocked-providers gauge must read 0")
 	require.Equal(t, 1, blockedBackup, "blockedBackupProviders count must equal map size")
 	require.Equal(t, 3, sticky, "stickySessions count must equal store size")
 	require.Equal(t, 1, reported, "reportedProviders count must equal register size")
@@ -2826,7 +2888,8 @@ func TestPublishStateSizes_PopulateThenReset(t *testing.T) {
 	csm.ResetTransientFailureState()
 
 	blocked, blockedBackup, sticky, reported = rec.snapshot()
-	require.Equal(t, 0, blocked, "ResetTransientFailureState must zero previousEpochBlockedProviders gauge")
+	require.Equal(t, 0, rec.prevEpochBlockedCount(), "ResetTransientFailureState must zero previousEpochBlockedProviders gauge")
+	require.Equal(t, 0, blocked, "blocked-providers gauge stays 0 — nothing was blocked in this test")
 	require.Equal(t, 0, blockedBackup, "ResetTransientFailureState must zero blockedBackupProviders gauge")
 	require.Equal(t, 0, sticky, "ResetTransientFailureState must zero stickySessions gauge")
 	require.Equal(t, 0, reported, "ResetTransientFailureState must zero reportedProviders gauge")

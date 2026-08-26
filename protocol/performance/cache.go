@@ -57,7 +57,7 @@ func (r *relayerCacheClientStore) connectGRPCConnectionToRelayerCacheService() (
 	connectCtx, cancel := context.WithTimeout(r.ctx, 3*time.Second)
 	defer cancel()
 
-	conn, err := lavasession.ConnectGRPCClient(connectCtx, r.address, false, true, false)
+	conn, err := lavasession.ConnectGRPCClient(connectCtx, r.address, false, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -264,4 +264,43 @@ func (cache *Cache) Close() error {
 		return nil
 	}
 	return cache.clientStore.close()
+}
+
+// SetEndpointObservation publishes one successful poll of an upstream endpoint to the cache
+// backend so peer pods can borrow it (the fleet tracker gate, MAG-2981). Fire-and-forget at the
+// call site: a failed publish only costs a peer one real poll.
+func (cache *Cache) SetEndpointObservation(ctx context.Context, set *pairingtypes.EndpointObservationSet) error {
+	if cache == nil {
+		return NotInitializedError
+	}
+
+	client := cache.clientStore.getClient()
+	if client == nil {
+		return NotConnectedError
+	}
+
+	_, err := client.SetEndpointObservation(ctx, set)
+	if err != nil {
+		cache.clientStore.resetOnConnectionError(err)
+	}
+	return err
+}
+
+// GetEndpointObservation reads the freshest peer observation of an upstream endpoint. A miss
+// is a reply with Found=false, not an error.
+func (cache *Cache) GetEndpointObservation(ctx context.Context, get *pairingtypes.EndpointObservationGet) (*pairingtypes.EndpointObservationReply, error) {
+	if cache == nil {
+		return nil, NotInitializedError
+	}
+
+	client := cache.clientStore.getClient()
+	if client == nil {
+		return nil, NotConnectedError
+	}
+
+	reply, err := client.GetEndpointObservation(ctx, get)
+	if err != nil {
+		cache.clientStore.resetOnConnectionError(err)
+	}
+	return reply, err
 }

@@ -65,7 +65,7 @@ func newReconcileFixture(t *testing.T, ctx context.Context) *reconcileFixture {
 }
 
 // admit replaces the live pairing with sessions for exactly these URLs, mirroring what the
-// post-startup admission paths do (retryFailedStaticProviders / applyReverification promote /
+// post-startup admission paths do (retryFailedProviders / applyReverification promote /
 // rebuildPairingFromConfig all rebuild sessions with FRESH DirectRPCConnections).
 //
 // The URLs point at a closed port: NewDirectRPCConnection for HTTP builds a client without
@@ -100,7 +100,7 @@ func (f *reconcileFixture) hasTracker(url string) bool {
 // An endpoint that is unreachable when the router boots fails startup verification and is held out
 // of the pairing, so the startup pass legitimately does not see it (which is why the boot log read
 // "failed=0 success=1" rather than "failed=2" — skipped, not failed). It is admitted later, with a
-// fresh DirectRPCConnection, by retryFailedStaticProviders / the epoch re-verify. Before the fix
+// fresh DirectRPCConnection, by retryFailedProviders / the epoch re-verify. Before the fix
 // nothing registered a tracker at that point and the endpoint never polled for the lifetime of the
 // process — PollIntervalMs=0 with ConsecutivePollFailures=0.
 //

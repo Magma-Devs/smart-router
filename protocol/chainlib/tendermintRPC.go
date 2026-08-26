@@ -38,7 +38,9 @@ type TendermintChainParser struct {
 
 // NewTendermintRpcChainParser creates a new instance of TendermintChainParser
 func NewTendermintRpcChainParser() (chainParser *TendermintChainParser, err error) {
-	return &TendermintChainParser{}, nil
+	parser := &TendermintChainParser{}
+	parser.skipWebsocketVerification = SkipWebsocketVerificationDefault
+	return parser, nil
 }
 
 func (bcp *TendermintChainParser) GetUniqueName() string {
@@ -651,35 +653,25 @@ func NewtendermintRpcChainProxy(ctx context.Context, nConns uint, rpcProviderEnd
 	return cp, cp.start(ctx, nConns, nodeUrl)
 }
 
-func (cp *tendermintRpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) {
+func (cp *tendermintRpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.TendermintrpcMessage)
 	if !ok {
 		batchMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.JsonrpcBatchMessage)
 		if !ok {
-			return nil, "", nil, utils.LavaFormatError("invalid message type in tendermintrpc failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage}, utils.Attribute{Key: "ptrCast", Value: ok})
+			return nil, utils.LavaFormatError("invalid message type in tendermintrpc failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage}, utils.Attribute{Key: "ptrCast", Value: ok})
 		}
-		if ch != nil {
-			return nil, "", nil, utils.LavaFormatError("does not support subscribe in a batch", nil)
-		}
-		reply, err := cp.sendBatchMessage(ctx, batchMessage, chainMessage)
-		return reply, "", nil, err
+		return cp.sendBatchMessage(ctx, batchMessage, chainMessage)
 	}
 	if nodeMessage.Path != "" {
-		return cp.SendURI(ctx, nodeMessage, ch, chainMessage)
+		return cp.SendURI(ctx, nodeMessage, chainMessage)
 	}
 
 	// Else do RPC call
-	return cp.SendRPC(ctx, nodeMessage, ch, chainMessage)
+	return cp.SendRPC(ctx, nodeMessage, chainMessage)
 }
 
-func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpcInterfaceMessages.TendermintrpcMessage, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) {
-	// check if the input channel is not nil
-	if ch != nil {
-		// return an error if the channel is not nil
-		return nil, "", nil, utils.LavaFormatError("Subscribe is not allowed on Tendermint URI", nil)
-	}
-
+func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpcInterfaceMessages.TendermintrpcMessage, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
 	if cp.httpClient == nil {
 		cp.httpClient = common.OptimizedHttpClient()
 	}
@@ -702,10 +694,10 @@ func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpc
 		// Validate if the error is related to the provider connection to the node or it is a valid error
 		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
 		if parsedError := cp.HandleNodeError(ctx, err); parsedError != nil {
-			return nil, "", nil, parsedError
+			return nil, parsedError
 		}
 		// TODO: if not parsed return error as reply or as error?
-		return nil, "", nil, err
+		return nil, err
 	}
 
 	if len(nodeMessage.GetHeaders()) > 0 {
@@ -728,7 +720,7 @@ func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpc
 		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(res.StatusCode))) // we ignore this error here since this code can be triggered not from grpc
 	}
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
 	// close the response body
 	if res.Body != nil {
@@ -737,13 +729,14 @@ func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpc
 
 	err = cp.HandleStatusError(res.StatusCode, nodeMessage.GetDisableErrorHandling())
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatWarning("Received invalid status code", nil, utils.Attribute{Key: "Status Code", Value: res.StatusCode}, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
+		err = common.WithRetryAfter(err, res.Header, time.Now())
+		return nil, utils.LavaFormatWarning("Received invalid status code", err, utils.Attribute{Key: "Status Code", Value: res.StatusCode}, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
 	}
 
 	// read the response body
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
 
 	// create a new relay reply struct with the response body as the data
@@ -757,19 +750,19 @@ func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpc
 	// checking if rest reply data is in json format
 	err = cp.HandleJSONFormatError(reply.RelayReply.Data)
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("Tendermint reply is neither a JSON object nor a JSON array of objects", nil, utils.Attribute{Key: "reply.Data", Value: string(reply.RelayReply.Data)})
+		return nil, utils.LavaFormatError("Tendermint reply is neither a JSON object nor a JSON array of objects", nil, utils.Attribute{Key: "reply.Data", Value: string(reply.RelayReply.Data)})
 	}
 
-	return reply, "", nil, nil
+	return reply, nil
 }
 
 // SendRPC sends Tendermint HTTP or WebSockets call
-func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpcInterfaceMessages.TendermintrpcMessage, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) {
+func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpcInterfaceMessages.TendermintrpcMessage, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
 	// Get rpc connection from the connection pool
 	var rpc *rpcclient.Client
 	rpc, err = cp.conn.GetRpc(ctx, true)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
 	// return the rpc connection to the websocket pool after the function completes
 	defer cp.conn.ReturnRpc(rpc)
@@ -779,7 +772,6 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 
 	// create variables for the rpc message and reply message
 	var rpcMessage *rpcclient.JsonrpcMessage
-	var sub *rpcclient.ClientSubscription
 	if len(nodeMessage.GetHeaders()) > 0 {
 		for _, metadata := range nodeMessage.GetHeaders() {
 			rpc.SetHeader(metadata.Name, metadata.Value)
@@ -787,35 +779,21 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 			defer rpc.SetHeader(metadata.Name, "")
 		}
 	}
-	// If ch is not nil do subscription
-	var nodeErr error
-	if ch != nil {
-		// subscribe to the rpc call if the channel is not nil
-		utils.LavaFormatTrace("Sending subscription",
-			utils.LogAttr("chainID", cp.BaseChainProxy.ChainID),
-			utils.LogAttr("apiName", chainMessage.GetApi().Name),
-			utils.LogAttr("nodeMessage.ID", nodeMessage.ID),
-			utils.LogAttr("nodeMessage.Method", nodeMessage.Method),
-			utils.LogAttr("nodeMessage.Params", nodeMessage.Params),
-		)
-		sub, rpcMessage, nodeErr = rpc.Subscribe(context.Background(), nodeMessage.ID, nodeMessage.Method, ch, nodeMessage.Params)
-	} else {
-		// set context with timeout
-		connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
-		defer cancel()
+	// set context with timeout
+	connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
+	defer cancel()
 
-		cp.NodeUrl.SetIpForwardingIfNecessary(ctx, rpc.SetHeader)
-		// perform the rpc call
-		rpcMessage, nodeErr = rpc.CallContext(connectCtx, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, false, nodeMessage.GetDisableErrorHandling())
-		if nodeErr != nil {
-			if errors.Is(nodeErr, common.StatusCodeError504) || errors.Is(nodeErr, common.StatusCodeError429) || errors.Is(nodeErr, common.StatusCodeErrorStrict) {
-				return nil, "", nil, utils.LavaFormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
-			}
-			// Validate if the error is related to the provider connection to the node or it is a valid error
-			// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
-			if parsedError := cp.HandleNodeError(ctx, nodeErr); parsedError != nil {
-				return nil, "", nil, parsedError
-			}
+	cp.NodeUrl.SetIpForwardingIfNecessary(ctx, rpc.SetHeader)
+	// perform the rpc call
+	rpcMessage, nodeErr := rpc.CallContext(connectCtx, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, false, nodeMessage.GetDisableErrorHandling())
+	if nodeErr != nil {
+		if errors.Is(nodeErr, common.StatusCodeError504) || errors.Is(nodeErr, common.StatusCodeError429) || errors.Is(nodeErr, common.StatusCodeErrorStrict) {
+			return nil, utils.LavaFormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
+		}
+		// Validate if the error is related to the connection to the node or it is a valid error
+		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
+		if parsedError := cp.HandleNodeError(ctx, nodeErr); parsedError != nil {
+			return nil, parsedError
 		}
 	}
 
@@ -825,13 +803,13 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 		rpcMessage = TryRecoverNodeErrorFromClientError(nodeErr)
 		if rpcMessage == nil {
 			utils.LavaFormatDebug("got error from node", utils.LogAttr("GUID", ctx), utils.LogAttr("nodeErr", nodeErr))
-			return nil, "", nil, nodeErr
+			return nil, nodeErr
 		}
 	}
 
 	replyMsg, err = rpcInterfaceMessages.ConvertTendermintMsg(rpcMessage)
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("tendermintRPC error", err)
+		return nil, utils.LavaFormatError("tendermintRPC error", err)
 	}
 
 	// if we didn't get a node error.
@@ -839,7 +817,7 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 		// validate result is valid
 		responseIsNilValidationError := ValidateNilResponse(string(replyMsg.Result))
 		if responseIsNilValidationError != nil {
-			return nil, "", nil, responseIsNilValidationError
+			return nil, responseIsNilValidationError
 		}
 	}
 	err = cp.ValidateRequestAndResponseIds(nodeMessage.ID, rpcMessage.ID)
@@ -850,7 +828,7 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 		if replyMsg.Error != nil {
 			responseError = replyMsg.Error.Message
 		}
-		return nil, "", nil, utils.LavaFormatError("tendermintRPC ID mismatch error", err,
+		return nil, utils.LavaFormatError("tendermintRPC ID mismatch error", err,
 			utils.Attribute{Key: "GUID", Value: ctx},
 			utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx},
 			utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx},
@@ -864,7 +842,7 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 	// marshal the jsonrpc message to json
 	data, err := json.Marshal(replyMsg)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
 
 	// create a new relay reply struct
@@ -875,23 +853,7 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 		},
 	}
 
-	if ch != nil {
-		// get the params for the rpc call
-		params := nodeMessage.Params
-
-		paramsMap, ok := params.(map[string]interface{})
-		if !ok {
-			return nil, "", nil, utils.LavaFormatError("unknown params type on tendermint subscribe", nil)
-		}
-		subscriptionID, ok = paramsMap["query"].(string)
-		if !ok {
-			utils.LavaFormatTrace("could not get subscriptionID from query params", utils.LogAttr("params", params))
-			// This is probably because of a misuse, therefore the provider will return a node error to the user as the subscription failed
-			subscriptionID = ""
-		}
-	}
-
-	return reply, subscriptionID, sub, err
+	return reply, err
 }
 
 // Shutdown stops accepting new connections, drains in-flight HTTP requests,

@@ -32,7 +32,6 @@ import (
 	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -54,11 +53,31 @@ type GrpcChainParser struct {
 
 	registry *dyncodec.Registry
 	codec    *dyncodec.Codec
+
+	// descriptorConfig records which node-url's grpc-config produced registry/codec,
+	// so a second node-url asking for a different one is caught rather than silently
+	// winning. See setupForProvider.
+	descriptorConfig *grpcDescriptorConfig
+}
+
+// grpcDescriptorConfig is the descriptor resolution a single node-url asks for.
+type grpcDescriptorConfig struct {
+	source string
+	path   string
+}
+
+func (c grpcDescriptorConfig) String() string {
+	if c.path == "" {
+		return c.source
+	}
+	return c.source + " (" + c.path + ")"
 }
 
 // NewGrpcChainParser creates a new instance of GrpcChainParser
 func NewGrpcChainParser() (chainParser *GrpcChainParser, err error) {
-	return &GrpcChainParser{}, nil
+	parser := &GrpcChainParser{}
+	parser.skipWebsocketVerification = SkipWebsocketVerificationDefault
+	return parser, nil
 }
 
 // cloneForValidation returns a *GrpcChainParser with isolated registry/codec
@@ -83,6 +102,12 @@ func NewGrpcChainParser() (chainParser *GrpcChainParser, err error) {
 //
 // registry/codec are aliased initially; setupForProvider on the clone will
 // replace the *clone's* fields, leaving the live parser untouched.
+//
+// descriptorConfig is deliberately NOT carried over: it records which node-url
+// produced the clone's registry, and the clone is built for a verification
+// endpoint whose node-url set is chosen by the caller. Starting it at nil lets
+// the clone record what it is actually given, and still catches a conflict
+// within that set.
 func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 	return &GrpcChainParser{
 		BaseChainParser: BaseChainParser{
@@ -97,6 +122,10 @@ func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 			allowedExtensions: apip.allowedExtensions,
 			extensionParser:   apip.extensionParser,
 			active:            apip.active,
+
+			// Carried, not re-seeded from the package default: the clone must verify
+			// under the same ws policy as the parser it stands in for.
+			skipWebsocketVerification: apip.SkipWebsocketVerification(),
 		},
 		registry: apip.registry,
 		codec:    apip.codec,
@@ -128,10 +157,36 @@ func (apip *GrpcChainParser) setupForConsumer(relayer grpcproxy.ProxyCallBack) {
 	apip.codec = dyncodec.NewCodec(apip.registry)
 }
 
-func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientConn) error {
-	remote := dyncodec.NewGRPCReflectionProtoFileRegistryFromConn(reflectionConnection)
+// setupForProvider builds the registry that backs GrpcMessage.dynamicResolve —
+// the path GetParams takes for binary-proto requests, and therefore what block
+// parsing depends on. It honours grpc-config for the same reason SendNodeMsg does:
+// a node that does not serve reflection would otherwise boot and then fail here,
+// at parse time, instead of at connect time (MAG-2350).
+func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientConn, grpcConfig *common.GrpcConfig) error {
+	// registry/codec are per chain; grpc-config is per node-url. newChainRouter
+	// builds one proxy per node-url batch entry and hands every one of them THIS
+	// parser, so each call overwrites the last — and since the batch is a map, "last"
+	// is whatever Go's randomized iteration order picks that boot. That was benign
+	// while every iteration produced an equivalent reflection registry; now that the
+	// registry follows the node-url's grpc-config, a chain whose gRPC node-urls
+	// disagree would parse blocks against a different descriptor set on each restart.
+	// Refuse the config rather than pick one of them at random (MAG-2350).
+	wanted := grpcDescriptorConfig{source: grpcConfig.GetDescriptorSource(), path: grpcConfig.DescriptorSetPath}
+	if apip.descriptorConfig != nil && *apip.descriptorConfig != wanted {
+		return utils.LavaFormatError("conflicting gRPC descriptor-source across a chain's node-urls", nil,
+			utils.LogAttr("configured", apip.descriptorConfig.String()),
+			utils.LogAttr("conflicting", wanted.String()),
+			utils.LogAttr("resolution", "block parsing resolves through one registry per chain, so every gRPC node-url on a chain must declare the same descriptor-source and descriptor-set-path"))
+	}
+
+	var remote dyncodec.ProtoFileRegistry = dyncodec.NewGRPCReflectionProtoFileRegistryFromConn(reflectionConnection)
+	remote, err := dyncodec.ProtoFileRegistryForGrpcConfig(grpcConfig, remote)
+	if err != nil {
+		return err
+	}
 	apip.registry = dyncodec.NewRegistry(remote)
 	apip.codec = dyncodec.NewCodec(apip.registry)
+	apip.descriptorConfig = &wanted
 	return nil
 }
 
@@ -404,7 +459,25 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		)
 	}
 
-	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionCallback)
+	// Same optional-interface pattern for server-streaming methods (MAG-2643). Left nil
+	// unless BOTH the relay sender has a subscription manager and this chain's spec
+	// carries a SUBSCRIBE directive — the callback parses every request it is offered,
+	// and that parse is pure overhead on a chain with no streaming methods to find.
+	// When it is nil, a streaming method is refused further down the relay path rather
+	// than being invoked as a unary call.
+	_, _, specHasSubscription := apil.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SUBSCRIBE)
+	var streamCallback grpcproxy.StreamProxyCallBack
+	if subscriptionProvider, ok := apil.relaySender.(GRPCSubscriptionProvider); ok && specHasSubscription {
+		if subscriptionManager := subscriptionProvider.GetGRPCSubscriptionManager(); subscriptionManager != nil {
+			streamCallback = apil.makeStreamRelayCallback(subscriptionManager)
+			utils.LavaFormatInfo("gRPC server-streaming support enabled",
+				utils.LogAttr("address", apil.endpoint.NetworkAddress),
+				utils.LogAttr("chainID", apil.endpoint.ChainID),
+			)
+		}
+	}
+
+	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionCallback, streamCallback)
 	if err != nil {
 		utils.LavaFormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
 	}
@@ -442,6 +515,172 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}
 }
 
+// makeStreamRelayCallback builds the gRPC listener's server-streaming entry point
+// (MAG-2643). It mirrors what ConsumerWebsocketManager does for eth_subscribe: parse
+// the request, recognise it as a subscription, start (or join) the upstream stream,
+// and hand back the per-client channel — except the client connection here is the
+// gRPC stream itself, which grpcproxy holds open and pumps.
+//
+// Returns (nil, nil) for anything that is not a spec-declared gRPC subscription, which
+// puts the call back on the unary path unchanged.
+func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCSubscriptionManager) grpcproxy.StreamProxyCallBack {
+	return func(ctx context.Context, method string, reqBody []byte) (*grpcproxy.StreamResponse, error) {
+		metadataValues, _ := metadata.FromIncomingContext(ctx)
+		dappID := extractDappIDFromGrpcHeader(metadataValues)
+		consumerIp := common.GetIpFromGrpcContext(ctx)
+
+		protocolMessage, err := apil.relaySender.ParseRelay(ctx, method, string(reqBody), "", dappID, consumerIp, convertToMetadataMapOfSlices(metadataValues))
+		if err != nil {
+			// Not this callback's error to report: an unknown or malformed method must
+			// keep producing exactly the error the unary path already produces for it.
+			return nil, nil
+		}
+		if !IsGrpcSubscription(protocolMessage) {
+			return nil, nil
+		}
+
+		guid := utils.GenerateUniqueIdentifier()
+		ctx = utils.WithUniqueIdentifier(ctx, guid)
+
+		// One gRPC stream is one subscriber. The WebSocket path keys clients by
+		// connection UID because a single socket multiplexes many subscriptions; here
+		// the stream is the connection, so the GUID identifies it for its whole life.
+		//
+		// It has to be per-stream: the manager holds one reply channel per client key
+		// per subscription, so two streams sharing a key would overwrite each other's
+		// channel, and releasing one on disconnect would release the other. The cost is
+		// that the manager's per-client limits (subscribe rate, max subscriptions per
+		// client) see every stream as a new client and so never bind for gRPC — the
+		// global subscription cap is what bounds this interface.
+		connectionUniqueId := strconv.FormatUint(guid, 10)
+		clientKey := subscriptionManager.ClientKey(dappID, consumerIp, connectionUniqueId)
+
+		startTime := time.Now()
+		metricsData := metrics.NewRelayAnalytics(dappID, apil.endpoint.ChainID, apil.endpoint.ApiInterface)
+		metricsData.SetProcessingTimestampBeforeRelay(startTime)
+
+		utils.LavaFormatDebug("in <<< GRPC stream subscribe",
+			utils.LogAttr("GUID", ctx),
+			utils.LogAttr("_method", method),
+			utils.LogAttr("dappID", dappID),
+		)
+
+		firstReply, repliesChan, err := subscriptionManager.StartSubscription(ctx, protocolMessage, dappID, consumerIp, connectionUniqueId, metricsData)
+
+		// Snapshot before the emit goroutine starts. AddMetricForGrpc writes Success and
+		// Origin on the struct it is handed, and the per-delivery emits work from these
+		// same fields for the life of the subscription — so each side needs its own
+		// copy. ConsumerWebsocketManager copies for the same reason.
+		subscriptionFields := *metricsData
+		go apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
+		if err != nil {
+			apil.logger.LogRequestAndResponse("grpc stream in/out", true, method, string(reqBody), "", err.Error(), connectionUniqueId, time.Since(startTime), err)
+			return nil, utils.LavaFormatError("failed to start gRPC subscription", err,
+				utils.LogAttr("GUID", ctx),
+				utils.LogAttr("_method", method),
+				utils.LogAttr("dappID", dappID),
+			)
+		}
+
+		return &grpcproxy.StreamResponse{
+			Replies: apil.forwardSubscriptionReplies(ctx, repliesChan, subscriptionFields, snapshotMetricsHeaders(metadataValues)),
+			// firstReply's payload is a JSON acknowledgement, which would not decode as
+			// the method's output type — only its subscription id is carried, as headers.
+			Metadata: streamResponseHeaders(firstReply.GetMetadata()),
+			Close: func() {
+				if err := subscriptionManager.UnsubscribeAll(context.Background(), clientKey); err != nil {
+					utils.LavaFormatWarning("failed to release gRPC subscription on stream close", err,
+						utils.LogAttr("GUID", ctx),
+						utils.LogAttr("_method", method),
+					)
+				}
+				apil.logger.LogRequestAndResponse("grpc stream in/out", false, method, string(reqBody), "", "", connectionUniqueId, time.Since(startTime), nil)
+			},
+		}, nil
+	}
+}
+
+// forwardSubscriptionReplies adapts the manager's reply channel to the raw payload
+// channel grpcproxy pumps, and emits one analytics record per pushed message.
+//
+// The billing shape matches the WebSocket path: the subscribe itself is billed at the
+// spec CU under its real method, and every pushed message is a separate operation at
+// the flat delivery default, so downstream billing stays a plain SUM(cu).
+//
+// subscriptionFields is taken by value because the per-message emits would otherwise
+// race each other on the shared RelayMetrics pointer.
+func (apil *GrpcChainListener) forwardSubscriptionReplies(ctx context.Context, repliesChan <-chan *pairingtypes.RelayReply, subscriptionFields metrics.RelayMetrics, metricsHeaders metadata.MD) <-chan []byte {
+	payloads := make(chan []byte)
+	go func() {
+		// Closing tells grpcproxy the upstream ended, which closes the client stream
+		// with OK.
+		defer close(payloads)
+		for reply := range repliesChan {
+			select {
+			case payloads <- reply.GetData():
+			case <-ctx.Done():
+				// The client is gone and grpcproxy has stopped reading, so this send
+				// would block forever. Leaving repliesChan undrained is safe: the
+				// manager's sender never blocks on a full channel, and the teardown
+				// StreamResponse.Close triggers closes it.
+				return
+			}
+
+			perMessage := subscriptionFields
+			perMessage.Timestamp = time.Now()
+			perMessage.ApiMethod = SubscriptionDeliveryMethod
+			perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
+			go apil.logger.AddMetricForGrpc(&perMessage, nil, &metricsHeaders)
+		}
+	}()
+	return payloads
+}
+
+// transportOwnedGRPCHeaders are response headers the HTTP/2 gRPC transport writes
+// itself. Relay metadata describes a relay payload, so on a streaming response — where
+// the payload never goes on the wire at all — these would either duplicate or contradict
+// what grpc-go already emitted. content-type is the live case: the acknowledgement is
+// JSON and says so, while every frame the client actually receives is application/grpc.
+var transportOwnedGRPCHeaders = map[string]struct{}{
+	"content-type":         {},
+	"content-length":       {},
+	"grpc-encoding":        {},
+	"grpc-accept-encoding": {},
+	"grpc-status":          {},
+	"grpc-message":         {},
+	"te":                   {},
+}
+
+// streamResponseHeaders converts the acknowledgement's relay metadata into gRPC response
+// headers, dropping the ones the transport owns. In practice what survives is the
+// subscription id — the one value that has to reach the client, since the ack body it
+// would otherwise have arrived in cannot be sent.
+func streamResponseHeaders(md []pairingtypes.Metadata) metadata.MD {
+	headers := make(metadata.MD, len(md))
+	for _, entry := range md {
+		key := strings.ToLower(entry.Name)
+		if _, reserved := transportOwnedGRPCHeaders[key]; reserved {
+			continue
+		}
+		headers[key] = append(headers[key], entry.Value)
+	}
+	return headers
+}
+
+// snapshotMetricsHeaders detaches the headers AddMetricForGrpc reads from the request
+// metadata. gRPC metadata strings can alias the transport receive buffer, and a
+// subscription's per-delivery emits keep referring to them for as long as the stream
+// lives — far past the point where the unary path would have released them.
+func snapshotMetricsHeaders(metadataValues metadata.MD) metadata.MD {
+	snapshot := metadata.MD{}
+	for _, key := range []string{metrics.RefererHeaderKey, metrics.UserAgentHeaderKey, metrics.OriginHeaderKey} {
+		if values := metadataValues.Get(key); len(values) > 0 {
+			snapshot.Set(key, strings.Clone(values[0]))
+		}
+	}
+	return snapshot
+}
+
 func (apil *GrpcChainListener) GetListeningAddress() string {
 	if p := apil.listeningAddress.Load(); p != nil {
 		return *p
@@ -467,7 +706,10 @@ func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	_, averageBlockTime, _, _ := parser.ChainBlockStats()
 	nodeUrl := rpcProviderEndpoint.NodeUrls[0]
 	nodeUrl.Url = strings.TrimSuffix(nodeUrl.Url, "/") // remove suffix if exists
-	conn, err := chainproxy.NewGRPCConnector(ctx, nConns, nodeUrl)
+	// Same context for lifetime and dial: this is a startup path, and ctx is the
+	// process's. There is nothing to distinguish — unlike the direct-RPC path,
+	// which builds its pool inside a relay (MAG-2808).
+	conn, err := chainproxy.NewGRPCConnector(ctx, ctx, nConns, nodeUrl)
 	if err != nil {
 		return nil, err
 	}
@@ -476,7 +718,10 @@ func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 
 func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, parser ChainParser, conn grpcConnectorInterface, rpcProviderEndpoint lavasession.RPCProviderEndpoint) (ChainProxy, error) {
 	cp := &GrpcChainProxy{
-		BaseChainProxy:   BaseChainProxy{averageBlockTime: averageBlockTime, ErrorHandler: &GRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID}, ChainID: rpcProviderEndpoint.ChainID, HashedNodeUrl: chainproxy.HashURL(rpcProviderEndpoint.NodeUrls[0].Url)},
+		// NodeUrl is what carries grpc-config onto the request path; without it
+		// cp.NodeUrl.GrpcConfig is the zero value and descriptor-source is invisible
+		// here no matter what the config says (MAG-2350).
+		BaseChainProxy:   BaseChainProxy{averageBlockTime: averageBlockTime, ErrorHandler: &GRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID}, ChainID: rpcProviderEndpoint.ChainID, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(rpcProviderEndpoint.NodeUrls[0].Url)},
 		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
 	}
 	cp.conn = conn
@@ -499,20 +744,17 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 	if !ok {
 		return nil, fmt.Errorf("grpc chain proxy: parser is not a GrpcChainParser")
 	}
-	err = grpcParser.setupForProvider(reflectionConnection)
+	err = grpcParser.setupForProvider(reflectionConnection, &cp.NodeUrl.GrpcConfig)
 	if err != nil {
 		return nil, fmt.Errorf("grpc chain proxy: failed to setup parser: %w", err)
 	}
 	return cp, nil
 }
 
-func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) {
-	if ch != nil {
-		return nil, "", nil, utils.LavaFormatError("Subscribe is not allowed on grpc", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
-	}
+func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
 	conn, err := cp.conn.GetRpc(ctx, true)
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("grpc get connection failed ", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, utils.LavaFormatError("grpc get connection failed ", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 	defer cp.conn.ReturnRpc(conn)
 
@@ -522,7 +764,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.GrpcMessage)
 	if !ok {
-		return nil, "", nil, utils.LavaFormatError("invalid message type in grpc failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
+		return nil, utils.LavaFormatError("invalid message type in grpc failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
 	}
 
 	metadataMap := make(map[string]string, 0)
@@ -538,7 +780,10 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	}
 
 	cl := grpcreflect.NewClientAuto(ctx, conn)
-	descriptorSource := rpcInterfaceMessages.DescriptorSourceFromServer(cl)
+	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&cp.NodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
+	if err != nil {
+		return nil, utils.LavaFormatError("failed resolving grpc descriptor source", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+	}
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(nodeMessage.Path)
 
 	// Check if we have method descriptor already cached.
@@ -549,15 +794,15 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	if !found { // method descriptor not cached yet, need to fetch it and add to cache
 		var descriptor desc.Descriptor
 		if descriptor, err = descriptorSource.FindSymbol(svc); err != nil {
-			return nil, "", nil, utils.LavaFormatError("descriptorSource.FindSymbol", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+			return nil, utils.LavaFormatError("descriptorSource.FindSymbol", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 		}
 		serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
 		if !ok {
-			return nil, "", nil, utils.LavaFormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "descriptor", Value: descriptor})
+			return nil, utils.LavaFormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "descriptor", Value: descriptor})
 		}
 		methodDescriptor = serviceDescriptor.FindMethodByName(methodName)
 		if methodDescriptor == nil {
-			return nil, "", nil, utils.LavaFormatError("serviceDescriptor.FindMethodByName returned nil", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "methodName", Value: methodName})
+			return nil, utils.LavaFormatError("serviceDescriptor.FindMethodByName returned nil", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "methodName", Value: methodName})
 		}
 
 		// add the descriptor to the chainProxy cache
@@ -575,11 +820,11 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 			msgLocal := msgFactory.NewMessage(methodDescriptor.GetInputType())
 			err = proto.Unmarshal(nodeMessage.Msg, msgLocal)
 			if err != nil {
-				return nil, "", nil, utils.LavaFormatError("Failed to unmarshal proto.Unmarshal(nodeMessage.Msg, msgLocal)", err)
+				return nil, utils.LavaFormatError("Failed to unmarshal proto.Unmarshal(nodeMessage.Msg, msgLocal)", err)
 			}
 			jsonBytes, err := marshalJSON(msgLocal)
 			if err != nil {
-				return nil, "", nil, utils.LavaFormatError("Failed to unmarshal marshalJSON(msgLocal)", err)
+				return nil, utils.LavaFormatError("Failed to unmarshal marshalJSON(msgLocal)", err)
 			}
 			reader = bytes.NewReader(jsonBytes)
 		} else {
@@ -594,7 +839,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 		AllowUnknownFields:    true,
 	})
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("Failed to create formatter", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, utils.LavaFormatError("Failed to create formatter", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 
 	// used when parsing the grpc result
@@ -603,7 +848,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	if formatMessage {
 		err = rp.Next(msg)
 		if err != nil {
-			return nil, "", nil, utils.LavaFormatError("rp.Next(msg) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+			return nil, utils.LavaFormatError("rp.Next(msg) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 		}
 	}
 
@@ -619,15 +864,28 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 	defer cancel()
 	err = conn.Invoke(connectCtx, "/"+nodeMessage.Path, msg, response, grpc.Header(&respHeaders))
 	if err != nil {
+		// A corroborated rate limit fails the send with the typed sentinel — matching the
+		// HTTP transports — instead of being converted into a node-error reply. gRPC has
+		// no status code to check, so common.RateLimitFromGRPC keys on the known texts,
+		// or on RESOURCE_EXHAUSTED corroborated by a retry delay in the metadata.
+		if st, ok := status.FromError(err); ok {
+			if retryAfter, limited := common.RateLimitFromGRPC(uint32(st.Code()), st.Message(), respHeaders); limited {
+				return nil, utils.LavaFormatWarning("gRPC node rate-limited the request", common.RateLimited(err, retryAfter),
+					utils.Attribute{Key: "GUID", Value: ctx},
+					utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID},
+					utils.Attribute{Key: "apiName", Value: nodeMessage.Path},
+				)
+			}
+		}
 		// Validate if the error is related to the provider connection to the node or it is a valid error
 		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
 		if parsedError := cp.HandleNodeError(ctx, err); parsedError != nil {
-			return nil, "", nil, parsedError
+			return nil, parsedError
 		}
 		// return the node's error back to the client as the error type is a invalid request which is cu deductible
 		respBytes, statusCode, handlingError := parseGrpcNodeErrorToReply(ctx, err)
 		if handlingError != nil {
-			return nil, "", nil, handlingError
+			return nil, handlingError
 		}
 		// set status code for user header
 		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(int(statusCode)))) // we ignore this error here since this code can be triggered not from grpc
@@ -638,13 +896,13 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 				Metadata: convertToMetadataMapOfSlices(respHeaders),
 			},
 		}
-		return reply, "", nil, nil
+		return reply, nil
 	}
 
 	var respBytes []byte
 	respBytes, err = proto.Marshal(response)
 	if err != nil {
-		return nil, "", nil, utils.LavaFormatError("proto.Marshal(response) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, utils.LavaFormatError("proto.Marshal(response) Failed", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 	// set response status code
 	validResponseStatus := http.StatusOK
@@ -657,7 +915,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, ch chan interface{}, 
 			Metadata: convertToMetadataMapOfSlices(respHeaders),
 		},
 	}
-	return reply, "", nil, nil
+	return reply, nil
 }
 
 // This method assumes that the error is due to misuse of the request arguments, meaning the user would like to get
@@ -694,8 +952,10 @@ func marshalJSON(msg proto.Message) ([]byte, error) {
 
 // Shutdown drains in-flight gRPC unary requests and closes the listener.
 // http.Server.Shutdown sends HTTP/2 GOAWAY frames automatically — that is
-// the gRPC "going away" equivalent for streaming clients (the smart router's
-// gRPC API is currently unary-only, so no client streams exist to drain).
+// the gRPC "going away" equivalent for the server-streaming subscriptions the
+// listener now serves. Each of those ends when its stream context is cancelled,
+// which releases the client from the upstream subscription via
+// grpcproxy.StreamResponse.Close.
 func (apil *GrpcChainListener) Shutdown(ctx context.Context) error {
 	if apil == nil || apil.httpServer == nil {
 		return nil

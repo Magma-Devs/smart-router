@@ -21,9 +21,12 @@ var ( // Consumer Side Errors
 	ContextDoneNoNeedToLockSelectionError   = errors.New("Context deadline exceeded while trying to lock selection")
 	BlockEndpointError                      = errors.New("Block the endpoint")
 	ConsistencyPreValidationError           = errors.New("endpoint failed pre-request consistency validation")
-	SelectedProviderUnavailableError        = errors.New("Header-selected provider has already failed for this request")
+	// The two outcomes of `lava-select-provider`, kept apart because the message
+	// reaches the caller verbatim: "not a provider here" and "already failed"
+	// call for different reactions.
+	SelectedProviderUnavailableError   = errors.New("Header-selected provider is not a valid provider for this request")
+	SelectedProviderAlreadyFailedError = errors.New("Header-selected provider has already failed for this request")
 )
-
 
 // SessionOutOfSyncGRPCCode is the gRPC status code used when wrapping SessionOutOfSyncError
 // as a gRPC status error. This value was historically derived from the cosmos SDK error code (677).

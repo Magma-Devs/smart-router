@@ -37,7 +37,11 @@ func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport
 	errorCode, errorMessage := chainlib.ExtractNodeErrorDetails(err)
 	classified := common.ClassifyError(connError, chainFamily, transport, errorCode, errorMessage)
 
-	return classified, common.NewLavaError(classified, err.Error())
+	// Wrap rather than flatten: the returned error must keep the original reachable so
+	// errors.Is still resolves its sentinel downstream. Flattening to err.Error() here
+	// is what severed context.Canceled and left the relay-race carve-out at the endpoint
+	// health decision permanently false (MAG-2648).
+	return classified, common.NewLavaErrorWrapping(classified, err)
 }
 
 // classifyAndWrap is a convenience that calls classifyDirectRPCError and returns

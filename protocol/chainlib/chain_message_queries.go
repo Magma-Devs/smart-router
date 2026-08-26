@@ -1,13 +1,8 @@
 package chainlib
 
 import (
-	"github.com/magma-Devs/smart-router/protocol/common"
 	types "github.com/magma-Devs/smart-router/types/spec"
 )
-
-func ShouldSendToAllProviders(chainMessage ChainMessage) bool {
-	return chainMessage.GetApi().Category.Stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS
-}
 
 func GetAddon(chainMessage ChainMessageForSend) string {
 	return chainMessage.GetApiCollection().CollectionData.AddOn
@@ -23,6 +18,35 @@ func GetComputeUnits(chainMessage ChainMessageForSend) uint64 {
 
 func GetStateful(chainMessage ChainMessageForSend) uint32 {
 	return chainMessage.GetApi().Category.Stateful
+}
+
+// IsGrpcSubscription reports whether this message targets a gRPC server-streaming
+// method, from the SUBSCRIBE parse directive its API carries in the spec.
+//
+// The spec is what decides routing, not a live reflection lookup. Reflection is
+// throttled or switched off on many public gRPC gateways (the header of
+// config/smartrouter_examples/smartrouter_cosmos.yml calls this out), and a router
+// that could only learn streaming-ness from reflection fell back to a unary Invoke
+// whenever the lookup failed. A unary invoke on a server-streaming method reads one
+// message and then errors on the second, so the caller got a truncated stream after
+// waiting out the hanging_api timeout — a silent wrong answer rather than a refusal
+// (MAG-2643). Reading it from the spec means the classification is available before
+// any upstream is touched, and is identical whether or not reflection answers.
+//
+// The signal is the SUBSCRIBE function tag — the same one the WebSocket path uses,
+// and the only sanctioned way to declare a subscription: `category.subscription` is
+// on lava-specs' removed-fields list and its CI rejects any spec carrying it.
+//
+// The interface check keeps this gRPC-scoped. A tendermintrpc collection carries
+// SUBSCRIBE directives too, and those belong to the WebSocket path.
+func IsGrpcSubscription(chainMessage ChainMessageForSend) bool {
+	if chainMessage == nil {
+		return false
+	}
+	if chainMessage.GetApiCollection().GetCollectionData().ApiInterface != types.APIInterfaceGrpc {
+		return false
+	}
+	return IsFunctionTagOfType(chainMessage, types.FUNCTION_TAG_SUBSCRIBE)
 }
 
 func GetParseDirective(api *types.Api, apiCollection *types.ApiCollection) *types.ParseDirective {

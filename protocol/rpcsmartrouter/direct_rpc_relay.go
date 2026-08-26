@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -33,12 +34,44 @@ type DirectRPCRelaySender struct {
 	groupLabel          string             // Cross-validation group label of this provider (may be empty)
 }
 
-// maxResponseSizeForBlockExtraction is the threshold above which we skip JSON parsing
-// for block height extraction. Responses larger than this (e.g. debug_traceTransaction,
-// trace_replayBlockTransactions) are too expensive to unmarshal and rarely contain
-// useful block height info. The ChainTracker independently maintains per-endpoint
-// block tracking, so skipping extraction here is safe.
-const maxResponseSizeForBlockExtraction = 1 * 1024 * 1024 // 1 MB
+// maxResponseSizeForBlockExtraction is the threshold above which block-height extraction
+// is skipped, on every transport (MAG-2557). One cap rather than one per transport: what
+// differs between JSON-RPC and gRPC is the encoding, not the size of the thing we want to
+// read, so splitting the number by transport would be two knobs serving one decision.
+//
+// The value is derived, not chosen. A block-extraction cap has to sit ABOVE the largest
+// response we legitimately want to parse, because on both transports the biggest response
+// IS the block source:
+//
+//   - gRPC: GET_BLOCKNUM resolves to cosmos.base.tendermint.v1beta1.Service/GetLatestBlock
+//     across the Cosmos family (AKASH, BABYLON, COSMOSSDK, DYDX, KAVA, SEI) and
+//     GET_BLOCK_BY_NUM to GetBlockByHeight — the whole block, every tx included.
+//   - JSON-RPC: GET_BLOCK_BY_NUM is eth_getBlockByNumber, which with full transaction
+//     objects measures ~460 KB median and ~670 KB peak over recent Ethereum mainnet blocks
+//     (Base ~385/577 KB) — already inside 1.5x of the 1 MB this constant used to carry,
+//     and that was a quiet sample.
+//
+// The ceiling to clear is therefore the largest block a chain can legally produce: its
+// consensus block.max_bytes — 4 MB on dYdX, 3 MB on Osmosis, 2 MB on Cosmos Hub, and
+// Tendermint's own default 21 MB. 32 MB is the next power of two above that default. A cap
+// below it fires only on full blocks — during congestion, silently, exactly when tip
+// accuracy matters most. A cap belongs above the range of legitimate responses, not inside
+// it.
+//
+// Deliberately not the transport's own MaxCallRecvMsgSize (512 MB): gRPC refuses to decode
+// a message larger than that before extraction ever runs, so a cap set there could never
+// fire. It would read as a guard and behave as none.
+//
+// What it buys differs by path, and neither is the primary filter:
+//   - On gRPC it is defense in depth. Extraction returns early unless the method carries a
+//     spec parse_directive, and only ~17 exist across all 55 gRPC collections in the
+//     catalog, so an untagged multi-MB response never reaches the unmarshal/marshal
+//     expansion at any size.
+//   - On JSON-RPC the EVM fallback is a switch over named methods with no default branch,
+//     so debug_traceTransaction and friends already return without unmarshalling whatever
+//     their size. The one method this genuinely bounds is eth_getLogs, which unmarshals the
+//     full array to read a block number off its first element.
+const maxResponseSizeForBlockExtraction = 32 * 1024 * 1024 // 32 MB
 
 // extractBlockHeightFromJSONResponse extracts block height using spec-driven parsing.
 // This works for any API interface (EVM, Tendermint, etc.) by using the chain's
@@ -48,10 +81,11 @@ func extractBlockHeightFromJSONResponse(
 	responseData []byte,
 	chainMessage chainlib.ChainMessage,
 ) int64 {
-	// Guard: skip block extraction for very large responses (e.g. debug/trace).
-	// Parsing multi-MB responses is extremely expensive (CPU + GC pressure) and
-	// these responses rarely contain block height info. Per-endpoint ChainTracker
-	// provides block tracking independently as a fallback.
+	// Guard: skip block extraction for very large responses. Parsing multi-MB responses
+	// is expensive (CPU + GC pressure) and the ones that reach an unmarshal here without
+	// carrying a height are led by eth_getLogs — see maxResponseSizeForBlockExtraction,
+	// which is shared with the gRPC path. Per-endpoint ChainTracker provides block
+	// tracking independently as a fallback when it fires.
 	if len(responseData) > maxResponseSizeForBlockExtraction {
 		utils.LavaFormatDebug("skipping block extraction for large response",
 			utils.LogAttr("response_size", len(responseData)),
@@ -216,6 +250,25 @@ func extractBlockHeightFromGRPCResponse(
 	responseData []byte,
 	chainMessage chainlib.ChainMessage,
 ) int64 {
+	// Guard: skip block extraction for pathologically large responses (MAG-2557).
+	// Extraction here is not a single parse but a three-step expansion — proto.Unmarshal
+	// into a dynamic.Message, MarshalJSON of that message, then a []byte copy of the
+	// resulting string (grpcMessage.NewParsableRPCInput). Each step allocates a fresh
+	// full-size representation, and JSON is several times the width of the packed proto it
+	// came from, so an oversized response multiplies into the router's heap.
+	//
+	// See maxResponseSizeForBlockExtraction for why the cap sits above every legal block
+	// rather than at some smaller round number. Per-endpoint ChainTracker provides block
+	// tracking independently as a fallback when it does fire.
+	if len(responseData) > maxResponseSizeForBlockExtraction {
+		utils.LavaFormatDebug("skipping gRPC block extraction for large response",
+			utils.LogAttr("response_size", len(responseData)),
+			utils.LogAttr("threshold", maxResponseSizeForBlockExtraction),
+			utils.LogAttr("method", chainMessage.GetApi().Name),
+		)
+		return 0
+	}
+
 	// Get parse directive from chain message (contains spec-defined parsing rules)
 	parseDirective := chainMessage.GetParseDirective()
 	if parseDirective == nil {
@@ -499,7 +552,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		if statusCode < 200 || statusCode >= 300 {
 			classifierMessage = fmt.Sprintf("HTTP %d: %s", statusCode, errorMessage)
 		}
-		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, errorCode, classifierMessage)
+		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportJsonRPC, errorCode, classifierMessage)
 
 		// MAG-1870 — HTTP status must be authoritative for 4xx-class transport
 		// errors. The single-pass classification above iterates matchers in
@@ -521,6 +574,11 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// The statusCode != errorCode guard skips the redundant pass in the
 		// bare-body fallback case where ExtractJSONRPCErrorCode returned 0
 		// and the first pass already ran with errorCode = statusCode.
+		//
+		// Only IsNonRetryable escalates here. The fault-axis flags
+		// (IsUnsupportedMethod, IsRateLimited) keep the first pass's verdict:
+		// the body code is the authoritative statement of *what* went wrong,
+		// and this pass exists solely to override *retryability*.
 		if !result.IsNonRetryable && (statusCode < 200 || statusCode >= 300) && statusCode != errorCode {
 			result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
 		}
@@ -664,7 +722,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		IsNodeError: isNodeError, // Correct transport-level classification
 	}
 	if hasError {
-		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportREST, response.StatusCode, errorMessage)
+		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, response.StatusCode, errorMessage)
 	}
 
 	utils.LavaFormatTrace("REST request completed",
@@ -754,24 +812,87 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			utils.LogAttr("latency", latency),
 		)
 
-		// Check if it's a gRPC status error (use comma-ok idiom to avoid panic)
-		grpcErr, isGRPCErr := err.(*lavasession.GRPCStatusError)
+		// errors.As rather than a bare type assertion: GRPCStatusError now implements
+		// Unwrap, so it is meant to be inspected through wrapping. A plain assertion
+		// would silently stop matching the moment anything wraps the error on its way
+		// here, rerouting node errors into classifyAndWrap with no visible cause.
+		var grpcErr *lavasession.GRPCStatusError
+		isGRPCErr := errors.As(err, &grpcErr)
 
 		if isGRPCErr && response != nil {
-			// gRPC error with status code - might contain valid error response
-			// The response.Data contains the error details in JSON format
-			return &common.RelayResult{
+			// A gRPC status error that still carried a response body: the node
+			// answered, and its answer is an error. Classify it through the same three
+			// steps every other node-error path uses — CheckResponseError, StatusCode,
+			// ApplyNodeErrorClassification — rather than applying a separate rule here.
+			//
+			// Note this arm is the ONLY one that classifies a gRPC node error. The
+			// success path 40 lines below runs the same three steps, but its
+			// CheckResponseError can never report an error: it is reached only with
+			// StatusCode = http.StatusOK, which GrpcMessage.CheckResponseError treats
+			// as "no error" by definition. Its shape is the model to copy; its
+			// hasError branch is unreachable on this transport.
+			//
+			// This arm previously left StatusCode at its 0 default and derived
+			// IsNodeError from `Code >= 13`. Both were wrong, independently:
+			//
+			//   - StatusCode 0 makes GrpcMessage.CheckResponseError report "no error"
+			//     downstream in results_manager.setValidResponse, so any upstream
+			//     error (INVALID_ARGUMENT on a malformed tx, NOT_FOUND on an object)
+			//     was served to the client as a success and was cacheable (MAG-2549).
+			//   - `Code >= 13` additionally left DeadlineExceeded (4) and every other
+			//     sub-13 code marked as not-a-node-error, which is what gates the
+			//     cache write and the lava-identified-node-error header.
+			//
+			// response.StatusCode is the same value the error carried (handleGRPCError
+			// builds both from one errorCode), so this loses nothing.
+			hasError, errorMessage := chainMessage.CheckResponseError(response.Data, response.StatusCode)
+			// GrpcMessage.CheckResponseError decides hasError from the status code alone
+			// and always returns an EMPTY message. Classifying on "" would reduce the
+			// gRPC registry to its three code matchers and silently disable every
+			// message-based row it has — "rate limit", "unimplemented", ENHANCE_YOUR_CALM
+			// — so a RESOURCE_EXHAUSTED saying "rate limit exceeded" would be scored as
+			// an availability failure instead of exempted as healthy-but-busy.
+			//
+			// grpcErr.Message before err.Error(): the former is the node's own status
+			// message, the latter is that message wrapped in our "gRPC error N: "
+			// rendering. Feed the classifier the undecorated text — the wrapper adds a
+			// literal "rpc error" substring (inside "gRPC error") that several guards
+			// key on, and it is our string, not the node's evidence.
+			if errorMessage == "" {
+				errorMessage = grpcErr.Message
+			}
+			if errorMessage == "" {
+				errorMessage = err.Error()
+			}
+			result := &common.RelayResult{
 				Reply: &pairingtypes.RelayReply{
 					Data:     response.Data,                                   // Error response in JSON format
 					Metadata: convertHTTPHeadersToMetadata(response.Metadata), // Include metadata even for errors
 				},
-				Finalized: true,
+				Finalized:  true,
+				StatusCode: response.StatusCode,
 				ProviderInfo: common.ProviderInfo{
 					ProviderAddress: endpointIdentifier,
 					ProviderGroup:   d.groupLabel,
 				},
-				IsNodeError: grpcErr.Code >= 13, // INTERNAL and above are node errors
-			}, nil
+				IsNodeError: hasError,
+			}
+			// This branch returns err == nil, so downstream sees a completed relay
+			// carrying a node error — same shape as the four body-error paths. It
+			// must therefore classify like them: without this, the availability gate
+			// in rpcsmartrouter_server.shouldFailSessionForResult had no carve-out to
+			// consult on the gRPC status-error path and scored every non-OK status as
+			// an availability failure, with no way to exempt a deterministic one.
+			//
+			// ApplyNodeErrorClassification rather than assigning IsNonRetryable alone:
+			// the flags are a set. IsRateLimited is what keeps a busy-but-healthy
+			// endpoint (RESOURCE_EXHAUSTED) out of the availability signal, and
+			// IsUnsupportedMethod is what gates the zero-CU carve-out — setting only
+			// IsNonRetryable is how both ended up classified but never assigned before.
+			if hasError {
+				result.ApplyNodeErrorClassification(d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage)
+			}
+			return result, nil
 		}
 
 		return nil, classifyAndWrap(err, d.chainFamily, common.TransportGRPC)
@@ -829,7 +950,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		IsNodeError: hasError,
 	}
 	if hasError {
-		result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage)
+		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage)
 	}
 
 	return result, nil

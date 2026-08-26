@@ -2,6 +2,7 @@ package lavasession
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -67,6 +68,76 @@ func (ext *RPCStaticProviderEndpoint) Validate() error {
 		return fmt.Errorf("provider api-interface cannot be empty")
 	}
 	return nil
+}
+
+// providerNameScope is the set within which a provider name has to be unique. A session manager is
+// built per chain+api-interface and owns its own pairing map, keyed by the provider's name, so that
+// is exactly the scope where two entries sharing a name collapse into one slot. The same name under
+// a different chain lands in a different session manager and is harmless — rejecting it would break
+// the common convention of labelling every upstream with its operator ("alchemy" on both ETH1 and
+// POLYGON1).
+type providerNameScope struct {
+	chainID      string
+	apiInterface string
+}
+
+// ValidateUniqueProviderNames rejects a configuration in which two providers on the same
+// chain+api-interface share a name. Pass every list that feeds one router — static and backup
+// together — because they are looked up against each other by address and a name shared across the
+// two is as ambiguous as one shared within either.
+//
+// A provider's name IS its routing identity: it is what the session manager keys csm.pairing by and
+// what the retry skip-list holds. Two providers sharing one collapse into a single entry, so one
+// upstream serves every request while the other sits idle, and setting that name aside after a
+// failure removes both and leaves nothing to retry against (MAG-2724).
+//
+// The router therefore refuses to start rather than serving at half capacity on a config it cannot
+// route unambiguously. The message names every collision so one edit fixes the config.
+func ValidateUniqueProviderNames(lists ...[]*RPCStaticProviderEndpoint) error {
+	grouped := map[providerNameScope]map[string][]*RPCStaticProviderEndpoint{}
+	for _, list := range lists {
+		for _, ext := range list {
+			if ext == nil {
+				continue
+			}
+			scope := providerNameScope{chainID: ext.ChainID, apiInterface: ext.ApiInterface}
+			if grouped[scope] == nil {
+				grouped[scope] = map[string][]*RPCStaticProviderEndpoint{}
+			}
+			grouped[scope][ext.Name] = append(grouped[scope][ext.Name], ext)
+		}
+	}
+
+	// Every collision is reported, sorted — an operator who duplicated three names should have to
+	// fix the config once, not boot three times to discover them one at a time. Sorted because the
+	// grouping is a map: reporting in range order would make the same bad config produce a
+	// different message on each run.
+	var collisions []string
+	for scope, byName := range grouped {
+		for name, entries := range byName {
+			if len(entries) < 2 {
+				continue
+			}
+			urls := make([]string, 0, len(entries))
+			for _, entry := range entries {
+				if len(entry.NodeUrls) > 0 {
+					urls = append(urls, entry.NodeUrls[0].Url)
+				}
+			}
+			collisions = append(collisions, fmt.Sprintf(
+				"%q on chain %s api-interface %s is shared by %d providers (urls: %s)",
+				name, scope.chainID, scope.apiInterface, len(entries), strings.Join(urls, ", "),
+			))
+		}
+	}
+	if len(collisions) == 0 {
+		return nil
+	}
+	sort.Strings(collisions)
+	return fmt.Errorf(
+		"duplicate provider names: %s — a provider name is the router's identity for a node, so two nodes sharing one on the same chain and api-interface cannot be told apart; give each a distinct name",
+		strings.Join(collisions, "; "),
+	)
 }
 
 func (endpoint *RPCProviderEndpoint) UrlsString() string {

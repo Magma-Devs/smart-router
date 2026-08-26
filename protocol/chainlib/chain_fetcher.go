@@ -3,6 +3,7 @@ package chainlib
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync/atomic"
@@ -18,7 +19,6 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/sigs"
-	"slices"
 )
 
 const (
@@ -92,6 +92,44 @@ func (cf *ChainFetcher) getVerificationsKey(verification VerificationContainer, 
 	return key
 }
 
+// skipVerification is the single gate deciding whether a verification runs for a node-url.
+// Two independent sources can suppress it: the per-node-url skip-verifications config (with
+// its "*" wildcard), and the process-wide --skip-all-verifications flag. Everything that
+// acts on behalf of a verification must go through here — including needsLatestBlock, so a
+// suppressed verification cannot drag the latest-block probe out to the upstream anyway.
+func skipVerification(url common.NodeUrl, name string) bool {
+	return SkipAllVerifications || url.ShouldSkipVerification(name)
+}
+
+// needsLatestBlock reports whether any verification that will ACTUALLY RUN for this
+// node-url depends on the chain head, and therefore whether Validate has to spend a
+// FetchLatestBlockNum relay against the upstream before verifying.
+//
+// Skipped verifications are excluded deliberately. The latest-block fetch is a real
+// relay: it retries 3x back-to-back and, in Validate, a failure aborts the whole
+// provider. Letting a configured-away verification pull it in meant skip-verifications
+// did not actually stop the router from probing the node — an upstream that rate-limits
+// the burst still got its provider demoted with every verification skipped.
+func needsLatestBlock(url common.NodeUrl, verifications []VerificationContainer) bool {
+	for _, v := range verifications {
+		if skipVerification(url, v.Name) {
+			continue
+		}
+		if v.Value == "" && v.LatestDistance != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// stopValidateRetries reports whether a failed attempt should end Validate's zero-delay
+// retry budget early. The budget exists for a cold-booting node; a rate-limited attempt
+// is different in kind — the extra requests land inside the same limiter window and only
+// add to the load that produced the 429.
+func stopValidateRetries(err error) bool {
+	return err == nil || errors.Is(err, common.StatusCodeError429)
+}
+
 func (cf *ChainFetcher) Validate(ctx context.Context) error {
 	for _, url := range cf.endpoint.NodeUrls {
 		utils.LavaFormatInfo("starting validation for url", utils.LogAttr("url", url.String()))
@@ -105,16 +143,10 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		}
 
 		var latestBlock int64
-		needToFetchLatestBlock := false
-		for _, v := range verifications {
-			if v.Value == "" && v.LatestDistance != 0 {
-				needToFetchLatestBlock = true
-			}
-		}
-		if needToFetchLatestBlock {
+		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
 				latestBlock, err = cf.FetchLatestBlockNum(ctx)
-				if err == nil {
+				if stopValidateRetries(err) {
 					break
 				}
 			}
@@ -126,7 +158,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		// invalidating cache as value might change
 		defer cf.invalidateVerificationsCache()
 		for _, verification := range verifications {
-			if slices.Contains(url.SkipVerifications, verification.Name) {
+			if skipVerification(url, verification.Name) {
 				utils.LavaFormatInfo("Skipping Verification due to provider configuration (skip-verifications setting)", utils.LogAttr("verification", verification.Name))
 				continue
 			}
@@ -134,7 +166,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 			var err error
 			for attempts := 0; attempts < 3; attempts++ {
 				err = cf.Verify(ctx, verification, uint64(latestBlock))
-				if err == nil {
+				if stopValidateRetries(err) {
 					break
 				}
 			}
@@ -196,16 +228,10 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 		}
 
 		var latestBlock int64
-		needToFetchLatestBlock := false
-		for _, v := range verifications {
-			if v.Value == "" && v.LatestDistance != 0 {
-				needToFetchLatestBlock = true
-			}
-		}
-		if needToFetchLatestBlock {
+		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
 				latestBlock, err = cf.FetchLatestBlockNum(ctx)
-				if err == nil {
+				if stopValidateRetries(err) {
 					break
 				}
 			}
@@ -213,13 +239,13 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 		nodeResult.LatestBlock = latestBlock
 
 		for _, verification := range verifications {
-			if slices.Contains(url.SkipVerifications, verification.Name) {
+			if skipVerification(url, verification.Name) {
 				continue
 			}
 			var verifyErr error
 			for attempts := 0; attempts < 3; attempts++ {
 				verifyErr = cf.Verify(ctx, verification, uint64(latestBlock))
-				if verifyErr == nil {
+				if stopValidateRetries(verifyErr) {
 					break
 				}
 			}
@@ -280,7 +306,7 @@ func getExtensionsForVerification(verification VerificationContainer, chainParse
 		ConnectionType: verification.ConnectionType,
 	}
 
-	if chainParser.IsTagInCollection(spectypes.FUNCTION_TAG_SUBSCRIBE, collectionKey) && !SkipWebsocketVerification {
+	if chainParser.IsTagInCollection(spectypes.FUNCTION_TAG_SUBSCRIBE, collectionKey) && !chainParser.SkipWebsocketVerification() {
 		if verification.Extension == "" {
 			extensions = []string{WebSocketExtension}
 		} else {
@@ -345,7 +371,7 @@ func (cf *ChainFetcher) Verify(ctx context.Context, verification VerificationCon
 
 	extensions := getExtensionsForVerification(verification, cf.chainParser)
 
-	reply, _, _, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, extensions)
+	reply, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, chainMessage, extensions)
 	if err != nil {
 		return utils.LavaFormatWarning("[-] verify failed sending chainMessage", err,
 			utils.LogAttr("chainID", cf.endpoint.ChainID),
@@ -471,7 +497,7 @@ func (cf *ChainFetcher) CustomMessage(ctx context.Context, path string, data []b
 	if err != nil {
 		return nil, err
 	}
-	reply, _, _, _, _, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+	reply, _, _, err := cf.chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 	utils.LavaFormatTrace("CustomMessage", utils.Attribute{Key: "reply", Value: reply})
 	if err != nil {
 		return nil, err
@@ -496,9 +522,9 @@ func (cf *ChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) 
 	if err != nil {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" failed creating chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
-	reply, _, _, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+	reply, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 	if err != nil {
-		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebug(tagName+" failed sending chainMessage", []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}, {Key: "error", Value: err}}...)
+		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" failed sending chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 	parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 	if err != nil {
@@ -593,10 +619,10 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 		return "", nil, utils.LavaFormatError(tagName+" failed CraftChainMessage on function template", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 	start := time.Now()
-	reply, _, _, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, nil, chainMessage, nil)
+	reply, proxyUrl, chainId, err := cf.chainRouter.SendNodeMsg(ctx, chainMessage, nil)
 	if err != nil {
 		timeTaken := time.Since(start)
-		return "", nil, utils.LavaFormatDebug(tagName+" failed sending chainMessage", []utils.Attribute{{Key: "sendTime", Value: timeTaken}, {Key: "error", Value: err}, {Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
+		return "", nil, utils.LavaFormatDebugErr(tagName+" failed sending chainMessage", err, []utils.Attribute{{Key: "sendTime", Value: timeTaken}, {Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
 
 	responseData := reply.RelayReply.Data
@@ -666,53 +692,6 @@ func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage Chain
 		parserInput = chainproxy.DefaultParsableRPCInput(respData)
 	}
 	return parserInput, nil
-}
-
-type DummyChainFetcher struct {
-	*ChainFetcher
-}
-
-func (cf *DummyChainFetcher) Validate(ctx context.Context) error {
-	for _, url := range cf.endpoint.NodeUrls {
-		addons := url.Addons
-		verifications, err := cf.chainParser.GetVerifications(addons, url.InternalPath, cf.endpoint.ApiInterface)
-		if err != nil {
-			return err
-		}
-		if len(verifications) == 0 {
-			utils.LavaFormatDebug("no verifications for NodeUrl", utils.Attribute{Key: "url", Value: url.String()})
-		}
-		for _, verification := range verifications {
-			// we give several chances for starting up
-			var err error
-			for attempts := 0; attempts < 3; attempts++ {
-				err = cf.Verify(ctx, verification, 0)
-				if err == nil {
-					break
-				}
-			}
-			if err != nil {
-				return utils.LavaFormatError("invalid Verification on provider startup", err, utils.Attribute{Key: "Addons", Value: addons}, utils.Attribute{Key: "verification", Value: verification.Name})
-			}
-		}
-	}
-	return nil
-}
-
-// overwrite this
-func (cf *DummyChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	return 0, nil
-}
-
-// overwrite this too
-func (cf *DummyChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
-	return "dummy", nil
-}
-
-func NewVerificationsOnlyChainFetcher(ctx context.Context, chainRouter ChainRouter, chainParser ChainParser, endpoint *lavasession.RPCProviderEndpoint) *DummyChainFetcher {
-	cfi := ChainFetcher{chainRouter: chainRouter, chainParser: chainParser, endpoint: endpoint}
-	cf := &DummyChainFetcher{ChainFetcher: &cfi}
-	return cf
 }
 
 // this method will calculate the request hash by changing the original object, and returning the data back to it after calculating the hash

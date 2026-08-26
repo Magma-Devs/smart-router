@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -389,6 +390,70 @@ func TestChainRouterWithDisabledWebSocketInSpec(t *testing.T) {
 	}
 }
 
+// TestSkipWebsocketVerificationIsPerParser pins the fix for MAG-2333.
+//
+// newChainRouter's websocket-enforcement branch used to read a package global that
+// `smartrouter health` flipped per endpoint while probing endpoints concurrently. Two
+// endpoints wanting opposite answers raced, and whichever wrote last decided for both —
+// so healthy legs reported red. The flag now lives on the parser and health builds one
+// parser per endpoint, so concurrent routers must each get the answer they asked for.
+//
+// The endpoint is deliberately http-only against a subscribe-capable spec: that is the
+// exact shape that trips enforcement, and the shape the existing ws tests never reach
+// because they always pair an http URL with a ws URL.
+func TestSkipWebsocketVerificationIsPerParser(t *testing.T) {
+	newSubscribeParser := func(skip bool) ChainParser {
+		t.Helper()
+		parser, err := NewChainParser(spectypes.APIInterfaceJsonRPC)
+		require.NoError(t, err)
+
+		spec := CreateMockSpec()
+		spec.ApiCollections = []*spectypes.ApiCollection{{
+			Enabled:        true,
+			CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceJsonRPC},
+			ParseDirectives: []*spectypes.ParseDirective{{
+				FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE,
+			}},
+		}}
+		parser.SetSpec(spec)
+		parser.SetSkipWebsocketVerification(skip)
+		return parser
+	}
+
+	httpOnlyEndpoint := func() *lavasession.RPCProviderEndpoint {
+		return &lavasession.RPCProviderEndpoint{
+			ChainID:      CreateMockSpec().Index,
+			ApiInterface: spectypes.APIInterfaceJsonRPC,
+			NodeUrls:     []common.NodeUrl{{Url: listenerAddressHttp}},
+		}
+	}
+
+	skipping := newSubscribeParser(true)
+	enforcing := newSubscribeParser(false)
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	var skipErr, enforceErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, skipErr = GetChainRouter(ctx, 1, httpOnlyEndpoint(), skipping)
+	}()
+	go func() {
+		defer wg.Done()
+		_, enforceErr = GetChainRouter(ctx, 1, httpOnlyEndpoint(), enforcing)
+	}()
+	wg.Wait()
+
+	require.NoError(t, skipErr, "a parser that opted out of ws verification must accept an http-only endpoint")
+	require.Error(t, enforceErr, "a parser that did not opt out must still refuse an http-only endpoint for a subscribe-capable spec")
+
+	// Neither router run may have leaked into the other parser or into the process default.
+	require.True(t, skipping.SkipWebsocketVerification())
+	require.False(t, enforcing.SkipWebsocketVerification())
+	require.False(t, SkipWebsocketVerificationDefault, "GetChainRouter must not write the package default")
+}
+
 func TestChainRouterWithEnabledWebSocketInSpec(t *testing.T) {
 	ctx := context.Background()
 	apiInterface := spectypes.APIInterfaceJsonRPC
@@ -759,8 +824,8 @@ func (m *chainProxyMock) GetChainProxyInformation() (common.NodeUrl, string) {
 	return common.NodeUrl{}, urlStr
 }
 
-func (m *chainProxyMock) SendNodeMsg(ctx context.Context, ch chan interface{}, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, subscriptionID string, relayReplyServer *rpcclient.ClientSubscription, err error) {
-	return nil, "", nil, nil
+func (m *chainProxyMock) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
+	return nil, nil
 }
 
 type PolicySt struct {

@@ -48,8 +48,9 @@ type ChainTrackerConfig struct {
 	// by failure backoff. The adaptive /4, /2, /16 tiers AND the block-gap recalibration
 	// are disconnected from scheduling (block-gap estimation still runs for block-time
 	// consumers, it just no longer moves the timer). Per-endpoint trackers set it to
-	// avgBlockTime/2 because relay harvest is the primary block signal, so the dedicated
-	// poll is a sparse fallback. Left 0 (the default) preserves the legacy adaptive
+	// avgBlockTime/divisor (default 2, operator-tunable — see
+	// endpointstate.PollDivisorFlagName) because relay harvest is the primary block signal,
+	// so the dedicated poll is a sparse fallback. Left 0 (the default) preserves the legacy adaptive
 	// cadence — used by the global tracker, whose readers are not yet harvest-fed.
 	//
 	// It is named for what it does (selects the fixed-interval scheduler), not a "floor":
@@ -57,9 +58,10 @@ type ChainTrackerConfig struct {
 	FlatPollInterval time.Duration
 
 	// RelayTipFresh, when set, is the traffic gate (MAG-2159 / Topic B): it reports whether a
-	// FRESH relay-harvested tip already covers this endpoint. When it returns true the dedicated
+	// FRESH observation already covers this endpoint — a relay-harvested tip, or a peer pod's
+	// poll borrowed through the cache backend (MAG-2981). When it returns true the dedicated
 	// poll skips the ENTIRE cycle — no FetchLatestBlockNum and no fork-check FetchBlockHashByNum
-	// — because served traffic is keeping the tip current. The gate lives here, ABOVE the
+	// — because something else is keeping the tip current. The gate lives here, ABOVE the
 	// generic/SVM iChainFetcherWrapper split, so it suppresses both EVM and Solana polls (the
 	// per-poller hook could only ever see the generic path). A skip touches nothing: no upstream
 	// call, no poll-health write, and no SVM cache mutation. Per-endpoint trackers set this; the
@@ -68,8 +70,9 @@ type ChainTrackerConfig struct {
 
 	// MaxRelaySkipsBeforePoll bounds consecutive gate skips: after this many skipped cycles the
 	// tracker forces one real poll for independent fork/liveness verification, so relay traffic
-	// reporting a stable-but-wrong tip cannot suppress the dedicated poll forever. 0 selects
-	// defaultMaxRelaySkipsBeforePoll. Only meaningful when RelayTipFresh is set.
+	// (or a peer pod) reporting a stable-but-wrong tip cannot suppress the dedicated poll
+	// forever — and every pod keeps proving its OWN path to the upstream. 0 selects
+	// DefaultMaxRelaySkipsBeforePoll. Only meaningful when RelayTipFresh is set.
 	MaxRelaySkipsBeforePoll int
 }
 

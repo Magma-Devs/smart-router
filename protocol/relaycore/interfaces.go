@@ -69,11 +69,15 @@ type ResultsSummary struct {
 	NodeErrors                int
 	SpecialNodeErrors         int
 	ProtocolErrors            int
-	HasNonRetryableNodeError  bool  // any node error with IsNonRetryable flag (umbrella — THE RETRY GATE)
-	HasUnsupportedMethod      bool  // subset of non-retryable, for caching decisions and zero-CU
-	HasPermanentProtocolError bool  // any non-retryable protocol error (excluding epoch mismatch)
-	HasEpochMismatch          bool  // any protocol error is epoch mismatch
-	HashErr                   error // hash computation error (nil = hash OK)
+	HasNonRetryableNodeError  bool // any node error with IsNonRetryable flag (umbrella — THE RETRY GATE)
+	HasUnsupportedMethod      bool // subset of non-retryable, for caching decisions and zero-CU
+	HasPermanentProtocolError bool // any non-retryable protocol error (excluding epoch mismatch)
+	HasEpochMismatch          bool // any protocol error is epoch mismatch
+	// OnlyRateLimited is true when at least one attempt failed and every failure so far was
+	// an upstream rate limit — the one failure that is safe to retry even for a stateful
+	// relay or a batch, because the upstream refused before executing anything.
+	OnlyRateLimited bool
+	HashErr         error // hash computation error (nil = hash OK)
 }
 
 // Action represents the post-relay decision action.
@@ -83,6 +87,19 @@ const (
 	ActionRetry Action = iota
 	ActionStop
 )
+
+// String makes Action readable in logs. Without it the retry decision line renders the
+// bare iota — every entry read "action=0", which is worse than not logging it at all.
+func (a Action) String() string {
+	switch a {
+	case ActionRetry:
+		return "retry"
+	case ActionStop:
+		return "stop"
+	default:
+		return "unknown"
+	}
+}
 
 // SendResult represents the pre-relay send result decision.
 type SendResult int

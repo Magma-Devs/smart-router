@@ -46,6 +46,7 @@ type SmartRouterMetricsManager struct {
 	// Endpoint-scoped metrics (labels: spec, apiInterface, endpoint_id, function)
 	endpointTotalRelaysServiced *MappedLabelsCounterVec  // rpc_endpoint_total_relays_serviced
 	endpointTotalErrored        *MappedLabelsCounterVec  // rpc_endpoint_total_errored
+	endpointTotalCancelled      *MappedLabelsCounterVec  // rpc_endpoint_total_cancelled
 	endpointEndToEndLatency     *prometheus.HistogramVec // rpc_endpoint_end_to_end_latency_milliseconds
 	endpointInFlight            *MappedLabelsGaugeVec    // rpc_endpoint_requests_in_flight
 
@@ -59,6 +60,9 @@ type SmartRouterMetricsManager struct {
 	endpointFetchBlockFails        *MappedLabelsCounterVec // rpc_endpoint_fetch_block_fails
 	endpointFetchLatestSuccess     *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_success
 	endpointFetchBlockSuccess      *MappedLabelsCounterVec // rpc_endpoint_fetch_block_success
+	endpointTrackerRequests        *MappedLabelsCounterVec // rpc_endpoint_tracker_requests_total
+	endpointTrackerGateSkips       *MappedLabelsCounterVec // rpc_endpoint_tracker_gate_skips_total
+	endpointTrackerGateErrors      *MappedLabelsCounterVec // rpc_endpoint_tracker_gate_errors_total
 
 	// Router-scoped metrics (labels: spec, apiInterface, function)
 	routerTotalRelaysServiced *prometheus.CounterVec   // smartrouter_total_relays_serviced
@@ -111,7 +115,10 @@ type SmartRouterMetricsManager struct {
 	// black-box internal state so integration tests can verify /debug/reset-all
 	// emptied each store. See MAG-1762.
 	csmBlockedProvidersCount       *prometheus.GaugeVec // smartrouter_csm_blocked_providers
+	csmPrevEpochBlockedProviders   *prometheus.GaugeVec // smartrouter_csm_previous_epoch_blocked_providers
+	csmProviderBlocked             *prometheus.GaugeVec // smartrouter_csm_provider_blocked
 	csmBlockedBackupProvidersCount *prometheus.GaugeVec // smartrouter_csm_blocked_backup_providers
+	endpointServingTier            *prometheus.GaugeVec // smartrouter_endpoint_serving_tier
 	csmStickySessionsCount         *prometheus.GaugeVec // smartrouter_csm_sticky_sessions
 	csmReportedProvidersCount      *prometheus.GaugeVec // smartrouter_csm_reported_providers
 
@@ -133,24 +140,21 @@ type SmartRouterMetricsManager struct {
 	// batchSignatures bounds how many distinct batch signatures may become label values.
 	batchSignatures *batchSignatureRegistry
 
+	// Unmatched-API ("Default-*") method names are bounded the same way (see
+	// default_method_label.go) — defaultMethodOverflow reports when the cap binds.
+	defaultMethodOverflow *prometheus.CounterVec
+	// defaultMethods bounds how many distinct Default-* names may become label values.
+	defaultMethods *batchSignatureRegistry
+
 	// Internal state
 	lock                    sync.RWMutex
 	endpointsHealthChecksOk uint64
-	endpointMetrics         map[string]*EndpointMetrics
 	// urlToProviderNames maps an endpoint URL to every provider name configured to use it.
 	// URL-keyed metric emissions (e.g. ChainTracker OnNewBlock callbacks) must fan out to
 	// ALL provider names sharing the URL — otherwise only the last-registered provider gets
 	// the metric label, leaving its peers stuck at the zero value on dashboards.
 	urlToProviderNames map[string][]string
 	optimizerQoSClient *ConsumerOptimizerQoSClient
-}
-
-// EndpointMetrics holds per-endpoint metrics state for function-level tracking
-type EndpointMetrics struct {
-	spec         string
-	apiInterface string
-	endpointID   string
-	lock         sync.Mutex
 }
 
 // SmartRouterMetricsManagerOptions contains configuration for the metrics manager.
@@ -192,6 +196,13 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	endpointTotalErrored := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
 		Name:       "rpc_endpoint_total_errored",
 		Help:       "Total errored relays for this RPC endpoint, by function.",
+		Labels:     endpointFunctionLabels,
+		Registerer: prometheus.DefaultRegisterer,
+	})
+
+	endpointTotalCancelled := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_total_cancelled",
+		Help:       "Relays cancelled by the router before completion, by function — relay-race losers on stateful broadcasts, and client disconnects. NOT an endpoint fault: these are deliberately excluded from rpc_endpoint_total_errored and from QoS/availability scoring. A high rate here is normal on write-heavy traffic (one winner, N-1 cancelled) and is the signal for tuning broadcast fan-out.",
 		Labels:     endpointFunctionLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
@@ -257,6 +268,43 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name:       "rpc_endpoint_fetch_block_success",
 		Help:       "Total successful specific-block fetch operations for this RPC endpoint.",
 		Labels:     endpointLabels,
+		Registerer: prometheus.DefaultRegisterer,
+	})
+
+	// Counts the actual upstream requests the per-endpoint ChainTracker sends, split by what
+	// the request was for. This is the ONLY metric that tracks tracker REQUEST VOLUME:
+	// rpc_endpoint_fetch_latest_{success,fails} count EVENTS (a new block was detected / the
+	// latest-block fetch failed), so neither moves when the number of requests changes — which
+	// is why the tracker's block-hash traffic was invisible until it was measured by hand.
+	//
+	// kind is bounded to trackerRequestKind* below. Watch kind="block_hash" go to zero when
+	// fork detection is off (--enable-fork-detection), and kind="latest_block" stay flat.
+	endpointTrackerRequests := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_tracker_requests_total",
+		Help:       "Total upstream requests sent by the per-endpoint chain tracker, by kind (latest_block, block_hash).",
+		Labels:     []string{"spec", "apiInterface", "endpoint_id", "kind"},
+		Registerer: prometheus.DefaultRegisterer,
+	})
+
+	// Counts the poll cycles the tracker's traffic gate suppressed, split by what made the
+	// poll redundant: source="relay" (served traffic kept the tip fresh) or source="peer"
+	// (another pod's poll, borrowed through the cache backend — the fleet gate, MAG-2981).
+	// Together with rpc_endpoint_tracker_requests_total this shows both halves of the
+	// tracker's cadence: requests sent, and ticks that sent nothing and why.
+	endpointTrackerGateSkips := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_tracker_gate_skips_total",
+		Help:       "Total per-endpoint tracker poll cycles suppressed by the traffic gate, by source (relay, peer).",
+		Labels:     []string{"spec", "apiInterface", "endpoint_id", "source"},
+		Registerer: prometheus.DefaultRegisterer,
+	})
+
+	// Counts FAILED calls to the fleet observation store, by operation. Without it a broken
+	// cache backend and a fleet with nothing to share are indistinguishable — both leave
+	// rpc_endpoint_tracker_gate_skips_total{source="peer"} at zero.
+	endpointTrackerGateErrors := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_tracker_gate_errors_total",
+		Help:       "Total failed fleet-observation-store calls made by the per-endpoint tracker gate, by op (fetch, publish).",
+		Labels:     []string{"spec", "apiInterface", "endpoint_id", "op"},
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
@@ -448,8 +496,16 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	csmStateLabels := []string{"spec", "apiInterface"}
 	csmBlockedProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_providers",
-		Help: "Size of ConsumerSessionManager.previousEpochBlockedProviders (cross-epoch known-bad provider memory). Goes to 0 after /debug/reset-all.",
+		Help: "Number of providers currently blocked and receiving no traffic (ConsumerSessionManager.currentlyBlockedProviderAddresses). Non-zero means the chain is degraded. Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels)
+	csmPrevEpochBlockedProviders := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_csm_previous_epoch_blocked_providers",
+		Help: "Size of ConsumerSessionManager.previousEpochBlockedProviders (cross-epoch known-bad provider memory, briefly populated at an epoch boundary and cleared once the re-block pass runs). Goes to 0 after /debug/reset-all. This is what smartrouter_csm_blocked_providers reported before the metric was corrected.",
+	}, csmStateLabels)
+	csmProviderBlocked := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_csm_provider_blocked",
+		Help: "Whether this specific provider is currently blocked (1=blocked, 0=serving). Companion to the smartrouter_csm_blocked_providers count, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
+	}, []string{"spec", "apiInterface", "provider_address"})
 	csmBlockedBackupProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_backup_providers",
 		Help: "Size of ConsumerSessionManager.blockedBackupProviders (per-epoch backup-provider failure memory). Goes to 0 after /debug/reset-all.",
@@ -461,6 +517,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	csmReportedProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_reported_providers",
 		Help: "Number of providers currently in the ReportedProviders unresponsiveness register. Goes to 0 after /debug/reset-all.",
+	}, csmStateLabels)
+	endpointServingTier := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_endpoint_serving_tier",
+		Help: "Which provider tier an endpoint is serving from: 2=primaries, 1=DEGRADED (backups only), 0=DARK (no healthy providers). Since MAG-2525 a dark chain no longer crash-loops, so this gauge — not pod restarts — is the signal that a chain cannot serve. Expected time at 0 depends on how the chain went dark: dark at boot is retried from ~2s (doubling to a 3m ceiling), but a chain demoted to dark after booting healthy is only re-checked by the 15m epoch re-verifier. Size alert windows for the 15m case.",
 	}, csmStateLabels)
 
 	// =========================================================================
@@ -512,6 +572,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_batch_signature_overflow_total",
 		Help: `Label normalizations that fell into method="batch:other". reason="cap": the spec exhausted its distinct-signature budget. reason="wide": one batch spanned more distinct methods than a signature may name. Non-zero means per-batch-type breakdowns are lossy — raise the cap or accept the aggregation.`,
 	}, []string{"spec", "reason"})
+	defaultMethodOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_default_method_overflow_total",
+		Help: `Label normalizations that fell into method="Default-other": the spec exhausted its distinct unmatched-API name budget. Sustained growth means clients are hitting URLs the spec does not match — concrete IDs in the path mint a new name per request — which usually indicates a spec gap (e.g. a path variant the templates miss).`,
+	}, []string{"spec"})
 
 	cacheLabels := []string{"spec", "apiInterface", "method"}
 	cacheRequestsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -575,19 +639,24 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerRequestsBatch = registerOrReuse(routerRequestsBatch)
 	batchSize = registerOrReuse(batchSize)
 	batchSignatureOverflow = registerOrReuse(batchSignatureOverflow)
+	defaultMethodOverflow = registerOrReuse(defaultMethodOverflow)
 	cacheRequestsTotalMetric = registerOrReuse(cacheRequestsTotalMetric)
 	cacheSuccessTotalMetric = registerOrReuse(cacheSuccessTotalMetric)
 	cacheFailedTotalMetric = registerOrReuse(cacheFailedTotalMetric)
 	cacheLatencyHistogram = registerOrReuse(cacheLatencyHistogram)
 	csmBlockedProvidersCount = registerOrReuse(csmBlockedProvidersCount)
+	csmPrevEpochBlockedProviders = registerOrReuse(csmPrevEpochBlockedProviders)
+	csmProviderBlocked = registerOrReuse(csmProviderBlocked)
 	csmBlockedBackupProvidersCount = registerOrReuse(csmBlockedBackupProvidersCount)
 	csmStickySessionsCount = registerOrReuse(csmStickySessionsCount)
 	csmReportedProvidersCount = registerOrReuse(csmReportedProvidersCount)
+	endpointServingTier = registerOrReuse(endpointServingTier)
 
 	manager := &SmartRouterMetricsManager{
 		// Endpoint-scoped (with function)
 		endpointTotalRelaysServiced: endpointTotalRelaysServiced,
 		endpointTotalErrored:        endpointTotalErrored,
+		endpointTotalCancelled:      endpointTotalCancelled,
 		endpointEndToEndLatency:     endpointEndToEndLatency,
 		endpointInFlight:            endpointInFlight,
 
@@ -601,6 +670,9 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		endpointFetchBlockFails:        endpointFetchBlockFails,
 		endpointFetchLatestSuccess:     endpointFetchLatestSuccess,
 		endpointFetchBlockSuccess:      endpointFetchBlockSuccess,
+		endpointTrackerRequests:        endpointTrackerRequests,
+		endpointTrackerGateSkips:       endpointTrackerGateSkips,
+		endpointTrackerGateErrors:      endpointTrackerGateErrors,
 
 		// Router-scoped (with function)
 		routerTotalRelaysServiced: routerTotalRelaysServiced,
@@ -658,6 +730,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		batchSignatureOverflow: batchSignatureOverflow,
 		batchSignatures:        newBatchSignatureRegistry(),
 
+		// Unmatched-API method bounding
+		defaultMethodOverflow: defaultMethodOverflow,
+		defaultMethods:        newDefaultMethodRegistry(),
+
 		// Cache group
 		cacheRequestsTotalMetric: cacheRequestsTotalMetric,
 		cacheSuccessTotalMetric:  cacheSuccessTotalMetric,
@@ -666,9 +742,12 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 
 		// CSM state-store gauges
 		csmBlockedProvidersCount:       csmBlockedProvidersCount,
+		csmPrevEpochBlockedProviders:   csmPrevEpochBlockedProviders,
+		csmProviderBlocked:             csmProviderBlocked,
 		csmBlockedBackupProvidersCount: csmBlockedBackupProvidersCount,
 		csmStickySessionsCount:         csmStickySessionsCount,
 		csmReportedProvidersCount:      csmReportedProvidersCount,
+		endpointServingTier:            endpointServingTier,
 
 		// Internal state
 		// Start fail-closed (0 = not-ready) so /readyz reports 503 until the
@@ -677,7 +756,6 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		// This keeps a freshly-booted pod out of the k8s Service load-balancer
 		// until it has actually verified a provider.
 		endpointsHealthChecksOk: 0,
-		endpointMetrics:         make(map[string]*EndpointMetrics),
 		urlToProviderNames:      make(map[string][]string),
 		optimizerQoSClient:      options.OptimizerQoSClient,
 	}
@@ -790,6 +868,18 @@ func (m *SmartRouterMetricsManager) AddEndpointRelayServiced(spec, apiInterface,
 	function = m.normalizeMethodLabel(spec, function)
 	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "function": function}
 	m.endpointTotalRelaysServiced.WithLabelValues(labels).Inc()
+}
+
+// AddEndpointRelayCancelled increments the cancelled counter for an endpoint and function.
+// Cancelled means WE stopped the relay — a relay-race loser or a client disconnect — so it
+// is deliberately not an error (MAG-2648).
+func (m *SmartRouterMetricsManager) AddEndpointRelayCancelled(spec, apiInterface, endpointID, function string) {
+	if m == nil {
+		return
+	}
+	function = m.normalizeMethodLabel(spec, function)
+	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "function": function}
+	m.endpointTotalCancelled.WithLabelValues(labels).Inc()
 }
 
 // AddEndpointRelayErrored increments the error counter for an endpoint and function
@@ -919,14 +1009,6 @@ func (m *SmartRouterMetricsManager) RegisterEndpoint(spec, apiInterface, endpoin
 	}
 
 	m.lock.Lock()
-	key := spec + "|" + apiInterface + "|" + endpointID
-	if _, exists := m.endpointMetrics[key]; !exists {
-		m.endpointMetrics[key] = &EndpointMetrics{
-			spec:         spec,
-			apiInterface: apiInterface,
-			endpointID:   endpointID,
-		}
-	}
 	// Append with dedup: multiple providers can share a URL, and the same (URL, provider)
 	// pair can be registered more than once (e.g. a provider with duplicate node-urls).
 	existing := m.urlToProviderNames[endpointID]
@@ -1031,20 +1113,52 @@ func (m *SmartRouterMetricsManager) RecordDirectRelayStart(spec, apiInterface, e
 	m.AddEndpointInFlightRequest(spec, apiInterface, endpointID, function)
 }
 
+// RelayOutcome is how a direct relay ended. It is three-valued rather than a success
+// bool because "cancelled" is neither (MAG-2648): the router aborted the relay itself —
+// a relay-race loser on a stateful broadcast, or a client that hung up — so the endpoint
+// neither served nor failed it, and must not be scored either way.
+type RelayOutcome int
+
+const (
+	RelayOutcomeSuccess RelayOutcome = iota
+	RelayOutcomeError
+	// RelayOutcomeCancelled: we stopped it. Records the in-flight decrement and the
+	// cancelled counter, and nothing else.
+	RelayOutcomeCancelled
+)
+
 // RecordDirectRelayEnd records the end of an in-flight request and updates metrics.
 // relay carries the request classification (IsWrite/IsArchive/IsDebugTrace/IsBatch)
 // that the call site should populate on the shared RelayMetrics before calling here.
-func (m *SmartRouterMetricsManager) RecordDirectRelayEnd(spec, apiInterface, endpointID, function string, latencyMs float64, success bool, relay *RelayMetrics) {
+//
+// Every outcome — including cancelled — MUST reach the in-flight decrement below, which
+// pairs the increment from RecordDirectRelayStart. Returning early for cancelled relays
+// would leak rpc_endpoint_requests_in_flight upward forever, one per race loser.
+func (m *SmartRouterMetricsManager) RecordDirectRelayEnd(spec, apiInterface, endpointID, function string, latencyMs float64, outcome RelayOutcome, relay *RelayMetrics) {
 	if m == nil {
 		return
 	}
 	// Observe the batch's element count BEFORE collapsing the label, and do it only
 	// here: this is the single once-per-completed-relay entry point, so the other
 	// recorders normalize without observing and a batch is counted exactly once.
-	m.observeBatchSize(spec, apiInterface, function)
+	// A cancelled relay never completed, so it is not observed.
+	if outcome != RelayOutcomeCancelled {
+		m.observeBatchSize(spec, apiInterface, function)
+	}
 	function = m.normalizeMethodLabel(spec, function)
 
 	m.SubEndpointInFlightRequest(spec, apiInterface, endpointID, function)
+
+	// A cancelled relay stops here: the in-flight gauge is balanced and the cancellation
+	// is counted, but no latency is observed (the relay never finished, so the number is
+	// meaningless) and none of the router request-group counters move — that keeps
+	// requests_total == requests_success + requests_failed a true invariant.
+	if outcome == RelayOutcomeCancelled {
+		m.AddEndpointRelayCancelled(spec, apiInterface, endpointID, function)
+		return
+	}
+
+	success := outcome == RelayOutcomeSuccess
 
 	if success {
 		m.RecordRelaySuccess(spec, apiInterface, endpointID, function, latencyMs)
@@ -1133,6 +1247,92 @@ func (m *SmartRouterMetricsManager) RecordBlockFetch(spec, apiInterface, endpoin
 				m.AddEndpointFetchBlockFail(spec, apiInterface, providerName)
 			}
 		}
+	}
+}
+
+// TrackerRequestKind values for RecordTrackerRequest. Deliberately a closed set of two —
+// this is a Prometheus label, so it must never carry a raw method name.
+const (
+	// TrackerRequestKindLatestBlock — the "what is your latest block?" poll
+	// (eth_blockNumber, getLatestBlockhash, ...). Sent on every non-gated poll tick.
+	TrackerRequestKindLatestBlock = "latest_block"
+
+	// TrackerRequestKindBlockHash — a block-hash fetch (eth_getBlockByNumber, getBlock).
+	// Only fork detection asks for these, so this series is zero when it is off.
+	TrackerRequestKindBlockHash = "block_hash"
+)
+
+// AddEndpointTrackerRequest increments the tracker upstream-request counter.
+//
+// Guards the counter itself, not just the manager: MappedLabelsCounterVec.WithLabelValues has
+// no nil receiver check, and partially-built managers exist (test fixtures construct only the
+// counters they assert on). A metric must never be the thing that takes the poll goroutine down.
+func (m *SmartRouterMetricsManager) AddEndpointTrackerRequest(spec, apiInterface, endpointID, kind string) {
+	if m == nil || m.endpointTrackerRequests == nil {
+		return
+	}
+	labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "kind": kind}
+	m.endpointTrackerRequests.WithLabelValues(labels).Inc()
+}
+
+// TrackerGateSkipSource values for RecordTrackerGateSkip. A closed set of two, mirroring the
+// two signals that can make a dedicated poll redundant.
+const (
+	// TrackerGateSkipSourceRelay — served relay traffic kept this endpoint's tip fresh.
+	TrackerGateSkipSourceRelay = "relay"
+	// TrackerGateSkipSourcePeer — another pod polled this endpoint and published the result
+	// to the cache backend (MAG-2981).
+	TrackerGateSkipSourcePeer = "peer"
+)
+
+// TrackerGateOp values for RecordTrackerGateError: the two calls the gate makes to the fleet
+// observation store.
+const (
+	// TrackerGateOpFetch — reading a peer's observation before polling failed, so the pod polled.
+	TrackerGateOpFetch = "fetch"
+	// TrackerGateOpPublish — publishing this pod's own observation to the fleet store failed.
+	TrackerGateOpPublish = "publish"
+)
+
+// RecordTrackerGateError records ONE failed fleet-store call, fanned out like RecordTrackerGateSkip.
+// It is what separates "the cache backend is unreachable or slow" from "no peer has anything to
+// share": both otherwise present only as peer skips sitting at zero.
+func (m *SmartRouterMetricsManager) RecordTrackerGateError(spec, apiInterface, endpointID, op string) {
+	if m == nil || m.endpointTrackerGateErrors == nil {
+		return
+	}
+	for _, providerName := range m.resolveProviderNames(endpointID) {
+		labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": providerName, "op": op}
+		m.endpointTrackerGateErrors.WithLabelValues(labels).Inc()
+	}
+}
+
+// RecordTrackerGateSkip records ONE poll cycle the traffic gate suppressed for an endpoint,
+// fanned out across every provider sharing the URL like RecordTrackerRequest.
+func (m *SmartRouterMetricsManager) RecordTrackerGateSkip(spec, apiInterface, endpointID, source string) {
+	if m == nil || m.endpointTrackerGateSkips == nil {
+		return
+	}
+	for _, providerName := range m.resolveProviderNames(endpointID) {
+		labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": providerName, "source": source}
+		m.endpointTrackerGateSkips.WithLabelValues(labels).Inc()
+	}
+}
+
+// RecordTrackerRequest records ONE upstream request sent by the per-endpoint chain tracker.
+// Fans out across every provider sharing the URL, the same way RecordBlockFetch does, so the
+// per-provider view reflects the real load each of them puts on that upstream.
+//
+// Counted at the transport chokepoint (EndpointPoller.sendRawRequest), so it reflects requests
+// the node actually received — not poll ticks. A tick suppressed by the relay traffic gate
+// sends nothing and is therefore not counted, which is the point: this is the series that
+// makes a traffic reduction provable.
+func (m *SmartRouterMetricsManager) RecordTrackerRequest(spec, apiInterface, endpointID, kind string) {
+	if m == nil {
+		return
+	}
+	for _, providerName := range m.resolveProviderNames(endpointID) {
+		m.AddEndpointTrackerRequest(spec, apiInterface, providerName, kind)
 	}
 }
 
@@ -1282,6 +1482,7 @@ func (m *SmartRouterMetricsManager) SetCrossValidationStragglerMetric(chainId, a
 	if m == nil || outcome == "" {
 		return
 	}
+	method = m.normalizeMethodLabel(chainId, method)
 	m.crossValidationStragglerTotalMetric.WithLabelValues(chainId, apiInterface, method, outcome).Inc()
 }
 
@@ -1300,8 +1501,6 @@ func (m *SmartRouterMetricsManager) UpdateHealthcheckStatusBreakdown(chainId, ap
 	m.routerOverallHealthBreakdown.WithLabelValues(chainId, apiInterface).Set(value)
 }
 
-func (m *SmartRouterMetricsManager) SetProviderLiveness(string, string, string, bool) {}
-
 func (m *SmartRouterMetricsManager) SetProviderSelected(chainId string, apiInterface string, _ string, allProviderScores []ProviderSelectionScores, _ float64) {
 	if m == nil {
 		return
@@ -1316,23 +1515,79 @@ func (m *SmartRouterMetricsManager) SetProviderSelected(chainId string, apiInter
 	}
 }
 
-func (m *SmartRouterMetricsManager) SetBlockedProvider(string, string, string, string, bool) {}
+// SetBlockedProvider publishes whether one specific provider is blocked. The aggregate count in
+// SetCSMBlockedProvidersCount says how many went out; this says which.
+//
+// Was an empty stub, so every blockProvider / restore call site published nothing and the smart
+// router had no per-provider blocked signal at all.
+//
+// providerEndpoint is deliberately NOT a label, and the parameter is ignored. Two reasons:
+//
+//  1. It would be a credential leak. Callers pass Endpoints[0].NetworkAddress, which is the raw
+//     configured node URL — and node URLs embed API keys in their path or query. The relay path
+//     already labels by provider name for exactly this reason ("use provider name (configured
+//     name) instead of raw URL to avoid leaking API keys"), and docs/METRICS.md states the rule
+//     outright: a credential must never reach a Prometheus series.
+//  2. It would go stale. Blocking is a per-provider decision, but Endpoints[0] is one arbitrary
+//     endpoint of several. If that value changes between the block and the unblock, the 0 lands
+//     on a new series and the old one is orphaned at 1 forever.
+//
+// The signature keeps the parameter because it is fixed by ConsumerMetricsManagerInf.
+func (m *SmartRouterMetricsManager) SetBlockedProvider(chainId, apiInterface, providerAddress, _ string, isBlocked bool) {
+	if m == nil {
+		return
+	}
+	value := 0.0
+	if isBlocked {
+		value = 1.0
+	}
+	m.csmProviderBlocked.WithLabelValues(chainId, apiInterface, providerAddress).Set(value)
+}
 
 func (m *SmartRouterMetricsManager) SetQOSMetrics(chainId string, apiInterface string, _ string, _ string, _ *pairingtypes.QualityOfServiceReport, _ *pairingtypes.QualityOfServiceReport, _ int64, _ uint64, _ time.Duration, _ bool) {
 }
 
 func (m *SmartRouterMetricsManager) ResetSessionRelatedMetrics() {}
 
-func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(string, string, map[string]string) {
+// ResetBlockedProvidersMetrics rebases the per-provider blocked gauge onto a new pairing.
+// UpdateAllProviders calls it on every epoch transition with the new epoch's provider set.
+//
+// Without this, a provider that was blocked and then dropped from the pairing leaves a series
+// stuck at 1 that nothing can ever clear: the unblock path only publishes for addresses it finds
+// in the standing block list, and that provider is no longer in it. Over many epochs those
+// phantoms accumulate — a slow cardinality leak that also reads as a permanent outage.
+//
+// Drop every series for this chain first, then seed 0 for each provider in the new pairing, so
+// providers that left are gone rather than frozen. A provider that the re-block pass immediately
+// re-blocks is corrected by the next publishStateSizes tick, which republishes the full truth.
+func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(chainId, apiInterface string, providerAddressToEndpoint map[string]string) {
+	if m == nil {
+		return
+	}
+	m.csmProviderBlocked.DeletePartialMatch(prometheus.Labels{"spec": chainId, "apiInterface": apiInterface})
+	for providerAddress := range providerAddressToEndpoint {
+		m.csmProviderBlocked.WithLabelValues(chainId, apiInterface, providerAddress).Set(0)
+	}
 }
 
-// SetCSMBlockedProvidersCount publishes the size of csm.previousEpochBlockedProviders.
-// Used by integration tests to verify /debug/reset-all emptied the store (MAG-1762).
+// SetCSMBlockedProvidersCount publishes the number of providers currently blocked — the operator-
+// facing "is this chain degraded" signal, and the post-condition integration tests assert against
+// /metrics after /debug/reset-all (MAG-1762).
 func (m *SmartRouterMetricsManager) SetCSMBlockedProvidersCount(chainId, apiInterface string, count int) {
 	if m == nil {
 		return
 	}
 	m.csmBlockedProvidersCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
+}
+
+// SetCSMPreviousEpochBlockedProvidersCount publishes the size of csm.previousEpochBlockedProviders,
+// the cross-epoch carry-over set. Split out from the gauge above, which now reports the thing its
+// name promises.
+func (m *SmartRouterMetricsManager) SetCSMPreviousEpochBlockedProvidersCount(chainId, apiInterface string, count int) {
+	if m == nil {
+		return
+	}
+	m.csmPrevEpochBlockedProviders.WithLabelValues(chainId, apiInterface).Set(float64(count))
 }
 
 // SetCSMBlockedBackupProvidersCount publishes the size of csm.blockedBackupProviders.
@@ -1341,6 +1596,37 @@ func (m *SmartRouterMetricsManager) SetCSMBlockedBackupProvidersCount(chainId, a
 		return
 	}
 	m.csmBlockedBackupProvidersCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
+}
+
+// Serving-tier gauge values. A chain that cannot serve no longer exits the
+// process (MAG-2525), so this gauge carries the signal that pod restarts used to.
+const (
+	ServingTierDark     = 0 // no healthy provider in either tier — endpoint reports unhealthy
+	ServingTierDegraded = 1 // no healthy primaries; serving from backups only
+	ServingTierPrimary  = 2 // serving from primaries
+)
+
+// ServingTier maps healthy per-tier provider counts onto the serving posture.
+// Backups count as serving: the router falls back to them on primary exhaustion,
+// so "all primaries down" is degraded rather than dark.
+func ServingTier(healthyStatic, healthyBackup int) int {
+	switch {
+	case healthyStatic > 0:
+		return ServingTierPrimary
+	case healthyBackup > 0:
+		return ServingTierDegraded
+	default:
+		return ServingTierDark
+	}
+}
+
+// SetEndpointServingTier publishes which provider tier an endpoint is serving
+// from. Alert on < 2 for degraded and == 0 for a chain that is dark.
+func (m *SmartRouterMetricsManager) SetEndpointServingTier(chainId, apiInterface string, healthyStatic, healthyBackup int) {
+	if m == nil {
+		return
+	}
+	m.endpointServingTier.WithLabelValues(chainId, apiInterface).Set(float64(ServingTier(healthyStatic, healthyBackup)))
 }
 
 // SetCSMStickySessionsCount publishes the number of live sticky-session affinities.
