@@ -3014,7 +3014,7 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 	// First pass: Identify which re-blocked providers had successful probes
 	providersNeedingComprehensiveProbe := make(map[string]reBlockedProviderInfo)
 
-	for blockedAddr := range csm.previousEpochBlockedProviders {
+	for blockedAddr, carried := range csm.previousEpochBlockedProviders {
 		cswp, exists := csm.pairing[blockedAddr]
 		isBackup := false
 		if !exists {
@@ -3028,16 +3028,23 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 		// A backup ALWAYS takes the comprehensive-probe branch: !isBackup short-circuits, so a
 		// backup's report state is never consulted at all. That is deliberate — report state is
 		// only meaningful as a health signal for a provider we actually have evidence about, and
-		// a backup that was never selected has none. Falling through to !IsReported for it would
-		// read "absent from reportedProviders" as "healthy" and unblock it with no real check.
+		// a backup that was never selected has none. Falling through to "not reported" for it would
+		// read that as "healthy" and unblock it with no real check.
 		//
-		// Note a backup CAN legitimately appear in reportedProviders: blockProvider's
-		// AddressIndexWasNotFoundError branch marks blockedBackupProviders and then falls through
-		// to the reportProvider block below it. That is irrelevant here precisely because the
-		// short-circuit means we never look.
-		if !isBackup && !csm.reportedProviders.IsReported(blockedAddr) {
-			// Non-backup provider whose probe succeeded (it wasn't added to reportedProviders).
-			// Unblock immediately.
+		// The report state comes from the CARRIED BLOCK RECORD, not from csm.reportedProviders.
+		// The live register cannot answer this question at an epoch transition: UpdateAllProviders
+		// calls reportedProviders.Reset() in its body, while this pass runs from a defer that
+		// sleeps first — so the register is always already empty by the time we get here. Reading
+		// it made every non-backup look unreported, sent all of them down the immediate-unblock
+		// branch, and left this else-branch unreachable for regular providers. The whole point of
+		// re-blocking them ("prevents known-bad providers from getting a clean slate") was undone
+		// in the same tick.
+		//
+		// The record is the honest source: it holds whether the provider was reported at the moment
+		// it was blocked, which is exactly what the register held before the reset.
+		if !isBackup && !carried.Reported {
+			// Non-backup provider that was never reported — no evidence it is bad. Unblock
+			// immediately.
 			utils.LavaFormatInfo("Re-blocked provider's probe succeeded, immediately unblocking",
 				utils.Attribute{Key: "provider", Value: blockedAddr},
 				utils.Attribute{Key: "isBackup", Value: isBackup},
