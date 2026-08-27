@@ -550,6 +550,10 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	for blockedAddr, carried := range csm.previousEpochBlockedProviders {
 		if _, exists := csm.pairing[blockedAddr]; exists {
 			record := carried.withCarryOver()
+			// This loop is the REGULAR pool. A record carried from a backup block still says
+			// Backup: true, and nothing else resets it, so /debug/provider-routing would report
+			// Scope="backup" for a provider whose only standing block is the primary one.
+			record.Backup = false
 			utils.LavaFormatDebug("UpdateAllProviders: Re-blocking provider from previous epoch",
 				utils.Attribute{Key: "provider", Value: blockedAddr},
 				utils.Attribute{Key: "epoch", Value: epoch},
@@ -946,6 +950,12 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 // call (MAG-2599).
 //
 // Backup blocks are NOT touched here, so their reason records deliberately survive.
+//
+// One caveat on the line it logs: with a non-empty addon the branch below APPENDS only the providers
+// that support that addon rather than replacing the list, so a released provider that does not
+// support it is out of the blocked list but not back in validAddresses. The line names it as
+// released, which is true of the blocked list and overstates it as routing. Pre-existing limbo, not
+// introduced here.
 func (csm *ConsumerSessionManager) setValidAddressesToDefaultValue(addon string, extensions []string, ctx context.Context, route ReleaseRoute) {
 	released := csm.currentlyBlockedProviderAddresses
 	csm.currentlyBlockedProviderAddresses = make([]string, 0) // reset currently blocked provider addresses
@@ -2259,9 +2269,15 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 		}
 
 		if runSecondChance {
+			// Read on the CALLING goroutine, not inside the timer. retrySecondChanceAfter is a
+			// package var that tests rewrite, and reading it from the spawned goroutine has no
+			// happens-before edge to that write — a real (if benign in production) cross-goroutine
+			// read, and enough to make `go test -race` on this package fail. Hoisting it creates the
+			// edge the tests already assume, and no test has to know about it.
+			retryAfter := retrySecondChanceAfter
 			// if we decide to allow a second chance, this provider will return to our list of valid providers (if it exists)
 			go func() {
-				<-time.After(retrySecondChanceAfter)
+				<-time.After(retryAfter)
 				// check epoch is still relevant, if not just return
 				if sessionEpoch != csm.atomicReadCurrentEpoch() {
 					return
@@ -2347,13 +2363,67 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 	// both have to wait for it.
 	if blocked != nil {
 		blocked.Reported = reportedNow
-		blocked.SecondChanceGranted = runSecondChance
+		// A backup never gets a second chance it can use: the timer calls
+		// validateAndReturnBlockedProviderToValidAddressesList, which walks only
+		// currentlyBlockedProviderAddresses, so a provider held in blockedBackupProviders is never
+		// found and the timer returns having done nothing. Recording the grant anyway would have the
+		// record assert a recovery that cannot happen — and combined with Reported=false it would
+		// claim BOTH that the reconnect loop will never look at it and that it comes back on its own.
+		//
+		// That backups are not released by the timer is pre-existing and is NOT changed here; this
+		// only stops the record advertising it. Whether the timer should release backups, or whether
+		// backups should skip the chance and be reported immediately, is a behaviour question filed
+		// alongside the epoch clean-slate defect.
+		blocked.SecondChanceGranted = runSecondChance && !blocked.Backup
 		csm.blockedProviderRecords[address] = *blocked
 		blockedCount = csm.blockedTotalLocked()
 		validRemaining = len(csm.validAddresses)
+	} else {
+		csm.refreshBlockOutcomeLocked(address, reportedNow, runSecondChance)
 	}
 
 	return nil
+}
+
+// refreshBlockOutcomeLocked updates the record of an ALREADY-blocked provider with the outcome of a
+// repeat block.
+//
+// A repeat call takes the provider out of nothing — it is already out — so the identity of the block
+// (Reason, Since, Detail) stays with the call that actually did it. But the report flow runs
+// regardless of that, and the call that genuinely REPORTS a provider is usually the second one: the
+// first offence takes the second chance instead, and the repeat finds secondChanceGivenToAddresses
+// already set and reports. On that call blocked is nil, so without this the record keeps Reported =
+// false forever — the map is edge-triggered and the next edge is the release.
+//
+// That inverts the contract BlockRecord documents: Reported == false is supposed to mean the
+// 30-second reconnect loop will never look at this provider, so an operator reads
+// /debug/provider-routing and concludes manual intervention is needed while the reconnect loop is in
+// fact already working on it.
+//
+// Neither field is ever cleared here: a provider that has been reported stays reported for as long
+// as the block stands, and a timer that was started cannot be unstarted. csm.lock must be held.
+func (csm *ConsumerSessionManager) refreshBlockOutcomeLocked(address string, reportedNow, secondChanceGranted bool) {
+	if !reportedNow && !secondChanceGranted {
+		return
+	}
+	record, ok := csm.blockedProviderRecords[address]
+	if !ok {
+		return // not blocked in either store — nothing this call did, and nothing to refresh
+	}
+	changed := false
+	if reportedNow && !record.Reported {
+		record.Reported = true
+		changed = true
+	}
+	// Same backup carve-out as the fresh-block path above: the timer cannot release a backup, so the
+	// record must not claim it will.
+	if secondChanceGranted && !record.SecondChanceGranted && !record.Backup {
+		record.SecondChanceGranted = true
+		changed = true
+	}
+	if changed {
+		csm.blockedProviderRecords[address] = record
+	}
 }
 
 // blockScope renders which pool a block landed in, for logs and debug output.

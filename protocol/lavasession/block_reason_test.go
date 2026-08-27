@@ -450,6 +450,13 @@ func dualPoolCSM(t *testing.T, address string) (*ConsumerSessionManager, *Consum
 }
 
 // blockInBothPools puts the provider in both blocked stores, the way the epoch re-block pass does.
+//
+// This is the one place in this file that seeds state directly, against the discipline stated at the
+// top. blockProvider deliberately cannot produce this shape — it takes the regular branch OR the
+// backup branch, never both — while the epoch re-block pass can, by running its two loops over the
+// same carried address. Reaching it through a full epoch would put the thing under test behind
+// several unrelated moving parts, so the fixture writes the second store directly; every release the
+// tests then exercise still goes through the product path.
 func blockInBothPools(t *testing.T, csm *ConsumerSessionManager, address string, reason BlockReason) {
 	t.Helper()
 	require.NoError(t, csm.blockProvider(context.Background(), address, reason, false,
@@ -671,4 +678,83 @@ func TestBlockRelease_EachEndingBlockIsAnnouncedWithItsOwnScope(t *testing.T) {
 	require.True(t, releasedBackup)
 	require.True(t, endedBackup.Backup)
 	require.Empty(t, blockedRecordCount(csm), "nothing is blocked now, so no record survives")
+}
+
+// The call that genuinely reports a provider is usually the SECOND block for an address that is
+// already out: the first offence takes the second chance instead, and the repeat finds the chance
+// already spent and reports. blocked is nil on that call, so without a write-back the record keeps
+// Reported=false forever — the map is edge-triggered and the next edge is the release.
+//
+// That inverts what BlockRecord documents: Reported==false means the reconnect loop will never look
+// at this provider, so an operator would read /debug/provider-routing and conclude manual
+// intervention is needed while the loop is already working on it.
+func TestBlockRecord_RepeatBlockRefreshesTheOutcomeButNotTheIdentity(t *testing.T) {
+	const address = "provider-reported-on-the-repeat"
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList(address), nil))
+	epoch := csm.atomicReadCurrentEpoch()
+
+	// First offence: reporting is requested, but the second chance is taken instead.
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonNeverServed,
+		true, epoch, 0, 16, true, nil))
+	first := blockedRecord(t, csm, address)
+	require.False(t, first.Reported, "the first offence takes the chance rather than reporting")
+	require.False(t, csm.reportedProviders.IsReported(address))
+
+	// Repeat while still blocked: the chance is spent, so THIS is the call that reports.
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
+		true, epoch, MaxConsecutiveConnectionAttempts, 0, true, nil))
+	second := blockedRecord(t, csm, address)
+
+	require.True(t, csm.reportedProviders.IsReported(address), "the register was updated by the repeat")
+	require.True(t, second.Reported, "and the record must agree — an operator reads this to decide whether to intervene")
+	require.Equal(t, first.Reason, second.Reason, "the block that actually took it out keeps the reason")
+	require.Equal(t, first.Since, second.Since, "and the timestamp")
+	require.Equal(t, first.Detail, second.Detail)
+}
+
+// The second-chance timer walks only currentlyBlockedProviderAddresses, so it can never release a
+// backup. Recording the grant anyway would make the record assert a recovery that cannot happen —
+// and alongside Reported=false it would claim both "the reconnect loop will never look at it" and
+// "it comes back on its own", neither of which is true.
+func TestBlockRecord_BackupNeverClaimsASecondChance(t *testing.T) {
+	const address = "backup-only"
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight,
+		createNamedPairingList("regular-a"), createNamedPairingList(address)))
+
+	// The never-served rule's shape: reported, and a second chance allowed.
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonNeverServed,
+		true, csm.atomicReadCurrentEpoch(), 0, 16, true, nil))
+
+	record := blockedRecord(t, csm, address)
+	require.True(t, record.Backup)
+	require.False(t, record.SecondChanceGranted,
+		"the timer cannot reach the backup store, so the record must not promise a recovery")
+}
+
+// A record carried from a backup block and re-applied to the REGULAR pool must stop describing the
+// backup pool, or /debug/provider-routing reports a scope the provider is no longer blocked in.
+func TestBlockRecord_CarriedRecordTakesTheScopeItIsReBlockedIn(t *testing.T) {
+	const address = "moves-pools"
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight,
+		createNamedPairingList("other"), createNamedPairingList(address)))
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
+		false, csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
+	require.True(t, blockedRecord(t, csm, address).Backup)
+
+	// Next epoch it is configured as a regular provider, and is not a backup at all.
+	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight,
+		createNamedPairingList("other", address), nil))
+
+	var row BlockedProviderInfo
+	for _, b := range csm.ProviderRoutingSnapshot().Blocked {
+		if b.Address == address {
+			row = b
+		}
+	}
+	require.Equal(t, address, row.Address, "it must still be blocked, carried over from the previous epoch")
+	require.Equal(t, "primary", row.Scope, "the only standing block is the regular one")
+	require.Equal(t, uint32(1), row.Carries)
 }
