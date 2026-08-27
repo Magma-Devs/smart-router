@@ -21,6 +21,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -207,10 +208,33 @@ func TestSecondaryCacheHitServesWithoutPrimary(t *testing.T) {
 	require.Equal(t, int64(100), gets[0].RequestedBlock)
 }
 
-// Timeout and transport errors both degrade to a miss within the configured
-// budget — the tier can never fail or stall a request.
+// Every non-hit degrades to the same fall-through, one per outcome in
+// ClassifyCacheLookupOutcome: a clean not-found, a transport error, and an exceeded
+// budget. The tier can never fail or stall a request.
 func TestSecondaryCacheTimeoutAndErrorAreMisses(t *testing.T) {
 	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 100)
+
+	// The plain not-found: no error, no reply. Distinct from the failure cases
+	// because the cache answered correctly — and its answer still carries the
+	// block-hash→height scalars the caller folds in via mergeBlockHashHeights,
+	// so the reply must survive the non-hit return rather than being dropped.
+	t.Run("clean not-found", func(t *testing.T) {
+		fake := &fakeCacheReader{
+			active: true,
+			reply: &pairingtypes.CacheRelayReply{
+				Reply:                 nil,
+				BlocksHashesToHeights: []*pairingtypes.BlockHashToHeight{{Hash: "0xabc", Height: 90}},
+			},
+		}
+		rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
+		hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("LAVA")
+		require.NoError(t, err)
+		served, reply := rpcss.trySecondaryCacheLookup(context.Background(), protocolMessage,
+			protocolMessage.RelayPrivateData(), nil, nil, hashKey, outputFormatter, 100)
+		require.False(t, served, "a not-found must fall through to providers")
+		require.NotNil(t, reply, "the miss reply must reach the caller's block-hash merge")
+		require.Len(t, reply.GetBlocksHashesToHeights(), 1)
+	})
 
 	t.Run("timeout", func(t *testing.T) {
 		fake := &fakeCacheReader{active: true, delay: 500 * time.Millisecond, reply: &pairingtypes.CacheRelayReply{Reply: &pairingtypes.RelayReply{Data: []byte("late")}}}
@@ -264,8 +288,66 @@ func TestSecondaryHitBackfillsPrimaryWithExactKeyAndValidSeenBlock(t *testing.T)
 	require.NotNil(t, reply.GetReply())
 	require.Equal(t, payload, reply.GetReply().Data)
 	require.GreaterOrEqual(t, reply.GetSeenBlock(), int64(100), "stored validity floor must be lifted to the locally resolved block")
-	require.Equal(t, 200, reply.GetStatusCode(), "assumed-success status must round-trip through the backfill")
+	require.Equal(t, 0, reply.GetStatusCode(),
+		"the entry's writer recorded no status, so the backfill must store zero (unknown) — "+
+			"stamping the assumed-200 used for serving would launder unknown into observed")
 	require.False(t, reply.GetIsNodeError())
+}
+
+// A status the entry's writer DID record survives the backfill verbatim, and the
+// caller is served that status rather than the assumed 200. Companion to the
+// zero-status case above: together they pin that the served default never leaks into
+// the store, and that a real status is never masked.
+func TestSecondaryHitPreservesWriterRecordedStatusThroughBackfill(t *testing.T) {
+	primary, rcs := startCacheServerForTest(t)
+	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 100)
+	payload := []byte(`{"block":{"header":{"height":"100"}}}`)
+	fake := &fakeCacheReader{
+		active: true,
+		reply: &pairingtypes.CacheRelayReply{
+			Reply:      &pairingtypes.RelayReply{Data: payload, LatestBlock: 100},
+			SeenBlock:  100,
+			StatusCode: 203, // a 2xx the populator accepts, distinguishable from the 200 default
+		},
+	}
+	rpcss := newSecondaryTestServer(chainParser, primary, fake, 100*time.Millisecond)
+
+	hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
+	require.NoError(t, err)
+	served, result := runSecondaryLookup(t, rpcss, protocolMessage, 100)
+	require.True(t, served)
+	require.Equal(t, 203, result.StatusCode, "a recorded status must reach the caller unmasked")
+
+	require.Eventually(t, func() bool {
+		return directGet(rcs, hashKey, 100, 100).GetReply() != nil
+	}, 3*time.Second, 25*time.Millisecond)
+	require.Equal(t, 203, directGet(rcs, hashKey, 100, 100).GetStatusCode(), "recorded status must round-trip through the backfill")
+}
+
+// A status the populator rejects (429) is served to the caller but never backfilled —
+// the entry's real status reaching RelayResult is what makes the populator's
+// status-code check reachable at all.
+func TestSecondaryHitWithRejectedStatusServesButNeverBackfills(t *testing.T) {
+	primary, rcs := startCacheServerForTest(t)
+	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 100)
+	fake := &fakeCacheReader{
+		active: true,
+		reply: &pairingtypes.CacheRelayReply{
+			Reply:      &pairingtypes.RelayReply{Data: []byte(`{"error":"rate limited"}`), LatestBlock: 100},
+			SeenBlock:  100,
+			StatusCode: http.StatusTooManyRequests,
+		},
+	}
+	rpcss := newSecondaryTestServer(chainParser, primary, fake, 100*time.Millisecond)
+
+	hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
+	require.NoError(t, err)
+	served, result := runSecondaryLookup(t, rpcss, protocolMessage, 100)
+	require.True(t, served)
+	require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
+
+	time.Sleep(700 * time.Millisecond)
+	require.Nil(t, directGet(rcs, hashKey, 100, 100).GetReply(), "a 429 entry must never be backfilled into the primary")
 }
 
 // Cached node errors — explicit flag and legacy placeholder — are served but
@@ -460,6 +542,51 @@ func TestMergeBlockHashHeights(t *testing.T) {
 			require.Equal(t, tc.wantEarliest, earliest, "earliest")
 		})
 	}
+}
+
+// Entry-kind resolution is the single helper BOTH tiers call, which is what makes a
+// replayed node error carry lava-identified-node-error regardless of which cache
+// answered. Pinning it here covers the primary tier's use too: that call site is two
+// lines inside sendRelayToEndpoint, which cannot be driven without a full session and
+// endpoint fixture, whereas the decision itself lives entirely in this function.
+func TestResolveCachedEntryKind(t *testing.T) {
+	const guid = uint64(4242)
+	guidCtx := utils.WithUniqueIdentifier(context.Background(), guid)
+	placeholder := []byte(`{"Error_GUID":"CACHED_ERROR","error":"execution reverted"}`)
+
+	t.Run("explicit flag marks a node error and leaves the payload alone", func(t *testing.T) {
+		data := []byte(`{"error":"execution reverted"}`)
+		isNodeError, resolved := resolveCachedEntryKind(guidCtx, &pairingtypes.CacheRelayReply{IsNodeError: true}, data)
+		require.True(t, isNodeError)
+		require.Equal(t, data, resolved, "no placeholder means no substitution")
+	})
+
+	t.Run("legacy placeholder implies node error and is substituted", func(t *testing.T) {
+		isNodeError, resolved := resolveCachedEntryKind(guidCtx, &pairingtypes.CacheRelayReply{}, placeholder)
+		require.True(t, isNodeError, "the placeholder is the entry-kind signal for backends predating IsNodeError")
+		require.Contains(t, string(resolved), `"Error_GUID":"4242"`, "the placeholder must carry this request's GUID")
+		require.NotContains(t, string(resolved), "CACHED_ERROR")
+	})
+
+	t.Run("a plain success is neither flagged nor rewritten", func(t *testing.T) {
+		data := []byte(`{"result":"0x64"}`)
+		isNodeError, resolved := resolveCachedEntryKind(guidCtx, &pairingtypes.CacheRelayReply{}, data)
+		require.False(t, isNodeError)
+		require.Equal(t, data, resolved)
+	})
+
+	t.Run("kind survives a context with no GUID", func(t *testing.T) {
+		isNodeError, resolved := resolveCachedEntryKind(context.Background(), &pairingtypes.CacheRelayReply{}, placeholder)
+		require.True(t, isNodeError, "kind is decided before substitution, so a missing GUID cannot hide it")
+		require.Equal(t, placeholder, resolved, "without a GUID the placeholder is left intact rather than half-rewritten")
+	})
+
+	t.Run("nil reply is safe and reports a success", func(t *testing.T) {
+		data := []byte(`{"result":"0x64"}`)
+		isNodeError, resolved := resolveCachedEntryKind(guidCtx, nil, data)
+		require.False(t, isNodeError)
+		require.Equal(t, data, resolved)
+	})
 }
 
 // The secondary tier must be skipped cleanly in every unconfigured/disconnected

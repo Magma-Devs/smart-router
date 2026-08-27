@@ -46,6 +46,18 @@ jobs:
           FINAL_STATUS_PUBLISHED='false'
           SUMMARY_WRITTEN='false'
 
+          # GitHub renders ::error:: and ::notice:: as annotations on the run and on
+          # the PR checks page. Without them this job is silent: every diagnostic
+          # below reaches the developer only through the commit status description
+          # (truncated at 140 chars) and the step summary, and neither is what you
+          # land on when you click through a red required check.
+          annotate() {
+            local level=$1
+            local detail=$2
+
+            printf '::%s title=Jira ticket gate::%s\n' "$level" "$detail"
+          }
+
           publish_status() {
             local state=$1
             local description=$2

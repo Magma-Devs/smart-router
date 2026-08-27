@@ -1319,6 +1319,37 @@ func (rpcss *RPCSmartRouterServer) getEarliestBlockHashRequestedFromCacheReply(c
 	return latestRequestedBlock, earliestRequestedBlock
 }
 
+// resolveCachedEntryKind reports whether a cache entry holds a node error rather than a
+// successful response, and returns the payload with the legacy CACHED_ERROR placeholder
+// replaced by this request's GUID.
+//
+// The two steps are inseparable and therefore share one helper: the kind must be decided
+// BEFORE the substitution erases the placeholder that older backends use to mark the
+// entry. Newer backends state it outright via CacheRelayReply.IsNodeError; the
+// placeholder is the fallback for entries written before that field existed.
+//
+// Tier-agnostic on purpose. Entry kind is a property of the entry, not of which cache
+// answered, and the router must label a replayed node error exactly as it labels a live
+// one — appendHeadersToRelayResult turns RelayResult.IsNodeError into
+// LAVA_IDENTIFIED_NODE_ERROR_HEADER, so a tier that dropped the flag would silently
+// serve the same bytes without the header.
+func resolveCachedEntryKind(ctx context.Context, cacheReply *pairingtypes.CacheRelayReply, data []byte) (isNodeError bool, resolvedData []byte) {
+	dataStr := string(data)
+	hasPlaceholder := strings.Contains(dataStr, common.CachedErrorGUIDPlaceholder)
+	isNodeError = cacheReply.GetIsNodeError() || hasPlaceholder
+	if !hasPlaceholder {
+		return isNodeError, data
+	}
+	guid, guidOk := utils.GetUniqueIdentifier(ctx)
+	if !guidOk {
+		// No GUID on this context: leave the placeholder rather than emit a half-substituted
+		// payload. The kind is already decided above, so serving is unaffected.
+		return isNodeError, data
+	}
+	guidStr := strconv.FormatUint(guid, 10)
+	return isNodeError, []byte(strings.Replace(dataStr, common.CachedErrorGUIDPlaceholder, common.CachedErrorGUIDKeyPrefix+guidStr+`"`, 1))
+}
+
 func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlock int64, latestBlockHashRequested int64, protocolMessage chainlib.ProtocolMessage) int64 {
 	if reqBlock == spectypes.LATEST_BLOCK && seenBlock != 0 {
 		// make optimizer select an endpoint that is likely to have the latest seen block
@@ -3527,7 +3558,10 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 			AverageBlockTime:      int64(averageBlockTime),
 			IsNodeError:           false, // node errors are rejected by the eligibility checks above
 			BlocksHashesToHeights: nil,   // Not available in direct RPC mode
-			StatusCode:            relayResult.StatusCode,
+			// The local captured above, not relayResult.StatusCode: this goroutine outlives
+			// the call and the response path keeps mutating relayResult, so reading a field
+			// off it here would be a cross-goroutine read of live state.
+			StatusCode: statusCode,
 		})
 
 		if err != nil {
@@ -3755,25 +3789,24 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							)
 							reply.Data = outputFormatter(reply.Data)
 
-							// If this is a cached error response with placeholder GUID, replace it with current request GUID
-							replyDataStr := string(reply.Data)
-							if strings.Contains(replyDataStr, common.CachedErrorGUIDPlaceholder) {
-								guid, guidOk := utils.GetUniqueIdentifier(ctx)
-								if guidOk {
-									guidStr := strconv.FormatUint(guid, 10)
-									// Replace the placeholder GUID with the actual request GUID
-									replyDataStr = strings.Replace(replyDataStr, common.CachedErrorGUIDPlaceholder, common.CachedErrorGUIDKeyPrefix+guidStr+`"`, 1)
-									reply.Data = []byte(replyDataStr)
-								}
-							}
+							// Entry kind + legacy GUID placeholder substitution, shared with the
+							// secondary tier so both label a replayed node error identically.
+							isNodeError, resolvedData := resolveCachedEntryKind(ctx, cacheReply, reply.Data)
+							reply.Data = resolvedData
 
 							relayResult := common.RelayResult{
 								Reply: reply,
 								Request: &pairingtypes.RelayRequest{
 									RelayData: localRelayData,
 								},
-								Finalized:    false, // cache responses are not considered finalized
-								StatusCode:   200,
+								Finalized: false, // cache responses are not considered finalized
+								// 200 is correct even for a cached node error: a node error is
+								// delivered inside a 2xx body (that is what IsNodeError marks), so
+								// this matches what a live relay of the same response reports.
+								StatusCode: 200,
+								// Served truthfully, so a cached node error carries the
+								// lava-identified-node-error header exactly like a live one.
+								IsNodeError:  isNodeError,
 								ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
 							}
 							// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was

@@ -2,8 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
-	"strconv"
-	"strings"
+	"net/http"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -106,34 +105,26 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	performance.SanitizeForeignCacheReply(copyReply)
 	copyReply.Data = outputFormatter(copyReply.Data)
 
-	// Entry kind must be decided BEFORE the GUID substitution below erases the legacy
-	// placeholder: explicit flag from newer backends, placeholder heuristic for
-	// older ones.
-	replyDataStr := string(copyReply.Data)
-	isNodeError := cacheReply.GetIsNodeError() || strings.Contains(replyDataStr, common.CachedErrorGUIDPlaceholder)
-	if strings.Contains(replyDataStr, common.CachedErrorGUIDPlaceholder) {
-		if guid, guidOk := utils.GetUniqueIdentifier(ctx); guidOk {
-			guidStr := strconv.FormatUint(guid, 10)
-			copyReply.Data = []byte(strings.Replace(replyDataStr, common.CachedErrorGUIDPlaceholder, common.CachedErrorGUIDKeyPrefix+guidStr+`"`, 1))
-		}
-	}
-
-	// Original upstream status, when the entry's writer recorded it. Zero is the
-	// legacy "unknown" and keeps today's assume-success serving; a real stored status
-	// flows through RelayResult so the populator's own 429/504/non-2xx checks decide
-	// backfill eligibility instead of a hardcoded 200 making them unreachable.
-	statusCode := cacheReply.GetStatusCode()
-	if statusCode == 0 {
-		statusCode = 200
-	}
+	// Entry kind + legacy GUID placeholder substitution, shared with the primary tier
+	// (resolveCachedEntryKind) so both label a replayed node error identically.
+	isNodeError, resolvedData := resolveCachedEntryKind(ctx, cacheReply, copyReply.Data)
+	copyReply.Data = resolvedData
 
 	relayResult := common.RelayResult{
 		Reply: copyReply,
 		Request: &pairingtypes.RelayRequest{
 			RelayData: localRelayData,
 		},
-		Finalized:  false, // cache responses are not considered finalized
-		StatusCode: statusCode,
+		Finalized: false, // cache responses are not considered finalized
+		// The status the ENTRY's writer recorded, carried verbatim — including zero,
+		// which means "the writer recorded none" (legacy backend). It is deliberately
+		// NOT fabricated into a 200 here: the backfill below persists this value, and
+		// stamping an assumed 200 would launder "unknown" into "this router observed a
+		// 200" in the primary store, destroying the distinction
+		// CacheRelayReply.StatusCode exists to preserve. A real stored status (429,
+		// 504, non-2xx) flows through so the populator's own checks reject the backfill.
+		// The serving default is applied after the backfill, below.
+		StatusCode: cacheReply.GetStatusCode(),
 		// Served truthfully: a cached node error carries the
 		// lava-identified-node-error header (appendHeadersToRelayResult), and the
 		// populator's node-error check is what rejects its backfill.
@@ -148,6 +139,16 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// appends; the actual SET stays async inside the populator. When the primary is
 	// inactive the populator skips itself (secondary-only topology).
 	rpcss.tryCacheWriteResolved(ctx, protocolMessage, &relayResult, &requestedBlockForCache)
+
+	// Serving default, applied only AFTER the backfill has captured the true stored
+	// value: an entry whose writer recorded no status is served as an assumed 200,
+	// matching a primary hit. (The chainlib serving paths would reach the same result
+	// on their own — each guards with `if relayResult.GetStatusCode() != 0` before
+	// setting an explicit status — but RelayResult also feeds RoundTrip, which copies
+	// StatusCode straight into an http.Response where a zero is not a valid status.)
+	if relayResult.StatusCode == 0 {
+		relayResult.StatusCode = http.StatusOK
+	}
 
 	// Same MAG-2160 rule as primary hits: a cached reply's LatestBlock is the block
 	// that was current when the entry was written, not a fresh chain-head
