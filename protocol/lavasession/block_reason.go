@@ -4,35 +4,30 @@ import "time"
 
 // BlockReason names WHY a provider was removed from routing (MAG-2599).
 //
-// Every provider block in this package carries one. Before these existed, all five block paths
-// emitted the same log line and stored the same thing — an address in a []string — so an operator
-// looking at an idle provider could see THAT it was out but never WHY, and the answer differed
-// enough between paths to change what you should do about it: a provider blocked for
-// `too-many-dead-sessions` is never reported, so the 30-second reconnect loop can never release it,
-// while one blocked for `all-endpoints-disabled` is.
+// Every provider block in this package carries one. Before these existed, every block path emitted
+// the same log line and stored the same thing — an address in a []string — so an operator looking
+// at an idle provider could see THAT it was out but never WHY, and the answer differed enough
+// between paths to change what you should do about it: whether a block is reported decides whether
+// the 30-second reconnect loop can ever release it.
 //
 // The strings are operator-facing: they appear as a `reason` metric label, as the `block_reason`
 // log field, and in /debug/provider-routing. Two rules keep them coherent as the list grows:
 //
-//   - A reason says what HAPPENED, not which counter tripped. "too-many-dead-sessions", not
-//     "blocklisted-session-cap" — nobody outside this package knows what a blocklisted session is.
+//   - A reason says what HAPPENED, not which counter tripped — nobody outside this package knows
+//     what a blocklisted session is.
 //   - They are part of the operator contract. Renaming one breaks dashboards and log queries, so
 //     prefer adding a new value over redefining an existing one.
+//
+// FAILOVER-TASKS section 2 removed two reasons that had producers when this file was written:
+// `too-many-dead-sessions` and `never-served-successfully`. Both mechanisms are gone, so the values
+// went with them rather than publishing a permanently-zero series for a mechanism that no longer
+// exists.
 type BlockReason string
 
 const (
 	// BlockReasonAllEndpointsDisabled — every URL this provider has failed too many times in a
 	// row, so there is nothing left to dial. Reported, so the reconnect loop can release it.
 	BlockReasonAllEndpointsDisabled BlockReason = "all-endpoints-disabled"
-
-	// BlockReasonTooManyDeadSessions — too many of this provider's sessions were retired, hitting
-	// the per-provider allowance. Deliberately NOT reported, so the reconnect loop never sees it.
-	BlockReasonTooManyDeadSessions BlockReason = "too-many-dead-sessions"
-
-	// BlockReasonNeverServed — a session failed past its error budget and the provider has never
-	// completed a successful relay. Narrow by construction: a provider that served earlier and is
-	// failing everything now is not caught by this.
-	BlockReasonNeverServed BlockReason = "never-served-successfully"
 
 	// BlockReasonExplicitSignal — a caller returned BlockProviderError / ReportAndBlockProviderError
 	// and asked for the block directly. No production code produces those sentinels today, so this
@@ -53,8 +48,6 @@ const (
 // call because the state-size publisher reads it on every tick, per chain and api-interface.
 var allBlockReasons = []BlockReason{
 	BlockReasonAllEndpointsDisabled,
-	BlockReasonTooManyDeadSessions,
-	BlockReasonNeverServed,
 	BlockReasonExplicitSignal,
 	BlockReasonPreviousEpoch,
 	BlockReasonUnspecified,
@@ -82,10 +75,6 @@ func AllBlockReasons() []BlockReason { return allBlockReasons }
 type ReleaseRoute string
 
 const (
-	// ReleaseSecondChanceTimer — the 3-minute timer blockProvider starts when it grants a second
-	// chance instead of reporting.
-	ReleaseSecondChanceTimer ReleaseRoute = "second-chance-timer"
-
 	// ReleaseHealthProbe — the proactive prober re-enabled an endpoint and restored the provider.
 	// The fastest route back, and the only one whose evidence is polls rather than real relays.
 	ReleaseHealthProbe ReleaseRoute = "health-probe"
@@ -136,13 +125,9 @@ type BlockRecord struct {
 	// and for humans — never parse it.
 	Detail string
 	// Reported records whether the provider was ACTUALLY added to the reported-providers register —
-	// not merely whether reporting was requested. A first offence that takes a second chance is not
-	// reported, so the two differ, and Reported and SecondChanceGranted are mutually exclusive.
+	// not merely whether reporting was requested. A repeat block of an already-blocked provider
+	// takes it out of nothing but can still be the call that reports it, so the two differ.
 	Reported bool
-	// SecondChanceGranted records whether a second-chance timer was actually started — not merely
-	// whether one was allowed. A provider that had already used its second chance is reported
-	// instead, and does not come back on a timer.
-	SecondChanceGranted bool
 	// Backup is true when the provider was blocked as a backup (blockedBackupProviders) rather than
 	// as a regular provider (currentlyBlockedProviderAddresses). A provider configured in both
 	// pools can be blocked in either — and when one of the two is released, this is updated to
