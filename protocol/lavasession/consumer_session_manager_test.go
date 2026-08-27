@@ -604,7 +604,7 @@ func TestNoPairingAvailableFlow(t *testing.T) {
 	validAddressessLength := len(csm.validAddresses)
 	copyValidAddressess := append([]string{}, csm.validAddresses...)
 	for index := 1; index < validAddressessLength; index++ {
-		csm.removeAddressFromValidAddresses(copyValidAddressess[index], BlockRecord{Reason: BlockReasonTooManyDeadSessions})
+		csm.removeAddressFromValidAddresses(copyValidAddressess[index], BlockRecord{Reason: BlockReasonExplicitSignal})
 	}
 
 	// get the address of the highest cu provider
@@ -654,161 +654,39 @@ func TestNoPairingAvailableFlow(t *testing.T) {
 	require.Equal(t, len(validSnapshot), 2)
 }
 
-func TestSecondChanceRecoveryFlow(t *testing.T) {
-	retrySecondChanceAfter = time.Second * 2
-	ctx := context.Background()
-	csm := CreateConsumerSessionManager()
-	pairingList := createPairingList("", true)
-	err := csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{0: pairingList[0], 1: pairingList[1]}, nil) // create two providers
-	require.NoError(t, err)
-	timeLimit := time.Second * 30
-	loopStartTime := time.Now()
-	for {
-		// implement a struct that returns: map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress} in the implementation for the DirectiveHeadersInf interface
-		directiveHeaders := DirectiveHeaders{map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress}}
-		usedProviders := NewUsedProviders(directiveHeaders)
-		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
-		require.NoError(t, err)
-		_, expectedProviderAddress := css[pairingList[0].PublicLavaAddress]
-		require.True(t, expectedProviderAddress)
-		for _, sessionInfo := range css {
-			csm.OnSessionFailure(sessionInfo.Session, fmt.Errorf("testError"))
-		}
-		_, ok := csm.secondChanceGivenToAddresses[pairingList[0].PublicLavaAddress]
-		if ok {
-			// should be present in secondChanceGivenToAddresses at some point.
-			fmt.Println(csm.secondChanceGivenToAddresses)
-			break
-		}
-		require.True(t, time.Since(loopStartTime) < timeLimit)
-	}
-
-	// check we get provider1.
-	usedProviders := NewUsedProviders(nil)
-	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
-	require.NoError(t, err)
-	_, expectedProviderAddress := css[pairingList[1].PublicLavaAddress]
-	require.True(t, expectedProviderAddress)
-	// check this provider is not reported.
-	require.False(t, csm.reportedProviders.IsReported(pairingList[0].PublicLavaAddress))
-	require.False(t, csm.reportedProviders.IsReported(pairingList[1].PublicLavaAddress))
-	// sleep for the duration of the retrySecondChanceAfter
-	loopStartTime = time.Now()
-	for {
-		if func() bool {
-			csm.lock.RLock()
-			defer csm.lock.RUnlock()
-			utils.LavaFormatInfo("waiting for provider to return to valid addresses", utils.LogAttr("provider", pairingList[0].PublicLavaAddress), utils.LogAttr("csm.validAddresses", csm.validAddresses))
-			return lavaslices.Contains(csm.validAddresses, pairingList[0].PublicLavaAddress)
-		}() {
-			utils.LavaFormatInfo("Wait Completed")
-			break
-		}
-		time.Sleep(time.Second)
-		require.True(t, time.Since(loopStartTime) < timeLimit)
-	}
-
-	require.True(t, lavaslices.Contains(csm.validAddresses, pairingList[0].PublicLavaAddress))
-	require.False(t, lavaslices.Contains(csm.currentlyBlockedProviderAddresses, pairingList[0].PublicLavaAddress))
-	require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus)
-
-	// now after we gave it a second chance, we give it another failure sequence, expecting it to this time be reported.
-	loopStartTime = time.Now()
-	for {
-		utils.LavaFormatDebug("Test", utils.LogAttr("csm.validAddresses", csm.validAddresses), utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus", csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus))
-		directiveHeaders := DirectiveHeaders{map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress}}
-		usedProviders := NewUsedProviders(directiveHeaders)
-		require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus)
-		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
-		require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus)
-		require.NoError(t, err)
-		_, expectedProviderAddress := css[pairingList[0].PublicLavaAddress]
-		require.True(t, expectedProviderAddress)
-		for _, sessionInfo := range css {
-			csm.OnSessionFailure(sessionInfo.Session, fmt.Errorf("testError"))
-			require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing[pairingList[0].PublicLavaAddress].blockedAndUsedWithChanceForRecoveryStatus)
-		}
-		if _, ok := csm.reportedProviders.addedToPurgeAndReport[pairingList[0].PublicLavaAddress]; ok {
-			break
-		}
-		require.True(t, time.Since(loopStartTime) < timeLimit)
-	}
-	utils.LavaFormatInfo("csm.reportedProviders", utils.LogAttr("csm.reportedProviders", csm.reportedProviders.addedToPurgeAndReport))
-	require.True(t, csm.reportedProviders.IsReported(pairingList[0].PublicLavaAddress))
-}
-
-// TestSecondChanceRenewedAfterProvenRecovery verifies that a provider which has
-// consumed its single second chance earns it back once it proves recovery with a
-// successful relay. Without this, in direct-rpc mode (no epoch transitions to
-// clear secondChanceGivenToAddresses) a provider that tripped a block twice over
-// its lifetime — even with full health in between — would stay hard-blocked for
-// the rest of the process lifetime. See MAG-1860.
-func TestSecondChanceRenewedAfterProvenRecovery(t *testing.T) {
-	retrySecondChanceAfter = time.Second * 2
-	ctx := context.Background()
+// TestBlockedProviderIsReportedImmediately pins the removal of the second chance.
+//
+// blockProvider used to withhold the report on a provider's first offence and start a 3-minute
+// timer that returned it to the pool on its own. A caller asking to report now reports, first
+// offence or not — there is no timer and no probation state.
+//
+// A regression pin rather than a proof of the change: the same behaviour was reachable before by
+// passing allowSecondChance=false. What it guards is that the parameter cannot come back, and that
+// nothing returns a blocked provider on a timer. TestSessionDeathDoesNotBlockTheProvider (in
+// block_reason_test.go) is the one that fails pre-removal.
+func TestBlockedProviderIsReportedImmediately(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	pairingList := createPairingList("", true)
 	err := csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{0: pairingList[0], 1: pairingList[1]}, nil)
 	require.NoError(t, err)
-	provider0 := pairingList[0].PublicLavaAddress
-	timeLimit := time.Second * 30
 
-	// Phase 1: fail provider0 (provider1 directive-blocked) until it consumes its single second chance.
-	loopStartTime := time.Now()
-	for {
-		directiveHeaders := DirectiveHeaders{map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress}}
-		usedProviders := NewUsedProviders(directiveHeaders)
-		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
-		require.NoError(t, err)
-		_, gotProvider0 := css[provider0]
-		require.True(t, gotProvider0)
-		for _, sessionInfo := range css {
-			csm.OnSessionFailure(sessionInfo.Session, fmt.Errorf("testError"))
-		}
-		if _, ok := csm.secondChanceGivenToAddresses[provider0]; ok {
-			break
-		}
-		require.True(t, time.Since(loopStartTime) < timeLimit)
-	}
-	// Precondition: provider0 has used its single second chance and is on probation.
-	require.Equal(t, uint32(1), csm.pairing[provider0].onSecondChanceProbation)
+	target := pairingList[0].PublicLavaAddress
+	require.NoError(t, csm.blockProvider(context.Background(), target, BlockReasonExplicitSignal, true, csm.atomicReadCurrentEpoch(), 0, 1, nil))
 
-	// Phase 2: wait for the second-chance timer to return provider0 to the valid pool.
-	loopStartTime = time.Now()
-	for !func() bool {
+	require.True(t, csm.reportedProviders.IsReported(target),
+		"the first block must report immediately — the second-chance arm was removed")
+
+	blocked := func() bool {
 		csm.lock.RLock()
 		defer csm.lock.RUnlock()
-		return lavaslices.Contains(csm.validAddresses, provider0)
-	}() {
-		time.Sleep(100 * time.Millisecond)
-		require.True(t, time.Since(loopStartTime) < timeLimit)
+		return lavaslices.Contains(csm.currentlyBlockedProviderAddresses, target)
 	}
-	require.False(t, csm.reportedProviders.IsReported(provider0))
+	require.True(t, blocked(), "and it must stay blocked; no timer returns it")
 
-	// Phase 3: a successful relay proves recovery — it must clear the probation
-	// marker (synchronously) and the second-chance memory (via deferred goroutine).
-	directiveHeaders := DirectiveHeaders{map[string]string{"lava-providers-block": pairingList[1].PublicLavaAddress}}
-	usedProviders := NewUsedProviders(directiveHeaders)
-	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, usedProviders, servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
-	require.NoError(t, err)
-	_, gotProvider0 := css[provider0]
-	require.True(t, gotProvider0)
-	for _, sessionInfo := range css {
-		doneErr := csm.OnSessionDone(sessionInfo.Session, servicedBlockNumber, cuForFirstRequest, time.Millisecond, sessionInfo.Session.CalculateExpectedLatency(2*time.Millisecond), 1, numberOfProviders, numberOfProviders, false, nil)
-		require.NoError(t, doneErr)
-	}
-	require.Equal(t, uint32(0), csm.pairing[provider0].onSecondChanceProbation, "probation must clear on a successful relay")
-
-	loopStartTime = time.Now()
-	for func() bool {
-		csm.lock.RLock()
-		defer csm.lock.RUnlock()
-		_, ok := csm.secondChanceGivenToAddresses[provider0]
-		return ok
-	}() {
-		time.Sleep(50 * time.Millisecond)
-		require.True(t, time.Since(loopStartTime) < timeLimit, "second-chance memory must be forgotten after proven recovery")
-	}
+	// Nothing schedules a return, so the block still stands. A short wait is enough to catch a
+	// re-introduced goroutine timer with a test-scale duration.
+	time.Sleep(100 * time.Millisecond)
+	require.True(t, blocked(), "no background timer may return a blocked provider on its own")
 }
 
 func runOnSessionDoneForConsumerSessionMap(t *testing.T, css ConsumerSessionsMap, csm *ConsumerSessionManager) {
@@ -929,25 +807,27 @@ func TestPairingReset(t *testing.T) {
 	}
 }
 
+// drainValidAddresses blocks every currently-valid provider so the pool is empty, which is the
+// precondition the pairing-reset tests below are actually about. These used to reach that state by
+// failing relays until the never-served-successfully rule blocked each provider; FAILOVER-TASKS
+// section 2 removed that rule, so the pool must be emptied directly. Reporting is off — the subject
+// is the reset path, not the reported-providers register.
+func drainValidAddresses(t *testing.T, csm *ConsumerSessionManager) {
+	csm.lock.RLock()
+	addresses := append([]string(nil), csm.validAddresses...)
+	csm.lock.RUnlock()
+	for _, address := range addresses {
+		require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
+	}
+}
+
 func TestPairingResetWithFailures(t *testing.T) {
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()
 	pairingList := createPairingList("", true)
 	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil) // update the providers.
 	require.NoError(t, err)
-	for {
-		utils.LavaFormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
-		if len(csm.validAddresses) == 0 { // wait for all pairings to be blocked.
-			break
-		}
-		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
-		require.NoError(t, err)
-
-		for _, cs := range css {
-			err = csm.OnSessionFailure(cs.Session, nil)
-			require.NoError(t, err) // fail test.
-		}
-	}
+	drainValidAddresses(t, csm)
 	require.Equal(t, len(csm.validAddresses), 0)
 	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 	require.NoError(t, err)
@@ -971,23 +851,7 @@ func TestPairingResetWithMultipleFailures(t *testing.T) {
 	require.NoError(t, err)
 
 	for numberOfResets := 0; numberOfResets < numberOfResetsToTest; numberOfResets++ {
-		for {
-			utils.LavaFormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
-			if len(csm.validAddresses) == 0 { // wait for all pairings to be blocked.
-				break
-			}
-			css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
-			require.NoError(t, err)
-
-			for _, cs := range css {
-				err = csm.OnSessionFailure(cs.Session, nil)
-				require.NoError(t, err)
-			}
-
-			if len(csm.validAddresses) == 0 && errors.Is(err, PairingListEmptyError) { // wait for all pairings to be blocked.
-				break
-			}
-		}
+		drainValidAddresses(t, csm)
 		require.Equal(t, len(csm.validAddresses), 0)
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 		require.NoError(t, err)
@@ -2320,7 +2184,7 @@ func TestBlockProvider_BackupProviderIsTracked(t *testing.T) {
 	backupAddr := backupList[0].PublicLavaAddress
 
 	// Block the backup provider
-	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonExplicitSignal, false, firstEpochHeight, 0, 0, nil)
 	require.NoError(t, err)
 
 	csm.lock.RLock()
@@ -2364,7 +2228,7 @@ func TestUpdateAllProviders_BlockedBackupProviderPersistedAcrossEpoch(t *testing
 	backupAddr := backupList[0].PublicLavaAddress
 
 	// Block it in the first epoch
-	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonExplicitSignal, false, firstEpochHeight, 0, 0, nil)
 	require.NoError(t, err)
 
 	csm.lock.RLock()
@@ -2404,7 +2268,7 @@ func TestUpdateAllProviders_NormalProviderBlockedAsBackupInNextEpoch(t *testing.
 
 	// Block a normal provider
 	normalAddr := pairingList[0].PublicLavaAddress
-	err = csm.blockProvider(context.Background(), normalAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), normalAddr, BlockReasonExplicitSignal, false, firstEpochHeight, 0, 0, nil)
 	require.NoError(t, err)
 
 	csm.lock.RLock()
@@ -2469,7 +2333,7 @@ func TestCheckAndUnblock_BackupRoutedToComprehensiveProbe(t *testing.T) {
 
 	// Seed previousEpochBlockedProviders as if this backup was blocked last epoch.
 	csm.lock.Lock()
-	csm.previousEpochBlockedProviders[backupAddr] = BlockRecord{Reason: BlockReasonTooManyDeadSessions}
+	csm.previousEpochBlockedProviders[backupAddr] = BlockRecord{Reason: BlockReasonExplicitSignal}
 	csm.blockedBackupProviders[backupAddr] = struct{}{}
 	csm.lock.Unlock()
 
@@ -2509,7 +2373,7 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 
 	backupAddr := backupList[0].PublicLavaAddress
 
-	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonExplicitSignal, false, firstEpochHeight, 0, 0, nil)
 	require.NoError(t, err)
 
 	// New epoch, same backup address, still pointing at the healthy gRPC listener.
@@ -2534,7 +2398,7 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 
 	csm.lock.Lock()
 	csm.blockedBackupProviders[backupAddr] = struct{}{}
-	csm.previousEpochBlockedProviders[backupAddr] = BlockRecord{Reason: BlockReasonTooManyDeadSessions}
+	csm.previousEpochBlockedProviders[backupAddr] = BlockRecord{Reason: BlockReasonExplicitSignal}
 	csm.lock.Unlock()
 
 	// Run the unblock pass. Comprehensive probe against grpcListener should succeed → unblock.
@@ -2559,7 +2423,7 @@ func TestGenerateReconnectCallback_BackupProviderUnblocked(t *testing.T) {
 
 	backupAddr := backupList[0].PublicLavaAddress
 
-	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonExplicitSignal, false, firstEpochHeight, 0, 0, nil)
 	require.NoError(t, err)
 
 	csm.lock.RLock()
@@ -2589,7 +2453,7 @@ func TestGenerateReconnectCallback_NonBackupUsesValidAddressesPath(t *testing.T)
 	require.NoError(t, err)
 
 	regularAddr := pairingList[0].PublicLavaAddress
-	err = csm.blockProvider(context.Background(), regularAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), regularAddr, BlockReasonExplicitSignal, false, firstEpochHeight, 0, 0, nil)
 	require.NoError(t, err)
 
 	// blockProvider removes from validAddresses and adds to currentlyBlockedProviderAddresses.
@@ -2645,7 +2509,7 @@ func TestGenerateReconnectCallback_OverlapBothPairingAndBackup(t *testing.T) {
 
 	// Block as primary — lands in currentlyBlockedProviderAddresses, removed from
 	// validAddresses.
-	err = csm.blockProvider(context.Background(), overlapAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), overlapAddr, BlockReasonExplicitSignal, false, firstEpochHeight, 0, 0, nil)
 	require.NoError(t, err)
 
 	// Seed the overlap: same address also registered as a backup, and blocked there.
@@ -2893,7 +2757,7 @@ func TestPublishStateSizes_PopulateThenReset(t *testing.T) {
 	csm := createConsumerSessionManagerWithMetrics(rec)
 
 	csm.lock.Lock()
-	csm.previousEpochBlockedProviders = map[string]BlockRecord{"a": {Reason: BlockReasonTooManyDeadSessions}, "b": {Reason: BlockReasonTooManyDeadSessions}}
+	csm.previousEpochBlockedProviders = map[string]BlockRecord{"a": {Reason: BlockReasonExplicitSignal}, "b": {Reason: BlockReasonExplicitSignal}}
 	csm.blockedBackupProviders = map[string]struct{}{"backup-bad": {}}
 	csm.lock.Unlock()
 	csm.stickySessions.Set("client-1", &StickySession{Provider: "p1", Epoch: 1})
@@ -2961,8 +2825,7 @@ func TestResetTransientFailureState(t *testing.T) {
 	// Pre-populate every transient store, plus a couple of "live pairing"
 	// entries we expect to survive the reset.
 	csm.lock.Lock()
-	csm.previousEpochBlockedProviders = map[string]BlockRecord{"prev-bad": {Reason: BlockReasonTooManyDeadSessions}}
-	csm.secondChanceGivenToAddresses = map[string]struct{}{"second-chance": {}}
+	csm.previousEpochBlockedProviders = map[string]BlockRecord{"prev-bad": {Reason: BlockReasonExplicitSignal}}
 	csm.blockedBackupProviders = map[string]struct{}{"bad-backup": {}}
 	// Live pairing — must NOT be cleared.
 	csm.validAddresses = []string{"good-provider"}
@@ -2986,7 +2849,6 @@ func TestResetTransientFailureState(t *testing.T) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 	require.Empty(t, csm.previousEpochBlockedProviders, "previousEpochBlockedProviders must be cleared")
-	require.Empty(t, csm.secondChanceGivenToAddresses, "secondChanceGivenToAddresses must be cleared")
 	require.Empty(t, csm.blockedBackupProviders, "blockedBackupProviders must be cleared")
 	// Live pairing untouched.
 	require.Equal(t, []string{"good-provider"}, csm.validAddresses, "validAddresses must be left intact")
