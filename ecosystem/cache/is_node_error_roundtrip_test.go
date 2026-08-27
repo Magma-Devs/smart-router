@@ -1,12 +1,9 @@
 package cache
 
 import (
-	"context"
 	"strings"
 	"testing"
-	"time"
 
-	relaytypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,46 +12,8 @@ import (
 // CacheRelayReply.IsNodeError. Before this, the flag only selected the write TTL and
 // was lost, so a reader (e.g. secondary-cache backfill) could not tell a cached node
 // error from a cached success.
-
-func newCacheServerForTest(t *testing.T) *RelayerCacheServer {
-	t.Helper()
-	cs := &CacheServer{
-		tempCache:                  newRistrettoForTest(t),
-		finalizedCache:             newRistrettoForTest(t),
-		blocksHashesToHeightsCache: newRistrettoForTest(t),
-		ExpirationFinalized:        time.Hour,
-		ExpirationNonFinalized:     5 * time.Second,
-		ExpirationNodeErrors:       5 * time.Second,
-	}
-	return &RelayerCacheServer{CacheServer: cs}
-}
-
-func setRelayForTest(t *testing.T, srv *RelayerCacheServer, hash []byte, block int64, finalized bool, isNodeError bool, data string) {
-	t.Helper()
-	_, err := srv.SetRelay(context.Background(), &relaytypes.RelayCacheSet{
-		RequestHash:      hash,
-		ChainId:          "LAV1",
-		RequestedBlock:   block,
-		SeenBlock:        block,
-		Response:         &relaytypes.RelayReply{Data: []byte(data), LatestBlock: block},
-		Finalized:        finalized,
-		AverageBlockTime: int64(15 * time.Second),
-		IsNodeError:      isNodeError,
-	})
-	require.NoError(t, err)
-	srv.CacheServer.tempCache.Wait()
-	srv.CacheServer.finalizedCache.Wait()
-}
-
-func getRelayForTest(srv *RelayerCacheServer, hash []byte, block int64) (*relaytypes.CacheRelayReply, error) {
-	return srv.GetRelay(context.Background(), &relaytypes.RelayCacheGet{
-		RequestHash:    hash,
-		ChainId:        "LAV1",
-		RequestedBlock: block,
-		SeenBlock:      block,
-		Finalized:      false, // the router always looks up with false; the server searches both stores
-	})
-}
+//
+// newCacheServerForTest / setRelayForTest / getRelayForTest live in helpers_test.go.
 
 func TestIsNodeErrorRoundTripNonFinalized(t *testing.T) {
 	srv := newCacheServerForTest(t)
