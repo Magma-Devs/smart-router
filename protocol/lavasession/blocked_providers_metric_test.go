@@ -18,7 +18,7 @@ import (
 // blockOneProvider blocks a provider the way the product does, rather than by writing the field.
 func blockOneProvider(t *testing.T, csm *ConsumerSessionManager, address string) {
 	t.Helper()
-	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonTooManyDeadSessions, false, csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonExplicitSignal, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
 }
 
 // A blocked provider must be visible in the gauge. This is the test whose absence let the bug ship.
