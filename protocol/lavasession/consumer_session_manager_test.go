@@ -2819,7 +2819,7 @@ func (r *stateSizeRecorder) SetBlockedProvider(_, _, providerAddress, _ string, 
 	r.providerBlocked[providerAddress] = isBlocked
 }
 
-// providerBlockedSnapshot returns the last value published for each provider.
+// SetCSMBlockedProvidersByReason records the complete per-reason map the publisher sent.
 func (r *stateSizeRecorder) SetCSMBlockedProvidersByReason(_, _ string, countsByReason map[string]int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2831,6 +2831,7 @@ func (r *stateSizeRecorder) SetCSMBlockedProvidersByReason(_, _ string, countsBy
 	}
 }
 
+// blockedByReasonSnapshot returns the last per-reason map published.
 func (r *stateSizeRecorder) blockedByReasonSnapshot() map[string]int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2841,6 +2842,7 @@ func (r *stateSizeRecorder) blockedByReasonSnapshot() map[string]int {
 	return out
 }
 
+// providerBlockedSnapshot returns the last value published for each provider.
 func (r *stateSizeRecorder) providerBlockedSnapshot() map[string]bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
