@@ -159,41 +159,15 @@ export ETH_RPC_URL_1="https://<your-eth-endpoint>"
 RUN_DEMO=1 ./scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh
 ```
 
-`RUN_DEMO=1` runs the three-step flow and prints the pass criteria. The steps,
-if you would rather drive them by hand:
+`RUN_DEMO=1` runs the flagship flow end to end and prints its pass criteria: one
+request through the *internal* router warms the internal cache from that zone's
+trusted nodes; the same request through the *external* router misses its own
+empty primary, is rescued by the secondary, and is served as `Cached`; an
+immediate repeat is served by the external router's *own* primary, because the
+first one backfilled it.
 
-**Step 1 — warm the internal zone.** One request through the *internal* router
-populates the internal cache from that zone's trusted nodes:
-
-```bash
-curl -s -X POST http://127.0.0.1:3361 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x112a880",false],"id":1}'
-```
-
-**Step 2 — the secondary rescue.** The same request through the *external*
-router. Its own primary is empty, so it reads the internal zone's cache and
-serves that answer — no upstream node was touched in the external zone:
-
-```bash
-curl -si -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x112a880",false],"id":1}' \
-  | grep -i lava-provider-address
-# Lava-Provider-Address: Cached
-```
-
-**Step 3 — the backfill pays off.** Repeat step 2 verbatim. The entry now lives
-in the external router's *own* primary, so the secondary is not consulted
-again. The secondary is read once per entry, not once per request:
-
-```bash
-curl -s http://127.0.0.1:7779/metrics | grep smartrouter_cache_success_total
-# …cache_tier="secondary" 1   ← step 2, the cross-zone rescue
-# …cache_tier="primary"   1   ← step 3, served locally after the backfill
-```
-
-That one-to-one split is the whole feature in a single output: a request that
-would have hit an upstream node was answered by another zone's cache, and it
-cost exactly one cross-zone lookup.
+To drive that flow — and each of the other four PRD use cases — by hand, drop
+`RUN_DEMO` and follow [Manual demo walkthrough](#manual-demo-walkthrough) below.
 
 ### Reading the logs
 
@@ -220,30 +194,138 @@ The per-lookup lines are `DBG`, so the router needs `--log-level debug` (the
 two-zone script sets it). The startup lines are `INF` and always appear when a
 secondary is configured.
 
-### Demonstrating the guarantees
+### Docker Compose
 
-Five copy-pasteable checks, each with the output it produces. They assume the
-two-zone script is running.
+For a container-based setup, layer
+`docker/docker-compose.secondary-cache.yml` on top of the base and cache
+overlays — see
+[LOCAL-COMPOSE.md](LOCAL-COMPOSE.md#enabling-a-read-only-secondary-cache). Note
+that both compose caches start empty, so demonstrating an actual secondary
+*hit* needs the two-zone script above, which supplies a second router to warm
+the shared cache.
 
-**Run this first in every shell you use** — the checks all reference
-`$LOGS_DIR`, and an unset variable silently collapses the path to `/FILE.log`
-("No such file or directory"):
+## Manual demo walkthrough
+
+One demo per use case in *PRD: Secondary Cache Backend*. Each is
+copy-pasteable, runs in about a minute, and ends in a single line of output you
+read as pass or fail.
+
+| PRD use case | Demo | Passes when |
+| --- | --- | --- |
+| **UC-1** Primary miss with secondary fallback | [UC-1](#uc-1--the-secondary-rescue) | The external router answers `Cached` without touching a node, then backfills so the next repeat is local |
+| **UC-2** Secondary miss (full fall-through) | [UC-2](#uc-2--full-fall-through) | A real upstream answers; the miss is recorded as a clean `miss`, not an error |
+| **UC-3** Secondary configured read-only | [UC-3](#uc-3--the-router-never-writes-the-secondary) | Writes on the secondary stay flat while the control primary grows |
+| **UC-4** Secondary unreachable | [UC-4](#uc-4--a-dead-secondary-never-affects-serving) | Requests keep succeeding, and the tier reconnects untouched |
+| **UC-5** No secondary configured | [UC-5](#uc-5--unconfigured-is-fully-backwards-compatible) | Zero secondary metric series and zero secondary log lines |
+
+Run them in order the first time: UC-4 and UC-5 restart services, so they are
+easiest to do last.
+
+### Before you start
+
+Start the two-zone lab. Leave `RUN_DEMO` off — UC-1 below *is* that flow, run
+by hand:
 
 ```bash
-cd "$(git rev-parse --show-toplevel)"          # repo root
-export LOGS_DIR="$PWD/debugging/logs"
-ls $LOGS_DIR                                    # CACHE_*.log, SMARTROUTER_*.log
+cd "$(git rev-parse --show-toplevel)"
+export ETH_RPC_URL_1="https://<your-eth-endpoint>"
+./scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh
 ```
+
+Then, **in every shell you use**, export the log directory the checks read. An
+unset `LOGS_DIR` silently collapses the paths to `/FILE.log` ("No such file or
+directory"):
+
+```bash
+export LOGS_DIR="$(git rev-parse --show-toplevel)/debugging/logs"
+ls $LOGS_DIR      # CACHE_EXTERNAL.log  CACHE_INTERNAL.log  SMARTROUTER_*.log
+```
+
+Give the routers ~20 s after the script returns to establish a chain tip before
+sending the first request.
+
+| Component | Address | Role in the demo |
+| --- | --- | --- |
+| router-external | `:3360`, metrics `:7779` | the router under test — primary `:20100`, secondary `:20101` |
+| router-internal | `:3361`, metrics `:7780` | the trusted zone, used only to warm the shared cache |
+| cache-external | `:20100` | the external zone's own primary |
+| cache-internal | `:20101` | the internal zone's primary **and** the external router's read-only secondary |
 
 > **Stopping a service: target the listener.** `lsof -ti:20101` matches *every*
 > process holding a socket on that port — including both routers, which hold
-> **client** connections to the secondary. Piping that into `kill` takes down
-> the routers too and invalidates the whole test. Always add `-sTCP:LISTEN` to
-> hit only the server.
+> **client** connections to the secondary. Piping that into `kill` takes the
+> routers down too and invalidates the test. Always add `-sTCP:LISTEN` so only
+> the server is hit.
 
-**1. The router never writes the secondary.** Counting writes on the secondary
-alone proves nothing — zero could just mean nothing happened. Count *both*
-caches over the same requests, so the router's own primary is the control:
+Each demo uses its own block number so the demos never warm each other's
+entries.
+
+### UC-1 — The secondary rescue
+
+*A primary miss is answered by the other zone's cache with no provider call —
+and the backfill makes it one cross-zone lookup per entry, not per request.*
+
+```bash
+B='{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x112a880",false],"id":1}'
+H='Content-Type: application/json'
+
+# 1. warm the INTERNAL zone (its router, its trusted nodes, its cache)
+curl -s -X POST http://127.0.0.1:3361 -H "$H" -d "$B" >/dev/null; sleep 1
+
+# 2. same request on the EXTERNAL router — its own primary is empty
+curl -si -X POST http://127.0.0.1:3360 -H "$H" -d "$B" | grep -i lava-provider-address
+
+# 3. repeat it verbatim — step 2's backfill now answers locally
+curl -si -X POST http://127.0.0.1:3360 -H "$H" -d "$B" | grep -i lava-provider-address
+
+sleep 1
+curl -s http://127.0.0.1:7779/metrics | grep '^smartrouter_cache_success_total'
+```
+
+Steps 2 and 3 both print `Lava-Provider-Address: Cached` — indistinguishable to
+the caller — and the tiers split one hit each:
+
+```
+smartrouter_cache_success_total{…,cache_tier="secondary"} 1   ← step 2, the cross-zone rescue
+smartrouter_cache_success_total{…,cache_tier="primary"}   1   ← step 3, served after the backfill
+```
+
+That one-to-one split is the whole feature in a single output: a request that
+would have hit an upstream node was answered by another zone's cache, and it
+cost exactly one cross-zone lookup.
+
+### UC-2 — Full fall-through
+
+*Both tiers miss: normal provider routing, and the secondary's only cost is the
+one lookup it is bounded to.*
+
+```bash
+B='{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x1020201",false],"id":1}'
+curl -si -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' -d "$B" \
+  | grep -i lava-provider-address
+sleep 1
+curl -s http://127.0.0.1:7779/metrics | grep '^smartrouter_cache_failed_total' \
+  | grep 'cache_tier="secondary"'
+```
+
+The header names a real upstream endpoint instead of `Cached`, and the lookup
+is classified as a clean miss:
+
+```
+smartrouter_cache_failed_total{…,cache_tier="secondary",outcome="miss"} 1
+```
+
+`outcome` is what separates a *cold* tier from a *broken* one: `miss` here
+versus `error`/`timeout` in UC-4. The lookup's cost is in
+`smartrouter_cache_latency_milliseconds{…,cache_tier="secondary"}`, and it can
+never exceed `secondary-cache-timeout`.
+
+### UC-3 — The router never writes the secondary
+
+*Read-only in practice, not just by declaration.* Counting writes on the
+secondary alone proves nothing — zero could just mean nothing happened. Count
+**both** caches over the same requests, so the router's own primary is the
+control:
 
 ```bash
 before_secondary=$(grep -c 'Got Cache Set' $LOGS_DIR/CACHE_INTERNAL.log)
@@ -264,9 +346,11 @@ echo "own primary (control): $before_primary -> $(grep -c 'Got Cache Set' $LOGS_
 
 The internal cache *will* show writes from its own router — that is the
 internal zone populating its own primary, which is the whole point. Only the
-delta caused by external-zone traffic matters.
+delta caused by external-zone traffic matters, and it is zero.
 
-**2. A dead secondary never affects serving.**
+### UC-4 — A dead secondary never affects serving
+
+*Kill the secondary mid-flight; serving continues, and the tier heals itself.*
 
 ```bash
 lsof -ti:20101 -sTCP:LISTEN | xargs kill        # stop ONLY the cache server
@@ -276,7 +360,8 @@ for b in 0x1030301 0x1030302; do
   curl -s --max-time 25 -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' \
     -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$b\",false],\"id\":1}" | head -c 50; echo
 done
-curl -s http://127.0.0.1:7779/metrics | grep 'cache_tier="secondary"' | grep failed_total
+curl -s http://127.0.0.1:7779/metrics | grep '^smartrouter_cache_failed_total' \
+  | grep 'cache_tier="secondary"'
 ```
 
 Both requests return real block data from upstream, and the metrics show:
@@ -289,8 +374,7 @@ Exactly **one** `error`, then silence — the client detects the dead connection
 once, marks the tier inactive, and subsequent requests skip it entirely rather
 than paying the timeout every time.
 
-**3. It reconnects on its own.** Restart the cache and watch the router
-recover without being touched:
+Now restart the cache and watch the router recover without being touched:
 
 ```bash
 screen -d -m -S cache_internal bash -c "smartrouter cache 127.0.0.1:20101 \
@@ -317,8 +401,10 @@ curl -si -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' -d "$
 # Lava-Provider-Address: Cached      ← secondary hits are back
 ```
 
-**4. Unconfigured is fully backwards compatible.** Restart the external router
-without the flag:
+### UC-5 — Unconfigured is fully backwards compatible
+
+*Restart the external router without the flag; the tier leaves no trace at
+all.*
 
 ```bash
 lsof -ti:3360 -sTCP:LISTEN | xargs kill; sleep 3
@@ -332,11 +418,15 @@ curl -s http://127.0.0.1:7779/metrics | grep -c 'cache_tier="secondary"'   # 0
 grep -ic 'secondary cache' $LOGS_DIR/SMARTROUTER_NOSEC.log                 # 0
 ```
 
-Zero secondary metric series and zero secondary log lines — the tier leaves no
-trace at all — while the primary tier and request serving continue normally.
+Zero secondary metric series and zero secondary log lines, while the primary
+tier and request serving continue normally. Rerun the setup script to put the
+lab back the way it was.
 
-**5. Misconfiguration aborts startup.** All three cases exit non-zero with a
-specific message rather than starting in a surprising state:
+### Bonus — misconfiguration aborts startup
+
+Not a use case, but the flip side of "independently configurable": all three
+bad configurations exit non-zero with a specific message rather than starting
+in a surprising state.
 
 ```bash
 CFG=config/smartrouter_examples/smartrouter_eth_zone_external.yml
@@ -351,15 +441,12 @@ smartrouter $CFG --secondary-cache-be '127.0.0.1:20101' --secondary-cache-timeou
 # exit=1  secondary-cache-timeout must be greater than zero, got 0s
 ```
 
-### Docker Compose
+### Tearing the lab down
 
-For a container-based setup, layer
-`docker/docker-compose.secondary-cache.yml` on top of the base and cache
-overlays — see
-[LOCAL-COMPOSE.md](LOCAL-COMPOSE.md#enabling-a-read-only-secondary-cache). Note
-that both compose caches start empty, so demonstrating an actual secondary
-*hit* needs the two-zone script above, which supplies a second router to warm
-the shared cache.
+```bash
+killall smartrouter
+screen -wipe
+```
 
 ## Scope of this release
 
@@ -378,9 +465,10 @@ ignored:
 
 Traceability against *PRD: Secondary Cache Backend* (April 2, 2026). What the
 router does in each case is described under
-[What happens in each situation](#what-happens-in-each-situation); this section
-records where each one is *proven*, so the claims above are auditable rather
-than asserted.
+[What happens in each situation](#what-happens-in-each-situation) and can be
+reproduced by hand from [Manual demo
+walkthrough](#manual-demo-walkthrough); this section records where each one is
+*proven*, so the claims above are auditable rather than asserted.
 
 ### Use cases
 
@@ -430,4 +518,4 @@ across tiers needs no special handling.
 | --- | --- |
 | Unit and integration tests | `protocol/rpcsmartrouter/secondary_cache_test.go`, `protocol/performance/secondary_config_test.go`, `protocol/performance/sanitize_test.go`, `types/relay/cache_test.go` |
 | Startup/config validation, end to end against the real binary | `tests/infrastructure/binary_startup/test_secondary_cache_config_validation.py` in `Magma-Devs/smart-router-automation` — fail-fast cases, advisory warnings, startup visibility, and flag-beats-YAML precedence |
-| Live two-zone flow | `scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh` with `RUN_DEMO=1` |
+| Live two-zone flow | `scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh` with `RUN_DEMO=1`; one hands-on demo per use case in [Manual demo walkthrough](#manual-demo-walkthrough) |
