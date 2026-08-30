@@ -2489,3 +2489,97 @@ func TestUnsubscribe_StillRejectsForeignSubscription(t *testing.T) {
 	assert.Equal(t, common.SubscriptionNotFoundError, err,
 		"unrelated client must not be able to unsubscribe via upstream-id fallback")
 }
+
+// substrateUnsubscribePairs is the full SUBSCRIBE/UNSUBSCRIBE set declared by the
+// ASTAR spec's base collection, and the same shape Acala (aca.json) and Shiden
+// (sdn.json) carry. Every Substrate spec pairs by name, and none of the pairings
+// is a "<x>_subscribe" -> "<x>_unsubscribe" rewrite: three of them
+// (chainHead_v1_follow, author_submitAndWatchExtrinsic,
+// transactionWatch_v1_submitAndWatch) do not contain "subscribe" at all.
+var substrateUnsubscribePairs = []struct {
+	subscribe   string
+	unsubscribe string
+}{
+	{"author_submitAndWatchExtrinsic", "author_unwatchExtrinsic"},
+	{"chainHead_v1_follow", "chainHead_v1_unfollow"},
+	{"chain_subscribeAllHeads", "chain_unsubscribeAllHeads"},
+	{"chain_subscribeFinalisedHeads", "chain_unsubscribeFinalisedHeads"},
+	{"chain_subscribeFinalizedHeads", "chain_unsubscribeFinalizedHeads"},
+	{"chain_subscribeNewHead", "chain_unsubscribeNewHead"},
+	{"chain_subscribeNewHeads", "chain_unsubscribeNewHeads"},
+	{"chain_subscribeRuntimeVersion", "chain_unsubscribeRuntimeVersion"},
+	{"state_subscribeRuntimeVersion", "state_unsubscribeRuntimeVersion"},
+	{"state_subscribeStorage", "state_unsubscribeStorage"},
+	{"subscribe_newHead", "unsubscribe_newHead"},
+	{"transactionWatch_v1_submitAndWatch", "transactionWatch_v1_unwatch"},
+}
+
+// TestResolveUnsubscribeMethod_UsesClientMethodName asserts the method the router
+// sends UPSTREAM, which is the thing MAG-3297 got wrong. Asserting only that an
+// unsubscribe does not error would pass against a node that happens to accept the
+// generic "unsubscribe".
+func TestResolveUnsubscribeMethod_UsesClientMethodName(t *testing.T) {
+	for _, pair := range substrateUnsubscribePairs {
+		t.Run(pair.unsubscribe, func(t *testing.T) {
+			// The client calls the spec's unsubscribe method; the api resolved from
+			// the spec by name is what lands on the protocol message.
+			pm := &mockWSProtocolMessage{method: pair.unsubscribe}
+
+			got := resolveUnsubscribeMethod(pm, pair.subscribe)
+			assert.Equal(t, pair.unsubscribe, got,
+				"router must call upstream with the method the client invoked")
+
+			// MAG-3297 regression guard: deriving from the subscribe method cannot
+			// produce this name. If someone reinstates derivation here, the assertion
+			// above stops holding and this one says why.
+			assert.NotEqual(t, pair.unsubscribe, getUnsubscribeMethod(pair.subscribe),
+				"derivation is expected to be wrong for Substrate — it is why this fix exists")
+		})
+	}
+}
+
+// TestResolveUnsubscribeMethod_EthAndTendermintUnchanged pins the two shapes that
+// already worked, so the fix is not a behaviour change for them. eth_unsubscribe
+// working while every Substrate pair failed is what localised this bug.
+func TestResolveUnsubscribeMethod_EthAndTendermintUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		subscribe   string
+		unsubscribe string
+	}{
+		{"evm", "eth_subscribe", "eth_unsubscribe"},
+		{"tendermint", "subscribe", "unsubscribe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pm := &mockWSProtocolMessage{method: tc.unsubscribe}
+			assert.Equal(t, tc.unsubscribe, resolveUnsubscribeMethod(pm, tc.subscribe))
+			// These are the cases the old derivation hardcoded, so it agrees.
+			assert.Equal(t, tc.unsubscribe, getUnsubscribeMethod(tc.subscribe))
+		})
+	}
+}
+
+// mockWSProtocolMessageNoApi is a message that resolved to no spec api — the only
+// case the derivation fallback is still reachable from.
+type mockWSProtocolMessageNoApi struct {
+	mockWSProtocolMessage
+}
+
+func (m *mockWSProtocolMessageNoApi) GetApi() *spectypes.Api { return nil }
+
+func TestResolveUnsubscribeMethod_FallsBackWithoutApi(t *testing.T) {
+	t.Run("nil api", func(t *testing.T) {
+		pm := &mockWSProtocolMessageNoApi{mockWSProtocolMessage{method: "chain_unsubscribeNewHeads"}}
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_subscribe"),
+			"with no api to read, fall back to derivation rather than sending an empty method")
+	})
+
+	t.Run("empty api name", func(t *testing.T) {
+		pm := &mockWSProtocolMessage{method: ""}
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_subscribe"))
+	})
+
+	t.Run("nil message", func(t *testing.T) {
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(nil, "eth_subscribe"))
+	})
+}
