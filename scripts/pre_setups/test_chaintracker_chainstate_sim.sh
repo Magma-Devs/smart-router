@@ -62,7 +62,7 @@ LOG_FILE="$LOGS_DIR/CHAINSTATE_ROUTER.log"
 SIM_LOG="$LOGS_DIR/CHAINSTATE_SIM.log"
 CONFIG_FILE="$WORK_DIR/chainstate_sim.yml"
 # The router resolves its config argument against a fixed set of search roots
-# (repo root, repo/config, ~/.lava), so an absolute path outside those roots is
+# (repo root, repo/config, ~/.smart-router), so an absolute path outside those roots is
 # reported as "not found". Pass it repo-relative and run with cwd = repo root.
 CONFIG_REL="debugging/chainstate_sim.yml"
 # Built into the working tree rather than installed to GOPATH/bin: the harness must

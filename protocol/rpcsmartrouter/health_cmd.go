@@ -93,7 +93,7 @@ or from inline "address chain-id api-interface" triplets like the rpcsmartrouter
 
 The config argument resolves exactly as the rpcsmartrouter command's does: an absolute path
 names the file outright, while a relative path or a bare name is looked up in the local
-running directory, ./config, then ` + lavaDefaultNodeHome + `.`,
+running directory, ./config, then ` + defaultNodeHome + `.`,
 		Example: `  smartrouter health config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
   smartrouter health https://eth1.lava.build ETH1 jsonrpc --use-static-spec specs/`,
 		Args: func(cmd *cobra.Command, args []string) error {
