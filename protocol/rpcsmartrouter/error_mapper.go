@@ -85,12 +85,15 @@ func classifyEndpointHealth(classified *common.LavaError, isClientCancellation b
 	// climb toward the disable threshold (clients hammering one unsupported method would
 	// otherwise disable an endpoint that is healthy for everything else, feeding the
 	// MAG-2550 disable/re-enable flap) and, being pre-MarkUnhealthy, they are never
-	// recorded as relay-probe recovery evidence either. The non-retryable variants already
-	// landed in the default arm below; this makes the rule explicit and extends it to the
-	// retryable NODE_METHOD_NOT_SUPPORTED, which previously marked unhealthy. No backoff:
-	// the endpoint is neither broken nor busy — steering THIS request to a different
-	// provider is the relay processor's job (Retryable=true), not backoff's.
-	if classified.SubCategory.IsUnsupportedMethod() || classified.Code == common.LavaErrorNodeMethodNotSupported.Code {
+	// recorded as relay-probe recovery evidence either. No backoff: the endpoint is neither
+	// broken nor busy — steering THIS request to a different provider is the relay
+	// processor's job (Retryable=true), not backoff's.
+	//
+	// This used to test NODE_METHOD_NOT_SUPPORTED by raw error code, because 2002 carried no
+	// subcategory and the flag alone could not catch it. It now carries
+	// SubCategoryNodeCapability, so both arms read the fault axis instead of one of them
+	// naming a code (FAILOVER-TASKS section 2).
+	if classified.SubCategory.IsUnsupportedMethod() || classified.SubCategory.IsNodeCapability() {
 		return false, false
 	}
 	switch {
