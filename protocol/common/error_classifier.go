@@ -511,6 +511,10 @@ type NodeErrorClassification struct {
 	// the endpoint answered truthfully about itself and must not be demoted for it.
 	// See ErrorSubCategory.IsNodeCapability.
 	IsNodeCapability bool
+	// IsNodeAtFault is the resolved verdict of the four axes above plus category and
+	// retryability — positive evidence that the endpoint is broken or unable to serve.
+	// See LavaError.EndpointAtFault; callers read this rather than re-deriving it.
+	IsNodeAtFault bool
 }
 
 // ClassifyNodeErrorForRetry runs ClassifyError exactly once and derives the
@@ -533,6 +537,7 @@ func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, erro
 		IsRateLimited:       c.SubCategory.IsRateLimit(),
 		IsDataScope:         c.SubCategory.IsDataScope(),
 		IsNodeCapability:    c.SubCategory.IsNodeCapability(),
+		IsNodeAtFault:       c.EndpointAtFault(),
 	}
 }
 
