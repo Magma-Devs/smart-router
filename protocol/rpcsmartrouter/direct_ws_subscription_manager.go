@@ -912,8 +912,9 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	// Only call upstream when we're the last client (single client on this subscription)
 	lastClient := len(activeSub.connectedClients) == 1
 
-	// Derive unsubscribe method: eth_subscribe -> eth_unsubscribe, subscribe -> unsubscribe
-	unsubscribeMethod := getUnsubscribeMethod(subscribeMethod)
+	// The method to call upstream is the one the client actually invoked, not one
+	// derived from the subscribe method. See resolveUnsubscribeMethod.
+	unsubscribeMethod := resolveUnsubscribeMethod(protocolMessage, subscribeMethod)
 	requestID := extractRequestID(protocolMessage.RelayPrivateData().Data)
 
 	var unsubscribeParams interface{}
@@ -981,8 +982,42 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	return nodeResp, nil
 }
 
+// resolveUnsubscribeMethod returns the method name to call upstream to tear a
+// subscription down.
+//
+// It is the name the client actually invoked. The spec pairs every SUBSCRIBE
+// parse directive with an UNSUBSCRIBE one carrying its own api_name, and the
+// caller has already matched this message against those directives by name
+// (consumer_websocket_manager.go dispatches here only when the message resolved
+// to an UNSUBSCRIBE tag), so the api name on the message IS the spec's
+// unsubscribe method. Nothing needs deriving.
+//
+// MAG-3297: it used to be derived from the subscribe method by string surgery,
+// which only ever worked for the two shapes getUnsubscribeMethod hardcodes.
+// Every Substrate pair falls through those to the "unsubscribe" fallback —
+// chain_subscribeNewHeads, state_subscribeStorage, subscribe_newHead and
+// chainHead_v1_follow are none of them "<x>_subscribe" — so the router called a
+// method the node does not have and forwarded its -32601 to the client. Several
+// pairs are not derivable by any string rule at all: chainHead_v1_follow tears
+// down with chainHead_v1_unfollow, author_submitAndWatchExtrinsic with
+// author_unwatchExtrinsic.
+//
+// getUnsubscribeMethod remains the fallback for a message with no api attached,
+// which a spec-resolved message never is.
+func resolveUnsubscribeMethod(protocolMessage chainlib.ProtocolMessage, subscribeMethod string) string {
+	if protocolMessage != nil {
+		if api := protocolMessage.GetApi(); api != nil && api.Name != "" {
+			return api.Name
+		}
+	}
+	return getUnsubscribeMethod(subscribeMethod)
+}
+
 // getUnsubscribeMethod derives the unsubscribe method from the subscribe method.
 // eth_subscribe -> eth_unsubscribe, subscribe -> unsubscribe
+//
+// Only reachable when the incoming message carries no api name; prefer
+// resolveUnsubscribeMethod, which uses the method the client invoked.
 func getUnsubscribeMethod(subscribeMethod string) string {
 	if subscribeMethod == "eth_subscribe" {
 		return "eth_unsubscribe"
