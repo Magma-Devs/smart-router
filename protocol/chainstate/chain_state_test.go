@@ -656,8 +656,9 @@ func TestRecompute_BaselineSincePreservedWhileBlockUnchanged(t *testing.T) {
 	// now being 11s old, because each Recompute refreshed baselineAt.
 	clk.advance(6 * time.Second)
 	cs.Recompute(majorityAt(1000))
-	_, since, ok = cs.consensusBaselineWithTime()
+	block, since, ok = cs.consensusBaselineWithTime()
 	require.True(t, ok, "a continuously reconfirmed baseline never expires, even past TTL-from-establishment")
+	require.Equal(t, int64(1000), block)
 	require.Equal(t, establishedAt, since, "establishment time is still preserved across the TTL boundary")
 
 	// A FORWARD advance to a new block resets the establishment clock to now.
