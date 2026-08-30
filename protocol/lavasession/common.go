@@ -28,16 +28,52 @@ func GetMaxAllowedBlockListedSessionPerProvider() int {
 	return MaxSessionsAllowedPerProvider / 3
 }
 
+// MaxConsecutiveConnectionAttempts is the number of consecutive failed requests after which an
+// endpoint is backed off (endpoint.Enabled = false) — the `bench-after` setting in
+// FAILOVER-TASKS section 6. Configurable via --bench-after; see DefaultBenchAfter for the default
+// and why it is what it is.
+//
+// A successful relay resets the counter (Endpoint.ResetHealth), so this is a consecutive-failure
+// budget, not a lifetime total. Which failures count is decided by the fault axis, NOT by
+// retryability — see common.LavaError.EndpointAtFault.
+//
+// A var rather than a const so the flag can set it. Written once at startup, before any relay is
+// served, and read-only thereafter.
+var MaxConsecutiveConnectionAttempts uint64 = DefaultBenchAfter
+
+// SetBenchAfter validates and applies the --bench-after threshold. Must be called before any relay
+// is served.
+//
+// Zero would disable an endpoint on its very first failed request, which on a single-endpoint
+// deployment reproduces the "No pairings" symptom the default exists to avoid. Rather than abort
+// the router over one flag, an out-of-range value falls back to the default with a warning —
+// matching how MinSelectionChance and the optimizer weights are handled.
+func SetBenchAfter(value uint64) {
+	if value == 0 {
+		utils.LavaFormatWarning("invalid --bench-after, falling back to the default", nil,
+			utils.LogAttr("requested", value),
+			utils.LogAttr("default", DefaultBenchAfter),
+			utils.LogAttr("hint", "must be > 0; 0 would disable an endpoint on its first failed request"),
+		)
+		MaxConsecutiveConnectionAttempts = DefaultBenchAfter
+		return
+	}
+	MaxConsecutiveConnectionAttempts = value
+}
+
 const (
-	// MaxConsecutiveConnectionAttempts is the number of consecutive connection
-	// failures after which an endpoint is backed off (endpoint.Enabled = false).
-	// Raised from 5 to 50 alongside removing the per-socket health gate: with that
-	// gate gone the (often sole) direct endpoint must not be disabled too eagerly on
-	// a transient blip, since disabling the only endpoint reproduces the "No pairings"
-	// symptom until an epoch/successful relay re-enables it. A successful relay resets
-	// the counter (see Endpoint.ResetHealth), so this is a consecutive-failure budget.
-	// Shared by the provider-relay path and blockProvider — this threshold gates both.
-	MaxConsecutiveConnectionAttempts = 50
+	// DefaultBenchAfter is the default for MaxConsecutiveConnectionAttempts.
+	//
+	// It was raised from 5 to 50 alongside removing the per-socket health gate: with that gate gone
+	// the (often sole) direct endpoint must not be disabled too eagerly on a transient blip, since
+	// disabling the only endpoint reproduces the "No pairings" symptom until an epoch or a
+	// successful relay re-enables it.
+	//
+	// Inherited rather than derived, and worth revisiting on production evidence: 50 was chosen to
+	// protect a single-endpoint deployment against transport blips, before the counter could see
+	// node errors at all. Now that it can, the same number covers a strictly larger set of
+	// failures.
+	DefaultBenchAfter uint64 = 50
 	// maxReenableProbeFlaps caps how far the probe's re-enable hysteresis escalates when an endpoint
 	// keeps passing cheap polls (which drive re-enable) but failing real relays (which drive the
 	// disable above). Each such re-enable→re-disable flap escalates the next re-enable's K by a power
