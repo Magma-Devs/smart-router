@@ -2459,10 +2459,14 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				createdConnections = append(createdConnections, directConn)
 
 				endpoint := &lavasession.Endpoint{
-					NetworkAddress:    url.Url,
-					Enabled:           true,
-					Addons:            extensions,
-					Extensions:        extensions,
+					NetworkAddress: url.Url,
+					Enabled:        true,
+					Addons:         extensions,
+					Extensions:     extensions,
+					// Carry the url's opt-out through, so session selection keeps
+					// base-collection traffic off an endpoint that only serves its
+					// add-ons (MAG-3296).
+					StandaloneAddons:  url.StandaloneAddons,
 					InternalPath:      url.InternalPath,
 					Connections:       nil,
 					DirectConnections: []lavasession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
