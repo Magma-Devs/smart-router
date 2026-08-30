@@ -124,6 +124,11 @@ const (
 	// DisableBatchRequestRetryFlag prevents batch requests from being retried on consumer/smartrouter side
 	DisableBatchRequestRetryFlag = "disable-batch-request-retry"
 
+	// BenchAfterFlagName is FAILOVER-TASKS section 6's `bench-after`: how many consecutive failed
+	// requests an endpoint may answer before it is taken out of rotation. Counts per endpoint
+	// address, not per provider and not per customer request — one customer request that retries
+	// across three endpoints writes one failure against each.
+	BenchAfterFlagName               = "bench-after"
 	MaxSessionsPerProviderFlagName   = "max-sessions-per-provider"  // Max number of sessions allowed per provider
 	DefaultProcessingTimeoutFlagName = "default-processing-timeout" // default timeout for relay processing
 	MinRelayTimeoutFlagName          = "min-relay-timeout"          // minimum relay timeout floor (default 1s)

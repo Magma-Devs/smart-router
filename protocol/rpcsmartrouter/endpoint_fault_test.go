@@ -132,7 +132,7 @@ func TestEndpointFault_CounterMovesOnlyOnFault(t *testing.T) {
 	require.True(t, atFault.IsNodeAtFault, "precondition: the freeze case blames")
 
 	// One short of the threshold, the blaming answer is what disables it.
-	e := endpointWith(uint64(lavasession.MaxConsecutiveConnectionAttempts) - 1)
+	e := endpointWith(lavasession.MaxConsecutiveConnectionAttempts - 1)
 	require.True(t, e.Enabled, "precondition: still enabled one failure short")
 	e.MarkUnhealthy() // the relay path's call, gated on IsNodeAtFault
 	require.False(t, e.Enabled,
@@ -143,7 +143,7 @@ func TestEndpointFault_CounterMovesOnlyOnFault(t *testing.T) {
 	blameless := jsonrpcNodeError(-32000, "transaction not found")
 	require.False(t, blameless.IsNodeAtFault, "precondition: not-found does not blame")
 
-	survivor := endpointWith(uint64(lavasession.MaxConsecutiveConnectionAttempts) - 1)
+	survivor := endpointWith(lavasession.MaxConsecutiveConnectionAttempts - 1)
 	for i := 0; i < 100; i++ {
 		if blameless.IsNodeAtFault { // never true; mirrors the relay path's gate
 			survivor.MarkUnhealthy()
