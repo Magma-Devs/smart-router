@@ -223,7 +223,7 @@ func (c *callback) call(ctx context.Context, method string, args []reflect.Value
 
 // Is t context.Context or *context.Context?
 func isContextType(t reflect.Type) bool {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return t == contextType
@@ -231,7 +231,7 @@ func isContextType(t reflect.Type) bool {
 
 // Does t satisfy the error interface?
 func isErrorType(t reflect.Type) bool {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return t.Implements(errorType)
@@ -239,7 +239,7 @@ func isErrorType(t reflect.Type) bool {
 
 // Is t Subscription or *Subscription?
 func isSubscriptionType(t reflect.Type) bool {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return t == subscriptionType

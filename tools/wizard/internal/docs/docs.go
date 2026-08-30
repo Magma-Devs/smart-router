@@ -4,7 +4,9 @@
 // hand in this repo; it's extrapolated from the docs.
 //
 // Catalog: http://docs.magmadevs.com/javascripts/chains-data.js — objects like
-//   {"id":"ethereum","name":"Ethereum","eco":"EVM",…,"specs":[".../ethereum.json"]}
+//
+//	{"id":"ethereum","name":"Ethereum","eco":"EVM",…,"specs":[".../ethereum.json"]}
+//
 // keyed here by spec-file basename (e.g. "ethereum.json").
 package docs
 

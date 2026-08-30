@@ -202,7 +202,7 @@ func stepChains(st *flow.State, chains []catalog.Chain, renderer *icons.Renderer
 }
 
 func stepEndpoints(st *flow.State, _ []catalog.Chain, _ *icons.Renderer) flow.Nav {
-	st.Primary = nil // fresh each entry (supports redo)
+	st.Primary = nil                      // fresh each entry (supports redo)
 	return st.CollectEndpoints("primary") // Esc inside returns Back
 }
 
@@ -404,7 +404,6 @@ func isDir(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && fi.IsDir()
 }
-
 
 // showLastRun reprints the most recently generated run plan (`--last`). It reads
 // the global record written on the last finish; with nothing recorded yet it
