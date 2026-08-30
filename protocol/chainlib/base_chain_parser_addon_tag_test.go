@@ -224,3 +224,82 @@ func TestGetParsingByTagForCollection_AddonOrderIsTheNodesOwn(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "other_blockNumber", parsing.ApiName)
 }
+
+// TestVerificationBorrowsItsOwnCollectionsDirective is the MAG-3296 defect in its
+// third location. A verification that names a function tag instead of carrying its
+// own template borrows a directive, and it used to borrow from taggedApis — which
+// holds one directive per tag, the base collection's.
+//
+// The shape is Acala's, verbatim from aca.json: the `evm` collection's `pruning`
+// verification is declared as nothing but `{"function_tag": "GET_EARLIEST_BLOCK"}`,
+// so it borrowed the base collection's Substrate chain_getBlockHash and probed an
+// EVM node with a method that node does not implement.
+func TestVerificationBorrowsItsOwnCollectionsDirective(t *testing.T) {
+	collectionData := func(addon string) spectypes.CollectionData {
+		return spectypes.CollectionData{
+			ApiInterface: spectypes.APIInterfaceJsonRPC,
+			Type:         "POST",
+			AddOn:        addon,
+		}
+	}
+
+	spec := spectypes.Spec{
+		Index:   "ACA",
+		Enabled: true,
+		ApiCollections: []*spectypes.ApiCollection{
+			{
+				Enabled:        true,
+				CollectionData: collectionData(""),
+				ParseDirectives: []*spectypes.ParseDirective{
+					{FunctionTag: spectypes.FUNCTION_TAG_GET_EARLIEST_BLOCK, ApiName: "chain_getBlockHash"},
+					{FunctionTag: spectypes.FUNCTION_TAG_GET_BLOCKNUM, ApiName: "chain_getHeader"},
+				},
+				Verifications: []*spectypes.Verification{{
+					Name:           "pruning",
+					ParseDirective: &spectypes.ParseDirective{FunctionTag: spectypes.FUNCTION_TAG_GET_EARLIEST_BLOCK},
+					Values:         []*spectypes.ParseValue{{LatestDistance: 7200}},
+				}},
+			},
+			{
+				Enabled:        true,
+				CollectionData: collectionData("evm"),
+				ParseDirectives: []*spectypes.ParseDirective{
+					{FunctionTag: spectypes.FUNCTION_TAG_GET_EARLIEST_BLOCK, ApiName: "eth_getBlockByNumber"},
+					{FunctionTag: spectypes.FUNCTION_TAG_GET_BLOCKNUM, ApiName: "eth_blockNumber"},
+				},
+				Verifications: []*spectypes.Verification{{
+					Name:           "pruning",
+					ParseDirective: &spectypes.ParseDirective{FunctionTag: spectypes.FUNCTION_TAG_GET_EARLIEST_BLOCK},
+					Values:         []*spectypes.ParseValue{{LatestDistance: 7200}},
+				}},
+			},
+			{
+				// Borrows a tag it does not declare itself, which is the ordinary
+				// case and must keep resolving through taggedApis as before.
+				Enabled:        true,
+				CollectionData: collectionData("txpool"),
+				Verifications: []*spectypes.Verification{{
+					Name:           "pruning",
+					ParseDirective: &spectypes.ParseDirective{FunctionTag: spectypes.FUNCTION_TAG_GET_EARLIEST_BLOCK},
+					Values:         []*spectypes.ParseValue{{LatestDistance: 7200}},
+				}},
+			},
+		},
+	}
+
+	_, _, _, _, _, verifications := getServiceApis(spec, spectypes.APIInterfaceJsonRPC)
+
+	directiveFor := func(addon string) string {
+		containers, ok := verifications[VerificationKey{Addon: addon}][""]
+		require.True(t, ok, "expected a verification for addon %q", addon)
+		require.Len(t, containers, 1)
+		return containers[0].ParseDirective.ApiName
+	}
+
+	require.Equal(t, "eth_getBlockByNumber", directiveFor("evm"),
+		"the evm verification must probe with the evm collection's directive")
+	require.Equal(t, "chain_getBlockHash", directiveFor(""),
+		"the base verification is unchanged")
+	require.Equal(t, "chain_getBlockHash", directiveFor("txpool"),
+		"a collection that declares no directive for the tag still inherits the base one")
+}
