@@ -133,6 +133,7 @@ func (n *Notifier) Notify(id ID, data interface{}) error {
 }
 
 // Closed returns a channel that is closed when the RPC connection is closed.
+//
 // Deprecated: use subscription error channel
 func (n *Notifier) Closed() <-chan interface{} {
 	return n.h.conn.closed()
