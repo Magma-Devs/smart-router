@@ -243,7 +243,6 @@ func applyReverification(
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, SpecReVerifyConcurrency)
 	for i, p := range configured {
-		i, p := i, p
 		sem <- struct{}{}
 		wg.Add(1)
 		go func() {

@@ -301,7 +301,9 @@ func TestPointViperAtConfigNotFound(t *testing.T) {
 
 		attrs := map[string]string{}
 		for _, attr := range configLocationAttributes(target, isFile) {
-			attrs[attr.Key] = attr.Value.(string)
+			value, ok := attr.Value.(string)
+			require.Truef(t, ok, "attribute %q must be a string, got %T", attr.Key, attr.Value)
+			attrs[attr.Key] = value
 		}
 		require.Contains(t, attrs, "searched_paths")
 		require.Contains(t, attrs["searched_paths"], filepath.Join("config", "nested", "missing.yml"),
