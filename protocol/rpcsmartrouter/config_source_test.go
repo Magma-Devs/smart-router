@@ -32,7 +32,7 @@ func TestPointViperAtConfigResolution(t *testing.T) {
 		setup func(t *testing.T, dir string) (args []string, wantMarker string)
 	}{
 		{
-			// The bug: this failed with "Not Found in [. ./config $HOME/.lava]".
+			// The bug: this failed with "Not Found in [. ./config $HOME/.smart-router]".
 			name: "absolute path",
 			setup: func(t *testing.T, dir string) ([]string, string) {
 				abs := writeConfig(t, filepath.Join(dir, "elsewhere", "router.yml"), "absolute")
@@ -152,15 +152,15 @@ func TestPointViperAtConfigResolution(t *testing.T) {
 			},
 		},
 		{
-			// The same, for the last search path. lavaDefaultNodeHome is the literal
-			// "$HOME/.lava"; viper expands it through absPathify, so the path branch has to
-			// expand it too or this resolves against a directory named "$HOME".
-			name: "relative path resolves through the lava home search path",
+			// The same, for the last search path. defaultNodeHome is the literal
+			// "$HOME/.smart-router"; viper expands it through absPathify, so the path branch
+			// has to expand it too or this resolves against a directory named "$HOME".
+			name: "relative path resolves through the home search path",
 			setup: func(t *testing.T, dir string) ([]string, string) {
 				home := t.TempDir()
 				t.Setenv("HOME", home)
-				writeConfig(t, filepath.Join(home, ".lava", "sub", "router.yml"), "via-lava-home")
-				return []string{"sub/router.yml"}, "via-lava-home"
+				writeConfig(t, filepath.Join(home, ".smart-router", "sub", "router.yml"), "via-home")
+				return []string{"sub/router.yml"}, "via-home"
 			},
 		},
 		{

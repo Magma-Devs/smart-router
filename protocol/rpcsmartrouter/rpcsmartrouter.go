@@ -61,10 +61,10 @@ const (
 	DebugRelaysFlagName           = "debug-relays"
 	DebugProbesFlagName           = "debug-probes"
 
-	// lavaAppName is the application name, previously app.Name.
-	lavaAppName = "lava"
-	// lavaDefaultNodeHome is the default home directory, previously lavaDefaultNodeHome (~/.lava).
-	lavaDefaultNodeHome = "$HOME/." + lavaAppName
+	// appName names the binary's dot-directory under $HOME.
+	appName = "smart-router"
+	// defaultNodeHome is the last of the config search paths (~/.smart-router).
+	defaultNodeHome = "$HOME/." + appName
 )
 
 var (
@@ -2864,12 +2864,11 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 		// error line, swamping kubectl logs in a CrashLoopBackOff. Operators need
 		// to see the error, not the flag catalogue.
 		SilenceUsage: true,
-		Long: `rpcsmartrouter sets up a centralized server with static and backup providers to perform api requests through the lava protocol.
-		This is the smart router mode that uses pre-configured static providers instead of dynamically discovering providers on-chain.
+		Long: `rpcsmartrouter runs a server that routes api requests across the static and backup providers in its config.
 		if no arguments are passed, assumes default config file: ` + DefaultRPCSmartRouterFileName + `
 		if one argument is passed, it is the config to load. An absolute path names the file
 		outright; anything else — a relative path, or a bare name — is looked up in the
-		local running directory, ./config, then ` + lavaDefaultNodeHome + `.
+		local running directory, ./config, then ` + defaultNodeHome + `.
 		An argument without a recognized extension has the supported ones appended, so
 		"akash" and "config/akash" both find config/akash.yml.
 		`,
