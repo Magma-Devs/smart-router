@@ -101,6 +101,42 @@ func skipVerification(url common.NodeUrl, name string) bool {
 	return SkipAllVerifications || url.ShouldSkipVerification(name)
 }
 
+// verificationsForNodeUrl drops the base collection's verifications for a url that
+// has opted out of serving it (NodeUrl.StandaloneAddons).
+//
+// GetVerifications always adds the empty addon to whatever a url declares, so an
+// add-on node runs the base collection's verifications too. That is right when the
+// add-on EXTENDS the base surface and wrong when it REPLACES it: Acala's base
+// chain-id verification fires a Substrate chain_getBlockHash, which an EVM-only
+// node answers with -32601, and an omitted severity in a spec means Fail — so one
+// inherited verification excluded the provider (MAG-3296).
+//
+// This runs BEFORE needsLatestBlock for the same reason the skip filter does: a
+// verification that is not going to run must not drag a head probe out to the
+// upstream on its way past.
+//
+// Filtering here rather than inside GetVerifications keeps the parser's signature
+// free of node-url concerns — and dropping Addon=="" containers afterwards is
+// exactly equivalent to never having appended the empty addon.
+func verificationsForNodeUrl(url common.NodeUrl, verifications []VerificationContainer) []VerificationContainer {
+	if url.ServesBaseCollection() {
+		return verifications
+	}
+	kept := make([]VerificationContainer, 0, len(verifications))
+	for _, verification := range verifications {
+		if verification.Addon == "" {
+			utils.LavaFormatDebug("skipping base-collection verification for a standalone-addons url",
+				utils.LogAttr("verification", verification.Name),
+				utils.LogAttr("url", url.UrlStr()),
+				utils.LogAttr("addons", url.Addons),
+			)
+			continue
+		}
+		kept = append(kept, verification)
+	}
+	return kept
+}
+
 // needsLatestBlock reports whether any verification that will ACTUALLY RUN for this
 // node-url depends on the chain head, and therefore whether Validate has to spend a
 // FetchLatestBlockNum relay against the upstream before verifying.
@@ -138,6 +174,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		verifications = verificationsForNodeUrl(url, verifications)
 		if len(verifications) == 0 {
 			utils.LavaFormatWarning("no verifications for url", nil, utils.LogAttr("url", url.String()))
 		}
@@ -229,6 +266,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 			results = append(results, nodeResult)
 			continue
 		}
+		verifications = verificationsForNodeUrl(url, verifications)
 
 		var latestBlock int64
 		if needsLatestBlock(url, verifications) {
