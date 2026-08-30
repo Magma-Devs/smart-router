@@ -145,7 +145,10 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		var latestBlock int64
 		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
-				latestBlock, err = cf.FetchLatestBlockNum(ctx)
+				// Probe the head with THIS url's collections. Using the base
+				// collection's directive for every node is what excluded a
+				// provider serving only a disjoint add-on surface (MAG-3296).
+				latestBlock, err = cf.FetchLatestBlockNumForCollection(ctx, url.Addons, url.InternalPath)
 				if stopValidateRetries(err) {
 					break
 				}
@@ -230,7 +233,9 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 		var latestBlock int64
 		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
-				latestBlock, err = cf.FetchLatestBlockNum(ctx)
+				// Same collection-aware probe as Validate, so `smartrouter health`
+				// reports the head a node can actually serve (MAG-3296).
+				latestBlock, err = cf.FetchLatestBlockNumForCollection(ctx, url.Addons, url.InternalPath)
 				if stopValidateRetries(err) {
 					break
 				}
@@ -505,8 +510,25 @@ func (cf *ChainFetcher) CustomMessage(ctx context.Context, path string, data []b
 	return reply.RelayReply.Data, nil
 }
 
+// FetchLatestBlockNum probes the chain head using the base collection's
+// GET_BLOCKNUM directive. Callers that know which collections the node actually
+// serves should use FetchLatestBlockNumForCollection instead — see MAG-3296.
 func (cf *ChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	parsing, apiCollection, ok := cf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
+	return cf.FetchLatestBlockNumForCollection(ctx, nil, "")
+}
+
+// FetchLatestBlockNumForCollection probes the chain head with the GET_BLOCKNUM
+// directive of the collection this node URL actually serves.
+//
+// MAG-3296: this used to be the base collection's directive for every node,
+// which excluded any provider whose add-on is a disjoint api surface rather than
+// a superset — an EVM-only Acala node answers the `evm` collection's
+// eth_blockNumber and cannot answer the base collection's Substrate
+// chain_getHeader at all. On the admission path a failed head probe returns
+// before a single verification runs, so such a provider was dropped without ever
+// being asked the questions it could answer.
+func (cf *ChainFetcher) FetchLatestBlockNumForCollection(ctx context.Context, addons []string, internalPath string) (int64, error) {
+	parsing, apiCollection, ok := cf.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, addons, internalPath)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCKNUM.String()
 	if !ok {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" tag function not found", nil, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)

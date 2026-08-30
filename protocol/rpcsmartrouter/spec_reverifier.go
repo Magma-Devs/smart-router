@@ -497,30 +497,49 @@ func validateProviderTier(
 // It builds a fresh ChainRouter + ChainFetcher under a bounded attempt context
 // (so a hung upstream cannot stall a whole reconcile cycle), calls Validate,
 // and tears the temporary resources down regardless of outcome.
+// verificationEndpoints splits the two endpoints a validation attempt needs.
+//
+// The ROUTER one expands every add-on url into a with-addon and a without-addon
+// route, the same way startup PHASE 1 does, because chain_router.go requires both
+// for routing flexibility.
+//
+// The FETCHER one carries only the urls the provider actually declared. The
+// stripped copies are a routing artifact, not a claim the provider made, and
+// MAG-3296 is what validating them costs: it makes every add-on node answer for
+// the base collection as well. Where an add-on extends the base surface that is
+// merely redundant; where it REPLACES it — Acala's `evm` against a Substrate base
+// — the stripped copy asks a question the node cannot answer. Validate returns on
+// the first failing url, so the copy's verdict became the provider's verdict and
+// an EVM-only node was dropped for failing to be a Substrate node.
+func verificationEndpoints(provider *lavasession.RPCStaticProviderEndpoint) (routerEndpoint, fetcherEndpoint *lavasession.RPCProviderEndpoint) {
+	routedNodeUrls := make([]common.NodeUrl, 0, len(provider.NodeUrls)*2)
+	for _, nodeUrl := range provider.NodeUrls {
+		routedNodeUrls = append(routedNodeUrls, nodeUrl)
+		if len(nodeUrl.Addons) > 0 {
+			noAddonUrl := nodeUrl
+			noAddonUrl.Addons = []string{}
+			routedNodeUrls = append(routedNodeUrls, noAddonUrl)
+		}
+	}
+
+	newEndpoint := func(nodeUrls []common.NodeUrl) *lavasession.RPCProviderEndpoint {
+		return &lavasession.RPCProviderEndpoint{
+			NetworkAddress: provider.NetworkAddress,
+			ChainID:        provider.ChainID,
+			ApiInterface:   provider.ApiInterface,
+			NodeUrls:       nodeUrls,
+		}
+	}
+	return newEndpoint(routedNodeUrls), newEndpoint(provider.NodeUrls)
+}
+
 func validateProvider(
 	ctx context.Context,
 	provider *lavasession.RPCStaticProviderEndpoint,
 	chainParser chainlib.ChainParser,
 	timeout time.Duration,
 ) error {
-	// Expand addon URLs the same way startup PHASE 1 does — chain_router.go
-	// requires both with-addon and without-addon routes for routing flexibility.
-	verificationNodeUrls := make([]common.NodeUrl, 0, len(provider.NodeUrls)*2)
-	for _, nodeUrl := range provider.NodeUrls {
-		verificationNodeUrls = append(verificationNodeUrls, nodeUrl)
-		if len(nodeUrl.Addons) > 0 {
-			noAddonUrl := nodeUrl
-			noAddonUrl.Addons = []string{}
-			verificationNodeUrls = append(verificationNodeUrls, noAddonUrl)
-		}
-	}
-
-	verificationEndpoint := &lavasession.RPCProviderEndpoint{
-		NetworkAddress: provider.NetworkAddress,
-		ChainID:        provider.ChainID,
-		ApiInterface:   provider.ApiInterface,
-		NodeUrls:       verificationNodeUrls,
-	}
+	routerEndpoint, verificationEndpoint := verificationEndpoints(provider)
 
 	attemptCtx, attemptCancel := context.WithTimeout(ctx, timeout)
 	defer attemptCancel()
@@ -534,7 +553,7 @@ func validateProvider(
 	validationParser := chainlib.CloneChainParserForValidation(chainParser)
 
 	parallelConnections := uint(lavasession.DefaultMaximumStreamsOverASingleConnection)
-	verificationRouter, err := chainlib.GetChainRouter(attemptCtx, parallelConnections, verificationEndpoint, validationParser)
+	verificationRouter, err := chainlib.GetChainRouter(attemptCtx, parallelConnections, routerEndpoint, validationParser)
 	if err != nil {
 		return err
 	}

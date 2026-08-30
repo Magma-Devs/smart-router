@@ -349,6 +349,62 @@ func (bcp *BaseChainParser) GetParsingByTag(tag spectypes.FUNCTION_TAG) (parsing
 	return val.Parsing, val.ApiCollection, ok
 }
 
+// GetParsingByTagForCollection resolves a tagged parse directive for a node that
+// serves specific add-on collections, falling back to GetParsingByTag's answer
+// when the node declares no add-ons or none of its collections carries the tag.
+//
+// MAG-3296: taggedApis holds exactly ONE directive per tag — the first collection
+// to declare it, which for a spec written base-first is the base collection. So
+// GetParsingByTag answers "the base collection's directive" no matter who is
+// asking. That is wrong for a spec whose add-on is a DISJOINT api surface rather
+// than a superset of the base one: Acala serves Substrate in the base collection
+// and EVM in an `evm` add-on, and an EVM-only node cannot answer the base
+// collection's chain_getHeader at all. Probing it with one gets -32601 and, on
+// the admission path, costs the provider its place outright.
+//
+// Add-ons are tried in the order the node declares them, so a node's own
+// preference decides between two collections that both carry the tag. The
+// connection type comes from the base answer, because the tag is served over the
+// same transport whichever collection defines it — this is a keyed lookup rather
+// than a scan of apiCollections, which is a map and would iterate randomly.
+//
+// `addons` may contain extension names too (callers pass NodeUrl.Addons, which
+// mixes both). An extension name matches no collection's AddOn, so it is skipped
+// rather than needing to be separated out first.
+func (bcp *BaseChainParser) GetParsingByTagForCollection(tag spectypes.FUNCTION_TAG, addons []string, internalPath string) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool) {
+	bcp.rwLock.RLock()
+	defer bcp.rwLock.RUnlock()
+
+	base, baseExisted := bcp.taggedApis[tag]
+	if baseExisted {
+		parsing, apiCollection, existed = base.Parsing, base.ApiCollection, true
+	}
+	if len(addons) == 0 || !baseExisted {
+		return parsing, apiCollection, existed
+	}
+
+	for _, addon := range addons {
+		if addon == "" {
+			continue // the base collection, which is already the fallback
+		}
+		collection, ok := bcp.apiCollections[CollectionKey{
+			ConnectionType: base.ApiCollection.CollectionData.Type,
+			InternalPath:   internalPath,
+			Addon:          addon,
+		}]
+		if !ok || !collection.Enabled {
+			continue
+		}
+		for _, directive := range collection.ParseDirectives {
+			if directive.FunctionTag == tag {
+				return directive, collection, true
+			}
+		}
+	}
+
+	return parsing, apiCollection, existed
+}
+
 func (bcp *BaseChainParser) IsTagInCollection(tag spectypes.FUNCTION_TAG, collectionKey CollectionKey) bool {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
