@@ -24,19 +24,19 @@ type chainItem struct {
 // Tab/⇧Tab switch families; "/" focuses the filter; space toggles; enter
 // confirms. Selection persists across family/filter changes.
 type ChainPicker struct {
-	all       []chainItem
-	byFamily  map[classify.Family][]chainItem
-	families  []classify.Family
-	famIdx    int
-	filter    textinput.Model
-	filtering bool
-	cursor    int
-	selected  map[string]bool // chain index -> chosen
-	visible   []chainItem     // current family ∩ filter
-	width     int
-	height    int
-	source    string
-	icons     *icons.Renderer
+	all          []chainItem
+	byFamily     map[classify.Family][]chainItem
+	families     []classify.Family
+	famIdx       int
+	filter       textinput.Model
+	filtering    bool
+	cursor       int
+	selected     map[string]bool // chain index -> chosen
+	visible      []chainItem     // current family ∩ filter
+	width        int
+	height       int
+	source       string
+	icons        *icons.Renderer
 	done         bool
 	cancelled    bool
 	changeSource bool
@@ -270,7 +270,7 @@ func (p ChainPicker) renderList() string {
 		it := p.visible[i]
 		marker := Hint.Render(" • ")
 		if p.selected[it.ch.Index] {
-			marker = OK.Render(" "+Check+" ")
+			marker = OK.Render(" " + Check + " ")
 		}
 		idx := it.ch.Index
 		name := it.ch.Name
@@ -288,7 +288,7 @@ func (p ChainPicker) renderList() string {
 			rowStyle = lipgloss.NewStyle().Foreground(Brand).Bold(true)
 			marker = Accent.Render(" ▸ ")
 			if p.selected[it.ch.Index] {
-				marker = OK.Render(" "+Check+" ")
+				marker = OK.Render(" " + Check + " ")
 			}
 		}
 		rows = append(rows, marker+rowStyle.Render(line))

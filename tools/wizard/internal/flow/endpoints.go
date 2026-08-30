@@ -401,9 +401,10 @@ func subLabel(step int, l Listener, url string) string {
 // to state — the caller (collectForChain) names the whole round's backend once, after
 // every interface is collected, and derives each provider name as <base>-<iface>.
 // Returns the assembled upstream (name left blank) and a Nav:
-//   Next   — an upstream was collected (first return is valid)
-//   Back   — Esc on the URL prompt: caller decides (prev step / stop)
-//   Cancel — blank URL while `required` is false: skip this interface
+//
+//	Next   — an upstream was collected (first return is valid)
+//	Back   — Esc on the URL prompt: caller decides (prev step / stop)
+//	Cancel — blank URL while `required` is false: skip this interface
 //
 // required: if true a blank URL re-prompts (it's mandatory); if false a blank URL
 // returns Cancel. collectForChain passes false for every interface — a backend may

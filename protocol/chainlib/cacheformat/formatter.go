@@ -3,8 +3,8 @@ package cacheformat
 import (
 	"encoding/json"
 
-	"github.com/magma-Devs/smart-router/utils"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

@@ -85,6 +85,7 @@ func (f *fixedScoreOptimizer) AppendRelayDataConsensus(string, time.Duration, ui
 func (f *fixedScoreOptimizer) GetReputationReportForProvider(address string) (*pairingtypes.QualityOfServiceReport, time.Time) {
 	return f.qos[address], time.Time{}
 }
+
 func (f *fixedScoreOptimizer) Strategy() provideroptimizer.Strategy {
 	return provideroptimizer.StrategyBalanced
 }

@@ -19,9 +19,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -825,7 +825,7 @@ func (m *chainProxyMock) GetChainProxyInformation() (common.NodeUrl, string) {
 }
 
 func (m *chainProxyMock) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
-	return nil, nil
+	return nil, nil //nolint:nilnil // a test double: the router under test never reads the reply
 }
 
 type PolicySt struct {
