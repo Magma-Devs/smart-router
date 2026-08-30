@@ -2407,8 +2407,8 @@ func TestListenForUpstreamMessages_NilUpstreamSubDoesNotPanic(t *testing.T) {
 	manager.lock.Unlock()
 
 	// A typed nil, exactly as createUpstreamSubscription used to hand back.
-	var nilSub *rpcclient.ClientSubscription
-	var upstreamSub upstreamErrSource = nilSub //nolint:staticcheck // SA4023: the typed nil is the subject of the test
+	var nilSub *rpcclient.ClientSubscription //nolint:staticcheck // SA4023: the typed nil is the subject of the test
+	var upstreamSub upstreamErrSource = nilSub
 	// Plain `== nil` is the check a caller would naturally reach for, and it does NOT catch
 	// this — the interface carries a type, so it compares non-nil even though the pointer
 	// inside is nil. (testify's NotNil disagrees: it unwraps via reflection. The Go-level
