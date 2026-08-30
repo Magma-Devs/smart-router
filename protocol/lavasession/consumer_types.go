@@ -225,6 +225,12 @@ type Endpoint struct {
 	relayProbeAttempts uint64
 	Addons             map[string]struct{}
 	Extensions         map[string]struct{}
+	// StandaloneAddons mirrors common.NodeUrl.StandaloneAddons: this endpoint
+	// serves ONLY the collections its Addons name, not those plus the base one.
+	// Set for a url whose add-on REPLACES the base api surface rather than
+	// extending it — Acala's `evm` against a Substrate base. It keeps
+	// base-collection traffic off an endpoint that cannot answer it (MAG-3296).
+	StandaloneAddons bool
 	// InternalPath is the spec collection this endpoint's url serves — "/v2",
 	// "/P", or "" for the root. It mirrors the chain router's own per-path
 	// proxies (chainlib/chain_router.go): a node-url declaring `internal-path`
@@ -311,8 +317,23 @@ func (e *Endpoint) IsProviderRelay() bool {
 	return len(e.Connections) > 0
 }
 
+// ServesBaseCollection reports whether this endpoint answers for the spec's base
+// collection as well as its add-ons. Mirrors common.NodeUrl.ServesBaseCollection,
+// from which it is populated. See StandaloneAddons.
+func (e *Endpoint) ServesBaseCollection() bool {
+	return !e.StandaloneAddons || len(e.Addons) == 0
+}
+
 func (e *Endpoint) CheckSupportForServices(addon string, extensions []string) (supported bool) {
-	if addon != "" {
+	if addon == "" {
+		// The base collection is not automatically everybody's. An endpoint whose
+		// add-ons REPLACE the base surface rather than extending it cannot serve a
+		// base-collection request at all — routing one to an EVM-only Acala node
+		// gets a -32601 the client reads as a verdict on its request (MAG-3296).
+		if !e.ServesBaseCollection() {
+			return false
+		}
+	} else {
 		if _, ok := e.Addons[addon]; !ok {
 			return false
 		}
@@ -839,7 +860,15 @@ func (cswp *ConsumerSessionsWithProvider) IsSupportingAddon(addon string) bool {
 	cswp.Lock.RLock()
 	defer cswp.Lock.RUnlock()
 	if addon == "" {
-		return true
+		// Not unconditionally true: a provider every one of whose endpoints has
+		// opted out of the base collection cannot serve a base-collection request
+		// (MAG-3296). A provider with any ordinary endpoint still can.
+		for _, endpoint := range cswp.Endpoints {
+			if endpoint.ServesBaseCollection() {
+				return true
+			}
+		}
+		return false
 	}
 	for _, endpoint := range cswp.Endpoints {
 		if _, ok := endpoint.Addons[addon]; ok {
