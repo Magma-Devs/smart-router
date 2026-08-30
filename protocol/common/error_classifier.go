@@ -505,6 +505,12 @@ type NodeErrorClassification struct {
 	// (an archive node may answer) but must not demote the endpoint that told us
 	// the truth. See ErrorSubCategory.IsDataScope.
 	IsDataScope bool
+	// IsNodeCapability is the fourth fault axis, and the same shape as IsDataScope
+	// one level up: the endpoint does not OFFER this capability, rather than not
+	// holding this data. Retryable — a node on a different tier may serve it — but
+	// the endpoint answered truthfully about itself and must not be demoted for it.
+	// See ErrorSubCategory.IsNodeCapability.
+	IsNodeCapability bool
 }
 
 // ClassifyNodeErrorForRetry runs ClassifyError exactly once and derives the
@@ -526,6 +532,7 @@ func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, erro
 		IsUnsupportedMethod: c.SubCategory.IsUnsupportedMethod(),
 		IsRateLimited:       c.SubCategory.IsRateLimit(),
 		IsDataScope:         c.SubCategory.IsDataScope(),
+		IsNodeCapability:    c.SubCategory.IsNodeCapability(),
 	}
 }
 
