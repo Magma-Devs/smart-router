@@ -112,6 +112,41 @@ func (sc ErrorSubCategory) IsNodeCapability() bool {
 	return sc == SubCategoryNodeCapability
 }
 
+// EndpointAtFault reports whether this classification is POSITIVE evidence that the endpoint
+// itself is broken or unable to serve — the one question the endpoint-health counter asks
+// (FAILOVER-TASKS section 2, decision 4).
+//
+// It is deliberately NOT Retryable. Retryable answers "would asking someone else help", which is a
+// routing question; this answers "is this endpoint at fault", which is a health question. They
+// diverge in both directions: a data-scope or capability answer is retryable and blameless, while a
+// caller-fault rejection is non-retryable and equally blameless.
+//
+// Absence of information is not fault. An unclassified error returns false, so an endpoint failing
+// in a way the registry has never seen is demoted by QoS but never disabled by the counter. That is
+// accepted: disabling a URL is a hard action and warrants evidence, and the fix per occurrence is
+// one registry line — which TestFaultAxis_EveryRegisteredCodeIsAccountedFor forces to be a
+// deliberate choice.
+//
+// Defined here rather than at the call sites so the endpoint counter, the relay result's
+// IsNodeAtFault flag and anything added later cannot drift apart.
+func (le *LavaError) EndpointAtFault() bool {
+	if le == nil || le == LavaErrorUnknown {
+		return false
+	}
+	// The four "not the endpoint's fault" axes: it answered truthfully about what it serves,
+	// what it holds, or how busy it is.
+	if le.SubCategory.IsUnsupportedMethod() || le.SubCategory.IsNodeCapability() ||
+		le.SubCategory.IsDataScope() || le.SubCategory.IsRateLimit() {
+		return false
+	}
+	if le.Category == CategoryInternal {
+		return true // could not reach it, or the transport broke
+	}
+	// CategoryExternal + Retryable is the node saying it is broken or not ready (internal error,
+	// bad gateway, syncing). Non-retryable external errors are the caller's fault.
+	return le.Category == CategoryExternal && le.Retryable
+}
+
 // LavaError is the central error definition — a classification struct, not a Go error.
 // It is metadata *about* an error, used for logging, metrics, and retry decisions.
 // The original error always passes through unchanged to the user (transparent hop).
