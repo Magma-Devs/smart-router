@@ -629,6 +629,18 @@ func (apip *BaseChainParser) getApiCollection(connectionType, internalPath, addo
 	return api, nil
 }
 
+// findParseDirectiveByTag returns a collection's own directive for a tag, or nil
+// when it declares none. Used to resolve what a tag-referencing verification
+// borrows, so it borrows from the collection it belongs to.
+func findParseDirectiveByTag(apiCollection *spectypes.ApiCollection, tag spectypes.FUNCTION_TAG) *spectypes.ParseDirective {
+	for _, directive := range apiCollection.ParseDirectives {
+		if directive.FunctionTag == tag {
+			return directive
+		}
+	}
+	return nil
+}
+
 func getServiceApis(
 	spec spectypes.Spec,
 	rpcInterface string,
@@ -740,8 +752,26 @@ func getServiceApis(
 			}
 			for _, verification := range apiCollection.Verifications {
 				if verification.ParseDirective.FunctionTag != spectypes.FUNCTION_TAG_VERIFICATION {
-					if _, ok := taggedApis[verification.ParseDirective.FunctionTag]; ok {
-						verification.ParseDirective = taggedApis[verification.ParseDirective.FunctionTag].Parsing
+					// A verification that names a tag instead of carrying its own
+					// template borrows a directive. Take the one from ITS OWN
+					// collection first (MAG-3296): taggedApis holds a single
+					// directive per tag — the first collection to declare it — so
+					// borrowing from there gave every collection the base one.
+					// Acala's `evm` pruning verification names GET_EARLIEST_BLOCK
+					// and was rewritten to probe with the base collection's
+					// Substrate chain_getBlockHash, which the EVM node it was
+					// meant to check cannot answer.
+					//
+					// taggedApis stays the fallback, so a collection that borrows a
+					// tag it does not itself declare still resolves exactly as before.
+					borrowed := findParseDirectiveByTag(apiCollection, verification.ParseDirective.FunctionTag)
+					if borrowed == nil {
+						if container, ok := taggedApis[verification.ParseDirective.FunctionTag]; ok {
+							borrowed = container.Parsing
+						}
+					}
+					if borrowed != nil {
+						verification.ParseDirective = borrowed
 					} else {
 						utils.LavaFormatError("Bad verification definition", fmt.Errorf("verification function tag is not defined in the collections parse directives"), utils.LogAttr("function_tag", verification.ParseDirective.FunctionTag))
 						continue
