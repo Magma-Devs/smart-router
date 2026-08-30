@@ -4289,6 +4289,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		relayResult.IsUnsupportedMethod = result.IsUnsupportedMethod
 		relayResult.IsRateLimited = result.IsRateLimited
 		relayResult.IsDataScope = result.IsDataScope
+		relayResult.IsNodeCapability = result.IsNodeCapability
 		relayResult.ProviderInfo = result.ProviderInfo
 
 		return relayLatency, httpStatusRelayError(statusCode, result.Reply), needsBackoff
@@ -4315,6 +4316,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	relayResult.IsUnsupportedMethod = result.IsUnsupportedMethod
 	relayResult.IsRateLimited = result.IsRateLimited
 	relayResult.IsDataScope = result.IsDataScope
+	relayResult.IsNodeCapability = result.IsNodeCapability
 	relayResult.ProviderInfo = result.ProviderInfo
 	if relayResult.Reply != nil {
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{
