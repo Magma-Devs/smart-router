@@ -139,7 +139,7 @@ func TestGRPCProxy_ServerStreaming_UnaryFallthrough(t *testing.T) {
 	proxyGRPCSrv, _, err := NewGRPCProxyWithReflection(unaryEcho(t), "", testCmdFlags(), nil, nil,
 		func(ctx context.Context, method string, reqBody []byte) (*StreamResponse, error) {
 			streamCallbackCalls++
-			return nil, nil
+			return nil, nil //nolint:nilnil // a test double: only the call count is asserted
 		})
 	require.NoError(t, err)
 

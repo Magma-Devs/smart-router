@@ -1,12 +1,11 @@
 package rpcInterfaceMessages
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/goccy/go-json"
-
-	"errors"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"

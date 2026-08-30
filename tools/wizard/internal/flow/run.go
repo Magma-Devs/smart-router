@@ -116,8 +116,8 @@ func (s *State) writePortOverride() string {
 
 // RunPlan holds the exact commands to show/execute.
 type RunPlan struct {
-	RenderStep string
-	UpCommand  string
+	RenderStep  string
+	UpCommand   string
 	DownCommand string
 }
 

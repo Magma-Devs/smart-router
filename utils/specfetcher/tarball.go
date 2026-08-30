@@ -10,8 +10,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/utils"
 	types "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // MaxTarballDecompressedBytes caps how much decompressed tarball data is read

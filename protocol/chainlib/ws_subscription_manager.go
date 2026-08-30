@@ -54,4 +54,3 @@ type WSSubscriptionManager interface {
 		metricsData *metrics.RelayMetrics,
 	) error
 }
-
