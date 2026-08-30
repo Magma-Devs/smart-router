@@ -121,6 +121,27 @@ type NodeUrl struct {
 	Addons            []string      `yaml:"addons,omitempty" json:"addons,omitempty" mapstructure:"addons"`
 	SkipVerifications []string      `yaml:"skip-verifications,omitempty" json:"skip-verifications,omitempty" mapstructure:"skip-verifications"`
 	Methods           []string      `yaml:"methods,omitempty" json:"methods,omitempty" mapstructure:"methods"`
+	// StandaloneAddons declares that this url serves ONLY the collections its
+	// `addons` name, instead of those plus the spec's base collection.
+	//
+	// It exists because a spec's add-on can mean either of two things and the
+	// spec model cannot tell them apart. Usually an add-on EXTENDS the base
+	// surface — an archive node still answers everything a full node does — and
+	// inheriting the base collection's verifications is right. But Acala,
+	// Litentry/Heima and peaq use an add-on as a DISJOINT surface: Substrate in
+	// the base collection, EVM in an `evm` add-on, served by different
+	// infrastructure with no method in common. There, inheriting the base
+	// collection asks the node to be something it never claimed to be, and the
+	// resulting failure costs the provider its place (MAG-3296).
+	//
+	// Default false, so every existing deployment keeps inheriting. Only an
+	// operator knows which of the two a given url is, which is why this is
+	// configuration and not inference — until the spec model can say it, at
+	// which point this becomes redundant rather than wrong.
+	//
+	// Ignored on a url that declares no addons: there would be nothing left to
+	// serve.
+	StandaloneAddons bool `yaml:"standalone-addons,omitempty" json:"standalone-addons,omitempty" mapstructure:"standalone-addons"`
 	// GrpcConfig holds gRPC-specific configuration for direct gRPC connections (smart router)
 	GrpcConfig GrpcConfig `yaml:"grpc-config,omitempty" json:"grpc-config,omitempty" mapstructure:"grpc-config"`
 }
@@ -142,6 +163,13 @@ const SkipVerificationsWildcard = "*"
 func (nurl NodeUrl) ShouldSkipVerification(name string) bool {
 	return slices.Contains(nurl.SkipVerifications, SkipVerificationsWildcard) ||
 		slices.Contains(nurl.SkipVerifications, name)
+}
+
+// ServesBaseCollection reports whether this url answers for the spec's base
+// collection in addition to whatever its addons name. True for every url that
+// has not opted out — see StandaloneAddons.
+func (nurl NodeUrl) ServesBaseCollection() bool {
+	return !nurl.StandaloneAddons || len(nurl.Addons) == 0
 }
 
 type ChainMessageGetApiInterface interface {
