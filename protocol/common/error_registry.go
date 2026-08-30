@@ -40,6 +40,7 @@ const (
 	SubCategoryUnsupportedMethod                  // zero retries, zero CU, cached response, no provider scoring
 	SubCategoryRateLimit                          // rate-limit signal: endpoint is healthy but busy, apply backoff, do not mark unhealthy
 	SubCategoryDataScope                          // endpoint does not hold the data: retry elsewhere may help, but it is not unhealthy
+	SubCategoryNodeCapability                     // endpoint does not offer this capability: retry elsewhere may help, but it is not unhealthy
 )
 
 func (sc ErrorSubCategory) String() string {
@@ -50,6 +51,8 @@ func (sc ErrorSubCategory) String() string {
 		return "rate_limit"
 	case SubCategoryDataScope:
 		return "data_scope"
+	case SubCategoryNodeCapability:
+		return "node_capability"
 	default:
 		return "none"
 	}
@@ -85,6 +88,28 @@ func (sc ErrorSubCategory) IsRateLimit() bool {
 // endpoint's availability score untouched.
 func (sc ErrorSubCategory) IsDataScope() bool {
 	return sc == SubCategoryDataScope
+}
+
+// IsNodeCapability reports whether this subcategory represents "the endpoint answered
+// authoritatively that it does not offer this capability" — a method that exists on the
+// API surface but is switched off on this particular node (provider tier, policy, admin
+// config). NODE_METHOD_NOT_SUPPORTED (2002) is the case.
+//
+// It is the same fault axis as IsDataScope, one level up: data scope is "I do not hold
+// that", capability is "I do not serve that". Both mean the endpoint did its job and told
+// us the truth about itself, and both keep Retryable TRUE so the request reaches a node
+// that can serve it — the full-node-primary / archive-backup shape.
+//
+// Deliberately NOT SubCategoryUnsupportedMethod, even though the wording is close.
+// ShouldRetryErrorWithContext hard-stops on that subcategory REGARDLESS of the Retryable
+// flag, so reusing it would kill the retry this classification exists to allow. The
+// distinction is real: NODE_METHOD_NOT_FOUND (2001) means the method exists nowhere, so
+// retrying is pointless; 2002 means it exists but not here, so retrying is the whole point.
+//
+// Health-tracking callers should therefore keep retrying elsewhere but leave the
+// endpoint's availability score untouched.
+func (sc ErrorSubCategory) IsNodeCapability() bool {
+	return sc == SubCategoryNodeCapability
 }
 
 // LavaError is the central error definition — a classification struct, not a Go error.
