@@ -1571,20 +1571,34 @@ func shouldFailSessionForResult(err error, relayResult *common.RelayResult) bool
 		!relayResult.IsDataScope
 }
 
-// shouldResetEndpointHealth reports whether a completed direct-RPC relay is proof that the endpoint
-// is working — the condition relayInnerDirect calls Endpoint.ResetHealth on.
+// relayProvesEndpointHealthy reports whether a completed direct-RPC relay is POSITIVE proof that
+// the endpoint is working — the condition relayInnerDirect calls Endpoint.ResetHealth on.
 //
-// Defined as the exact negation of shouldFailSessionForResult so the endpoint-health path and the
-// QoS path cannot form different opinions about the same relay. They could before: relayInnerDirect
-// gated only on `statusCode >= 500 || == 429`, which no gRPC status can satisfy (the codes are
-// 0-16), so every gRPC node error fell through to "success — reset health" at the same moment
-// shouldFailSessionForResult was reporting it to the session manager as an availability failure.
+// It used to be the exact negation of shouldFailSessionForResult, so every relay either counted
+// against the endpoint or cleared it. FAILOVER-TASKS section 2 decision 4 adds a third outcome, and
+// the negation cannot express it:
 //
-// Keeping it a negation rather than a second rule is deliberate: a carve-out added to one gate is
-// then automatically honoured by the other, which is how a rate-limited or data-scope answer keeps
-// restoring health while an UNAVAILABLE one stops.
-func shouldResetEndpointHealth(relayResult *common.RelayResult) bool {
-	return !shouldFailSessionForResult(nil, relayResult)
+//	the endpoint was at fault          -> counter +1        (classifyEndpointHealth)
+//	the relay demonstrably succeeded   -> counter reset     (this function)
+//	anything else                      -> counter untouched
+//
+// The middle band is the point. A rate limit, a caller-fault rejection, an "I do not hold that",
+// and an error nobody has catalogued all tell us nothing about whether the endpoint can serve, so
+// they must neither punish it nor certify it.
+//
+// Concretely, this is what closes the unrecognised-4xx hole. Under the negation an unrecognised 4xx
+// was not a failure, so it was a success, so it RESET the counter to zero — an endpoint 49 failures
+// into its budget that then answered a strange 403 looked perfectly healthy again. Now the counter
+// stays where it was.
+//
+// Any node error disqualifies, whatever its subcategory: an endpoint that rejected the request
+// before doing work has not shown it can serve one. StatusCode 0 is gRPC's codes.OK — gRPC statuses
+// are 0-16 and never reach the 2xx range.
+func relayProvesEndpointHealthy(relayResult *common.RelayResult) bool {
+	if relayResult == nil || relayResult.IsNodeError {
+		return false
+	}
+	return relayResult.StatusCode == 0 || (relayResult.StatusCode >= 200 && relayResult.StatusCode < 300)
 }
 
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
@@ -4113,14 +4127,35 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		relayResult.IsRateLimited = result.IsRateLimited
 		relayResult.IsDataScope = result.IsDataScope
 		relayResult.IsNodeCapability = result.IsNodeCapability
+		relayResult.IsNodeAtFault = result.IsNodeAtFault
 		relayResult.ProviderInfo = result.ProviderInfo
 
 		return relayLatency, httpStatusRelayError(statusCode, result.Reply), needsBackoff
 	}
 
-	// Success - reset endpoint health. A node error the QoS path is scoring against this endpoint
-	// is not a success and must not certify it healthy; see shouldResetEndpointHealth.
-	if targetEndpoint != nil && shouldResetEndpointHealth(result) {
+	// A node error delivered inside a 2xx body reaches here with err == nil and a 200 status, so it
+	// used to touch the endpoint counter in NEITHER direction: no MarkUnhealthy (the err arm above
+	// never ran) and no ResetHealth (the reset gate returned false). The counter FROZE.
+	//
+	// That is the gap FAILOVER-TASKS section 2 names — the router caught endpoints that were dead,
+	// not ones that were dying — because an endpoint answering every request with an error inside a
+	// 200 is the commonest shape of a dying node and the single most likely thing to freeze it.
+	//
+	// Classified through the same gate as the err arm, so "was the endpoint at fault" has one
+	// answer regardless of how the failure arrived. Evidence is recorded first, as the other arms
+	// do, so a disable episode crossing the threshold here carries its replay payload (MAG-2550).
+	// The verdict was already resolved by the sender's ApplyNodeErrorClassification, so this reads
+	// it rather than re-classifying — one answer to "was the endpoint at fault", wherever it is
+	// asked (common.LavaError.EndpointAtFault).
+	if result.IsNodeAtFault && targetEndpoint != nil {
+		rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
+		targetEndpoint.MarkUnhealthy()
+		rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
+	}
+
+	// Reset only on POSITIVE proof the endpoint served — see relayProvesEndpointHealthy for why
+	// this is no longer the negation of the failure gate.
+	if targetEndpoint != nil && relayProvesEndpointHealthy(result) {
 		if targetEndpoint.ResetHealth() {
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, true)
 		}
@@ -4140,6 +4175,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	relayResult.IsRateLimited = result.IsRateLimited
 	relayResult.IsDataScope = result.IsDataScope
 	relayResult.IsNodeCapability = result.IsNodeCapability
+	relayResult.IsNodeAtFault = result.IsNodeAtFault
 	relayResult.ProviderInfo = result.ProviderInfo
 	if relayResult.Reply != nil {
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{

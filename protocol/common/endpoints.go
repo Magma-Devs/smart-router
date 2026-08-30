@@ -543,6 +543,10 @@ type RelayResult struct {
 	// different tier may serve it — but the endpoint is healthy, so the direct-RPC
 	// availability gate excludes it. Same axis as IsDataScope, one level up.
 	IsNodeCapability bool
+	// IsNodeAtFault — positive evidence the endpoint itself is broken or unable to serve, as
+	// opposed to answering truthfully about a request it cannot satisfy. This is what the
+	// endpoint-health counter reads; see LavaError.EndpointAtFault for why it is not Retryable.
+	IsNodeAtFault bool
 }
 
 // ApplyNodeErrorClassification stamps every registry-derived policy flag onto a node-error
@@ -562,6 +566,7 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	rr.IsRateLimited = classification.IsRateLimited
 	rr.IsDataScope = classification.IsDataScope
 	rr.IsNodeCapability = classification.IsNodeCapability
+	rr.IsNodeAtFault = classification.IsNodeAtFault
 }
 
 func (rr *RelayResult) GetReplyServer() pairingtypes.Relayer_RelaySubscribeClient {
