@@ -71,6 +71,12 @@ var (
 	Yaml_config_properties         = []string{"network-address", "chain-id", "api-interface"}
 	RelaysHealthEnableFlagDefault  = true
 	RelayHealthIntervalFlagDefault = 5 * time.Minute
+	// Probe cadence while a chain is unhealthy. A pod whose /readyz is 503 is out
+	// of the Service, so recovery is only ever discovered by the crafted-relay
+	// probe — at the healthy cadence that is up to 5 minutes of refusing traffic
+	// the chain can already serve. 15s bounds recovery detection tightly while
+	// costing probes only on chains that are actually down.
+	RelayHealthUnhealthyIntervalFlagDefault = 15 * time.Second
 
 	// StaticProviderDummyStake is used for stake-based provider selection weighting.
 	// For static providers that do NOT specify an explicit stake, we keep this at 0 so CalcWeightsByStake
@@ -2739,7 +2745,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 	var relaysMonitor *metrics.RelaysMonitor
 	if options.cmdFlags.RelaysHealthEnableFlag {
-		relaysMonitor = metrics.NewRelaysMonitor(options.cmdFlags.RelaysHealthIntervalFlag, rpcEndpoint.ChainID, rpcEndpoint.ApiInterface)
+		relaysMonitor = metrics.NewRelaysMonitor(options.cmdFlags.RelaysHealthIntervalFlag, options.cmdFlags.RelaysHealthUnhealthyIntervalFlag, rpcEndpoint.ChainID, rpcEndpoint.ApiInterface)
 		// Boot validation already knows whether anything can serve, so don't let the
 		// monitor's optimistic default claim health for a chain that came up dark.
 		relaysMonitor.SeedInitialHealth(chainServable)
@@ -3214,23 +3220,24 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 
 			consumerPropagatedFlags := common.ConsumerCmdFlags{
-				HeadersFlag:              viper.GetString(common.CorsHeadersFlag),
-				CredentialsFlag:          viper.GetString(common.CorsCredentialsFlag),
-				OriginFlag:               viper.GetString(common.CorsOriginFlag),
-				MethodsFlag:              viper.GetString(common.CorsMethodsFlag),
-				ExposeHeadersFlag:        viper.GetString(common.CorsExposeHeadersFlag),
-				CDNCacheDuration:         viper.GetString(common.CDNCacheDurationFlag),
-				RelaysHealthEnableFlag:   viper.GetBool(common.RelaysHealthEnableFlag),
-				RelaysHealthIntervalFlag: viper.GetDuration(common.RelayHealthIntervalFlag),
-				DebugRelays:              viper.GetBool(DebugRelaysFlagName),
-				StaticSpecPaths:          viper.GetStringSlice(common.UseStaticSpecFlag),
-				GitHubToken:              viper.GetString(common.GitHubTokenFlag),
-				GitLabToken:              viper.GetString(common.GitLabTokenFlag),
-				EpochDuration:            epochDuration,
-				EnableSelectionStats:     viper.GetBool(common.EnableSelectionStatsHeaderFlag),
-				DebugAddress:             viper.GetString("debug-address"),
-				ResponseCompression:      viper.GetString(common.ResponseCompressionFlag),
-				ShutdownGracePeriod:      viper.GetDuration(common.ShutdownGracePeriodFlag),
+				HeadersFlag:                       viper.GetString(common.CorsHeadersFlag),
+				CredentialsFlag:                   viper.GetString(common.CorsCredentialsFlag),
+				OriginFlag:                        viper.GetString(common.CorsOriginFlag),
+				MethodsFlag:                       viper.GetString(common.CorsMethodsFlag),
+				ExposeHeadersFlag:                 viper.GetString(common.CorsExposeHeadersFlag),
+				CDNCacheDuration:                  viper.GetString(common.CDNCacheDurationFlag),
+				RelaysHealthEnableFlag:            viper.GetBool(common.RelaysHealthEnableFlag),
+				RelaysHealthIntervalFlag:          viper.GetDuration(common.RelayHealthIntervalFlag),
+				RelaysHealthUnhealthyIntervalFlag: viper.GetDuration(common.RelayHealthUnhealthyIntervalFlag),
+				DebugRelays:                       viper.GetBool(DebugRelaysFlagName),
+				StaticSpecPaths:                   viper.GetStringSlice(common.UseStaticSpecFlag),
+				GitHubToken:                       viper.GetString(common.GitHubTokenFlag),
+				GitLabToken:                       viper.GetString(common.GitLabTokenFlag),
+				EpochDuration:                     epochDuration,
+				EnableSelectionStats:              viper.GetBool(common.EnableSelectionStatsHeaderFlag),
+				DebugAddress:                      viper.GetString("debug-address"),
+				ResponseCompression:               viper.GetString(common.ResponseCompressionFlag),
+				ShutdownGracePeriod:               viper.GetDuration(common.ShutdownGracePeriodFlag),
 			}
 
 			rpcSmartRouterSharedState := viper.GetBool(common.SharedStateFlag)
@@ -3359,6 +3366,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")
+	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthUnhealthyIntervalFlag, RelayHealthUnhealthyIntervalFlagDefault, "probe interval while a chain is unhealthy; bounds how fast /readyz recovers after upstreams come back (clamped to relays-health-interval)")
 	// Registered as a flagset-owned Bool (NOT BoolVar bound to the lavasession global): BoolVar writes
 	// the bound global at registration time, which raced probe goroutines reading it. Applied to the
 	// atomic global in RunE via lavasession.SetDebugProbes.
