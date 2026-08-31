@@ -3213,6 +3213,8 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				)
 			}
 
+			chainlib.SetWebSocketKeepAliveInterval(viper.GetDuration(common.WebsocketKeepAliveIntervalFlag))
+
 			consumerPropagatedFlags := common.ConsumerCmdFlags{
 				HeadersFlag:              viper.GetString(common.CorsHeadersFlag),
 				CredentialsFlag:          viper.GetString(common.CorsCredentialsFlag),
@@ -3378,6 +3380,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Int64Var(&chainlib.MaximumNumberOfParallelWebsocketConnectionsPerIp, common.LimitParallelWebsocketConnectionsPerIpFlag, chainlib.MaximumNumberOfParallelWebsocketConnectionsPerIp, "limit number of parallel connections to websocket, per ip, default is unlimited (0)")
 	cmdRPCSmartRouter.Flags().Int64Var(&chainlib.MaxIdleTimeInSeconds, common.LimitWebsocketIdleTimeFlag, chainlib.MaxIdleTimeInSeconds, "limit the idle time in seconds for a websocket connection, default is 20 minutes ( 20 * 60 )")
 	cmdRPCSmartRouter.Flags().DurationVar(&chainlib.WebSocketBanDuration, common.BanDurationForWebsocketRateLimitExceededFlag, chainlib.WebSocketBanDuration, "once websocket rate limit is reached, user will be banned Xfor a duration, default no ban")
+	cmdRPCSmartRouter.Flags().Duration(common.WebsocketKeepAliveIntervalFlag, chainlib.DefaultWebSocketKeepAliveInterval, "how often to ping an open websocket connection so proxies in front of the router do not reap it as idle, 0 disables")
 
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerificationDefault, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerificationDefault, "skip websocket verification for chains that require ws/wss endpoints")
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipAllVerifications, common.SkipAllVerificationsFlag, chainlib.SkipAllVerifications, "skip ALL spec verifications for every provider this process serves, healthy ones included. An escape hatch for bringing a router up against upstreams that cannot survive being probed; prefer the per-node-url skip-verifications config (which accepts \"*\") for anything ongoing")

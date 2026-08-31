@@ -106,6 +106,7 @@ const (
 	BanDurationForWebsocketRateLimitExceededFlag = "ban-duration-for-websocket-rate-limit-exceeded"
 	LimitParallelWebsocketConnectionsPerIpFlag   = "limit-parallel-websocket-connections-per-ip"
 	LimitWebsocketIdleTimeFlag                   = "limit-websocket-connection-idle-time"
+	WebsocketKeepAliveIntervalFlag               = "websocket-keep-alive-interval"
 	SkipWebsocketVerificationFlag                = "skip-websocket-verification"
 	// SkipAllVerificationsFlag turns spec verification off process-wide. Broader than the
 	// per-node-url "*" wildcard in skip-verifications: it covers EVERY provider this process
