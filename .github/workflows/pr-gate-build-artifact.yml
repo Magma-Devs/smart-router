@@ -393,7 +393,13 @@ jobs:
           DEPLOYMENT="eth-sim-router"
           SERVICE="eth-sim-router"
           CONTAINER="router"
-          SELECTOR="app.lavanet.io/router=eth-sim"
+          # Chart 6.0.0 renamed the per-router pod label app.lavanet.io/router ->
+          # app.smart-router-id; resolve whichever the box is on so the gate reads
+          # the cluster correctly on either side of its chart migration.
+          SELECTOR="app.smart-router-id=eth-sim"
+          if [ -z "$(kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" -o name 2>/dev/null)" ]; then
+            SELECTOR="app.lavanet.io/router=eth-sim"
+          fi
           SERVICE_PORT="3000"
           HEALTH_PATH="/lava/health"
           previous_image="${PREVIOUS_IMAGE:-}"
