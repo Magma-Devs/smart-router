@@ -65,6 +65,12 @@ type ConsumerSessionManager struct {
 	pairingAddresses       map[uint64]string
 	pairingAddressesLength uint64
 
+	// lastPairingUpdate is when UpdateAllProviders last rebuilt the pairing. It is reported on the
+	// pool-empty line, where it separates a pool that was never populated (the provider failed its
+	// startup verification and was never added) from one that has drained since the last epoch —
+	// two causes that look identical once the pool is empty.
+	lastPairingUpdate time.Time
+
 	// contains all provider addresses that are currently valid
 	validAddresses []string
 	// provider addresses that were given a second chance instead of reporting them immediately
@@ -534,6 +540,13 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	// Save reference to old pairingPurge BEFORE updating, so we can close connections outside the lock
 	oldPairingPurge := csm.pairingPurge
 	csm.pairingPurge = csm.pairing
+	// Membership of the outgoing pairing, captured before the map is replaced, so the line at the
+	// end of this function can report what actually changed rather than only the new size. A
+	// provider silently dropping out between epochs is the failure this makes visible.
+	previousPairingAddresses := make([]string, 0, len(csm.pairing))
+	for address := range csm.pairing {
+		previousPairingAddresses = append(previousPairingAddresses, address)
+	}
 	csm.pairing = make(map[string]*ConsumerSessionsWithProvider, pairingListLength)
 	for idx, provider := range pairingList {
 		csm.pairingAddresses[idx] = provider.PublicLavaAddress
@@ -604,7 +617,29 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	// Clean up expired sticky sessions
 	csm.stickySessions.DeleteOldSessions(previousEpoch)
 
-	utils.LavaFormatDebug("updated providers", utils.Attribute{Key: "epoch", Value: epoch}, utils.Attribute{Key: "spec", Value: csm.rpcEndpoint.Key()})
+	csm.lastPairingUpdate = time.Now()
+
+	// The pairing inventory is the answer to "why was the primary not even a candidate?". A pool
+	// that never contained a provider and one that dropped it look identical from the selection
+	// path — every line there can only report what IS in the pool, never what left it. This runs
+	// once per epoch, not per relay, so INFO costs nothing and gives the log a periodic record of
+	// pool composition to correlate against.
+	currentPairingAddresses := make([]string, 0, len(csm.pairing))
+	for address := range csm.pairing {
+		currentPairingAddresses = append(currentPairingAddresses, address)
+	}
+	sort.Strings(currentPairingAddresses)
+	added, removed, carriedOver := diffAddressSets(previousPairingAddresses, currentPairingAddresses)
+	utils.LavaFormatInfo("pairing updated",
+		utils.LogAttr("epoch", epoch),
+		utils.LogAttr("spec", csm.rpcEndpoint.Key()),
+		utils.LogAttr("size", len(currentPairingAddresses)),
+		utils.LogAttr("providers", currentPairingAddresses),
+		utils.LogAttr("added", added),
+		utils.LogAttr("removed", removed),
+		utils.LogAttr("carried_over", carriedOver),
+		utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
+	)
 
 	// Close old connections OUTSIDE the lock to prevent blocking other operations
 	// This is safe because after an entire epoch, it's impossible to have sessions connected to the old purged list
@@ -1028,6 +1063,74 @@ func (csm *ConsumerSessionManager) setValidAddressesToDefaultValue(addon string,
 	}
 }
 
+// poolEmptyReason names WHY the selectable pool is empty, in the same kebab-case vocabulary as
+// BlockReason and EndpointDisableReason. The distinction is the whole point of the line: the causes
+// below are investigated in different places, and the empty pool they produce looks identical.
+//
+//	pairing-empty   nothing was ever registered for this chain — the provider failed startup
+//	                verification, or the epoch rebuilt with an empty list. Not a routing problem.
+//	all-blocked     the pairing has members and every one of them is blocked. A routing problem,
+//	                and the block reasons (MAG-2599) say which.
+//	addon-filtered  the pairing has usable members, but none serves this addon/extension.
+func poolEmptyReason(pairingSize, blockedCount int, addon string, extensions []string) string {
+	switch {
+	case pairingSize == 0:
+		return "pairing-empty"
+	case blockedCount > 0:
+		return "all-blocked"
+	case addon != "" || len(extensions) > 0:
+		return "addon-filtered"
+	default:
+		// The pairing holds unblocked providers that serve the default collection, yet nothing is
+		// selectable. Not a known shape — name it rather than mislabel it as one of the above.
+		return "unspecified"
+	}
+}
+
+// formatPairingUpdateTime renders the last pairing rebuild for the log. The zero value means
+// UpdateAllProviders has not run yet, which is a genuinely different state from "rebuilt long ago"
+// and must not render as a zero timestamp that reads like 1 January year 1.
+func formatPairingUpdateTime(at time.Time) string {
+	if at.IsZero() {
+		return "never"
+	}
+	return at.UTC().Format(time.RFC3339)
+}
+
+// diffAddressSets reports how membership changed between two provider-address sets. Every result
+// is sorted so the log line is stable across epochs — the inputs come from Go map iteration, whose
+// order is deliberately randomised, and an unsorted line would read as churn on every epoch even
+// when nothing moved.
+func diffAddressSets(previous, current []string) (added, removed, carriedOver []string) {
+	previousSet := make(map[string]struct{}, len(previous))
+	for _, address := range previous {
+		previousSet[address] = struct{}{}
+	}
+	currentSet := make(map[string]struct{}, len(current))
+	for _, address := range current {
+		currentSet[address] = struct{}{}
+	}
+	// Non-nil empties: a nil slice renders as "" in the log, which reads as a missing field rather
+	// than as "nothing changed".
+	added, removed, carriedOver = []string{}, []string{}, []string{}
+	for _, address := range current {
+		if _, existed := previousSet[address]; existed {
+			carriedOver = append(carriedOver, address)
+		} else {
+			added = append(added, address)
+		}
+	}
+	for _, address := range previous {
+		if _, kept := currentSet[address]; !kept {
+			removed = append(removed, address)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(carriedOver)
+	return added, removed, carriedOver
+}
+
 // reads cs.currentEpoch atomically
 func (csm *ConsumerSessionManager) atomicWriteCurrentEpoch(epoch uint64) {
 	atomic.StoreUint64(&csm.currentEpoch, epoch)
@@ -1152,9 +1255,57 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 		return nil, false
 	}
 
-	utils.LavaFormatWarning("NO VALID PROVIDERS - TRIGGERING RESET", nil, utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensionNames), utils.LogAttr("GUID", ctx))
+	// Inventory of the pool, taken before the reset. "No valid providers" on its own cannot separate
+	// a pairing that never contained a primary from one whose every member is blocked, and the two
+	// lead to opposite investigations: the first is registration/verification (the provider never
+	// joined), the second is routing (it joined and was taken out). Read under RLock — every field
+	// below is written under csm.lock elsewhere, and this function runs unlocked because
+	// resetValidAddresses takes the write lock itself.
+	csm.lock.RLock()
+	pairingSize := len(csm.pairingAddresses)
+	validCount := len(csm.validAddresses)
+	blockedCount := len(csm.currentlyBlockedProviderAddresses)
+	backupPoolSize := len(csm.backupProviders)
+	lastPairingUpdate := csm.lastPairingUpdate
+	csm.lock.RUnlock()
+
+	utils.LavaFormatWarning("provider pool empty", nil,
+		utils.LogAttr("reason", poolEmptyReason(pairingSize, blockedCount, addon, extensionNames)),
+		utils.LogAttr("spec", csm.rpcEndpoint.Key()),
+		utils.LogAttr("pairing_size", pairingSize),
+		utils.LogAttr("valid", validCount),
+		utils.LogAttr("blocked", blockedCount),
+		utils.LogAttr("backup_pool", backupPoolSize),
+		utils.LogAttr("last_pairing_update", formatPairingUpdateTime(lastPairingUpdate)),
+		utils.LogAttr("addon", addon),
+		utils.LogAttr("extensions", extensionNames),
+		utils.LogAttr("GUID", ctx),
+	)
+
 	csm.resetValidAddresses(addon, extensionNames)
-	utils.LavaFormatInfo("RESET COMPLETED", utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensionNames), utils.LogAttr("newValidAddressesCount", len(csm.cacheAddonAddresses(addon, extensionNames, ctx))), utils.LogAttr("GUID", ctx))
+
+	// The reset refills validAddresses straight from the pairing, so it can only restore what the
+	// pairing holds. With an empty pairing it is a no-op — and the line that used to report this
+	// said "RESET COMPLETED" at INFO either way, which reads as recovery precisely when none
+	// happened. Report the two outcomes as the different events they are.
+	restored := len(csm.cacheAddonAddresses(addon, extensionNames, ctx))
+	if restored == 0 {
+		utils.LavaFormatWarning("pool reset recovered no providers", nil,
+			utils.LogAttr("reason", poolEmptyReason(pairingSize, blockedCount, addon, extensionNames)),
+			utils.LogAttr("pairing_size", pairingSize),
+			utils.LogAttr("addon", addon),
+			utils.LogAttr("extensions", extensionNames),
+			utils.LogAttr("GUID", ctx),
+		)
+	} else {
+		utils.LavaFormatInfo("pool reset restored providers",
+			utils.LogAttr("restored", restored),
+			utils.LogAttr("released_from_blocked", blockedCount),
+			utils.LogAttr("addon", addon),
+			utils.LogAttr("extensions", extensionNames),
+			utils.LogAttr("GUID", ctx),
+		)
+	}
 
 	sessionWithProviderMap, err := csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
 	if err != nil {
