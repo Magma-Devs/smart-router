@@ -32,6 +32,10 @@ const (
 	// SetRelayRetryLimitFlag controls the maximum number of retry attempts on relay errors
 	// (both node errors and protocol errors) for consumers and smart routers.
 	SetRelayRetryLimitFlag = "set-relay-retry-limit"
+	// StatefulToBackupFlag widens the stateful broadcast to the backup tier. Off by default:
+	// a stateful relay reaches every provider it selects, so turning this on sends every
+	// stateful request to the backup as well — including the ones the primaries serve fine.
+	StatefulToBackupFlag = "stateful-to-backup"
 	// BatchNodeErrorOnAny controls batch request error detection for JSON-RPC batch requests
 	BatchNodeErrorOnAnyFlag = "batch-node-error-on-any"
 
