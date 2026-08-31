@@ -1434,6 +1434,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 						"NetworkAddress":           url,
 						"Enabled":                  health.Enabled,
 						"DisabledAt":               debugTimeRFC3339(health.DisabledAt),
+						"DisableReason":            string(health.DisableReason),
 						"ConsecutiveHealthyProbes": health.ConsecutiveHealthyProbes,
 						"ConsecutivePollFailures":  obs.ConsecutivePollFailures,
 						"LastSuccessfulPoll":       debugTimeRFC3339(obs.LastSuccessfulPoll),

@@ -4064,7 +4064,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// the disable episode carries its replayable recovery evidence (MAG-2550).
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
-			targetEndpoint.MarkUnhealthy()
+			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(classified))
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 		}
 
@@ -4088,7 +4088,10 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
-			targetEndpoint.MarkUnhealthy()
+			// Decided on the status alone, without reading the body — so this is the case where the
+			// registry has told us nothing, and it is named separately from node-error to keep that
+			// visible rather than merged away.
+			targetEndpoint.MarkUnhealthy(lavasession.EndpointDisableServerError)
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.LavaFormatDebug("endpoint returned error status",
 				utils.LogAttr("status", statusCode),

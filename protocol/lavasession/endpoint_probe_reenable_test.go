@@ -20,7 +20,7 @@ var probeBase = time.Unix(1_700_000_000, 0)
 func disableAt(t *testing.T, e *Endpoint, at time.Time) {
 	t.Helper()
 	for i := 0; i < MaxConsecutiveConnectionAttempts; i++ {
-		e.markUnhealthyAt(at)
+		e.markUnhealthyAt(at, EndpointDisableUnreachable)
 	}
 	require.False(t, e.Enabled, "endpoint must be disabled after the relay disable threshold")
 }
@@ -136,7 +136,7 @@ func TestRecordProbeVerdict_NeverTouchesEnabledEndpoint(t *testing.T) {
 	e := &Endpoint{NetworkAddress: "http://ep:8545", Enabled: true}
 
 	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
-		e.markUnhealthyAt(probeBase)
+		e.markUnhealthyAt(probeBase, EndpointDisableUnreachable)
 	}
 	require.True(t, e.Enabled)
 
@@ -150,7 +150,7 @@ func TestRecordProbeVerdict_NeverTouchesEnabledEndpoint(t *testing.T) {
 	require.Equal(t, uint64(0), e.consecutiveHealthyProbes, "the hysteresis streak stays 0 while enabled")
 	e.mu.RUnlock()
 
-	e.markUnhealthyAt(probeBase)
+	e.markUnhealthyAt(probeBase, EndpointDisableUnreachable)
 	require.False(t, e.Enabled, "the relay path can still disable despite intervening healthy probes")
 }
 
@@ -171,11 +171,11 @@ func TestRecordProbeVerdict_TrialBudgetOnProbeReEnable(t *testing.T) {
 
 	// The trial tolerates budget-1 failures without re-disabling…
 	for i := uint64(0); i < probeReenableTrialBudget-1; i++ {
-		e.markUnhealthyAt(probeBase.Add(3 * time.Second))
+		e.markUnhealthyAt(probeBase.Add(3*time.Second), EndpointDisableUnreachable)
 	}
 	require.True(t, e.Enabled, "a re-enabled endpoint isn't one failure from disabling — the trial budget absorbs blips")
 	// …and the budget-th consecutive failure ends the trial.
-	e.markUnhealthyAt(probeBase.Add(3 * time.Second))
+	e.markUnhealthyAt(probeBase.Add(3*time.Second), EndpointDisableUnreachable)
 	require.False(t, e.Enabled, "a still-broken endpoint re-disables after the trial budget, not after another full threshold")
 
 	// A successful real relay during a trial restores the FULL consecutive-failure budget. The
@@ -186,10 +186,10 @@ func TestRecordProbeVerdict_TrialBudgetOnProbeReEnable(t *testing.T) {
 	require.True(t, healthyPoll(e, probeBase.Add(time.Duration(3+2*k)*time.Second), k))
 	require.True(t, e.ResetHealth(), "a successful relay validates the trial")
 	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
-		e.markUnhealthyAt(probeBase.Add(6 * time.Second))
+		e.markUnhealthyAt(probeBase.Add(6*time.Second), EndpointDisableUnreachable)
 	}
 	require.True(t, e.Enabled, "after relay validation the endpoint has the full failure budget again")
-	e.markUnhealthyAt(probeBase.Add(6 * time.Second))
+	e.markUnhealthyAt(probeBase.Add(6*time.Second), EndpointDisableUnreachable)
 	require.False(t, e.Enabled)
 }
 
@@ -207,7 +207,7 @@ func TestRecordProbeVerdict_DisabledAtNotPushedForwardByRepeatedMarkUnhealthy(t 
 	// More relay failures arrive on the already-disabled endpoint at a LATER instant. If disabledAt
 	// were re-stamped to this later time, the prior post-disable poll would retroactively look
 	// pre-disable and the streak would be wasted.
-	e.markUnhealthyAt(probeBase.Add(100 * time.Second))
+	e.markUnhealthyAt(probeBase.Add(100*time.Second), EndpointDisableUnreachable)
 	e.mu.RLock()
 	require.Equal(t, probeBase, e.disabledAt, "disabledAt must not move on an already-disabled endpoint")
 	e.mu.RUnlock()
@@ -292,7 +292,7 @@ func TestResetHealth_GenuineRecoveryDoesNotEscalate(t *testing.T) {
 	require.True(t, healthyPoll(e, probeBase.Add(2*time.Second), k), "re-enabled by the probe")
 
 	// A real relay succeeds, validating the recovery (clears the probe-grant flag).
-	e.markUnhealthyAt(probeBase.Add(3 * time.Second)) // a partial failure raises refusals so ResetHealth acts
+	e.markUnhealthyAt(probeBase.Add(3*time.Second), EndpointDisableUnreachable) // a partial failure raises refusals so ResetHealth acts
 	require.True(t, e.ResetHealth())
 
 	// A later disable is a fresh first offense, not a flap — no escalation.
