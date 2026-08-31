@@ -565,6 +565,16 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		return err
 	}
 	app.Post("/*", handlerPost)
+	// A caller that guesses the bare endpoint URL (wss://host/) sends a GET
+	// carrying the upgrade headers — the ws/wss scheme never reaches the server,
+	// so that header is the only signal. Serve any such GET from the handler
+	// /ws and /websocket already use; a GET without it still answers 405.
+	app.Get("/*", func(fiberCtx *fiber.Ctx) error {
+		if !websocket.IsWebSocketUpgrade(fiberCtx) {
+			return fiber.ErrMethodNotAllowed
+		}
+		return fiberCtx.Next()
+	}, wsUpgradeMiddleware, websocketCallbackWithDappID)
 	// Go
 	addrChannel := make(chan string)
 	addrChannelSafe := common.NewSafeChannelSender(ctx, addrChannel)

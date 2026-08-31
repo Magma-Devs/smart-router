@@ -31,6 +31,8 @@ func (f *failingFrameWriter) SetReadDeadline(time.Time) error {
 	return nil
 }
 
+func (f *failingFrameWriter) SetWriteDeadline(time.Time) error { return nil }
+
 // TestWebsocketWriterFailure_UnblocksSenders is the regression for MAG-3722: when the
 // writer goroutine died on a failed write, every later frame sender blocked forever, and
 // the read loop's own error path is one of them, so the handler never returned and the

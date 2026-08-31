@@ -500,3 +500,19 @@ func TestTendermintRpcChainListener_GracefulShutdown_RejectsNewConnectionsAfterS
 	}
 	require.Error(t, err, "GET after Shutdown should fail with connection error")
 }
+
+// Same as the jsonrpc listener: the bare endpoint URL upgrades. Tendermint's
+// URI-style GETs are unaffected — they carry no upgrade header and still reach
+// the relay handler.
+func TestTendermintRpcChainListener_WebSocketUpgradesOnAnyPath(t *testing.T) {
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	_, addr := startTestTendermintListener(t, serveCtx)
+
+	for _, path := range []string{"/", "/ws", "/websocket", "/lava@dapp"} {
+		client, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+path, nil)
+		require.NoError(t, err, "WS dial on %q should upgrade", path)
+		require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode, "path %q", path)
+		_ = client.Close()
+	}
+}
