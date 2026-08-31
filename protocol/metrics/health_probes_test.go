@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -78,4 +79,38 @@ func TestReadyz_AliasesHealthOverall(t *testing.T) {
 
 	m.UpdateHealthCheckStatus(false)
 	require.Equal(t, getStatus(t, srv.URL+"/metrics/health-overall"), getStatus(t, srv.URL+"/readyz"))
+}
+
+// The gauge and /readyz report the same state, so they must not disagree — and
+// they did, from birth: the constructor set the gauge to 1 while
+// endpointsHealthChecksOk started fail-closed at 0. A router that had verified
+// nothing reported healthy, and one that never became healthy went on doing so,
+// which is how a 503 on /readyz sat next to a gauge reading 1 on a live tenant.
+func TestOverallHealthGaugeAgreesWithReadyz(t *testing.T) {
+	m := NewSmartRouterMetricsManager(SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, m)
+	srv := probeServer(m)
+	defer srv.Close()
+
+	// At construction nothing has checked a provider: both halves say unhealthy.
+	require.Equal(t, http.StatusServiceUnavailable, getStatus(t, srv.URL+"/readyz"),
+		"/readyz must be fail-closed before the first health check")
+	require.Equal(t, 0.0, gaugeValue(t, m.routerOverallHealth),
+		"the gauge must not claim healthy before anything has verified it")
+
+	// Both halves move together, in both directions.
+	m.UpdateHealthCheckStatus(true)
+	require.Equal(t, http.StatusOK, getStatus(t, srv.URL+"/readyz"))
+	require.Equal(t, 1.0, gaugeValue(t, m.routerOverallHealth))
+
+	m.UpdateHealthCheckStatus(false)
+	require.Equal(t, http.StatusServiceUnavailable, getStatus(t, srv.URL+"/readyz"))
+	require.Equal(t, 0.0, gaugeValue(t, m.routerOverallHealth))
+}
+
+func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, g.Write(&m))
+	return m.GetGauge().GetValue()
 }
