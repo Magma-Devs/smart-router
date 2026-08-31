@@ -270,7 +270,7 @@ func (cf *ChainFetcher) validate(ctx context.Context, perCollection bool) (Provi
 				// Probe the head with THIS url's collections. Using the base
 				// collection's directive for every node is what excluded a
 				// provider serving only a disjoint add-on surface (MAG-3296).
-				latestBlock, err = cf.FetchLatestBlockNumForCollection(ctx, url.Addons, url.InternalPath)
+				latestBlock, err = cf.FetchLatestBlockNumForCollection(ctx, url.Addons, url.InternalPath, url.ServesBaseCollection())
 				if stopValidateRetries(err) {
 					break
 				}
@@ -370,7 +370,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 			for attempts := 0; attempts < 3; attempts++ {
 				// Same collection-aware probe as Validate, so `smartrouter health`
 				// reports the head a node can actually serve (MAG-3296).
-				latestBlock, err = cf.FetchLatestBlockNumForCollection(ctx, url.Addons, url.InternalPath)
+				latestBlock, err = cf.FetchLatestBlockNumForCollection(ctx, url.Addons, url.InternalPath, url.ServesBaseCollection())
 				if stopValidateRetries(err) {
 					break
 				}
@@ -649,7 +649,7 @@ func (cf *ChainFetcher) CustomMessage(ctx context.Context, path string, data []b
 // GET_BLOCKNUM directive. Callers that know which collections the node actually
 // serves should use FetchLatestBlockNumForCollection instead — see MAG-3296.
 func (cf *ChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	return cf.FetchLatestBlockNumForCollection(ctx, nil, "")
+	return cf.FetchLatestBlockNumForCollection(ctx, nil, "", true)
 }
 
 // FetchLatestBlockNumForCollection probes the chain head with the GET_BLOCKNUM
@@ -662,8 +662,8 @@ func (cf *ChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) 
 // chain_getHeader at all. On the admission path a failed head probe returns
 // before a single verification runs, so such a provider was dropped without ever
 // being asked the questions it could answer.
-func (cf *ChainFetcher) FetchLatestBlockNumForCollection(ctx context.Context, addons []string, internalPath string) (int64, error) {
-	parsing, apiCollection, ok := cf.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, addons, internalPath)
+func (cf *ChainFetcher) FetchLatestBlockNumForCollection(ctx context.Context, addons []string, internalPath string, allowBaseFallback bool) (int64, error) {
+	parsing, apiCollection, ok := cf.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, addons, internalPath, allowBaseFallback)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCKNUM.String()
 	if !ok {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" tag function not found", nil, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)

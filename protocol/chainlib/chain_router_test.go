@@ -19,9 +19,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/utils"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 

@@ -165,9 +165,9 @@ func (mr *MockChainParserMockRecorder) GetParsingByTag(tag interface{}) *gomock.
 }
 
 // GetParsingByTagForCollection mocks base method.
-func (m *MockChainParser) GetParsingByTagForCollection(tag spec.FUNCTION_TAG, addons []string, internalPath string) (*spec.ParseDirective, *spec.ApiCollection, bool) {
+func (m *MockChainParser) GetParsingByTagForCollection(tag spec.FUNCTION_TAG, addons []string, internalPath string, allowBaseFallback bool) (*spec.ParseDirective, *spec.ApiCollection, bool) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetParsingByTagForCollection", tag, addons, internalPath)
+	ret := m.ctrl.Call(m, "GetParsingByTagForCollection", tag, addons, internalPath, allowBaseFallback)
 	ret0, _ := ret[0].(*spec.ParseDirective)
 	ret1, _ := ret[1].(*spec.ApiCollection)
 	ret2, _ := ret[2].(bool)
@@ -175,9 +175,9 @@ func (m *MockChainParser) GetParsingByTagForCollection(tag spec.FUNCTION_TAG, ad
 }
 
 // GetParsingByTagForCollection indicates an expected call of GetParsingByTagForCollection.
-func (mr *MockChainParserMockRecorder) GetParsingByTagForCollection(tag, addons, internalPath interface{}) *gomock.Call {
+func (mr *MockChainParserMockRecorder) GetParsingByTagForCollection(tag, addons, internalPath, allowBaseFallback interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetParsingByTagForCollection", reflect.TypeOf((*MockChainParser)(nil).GetParsingByTagForCollection), tag, addons, internalPath)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetParsingByTagForCollection", reflect.TypeOf((*MockChainParser)(nil).GetParsingByTagForCollection), tag, addons, internalPath, allowBaseFallback)
 }
 
 // GetUniqueName mocks base method.

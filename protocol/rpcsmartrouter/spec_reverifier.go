@@ -545,7 +545,7 @@ func validateProvider(
 	chainParser chainlib.ChainParser,
 	timeout time.Duration,
 ) error {
-	routerEndpoint, verificationEndpoint := verificationEndpoints(provider)
+	routerEndpoint, fetcherEndpoint := verificationEndpoints(provider)
 
 	attemptCtx, attemptCancel := context.WithTimeout(ctx, timeout)
 	defer attemptCancel()
@@ -567,7 +567,7 @@ func validateProvider(
 	verificationFetcher := chainlib.NewChainFetcher(attemptCtx, &chainlib.ChainFetcherOptions{
 		ChainRouter: verificationRouter,
 		ChainParser: validationParser,
-		Endpoint:    verificationEndpoint,
+		Endpoint:    fetcherEndpoint,
 		Cache:       nil,
 	})
 
