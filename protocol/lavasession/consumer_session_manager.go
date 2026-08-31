@@ -65,6 +65,19 @@ type ConsumerSessionManager struct {
 	pairingAddresses       map[uint64]string
 	pairingAddressesLength uint64
 
+	// pairingGeneration increments on every UpdateAllProviders. It is the key the pool-empty
+	// report throttles on: an empty pool is a property of the pairing, not of the request that
+	// tripped over it, so it is worth one WARN per pairing rather than one per relay.
+	pairingGeneration uint64
+
+	// poolEmptyReportMu guards the two fields below. A dedicated mutex rather than csm.lock: this
+	// is taken on the failing-relay path, and that path must not contend the manager's central
+	// lock just to decide whether a line has already been printed.
+	poolEmptyReportMu     sync.Mutex
+	poolEmptyReportedGen  uint64
+	poolEmptyReportedWhy  string
+	poolEmptyReportedEver bool
+
 	// lastPairingUpdate is when UpdateAllProviders last rebuilt the pairing. It is reported on the
 	// pool-empty line, where it separates a pool that was never populated (the provider failed its
 	// startup verification and was never added) from one that has drained since the last epoch —
@@ -626,6 +639,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	csm.stickySessions.DeleteOldSessions(previousEpoch)
 
 	csm.lastPairingUpdate = time.Now()
+	csm.pairingGeneration++
 
 	// The pairing inventory is the answer to "why was the primary not even a candidate?". A pool
 	// that never contained a provider and one that dropped it look identical from the selection
@@ -1093,20 +1107,62 @@ type poolInventory struct {
 	blockedCount      int
 	backupPoolSize    int
 	lastPairingUpdate time.Time
+
+	// capable counts pairing members that could serve THIS request — they pass the same
+	// addon/extension predicates the selectable set is built from — and capableBlocked how many of
+	// those are currently blocked.
+	//
+	// These exist because validCount cannot answer the question. validCount is the DEFAULT
+	// collection's size, while the emptiness that brings us here is addon-scoped, so comparing them
+	// is apples to oranges: a pairing of five with one archive provider that is blocked and four
+	// that never served archive has validCount=4 and reports "the addon filtered everything out",
+	// when the truth is that the single archive-capable provider is blocked. Scoping the counts to
+	// the request is what makes the reason survive contact with an addon.
+	capable        int
+	capableBlocked int
+
+	// generation is the pairing generation this snapshot was taken at, carried here rather than
+	// read separately so the throttle key and the counts it guards describe the same instant.
+	generation uint64
 }
 
-// snapshotPoolInventory reads the pool state for the diagnostic lines. Callers MUST NOT hold
-// csm.lock — this takes the read lock itself.
-func (csm *ConsumerSessionManager) snapshotPoolInventory() poolInventory {
+// snapshotPoolInventory reads the pool state for the diagnostic lines, scoped to the request that
+// found the pool empty. Callers MUST NOT hold csm.lock — this takes the read lock itself, and takes
+// it once so every field describes the same instant.
+func (csm *ConsumerSessionManager) snapshotPoolInventory(addon string, extensions []string, ctx context.Context) poolInventory {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
-	return poolInventory{
+
+	blocked := make(map[string]struct{}, len(csm.currentlyBlockedProviderAddresses))
+	for _, address := range csm.currentlyBlockedProviderAddresses {
+		blocked[address] = struct{}{}
+	}
+
+	inventory := poolInventory{
 		pairingSize:       len(csm.pairingAddresses),
 		validCount:        len(csm.validAddresses),
 		blockedCount:      len(csm.currentlyBlockedProviderAddresses),
 		backupPoolSize:    len(csm.backupProviders),
 		lastPairingUpdate: csm.lastPairingUpdate,
+		generation:        csm.pairingGeneration,
 	}
+
+	// Same predicates CalculateAddonValidAddresses filters on, so "capable" means exactly "would
+	// have been selectable had it not been blocked".
+	for _, address := range csm.pairingAddresses {
+		provider, ok := csm.pairing[address]
+		if !ok || provider == nil {
+			continue
+		}
+		if !provider.IsSupportingAddon(addon) || !provider.IsSupportingExtensions(extensions, ctx) {
+			continue
+		}
+		inventory.capable++
+		if _, isBlocked := blocked[address]; isBlocked {
+			inventory.capableBlocked++
+		}
+	}
+	return inventory
 }
 
 // reason names WHY the selectable pool is empty, in the same kebab-case vocabulary as
@@ -1115,42 +1171,81 @@ func (csm *ConsumerSessionManager) snapshotPoolInventory() poolInventory {
 //
 //	pairing-empty        nothing was ever registered for this chain — the provider failed startup
 //	                     verification, or the epoch rebuilt with an empty list. Not a routing problem.
-//	addon-filtered       members survived into validAddresses, but none serves this addon/extension.
-//	no-usable-endpoints  members survived into validAddresses and the request asks for the default
-//	                     collection, which nothing filters except a provider having no usable
-//	                     endpoint. Registration succeeded, the endpoints behind it did not.
-//	all-blocked          every registered member is blocked. A routing problem, and the block
-//	                     reasons (MAG-2599) say which.
+//	addon-filtered       members are registered, and not one of them serves this addon/extension.
+//	                     A spec or config problem; no amount of routing recovers it.
+//	no-usable-endpoints  the request asks for the default collection, which every provider serves by
+//	                     definition, yet nothing is capable — the only predicate left is having at
+//	                     least one endpoint, so these providers registered with none.
+//	all-blocked          every member that COULD serve this request is blocked. A routing problem,
+//	                     and the block reasons (MAG-2599) say which.
 //
-// validCount is what separates the filtered causes from the blocked ones, and it is why the order
-// below is not negotiable. A member that is still in validAddresses was NOT taken out by blocking,
-// so if nothing is selectable the filter is what removed it. Testing blockedCount first — as this
-// did before — reported all-blocked for a pairing of five with one blocked member and four that
-// simply do not serve the requested addon, which is the mislabel this whole line exists to prevent.
+// Every branch keys on capable/capableBlocked, which are scoped to this request. Keying on
+// validCount instead — as this did before — compares the default collection's size against an
+// addon-scoped emptiness, and the two mislabels that produces are exact mirror images: testing
+// blockedCount first called a filtered pool "all-blocked", and testing validCount first called a
+// blocked pool "addon-filtered". Neither is fixed by reordering; both are fixed by counting the
+// providers that could actually have served.
 func (inv poolInventory) reason(addon string, extensions []string) string {
 	switch {
 	case inv.pairingSize == 0:
 		return "pairing-empty"
-	case inv.validCount > 0 && (addon != "" || len(extensions) > 0):
+	case inv.capable == 0 && (addon != "" || len(extensions) > 0):
 		return "addon-filtered"
-	case inv.validCount > 0:
+	case inv.capable == 0:
 		return "no-usable-endpoints"
-	case inv.blockedCount >= inv.pairingSize:
+	case inv.capableBlocked >= inv.capable:
 		return "all-blocked"
 	default:
-		// Members are registered, not all of them are blocked, and none reached validAddresses.
-		// Not a shape we model — name it rather than borrow one of the above.
+		// Providers that can serve this request exist and are not all blocked, yet nothing was
+		// selectable. Not a shape we model — name it rather than borrow one of the above.
 		return "unspecified"
 	}
 }
 
 // logPoolEmpty reports that nothing is selectable, and why. It is the one place the pool-empty
-// vocabulary is rendered, so the two call sites in releaseBlockedProvidersIfPoolEmpty — the guard's
-// empty-pairing return and the release itself — cannot drift into describing the same state
-// differently. Callers MUST NOT hold csm.lock: the inventory is snapshotted separately.
+// vocabulary is rendered, so the call sites in releaseBlockedProvidersIfPoolEmpty cannot drift into
+// describing the same state differently.
+//
+// The first report for a given pairing generation and reason goes to WARN; every repeat until one
+// of those changes goes to DEBUG. An empty pool is a property of the pairing, and the pairing does
+// not change between relays — a chain whose providers all failed startup verification stays empty
+// indefinitely, and this runs on every relay (more than once per relay, per GetSessions' retry
+// cascade). Reporting it per-relay at WARN would turn a permanent state into a sustained alert
+// stream, which is the log-flood this whole change set exists to reduce, only at a level alerts
+// fire on. Throttling on the generation means a genuinely new outage still warns immediately.
+//
+// Callers MUST NOT hold csm.lock: the inventory is snapshotted separately, and this takes
+// poolEmptyReportMu.
 func (csm *ConsumerSessionManager) logPoolEmpty(ctx context.Context, inventory poolInventory, addon string, extensions []string) {
-	utils.LavaFormatWarning("provider pool empty", nil,
-		utils.LogAttr("reason", inventory.reason(addon, extensions)),
+	why := inventory.reason(addon, extensions)
+
+	csm.poolEmptyReportMu.Lock()
+	generation := inventory.generation
+	firstForThisPairing := !csm.poolEmptyReportedEver ||
+		csm.poolEmptyReportedGen != generation ||
+		csm.poolEmptyReportedWhy != why
+	if firstForThisPairing {
+		csm.poolEmptyReportedEver = true
+		csm.poolEmptyReportedGen = generation
+		csm.poolEmptyReportedWhy = why
+	}
+	csm.poolEmptyReportMu.Unlock()
+
+	report := utils.LavaFormatDebug
+	if firstForThisPairing {
+		// LavaFormatWarning takes an error argument the debug form does not, so the two cannot share
+		// a function value the way the level-conditional sites elsewhere do.
+		report = func(description string, attributes ...utils.Attribute) error {
+			return utils.LavaFormatWarning(description, nil, attributes...)
+		}
+	}
+
+	report("provider pool empty",
+		utils.LogAttr("reason", why),
+		utils.LogAttr("repeat", !firstForThisPairing),
+		utils.LogAttr("pairing_generation", generation),
+		utils.LogAttr("capable", inventory.capable),
+		utils.LogAttr("capable_blocked", inventory.capableBlocked),
 		utils.LogAttr("spec", csm.rpcEndpoint.Key()),
 		utils.LogAttr("pairing_size", inventory.pairingSize),
 		utils.LogAttr("valid", inventory.validCount),
@@ -1234,15 +1329,22 @@ func (csm *ConsumerSessionManager) atomicReadNumberOfResets() (resets uint64) {
 // it is the frame that holds the pool inventory and the request GUID, so it can name the actual
 // cause and attribute it to a chain and a relay. Logging here as well only reproduced the same
 // event three more times, once at ERROR.
-func (csm *ConsumerSessionManager) resetValidAddresses(addon string, extensions []string) uint64 {
+// resetValidAddresses releases the blocked list and refills validAddresses from the pairing.
+//
+// didReset reports whether this call actually did that. The re-verify below can find the pool
+// already refilled — an epoch tick landing while we waited for the write lock — in which case this
+// is a no-op, and a caller that assumed otherwise would credit that epoch's recovery to a reset
+// that never ran. Returning the fact is what lets the caller describe what it actually did.
+func (csm *ConsumerSessionManager) resetValidAddresses(addon string, extensions []string) (numberOfResets uint64, didReset bool) {
 	csm.lock.Lock() // lock write
 	defer csm.lock.Unlock()
 	if len(csm.getValidAddresses(addon, extensions, context.Background())) == 0 { // re verify it didn't change while waiting for lock.
 		csm.setValidAddressesToDefaultValue(addon, extensions, context.Background(), ReleasePoolEmpty)
 		csm.numberOfResets += 1
+		didReset = true
 	}
 	// if len(csm.validAddresses) != 0 meaning we had a reset (or an epoch change), so we need to return the numberOfResets which is currently in csm
-	return csm.numberOfResets
+	return csm.numberOfResets, didReset
 }
 
 func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions []string, ctx context.Context) []string {
@@ -1332,15 +1434,21 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 	// the release for an empty pairing too — its loop over pairingAddresses never executes, so it
 	// returns false — and that return is the one shape this whole line exists to report. Taking the
 	// snapshot after the guard put the diagnosis on the far side of the branch that swallows it.
-	inventory := csm.snapshotPoolInventory()
+	inventory := csm.snapshotPoolInventory(addon, extensionNames, ctx)
 
 	if !csm.releaseCouldServeThisRequest(tempIgnoredProviders.providers, addon, extensionNames, ctx) {
 		// A declined release is usually ordinary retry exhaustion: this request has already tried
-		// every provider, releasing rescues nothing, and that stays at DEBUG. An empty pairing
-		// reaches the same return for the opposite reason — there was never a provider to try, so
-		// "every provider has already been tried" is not merely unhelpful, it is false. Nothing
-		// downstream can correct it either, because resetValidAddresses is never reached.
-		if inventory.pairingSize == 0 {
+		// every provider, releasing rescues nothing, and that stays at DEBUG.
+		//
+		// It is not always that, and the discriminator is whether this request tried anything — NOT
+		// whether the pairing is empty. releaseCouldServeThisRequest returns false for every
+		// structural emptiness too: an empty pairing, a pairing where nothing serves the requested
+		// addon, and a pairing whose members registered with no endpoints (IsSupportingExtensions
+		// is false for a zero-endpoint provider, so it fails the capability test even for the
+		// default collection). In all three nothing was tried, and "every provider has already been
+		// tried" is not merely unhelpful, it is false — the request tried nothing. Keying on
+		// pairingSize rescued only the first of the three and left the other two on the false line.
+		if len(tempIgnoredProviders.providers) == 0 {
 			csm.logPoolEmpty(ctx, inventory, addon, extensionNames)
 			return nil, false
 		}
@@ -1351,32 +1459,49 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 
 	csm.logPoolEmpty(ctx, inventory, addon, extensionNames)
 
-	csm.resetValidAddresses(addon, extensionNames)
+	_, didReset := csm.resetValidAddresses(addon, extensionNames)
 
 	// The reset refills validAddresses straight from the pairing, so it can only restore what the
 	// pairing holds. With an empty pairing it is a no-op — and the line that used to report this
 	// said "RESET COMPLETED" at INFO either way, which reads as recovery precisely when none
 	// happened. Report the two outcomes as the different events they are.
 	restored := len(csm.cacheAddonAddresses(addon, extensionNames, ctx))
-	if restored == 0 {
-		// Re-snapshot. The reset cleared the blocked list and refilled validAddresses, so the
-		// pre-reset reason no longer describes the state we are in — reusing it would report
-		// all-blocked for a pool whose blocked list was just released and which still came up
-		// empty, naming the one cause the reset has already ruled out.
-		afterReset := csm.snapshotPoolInventory()
-		utils.LavaFormatWarning("pool reset recovered no providers", nil,
-			utils.LogAttr("reason", afterReset.reason(addon, extensionNames)),
+	switch {
+	case !didReset:
+		// The re-verify inside resetValidAddresses found the pool already refilled, so this call
+		// released nothing. Whatever repopulated it — an epoch tick that landed while we waited for
+		// the write lock — is not ours to claim, and "pool reset restored providers" would credit
+		// this request with a recovery it did not perform.
+		utils.LavaFormatDebug("pool refilled before the reset ran, nothing released",
+			utils.LogAttr("selectable", restored),
 			utils.LogAttr("spec", csm.rpcEndpoint.Key()),
-			utils.LogAttr("pairing_size", afterReset.pairingSize),
-			utils.LogAttr("released_from_blocked", inventory.blockedCount),
 			utils.LogAttr("addon", addon),
 			utils.LogAttr("extensions", extensionNames),
 			utils.LogAttr("GUID", ctx),
 		)
-	} else {
+	case restored == 0:
+		// Re-snapshot. The reset cleared the blocked list and refilled validAddresses, so the
+		// pre-reset reason no longer describes the state we are in — reusing it would report
+		// all-blocked for a pool whose blocked list was just released and which still came up
+		// empty, naming the one cause the reset has already ruled out.
+		afterReset := csm.snapshotPoolInventory(addon, extensionNames, ctx)
+		utils.LavaFormatWarning("pool reset recovered no providers", nil,
+			utils.LogAttr("reason", afterReset.reason(addon, extensionNames)),
+			utils.LogAttr("spec", csm.rpcEndpoint.Key()),
+			utils.LogAttr("pairing_size", afterReset.pairingSize),
+			// Named for its provenance: this count comes from the pre-reset snapshot, while the
+			// reason and size beside it come from the post-reset one. Two snapshots on one line is
+			// unavoidable here — the whole point is to contrast before with after — but a reader
+			// must not take them for one instant.
+			utils.LogAttr("blocked_before_reset", inventory.blockedCount),
+			utils.LogAttr("addon", addon),
+			utils.LogAttr("extensions", extensionNames),
+			utils.LogAttr("GUID", ctx),
+		)
+	default:
 		utils.LavaFormatInfo("pool reset restored providers",
 			utils.LogAttr("restored", restored),
-			utils.LogAttr("released_from_blocked", inventory.blockedCount),
+			utils.LogAttr("blocked_before_reset", inventory.blockedCount),
 			utils.LogAttr("spec", csm.rpcEndpoint.Key()),
 			utils.LogAttr("addon", addon),
 			utils.LogAttr("extensions", extensionNames),

@@ -16,63 +16,73 @@ import (
 // the line worthless again.
 func TestPoolEmptyReason_NamesTheCauseNotTheSymptom(t *testing.T) {
 	for _, tt := range []struct {
-		name        string
-		pairingSize int
-		validCount  int
-		blocked     int
-		addon       string
-		extensions  []string
-		want        string
+		name           string
+		pairingSize    int
+		capable        int
+		capableBlocked int
+		addon          string
+		extensions     []string
+		want           string
 	}{
 		{
 			// The zxb5l case: nothing was ever registered. Not a routing problem, and the block
 			// reasons have nothing to say about it — there is no provider to have blocked.
-			name: "nothing registered", pairingSize: 0, validCount: 0, blocked: 0, want: "pairing-empty",
+			name: "nothing registered", pairingSize: 0, want: "pairing-empty",
 		},
 		{
 			// pairing-empty wins even when a stale blocked count is present: with no pairing there is
 			// nothing for the reset to restore, which is the actionable fact.
 			name:        "nothing registered outranks a stale blocked count",
-			pairingSize: 0, validCount: 0, blocked: 3, want: "pairing-empty",
+			pairingSize: 0, capable: 0, capableBlocked: 3, want: "pairing-empty",
 		},
 		{
-			name:        "pairing present and every member blocked",
-			pairingSize: 2, validCount: 0, blocked: 2, want: "all-blocked",
+			name:        "pairing present and every member that could serve is blocked",
+			pairingSize: 2, capable: 2, capableBlocked: 2, want: "all-blocked",
 		},
 		{
-			// The regression this ordering exists to prevent. Four of the five members are unblocked
-			// and simply do not serve the addon; testing blockedCount first called that all-blocked,
-			// which sends the reader to the block reasons for four providers that were never blocked.
-			name:        "one blocked member does not make a filtered pool all-blocked",
-			pairingSize: 5, validCount: 4, blocked: 1, addon: "archive", want: "addon-filtered",
+			// The mislabel this line exists to prevent, in its first form: four of five members are
+			// unblocked and simply do not serve the addon. Keying on blockedCount called that
+			// all-blocked, sending the reader to block reasons for providers never blocked. Only one
+			// member is addon-capable and it is blocked, so the honest answer is all-blocked — for
+			// the ONE provider that matters, not the four that were never candidates.
+			name:        "one capable member, and it is blocked",
+			pairingSize: 5, capable: 1, capableBlocked: 1, addon: "archive", want: "all-blocked",
 		},
 		{
-			name:        "addon filtered out the whole pairing",
-			pairingSize: 3, validCount: 3, blocked: 0, addon: "debug", want: "addon-filtered",
+			// The same mislabel in its mirror form. Keying on validCount called this addon-filtered
+			// because four unrelated members were still valid, when the truth is that the two
+			// providers that serve the addon are both blocked.
+			name:        "capable members all blocked while unrelated members stay valid",
+			pairingSize: 6, capable: 2, capableBlocked: 2, extensions: []string{"archive"}, want: "all-blocked",
 		},
 		{
-			name:        "extension filtered out the whole pairing",
-			pairingSize: 3, validCount: 3, blocked: 0, extensions: []string{"archive"}, want: "addon-filtered",
+			// Genuinely filtered: not one member serves the addon. A spec or config problem, and no
+			// amount of routing recovers it.
+			name:        "no member serves the addon at all",
+			pairingSize: 3, capable: 0, addon: "debug", want: "addon-filtered",
 		},
 		{
-			// Members survived into validAddresses and the request wants the default collection,
-			// which nothing filters except a provider having no usable endpoint. Registration
-			// succeeded; the endpoints behind it did not.
-			name:        "registered members with no usable endpoint",
-			pairingSize: 3, validCount: 3, blocked: 0, want: "no-usable-endpoints",
+			name:        "no member serves the extension at all",
+			pairingSize: 3, capable: 0, extensions: []string{"archive"}, want: "addon-filtered",
 		},
 		{
-			// Members registered, not all blocked, and none reached validAddresses. Not a shape we
-			// model — it must not borrow one of the names above.
+			// The default collection is served by every provider by definition, so the only predicate
+			// left is having at least one endpoint. Nothing capable means they registered with none.
+			name:        "registered members with no endpoints at all",
+			pairingSize: 3, capable: 0, want: "no-usable-endpoints",
+		},
+		{
+			// Capable members exist and are not all blocked, yet nothing was selectable. Not a shape
+			// we model — it must not borrow one of the names above.
 			name:        "unmodelled shape is named, not mislabelled",
-			pairingSize: 5, validCount: 0, blocked: 1, want: "unspecified",
+			pairingSize: 5, capable: 3, capableBlocked: 1, want: "unspecified",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			inv := poolInventory{pairingSize: tt.pairingSize, validCount: tt.validCount, blockedCount: tt.blocked}
+			inv := poolInventory{pairingSize: tt.pairingSize, capable: tt.capable, capableBlocked: tt.capableBlocked}
 			if got := inv.reason(tt.addon, tt.extensions); got != tt.want {
-				t.Fatalf("poolInventory{pairing:%d valid:%d blocked:%d}.reason(%q, %v) = %q, want %q",
-					tt.pairingSize, tt.validCount, tt.blocked, tt.addon, tt.extensions, got, tt.want)
+				t.Fatalf("poolInventory{pairing:%d capable:%d capableBlocked:%d}.reason(%q, %v) = %q, want %q",
+					tt.pairingSize, tt.capable, tt.capableBlocked, tt.addon, tt.extensions, got, tt.want)
 			}
 		})
 	}
@@ -84,7 +94,7 @@ func TestSnapshotPoolInventory_ReadsTheRealState(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
 
-	full := csm.snapshotPoolInventory()
+	full := csm.snapshotPoolInventory("", nil, context.Background())
 	require.Equal(t, numberOfProviders, full.pairingSize)
 	require.Equal(t, numberOfProviders, full.validCount)
 	require.Zero(t, full.blockedCount)
@@ -94,12 +104,12 @@ func TestSnapshotPoolInventory_ReadsTheRealState(t *testing.T) {
 	for _, address := range append([]string{}, csm.validAddresses...) {
 		require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonTooManyDeadSessions, false, csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
 	}
-	blocked := csm.snapshotPoolInventory()
+	blocked := csm.snapshotPoolInventory("", nil, context.Background())
 	require.Equal(t, "all-blocked", blocked.reason("", nil))
 
 	// An empty pairing is the other cause entirely, and the reset cannot undo it.
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight+1, nil, nil))
-	require.Equal(t, "pairing-empty", csm.snapshotPoolInventory().reason("", nil))
+	require.Equal(t, "pairing-empty", csm.snapshotPoolInventory("", nil, context.Background()).reason("", nil))
 }
 
 // An empty pairing is declined by releaseCouldServeThisRequest — its loop over pairingAddresses
@@ -159,12 +169,21 @@ func TestReleaseBlockedProvidersIfPoolEmpty_ReportsARecoveredPool(t *testing.T) 
 // real customer capture to look at billing.
 func TestResetValidAddresses_DoesNotBlameASubscription(t *testing.T) {
 	csm := CreateConsumerSessionManager()
-	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, nil, nil))
 
-	records := captureLogs(t, func() { csm.resetValidAddresses("", nil) })
+	// UpdateAllProviders is inside the capture on purpose. Resetting an empty pairing logs nothing
+	// at all now, so capturing only that leaves records empty and the assertion below iterates zero
+	// times — green whether or not the sink works, and green whether or not the line came back.
+	// Including the pairing update guarantees at least one record, which makes NotEmpty a real
+	// check that the sink is capturing and the loop a real check of what it captured.
+	records := captureLogs(t, func() {
+		require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, nil, nil))
+		csm.resetValidAddresses("", nil)
+	})
 
+	require.NotEmpty(t, records,
+		"the sink captured nothing — the assertion below would pass vacuously")
 	for _, record := range records {
-		require.NotContains(t, record["message"], "subscription",
+		require.NotContains(t, logMessage(record), "subscription",
 			"an empty pool must never be reported as a subscription problem")
 	}
 }
@@ -230,14 +249,33 @@ func assertAddresses(t *testing.T, field string, got, want []string) {
 // captureLogs records everything logged during fn as parsed JSON. It drives the real sink rather
 // than a stub, so a test asserting on a log line fails when the line stops being emitted — which is
 // the only failure mode that matters for a change whose entire product is log output.
+// debugRingCapacity is deliberately far above what these tests emit. The ring evicts oldest-first,
+// and the record every assertion here looks for — "provider pool empty" — is the FIRST one emitted
+// on the path. Size it to the run and any added logging silently evicts the line under test, turning
+// these into red tests that claim a log line was never emitted when it was emitted and dropped.
+const debugRingCapacity = 100000
+
+// logMessage reads a record's message without assuming it has one. A record reaching the shared ring
+// without a "message" key — a line sent via .Send() rather than .Msg() — would otherwise fail
+// require.NotContains on a nil argument, with an error about builtin len() that points nowhere near
+// the actual subject.
+func logMessage(record map[string]any) string {
+	message, _ := record["message"].(string)
+	return message
+}
+
 func captureLogs(t *testing.T, fn func()) []map[string]any {
 	t.Helper()
-	utils.EnableDebugLogBuffer(1000)
+	// EnableDebugLogBuffer swaps a process-global sink. Without the cleanup every later test in this
+	// binary keeps paying the copy-and-append on every log call, and the sink's documented
+	// "disabled by default" contract stays broken for the rest of the run.
+	utils.EnableDebugLogBuffer(debugRingCapacity)
+	t.Cleanup(utils.DisableDebugLogBuffer)
 	utils.ClearDebugLogBuffer()
 
 	fn()
 
-	raw := utils.ReadDebugLogBuffer("", time.Time{}, time.Time{}, 1000)
+	raw := utils.ReadDebugLogBuffer("", time.Time{}, time.Time{}, debugRingCapacity)
 	records := make([]map[string]any, 0, len(raw))
 	for _, line := range raw {
 		record := map[string]any{}
@@ -256,4 +294,65 @@ func findLogRecord(records []map[string]any, message string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// The guard declines the release for every structural emptiness, not only an empty pairing: a
+// pairing where nothing serves the requested addon reaches the same return. Keying the diagnosis on
+// pairingSize rescued only the empty-pairing case and left this one reporting "every provider has
+// already been tried" — for a request that tried nothing at all.
+func TestReleaseBlockedProvidersIfPoolEmpty_ReportsAnAddonNothingServes(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
+
+	records := captureLogs(t, func() {
+		_, ok := csm.releaseBlockedProvidersIfPoolEmpty(context.Background(), 1,
+			&ignoredProviders{providers: map[string]struct{}{}}, 10, spectypes.NOT_APPLICABLE,
+			"nonexistent-addon", nil, 0, 0, "", "", 0, 0)
+		require.False(t, ok, "no provider serves this addon, so nothing can be released")
+	})
+
+	line := findLogRecord(records, "provider pool empty")
+	require.NotNil(t, line, "a pairing that cannot serve the addon must say so, not fall silent")
+	require.Equal(t, "addon-filtered", line["reason"],
+		"no member serves this addon — that is a config problem, not retry exhaustion")
+
+	require.Nil(t, findLogRecord(records, "every provider has already been tried by this request, leaving the blocked list standing"),
+		"nothing was tried: the ignored set was empty on entry")
+}
+
+// An empty pool is a property of the pairing, and the pairing does not change between relays. A
+// chain whose providers all failed startup verification stays empty indefinitely, and this path runs
+// on every relay — reporting it per-relay at WARN turns a permanent state into a sustained alert
+// stream, which is the log flood this work exists to reduce.
+func TestReleaseBlockedProvidersIfPoolEmpty_WarnsOncePerPairing(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, nil, nil))
+
+	callOnce := func() map[string]any {
+		var line map[string]any
+		records := captureLogs(t, func() {
+			csm.releaseBlockedProvidersIfPoolEmpty(context.Background(), 1,
+				&ignoredProviders{providers: map[string]struct{}{}}, 10, spectypes.NOT_APPLICABLE,
+				"", nil, 0, 0, "", "", 0, 0)
+		})
+		line = findLogRecord(records, "provider pool empty")
+		require.NotNil(t, line, "the state must still be reported on every pass, at some level")
+		return line
+	}
+
+	first := callOnce()
+	require.Equal(t, "warn", first["level"], "the first report for a pairing is the alertable one")
+	require.Equal(t, "false", first["repeat"])
+
+	second := callOnce()
+	require.Equal(t, "debug", second["level"],
+		"a repeat for the same pairing must not warn again — the state has not changed")
+	require.Equal(t, "true", second["repeat"])
+
+	// A genuinely new pairing is a new outage, and must warn immediately rather than inherit the
+	// throttle from the pairing that preceded it.
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight+1, nil, nil))
+	afterRebuild := callOnce()
+	require.Equal(t, "warn", afterRebuild["level"],
+		"a rebuilt pairing that is still empty is a fresh event, not a repeat")
 }
