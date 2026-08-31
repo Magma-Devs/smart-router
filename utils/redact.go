@@ -23,6 +23,11 @@ const RedactedURLMark = "/" + RedactedMark
 // needs to identify — always precedes them.
 var urlInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"'` + "`" + `<>\\^{}|\[\],;)]+`)
 
+// schemeLessURLInText matches a credential-bearing scheme-less node url while
+// requiring a recognizable host. That keeps ordinary prose, provider names,
+// lava addresses and bare host:port values untouched.
+var schemeLessURLInText = regexp.MustCompile(`\b(?:(?:localhost|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+)(?::[0-9]+)?|[a-zA-Z0-9-]+:[0-9]+)[/?#][^\s"'` + "`" + `<>\\^{}|\[\],;)]+`)
+
 // RedactURL reduces one url to scheme://host[:port]. Upstream vendors carry the
 // api key in the userinfo, the path (".../v2/<key>") or the query
 // ("?apikey=<key>"), so everything past the host is dropped wholesale — a
@@ -78,13 +83,14 @@ func RedactIfURL(s string) string {
 // message embeds the full request url (Go masks only the userinfo password), or
 // a message that interpolated a node-url.
 //
-// The Contains check keeps this near-free for the log lines that hold no url,
+// The delimiter check keeps this near-free for the log lines that hold no url,
 // which is nearly all of them.
 func RedactSecrets(s string) string {
-	if !strings.Contains(s, "://") {
+	if !strings.Contains(s, "://") && !strings.ContainsAny(s, "/?#") {
 		return s
 	}
-	return urlInText.ReplaceAllStringFunc(s, RedactURL)
+	redacted := urlInText.ReplaceAllStringFunc(s, RedactURL)
+	return schemeLessURLInText.ReplaceAllStringFunc(redacted, RedactURL)
 }
 
 // RedactSecretsErr returns err with its message redacted, preserving the cause

@@ -34,8 +34,9 @@ func captureLog(t *testing.T, level zerolog.Level, fn func()) string {
 }
 
 const (
-	testSecretKey = "AbC123SecretKey"
-	testSecretURL = "https://eth-mainnet.example.com/v2/" + testSecretKey
+	testSecretKey           = "AbC123SecretKey"
+	testSecretURL           = "https://eth-mainnet.example.com/v2/" + testSecretKey
+	testSchemeLessSecretURL = "eth-mainnet.example.com/v2/" + testSecretKey
 )
 
 // MAG-3330: ~87 call sites log a raw node-url. Redacting inside LavaFormatLog is
@@ -49,6 +50,15 @@ func TestLavaFormatLog_RedactsURLInAttribute(t *testing.T) {
 	assert.NotContains(t, out, testSecretKey)
 	assert.Contains(t, out, "eth-mainnet.example.com", "the host stays, so the line is still actionable")
 	assert.Contains(t, out, "created direct RPC connection")
+}
+
+func TestLavaFormatLog_RedactsSchemeLessURLInAttribute(t *testing.T) {
+	out := captureLog(t, zerolog.TraceLevel, func() {
+		LavaFormatInfo("created direct RPC connection", LogAttr("url", testSchemeLessSecretURL))
+	})
+
+	assert.NotContains(t, out, testSecretKey)
+	assert.Contains(t, out, "eth-mainnet.example.com")
 }
 
 func TestLavaFormatLog_RedactsURLInWrappedError(t *testing.T) {

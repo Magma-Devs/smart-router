@@ -48,6 +48,10 @@ func TestRedactSecrets_LeavesNonURLTextAlone(t *testing.T) {
 		"dial tcp 10.0.0.7:443: connect: connection refused",
 		"prometheus endpoint listening 0.0.0.0:7779",
 		"provider eth-primary-1 blocked",
+		"eth-primary-1",
+		"lava@harvestGenProvider",
+		"lava@1abcdefghijklmnop",
+		"ep:8545",
 		"",
 	} {
 		assert.Equal(t, s, RedactSecrets(s))
@@ -75,6 +79,16 @@ func TestRedactSecrets_RedactsEmbeddedURLs(t *testing.T) {
 			name: "url in attribute-style text",
 			in:   "{url:https://node.example.com/v2/SecretKey123,method:eth_call}",
 			want: "{url:https://node.example.com/[redacted],method:eth_call}",
+		},
+		{
+			name: "scheme-less url with key in path",
+			in:   "failed node.example.com/v2/SecretKey123",
+			want: "failed node.example.com/[redacted]",
+		},
+		{
+			name: "scheme-less url with key in query",
+			in:   `Post "node.example.com/rpc?apikey=SecretKey123": connection refused`,
+			want: `Post "node.example.com/[redacted]": connection refused`,
 		},
 	}
 	for _, tt := range tests {
