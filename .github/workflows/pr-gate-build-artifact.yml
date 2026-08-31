@@ -283,9 +283,9 @@ jobs:
             "$SSH_HOST" \
             'set -euo pipefail
              hostname
-             kubectl get ns lava-infra
-             kubectl get deploy -n lava-infra
-             kubectl get pods -n lava-infra' >"$ssh_stdout" 2>"$ssh_stderr"; then
+             kubectl get ns smart-router
+             kubectl get deploy -n smart-router
+             kubectl get pods -n smart-router' >"$ssh_stdout" 2>"$ssh_stderr"; then
             echo "::error::dev-sim-prtests preflight failed while connecting or running read-only checks"
             print_sanitized_remote_output
             exit 1
@@ -324,24 +324,24 @@ jobs:
 
           ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RemoteCommand=none -o RequestTTY=no -o ServerAliveInterval=30 -o ServerAliveCountMax=20)
 
-          previous_image="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "kubectl -n lava-infra get deployment eth-sim-router -o jsonpath='{range .spec.template.spec.containers[?(@.name==\"router\")]}{.image}{end}'")"
+          previous_image="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "kubectl -n smart-router get deployment eth-sim-router -o jsonpath='{range .spec.template.spec.containers[?(@.name==\"router\")]}{.image}{end}'")"
           if [ -z "$previous_image" ]; then
-            echo "::error::Could not capture current image for lava-infra/deployment/eth-sim-router container router"
+            echo "::error::Could not capture current image for smart-router/deployment/eth-sim-router container router"
             exit 1
           fi
-          previous_args_b64="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "kubectl -n lava-infra get deployment eth-sim-router -o json | jq -c '.spec.template.spec.containers[] | select(.name==\"router\").args // []' | base64 | tr -d '\n'")"
+          previous_args_b64="$(ssh "${ssh_opts[@]}" "$SSH_HOST" "kubectl -n smart-router get deployment eth-sim-router -o json | jq -c '.spec.template.spec.containers[] | select(.name==\"router\").args // []' | base64 | tr -d '\n'")"
           if [ -z "$previous_args_b64" ]; then
-            echo "::error::Could not capture current args for lava-infra/deployment/eth-sim-router container router"
+            echo "::error::Could not capture current args for smart-router/deployment/eth-sim-router container router"
             exit 1
           fi
 
           rollback_remote() {
-            echo "Attempting rollback for lava-infra/deployment/eth-sim-router container router"
+            echo "Attempting rollback for smart-router/deployment/eth-sim-router container router"
             # shellcheck disable=SC2029
             ssh "${ssh_opts[@]}" "$SSH_HOST" "PREVIOUS_IMAGE='${previous_image}' PREVIOUS_ARGS_B64='${previous_args_b64}' bash -s" <<'REMOTE_ROLLBACK'
           set -euo pipefail
 
-          NAMESPACE="lava-infra"
+          NAMESPACE="smart-router"
           DEPLOYMENT="eth-sim-router"
           CONTAINER="router"
 
@@ -389,7 +389,7 @@ jobs:
           if ! ssh "${ssh_opts[@]}" "$SSH_HOST" "PR_IMAGE='${PR_IMAGE}' PREVIOUS_IMAGE='${previous_image}' PREVIOUS_ARGS_B64='${previous_args_b64}' bash -s" 2>&1 <<'REMOTE_ROLLOUT' | tee "$rollout_output"
           set -euo pipefail
 
-          NAMESPACE="lava-infra"
+          NAMESPACE="smart-router"
           DEPLOYMENT="eth-sim-router"
           SERVICE="eth-sim-router"
           CONTAINER="router"
@@ -615,13 +615,13 @@ jobs:
           {
             echo "### dev-sim-prtests Kubernetes rollout validation"
             echo ""
-            echo "- Namespace: \`lava-infra\`"
+            echo "- Namespace: \`smart-router\`"
             echo "- Deployment: \`eth-sim-router\`"
             echo "- Container: \`router\`"
             echo "- Service: \`eth-sim-router\`"
             echo "- PR image: \`${PR_IMAGE}\`"
-            echo "- Rollout command: \`kubectl -n lava-infra set image deployment/eth-sim-router router=${PR_IMAGE}\`"
-            echo "- Readiness command: \`kubectl -n lava-infra rollout status deployment/eth-sim-router --timeout=600s\`"
+            echo "- Rollout command: \`kubectl -n smart-router set image deployment/eth-sim-router router=${PR_IMAGE}\`"
+            echo "- Readiness command: \`kubectl -n smart-router rollout status deployment/eth-sim-router --timeout=600s\`"
             echo "- Smoke endpoint: \`${smoke_endpoint}\`"
             echo "- Validation result: \`passed\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -752,7 +752,7 @@ jobs:
           CHART_REPO_DIR="${REMOTE_TMP}/smart-router-helm-chart"
           VALUES_FILE="${REMOTE_TMP}/dev-pr-gate-values.yaml"
           PULL_SECRET_NAME="ghcr-secret"
-          PULL_SECRET_SOURCE_NAMESPACE="lava-infra"
+          PULL_SECRET_SOURCE_NAMESPACE="smart-router"
           ROUTER_ID="eth"
           ROUTER_SERVICE="${ROUTER_ID}-router"
           SERVICE_PORT="3000"
@@ -839,8 +839,8 @@ jobs:
 
           copy_pull_secret() {
             kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-            kubectl -n lava-infra get secret ghcr-secret -o yaml \
-              | sed "s/namespace: lava-infra/namespace: ${NAMESPACE}/" \
+            kubectl -n smart-router get secret ghcr-secret -o yaml \
+              | sed "s/namespace: smart-router/namespace: ${NAMESPACE}/" \
               | kubectl apply -f -
             kubectl -n "$NAMESPACE" get secret "$PULL_SECRET_NAME" >/dev/null
             echo "Copied image pull secret ${PULL_SECRET_NAME} into ${NAMESPACE}"
