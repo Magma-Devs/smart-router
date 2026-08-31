@@ -8,6 +8,7 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/utils"
 
@@ -33,7 +34,7 @@ func (tm *TendermintrpcMessage) GetRawRequestHash() ([]byte, error) {
 	headers := tm.GetHeaders()
 	headersByteArray, err := json.Marshal(headers)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", headers))
+		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", common.RedactMetadata(headers)))
 		return []byte{}, err
 	}
 	methodByteArray := []byte(tm.Method + tm.Path)

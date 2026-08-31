@@ -2,12 +2,16 @@ package utils
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 )
 
+// RedactedMark stands in for any withheld value.
+const RedactedMark = "[redacted]"
+
 // RedactedURLMark replaces the credential-bearing tail of a url. It is a path
 // segment so a redacted url still reads as a url in logs and error text.
-const RedactedURLMark = "/[redacted]"
+const RedactedURLMark = "/" + RedactedMark
 
 // urlInText matches a scheme-qualified url inside arbitrary text. Anchoring on
 // "://" keeps prose and scheme-less identifiers — a host:port listen address, a
@@ -95,4 +99,85 @@ func RedactSecretsErr(err error) error {
 		return err
 	}
 	return &wrappedLavaError{msg: redacted, cause: err}
+}
+
+// safeHeaderValues names the headers whose values may be logged. Everything else
+// is withheld, because auth header names are operator-configured per node-url
+// (auth-config.auth-headers) and inbound requests carry the caller's own
+// credentials — no deny-list can enumerate either. Header NAMES are always
+// logged, so a redacted line still shows what was sent.
+var safeHeaderValues = map[string]struct{}{
+	"accept": {}, "accept-encoding": {}, "accept-language": {}, "allow": {},
+	"cache-control": {}, "connection": {}, "content-encoding": {},
+	"content-language": {}, "content-length": {}, "content-type": {},
+	"date": {}, "expect": {}, "host": {}, "keep-alive": {}, "server": {},
+	"te": {}, "trailer": {}, "transfer-encoding": {}, "upgrade": {},
+	"user-agent": {}, "vary": {}, "via": {},
+}
+
+// IsSensitiveHeader reports whether a header's value must be withheld from logs.
+// Fails closed: anything not explicitly known-safe is sensitive.
+func IsSensitiveHeader(name string) bool {
+	_, safe := safeHeaderValues[strings.ToLower(strings.TrimSpace(name))]
+	return !safe
+}
+
+// RedactHeaderValue returns value when the header is known-safe to log, and the
+// redaction mark otherwise.
+func RedactHeaderValue(name, value string) string {
+	if IsSensitiveHeader(name) {
+		return RedactedMark
+	}
+	return value
+}
+
+// RedactHeaders renders a header map for logging with sensitive values withheld.
+// Takes the unnamed map type so http.Header and grpc metadata.MD both assign to
+// it. Output is sorted by name — map iteration order would otherwise make log
+// lines differ run to run.
+func RedactHeaders(h map[string][]string) string {
+	names := make([]string, 0, len(h))
+	for name := range h {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, name := range names {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(name)
+		b.WriteByte(':')
+		if IsSensitiveHeader(name) {
+			b.WriteString(RedactedMark)
+			continue
+		}
+		b.WriteString(strings.Join(h[name], ","))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// RedactHeaderMap is RedactHeaders for a single-valued header map.
+func RedactHeaderMap(h map[string]string) string {
+	names := make([]string, 0, len(h))
+	for name := range h {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, name := range names {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(name)
+		b.WriteByte(':')
+		b.WriteString(RedactHeaderValue(name, h[name]))
+	}
+	b.WriteByte('}')
+	return b.String()
 }
