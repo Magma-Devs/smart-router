@@ -439,15 +439,16 @@ func validateProviderTier(
 	rpcEndpoint *lavasession.RPCEndpoint,
 	chainParser chainlib.ChainParser,
 	tier reverifyTier,
-	validate func(context.Context, *lavasession.RPCStaticProviderEndpoint) error,
-) (map[*lavasession.RPCStaticProviderEndpoint]struct{}, []*lavasession.RPCStaticProviderEndpoint) {
+	validate func(context.Context, *lavasession.RPCStaticProviderEndpoint) (chainlib.ProviderAdmission, error),
+) (map[*lavasession.RPCStaticProviderEndpoint]struct{}, []*lavasession.RPCStaticProviderEndpoint, map[*lavasession.RPCStaticProviderEndpoint]chainlib.ProviderAdmission) {
 	failedSet := make(map[*lavasession.RPCStaticProviderEndpoint]struct{})
+	admissions := make(map[*lavasession.RPCStaticProviderEndpoint]chainlib.ProviderAdmission)
 	if len(providers) == 0 {
-		return failedSet, nil
+		return failedSet, nil, admissions
 	}
 	if validate == nil {
-		validate = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
-			return validateProvider(c, p, chainParser, BootValidateTimeout)
+		validate = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) (chainlib.ProviderAdmission, error) {
+			return validateProviderCollections(c, p, chainParser, BootValidateTimeout)
 		}
 	}
 
@@ -459,6 +460,7 @@ func validateProviderTier(
 	)
 
 	results := make([]error, len(providers))
+	admitted := make([]chainlib.ProviderAdmission, len(providers))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, SpecReVerifyConcurrency)
 	for i, p := range providers {
@@ -467,7 +469,7 @@ func validateProviderTier(
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = validate(ctx, p)
+			admitted[i], results[i] = validate(ctx, p)
 		}()
 	}
 	wg.Wait()
@@ -484,13 +486,17 @@ func validateProviderTier(
 			)
 			continue
 		}
+		if admitted[i].Any() {
+			admissions[p] = admitted[i]
+		}
 		utils.LavaFormatInfo("Provider validated successfully",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("tier", tier.String()),
 			utils.LogAttr("provider", p.Name),
+			utils.LogAttr("addonsRefused", admitted[i].Any()),
 		)
 	}
-	return failedSet, failedOrdered
+	return failedSet, failedOrdered, admissions
 }
 
 // validateProvider runs a single spec-verification pass against one provider.
@@ -566,4 +572,44 @@ func validateProvider(
 	})
 
 	return verificationFetcher.Validate(attemptCtx)
+}
+
+// validateProviderCollections is validateProvider with per-collection admission
+// (MAG-3326): an add-on whose verification fails is refused on its own, and the
+// provider survives with the rest.
+//
+// Boot only. applyReverification keeps the all-or-nothing Validate deliberately:
+// the epoch path already carries temporal hysteresis at provider granularity
+// (reverifyDemoteThreshold, MAG-2445, added because a 40-second blip cost a
+// provider a full epoch), and per-collection demotion there needs the same
+// hysteresis per add-on before it can be safe. Without it one transient failure
+// would strip an add-on until restart.
+//
+// TODO(MAG-3326): give the epoch path per-add-on hysteresis, then move it here too.
+func validateProviderCollections(
+	ctx context.Context,
+	provider *lavasession.RPCStaticProviderEndpoint,
+	chainParser chainlib.ChainParser,
+	timeout time.Duration,
+) (chainlib.ProviderAdmission, error) {
+	routerEndpoint, verificationEndpoint := verificationEndpoints(provider)
+
+	attemptCtx, attemptCancel := context.WithTimeout(ctx, timeout)
+	defer attemptCancel()
+
+	validationParser := chainlib.CloneChainParserForValidation(chainParser)
+	parallelConnections := uint(lavasession.DefaultMaximumStreamsOverASingleConnection)
+	verificationRouter, err := chainlib.GetChainRouter(attemptCtx, parallelConnections, routerEndpoint, validationParser)
+	if err != nil {
+		return chainlib.ProviderAdmission{}, err
+	}
+
+	verificationFetcher := chainlib.NewChainFetcher(attemptCtx, &chainlib.ChainFetcherOptions{
+		ChainRouter: verificationRouter,
+		ChainParser: validationParser,
+		Endpoint:    verificationEndpoint,
+		Cache:       nil,
+	})
+
+	return verificationFetcher.ValidateCollections(attemptCtx)
 }

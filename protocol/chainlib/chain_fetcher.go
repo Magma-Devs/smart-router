@@ -166,13 +166,98 @@ func stopValidateRetries(err error) bool {
 	return err == nil || errors.Is(err, common.StatusCodeError429)
 }
 
+// ProviderAdmission records which add-on collections a provider's node urls
+// failed to answer for, so a failure attributable to ONE add-on costs that
+// add-on rather than the whole provider (MAG-3326).
+//
+// Empty means everything a url declared was admitted.
+type ProviderAdmission struct {
+	failedAddons map[string]map[string]struct{}
+}
+
+func admissionKey(url common.NodeUrl) string {
+	return url.Url + "\x00" + url.InternalPath
+}
+
+func (a *ProviderAdmission) fail(url common.NodeUrl, addon string) {
+	if a.failedAddons == nil {
+		a.failedAddons = map[string]map[string]struct{}{}
+	}
+	key := admissionKey(url)
+	if a.failedAddons[key] == nil {
+		a.failedAddons[key] = map[string]struct{}{}
+	}
+	a.failedAddons[key][addon] = struct{}{}
+}
+
+// Any reports whether any add-on was refused.
+func (a ProviderAdmission) Any() bool { return len(a.failedAddons) > 0 }
+
+// Apply returns a COPY of nodeUrls with each url's refused add-ons removed.
+//
+// The input is never mutated: it is the parsed configuration, and the epoch
+// re-verification path re-reads it every cycle. Stripping it in place would make
+// one transient failure permanent — the failure this codebase already guards
+// against at provider granularity with reverifyDemoteThreshold.
+func (a ProviderAdmission) Apply(nodeUrls []common.NodeUrl) []common.NodeUrl {
+	if !a.Any() {
+		return nodeUrls
+	}
+	out := make([]common.NodeUrl, 0, len(nodeUrls))
+	for _, url := range nodeUrls {
+		refused := a.failedAddons[admissionKey(url)]
+		if len(refused) == 0 || len(url.Addons) == 0 {
+			out = append(out, url)
+			continue
+		}
+		kept := make([]string, 0, len(url.Addons))
+		for _, addon := range url.Addons {
+			if _, bad := refused[addon]; bad {
+				continue
+			}
+			kept = append(kept, addon)
+		}
+		copied := url
+		copied.Addons = kept
+		out = append(out, copied)
+	}
+	return out
+}
+
 func (cf *ChainFetcher) Validate(ctx context.Context) error {
+	_, err := cf.validate(ctx, false)
+	return err
+}
+
+// ValidateCollections runs the same verifications Validate does, but a
+// Fail-severity failure that belongs to ONE add-on removes that add-on from the
+// url instead of the provider from the pairing (MAG-3326). A provider that
+// serves the base collection perfectly and fails one add-on's verification used
+// to be excluded from everything — adding an archive url to a healthy provider
+// could cost the provider.
+//
+// A failure with no add-on to attribute it to stays fatal: the base collection's
+// own verifications, a head probe that never answered, GetVerifications itself.
+// A node that cannot serve the spec's primary surface has nothing narrower to
+// fall back to.
+//
+// Deliberately NOT derived here: a base-collection failure does not silently
+// turn a url into a standalone-addons one. Only an operator can tell "this node
+// serves only EVM by design" from "its Substrate side is down right now", and
+// inferring the first from the second would quietly admit a degraded node on a
+// narrower surface. That assertion stays the standalone-addons flag's job.
+func (cf *ChainFetcher) ValidateCollections(ctx context.Context) (ProviderAdmission, error) {
+	return cf.validate(ctx, true)
+}
+
+func (cf *ChainFetcher) validate(ctx context.Context, perCollection bool) (ProviderAdmission, error) {
+	admission := ProviderAdmission{}
 	for _, url := range cf.endpoint.NodeUrls {
 		utils.LavaFormatInfo("starting validation for url", utils.LogAttr("url", url.String()))
 		addons := url.Addons
 		verifications, err := cf.chainParser.GetVerifications(addons, url.InternalPath, cf.endpoint.ApiInterface)
 		if err != nil {
-			return err
+			return admission, err
 		}
 		verifications = verificationsForNodeUrl(url, verifications)
 		if len(verifications) == 0 {
@@ -192,7 +277,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 			}
 			if err != nil {
 				utils.LavaFormatError("failed to fetch latest block number", err)
-				return err
+				return admission, err
 			}
 		}
 		// invalidating cache as value might change
@@ -214,14 +299,26 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 				cf.verificationsStatus.Store(cf.getVerificationsKey(verification, cf.endpoint.ApiInterface, cf.endpoint.ChainID), false)
 				utils.LavaFormatWarning("failed verification on provider startup", err, utils.LogAttr("verification", verification.Name))
 				if verification.Severity == spectypes.ParseValue_Fail {
-					return utils.LavaFormatError("invalid Verification on provider startup", err, utils.Attribute{Key: "Addons", Value: addons}, utils.Attribute{Key: "verification", Value: verification.Name})
+					// A failure that belongs to one add-on costs that add-on, not
+					// the provider. Only a failure with no add-on to attribute it
+					// to — the base collection's own — is still fatal (MAG-3326).
+					if perCollection && verification.Addon != "" {
+						admission.fail(url, verification.Addon)
+						utils.LavaFormatWarning("refusing one add-on for this url, keeping the provider", err,
+							utils.LogAttr("url", url.String()),
+							utils.LogAttr("addon", verification.Addon),
+							utils.LogAttr("verification", verification.Name),
+						)
+						continue
+					}
+					return admission, utils.LavaFormatError("invalid Verification on provider startup", err, utils.Attribute{Key: "Addons", Value: addons}, utils.Attribute{Key: "verification", Value: verification.Name})
 				}
 			} else {
 				cf.verificationsStatus.Store(cf.getVerificationsKey(verification, cf.endpoint.ApiInterface, cf.endpoint.ChainID), true)
 			}
 		}
 	}
-	return nil
+	return admission, nil
 }
 
 // VerificationResult is the outcome of running a single spec verification against one node URL.
