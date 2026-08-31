@@ -712,7 +712,7 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 ) (*DirectRPCResponse, error) {
 	client, err := w.ensureClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to dial WebSocket %s: %w", w.nodeUrl.Url, err)
+		return nil, fmt.Errorf("failed to dial WebSocket %s: %w", w.nodeUrl.UrlStr(), err)
 	}
 
 	// Decode the already-built request body to recover id/method/params for the
@@ -721,7 +721,7 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 	// CallContext accepts.
 	var reqMsg rpcInterfaceMessages.JsonrpcMessage
 	if err := json.Unmarshal(data, &reqMsg); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON-RPC request for WebSocket %s: %w", w.nodeUrl.Url, err)
+		return nil, fmt.Errorf("failed to parse JSON-RPC request for WebSocket %s: %w", w.nodeUrl.UrlStr(), err)
 	}
 
 	// Send a connection-unique wire id so concurrent requests can't collide in
@@ -742,7 +742,7 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 
 	respBytes, err := json.Marshal(&out)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal WebSocket response for %s: %w", w.nodeUrl.Url, err)
+		return nil, fmt.Errorf("failed to marshal WebSocket response for %s: %w", w.nodeUrl.UrlStr(), err)
 	}
 	utils.LavaFormatTrace("WebSocket SendRequest succeeded",
 		utils.LogAttr("endpoint", w.nodeUrl.Url),
@@ -762,7 +762,7 @@ func (w *WebSocketDirectRPCConnection) ensureClient(ctx context.Context) (*rpccl
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
-		return nil, fmt.Errorf("WebSocket connection is closed for endpoint %s", w.nodeUrl.Url)
+		return nil, fmt.Errorf("WebSocket connection is closed for endpoint %s", w.nodeUrl.UrlStr())
 	}
 	if w.client != nil {
 		return w.client, nil

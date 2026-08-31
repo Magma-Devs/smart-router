@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -292,4 +294,37 @@ func TestLavaFormat_GUIDAttachedToNormalLogPaths(t *testing.T) {
 	// normal-path key is the literal "GUID".
 	_, hasErrorGUID := parsed["Error_GUID"]
 	assert.False(t, hasErrorGUID, "normal-path log must not carry Error_GUID field")
+}
+
+// MAG-3330: every client-facing error envelope is built here, so an upstream
+// node-url's api key must not survive into it. The router runs with
+// ReturnMaskedErrors="false" (no -ldflags sets it), which is the branch that
+// copies the error text into the response, so that is the branch under test.
+func TestGetUniqueGuidResponseForError_RedactsUpstreamURL(t *testing.T) {
+	require.Equal(t, "false", ReturnMaskedErrors, "the unmasked branch is the shipped default")
+
+	plog, err := NewRPCConsumerLogs(nil, nil, nil)
+	require.Nil(t, err)
+	utils.SetGlobalLoggingLevel("fatal") // this path logs the error too; keep the output quiet
+
+	const secret = "AbC123SecretKey"
+	// The exact shape net/http produces: Go masks only the userinfo password, so
+	// a key in the path reaches us intact.
+	transportErr := fmt.Errorf("http request failed: %w", &url.Error{
+		Op:  "Post",
+		URL: "https://eth-mainnet.example.com/v2/" + secret,
+		Err: errors.New("connection reset by peer"),
+	})
+	require.Contains(t, transportErr.Error(), secret, "precondition: the raw error carries the key")
+
+	envelope := plog.GetUniqueGuidResponseForError(transportErr, "msgSeed")
+
+	assert.NotContains(t, envelope, secret)
+
+	errObject := &ErrorData{}
+	require.Nil(t, json.Unmarshal([]byte(envelope), errObject))
+	assert.Equal(t, "msgSeed", errObject.GUID)
+	// Still actionable: the host and the cause survive, only the credential goes.
+	assert.Contains(t, errObject.Error1, "eth-mainnet.example.com")
+	assert.Contains(t, errObject.Error1, "connection reset by peer")
 }

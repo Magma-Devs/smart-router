@@ -524,7 +524,7 @@ func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tie
 	selectedURL := selectedURLs[0]
 	selectedEndpoint, exists := byURL[selectedURL]
 	if !exists {
-		return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", selectedURL)
+		return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", utils.RedactURL(selectedURL))
 	}
 
 	utils.LavaFormatDebug("DirectWS: selected endpoint via optimizer",

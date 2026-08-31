@@ -157,13 +157,12 @@ func (nurl NodeUrl) String() string {
 	return urlStr
 }
 
+// UrlStr renders the node-url for display — logs, error text, the health
+// command. It keeps scheme://host[:port] and drops the rest, because vendors put
+// the api key in the userinfo, the path (".../v2/<key>") or the query. Never use
+// it to dial; NodeUrl.Url is the address.
 func (nurl *NodeUrl) UrlStr() string {
-	parsedURL, err := url.Parse(nurl.Url)
-	if err != nil {
-		return nurl.Url
-	}
-	parsedURL.User = nil
-	return parsedURL.String()
+	return utils.RedactURL(nurl.Url)
 }
 
 func (url *NodeUrl) GetAuthHeaders() map[string]string {
