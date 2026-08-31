@@ -3439,3 +3439,80 @@ func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *tes
 		require.True(t, slotKept, "the slot-reporting endpoint must be the survivor")
 	})
 }
+
+// stubCacheBackend is a CacheBackend that also reports a backend endpoint, so
+// the debug header's gating can be exercised without a live cache.
+type stubCacheBackend struct{ endpoint string }
+
+func (s *stubCacheBackend) CacheActive() bool { return true }
+func (s *stubCacheBackend) GetEntry(ctx context.Context, _ *pairingtypes.RelayCacheGet) (*pairingtypes.CacheRelayReply, error) {
+	return &pairingtypes.CacheRelayReply{}, nil
+}
+func (s *stubCacheBackend) SetEntry(ctx context.Context, _ *pairingtypes.RelayCacheSet) error {
+	return nil
+}
+func (s *stubCacheBackend) Flush(ctx context.Context) error { return nil }
+func (s *stubCacheBackend) Close() error                    { return nil }
+func (s *stubCacheBackend) BackendEndpoint() string         { return s.endpoint }
+
+// The Lava-Cache-Backend header names the node that served a hit. It exposes an
+// internal infrastructure address, so it must appear ONLY under --debug-relays.
+func TestCacheBackendHeaderIsDebugGated(t *testing.T) {
+	ctx := context.Background()
+
+	findHeader := func(metadata []pairingtypes.Metadata, name string) *pairingtypes.Metadata {
+		for i := range metadata {
+			if metadata[i].Name == name {
+				return &metadata[i]
+			}
+		}
+		return nil
+	}
+
+	// A cache-resolved relay: no provider address, so the header logic reports
+	// "Cached" and considers naming the backend.
+	appendFor := func(server *RPCSmartRouterServer) []pairingtypes.Metadata {
+		relayResult := &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
+			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		}
+		server.appendHeadersToRelayResult(ctx, relayResult, 0, &MockRelayProcessorForHeaders{
+			successResults: []common.RelayResult{{ProviderInfo: common.ProviderInfo{ProviderAddress: ""}}},
+		}, &MockProtocolMessage{api: &spectypes.Api{Name: "eth_blockNumber"}}, "eth_blockNumber", nil, true)
+		return relayResult.Reply.Metadata
+	}
+
+	t.Run("debug on - names the serving backend", func(t *testing.T) {
+		metadata := appendFor(&RPCSmartRouterServer{
+			debugRelays: true,
+			cache:       &stubCacheBackend{endpoint: "10.0.0.11:63812"},
+		})
+		header := findHeader(metadata, common.CACHE_BACKEND_HEADER_NAME)
+		require.NotNil(t, header)
+		require.Equal(t, "10.0.0.11:63812", header.Value)
+	})
+
+	t.Run("debug off - internal address never reaches the client", func(t *testing.T) {
+		metadata := appendFor(&RPCSmartRouterServer{
+			debugRelays: false,
+			cache:       &stubCacheBackend{endpoint: "10.0.0.11:63812"},
+		})
+		require.Nil(t, findHeader(metadata, common.CACHE_BACKEND_HEADER_NAME),
+			"the header leaks internal infrastructure addresses and must stay behind --debug-relays")
+		require.NotNil(t, findHeader(metadata, common.PROVIDER_ADDRESS_HEADER_NAME),
+			"the ordinary provider header is unaffected")
+	})
+
+	t.Run("endpoint unknown - header omitted rather than empty", func(t *testing.T) {
+		metadata := appendFor(&RPCSmartRouterServer{
+			debugRelays: true,
+			cache:       &stubCacheBackend{endpoint: ""},
+		})
+		require.Nil(t, findHeader(metadata, common.CACHE_BACKEND_HEADER_NAME))
+	})
+
+	t.Run("no cache backend - nil interface is safe", func(t *testing.T) {
+		metadata := appendFor(&RPCSmartRouterServer{debugRelays: true})
+		require.Nil(t, findHeader(metadata, common.CACHE_BACKEND_HEADER_NAME))
+	})
+}

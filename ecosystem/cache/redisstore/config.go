@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -203,8 +204,28 @@ func (cfg Config) sentinelPassword() (string, error) {
 // Config → go-redis options mapping (pure, so tests assert it directly)
 // ---------------------------------------------------------------------------
 
-func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider) *redis.Options {
+// trackingDialer wraps go-redis's own dialer so the store learns which address
+// it actually connected to. It delegates to redis.NewDialer rather than dialing
+// itself, because that is where TLS negotiation lives — hand-rolling the dial
+// here would silently drop TLS.
+//
+// This is the only way to name the serving node: the configured address is the
+// sentinel set (not the master) under sentinel, and a discovery seed (not the
+// shard) under cluster.
+func trackingDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
+	base := redis.NewDialer(&redis.Options{TLSConfig: tlsCfg, DialTimeout: dialTimeout})
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := base(ctx, network, addr)
+		if err == nil {
+			tracker.note(addr)
+		}
+		return conn, err
+	}
+}
+
+func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.Options {
 	return &redis.Options{
+		Dialer:                       trackingDialer(tlsCfg, cfg.DialTimeout, tracker),
 		Addr:                         addrs[0],
 		DB:                           cfg.DB,
 		StreamingCredentialsProvider: provider,
@@ -228,8 +249,11 @@ func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider
 // the streaming re-auth manager, so the first operation nil-panics. With the
 // context provider, rotated credentials apply on reconnects and failovers —
 // in-place re-auth of idle connections needs the upstream gap fixed first.
-func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source CredentialsSource, sentinelPassword string) *redis.FailoverOptions {
+func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source CredentialsSource, sentinelPassword string, tracker *endpointTracker) *redis.FailoverOptions {
 	return &redis.FailoverOptions{
+		// Records the DATA-node address, which under sentinel is whichever node
+		// currently holds the master role — it changes on every failover.
+		Dialer:           trackingDialer(tlsCfg, cfg.DialTimeout, tracker),
 		MasterName:       cfg.MasterName,
 		SentinelAddrs:    addrs,
 		SentinelUsername: cfg.SentinelUsername,
@@ -248,8 +272,9 @@ func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source Cre
 	}
 }
 
-func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider) *redis.ClusterOptions {
+func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.ClusterOptions {
 	return &redis.ClusterOptions{
+		Dialer:                       trackingDialer(tlsCfg, cfg.DialTimeout, tracker),
 		Addrs:                        addrs,
 		StreamingCredentialsProvider: provider,
 		TLSConfig:                    tlsCfg,
@@ -263,17 +288,17 @@ func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *S
 }
 
 // buildClient constructs one client for the given address set.
-func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider) (redis.UniversalClient, error) {
+func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) (redis.UniversalClient, error) {
 	switch cfg.topology() {
 	case TopologySentinel:
 		sentinelPassword, err := cfg.sentinelPassword()
 		if err != nil {
 			return nil, err
 		}
-		return redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, cfg.credentialsSource(), sentinelPassword)), nil
+		return redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, cfg.credentialsSource(), sentinelPassword, tracker)), nil
 	case TopologyCluster:
-		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, provider)), nil
+		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, provider, tracker)), nil
 	default:
-		return redis.NewClient(cfg.standaloneOptions(addrs, tlsCfg, provider)), nil
+		return redis.NewClient(cfg.standaloneOptions(addrs, tlsCfg, provider, tracker)), nil
 	}
 }

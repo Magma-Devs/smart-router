@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
@@ -56,9 +57,54 @@ type Store struct {
 	read   redis.UniversalClient
 	prefix string
 
+	// readEndpoint/writeEndpoint record the address most recently DIALLED for
+	// each client, so the store can name the node actually serving it. Static
+	// configuration cannot answer this: under sentinel the serving node changes
+	// on every failover, and under cluster it depends on the key's slot.
+	// Observability only — nothing in the cache path reads these.
+	readEndpoint  *endpointTracker
+	writeEndpoint *endpointTracker
+
 	// stopWatcher terminates the credential poll loop (nil when the
 	// credentials are static).
 	stopWatcher chan struct{}
+}
+
+// endpointTracker holds the last successfully dialled address. Written from
+// dial callbacks on arbitrary goroutines, read from the relay path, so it is
+// atomic; a slightly stale value is fine for its purpose (naming a node in a
+// debug header) and never affects routing.
+type endpointTracker struct {
+	addr atomic.Value // string
+}
+
+func (t *endpointTracker) note(addr string) {
+	if t != nil {
+		t.addr.Store(addr)
+	}
+}
+
+func (t *endpointTracker) current() string {
+	if t == nil {
+		return ""
+	}
+	if addr, ok := t.addr.Load().(string); ok {
+		return addr
+	}
+	return ""
+}
+
+// ReadEndpoint names the backend node that most recently served a read — the
+// current master under sentinel, the last-touched shard under cluster, the
+// configured node under standalone. Empty before the first dial.
+func (s *Store) ReadEndpoint() string {
+	if s == nil {
+		return ""
+	}
+	if endpoint := s.readEndpoint.current(); endpoint != "" {
+		return endpoint
+	}
+	return s.writeEndpoint.current()
 }
 
 var _ core.KVStore = (*Store)(nil)
@@ -81,14 +127,17 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("resp-cache: reading credentials: %w", err)
 	}
 
-	writeClient, err := cfg.buildClient(cfg.Addresses, tlsCfg, provider)
+	writeTracker := &endpointTracker{}
+	readTracker := writeTracker
+	writeClient, err := cfg.buildClient(cfg.Addresses, tlsCfg, provider, writeTracker)
 	if err != nil {
 		return nil, err
 	}
 	readClient := writeClient
 	if len(cfg.ReadAddresses) > 0 {
 		warnIfReadSplitIsDiscoveryScoped(cfg)
-		readClient, err = cfg.buildClient(cfg.ReadAddresses, tlsCfg, provider)
+		readTracker = &endpointTracker{}
+		readClient, err = cfg.buildClient(cfg.ReadAddresses, tlsCfg, provider, readTracker)
 		if err != nil {
 			_ = writeClient.Close()
 			return nil, err
@@ -103,6 +152,8 @@ func New(cfg Config) (*Store, error) {
 		}
 		return nil, err
 	}
+	store.writeEndpoint = writeTracker
+	store.readEndpoint = readTracker
 	if cfg.PasswordFile != "" {
 		store.stopWatcher = make(chan struct{})
 		go watchCredentials(provider, cfg.refreshInterval(), store.stopWatcher)
@@ -150,7 +201,13 @@ func newStore(writeClient, readClient redis.UniversalClient, keyPrefix string) (
 	if !keyPrefixPattern.MatchString(keyPrefix) {
 		return nil, fmt.Errorf("invalid resp-cache key prefix %q: must match %s — SCAN MATCH patterns are globs, so glob characters could purge unrelated keys", keyPrefix, keyPrefixPattern.String())
 	}
-	return &Store{write: writeClient, read: readClient, prefix: keyPrefix}, nil
+	return &Store{
+		write:         writeClient,
+		read:          readClient,
+		prefix:        keyPrefix,
+		readEndpoint:  &endpointTracker{},
+		writeEndpoint: &endpointTracker{},
+	}, nil
 }
 
 func (s *Store) key(k string) string {

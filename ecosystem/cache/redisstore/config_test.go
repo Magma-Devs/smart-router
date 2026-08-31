@@ -65,7 +65,7 @@ func TestFailoverOptionsMapping(t *testing.T) {
 
 	sentinelPassword, err := cfg.sentinelPassword()
 	require.NoError(t, err)
-	opts := cfg.failoverOptions(cfg.Addresses, nil, cfg.credentialsSource(), sentinelPassword)
+	opts := cfg.failoverOptions(cfg.Addresses, nil, cfg.credentialsSource(), sentinelPassword, &endpointTracker{})
 
 	require.Equal(t, "mymaster", opts.MasterName)
 	require.Equal(t, cfg.Addresses, opts.SentinelAddrs)
@@ -93,7 +93,7 @@ func TestClusterOptionsMapping(t *testing.T) {
 	}
 	require.NoError(t, cfg.Validate())
 	provider := NewStreamingProvider(cfg.credentialsSource())
-	opts := cfg.clusterOptions(cfg.Addresses, nil, provider)
+	opts := cfg.clusterOptions(cfg.Addresses, nil, provider, &endpointTracker{})
 
 	require.Equal(t, cfg.Addresses, opts.Addrs,
 		"the configuration endpoint is the discovery seed — never a full node list")

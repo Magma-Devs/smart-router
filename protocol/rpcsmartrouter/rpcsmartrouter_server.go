@@ -4590,6 +4590,22 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			Value: providerAddress,
 		})
 
+		// On a cache hit, name the backend that served it. Debug-gated: the
+		// value is an internal infrastructure address (a Redis node, a cache-be
+		// pod) and must never reach ordinary clients. Under sentinel it is the
+		// current master, so it visibly changes across a failover — which is
+		// what makes a promotion observable from the outside.
+		if providerAddress == "Cached" && rpcss.debugRelays && rpcss.cache != nil {
+			if reporter, ok := rpcss.cache.(performance.BackendEndpointReporter); ok {
+				if endpoint := reporter.BackendEndpoint(); endpoint != "" {
+					metadataReply = append(metadataReply, pairingtypes.Metadata{
+						Name:  common.CACHE_BACKEND_HEADER_NAME,
+						Value: endpoint,
+					})
+				}
+			}
+		}
+
 		// add the relay retried count: total attempts minus 1 (the initial attempt is not a retry)
 		successResults, nodeErrorResults, protocolErrorResults := relayProcessor.GetResultsData()
 		totalAttempts := uint64(len(successResults)) + uint64(len(nodeErrorResults)) + protocolErrors

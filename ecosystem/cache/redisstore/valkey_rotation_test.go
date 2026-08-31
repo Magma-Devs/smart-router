@@ -34,14 +34,19 @@ import (
 func TestLiveRotationAgainstRealValkey(t *testing.T) {
 	addr := os.Getenv("RESP_CACHE_TEST_VALKEY_ADDR")
 	if addr == "" {
-		t.Skip("set RESP_CACHE_TEST_VALKEY_ADDR to a real Valkey/Redis (docker run --rm -p 127.0.0.1:63790:6379 valkey/valkey) to run")
+		t.Skip("set RESP_CACHE_TEST_VALKEY_ADDR to a real Valkey/Redis (docker run --rm -d --name rot-valkey -p 127.0.0.1:63795:6379 valkey/valkey:7.2) to run")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	admin := redis.NewClient(&redis.Options{Addr: addr})
 	t.Cleanup(func() { _ = admin.Close() })
-	require.NoError(t, admin.Ping(ctx).Err())
+	// Opting in without a reachable server is a hard failure, not a skip (same
+	// rule as requireDockerLane) — but say what is missing, because the bare
+	// dial error reads like a product fault rather than a missing prerequisite.
+	require.NoError(t, admin.Ping(ctx).Err(),
+		"RESP_CACHE_TEST_VALKEY_ADDR=%s is set but nothing is listening there — start the server first:\n"+
+			"  docker run --rm -d --name rot-valkey -p 127.0.0.1:63795:6379 valkey/valkey:7.2", addr)
 
 	for _, user := range []string{"rotuser1", "rotuser2"} {
 		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", user, "on", ">"+user+"-pw", "~*", "+@all").Err())

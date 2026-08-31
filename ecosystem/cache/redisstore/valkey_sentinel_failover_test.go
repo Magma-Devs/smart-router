@@ -144,7 +144,7 @@ requirepass %s
 		WriteTimeout:     2 * time.Second,
 	}
 	require.NoError(t, cfg.Validate())
-	opts := cfg.failoverOptions(cfg.Addresses, nil, cfg.credentialsSource(), sentinelPass)
+	opts := cfg.failoverOptions(cfg.Addresses, nil, cfg.credentialsSource(), sentinelPass, &endpointTracker{})
 	opts.Dialer = func(ctx context.Context, netw, addr string) (net.Conn, error) {
 		_, port, splitErr := net.SplitHostPort(addr)
 		if splitErr != nil {

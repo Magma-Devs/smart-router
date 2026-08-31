@@ -255,6 +255,16 @@ func (cache *Cache) Flush(ctx context.Context) error {
 	return err
 }
 
+// BackendEndpoint returns the cache-be address this client is configured
+// against. Unlike the RESP backend there is nothing dynamic to report — the
+// cache sidecar is a single endpoint.
+func (cache *Cache) BackendEndpoint() string {
+	if cache == nil || cache.clientStore == nil {
+		return ""
+	}
+	return cache.clientStore.address
+}
+
 // Close permanently shuts the client down: the background reconnect loop stops,
 // the gRPC connection closes, and the cache reads as inactive (operations
 // return NotConnectedError). Nil-safe and idempotent; reached from the router's

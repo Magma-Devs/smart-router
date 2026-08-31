@@ -217,3 +217,34 @@ func TestChainTipNotApplicableWhenMissing(t *testing.T) {
 	require.False(t, fresh)
 	require.Equal(t, spectypes.NOT_APPLICABLE, block)
 }
+
+// The endpoint tracker must name the node actually dialled — the whole point is
+// that configuration cannot answer this under sentinel or cluster.
+func TestReadEndpointNamesTheDialledNode(t *testing.T) {
+	mr := miniredis.RunT(t)
+	store, err := New(Config{Addresses: []string{mr.Addr()}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	require.Empty(t, store.ReadEndpoint(), "nothing dialled yet")
+	require.NoError(t, store.SetHeight(context.Background(), core.HeightKey("ETH1", "0xa"), 7, time.Minute))
+	require.Equal(t, mr.Addr(), store.ReadEndpoint(), "reports the address the client connected to")
+}
+
+// With reads split off, the header must name the READ endpoint — that is the
+// node that served the hit.
+func TestReadEndpointPrefersTheReadClient(t *testing.T) {
+	mrWrite, mrRead := miniredis.RunT(t), miniredis.RunT(t)
+	store, err := New(Config{
+		Addresses:     []string{mrWrite.Addr()},
+		ReadAddresses: []string{mrRead.Addr()},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	require.NoError(t, store.SetHeight(ctx, core.HeightKey("ETH1", "0xb"), 7, time.Minute))
+	_, _, err = store.GetHeight(ctx, core.HeightKey("ETH1", "0xb"))
+	require.NoError(t, err)
+	require.Equal(t, mrRead.Addr(), store.ReadEndpoint())
+}

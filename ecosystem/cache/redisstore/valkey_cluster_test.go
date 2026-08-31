@@ -91,7 +91,7 @@ func TestClusterDocker(t *testing.T) {
 		WriteTimeout: 2 * time.Second,
 	}
 	require.NoError(t, cfg.Validate())
-	opts := cfg.clusterOptions(cfg.Addresses, nil, NewStreamingProvider(cfg.credentialsSource()))
+	opts := cfg.clusterOptions(cfg.Addresses, nil, NewStreamingProvider(cfg.credentialsSource()), &endpointTracker{})
 	opts.Dialer = func(ctx context.Context, netw, addr string) (net.Conn, error) {
 		_, port, splitErr := net.SplitHostPort(addr)
 		if splitErr != nil {

@@ -158,6 +158,17 @@ func logUnavailable(message string, err error) {
 	)
 }
 
+// BackendEndpoint names the RESP node that most recently served a read. Under
+// sentinel that is the current master and it changes after a failover; under
+// cluster it is the last shard touched. Observability only — see
+// common.CACHE_BACKEND_HEADER_NAME for why it is debug-gated at the call site.
+func (cache *RespCache) BackendEndpoint() string {
+	if cache == nil {
+		return ""
+	}
+	return cache.store.ReadEndpoint()
+}
+
 // CacheActive reports whether the backend is configured. Reachability is NOT
 // probed here — like the gRPC client, a failing backend degrades per-operation
 // (a lookup that errors is a miss) rather than flipping the whole cache off.

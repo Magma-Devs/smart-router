@@ -26,3 +26,15 @@ type CacheBackend interface {
 }
 
 var _ CacheBackend = (*Cache)(nil)
+
+// BackendEndpointReporter is implemented by backends that can name the server
+// that served a cache hit. Optional on purpose: it is a debug affordance, so it
+// stays off the CacheBackend contract and call sites type-assert for it.
+type BackendEndpointReporter interface {
+	BackendEndpoint() string
+}
+
+var (
+	_ BackendEndpointReporter = (*Cache)(nil)
+	_ BackendEndpointReporter = (*RespCache)(nil)
+)
