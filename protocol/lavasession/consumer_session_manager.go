@@ -94,6 +94,15 @@ type ConsumerSessionManager struct {
 	// Production uses the process-wide holdoff.Shared; tests inject a clock-pinned one.
 	rateLimitHoldoff *holdoff.Registry
 
+	// statefulToBackup widens a stateful relay's broadcast to the backup tier
+	// (--stateful-to-backup). It lives here, rather than as a package variable, because one
+	// manager serves exactly one chain + api-interface: a customer who wants transaction
+	// broadcast mirrored to an expensive backup on one chain rarely wants it on all of them.
+	//
+	// The zero value is the safe one. Left unset, a stateful relay reaches primaries only,
+	// which is the behaviour of every release before this field existed.
+	statefulToBackup bool
+
 	// contains a sorted list of blocked addresses, sorted by their cu used this epoch for higher chance of response
 	currentlyBlockedProviderAddresses []string
 
@@ -1796,28 +1805,142 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	}
 }
 
-// csm must be rlocked here
-func (csm *ConsumerSessionManager) getTopTenProvidersForStatefulCalls(validAddresses []string, ignoredProvidersList map[string]struct{}) []string {
-	// sort by cu used, easiest to sort by that factor as it probably means highest QOS and easily read by atomic
-	customSort := func(i, j int) bool {
-		return csm.pairing[validAddresses[i]].atomicReadUsedComputeUnits() > csm.pairing[validAddresses[j]].atomicReadUsedComputeUnits()
+// statefulFanoutPerTier caps how many providers a stateful relay broadcasts to within one tier.
+// It bounds the fan-out, not the number of tiers: primaries and backups are capped separately, so
+// enabling the backup tier widens the broadcast instead of evicting primaries from it.
+const statefulFanoutPerTier = 10
+
+// getProvidersForStatefulCalls returns the providers a stateful relay broadcasts to.
+//
+// The primary tier is always included. The backup tier is appended only when this chain enables it
+// (--stateful-to-backup, off by default), and it is appended rather than merged: each tier is
+// ranked on its own and primaries come first. Ranking the two together would mean comparing compute
+// units served between a warm primary and a cold backup, a number that says nothing about either —
+// and since the cap is what decides who survives, a merged ranking would let a backup that has been
+// serving for a while start pushing primaries out of the broadcast.
+//
+// Order does not decide who is relayed to: every address returned here gets a session and its own
+// goroutine. It decides only who survives the cap.
+//
+// csm must be rlocked here.
+func (csm *ConsumerSessionManager) getProvidersForStatefulCalls(ctx context.Context, validAddresses []string, ignoredProvidersList map[string]struct{}, addon string, extensions []string) []string {
+	providers := csm.rankStatefulTier(validAddresses, ignoredProvidersList)
+	if !csm.statefulToBackup {
+		return providers
 	}
-	// Sort the slice using the custom sorting rule
-	sort.Slice(validAddresses, customSort)
-	addresses := []string{}
-	wantedLength := 10
-	for _, sortedAddress := range validAddresses {
-		// skip ignored providers
-		if _, foundInIgnoredProviderList := ignoredProvidersList[sortedAddress]; foundInIgnoredProviderList {
+
+	backups := csm.rankStatefulTier(csm.eligibleBackupsForStateful(ctx, ignoredProvidersList, addon, extensions), ignoredProvidersList)
+	if len(backups) == 0 {
+		return providers
+	}
+
+	// Only logged when the backup tier actually joins a broadcast, so a router with the flag off —
+	// or with no eligible backup — pays nothing and says nothing. When it does fire it is worth an
+	// INFO: a metered tier has just been engaged on a request the primaries may well serve.
+	utils.LavaFormatInfo("stateful relay broadcasting to the backup tier as well",
+		utils.LogAttr("primaries", providers),
+		utils.LogAttr("backups", backups),
+		utils.LogAttr("addon", addon),
+		utils.LogAttr("extensions", extensions),
+		utils.LogAttr("GUID", ctx),
+	)
+	return append(providers, backups...)
+}
+
+// rankStatefulTier orders one tier's addresses by compute units served, highest first, drops the
+// providers this request has already tried, and caps what is left at statefulFanoutPerTier.
+//
+// It never reorders its argument. validAddresses can be the cached addon-address slice shared with
+// every other reader of that router key, and sorting it in place — as this code used to — races
+// them under the read lock this runs beneath.
+//
+// Ties break on the address so the broadcast is reproducible. Compute units are equal for every
+// provider on a freshly started router, which makes the tie the common case rather than the corner
+// one.
+//
+// csm must be rlocked here.
+func (csm *ConsumerSessionManager) rankStatefulTier(addresses []string, ignoredProvidersList map[string]struct{}) []string {
+	ranked := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		if _, alreadyTried := ignoredProvidersList[address]; alreadyTried {
 			continue
 		}
-		// fill the slice until we have 10 providers who are not ignored
-		addresses = append(addresses, sortedAddress)
-		if len(addresses) >= wantedLength {
-			break
-		}
+		ranked = append(ranked, address)
 	}
-	return addresses
+
+	sort.Slice(ranked, func(i, j int) bool {
+		cuI, cuJ := csm.usedComputeUnits(ranked[i]), csm.usedComputeUnits(ranked[j])
+		if cuI != cuJ {
+			return cuI > cuJ
+		}
+		return ranked[i] < ranked[j]
+	})
+
+	if len(ranked) > statefulFanoutPerTier {
+		ranked = ranked[:statefulFanoutPerTier]
+	}
+	return ranked
+}
+
+// eligibleBackupsForStateful returns the backups a stateful broadcast may include: not already
+// tried by this request, not blocked, able to serve the addon and extensions asked for, and not
+// currently held off after a 429.
+//
+// The hold-off is a plain exclusion here, unlike filterRateLimitedProviders, which keeps the
+// soonest-to-expire candidate rather than leave a request with nowhere to go. That rescue cannot be
+// needed on this path: the backup tier is additive, and a stateful broadcast only gets here with at
+// least one primary already chosen.
+//
+// csm must be rlocked here.
+func (csm *ConsumerSessionManager) eligibleBackupsForStateful(ctx context.Context, ignoredProvidersList map[string]struct{}, addon string, extensions []string) []string {
+	eligible := make([]string, 0, len(csm.backupProviders))
+	for address, provider := range csm.backupProviders {
+		if provider == nil {
+			continue
+		}
+		if _, alreadyTried := ignoredProvidersList[address]; alreadyTried {
+			continue
+		}
+		if _, blocked := csm.blockedBackupProviders[address]; blocked {
+			continue
+		}
+		if !provider.IsSupportingAddon(addon) || !provider.IsSupportingExtensions(extensions, ctx) {
+			continue
+		}
+		if csm.rateLimitHoldoff != nil {
+			if _, heldOff := csm.rateLimitHoldoff.ProviderReadyAt(address); heldOff {
+				continue
+			}
+		}
+		eligible = append(eligible, address)
+	}
+	return eligible
+}
+
+// usedComputeUnits reads a provider's compute units served this epoch, whichever tier it belongs
+// to. Unknown addresses report 0 and therefore rank last, which is the right answer for the only
+// way one can occur: a provider dropped from the pairing between selection and this read.
+//
+// csm must be rlocked here.
+func (csm *ConsumerSessionManager) usedComputeUnits(address string) uint64 {
+	if provider := csm.providerByAddress(address); provider != nil {
+		return provider.atomicReadUsedComputeUnits()
+	}
+	return 0
+}
+
+// providerByAddress resolves an address to its session pool across both tiers.
+//
+// Everything that walks a selected-provider list has to go through this rather than reach into
+// csm.pairing directly, because a stateful broadcast can now carry backup addresses alongside
+// primary ones and csm.pairing does not hold backups.
+//
+// csm must be rlocked here.
+func (csm *ConsumerSessionManager) providerByAddress(address string) *ConsumerSessionsWithProvider {
+	if provider, ok := csm.pairing[address]; ok {
+		return provider
+	}
+	return csm.backupProviders[address]
 }
 
 // convertSelectionStatsToMetrics converts SelectionStats to metrics format with all provider scores
@@ -2047,7 +2170,7 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 
 	var providers []string
 	if stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS && csm.providerOptimizer.Strategy() != provideroptimizer.StrategyCost {
-		providers = csm.getTopTenProvidersForStatefulCalls(validAddresses, ignoredProvidersList)
+		providers = csm.getProvidersForStatefulCalls(ctx, validAddresses, ignoredProvidersList, addon, extensions)
 	} else if stickiness != "" {
 		var selectionStats *provideroptimizer.SelectionStats
 		providers, selectionStats = csm.providerOptimizer.ChooseUpstreamWithStats(ctx, validAddresses, ignoredProvidersList, cu, requestedBlock)
@@ -2389,12 +2512,16 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 	for {
 		// Iterate over providers
 		for _, providerAddress := range providerAddresses {
-			consumerSessionsWithProvider := csm.pairing[providerAddress]
+			// Both tiers, because a stateful broadcast may include backups (--stateful-to-backup)
+			// and those live outside csm.pairing. An address in neither map is still a genuine
+			// invariant break in selection, and still fatal.
+			consumerSessionsWithProvider := csm.providerByAddress(providerAddress)
 			if consumerSessionsWithProvider == nil {
 				utils.LavaFormatFatal("invalid provider address returned from csm.getValidProviderAddresses", nil,
 					utils.Attribute{Key: "providerAddress", Value: providerAddress},
 					utils.Attribute{Key: "all_providerAddresses", Value: providerAddresses},
 					utils.Attribute{Key: "pairing", Value: csm.pairing},
+					utils.Attribute{Key: "backupProviders", Value: csm.backupProviders},
 					utils.Attribute{Key: "epochAtStart", Value: currentEpoch},
 					utils.Attribute{Key: "currentEpoch", Value: csm.atomicReadCurrentEpoch()},
 					utils.Attribute{Key: "validAddresses", Value: csm.getValidAddresses(addon, extensions, ctx)},
@@ -3498,6 +3625,16 @@ func NewConsumerSessionManager(
 // This must be called after creating the ConsumerSessionManager
 func (csm *ConsumerSessionManager) SetLavaBlockHeightCallback(getLavaBlockHeight func() int64) {
 	csm.getLavaBlockHeight = getLavaBlockHeight
+}
+
+// SetStatefulToBackup widens this chain's stateful broadcast to the backup tier
+// (--stateful-to-backup). Call it during setup, before the manager serves any relay; it is not
+// safe to flip under traffic and there is no reason to.
+//
+// Left unset the manager keeps stateful relays on the primary tier, which is what every release
+// before this flag did.
+func (csm *ConsumerSessionManager) SetStatefulToBackup(enabled bool) {
+	csm.statefulToBackup = enabled
 }
 
 // ResetTransientFailureState clears every cross-epoch failure-tracking store
