@@ -257,8 +257,11 @@ sending the first request.
 > routers down too and invalidates the test. Always add `-sTCP:LISTEN` so only
 > the server is hit.
 
-Each demo uses its own block number so the demos never warm each other's
-entries.
+Each demo uses its own block number so they never warm each other's entries.
+They are also **one-shot**: once a block has been served it is cached, so
+re-running a demo needs a fresh block — bump the last hex digits. To start over
+completely, rerun the setup script; the caches are in-memory, so restarting
+them empties both tiers, and the script also clears the logs.
 
 ### UC-1 — The secondary rescue
 
@@ -352,54 +355,115 @@ delta caused by external-zone traffic matters, and it is zero.
 
 *Kill the secondary mid-flight; serving continues, and the tier heals itself.*
 
+Mark the router log before you start. It is opened in append mode, so it can
+already hold reconnect lines from an earlier cycle — reading those is the
+easiest way to misjudge this demo. (`wc -l` pads with spaces on macOS, and
+`tail -n +` rejects that, hence the `tr`.)
+
 ```bash
+MARK=$(wc -l < $LOGS_DIR/SMARTROUTER_EXTERNAL.log | tr -d '[:space:]')
+
 lsof -ti:20101 -sTCP:LISTEN | xargs kill        # stop ONLY the cache server
 sleep 2
+nc -z 127.0.0.1 20101 2>/dev/null && echo "still up — the kill missed" || echo "secondary is down"
+```
 
+Serve two blocks neither cache holds:
+
+```bash
 for b in 0x1030301 0x1030302; do
   curl -s --max-time 25 -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' \
-    -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$b\",false],\"id\":1}" | head -c 50; echo
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$b\",false],\"id\":1}" | head -c 500; echo
 done
+sleep 1
 curl -s http://127.0.0.1:7779/metrics | grep '^smartrouter_cache_failed_total' \
-  | grep 'cache_tier="secondary"'
+  | grep 'cache_tier="secondary"' | grep eth_getBlockByNumber
 ```
 
 Both requests return real block data from upstream, and the metrics show:
 
 ```
-smartrouter_cache_failed_total{…,cache_tier="secondary",outcome="error"} 1
+smartrouter_cache_failed_total{…,cache_tier="secondary",method="eth_getBlockByNumber",outcome="error"} 1
 ```
 
 Exactly **one** `error`, then silence — the client detects the dead connection
 once, marks the tier inactive, and subsequent requests skip it entirely rather
-than paying the timeout every time.
+than paying the timeout every time. (Filtering on the method keeps the router's
+own `eth_blockNumber` tip queries, which carry their own series, out of the
+way.)
 
-Now restart the cache and watch the router recover without being touched:
+#### Restart it and watch the router heal
+
+`screen -d -m` detaches immediately, so a cache that fails to start produces
+**no terminal output at all** — the failure goes to `CACHE_INTERNAL.log`.
+Confirm the listener is actually back before you judge the router:
 
 ```bash
 screen -d -m -S cache_internal bash -c "smartrouter cache 127.0.0.1:20101 \
   --metrics_address 0.0.0.0:20201 --log_level debug 2>&1 | tee -a $LOGS_DIR/CACHE_INTERNAL.log"
-sleep 30
-grep -i 'reconnect' $LOGS_DIR/SMARTROUTER_EXTERNAL.log | tail -3
+
+for i in $(seq 1 10); do nc -z 127.0.0.1 20101 2>/dev/null && break; sleep 1; done
+nc -z 127.0.0.1 20101 2>/dev/null \
+  && echo "cache is back" \
+  || { echo "cache did NOT restart:"; tail -3 $LOGS_DIR/CACHE_INTERNAL.log; }
+```
+
+Then read only the lines written since the kill:
+
+```bash
+sleep 12
+tail -n +$MARK $LOGS_DIR/SMARTROUTER_EXTERNAL.log | grep -i 'cache service'
 ```
 
 ```
 WRN cache service connection error detected, triggering reconnection  address=127.0.0.1:20101
 INF cache service reconnection loop started                           address=127.0.0.1:20101
+DBG cache service connection attempt failed  error="context deadline exceeded"
+DBG cache service connection attempt failed  error="context deadline exceeded"
+INF cache service connected successfully                              address=127.0.0.1:20101
 INF cache service reconnection succeeded, exiting reconnect loop      address=127.0.0.1:20101
 ```
 
-The restarted cache is empty, so re-warm through the internal router to show
-hits resuming:
+The loop retries every ~8 s (a 3 s dial plus the 5 s interval) and reconnects
+within seconds of the cache coming back.
+
+> **Seeing only the first two lines does not mean the reconnect is broken — it
+> means the cache is not up.** The loop retries indefinitely and will succeed
+> the moment the port answers. Two things make this look worse than it is: the
+> retry line is `DBG` and contains no "reconnect", so a `grep -i reconnect`
+> hides it; and `context deadline exceeded` is simply how the blocking 3 s dial
+> reports "nothing is listening", not a lookup timeout. The usual causes are a
+> restart that hit `bind: address already in use` because the cache was never
+> actually down, or an unset `$LOGS_DIR` in that shell — `tee` then dies on
+> `/CACHE_INTERNAL.log` and takes the cache process down with it. The
+> `cache is back` check above catches both.
+
+#### Confirm secondary hits resume
+
+The restarted cache is empty, so re-warm through the internal router — using a
+block **no earlier demo has used**. A block that is already backfilled into the
+external primary is answered from there, and you would be reading `Cached` from
+the wrong tier:
 
 ```bash
-B='{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x1194000",false],"id":1}'
+B='{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x1194567",false],"id":1}'
 curl -s -X POST http://127.0.0.1:3361 -H 'Content-Type: application/json' -d "$B" >/dev/null
 sleep 2
 curl -si -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' -d "$B" \
   | grep -i lava-provider-address
-# Lava-Provider-Address: Cached      ← secondary hits are back
+sleep 1
+curl -s http://127.0.0.1:7779/metrics | grep '^smartrouter_cache_success_total' \
+  | grep 'cache_tier="secondary"'
 ```
+
+```
+Lava-Provider-Address: Cached
+smartrouter_cache_success_total{…,cache_tier="secondary",method="eth_getBlockByNumber"} 1   ← +1
+```
+
+The header alone cannot close this step: a primary hit and a secondary hit are
+byte-identical to the caller by design. The `cache_tier` counter is what tells
+you which tier answered.
 
 ### UC-5 — Unconfigured is fully backwards compatible
 
