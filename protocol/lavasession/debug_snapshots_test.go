@@ -23,7 +23,7 @@ func TestEndpointHealthSnapshot_TracksDisableAndRecovery(t *testing.T) {
 	// Disable via the relay-path failure threshold; disabledAt is stamped edge-triggered.
 	t0 := time.Unix(1_700_000_000, 0)
 	e.ConnectionRefusals = MaxConsecutiveConnectionAttempts - 1
-	e.markUnhealthyAt(t0)
+	e.markUnhealthyAt(t0, EndpointDisableUnreachable)
 	s = e.HealthSnapshot()
 	require.False(t, s.Enabled)
 	require.Equal(t, t0, s.DisabledAt)

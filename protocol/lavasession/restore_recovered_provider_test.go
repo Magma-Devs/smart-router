@@ -162,7 +162,7 @@ func TestEndpointEnabled_NoRaceUnderConcurrentProbeAndRelay(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				e.MarkUnhealthy()
+				e.MarkUnhealthy(EndpointDisableUnreachable)
 			}
 		}
 	}()

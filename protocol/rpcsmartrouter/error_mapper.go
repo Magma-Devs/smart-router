@@ -5,6 +5,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
 )
 
 // extractLavaError extracts the *common.LavaError from a LavaWrappedError,
@@ -104,4 +105,23 @@ func classifyEndpointHealth(classified *common.LavaError, isClientCancellation b
 	default:
 		return false, false
 	}
+}
+
+// endpointDisableReasonFor maps a classified relay error to the reason recorded on the disable.
+//
+// It is only ever consulted once classifyEndpointHealth has already decided the endpoint is at
+// fault, so it does not repeat that judgement — it only names which KIND of fault, which is the
+// distinction the provider-level `all-endpoints-disabled` cannot express.
+//
+// The split is the registry's own category boundary: Internal means the request never got an answer,
+// External means the node answered and the answer was its own failure. Those lead an operator to
+// different places — the network path versus the node process.
+func endpointDisableReasonFor(classified *common.LavaError) lavasession.EndpointDisableReason {
+	if classified == nil {
+		return lavasession.EndpointDisableUnspecified
+	}
+	if classified.Category == common.CategoryInternal {
+		return lavasession.EndpointDisableUnreachable
+	}
+	return lavasession.EndpointDisableNodeError
 }
