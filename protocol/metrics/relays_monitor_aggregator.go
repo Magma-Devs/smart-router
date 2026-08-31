@@ -41,6 +41,17 @@ func (rma *RelaysMonitorAggregator) RegisterRelaysMonitor(rpcEndpointKey string,
 
 func (rma *RelaysMonitorAggregator) StartMonitoring(ctx context.Context) {
 	go func() {
+		// Evaluate once before waiting on the ticker. Without this the first
+		// health check is a whole interval away — 5 minutes by default — and
+		// for that entire window /readyz serves its fail-closed initial value
+		// rather than an observed one. A pod that is already relaying reads as
+		// not-ready, and a pod that can serve nothing reads the same way, so
+		// the two are indistinguishable exactly when it matters: at rollout.
+		//
+		// This does not shorten the window to the first HEALTHY result, which
+		// is still bounded by the ticker — it makes the state observed rather
+		// than assumed from t=0.
+		rma.runHealthCheck()
 		for {
 			select {
 			case <-rma.ticker.C:
