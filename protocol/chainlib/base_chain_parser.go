@@ -371,24 +371,37 @@ func (bcp *BaseChainParser) GetParsingByTag(tag spectypes.FUNCTION_TAG) (parsing
 // `addons` may contain extension names too (callers pass NodeUrl.Addons, which
 // mixes both). An extension name matches no collection's AddOn, so it is skipped
 // rather than needing to be separated out first.
-func (bcp *BaseChainParser) GetParsingByTagForCollection(tag spectypes.FUNCTION_TAG, addons []string, internalPath string) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool) {
+//
+// allowBaseFallback is the caller's ServesBaseCollection(): false means the node
+// serves ONLY its add-on collections, and the tagged fallback is then refused
+// rather than handing back a directive that node cannot answer.
+func (bcp *BaseChainParser) GetParsingByTagForCollection(tag spectypes.FUNCTION_TAG, addons []string, internalPath string, allowBaseFallback bool) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool) {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
 
-	base, baseExisted := bcp.taggedApis[tag]
-	if baseExisted {
-		parsing, apiCollection, existed = base.Parsing, base.ApiCollection, true
+	// `tagged`, not `base`: taggedApis is first-wins in SPEC-FILE order, so for a
+	// spec that lists an add-on collection before the base one this entry is the
+	// add-on's. The name must not assert an invariant the map does not enforce.
+	tagged, taggedExisted := bcp.taggedApis[tag]
+	if taggedExisted {
+		parsing, apiCollection, existed = tagged.Parsing, tagged.ApiCollection, true
 	}
-	if len(addons) == 0 || !baseExisted {
+	if len(addons) == 0 || !taggedExisted {
+		// taggedApis is populated from EVERY enabled collection, so a tag missing
+		// from it is declared nowhere and searching the add-on collections cannot
+		// find it either.
+		if !taggedExisted {
+			return nil, nil, false
+		}
 		return parsing, apiCollection, existed
 	}
 
 	for _, addon := range addons {
 		if addon == "" {
-			continue // the base collection, which is already the fallback
+			continue // the base collection, which is the fallback below
 		}
 		collection, ok := bcp.apiCollections[CollectionKey{
-			ConnectionType: base.ApiCollection.CollectionData.Type,
+			ConnectionType: tagged.ApiCollection.CollectionData.Type,
 			InternalPath:   internalPath,
 			Addon:          addon,
 		}]
@@ -402,6 +415,16 @@ func (bcp *BaseChainParser) GetParsingByTagForCollection(tag spectypes.FUNCTION_
 		}
 	}
 
+	if !allowBaseFallback {
+		// The caller serves only its add-on collections, and none of them declares
+		// this tag. Falling back would hand it the one directive the operator said
+		// the node cannot answer — reinstating the very probe standalone-addons
+		// opted out of, quietly. The keyed lookup above misses whenever a spec
+		// declares the add-on collection only at the root and the url carries an
+		// internal path, so this is reachable the moment a spec combines a disjoint
+		// add-on with internal paths.
+		return nil, nil, false
+	}
 	return parsing, apiCollection, existed
 }
 

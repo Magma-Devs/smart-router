@@ -2434,6 +2434,30 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 					extensions[extension] = struct{}{}
 				}
 
+				// standalone-addons only means anything for a url that declares an
+				// actual add-on COLLECTION. Addons here is the raw config list, which
+				// mixes add-ons and extensions, and Endpoint.Addons/.Extensions are
+				// both populated from it above. So on a url whose entries are all
+				// extension names the opt-out would make the endpoint eligible for
+				// nothing at all: extension traffic carries addon "" with the
+				// extension in a separate slice, and CheckSupportForServices would
+				// fail the base check before reaching the extension loop. Admission
+				// passes (no verifications), and the endpoint silently serves no
+				// traffic — a config typo with no diagnostic.
+				standaloneAddons := url.StandaloneAddons
+				if standaloneAddons {
+					declaredAddons, _, sepErr := chainParser.SeparateAddonsExtensions(ctx, url.Addons)
+					if sepErr != nil || len(declaredAddons) == 0 {
+						utils.LavaFormatWarning("ignoring standalone-addons: url declares no add-on collection", sepErr,
+							utils.LogAttr("url", url.Url),
+							utils.LogAttr("addons", url.Addons),
+							utils.LogAttr("provider", provider.Name),
+							utils.LogAttr("hint", "standalone-addons names add-on collections; extension names belong in addons but do not opt a url out of the base collection"),
+						)
+						standaloneAddons = false
+					}
+				}
+
 				// Create DirectRPCConnection for smart router (direct mode)
 				// Use default parallel connections for HTTP connection pooling
 				// Pass ApiInterface for proper protocol detection (bare host:port → gRPC when interface is gRPC)
@@ -2465,8 +2489,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 					Extensions:     extensions,
 					// Carry the url's opt-out through, so session selection keeps
 					// base-collection traffic off an endpoint that only serves its
-					// add-ons (MAG-3296).
-					StandaloneAddons:  url.StandaloneAddons,
+					// add-ons (MAG-3296). Downgraded to false above for a url that
+					// names no add-on collection.
+					StandaloneAddons:  standaloneAddons,
 					InternalPath:      url.InternalPath,
 					Connections:       nil,
 					DirectConnections: []lavasession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
