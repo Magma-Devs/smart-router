@@ -2415,6 +2415,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	rpsr.sessionManagers[sessionManagerKey] = sessionManager
 	rpsr.mu.Unlock()
 
+	// Populated by PHASE 1 below, before this closure is first called.
+	admissionsByProvider := map[*lavasession.RPCStaticProviderEndpoint]chainlib.ProviderAdmission{}
+
 	// Helper function to convert provider endpoints to sessions
 	convertProvidersToSessions := func(providerList []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
 		sessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
@@ -2428,7 +2431,11 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			}
 
 			endpoints := []*lavasession.Endpoint{}
-			for _, url := range expandInternalPaths(provider.NodeUrls, chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
+			// Drop the add-ons validation refused for this provider before the urls
+			// are expanded — Apply returns a copy, so the parsed config is untouched
+			// and the epoch path still re-reads it whole (MAG-3326).
+			admittedNodeUrls := admissionsByProvider[provider].Apply(provider.NodeUrls)
+			for _, url := range expandInternalPaths(admittedNodeUrls, chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
 				extensions := map[string]struct{}{}
 				for _, extension := range url.Addons {
 					extensions[extension] = struct{}{}
@@ -2585,10 +2592,22 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// either tier boots but reports unhealthy on its health endpoint (see the
 	// relaysMonitor seeding below), so it is pulled from rotation rather than
 	// silently accepting traffic it cannot serve.
-	failedStaticSet, failedStaticEndpoints := validateProviderTier(
+	failedStaticSet, failedStaticEndpoints, staticAdmissions := validateProviderTier(
 		ctx, relevantStaticProviderList, rpcEndpoint, chainParser, reverifyTierStatic, nil)
-	failedBackupSet, failedBackupEndpoints := validateProviderTier(
+	failedBackupSet, failedBackupEndpoints, backupAdmissions := validateProviderTier(
 		ctx, relevantBackupProviderList, rpcEndpoint, chainParser, reverifyTierBackup, nil)
+
+	// Per-collection admission (MAG-3326): an add-on whose verification failed is
+	// refused on its own and the provider keeps the rest, so adding an archive url
+	// to an otherwise healthy provider can no longer cost the provider. Read by
+	// convertProvidersToSessions below, which builds the endpoints.
+	//
+	// Written once here, before the closure is ever called, and read-only from then
+	// on — the closure also runs from the epoch path, which does not repopulate it.
+	for provider, admission := range backupAdmissions {
+		staticAdmissions[provider] = admission
+	}
+	admissionsByProvider = staticAdmissions
 
 	healthyStaticCount := len(relevantStaticProviderList) - len(failedStaticSet)
 	healthyBackupCount := len(relevantBackupProviderList) - len(failedBackupSet)
