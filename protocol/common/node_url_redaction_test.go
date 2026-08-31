@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
 // MAG-3330: UrlStr is the display form of a node-url — it feeds logs, error text
@@ -38,4 +40,36 @@ func TestNodeUrl_UrlStr_DoesNotMutateUrl(t *testing.T) {
 	nurl := NodeUrl{Url: raw}
 	_ = nurl.UrlStr()
 	assert.Equal(t, raw, nurl.Url)
+}
+
+// Relay metadata carries the same credentials as an http.Header — the caller's
+// own key inbound, the configured auth-headers outbound.
+func TestRedactMetadata(t *testing.T) {
+	md := []pairingtypes.Metadata{
+		{Name: "x-api-key", Value: "AbC123SecretKey"},
+		{Name: "content-type", Value: "application/json"},
+		{Name: "authorization", Value: "Bearer AbC123SecretKey"},
+	}
+
+	got := RedactMetadata(md)
+
+	assert.NotContains(t, got, "AbC123SecretKey")
+	assert.Contains(t, got, "content-type:application/json")
+	// Sorted, so the rendering is stable across runs.
+	assert.Equal(t, "{authorization:[redacted], content-type:application/json, x-api-key:[redacted]}", got)
+}
+
+// The input slice must not be reordered — it is live relay data, not a copy.
+func TestRedactMetadata_DoesNotMutateInput(t *testing.T) {
+	md := []pairingtypes.Metadata{
+		{Name: "zeta", Value: "1"},
+		{Name: "alpha", Value: "2"},
+	}
+	_ = RedactMetadata(md)
+	assert.Equal(t, "zeta", md[0].Name)
+	assert.Equal(t, "alpha", md[1].Name)
+}
+
+func TestRedactMetadata_Empty(t *testing.T) {
+	assert.Equal(t, "{}", RedactMetadata(nil))
 }

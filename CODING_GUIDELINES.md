@@ -37,6 +37,12 @@ This document is an extension to [CONTRIBUTING](./CONTRIBUTING.md) and provides 
   strips urls out of arbitrary text such as a `*url.Error` message. `LavaFormatLog`
   applies it to every message and attribute, so ordinary logging is already safe —
   what needs care is any path that formats a url without going through it.
+* Request headers are credentials too — `auth-config.auth-headers` outbound, the
+  caller's own key inbound. Never log a header map directly; render it with
+  `utils.RedactHeaders` / `utils.RedactHeaderMap`, or `common.RedactMetadata` for
+  relay metadata. These fail closed: header names are always shown, values only
+  for a small allow-list of transport headers, because auth header names are
+  operator-configured and no deny-list can enumerate them.
 
 ### Documentation
 

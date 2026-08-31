@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -570,4 +571,27 @@ func GetIpFromGrpcContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+// RedactMetadata renders relay metadata for logging with sensitive header values
+// withheld. Relay metadata carries the same credentials as an http.Header — the
+// caller's own api key inbound, the configured auth-headers outbound — so it gets
+// the same treatment; see utils.RedactHeaders.
+func RedactMetadata(md []pairingtypes.Metadata) string {
+	sorted := make([]pairingtypes.Metadata, len(md))
+	copy(sorted, md)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, entry := range sorted {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(entry.Name)
+		b.WriteByte(':')
+		b.WriteString(utils.RedactHeaderValue(entry.Name, entry.Value))
+	}
+	b.WriteByte('}')
+	return b.String()
 }

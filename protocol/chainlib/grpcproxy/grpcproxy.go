@@ -177,7 +177,7 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) g
 		}
 
 		if err := stream.SetHeader(md); err != nil {
-			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headers", md))
+			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headers", utils.RedactHeaders(md)))
 		}
 		return stream.SendMsg(respBytes)
 	}
@@ -199,7 +199,7 @@ func serveServerStream(stream grpc.ServerStream, response *StreamResponse) error
 
 	if len(response.Metadata) > 0 {
 		if err := stream.SetHeader(lowercaseMetadata(response.Metadata)); err != nil {
-			utils.LavaFormatError("Got error when setting stream header", err, utils.LogAttr("headers", response.Metadata))
+			utils.LavaFormatError("Got error when setting stream header", err, utils.LogAttr("headers", utils.RedactHeaders(response.Metadata)))
 		}
 	}
 
