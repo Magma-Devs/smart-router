@@ -1268,7 +1268,7 @@ func (dgm *DirectGRPCSubscriptionManager) selectFromTier(ctx context.Context, ti
 	if endpoint, exists := byURL[selectedURL]; exists {
 		return endpoint, nil
 	}
-	return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", selectedURL)
+	return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", utils.RedactURL(selectedURL))
 }
 
 func (dgm *DirectGRPCSubscriptionManager) checkClientSubscriptionLimit(clientKey string) error {

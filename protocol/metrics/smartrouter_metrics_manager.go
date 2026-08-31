@@ -1050,7 +1050,11 @@ func (m *SmartRouterMetricsManager) resolveProviderNames(urlOrName string) []str
 		copy(out, names)
 		return out
 	}
-	return []string{urlOrName}
+	// Unregistered input is either a provider name (passed straight through by
+	// callers that already resolved it) or a url that never reached
+	// RegisterEndpoint. RedactIfURL leaves the name alone — a lava address is not
+	// a url — and keeps a node-url's api key out of a scraped, retained label.
+	return []string{utils.RedactIfURL(urlOrName)}
 }
 
 // resolveProviderName returns the first provider name configured for a given endpoint URL,

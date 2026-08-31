@@ -30,6 +30,13 @@ This document is an extension to [CONTRIBUTING](./CONTRIBUTING.md) and provides 
     * malleability
     * code must be always deterministic
 * Thread safety. If some functionality is not thread-safe, or uses something that is not thread-safe, then clearly indicate the risk on each level.
+* Upstream node-urls are credentials. Many carry the vendor api key in their path
+  or query, so a raw `NodeUrl.Url` must never reach a log, an error returned to a
+  client, a metric label or a span attribute. `utils.RedactURL` (and
+  `NodeUrl.UrlStr()`, which uses it) is the display form; `utils.RedactSecrets`
+  strips urls out of arbitrary text such as a `*url.Error` message. `LavaFormatLog`
+  applies it to every message and attribute, so ordinary logging is already safe —
+  what needs care is any path that formats a url without going through it.
 
 ### Documentation
 

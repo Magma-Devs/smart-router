@@ -373,10 +373,15 @@ const (
 )
 
 func TestRecordHTTPRequest(t *testing.T) {
+	// http.url is redacted to scheme://host before export (MAG-3330): spans leave
+	// the process for a collector, and upstream node-urls carry the vendor api key
+	// in their path or query. net.peer.* is derived from the raw url and is
+	// unaffected — a hostname and port are not credentials.
 	tests := []struct {
 		name        string
 		method      string
 		url         string
+		expectURL   string
 		expectHost  string
 		expectPort  int64
 		expectNoNet bool
@@ -385,6 +390,7 @@ func TestRecordHTTPRequest(t *testing.T) {
 			name:       "URL with explicit port",
 			method:     "POST",
 			url:        "https://provider.example.com:8443/jsonrpc",
+			expectURL:  "https://provider.example.com:8443/[redacted]",
 			expectHost: "provider.example.com",
 			expectPort: 8443,
 		},
@@ -392,12 +398,28 @@ func TestRecordHTTPRequest(t *testing.T) {
 			name:       "URL without port",
 			method:     "GET",
 			url:        "https://provider.example.com/jsonrpc",
+			expectURL:  "https://provider.example.com/[redacted]",
+			expectHost: "provider.example.com",
+		},
+		{
+			name:       "api key in path never reaches the span",
+			method:     "POST",
+			url:        "https://provider.example.com/v2/AbC123SecretKey",
+			expectURL:  "https://provider.example.com/[redacted]",
+			expectHost: "provider.example.com",
+		},
+		{
+			name:       "api key in query never reaches the span",
+			method:     "POST",
+			url:        "https://provider.example.com/rpc?apikey=AbC123SecretKey",
+			expectURL:  "https://provider.example.com/[redacted]",
 			expectHost: "provider.example.com",
 		},
 		{
 			name:        "malformed URL is best-effort skipped",
 			method:      "POST",
 			url:         "not-a-url",
+			expectURL:   "not-a-url",
 			expectNoNet: true,
 		},
 	}
@@ -409,7 +431,8 @@ func TestRecordHTTPRequest(t *testing.T) {
 			})
 
 			require.Equal(t, tc.method, attrs[keyHTTPMethod].AsString())
-			require.Equal(t, tc.url, attrs[keyHTTPURL].AsString())
+			require.Equal(t, tc.expectURL, attrs[keyHTTPURL].AsString())
+			require.NotContains(t, attrs[keyHTTPURL].AsString(), "AbC123SecretKey")
 
 			if tc.expectNoNet {
 				require.NotContains(t, attrs, keyNetPeerName)

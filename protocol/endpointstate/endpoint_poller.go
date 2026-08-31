@@ -407,7 +407,7 @@ func (ecf *EndpointPoller) ObserveLatestBlockPoll(block int64, transportLatency 
 // For JSON-RPC/POST requests, requestData is the JSON body.
 func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string, kind string) ([]byte, error) {
 	if ecf.directConnection == nil {
-		return nil, fmt.Errorf("no direct connection for endpoint %s", ecf.endpointURL)
+		return nil, fmt.Errorf("no direct connection for endpoint %s", utils.RedactURL(ecf.endpointURL))
 	}
 	// Counted once the request is about to go out, so the number matches what the upstream
 	// node was actually asked for. Deliberately AFTER the no-connection guard above (nothing
@@ -455,7 +455,7 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	httpDoer, ok := ecf.directConnection.(lavasession.HTTPDirectRPCDoer)
 	if !ok {
-		return nil, fmt.Errorf("connection does not support HTTP requests for endpoint %s", ecf.endpointURL)
+		return nil, fmt.Errorf("connection does not support HTTP requests for endpoint %s", utils.RedactURL(ecf.endpointURL))
 	}
 
 	fullURL, err := common.JoinURLPath(ecf.directConnection.GetURL(), path)
