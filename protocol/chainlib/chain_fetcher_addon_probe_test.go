@@ -63,7 +63,7 @@ func TestValidateProbesHeadWithTheUrlsOwnCollections(t *testing.T) {
 			// lookup. Returning "not found" ends Validate here, which is all this
 			// test needs — the call itself is the subject.
 			parser.EXPECT().
-				GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, tc.addons, tc.internalPath).
+				GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, tc.addons, tc.internalPath, true).
 				Return(nil, nil, false).
 				MinTimes(1)
 
@@ -85,7 +85,7 @@ func TestFetchLatestBlockNumKeepsBaseCollectionSemantics(t *testing.T) {
 
 	parser := NewMockChainParser(ctrl)
 	parser.EXPECT().
-		GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, nil, "").
+		GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, nil, "", true).
 		Return(nil, nil, false)
 
 	fetcher := &ChainFetcher{

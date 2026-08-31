@@ -140,7 +140,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 		ecf.ObserveLatestBlockPoll(blockNum, pollLatency, err)
 	}()
 
-	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, ecf.collectionAddons(), ecf.endpoint.InternalPath)
+	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, ecf.collectionAddons(), ecf.endpoint.InternalPath, ecf.endpoint.ServesBaseCollection())
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCKNUM.String()
 	if !ok {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" tag function not found", nil,
@@ -231,7 +231,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 // This handles both propagation delays (the latest slot data hasn't reached the
 // node yet) and skipped slots (Solana occasionally produces no block for a slot).
 func (ecf *EndpointPoller) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
-	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM, ecf.collectionAddons(), ecf.endpoint.InternalPath)
+	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM, ecf.collectionAddons(), ecf.endpoint.InternalPath, ecf.endpoint.ServesBaseCollection())
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM.String()
 	if !ok {
 		return "", utils.LavaFormatError(tagName+" tag function not found", nil,

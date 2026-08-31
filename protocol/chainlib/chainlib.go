@@ -68,7 +68,7 @@ type ChainParser interface {
 	SetSpec(spec spectypes.Spec)
 	ChainBlockStats() (allowedBlockLagForQosSync int64, averageBlockTime time.Duration, blockDistanceForFinalizedData, blocksInFinalizationProof uint32)
 	GetParsingByTag(tag spectypes.FUNCTION_TAG) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool)
-	GetParsingByTagForCollection(tag spectypes.FUNCTION_TAG, addons []string, internalPath string) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool)
+	GetParsingByTagForCollection(tag spectypes.FUNCTION_TAG, addons []string, internalPath string, allowBaseFallback bool) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool)
 	IsTagInCollection(tag spectypes.FUNCTION_TAG, collectionKey CollectionKey) bool
 	GetAllInternalPaths() []string
 	IsInternalPathEnabled(internalPath string, apiInterface string, addon string) bool

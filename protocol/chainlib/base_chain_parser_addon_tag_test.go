@@ -158,7 +158,7 @@ func TestGetParsingByTagForCollection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parsing, _, existed := parser.GetParsingByTagForCollection(
-				spectypes.FUNCTION_TAG_GET_BLOCKNUM, tc.addons, tc.internalPath)
+				spectypes.FUNCTION_TAG_GET_BLOCKNUM, tc.addons, tc.internalPath, true)
 			require.Equal(t, tc.wantExisted, existed)
 			require.NotNil(t, parsing)
 			require.Equal(t, tc.wantApiName, parsing.ApiName)
@@ -167,19 +167,42 @@ func TestGetParsingByTagForCollection(t *testing.T) {
 
 	t.Run("the resolved collection is returned alongside the directive", func(t *testing.T) {
 		_, collection, ok := parser.GetParsingByTagForCollection(
-			spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"evm"}, "")
+			spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"evm"}, "", true)
 		require.True(t, ok)
 		require.Same(t, evm, collection,
 			"the caller crafts the probe from CollectionData, so it must be the add-on's")
 	})
 
 	t.Run("a tag no collection declares stays absent", func(t *testing.T) {
-		// GET_BLOCK_BY_NUM is declared by the evm collection but has no taggedApis
-		// entry, so there is no base answer to fall back to. Reporting it as found
-		// would hand callers a directive the base surface cannot serve.
+		// getServiceApis populates taggedApis from EVERY enabled collection, so a
+		// tag missing from it is declared nowhere and the add-on search cannot find
+		// it either. GET_EARLIEST_BLOCK is that tag here — no collection in this
+		// fixture declares one.
 		_, _, existed := parser.GetParsingByTagForCollection(
-			spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM, []string{"evm"}, "")
+			spectypes.FUNCTION_TAG_GET_EARLIEST_BLOCK, []string{"evm"}, "", true)
 		require.False(t, existed)
+	})
+
+	t.Run("a standalone url is not handed the fallback it opted out of", func(t *testing.T) {
+		// The evm collection declares GET_BLOCKNUM at the root, so a root url
+		// resolves normally even with the fallback refused.
+		parsing, _, ok := parser.GetParsingByTagForCollection(
+			spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"evm"}, "", false)
+		require.True(t, ok)
+		require.Equal(t, "eth_blockNumber", parsing.ApiName)
+
+		// On an internal path the spec does not define the add-on collection at,
+		// the keyed lookup misses. For an ordinary url the base directive is the
+		// right answer; for one that serves ONLY its add-ons it is the very probe
+		// the operator said the node cannot answer, so it must fail loudly instead.
+		_, _, okOrdinary := parser.GetParsingByTagForCollection(
+			spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"evm"}, "/nope", true)
+		require.True(t, okOrdinary, "an ordinary url still inherits the base directive")
+
+		_, _, okStandalone := parser.GetParsingByTagForCollection(
+			spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"evm"}, "/nope", false)
+		require.False(t, okStandalone,
+			"a standalone url must not be handed the base collection's directive")
 	})
 
 	t.Run("resolution is deterministic across calls", func(t *testing.T) {
@@ -188,7 +211,7 @@ func TestGetParsingByTagForCollection(t *testing.T) {
 		// whose tip source flaps.
 		for i := 0; i < 200; i++ {
 			parsing, _, ok := parser.GetParsingByTagForCollection(
-				spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"txpool", "evm"}, "")
+				spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"txpool", "evm"}, "", true)
 			require.True(t, ok)
 			require.Equal(t, "eth_blockNumber", parsing.ApiName)
 		}
@@ -215,12 +238,12 @@ func TestGetParsingByTagForCollection_AddonOrderIsTheNodesOwn(t *testing.T) {
 	parser.apiCollections[CollectionKey{ConnectionType: "POST", Addon: "other"}] = second
 
 	parsing, _, ok := parser.GetParsingByTagForCollection(
-		spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"evm", "other"}, "")
+		spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"evm", "other"}, "", true)
 	require.True(t, ok)
 	require.Equal(t, "eth_blockNumber", parsing.ApiName)
 
 	parsing, _, ok = parser.GetParsingByTagForCollection(
-		spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"other", "evm"}, "")
+		spectypes.FUNCTION_TAG_GET_BLOCKNUM, []string{"other", "evm"}, "", true)
 	require.True(t, ok)
 	require.Equal(t, "other_blockNumber", parsing.ApiName)
 }
