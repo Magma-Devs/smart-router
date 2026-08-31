@@ -30,6 +30,7 @@ type mockSubscriptionServer struct {
 	server          *httptest.Server
 	upgrader        websocket.Upgrader
 	subscriptions   map[string]chan struct{} // subscription ID -> close channel
+	observedMethods []string                 // every JSON-RPC method the server was actually asked for
 	lock            sync.RWMutex
 	writeMu         sync.Mutex // serializes conn.WriteMessage — gorilla requires a single concurrent writer
 	messageInterval time.Duration
@@ -78,30 +79,19 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 
-		// Handle subscription requests
-		if strings.HasSuffix(req.Method, "_subscribe") || strings.HasPrefix(req.Method, "eth_subscribe") {
-			subID := ms.createSubscription()
+		ms.recordMethod(req.Method)
 
-			// Send subscription confirmation
-			response := map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      req.ID,
-				"result":  subID,
-			}
-			respBytes, _ := json.Marshal(response)
-			ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)
-
-			// Start sending subscription messages
-			go ms.sendSubscriptionMessages(conn, subID)
-		} else if strings.HasSuffix(req.Method, "_unsubscribe") || strings.HasPrefix(req.Method, "eth_unsubscribe") {
-			// Get subscription ID from params
-			params, ok := req.Params.([]interface{})
-			if ok && len(params) > 0 {
-				if subID, ok := params[0].(string); ok {
-					ms.closeSubscription(subID)
-				}
-			}
-
+		// Classify by whether the caller handed us a LIVE subscription id, never by
+		// the method name. This harness used to gate on "_subscribe"/"_unsubscribe"
+		// suffixes, which is the same assumption that produced MAG-3297: it could
+		// not serve a chain_subscribeNewHeads / chain_unsubscribeNewHeads pair at
+		// all, so no test here could have caught the bug.
+		//
+		// Everything gets a reply. Dropping an unrecognised method would make a
+		// regression hang out the router's 10s CallContext timeout instead of
+		// failing fast.
+		if subID, ok := firstStringParam(req.Params); ok && ms.hasSubscription(subID) {
+			ms.closeSubscription(subID)
 			response := map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
@@ -109,8 +99,52 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 			}
 			respBytes, _ := json.Marshal(response)
 			ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)
+			continue
 		}
+
+		subID := ms.createSubscription()
+		response := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result":  subID,
+		}
+		respBytes, _ := json.Marshal(response)
+		ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)
+		go ms.sendSubscriptionMessages(conn, subID)
 	}
+}
+
+// firstStringParam returns params[0] when it is a string, which is the shape every
+// unsubscribe in every spec uses to name the subscription being torn down.
+func firstStringParam(params interface{}) (string, bool) {
+	list, ok := params.([]interface{})
+	if !ok || len(list) == 0 {
+		return "", false
+	}
+	s, ok := list[0].(string)
+	return s, ok
+}
+
+func (ms *mockSubscriptionServer) recordMethod(method string) {
+	ms.lock.Lock()
+	defer ms.lock.Unlock()
+	ms.observedMethods = append(ms.observedMethods, method)
+}
+
+// ObservedMethods returns the JSON-RPC methods the upstream was actually asked
+// for, which is the thing MAG-3297 got wrong and the only place a regression at
+// the CallContext call site is visible.
+func (ms *mockSubscriptionServer) ObservedMethods() []string {
+	ms.lock.RLock()
+	defer ms.lock.RUnlock()
+	return append([]string(nil), ms.observedMethods...)
+}
+
+func (ms *mockSubscriptionServer) hasSubscription(subID string) bool {
+	ms.lock.RLock()
+	defer ms.lock.RUnlock()
+	_, ok := ms.subscriptions[subID]
+	return ok
 }
 
 func (ms *mockSubscriptionServer) createSubscription() string {
@@ -2491,11 +2525,15 @@ func TestUnsubscribe_StillRejectsForeignSubscription(t *testing.T) {
 }
 
 // substrateUnsubscribePairs is the full SUBSCRIBE/UNSUBSCRIBE set declared by the
-// ASTAR spec's base collection, and the same shape Acala (aca.json) and Shiden
-// (sdn.json) carry. Every Substrate spec pairs by name, and none of the pairings
-// is a "<x>_subscribe" -> "<x>_unsubscribe" rewrite: three of them
-// (chainHead_v1_follow, author_submitAndWatchExtrinsic,
-// transactionWatch_v1_submitAndWatch) do not contain "subscribe" at all.
+// ASTAR spec's base collection, transcribed from lava-specs `astar.json` (already
+// merged on that repo's main); Acala (`aca.json`) and Shiden (`sdn.json`) carry
+// the same shape. The specs live in lava-specs, not under `specs/` here, so this
+// table cannot be validated in-repo — hence naming the file it came from.
+//
+// It is documentation of WHY no string rule could have worked, not coverage
+// breadth: every row drives the same one-line pass-through. The three rows that
+// carry the argument are chainHead_v1_follow, author_submitAndWatchExtrinsic and
+// transactionWatch_v1_submitAndWatch, which do not contain "subscribe" at all.
 var substrateUnsubscribePairs = []struct {
 	subscribe   string
 	unsubscribe string
@@ -2582,4 +2620,90 @@ func TestResolveUnsubscribeMethod_FallsBackWithoutApi(t *testing.T) {
 	t.Run("nil message", func(t *testing.T) {
 		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(nil, "eth_subscribe"))
 	})
+
+	// The one row here whose input the parser can actually hand you. A method the
+	// spec does not declare still gets an api, synthesised as "Default-<method>"
+	// (base_chain_parser.go defaultApiContainer). Sending that upstream would be a
+	// method no node implements, so it must not be preferred over the fallback.
+	//
+	// Unreachable from today's only caller — a "Default-" name matches no
+	// directive's ApiName, so the message is never classified UNSUBSCRIBE — but
+	// the guard belongs to this function, not to its caller's invariant.
+	t.Run("synthesised default api name", func(t *testing.T) {
+		pm := &mockWSProtocolMessage{method: chainlib.DefaultApiName + "chain_unsubscribeNewHeads"}
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_subscribe"),
+			"a Default-prefixed name is not a wire method")
+	})
+}
+
+// TestEndToEnd_UnsubscribeSendsTheSpecMethodUpstream is the MAG-3297 regression
+// test at the level the bug lived: what the ROUTER SENDS UPSTREAM.
+//
+// The unit tests above pin resolveUnsubscribeMethod's return value, which does
+// not exercise the CallContext call site — reverting that one line back to
+// getUnsubscribeMethod would leave them all green. This one drives a real
+// WebSocket round trip and asserts the method the upstream was actually asked
+// for, which is the only place that regression is visible.
+//
+// It uses a Substrate pair on purpose. Before the fix the router derived the
+// teardown method from the subscribe method by string surgery, and
+// chain_subscribeNewHeads matches none of its rules, so it sent the literal
+// "unsubscribe" — which is what this asserts is absent.
+func TestEndToEnd_UnsubscribeSendsTheSpecMethodUpstream(t *testing.T) {
+	mockSrv := newMockSubscriptionServer()
+	mockSrv.messageInterval = 20 * time.Millisecond
+	defer mockSrv.Close()
+
+	nodeUrl := &common.NodeUrl{Url: mockSrv.URL()}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "SDN", "jsonrpc",
+		[]*common.NodeUrl{nodeUrl},
+		nil, nil, nil,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	const dappID, ip, wsUID = "dapp-sdn", "192.168.99.98", "ws-sdn"
+	subscribeBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "method": "chain_subscribeNewHeads", "params": []interface{}{}, "id": 1,
+	})
+	require.NoError(t, err)
+	subscribeMsg := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{method: "chain_subscribeNewHeads", params: []interface{}{}},
+		rawData:               subscribeBody,
+	}
+
+	reply, _, err := manager.StartSubscription(ctx, subscribeMsg, dappID, ip, wsUID, nil)
+	require.NoError(t, err, "the subscribe half always worked, including before the fix")
+	require.NotNil(t, reply)
+
+	var subResp map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(reply.Data, &subResp))
+	var routerSubID string
+	require.NoError(t, json.Unmarshal(subResp["result"], &routerSubID))
+	require.NotEmpty(t, routerSubID)
+
+	unsubscribeBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "method": "chain_unsubscribeNewHeads", "params": []interface{}{routerSubID}, "id": 2,
+	})
+	require.NoError(t, err)
+	unsubscribeMsg := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{
+			method: "chain_unsubscribeNewHeads",
+			params: []interface{}{routerSubID},
+		},
+		rawData: unsubscribeBody,
+	}
+
+	_, err = manager.Unsubscribe(ctx, unsubscribeMsg, dappID, ip, wsUID, nil)
+	require.NoError(t, err)
+
+	observed := mockSrv.ObservedMethods()
+	require.Contains(t, observed, "chain_subscribeNewHeads")
+	require.Contains(t, observed, "chain_unsubscribeNewHeads",
+		"the router must tear down with the spec's own unsubscribe method; observed=%v", observed)
+	require.NotContains(t, observed, "unsubscribe",
+		"the derivation fallback sent this literal method, which no Substrate node implements; observed=%v", observed)
 }

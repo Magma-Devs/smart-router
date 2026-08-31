@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1002,11 +1003,20 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 // down with chainHead_v1_unfollow, author_submitAndWatchExtrinsic with
 // author_unwatchExtrinsic.
 //
-// getUnsubscribeMethod remains the fallback for a message with no api attached,
-// which a spec-resolved message never is.
+// The DefaultApiName guard is the one that matters. A method the spec does not
+// declare still gets an api, synthesised with Name "Default-<method>"
+// (base_chain_parser.go defaultApiContainer), and sending that upstream would be
+// a method no node has. It is unreachable from the single current caller — a
+// "Default-" name matches no directive's ApiName, so such a message is never
+// classified UNSUBSCRIBE and never arrives here — but the guard belongs to this
+// function rather than to its caller's invariant, since the doc above invites
+// future callers.
+//
+// getUnsubscribeMethod remains the fallback for those shapes.
 func resolveUnsubscribeMethod(protocolMessage chainlib.ProtocolMessage, subscribeMethod string) string {
 	if protocolMessage != nil {
-		if api := protocolMessage.GetApi(); api != nil && api.Name != "" {
+		if api := protocolMessage.GetApi(); api != nil && api.Name != "" &&
+			!strings.HasPrefix(api.Name, chainlib.DefaultApiName) {
 			return api.Name
 		}
 	}
