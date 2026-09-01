@@ -1447,7 +1447,7 @@ func TestRewriteSubscriptionID_Tendermint(t *testing.T) {
 	}
 
 	// Should pass through unchanged (Tendermint doesn't need ID rewriting)
-	result, err := rewriteSubscriptionID(tendermintMsg, "router-id-123")
+	result, err := rewriteSubscriptionID(tendermintMsg, "router-id-123", false)
 	require.NoError(t, err)
 
 	var parsed map[string]json.RawMessage
@@ -1471,7 +1471,7 @@ func TestRewriteSubscriptionID_EVM(t *testing.T) {
 		Params: json.RawMessage(`{"subscription":"0xoriginal","result":{"blockNumber":"0x1234"}}`),
 	}
 
-	result, err := rewriteSubscriptionID(evmMsg, "0xrouter123")
+	result, err := rewriteSubscriptionID(evmMsg, "0xrouter123", false)
 	require.NoError(t, err)
 
 	var parsed struct {
@@ -1498,7 +1498,7 @@ func TestRewriteSubscriptionID_Substrate(t *testing.T) {
 		Params: json.RawMessage(`{"subscription":"Ck1rTHhOa1hxTGV3","result":{"number":"0x1234"}}`),
 	}
 
-	result, err := rewriteSubscriptionID(substrateMsg, "rs_router_1")
+	result, err := rewriteSubscriptionID(substrateMsg, "rs_router_1", false)
 	require.NoError(t, err)
 
 	var parsed struct {
@@ -1530,7 +1530,7 @@ func TestRewriteSubscriptionID_SolanaNumeric(t *testing.T) {
 		Params: json.RawMessage(`{"subscription":23784,"result":{"context":{"slot":5208469}}}`),
 	}
 
-	result, err := rewriteSubscriptionID(solanaMsg, "1000001")
+	result, err := rewriteSubscriptionID(solanaMsg, "1000001", true)
 	require.NoError(t, err)
 
 	var parsed struct {
@@ -1558,7 +1558,7 @@ func TestRewriteSubscriptionID_NonScalarIDUntouched(t *testing.T) {
 		Params: json.RawMessage(`{"subscription":{"nested":true},"result":{}}`),
 	}
 
-	result, err := rewriteSubscriptionID(msg, "1000001")
+	result, err := rewriteSubscriptionID(msg, "1000001", false)
 	require.NoError(t, err)
 	assert.Contains(t, string(result), `"nested":true`,
 		"an object id is not something a router id can stand in for; pass it through")
@@ -1649,7 +1649,7 @@ func TestCreateSubscriptionReply_Tendermint(t *testing.T) {
 	}
 
 	// For Tendermint, should return original result format (not router ID)
-	replyData, err := createSubscriptionReply("router-id-ignored", json.RawMessage(`1`), originalMsg, "tendermintrpc")
+	replyData, err := createSubscriptionReply("router-id-ignored", json.RawMessage(`1`), originalMsg, "tendermintrpc", false)
 	require.NoError(t, err)
 
 	// Parse the response
@@ -1689,7 +1689,7 @@ func TestCreateSubscriptionReply_Tendermint_PreservesUpstreamFields(t *testing.T
 		},
 	}
 
-	replyData, err := createSubscriptionReply("ignored", json.RawMessage(`"abc"`), originalMsg, "tendermintrpc")
+	replyData, err := createSubscriptionReply("ignored", json.RawMessage(`"abc"`), originalMsg, "tendermintrpc", false)
 	require.NoError(t, err)
 
 	var resp map[string]json.RawMessage
@@ -1722,7 +1722,7 @@ func TestCreateSubscriptionReply_EVM(t *testing.T) {
 	routerID := "0xrouter456"
 
 	// For EVM, should replace upstream ID with router ID
-	replyData, err := createSubscriptionReply(routerID, json.RawMessage(`1`), originalMsg, "jsonrpc")
+	replyData, err := createSubscriptionReply(routerID, json.RawMessage(`1`), originalMsg, "jsonrpc", false)
 	require.NoError(t, err)
 
 	// Parse the response
@@ -1748,7 +1748,7 @@ func TestCreateSubscriptionReplyFromRouterID_Tendermint(t *testing.T) {
 	clientRequestID := json.RawMessage(`42`)
 
 	// For Tendermint, should return query format with client's request ID
-	replyData, err := createSubscriptionReplyFromRouterID("router-id-ignored", clientRequestID, "tendermintrpc", originalResult)
+	replyData, err := createSubscriptionReplyFromRouterID("router-id-ignored", clientRequestID, "tendermintrpc", originalResult, false)
 	require.NoError(t, err)
 
 	// Parse the response
@@ -1779,7 +1779,7 @@ func TestCreateSubscriptionReplyFromRouterID_EVM(t *testing.T) {
 	clientRouterID := "0xclient-router-id"
 
 	// For EVM, should return router ID (originalResult not used)
-	replyData, err := createSubscriptionReplyFromRouterID(clientRouterID, clientRequestID, "jsonrpc", nil)
+	replyData, err := createSubscriptionReplyFromRouterID(clientRouterID, clientRequestID, "jsonrpc", nil, false)
 	require.NoError(t, err)
 
 	// Parse the response
@@ -1808,7 +1808,7 @@ func TestTendermintSubscriptionEndToEnd(t *testing.T) {
 		}
 
 		// Create reply for Tendermint
-		reply, err := createSubscriptionReply("any-router-id", json.RawMessage(`1`), upstreamResponse, "tendermintrpc")
+		reply, err := createSubscriptionReply("any-router-id", json.RawMessage(`1`), upstreamResponse, "tendermintrpc", false)
 		require.NoError(t, err)
 
 		// Client should see the query format, not a router ID
@@ -1825,7 +1825,7 @@ func TestTendermintSubscriptionEndToEnd(t *testing.T) {
 		}
 
 		// Rewrite should pass through unchanged for Tendermint
-		rewritten, err := rewriteSubscriptionID(notification, "some-router-id")
+		rewritten, err := rewriteSubscriptionID(notification, "some-router-id", false)
 		require.NoError(t, err)
 
 		// Should still contain the query and data
@@ -2181,7 +2181,7 @@ func TestCreateSubscriptionReply_EchoesStringRequestID(t *testing.T) {
 		}
 
 		clientID := json.RawMessage(`"client-uuid-1"`)
-		replyData, err := createSubscriptionReply("rs_abc123_00001", clientID, upstream, "jsonrpc")
+		replyData, err := createSubscriptionReply("rs_abc123_00001", clientID, upstream, "jsonrpc", false)
 		require.NoError(t, err)
 
 		var resp map[string]json.RawMessage
@@ -2200,7 +2200,7 @@ func TestCreateSubscriptionReply_EchoesStringRequestID(t *testing.T) {
 			Result:  json.RawMessage(`"0xabc"`),
 		}
 
-		replyData, err := createSubscriptionReply("rs_xxx_00001", json.RawMessage(`42`), upstream, "jsonrpc")
+		replyData, err := createSubscriptionReply("rs_xxx_00001", json.RawMessage(`42`), upstream, "jsonrpc", false)
 		require.NoError(t, err)
 
 		var resp map[string]json.RawMessage
@@ -2216,7 +2216,7 @@ func TestCreateSubscriptionReply_EchoesStringRequestID(t *testing.T) {
 			Result:  json.RawMessage(`{"query":"tm.event='NewBlock'"}`),
 		}
 
-		replyData, err := createSubscriptionReply("ignored", json.RawMessage(`"abc"`), upstream, "tendermintrpc")
+		replyData, err := createSubscriptionReply("ignored", json.RawMessage(`"abc"`), upstream, "tendermintrpc", false)
 		require.NoError(t, err)
 
 		var resp map[string]json.RawMessage
@@ -2987,7 +2987,7 @@ func TestCreateSubscriptionReply_SolanaNumeric(t *testing.T) {
 		Result: json.RawMessage(`23784`),
 	}
 
-	reply, err := createSubscriptionReply("1000001", json.RawMessage(`7`), upstream, "jsonrpc")
+	reply, err := createSubscriptionReply("1000001", json.RawMessage(`7`), upstream, "jsonrpc", true)
 	require.NoError(t, err)
 
 	var parsed struct {
@@ -3150,7 +3150,10 @@ func TestEndToEnd_SolanaJoiningClientGetsItsOwnNumericID(t *testing.T) {
 
 	assert.NotEqual(t, firstID, secondID, "each client gets its own id")
 
-	require.Equal(t, 1, len(manager.activeSubscriptions),
+	manager.lock.RLock()
+	activeCount := len(manager.activeSubscriptions)
+	manager.lock.RUnlock()
+	require.Equal(t, 1, activeCount,
 		"identical params must share one upstream subscription")
 
 	for name, ch := range map[string]<-chan *pairingtypes.RelayReply{"first": firstChan, "second": secondChan} {
@@ -3173,6 +3176,12 @@ func TestEndToEnd_SolanaJoiningClientGetsItsOwnNumericID(t *testing.T) {
 // handleUpstreamDisconnect re-subscribes and the node answers with a DIFFERENT id, so a
 // client holding the upstream one would silently be left with an id that names nothing —
 // pushes tagged with an id it never saw, and an unsubscribe that cannot be matched.
+//
+// Scope: this calls handleUpstreamDisconnect directly rather than provoking a real upstream
+// error, so it exercises the restore path and NOT listenForUpstreamMessages' cleanup-ownership
+// handoff (which is covered by TestListenForUpstreamMessages_ReconnectSkipsCleanup). One
+// consequence is that the original listener goroutine is still selecting when the restored one
+// starts; both fan out to the same clients, so the assertions below are unaffected.
 func TestSolanaRouterIDSurvivesUpstreamReconnect(t *testing.T) {
 	mockSrv := newSolanaMockServer()
 	defer mockSrv.Close()
@@ -3237,5 +3246,71 @@ drainLoop:
 			"post-reconnect frames must still carry the id the client holds, not upstream %q", upstreamAfter)
 	case <-time.After(5 * time.Second):
 		t.Fatal("no push frame after the reconnect — the subscription was not restored")
+	}
+}
+
+// TestSubscriptionIDsAreNumeric is the guard on the one decision that picks a client's id
+// type. It is separated out because the shape decision and the id canonicalisation are two
+// different functions, and a case covered on only one of them is how `null` slipped through:
+// json.Unmarshal decodes null into an int64 with a NIL error, so a plain decode reports it as
+// a number while CanonicalSubscriptionID correctly reports it as naming nothing.
+func TestSubscriptionIDsAreNumeric(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"solana number", `23784`, true},
+		{"zero", `0`, true},
+		{"negative", `-5`, true},
+		{"leading whitespace", "  23784", true},
+		{"ethereum hex string", `"0x9ce59a13"`, false},
+		{"substrate opaque string", `"Ck1rTHhOa1hxTGV3"`, false},
+		{"null is not a number", `null`, false},
+		{"tendermint query object", `{"query":"tm.event='NewBlock'"}`, false},
+		{"array", `[1]`, false},
+		{"absent", ``, false},
+		{"true", `true`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, subscriptionIDsAreNumeric(json.RawMessage(tc.raw)),
+				"subscriptionIDsAreNumeric(%s)", tc.raw)
+		})
+	}
+}
+
+// TestSubscriptionIDsAreNumeric_AgreesWithCanonicalisation pins the two halves together. A
+// value this reports as numeric must be one CanonicalSubscriptionID also accepts, or the
+// router would issue an id in a shape whose upstream counterpart it cannot key on.
+func TestSubscriptionIDsAreNumeric_AgreesWithCanonicalisation(t *testing.T) {
+	for _, raw := range []string{`23784`, `0`, `null`, `""`, `"0xabc"`, `{}`, `[1]`, `1.5`} {
+		if subscriptionIDsAreNumeric(json.RawMessage(raw)) {
+			_, named := rpcclient.CanonicalSubscriptionID(json.RawMessage(raw))
+			assert.True(t, named,
+				"%s reads as numeric but names no subscription — the two halves disagree", raw)
+		}
+	}
+}
+
+// TestGenerateNumericRouterID covers the generator whose output the client is handed
+// verbatim: ids must be numbers, must be distinct, and must sit above the range a node
+// plausibly issues so they cannot be mistaken for an upstream id in the unsubscribe lookup.
+func TestGenerateNumericRouterID(t *testing.T) {
+	mapper := NewSubscriptionIDMapper()
+
+	seen := make(map[string]struct{}, 100)
+	for i := 0; i < 100; i++ {
+		id := mapper.GenerateNumericRouterID()
+
+		parsed, err := strconv.ParseInt(id, 10, 64)
+		require.NoError(t, err, "a numeric router id must parse as a number, got %q", id)
+		assert.GreaterOrEqual(t, parsed, int64(numericRouterIDBase),
+			"ids must sit above the base, or they can collide with a node's own ids")
+		assert.Less(t, parsed, int64(1)<<53,
+			"ids must stay below 2^53 or a JavaScript client cannot round-trip them")
+
+		_, dup := seen[id]
+		require.False(t, dup, "ids must be distinct, %q repeated at i #%d", id, i)
+		seen[id] = struct{}{}
 	}
 }

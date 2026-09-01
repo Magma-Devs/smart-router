@@ -35,9 +35,10 @@ func TestCanonicalSubscriptionID(t *testing.T) {
 	}
 }
 
-// TestIsSubscriptionNotification pins which frames the shape-based case claims. It runs last
-// in handleImmediate, so it only ever sees what the method-name cases above declined.
-func TestIsSubscriptionNotification(t *testing.T) {
+// TestSubscriptionIDFromParams pins which frames the shape-based dispatch case claims. The
+// case guards on method and params being present before calling this, so the cases below
+// cover what it decides once past that guard.
+func TestSubscriptionIDFromParams(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		msg  *JsonrpcMessage
@@ -80,7 +81,8 @@ func TestIsSubscriptionNotification(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, tc.msg.isSubscriptionNotification())
+			_, ok := subscriptionIDFromParams(tc.msg.Params)
+			assert.Equal(t, tc.want, ok && tc.msg.Method != "")
 		})
 	}
 }
