@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,16 @@ type mockSubscriptionServer struct {
 	// against the one shape the router happened to handle.
 	notificationMethod string
 	subscriptionID     string
+
+	// numericIDs makes the server number its subscriptions instead of naming them, which
+	// is what Solana does and what no test here could express before MAG-3359.
+	// firstNumericID is the id the first such subscription gets.
+	numericIDs     bool
+	firstNumericID int
+
+	// subscriptionSeq makes successive ids distinct, so a test can tell a restored
+	// subscription from the one it replaced.
+	subscriptionSeq int
 }
 
 // safeWriteMessage serializes WS writes: handleWS (response) and the spawned sendSubscriptionMessages
@@ -60,6 +71,7 @@ func newMockSubscriptionServer() *mockSubscriptionServer {
 		messageInterval:    100 * time.Millisecond,
 		notificationMethod: "eth_subscription",
 		subscriptionID:     "0x" + strings.Repeat("f", 32),
+		firstNumericID:     23784,
 	}
 
 	ms.server = httptest.NewServer(http.HandlerFunc(ms.handleWS))
@@ -100,7 +112,7 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 		// Everything gets a reply. Dropping an unrecognised method would make a
 		// regression hang out the router's 10s CallContext timeout instead of
 		// failing fast.
-		if subID, ok := firstStringParam(req.Params); ok && ms.hasSubscription(subID) {
+		if subID, ok := ms.firstSubscriptionParam(req.Params); ok && ms.hasSubscription(subID) {
 			ms.closeSubscription(subID)
 			response := map[string]interface{}{
 				"jsonrpc": "2.0",
@@ -112,27 +124,43 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 
-		subID := ms.createSubscription()
+		subID, wireID := ms.createSubscription()
 		response := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      req.ID,
-			"result":  subID,
+			"result":  wireID,
 		}
 		respBytes, _ := json.Marshal(response)
 		ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)
-		go ms.sendSubscriptionMessages(conn, subID)
+		go ms.sendSubscriptionMessages(conn, subID, wireID)
 	}
 }
 
-// firstStringParam returns params[0] when it is a string, which is the shape every
-// unsubscribe in every spec uses to name the subscription being torn down.
-func firstStringParam(params interface{}) (string, bool) {
+// firstSubscriptionParam returns params[0] rendered the way createSubscription keys
+// subscriptions: a string verbatim, a number in decimal.
+//
+// Accepting the number matters. Solana numbers its subscriptions, so a string-only check
+// reads accountUnsubscribe(23784) as a fresh subscribe and answers with a new id instead of
+// tearing the old one down — which is the same "the harness can only speak EVM" blindness
+// that hid MAG-3345.
+func (ms *mockSubscriptionServer) firstSubscriptionParam(params interface{}) (string, bool) {
 	list, ok := params.([]interface{})
 	if !ok || len(list) == 0 {
 		return "", false
 	}
-	s, ok := list[0].(string)
-	return s, ok
+	switch v := list[0].(type) {
+	case string:
+		// A node that numbers its subscriptions does not answer to a quoted id. Being
+		// strict here is what makes the teardown param's shape observable: a lenient mock
+		// accepts the router's canonical decimal string and hides the bug.
+		if ms.numericIDs {
+			return "", false
+		}
+		return v, true
+	case float64:
+		return strconv.FormatInt(int64(v), 10), true
+	}
+	return "", false
 }
 
 func (ms *mockSubscriptionServer) recordMethod(method string) {
@@ -157,12 +185,27 @@ func (ms *mockSubscriptionServer) hasSubscription(subID string) bool {
 	return ok
 }
 
-func (ms *mockSubscriptionServer) createSubscription() string {
+// createSubscription mints the next subscription id: the key the server tracks it under,
+// and the JSON value it puts on the wire. The first non-numeric id is subscriptionID
+// unchanged, so tests written against the old fixed-id harness keep their expectations.
+func (ms *mockSubscriptionServer) createSubscription() (key string, wire any) {
 	ms.lock.Lock()
 	defer ms.lock.Unlock()
 
-	ms.subscriptions[ms.subscriptionID] = make(chan struct{})
-	return ms.subscriptionID
+	ms.subscriptionSeq++
+	if ms.numericIDs {
+		id := ms.firstNumericID + ms.subscriptionSeq - 1
+		key = strconv.Itoa(id)
+		ms.subscriptions[key] = make(chan struct{})
+		return key, id
+	}
+
+	key = ms.subscriptionID
+	if ms.subscriptionSeq > 1 {
+		key = fmt.Sprintf("%s-%d", ms.subscriptionID, ms.subscriptionSeq)
+	}
+	ms.subscriptions[key] = make(chan struct{})
+	return key, key
 }
 
 func (ms *mockSubscriptionServer) closeSubscription(subID string) {
@@ -175,7 +218,7 @@ func (ms *mockSubscriptionServer) closeSubscription(subID string) {
 	}
 }
 
-func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn, subID string) {
+func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn, subID string, wireID any) {
 	ms.lock.RLock()
 	closeCh, exists := ms.subscriptions[subID]
 	ms.lock.RUnlock()
@@ -198,7 +241,7 @@ func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn,
 				"jsonrpc": "2.0",
 				"method":  ms.notificationMethod,
 				"params": map[string]interface{}{
-					"subscription": subID,
+					"subscription": wireID,
 					"result": map[string]interface{}{
 						"number": counter,
 					},
@@ -1475,30 +1518,76 @@ func TestRewriteSubscriptionID_Substrate(t *testing.T) {
 		"the payload must be relayed unchanged")
 }
 
-// TestRewriteSubscriptionID_SolanaUntouched pins the boundary of the MAG-3345 rewrite.
-// Solana's ids are integers, so a router id cannot stand in for one. Matching on the
-// params envelope brings those frames into range of the rewrite for the first time, and
-// they must keep falling through to pass-through rather than acquiring a string id.
-func TestRewriteSubscriptionID_SolanaUntouched(t *testing.T) {
+// TestRewriteSubscriptionID_SolanaNumeric supersedes MAG-3345's
+// TestRewriteSubscriptionID_SolanaUntouched, which asserted that a Solana frame passed
+// through carrying the upstream id. That was the correct boundary while router ids were
+// always strings — a string id is one a Solana client cannot hand back to
+// accountUnsubscribe. Now that router ids follow the chain's own shape, the frame must be
+// rewritten like any other, with the id staying a JSON number (MAG-3359).
+func TestRewriteSubscriptionID_SolanaNumeric(t *testing.T) {
 	solanaMsg := &rpcclient.JsonrpcMessage{
 		Method: "accountNotification",
 		Params: json.RawMessage(`{"subscription":23784,"result":{"context":{"slot":5208469}}}`),
 	}
 
-	result, err := rewriteSubscriptionID(solanaMsg, "rs_router_1")
+	result, err := rewriteSubscriptionID(solanaMsg, "1000001")
 	require.NoError(t, err)
 
 	var parsed struct {
 		Method string `json:"method"`
 		Params struct {
 			Subscription json.RawMessage `json:"subscription"`
+			Result       json.RawMessage `json:"result"`
 		} `json:"params"`
 	}
 	require.NoError(t, json.Unmarshal(result, &parsed))
 
 	assert.Equal(t, "accountNotification", parsed.Method)
-	assert.JSONEq(t, `23784`, string(parsed.Params.Subscription),
-		"an integer subscription id must not be replaced by a string router id")
+	assert.JSONEq(t, `1000001`, string(parsed.Params.Subscription),
+		"the router id must replace the upstream id")
+	assert.Equal(t, "1000001", string(parsed.Params.Subscription),
+		"and must stay a JSON number — a quoted id is one accountUnsubscribe cannot use")
+	assert.JSONEq(t, `{"context":{"slot":5208469}}`, string(parsed.Params.Result))
+}
+
+// TestRewriteSubscriptionID_NonScalarIDUntouched keeps the rewrite off anything that is not
+// a string or a number, rather than coercing it.
+func TestRewriteSubscriptionID_NonScalarIDUntouched(t *testing.T) {
+	msg := &rpcclient.JsonrpcMessage{
+		Method: "oddNotification",
+		Params: json.RawMessage(`{"subscription":{"nested":true},"result":{}}`),
+	}
+
+	result, err := rewriteSubscriptionID(msg, "1000001")
+	require.NoError(t, err)
+	assert.Contains(t, string(result), `"nested":true`,
+		"an object id is not something a router id can stand in for; pass it through")
+}
+
+// TestExtractSubscriptionID_Numeric covers the upstream id arriving as a number. Returning
+// "" here — which is what a string-only decode did — left the router with no mapping to
+// translate back to on unsubscribe.
+func TestExtractSubscriptionID_Numeric(t *testing.T) {
+	assert.Equal(t, "23784", extractSubscriptionID(&rpcclient.JsonrpcMessage{
+		Result: json.RawMessage(`23784`),
+	}), "a numbered subscription must canonicalise to its decimal string")
+
+	assert.Equal(t, "0xabc", extractSubscriptionID(&rpcclient.JsonrpcMessage{
+		Result: json.RawMessage(`"0xabc"`),
+	}), "a named subscription is unchanged")
+
+	assert.Equal(t, "", extractSubscriptionID(&rpcclient.JsonrpcMessage{
+		Result: json.RawMessage(`{"query":"tm.event='NewBlock'"}`),
+	}), "an object result names no subscription")
+}
+
+// TestSubscriptionIDValue_ShapesForTheWire pins the one place the string/number distinction
+// is allowed to exist: the wire. Everything inside the router is the decimal string.
+func TestSubscriptionIDValue_ShapesForTheWire(t *testing.T) {
+	assert.Equal(t, int64(1000001), subscriptionIDValue("1000001", true))
+	assert.Equal(t, "1000001", subscriptionIDValue("1000001", false))
+	assert.Equal(t, "rs_abc123_00001", subscriptionIDValue("rs_abc123_00001", true),
+		"an id that is not a number must not be mangled into one")
 }
 
 // TestDirectWSSubscriptionManager_TendermintAPIInterface tests manager with Tendermint API interface
@@ -2856,5 +2945,297 @@ func TestEndToEnd_SubstratePushFrameReachesClient(t *testing.T) {
 		assert.NotEmpty(t, frame.Params.Result, "the payload must be relayed")
 	case <-time.After(5 * time.Second):
 		t.Fatal("no push frame reached the client within 5s — the subscription is dead end-to-end")
+	}
+}
+
+// --- MAG-3359: chains that number their subscriptions -----------------------------------
+
+// TestUnsubscribeParamsExtraction_SolanaNumeric covers the client sending its id back as a
+// JSON number. A string-only type assertion rejected it outright, so the unsubscribe failed
+// before it ever reached the ownership check.
+func TestUnsubscribeParamsExtraction_SolanaNumeric(t *testing.T) {
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "SOLANA", "jsonrpc",
+		[]*common.NodeUrl{{Url: "ws://localhost:8900"}},
+		nil, nil, nil,
+	)
+
+	numeric := &mockWSProtocolMessage{
+		method: "accountUnsubscribe",
+		params: []interface{}{int64(1000001)},
+	}
+	id, err := manager.extractSubscriptionIDFromUnsubscribe(numeric)
+	require.NoError(t, err)
+	assert.Equal(t, "1000001", id, "a numbered id must canonicalise to its decimal string")
+
+	named := &mockWSProtocolMessage{
+		method: "eth_unsubscribe",
+		params: []interface{}{"0x1a2b3c4d"},
+	}
+	id, err = manager.extractSubscriptionIDFromUnsubscribe(named)
+	require.NoError(t, err)
+	assert.Equal(t, "0x1a2b3c4d", id, "a named id is unchanged")
+}
+
+// TestCreateSubscriptionReply_SolanaNumeric pins the reply shape. Solana's collection is
+// jsonrpc, so it lands in the same branch as EVM — the number/string decision has to come
+// from the node's own response, not from the api interface.
+func TestCreateSubscriptionReply_SolanaNumeric(t *testing.T) {
+	upstream := &rpcclient.JsonrpcMessage{
+		ID:     json.RawMessage(`7`),
+		Result: json.RawMessage(`23784`),
+	}
+
+	reply, err := createSubscriptionReply("1000001", json.RawMessage(`7`), upstream, "jsonrpc")
+	require.NoError(t, err)
+
+	var parsed struct {
+		ID     json.RawMessage `json:"id"`
+		Result json.RawMessage `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(reply, &parsed))
+	assert.JSONEq(t, `7`, string(parsed.ID))
+	assert.Equal(t, "1000001", string(parsed.Result),
+		"result must be the router id as a JSON number, not the upstream id and not a string")
+}
+
+// solanaSubscribeMessage builds the accountSubscribe the tests below drive the manager with.
+func solanaSubscribeMessage(t *testing.T, requestID int) *mockWSProtocolMessageWithRawData {
+	t.Helper()
+	const account = "Vote111111111111111111111111111111111111111"
+	body, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "method": "accountSubscribe",
+		"params": []interface{}{account}, "id": requestID,
+	})
+	require.NoError(t, err)
+	return &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{
+			method: "accountSubscribe",
+			params: []interface{}{account},
+		},
+		rawData: body,
+	}
+}
+
+// newSolanaMockServer returns a mock upstream that behaves like a Solana node: it numbers
+// its subscriptions and names its push frames after the payload.
+func newSolanaMockServer() *mockSubscriptionServer {
+	ms := newMockSubscriptionServer()
+	ms.messageInterval = 20 * time.Millisecond
+	ms.notificationMethod = "accountNotification"
+	ms.numericIDs = true
+	return ms
+}
+
+func newSolanaManager(nodeUrl *common.NodeUrl) *DirectWSSubscriptionManager {
+	return NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "SOLANA", "jsonrpc",
+		[]*common.NodeUrl{nodeUrl},
+		nil, nil, nil,
+	)
+}
+
+// numericSubscriptionID reads the id out of a subscribe reply, failing the test unless it is
+// an unquoted JSON number. The quoting is the whole point: a Solana client stores whatever
+// `result` gave it and hands that straight back to accountUnsubscribe.
+func numericSubscriptionID(t *testing.T, replyData []byte) int64 {
+	t.Helper()
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(replyData, &resp))
+	var id int64
+	require.NoError(t, json.Unmarshal(resp.Result, &id),
+		"result must be a JSON number, got %s", resp.Result)
+	return id
+}
+
+// TestEndToEnd_SolanaNumericSubscriptionRoundTrip is the regression for MAG-3359. It runs
+// over a real WebSocket against a node that numbers its subscriptions, so every site the
+// ticket enumerated is live at once: the dispatcher that decides a frame is a push at all,
+// the upstream-id extraction, the reply shape, the per-frame rewrite, and both ends of
+// unsubscribe.
+//
+// Before the fix nothing arrived on repliesChan at all, exactly as for Substrate — the
+// dispatcher never recognised accountNotification, so the router answered the node with an
+// "invalid request" for every push instead of delivering it.
+func TestEndToEnd_SolanaNumericSubscriptionRoundTrip(t *testing.T) {
+	mockSrv := newSolanaMockServer()
+	defer mockSrv.Close()
+
+	manager := newSolanaManager(&common.NodeUrl{Url: mockSrv.URL()})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	const dappID, ip, wsUID = "dapp-sol", "192.168.99.96", "ws-sol"
+	reply, repliesChan, err := manager.StartSubscription(ctx, solanaSubscribeMessage(t, 1), dappID, ip, wsUID, nil)
+	require.NoError(t, err, "the subscribe half always worked")
+	require.NotNil(t, reply)
+	require.NotNil(t, repliesChan)
+
+	routerSubID := numericSubscriptionID(t, reply.Data)
+	require.NotEqual(t, int64(23784), routerSubID,
+		"the router must issue its own id; passing the upstream one through is what breaks on reconnect")
+
+	select {
+	case notif := <-repliesChan:
+		require.NotNil(t, notif, "a Solana subscription must deliver push frames")
+		var frame struct {
+			Method string `json:"method"`
+			Params struct {
+				Subscription json.RawMessage `json:"subscription"`
+				Result       json.RawMessage `json:"result"`
+			} `json:"params"`
+		}
+		require.NoError(t, json.Unmarshal(notif.Data, &frame))
+		assert.Equal(t, "accountNotification", frame.Method)
+		assert.Equal(t, strconv.FormatInt(routerSubID, 10), string(frame.Params.Subscription),
+			"the push must carry the router id, still unquoted")
+		assert.NotEmpty(t, frame.Params.Result, "the payload must be relayed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("no push frame reached the client within 5s — the subscription is dead end-to-end")
+	}
+
+	unsubBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "method": "accountUnsubscribe",
+		"params": []interface{}{routerSubID}, "id": 2,
+	})
+	require.NoError(t, err)
+	unsubMsg := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{
+			method: "accountUnsubscribe",
+			params: []interface{}{routerSubID},
+		},
+		rawData: unsubBody,
+	}
+
+	nodeResp, err := manager.Unsubscribe(ctx, unsubMsg, dappID, ip, wsUID, nil)
+	require.NoError(t, err, "unsubscribe with the issued numeric id must not be rejected")
+	require.NotNil(t, nodeResp)
+
+	observed := mockSrv.ObservedMethods()
+	require.Contains(t, observed, "accountSubscribe")
+	require.Contains(t, observed, "accountUnsubscribe")
+
+	mockSrv.lock.RLock()
+	leftover := len(mockSrv.subscriptions)
+	mockSrv.lock.RUnlock()
+	assert.Equal(t, 0, leftover,
+		"the node must have been sent its own integer id; the router id would have matched nothing there")
+}
+
+// TestEndToEnd_SolanaJoiningClientGetsItsOwnNumericID covers the dedup path. A second client
+// on the same params joins the one upstream subscription and is issued its own id — which
+// has to be a number too, since the id-shape decision lives on the subscription rather than
+// being re-derived from a node response the joining client never sees.
+func TestEndToEnd_SolanaJoiningClientGetsItsOwnNumericID(t *testing.T) {
+	mockSrv := newSolanaMockServer()
+	defer mockSrv.Close()
+
+	manager := newSolanaManager(&common.NodeUrl{Url: mockSrv.URL()})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	firstReply, firstChan, err := manager.StartSubscription(ctx, solanaSubscribeMessage(t, 1), "dapp-a", "10.0.0.1", "ws-a", nil)
+	require.NoError(t, err)
+	require.NotNil(t, firstChan)
+	firstID := numericSubscriptionID(t, firstReply.Data)
+
+	secondReply, secondChan, err := manager.StartSubscription(ctx, solanaSubscribeMessage(t, 2), "dapp-b", "10.0.0.2", "ws-b", nil)
+	require.NoError(t, err)
+	require.NotNil(t, secondChan, "the second client must join, not be turned away")
+	secondID := numericSubscriptionID(t, secondReply.Data)
+
+	assert.NotEqual(t, firstID, secondID, "each client gets its own id")
+
+	require.Equal(t, 1, len(manager.activeSubscriptions),
+		"identical params must share one upstream subscription")
+
+	for name, ch := range map[string]<-chan *pairingtypes.RelayReply{"first": firstChan, "second": secondChan} {
+		select {
+		case notif := <-ch:
+			require.NotNil(t, notif)
+			assert.Contains(t, string(notif.Data), `"accountNotification"`,
+				"%s client should receive the push", name)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s client received no push frame within 5s", name)
+		}
+	}
+}
+
+// TestSolanaRouterIDSurvivesUpstreamReconnect is the assertion that encodes why the router
+// issues its own numeric id rather than relaying the node's.
+//
+// Passing the upstream id through would have been a far smaller change, and it is what the
+// ticket floated as the cheap option. This test is why it was rejected:
+// handleUpstreamDisconnect re-subscribes and the node answers with a DIFFERENT id, so a
+// client holding the upstream one would silently be left with an id that names nothing —
+// pushes tagged with an id it never saw, and an unsubscribe that cannot be matched.
+func TestSolanaRouterIDSurvivesUpstreamReconnect(t *testing.T) {
+	mockSrv := newSolanaMockServer()
+	defer mockSrv.Close()
+
+	manager := newSolanaManager(&common.NodeUrl{Url: mockSrv.URL()})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	const dappID, ip, wsUID = "dapp-sol", "192.168.99.95", "ws-sol"
+	reply, repliesChan, err := manager.StartSubscription(ctx, solanaSubscribeMessage(t, 1), dappID, ip, wsUID, nil)
+	require.NoError(t, err)
+	routerSubID := numericSubscriptionID(t, reply.Data)
+
+	clientKey := manager.CreateWebSocketConnectionUniqueKey(dappID, ip, wsUID)
+
+	manager.lock.RLock()
+	require.Len(t, manager.activeSubscriptions, 1)
+	var hashedParams string
+	var activeSub *directActiveSubscription
+	for hp, sub := range manager.activeSubscriptions {
+		hashedParams, activeSub = hp, sub
+	}
+	upstreamBefore := activeSub.upstreamID
+	manager.lock.RUnlock()
+
+	require.Equal(t, "23784", upstreamBefore, "the first upstream subscription")
+
+	// Drain whatever the original subscription already delivered, so the frame asserted on
+	// below is unambiguously one the restored subscription produced.
+	drain := time.After(200 * time.Millisecond)
+drainLoop:
+	for {
+		select {
+		case <-repliesChan:
+		case <-drain:
+			break drainLoop
+		}
+	}
+
+	manager.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
+
+	manager.lock.RLock()
+	upstreamAfter := activeSub.upstreamID
+	routerIDAfter := activeSub.clientRouterIDs[clientKey]
+	manager.lock.RUnlock()
+
+	require.NotEqual(t, upstreamBefore, upstreamAfter,
+		"the node must have issued a new id, or this test proves nothing")
+	assert.Equal(t, strconv.FormatInt(routerSubID, 10), routerIDAfter,
+		"the client's id must be unchanged across the reconnect — that is what the indirection buys")
+
+	select {
+	case notif := <-repliesChan:
+		require.NotNil(t, notif)
+		var frame struct {
+			Params struct {
+				Subscription json.RawMessage `json:"subscription"`
+			} `json:"params"`
+		}
+		require.NoError(t, json.Unmarshal(notif.Data, &frame))
+		assert.Equal(t, strconv.FormatInt(routerSubID, 10), string(frame.Params.Subscription),
+			"post-reconnect frames must still carry the id the client holds, not upstream %q", upstreamAfter)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no push frame after the reconnect — the subscription was not restored")
 	}
 }

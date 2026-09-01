@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -97,9 +98,50 @@ func (msg *JsonrpcMessage) isEthereumNotification() bool {
 		strings.HasSuffix(msg.Method, ethereumNotificationMethodSuffix)
 }
 
+// CanonicalSubscriptionID renders a raw JSON subscription id in the decimal-string form
+// the client dispatcher keys subscriptions under, and reports whether raw named one at all.
+//
+// A string id is used verbatim. A numbered id is rendered with strconv, matching how
+// handleResponse registers one: a node that answers subscribe with a number lands in the
+// integer fallback there and is stored under strconv.Itoa of it. Keying both shapes the
+// same way is what lets one lookup serve every chain — and why this is exported: the
+// router canonicalises upstream ids with it too, and a divergence between the two would
+// silently drop every push.
+//
+// Solana is the only supported chain that numbers its subscriptions (MAG-3359).
+func CanonicalSubscriptionID(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return asString, asString != ""
+	}
+	var asNumber int64
+	if err := json.Unmarshal(raw, &asNumber); err == nil {
+		return strconv.FormatInt(asNumber, 10), true
+	}
+	return "", false
+}
+
+// subscriptionIDFromParams returns the subscription named by a push frame's params
+// envelope, canonicalised for the clientSubs lookup.
+func subscriptionIDFromParams(params json.RawMessage) (string, bool) {
+	if params == nil {
+		return "", false
+	}
+	var envelope struct {
+		Subscription json.RawMessage `json:"subscription"`
+	}
+	if err := json.Unmarshal(params, &envelope); err != nil {
+		return "", false
+	}
+	return CanonicalSubscriptionID(envelope.Subscription)
+}
+
 // isSubscriptionNotification recognises a server-to-client subscription push by its
 // shape rather than by its method name: a method-bearing message whose params name a
-// string subscription.
+// subscription.
 //
 // Every predicate above keys off the method name, which only works for chains that
 // name the frame after the subscription mechanism (eth_subscription, *Notification).
@@ -108,21 +150,17 @@ func (msg *JsonrpcMessage) isEthereumNotification() bool {
 // envelope as Ethereum. No suffix rule can cover that, so nothing delivered those
 // frames and every Substrate subscription was silently dead (MAG-3345).
 //
-// The string check keeps this off Solana, whose ids are integers. Solana pushes are
-// unhandled today for a separate reason — handleImmediate's solana branch sits inside
-// the isEthereumNotification case, and that predicate itself requires the
-// "_subscription" suffix, which "accountNotification" does not have, so the branch is
-// unreachable. Delivering them needs an integer-id router mapping the id mapper cannot
-// express, which is its own change; MAG-3345 is the Substrate gap.
+// Solana frames (accountNotification and friends) reach this case too, and for the same
+// reason: the solana branch above is unreachable, because its enclosing
+// isEthereumNotification requires the "_subscription" suffix that accountNotification
+// does not have. They differ only in numbering the subscription rather than naming it,
+// which CanonicalSubscriptionID absorbs (MAG-3359).
 func (msg *JsonrpcMessage) isSubscriptionNotification() bool {
 	if msg.Method == "" || msg.Params == nil {
 		return false
 	}
-	var result ethereumSubscriptionResult
-	if err := json.Unmarshal(msg.Params, &result); err != nil {
-		return false
-	}
-	return result.ID != ""
+	_, ok := subscriptionIDFromParams(msg.Params)
+	return ok
 }
 
 func (msg *JsonrpcMessage) isTendermintNotification() bool {

@@ -241,6 +241,11 @@ func (h *handler) handleImmediate(msg *JsonrpcMessage) bool {
 			h.handleSubscriptionResultEthereum(msg)
 			return true
 		} else if strings.HasSuffix(msg.Method, solanaNotificationMethodSuffix) {
+			// Unreachable: isEthereumNotification above already required the
+			// "_subscription" suffix, which no *Notification method has. Solana frames
+			// are served by the isSubscriptionNotification case below instead — left
+			// in place only so removing it is not confused with a behaviour change
+			// (MAG-3359).
 			h.handleSubscriptionResultSolana(msg)
 			return true
 		}
@@ -273,17 +278,16 @@ func (h *handler) handleImmediate(msg *JsonrpcMessage) bool {
 // fell through to handleCallMsg, which has no id and no matching method to serve, so the
 // router answered the node with an "invalid request" error for every push it received.
 func (h *handler) handleSubscriptionResultByParams(msg *JsonrpcMessage) {
-	var result ethereumSubscriptionResult
-	if err := json.Unmarshal(msg.Params, &result); err != nil {
+	id, ok := subscriptionIDFromParams(msg.Params)
+	if !ok {
 		utils.LavaFormatTrace("Dropping invalid subscription message",
-			utils.LogAttr("err", err),
 			utils.LogAttr("params", string(msg.Params)),
 		)
 		h.log.Debug("Dropping invalid subscription message")
 		return
 	}
-	if h.clientSubs[result.ID] != nil {
-		h.clientSubs[result.ID].deliver(msg)
+	if h.clientSubs[id] != nil {
+		h.clientSubs[id].deliver(msg)
 	}
 }
 
