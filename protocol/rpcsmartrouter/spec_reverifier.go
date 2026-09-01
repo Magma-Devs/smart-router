@@ -80,7 +80,9 @@ type chainReverifyInputs struct {
 	// recordAdmission publishes a freshly computed per-collection admission so the
 	// endpoint builder stops using the boot-time one. Nil in tests that do not
 	// build endpoints.
-	recordAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission)
+	// It returns true when the admitted set actually moved, which is what tells
+	// applyReverification to rebuild that provider's session.
+	recordAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool
 	// demoteFailStreak counts CONSECUTIVE failed re-verify cycles per active provider, keyed
 	// "<tier>|<name>" so a name configured in both tiers cannot share a counter. It is the only
 	// state that survives between epoch ticks, and it exists so a transient outage overlapping
@@ -198,6 +200,11 @@ func applyReverification(
 	if len(configured) == 0 {
 		return fresh, nil, nil
 	}
+	// Providers whose admitted service set moved during this pass. They are
+	// rebuilt below rather than left with the endpoints they were built with.
+	var admissionMovedMu sync.Mutex
+	admissionMoved := map[string]struct{}{}
+
 	probe := inputs.validateFn
 	if probe == nil {
 		probe = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
@@ -215,8 +222,11 @@ func applyReverification(
 			if err != nil {
 				return err
 			}
-			if inputs.recordAdmission != nil {
-				inputs.recordAdmission(p, admission)
+			if inputs.recordAdmission != nil && inputs.recordAdmission(p, admission) {
+				// Probes run concurrently, so the set of movers is guarded.
+				admissionMovedMu.Lock()
+				admissionMoved[p.Name] = struct{}{}
+				admissionMovedMu.Unlock()
 			}
 			return nil
 		}
@@ -286,13 +296,29 @@ func applyReverification(
 		streakKey := tier.String() + "|" + p.Name
 		if err == nil {
 			delete(inputs.demoteFailStreak, streakKey)
-			healthyNames[p.Name] = struct{}{}
-			if !wasActive {
+			_, moved := admissionMoved[p.Name]
+			switch {
+			case !wasActive:
 				toAdmit = append(toAdmit, p)
 				utils.LavaFormatInfo("re-verify: "+tier.String()+" provider recovered",
 					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 					utils.LogAttr("provider", p.Name),
 				)
+			case moved:
+				// Rebuild in place. Leaving it out of healthyNames demotes the stale
+				// session, so the caller closes its connections after the pairing has
+				// swung over, and toAdmit rebuilds it from config with the admission
+				// just recorded. Re-validating alone would not do it: an active
+				// session is refreshed from its OWN endpoints, so a service that has
+				// recovered — or one newly refused — would not reach the pairing until
+				// the provider happened to be demoted and promoted (MAG-3326 review).
+				toAdmit = append(toAdmit, p)
+				utils.LavaFormatInfo("re-verify: rebuilding "+tier.String()+" provider, admitted services changed",
+					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+					utils.LogAttr("provider", p.Name),
+				)
+			default:
+				healthyNames[p.Name] = struct{}{}
 			}
 			continue
 		}
@@ -460,7 +486,9 @@ func validateProviderTier(
 	chainParser chainlib.ChainParser,
 	tier reverifyTier,
 	validate func(context.Context, *lavasession.RPCStaticProviderEndpoint) error,
-	recordAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission),
+	// It returns true when the admitted set actually moved, which is what tells
+	// applyReverification to rebuild that provider's session.
+	recordAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool,
 ) (map[*lavasession.RPCStaticProviderEndpoint]struct{}, []*lavasession.RPCStaticProviderEndpoint) {
 	failedSet := make(map[*lavasession.RPCStaticProviderEndpoint]struct{})
 	if len(providers) == 0 {

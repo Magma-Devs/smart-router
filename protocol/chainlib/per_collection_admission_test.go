@@ -234,3 +234,36 @@ func TestValidateCollections_HealthyProviderRefusesNothing(t *testing.T) {
 	require.True(t, keep)
 	require.Equal(t, []string{"archive"}, services)
 }
+
+// TestProviderAdmission_Equal covers the change detection the epoch path rebuilds
+// on. An active session is refreshed from its OWN endpoints, so noticing that the
+// admitted set moved is the only thing that gets a recovered service back into the
+// pairing without waiting for a demote/promote cycle.
+func TestProviderAdmission_Equal(t *testing.T) {
+	url := common.NodeUrl{Url: "https://a", InternalPath: "", Addons: []string{"archive", "debug"}}
+	other := common.NodeUrl{Url: "https://b", Addons: []string{"archive"}}
+
+	var empty ProviderAdmission
+	require.True(t, empty.Equal(ProviderAdmission{}), "two clean passes are equal")
+
+	var one ProviderAdmission
+	one.fail(url, "archive")
+	require.False(t, empty.Equal(one), "a service becoming refused is a change")
+	require.False(t, one.Equal(empty), "and a service recovering is too")
+
+	var same ProviderAdmission
+	same.fail(url, "archive")
+	require.True(t, one.Equal(same), "the same refusal twice is not a change")
+
+	var two ProviderAdmission
+	two.fail(url, "archive")
+	two.fail(url, "debug")
+	require.False(t, one.Equal(two), "a second refusal on the same url is a change")
+
+	// Same service name, different url: distinct refusals, so not equal. Length
+	// alone would not catch this.
+	var elsewhere ProviderAdmission
+	elsewhere.fail(other, "archive")
+	require.False(t, one.Equal(elsewhere), "same service on a different url is a different refusal")
+	require.Equal(t, len(one.refused), len(elsewhere.refused), "and the counts match, so length alone cannot tell")
+}

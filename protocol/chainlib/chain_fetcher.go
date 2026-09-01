@@ -225,6 +225,23 @@ func (a *ProviderAdmission) fail(url common.NodeUrl, service string) {
 // Any reports whether any service was refused.
 func (a ProviderAdmission) Any() bool { return len(a.refused) > 0 }
 
+// Equal reports whether two admissions refuse exactly the same services. The
+// epoch path uses it to notice that a provider's admitted set has moved, which
+// is the trigger for rebuilding its session — an active session reuses the
+// endpoints it was built with, so a recovered service is not picked up by
+// re-validating alone.
+func (a ProviderAdmission) Equal(other ProviderAdmission) bool {
+	if len(a.refused) != len(other.refused) {
+		return false
+	}
+	for key := range a.refused {
+		if _, ok := other.refused[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // AdmittedServices returns the services this url may still claim, and whether the
 // url is worth building an endpoint for at all.
 //

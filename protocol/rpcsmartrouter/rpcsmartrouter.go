@@ -2428,12 +2428,18 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		defer admissionMu.RUnlock()
 		return admissionsByProvider[provider]
 	}
-	recordAdmission := func(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
+	// Returns whether the admitted set actually moved. applyReverification uses
+	// that to rebuild the provider's session: an active session is refreshed from
+	// its OWN endpoints, so recording a new admission is not by itself enough to
+	// get a recovered service back into the pairing.
+	recordAdmission := func(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
 		admissionMu.Lock()
 		defer admissionMu.Unlock()
+		previous, seen := admissionsByProvider[provider]
 		// Assigned unconditionally, including an empty admission: that is how a
 		// service that has recovered gets un-refused.
 		admissionsByProvider[provider] = admission
+		return seen && !previous.Equal(admission)
 	}
 
 	// Helper function to convert provider endpoints to sessions
