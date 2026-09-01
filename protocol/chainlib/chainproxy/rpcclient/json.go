@@ -139,30 +139,6 @@ func subscriptionIDFromParams(params json.RawMessage) (string, bool) {
 	return CanonicalSubscriptionID(envelope.Subscription)
 }
 
-// isSubscriptionNotification recognises a server-to-client subscription push by its
-// shape rather than by its method name: a method-bearing message whose params name a
-// subscription.
-//
-// Every predicate above keys off the method name, which only works for chains that
-// name the frame after the subscription mechanism (eth_subscription, *Notification).
-// Substrate names it after the payload — chain_newHead, state_storage,
-// author_extrinsicUpdate — while using the identical {subscription, result} params
-// envelope as Ethereum. No suffix rule can cover that, so nothing delivered those
-// frames and every Substrate subscription was silently dead (MAG-3345).
-//
-// Solana frames (accountNotification and friends) reach this case too, and for the same
-// reason: the solana branch above is unreachable, because its enclosing
-// isEthereumNotification requires the "_subscription" suffix that accountNotification
-// does not have. They differ only in numbering the subscription rather than naming it,
-// which CanonicalSubscriptionID absorbs (MAG-3359).
-func (msg *JsonrpcMessage) isSubscriptionNotification() bool {
-	if msg.Method == "" || msg.Params == nil {
-		return false
-	}
-	_, ok := subscriptionIDFromParams(msg.Params)
-	return ok
-}
-
 func (msg *JsonrpcMessage) isTendermintNotification() bool {
 	var result tendermintSubscribeReply
 	err := json.Unmarshal(msg.Result, &result)

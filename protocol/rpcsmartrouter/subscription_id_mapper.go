@@ -31,9 +31,12 @@ type SubscriptionIDMapper struct {
 	// clientCounters tracks per-client monotonic counters for ID generation
 	clientCounters map[string]*atomic.Uint64
 
-	// numericCounter backs GenerateNumericRouterID. It is process-wide rather than
-	// per-client because a numeric id is handed to the client verbatim and is compared
-	// against upstream ids during unsubscribe, so it has to be unique across all clients.
+	// numericCounter backs GenerateNumericRouterID. Unlike clientCounters it is not
+	// per-client: a numeric id is handed to the client verbatim and is compared against
+	// upstream ids during unsubscribe, so it has to be unique across every client this
+	// mapper serves. That is the scope the lookups actually need — each manager builds its
+	// own mapper, so two managers do issue the same numbers, and nothing may key across
+	// them on this value.
 	numericCounter atomic.Uint64
 
 	lock sync.RWMutex
@@ -86,7 +89,8 @@ func (m *SubscriptionIDMapper) GenerateRouterID(clientKey string) string {
 // and is rendered as a JSON number only where it reaches the wire.
 //
 // Unlike GenerateRouterID the counter is not per-client: the value is visible to the client
-// and is matched against upstream ids on unsubscribe, so it must be globally unique.
+// and is matched against upstream ids on unsubscribe, so it must be unique across every
+// client this mapper serves.
 func (m *SubscriptionIDMapper) GenerateNumericRouterID() string {
 	return strconv.FormatUint(numericRouterIDBase+m.numericCounter.Add(1), 10)
 }
