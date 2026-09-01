@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -30,8 +31,25 @@ type SubscriptionIDMapper struct {
 	// clientCounters tracks per-client monotonic counters for ID generation
 	clientCounters map[string]*atomic.Uint64
 
+	// numericCounter backs GenerateNumericRouterID. It is process-wide rather than
+	// per-client because a numeric id is handed to the client verbatim and is compared
+	// against upstream ids during unsubscribe, so it has to be unique across all clients.
+	numericCounter atomic.Uint64
+
 	lock sync.RWMutex
 }
+
+// numericRouterIDBase offsets generated numeric ids clear of the range nodes use for their
+// own, so a router id can never collide with some other subscription's upstream id during
+// the unsubscribe lookup — without that lookup having to know which is which.
+//
+// The base is deliberately far above anything a node plausibly issues rather than merely
+// above what Solana is observed to issue today, so the guarantee does not rest on node
+// behaviour. The ceiling is the other side of it: ids are JSON numbers, and a JavaScript
+// client parses them as float64, so base plus counter has to stay under 2^53 to survive the
+// round trip. 2^40 leaves roughly four thousand times more headroom than any one process
+// will ever need.
+const numericRouterIDBase = 1 << 40
 
 // NewSubscriptionIDMapper creates a new subscription ID mapper
 func NewSubscriptionIDMapper() *SubscriptionIDMapper {
@@ -60,6 +78,17 @@ func (m *SubscriptionIDMapper) GenerateRouterID(clientKey string) string {
 	count := counter.Add(1)
 
 	return fmt.Sprintf("rs_%s_%05d", clientHash, count)
+}
+
+// GenerateNumericRouterID creates a router subscription ID for chains that number their
+// subscriptions rather than naming them (Solana). The id is returned in the same canonical
+// decimal-string form as every other id here — every map in this type stays string-keyed —
+// and is rendered as a JSON number only where it reaches the wire.
+//
+// Unlike GenerateRouterID the counter is not per-client: the value is visible to the client
+// and is matched against upstream ids on unsubscribe, so it must be globally unique.
+func (m *SubscriptionIDMapper) GenerateNumericRouterID() string {
+	return strconv.FormatUint(numericRouterIDBase+m.numericCounter.Add(1), 10)
 }
 
 // RegisterMapping creates the bidirectional mapping between router and upstream IDs.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,13 @@ type directActiveSubscription struct {
 	// Subscription params for restoration after reconnect
 	subscriptionParams []byte // Original subscription params (JSON)
 	subscribeMethod    string // Method name (e.g., "eth_subscribe", "subscribe")
+
+	// numericIDs records that this chain numbers its subscriptions rather than naming
+	// them, read from the subscribe response the node actually sent. It is a property of
+	// the chain, so it survives a reconnect even though upstreamID does not. Only the two
+	// places that cannot read the shape off the message in front of them consult it: the
+	// id issued to a joining client, and the param sent upstream on unsubscribe.
+	numericIDs bool
 
 	// Client tracking - multiple clients can share one upstream subscription
 	connectedClients map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]
@@ -742,8 +750,10 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 
 	// Generate router subscription ID (for EVM deduplication)
 	// For Tendermint, the query string is the identifier, but we still generate
-	// router IDs for internal tracking (not exposed to clients)
-	routerID := dwsm.idMapper.GenerateRouterID(clientKey)
+	// router IDs for internal tracking (not exposed to clients).
+	// The id must be shaped like the one this chain issues, which the node just told us.
+	numericIDs := firstMsg != nil && subscriptionIDsAreNumeric(firstMsg.Result)
+	routerID := dwsm.generateRouterID(clientKey, numericIDs)
 
 	// Extract upstream subscription ID based on API interface
 	// - EVM chains: subscription ID is in the response result (hex string)
@@ -789,6 +799,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		hashedParams:         hashedParams,
 		subscriptionParams:   subscriptionParams, // Store for restoration after reconnect
 		subscribeMethod:      subscribeMethod,    // Store for restoration (eth_subscribe, subscribe, etc.)
+		numericIDs:           numericIDs,         // Chain-level, so it outlives any one upstream id
 		connectedClients:     make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]),
 		firstReply:           firstReply,
 		originalResult:       originalResult, // Store for Tendermint joining clients
@@ -909,6 +920,7 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	// Get upstream connection and params before unlock for the CallContext
 	conn := activeSub.upstreamConnection
 	upstreamID := activeSub.upstreamID
+	numericIDs := activeSub.numericIDs
 	subscribeMethod := activeSub.subscribeMethod
 	// Only call upstream when we're the last client (single client on this subscription)
 	lastClient := len(activeSub.connectedClients) == 1
@@ -922,7 +934,9 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	if dwsm.apiInterface == "tendermintrpc" {
 		unsubscribeParams = map[string]interface{}{"query": upstreamID}
 	} else {
-		unsubscribeParams = []interface{}{upstreamID}
+		// The node is told its own id, in its own shape: Solana rejects the decimal string
+		// the router canonicalises to internally.
+		unsubscribeParams = []interface{}{subscriptionIDValue(upstreamID, numericIDs)}
 	}
 
 	dwsm.lock.Unlock()
@@ -1124,6 +1138,20 @@ func (dwsm *DirectWSSubscriptionManager) UnsubscribeAll(
 }
 
 // getHashedParams extracts and hashes the subscription parameters from a protocol message
+// generateRouterID issues a router subscription id shaped like the ones this chain uses.
+//
+// Chains that number their subscriptions get a number, because the client hands the id
+// straight back on unsubscribe. The router still issues its OWN id rather than passing the
+// upstream one through: an upstream id does not survive a reconnect — handleUpstreamDisconnect
+// re-subscribes and the node answers with a different one — whereas a router id is stable for
+// the life of the client's subscription, which is the whole reason the indirection exists.
+func (dwsm *DirectWSSubscriptionManager) generateRouterID(clientKey string, numeric bool) string {
+	if numeric {
+		return dwsm.idMapper.GenerateNumericRouterID()
+	}
+	return dwsm.idMapper.GenerateRouterID(clientKey)
+}
+
 func (dwsm *DirectWSSubscriptionManager) getHashedParams(protocolMessage chainlib.ProtocolMessage) (hashedParams string, params []byte, err error) {
 	params, err = gojson.Marshal(protocolMessage.GetRPCMessage().GetParams())
 	if err != nil {
@@ -1160,10 +1188,12 @@ func (dwsm *DirectWSSubscriptionManager) extractSubscriptionIDFromUnsubscribe(pr
 		}
 	}
 
-	// For EVM: try to extract as array (JSON-RPC style: ["subscription_id"])
-	var paramsArray []any
+	// Everything else: a JSON-RPC array whose first element names the subscription — a
+	// string on EVM and Substrate, a number on Solana. Decoding into json.RawMessage rather
+	// than `any` is what keeps a large numeric id exact; a float64 would not (MAG-3359).
+	var paramsArray []json.RawMessage
 	if err := gojson.Unmarshal(paramsBytes, &paramsArray); err == nil && len(paramsArray) > 0 {
-		if id, ok := paramsArray[0].(string); ok {
+		if id, ok := rpcclient.CanonicalSubscriptionID(paramsArray[0]); ok {
 			return id, nil
 		}
 	}
@@ -1210,8 +1240,10 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	}
 
 	// Generate a unique router ID for this joining client (for EVM deduplication)
-	// For Tendermint, we still generate IDs for internal tracking but don't expose them
-	clientRouterID := dwsm.idMapper.GenerateRouterID(clientKey)
+	// For Tendermint, we still generate IDs for internal tracking but don't expose them.
+	// The joining client must be issued an id of the same shape as the one the first
+	// client got, which only activeSub still knows.
+	clientRouterID := dwsm.generateRouterID(clientKey, activeSub.numericIDs)
 
 	// Register the mapping: this client's router ID -> shared upstream ID
 	dwsm.idMapper.RegisterMapping(clientRouterID, activeSub.upstreamID)
@@ -1705,15 +1737,48 @@ func extractRequestID(data []byte) json.RawMessage {
 	return req.ID
 }
 
-// extractSubscriptionID extracts the subscription ID from the first response (EVM style)
-// For EVM chains: the subscription ID is returned as a hex string in the result field
+// extractSubscriptionID extracts the subscription ID from the first response.
+//
+// EVM and Substrate name the subscription with a string; Solana numbers it. Both are
+// canonicalised to the decimal-string form the rpcclient dispatcher keys subscriptions
+// under, using that package's own helper so the two cannot drift apart — they are the
+// same identity, and a divergence would strand every push (MAG-3359).
 func extractSubscriptionID(msg *rpcclient.JsonrpcMessage) string {
 	if msg == nil || msg.Result == nil {
 		return ""
 	}
-	var id string
-	if err := json.Unmarshal(msg.Result, &id); err != nil {
-		return ""
+	id, _ := rpcclient.CanonicalSubscriptionID(msg.Result)
+	return id
+}
+
+// subscriptionIDsAreNumeric reports whether a node numbers its subscriptions rather than
+// naming them, read from the raw JSON the node sent rather than from the chain id. Solana
+// is the only supported chain that does.
+func subscriptionIDsAreNumeric(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var asNumber int64
+	return json.Unmarshal(raw, &asNumber) == nil
+}
+
+// subscriptionIDValue renders a canonical (decimal-string) subscription id for the wire in
+// the shape its chain uses: a JSON number where the node numbers its subscriptions, a
+// string everywhere else.
+//
+// The shape is not cosmetic. A Solana client stores whatever the subscribe response gave it
+// and hands that straight back to accountUnsubscribe, so a string there is an id it cannot
+// use.
+//
+// An id that does not parse falls back to the string form. That is unreachable rather than
+// handled: every id reaching here on a numeric chain came from GenerateNumericRouterID or
+// from a node response already canonicalised through CanonicalSubscriptionID. The fallback
+// exists so a future caller cannot turn a bad id into a different valid-looking one.
+func subscriptionIDValue(id string, numeric bool) any {
+	if numeric {
+		if asNumber, err := strconv.ParseInt(id, 10, 64); err == nil {
+			return asNumber
+		}
 	}
 	return id
 }
@@ -1773,11 +1838,13 @@ func createSubscriptionReply(routerID string, requestID json.RawMessage, origina
 		return json.Marshal(obj)
 	}
 
-	// For EVM: response carries the router ID (not the upstream hex) and the caller's id.
+	// Everything else: the response carries the router ID (not the upstream one) and the
+	// caller's id, rendered in the shape this chain names subscriptions with. Solana is
+	// jsonrpc, so it lands here rather than in the Tendermint branch above.
 	response := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      requestID,
-		"result":  routerID,
+		"result":  subscriptionIDValue(routerID, subscriptionIDsAreNumeric(originalMsg.Result)),
 	}
 
 	return json.Marshal(response)
@@ -1799,12 +1866,13 @@ func createSubscriptionReplyFromRouterID(routerID string, requestID json.RawMess
 		return json.Marshal(response)
 	}
 
-	// For EVM: create response with the client's unique router ID and their original request ID
-	// JSON-RPC 2.0 requires the response ID to match the request ID exactly
+	// Everything else: the client's unique router ID and their original request ID, in the
+	// shape this chain names subscriptions with. JSON-RPC 2.0 requires the response ID to
+	// match the request ID exactly.
 	response := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      requestID,
-		"result":  routerID,
+		"result":  subscriptionIDValue(routerID, subscriptionIDsAreNumeric(originalResult)),
 	}
 
 	return json.Marshal(response)
@@ -1817,9 +1885,10 @@ func createSubscriptionReplyFromRouterID(routerID string, requestID json.RawMess
 // rather than from a fixed {subscription, result} pair, so anything a chain adds alongside
 // them survives the rewrite.
 //
-// Returning nil for a non-string id keeps Solana out: its ids are integers, and a router id
-// is not one, so writing a string in would hand the client an id of a type its own
-// unsubscribe cannot use.
+// The router id is written back in the shape the frame used: a number where the upstream
+// numbered its subscription, a string where it named one. Requiring a string here used to
+// exclude Solana entirely, which was correct while router ids were always strings and is
+// wrong now that they follow the chain (MAG-3359).
 func rewriteParamsSubscriptionID(params json.RawMessage, routerID string) json.RawMessage {
 	if params == nil {
 		return nil
@@ -1832,11 +1901,10 @@ func rewriteParamsSubscriptionID(params json.RawMessage, routerID string) json.R
 	if !ok {
 		return nil
 	}
-	var upstreamID string
-	if err := json.Unmarshal(raw, &upstreamID); err != nil {
+	if _, named := rpcclient.CanonicalSubscriptionID(raw); !named {
 		return nil
 	}
-	newID, err := json.Marshal(routerID)
+	newID, err := json.Marshal(subscriptionIDValue(routerID, subscriptionIDsAreNumeric(raw)))
 	if err != nil {
 		return nil
 	}
