@@ -2415,6 +2415,27 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	rpsr.sessionManagers[sessionManagerKey] = sessionManager
 	rpsr.mu.Unlock()
 
+	// Per-collection admission (MAG-3326). Refreshed by PHASE 1 below AND by every
+	// epoch re-validation, so a service refused once does not stay refused for the
+	// process lifetime — the endpoint builder runs on the retry and promote paths
+	// too, and a boot-time blip would otherwise outlive its cause until restart.
+	//
+	// Guarded because those paths do not all hold the router lock.
+	var admissionMu sync.RWMutex
+	admissionsByProvider := map[*lavasession.RPCStaticProviderEndpoint]chainlib.ProviderAdmission{}
+	admissionFor := func(provider *lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission {
+		admissionMu.RLock()
+		defer admissionMu.RUnlock()
+		return admissionsByProvider[provider]
+	}
+	recordAdmission := func(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
+		admissionMu.Lock()
+		defer admissionMu.Unlock()
+		// Assigned unconditionally, including an empty admission: that is how a
+		// service that has recovered gets un-refused.
+		admissionsByProvider[provider] = admission
+	}
+
 	// Helper function to convert provider endpoints to sessions
 	convertProvidersToSessions := func(providerList []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
 		sessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
@@ -2428,9 +2449,29 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			}
 
 			endpoints := []*lavasession.Endpoint{}
+			// expandInternalPaths gets the RAW urls. Its subscription probe resolves a
+			// collection from the url's declared add-ons to decide ws-vs-http, and its
+			// doc requires the list it produces to mirror the chain router's, which is
+			// built from the untouched config — so narrowing the input here would move
+			// endpoints in or out per internal path as a side effect of admission
+			// (MAG-3326 review). The admission is applied to each endpoint below instead.
+			admission := admissionFor(provider)
 			for _, url := range expandInternalPaths(provider.NodeUrls, chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
+				admittedServices, keep := admission.AdmittedServices(url)
+				if !keep {
+					// A url that serves only its add-ons and kept none has nothing left.
+					// Building it anyway would empty its service list, flip
+					// ServesBaseCollection() to true, and hand a node its operator
+					// declared cannot answer the base collection back to base traffic.
+					utils.LavaFormatWarning("dropping node url: every add-on it declared was refused", nil,
+						utils.LogAttr("url", url.Url),
+						utils.LogAttr("addons", url.Addons),
+						utils.LogAttr("provider", provider.Name),
+					)
+					continue
+				}
 				extensions := map[string]struct{}{}
-				for _, extension := range url.Addons {
+				for _, extension := range admittedServices {
 					extensions[extension] = struct{}{}
 				}
 
@@ -2446,7 +2487,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				// traffic — a config typo with no diagnostic.
 				standaloneAddons := url.StandaloneAddons
 				if standaloneAddons {
-					declaredAddons, _, sepErr := chainParser.SeparateAddonsExtensions(ctx, url.Addons)
+					declaredAddons, _, sepErr := chainParser.SeparateAddonsExtensions(ctx, admittedServices)
 					if sepErr != nil || len(declaredAddons) == 0 {
 						utils.LavaFormatWarning("ignoring standalone-addons: url declares no add-on collection", sepErr,
 							utils.LogAttr("url", url.Url),
@@ -2586,9 +2627,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// relaysMonitor seeding below), so it is pulled from rotation rather than
 	// silently accepting traffic it cannot serve.
 	failedStaticSet, failedStaticEndpoints := validateProviderTier(
-		ctx, relevantStaticProviderList, rpcEndpoint, chainParser, reverifyTierStatic, nil)
+		ctx, relevantStaticProviderList, rpcEndpoint, chainParser, reverifyTierStatic, nil, recordAdmission)
 	failedBackupSet, failedBackupEndpoints := validateProviderTier(
-		ctx, relevantBackupProviderList, rpcEndpoint, chainParser, reverifyTierBackup, nil)
+		ctx, relevantBackupProviderList, rpcEndpoint, chainParser, reverifyTierBackup, nil, recordAdmission)
 
 	healthyStaticCount := len(relevantStaticProviderList) - len(failedStaticSet)
 	healthyBackupCount := len(relevantBackupProviderList) - len(failedBackupSet)
@@ -2635,6 +2676,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		chainParser:                chainParser,
 		rpcEndpoint:                rpcEndpoint,
 		convertProvidersToSessions: convertProvidersToSessions,
+		recordAdmission:            recordAdmission,
 		configuredStatic:           relevantStaticProviderList,
 		configuredBackup:           relevantBackupProviderList,
 	}
