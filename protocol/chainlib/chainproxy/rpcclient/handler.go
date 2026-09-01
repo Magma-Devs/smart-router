@@ -255,8 +255,35 @@ func (h *handler) handleImmediate(msg *JsonrpcMessage) bool {
 		h.handleResponse(msg)
 		h.log.Trace("Handled RPC response", "reqid", idForLog{msg.ID}, "duration", time.Since(start))
 		return true
+	case msg.isSubscriptionNotification():
+		// Last, so the method-name cases above keep first claim on anything they
+		// already recognise. This one matches on the params envelope alone, which is
+		// how Substrate pushes arrive — see isSubscriptionNotification.
+		h.handleSubscriptionResultByParams(msg)
+		return true
 	default:
 		return false
+	}
+}
+
+// handleSubscriptionResultByParams delivers a subscription notification identified by its
+// params envelope rather than by its method name.
+//
+// Returning false for these from handleImmediate was worse than dropping them: the frame
+// fell through to handleCallMsg, which has no id and no matching method to serve, so the
+// router answered the node with an "invalid request" error for every push it received.
+func (h *handler) handleSubscriptionResultByParams(msg *JsonrpcMessage) {
+	var result ethereumSubscriptionResult
+	if err := json.Unmarshal(msg.Params, &result); err != nil {
+		utils.LavaFormatTrace("Dropping invalid subscription message",
+			utils.LogAttr("err", err),
+			utils.LogAttr("params", string(msg.Params)),
+		)
+		h.log.Debug("Dropping invalid subscription message")
+		return
+	}
+	if h.clientSubs[result.ID] != nil {
+		h.clientSubs[result.ID].deliver(msg)
 	}
 }
 
