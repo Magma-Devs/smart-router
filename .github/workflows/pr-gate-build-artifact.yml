@@ -203,9 +203,9 @@ jobs:
 
       # TEMPORARY (MAG-3351): the dev-sim-prtests box still runs the pre-chart-6
       # `lava-infra` layout, so the SSH/kubectl steps below cannot reach the chart-6
-      # `smart-router` namespace or the `app.smart-router-id` selector. The build and
-      # push above keeps producing the required `dev-sim-prtests / preflight` status.
-      # Uncomment once the box is migrated.
+      # `smart-router` namespace or the `app.smart-router-id` selector. Uncomment
+      # them, and the `preflight-status` job at the end of this file, once the box
+      # is migrated.
 #       - name: Check dev-sim-prtests access
 #         env:
 #           SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
@@ -1359,36 +1359,41 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit 0
 
-  preflight-status:
-    name: Publish PR Validation Status
-    runs-on: ubuntu-latest
-    needs: [metadata, build]
-    if: ${{ always() && needs.metadata.result != 'skipped' }}
-    steps:
-      - name: Publish dev-sim-prtests status
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
-          BUILD_RESULT: ${{ needs.build.result }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if [ -z "$HEAD_SHA" ]; then
-            echo "::error::Could not resolve head SHA for preflight status"
-            exit 1
-          fi
-
-          state="failure"
-          description="dev-sim-prtests preflight failed"
-          if [ "$BUILD_RESULT" = "success" ]; then
-            state="success"
-            description="dev-sim-prtests preflight passed"
-          fi
-
-          gh api \
-            --method POST \
-            "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
-            -f state="$state" \
-            -f context="dev-sim-prtests / preflight" \
-            -f description="$description" \
-            -f target_url="$RUN_URL"
+  # TEMPORARY (MAG-3351): this job publishes the `dev-sim-prtests / preflight`
+  # commit status. While the box steps above are parked there is nothing for it to
+  # report, so it stays off and the context is not published at all. The matching
+  # `Require PR Gate on main` ruleset is disabled to match; re-enable it when this
+  # job comes back.
+#   preflight-status:
+#     name: Publish PR Validation Status
+#     runs-on: ubuntu-latest
+#     needs: [metadata, build]
+#     if: ${{ always() && needs.metadata.result != 'skipped' }}
+#     steps:
+#       - name: Publish dev-sim-prtests status
+#         env:
+#           GH_TOKEN: ${{ github.token }}
+#           HEAD_SHA: ${{ needs.metadata.outputs.head_sha }}
+#           BUILD_RESULT: ${{ needs.build.result }}
+#           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+#         run: |
+#           set -euo pipefail
+#           if [ -z "$HEAD_SHA" ]; then
+#             echo "::error::Could not resolve head SHA for preflight status"
+#             exit 1
+#           fi
+#
+#           state="failure"
+#           description="dev-sim-prtests preflight failed"
+#           if [ "$BUILD_RESULT" = "success" ]; then
+#             state="success"
+#             description="dev-sim-prtests preflight passed"
+#           fi
+#
+#           gh api \
+#             --method POST \
+#             "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+#             -f state="$state" \
+#             -f context="dev-sim-prtests / preflight" \
+#             -f description="$description" \
+#             -f target_url="$RUN_URL"
