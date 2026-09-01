@@ -34,6 +34,14 @@ type mockSubscriptionServer struct {
 	lock            sync.RWMutex
 	writeMu         sync.Mutex // serializes conn.WriteMessage — gorilla requires a single concurrent writer
 	messageInterval time.Duration
+
+	// notificationMethod is the JSON-RPC method the push frames carry, and subscriptionID
+	// is the id handed back on subscribe. Both default to the EVM shape. Substrate names
+	// its frames after the payload and its ids are not hex, and a harness that can only
+	// speak EVM is exactly why MAG-3345 went unnoticed: every existing test here asserted
+	// against the one shape the router happened to handle.
+	notificationMethod string
+	subscriptionID     string
 }
 
 // safeWriteMessage serializes WS writes: handleWS (response) and the spawned sendSubscriptionMessages
@@ -47,9 +55,11 @@ func (ms *mockSubscriptionServer) safeWriteMessage(conn *websocket.Conn, message
 
 func newMockSubscriptionServer() *mockSubscriptionServer {
 	ms := &mockSubscriptionServer{
-		upgrader:        websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
-		subscriptions:   make(map[string]chan struct{}),
-		messageInterval: 100 * time.Millisecond,
+		upgrader:           websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+		subscriptions:      make(map[string]chan struct{}),
+		messageInterval:    100 * time.Millisecond,
+		notificationMethod: "eth_subscription",
+		subscriptionID:     "0x" + strings.Repeat("f", 32),
 	}
 
 	ms.server = httptest.NewServer(http.HandlerFunc(ms.handleWS))
@@ -151,9 +161,8 @@ func (ms *mockSubscriptionServer) createSubscription() string {
 	ms.lock.Lock()
 	defer ms.lock.Unlock()
 
-	subID := "0x" + strings.Repeat("f", 32)[:32] // Simple subscription ID
-	ms.subscriptions[subID] = make(chan struct{})
-	return subID
+	ms.subscriptions[ms.subscriptionID] = make(chan struct{})
+	return ms.subscriptionID
 }
 
 func (ms *mockSubscriptionServer) closeSubscription(subID string) {
@@ -187,7 +196,7 @@ func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn,
 			// Send subscription notification
 			notification := map[string]interface{}{
 				"jsonrpc": "2.0",
-				"method":  "eth_subscription",
+				"method":  ms.notificationMethod,
 				"params": map[string]interface{}{
 					"subscription": subID,
 					"result": map[string]interface{}{
@@ -1434,6 +1443,62 @@ func TestRewriteSubscriptionID_EVM(t *testing.T) {
 
 	assert.Equal(t, "eth_subscription", parsed.Method)
 	assert.Equal(t, "0xrouter123", parsed.Params.Subscription) // Should be rewritten
+}
+
+// TestRewriteSubscriptionID_Substrate is the unit half of MAG-3345. Substrate uses the
+// same params envelope as EVM but names the frame after the payload, so matching on
+// method == "eth_subscription" passed these through untouched — the client received the
+// upstream id instead of the router id it was issued at subscribe time.
+func TestRewriteSubscriptionID_Substrate(t *testing.T) {
+	substrateMsg := &rpcclient.JsonrpcMessage{
+		Method: "chain_newHead",
+		Params: json.RawMessage(`{"subscription":"Ck1rTHhOa1hxTGV3","result":{"number":"0x1234"}}`),
+	}
+
+	result, err := rewriteSubscriptionID(substrateMsg, "rs_router_1")
+	require.NoError(t, err)
+
+	var parsed struct {
+		Method string `json:"method"`
+		Params struct {
+			Subscription string          `json:"subscription"`
+			Result       json.RawMessage `json:"result"`
+		} `json:"params"`
+	}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	assert.Equal(t, "chain_newHead", parsed.Method,
+		"the frame's own method must survive; the client dispatches on it")
+	assert.Equal(t, "rs_router_1", parsed.Params.Subscription,
+		"subscription must be the router id, not the upstream id")
+	assert.JSONEq(t, `{"number":"0x1234"}`, string(parsed.Params.Result),
+		"the payload must be relayed unchanged")
+}
+
+// TestRewriteSubscriptionID_SolanaUntouched pins the boundary of the MAG-3345 rewrite.
+// Solana's ids are integers, so a router id cannot stand in for one. Matching on the
+// params envelope brings those frames into range of the rewrite for the first time, and
+// they must keep falling through to pass-through rather than acquiring a string id.
+func TestRewriteSubscriptionID_SolanaUntouched(t *testing.T) {
+	solanaMsg := &rpcclient.JsonrpcMessage{
+		Method: "accountNotification",
+		Params: json.RawMessage(`{"subscription":23784,"result":{"context":{"slot":5208469}}}`),
+	}
+
+	result, err := rewriteSubscriptionID(solanaMsg, "rs_router_1")
+	require.NoError(t, err)
+
+	var parsed struct {
+		Method string `json:"method"`
+		Params struct {
+			Subscription json.RawMessage `json:"subscription"`
+		} `json:"params"`
+	}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	assert.Equal(t, "accountNotification", parsed.Method)
+	assert.JSONEq(t, `23784`, string(parsed.Params.Subscription),
+		"an integer subscription id must not be replaced by a string router id")
 }
 
 // TestDirectWSSubscriptionManager_TendermintAPIInterface tests manager with Tendermint API interface
@@ -2706,4 +2771,90 @@ func TestEndToEnd_UnsubscribeSendsTheSpecMethodUpstream(t *testing.T) {
 		"the router must tear down with the spec's own unsubscribe method; observed=%v", observed)
 	require.NotContains(t, observed, "unsubscribe",
 		"the derivation fallback sent this literal method, which no Substrate node implements; observed=%v", observed)
+}
+
+// TestEndToEnd_SubstratePushFrameReachesClient is the regression for MAG-3345: no Substrate
+// subscription had ever relayed a push frame end-to-end. The subscribe call itself always
+// succeeded, which is what made the gap silent — nothing errored, frames simply never came.
+//
+// It runs against a real WebSocket, so the whole delivery path is live: the rpcclient
+// dispatcher that decides whether a frame is a subscription push at all, and the manager's
+// per-client id rewrite. Two independent defects sat on that path, and the assertions below
+// separate them:
+//
+//   - rpcclient's handleImmediate only recognised pushes whose method ended in
+//     "_subscription"/"Notification" (or carried a Tendermint query). chain_newHead matches
+//     none of those, so the frame was never delivered to the subscription — worse, it fell
+//     through to the call path and the router answered the node with "invalid request".
+//     Nothing arrives on repliesChan at all.
+//   - rewriteSubscriptionID keyed on method == "eth_subscription", so even once delivered,
+//     a Substrate frame reached the client carrying the UPSTREAM id rather than the router
+//     id the client was handed at subscribe time.
+//
+// Either bug alone leaves the subscription unusable, so both are asserted.
+func TestEndToEnd_SubstratePushFrameReachesClient(t *testing.T) {
+	mockSrv := newMockSubscriptionServer()
+	mockSrv.messageInterval = 20 * time.Millisecond
+	// A Substrate node names the frame after the payload, and its ids are opaque
+	// base58-ish strings — not hex, so nothing here can pass by matching an "0x" prefix.
+	mockSrv.notificationMethod = "chain_newHead"
+	mockSrv.subscriptionID = "Ck1rTHhOa1hxTGV3"
+	defer mockSrv.Close()
+
+	nodeUrl := &common.NodeUrl{Url: mockSrv.URL()}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "AVN", "jsonrpc",
+		[]*common.NodeUrl{nodeUrl},
+		nil, nil, nil,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	const dappID, ip, wsUID = "dapp-avn", "192.168.99.97", "ws-avn"
+	subscribeBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "method": "chain_subscribeNewHeads", "params": []interface{}{}, "id": 1,
+	})
+	require.NoError(t, err)
+	subscribeMsg := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{method: "chain_subscribeNewHeads", params: []interface{}{}},
+		rawData:               subscribeBody,
+	}
+
+	reply, repliesChan, err := manager.StartSubscription(ctx, subscribeMsg, dappID, ip, wsUID, nil)
+	require.NoError(t, err, "the subscribe half always worked, including before the fix")
+	require.NotNil(t, reply)
+	require.NotNil(t, repliesChan)
+
+	var subResp map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(reply.Data, &subResp))
+	var routerSubID string
+	require.NoError(t, json.Unmarshal(subResp["result"], &routerSubID))
+	require.NotEmpty(t, routerSubID)
+	require.NotEqual(t, mockSrv.subscriptionID, routerSubID,
+		"the router must issue its own id, otherwise the rewrite assertion below proves nothing")
+
+	select {
+	case notif := <-repliesChan:
+		require.NotNil(t, notif, "a Substrate subscription must deliver push frames")
+
+		var frame struct {
+			Method string `json:"method"`
+			Params struct {
+				Subscription string          `json:"subscription"`
+				Result       json.RawMessage `json:"result"`
+			} `json:"params"`
+		}
+		require.NoError(t, json.Unmarshal(notif.Data, &frame))
+
+		assert.Equal(t, "chain_newHead", frame.Method,
+			"the frame must keep the method the node sent — a Substrate client dispatches on it")
+		assert.Equal(t, routerSubID, frame.Params.Subscription,
+			"the push must carry the router id issued at subscribe time, not the upstream id %q",
+			mockSrv.subscriptionID)
+		assert.NotEmpty(t, frame.Params.Result, "the payload must be relayed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("no push frame reached the client within 5s — the subscription is dead end-to-end")
+	}
 }

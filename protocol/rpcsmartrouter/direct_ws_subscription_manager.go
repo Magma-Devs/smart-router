@@ -1810,39 +1810,65 @@ func createSubscriptionReplyFromRouterID(routerID string, requestID json.RawMess
 	return json.Marshal(response)
 }
 
+// rewriteParamsSubscriptionID returns params with its "subscription" field replaced by
+// routerID, or nil when params is not a subscription envelope carrying a string id.
+//
+// Sibling fields are preserved: the envelope is rebuilt from what upstream actually sent
+// rather than from a fixed {subscription, result} pair, so anything a chain adds alongside
+// them survives the rewrite.
+//
+// Returning nil for a non-string id keeps Solana out: its ids are integers, and a router id
+// is not one, so writing a string in would hand the client an id of a type its own
+// unsubscribe cannot use.
+func rewriteParamsSubscriptionID(params json.RawMessage, routerID string) json.RawMessage {
+	if params == nil {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(params, &fields); err != nil {
+		return nil
+	}
+	raw, ok := fields["subscription"]
+	if !ok {
+		return nil
+	}
+	var upstreamID string
+	if err := json.Unmarshal(raw, &upstreamID); err != nil {
+		return nil
+	}
+	newID, err := json.Marshal(routerID)
+	if err != nil {
+		return nil
+	}
+	fields["subscription"] = newID
+	rewritten, err := json.Marshal(fields)
+	if err != nil {
+		return nil
+	}
+	return rewritten
+}
+
 // rewriteSubscriptionID rewrites the subscription ID in a notification message
-// For EVM (eth_subscription): rewrites params.subscription with router ID
+// For params-carried subscriptions (EVM, Substrate): rewrites params.subscription with router ID
 // For Tendermint: notifications contain query in result, passed through as-is
 func rewriteSubscriptionID(msg *rpcclient.JsonrpcMessage, routerID string) ([]byte, error) {
 	if msg == nil {
 		return nil, fmt.Errorf("message is nil")
 	}
 
-	// EVM subscription notifications format:
+	// Subscription notifications that carry the id in params:
 	// {"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0x...","result":{...}}}
-	if msg.Method == "eth_subscription" && msg.Params != nil {
-		var params struct {
-			Subscription string          `json:"subscription"`
-			Result       json.RawMessage `json:"result"`
-		}
-		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			return nil, err
-		}
-
-		// Rewrite with router ID
-		newParams := map[string]any{
-			"subscription": routerID,
-			"result":       params.Result,
-		}
-		paramsBytes, err := json.Marshal(newParams)
-		if err != nil {
-			return nil, err
-		}
-
+	//
+	// Match the envelope, not the method name. Substrate uses this exact shape but names
+	// the frame after the payload (chain_newHead, state_storage, author_extrinsicUpdate),
+	// so an == "eth_subscription" test rewrote EVM and let Substrate through carrying the
+	// UPSTREAM id — an id the client was never given and cannot match to its subscription
+	// (MAG-3345). The method is echoed back rather than hard-coded for the same reason.
+	if rewritten := rewriteParamsSubscriptionID(msg.Params, routerID); rewritten != nil {
 		response := map[string]any{
 			"jsonrpc": "2.0",
-			"method":  "eth_subscription",
-			"params":  json.RawMessage(paramsBytes),
+			"method":  msg.Method,
+			"params":  json.RawMessage(rewritten),
 		}
 		return json.Marshal(response)
 	}

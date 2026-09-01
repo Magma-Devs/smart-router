@@ -97,6 +97,34 @@ func (msg *JsonrpcMessage) isEthereumNotification() bool {
 		strings.HasSuffix(msg.Method, ethereumNotificationMethodSuffix)
 }
 
+// isSubscriptionNotification recognises a server-to-client subscription push by its
+// shape rather than by its method name: a method-bearing message whose params name a
+// string subscription.
+//
+// Every predicate above keys off the method name, which only works for chains that
+// name the frame after the subscription mechanism (eth_subscription, *Notification).
+// Substrate names it after the payload — chain_newHead, state_storage,
+// author_extrinsicUpdate — while using the identical {subscription, result} params
+// envelope as Ethereum. No suffix rule can cover that, so nothing delivered those
+// frames and every Substrate subscription was silently dead (MAG-3345).
+//
+// The string check keeps this off Solana, whose ids are integers. Solana pushes are
+// unhandled today for a separate reason — handleImmediate's solana branch sits inside
+// the isEthereumNotification case, and that predicate itself requires the
+// "_subscription" suffix, which "accountNotification" does not have, so the branch is
+// unreachable. Delivering them needs an integer-id router mapping the id mapper cannot
+// express, which is its own change; MAG-3345 is the Substrate gap.
+func (msg *JsonrpcMessage) isSubscriptionNotification() bool {
+	if msg.Method == "" || msg.Params == nil {
+		return false
+	}
+	var result ethereumSubscriptionResult
+	if err := json.Unmarshal(msg.Params, &result); err != nil {
+		return false
+	}
+	return result.ID != ""
+}
+
 func (msg *JsonrpcMessage) isTendermintNotification() bool {
 	var result tendermintSubscribeReply
 	err := json.Unmarshal(msg.Result, &result)
