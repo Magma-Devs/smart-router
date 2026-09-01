@@ -82,6 +82,18 @@ func TestIsSupportingAddon_StandaloneAddons(t *testing.T) {
 	})
 }
 
+// extensionOnlyEndpoint is the production shape: Addons and Extensions are both
+// built from the same raw url.Addons list, so an extension name lands in both.
+func extensionOnlyEndpoint() *Endpoint {
+	return &Endpoint{
+		NetworkAddress:   "https://archive.example.com",
+		Enabled:          true,
+		Addons:           map[string]struct{}{"archive": {}},
+		Extensions:       map[string]struct{}{"archive": {}},
+		StandaloneAddons: true,
+	}
+}
+
 // TestStandaloneAddonsOnAnExtensionOnlyUrlServesNothing pins WHY the boot path
 // downgrades standalone-addons on a url that names no add-on collection.
 //
@@ -93,13 +105,7 @@ func TestIsSupportingAddon_StandaloneAddons(t *testing.T) {
 // passes — there are no verifications to fail — so a config typo yields a
 // silently dead endpoint. rpcsmartrouter.go downgrades the flag and warns.
 func TestStandaloneAddonsOnAnExtensionOnlyUrlServesNothing(t *testing.T) {
-	extensionOnly := &Endpoint{
-		NetworkAddress:   "https://archive.example.com",
-		Enabled:          true,
-		Addons:           map[string]struct{}{"archive": {}},
-		Extensions:       map[string]struct{}{"archive": {}},
-		StandaloneAddons: true,
-	}
+	extensionOnly := extensionOnlyEndpoint()
 
 	require.False(t, extensionOnly.CheckSupportForServices("", []string{"archive"}),
 		"archive traffic carries addon \"\", so the opt-out refuses it")
@@ -109,7 +115,9 @@ func TestStandaloneAddonsOnAnExtensionOnlyUrlServesNothing(t *testing.T) {
 	// Which is why the flag is downgraded before the endpoint is built. Same
 	// endpoint without it serves both, which is the behaviour an operator who
 	// wrote `addons: [archive]` expects.
-	downgraded := *extensionOnly
+	// Built fresh rather than copied: Endpoint carries a sync.RWMutex, and go vet
+	// rejects copying it.
+	downgraded := extensionOnlyEndpoint()
 	downgraded.StandaloneAddons = false
 	require.True(t, downgraded.CheckSupportForServices("", []string{"archive"}))
 	require.True(t, downgraded.CheckSupportForServices("", nil))

@@ -42,16 +42,6 @@ func bootTestProviders(names ...string) []*lavasession.RPCStaticProviderEndpoint
 	return providers
 }
 
-// admitAll adapts an error-returning validate func to the per-collection
-// signature validateProviderTier takes since MAG-3326: nothing is ever refused
-// at add-on granularity, so a pass admits everything the url declared and a
-// failure still excludes the whole provider — the behaviour these tests assert.
-func admitAll(fn func(context.Context, *lavasession.RPCStaticProviderEndpoint) error) func(context.Context, *lavasession.RPCStaticProviderEndpoint) (chainlib.ProviderAdmission, error) {
-	return func(ctx context.Context, p *lavasession.RPCStaticProviderEndpoint) (chainlib.ProviderAdmission, error) {
-		return chainlib.ProviderAdmission{}, fn(ctx, p)
-	}
-}
-
 // failThese returns a validate func that fails exactly the named providers.
 func failThese(names ...string) func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
 	failing := make(map[string]struct{}, len(names))
@@ -71,9 +61,9 @@ func TestValidateProviderTier_PartitionsAndPreservesConfiguredOrder(t *testing.T
 	// definitely differs from configured order.
 	providers := bootTestProviders("p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7")
 
-	failedSet, failedOrdered, _ := validateProviderTier(
+	failedSet, failedOrdered := validateProviderTier(
 		context.Background(), providers, bootTestEndpoint(), nil, reverifyTierStatic,
-		admitAll(failThese("p6", "p1", "p3")))
+		failThese("p6", "p1", "p3"), nil)
 
 	require.Len(t, failedSet, 3)
 	names := make([]string, 0, len(failedOrdered))
@@ -91,12 +81,12 @@ func TestValidateProviderTier_PartitionsAndPreservesConfiguredOrder(t *testing.T
 }
 
 func TestValidateProviderTier_EmptyTierIsNotAnError(t *testing.T) {
-	failedSet, failedOrdered, _ := validateProviderTier(
+	failedSet, failedOrdered := validateProviderTier(
 		context.Background(), nil, bootTestEndpoint(), nil, reverifyTierBackup,
-		admitAll(func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
+		func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
 			t.Fatal("validate must not be called for an empty tier")
 			return nil
-		}))
+		}, nil)
 
 	require.Empty(t, failedSet)
 	require.Empty(t, failedOrdered)
@@ -107,9 +97,9 @@ func TestValidateProviderTier_EmptyTierIsNotAnError(t *testing.T) {
 func TestValidateProviderTier_AllProvidersFailingIsReportedNotFatal(t *testing.T) {
 	providers := bootTestProviders("dead1", "dead2", "dead3")
 
-	failedSet, failedOrdered, _ := validateProviderTier(
+	failedSet, failedOrdered := validateProviderTier(
 		context.Background(), providers, bootTestEndpoint(), nil, reverifyTierStatic,
-		admitAll(failThese("dead1", "dead2", "dead3")))
+		failThese("dead1", "dead2", "dead3"), nil)
 
 	require.Len(t, failedSet, 3, "every provider failed")
 	require.Len(t, failedOrdered, 3, "and every one is queued for retry rather than aborting boot")
@@ -127,7 +117,7 @@ func TestValidateProviderTier_RunsConcurrently(t *testing.T) {
 		defer close(done)
 		validateProviderTier(
 			context.Background(), providers, bootTestEndpoint(), nil, reverifyTierStatic,
-			admitAll(func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
+			func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
 				cur := atomic.AddInt64(&inFlight, 1)
 				for {
 					old := atomic.LoadInt64(&peak)
@@ -138,7 +128,7 @@ func TestValidateProviderTier_RunsConcurrently(t *testing.T) {
 				<-release
 				atomic.AddInt64(&inFlight, -1)
 				return nil
-			}))
+			}, nil)
 	}()
 
 	require.Eventually(t, func() bool { return atomic.LoadInt64(&inFlight) > 1 }, 5*time.Second, 5*time.Millisecond,
