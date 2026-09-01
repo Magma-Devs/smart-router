@@ -1195,8 +1195,16 @@ func (dwsm *DirectWSSubscriptionManager) extractSubscriptionIDFromUnsubscribe(pr
 	}
 
 	// Everything else: a JSON-RPC array whose first element names the subscription — a
-	// string on EVM and Substrate, a number on Solana. Decoding into json.RawMessage rather
-	// than `any` is what keeps a large numeric id exact; a float64 would not (MAG-3359).
+	// string on EVM and Substrate, a number on Solana. Decoding into json.RawMessage keeps
+	// both shapes in one branch and hands them to the same canonicaliser the dispatcher
+	// uses, rather than type-switching on `any` (MAG-3359).
+	//
+	// It does NOT rescue precision, despite the obvious temptation to claim so: the caller
+	// hands us params that GetRPCMessage already decoded into `any`, so a large integer was
+	// rounded to float64 before this function ran and paramsBytes above re-marshals the
+	// rounded value. Router ids stay well inside 2^53 (see numericRouterIDBase), so nothing
+	// is currently at risk — but the rounding happens upstream of here and a fix belongs
+	// there, not in this decode.
 	var paramsArray []json.RawMessage
 	if err := gojson.Unmarshal(paramsBytes, &paramsArray); err == nil && len(paramsArray) > 0 {
 		if id, ok := rpcclient.CanonicalSubscriptionID(paramsArray[0]); ok {
@@ -1779,7 +1787,11 @@ func subscriptionIDsAreNumeric(raw json.RawMessage) bool {
 		return false
 	}
 	var asNumber int64
-	return json.Unmarshal(trimmed, &asNumber) == nil
+	// gojson, not encoding/json: CanonicalSubscriptionID decodes with gojson, and these two
+	// have to agree on every input or the router issues an id in a shape whose upstream
+	// counterpart it cannot key on. Two implementations of one decision is what produced
+	// the null divergence above.
+	return gojson.Unmarshal(trimmed, &asNumber) == nil
 }
 
 // subscriptionIDValue renders a canonical (decimal-string) subscription id for the wire in
@@ -1899,7 +1911,14 @@ func createSubscriptionReplyFromRouterID(routerID string, requestID json.RawMess
 }
 
 // rewriteParamsSubscriptionID returns params with its "subscription" field replaced by
-// routerID, or nil when params is not a subscription envelope carrying a string id.
+// routerID.
+//
+// It returns (nil, nil) when params is not a subscription envelope at all, which is the
+// caller's signal to try the other shapes. It returns an error when params IS one but names
+// its subscription in a shape no router id can stand in for: passing that through would
+// hand every client the UPSTREAM id — the same id for all of them — quietly defeating the
+// per-client indirection that unsubscribe depends on. The pre-MAG-3345 code failed loudly
+// there and so does this.
 //
 // Sibling fields are preserved: the envelope is rebuilt from what upstream actually sent
 // rather than from a fixed {subscription, result} pair, so anything a chain adds alongside
@@ -1910,31 +1929,31 @@ func createSubscriptionReplyFromRouterID(routerID string, requestID json.RawMess
 // and the subscription is the one that decided what the client was given. Requiring a
 // string here used to exclude Solana entirely, which was correct while router ids were
 // always strings and is wrong now that they follow the chain (MAG-3359).
-func rewriteParamsSubscriptionID(params json.RawMessage, routerID string, numericIDs bool) json.RawMessage {
+func rewriteParamsSubscriptionID(params json.RawMessage, routerID string, numericIDs bool) (json.RawMessage, error) {
 	if params == nil {
-		return nil
+		return nil, nil
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(params, &fields); err != nil {
-		return nil
+		return nil, nil
 	}
 	raw, ok := fields["subscription"]
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	if _, named := rpcclient.CanonicalSubscriptionID(raw); !named {
-		return nil
+		return nil, fmt.Errorf("subscription id is neither a string nor a number: %s", raw)
 	}
 	newID, err := json.Marshal(subscriptionIDValue(routerID, numericIDs))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	fields["subscription"] = newID
 	rewritten, err := json.Marshal(fields)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return rewritten
+	return rewritten, nil
 }
 
 // rewriteSubscriptionID rewrites the subscription ID in a notification message
@@ -1953,7 +1972,11 @@ func rewriteSubscriptionID(msg *rpcclient.JsonrpcMessage, routerID string, numer
 	// so an == "eth_subscription" test rewrote EVM and let Substrate through carrying the
 	// UPSTREAM id — an id the client was never given and cannot match to its subscription
 	// (MAG-3345). The method is echoed back rather than hard-coded for the same reason.
-	if rewritten := rewriteParamsSubscriptionID(msg.Params, routerID, numericIDs); rewritten != nil {
+	rewritten, err := rewriteParamsSubscriptionID(msg.Params, routerID, numericIDs)
+	if err != nil {
+		return nil, err
+	}
+	if rewritten != nil {
 		response := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  msg.Method,
