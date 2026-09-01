@@ -63,7 +63,7 @@ func TestValidateProviderTier_PartitionsAndPreservesConfiguredOrder(t *testing.T
 
 	failedSet, failedOrdered := validateProviderTier(
 		context.Background(), providers, bootTestEndpoint(), nil, reverifyTierStatic,
-		failThese("p6", "p1", "p3"))
+		failThese("p6", "p1", "p3"), nil)
 
 	require.Len(t, failedSet, 3)
 	names := make([]string, 0, len(failedOrdered))
@@ -86,7 +86,7 @@ func TestValidateProviderTier_EmptyTierIsNotAnError(t *testing.T) {
 		func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
 			t.Fatal("validate must not be called for an empty tier")
 			return nil
-		})
+		}, nil)
 
 	require.Empty(t, failedSet)
 	require.Empty(t, failedOrdered)
@@ -99,7 +99,7 @@ func TestValidateProviderTier_AllProvidersFailingIsReportedNotFatal(t *testing.T
 
 	failedSet, failedOrdered := validateProviderTier(
 		context.Background(), providers, bootTestEndpoint(), nil, reverifyTierStatic,
-		failThese("dead1", "dead2", "dead3"))
+		failThese("dead1", "dead2", "dead3"), nil)
 
 	require.Len(t, failedSet, 3, "every provider failed")
 	require.Len(t, failedOrdered, 3, "and every one is queued for retry rather than aborting boot")
@@ -128,7 +128,7 @@ func TestValidateProviderTier_RunsConcurrently(t *testing.T) {
 				<-release
 				atomic.AddInt64(&inFlight, -1)
 				return nil
-			})
+			}, nil)
 	}()
 
 	require.Eventually(t, func() bool { return atomic.LoadInt64(&inFlight) > 1 }, 5*time.Second, 5*time.Millisecond,
