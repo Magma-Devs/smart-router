@@ -1550,18 +1550,35 @@ func TestRewriteSubscriptionID_SolanaNumeric(t *testing.T) {
 	assert.JSONEq(t, `{"context":{"slot":5208469}}`, string(parsed.Params.Result))
 }
 
-// TestRewriteSubscriptionID_NonScalarIDUntouched keeps the rewrite off anything that is not
-// a string or a number, rather than coercing it.
-func TestRewriteSubscriptionID_NonScalarIDUntouched(t *testing.T) {
+// TestRewriteSubscriptionID_UnusableIDIsAnError covers an envelope that names its
+// subscription in a shape no router id can stand in for.
+//
+// Passing it through would be worse than failing: every client sharing the subscription
+// would receive the same UPSTREAM id, silently defeating the per-client indirection that
+// unsubscribe depends on. routeMessageToClients logs the error and drops the frame for that
+// client, which is what the pre-MAG-3345 code did for a params blob it could not parse.
+func TestRewriteSubscriptionID_UnusableIDIsAnError(t *testing.T) {
 	msg := &rpcclient.JsonrpcMessage{
 		Method: "oddNotification",
 		Params: json.RawMessage(`{"subscription":{"nested":true},"result":{}}`),
 	}
 
+	_, err := rewriteSubscriptionID(msg, "1000001", false)
+	require.Error(t, err, "an object id must not be silently passed through")
+	assert.Contains(t, err.Error(), "neither a string nor a number")
+}
+
+// TestRewriteSubscriptionID_NonEnvelopePassesThrough keeps that error off frames that are
+// not subscription envelopes at all — those still fall through to the other shapes.
+func TestRewriteSubscriptionID_NonEnvelopePassesThrough(t *testing.T) {
+	msg := &rpcclient.JsonrpcMessage{
+		Method: "someNotification",
+		Params: json.RawMessage(`{"height":"12345"}`),
+	}
+
 	result, err := rewriteSubscriptionID(msg, "1000001", false)
-	require.NoError(t, err)
-	assert.Contains(t, string(result), `"nested":true`,
-		"an object id is not something a router id can stand in for; pass it through")
+	require.NoError(t, err, "params that name no subscription are not this function's business")
+	assert.Contains(t, string(result), `"height":"12345"`)
 }
 
 // TestExtractSubscriptionID_Numeric covers the upstream id arriving as a number. Returning
