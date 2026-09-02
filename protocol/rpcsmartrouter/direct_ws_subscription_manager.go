@@ -1157,14 +1157,33 @@ func (dwsm *DirectWSSubscriptionManager) generateRouterID(clientKey string, nume
 	return dwsm.idMapper.GenerateRouterID(clientKey)
 }
 
-// getHashedParams extracts and hashes the subscription parameters from a protocol message
+// getHashedParams derives the key one subscription is tracked under: the method the client
+// invoked, plus its params.
+//
+// The method has to be in the key. Substrate's subscription methods are overwhelmingly
+// parameterless, so chain_subscribeNewHead, state_subscribeRuntimeVersion,
+// chain_subscribeAllHeads and the rest all marshal to the same `[]` — hashing params alone
+// gave every one of them the same key, and the first subscriber to register it silently
+// owned the upstream stream for all the others. A client subscribed to runtime-version
+// changes received new-head payloads re-stamped with its own id, with nothing to detect the
+// substitution (MAG-3378). EVM never showed this because eth_subscribe carries its channel
+// in the params, so its subscriptions hash apart on params alone.
+//
+// The composite mirrors the gRPC manager's hashSubscriptionParams, which has always keyed on
+// (method path, request data). This is the WebSocket side catching up, not a new convention.
+//
+// Only StartSubscription calls this. Every other consumer of the key — Unsubscribe, the
+// pending-subscription broadcast, the joining-client lookup, client disconnect, cleanup —
+// receives it or iterates activeSubscriptions, so none of them recompute it and all follow
+// automatically.
 func (dwsm *DirectWSSubscriptionManager) getHashedParams(protocolMessage chainlib.ProtocolMessage) (hashedParams string, params []byte, err error) {
 	params, err = gojson.Marshal(protocolMessage.GetRPCMessage().GetParams())
 	if err != nil {
 		return "", nil, utils.LavaFormatError("could not marshal params", err)
 	}
 
-	hashedParams = rpcclient.CreateHashFromParams(params)
+	method := protocolMessage.GetApi().Name
+	hashedParams = rpcclient.CreateHashFromParams([]byte(fmt.Sprintf("%s:%s", method, params)))
 	return hashedParams, params, nil
 }
 
