@@ -2052,7 +2052,7 @@ func rewriteSubscriptionID(msg *rpcclient.JsonrpcMessage, routerID string, numer
 		response := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  msg.Method,
-			"params":  json.RawMessage(rewritten),
+			"params":  rewritten,
 		}
 		return json.Marshal(response)
 	}
