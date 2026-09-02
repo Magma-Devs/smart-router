@@ -3376,3 +3376,77 @@ func TestGenerateNumericRouterID(t *testing.T) {
 		seen[id] = struct{}{}
 	}
 }
+
+// TestClientDisconnect_TearsDownUpstreamSubscription is MAG-3366's regression.
+//
+// A client that closes its socket without sending an explicit unsubscribe used
+// to leave the node publishing: ClientSubscription.Unsubscribe only signals this
+// process's forwarding goroutine, and nothing was sent on the wire. Because the
+// upstream connection is POOLED, the next subscription to the same query
+// inherited those pushes, so every such disconnect added one more copy of every
+// event for every future subscriber, permanently.
+//
+// Measured on a Tendermint tenant before the fix: 7 -> 8 -> 9 -> 10 copies per
+// block over four sequential subscribe/disconnect cycles, one client each time.
+//
+// The explicit-unsubscribe path always did this correctly, which is why it went
+// unnoticed — well-behaved clients unsubscribe, real ones close the socket. So
+// this test does NOT unsubscribe: it cancels the client context, which is what
+// a closed websocket does.
+func TestClientDisconnect_TearsDownUpstreamSubscription(t *testing.T) {
+	mockSrv := newMockSubscriptionServer()
+	mockSrv.messageInterval = 20 * time.Millisecond
+	defer mockSrv.Close()
+
+	nodeUrl := &common.NodeUrl{Url: mockSrv.URL()}
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "ETH", "jsonrpc",
+		[]*common.NodeUrl{nodeUrl},
+		nil, nil, nil,
+	)
+
+	// The CLIENT's context — cancelling it is the disconnect.
+	clientCtx, disconnect := context.WithCancel(context.Background())
+
+	subscribeBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "eth_subscribe",
+		"params":  []interface{}{"newHeads"},
+		"id":      1,
+	})
+	require.NoError(t, err)
+
+	subscribeMsg := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{
+			method: "eth_subscribe",
+			params: []interface{}{"newHeads"},
+		},
+		rawData: subscribeBody,
+	}
+
+	reply, repliesChan, err := manager.StartSubscription(
+		clientCtx, subscribeMsg, "dapp-disc", "10.0.0.1", "ws-disc", nil)
+	require.NoError(t, err, "subscribe must succeed")
+	require.NotNil(t, reply)
+	require.NotNil(t, repliesChan)
+
+	require.Contains(t, mockSrv.ObservedMethods(), "eth_subscribe",
+		"precondition: the upstream must have been subscribed")
+	require.NotContains(t, mockSrv.ObservedMethods(), "eth_unsubscribe",
+		"precondition: nothing should have been torn down yet")
+
+	// The client goes away WITHOUT sending eth_unsubscribe.
+	disconnect()
+
+	require.Eventually(t, func() bool {
+		for _, m := range mockSrv.ObservedMethods() {
+			if m == "eth_unsubscribe" {
+				return true
+			}
+		}
+		return false
+	}, 15*time.Second, 50*time.Millisecond,
+		"a client disconnect must tell the NODE to stop pushing; without it the "+
+			"pooled connection keeps delivering and every later subscriber gets an extra copy")
+}
