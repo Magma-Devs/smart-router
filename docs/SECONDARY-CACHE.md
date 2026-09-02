@@ -51,6 +51,11 @@ request ──► primary cache ──hit──► served ("Cached")
   `Lava-Provider-Address: Cached` header — byte-identical to a primary-cache
   hit. The stripped copy is the only copy used, so nothing unsanitized can
   reach your primary cache either.
+- **No foreign block heights.** The entry's `LatestBlock` is dropped in the same
+  step. It is inert when serving, but the backfill would otherwise publish a
+  foreign zone's chain head into your own cache as the block that `latest`,
+  `safe`, `finalized` and `pending` resolve to — chain-wide, and unlowerable
+  until it expires. Your router's own tracked tip is used instead.
 
 Any backend that speaks the Smart Router cache protocol works as either tier —
 the secondary is simply a second `smartrouter cache` address. The two tiers are
@@ -486,24 +491,38 @@ Zero secondary metric series and zero secondary log lines, while the primary
 tier and request serving continue normally. Rerun the setup script to put the
 lab back the way it was.
 
-### Bonus — misconfiguration aborts startup
+### Bonus — misconfiguration is caught at startup
 
-Not a use case, but the flip side of "independently configurable": all three
-bad configurations exit non-zero with a specific message rather than starting
-in a surprising state.
+Not a use case, but the flip side of "independently configurable": a bad
+configuration is reported with a specific message rather than starting in a
+surprising state.
+
+A setting that would make the *enabled* secondary behave incorrectly is fatal:
 
 ```bash
 CFG=config/smartrouter_examples/smartrouter_eth_zone_external.yml
 smartrouter $CFG --secondary-cache-be '127.0.0.1:20101' --secondary-cache-mode read-write
 # exit=1  secondary-cache-mode must be "read-only" (read-write is reserved for a future iteration), got "read-write"
 
-smartrouter $CFG --secondary-cache-timeout 100ms
-# exit=1  secondary cache options are set while secondary-cache-be is empty — dangling
-#         configuration (set secondary-cache-be or drop secondary-cache-timeout/secondary-cache-mode)
-
 smartrouter $CFG --secondary-cache-be '127.0.0.1:20101' --secondary-cache-timeout 0s
 # exit=1  secondary-cache-timeout must be greater than zero, got 0s
 ```
+
+Tuning options with no address are a warning, not a failure — the router starts
+with the secondary disabled:
+
+```bash
+smartrouter $CFG --secondary-cache-timeout 100ms
+# exit=0, logged at WARN:
+#   secondary cache options (secondary-cache-timeout/secondary-cache-mode) are set
+#   while secondary-cache-be is empty — dangling configuration, secondary cache
+#   disabled (set secondary-cache-be to enable it, or drop the unused options)
+```
+
+This shape is usually a typo, which the warning names. But it is also what a
+single templated YAML looks like when it is shared across a fleet where only
+some routers run a secondary, and failing startup there would turn an unused
+key into an outage on every router that does not.
 
 ### Tearing the lab down
 
@@ -556,6 +575,7 @@ walkthrough](#manual-demo-walkthrough); this section records where each one is
 | Failure never affects serving; primary-grade resilience | Met | Same reconnect loop and non-blocking failure semantics as the primary |
 | Backwards compatible when unconfigured | Met | No secondary series in metrics, no added step in the request path |
 | No provider-identifying metadata exposed | Met — and **not** a no-op | The format *does* carry it (`Sig`, `SigBlocks`, `Metadata` holding upstream response headers). All three are dropped on a private copy that becomes the only copy used. `TestSanitizeForeignCacheReplyDropsAllMetadataAndSignatures`, `TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill` |
+| No foreign chain state adopted | Met on both channels | `SeenBlock` is never fed to `adoptSharedStateTip` (`TestSecondarySeenBlockNeverAdoptedIntoChainState`), and `Reply.LatestBlock` is zeroed by the sanitizer so the backfill cannot publish a foreign head as the primary's chain-level tip, where it would shift `LATEST`/`SAFE`/`FINALIZED`/`PENDING` resolution chain-wide. `TestSanitizeForeignCacheReplyDropsLatestBlock`, `TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill` |
 
 ### Nice-to-have requirements
 
