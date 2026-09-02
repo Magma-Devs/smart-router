@@ -1,6 +1,8 @@
 package redisstore
 
 import (
+	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,6 +44,62 @@ func TestConfigValidateMatrix(t *testing.T) {
 			require.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+func listenLocal(t *testing.T) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener
+}
+
+// The endpoint tracker must name the DATA node, never a sentinel.
+//
+// go-redis reuses FailoverOptions.Dialer for the sentinel control-plane
+// connections, so an unfiltered tracking dialer records sentinel addresses
+// alongside the master's — last write wins, and sentinels re-dial at arbitrary
+// times (discovery, the +switch-master subscription). That makes
+// Lava-Cache-Backend, the header a failover is observed through, nondeterministic.
+func TestSentinelAddressesAreNotRecordedAsTheDataNode(t *testing.T) {
+	sentinel := listenLocal(t)
+	master := listenLocal(t)
+	sentinelAddr, masterAddr := sentinel.Addr().String(), master.Addr().String()
+
+	tracker := &endpointTracker{}
+	dial := trackingDialerExcluding(nil, time.Second, tracker, []string{sentinelAddr})
+
+	dialOnce := func(addr string) {
+		t.Helper()
+		conn, err := dial(context.Background(), "tcp", addr)
+		require.NoError(t, err)
+		_ = conn.Close()
+	}
+
+	dialOnce(sentinelAddr)
+	require.Empty(t, tracker.current(), "a sentinel dial must not be recorded as the data node")
+
+	dialOnce(masterAddr)
+	require.Equal(t, masterAddr, tracker.current(), "the data node is what the tracker names")
+
+	dialOnce(sentinelAddr)
+	require.Equal(t, masterAddr, tracker.current(),
+		"a later sentinel re-dial must not clobber the recorded master — this is the "+
+			"nondeterminism that makes the failover header untrustworthy")
+}
+
+// The unfiltered dialer still records everything it dials; standalone and
+// cluster depend on that.
+func TestTrackingDialerRecordsWhenNothingIsExcluded(t *testing.T) {
+	node := listenLocal(t)
+	tracker := &endpointTracker{}
+	dial := trackingDialer(nil, time.Second, tracker)
+
+	conn, err := dial(context.Background(), "tcp", node.Addr().String())
+	require.NoError(t, err)
+	_ = conn.Close()
+
+	require.Equal(t, node.Addr().String(), tracker.current())
 }
 
 // The sentinel control plane authenticates independently of the data nodes:

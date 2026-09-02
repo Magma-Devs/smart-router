@@ -40,6 +40,17 @@ type KVStore interface {
 
 	// Block-hash → height scalars. Missing key reads as (0, false).
 	GetHeight(ctx context.Context, key string) (int64, bool, error)
+
+	// GetHeights fetches heights for the given keys, index-aligned with the
+	// input; a false in the second slice is a miss. Adapters should batch where
+	// the transport allows, for the same reason GetEntries does: a relay may
+	// carry several block hashes, the lookup runs inside the caller's per-relay
+	// cache budget (common.CacheTimeout, 50ms), and an adapter cannot batch
+	// across separate GetHeight calls — over a remote backend that is one
+	// network round trip per hash, and enough of them turn a warm cache into a
+	// miss. An in-process store may simply read sequentially.
+	GetHeights(ctx context.Context, keys []string) ([]int64, []bool, error)
+
 	SetHeight(ctx context.Context, key string, height int64, ttl time.Duration) error
 
 	// Purge drops every entry this store holds (the FlushCache RPC).

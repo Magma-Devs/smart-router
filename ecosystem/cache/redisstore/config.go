@@ -213,11 +213,32 @@ func (cfg Config) sentinelPassword() (string, error) {
 // sentinel set (not the master) under sentinel, and a discovery seed (not the
 // shard) under cluster.
 func trackingDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
+	return trackingDialerExcluding(tlsCfg, dialTimeout, tracker, nil)
+}
+
+// trackingDialerExcluding is trackingDialer with a set of addresses whose dials
+// are made but never recorded.
+//
+// Sentinel needs this. go-redis copies FailoverOptions.Dialer verbatim into the
+// options it builds for the SENTINEL control-plane connections
+// (sentinelOptions, sentinel.go), so a plain tracking dialer records sentinel
+// addresses alongside the master's — last write wins, and the sentinels re-dial
+// at arbitrary times (discovery, the +switch-master subscription). The tracker
+// feeds the Lava-Cache-Backend header, which is how a failover is observed, so
+// an unfiltered tracker turns that signal into a coin flip. FailoverOptions
+// exposes no separate sentinel dialer, so filtering here is the available fix.
+func trackingDialerExcluding(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker, exclude []string) func(context.Context, string, string) (net.Conn, error) {
 	base := redis.NewDialer(&redis.Options{TLSConfig: tlsCfg, DialTimeout: dialTimeout})
+	excluded := make(map[string]struct{}, len(exclude))
+	for _, addr := range exclude {
+		excluded[addr] = struct{}{}
+	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		conn, err := base(ctx, network, addr)
 		if err == nil {
-			tracker.note(addr)
+			if _, isExcluded := excluded[addr]; !isExcluded {
+				tracker.note(addr)
+			}
 		}
 		return conn, err
 	}
@@ -251,9 +272,11 @@ func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider
 // in-place re-auth of idle connections needs the upstream gap fixed first.
 func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source CredentialsSource, sentinelPassword string, tracker *endpointTracker) *redis.FailoverOptions {
 	return &redis.FailoverOptions{
-		// Records the DATA-node address, which under sentinel is whichever node
-		// currently holds the master role — it changes on every failover.
-		Dialer:           trackingDialer(tlsCfg, cfg.DialTimeout, tracker),
+		// Records the DATA-node address — whichever node currently holds the
+		// master role, which changes on every failover. The sentinel addresses
+		// are excluded because this same dialer is reused for the sentinel
+		// control-plane connections; see trackingDialerExcluding.
+		Dialer:           trackingDialerExcluding(tlsCfg, cfg.DialTimeout, tracker, addrs),
 		MasterName:       cfg.MasterName,
 		SentinelAddrs:    addrs,
 		SentinelUsername: cfg.SentinelUsername,

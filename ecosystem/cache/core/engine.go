@@ -90,11 +90,31 @@ func (e *Engine) SetSharedTip(ctx context.Context, chainId, sharedStateId string
 	}
 }
 
+// getBlockHeightsFromHashes resolves every requested hash in ONE store call.
+// It runs inside the caller's per-relay cache budget (common.CacheTimeout,
+// 50ms), so a per-hash loop costs one round trip per hash on a remote backend
+// and a request carrying several hashes can spend the whole budget here.
+// Batching is the adapter's job — it cannot batch across separate GetHeight
+// calls — so the engine hands it the whole key set at once.
 func (e *Engine) getBlockHeightsFromHashes(ctx context.Context, chainId string, hashes []*relaytypes.BlockHashToHeight) []*relaytypes.BlockHashToHeight {
-	for _, hashToHeight := range hashes {
-		value, found, err := e.Store.GetHeight(ctx, HeightKey(chainId, hashToHeight.Hash))
-		if err == nil && found {
-			hashToHeight.Height = value
+	if len(hashes) == 0 {
+		return hashes
+	}
+	keys := make([]string, len(hashes))
+	for i, hashToHeight := range hashes {
+		keys[i] = HeightKey(chainId, hashToHeight.Hash)
+	}
+
+	heights, found, err := e.Store.GetHeights(ctx, keys)
+	if err != nil {
+		for _, hashToHeight := range hashes {
+			hashToHeight.Height = spectypes.NOT_APPLICABLE
+		}
+		return hashes
+	}
+	for i, hashToHeight := range hashes {
+		if found[i] {
+			hashToHeight.Height = heights[i]
 		} else {
 			hashToHeight.Height = spectypes.NOT_APPLICABLE
 		}

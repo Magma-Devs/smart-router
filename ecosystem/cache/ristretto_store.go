@@ -157,6 +157,21 @@ func (r ristrettoStore) GetHeight(ctx context.Context, key string) (int64, bool,
 	return 0, false, nil
 }
 
+// GetHeights reads sequentially: these are in-process map lookups, so there is
+// no transport to batch over and no budget to protect.
+func (r ristrettoStore) GetHeights(ctx context.Context, keys []string) ([]int64, []bool, error) {
+	heights := make([]int64, len(keys))
+	found := make([]bool, len(keys))
+	for i, key := range keys {
+		height, ok, err := r.GetHeight(ctx, key)
+		if err != nil {
+			return nil, nil, err
+		}
+		heights[i], found[i] = height, ok
+	}
+	return heights, found, nil
+}
+
 func (r ristrettoStore) SetHeight(ctx context.Context, key string, height int64, ttl time.Duration) error {
 	r.route(key).SetWithTTL(key, height, 1, ttl)
 	return nil

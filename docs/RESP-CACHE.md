@@ -66,7 +66,7 @@ router never starts half-configured.
 | `read-addresses` | *(unset)* | Optional separate endpoint(s) for **reads** (reader endpoints). Writes stay on `addresses`. Selects an *endpoint*, not a replica role — see the caveat under [Multi-region reads](#multi-region-reads-readwrite-split). |
 | `master-name` | — | Sentinel only (required there): the monitored master set name. |
 | `username` / `password` | *(unset)* | Static data-node credentials (AUTH / ACL). |
-| `password-file` | *(unset)* | Rotation-capable credentials: the file is polled and changes are pushed to **live connections**, which re-authenticate in place — no restart, no connection loss. Holds the password, or `username:password` to rotate the ACL user too. Mutually exclusive with `password`. |
+| `password-file` | *(unset)* | Rotation-capable credentials: the file is polled and changes are pushed to **live connections**, which re-authenticate in place — no restart, no connection loss (standalone and cluster; under sentinel rotation applies on reconnect — see [Credential rotation](#credential-rotation)). Holds the password, or `username:password` to rotate the ACL user too — so a password containing `:` cannot be expressed here. Mutually exclusive with `password`. |
 | `credential-refresh-interval` | `10s` | Poll cadence for `password-file`. |
 | `sentinel-username` / `sentinel-password` / `sentinel-password-file` | *(unset)* | **Sentinel control-plane** credentials — sentinels authenticate independently of the data nodes; hardened deployments fail discovery without these. Only valid with `topology: sentinel`, and read once at startup (rotating them needs a restart). |
 | `db` | `0` | Logical database (standalone/sentinel only; rejected for cluster). |
@@ -158,7 +158,17 @@ Under `topology: sentinel` the go-redis failover client (v9.22) does not support
 streaming re-auth, so rotated credentials are resolved fresh **per connection attempt** — they
 apply on reconnects and failovers rather than being pushed to idle connections. Keep the
 previous credential valid for a rotation grace window (standard ACL dual-credential practice)
-and rotation is seamless there too.
+and rotation is seamless there too. This applies to the **data-node** password under sentinel,
+not just `sentinel-password-file`. Because no in-place re-auth is possible there, the router
+does not run the rotation poller under sentinel at all; it logs once at startup that rotation
+applies on reconnect, rather than reporting rotations it cannot deliver.
+
+> **A password containing `:` cannot be expressed in a password file.** The first colon is
+> always the `username:password` separator, so a file holding `p@ss:word` authenticates as user
+> `p@ss` with password `word`. That fails closed, but it surfaces as an opaque `WRONGPASS` —
+> the router deliberately withholds the server's auth reply from logs — so the router logs a
+> warning once at startup when the file contains a colon, naming only the parsed username.
+> Either avoid `:` in the password or use the explicit `username:password` form deliberately.
 
 ## Sizing and eviction (`maxmemory-policy`)
 

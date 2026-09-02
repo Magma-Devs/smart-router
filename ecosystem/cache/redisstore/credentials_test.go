@@ -60,6 +60,38 @@ func TestFileCredentialsParsing(t *testing.T) {
 // The plumbing contract: a push reaches every subscribed connection exactly
 // when the credentials actually changed; unsubscribed listeners never hear
 // again.
+// Under sentinel the data-node credentials go through CredentialsProviderContext,
+// not the streaming provider, so the provider has no subscribers and a rotation
+// watcher can only ever log "connections=0" — which reads to an operator as
+// "re-authenticated in place", the one thing that did not happen. No watcher is
+// started there; rotation applies on reconnect.
+func TestSentinelPasswordFileStartsNoWatcher(t *testing.T) {
+	passwordFile := writeTempFile(t, "data-pass", "placeholder-not-a-real-credential\n")
+
+	sentinel, err := New(Config{
+		Topology:     TopologySentinel,
+		Addresses:    []string{"127.0.0.1:26379"},
+		MasterName:   "mymaster",
+		Username:     "cacheuser",
+		PasswordFile: passwordFile,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sentinel.Close() })
+	require.Nil(t, sentinel.stopWatcher,
+		"a watcher under sentinel would detect every rotation and re-authenticate nothing")
+
+	standalone, err := New(Config{
+		Topology:     TopologyStandalone,
+		Addresses:    []string{"127.0.0.1:6379"},
+		Username:     "cacheuser",
+		PasswordFile: passwordFile,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = standalone.Close() })
+	require.NotNil(t, standalone.stopWatcher,
+		"standalone uses the streaming provider, where in-place re-auth does work")
+}
+
 func TestStreamingProviderPushes(t *testing.T) {
 	credFile := writeTempFile(t, "cred", "pw1")
 	provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})

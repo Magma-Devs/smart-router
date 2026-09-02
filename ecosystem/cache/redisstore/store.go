@@ -155,8 +155,21 @@ func New(cfg Config) (*Store, error) {
 	store.writeEndpoint = writeTracker
 	store.readEndpoint = readTracker
 	if cfg.PasswordFile != "" {
-		store.stopWatcher = make(chan struct{})
-		go watchCredentials(provider, cfg.refreshInterval(), store.stopWatcher)
+		if cfg.topology() == TopologySentinel {
+			// Sentinel carries data-node credentials through
+			// CredentialsProviderContext, not the streaming provider (see
+			// failoverOptions), so the provider has no subscribers here. A
+			// watcher would detect every rotation and re-authenticate nothing,
+			// logging "connections=0" — which reads as "rotation applied in
+			// place" to an operator, the one thing that did NOT happen. Say
+			// once what actually holds instead of running a loop that cannot act.
+			utils.LavaFormatInfo("resp-cache credential rotation under sentinel applies on the next reconnect or failover, not in place on live connections",
+				utils.LogAttr("password-file", cfg.PasswordFile),
+			)
+		} else {
+			store.stopWatcher = make(chan struct{})
+			go watchCredentials(provider, cfg.refreshInterval(), store.stopWatcher)
+		}
 	}
 	return store, nil
 }
@@ -352,9 +365,18 @@ func (s *Store) SetEntry(ctx context.Context, key string, env *core.Envelope, tt
 // setInt64GEScript implements greater-OR-EQUAL compare-and-set on a single
 // key: equal observations rewrite, refreshing the TTL — a stalled-but-alive
 // chain must not lose its tip. Single-key scripts are Cluster-safe.
+//
+// A corrupt stored value must fall THROUGH to the write, not fence it. Guarding
+// only on `cur` catches the missing key but not the non-numeric one: tonumber
+// yields nil, the comparison raises, the SET below never runs — and since the
+// key is never overwritten, the failure repeats for every subsequent write and
+// cannot self-heal. That would make a foreign writer on a SHARED store able to
+// wedge tip publishing permanently, which is exactly the invariant GetInt64
+// states below.
 var setInt64GEScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
-if cur and tonumber(ARGV[1]) < tonumber(cur) then
+local curn = cur and tonumber(cur)
+if curn and tonumber(ARGV[1]) < curn then
 	return 0
 end
 if tonumber(ARGV[2]) > 0 then
@@ -398,10 +420,19 @@ func (s *Store) SetInt64IfGreaterOrEqual(ctx context.Context, key string, value 
 // The chain tip stores "block:freshnessDeadlineUnixMs". Readers honour the
 // embedded deadline; the monotonic guard compares against the raw stored
 // block for as long as the key is retained (chainTipRetention), stale or not.
+//
+// The match result is bound before tonumber rather than nested inside it, which
+// is a TEST-INFRASTRUCTURE requirement, not a correctness one: on a corrupt
+// value string.match returns nil, and real Redis (PUC Lua 5.1) returns nil from
+// tonumber(nil) while miniredis (gopher-lua) raises "bad argument #1 to
+// tonumber (value expected)". Nesting it makes the corrupt-value path
+// untestable under miniredis and invites someone to "fix" a script that is
+// already correct against a real backend.
 var setChainTipGEScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if cur then
-	local curb = tonumber(string.match(cur, '^(-?%d+)'))
+	local match = string.match(cur, '^(-?%d+)')
+	local curb = match and tonumber(match)
 	if curb and tonumber(ARGV[1]) < curb then
 		return 0
 	end
@@ -472,6 +503,43 @@ func (s *Store) GetHeight(ctx context.Context, key string) (int64, bool, error) 
 		return 0, false, nil
 	}
 	return value, true, nil
+}
+
+// GetHeights collapses the per-hash lookups into a single pipeline execution.
+// A relay carrying several block hashes would otherwise spend one round trip
+// per hash inside the caller's 50ms cache budget — over a multi-region link
+// that is enough to turn a warm cache into a miss. A corrupt or non-numeric
+// value reads as a miss, matching GetHeight.
+func (s *Store) GetHeights(ctx context.Context, keys []string) ([]int64, []bool, error) {
+	heights := make([]int64, len(keys))
+	found := make([]bool, len(keys))
+	if len(keys) == 0 {
+		return heights, found, nil
+	}
+
+	pipe := s.read.Pipeline()
+	cmds := make([]*redis.StringCmd, len(keys))
+	for i, key := range keys {
+		cmds[i] = pipe.Get(ctx, s.key(key))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, nil, err
+	}
+	for i, cmd := range cmds {
+		raw, err := cmd.Result()
+		if err == redis.Nil {
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		value, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		heights[i], found[i] = value, true
+	}
+	return heights, found, nil
 }
 
 func (s *Store) SetHeight(ctx context.Context, key string, height int64, ttl time.Duration) error {

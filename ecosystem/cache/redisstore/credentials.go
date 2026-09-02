@@ -32,9 +32,18 @@ func (s StaticCredentials) Credentials() (string, string, error) {
 // or "username:password" to rotate the username too (ACL-user rotation);
 // surrounding whitespace/newlines are trimmed. Kubernetes-mounted secrets and
 // sidecar token refreshers rotate by rewriting the file.
+//
+// CONSTRAINT: the combined form makes the first ":" a separator unconditionally,
+// so a password that CONTAINS a colon cannot be expressed in this file. Such a
+// file authenticates as the username before the colon and the remainder as the
+// password, which fails closed — but as an opaque WRONGPASS, and the auth-error
+// path deliberately withholds the server's reply, so nothing points at the
+// cause. warnOnce below leaves that breadcrumb.
 type FileCredentials struct {
 	Username string
 	Path     string
+
+	warnedCombined sync.Once
 }
 
 func (f *FileCredentials) Credentials() (string, string, error) {
@@ -43,6 +52,17 @@ func (f *FileCredentials) Credentials() (string, string, error) {
 		return "", "", err
 	}
 	if user, pass, found := strings.Cut(raw, ":"); found {
+		// Logged once, not per call: this runs on every connection attempt.
+		// The password half is never logged. Stated rather than warned about:
+		// the combined form is legitimate and documented, so this confirms the
+		// interpretation for whoever meant it and is the only breadcrumb for
+		// whoever did not.
+		f.warnedCombined.Do(func() {
+			utils.LavaFormatInfo("resp-cache password file contains ':' and is read as \"username:password\"; a password that itself contains a colon cannot be expressed in this file",
+				utils.LogAttr("path", f.Path),
+				utils.LogAttr("parsed-username", user),
+			)
+		})
 		return user, pass, nil
 	}
 	return f.Username, raw, nil

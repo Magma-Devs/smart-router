@@ -81,6 +81,21 @@ func (p Policy) SharedStateTip(averageBlockTimeForChain time.Duration) time.Dura
 func (p Policy) ForRelayEntry(finalized, isNodeError bool, averageBlockTime time.Duration, blockHash []byte) time.Duration {
 	if finalized {
 		if isNodeError {
+			// A spec that omits average_block_time passes 0 here, and min(0, x)
+			// is 0 — which both adapters read as "never expires" (ristretto by
+			// its SetWithTTL contract, the RESP store by mapping a non-positive
+			// TTL to a plain SET). One such write leaves a permanent key that no
+			// volatile-* maxmemory policy can ever evict, defeating the
+			// all-keys-volatile property chainTipRetention was bounded to
+			// preserve. The flat NodeErrors bound is the floor.
+			//
+			// Fixed here rather than in the adapters because the same
+			// non-positive-means-permanent semantics appear in two places per
+			// adapter (SetEntry and the int64 CAS script), and the policy is the
+			// single point that governs both.
+			if averageBlockTime <= 0 {
+				return p.NodeErrors
+			}
 			return lavaslices.Min([]time.Duration{averageBlockTime, p.NodeErrors})
 		}
 		return p.Finalized

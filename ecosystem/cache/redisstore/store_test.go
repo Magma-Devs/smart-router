@@ -104,6 +104,57 @@ func TestSetInt64GreaterOrEqual(t *testing.T) {
 	require.Equal(t, int64(150), v)
 }
 
+// A corrupt value must not be able to WEDGE tip publishing.
+//
+// GetInt64 already treats corruption as a miss rather than fataling, because a
+// router-embedded backend on a SHARED store must not be crashable by a foreign
+// writer. The write side has to honour the same invariant: if the compare-and-set
+// raises on a non-numeric stored value, the SET never runs, the key is never
+// overwritten, and every subsequent write fails identically — the key cannot
+// self-heal and tip publishing for that chain/pod is dead until someone deletes
+// it by hand.
+func TestSetInt64OverCorruptValue(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+	key := core.SharedTipKey("ETH1", "fleet")
+	require.NoError(t, mr.Set("sr:"+key, "not-a-number"))
+
+	_, found, err := store.GetInt64(ctx, key)
+	require.NoError(t, err, "corruption reads as a miss, not an error")
+	require.False(t, found)
+
+	require.NoError(t, store.SetInt64IfGreaterOrEqual(ctx, key, 100, 2*time.Second),
+		"a corrupt stored value must fall through to the write, not fence it")
+
+	value, found, err := store.GetInt64(ctx, key)
+	require.NoError(t, err)
+	require.True(t, found, "the write must have landed — the key self-heals")
+	require.Equal(t, int64(100), value)
+}
+
+// Same invariant for the chain tip. This script was already correct against a
+// real backend; the test exists because it is the pair to the one above, and
+// because it pins the miniredis-portable form — see setChainTipGEScript on why
+// the match result is bound before tonumber rather than nested inside it.
+func TestSetChainTipOverCorruptValue(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+	key := core.ChainTipKey("ETH1")
+	require.NoError(t, mr.Set("sr:"+key, "garbage-no-digits"))
+
+	_, fresh, err := store.GetChainTip(ctx, key)
+	require.NoError(t, err)
+	require.False(t, fresh, "a corrupt tip reads as unknown")
+
+	require.NoError(t, store.SetChainTipIfGreaterOrEqual(ctx, key, 100),
+		"a corrupt stored value must not fence the write")
+
+	block, fresh, err := store.GetChainTip(ctx, key)
+	require.NoError(t, err)
+	require.True(t, fresh)
+	require.Equal(t, int64(100), block)
+}
+
 // Chain-tip semantics ported from the in-memory adapter: readers honour the
 // embedded freshness deadline, while the monotonic guard keeps comparing
 // against the raw stored block even after it goes stale.

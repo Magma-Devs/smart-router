@@ -22,6 +22,11 @@ type fakeStore struct {
 	tipFresh bool
 	tipSets  []int64
 	heights  map[string]int64
+
+	// heightCalls counts round trips to the height surface: one per GetHeights
+	// call regardless of key count, so a test can tell a batched lookup from a
+	// per-hash loop.
+	heightCalls int
 }
 
 func newFakeStore() *fakeStore {
@@ -87,8 +92,21 @@ func (f *fakeStore) SetChainTipIfGreaterOrEqual(ctx context.Context, key string,
 func (f *fakeStore) GetHeight(ctx context.Context, key string) (int64, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.heightCalls++
 	v, ok := f.heights[key]
 	return v, ok, nil
+}
+
+func (f *fakeStore) GetHeights(ctx context.Context, keys []string) ([]int64, []bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.heightCalls++
+	heights := make([]int64, len(keys))
+	found := make([]bool, len(keys))
+	for i, key := range keys {
+		heights[i], found[i] = f.heights[key]
+	}
+	return heights, found, nil
 }
 
 func (f *fakeStore) SetHeight(ctx context.Context, key string, height int64, ttl time.Duration) error {
@@ -159,6 +177,68 @@ func TestPolicyForRelayEntry(t *testing.T) {
 		"non-finalized: an eighth of the block time when above the floor")
 	require.Equal(t, 500*time.Millisecond, p.ForRelayEntry(false, false, time.Second, nil),
 		"non-finalized: floored at the configured non-finalized expiration")
+
+	// A spec that omits average_block_time passes 0 here. min(0, NodeErrors) is
+	// 0, and a non-positive TTL means "never expires" in both adapters — one
+	// such write leaves a key no volatile-* maxmemory policy can ever evict,
+	// defeating the all-keys-volatile property the backend is built around.
+	require.Equal(t, 250*time.Millisecond, p.ForRelayEntry(true, true, 0, nil),
+		"finalized node error with no average block time must fall back to the node-error cap, never to a permanent key")
+	require.Equal(t, 250*time.Millisecond, p.ForRelayEntry(true, true, -time.Second, nil),
+		"a negative average block time is the same hazard")
+	require.Positive(t, p.ForRelayEntry(true, true, 0, nil),
+		"no input may make a relay entry permanent")
+}
+
+// Block-hash lookups must cost ONE store round trip, not one per hash.
+//
+// This runs inside the caller's per-relay cache budget (common.CacheTimeout,
+// 50ms). Over a remote backend a per-hash loop is one network round trip each,
+// and a request carrying several hashes can spend the whole budget resolving
+// them — turning a warm cache into a miss on exactly the multi-region
+// deployments the RESP backend exists to serve. An adapter cannot batch across
+// separate GetHeight calls, so the engine has to hand it the whole key set.
+func TestGetRelayBatchesBlockHashLookups(t *testing.T) {
+	store := newFakeStore()
+	ctx := context.Background()
+	requestHash := []byte{0x01}
+	seedEntry(store, false, "ETH1", requestHash, 100, 100, []byte(`ok`))
+
+	hashes := []string{"0xaa", "0xbb", "0xcc", "0xdd"}
+	for i, hash := range hashes {
+		require.NoError(t, store.SetHeight(ctx, HeightKey("ETH1", hash), int64(100+i), time.Minute))
+	}
+	// One the store has never seen: misses must stay index-aligned with hits.
+	requested := append(append([]string{}, hashes...), "0xmissing")
+
+	req := getReq("ETH1", requestHash, 100, 100, false)
+	req.BlocksHashesToHeights = make([]*relaytypes.BlockHashToHeight, len(requested))
+	for i, hash := range requested {
+		req.BlocksHashesToHeights[i] = &relaytypes.BlockHashToHeight{Hash: hash}
+	}
+
+	store.mu.Lock()
+	store.heightCalls = 0
+	store.mu.Unlock()
+
+	reply, _, err := testEngine(store).GetRelay(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, reply)
+
+	store.mu.Lock()
+	calls := store.heightCalls
+	store.mu.Unlock()
+	require.Equal(t, 1, calls,
+		"%d hashes must cost one store round trip; %d means the engine is looping per hash inside a 50ms budget",
+		len(requested), calls)
+
+	for i, resolved := range reply.BlocksHashesToHeights {
+		if i < len(hashes) {
+			require.Equal(t, int64(100+i), resolved.Height, "hash %s resolved to the wrong height", resolved.Hash)
+		} else {
+			require.Equal(t, spectypes.NOT_APPLICABLE, resolved.Height, "an unknown hash must read as NOT_APPLICABLE")
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
