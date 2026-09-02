@@ -3837,15 +3837,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 					}
 					// Secondary tier (docs/SECONDARY-CACHE.md): consulted whenever the primary
 					// produced no hit — including primary inactive or unconfigured. A hit is
-					// sanitized, served, and backfilled through the populator; a miss still
-					// contributes block-hash→height data to the merge.
+					// sanitized, served, and backfilled through the populator. A miss leaves
+					// latestBlockHashRequested/earliestBlockHashRequested exactly as the primary
+					// left them: those scalars steer local block resolution and archive routing,
+					// and the secondary is a trust boundary, not a second source of chain state.
 					if secondaryCacheActive {
-						served, secondaryCacheReply := rpcss.trySecondaryCacheLookup(ctx, protocolMessage, localRelayData, relayProcessor, analytics, hashKey, outputFormatter, requestedBlockForCache)
-						if served {
+						if rpcss.trySecondaryCacheLookup(ctx, protocolMessage, localRelayData, relayProcessor, analytics, hashKey, outputFormatter, requestedBlockForCache) {
 							return nil
 						}
-						latestFromSecondary, earliestFromSecondary := rpcss.getEarliestBlockHashRequestedFromCacheReply(secondaryCacheReply)
-						latestBlockHashRequested, earliestBlockHashRequested = mergeBlockHashHeights(latestBlockHashRequested, earliestBlockHashRequested, latestFromSecondary, earliestFromSecondary)
 					}
 				}
 			} else {
