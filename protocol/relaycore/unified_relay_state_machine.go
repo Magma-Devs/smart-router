@@ -34,6 +34,27 @@ type UnifiedRelayStateMachine struct {
 	relayStateLock        sync.RWMutex
 	config                StateMachineConfig
 	policy                RelayPolicyInf
+
+	// stopReason is the policy's reason for the most recent decision to stop. It rides out on the
+	// Done instruction so the request's final line can report it. Guarded by relayStateLock: the
+	// decision is taken on the state machine's goroutine and read when Done is sent, which
+	// validateReturnCondition dispatches from another.
+	stopReason string
+}
+
+// setStopReason records why the state machine is stopping. Last writer wins, which is what the
+// final line wants — a request that exhausts retries and then hits the processing timeout stopped
+// for the timeout.
+func (sm *UnifiedRelayStateMachine) setStopReason(reason string) {
+	sm.relayStateLock.Lock()
+	defer sm.relayStateLock.Unlock()
+	sm.stopReason = reason
+}
+
+func (sm *UnifiedRelayStateMachine) getStopReason() string {
+	sm.relayStateLock.RLock()
+	defer sm.relayStateLock.RUnlock()
+	return sm.stopReason
 }
 
 func NewUnifiedRelayStateMachine(
@@ -269,7 +290,7 @@ func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 		utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 	)
 
-	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true}
+	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: "ProcessingTimeout"}
 	return true
 }
 
@@ -348,14 +369,22 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 				case SendSuccess:
 					// continue to select loop
 				case SendStop:
+					// This arm stops the request WITHOUT consulting the policy, so it has to name
+					// its own reason — the policy's Decide is never reached here and the field
+					// would otherwise be blank on exactly the exhaustion cases an operator is
+					// reading the line to understand.
 					if isPairingListEmpty && sm.config.EnableCircuitBreaker {
-						utils.LavaFormatWarning("Circuit breaker triggered: All providers exhausted, stopping retries",
+						sm.setStopReason("AllProvidersExhausted")
+						utils.LavaFormatWarning("Circuit breaker: all providers exhausted, stopping new attempts — relays already in flight may still answer",
 							nil,
 							utils.LogAttr("GUID", sm.ctx),
 							utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
 						)
 					} else if sm.usedProviders.BatchNumber() == 0 && sm.policy.GetConsecutiveBatchErrors() == sm.config.SendRelayAttempts+1 {
+						sm.setStopReason("FirstMessageFailed")
 						utils.LavaFormatWarning("Failed Sending First Message", err, utils.LogAttr("consecutive errors", sm.policy.GetConsecutiveBatchErrors()), utils.LogAttr("GUID", sm.ctx))
+					} else {
+						sm.setStopReason("SendStop")
 					}
 					go validateReturnCondition(err)
 				case SendRetry:
@@ -372,7 +401,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 				utils.LavaFormatTrace("[StateMachine] success := <-gotResults", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
 				if success {
 					utils.LavaFormatTrace("[StateMachine] successfully sent message", utils.LogAttr("GUID", sm.ctx))
-					relayTaskChannel <- RelayStateSendInstructions{Done: true}
+					relayTaskChannel <- RelayStateSendInstructions{Done: true, StopReason: "Success"}
 					return
 				}
 
@@ -403,6 +432,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					sm.stateTransition(sm.getLatestState(), nodeErrors, &output.Mutation)
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 				} else {
+					sm.setStopReason(output.Reason)
 					// Don't return immediately — in-flight relays from earlier batches
 					// may still succeed. validateReturnCondition waits 15ms and checks
 					// whether any relays are still CurrentlyUsed before concluding.
@@ -430,7 +460,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 
 			case returnErr := <-returnCondition:
 				utils.LavaFormatTrace("[StateMachine] returnErr := <-returnCondition", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
-				relayTaskChannel <- RelayStateSendInstructions{Err: returnErr, Done: true}
+				relayTaskChannel <- RelayStateSendInstructions{Err: returnErr, Done: true, StopReason: sm.getStopReason()}
 				return
 
 			case <-processingCtx.Done():
@@ -447,7 +477,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 						utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
 						utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 					)
-					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true}
+					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: "ProcessingTimeout"}
 				}
 				return
 			}

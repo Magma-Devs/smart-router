@@ -1075,8 +1075,34 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		preferStructuralFailureReason(returnedResult, relayProcessor.GetCrossValidationFailFastReason())
 	}
 
-	utils.LavaFormatInfo("ProcessingResult RETURNED",
-		utils.LogAttr("has_result", returnedResult != nil),
+	// The one line that describes what the caller actually got. It fires once per request on the
+	// return path, and everything it reports is already in hand here — which is why the two
+	// questions it answers went unanswerable for so long over a line that was one field short.
+	//
+	// served_by names the provider whose bytes were returned. On a request that failed over, that
+	// is the ONLY place the winner appears at INFO: the per-endpoint success line is DEBUG, and
+	// promoting that instead would add a line to every successful relay to say what this one
+	// already knows.
+	//
+	// stop_reason says why there was no further attempt. A stateful relay is not retried after a
+	// timeout — a possibly-executed write must not run twice — which is correct, and was invisible,
+	// so a write that died at the deadline looked identical to one the router simply gave up on.
+	// served_by is only filled when something was actually served. On a failed relay
+	// GetProvider() still returns the provider that produced the failure, and reporting that as
+	// "served_by" would have the field lie on exactly the requests an operator reads most
+	// carefully — the failure is already attributed by the per-endpoint line and by `error`.
+	servedBy := ""
+	statusCode := 0
+	if returnedResult != nil {
+		statusCode = returnedResult.StatusCode
+		if returnedResult.Reply != nil {
+			servedBy = returnedResult.GetProvider()
+		}
+	}
+	utils.LavaFormatInfo("relay finished",
+		utils.LogAttr("served_by", servedBy),
+		utils.LogAttr("stop_reason", relayProcessor.GetStopReason()),
+		utils.LogAttr("status", statusCode),
 		utils.LogAttr("has_reply", returnedResult != nil && returnedResult.Reply != nil),
 		utils.LogAttr("reply_size", func() int {
 			if returnedResult != nil && returnedResult.Reply != nil {
@@ -1235,10 +1261,10 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		)
 
 		if task.IsDone() {
-			utils.LavaFormatInfo("🏁 TASK IS DONE - RETURNING FROM ProcessRelaySend",
-				utils.LogAttr("error", task.Err),
-				utils.LogAttr("GUID", ctx),
-			)
+			// Hand the state machine's reason to the processor so the request's final line can
+			// report why there was no further attempt. Without it a stateful relay that times out
+			// simply stops, and the log gives a reader nothing to distinguish that from a bug.
+			relayProcessor.SetStopReason(task.StopReason)
 			if task.Err != nil {
 				tracing.RecordError(span, task.Err)
 			}
