@@ -151,7 +151,7 @@ func runSecondaryLookup(t *testing.T, rpcss *RPCSmartRouterServer, protocolMessa
 	waitDone := make(chan struct{})
 	go func() { _ = relayProcessor.WaitForResults(waitCtx); close(waitDone) }()
 
-	served, _ := rpcss.trySecondaryCacheLookup(ctx, protocolMessage, protocolMessage.RelayPrivateData(), relayProcessor, nil, hashKey, outputFormatter, requestedBlockForCache)
+	served := rpcss.trySecondaryCacheLookup(ctx, protocolMessage, protocolMessage.RelayPrivateData(), relayProcessor, nil, hashKey, outputFormatter, requestedBlockForCache)
 	if !served {
 		waitCancel()
 		<-waitDone
@@ -215,9 +215,10 @@ func TestSecondaryCacheTimeoutAndErrorAreMisses(t *testing.T) {
 	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 100)
 
 	// The plain not-found: no error, no reply. Distinct from the failure cases
-	// because the cache answered correctly — and its answer still carries the
-	// block-hash→height scalars the caller folds in via mergeBlockHashHeights,
-	// so the reply must survive the non-hit return rather than being dropped.
+	// because the cache answered correctly — and its answer must still leave nothing
+	// behind. Block-hash→height mappings are chain-scoped state that steers
+	// resolveRequestedBlock and archive routing; a foreign tier does not get to supply
+	// them, so the lookup neither asks for them nor hands the reply back.
 	t.Run("clean not-found", func(t *testing.T) {
 		fake := &fakeCacheReader{
 			active: true,
@@ -229,11 +230,14 @@ func TestSecondaryCacheTimeoutAndErrorAreMisses(t *testing.T) {
 		rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
 		hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("LAVA")
 		require.NoError(t, err)
-		served, reply := rpcss.trySecondaryCacheLookup(context.Background(), protocolMessage,
+		served := rpcss.trySecondaryCacheLookup(context.Background(), protocolMessage,
 			protocolMessage.RelayPrivateData(), nil, nil, hashKey, outputFormatter, 100)
 		require.False(t, served, "a not-found must fall through to providers")
-		require.NotNil(t, reply, "the miss reply must reach the caller's block-hash merge")
-		require.Len(t, reply.GetBlocksHashesToHeights(), 1)
+
+		gets := fake.recorded()
+		require.Len(t, gets, 1)
+		require.Nil(t, gets[0].BlocksHashesToHeights,
+			"the secondary GET must not request hash→height mappings it is not allowed to use")
 	})
 
 	t.Run("timeout", func(t *testing.T) {
@@ -398,7 +402,8 @@ func TestSecondaryCachedNodeErrorsServeButNeverBackfill(t *testing.T) {
 
 // Full-path poisoned-entry test: foreign signatures, ARBITRARY foreign metadata
 // (names no denylist could enumerate) and a foreign chain height appear neither in
-// the served result nor in the primary backfill — the drop-all sanitization policy.
+// the served result nor in the primary backfill, while the transport headers that
+// describe how to decode the payload survive — the allowlist sanitization policy.
 func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	primary, rcs := startCacheServerForTest(t)
 	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 100)
@@ -424,6 +429,9 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 					{Name: "X-Served-By", Value: "edge-9.internal"},
 					{Name: "Via", Value: "1.1 lb.provider.example"},
 					{Name: "Server", Value: "nginx/1.25 (provider-pool-b)"},
+					// the one header that must NOT go: Reply.Metadata is the only source
+					// of client response headers, so dropping it retypes the body
+					{Name: "Content-Type", Value: "application/json"},
 				},
 			},
 			SeenBlock: 100,
@@ -438,10 +446,11 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	served, result := runSecondaryLookup(t, rpcss, protocolMessage, 100)
 	require.True(t, served)
 
-	// caller-visible result: no foreign identity anywhere
+	// caller-visible result: no foreign identity anywhere, transport headers intact
 	require.Nil(t, result.Reply.Sig)
 	require.Nil(t, result.Reply.SigBlocks)
-	require.Empty(t, result.Reply.Metadata, "all foreign metadata must be dropped from the served reply")
+	require.Equal(t, []pairingtypes.Metadata{{Name: "Content-Type", Value: "application/json"}}, result.Reply.Metadata,
+		"every identity-bearing header is dropped; only the transport allowlist survives")
 	require.Equal(t, "", result.ProviderInfo.ProviderAddress, "locally minted Lava-Provider-Address: Cached still applies downstream")
 	require.Equal(t, payload, result.Reply.Data)
 	require.Zero(t, result.Reply.LatestBlock, "a foreign chain height must not ride out on the served reply")
@@ -451,7 +460,8 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 		return directGet(rcs, hashKey, 100, 100).GetReply() != nil
 	}, 3*time.Second, 25*time.Millisecond)
 	stored := directGet(rcs, hashKey, 100, 100)
-	require.Empty(t, stored.GetReply().Metadata, "foreign metadata must not reach the primary store")
+	require.Equal(t, []pairingtypes.Metadata{{Name: "Content-Type", Value: "application/json"}}, stored.GetReply().Metadata,
+		"foreign identity metadata must not reach the primary store, but the entry must stay decodable from it")
 	require.Empty(t, stored.GetReply().Sig)
 	require.Empty(t, stored.GetReply().SigBlocks)
 	require.Equal(t, payload, stored.GetReply().Data)
@@ -528,38 +538,126 @@ func TestSecondaryCacheFlagAndYamlWiring(t *testing.T) {
 	})
 }
 
+// buildHashBearingProtocolMessage builds a REAL protocol message whose
+// GetRequestedBlocksHashes is non-empty — the shape the primary tier feeds into
+// RelayCacheGet.BlocksHashesToHeights. ETH1/`trace_transaction` is used because it is
+// the bundled spec's hash-parsed method (`parse_type: BLOCK_HASH` on `.params.[0]`);
+// eth_getBlockByHash carries no such parser and yields no hashes, which would make a
+// "we never ask" assertion vacuously true.
+func buildHashBearingProtocolMessage(t *testing.T, ctx context.Context, blockHash string) (chainlib.ChainParser, chainlib.ProtocolMessage) {
+	t.Helper()
+	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"trace_transaction","params":["` + blockHash + `"]}`)
+	chainMsg, err := chainParser.ParseMsg("", body, http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	relayData := &pairingtypes.RelayPrivateData{
+		ConnectionType: http.MethodPost,
+		Data:           body,
+		SeenBlock:      100,
+		ApiInterface:   string(spectypes.APIInterfaceJsonRPC),
+	}
+	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, relayData, "test-dapp", "127.0.0.1")
+	require.Equal(t, []string{blockHash}, protocolMessage.GetRequestedBlocksHashes(),
+		"fixture must genuinely carry a requested block hash, or the assertion below proves nothing")
+	return chainParser, protocolMessage
+}
+
+// The second half of the foreign-chain-state class the LatestBlock fix closed.
+// BlocksHashesToHeights lives on the OUTER CacheRelayReply, structurally out of
+// SanitizeForeignCacheReply's reach, and the heights it carries steer two local
+// decisions: resolveRequestedBlock raises reqBlock to the latest of them (gating
+// endpoint sync and optimizer selection) and the earliest drives
+// UpdateEarliestAndValidateExtensionRules into archive routing. Folded in, the
+// max-for-latest rule below would raise reqBlock to 987654321 and strand the request
+// on "no endpoint is synced to that block".
+//
+// The lookup therefore never asks for them — pinned on the REQUEST rather than on the
+// reply, because a request that does not ask cannot be re-plumbed into a fold by a
+// later change without this failing first. The request carries a real hash, so the
+// primary tier's own call site would populate the field here.
+func TestSecondaryLookupNeverRequestsForeignBlockHashHeights(t *testing.T) {
+	const blockHash = "0x1111111111111111111111111111111111111111111111111111111111111111"
+	chainParser, protocolMessage := buildHashBearingProtocolMessage(t, context.Background(), blockHash)
+
+	fake := &fakeCacheReader{
+		active: true,
+		reply: &pairingtypes.CacheRelayReply{
+			// A foreign zone claiming an absurd height for the hash in play.
+			BlocksHashesToHeights: []*pairingtypes.BlockHashToHeight{{Hash: blockHash, Height: 987654321}},
+		},
+	}
+	rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
+	rpcss.listenEndpoint = &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC}
+
+	hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("ETH1")
+	require.NoError(t, err)
+	served := rpcss.trySecondaryCacheLookup(context.Background(), protocolMessage,
+		protocolMessage.RelayPrivateData(), nil, nil, hashKey, outputFormatter, 100)
+	require.False(t, served, "reply-less entry is a miss")
+
+	gets := fake.recorded()
+	require.Len(t, gets, 1)
+	require.Nil(t, gets[0].BlocksHashesToHeights,
+		"the secondary GET must not ask for hash→height mappings this router is not allowed to adopt")
+}
+
+// Zeroing LatestBlock in the sanitizer is not quite inert on the serving path: its one
+// remaining reader is appendHeadersToRelayResult, which emits Provider-Latest-Block
+// whenever the value is positive. Left at zero, a secondary hit would be the single
+// response in the system that omits that header, so the two tiers would not be
+// interchangeable to a caller — which is exactly what operators are told they are.
+// The re-stamped value must be the LOCAL gated tip and never the foreign head.
+func TestSecondaryHitRestampsLatestBlockFromLocalTip(t *testing.T) {
+	const (
+		foreignHead = int64(987654321)
+		localTip    = int64(100)
+	)
+	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), localTip)
+	fake := &fakeCacheReader{
+		active: true,
+		reply: &pairingtypes.CacheRelayReply{
+			Reply:     &pairingtypes.RelayReply{Data: []byte(`{"block":{"header":{"height":"100"}}}`), LatestBlock: foreignHead},
+			SeenBlock: localTip,
+		},
+	}
+	rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
+	rpcss.chainState = chainstate.New("LAVA", chainstate.DefaultConfig(12*time.Second))
+	rpcss.chainState.SetLatestBlock(localTip)
+
+	served, result := runSecondaryLookup(t, rpcss, protocolMessage, localTip)
+	require.True(t, served)
+	require.Equal(t, localTip, result.Reply.LatestBlock,
+		"Provider-Latest-Block must be served from this router's own tip, so both tiers emit it")
+	require.NotEqual(t, foreignHead, result.Reply.LatestBlock)
+}
+
+// A router that has not observed a tip yet leaves the field at zero and simply omits
+// the header, exactly as it already does on any other path with no tip — the re-stamp
+// must not invent a height, least of all the foreign one it just dropped.
+func TestSecondaryHitOmitsLatestBlockWithNoLocalTip(t *testing.T) {
+	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 100)
+	fake := &fakeCacheReader{
+		active: true,
+		reply: &pairingtypes.CacheRelayReply{
+			Reply: &pairingtypes.RelayReply{Data: []byte(`{"block":{"header":{"height":"100"}}}`), LatestBlock: 987654321},
+		},
+	}
+	rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
+
+	served, result := runSecondaryLookup(t, rpcss, protocolMessage, 100)
+	require.True(t, served)
+	require.Zero(t, result.Reply.LatestBlock, "no local tip means no header, not a foreign one")
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-// Block-hash→height merge semantics:
-// merged, never overwritten — earliest is the minimum valid height, latest the
-// maximum, and a reply without mappings (NOT_APPLICABLE) cannot erase the other
-// tier's values.
-func TestMergeBlockHashHeights(t *testing.T) {
-	na := spectypes.NOT_APPLICABLE
-	cases := []struct {
-		name                                   string
-		latestA, earliestA, latestB, earliestB int64
-		wantLatest, wantEarliest               int64
-	}{
-		{"both empty", na, na, na, na, na, na},
-		{"primary only", 200, 100, na, na, 200, 100},
-		{"secondary only", na, na, 300, 50, 300, 50},
-		{"complementary ranges widen both ends", 200, 100, 300, 50, 300, 50},
-		{"secondary inside primary range changes nothing", 300, 50, 200, 100, 300, 50},
-		{"conflicting values fold deterministically", 200, 100, 250, 80, 250, 80},
-		{"empty secondary cannot erase primary", 200, 100, na, na, 200, 100},
-		{"zero is a valid height", 200, 100, na, 0, 200, 0},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			latest, earliest := mergeBlockHashHeights(tc.latestA, tc.earliestA, tc.latestB, tc.earliestB)
-			require.Equal(t, tc.wantLatest, latest, "latest")
-			require.Equal(t, tc.wantEarliest, earliest, "earliest")
-		})
-	}
-}
 
 // Entry-kind resolution is the single helper BOTH tiers call, which is what makes a
 // replayed node error carry lava-identified-node-error regardless of which cache

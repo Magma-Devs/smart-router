@@ -33,14 +33,24 @@ func (rpcss *RPCSmartRouterServer) secondaryCacheActive() bool {
 // error, which is served but never re-written as a success. Every error,
 // timeout, or malformed entry degrades to a miss; this tier can never fail a request.
 //
-// Returns served=true when the response was set on the relay processor, plus the raw
-// reply so a miss can still contribute block-hash→height data to the
-// mergeBlockHashHeights fold.
+// Returns served=true when the response was set on the relay processor.
 //
 // Deliberate differences from the primary lookup:
 //   - SharedStateId is empty and the reply's SeenBlock is never fed to
 //     adoptSharedStateTip: shared-state tip exchange is fleet-scoped, and a
 //     foreign-zone cache is not this router's fleet.
+//   - The reply's BlocksHashesToHeights is discarded rather than folded into
+//     latestBlockHashRequested/earliestBlockHashRequested. Those two scalars steer
+//     local decisions — resolveRequestedBlock raises reqBlock to the latest, which
+//     gates endpoint sync and optimizer selection, and the earliest drives
+//     UpdateEarliestAndValidateExtensionRules into archive routing — and the fold
+//     took max-for-latest / min-for-earliest, so the more extreme value always won
+//     and a foreign tier beat this router's own primary by construction. That is the
+//     same class SanitizeForeignCacheReply exists to close for LatestBlock: a foreign
+//     scalar must not reach local chain-scoped state. The cost is that hash-keyed
+//     archive detection falls back to the primary's mappings alone (and, in a
+//     secondary-only topology, to none) — the same position a router with no cache is
+//     already in.
 //   - The lookup runs under the operator-configured secondary-cache-timeout rather
 //     than the primary's fixed budget.
 //   - Every attempted lookup is recorded with cache_tier=secondary and its outcome
@@ -57,21 +67,25 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	hashKey []byte,
 	outputFormatter func([]byte) []byte,
 	requestedBlockForCache int64,
-) (served bool, secondaryReply *pairingtypes.CacheRelayReply) {
+) (served bool) {
 	chainId, apiInterface := rpcss.GetChainIdAndApiInterface()
 
 	cacheCtx, cancel := context.WithTimeout(ctx, rpcss.secondaryCacheTimeout)
 	_, cacheSpan := tracing.StartInternalSpan(ctx, tracing.SpanCacheLookup)
 	cacheStart := time.Now()
 	cacheReply, cacheError := rpcss.secondaryCache.GetEntry(cacheCtx, &pairingtypes.RelayCacheGet{
-		RequestHash:           hashKey,
-		RequestedBlock:        requestedBlockForCache,
-		ChainId:               chainId,
-		BlockHash:             nil,
-		Finalized:             false, // same as the primary: the server searches both stores
-		SharedStateId:         "",    // never join a foreign fleet's shared state
-		SeenBlock:             localRelayData.SeenBlock,
-		BlocksHashesToHeights: rpcss.newBlocksHashesToHeightsSliceFromRequestedBlockHashes(protocolMessage.GetRequestedBlocksHashes()),
+		RequestHash:    hashKey,
+		RequestedBlock: requestedBlockForCache,
+		ChainId:        chainId,
+		BlockHash:      nil,
+		Finalized:      false, // same as the primary: the server searches both stores
+		SharedStateId:  "",    // never join a foreign fleet's shared state
+		SeenBlock:      localRelayData.SeenBlock,
+		// Not asked for, because the answer would not be used: foreign block-hash→height
+		// mappings are chain-scoped state this router must not adopt (see the doc comment
+		// above). Leaving the field nil keeps the request and the trust boundary in
+		// agreement instead of relying on the caller to drop the reply.
+		BlocksHashesToHeights: nil,
 	})
 	cancel()
 	latencyMs := float64(time.Since(cacheStart).Milliseconds())
@@ -109,8 +123,9 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	cacheSpan.End()
 	go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierSecondary, outcome, latencyMs)
 	if !hit {
-		// miss, error, and timeout all degrade to a miss; the reply may still
-		// carry block-hash→height data worth merging
+		// miss, error, and timeout all degrade to a miss; nothing from the reply is
+		// carried forward, so the request proceeds exactly as it would with no
+		// secondary configured
 		utils.LavaFormatDebug("secondary cache lookup produced no hit",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
@@ -118,10 +133,23 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 			utils.LogAttr("outcome", outcome),
 			utils.LogAttr("latencyMs", latencyMs),
 		)
-		return false, cacheReply
+		return false
 	}
 
 	performance.SanitizeForeignCacheReply(copyReply)
+	// Re-stamp the zeroed LatestBlock from this router's own GATED tip, so the two tiers
+	// serve the same header set. LatestBlock's only serving-side reader is
+	// appendHeadersToRelayResult, which emits Provider-Latest-Block when the value is
+	// positive: leaving the sanitizer's zero in place would make a secondary hit the one
+	// response in the system that omits it, breaking the tier symmetry operators are told
+	// to rely on. The value written here is locally sourced and anti-lie-guarded, so none
+	// of the three backfill problems the zeroing closed can reopen —
+	// isFinalizedForCacheWrite sees max(localTip, localTip) and SetRelay stores
+	// max(localTip, locally derived SeenBlock), both local. A router with no tip yet
+	// leaves the field at zero and simply omits the header, as it already does elsewhere.
+	if localTip := int64(rpcss.getLatestBlock()); localTip > 0 {
+		copyReply.LatestBlock = localTip
+	}
 	copyReply.Data = outputFormatter(copyReply.Data)
 
 	// Entry kind + legacy GUID placeholder substitution, shared with the primary tier
@@ -193,23 +221,5 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		utils.LogAttr("isNodeError", isNodeError),
 		utils.LogAttr("GUID", ctx),
 	)
-	return true, cacheReply
-}
-
-// mergeBlockHashHeights merges the block-hash→height scalars harvested from the
-// primary and secondary miss replies:
-// information is merged, never overwritten. The earliest is the minimum valid
-// height, the latest the maximum, and a reply without mappings (NOT_APPLICABLE,
-// negative) cannot erase the other tier's values. Conflicting heights for the same
-// hash both enter the fold deterministically.
-func mergeBlockHashHeights(latestA, earliestA, latestB, earliestB int64) (latest, earliest int64) {
-	latest = latestA
-	if latestB >= 0 && (latest < 0 || latestB > latest) {
-		latest = latestB
-	}
-	earliest = earliestA
-	if earliestB >= 0 && (earliest < 0 || earliestB < earliest) {
-		earliest = earliestB
-	}
-	return latest, earliest
+	return true
 }
