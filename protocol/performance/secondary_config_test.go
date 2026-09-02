@@ -17,14 +17,22 @@ func TestSecondaryCacheConfigValidate(t *testing.T) {
 		require.Empty(t, warnings)
 	})
 
-	t.Run("dangling timeout without address fails", func(t *testing.T) {
-		_, err := SecondaryCacheConfig{Timeout: time.Second, Mode: SecondaryCacheModeReadOnly}.Validate("cache:20100", true, false)
-		require.ErrorContains(t, err, "dangling")
+	// Dangling options warn instead of failing startup: the shape is usually a typo,
+	// but it also occurs legitimately when one templated YAML is shared across a fleet
+	// where only some routers run a secondary. Failing there would turn an unused key
+	// into an outage on every router that does not.
+	t.Run("dangling timeout without address warns and starts", func(t *testing.T) {
+		warnings, err := SecondaryCacheConfig{Timeout: time.Second, Mode: SecondaryCacheModeReadOnly}.Validate("cache:20100", true, false)
+		require.NoError(t, err)
+		require.Len(t, warnings, 1)
+		require.Contains(t, warnings[0], "dangling")
 	})
 
-	t.Run("dangling mode without address fails", func(t *testing.T) {
-		_, err := SecondaryCacheConfig{Timeout: DefaultSecondaryCacheTimeout, Mode: SecondaryCacheModeReadOnly}.Validate("cache:20100", false, true)
-		require.ErrorContains(t, err, "dangling")
+	t.Run("dangling mode without address warns and starts", func(t *testing.T) {
+		warnings, err := SecondaryCacheConfig{Timeout: DefaultSecondaryCacheTimeout, Mode: SecondaryCacheModeReadOnly}.Validate("cache:20100", false, true)
+		require.NoError(t, err)
+		require.Len(t, warnings, 1)
+		require.Contains(t, warnings[0], "dangling")
 	})
 
 	t.Run("zero timeout fails", func(t *testing.T) {
