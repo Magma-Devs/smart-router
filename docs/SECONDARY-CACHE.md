@@ -35,7 +35,9 @@ request ──► primary cache ──hit──► served ("Cached")
   *own* primary cache under the same eligibility rules applied to upstream
   responses (cached node errors and error statuses are served but never
   re-written as successes). The next identical request hits the primary
-  directly — the secondary is consulted once per entry, not per request.
+  directly — for an explicit-block query the secondary is consulted once per
+  entry, not per request. (`latest`-tagged queries are the exception; see
+  [Scope of this release](#scope-of-this-release).)
 - **Node errors are labelled the same from either tier.** A cached node error
   is served with the `lava-identified-node-error` response header, exactly as a
   live node error is — so a replayed error is never mistaken for a success, and
@@ -46,21 +48,36 @@ request ──► primary cache ──hit──► served ("Cached")
 - **No identity leakage.** Cache entries *do* carry data that identifies where
   they came from — the upstream's response headers plus the writer's
   signatures. Every entry crossing in from the secondary is copied and stripped
-  of all three (`Metadata`, `Sig`, `SigBlocks`) before it is served or
-  backfilled, so the caller sees only the response body and the router's own
-  `Lava-Provider-Address: Cached` header — byte-identical to a primary-cache
-  hit. The stripped copy is the only copy used, so nothing unsanitized can
-  reach your primary cache either.
+  before it is served or backfilled: `Sig` and `SigBlocks` go entirely, and
+  `Metadata` is reduced to an **allowlist** of the headers that describe how to
+  decode the payload (`Content-Type`, `Content-Encoding`). Everything else in it
+  goes, including header names this router has never heard of — an allowlist
+  rather than a denylist because upstream response headers are an open set that
+  no denylist can be proven to cover. The caller therefore sees the response
+  body, its content type, and the router's own locally minted headers
+  (`Lava-Provider-Address: Cached`, the GUID, `Provider-Latest-Block`) — the
+  same header set a primary-cache hit produces. The stripped copy is the only
+  copy used, so nothing unsanitized can reach your primary cache either.
 - **No foreign block heights.** The entry's `LatestBlock` is dropped in the same
-  step. It is inert when serving, but the backfill would otherwise publish a
-  foreign zone's chain head into your own cache as the block that `latest`,
-  `safe`, `finalized` and `pending` resolve to — chain-wide, and unlowerable
-  until it expires. Your router's own tracked tip is used instead.
+  step, and the router re-stamps its *own* tracked tip in its place so
+  `Provider-Latest-Block` stays truthful and locally sourced. Left as-is, the
+  backfill would publish a foreign zone's chain head into your own cache as the
+  block that `latest`, `safe`, `finalized` and `pending` resolve to — chain-wide,
+  and unlowerable until it expires.
+- **No foreign hash→height mappings.** For the same reason, the secondary is
+  never asked for the block-hash→height mappings the primary tier supplies. Those
+  heights raise the effective requested block (gating endpoint sync and optimizer
+  selection) and decide archive routing, and the two tiers' values were folded
+  max-for-latest / min-for-earliest — so the more extreme value always won and a
+  foreign tier would beat your own primary by construction. Hash-keyed archive
+  detection therefore uses your primary's mappings alone, or none in a
+  secondary-only topology, exactly as on a router with no cache configured.
 
 Any backend that speaks the Smart Router cache protocol works as either tier —
-the secondary is simply a second `smartrouter cache` address. The two tiers are
-independent connections, so a mixed pairing (a different supported cache engine
-on each tier) is a supported configuration, not a special case.
+the secondary is simply a second `smartrouter cache` address. Run the same cache
+engine on both: pairing *different* engines across the two tiers is not a
+supported configuration (see [Open question, still
+open](#open-question-still-open)).
 
 ## What happens in each situation
 
@@ -291,7 +308,8 @@ curl -s http://127.0.0.1:7779/metrics | grep '^smartrouter_cache_success_total'
 ```
 
 Steps 2 and 3 both print `Lava-Provider-Address: Cached` — indistinguishable to
-the caller — and the tiers split one hit each:
+the caller, since step 3 replays the sanitized copy step 2 backfilled — and the
+tiers split one hit each:
 
 ```
 smartrouter_cache_success_total{…,cache_tier="secondary"} 1   ← step 2, the cross-zone rescue
@@ -466,9 +484,13 @@ Lava-Provider-Address: Cached
 smartrouter_cache_success_total{…,cache_tier="secondary",method="eth_getBlockByNumber"} 1   ← +1
 ```
 
-The header alone cannot close this step: a primary hit and a secondary hit are
-byte-identical to the caller by design. The `cache_tier` counter is what tells
-you which tier answered.
+The header alone cannot close this step: nothing in the response names the tier
+that answered — both carry the same locally minted header set, and the body is
+the same bytes. (The one difference is invisible here and by design: an entry
+that came from the secondary replays only its `Content-Type` /
+`Content-Encoding`, not whatever other upstream headers the writer's node
+happened to send.) The `cache_tier` counter is what tells you which tier
+answered.
 
 ### UC-5 — Unconfigured is fully backwards compatible
 
@@ -544,6 +566,22 @@ ignored:
 - **More than two tiers.** The design is one primary and one optional
   secondary. An ordered chain of N tiers is not supported.
 
+Out of scope and *not* rejected at startup, because the configuration is
+perfectly valid and only its benefit is limited:
+
+- **Cross-zone hits for `latest`-tagged queries.** A cache key is
+  `request hash ‖ block`, and for a `latest`-tagged request the router resolves
+  the block against **its own** tracked tip *before* the lookup, so the cache
+  server's own tag resolution never runs. Two zones tracking the chain
+  independently are routinely a block or two apart, and when they are, every
+  `latest`-tagged lookup builds a key the other zone never wrote and misses —
+  paying the cross-zone timeout each time rather than once per entry. Explicit
+  block numbers, block hashes and any other pinned query are unaffected and are
+  what this tier is for. If your workload is mostly `latest`-tagged, keep
+  `secondary-cache-timeout` tight: the tier will cost you that budget per
+  request and return nothing. Making the two zones agree on a block for `latest`
+  is a protocol change, not a configuration one, and is deferred.
+
 ## Use-case coverage
 
 Traceability against *PRD: Secondary Cache Backend* (April 2, 2026). What the
@@ -558,7 +596,7 @@ walkthrough](#manual-demo-walkthrough); this section records where each one is
 | PRD use case | Status | Proven by |
 | --- | --- | --- |
 | **UC-1** Primary miss with secondary fallback — served without hitting providers, populator decides the backfill | Covered | `TestSecondaryCacheHitServesWithoutPrimary`, `TestSecondaryHitBackfillsPrimaryWithExactKeyAndValidSeenBlock` (backfill goes through a **real** cache server, so a follow-up primary GET provably hits) |
-| **UC-2** Secondary miss — full fall-through, no overhead beyond the lookup | Covered | `TestSecondaryCacheTimeoutAndErrorAreMisses` — one subtest per outcome (`clean not-found`, `timeout`, `error`); `TestMergeBlockHashHeights` pins that a miss still contributes its block-hash data |
+| **UC-2** Secondary miss — full fall-through, no overhead beyond the lookup | Covered | `TestSecondaryCacheTimeoutAndErrorAreMisses` — one subtest per outcome (`clean not-found`, `timeout`, `error`), each pinning that the miss leaves nothing behind |
 | **UC-3** Secondary configured read-only — never modified by this router | Covered | Structural: `performance.CacheReader` exposes only `CacheActive`/`GetEntry`, so writes are a compile error. `TestSecondaryCacheConfigValidate` pins that any mode but `read-only` aborts startup |
 | **UC-4** Secondary unreachable — skipped, no impact, reconnects | Covered | `TestSecondaryCacheTimeoutAndErrorAreMisses` (bounded by the timeout), `TestSecondaryCacheActiveNilSafety`; reconnection is the primary's own loop, shared unchanged |
 | **UC-5** No secondary configured — fully backwards compatible | Covered | `TestSecondaryCacheActiveNilSafety` (nil interface *and* typed-nil client), `TestSecondaryCacheFlagAndYamlWiring` |
@@ -574,8 +612,8 @@ walkthrough](#manual-demo-walkthrough); this section records where each one is
 | Configurable lookup timeout; exceeded = miss | Met | `secondary-cache-timeout`, default `50ms` |
 | Failure never affects serving; primary-grade resilience | Met | Same reconnect loop and non-blocking failure semantics as the primary |
 | Backwards compatible when unconfigured | Met | No secondary series in metrics, no added step in the request path |
-| No provider-identifying metadata exposed | Met — and **not** a no-op | The format *does* carry it (`Sig`, `SigBlocks`, `Metadata` holding upstream response headers). All three are dropped on a private copy that becomes the only copy used. `TestSanitizeForeignCacheReplyDropsAllMetadataAndSignatures`, `TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill` |
-| No foreign chain state adopted | Met on both channels | `SeenBlock` is never fed to `adoptSharedStateTip` (`TestSecondarySeenBlockNeverAdoptedIntoChainState`), and `Reply.LatestBlock` is zeroed by the sanitizer so the backfill cannot publish a foreign head as the primary's chain-level tip, where it would shift `LATEST`/`SAFE`/`FINALIZED`/`PENDING` resolution chain-wide. `TestSanitizeForeignCacheReplyDropsLatestBlock`, `TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill` |
+| No provider-identifying metadata exposed | Met — and **not** a no-op | The format *does* carry it (`Sig`, `SigBlocks`, `Metadata` holding upstream response headers). `Sig`/`SigBlocks` are dropped entirely and `Metadata` is reduced to the `Content-Type`/`Content-Encoding` allowlist, on a private copy that becomes the only copy used. Allowlist, not denylist: upstream headers are an open set. `TestSanitizeForeignCacheReplyDropsIdentityMetadataAndSignatures`, `TestSanitizeForeignCacheReplyKeepsTransportHeaders`, `TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill` |
+| No foreign chain state adopted | Met on all three channels | `SeenBlock` is never fed to `adoptSharedStateTip` (`TestSecondarySeenBlockNeverAdoptedIntoChainState`); `Reply.LatestBlock` is zeroed by the sanitizer and re-stamped from the local tip, so the backfill cannot publish a foreign head as the primary's chain-level tip, where it would shift `LATEST`/`SAFE`/`FINALIZED`/`PENDING` resolution chain-wide (`TestSanitizeForeignCacheReplyDropsLatestBlock`, `TestSecondaryHitRestampsLatestBlockFromLocalTip`, `TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill`); and `BlocksHashesToHeights` — which sits on the outer `CacheRelayReply`, beyond the sanitizer's reach — is never requested, so foreign heights cannot raise the effective requested block or force archive routing (`TestSecondaryLookupNeverRequestsForeignBlockHashHeights`) |
 
 ### Nice-to-have requirements
 
@@ -587,14 +625,20 @@ walkthrough](#manual-demo-walkthrough); this section records where each one is
 | Configurable access mode | Built as an explicit setting; only `read-only` is accepted. Read-write is deferred and rejected at startup rather than ignored |
 | Support for N cache tiers | Not built — the PRD marks this optional and scopes to one secondary |
 
-### Open question, answered
+### Open question, still open
 
 > *Should mixed cache engine configurations be supported?*
 
-Yes. The two tiers are independent connections that speak the Smart Router
-cache protocol; the storage engine behind each address is that cache service's
-own concern and is invisible to the router. Pairing different supported engines
-across tiers needs no special handling.
+MAG-2596 records the answer as *"don't support mixed cache engines"*, and that
+product decision stands until its reporter revisits it — **do not read this
+release as reversing it.**
+
+What the implementation can say is narrower, and only about mechanism: the
+router does not know or ask which storage engine sits behind either address. The
+two tiers are independent connections speaking the Smart Router cache protocol,
+so a mixed pairing needs no special handling in the router and would not be
+detected, let alone rejected, if you configured one. Nothing here validates,
+tests, or supports that combination.
 
 ### Where the proof lives
 
