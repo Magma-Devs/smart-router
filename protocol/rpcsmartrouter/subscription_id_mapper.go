@@ -1,9 +1,12 @@
 package rpcsmartrouter
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -30,8 +33,28 @@ type SubscriptionIDMapper struct {
 	// clientCounters tracks per-client monotonic counters for ID generation
 	clientCounters map[string]*atomic.Uint64
 
+	// numericCounter backs GenerateNumericRouterID. Unlike clientCounters it is not
+	// per-client: a numeric id is handed to the client verbatim and is compared against
+	// upstream ids during unsubscribe, so it has to be unique across every client this
+	// mapper serves. That is the scope the lookups actually need — each manager builds its
+	// own mapper, so two managers do issue the same numbers, and nothing may key across
+	// them on this value.
+	numericCounter atomic.Uint64
+
 	lock sync.RWMutex
 }
+
+// numericRouterIDBase offsets generated numeric ids clear of the range nodes use for their
+// own, so a router id can never collide with some other subscription's upstream id during
+// the unsubscribe lookup — without that lookup having to know which is which.
+//
+// The base is deliberately far above anything a node plausibly issues rather than merely
+// above what Solana is observed to issue today, so the guarantee does not rest on node
+// behaviour. The ceiling is the other side of it: ids are JSON numbers, and a JavaScript
+// client parses them as float64, so base plus counter has to stay under 2^53 to survive the
+// round trip. 2^40 leaves roughly four thousand times more headroom than any one process
+// will ever need.
+const numericRouterIDBase = 1 << 40
 
 // NewSubscriptionIDMapper creates a new subscription ID mapper
 func NewSubscriptionIDMapper() *SubscriptionIDMapper {
@@ -60,6 +83,41 @@ func (m *SubscriptionIDMapper) GenerateRouterID(clientKey string) string {
 	count := counter.Add(1)
 
 	return fmt.Sprintf("rs_%s_%05d", clientHash, count)
+}
+
+// GenerateNumericRouterID creates a router subscription ID for chains that number their
+// subscriptions rather than naming them (Solana). The id is returned in the same canonical
+// decimal-string form as every other id here — every map in this type stays string-keyed —
+// and is rendered as a JSON number only where it reaches the wire.
+//
+// Unlike GenerateRouterID the counter is not per-client: the value is visible to the client
+// and is matched against upstream ids on unsubscribe, so it must be unique across every
+// client this mapper serves.
+func (m *SubscriptionIDMapper) GenerateNumericRouterID() string {
+	return strconv.FormatUint(numericRouterIDBase+m.numericCounter.Add(randomIDStride()), 10)
+}
+
+// maxIDStride bounds how far one id advances the counter. The span between
+// numericRouterIDBase and the 2^53 ceiling leaves room for roughly 1.7e10 ids at the average
+// stride, which no process will approach.
+const maxIDStride = 1 << 20
+
+// randomIDStride returns how far the counter advances for the next numeric id.
+//
+// A fixed +1 would make these ids a public counter: any client can subscribe twice and read
+// off exactly how many subscriptions the manager issued to everyone else in between. The
+// string path avoids that by namespacing per client (rs_{clientHash}_{counter}); a bare
+// number cannot. Seeding the counter randomly at construction would hide the absolute total
+// but NOT that delta, so the stride itself is what has to vary.
+//
+// It stays monotonic, so uniqueness remains structural rather than probabilistic.
+func randomIDStride() uint64 {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// A predictable id beats failing to issue one; uniqueness is unaffected.
+		return 1
+	}
+	return 1 + uint64(binary.BigEndian.Uint32(b[:])%maxIDStride)
 }
 
 // RegisterMapping creates the bidirectional mapping between router and upstream IDs.

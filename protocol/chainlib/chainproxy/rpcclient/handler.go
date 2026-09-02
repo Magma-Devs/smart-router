@@ -17,6 +17,7 @@
 package rpcclient
 
 import (
+	"bytes"
 	"context"
 	"reflect"
 	"strconv"
@@ -241,10 +242,34 @@ func (h *handler) handleImmediate(msg *JsonrpcMessage) bool {
 			h.handleSubscriptionResultEthereum(msg)
 			return true
 		} else if strings.HasSuffix(msg.Method, solanaNotificationMethodSuffix) {
+			// Unreachable: isEthereumNotification above already required the
+			// "_subscription" suffix, which no *Notification method has. Solana frames
+			// are served by the shape-based case below instead — left in place only so
+			// removing it is not confused with a behaviour change (MAG-3359).
 			h.handleSubscriptionResultSolana(msg)
 			return true
 		}
 		return false
+	case msg.Method != "" && msg.Params != nil:
+		// Shape-based delivery: a method-bearing frame whose params name a subscription.
+		// The method-name cases above keep first claim on anything they already
+		// recognise; this catches the rest, which is how Substrate and Solana pushes
+		// arrive — see subscriptionIDFromParams.
+		//
+		// It sits BEFORE the StarkNet case deliberately. That predicate matches any
+		// id-less method-bearing frame carrying a result, so a push that also sets a
+		// top-level result would be swallowed there and answered with "invalid request"
+		// — the very MAG-3345 symptom this exists to remove. StarkNet's own frames put
+		// the id in result and carry no params, so they never enter this case.
+		//
+		// The id is parsed once and handed to the delivery path. The sibling handlers
+		// above re-parse inside the handler, which here would mean decoding the whole
+		// payload twice for every frame delivered.
+		id, named := subscriptionIDFromParams(msg.Params)
+		if !named {
+			return false
+		}
+		return h.deliverSubscriptionPush(msg, id)
 	case msg.isStarkNetPathfinderNotification():
 		if strings.HasSuffix(msg.Method, ethereumNotificationMethodSuffix) {
 			h.handleSubscriptionResultStarkNetPathfinder(msg)
@@ -258,6 +283,38 @@ func (h *handler) handleImmediate(msg *JsonrpcMessage) bool {
 	default:
 		return false
 	}
+}
+
+// deliverSubscriptionPush hands a push frame to the subscription it names, reporting
+// whether this handler claimed the frame.
+//
+// Claiming matters as much as delivering. Before MAG-3345 an unrecognised push fell
+// through to handleCallMsg, which had no id and no matching method to serve, so the router
+// answered the node with an "invalid request" for every frame it received. But a frame that
+// carries a request id is a request the peer expects answered, and swallowing it silently
+// would leave the peer waiting on a reply that never comes — so an id-bearing frame that
+// matches no subscription is handed back to the call path, while an id-less one (a genuine
+// JSON-RPC notification, which nobody is waiting on) is claimed and dropped with a trace.
+func (h *handler) deliverSubscriptionPush(msg *JsonrpcMessage, subscriptionID string) bool {
+	if sub := h.clientSubs[subscriptionID]; sub != nil {
+		sub.deliver(msg)
+		return true
+	}
+	// An explicit "id":null is not a request id — hasValidID only rejects objects and
+	// arrays, so `null` passes it. Letting that through to the call path answers the node
+	// with "invalid request" for a late push, which is the MAG-3345 symptom itself.
+	if msg.hasValidID() && !bytes.Equal(msg.ID, null) {
+		return false
+	}
+	// Late frames after an unsubscribe land here routinely, so this is a trace and not a
+	// warning — but it is logged, because a subscription registered under a key the push
+	// does not name is otherwise indistinguishable from a healthy idle one, which is
+	// exactly the failure mode MAG-3345 was.
+	utils.LavaFormatTrace("Dropping subscription push with no matching subscription",
+		utils.LogAttr("method", msg.Method),
+		utils.LogAttr("subscriptionID", subscriptionID),
+	)
+	return true
 }
 
 func (h *handler) handleSubscriptionResultStarkNetPathfinder(msg *JsonrpcMessage) {
@@ -351,11 +408,12 @@ func (h *handler) handleResponse(msg *JsonrpcMessage) {
 		go op.sub.run()
 		h.clientSubs[op.sub.subid] = op.sub
 	} else {
-		// This is because StarkNet Pathfinder is returning an integer instead of a string in the result
-		var integerSubId int
+		// This is because StarkNet Pathfinder is returning an integer instead of a string in the result.
+		// int64 rather than int so this key cannot drift from CanonicalSubscriptionID's on a 32-bit build.
+		var integerSubId int64
 		if json.Unmarshal(msg.Result, &integerSubId) == nil {
 			op.err = nil
-			op.sub.subid = strconv.Itoa(integerSubId)
+			op.sub.subid = strconv.FormatInt(integerSubId, 10)
 			go op.sub.run()
 			h.clientSubs[op.sub.subid] = op.sub
 		}
