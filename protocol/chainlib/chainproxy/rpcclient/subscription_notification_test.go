@@ -1,6 +1,7 @@
 package rpcclient
 
 import (
+	"context"
 	"testing"
 
 	"github.com/goccy/go-json"
@@ -83,6 +84,50 @@ func TestSubscriptionIDFromParams(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, ok := subscriptionIDFromParams(tc.msg.Params)
 			assert.Equal(t, tc.want, ok && tc.msg.Method != "")
+		})
+	}
+}
+
+// stubConn is the minimal jsonWriter newHandler needs.
+type stubConn struct{ closedCh chan interface{} }
+
+func (s *stubConn) writeJSON(context.Context, interface{}) error { return nil }
+func (s *stubConn) closed() <-chan interface{}                   { return s.closedCh }
+func (s *stubConn) remoteAddr() string                           { return "stub" }
+
+func newTestHandler() *handler {
+	return newHandler(context.Background(), &stubConn{closedCh: make(chan interface{})},
+		func() ID { return ID("1") }, &serviceRegistry{})
+}
+
+// TestDeliverSubscriptionPush_ClaimsUnmatchedNotifications covers which unmatched frames the
+// dispatcher keeps and which it hands back to the call path.
+//
+// Handing one back means the router answers the node with "invalid request" — the MAG-3345
+// symptom. That is right for a request the peer is waiting on, and wrong for a push. The
+// distinction is the request id, and `"id":null` is the trap: hasValidID only rejects objects
+// and arrays, so a literal null passes it while meaning the opposite.
+func TestDeliverSubscriptionPush_ClaimsUnmatchedNotifications(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		id        json.RawMessage
+		wantClaim bool
+	}{
+		{"no id — a notification, nobody is waiting", nil, true},
+		{`explicit "id":null is still a notification`, json.RawMessage(`null`), true},
+		{"numeric id — a request that needs an answer", json.RawMessage(`7`), false},
+		{"string id — a request that needs an answer", json.RawMessage(`"abc"`), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHandler()
+			msg := &JsonrpcMessage{
+				Version: Vsn,
+				ID:      tc.id,
+				Method:  "chain_newHead",
+				Params:  json.RawMessage(`{"subscription":"nobody-is-subscribed","result":{}}`),
+			}
+			assert.Equal(t, tc.wantClaim, h.deliverSubscriptionPush(msg, "nobody-is-subscribed"),
+				"claiming an unmatched frame suppresses the invalid-request reply to the node")
 		})
 	}
 }

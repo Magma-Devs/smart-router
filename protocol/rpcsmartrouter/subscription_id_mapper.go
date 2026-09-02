@@ -1,7 +1,9 @@
 package rpcsmartrouter
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"strconv"
@@ -92,7 +94,30 @@ func (m *SubscriptionIDMapper) GenerateRouterID(clientKey string) string {
 // and is matched against upstream ids on unsubscribe, so it must be unique across every
 // client this mapper serves.
 func (m *SubscriptionIDMapper) GenerateNumericRouterID() string {
-	return strconv.FormatUint(numericRouterIDBase+m.numericCounter.Add(1), 10)
+	return strconv.FormatUint(numericRouterIDBase+m.numericCounter.Add(randomIDStride()), 10)
+}
+
+// maxIDStride bounds how far one id advances the counter. The span between
+// numericRouterIDBase and the 2^53 ceiling leaves room for roughly 1.7e10 ids at the average
+// stride, which no process will approach.
+const maxIDStride = 1 << 20
+
+// randomIDStride returns how far the counter advances for the next numeric id.
+//
+// A fixed +1 would make these ids a public counter: any client can subscribe twice and read
+// off exactly how many subscriptions the manager issued to everyone else in between. The
+// string path avoids that by namespacing per client (rs_{clientHash}_{counter}); a bare
+// number cannot. Seeding the counter randomly at construction would hide the absolute total
+// but NOT that delta, so the stride itself is what has to vary.
+//
+// It stays monotonic, so uniqueness remains structural rather than probabilistic.
+func randomIDStride() uint64 {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// A predictable id beats failing to issue one; uniqueness is unaffected.
+		return 1
+	}
+	return 1 + uint64(binary.BigEndian.Uint32(b[:])%maxIDStride)
 }
 
 // RegisterMapping creates the bidirectional mapping between router and upstream IDs.

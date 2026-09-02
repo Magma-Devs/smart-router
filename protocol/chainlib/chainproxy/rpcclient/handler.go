@@ -17,6 +17,7 @@
 package rpcclient
 
 import (
+	"bytes"
 	"context"
 	"reflect"
 	"strconv"
@@ -299,7 +300,10 @@ func (h *handler) deliverSubscriptionPush(msg *JsonrpcMessage, subscriptionID st
 		sub.deliver(msg)
 		return true
 	}
-	if msg.hasValidID() {
+	// An explicit "id":null is not a request id — hasValidID only rejects objects and
+	// arrays, so `null` passes it. Letting that through to the call path answers the node
+	// with "invalid request" for a late push, which is the MAG-3345 symptom itself.
+	if msg.hasValidID() && !bytes.Equal(msg.ID, null) {
 		return false
 	}
 	// Late frames after an unsubscribe land here routinely, so this is a trace and not a
