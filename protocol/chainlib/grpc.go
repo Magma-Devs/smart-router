@@ -179,7 +179,10 @@ func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientC
 			utils.LogAttr("resolution", "block parsing resolves through one registry per chain, so every gRPC node-url on a chain must declare the same descriptor-source and descriptor-set-path"))
 	}
 
-	var remote dyncodec.ProtoFileRegistry = dyncodec.NewGRPCReflectionProtoFileRegistryFromConn(reflectionConnection)
+	// grpc-config is what bounds reflection here. Without it a node that accepts
+	// the reflection stream and never answers blocks until BootValidateTimeout
+	// tears the connector down, and the failure reads as a closed pool (MAG-3371).
+	var remote dyncodec.ProtoFileRegistry = dyncodec.NewGRPCReflectionProtoFileRegistryFromConn(reflectionConnection, grpcConfig.GetReflectionTimeout())
 	remote, err := dyncodec.ProtoFileRegistryForGrpcConfig(grpcConfig, remote)
 	if err != nil {
 		return err

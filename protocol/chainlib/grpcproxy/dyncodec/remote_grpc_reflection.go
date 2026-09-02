@@ -3,6 +3,7 @@ package dyncodec
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
@@ -12,9 +13,24 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 )
 
-func NewGRPCReflectionProtoFileRegistryFromConn(conn *grpc.ClientConn) *GRPCReflectionProtoFileRegistry {
+// defaultReflectionTimeout mirrors common.GrpcConfig.GetReflectionTimeout's
+// default. It is duplicated rather than imported to keep dyncodec free of the
+// config package, and exists so a zero timeout cannot reintroduce the unbounded
+// behaviour this file used to have.
+const defaultReflectionTimeout = 5 * time.Second
+
+// NewGRPCReflectionProtoFileRegistryFromConn builds a reflection-backed registry.
+//
+// reflectionTimeout bounds each reflection exchange; zero or negative takes the
+// default above, so a caller that has no configured value still gets a bound
+// rather than none.
+func NewGRPCReflectionProtoFileRegistryFromConn(conn *grpc.ClientConn, reflectionTimeout time.Duration) *GRPCReflectionProtoFileRegistry {
+	if reflectionTimeout <= 0 {
+		reflectionTimeout = defaultReflectionTimeout
+	}
 	return &GRPCReflectionProtoFileRegistry{
-		rpb: grpc_reflection_v1alpha.NewServerReflectionClient(conn),
+		rpb:     grpc_reflection_v1alpha.NewServerReflectionClient(conn),
+		timeout: reflectionTimeout,
 	}
 }
 
@@ -22,6 +38,23 @@ func NewGRPCReflectionProtoFileRegistryFromConn(conn *grpc.ClientConn) *GRPCRefl
 // which uses grpc reflection to resolve files.
 type GRPCReflectionProtoFileRegistry struct {
 	rpb grpc_reflection_v1alpha.ServerReflectionClient
+
+	// timeout bounds one reflection exchange. Both methods below open a stream,
+	// send a single request and read a single reply before returning, so a
+	// call-scoped deadline is the whole operation's deadline.
+	//
+	// It is load-bearing because a server can accept the stream and then never
+	// answer: gRPC applies no deadline of its own, so an unbounded call blocks
+	// until something else tears the connection down. On the startup-verification
+	// path that is BootValidateTimeout, and the failure then surfaces as a closed
+	// connection pool rather than as reflection never answering (MAG-3371).
+	timeout time.Duration
+}
+
+// reflectionCtx returns the deadline-bounded context for one exchange. The
+// caller must call cancel once it has finished with the stream.
+func (g *GRPCReflectionProtoFileRegistry) reflectionCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), g.timeout)
 }
 
 func (g *GRPCReflectionProtoFileRegistry) ProtoFileByPath(path string) (_ *descriptorpb.FileDescriptorProto, err error) {
@@ -31,7 +64,10 @@ func (g *GRPCReflectionProtoFileRegistry) ProtoFileByPath(path string) (_ *descr
 		}
 	}()
 
-	stream, err := g.rpb.ServerReflectionInfo(context.Background())
+	ctx, cancel := g.reflectionCtx()
+	defer cancel()
+
+	stream, err := g.rpb.ServerReflectionInfo(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +94,10 @@ func (g *GRPCReflectionProtoFileRegistry) ProtoFileContainingSymbol(name protore
 			err = fmt.Errorf("proto file containing symbol: %w", err)
 		}
 	}()
-	stream, err := g.rpb.ServerReflectionInfo(context.Background())
+	ctx, cancel := g.reflectionCtx()
+	defer cancel()
+
+	stream, err := g.rpb.ServerReflectionInfo(ctx)
 	if err != nil {
 		return nil, err
 	}
