@@ -44,6 +44,12 @@ type mockSubscriptionServer struct {
 	notificationMethod string
 	subscriptionID     string
 
+	// notificationMethods names push frames per subscribe method, which a real node does —
+	// it names the frame after the payload. Two concurrent subscriptions therefore push
+	// frames with different method names, and that is the only thing that makes
+	// cross-delivery between them observable. Falls back to notificationMethod.
+	notificationMethods map[string]string
+
 	// numericIDs makes the server number its subscriptions instead of naming them, which
 	// is what Solana does and what no test here could express before MAG-3359.
 	// firstNumericID is the id the first such subscription gets.
@@ -125,6 +131,7 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 		}
 
 		subID, wireID := ms.createSubscription()
+		subscribeMethod := req.Method
 		response := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      req.ID,
@@ -132,7 +139,7 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 		}
 		respBytes, _ := json.Marshal(response)
 		ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)
-		go ms.sendSubscriptionMessages(conn, subID, wireID)
+		go ms.sendSubscriptionMessages(conn, subID, wireID, subscribeMethod)
 	}
 }
 
@@ -218,7 +225,15 @@ func (ms *mockSubscriptionServer) closeSubscription(subID string) {
 	}
 }
 
-func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn, subID string, wireID any) {
+// notificationMethodFor names the push frames one subscription produces.
+func (ms *mockSubscriptionServer) notificationMethodFor(subscribeMethod string) string {
+	if m, ok := ms.notificationMethods[subscribeMethod]; ok {
+		return m
+	}
+	return ms.notificationMethod
+}
+
+func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn, subID string, wireID any, subscribeMethod string) {
 	ms.lock.RLock()
 	closeCh, exists := ms.subscriptions[subID]
 	ms.lock.RUnlock()
@@ -239,15 +254,18 @@ func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn,
 			// Send subscription notification
 			notification := map[string]interface{}{
 				"jsonrpc": "2.0",
-				"method":  ms.notificationMethod,
+				"method":  ms.notificationMethodFor(subscribeMethod),
 				"params": map[string]interface{}{
 					"subscription": wireID,
 					"result": map[string]interface{}{
 						"number": counter,
-						// Provenance: which upstream subscription produced this frame.
-						// Without it a post-reconnect assertion cannot tell a restored
-						// frame from one the previous subscription is still pushing.
+						// Provenance: which upstream subscription produced this frame, and
+						// which subscribe call created it. Without these a post-reconnect
+						// assertion cannot tell a restored frame from one the previous
+						// subscription is still pushing, and a cross-delivery assertion
+						// cannot tell whose payload it received.
 						"upstream": wireID,
+						"from":     subscribeMethod,
 					},
 				},
 			}
@@ -3449,4 +3467,94 @@ func TestClientDisconnect_TearsDownUpstreamSubscription(t *testing.T) {
 	}, 15*time.Second, 50*time.Millisecond,
 		"a client disconnect must tell the NODE to stop pushing; without it the "+
 			"pooled connection keeps delivering and every later subscriber gets an extra copy")
+}
+
+// TestEndToEnd_ConcurrentSubstrateSubscriptionsDoNotCrossDeliver is the regression for
+// MAG-3378: two clients subscribing to DIFFERENT parameterless methods were silently served
+// the same upstream stream.
+//
+// Substrate's subscription methods overwhelmingly take no params, so hashing params alone
+// gave chain_subscribeNewHead and state_subscribeRuntimeVersion the same key. The first
+// subscriber owned it; the second was attached to that stream and received its payloads,
+// re-stamped with its own router id. Nothing errored — the data was simply wrong, on a paid
+// relay path, undetectable by the client.
+//
+// It needs all three of: two DIFFERENT parameterless methods, two SEPARATE client
+// connections, and frames whose payload names the subscription that produced it. A
+// single-client or single-subscription test cannot see it, which is why the pipeline's own
+// per-method probing never did.
+func TestEndToEnd_ConcurrentSubstrateSubscriptionsDoNotCrossDeliver(t *testing.T) {
+	mockSrv := newMockSubscriptionServer()
+	mockSrv.messageInterval = 20 * time.Millisecond
+	mockSrv.notificationMethods = map[string]string{
+		"chain_subscribeNewHead":        "chain_newHead",
+		"state_subscribeRuntimeVersion": "state_runtimeVersion",
+	}
+	defer mockSrv.Close()
+
+	manager := NewDirectWSSubscriptionManager(
+		getTestMetricsManager(),
+		"jsonrpc", "DOT", "jsonrpc",
+		[]*common.NodeUrl{{Url: mockSrv.URL()}},
+		nil, nil, nil,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Both take no params — that is the collision condition.
+	subscribe := func(t *testing.T, method, dappID, ip, wsUID string) <-chan *pairingtypes.RelayReply {
+		t.Helper()
+		body, err := json.Marshal(map[string]interface{}{
+			"jsonrpc": "2.0", "method": method, "params": []interface{}{}, "id": 1,
+		})
+		require.NoError(t, err)
+		msg := &mockWSProtocolMessageWithRawData{
+			mockWSProtocolMessage: mockWSProtocolMessage{method: method, params: []interface{}{}},
+			rawData:               body,
+		}
+		_, ch, err := manager.StartSubscription(ctx, msg, dappID, ip, wsUID, nil)
+		require.NoError(t, err, "%s must subscribe", method)
+		require.NotNil(t, ch, "%s must get its own notifications channel, not be deduped away", method)
+		return ch
+	}
+
+	headsCh := subscribe(t, "chain_subscribeNewHead", "dapp-a", "10.0.0.1", "ws-a")
+	versionCh := subscribe(t, "state_subscribeRuntimeVersion", "dapp-b", "10.0.0.2", "ws-b")
+
+	manager.lock.RLock()
+	activeCount := len(manager.activeSubscriptions)
+	manager.lock.RUnlock()
+	assert.Equal(t, 2, activeCount,
+		"two different methods must be two upstream subscriptions; one means they collided on the key")
+
+	// Every frame a client receives must come from the method that client subscribed to.
+	assertOwnPayloads := func(t *testing.T, name, wantFrom, wantMethod string, ch <-chan *pairingtypes.RelayReply) {
+		t.Helper()
+		for i := 0; i < 3; i++ {
+			select {
+			case notif := <-ch:
+				require.NotNil(t, notif)
+				var frame struct {
+					Method string `json:"method"`
+					Params struct {
+						Result struct {
+							From string `json:"from"`
+						} `json:"result"`
+					} `json:"params"`
+				}
+				require.NoError(t, json.Unmarshal(notif.Data, &frame))
+				require.Equal(t, wantFrom, frame.Params.Result.From,
+					"%s received a payload produced by %q, frame #%d — cross-delivery",
+					name, frame.Params.Result.From, i)
+				require.Equal(t, wantMethod, frame.Method,
+					"%s frame #%d carries the wrong notification method", name, i)
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s received no frame #%d within 5s", name, i)
+			}
+		}
+	}
+
+	assertOwnPayloads(t, "newHead client", "chain_subscribeNewHead", "chain_newHead", headsCh)
+	assertOwnPayloads(t, "runtimeVersion client", "state_subscribeRuntimeVersion", "state_runtimeVersion", versionCh)
 }
