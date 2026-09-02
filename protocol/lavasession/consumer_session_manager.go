@@ -2631,14 +2631,25 @@ func (csm *ConsumerSessionManager) validateAndReturnBlockedProviderToValidAddres
 	// if we didn't find it, we might had two sessions in parallel and thats ok. the first one dealt with it we can just return
 }
 
-// blockRecordOrUnknownLocked returns a blocked provider's record, or a placeholder naming the epoch
-// carry-over when none is stored. The placeholder should be unreachable — every block writes a
-// record — so seeing it in a log means a block path forgot to. csm.lock must be held.
+// blockRecordOrUnknownLocked returns a blocked provider's record, or a placeholder when none is
+// stored. csm.lock must be held.
+//
+// The placeholder fails CLOSED: Reported is true, so an unknown block faces the epoch's probe rather
+// than being waved through. That field decides whether a re-blocked provider has to prove itself,
+// and its zero value would read as "never reported, no evidence against it, let it back in" — which
+// is precisely the free clean slate the re-block exists to prevent. When we do not know why a
+// provider is out, the safe answer is to make it prove itself, not to assume the best.
+//
+// Reaching this means a block path did not record a reason, which is a bug in that path rather than
+// a state to tolerate quietly — hence the warning.
 func (csm *ConsumerSessionManager) blockRecordOrUnknownLocked(providerAddress string) BlockRecord {
 	if record, ok := csm.blockedProviderRecords[providerAddress]; ok {
 		return record
 	}
-	return BlockRecord{Reason: BlockReasonPreviousEpoch, Since: time.Now()}
+	utils.LavaFormatWarning("blocked provider carried no block record at the epoch boundary", nil,
+		utils.LogAttr("address", providerAddress),
+	)
+	return BlockRecord{Reason: BlockReasonPreviousEpoch, Since: time.Now(), Reported: true}
 }
 
 // blockedTotalLocked is how many providers are out across both pools — the number an operator wants
@@ -3013,7 +3024,7 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 	// First pass: Identify which re-blocked providers had successful probes
 	providersNeedingComprehensiveProbe := make(map[string]reBlockedProviderInfo)
 
-	for blockedAddr := range csm.previousEpochBlockedProviders {
+	for blockedAddr, carried := range csm.previousEpochBlockedProviders {
 		cswp, exists := csm.pairing[blockedAddr]
 		isBackup := false
 		if !exists {
@@ -3027,16 +3038,23 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 		// A backup ALWAYS takes the comprehensive-probe branch: !isBackup short-circuits, so a
 		// backup's report state is never consulted at all. That is deliberate — report state is
 		// only meaningful as a health signal for a provider we actually have evidence about, and
-		// a backup that was never selected has none. Falling through to !IsReported for it would
-		// read "absent from reportedProviders" as "healthy" and unblock it with no real check.
+		// a backup that was never selected has none. Falling through to "not reported" for it would
+		// read that as "healthy" and unblock it with no real check.
 		//
-		// Note a backup CAN legitimately appear in reportedProviders: blockProvider's
-		// AddressIndexWasNotFoundError branch marks blockedBackupProviders and then falls through
-		// to the reportProvider block below it. That is irrelevant here precisely because the
-		// short-circuit means we never look.
-		if !isBackup && !csm.reportedProviders.IsReported(blockedAddr) {
-			// Non-backup provider whose probe succeeded (it wasn't added to reportedProviders).
-			// Unblock immediately.
+		// The report state comes from the CARRIED BLOCK RECORD, not from csm.reportedProviders.
+		// The live register cannot answer this question at an epoch transition: UpdateAllProviders
+		// calls reportedProviders.Reset() in its body, while this pass runs from a defer that
+		// sleeps first — so the register is always already empty by the time we get here. Reading
+		// it made every non-backup look unreported, sent all of them down the immediate-unblock
+		// branch, and left this else-branch unreachable for regular providers. The whole point of
+		// re-blocking them ("prevents known-bad providers from getting a clean slate") was undone
+		// in the same tick.
+		//
+		// The record is the honest source: it holds whether the provider was reported at the moment
+		// it was blocked, which is exactly what the register held before the reset.
+		if !isBackup && !carried.Reported {
+			// Non-backup provider that was never reported — no evidence it is bad. Unblock
+			// immediately.
 			utils.LavaFormatInfo("Re-blocked provider's probe succeeded, immediately unblocking",
 				utils.Attribute{Key: "provider", Value: blockedAddr},
 				utils.Attribute{Key: "isBackup", Value: isBackup},
@@ -3044,7 +3062,10 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 				utils.LogAttr("GUID", ctx),
 			)
 			csm.validateAndReturnBlockedProviderToValidAddressesListLocked(blockedAddr, ReleaseEpochNotReported)
-			csm.reportedProviders.RemoveReport(blockedAddr)
+			// No RemoveReport here. UpdateAllProviders resets the register in its body before this
+			// pass runs, so there has never been anything to remove — and this branch no longer
+			// consults it at all. Leaving the call in would suggest the register is meaningful on
+			// this path, which is the assumption that produced the bug above.
 		} else {
 			// Either a backup provider (always routed here by the short-circuit above),
 			// or a non-backup that was reported for relay failures.
