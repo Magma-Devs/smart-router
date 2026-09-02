@@ -21,17 +21,23 @@ func (c SecondaryCacheConfig) Enabled() bool {
 // Validate applies the secondary-cache startup rules (docs/SECONDARY-CACHE.md).
 // A hard error fails startup; warnings are logged and startup proceeds.
 // timeoutSet/modeSet distinguish an explicitly provided flag/YAML value from the
-// default — secondary options without an address are a deployment mistake, not a
-// configuration. primaryAddress feeds the two advisory warnings: secondary-only is
+// default. primaryAddress feeds the two advisory warnings: secondary-only is
 // explicitly allowed but warned about (no backfill), and secondary == primary
 // is legal but almost certainly unintended.
+//
+// Tuning options with no address are reported as a warning rather than a startup
+// failure. They are usually a typo worth surfacing, but the same shape occurs
+// legitimately when one templated YAML is shared across a fleet in which only some
+// routers run a secondary — and failing startup there turns a harmless unused key
+// into an outage on every router that does not. The warning still names the problem,
+// and the secondary is simply left disabled.
 func (c SecondaryCacheConfig) Validate(primaryAddress string, timeoutSet, modeSet bool) (warnings []string, err error) {
 	if !c.Enabled() {
 		if timeoutSet || modeSet {
-			return nil, fmt.Errorf("secondary cache options are set while %s is empty — dangling configuration (set %s or drop %s/%s)",
-				SecondaryCacheFlagName, SecondaryCacheFlagName, SecondaryCacheTimeoutFlagName, SecondaryCacheModeFlagName)
+			warnings = append(warnings, fmt.Sprintf("secondary cache options (%s/%s) are set while %s is empty — dangling configuration, secondary cache disabled (set %s to enable it, or drop the unused options)",
+				SecondaryCacheTimeoutFlagName, SecondaryCacheModeFlagName, SecondaryCacheFlagName, SecondaryCacheFlagName))
 		}
-		return nil, nil
+		return warnings, nil
 	}
 	if c.Timeout <= 0 {
 		return nil, fmt.Errorf("%s must be greater than zero, got %s", SecondaryCacheTimeoutFlagName, c.Timeout)
