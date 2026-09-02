@@ -3068,9 +3068,34 @@ func (csm *ConsumerSessionManager) OnSessionRateLimited(consumerSession *SingleC
 
 // Report session failure, mark it as blocked from future usages, report if timeout happened.
 func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsumerSession, errorReceived error) error {
+	return csm.releaseWithAvailabilityFailure(consumerSession, errorReceived, "OnSessionFailure")
+}
+
+// OnSessionUnresponsive releases a session whose relay was dispatched, was given its full
+// per-attempt window, and produced no response at all — the endpoint hung. It records the same
+// availability failure as OnSessionFailure.
+//
+// It is a separate name from OnSessionFailure on purpose, and the separation is the point rather
+// than the current behaviour: "failed" means the endpoint answered with something we could not use,
+// "unresponsive" means it answered nothing. A punishment added to failure handling later — a harsher
+// block rule, an on-chain report, a different decay — must not land on hung endpoints unless someone
+// decides it should. Sharing the accounting through releaseWithAvailabilityFailure keeps the two
+// byte-identical today while leaving the seam to diverge at. Same reasoning as OnSessionDiscarded
+// versus OnSessionCancelled above.
+//
+// Not to be confused with OnSessionCancelled: that is for a relay WE stopped before it had its
+// window — a race loser or a client disconnect — where the endpoint's availability was never
+// actually tested. Here it was tested, for the full window, and produced nothing. Routing these
+// through OnSessionCancelled is the bug it exists to prevent: nothing at all would be recorded, so a
+// permanently hung endpoint would keep whatever score it had and be selected again next request.
+func (csm *ConsumerSessionManager) OnSessionUnresponsive(consumerSession *SingleConsumerSession, errorReceived error) error {
+	return csm.releaseWithAvailabilityFailure(consumerSession, errorReceived, "OnSessionUnresponsive")
+}
+
+func (csm *ConsumerSessionManager) releaseWithAvailabilityFailure(consumerSession *SingleConsumerSession, errorReceived error, caller string) error {
 	// consumerSession must be locked when getting here.
 	if err := consumerSession.VerifyLock(); err != nil {
-		return fmt.Errorf("OnSessionFailure, consumerSession.lock must be locked before accessing this method, additional info: %w", err)
+		return fmt.Errorf("%s, consumerSession.lock must be locked before accessing this method, additional info: %w", caller, err)
 	}
 	// redemptionSession = true, if we got this provider from the blocked provider list.
 	// if so, it means we already reported this provider and blocked it we do not need to do it again.

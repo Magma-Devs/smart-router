@@ -313,7 +313,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 		gotResults := make(chan bool, 1)
 		processingTimeout, relayTimeout := sm.relaySender.GetProcessingTimeout(sm.GetProtocolMessage())
 		if sm.debugRelays {
-			utils.LavaFormatDebug("Relay initiated with the following timeout schedule", utils.LogAttr("processingTimeout", processingTimeout), utils.LogAttr("newRelayTimeout", relayTimeout), utils.LogAttr("GUID", sm.ctx))
+			utils.LavaFormatDebug("Relay initiated with the following timeout schedule", utils.LogAttr("processingTimeout", processingTimeout), utils.LogAttr("attemptWindow", relayTimeout), utils.LogAttr("GUID", sm.ctx))
 		}
 		processingCtx, processingCtxCancel := context.WithTimeout(sm.ctx, processingTimeout)
 		defer processingCtxCancel()
@@ -356,7 +356,12 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 			NumOfProviders: numProviders,
 		}
 
-		// Initialize parameters
+		// Initialize parameters.
+		//
+		// relayTimeout is the attempt WINDOW, and here it is used for the only job it should ever
+		// have had: deciding when to dispatch another endpoint. It no longer doubles as the deadline
+		// that kills the attempt in flight, so a dispatch here genuinely hedges the previous attempt
+		// rather than replacing one that was killed at the same instant.
 		startNewBatchTicker := time.NewTicker(relayTimeout)
 		defer startNewBatchTicker.Stop()
 

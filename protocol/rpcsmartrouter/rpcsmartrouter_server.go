@@ -1661,13 +1661,26 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// Extract original request bytes (for batch support - we need to forward the original JSON)
 	originalRequestData := protocolMessage.RelayPrivateData().Data
 
-	// Get relay timeout
+	// Two clocks, deliberately separate.
+	//
+	// relayTimeout is the WINDOW: how long an endpoint is expected to take, and therefore both when
+	// the state machine's ticker dispatches the next endpoint and how long an endpoint must be given
+	// before a non-answer counts against it. attemptBudget is how long an attempt may actually LIVE.
+	//
+	// They used to be the same value, so the moment the next endpoint was dispatched was the moment
+	// the current one was killed. A method genuinely slower than the window could therefore never
+	// succeed on any endpoint: three attempts killed at the window, the error tolerance exhausted by
+	// timeouts our own timer manufactured, and the request abandoned with most of its budget unspent.
+	// The provider-side chain proxies never had this problem — CapTimeoutForSend has always handed an
+	// attempt the whole processing budget — so this brings the direct path back in line with them.
 	_, averageBlockTime, _, _ := rpcss.chainParser.ChainBlockStats()
 	relayTimeout := chainlib.GetRelayTimeout(protocolMessage, averageBlockTime)
+	attemptBudget := common.GetTimeoutForProcessing(relayTimeout, chainlib.GetTimeoutInfo(protocolMessage))
 
 	utils.LavaFormatDebug("sending direct RPC relay",
 		utils.LogAttr("num_endpoints", len(sessions)),
-		utils.LogAttr("timeout", relayTimeout),
+		utils.LogAttr("window", relayTimeout),
+		utils.LogAttr("attempt_budget", attemptBudget),
 		utils.LogAttr("method", chainMessage.GetApi().Name),
 		utils.LogAttr("GUID", ctx),
 	)
@@ -1832,7 +1845,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// its context as soon as the quorum early-exits, which used to kill straggler relays mid-flight —
 	// their responses were silently dropped and never compared against the consensus. Detached
 	// stragglers run to completion (bounded by the reflection pre-check + SendDirectRelay's
-	// relayTimeout+url.Timeout window) and always push their response via the deferred SetResponse,
+	// attemptBudget+url.Timeout window) and always push their response via the deferred SetResponse,
 	// feeding the post-reply straggler watcher. Values (GUID, IP forwarding metadata) are preserved
 	// by WithoutCancel. Non-CV selections keep the batch cancel: aborting the hedged losers on first
 	// success is a deliberate resource-saver there. Trade-off: in CV mode a client disconnect no
@@ -1874,9 +1887,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		// Stamp a deliberately GENEROUS upper bound for the straggler watcher, anchored at launch.
 		// A detached goroutine's lifetime is the sum of individually-bounded phases — the gRPC
 		// reflection pre-check (≤ relayTimeout, see relayInnerDirect) THEN SendDirectRelay's
-		// relayTimeout+url.Timeout window THEN post-relay bookkeeping — so rather than track each
-		// phase precisely (they keep hiding), bound it at 2*relayTimeout + max url.Timeout + grace,
-		// which dominates any real relay-phase sum. The watcher normally exits early when the last
+		// attemptBudget+url.Timeout window THEN post-relay bookkeeping — so rather than track each
+		// phase precisely (they keep hiding), bound it at relayTimeout + attemptBudget + max
+		// url.Timeout + grace, which dominates any real relay-phase sum.
+		//
+		// The send phase is bounded by the ATTEMPT BUDGET, not the window: an attempt is no longer
+		// killed at the window. The old 2*relayTimeout form silently became an under-estimate the
+		// moment those two values stopped being equal, which would have made the watcher give up on
+		// a straggler that was still legitimately in flight and report it as never received. The watcher normally exits early when the last
 		// straggler pushes, so this bound only bites when a goroutine genuinely leaks; then
 		// "not-received" is the honest outcome. Overshoot cost is holding the processor a little
 		// longer in that rare case.
@@ -1891,7 +1909,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				}
 			}
 		}
-		relayProcessor.SetCrossValidationRelayDeadline(time.Now().Add(2*relayTimeout + maxNodeTimeout + crossValidationStragglerGrace))
+		relayProcessor.SetCrossValidationRelayDeadline(time.Now().Add(relayTimeout + attemptBudget + maxNodeTimeout + crossValidationStragglerGrace))
 	}
 
 	// Launch goroutines for each direct RPC endpoint (parallel relay pattern)
@@ -1975,10 +1993,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				singleConsumerSession,
 				localRelayResult,
 				relayTimeout,
+				attemptBudget,
 				chainMessage,
 				originalRequestData,
 				analytics,
 			)
+
+			// Was this endpoint given its full window? The answer decides, below, whether a relay
+			// that produced nothing is an endpoint that hung or one we simply stopped too early.
+			gotFullWindow := endpointGotItsWindow(relayLatency, relayTimeout)
 
 			// Did WE stop this relay? On a stateful broadcast every endpoint is queried and the
 			// first answer cancels the rest, so N-1 goroutines land here holding context.Canceled
@@ -1996,6 +2019,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// straggler goroutine; the per-relay outcome is passed explicitly.
 				outcome := metrics.RelayOutcomeSuccess
 				switch {
+				case isClientCancel && gotFullWindow:
+					// Had its window and answered nothing. Cancelled is the wrong label — that one
+					// deliberately keeps the relay out of the error and latency series, which is
+					// right for a race loser and wrong for a hang. Report it as the error it is, so
+					// the metrics agree with the availability sample recorded below.
+					outcome = metrics.RelayOutcomeError
 				case isClientCancel:
 					outcome = metrics.RelayOutcomeCancelled
 				case err != nil:
@@ -2064,12 +2093,38 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				holdoffURL = targetEndpoint.NetworkAddress
 			}
 
-			if isClientCancel {
-				// We cancelled it, so the endpoint's availability was never actually tested —
-				// release the session and return its CU without a QoS penalty (MAG-2648).
-				// Routing this through OnSessionFailure is the bug: it feeds AddFailedRelay and
-				// the optimizer an availability sample of 0, and on a broadcast that lands on
-				// every healthy node except the single fastest one.
+			if isClientCancel && gotFullWindow {
+				// We cancelled it, but only after it had been given its full window and had still
+				// produced nothing. That is not a race loser, it is an endpoint that hung, and the
+				// availability signal has to say so — otherwise nothing at all is recorded, the
+				// endpoint keeps whatever score it had, and we select it again next request.
+				//
+				// This case only exists because an attempt is no longer killed at the window. It
+				// used to surface as a DeadlineExceeded, which is not a cancellation and so landed
+				// on the failure path by itself. Now the attempt outlives the window and is
+				// cancelled when the request ends, which without this branch would route a hang
+				// into the MAG-2648 no-penalty path and quietly forgive it.
+				//
+				// OnSessionUnresponsive rather than OnSessionFailure: same accounting today, but a
+				// hang and a failure are different events and must be free to be punished
+				// differently later.
+				utils.LavaFormatInfo("endpoint produced no response within its window",
+					utils.LogAttr("endpoint", endpointAddress),
+					utils.LogAttr("window", relayTimeout),
+					utils.LogAttr("waited", relayLatency),
+					utils.LogAttr("GUID", goroutineCtx),
+				)
+				if errSession := rpcss.sessionManager.OnSessionUnresponsive(singleConsumerSession, err); errSession != nil {
+					utils.LavaFormatWarning("OnSessionUnresponsive failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if isClientCancel {
+				// We cancelled it before it had its window, so the endpoint's availability was
+				// never actually tested — release the session and return its CU without a QoS
+				// penalty (MAG-2648). Routing this through OnSessionFailure is the bug: it feeds
+				// AddFailedRelay and the optimizer an availability sample of 0, and on a broadcast
+				// that lands on every healthy node except the single fastest one.
 				//
 				// This branch precedes the shouldFailSession test on purpose — a cancelled relay
 				// always has err != nil, so it would otherwise be swallowed by the failure arm.
@@ -4063,11 +4118,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 }
 
 // relayInnerDirect handles relay requests using direct RPC connections (smart router mode)
+// relayTimeout is the WINDOW — how long this endpoint is expected to take. attemptBudget is how
+// long the attempt may live. See sendRelayToDirectEndpoints for why the two must not be one value.
 func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	ctx context.Context,
 	singleConsumerSession *lavasession.SingleConsumerSession,
 	relayResult *common.RelayResult,
 	relayTimeout time.Duration,
+	attemptBudget time.Duration,
 	chainMessage chainlib.ChainMessage,
 	originalRequestData []byte,
 	analytics *metrics.RelayMetrics,
@@ -4080,7 +4138,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 	if rpcss.debugRelays {
 		utils.LavaFormatDebug("Sending direct RPC relay",
-			utils.LogAttr("timeout", relayTimeout),
+			utils.LogAttr("window", relayTimeout),
+			utils.LogAttr("attempt_budget", attemptBudget),
 			utils.LogAttr("method", chainMessage.GetApi().Name),
 			utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
 			utils.LogAttr("protocol", directConnection.GetProtocol()),
@@ -4125,7 +4184,9 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			// Bound the reflection lookup explicitly: it dials + queries the upstream's reflection
 			// service, and detached CV relay contexts carry no deadline — an upstream that accepts the
 			// connection but never answers would otherwise block this goroutine (and leak its session)
-			// forever, since the relay-timeout bound is only applied later inside SendDirectRelay.
+			// forever, since the attempt-budget bound is only applied later inside SendDirectRelay.
+			// Bounded by the WINDOW rather than the budget on purpose: this is a cheap capability
+			// probe, not the relay, and it should not be allowed to consume the whole request.
 			streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
 			isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
 			streamCheckCancel()
@@ -4159,7 +4220,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 	// Send relay directly to RPC endpoint
 	startTime := time.Now()
-	result, err := directSender.SendDirectRelay(ctx, chainMessage, relayTimeout)
+	result, err := directSender.SendDirectRelay(ctx, chainMessage, attemptBudget)
 	relayLatency = time.Since(startTime)
 
 	// Get endpoint for health tracking (use stored reference, not string lookup)
@@ -4400,6 +4461,38 @@ func (rpcss *RPCSmartRouterServer) getMetadataFromRelayTrailer(metadataHeaders [
 			relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, extensionMD)
 		}
 	}
+}
+
+// endpointGotItsWindow reports whether an endpoint was given its full expected answer window
+// before its relay stopped.
+//
+// It is the fairness test behind the availability verdict for a relay that produced nothing. An
+// attempt is no longer killed at the window, so a hung endpoint's relay ends when the REQUEST ends
+// — as a cancellation. Without this test every hang would route to the no-penalty path built for
+// race losers (MAG-2648), nothing at all would be recorded, and a permanently hung endpoint would
+// keep its score and be selected again on the next request.
+//
+// Elapsed time is deliberately the input, rather than why the request ended. Two consequences, both
+// wanted:
+//
+//   - An endpoint that hung is blamed even when the request SUCCEEDED through someone else. A
+//     stop-reason test would let it off in exactly that case, which is the common one.
+//   - An endpoint dispatched shortly before the budget expired has elapsed less than its window, so
+//     it is not blamed. It genuinely never had a fair chance, and this falls out without a special
+//     case for the end of the budget.
+//
+// Only ever consulted for relays that returned no response. An endpoint that ANSWERS late is not
+// blamed here — its slowness is already carried, proportionally, by its latency sample. Blaming
+// late answers would be actively harmful: on a chain where a method legitimately takes longer than
+// the window, every endpoint would be blamed on every request until consecutive-failure blocking
+// took the whole chain out.
+func endpointGotItsWindow(elapsed, window time.Duration) bool {
+	if window <= 0 {
+		// No meaningful window was configured, so nothing was promised and nothing can be judged
+		// against it. Withhold the blame rather than manufacture it out of a zero.
+		return false
+	}
+	return elapsed >= window
 }
 
 // crossValidationStragglerGrace pads the straggler watcher's launch-anchored deadline to absorb the

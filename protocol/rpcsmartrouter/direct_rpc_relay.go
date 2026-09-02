@@ -346,23 +346,30 @@ func sanitizeEndpointURL(rawURL string) string {
 
 // SendDirectRelay sends a relay request directly to an RPC endpoint
 // SendDirectRelay routes to the appropriate protocol handler (JSON-RPC or REST)
+//
+// attemptBudget is how long this attempt may live, NOT how long we wait before trying another
+// endpoint. Those are two different clocks and they used to be the same value, which is why a
+// method slower than the hedge interval could never succeed on any endpoint: the attempt was killed
+// at the exact moment the next one was dispatched, three times over, until the error tolerance gave
+// up with most of the request budget unspent. The hedge interval stays in the state machine's
+// ticker; this is the request's own budget, so an endpoint that is merely slow is allowed to finish.
 func (d *DirectRPCRelaySender) SendDirectRelay(
 	ctx context.Context,
 	chainMessage chainlib.ChainMessage,
-	relayTimeout time.Duration,
+	attemptBudget time.Duration,
 ) (*common.RelayResult, error) {
 	// Branch based on API interface
 	apiCollection := chainMessage.GetApiCollection()
 
 	switch apiCollection.CollectionData.ApiInterface {
 	case "jsonrpc", "tendermintrpc":
-		return d.sendJSONRPCRelay(ctx, chainMessage, relayTimeout)
+		return d.sendJSONRPCRelay(ctx, chainMessage, attemptBudget)
 
 	case "rest":
-		return d.sendRESTRelay(ctx, chainMessage, relayTimeout)
+		return d.sendRESTRelay(ctx, chainMessage, attemptBudget)
 
 	case "grpc":
-		return d.sendGRPCRelay(ctx, chainMessage, relayTimeout)
+		return d.sendGRPCRelay(ctx, chainMessage, attemptBudget)
 
 	default:
 		return nil, fmt.Errorf("unsupported API interface for direct RPC: %s", apiCollection.CollectionData.ApiInterface)
@@ -374,12 +381,12 @@ func (d *DirectRPCRelaySender) SendDirectRelay(
 func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	ctx context.Context,
 	chainMessage chainlib.ChainMessage,
-	relayTimeout time.Duration,
+	attemptBudget time.Duration,
 ) (*common.RelayResult, error) {
 	// Use NodeUrl.LowerContextTimeoutWithDuration for per-endpoint timeout overrides
 	// This allows operators to configure extended timeouts for heavy RPCs (debug_traceTransaction, etc.)
 	nodeUrl := d.directConnection.GetNodeUrl()
-	requestCtx, cancel := nodeUrl.LowerContextTimeoutWithDuration(ctx, relayTimeout)
+	requestCtx, cancel := nodeUrl.LowerContextTimeoutWithDuration(ctx, attemptBudget)
 	defer cancel()
 
 	// STEP 1: Use original request bytes (supports batch requests)
@@ -407,7 +414,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		utils.LogAttr("endpoint", endpointIdentifier),
 		utils.LogAttr("protocol", d.directConnection.GetProtocol()),
 		utils.LogAttr("method", chainMessage.GetApi().Name),
-		utils.LogAttr("timeout", relayTimeout),
+		utils.LogAttr("timeout", attemptBudget),
 	)
 
 	// Use DoHTTPRequest with []Metadata (preserves duplicates, supports delete semantics)
@@ -591,11 +598,11 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 func (d *DirectRPCRelaySender) sendRESTRelay(
 	ctx context.Context,
 	chainMessage chainlib.ChainMessage,
-	relayTimeout time.Duration,
+	attemptBudget time.Duration,
 ) (*common.RelayResult, error) {
 	// Use NodeUrl.LowerContextTimeoutWithDuration for per-endpoint timeout overrides
 	nodeUrl := d.directConnection.GetNodeUrl()
-	requestCtx, cancel := nodeUrl.LowerContextTimeoutWithDuration(ctx, relayTimeout)
+	requestCtx, cancel := nodeUrl.LowerContextTimeoutWithDuration(ctx, attemptBudget)
 	defer cancel()
 
 	// Get RPC message
@@ -741,11 +748,11 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 func (d *DirectRPCRelaySender) sendGRPCRelay(
 	ctx context.Context,
 	chainMessage chainlib.ChainMessage,
-	relayTimeout time.Duration,
+	attemptBudget time.Duration,
 ) (*common.RelayResult, error) {
 	// Apply per-endpoint timeout override
 	nodeUrl := d.directConnection.GetNodeUrl()
-	requestCtx, cancel := nodeUrl.LowerContextTimeoutWithDuration(ctx, relayTimeout)
+	requestCtx, cancel := nodeUrl.LowerContextTimeoutWithDuration(ctx, attemptBudget)
 	defer cancel()
 
 	// Get RPC message (contains the gRPC method path and request data)
@@ -789,7 +796,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	utils.LavaFormatTrace("sending direct gRPC request",
 		utils.LogAttr("endpoint", endpointIdentifier),
 		utils.LogAttr("method", methodPath),
-		utils.LogAttr("timeout", relayTimeout),
+		utils.LogAttr("timeout", attemptBudget),
 	)
 
 	// Send gRPC request via DirectRPCConnection

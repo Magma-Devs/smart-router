@@ -43,7 +43,7 @@ type RelayProcessor struct {
 	statefulRelayTargets            []string // stores all providers that received a stateful relay
 	crossValidationQueriedProviders []string // stores all providers that were queried for cross-validation (even if response not received)
 	// crossValidationRelayDeadline is the latest batch's relay upper bound, stamped at launch:
-	// launch time + relayTimeout + the largest per-endpoint url.Timeout override (mirroring
+	// launch time + relayTimeout + attemptBudget + the largest per-endpoint url.Timeout override (mirroring
 	// LowerContextTimeoutWithDuration, the actual bound on each detached relay). The straggler
 	// watcher uses it so its deadline neither undershoots a slow-RPC endpoint's legitimate late
 	// response nor outlives the true bound (MAG-2187). Guarded by rp.lock.
@@ -285,7 +285,7 @@ func (rp *RelayProcessor) GetCrossValidationQueriedProviders() []string {
 }
 
 // SetCrossValidationRelayDeadline stamps the latest batch's relay upper bound at launch time
-// (launch + relayTimeout + max per-endpoint url.Timeout). See the field comment.
+// (launch + relayTimeout + attemptBudget + max per-endpoint url.Timeout). See the field comment.
 func (rp *RelayProcessor) SetCrossValidationRelayDeadline(deadline time.Time) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
