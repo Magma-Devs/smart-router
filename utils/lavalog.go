@@ -144,6 +144,19 @@ func EnableDebugLogBuffer(maxLines int) {
 	debugBufferLogger.Store(&logger)
 }
 
+// DisableDebugLogBuffer turns the ring-buffer sink back off and drops the ring.
+// EnableDebugLogBuffer swaps a process-global sink, so a test that enables it must
+// restore this state — otherwise every later log call in the binary keeps paying the
+// copy-and-append, and the sink's "disabled by default" contract is broken for
+// anything that inspects it afterwards.
+func DisableDebugLogBuffer() {
+	disabled := zerolog.New(io.Discard).Level(zerolog.Disabled)
+	debugBufferLogger.Store(&disabled)
+	debugRingMu.Lock()
+	debugRing = nil
+	debugRingMu.Unlock()
+}
+
 // ClearDebugLogBuffer drops every record currently in the ring. No-op when the
 // buffer was never enabled.
 func ClearDebugLogBuffer() {
