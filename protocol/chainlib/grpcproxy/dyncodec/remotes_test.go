@@ -71,7 +71,7 @@ func TestRemotes(t *testing.T) {
 	}
 
 	t.Run("test grpc remote", func(t *testing.T) {
-		remote := NewGRPCReflectionProtoFileRegistryFromConn(conn)
+		remote := NewGRPCReflectionProtoFileRegistryFromConn(conn, 0)
 		testRemote(remote)
 	})
 
