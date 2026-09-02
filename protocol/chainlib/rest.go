@@ -303,7 +303,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("msgSeed", msgSeed),
 			utils.LogAttr("body", requestBody),
-			utils.LogAttr("headers", restHeaders),
+			utils.LogAttr("headers", common.RedactMetadata(restHeaders)),
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, http.MethodPost, dappID, userIp, analytics, restHeaders)
 		reply := relayResult.GetReply()
@@ -372,7 +372,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("path", path),
 			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("headers", restHeaders),
+			utils.LogAttr("headers", common.RedactMetadata(restHeaders)),
 		)
 
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, "", fiberCtx.Method(), dappID, userIp, analytics, restHeaders)
@@ -508,7 +508,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 
 	utils.LavaFormatInfo("Sending request to node from provider",
 		utils.LogAttr("_method", nodeMessage.Path),
-		utils.LogAttr("headers", req.Header),
+		utils.LogAttr("headers", utils.RedactHeaders(req.Header)),
 		utils.LogAttr("apiInterface", "rest"),
 	)
 

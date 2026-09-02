@@ -604,7 +604,7 @@ func TestNoPairingAvailableFlow(t *testing.T) {
 	validAddressessLength := len(csm.validAddresses)
 	copyValidAddressess := append([]string{}, csm.validAddresses...)
 	for index := 1; index < validAddressessLength; index++ {
-		csm.removeAddressFromValidAddresses(copyValidAddressess[index])
+		csm.removeAddressFromValidAddresses(copyValidAddressess[index], BlockRecord{Reason: BlockReasonTooManyDeadSessions})
 	}
 
 	// get the address of the highest cu provider
@@ -2320,7 +2320,7 @@ func TestBlockProvider_BackupProviderIsTracked(t *testing.T) {
 	backupAddr := backupList[0].PublicLavaAddress
 
 	// Block the backup provider
-	err = csm.blockProvider(context.Background(), backupAddr, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
 
 	csm.lock.RLock()
@@ -2364,7 +2364,7 @@ func TestUpdateAllProviders_BlockedBackupProviderPersistedAcrossEpoch(t *testing
 	backupAddr := backupList[0].PublicLavaAddress
 
 	// Block it in the first epoch
-	err = csm.blockProvider(context.Background(), backupAddr, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
 
 	csm.lock.RLock()
@@ -2404,7 +2404,7 @@ func TestUpdateAllProviders_NormalProviderBlockedAsBackupInNextEpoch(t *testing.
 
 	// Block a normal provider
 	normalAddr := pairingList[0].PublicLavaAddress
-	err = csm.blockProvider(context.Background(), normalAddr, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), normalAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
 
 	csm.lock.RLock()
@@ -2469,7 +2469,7 @@ func TestCheckAndUnblock_BackupRoutedToComprehensiveProbe(t *testing.T) {
 
 	// Seed previousEpochBlockedProviders as if this backup was blocked last epoch.
 	csm.lock.Lock()
-	csm.previousEpochBlockedProviders[backupAddr] = struct{}{}
+	csm.previousEpochBlockedProviders[backupAddr] = BlockRecord{Reason: BlockReasonTooManyDeadSessions}
 	csm.blockedBackupProviders[backupAddr] = struct{}{}
 	csm.lock.Unlock()
 
@@ -2509,7 +2509,7 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 
 	backupAddr := backupList[0].PublicLavaAddress
 
-	err = csm.blockProvider(context.Background(), backupAddr, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
 
 	// New epoch, same backup address, still pointing at the healthy gRPC listener.
@@ -2534,7 +2534,7 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 
 	csm.lock.Lock()
 	csm.blockedBackupProviders[backupAddr] = struct{}{}
-	csm.previousEpochBlockedProviders[backupAddr] = struct{}{}
+	csm.previousEpochBlockedProviders[backupAddr] = BlockRecord{Reason: BlockReasonTooManyDeadSessions}
 	csm.lock.Unlock()
 
 	// Run the unblock pass. Comprehensive probe against grpcListener should succeed → unblock.
@@ -2559,7 +2559,7 @@ func TestGenerateReconnectCallback_BackupProviderUnblocked(t *testing.T) {
 
 	backupAddr := backupList[0].PublicLavaAddress
 
-	err = csm.blockProvider(context.Background(), backupAddr, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), backupAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
 
 	csm.lock.RLock()
@@ -2589,7 +2589,7 @@ func TestGenerateReconnectCallback_NonBackupUsesValidAddressesPath(t *testing.T)
 	require.NoError(t, err)
 
 	regularAddr := pairingList[0].PublicLavaAddress
-	err = csm.blockProvider(context.Background(), regularAddr, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), regularAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
 
 	// blockProvider removes from validAddresses and adds to currentlyBlockedProviderAddresses.
@@ -2645,7 +2645,7 @@ func TestGenerateReconnectCallback_OverlapBothPairingAndBackup(t *testing.T) {
 
 	// Block as primary — lands in currentlyBlockedProviderAddresses, removed from
 	// validAddresses.
-	err = csm.blockProvider(context.Background(), overlapAddr, false, firstEpochHeight, 0, 0, false, nil)
+	err = csm.blockProvider(context.Background(), overlapAddr, BlockReasonTooManyDeadSessions, false, firstEpochHeight, 0, 0, false, nil)
 	require.NoError(t, err)
 
 	// Seed the overlap: same address also registered as a backup, and blocked there.
@@ -2777,6 +2777,7 @@ type stateSizeRecorder struct {
 	stickySessionsCount int
 	reportedProviders   int
 	providerBlocked     map[string]bool
+	blockedByReason     map[string]int
 }
 
 func (r *stateSizeRecorder) SetCSMPreviousEpochBlockedProvidersCount(_, _ string, c int) {
@@ -2816,6 +2817,29 @@ func (r *stateSizeRecorder) SetBlockedProvider(_, _, providerAddress, _ string, 
 		r.providerBlocked = map[string]bool{}
 	}
 	r.providerBlocked[providerAddress] = isBlocked
+}
+
+// SetCSMBlockedProvidersByReason records the complete per-reason map the publisher sent.
+func (r *stateSizeRecorder) SetCSMBlockedProvidersByReason(_, _ string, countsByReason map[string]int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Replaced wholesale, not merged: the publisher sends a complete map every tick, and merging
+	// would hide exactly the stale-reason bug this gauge is shaped to avoid.
+	r.blockedByReason = make(map[string]int, len(countsByReason))
+	for reason, count := range countsByReason {
+		r.blockedByReason[reason] = count
+	}
+}
+
+// blockedByReasonSnapshot returns the last per-reason map published.
+func (r *stateSizeRecorder) blockedByReasonSnapshot() map[string]int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]int, len(r.blockedByReason))
+	for reason, count := range r.blockedByReason {
+		out[reason] = count
+	}
+	return out
 }
 
 // providerBlockedSnapshot returns the last value published for each provider.
@@ -2869,7 +2893,7 @@ func TestPublishStateSizes_PopulateThenReset(t *testing.T) {
 	csm := createConsumerSessionManagerWithMetrics(rec)
 
 	csm.lock.Lock()
-	csm.previousEpochBlockedProviders = map[string]struct{}{"a": {}, "b": {}}
+	csm.previousEpochBlockedProviders = map[string]BlockRecord{"a": {Reason: BlockReasonTooManyDeadSessions}, "b": {Reason: BlockReasonTooManyDeadSessions}}
 	csm.blockedBackupProviders = map[string]struct{}{"backup-bad": {}}
 	csm.lock.Unlock()
 	csm.stickySessions.Set("client-1", &StickySession{Provider: "p1", Epoch: 1})
@@ -2937,7 +2961,7 @@ func TestResetTransientFailureState(t *testing.T) {
 	// Pre-populate every transient store, plus a couple of "live pairing"
 	// entries we expect to survive the reset.
 	csm.lock.Lock()
-	csm.previousEpochBlockedProviders = map[string]struct{}{"prev-bad": {}}
+	csm.previousEpochBlockedProviders = map[string]BlockRecord{"prev-bad": {Reason: BlockReasonTooManyDeadSessions}}
 	csm.secondChanceGivenToAddresses = map[string]struct{}{"second-chance": {}}
 	csm.blockedBackupProviders = map[string]struct{}{"bad-backup": {}}
 	// Live pairing — must NOT be cleared.

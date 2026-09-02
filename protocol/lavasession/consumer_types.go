@@ -110,10 +110,8 @@ type ProviderOptimizer interface {
 	AppendRelayFailure(providerAddress string)
 	AppendRelayData(providerAddress string, latency time.Duration, cu, syncBlock uint64)
 	AppendRelayDataConsensus(providerAddress string, latency time.Duration, cu, syncBlock uint64, syncRef provideroptimizer.SyncReference)
-	ChooseProvider(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
-	ChooseProviderWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string, stats *provideroptimizer.SelectionStats)
-	ChooseBestProvider(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
-	ChooseBestProviderWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string, stats *provideroptimizer.SelectionStats)
+	ChooseUpstream(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
+	ChooseUpstreamWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string, stats *provideroptimizer.SelectionStats)
 	GetReputationReportForProvider(string) (*pairingtypes.QualityOfServiceReport, time.Time)
 	Strategy() provideroptimizer.Strategy
 	UpdateWeights(map[string]int64, uint64)
@@ -227,6 +225,12 @@ type Endpoint struct {
 	relayProbeAttempts uint64
 	Addons             map[string]struct{}
 	Extensions         map[string]struct{}
+	// StandaloneAddons mirrors common.NodeUrl.StandaloneAddons: this endpoint
+	// serves ONLY the collections its Addons name, not those plus the base one.
+	// Set for a url whose add-on REPLACES the base api surface rather than
+	// extending it — Acala's `evm` against a Substrate base. It keeps
+	// base-collection traffic off an endpoint that cannot answer it (MAG-3296).
+	StandaloneAddons bool
 	// InternalPath is the spec collection this endpoint's url serves — "/v2",
 	// "/P", or "" for the root. It mirrors the chain router's own per-path
 	// proxies (chainlib/chain_router.go): a node-url declaring `internal-path`
@@ -238,7 +242,7 @@ type Endpoint struct {
 	// it does not serve, and the vendor's 404 then reads as a verdict on the
 	// request.
 	InternalPath string
-	mu                 sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload, relayProbeTimeout, relayProbeAttempts
+	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload, relayProbeTimeout, relayProbeAttempts
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
 	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
@@ -313,8 +317,23 @@ func (e *Endpoint) IsProviderRelay() bool {
 	return len(e.Connections) > 0
 }
 
+// ServesBaseCollection reports whether this endpoint answers for the spec's base
+// collection as well as its add-ons. Mirrors common.NodeUrl.ServesBaseCollection,
+// from which it is populated. See StandaloneAddons.
+func (e *Endpoint) ServesBaseCollection() bool {
+	return !e.StandaloneAddons || len(e.Addons) == 0
+}
+
 func (e *Endpoint) CheckSupportForServices(addon string, extensions []string) (supported bool) {
-	if addon != "" {
+	if addon == "" {
+		// The base collection is not automatically everybody's. An endpoint whose
+		// add-ons REPLACE the base surface rather than extending it cannot serve a
+		// base-collection request at all — routing one to an EVM-only Acala node
+		// gets a -32601 the client reads as a verdict on its request (MAG-3296).
+		if !e.ServesBaseCollection() {
+			return false
+		}
+	} else {
 		if _, ok := e.Addons[addon]; !ok {
 			return false
 		}
@@ -408,6 +427,18 @@ func (e *Endpoint) reenableFromProbeLocked() {
 	e.clearRecoveryTrackingLocked()
 }
 
+// endpointApproachingDisable reports whether a just-recorded failure leaves the endpoint still
+// enabled but inside the last endpointDisableWarningWindow of its refusal budget — the window in
+// which the run-up to a disable is worth a breadcrumb (MAG-2599).
+//
+// Extracted so the boundedness claim in common.go ("at most this many lines per disable episode")
+// is testable without capturing log output; it is the load-bearing property of the whole breadcrumb.
+// wasEnabled && !transitioned is what rules out both an underflow and a line on an already-disabled
+// endpoint: an enabled endpoint that did not transition has refusals < MaxConsecutiveConnectionAttempts.
+func endpointApproachingDisable(wasEnabled, transitioned bool, refusals uint64) bool {
+	return wasEnabled && !transitioned && refusals+endpointDisableWarningWindow >= MaxConsecutiveConnectionAttempts
+}
+
 // MarkUnhealthy increments connection refusals and disables endpoint if threshold exceeded.
 func (e *Endpoint) MarkUnhealthy() {
 	e.markUnhealthyAt(time.Now())
@@ -438,12 +469,21 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 		transitioned = true
 	}
 	addr, refusals, isDirect := e.NetworkAddress, e.ConnectionRefusals, e.IsDirectRPC()
+	approaching := endpointApproachingDisable(wasEnabled, transitioned, refusals)
 	e.mu.Unlock()
 
 	if transitioned {
 		utils.LavaFormatWarning("disabled unhealthy endpoint", nil,
 			utils.LogAttr("endpoint", addr),
 			utils.LogAttr("refusals", refusals),
+			utils.LogAttr("is_direct_rpc", isDirect),
+		)
+	} else if approaching {
+		utils.LavaFormatDebug("endpoint approaching the disable threshold",
+			utils.LogAttr("endpoint", addr),
+			utils.LogAttr("refusals", refusals),
+			utils.LogAttr("threshold", uint64(MaxConsecutiveConnectionAttempts)),
+			utils.LogAttr("remaining", MaxConsecutiveConnectionAttempts-refusals),
 			utils.LogAttr("is_direct_rpc", isDirect),
 		)
 	}
@@ -820,7 +860,15 @@ func (cswp *ConsumerSessionsWithProvider) IsSupportingAddon(addon string) bool {
 	cswp.Lock.RLock()
 	defer cswp.Lock.RUnlock()
 	if addon == "" {
-		return true
+		// Not unconditionally true: a provider every one of whose endpoints has
+		// opted out of the base collection cannot serve a base-collection request
+		// (MAG-3296). A provider with any ordinary endpoint still can.
+		for _, endpoint := range cswp.Endpoints {
+			if endpoint.ServesBaseCollection() {
+				return true
+			}
+		}
+		return false
 	}
 	for _, endpoint := range cswp.Endpoints {
 		if _, ok := endpoint.Addons[addon]; ok {

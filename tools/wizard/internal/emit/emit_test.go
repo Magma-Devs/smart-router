@@ -1,19 +1,21 @@
 package emit
+
 import "testing"
+
 func TestRender(t *testing.T) {
 	c := &Config{
 		Metrics: "0.0.0.0:7779", Cache: true,
-		Listeners: []Listener{{ChainID:"ETH1",Iface:"jsonrpc",Port:3360}},
+		Listeners: []Listener{{ChainID: "ETH1", Iface: "jsonrpc", Port: 3360}},
 		Primary: []Upstream{{
-			Name:"eth-lava", ChainID:"ETH1", Iface:"jsonrpc",
-			URLs: []string{"https://eth1.lava.build","wss://eth1.lava.build/websocket"},
-			Addons: []string{"debug","trace"},
-		},{
-			Name:"eth-keyed", ChainID:"ETH1", Iface:"jsonrpc",
+			Name: "eth-lava", ChainID: "ETH1", Iface: "jsonrpc",
+			URLs:   []string{"https://eth1.lava.build", "wss://eth1.lava.build/websocket"},
+			Addons: []string{"debug", "trace"},
+		}, {
+			Name: "eth-keyed", ChainID: "ETH1", Iface: "jsonrpc",
 			URLs: []string{"https://eth.example.com"},
-			Auth: &Auth{Var:"RPC_KEY_ETH1", Kind:"header:x-api-key"},
+			Auth: &Auth{Var: "RPC_KEY_ETH1", Kind: "header:x-api-key"},
 		}},
-		Backup: []Upstream{{Name:"eth-bk",ChainID:"ETH1",Iface:"jsonrpc",URLs:[]string{"https://backup"}}},
+		Backup: []Upstream{{Name: "eth-bk", ChainID: "ETH1", Iface: "jsonrpc", URLs: []string{"https://backup"}}},
 	}
 	tpl := c.YAML()
 	// schema essentials. Each upstream is ONE provider; its capabilities are extra
@@ -23,17 +25,23 @@ func TestRender(t *testing.T) {
 	// url on every jsonrpc provider), and an addon on the same provider as the ws
 	// url is exactly what makes the base "||" collection available to the addon
 	// router. See writeRPCBlock for the live-verified reasoning.
-	must := []string{`cache-be: "cache:20100"`, `chain-id: "ETH1"`,
+	must := []string{
+		`cache-be: "cache:20100"`, `chain-id: "ETH1"`,
 		`- url: "wss://eth1.lava.build/websocket"`, `addons: ["debug"]`, `addons: ["trace"]`,
 		`- name: "eth-lava"`, `- name: "eth-keyed"`,
-		`auth-config:`, `x-api-key: "${RPC_KEY_ETH1}"`, "backup-direct-rpc:"}
+		`auth-config:`, `x-api-key: "${RPC_KEY_ETH1}"`, "backup-direct-rpc:",
+	}
 	for _, m := range must {
-		if !contains(tpl, m) { t.Errorf("YAML missing %q\n---\n%s", m, tpl) }
+		if !contains(tpl, m) {
+			t.Errorf("YAML missing %q\n---\n%s", m, tpl)
+		}
 	}
 	// Capabilities are NOT separate providers — there must be no "<name>-<addon>"
 	// provider entry. (Older layout emitted eth-lava-debug / eth-lava-trace.)
 	for _, bad := range []string{`- name: "eth-lava-debug"`, `- name: "eth-lava-trace"`} {
-		if contains(tpl, bad) { t.Errorf("YAML must NOT split capabilities into providers, found %q\n---\n%s", bad, tpl) }
+		if contains(tpl, bad) {
+			t.Errorf("YAML must NOT split capabilities into providers, found %q\n---\n%s", bad, tpl)
+		}
 	}
 	// The ws url appears exactly once — under the single eth-lava provider.
 	if n := countOf(tpl, `- url: "wss://eth1.lava.build/websocket"`); n != 1 {
@@ -51,16 +59,25 @@ func TestRender(t *testing.T) {
 		t.Errorf("expected 4 api-interface lines (1 listener + 2 primary + 1 backup), got %d\n---\n%s", n, tpl)
 	}
 	// env vars
-	if vs := c.EnvVars(); len(vs) != 1 || vs[0] != "RPC_KEY_ETH1" { t.Errorf("env vars = %v", vs) }
+	if vs := c.EnvVars(); len(vs) != 1 || vs[0] != "RPC_KEY_ETH1" {
+		t.Errorf("env vars = %v", vs)
+	}
 	// render expands the placeholder
-	rendered := Render(tpl, map[string]string{"RPC_KEY_ETH1":"secret123"})
-	if !contains(rendered, `x-api-key: "secret123"`) { t.Errorf("render didn't expand:\n%s", rendered) }
+	rendered := Render(tpl, map[string]string{"RPC_KEY_ETH1": "secret123"})
+	if !contains(rendered, `x-api-key: "secret123"`) {
+		t.Errorf("render didn't expand:\n%s", rendered)
+	}
 	// lint: clean once rendered
-	if p := c.Lint(rendered); len(p) != 0 { t.Errorf("lint should be clean, got %v", p) }
+	if p := c.Lint(rendered); len(p) != 0 {
+		t.Errorf("lint should be clean, got %v", p)
+	}
 	// lint: flags missing upstream
-	c2 := &Config{Listeners:[]Listener{{ChainID:"BASE",Iface:"jsonrpc",Port:3361}}}
-	if p := c2.Lint(c2.YAML()); len(p) == 0 { t.Error("lint should flag missing upstream") }
+	c2 := &Config{Listeners: []Listener{{ChainID: "BASE", Iface: "jsonrpc", Port: 3361}}}
+	if p := c2.Lint(c2.YAML()); len(p) == 0 {
+		t.Error("lint should flag missing upstream")
+	}
 }
+
 // TestArchiveWsSkipPruning: an upstream with BOTH a ws url and the archive
 // extension on a subscription interface gets `skip-verifications: ["pruning"]` on
 // its archive node-url (so the ws-widened archive verification doesn't exclude the
@@ -125,13 +142,22 @@ func TestArchiveWsSkipPruning(t *testing.T) {
 	}
 }
 
-func contains(s, sub string) bool { return len(s) >= len(sub) && (indexOf(s,sub) >= 0) }
+func contains(s, sub string) bool { return len(s) >= len(sub) && (indexOf(s, sub) >= 0) }
 func countOf(s, sub string) int {
 	n := 0
-	for i := 0; i+len(sub) <= len(s); i++ { if s[i:i+len(sub)]==sub { n++ } }
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			n++
+		}
+	}
 	return n
 }
+
 func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ { if s[i:i+len(sub)]==sub { return i } }
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
 	return -1
 }

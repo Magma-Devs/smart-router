@@ -54,6 +54,11 @@ type RelayProcessor struct {
 	// lava-cross-validation-failure-reason header from it — the error returns are left byte-for-byte
 	// unchanged so the state machine's PairingListEmptyError stop logic is unaffected. Guarded by rp.lock.
 	crossValidationFailFastReason string
+
+	// stopReason is why the state machine stopped this request ("Stateful", "MaxRetriesReached",
+	// "ProcessingTimeout", "Success", …), so the request's final log line can say why there was
+	// no further attempt. Guarded by rp.lock.
+	stopReason string
 }
 
 // quorumStat is the per-hash agreement tally for cross-validation: how many providers returned this exact
@@ -293,6 +298,21 @@ func (rp *RelayProcessor) GetCrossValidationRelayDeadline() time.Time {
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 	return rp.crossValidationRelayDeadline
+}
+
+// SetStopReason records why the state machine stopped this request. Set once, on the Done
+// instruction — the same carrier idea as the cross-validation fail-fast reason below.
+func (rp *RelayProcessor) SetStopReason(reason string) {
+	rp.lock.Lock()
+	defer rp.lock.Unlock()
+	rp.stopReason = reason
+}
+
+// GetStopReason returns why the request stopped, or "" if the state machine never said.
+func (rp *RelayProcessor) GetStopReason() string {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return rp.stopReason
 }
 
 // SetCrossValidationFailFastReason records why a cross-validation request was aborted before any relay

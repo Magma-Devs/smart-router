@@ -101,6 +101,42 @@ func skipVerification(url common.NodeUrl, name string) bool {
 	return SkipAllVerifications || url.ShouldSkipVerification(name)
 }
 
+// verificationsForNodeUrl drops the base collection's verifications for a url that
+// has opted out of serving it (NodeUrl.StandaloneAddons).
+//
+// GetVerifications always adds the empty addon to whatever a url declares, so an
+// add-on node runs the base collection's verifications too. That is right when the
+// add-on EXTENDS the base surface and wrong when it REPLACES it: Acala's base
+// chain-id verification fires a Substrate chain_getBlockHash, which an EVM-only
+// node answers with -32601, and an omitted severity in a spec means Fail — so one
+// inherited verification excluded the provider (MAG-3296).
+//
+// This runs BEFORE needsLatestBlock for the same reason the skip filter does: a
+// verification that is not going to run must not drag a head probe out to the
+// upstream on its way past.
+//
+// Filtering here rather than inside GetVerifications keeps the parser's signature
+// free of node-url concerns — and dropping Addon=="" containers afterwards is
+// exactly equivalent to never having appended the empty addon.
+func verificationsForNodeUrl(url common.NodeUrl, verifications []VerificationContainer) []VerificationContainer {
+	if url.ServesBaseCollection() {
+		return verifications
+	}
+	kept := make([]VerificationContainer, 0, len(verifications))
+	for _, verification := range verifications {
+		if verification.Addon == "" {
+			utils.LavaFormatDebug("skipping base-collection verification for a standalone-addons url",
+				utils.LogAttr("verification", verification.Name),
+				utils.LogAttr("url", url.UrlStr()),
+				utils.LogAttr("addons", url.Addons),
+			)
+			continue
+		}
+		kept = append(kept, verification)
+	}
+	return kept
+}
+
 // needsLatestBlock reports whether any verification that will ACTUALLY RUN for this
 // node-url depends on the chain head, and therefore whether Validate has to spend a
 // FetchLatestBlockNum relay against the upstream before verifying.
@@ -130,14 +166,142 @@ func stopValidateRetries(err error) bool {
 	return err == nil || errors.Is(err, common.StatusCodeError429)
 }
 
+// admissionKey identifies one refused service on one node url. A comparable
+// struct rather than a joined string: the join needed a NUL sentinel, which is
+// an invariant every reader has to re-verify.
+type admissionKey struct {
+	url          string
+	internalPath string
+	service      string
+}
+
+// ProviderAdmission records the services a provider's node urls failed to answer
+// for, so a failure attributable to ONE service costs that service rather than
+// the whole provider (MAG-3326).
+//
+// "Service" is a name as it appears in NodeUrl.Addons, which mixes add-on and
+// extension names — the router's own config makes no distinction, and neither
+// does Endpoint.Addons/.Extensions, both of which are built from that one list.
+//
+// Empty means everything a url declared was admitted.
+type ProviderAdmission struct {
+	refused map[admissionKey]struct{}
+}
+
+// refusedServiceFor returns the service a failed verification should be charged
+// to, or "" when the failure belongs to no single service and is therefore fatal.
+//
+// EXTENSION FIRST, and this is the whole correctness of the feature. A
+// VerificationContainer carries both an Addon and an Extension, and the narrower
+// one is what was actually probed:
+//
+//   - {Addon:"", Extension:"archive"} — every EVM and cosmos spec keys the archive
+//     check this way, on the BASE collection. Charging it to Addon would find ""
+//     and take the fatal path, which is the motivating case of this whole ticket:
+//     "attach an archive url to a healthy provider, fail the archive check, lose
+//     the provider". Charging it to "archive" refuses archive and keeps the rest.
+//   - {Addon:"trace", Extension:"archive"} — ethereum's trace collection carries an
+//     archive-scoped pruning value. What failed is the node's archive-ness, not its
+//     trace support, so refusing "trace" would drop working traffic and leave the
+//     failing archive extension advertised.
+//   - {Addon:"debug", Extension:""} — an add-on with no extension scope; charge the
+//     add-on.
+//   - {Addon:"", Extension:""} — the base collection's own. Nothing narrower to
+//     fall back to, so it stays fatal.
+func refusedServiceFor(verification VerificationContainer) string {
+	if verification.Extension != "" {
+		return verification.Extension
+	}
+	return verification.Addon
+}
+
+func (a *ProviderAdmission) fail(url common.NodeUrl, service string) {
+	if a.refused == nil {
+		a.refused = map[admissionKey]struct{}{}
+	}
+	a.refused[admissionKey{url: url.Url, internalPath: url.InternalPath, service: service}] = struct{}{}
+}
+
+// Any reports whether any service was refused.
+func (a ProviderAdmission) Any() bool { return len(a.refused) > 0 }
+
+// Equal reports whether two admissions refuse exactly the same services. The
+// epoch path uses it to notice that a provider's admitted set has moved, which
+// is the trigger for rebuilding its session — an active session reuses the
+// endpoints it was built with, so a recovered service is not picked up by
+// re-validating alone.
+func (a ProviderAdmission) Equal(other ProviderAdmission) bool {
+	if len(a.refused) != len(other.refused) {
+		return false
+	}
+	for key := range a.refused {
+		if _, ok := other.refused[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// AdmittedServices returns the services this url may still claim, and whether the
+// url is worth building an endpoint for at all.
+//
+// keep is false when a url that serves ONLY its add-ons (standalone-addons) has
+// had every one refused. Such a url has nothing left: emptying its service list
+// would flip ServesBaseCollection() to true and hand a node its operator declared
+// cannot answer the base collection straight back to base traffic — the MAG-3296
+// failure, re-entered from the other side.
+func (a ProviderAdmission) AdmittedServices(url common.NodeUrl) (services []string, keep bool) {
+	// The common case by far — every healthy provider, on every session rebuild
+	// (boot, each failed-provider retry, each epoch tick). Returning the input
+	// avoids an allocation per url per rebuild; the test pins slice identity
+	// rather than equality, since a deep compare would not notice its loss.
+	if !a.Any() || len(url.Addons) == 0 {
+		return url.Addons, true
+	}
+	services = make([]string, 0, len(url.Addons))
+	for _, service := range url.Addons {
+		if _, bad := a.refused[admissionKey{url: url.Url, internalPath: url.InternalPath, service: service}]; bad {
+			continue
+		}
+		services = append(services, service)
+	}
+	if len(services) == 0 && !url.ServesBaseCollection() {
+		return nil, false
+	}
+	return services, true
+}
+
 func (cf *ChainFetcher) Validate(ctx context.Context) error {
+	_, err := cf.validate(ctx, false)
+	return err
+}
+
+// ValidateCollections runs the same verifications Validate does, but a
+// Fail-severity failure that belongs to ONE service refuses that service instead
+// of the provider (MAG-3326). See refusedServiceFor for what "belongs to" means.
+//
+// A failure with no service to attribute it to stays fatal: the base collection's
+// own verifications, a head probe that never answered, GetVerifications itself. A
+// node that cannot serve the spec's primary surface has nothing narrower to fall
+// back to.
+//
+// Deliberately NOT derived: a base-collection failure does not turn a url into a
+// standalone-addons one. Only an operator can tell "serves only EVM by design"
+// from "its Substrate side is down right now".
+func (cf *ChainFetcher) ValidateCollections(ctx context.Context) (ProviderAdmission, error) {
+	return cf.validate(ctx, true)
+}
+
+func (cf *ChainFetcher) validate(ctx context.Context, perCollection bool) (ProviderAdmission, error) {
+	admission := ProviderAdmission{}
 	for _, url := range cf.endpoint.NodeUrls {
 		utils.LavaFormatInfo("starting validation for url", utils.LogAttr("url", url.String()))
 		addons := url.Addons
 		verifications, err := cf.chainParser.GetVerifications(addons, url.InternalPath, cf.endpoint.ApiInterface)
 		if err != nil {
-			return err
+			return admission, err
 		}
+		verifications = verificationsForNodeUrl(url, verifications)
 		if len(verifications) == 0 {
 			utils.LavaFormatWarning("no verifications for url", nil, utils.LogAttr("url", url.String()))
 		}
@@ -145,14 +309,20 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		var latestBlock int64
 		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
-				latestBlock, err = cf.FetchLatestBlockNum(ctx)
+				// Probe the head with THIS url's collections. Using the base
+				// collection's directive for every node is what excluded a
+				// provider serving only a disjoint add-on surface (MAG-3296).
+				latestBlock, err = cf.FetchLatestBlockNumForCollection(ctx, url.Addons, url.InternalPath, url.ServesBaseCollection())
 				if stopValidateRetries(err) {
 					break
 				}
 			}
 			if err != nil {
+				// Not attributable to one service: the head probe is resolved from
+				// the url's collections as a whole, so a failure here says the node
+				// cannot answer any of them.
 				utils.LavaFormatError("failed to fetch latest block number", err)
-				return err
+				return admission, err
 			}
 		}
 		// invalidating cache as value might change
@@ -174,14 +344,25 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 				cf.verificationsStatus.Store(cf.getVerificationsKey(verification, cf.endpoint.ApiInterface, cf.endpoint.ChainID), false)
 				utils.LavaFormatWarning("failed verification on provider startup", err, utils.LogAttr("verification", verification.Name))
 				if verification.Severity == spectypes.ParseValue_Fail {
-					return utils.LavaFormatError("invalid Verification on provider startup", err, utils.Attribute{Key: "Addons", Value: addons}, utils.Attribute{Key: "verification", Value: verification.Name})
+					if service := refusedServiceFor(verification); perCollection && service != "" {
+						admission.fail(url, service)
+						utils.LavaFormatWarning("refusing one service for this url, keeping the provider", err,
+							utils.LogAttr("url", url.String()),
+							utils.LogAttr("service", service),
+							utils.LogAttr("addon", verification.Addon),
+							utils.LogAttr("extension", verification.Extension),
+							utils.LogAttr("verification", verification.Name),
+						)
+						continue
+					}
+					return admission, utils.LavaFormatError("invalid Verification on provider startup", err, utils.Attribute{Key: "Addons", Value: addons}, utils.Attribute{Key: "verification", Value: verification.Name})
 				}
 			} else {
 				cf.verificationsStatus.Store(cf.getVerificationsKey(verification, cf.endpoint.ApiInterface, cf.endpoint.ChainID), true)
 			}
 		}
 	}
-	return nil
+	return admission, nil
 }
 
 // VerificationResult is the outcome of running a single spec verification against one node URL.
@@ -226,11 +407,14 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 			results = append(results, nodeResult)
 			continue
 		}
+		verifications = verificationsForNodeUrl(url, verifications)
 
 		var latestBlock int64
 		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
-				latestBlock, err = cf.FetchLatestBlockNum(ctx)
+				// Same collection-aware probe as Validate, so `smartrouter health`
+				// reports the head a node can actually serve (MAG-3296).
+				latestBlock, err = cf.FetchLatestBlockNumForCollection(ctx, url.Addons, url.InternalPath, url.ServesBaseCollection())
 				if stopValidateRetries(err) {
 					break
 				}
@@ -505,8 +689,25 @@ func (cf *ChainFetcher) CustomMessage(ctx context.Context, path string, data []b
 	return reply.RelayReply.Data, nil
 }
 
+// FetchLatestBlockNum probes the chain head using the base collection's
+// GET_BLOCKNUM directive. Callers that know which collections the node actually
+// serves should use FetchLatestBlockNumForCollection instead — see MAG-3296.
 func (cf *ChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	parsing, apiCollection, ok := cf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
+	return cf.FetchLatestBlockNumForCollection(ctx, nil, "", true)
+}
+
+// FetchLatestBlockNumForCollection probes the chain head with the GET_BLOCKNUM
+// directive of the collection this node URL actually serves.
+//
+// MAG-3296: this used to be the base collection's directive for every node,
+// which excluded any provider whose add-on is a disjoint api surface rather than
+// a superset — an EVM-only Acala node answers the `evm` collection's
+// eth_blockNumber and cannot answer the base collection's Substrate
+// chain_getHeader at all. On the admission path a failed head probe returns
+// before a single verification runs, so such a provider was dropped without ever
+// being asked the questions it could answer.
+func (cf *ChainFetcher) FetchLatestBlockNumForCollection(ctx context.Context, addons []string, internalPath string, allowBaseFallback bool) (int64, error) {
+	parsing, apiCollection, ok := cf.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, addons, internalPath, allowBaseFallback)
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCKNUM.String()
 	if !ok {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" tag function not found", nil, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)

@@ -1249,7 +1249,7 @@ func (dgm *DirectGRPCSubscriptionManager) selectFromTier(ctx context.Context, ti
 		allURLs = append(allURLs, ep.Url)
 	}
 	// cu=1 and requestedBlock=LATEST_BLOCK (-2) are sensible defaults for subscriptions.
-	selectedURLs := dgm.optimizer.ChooseProvider(ctx, allURLs, ignoredEndpoints, 1, -2)
+	selectedURLs := dgm.optimizer.ChooseUpstream(ctx, allURLs, ignoredEndpoints, 1, -2)
 
 	if len(selectedURLs) == 0 {
 		// Optimizer returned nothing — fall back to first-non-ignored within tier.
@@ -1268,7 +1268,7 @@ func (dgm *DirectGRPCSubscriptionManager) selectFromTier(ctx context.Context, ti
 	if endpoint, exists := byURL[selectedURL]; exists {
 		return endpoint, nil
 	}
-	return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", selectedURL)
+	return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", utils.RedactURL(selectedURL))
 }
 
 func (dgm *DirectGRPCSubscriptionManager) checkClientSubscriptionLimit(clientKey string) error {

@@ -95,6 +95,8 @@ const (
 	ProviderOptimizerSyncWeight         = "qos-sync-weight"          // weight for sync score (default: 0.2)
 	ProviderOptimizerStakeWeight        = "qos-stake-weight"         // weight for stake (default: 0.1)
 	ProviderOptimizerMinSelectionChance = "qos-min-selection-chance" // minimum selection probability for any provider (default: 0.01)
+	ProviderOptimizerSelectionMode      = "qos-selection-mode"       // how the winner is picked from the scored providers: weighted-random (default) or best
+	ProviderOptimizerSelectionPriority  = "qos-selection-priority"   // preset over the four weights above: balanced (default), most-reliable, fastest, freshest
 
 	// optimizer qos sampling cadence — drives the in-memory /metrics
 	// selection-score cache and the OTel optimizer_qos emit.

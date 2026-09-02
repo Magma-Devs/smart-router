@@ -64,7 +64,7 @@ linters:
         text: "QF\\d+:"
       - linters:
           - staticcheck
-        text: 'SA1019:.*"github.com/golang/protobuf/proto" is deprecated.*'
+        text: 'SA1019:.*"?github.com/golang/protobuf/proto"? is deprecated.*'
       # gRPC bumped grpc.DialContext / grpc.Dial / grpc.WithBlock /
       # grpc.WithReturnConnectionError to deprecated in v1.63 in favor of
       # grpc.NewClient. Migration is non-trivial (NewClient is lazy, no
@@ -78,6 +78,26 @@ linters:
         linters:
           - staticcheck
         text: "SA1019:"
+      # jhump/protoreflect desc + dynamic are the v1 protobuf reflection API. Moving to
+      # google.golang.org/protobuf/reflect is a dependency migration, not a lint fix.
+      - linters:
+          - staticcheck
+        text: 'SA1019:.*github.com/jhump/protoreflect/(desc|dynamic) is deprecated.*'
+      # h2c is superseded by http.Server.Protocols (Go 1.24). The cleartext HTTP/2 path
+      # carries the cache and gRPC proxy listeners, so it moves in its own change.
+      - linters:
+          - staticcheck
+        text: 'SA1019:.*golang.org/x/net/http2/h2c.*is deprecated.*'
+      # Error strings are matched by callers, tests and the dashboard; recasing or
+      # unpunctuating them is a wire-visible change, decided per error, not by a linter.
+      - linters:
+          - staticcheck
+        text: "ST1005:"
+      # Exported error variables keep their names: renaming 23 of them is a
+      # cross-package churn for style alone.
+      - linters:
+          - staticcheck
+        text: "ST1012:"
 
 formatters:
   enable:

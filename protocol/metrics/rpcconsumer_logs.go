@@ -176,7 +176,12 @@ func (rpccl *RPCConsumerLogs) GetUniqueGuidResponseForError(responseError error,
 		Error_GUID: msgSeed,
 	}
 	if ReturnMaskedErrors == "false" {
-		data.Error = responseError.Error()
+		// Every client-facing error envelope — jsonrpc, tendermint, rest, grpc and
+		// ws — is built here, so this is the one place that has to strip upstream
+		// credentials. net/http's *url.Error embeds the full request url and Go
+		// masks only the userinfo password, so a transport failure would otherwise
+		// hand the caller the node-url's api key.
+		data.Error = utils.RedactSecrets(responseError.Error())
 	}
 
 	utils.LavaFormatError("UniqueGuidResponseForError", responseError, utils.Attribute{Key: "msgSeed", Value: msgSeed})

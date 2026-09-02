@@ -22,8 +22,8 @@ import (
 type Renderer struct {
 	mode   Mode
 	slugs  *slugMap
-	cells  int // icon height/width in terminal cells
-	px     int // raster size in pixels
+	cells  int               // icon height/width in terminal cells
+	px     int               // raster size in pixels
 	cache  map[string]string // specFile -> ready escape sequence ("" = none)
 	cacheD string
 	mu     sync.Mutex

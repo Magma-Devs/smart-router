@@ -179,7 +179,10 @@ func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientC
 			utils.LogAttr("resolution", "block parsing resolves through one registry per chain, so every gRPC node-url on a chain must declare the same descriptor-source and descriptor-set-path"))
 	}
 
-	var remote dyncodec.ProtoFileRegistry = dyncodec.NewGRPCReflectionProtoFileRegistryFromConn(reflectionConnection)
+	// grpc-config is what bounds reflection here. Without it a node that accepts
+	// the reflection stream and never answers blocks until BootValidateTimeout
+	// tears the connector down, and the failure reads as a closed pool (MAG-3371).
+	var remote dyncodec.ProtoFileRegistry = dyncodec.NewGRPCReflectionProtoFileRegistryFromConn(reflectionConnection, grpcConfig.GetReflectionTimeout())
 	remote, err := dyncodec.ProtoFileRegistryForGrpcConfig(grpcConfig, remote)
 	if err != nil {
 		return err
@@ -419,7 +422,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		utils.LavaFormatDebug("in <<< GRPC Relay ",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr("_method", method),
-			utils.LogAttr("headers", grpcHeaders),
+			utils.LogAttr("headers", common.RedactMetadata(grpcHeaders)),
 		)
 		metricsData := metrics.NewRelayAnalytics(dappID, apil.endpoint.ChainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
@@ -854,7 +857,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 
 	utils.LavaFormatTrace("provider sending node message",
 		utils.LogAttr("_method", nodeMessage.Path),
-		utils.LogAttr("headers", metadataMap),
+		utils.LogAttr("headers", utils.RedactHeaderMap(metadataMap)),
 		utils.LogAttr("apiInterface", "grpc"),
 	)
 

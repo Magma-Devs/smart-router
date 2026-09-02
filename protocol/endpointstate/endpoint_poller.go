@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -105,6 +106,27 @@ func (ecf *EndpointPoller) hydrateGrpcChainMessage(chainMessage chainlib.ChainMe
 	return chainlib.HydrateGrpcResponseParsing(chainMessage, methodDesc)
 }
 
+// collectionAddons returns this endpoint's declared add-ons, so the head poll and
+// the fork check ask for the directives of the collection the node actually serves
+// rather than the base collection's (MAG-3296).
+//
+// Sorted, because Endpoint.Addons is a map and an unsorted range would let two
+// polls of the same endpoint pick different collections when a node declares more
+// than one add-on carrying the tag. Which collection wins matters less than it
+// being the same one every time — an alternating tip source reads as a flapping
+// node.
+func (ecf *EndpointPoller) collectionAddons() []string {
+	if ecf.endpoint == nil || len(ecf.endpoint.Addons) == 0 {
+		return nil
+	}
+	addons := make([]string, 0, len(ecf.endpoint.Addons))
+	for addon := range ecf.endpoint.Addons {
+		addons = append(addons, addon)
+	}
+	sort.Strings(addons)
+	return addons
+}
+
 // FetchLatestBlockNum fetches the latest block number from the endpoint.
 // Uses spec-driven parsing to support any chain type (EVM, Tendermint, REST, etc.).
 func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum int64, err error) {
@@ -118,7 +140,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 		ecf.ObserveLatestBlockPoll(blockNum, pollLatency, err)
 	}()
 
-	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
+	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, ecf.collectionAddons(), ecf.endpoint.InternalPath, ecf.endpoint.ServesBaseCollection())
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCKNUM.String()
 	if !ok {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatError(tagName+" tag function not found", nil,
@@ -209,7 +231,7 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 // This handles both propagation delays (the latest slot data hasn't reached the
 // node yet) and skipped slots (Solana occasionally produces no block for a slot).
 func (ecf *EndpointPoller) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
-	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
+	parsing, apiCollection, ok := ecf.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM, ecf.collectionAddons(), ecf.endpoint.InternalPath, ecf.endpoint.ServesBaseCollection())
 	tagName := spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM.String()
 	if !ok {
 		return "", utils.LavaFormatError(tagName+" tag function not found", nil,
@@ -385,7 +407,7 @@ func (ecf *EndpointPoller) ObserveLatestBlockPoll(block int64, transportLatency 
 // For JSON-RPC/POST requests, requestData is the JSON body.
 func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string, kind string) ([]byte, error) {
 	if ecf.directConnection == nil {
-		return nil, fmt.Errorf("no direct connection for endpoint %s", ecf.endpointURL)
+		return nil, fmt.Errorf("no direct connection for endpoint %s", utils.RedactURL(ecf.endpointURL))
 	}
 	// Counted once the request is about to go out, so the number matches what the upstream
 	// node was actually asked for. Deliberately AFTER the no-connection guard above (nothing
@@ -433,7 +455,7 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	httpDoer, ok := ecf.directConnection.(lavasession.HTTPDirectRPCDoer)
 	if !ok {
-		return nil, fmt.Errorf("connection does not support HTTP requests for endpoint %s", ecf.endpointURL)
+		return nil, fmt.Errorf("connection does not support HTTP requests for endpoint %s", utils.RedactURL(ecf.endpointURL))
 	}
 
 	fullURL, err := common.JoinURLPath(ecf.directConnection.GetURL(), path)

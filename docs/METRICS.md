@@ -385,6 +385,7 @@ went out, and which" — so read the alerting note under the table before buildi
 | `smartrouter_csm_blocked_providers` | Gauge | `spec`, `apiInterface` | Providers currently blocked. **Non-zero means the chain is degraded** — but zero does not prove it is healthy; see the sampling note below. Previously this reported the previous-epoch store instead and read 0 during outages. |
 | `smartrouter_csm_previous_epoch_blocked_providers` | Gauge | `spec`, `apiInterface` | Size of the previous-epoch blocked-providers store (cross-epoch carry-over, briefly populated at an epoch boundary). This is what `smartrouter_csm_blocked_providers` reported before it was corrected. |
 | `smartrouter_csm_provider_blocked` | Gauge | `spec`, `apiInterface`, `provider_address` | Whether one specific provider is blocked (1=blocked, 0=serving) — which provider went out, versus how many. Labelled by provider name only: a node URL can embed an API key and must never reach a series. |
+| `smartrouter_csm_blocked_providers_by_reason` | Gauge | `spec`, `apiInterface`, `reason` | How many providers are blocked, split by **why**: `all-endpoints-disabled`, `too-many-dead-sessions`, `never-served-successfully`, `explicit-block-signal`, `blocked-in-previous-epoch`, `unspecified`. Every reason is republished on every tick including the zeros, so a reason that stops applying returns to 0 rather than sticking. It counts **both pools**, so the identity is `sum()` == `smartrouter_csm_blocked_providers` + `smartrouter_csm_blocked_backup_providers` — not the first alone. One caveat: those two gauges count **memberships** while this one counts **providers**, so a provider configured in both pools and blocked in both is counted twice by the sum of the other two and once here. That is deliberate — the question this gauge answers is *how many providers are out, and why*. Deliberately carries **no provider label** — with one, a provider re-blocked under a different reason would leave the old reason's series stuck at 1. Use `smartrouter_csm_provider_blocked` or `/debug/provider-routing` for *which* provider. |
 | `smartrouter_csm_blocked_backup_providers` | Gauge | `spec`, `apiInterface` | Size of the blocked-backup-providers store. Backups are tracked here only — they never appear in `smartrouter_csm_provider_blocked`. |
 | `smartrouter_csm_sticky_sessions` | Gauge | `spec`, `apiInterface` | Live sticky-session affinities. |
 | `smartrouter_csm_reported_providers` | Gauge | `spec`, `apiInterface` | Size of the reported-providers register. |
@@ -401,6 +402,9 @@ max_over_time(smartrouter_csm_blocked_providers[5m]) > 0
 
 # which provider — the same window, per provider
 max_over_time(smartrouter_csm_provider_blocked[5m]) > 0
+
+# ...and why they are out
+max_over_time(smartrouter_csm_blocked_providers_by_reason[5m]) > 0
 ```
 
 For "is this chain serving at all", prefer `smartrouter_endpoint_serving_tier` (below): it is not

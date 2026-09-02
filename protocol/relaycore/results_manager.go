@@ -154,7 +154,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		var reqHeaders interface{}
 		if response.RelayResult.Request != nil && response.RelayResult.Request.RelayData != nil {
 			reqPayload = string(response.RelayResult.Request.RelayData.Data)
-			reqHeaders = response.RelayResult.Request.RelayData.Metadata
+			reqHeaders = common.RedactMetadata(response.RelayResult.Request.RelayData.Metadata)
 		}
 		// Get request URL safely
 		requestUrl := ""
@@ -186,7 +186,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			utils.LogAttr("api", protocolMessage.GetApi().Name),
 			utils.LogAttr("requestUrl", requestUrl),
 			utils.LogAttr("payload", parser.CapStringLen(string(response.RelayResult.Reply.Data))),
-			utils.LogAttr("headers", response.RelayResult.Reply.Metadata),
+			utils.LogAttr("headers", common.RedactMetadata(response.RelayResult.Reply.Metadata)),
 			utils.LogAttr("requestPayload", parser.CapStringLen(reqPayload)),
 			utils.LogAttr("requestHeaders", reqHeaders),
 		)

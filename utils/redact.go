@@ -1,0 +1,189 @@
+package utils
+
+import (
+	"regexp"
+	"sort"
+	"strings"
+)
+
+// RedactedMark stands in for any withheld value.
+const RedactedMark = "[redacted]"
+
+// RedactedURLMark replaces the credential-bearing tail of a url. It is a path
+// segment so a redacted url still reads as a url in logs and error text.
+const RedactedURLMark = "/" + RedactedMark
+
+// urlInText matches a scheme-qualified url inside arbitrary text. Anchoring on
+// "://" keeps prose and scheme-less identifiers — a host:port listen address, a
+// provider name, a "dial tcp 10.0.0.1:443" — untouched.
+//
+// The match stops at ",;)" as well as at quotes and brackets so a url embedded in
+// a log attribute list ("{url:https://host/p,method:eth_call}") does not swallow
+// what follows it. No credential charset uses those, and the host — all this
+// needs to identify — always precedes them.
+var urlInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"'` + "`" + `<>\\^{}|\[\],;)]+`)
+
+// schemeLessURLInText matches a credential-bearing scheme-less node url while
+// requiring a recognizable host. That keeps ordinary prose, provider names,
+// lava addresses and bare host:port values untouched.
+var schemeLessURLInText = regexp.MustCompile(`\b(?:(?:localhost|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+)(?::[0-9]+)?|[a-zA-Z0-9-]+:[0-9]+)[/?#][^\s"'` + "`" + `<>\\^{}|\[\],;)]+`)
+
+// RedactURL reduces one url to scheme://host[:port]. Upstream vendors carry the
+// api key in the userinfo, the path (".../v2/<key>") or the query
+// ("?apikey=<key>"), so everything past the host is dropped wholesale — a
+// heuristic that kept "harmless-looking" segments would eventually keep a key.
+//
+// Scheme-less urls ("host/v2/<key>") are handled too: the config accepts them
+// and the direct-connection layer resolves the scheme from the api-interface.
+func RedactURL(raw string) string {
+	if raw == "" {
+		return raw
+	}
+
+	scheme, rest := "", raw
+	if i := strings.Index(raw, "://"); i >= 0 {
+		scheme, rest = raw[:i+3], raw[i+3:]
+	}
+
+	authority := rest
+	rest = ""
+	if i := strings.IndexAny(authority, "/?#"); i >= 0 {
+		authority, rest = authority[:i], authority[i:]
+	}
+
+	// "user:pass@host" keeps only "host".
+	if i := strings.LastIndex(authority, "@"); i >= 0 {
+		authority = authority[i+1:]
+	}
+
+	if authority == "" {
+		return scheme
+	}
+	// A bare "/" carries nothing, so it survives rather than becoming a mark.
+	if rest == "" || rest == "/" {
+		return scheme + authority + rest
+	}
+	return scheme + authority + RedactedURLMark
+}
+
+// RedactIfURL redacts s only when it looks like a url — it carries a "://"
+// scheme, or a path/query/fragment delimiter. Anything else comes back
+// untouched, which matters where the input is a url OR an identifier: a lava
+// provider address ("lava@provider") is not a url, and RedactURL would read its
+// "@" as userinfo and drop the prefix.
+func RedactIfURL(s string) string {
+	if strings.Contains(s, "://") || strings.ContainsAny(s, "/?#") {
+		return RedactURL(s)
+	}
+	return s
+}
+
+// RedactSecrets rewrites every url in s with RedactURL. Use it on any text that
+// may have picked up a url indirectly — an error from net/http, whose *url.Error
+// message embeds the full request url (Go masks only the userinfo password), or
+// a message that interpolated a node-url.
+//
+// The delimiter check keeps this near-free for the log lines that hold no url,
+// which is nearly all of them.
+func RedactSecrets(s string) string {
+	if !strings.Contains(s, "://") && !strings.ContainsAny(s, "/?#") {
+		return s
+	}
+	redacted := urlInText.ReplaceAllStringFunc(s, RedactURL)
+	return schemeLessURLInText.ReplaceAllStringFunc(redacted, RedactURL)
+}
+
+// RedactSecretsErr returns err with its message redacted, preserving the cause
+// so errors.Is/As still traverse it. Returns err unchanged when it holds no url.
+func RedactSecretsErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	redacted := RedactSecrets(msg)
+	if redacted == msg {
+		return err
+	}
+	return &wrappedLavaError{msg: redacted, cause: err}
+}
+
+// safeHeaderValues names the headers whose values may be logged. Everything else
+// is withheld, because auth header names are operator-configured per node-url
+// (auth-config.auth-headers) and inbound requests carry the caller's own
+// credentials — no deny-list can enumerate either. Header NAMES are always
+// logged, so a redacted line still shows what was sent.
+var safeHeaderValues = map[string]struct{}{
+	"accept": {}, "accept-encoding": {}, "accept-language": {}, "allow": {},
+	"cache-control": {}, "connection": {}, "content-encoding": {},
+	"content-language": {}, "content-length": {}, "content-type": {},
+	"date": {}, "expect": {}, "host": {}, "keep-alive": {}, "server": {},
+	"te": {}, "trailer": {}, "transfer-encoding": {}, "upgrade": {},
+	"user-agent": {}, "vary": {}, "via": {},
+}
+
+// IsSensitiveHeader reports whether a header's value must be withheld from logs.
+// Fails closed: anything not explicitly known-safe is sensitive.
+func IsSensitiveHeader(name string) bool {
+	_, safe := safeHeaderValues[strings.ToLower(strings.TrimSpace(name))]
+	return !safe
+}
+
+// RedactHeaderValue returns value when the header is known-safe to log, and the
+// redaction mark otherwise.
+func RedactHeaderValue(name, value string) string {
+	if IsSensitiveHeader(name) {
+		return RedactedMark
+	}
+	return value
+}
+
+// RedactHeaders renders a header map for logging with sensitive values withheld.
+// Takes the unnamed map type so http.Header and grpc metadata.MD both assign to
+// it. Output is sorted by name — map iteration order would otherwise make log
+// lines differ run to run.
+func RedactHeaders(h map[string][]string) string {
+	names := make([]string, 0, len(h))
+	for name := range h {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, name := range names {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(name)
+		b.WriteByte(':')
+		if IsSensitiveHeader(name) {
+			b.WriteString(RedactedMark)
+			continue
+		}
+		b.WriteString(strings.Join(h[name], ","))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// RedactHeaderMap is RedactHeaders for a single-valued header map.
+func RedactHeaderMap(h map[string]string) string {
+	names := make([]string, 0, len(h))
+	for name := range h {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, name := range names {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(name)
+		b.WriteByte(':')
+		b.WriteString(RedactHeaderValue(name, h[name]))
+	}
+	b.WriteByte('}')
+	return b.String()
+}

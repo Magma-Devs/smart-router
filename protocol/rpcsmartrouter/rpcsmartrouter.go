@@ -50,6 +50,7 @@ import (
 	scoreutils "github.com/magma-Devs/smart-router/utils/score"
 	"github.com/magma-Devs/smart-router/version"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -60,10 +61,10 @@ const (
 	DebugRelaysFlagName           = "debug-relays"
 	DebugProbesFlagName           = "debug-probes"
 
-	// lavaAppName is the application name, previously app.Name.
-	lavaAppName = "lava"
-	// lavaDefaultNodeHome is the default home directory, previously lavaDefaultNodeHome (~/.lava).
-	lavaDefaultNodeHome = "$HOME/." + lavaAppName
+	// appName names the binary's dot-directory under $HOME.
+	appName = "smart-router"
+	// defaultNodeHome is the last of the config search paths (~/.smart-router).
+	defaultNodeHome = "$HOME/." + appName
 )
 
 var (
@@ -234,7 +235,7 @@ type rpcSmartRouterStartOptions struct {
 	stateShare               bool
 	staticProvidersList      []*lavasession.RPCStaticProviderEndpoint // define static providers as primary providers
 	backupProvidersList      []*lavasession.RPCStaticProviderEndpoint // define backup providers as emergency fallback when no providers available
-	weightedSelectorConfig   provideroptimizer.WeightedSelectorConfig
+	upstreamSelectorConfig   provideroptimizer.UpstreamSelectorConfig
 }
 
 // Start sets up the RPCSmartRouter and all its processes, then returns once
@@ -831,6 +832,116 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 	return total
 }
 
+// resolveSelectionWeights turns --qos-selection-priority plus the individual
+// --qos-*-weight flags into the four QoS weights the endpoint selector scores on.
+//
+// Precedence: the priority preset sets the weights, then any weight the operator set by
+// hand overrides it — so the preset is a starting point, never a cage.
+//
+// "Set by hand" deliberately checks the config file as well as the command line.
+// Changed() only reports flags typed on the CLI, so a weight set in config.yml would
+// otherwise lose silently to the preset; viper.InConfig covers that half.
+//
+// Only the four weights are decided here. Every other field is left at its default for
+// the caller to fill in, so a priority can never move something it does not own.
+//
+// The weights are normalised to sum to 1.0 before returning. A preset sums to 1.0 by
+// construction, so ANY partial override breaks the sum — --qos-selection-priority fastest
+// with --qos-latency-weight 0.5 gives 0.80 — and NewUpstreamSelector would then rescale it
+// while logging "weights do not sum to 1.0, normalizing" at WARN. That reads as the
+// operator's mistake on a combination this flag explicitly advertises, and it left three
+// disagreeing accounts of one config: this Info line reported the typed 0.5, the WARN said
+// the config was wrong, and the selector ran 0.625.
+//
+// Normalising here does the identical arithmetic one step earlier, in the code that knows
+// the override was deliberate, so the selector receives a set that already sums to 1.0 and
+// stays quiet. Nothing about routing changes: scaling preserves ratios, so 0.5/0.8 and
+// 0.625/1.0 are the same share. Reported by @avitenzer.
+//
+// Genuinely broken input is deliberately NOT handled here — negative, NaN, Inf, or an
+// all-zero set falls through untouched so NewUpstreamSelector's existing validation still
+// rejects it loudly and falls back to defaults. This only quiets the case we decided is
+// legitimate: correct proportions that happen not to total 1.
+func resolveSelectionWeights(flags *pflag.FlagSet) (provideroptimizer.UpstreamSelectorConfig, error) {
+	config := provideroptimizer.DefaultUpstreamSelectorConfig()
+
+	priority, err := provideroptimizer.ParseSelectionPriority(viper.GetString(common.ProviderOptimizerSelectionPriority))
+	if err != nil {
+		return config, err
+	}
+	config = priority.ApplyTo(config)
+
+	overridden := []string{}
+	for _, w := range []struct {
+		flagName string
+		target   *float64
+	}{
+		{common.ProviderOptimizerAvailabilityWeight, &config.AvailabilityWeight},
+		{common.ProviderOptimizerLatencyWeight, &config.LatencyWeight},
+		{common.ProviderOptimizerSyncWeight, &config.SyncWeight},
+		{common.ProviderOptimizerStakeWeight, &config.StakeWeight},
+	} {
+		if (flags != nil && flags.Changed(w.flagName)) || viper.InConfig(w.flagName) {
+			*w.target = viper.GetFloat64(w.flagName)
+			overridden = append(overridden, w.flagName)
+		}
+	}
+
+	rescaled := normalizeSelectionWeights(&config)
+
+	// Stay quiet on the default path so an untouched deployment logs nothing new. The
+	// weights logged are the EFFECTIVE ones — what the selector will actually score on,
+	// after any rescale — because the typed number is not what runs and an operator who
+	// reads this line should not have to work that out.
+	if priority != provideroptimizer.SelectionPriorityBalanced || len(overridden) > 0 {
+		utils.LavaFormatInfo("Working with provider selection priority: "+priority.String(),
+			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
+			utils.LogAttr("latencyWeight", config.LatencyWeight),
+			utils.LogAttr("syncWeight", config.SyncWeight),
+			utils.LogAttr("stakeWeight", config.StakeWeight),
+			utils.LogAttr("manuallyOverridden", strings.Join(overridden, ",")),
+			utils.LogAttr("rescaledToSumToOne", rescaled),
+		)
+	}
+
+	return config, nil
+}
+
+// normalizeSelectionWeights scales the four QoS weights so they sum to 1.0, and reports
+// whether it had to. Returns false when the set is already normalised or when it is invalid
+// and must be left for NewUpstreamSelector to reject.
+//
+// The 0.001 tolerance mirrors NewUpstreamSelector's own check exactly. That is the point:
+// matching it is what guarantees the selector's "weights do not sum to 1.0" warning cannot
+// fire on a set that came through here.
+func normalizeSelectionWeights(config *provideroptimizer.UpstreamSelectorConfig) bool {
+	weights := []*float64{
+		&config.AvailabilityWeight,
+		&config.LatencyWeight,
+		&config.SyncWeight,
+		&config.StakeWeight,
+	}
+
+	total := 0.0
+	for _, w := range weights {
+		// A negative or non-finite weight is a config error, not a scaling problem. Leave
+		// the whole set alone so the selector's validation still sees it as handed in.
+		if math.IsNaN(*w) || math.IsInf(*w, 0) || *w < 0 {
+			return false
+		}
+		total += *w
+	}
+
+	if total <= 0 || math.Abs(total-1.0) <= 0.001 {
+		return false
+	}
+
+	for _, w := range weights {
+		*w /= total
+	}
+	return true
+}
+
 // routerConfigOptimizerWeights is the JSON shape for a single provider-optimizer's
 // active selection weights, used for each per-chain entry in the PerChainOptimizer map
 // returned by GET /debug/runtime-config. Fields carry no json tags, so each key marshals
@@ -841,6 +952,7 @@ type routerConfigOptimizerWeights struct {
 	SyncWeight         float64
 	StakeWeight        float64
 	MinSelectionChance float64
+	SelectionMode      string
 }
 
 // routerConfigResponse is the JSON body of GET /debug/runtime-config. It exposes the
@@ -891,7 +1003,7 @@ type routerConfigResponse struct {
 	MostFrequentPollingMultiplier int
 	PollingUpdateLength           int
 
-	// optimizer selection weights from DefaultWeightedSelectorConfig(), as flat
+	// optimizer selection weights from DefaultUpstreamSelectorConfig(), as flat
 	// top-level keys (the ticket's Phase 2 shape rule).
 	AvailabilityWeight float64
 	LatencyWeight      float64
@@ -1429,6 +1541,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"ValidAddresses":                    s.ValidAddresses,
 					"CurrentlyBlockedProviderAddresses": s.CurrentlyBlockedProviderAddresses,
 					"BlockedBackupProviders":            s.BlockedBackupProviders,
+					// Blocked answers WHY each of the above is out (MAG-2599); HeldOff covers the
+					// providers that are eligible and healthy but are not being asked yet because
+					// they rate-limited us. The three original keys are unchanged on purpose — the
+					// MAG-2202 suite reads them by name.
+					"Blocked": s.Blocked,
+					"HeldOff": s.HeldOff,
 				})
 			}
 			deps.router.mu.Unlock()
@@ -1869,13 +1987,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			return
 		}
 
-		toWeights := func(c provideroptimizer.WeightedSelectorConfig) routerConfigOptimizerWeights {
+		toWeights := func(c provideroptimizer.UpstreamSelectorConfig) routerConfigOptimizerWeights {
 			return routerConfigOptimizerWeights{
 				AvailabilityWeight: c.AvailabilityWeight,
 				LatencyWeight:      c.LatencyWeight,
 				SyncWeight:         c.SyncWeight,
 				StakeWeight:        c.StakeWeight,
 				MinSelectionChance: c.MinSelectionChance,
+				SelectionMode:      c.SelectionMode.String(),
 			}
 		}
 
@@ -1884,14 +2003,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		perChain := map[string]routerConfigOptimizerWeights{}
 		if optimizers != nil {
 			optimizers.Range(func(chainID string, opt *provideroptimizer.ProviderOptimizer) bool {
-				perChain[chainID] = toWeights(opt.GetWeightedSelectorConfig())
+				perChain[chainID] = toWeights(opt.GetUpstreamSelectorConfig())
 				return true
 			})
 		}
 
 		smConfig := SmartRouterStateMachineConfig()
 
-		optimizerDefaults := provideroptimizer.DefaultWeightedSelectorConfig()
+		optimizerDefaults := provideroptimizer.DefaultUpstreamSelectorConfig()
 
 		resp := routerConfigResponse{
 			SchemaVersion: 1,
@@ -2280,7 +2399,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// aside), so the optimizer's wanted-concurrency is always 1. The legacy
 	// --concurrent-providers flag fed a write-only optimizer field and is removed.
 	newOptimizer := provideroptimizer.NewProviderOptimizer(options.strategy, averageBlockTime, 1, smartRouterOptimizerQoSClient, chainID)
-	newOptimizer.ConfigureWeightedSelector(options.weightedSelectorConfig)
+	newOptimizer.ConfigureUpstreamSelector(options.upstreamSelectorConfig)
 	optimizer, loaded, err := optimizers.LoadOrStore(chainID, newOptimizer)
 	if err != nil {
 		errCh <- err
@@ -2313,6 +2432,33 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	rpsr.sessionManagers[sessionManagerKey] = sessionManager
 	rpsr.mu.Unlock()
 
+	// Per-collection admission (MAG-3326). Refreshed by PHASE 1 below AND by every
+	// epoch re-validation, so a service refused once does not stay refused for the
+	// process lifetime — the endpoint builder runs on the retry and promote paths
+	// too, and a boot-time blip would otherwise outlive its cause until restart.
+	//
+	// Guarded because those paths do not all hold the router lock.
+	var admissionMu sync.RWMutex
+	admissionsByProvider := map[*lavasession.RPCStaticProviderEndpoint]chainlib.ProviderAdmission{}
+	admissionFor := func(provider *lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission {
+		admissionMu.RLock()
+		defer admissionMu.RUnlock()
+		return admissionsByProvider[provider]
+	}
+	// Returns whether the admitted set actually moved. applyReverification uses
+	// that to rebuild the provider's session: an active session is refreshed from
+	// its OWN endpoints, so recording a new admission is not by itself enough to
+	// get a recovered service back into the pairing.
+	recordAdmission := func(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
+		admissionMu.Lock()
+		defer admissionMu.Unlock()
+		previous, seen := admissionsByProvider[provider]
+		// Assigned unconditionally, including an empty admission: that is how a
+		// service that has recovered gets un-refused.
+		admissionsByProvider[provider] = admission
+		return seen && !previous.Equal(admission)
+	}
+
 	// Helper function to convert provider endpoints to sessions
 	convertProvidersToSessions := func(providerList []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
 		sessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
@@ -2326,10 +2472,54 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			}
 
 			endpoints := []*lavasession.Endpoint{}
+			// expandInternalPaths gets the RAW urls. Its subscription probe resolves a
+			// collection from the url's declared add-ons to decide ws-vs-http, and its
+			// doc requires the list it produces to mirror the chain router's, which is
+			// built from the untouched config — so narrowing the input here would move
+			// endpoints in or out per internal path as a side effect of admission
+			// (MAG-3326 review). The admission is applied to each endpoint below instead.
+			admission := admissionFor(provider)
 			for _, url := range expandInternalPaths(provider.NodeUrls, chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
+				admittedServices, keep := admission.AdmittedServices(url)
+				if !keep {
+					// A url that serves only its add-ons and kept none has nothing left.
+					// Building it anyway would empty its service list, flip
+					// ServesBaseCollection() to true, and hand a node its operator
+					// declared cannot answer the base collection back to base traffic.
+					utils.LavaFormatWarning("dropping node url: every add-on it declared was refused", nil,
+						utils.LogAttr("url", url.Url),
+						utils.LogAttr("addons", url.Addons),
+						utils.LogAttr("provider", provider.Name),
+					)
+					continue
+				}
 				extensions := map[string]struct{}{}
-				for _, extension := range url.Addons {
+				for _, extension := range admittedServices {
 					extensions[extension] = struct{}{}
+				}
+
+				// standalone-addons only means anything for a url that declares an
+				// actual add-on COLLECTION. Addons here is the raw config list, which
+				// mixes add-ons and extensions, and Endpoint.Addons/.Extensions are
+				// both populated from it above. So on a url whose entries are all
+				// extension names the opt-out would make the endpoint eligible for
+				// nothing at all: extension traffic carries addon "" with the
+				// extension in a separate slice, and CheckSupportForServices would
+				// fail the base check before reaching the extension loop. Admission
+				// passes (no verifications), and the endpoint silently serves no
+				// traffic — a config typo with no diagnostic.
+				standaloneAddons := url.StandaloneAddons
+				if standaloneAddons {
+					declaredAddons, _, sepErr := chainParser.SeparateAddonsExtensions(ctx, admittedServices)
+					if sepErr != nil || len(declaredAddons) == 0 {
+						utils.LavaFormatWarning("ignoring standalone-addons: url declares no add-on collection", sepErr,
+							utils.LogAttr("url", url.Url),
+							utils.LogAttr("addons", url.Addons),
+							utils.LogAttr("provider", provider.Name),
+							utils.LogAttr("hint", "standalone-addons names add-on collections; extension names belong in addons but do not opt a url out of the base collection"),
+						)
+						standaloneAddons = false
+					}
 				}
 
 				// Create DirectRPCConnection for smart router (direct mode)
@@ -2357,10 +2547,15 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				createdConnections = append(createdConnections, directConn)
 
 				endpoint := &lavasession.Endpoint{
-					NetworkAddress:    url.Url,
-					Enabled:           true,
-					Addons:            extensions,
-					Extensions:        extensions,
+					NetworkAddress: url.Url,
+					Enabled:        true,
+					Addons:         extensions,
+					Extensions:     extensions,
+					// Carry the url's opt-out through, so session selection keeps
+					// base-collection traffic off an endpoint that only serves its
+					// add-ons (MAG-3296). Downgraded to false above for a url that
+					// names no add-on collection.
+					StandaloneAddons:  standaloneAddons,
 					InternalPath:      url.InternalPath,
 					Connections:       nil,
 					DirectConnections: []lavasession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
@@ -2455,9 +2650,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// relaysMonitor seeding below), so it is pulled from rotation rather than
 	// silently accepting traffic it cannot serve.
 	failedStaticSet, failedStaticEndpoints := validateProviderTier(
-		ctx, relevantStaticProviderList, rpcEndpoint, chainParser, reverifyTierStatic, nil)
+		ctx, relevantStaticProviderList, rpcEndpoint, chainParser, reverifyTierStatic, nil, recordAdmission)
 	failedBackupSet, failedBackupEndpoints := validateProviderTier(
-		ctx, relevantBackupProviderList, rpcEndpoint, chainParser, reverifyTierBackup, nil)
+		ctx, relevantBackupProviderList, rpcEndpoint, chainParser, reverifyTierBackup, nil, recordAdmission)
 
 	healthyStaticCount := len(relevantStaticProviderList) - len(failedStaticSet)
 	healthyBackupCount := len(relevantBackupProviderList) - len(failedBackupSet)
@@ -2504,6 +2699,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		chainParser:                chainParser,
 		rpcEndpoint:                rpcEndpoint,
 		convertProvidersToSessions: convertProvidersToSessions,
+		recordAdmission:            recordAdmission,
 		configuredStatic:           relevantStaticProviderList,
 		configuredBackup:           relevantBackupProviderList,
 	}
@@ -2762,12 +2958,11 @@ func CreateRPCSmartRouterCobraCommand() *cobra.Command {
 		// error line, swamping kubectl logs in a CrashLoopBackOff. Operators need
 		// to see the error, not the flag catalogue.
 		SilenceUsage: true,
-		Long: `rpcsmartrouter sets up a centralized server with static and backup providers to perform api requests through the lava protocol.
-		This is the smart router mode that uses pre-configured static providers instead of dynamically discovering providers on-chain.
+		Long: `rpcsmartrouter runs a server that routes api requests across the static and backup providers in its config.
 		if no arguments are passed, assumes default config file: ` + DefaultRPCSmartRouterFileName + `
 		if one argument is passed, it is the config to load. An absolute path names the file
 		outright; anything else — a relative path, or a bare name — is looked up in the
-		local running directory, ./config, then ` + lavaDefaultNodeHome + `.
+		local running directory, ./config, then ` + defaultNodeHome + `.
 		An argument without a recognized extension has the supported ones appended, so
 		"akash" and "config/akash" both find config/akash.yml.
 		`,
@@ -3056,13 +3251,21 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			if err := scoreutils.SetProbeUpdateWeight(viper.GetFloat64(common.ProbeUpdateWeightFlagName)); err != nil {
 				return err
 			}
-			weightedSelectorConfig := provideroptimizer.DefaultWeightedSelectorConfig()
-			weightedSelectorConfig.AvailabilityWeight = viper.GetFloat64(common.ProviderOptimizerAvailabilityWeight)
-			weightedSelectorConfig.LatencyWeight = viper.GetFloat64(common.ProviderOptimizerLatencyWeight)
-			weightedSelectorConfig.SyncWeight = viper.GetFloat64(common.ProviderOptimizerSyncWeight)
-			weightedSelectorConfig.StakeWeight = viper.GetFloat64(common.ProviderOptimizerStakeWeight)
-			weightedSelectorConfig.MinSelectionChance = viper.GetFloat64(common.ProviderOptimizerMinSelectionChance)
-			weightedSelectorConfig.Strategy = strategyFlag.Strategy
+			upstreamSelectorConfig, err := resolveSelectionWeights(cmd.Flags())
+			if err != nil {
+				return err
+			}
+			upstreamSelectorConfig.MinSelectionChance = viper.GetFloat64(common.ProviderOptimizerMinSelectionChance)
+			upstreamSelectorConfig.Strategy = strategyFlag.Strategy
+
+			selectionMode, err := provideroptimizer.ParseSelectionMode(viper.GetString(common.ProviderOptimizerSelectionMode))
+			if err != nil {
+				return err
+			}
+			upstreamSelectorConfig.SelectionMode = selectionMode
+			if selectionMode != provideroptimizer.SelectionModeWeightedRandom {
+				utils.LavaFormatInfo("Working with provider selection mode: " + selectionMode.String())
+			}
 
 			// RPCSmartRouter always runs in standalone mode
 			epochDuration := viper.GetDuration(common.EpochDurationFlag)
@@ -3119,7 +3322,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				stateShare:               rpcSmartRouterSharedState,
 				staticProvidersList:      directRPCEndpoints,
 				backupProvidersList:      backupDirectRPCEndpoints,
-				weightedSelectorConfig:   weightedSelectorConfig,
+				upstreamSelectorConfig:   upstreamSelectorConfig,
 			})
 			if err != nil {
 				return err
@@ -3166,12 +3369,14 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// Process-wide in the same sense as the flag above.
 	cmdRPCSmartRouter.Flags().Float64(endpointstate.PollDivisorFlagName, 0, fmt.Sprintf("polling-relief: per-endpoint chain tracker polls every avgBlockTime/divisor (default %g). Below 1 polls SLOWER than the chain produces blocks — %g is one poll per four block times, the largest relief available. Allowed [%g,%g]; out-of-range reverts to default. Applies to EVERY chain this process serves.", endpointstate.DefaultPollDivisor, endpointstate.MinPollDivisor, endpointstate.MinPollDivisor, endpointstate.MaxPollDivisor))
 	cmdRPCSmartRouter.Flags().Var(&strategyFlag, "strategy", fmt.Sprintf("the strategy to use to pick providers (%s)", strings.Join(strategyNames, "|")))
-	defaultWeightedConfig := provideroptimizer.DefaultWeightedSelectorConfig()
-	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerAvailabilityWeight, defaultWeightedConfig.AvailabilityWeight, "weight assigned to provider availability when computing selection scores")
-	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerLatencyWeight, defaultWeightedConfig.LatencyWeight, "weight assigned to provider latency when computing selection scores")
-	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerSyncWeight, defaultWeightedConfig.SyncWeight, "weight assigned to provider sync freshness when computing selection scores")
-	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerStakeWeight, defaultWeightedConfig.StakeWeight, "weight assigned to provider stake when computing selection scores")
-	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerMinSelectionChance, defaultWeightedConfig.MinSelectionChance, "minimum selection probability for any provider regardless of score")
+	defaultSelectorConfig := provideroptimizer.DefaultUpstreamSelectorConfig()
+	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerAvailabilityWeight, defaultSelectorConfig.AvailabilityWeight, "weight assigned to provider availability when computing selection scores")
+	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerLatencyWeight, defaultSelectorConfig.LatencyWeight, "weight assigned to provider latency when computing selection scores")
+	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerSyncWeight, defaultSelectorConfig.SyncWeight, "weight assigned to provider sync freshness when computing selection scores")
+	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerStakeWeight, defaultSelectorConfig.StakeWeight, "weight assigned to provider stake when computing selection scores")
+	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerMinSelectionChance, defaultSelectorConfig.MinSelectionChance, "minimum selection probability for any provider regardless of score")
+	cmdRPCSmartRouter.Flags().String(common.ProviderOptimizerSelectionMode, defaultSelectorConfig.SelectionMode.String(), fmt.Sprintf("how the winner is picked from the scored providers (%s): weighted_random draws proportionally to score, best always takes the highest scorer", strings.Join(provideroptimizer.SelectionModeNames(), "|")))
+	cmdRPCSmartRouter.Flags().String(common.ProviderOptimizerSelectionPriority, provideroptimizer.SelectionPriorityBalanced.String(), fmt.Sprintf("what to optimise for (%s) — a preset over the four qos-*-weight flags above; any weight set by hand overrides the preset", strings.Join(provideroptimizer.SelectionPriorityNames(), "|")))
 	if err := viper.BindPFlag(common.ProviderOptimizerAvailabilityWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerAvailabilityWeight)); err != nil {
 		utils.LavaFormatFatal("failed binding availability weight flag", err)
 	}
@@ -3186,6 +3391,12 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerMinSelectionChance, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerMinSelectionChance)); err != nil {
 		utils.LavaFormatFatal("failed binding min selection chance flag", err)
+	}
+	if err := viper.BindPFlag(common.ProviderOptimizerSelectionMode, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSelectionMode)); err != nil {
+		utils.LavaFormatFatal("failed binding selection mode flag", err)
+	}
+	if err := viper.BindPFlag(common.ProviderOptimizerSelectionPriority, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSelectionPriority)); err != nil {
+		utils.LavaFormatFatal("failed binding selection priority flag", err)
 	}
 	cmdRPCSmartRouter.Flags().String(metrics.MetricsListenFlagName, metrics.DisabledFlagOption, "the address to expose prometheus metrics (such as localhost:7779)")
 	// Usage telemetry (OTel) — off by default. When enabled, per-relay and

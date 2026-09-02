@@ -349,6 +349,85 @@ func (bcp *BaseChainParser) GetParsingByTag(tag spectypes.FUNCTION_TAG) (parsing
 	return val.Parsing, val.ApiCollection, ok
 }
 
+// GetParsingByTagForCollection resolves a tagged parse directive for a node that
+// serves specific add-on collections, falling back to GetParsingByTag's answer
+// when the node declares no add-ons or none of its collections carries the tag.
+//
+// MAG-3296: taggedApis holds exactly ONE directive per tag — the first collection
+// to declare it, which for a spec written base-first is the base collection. So
+// GetParsingByTag answers "the base collection's directive" no matter who is
+// asking. That is wrong for a spec whose add-on is a DISJOINT api surface rather
+// than a superset of the base one: Acala serves Substrate in the base collection
+// and EVM in an `evm` add-on, and an EVM-only node cannot answer the base
+// collection's chain_getHeader at all. Probing it with one gets -32601 and, on
+// the admission path, costs the provider its place outright.
+//
+// Add-ons are tried in the order the node declares them, so a node's own
+// preference decides between two collections that both carry the tag. The
+// connection type comes from the base answer, because the tag is served over the
+// same transport whichever collection defines it — this is a keyed lookup rather
+// than a scan of apiCollections, which is a map and would iterate randomly.
+//
+// `addons` may contain extension names too (callers pass NodeUrl.Addons, which
+// mixes both). An extension name matches no collection's AddOn, so it is skipped
+// rather than needing to be separated out first.
+//
+// allowBaseFallback is the caller's ServesBaseCollection(): false means the node
+// serves ONLY its add-on collections, and the tagged fallback is then refused
+// rather than handing back a directive that node cannot answer.
+func (bcp *BaseChainParser) GetParsingByTagForCollection(tag spectypes.FUNCTION_TAG, addons []string, internalPath string, allowBaseFallback bool) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool) {
+	bcp.rwLock.RLock()
+	defer bcp.rwLock.RUnlock()
+
+	// `tagged`, not `base`: taggedApis is first-wins in SPEC-FILE order, so for a
+	// spec that lists an add-on collection before the base one this entry is the
+	// add-on's. The name must not assert an invariant the map does not enforce.
+	tagged, taggedExisted := bcp.taggedApis[tag]
+	if taggedExisted {
+		parsing, apiCollection, existed = tagged.Parsing, tagged.ApiCollection, true
+	}
+	if len(addons) == 0 || !taggedExisted {
+		// taggedApis is populated from EVERY enabled collection, so a tag missing
+		// from it is declared nowhere and searching the add-on collections cannot
+		// find it either.
+		if !taggedExisted {
+			return nil, nil, false
+		}
+		return parsing, apiCollection, existed
+	}
+
+	for _, addon := range addons {
+		if addon == "" {
+			continue // the base collection, which is the fallback below
+		}
+		collection, ok := bcp.apiCollections[CollectionKey{
+			ConnectionType: tagged.ApiCollection.CollectionData.Type,
+			InternalPath:   internalPath,
+			Addon:          addon,
+		}]
+		if !ok || !collection.Enabled {
+			continue
+		}
+		for _, directive := range collection.ParseDirectives {
+			if directive.FunctionTag == tag {
+				return directive, collection, true
+			}
+		}
+	}
+
+	if !allowBaseFallback {
+		// The caller serves only its add-on collections, and none of them declares
+		// this tag. Falling back would hand it the one directive the operator said
+		// the node cannot answer — reinstating the very probe standalone-addons
+		// opted out of, quietly. The keyed lookup above misses whenever a spec
+		// declares the add-on collection only at the root and the url carries an
+		// internal path, so this is reachable the moment a spec combines a disjoint
+		// add-on with internal paths.
+		return nil, nil, false
+	}
+	return parsing, apiCollection, existed
+}
+
 func (bcp *BaseChainParser) IsTagInCollection(tag spectypes.FUNCTION_TAG, collectionKey CollectionKey) bool {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
@@ -573,6 +652,18 @@ func (apip *BaseChainParser) getApiCollection(connectionType, internalPath, addo
 	return api, nil
 }
 
+// findParseDirectiveByTag returns a collection's own directive for a tag, or nil
+// when it declares none. Used to resolve what a tag-referencing verification
+// borrows, so it borrows from the collection it belongs to.
+func findParseDirectiveByTag(apiCollection *spectypes.ApiCollection, tag spectypes.FUNCTION_TAG) *spectypes.ParseDirective {
+	for _, directive := range apiCollection.ParseDirectives {
+		if directive.FunctionTag == tag {
+			return directive
+		}
+	}
+	return nil
+}
+
 func getServiceApis(
 	spec spectypes.Spec,
 	rpcInterface string,
@@ -684,8 +775,26 @@ func getServiceApis(
 			}
 			for _, verification := range apiCollection.Verifications {
 				if verification.ParseDirective.FunctionTag != spectypes.FUNCTION_TAG_VERIFICATION {
-					if _, ok := taggedApis[verification.ParseDirective.FunctionTag]; ok {
-						verification.ParseDirective = taggedApis[verification.ParseDirective.FunctionTag].Parsing
+					// A verification that names a tag instead of carrying its own
+					// template borrows a directive. Take the one from ITS OWN
+					// collection first (MAG-3296): taggedApis holds a single
+					// directive per tag — the first collection to declare it — so
+					// borrowing from there gave every collection the base one.
+					// Acala's `evm` pruning verification names GET_EARLIEST_BLOCK
+					// and was rewritten to probe with the base collection's
+					// Substrate chain_getBlockHash, which the EVM node it was
+					// meant to check cannot answer.
+					//
+					// taggedApis stays the fallback, so a collection that borrows a
+					// tag it does not itself declare still resolves exactly as before.
+					borrowed := findParseDirectiveByTag(apiCollection, verification.ParseDirective.FunctionTag)
+					if borrowed == nil {
+						if container, ok := taggedApis[verification.ParseDirective.FunctionTag]; ok {
+							borrowed = container.Parsing
+						}
+					}
+					if borrowed != nil {
+						verification.ParseDirective = borrowed
 					} else {
 						utils.LavaFormatError("Bad verification definition", fmt.Errorf("verification function tag is not defined in the collections parse directives"), utils.LogAttr("function_tag", verification.ParseDirective.FunctionTag))
 						continue
@@ -767,14 +876,16 @@ func newRestApiContainer(api *spectypes.Api, collectionKey CollectionKey) (ApiKe
 	if err != nil {
 		return ApiKey{}, ApiContainer{}, err
 	}
-	return ApiKey{
-			Name:           apiPattern,
-			ConnectionType: collectionKey.ConnectionType,
-		}, ApiContainer{
-			api:           api,
-			collectionKey: collectionKey,
-			restMatcher:   matcher,
-		}, nil
+	key := ApiKey{
+		Name:           apiPattern,
+		ConnectionType: collectionKey.ConnectionType,
+	}
+	container := ApiContainer{
+		api:           api,
+		collectionKey: collectionKey,
+		restMatcher:   matcher,
+	}
+	return key, container, nil
 }
 
 // restApiMatcher holds everything matchSpecApiByName needs for one REST api. It is built

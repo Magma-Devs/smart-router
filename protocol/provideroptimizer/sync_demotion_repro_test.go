@@ -35,12 +35,12 @@ func resolveSyncScore(t *testing.T, po *ProviderOptimizer, addr string) float64 
 	return s
 }
 
-// firstPickShare drives ChooseProvider n times against frozen scores and returns the share
+// firstPickShare drives ChooseUpstream n times against frozen scores and returns the share
 // of first picks each provider won.
 func firstPickShare(po *ProviderOptimizer, providers []string, n int) map[string]float64 {
 	counts := map[string]int{}
 	for i := 0; i < n; i++ {
-		pick := po.ChooseProvider(context.Background(), providers, nil, 10, spectypes.LATEST_BLOCK)
+		pick := po.ChooseUpstream(context.Background(), providers, nil, 10, spectypes.LATEST_BLOCK)
 		if len(pick) > 0 {
 			counts[pick[0]]++
 		}

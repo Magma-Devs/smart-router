@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // SmartRouterTracerName is the OTel instrumentation scope name used for all
@@ -84,6 +85,9 @@ func RelaySpanFromContext(ctx context.Context) trace.Span {
 
 // RecordError records the error on the span and sets its status to Error.
 func RecordError(span trace.Span, err error) {
+	// Redacted before export: a transport failure's *url.Error carries the full
+	// upstream url, whose path and query hold the vendor api key.
+	err = utils.RedactSecretsErr(err)
 	span.RecordError(err)
 	span.SetStatus(otelcodes.Error, err.Error())
 }
@@ -213,7 +217,9 @@ func RecordHTTPRequest(span trace.Span, method, urlStr string) {
 	}
 	attrs := []attribute.KeyValue{
 		semconv.HTTPMethod(method),
-		semconv.HTTPURL(urlStr),
+		// scheme://host only — the path and query carry the vendor api key, and
+		// spans leave the process for a collector.
+		semconv.HTTPURL(utils.RedactURL(urlStr)),
 	}
 	attrs = appendNetPeer(attrs, urlStr)
 	span.SetAttributes(attrs...)

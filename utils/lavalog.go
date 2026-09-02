@@ -144,6 +144,19 @@ func EnableDebugLogBuffer(maxLines int) {
 	debugBufferLogger.Store(&logger)
 }
 
+// DisableDebugLogBuffer turns the ring-buffer sink back off and drops the ring.
+// EnableDebugLogBuffer swaps a process-global sink, so a test that enables it must
+// restore this state — otherwise every later log call in the binary keeps paying the
+// copy-and-append, and the sink's "disabled by default" contract is broken for
+// anything that inspects it afterwards.
+func DisableDebugLogBuffer() {
+	disabled := zerolog.New(io.Discard).Level(zerolog.Disabled)
+	debugBufferLogger.Store(&disabled)
+	debugRingMu.Lock()
+	debugRing = nil
+	debugRingMu.Unlock()
+}
+
 // ClearDebugLogBuffer drops every record currently in the ring. No-op when the
 // buffer was never enabled.
 func ClearDebugLogBuffer() {
@@ -562,23 +575,30 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			debugBufferEvent = dbgLogger.Trace()
 		}
 	}
+	// Everything below is written to a log sink or embedded in the returned
+	// error's message, and upstream node-urls carry api keys in their path and
+	// query. Redact once here rather than at every call site.
+	description = RedactSecrets(description)
 	output := description
 	attrStrings := []string{}
 	if err != nil {
-		logEvent = logEvent.Err(err)
+		// The log sinks get the redacted message; the returned error keeps err
+		// itself as its cause, so errors.Is/As are unaffected.
+		logErr := RedactSecretsErr(err)
+		logEvent = logEvent.Err(logErr)
 		if rollingLoggerEvent != nil {
-			rollingLoggerEvent = rollingLoggerEvent.Err(err)
+			rollingLoggerEvent = rollingLoggerEvent.Err(logErr)
 		}
 		if debugBufferEvent != nil {
-			debugBufferEvent = debugBufferEvent.Err(err)
+			debugBufferEvent = debugBufferEvent.Err(logErr)
 		}
-		output = fmt.Sprintf("%s ErrMsg: %s", output, err.Error())
+		output = fmt.Sprintf("%s ErrMsg: %s", output, logErr.Error())
 	}
 	if len(attributes) > 0 {
 		for idx, attr := range attributes {
 			key := attr.Key
 			val := attr.Value
-			st_val := StrValueForLog(val, key, idx, attributes)
+			st_val := RedactSecrets(StrValueForLog(val, key, idx, attributes))
 			logEvent = logEvent.Str(key, st_val)
 			if rollingLoggerEvent != nil {
 				rollingLoggerEvent = rollingLoggerEvent.Str(key, st_val)

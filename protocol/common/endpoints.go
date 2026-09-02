@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -127,6 +128,27 @@ type NodeUrl struct {
 	Addons            []string      `yaml:"addons,omitempty" json:"addons,omitempty" mapstructure:"addons"`
 	SkipVerifications []string      `yaml:"skip-verifications,omitempty" json:"skip-verifications,omitempty" mapstructure:"skip-verifications"`
 	Methods           []string      `yaml:"methods,omitempty" json:"methods,omitempty" mapstructure:"methods"`
+	// StandaloneAddons declares that this url serves ONLY the collections its
+	// `addons` name, instead of those plus the spec's base collection.
+	//
+	// It exists because a spec's add-on can mean either of two things and the
+	// spec model cannot tell them apart. Usually an add-on EXTENDS the base
+	// surface — an archive node still answers everything a full node does — and
+	// inheriting the base collection's verifications is right. But Acala,
+	// Litentry/Heima and peaq use an add-on as a DISJOINT surface: Substrate in
+	// the base collection, EVM in an `evm` add-on, served by different
+	// infrastructure with no method in common. There, inheriting the base
+	// collection asks the node to be something it never claimed to be, and the
+	// resulting failure costs the provider its place (MAG-3296).
+	//
+	// Default false, so every existing deployment keeps inheriting. Only an
+	// operator knows which of the two a given url is, which is why this is
+	// configuration and not inference — until the spec model can say it, at
+	// which point this becomes redundant rather than wrong.
+	//
+	// Ignored on a url that declares no addons: there would be nothing left to
+	// serve.
+	StandaloneAddons bool `yaml:"standalone-addons,omitempty" json:"standalone-addons,omitempty" mapstructure:"standalone-addons"`
 	// GrpcConfig holds gRPC-specific configuration for direct gRPC connections (smart router)
 	GrpcConfig GrpcConfig `yaml:"grpc-config,omitempty" json:"grpc-config,omitempty" mapstructure:"grpc-config"`
 }
@@ -150,6 +172,13 @@ func (nurl NodeUrl) ShouldSkipVerification(name string) bool {
 		slices.Contains(nurl.SkipVerifications, name)
 }
 
+// ServesBaseCollection reports whether this url answers for the spec's base
+// collection in addition to whatever its addons name. True for every url that
+// has not opted out — see StandaloneAddons.
+func (nurl NodeUrl) ServesBaseCollection() bool {
+	return !nurl.StandaloneAddons || len(nurl.Addons) == 0
+}
+
 type ChainMessageGetApiInterface interface {
 	GetApi() *spectypes.Api
 }
@@ -163,13 +192,12 @@ func (nurl NodeUrl) String() string {
 	return urlStr
 }
 
+// UrlStr renders the node-url for display — logs, error text, the health
+// command. It keeps scheme://host[:port] and drops the rest, because vendors put
+// the api key in the userinfo, the path (".../v2/<key>") or the query. Never use
+// it to dial; NodeUrl.Url is the address.
 func (nurl *NodeUrl) UrlStr() string {
-	parsedURL, err := url.Parse(nurl.Url)
-	if err != nil {
-		return nurl.Url
-	}
-	parsedURL.User = nil
-	return parsedURL.String()
+	return utils.RedactURL(nurl.Url)
 }
 
 func (url *NodeUrl) GetAuthHeaders() map[string]string {
@@ -577,4 +605,27 @@ func GetIpFromGrpcContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+// RedactMetadata renders relay metadata for logging with sensitive header values
+// withheld. Relay metadata carries the same credentials as an http.Header — the
+// caller's own api key inbound, the configured auth-headers outbound — so it gets
+// the same treatment; see utils.RedactHeaders.
+func RedactMetadata(md []pairingtypes.Metadata) string {
+	sorted := make([]pairingtypes.Metadata, len(md))
+	copy(sorted, md)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, entry := range sorted {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(entry.Name)
+		b.WriteByte(':')
+		b.WriteString(utils.RedactHeaderValue(entry.Name, entry.Value))
+	}
+	b.WriteByte('}')
+	return b.String()
 }

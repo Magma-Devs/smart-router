@@ -34,7 +34,7 @@ import (
 // configSearchPaths are the directories a config argument is resolved against, in
 // precedence order — both a bare *name* and a *relative* path. An absolute path names its
 // file outright and is not resolved against them.
-var configSearchPaths = []string{".", "./config", lavaDefaultNodeHome}
+var configSearchPaths = []string{".", "./config", defaultNodeHome}
 
 // defaultConfigType is the format assumed for a config whose extension does not declare
 // one — including the extension-less names the search-path lookup accepts. Every
@@ -133,8 +133,8 @@ func configFilePathCandidates(arg string) []string {
 	candidates := make([]string, 0, len(configSearchPaths))
 	for _, searchPath := range configSearchPaths {
 		// Viper runs a search path through absPathify, which expands the $HOME that the
-		// lavaDefaultNodeHome literal carries. filepath.Join would keep it verbatim, so the
-		// expansion has to happen here for $HOME/.lava to mean the same thing in both
+		// defaultNodeHome literal carries. filepath.Join would keep it verbatim, so the
+		// expansion has to happen here for $HOME/.smart-router to mean the same thing in both
 		// branches.
 		candidates = append(candidates, filepath.Join(os.ExpandEnv(searchPath), arg))
 	}

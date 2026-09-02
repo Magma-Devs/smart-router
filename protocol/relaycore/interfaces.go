@@ -49,6 +49,10 @@ type RelayStateSendInstructions struct {
 	Done           bool
 	RelayState     *RelayState
 	NumOfProviders int
+	// StopReason is why the state machine stopped ("Stateful", "MaxRetriesReached", …), carried
+	// on the Done instruction so the request's final log line can say why there was no further
+	// attempt. Empty on a non-Done instruction.
+	StopReason string
 }
 
 func (rssi *RelayStateSendInstructions) IsDone() bool {

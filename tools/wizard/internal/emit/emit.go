@@ -2,7 +2,9 @@
 // state, plus the secret scaffold (.env + ${VAR} template + render).
 //
 // Mirrors scripts/wizard/lib/emit.sh. Schema (per protocol/common/endpoints.go):
-//   metrics-listen-address, cache-be?, endpoints[], direct-rpc[], backup-direct-rpc[]
+//
+//	metrics-listen-address, cache-be?, endpoints[], direct-rpc[], backup-direct-rpc[]
+//
 // Each provider: name/chain-id/api-interface/node-urls[{url, addons?, auth-config?}].
 // The router reads YAML literally (no ${ENV} expansion), so auth uses ${VAR}
 // placeholders rendered from a .env via Render (an envsubst equivalent).

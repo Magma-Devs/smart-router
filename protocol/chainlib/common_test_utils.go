@@ -132,7 +132,11 @@ var mockGRPCServiceDesc = grpc.ServiceDesc{
 				if err := dec(in); err != nil {
 					return nil, err
 				}
-				return srv.(mockBlockServiceServer).GetLatestBlock(ctx, in)
+				server, ok := srv.(mockBlockServiceServer)
+				if !ok {
+					return nil, fmt.Errorf("unexpected server type %T", srv)
+				}
+				return server.GetLatestBlock(ctx, in)
 			},
 		},
 	},

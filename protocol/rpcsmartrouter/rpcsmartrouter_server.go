@@ -1075,8 +1075,27 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		preferStructuralFailureReason(returnedResult, relayProcessor.GetCrossValidationFailFastReason())
 	}
 
-	utils.LavaFormatInfo("ProcessingResult RETURNED",
-		utils.LogAttr("has_result", returnedResult != nil),
+	// The one line describing what the caller got. It fires once per request that produced any
+	// result, and is the only place at INFO that names the provider behind a failed-over response.
+	//
+	// served_by is filled only when bytes were served. GetProvider() also returns a provider on a
+	// failed result, and reporting that would make the field lie on exactly the requests an
+	// operator reads most carefully; the per-endpoint line and `error` attribute those.
+	//
+	// stop_reason says why there was no further attempt — a stateful relay is not retried after a
+	// timeout, since a possibly-executed write must not run twice.
+	servedBy := ""
+	statusCode := 0
+	if returnedResult != nil {
+		statusCode = returnedResult.StatusCode
+		if returnedResult.Reply != nil {
+			servedBy = returnedResult.GetProvider()
+		}
+	}
+	utils.LavaFormatInfo("relay finished",
+		utils.LogAttr("served_by", servedBy),
+		utils.LogAttr("stop_reason", relayProcessor.GetStopReason()),
+		utils.LogAttr("status", statusCode),
 		utils.LogAttr("has_reply", returnedResult != nil && returnedResult.Reply != nil),
 		utils.LogAttr("reply_size", func() int {
 			if returnedResult != nil && returnedResult.Reply != nil {
@@ -1222,12 +1241,14 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		return relayProcessor, err
 	}
 
-	utils.LavaFormatInfo("🎬 STARTING TASK CHANNEL LOOP",
+	// The loop's per-task scaffolding is DEBUG: it fires once per batch and reports nothing the
+	// terminal "relay finished" line does not already carry once per request.
+	utils.LavaFormatDebug("[RPCSmartRouterServer] task channel loop started",
 		utils.LogAttr("GUID", ctx),
 	)
 
 	for task := range relayTaskChannel {
-		utils.LavaFormatInfo("📨 RECEIVED TASK FROM CHANNEL",
+		utils.LavaFormatDebug("[RPCSmartRouterServer] task received",
 			utils.LogAttr("is_done", task.IsDone()),
 			utils.LogAttr("has_error", task.Err != nil),
 			utils.LogAttr("num_providers", task.NumOfProviders),
@@ -1235,10 +1256,8 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		)
 
 		if task.IsDone() {
-			utils.LavaFormatInfo("🏁 TASK IS DONE - RETURNING FROM ProcessRelaySend",
-				utils.LogAttr("error", task.Err),
-				utils.LogAttr("GUID", ctx),
-			)
+			// Hand the state machine's reason to the processor for the request's final line.
+			relayProcessor.SetStopReason(task.StopReason)
 			if task.Err != nil {
 				tracing.RecordError(span, task.Err)
 			}
@@ -1255,16 +1274,12 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 			},
 		)
 
-		utils.LavaFormatInfo("UPDATING BATCH",
+		utils.LavaFormatDebug("[RPCSmartRouterServer] updating batch",
 			utils.LogAttr("error", err),
 			utils.LogAttr("GUID", ctx),
 		)
 
 		relayProcessor.UpdateBatch(err)
-
-		utils.LavaFormatInfo("LOOPING BACK TO RECEIVE NEXT TASK",
-			utils.LogAttr("GUID", ctx),
-		)
 	}
 
 	// shouldn't happen.

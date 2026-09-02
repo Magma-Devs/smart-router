@@ -49,7 +49,7 @@ func (f nodeErrorFixture) relayResult() *common.RelayResult {
 //	  -> common.RelayResult flags           (as direct_rpc_relay.go sets them)
 //	  -> shouldFailSessionForResult         (THE FIX — the only thing that differs between subtests)
 //	  -> AppendRelayFailure / AppendRelayData
-//	  -> ProviderOptimizer.ChooseProvider   (real selection)
+//	  -> ProviderOptimizer.ChooseUpstream   (real selection)
 //
 // The subtests do NOT branch on a test-controlled "scoreable" flag; they differ only in which error
 // the endpoint returns. Whether that error demotes anyone is the gate's verdict, which is what makes
@@ -78,7 +78,7 @@ func TestNodeErrorProviderIsDemoted_MAG2156(t *testing.T) {
 		share = map[string]int{}
 
 		for i := 0; i < relays; i++ {
-			picked := po.ChooseProvider(context.Background(), providers, nil, 10, spectypes.LATEST_BLOCK)
+			picked := po.ChooseUpstream(context.Background(), providers, nil, 10, spectypes.LATEST_BLOCK)
 			require.NotEmpty(t, picked, "optimizer must always return a candidate")
 			first := picked[0]
 			share[first]++

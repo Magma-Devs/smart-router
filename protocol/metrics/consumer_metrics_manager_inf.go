@@ -45,6 +45,7 @@ func (NoOpConsumerMetrics) SetQOSMetrics(string, string, string, string, *pairin
 func (NoOpConsumerMetrics) ResetSessionRelatedMetrics()                                    {}
 func (NoOpConsumerMetrics) ResetBlockedProvidersMetrics(string, string, map[string]string) {}
 func (NoOpConsumerMetrics) SetCSMBlockedProvidersCount(string, string, int)                {}
+func (NoOpConsumerMetrics) SetCSMBlockedProvidersByReason(string, string, map[string]int)  {}
 func (NoOpConsumerMetrics) SetCSMPreviousEpochBlockedProvidersCount(string, string, int)   {}
 func (NoOpConsumerMetrics) SetCSMBlockedBackupProvidersCount(string, string, int)          {}
 func (NoOpConsumerMetrics) SetCSMStickySessionsCount(string, string, int)                  {}
@@ -112,6 +113,11 @@ type ConsumerMetricsManagerInf interface {
 	// currentlyBlockedProviderAddresses, so SetCSMBlockedProvidersCount is
 	// zeroed by ResetBlockedProviders — /debug/reset-all calls both.
 	SetCSMBlockedProvidersCount(chainId, apiInterface string, count int)
+	// SetCSMBlockedProvidersByReason publishes the blocked-provider count split by reason. The map
+	// is complete — every known reason, zeros included — so consumers can write all of them and
+	// keep the series self-correcting. Keys are lavasession.BlockReason values as plain strings;
+	// this package cannot import lavasession (that would be a cycle).
+	SetCSMBlockedProvidersByReason(chainId, apiInterface string, countsByReason map[string]int)
 	SetCSMPreviousEpochBlockedProvidersCount(chainId, apiInterface string, count int)
 	SetCSMBlockedBackupProvidersCount(chainId, apiInterface string, count int)
 	SetCSMStickySessionsCount(chainId, apiInterface string, count int)

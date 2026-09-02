@@ -77,6 +77,12 @@ type chainReverifyInputs struct {
 	// to validateProvider (real network probe). Tests inject a fake to exercise
 	// updateEpoch's orchestration without standing up upstreams.
 	validateFn func(context.Context, *lavasession.RPCStaticProviderEndpoint) error
+	// recordAdmission publishes a freshly computed per-collection admission so the
+	// endpoint builder stops using the boot-time one. Nil in tests that do not
+	// build endpoints.
+	// It returns true when the admitted set actually moved, which is what tells
+	// applyReverification to rebuild that provider's session.
+	recordAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool
 	// demoteFailStreak counts CONSECUTIVE failed re-verify cycles per active provider, keyed
 	// "<tier>|<name>" so a name configured in both tiers cannot share a counter. It is the only
 	// state that survives between epoch ticks, and it exists so a transient outage overlapping
@@ -194,10 +200,35 @@ func applyReverification(
 	if len(configured) == 0 {
 		return fresh, nil, nil
 	}
+	// Providers whose admitted service set moved during this pass. They are
+	// rebuilt below rather than left with the endpoints they were built with.
+	var admissionMovedMu sync.Mutex
+	admissionMoved := map[string]struct{}{}
+
 	probe := inputs.validateFn
 	if probe == nil {
 		probe = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
-			return validateProvider(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
+			// Per-collection here too (MAG-3326). With the all-or-nothing Validate
+			// this path re-probed the UNSTRIPPED config every tick, failed on the
+			// same refused service, and demoted the whole provider once
+			// demoteFailStreak reached reverifyDemoteThreshold — undoing the boot
+			// admission about two ticks after boot, into a worse state than before.
+			//
+			// Recording the fresh admission on every tick is also what keeps a
+			// refusal from outliving the failure that caused it: a service that
+			// recovers is re-admitted at the next tick instead of staying refused
+			// until the process restarts.
+			admission, err := validateProviderCollections(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
+			if err != nil {
+				return err
+			}
+			if inputs.recordAdmission != nil && inputs.recordAdmission(p, admission) {
+				// Probes run concurrently, so the set of movers is guarded.
+				admissionMovedMu.Lock()
+				admissionMoved[p.Name] = struct{}{}
+				admissionMovedMu.Unlock()
+			}
+			return nil
 		}
 	}
 	if inputs.rateLimitHoldoff == nil {
@@ -243,7 +274,6 @@ func applyReverification(
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, SpecReVerifyConcurrency)
 	for i, p := range configured {
-		i, p := i, p
 		sem <- struct{}{}
 		wg.Add(1)
 		go func() {
@@ -266,13 +296,29 @@ func applyReverification(
 		streakKey := tier.String() + "|" + p.Name
 		if err == nil {
 			delete(inputs.demoteFailStreak, streakKey)
-			healthyNames[p.Name] = struct{}{}
-			if !wasActive {
+			_, moved := admissionMoved[p.Name]
+			switch {
+			case !wasActive:
 				toAdmit = append(toAdmit, p)
 				utils.LavaFormatInfo("re-verify: "+tier.String()+" provider recovered",
 					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 					utils.LogAttr("provider", p.Name),
 				)
+			case moved:
+				// Rebuild in place. Leaving it out of healthyNames demotes the stale
+				// session, so the caller closes its connections after the pairing has
+				// swung over, and toAdmit rebuilds it from config with the admission
+				// just recorded. Re-validating alone would not do it: an active
+				// session is refreshed from its OWN endpoints, so a service that has
+				// recovered — or one newly refused — would not reach the pairing until
+				// the provider happened to be demoted and promoted (MAG-3326 review).
+				toAdmit = append(toAdmit, p)
+				utils.LavaFormatInfo("re-verify: rebuilding "+tier.String()+" provider, admitted services changed",
+					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+					utils.LogAttr("provider", p.Name),
+				)
+			default:
+				healthyNames[p.Name] = struct{}{}
 			}
 			continue
 		}
@@ -440,14 +486,27 @@ func validateProviderTier(
 	chainParser chainlib.ChainParser,
 	tier reverifyTier,
 	validate func(context.Context, *lavasession.RPCStaticProviderEndpoint) error,
+	// It returns true when the admitted set actually moved, which is what tells
+	// applyReverification to rebuild that provider's session.
+	recordAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool,
 ) (map[*lavasession.RPCStaticProviderEndpoint]struct{}, []*lavasession.RPCStaticProviderEndpoint) {
 	failedSet := make(map[*lavasession.RPCStaticProviderEndpoint]struct{})
 	if len(providers) == 0 {
 		return failedSet, nil
 	}
 	if validate == nil {
+		// Per-collection at boot, recording what each provider was admitted for.
+		// Returning nil for a service-attributable failure is the point: the
+		// provider stays, minus that service (MAG-3326).
 		validate = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
-			return validateProvider(c, p, chainParser, BootValidateTimeout)
+			admission, err := validateProviderCollections(c, p, chainParser, BootValidateTimeout)
+			if err != nil {
+				return err
+			}
+			if recordAdmission != nil {
+				recordAdmission(p, admission)
+			}
+			return nil
 		}
 	}
 
@@ -497,30 +556,76 @@ func validateProviderTier(
 // It builds a fresh ChainRouter + ChainFetcher under a bounded attempt context
 // (so a hung upstream cannot stall a whole reconcile cycle), calls Validate,
 // and tears the temporary resources down regardless of outcome.
+// verificationEndpoints splits the two endpoints a validation attempt needs.
+//
+// The ROUTER one expands every add-on url into a with-addon and a without-addon
+// route, the same way startup PHASE 1 does, because chain_router.go requires both
+// for routing flexibility.
+//
+// The FETCHER one carries only the urls the provider actually declared. The
+// stripped copies are a routing artifact, not a claim the provider made, and
+// MAG-3296 is what validating them costs: it makes every add-on node answer for
+// the base collection as well. Where an add-on extends the base surface that is
+// merely redundant; where it REPLACES it — Acala's `evm` against a Substrate base
+// — the stripped copy asks a question the node cannot answer. Validate returns on
+// the first failing url, so the copy's verdict became the provider's verdict and
+// an EVM-only node was dropped for failing to be a Substrate node.
+func verificationEndpoints(provider *lavasession.RPCStaticProviderEndpoint) (routerEndpoint, fetcherEndpoint *lavasession.RPCProviderEndpoint) {
+	routedNodeUrls := make([]common.NodeUrl, 0, len(provider.NodeUrls)*2)
+	for _, nodeUrl := range provider.NodeUrls {
+		routedNodeUrls = append(routedNodeUrls, nodeUrl)
+		if len(nodeUrl.Addons) > 0 {
+			noAddonUrl := nodeUrl
+			noAddonUrl.Addons = []string{}
+			routedNodeUrls = append(routedNodeUrls, noAddonUrl)
+		}
+	}
+
+	newEndpoint := func(nodeUrls []common.NodeUrl) *lavasession.RPCProviderEndpoint {
+		return &lavasession.RPCProviderEndpoint{
+			NetworkAddress: provider.NetworkAddress,
+			ChainID:        provider.ChainID,
+			ApiInterface:   provider.ApiInterface,
+			NodeUrls:       nodeUrls,
+		}
+	}
+	return newEndpoint(routedNodeUrls), newEndpoint(provider.NodeUrls)
+}
+
 func validateProvider(
 	ctx context.Context,
 	provider *lavasession.RPCStaticProviderEndpoint,
 	chainParser chainlib.ChainParser,
 	timeout time.Duration,
 ) error {
-	// Expand addon URLs the same way startup PHASE 1 does — chain_router.go
-	// requires both with-addon and without-addon routes for routing flexibility.
-	verificationNodeUrls := make([]common.NodeUrl, 0, len(provider.NodeUrls)*2)
-	for _, nodeUrl := range provider.NodeUrls {
-		verificationNodeUrls = append(verificationNodeUrls, nodeUrl)
-		if len(nodeUrl.Addons) > 0 {
-			noAddonUrl := nodeUrl
-			noAddonUrl.Addons = []string{}
-			verificationNodeUrls = append(verificationNodeUrls, noAddonUrl)
-		}
-	}
+	_, err := validateProviderImpl(ctx, provider, chainParser, timeout, false)
+	return err
+}
 
-	verificationEndpoint := &lavasession.RPCProviderEndpoint{
-		NetworkAddress: provider.NetworkAddress,
-		ChainID:        provider.ChainID,
-		ApiInterface:   provider.ApiInterface,
-		NodeUrls:       verificationNodeUrls,
-	}
+// validateProviderCollections is validateProvider with per-collection admission
+// (MAG-3326): a service whose verification fails is refused on its own and the
+// provider survives with the rest.
+func validateProviderCollections(
+	ctx context.Context,
+	provider *lavasession.RPCStaticProviderEndpoint,
+	chainParser chainlib.ChainParser,
+	timeout time.Duration,
+) (chainlib.ProviderAdmission, error) {
+	return validateProviderImpl(ctx, provider, chainParser, timeout, true)
+}
+
+// validateProviderImpl is the one body both share. The boot probe and the epoch
+// probe must behave identically apart from their attribution mode, and this area
+// has already paid for a hand-kept copy once — keeping them one function means a
+// change to the temporary router's lifetime cannot land in only one of them.
+func validateProviderImpl(
+	ctx context.Context,
+	provider *lavasession.RPCStaticProviderEndpoint,
+	chainParser chainlib.ChainParser,
+	timeout time.Duration,
+	perCollection bool,
+) (chainlib.ProviderAdmission, error) {
+	routerEndpoint, fetcherEndpoint := verificationEndpoints(provider)
 
 	attemptCtx, attemptCancel := context.WithTimeout(ctx, timeout)
 	defer attemptCancel()
@@ -534,17 +639,20 @@ func validateProvider(
 	validationParser := chainlib.CloneChainParserForValidation(chainParser)
 
 	parallelConnections := uint(lavasession.DefaultMaximumStreamsOverASingleConnection)
-	verificationRouter, err := chainlib.GetChainRouter(attemptCtx, parallelConnections, verificationEndpoint, validationParser)
+	verificationRouter, err := chainlib.GetChainRouter(attemptCtx, parallelConnections, routerEndpoint, validationParser)
 	if err != nil {
-		return err
+		return chainlib.ProviderAdmission{}, err
 	}
 
 	verificationFetcher := chainlib.NewChainFetcher(attemptCtx, &chainlib.ChainFetcherOptions{
 		ChainRouter: verificationRouter,
 		ChainParser: validationParser,
-		Endpoint:    verificationEndpoint,
+		Endpoint:    fetcherEndpoint,
 		Cache:       nil,
 	})
 
-	return verificationFetcher.Validate(attemptCtx)
+	if perCollection {
+		return verificationFetcher.ValidateCollections(attemptCtx)
+	}
+	return chainlib.ProviderAdmission{}, verificationFetcher.Validate(attemptCtx)
 }
