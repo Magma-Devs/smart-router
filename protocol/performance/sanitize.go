@@ -1,24 +1,53 @@
 package performance
 
 import (
+	"strings"
+
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
+
+// foreignReplyMetadataAllowlist is the set of response headers a foreign cache entry
+// is allowed to carry through the trust boundary. It holds exactly the headers that
+// describe how to decode the payload the entry already delivers — nothing that names,
+// locates, or otherwise identifies whoever produced it.
+//
+// An allowlist rather than a denylist: Metadata is an open set of arbitrary upstream
+// HTTP/gRPC response headers (X-Provider-ID, Via, Server, ...) and no denylist over it
+// can be proven complete. An allowlist inverts that burden — a header this router has
+// never heard of is dropped by default, and the entries below are the two whose absence
+// is a serving regression rather than a privacy win. Compared case-insensitively:
+// HTTP header names are case-insensitive and REST populates Metadata straight from
+// http.Header.
+//
+// Why these two and not more:
+//
+//   - Content-Type: the primary tier passes the upstream value through, and the fiber
+//     serving paths only pre-set application/json as a default that upstream metadata
+//     overrides. Dropping it silently retypes every non-JSON REST body.
+//   - Content-Encoding: the stored Data is encoded exactly as the header says. Keeping
+//     one without the other hands the caller a body it cannot decode.
+//
+// Content-Length is deliberately NOT here: the payload is re-stamped by the request's
+// outputFormatter before it is served, so a replayed length can disagree with the body.
+var foreignReplyMetadataAllowlist = []string{
+	"Content-Type",
+	"Content-Encoding",
+}
 
 // SanitizeForeignCacheReply strips identity-bearing data from a cache reply that
 // crossed a trust boundary — the secondary cache (docs/SECONDARY-CACHE.md).
 // Entries in a foreign cache may have been written by other router versions or other
-// software lineages, and RelayReply.Metadata carries arbitrary upstream HTTP/gRPC
-// response headers (X-Provider-ID, Via, Server, ...) that no denylist can be proven
-// to cover. The policy is therefore drop-everything: provider signatures are zeroed
-// and Metadata is removed wholesale. Nothing in the metadata is load-bearing for
-// serving a cached payload — the response body is Data, and transport headers
-// (Content-Type, the Lava-Provider-Address: Cached resolver) are minted locally by
-// the serving path after sanitization.
+// software lineages. Provider signatures are zeroed and Metadata is reduced to the
+// transport-decoding allowlist above; everything else in it goes, including names this
+// router has never heard of. Headers the router mints itself — Lava-Provider-Address:
+// Cached, the GUID, the version header — are appended by appendHeadersToRelayResult
+// after sanitization and are unaffected.
 //
-// LatestBlock is zeroed for the same reason, and it is the field with teeth. On the
-// serving path it is inert — the MAG-2160 rule already keeps a cached reply's
-// LatestBlock out of tip state — but the sanitized clone is also what backfills the
-// primary, and there the foreign value is not inert:
+// LatestBlock is zeroed, and it is the field with teeth. On the serving path it is
+// nearly inert — the MAG-2160 rule already keeps a cached reply's LatestBlock out of tip
+// state, and its one remaining reader is the Provider-Latest-Block response header,
+// which the caller is expected to re-stamp from the local tip. But the sanitized clone
+// is also what backfills the primary, and there the foreign value is not inert at all:
 //
 //   - it feeds isFinalizedForCacheWrite, which takes max(reply, tracked) and so walks
 //     around that function's deliberate use of the GATED chain tip, letting a too-high
@@ -46,6 +75,23 @@ func SanitizeForeignCacheReply(reply *pairingtypes.RelayReply) {
 	}
 	reply.Sig = nil
 	reply.SigBlocks = nil
-	reply.Metadata = nil
+	reply.Metadata = filterForeignReplyMetadata(reply.Metadata)
 	reply.LatestBlock = 0
+}
+
+// filterForeignReplyMetadata keeps only the allowlisted transport headers, preserving
+// their original order and casing. Returns nil rather than an empty slice when nothing
+// survives, so an entry with no usable headers is indistinguishable from one that
+// carried none.
+func filterForeignReplyMetadata(metadata []pairingtypes.Metadata) []pairingtypes.Metadata {
+	var kept []pairingtypes.Metadata
+	for _, md := range metadata {
+		for _, allowed := range foreignReplyMetadataAllowlist {
+			if strings.EqualFold(md.Name, allowed) {
+				kept = append(kept, md)
+				break
+			}
+		}
+	}
+	return kept
 }

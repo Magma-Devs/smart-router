@@ -7,11 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The drop-everything policy: a foreign cache
-// entry's Metadata is arbitrary upstream response metadata and cannot be proven
-// identity-free by any denylist, so all of it goes — including names this router has
-// never heard of. Payload fields that carry the response itself survive untouched.
-func TestSanitizeForeignCacheReplyDropsAllMetadataAndSignatures(t *testing.T) {
+// The allowlist policy: a foreign cache entry's Metadata is an open set of arbitrary
+// upstream response headers that no denylist could be proven to cover, so everything
+// goes EXCEPT the headers that describe how to decode the payload the entry already
+// delivers. Payload fields that carry the response itself survive untouched.
+func TestSanitizeForeignCacheReplyDropsIdentityMetadataAndSignatures(t *testing.T) {
 	reply := &pairingtypes.RelayReply{
 		Data:                  []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`),
 		Sig:                   []byte{0x01},
@@ -29,8 +29,8 @@ func TestSanitizeForeignCacheReplyDropsAllMetadataAndSignatures(t *testing.T) {
 			{Name: "Via", Value: "1.1 lb.provider.example"},
 			{Name: "Server", Value: "nginx/1.25 (provider-pool-b)"},
 			{Name: "X-Node-Custom", Value: "geth/1.14"},
-			// even innocuous-looking headers go — nothing in Metadata is load-bearing
-			{Name: "Content-Type", Value: "application/json"},
+			// re-stamped by this request's outputFormatter, so a replayed length can lie
+			{Name: "Content-Length", Value: "39"},
 		},
 	}
 
@@ -42,6 +42,48 @@ func TestSanitizeForeignCacheReplyDropsAllMetadataAndSignatures(t *testing.T) {
 	// the response payload itself is untouched
 	require.Equal(t, []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`), reply.Data)
 	require.NotEmpty(t, reply.FinalizedBlocksHashes)
+}
+
+// Content-Type and Content-Encoding survive, because Reply.Metadata is the ONLY source
+// of client response headers (addHeadersAndSendBytes / SetResponseFromRelayResult) and
+// nothing downstream re-derives them from the body. Dropping them made a secondary hit
+// serve a differently-typed — or, with an encoded body, undecodable — response than the
+// primary tier serves for the same entry.
+func TestSanitizeForeignCacheReplyKeepsTransportHeaders(t *testing.T) {
+	reply := &pairingtypes.RelayReply{
+		Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`),
+		Metadata: []pairingtypes.Metadata{
+			{Name: "X-Provider-ID", Value: "prov-42"},
+			{Name: "Content-Type", Value: "application/json"},
+			// case-insensitive: REST fills Metadata straight from http.Header
+			{Name: "content-encoding", Value: "gzip"},
+		},
+	}
+
+	SanitizeForeignCacheReply(reply)
+
+	require.Equal(t, []pairingtypes.Metadata{
+		{Name: "Content-Type", Value: "application/json"},
+		{Name: "content-encoding", Value: "gzip"},
+	}, reply.Metadata, "the transport allowlist survives, in order and with its original casing")
+}
+
+// A non-JSON body is the case that makes the allowlist load-bearing rather than
+// cosmetic: the fiber handlers pre-set application/json and only upstream metadata
+// overrides it, so dropping Content-Type would hand a caller Protobuf or CSV bytes
+// labelled as JSON.
+func TestSanitizeForeignCacheReplyKeepsNonJSONContentType(t *testing.T) {
+	reply := &pairingtypes.RelayReply{
+		Data: []byte{0x08, 0x96, 0x01},
+		Metadata: []pairingtypes.Metadata{
+			{Name: "Content-Type", Value: "application/x-protobuf"},
+			{Name: "Server", Value: "nginx/1.25"},
+		},
+	}
+
+	SanitizeForeignCacheReply(reply)
+
+	require.Equal(t, []pairingtypes.Metadata{{Name: "Content-Type", Value: "application/x-protobuf"}}, reply.Metadata)
 }
 
 // LatestBlock is dropped, not preserved. It looks like an inert payload field because
