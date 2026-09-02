@@ -76,7 +76,35 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	cancel()
 	latencyMs := float64(time.Since(cacheStart).Milliseconds())
 	hit := cacheError == nil && cacheReply.GetReply() != nil
+
+	// Trust boundary: work on a private copy and strip identity-bearing data
+	// before the entry is served or backfilled. The sanitized copy is the ONLY copy
+	// used from here on.
+	//
+	// The copy is attempted BEFORE the outcome is recorded, because a copy failure
+	// falls through to a provider: classifying this as a hit first would count the
+	// request in smartrouter_cache_success_total{cache_tier="secondary"} while the
+	// secondary served nothing, and that series is documented as requests served from
+	// the tier. A reply the secondary did return but that this router could not handle
+	// is recorded as an error rather than a miss — the distinction is the point of the
+	// outcome label, and a miss would hide a local defect as normal cache behaviour.
+	var copyReply *pairingtypes.RelayReply
+	copyFailed := false
+	if hit {
+		copyReply = &pairingtypes.RelayReply{}
+		if copyErr := protocopy.DeepCopyProtoObject(cacheReply.GetReply(), copyReply); copyErr != nil {
+			utils.LavaFormatWarning("secondary cache hit dropped: failed to copy reply", copyErr,
+				utils.LogAttr("GUID", ctx),
+			)
+			hit = false
+			copyFailed = true
+		}
+	}
+
 	outcome := metrics.ClassifyCacheLookupOutcome(cacheError, hit)
+	if copyFailed {
+		outcome = metrics.CacheOutcomeError
+	}
 	tracing.RecordCacheResult(ctx, cacheSpan, metrics.CacheTierSecondary, outcome, hit, latencyMs)
 	cacheSpan.End()
 	go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierSecondary, outcome, latencyMs)
@@ -87,21 +115,12 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
 			utils.LogAttr("cacheError", cacheError),
+			utils.LogAttr("outcome", outcome),
 			utils.LogAttr("latencyMs", latencyMs),
 		)
 		return false, cacheReply
 	}
 
-	// Trust boundary: work on a private copy and strip identity-bearing data
-	// before the entry is served or backfilled. The sanitized copy is the ONLY copy
-	// used from here on.
-	copyReply := &pairingtypes.RelayReply{}
-	if copyErr := protocopy.DeepCopyProtoObject(cacheReply.GetReply(), copyReply); copyErr != nil {
-		utils.LavaFormatWarning("secondary cache hit dropped: failed to copy reply", copyErr,
-			utils.LogAttr("GUID", ctx),
-		)
-		return false, cacheReply
-	}
 	performance.SanitizeForeignCacheReply(copyReply)
 	copyReply.Data = outputFormatter(copyReply.Data)
 
