@@ -2,9 +2,9 @@ package relaycore
 
 import "testing"
 
-// The stop reason travels state machine → Done instruction → processor → the request's final log
-// line. Each hop is trivial; the value is that the chain exists at all, because without it "why was
-// there no second attempt?" is answerable only at DEBUG.
+// SendParsedRelay reads the reason off the processor for the final line and prints whatever it
+// finds, so the empty default is part of the contract: a request the state machine never named
+// must render a blank field, not a stale one.
 func TestRelayProcessor_StopReasonRoundTrips(t *testing.T) {
 	rp := &RelayProcessor{}
 
@@ -25,11 +25,18 @@ func TestRelayProcessor_StopReasonRoundTrips(t *testing.T) {
 	}
 }
 
-// Every terminating path names a reason. A Done instruction with an empty StopReason produces a
-// final line that silently omits the field, which is the state this change exists to remove.
-func TestRelayStateSendInstructions_CarriesTheStopReason(t *testing.T) {
-	instruction := RelayStateSendInstructions{Done: true, StopReason: "MaxRetriesReached"}
-	if instruction.StopReason == "" {
-		t.Fatal("the Done instruction must be able to carry a reason")
+// The deadline paths call stopReasonOr: the timeout ends the wait, but if the policy had already
+// decided to stop, THAT is why there was no further attempt and it is the more useful answer.
+// Reporting "ProcessingTimeout" over a recorded "Stateful" loses the fact the field exists for.
+func TestStateMachine_StopReasonOrPrefersTheRecordedReason(t *testing.T) {
+	sm := &UnifiedRelayStateMachine{}
+
+	if got := sm.stopReasonOr("ProcessingTimeout"); got != "ProcessingTimeout" {
+		t.Fatalf("with nothing recorded the fallback stands: got %q", got)
+	}
+
+	sm.setStopReason("Stateful")
+	if got := sm.stopReasonOr("ProcessingTimeout"); got != "Stateful" {
+		t.Fatalf("a recorded policy reason outranks the deadline fallback: got %q", got)
 	}
 }

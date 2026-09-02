@@ -56,8 +56,8 @@ type RelayProcessor struct {
 	crossValidationFailFastReason string
 
 	// stopReason is why the state machine stopped this request ("Stateful", "MaxRetriesReached",
-	// "ProcessingTimeout", "Success", …). Carried here so the request's final log line can say why
-	// there was no further attempt — previously only visible at DEBUG on policy.Decide.
+	// "ProcessingTimeout", "Success", …), so the request's final log line can say why there was
+	// no further attempt. Guarded by rp.lock.
 	stopReason string
 }
 
@@ -301,8 +301,7 @@ func (rp *RelayProcessor) GetCrossValidationRelayDeadline() time.Time {
 }
 
 // SetStopReason records why the state machine stopped this request. Set once, on the Done
-// instruction, so the request's final line can report it — the same carrier idea as the
-// cross-validation fail-fast reason below.
+// instruction — the same carrier idea as the cross-validation fail-fast reason below.
 func (rp *RelayProcessor) SetStopReason(reason string) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
