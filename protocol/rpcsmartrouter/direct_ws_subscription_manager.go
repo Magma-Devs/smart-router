@@ -1656,16 +1656,71 @@ func (dwsm *DirectWSSubscriptionManager) handleClientDisconnect(
 		upstreamConn := activeSub.upstreamConnection
 		upstreamPool := activeSub.upstreamPool
 		go func() {
+			// Tell the NODE first, while the connection is still pooled and live:
+			// NotifySubscriptionRemoved below may scale it down, and Unsubscribe
+			// sends nothing on the wire. Ordering is the whole fix.
+			dwsm.teardownUpstreamSubscription(activeSub)
 			activeSub.upstreamSubscription.Unsubscribe()
 			activeSub.cancel()
 			close(activeSub.closeSubChan)
+			// Moved inside the goroutine so it runs AFTER the teardown above.
+			if upstreamConn != nil {
+				upstreamPool.NotifySubscriptionRemoved(upstreamConn)
+			}
 		}()
 		delete(dwsm.activeSubscriptions, hashedParams)
 		dwsm.totalSubscriptions.Add(-1) // Decrement global counter
-		// Notify pool to potentially scale down
-		if upstreamConn != nil {
-			upstreamPool.NotifySubscriptionRemoved(upstreamConn)
-		}
+	}
+}
+
+// upstreamUnsubscribeTimeout bounds the teardown call below. Some gateways never
+// answer an unsubscribe; without a bound the disconnect path would block on one.
+const upstreamUnsubscribeTimeout = 10 * time.Second
+
+// teardownUpstreamSubscription tells the NODE to stop pushing.
+//
+// This is the half a client disconnect skipped. ClientSubscription.Unsubscribe
+// only signals this process's forwarding goroutine — unlike upstream go-ethereum
+// it sends nothing on the wire — so the explicit call below is the only thing
+// that reaches the node. Without it the node keeps publishing a subscription
+// nobody reads, and because the connection is POOLED the next subscription to
+// the same query inherits those pushes: every client that closed its socket
+// without an explicit unsubscribe adds one more copy of every event, to every
+// future subscriber, until the process restarts.
+//
+// Measured on a Tendermint tenant before the fix: copies per block climbed
+// 7 -> 8 -> 9 -> 10 over four sequential subscribe/disconnect cycles, with one
+// client connected each time (MAG-3366). The explicit-unsubscribe path always
+// did this correctly, which is why it went unnoticed — a well-behaved client
+// sends unsubscribe, and a real one just closes the socket.
+//
+// Best-effort by design: it also runs where the connection may already be gone
+// (upstream disconnect, shutdown), so a failure is traced rather than warned.
+// Must be called WITHOUT dwsm.lock held — it makes a network call.
+func (dwsm *DirectWSSubscriptionManager) teardownUpstreamSubscription(activeSub *directActiveSubscription) {
+	if activeSub == nil || activeSub.upstreamConnection == nil {
+		return
+	}
+	client := activeSub.upstreamConnection.GetClient()
+	if client == nil {
+		return
+	}
+
+	var params interface{}
+	if dwsm.apiInterface == "tendermintrpc" {
+		params = map[string]interface{}{"query": activeSub.upstreamID}
+	} else {
+		params = []interface{}{activeSub.upstreamID}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), upstreamUnsubscribeTimeout)
+	defer cancel()
+	if _, err := client.CallContext(ctx, json.RawMessage("1"),
+		getUnsubscribeMethod(activeSub.subscribeMethod), params, true, false); err != nil {
+		utils.LavaFormatTrace("DirectWS: upstream unsubscribe on disconnect failed",
+			utils.LogAttr("error", err),
+			utils.LogAttr("upstreamID", activeSub.upstreamID),
+		)
 	}
 }
 
@@ -1698,10 +1753,17 @@ func (dwsm *DirectWSSubscriptionManager) cleanupSubscription(hashedParams string
 	delete(dwsm.activeSubscriptions, hashedParams)
 	dwsm.totalSubscriptions.Add(-1) // Decrement global counter
 
-	// Notify pool to potentially scale down
-	if activeSub.upstreamConnection != nil {
-		activeSub.upstreamPool.NotifySubscriptionRemoved(activeSub.upstreamConnection)
-	}
+	// Same omission as the disconnect path: without this the node keeps pushing.
+	// Async because this runs under dwsm.lock and makes a network call, and the
+	// pool notify goes after it so the connection is still live when it is used.
+	upstreamConn := activeSub.upstreamConnection
+	upstreamPool := activeSub.upstreamPool
+	go func() {
+		dwsm.teardownUpstreamSubscription(activeSub)
+		if upstreamConn != nil {
+			upstreamPool.NotifySubscriptionRemoved(upstreamConn)
+		}
+	}()
 
 	utils.LavaFormatTrace("DirectWS: subscription cleaned up",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
@@ -1990,7 +2052,7 @@ func rewriteSubscriptionID(msg *rpcclient.JsonrpcMessage, routerID string, numer
 		response := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  msg.Method,
-			"params":  json.RawMessage(rewritten),
+			"params":  rewritten,
 		}
 		return json.Marshal(response)
 	}
