@@ -211,8 +211,9 @@ func TestDiffAddressSets_OutputIsSortedRegardlessOfInputOrder(t *testing.T) {
 	assertAddresses(t, "carried (second order)", secondCarried, []string{"a", "b"})
 }
 
-// A nil slice renders as "" in the log line, which reads as a missing field rather than as
-// "nothing changed" — the two must not look alike on the one line that reports pool churn.
+// Unchanged membership returns empty slices rather than nil. The log cannot tell the two apart —
+// both render as "" — so this is a contract for the callers: a result is always safe to range over
+// and append to without a nil check.
 func TestDiffAddressSets_UnchangedMembershipRendersEmptyNotNil(t *testing.T) {
 	added, removed, carried := diffAddressSets([]string{"lava"}, []string{"lava"})
 	if added == nil || removed == nil {
@@ -355,4 +356,67 @@ func TestReleaseBlockedProvidersIfPoolEmpty_WarnsOncePerPairing(t *testing.T) {
 	afterRebuild := callOnce()
 	require.Equal(t, "warn", afterRebuild["level"],
 		"a rebuilt pairing that is still empty is a fresh event, not a repeat")
+}
+
+// The pairing inventory is the answer to "why was the primary not even a candidate?", and `removed`
+// is the field that carries it: a provider that silently leaves the pool between epochs is invisible
+// from the selection path, where every line reports what IS in the pool and none reports what left.
+//
+// This drives UpdateAllProviders through the real log sink rather than testing diffAddressSets in
+// isolation, for the same reason the pool-empty tests do: a helper test cannot tell you whether the
+// line is ever reached, and the line is the entire product of the change.
+func TestUpdateAllProviders_ReportsPairingMembershipAndChurn(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+
+	firstPush := captureLogs(t, func() {
+		require.NoError(t, csm.UpdateAllProviders(firstEpochHeight,
+			createNamedPairingList("gamma", "alpha", "beta"), nil))
+	})
+
+	line := findLogRecord(firstPush, "pairing updated")
+	require.NotNil(t, line, "every provider-set push must report the resulting membership")
+	require.Equal(t, "3", line["size"])
+	require.Equal(t, "alpha,beta,gamma", line["providers"],
+		"membership is sorted: the source is Go map iteration, and an unsorted line reads as churn")
+	require.Equal(t, "alpha,beta,gamma", line["added"], "the first push adds everything")
+	require.Equal(t, "", line["removed"])
+
+	// The push that matters. A provider dropping out between epochs is the failure this line exists
+	// to make visible, and `removed` is the only place it appears.
+	secondPush := captureLogs(t, func() {
+		require.NoError(t, csm.UpdateAllProviders(firstEpochHeight+1,
+			createNamedPairingList("alpha", "beta"), nil))
+	})
+
+	line = findLogRecord(secondPush, "pairing updated")
+	require.NotNil(t, line)
+	require.Equal(t, "gamma", line["removed"],
+		"a provider that left the pairing must be named — nothing else in the router reports it")
+	require.Equal(t, "alpha,beta", line["carried_over"])
+	require.Equal(t, "", line["added"])
+	require.Equal(t, "2", line["size"])
+}
+
+// The backup tier gets the same treatment for the same reason: since MAG-2525 a chain can serve on
+// backups alone, so a backup leaving the pool is the same invisible failure with the same blast
+// radius. Reported on its own fields so a backup change is not mistaken for a primary one.
+func TestUpdateAllProviders_ReportsBackupPoolChurnSeparately(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight,
+		createNamedPairingList("alpha"), createNamedPairingList("backup-one", "backup-two")))
+
+	records := captureLogs(t, func() {
+		require.NoError(t, csm.UpdateAllProviders(firstEpochHeight+1,
+			createNamedPairingList("alpha"), createNamedPairingList("backup-one")))
+	})
+
+	line := findLogRecord(records, "pairing updated")
+	require.NotNil(t, line)
+	require.Equal(t, "backup-two", line["backup_removed"],
+		"a backup leaving the pool is reported, and on the backup fields")
+	require.Equal(t, "1", line["backup_pool_size"])
+	require.Equal(t, "backup-one", line["backup_providers"])
+	// The primary tier did not move, and must not be reported as though it had.
+	require.Equal(t, "", line["removed"])
+	require.Equal(t, "alpha", line["carried_over"])
 }

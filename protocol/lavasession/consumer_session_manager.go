@@ -1281,8 +1281,8 @@ func diffAddressSets(previous, current []string) (added, removed, carriedOver []
 	for _, address := range current {
 		currentSet[address] = struct{}{}
 	}
-	// Non-nil empties: a nil slice renders as "" in the log, which reads as a missing field rather
-	// than as "nothing changed".
+	// Non-nil empties. The log renders nil and empty identically (both ""), so this is for the
+	// callers: a returned slice is always safe to range over and append to.
 	added, removed, carriedOver = []string{}, []string{}, []string{}
 	for _, address := range current {
 		if _, existed := previousSet[address]; existed {
@@ -1316,25 +1316,17 @@ func (csm *ConsumerSessionManager) atomicReadNumberOfResets() (resets uint64) {
 	return atomic.LoadUint64(&csm.numberOfResets)
 }
 
-// reset the valid addresses list and increase numberOfResets
-//
-// The outcome is deliberately NOT logged here. It used to be, in three lines, and the last of them
-// blamed an expired or unpurchased subscription for an empty pool. The smart router has neither: it
-// has no subscription and no on-chain pairing, its provider set comes from the endpoint config and
-// from the epoch refresh that rebuilds it, and consumerPublicAddress is a locally generated
-// smart-router-<rand> identifier rather than an account. That line sent every reader of a real
-// customer capture to look at billing, and it fired roughly twice a second while doing it.
-//
-// The single caller reports the outcome instead — see releaseBlockedProvidersIfPoolEmpty — because
-// it is the frame that holds the pool inventory and the request GUID, so it can name the actual
-// cause and attribute it to a chain and a relay. Logging here as well only reproduced the same
-// event three more times, once at ERROR.
-// resetValidAddresses releases the blocked list and refills validAddresses from the pairing.
+// resetValidAddresses releases the blocked list, refills validAddresses from the pairing, and
+// increments numberOfResets.
 //
 // didReset reports whether this call actually did that. The re-verify below can find the pool
 // already refilled — an epoch tick landing while we waited for the write lock — in which case this
 // is a no-op, and a caller that assumed otherwise would credit that epoch's recovery to a reset
 // that never ran. Returning the fact is what lets the caller describe what it actually did.
+//
+// The outcome is reported by the single caller, releaseBlockedProvidersIfPoolEmpty, not here: that
+// frame holds the pool inventory and the request GUID, so it can name the cause and attribute it to
+// a chain and a relay.
 func (csm *ConsumerSessionManager) resetValidAddresses(addon string, extensions []string) (numberOfResets uint64, didReset bool) {
 	csm.lock.Lock() // lock write
 	defer csm.lock.Unlock()
