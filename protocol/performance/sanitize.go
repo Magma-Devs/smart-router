@@ -15,6 +15,28 @@ import (
 // (Content-Type, the Lava-Provider-Address: Cached resolver) are minted locally by
 // the serving path after sanitization.
 //
+// LatestBlock is zeroed for the same reason, and it is the field with teeth. On the
+// serving path it is inert — the MAG-2160 rule already keeps a cached reply's
+// LatestBlock out of tip state — but the sanitized clone is also what backfills the
+// primary, and there the foreign value is not inert:
+//
+//   - it feeds isFinalizedForCacheWrite, which takes max(reply, tracked) and so walks
+//     around that function's deliberate use of the GATED chain tip, letting a too-high
+//     foreign head finalize a mutable block into the long-TTL store;
+//   - SetRelay stores max(Response.LatestBlock, SeenBlock) as the entry's staleness
+//     floor, and GetRelay only ever rejects a floor that is too LOW, so an inflated
+//     one makes the entry outlive every staleness check;
+//   - SetRelay then publishes that value as the cache server's chain-level latest
+//     block via a monotonic-max write that nothing can lower until expiry. That key is
+//     what resolves LATEST/SAFE/FINALIZED/PENDING, so one over-high foreign value
+//     shifts negative-tag resolution for the WHOLE chain on this router's own primary,
+//     and those lanes then look up keys nobody wrote and miss permanently.
+//
+// Zeroing costs nothing: isFinalizedForCacheWrite falls back to the tracked tip alone
+// (what its own comment says it wants), and the backfill's stored floor falls back to
+// the locally derived SeenBlock. The backfill is the only path on which a
+// cache-sourced LatestBlock could reach setLatestBlock at all.
+//
 // The caller must pass a clone it owns: the reply is mutated in place, and the
 // sanitized clone must be the only copy used for both serving the caller and
 // backfilling the primary cache.
@@ -25,4 +47,5 @@ func SanitizeForeignCacheReply(reply *pairingtypes.RelayReply) {
 	reply.Sig = nil
 	reply.SigBlocks = nil
 	reply.Metadata = nil
+	reply.LatestBlock = 0
 }

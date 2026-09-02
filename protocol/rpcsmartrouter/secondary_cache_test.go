@@ -396,19 +396,25 @@ func TestSecondaryCachedNodeErrorsServeButNeverBackfill(t *testing.T) {
 	}
 }
 
-// Full-path poisoned-entry test: foreign signatures and ARBITRARY foreign
-// metadata (names no denylist could enumerate) appear neither in the served result
-// nor in the primary backfill payload — the drop-all sanitization policy.
+// Full-path poisoned-entry test: foreign signatures, ARBITRARY foreign metadata
+// (names no denylist could enumerate) and a foreign chain height appear neither in
+// the served result nor in the primary backfill — the drop-all sanitization policy.
 func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	primary, rcs := startCacheServerForTest(t)
 	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 100)
 	payload := []byte(`{"block":{"header":{"height":"100"}}}`)
+	// A foreign zone's chain head, wildly ahead of this router's. Unlike the
+	// identity fields this one is not merely embarrassing: on the backfill path
+	// SetRelay publishes Response.LatestBlock as the cache server's chain-level tip
+	// through a monotonic-max write, and that key is what LATEST/SAFE/FINALIZED/
+	// PENDING resolve to for the whole chain until it expires.
+	const foreignHead = int64(987654321)
 	fake := &fakeCacheReader{
 		active: true,
 		reply: &pairingtypes.CacheRelayReply{
 			Reply: &pairingtypes.RelayReply{
 				Data:        payload,
-				LatestBlock: 100,
+				LatestBlock: foreignHead,
 				Sig:         []byte{0xde, 0xad},
 				SigBlocks:   []byte{0xbe, 0xef},
 				Metadata: []pairingtypes.Metadata{
@@ -438,6 +444,7 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	require.Empty(t, result.Reply.Metadata, "all foreign metadata must be dropped from the served reply")
 	require.Equal(t, "", result.ProviderInfo.ProviderAddress, "locally minted Lava-Provider-Address: Cached still applies downstream")
 	require.Equal(t, payload, result.Reply.Data)
+	require.Zero(t, result.Reply.LatestBlock, "a foreign chain height must not ride out on the served reply")
 
 	// backfill payload: the sanitized clone is the only thing written
 	require.Eventually(t, func() bool {
@@ -448,6 +455,16 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	require.Empty(t, stored.GetReply().Sig)
 	require.Empty(t, stored.GetReply().SigBlocks)
 	require.Equal(t, payload, stored.GetReply().Data)
+	require.Zero(t, stored.GetReply().LatestBlock, "a foreign chain height must not be persisted in the primary store")
+
+	// The consequence that actually matters: the foreign head must not have become
+	// the primary's chain-level tip. A LATEST-tagged lookup resolves against that
+	// tip, so if the foreign value had been published, this would resolve to block
+	// 987654321 — a key nobody ever wrote — and miss. Resolving to the locally
+	// derived 100 and hitting is the proof it was not.
+	byTag := directGet(rcs, hashKey, spectypes.LATEST_BLOCK, 0)
+	require.NotNil(t, byTag.GetReply(), "LATEST must still resolve to this router's own tip, not the foreign head")
+	require.Equal(t, payload, byTag.GetReply().Data)
 }
 
 // The secondary reply's SeenBlock is never adopted into ChainState, even with
