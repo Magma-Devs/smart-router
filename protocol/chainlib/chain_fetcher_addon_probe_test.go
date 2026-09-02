@@ -95,7 +95,7 @@ func TestFetchLatestBlockNumKeepsBaseCollectionSemantics(t *testing.T) {
 
 	block, err := fetcher.FetchLatestBlockNum(context.Background())
 	require.Error(t, err)
-	require.Equal(t, int64(spectypes.NOT_APPLICABLE), block)
+	require.Equal(t, spectypes.NOT_APPLICABLE, block)
 }
 
 // acalaVerifications is the set GetVerifications returns for a node declaring
