@@ -1935,6 +1935,16 @@ func rewriteParamsSubscriptionID(params json.RawMessage, routerID string, numeri
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(params, &fields); err != nil {
+		// Not a JSON object, so not an envelope this can rewrite — a positional params
+		// array lands here, and passing it through is right. Traced rather than silent
+		// because the pre-MAG-3345 code returned an error for an eth_subscription frame
+		// whose params would not decode, and the caller skipped that client; anything
+		// reaching here now is forwarded carrying the UPSTREAM id instead. No delivered
+		// frame can reach it today (the dispatcher already decoded these params to find
+		// the subscription), so this is the trace that would show that changing.
+		utils.LavaFormatTrace("DirectWS: subscription params are not an object, forwarding unrewritten",
+			utils.LogAttr("err", err),
+		)
 		return nil, nil
 	}
 	raw, ok := fields["subscription"]
