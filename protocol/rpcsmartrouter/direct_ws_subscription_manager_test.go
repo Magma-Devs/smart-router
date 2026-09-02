@@ -244,6 +244,10 @@ func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn,
 					"subscription": wireID,
 					"result": map[string]interface{}{
 						"number": counter,
+						// Provenance: which upstream subscription produced this frame.
+						// Without it a post-reconnect assertion cannot tell a restored
+						// frame from one the previous subscription is still pushing.
+						"upstream": wireID,
 					},
 				},
 			}
@@ -1570,7 +1574,7 @@ func TestRewriteSubscriptionID_UnusableIDIsAnError(t *testing.T) {
 
 	_, err := rewriteSubscriptionID(msg, "1000001", false)
 	require.Error(t, err, "an object id must not be silently passed through")
-	assert.Contains(t, err.Error(), "neither a string nor a number")
+	assert.Contains(t, err.Error(), "names no subscription")
 }
 
 // TestRewriteSubscriptionID_NonEnvelopePassesThrough keeps that error off frames that are
@@ -2998,6 +3002,21 @@ func TestUnsubscribeParamsExtraction_SolanaNumeric(t *testing.T) {
 	id, err = manager.extractSubscriptionIDFromUnsubscribe(named)
 	require.NoError(t, err)
 	assert.Equal(t, "0x1a2b3c4d", id, "a named id is unchanged")
+
+	// The shape production actually delivers. GetRPCMessage decodes params into
+	// interface{}, so a client's numeric id arrives as a float64 and is re-marshalled from
+	// one — the int64 above never exercises that. This fails loudly if the id range is ever
+	// raised toward 2^53, where float64 stops being exact.
+	for _, id := range []float64{1 << 40, (1 << 40) + 1, (1 << 40) + 99999, (1 << 53) - 1} {
+		asFloat := &mockWSProtocolMessage{
+			method: "accountUnsubscribe",
+			params: []interface{}{id},
+		}
+		got, err := manager.extractSubscriptionIDFromUnsubscribe(asFloat)
+		require.NoError(t, err)
+		assert.Equal(t, strconv.FormatInt(int64(id), 10), got,
+			"a float64 id must round-trip exactly, id=%v", id)
+	}
 }
 
 // TestCreateSubscriptionReply_SolanaNumeric pins the reply shape. Solana's collection is
@@ -3255,19 +3274,40 @@ drainLoop:
 	assert.Equal(t, strconv.FormatInt(routerSubID, 10), routerIDAfter,
 		"the client's id must be unchanged across the reconnect — that is what the indirection buys")
 
-	select {
-	case notif := <-repliesChan:
+	// Read until a frame from the RESTORED subscription arrives. The previous upstream
+	// subscription is never torn down here — handleUpstreamDisconnect is called directly,
+	// so ReconnectWithBackoff finds the pool already healthy and returns without dropping
+	// the connection, and the mock keeps pushing on the old id. Without checking
+	// provenance this assertion could be satisfied by a pre-reconnect frame and would
+	// guard nothing.
+	deadline := time.After(5 * time.Second)
+	for {
+		var notif *pairingtypes.RelayReply
+		select {
+		case notif = <-repliesChan:
+		case <-deadline:
+			t.Fatal("no push frame from the restored subscription within 5s")
+		}
 		require.NotNil(t, notif)
+
 		var frame struct {
 			Params struct {
 				Subscription json.RawMessage `json:"subscription"`
+				Result       struct {
+					Upstream json.RawMessage `json:"upstream"`
+				} `json:"result"`
 			} `json:"params"`
 		}
 		require.NoError(t, json.Unmarshal(notif.Data, &frame))
+
 		assert.Equal(t, strconv.FormatInt(routerSubID, 10), string(frame.Params.Subscription),
-			"post-reconnect frames must still carry the id the client holds, not upstream %q", upstreamAfter)
-	case <-time.After(5 * time.Second):
-		t.Fatal("no push frame after the reconnect — the subscription was not restored")
+			"every frame must carry the id the client holds, not an upstream id")
+
+		if string(frame.Params.Result.Upstream) == upstreamAfter {
+			break // this one demonstrably came from the restored subscription
+		}
+		require.Equal(t, upstreamBefore, string(frame.Params.Result.Upstream),
+			"a frame came from neither the original nor the restored subscription")
 	}
 }
 

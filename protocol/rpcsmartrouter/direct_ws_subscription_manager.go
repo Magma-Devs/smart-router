@@ -1952,7 +1952,7 @@ func rewriteParamsSubscriptionID(params json.RawMessage, routerID string, numeri
 		return nil, nil
 	}
 	if _, named := rpcclient.CanonicalSubscriptionID(raw); !named {
-		return nil, fmt.Errorf("subscription id is neither a string nor a number: %s", raw)
+		return nil, fmt.Errorf("subscription id names no subscription: %s", raw)
 	}
 	newID, err := json.Marshal(subscriptionIDValue(routerID, numericIDs))
 	if err != nil {
