@@ -1495,7 +1495,7 @@ func TestRewriteSubscriptionID_EVM(t *testing.T) {
 func TestRewriteSubscriptionID_Substrate(t *testing.T) {
 	substrateMsg := &rpcclient.JsonrpcMessage{
 		Method: "chain_newHead",
-		Params: json.RawMessage(`{"subscription":"Ck1rTHhOa1hxTGV3","result":{"number":"0x1234"}}`),
+		Params: json.RawMessage(`{"subscription":"Ck1rTHhOa1hxTGV3","result":{"number":"0x1234"},"extra":"keepme"}`),
 	}
 
 	result, err := rewriteSubscriptionID(substrateMsg, "rs_router_1", false)
@@ -1506,6 +1506,7 @@ func TestRewriteSubscriptionID_Substrate(t *testing.T) {
 		Params struct {
 			Subscription string          `json:"subscription"`
 			Result       json.RawMessage `json:"result"`
+			Extra        json.RawMessage `json:"extra"`
 		} `json:"params"`
 	}
 	require.NoError(t, json.Unmarshal(result, &parsed))
@@ -1516,6 +1517,10 @@ func TestRewriteSubscriptionID_Substrate(t *testing.T) {
 		"subscription must be the router id, not the upstream id")
 	assert.JSONEq(t, `{"number":"0x1234"}`, string(parsed.Params.Result),
 		"the payload must be relayed unchanged")
+	assert.JSONEq(t, `"keepme"`, string(parsed.Params.Extra),
+		"a sibling field must survive: preserving them is the whole reason the rewrite "+
+			"rebuilds the envelope from a map instead of a fixed {subscription, result} "+
+			"struct, and without this assertion a revert to the struct passes every test")
 }
 
 // TestRewriteSubscriptionID_SolanaNumeric supersedes MAG-3345's
