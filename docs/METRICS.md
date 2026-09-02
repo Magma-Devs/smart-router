@@ -350,6 +350,11 @@ histogram_quantile(0.9,
 | `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier`, `outcome` | Non-hit lookups, split by the closed enum `outcome` = `miss` (clean not-found) \| `error` (transport/server error) \| `timeout` (per-lookup budget exceeded). |
 | `smartrouter_cache_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `method`, `cache_tier` | Cache lookup latency, observed on **every attempted lookup** (hits and non-hits). |
 
+Per tier, `cache_requests_total` = `cache_success_total` + `sum without (outcome) (cache_failed_total)`.
+Note the `sum without` — recovering the identity now takes an explicit aggregation
+across `outcome`, where before `_failed_total` was a single series.
+(`TestSmartRouterRecordCacheResult_TotalEqualsSuccessPlusFailedPerTier`.)
+
 > **Migration note (secondary-cache release).** These series previously had no
 > `cache_tier` label, `_failed_total` had no `outcome`, and the latency histogram
 > was observed on hits only. Aggregating queries (`sum by (spec, method)`) keep

@@ -62,6 +62,49 @@ func TestSmartRouterRecordCacheResult_FailedSplitsByOutcome(t *testing.T) {
 	require.Equal(t, float64(2), testutil.ToFloat64(m.cacheRequestsTotalMetric.WithLabelValues("ETH1", "jsonrpc", "eth_blockNumber", CacheTierSecondary)))
 }
 
+// requests_total == success_total + Σ failed_total{outcome}, per tier, across a
+// realistic mix. The identity matters MORE than it did before this change, not less:
+// failed_total gained an `outcome` label, so recovering it now requires a
+// sum-across-outcome that a dashboard can get wrong silently, and a future outcome
+// value recorded on neither counter would leave requests_total unexplained.
+func TestSmartRouterRecordCacheResult_TotalEqualsSuccessPlusFailedPerTier(t *testing.T) {
+	m := newSmartRouterForCacheTest()
+
+	mixed := []struct {
+		tier    string
+		outcome string
+	}{
+		{CacheTierPrimary, CacheOutcomeHit},
+		{CacheTierPrimary, CacheOutcomeMiss},
+		{CacheTierPrimary, CacheOutcomeMiss},
+		{CacheTierPrimary, CacheOutcomeError},
+		{CacheTierSecondary, CacheOutcomeHit},
+		{CacheTierSecondary, CacheOutcomeHit},
+		{CacheTierSecondary, CacheOutcomeTimeout},
+		{CacheTierSecondary, CacheOutcomeError},
+		{CacheTierSecondary, CacheOutcomeMiss},
+	}
+	for _, r := range mixed {
+		m.RecordCacheResult("ETH1", "jsonrpc", "eth_blockNumber", r.tier, r.outcome, 3.0)
+	}
+
+	for _, tier := range []string{CacheTierPrimary, CacheTierSecondary} {
+		base := []string{"ETH1", "jsonrpc", "eth_blockNumber", tier}
+		total := testutil.ToFloat64(m.cacheRequestsTotalMetric.WithLabelValues(base...))
+		success := testutil.ToFloat64(m.cacheSuccessTotalMetric.WithLabelValues(base...))
+
+		var failed float64
+		for _, outcome := range []string{CacheOutcomeMiss, CacheOutcomeError, CacheOutcomeTimeout} {
+			failed += testutil.ToFloat64(m.cacheFailedTotalMetric.WithLabelValues(append(append([]string{}, base...), outcome)...))
+		}
+
+		require.Equal(t, total, success+failed,
+			"tier %s: requests_total must equal success_total plus the sum of failed_total across every outcome", tier)
+		require.Greater(t, success, float64(0), "tier %s: the mix must exercise both sides of the identity", tier)
+		require.Greater(t, failed, float64(0), "tier %s: the mix must exercise both sides of the identity", tier)
+	}
+}
+
 // Latency is observed for EVERY attempted lookup — a deliberate change from the
 // old hit-only observation, which hid exactly the tail (errors/timeouts) that
 // matters for a network-hop secondary.
