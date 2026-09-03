@@ -25,7 +25,7 @@ require (
 	github.com/golang/protobuf v1.5.4
 	github.com/grafana/pyroscope-go v1.4.1
 	github.com/itchyny/gojq v0.12.19
-	github.com/jhump/protoreflect v1.18.0
+	github.com/jhump/protoreflect v1.18.1
 	github.com/joho/godotenv v1.5.1
 	github.com/newrelic/go-agent/v3 v3.44.2
 	github.com/spf13/pflag v1.0.10
