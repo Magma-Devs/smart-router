@@ -1031,6 +1031,74 @@ func (rpcss *RPCSmartRouterServer) ParseRelay(
 	return protocolMessage, nil
 }
 
+// errUnknownWriteOutcome is what a client is told when a write ended with no node having answered.
+//
+// "Failed" would be a claim we cannot support. The request reached an upstream that never replied,
+// and our deadline cannot un-send it — both GK8 incidents ended with the transaction broadcast and
+// the customer told it had failed, which is the worst of the three possible answers because it
+// invites a resubmit of a transaction that may already be on chain.
+//
+// It names the action rather than only the state on purpose: the useful thing for a caller holding
+// this error is to check the chain, not to retry.
+var errUnknownWriteOutcome = errors.New("transaction status unclear: timeout reached before any node responded; the transaction may already have been submitted — verify on-chain before resubmitting")
+
+// writeOutcomeIsUnknown reports whether a FAILED request was a write whose outcome we genuinely do
+// not know, as opposed to one we know did not happen.
+//
+// Three conditions, and the third is the interesting one:
+//
+//   - it is a write. A read that fails is simply a read that failed.
+//   - no node answered. If any node replied at all, even with an error, that reply is its answer
+//     and is passed through untouched — we never overwrite what a node said.
+//   - we cannot PROVE the request never left this process. Connect-phase failures do prove it:
+//     refused, DNS, TLS and unreachable all mean no bytes were written, and they return in
+//     milliseconds. Everything else leaves the upstream possibly holding the transaction.
+//
+// The absence of evidence resolves to "unknown", which is the safe direction for a write and also
+// the common one since the attempt stopped being killed at its window: a hung write now ends when
+// the request's budget expires, with its goroutine still in flight and nothing recorded at all. A
+// rule keyed on the error code would see nothing there and wrongly report a clean failure.
+//
+// It is deliberately evaluated at the request level rather than inside the results manager, because
+// a failed request can arrive at the client through either of two branches in SendParsedRelay
+// depending on whether an in-flight goroutine happened to push before the caller looked. Deciding
+// once, here, is what stops that race from being visible to the customer as two different errors
+// for the same incident.
+func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) bool {
+	if chainlib.GetStateful(protocolMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+		return false
+	}
+	if relayProcessor == nil {
+		// The request failed before a processor existed, so nothing was ever dispatched.
+		return false
+	}
+
+	return unknownWriteOutcome(relayProcessor.GetResultsData())
+}
+
+// unknownWriteOutcome is the judgement itself, split from the lookup above so it can be exercised
+// directly: it is a pure function of what came back, and the interesting cases (no evidence at all,
+// evidence that proves nothing) are awkward to stage through a live processor.
+//
+// Assumes the caller has already established that this is a failed write.
+func unknownWriteOutcome(successResults, nodeErrors []common.RelayResult, protocolErrors []relaycore.RelayError) bool {
+	if len(successResults) > 0 || len(nodeErrors) > 0 {
+		// A node answered. That reply is its answer and is passed through untouched.
+		return false
+	}
+
+	for _, protocolError := range protocolErrors {
+		// An unclassified error proves nothing either, so it counts as "may have reached".
+		if protocolError.LavaError == nil || protocolError.LavaError.MayHaveReachedNode {
+			return true
+		}
+	}
+
+	// No evidence at all: nothing was recorded because the attempt was still in flight when the
+	// budget expired. That is the ordinary shape of a hung write, and it is unknown, not failed.
+	return len(protocolErrors) == 0
+}
+
 func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	ctx context.Context,
 	analytics *metrics.RelayMetrics,
@@ -1056,6 +1124,15 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			if reason := relayProcessor.GetCrossValidationFailFastReason(); reason != "" {
 				return rpcss.crossValidationFailFast(reason, protocolMessage), err
 			}
+		}
+
+		if writeOutcomeIsUnknown(protocolMessage, relayProcessor) {
+			utils.LavaFormatWarning("write outcome unknown", err,
+				utils.LogAttr("write_outcome", "unknown"),
+				utils.LogAttr("api", protocolMessage.GetApi().Name),
+				utils.LogAttr("GUID", ctx),
+			)
+			return nil, errUnknownWriteOutcome
 		}
 
 		return nil, err
@@ -1143,6 +1220,19 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName(), pendingProviders)
 
 	if err != nil {
+		if writeOutcomeIsUnknown(protocolMessage, relayProcessor) {
+			utils.LavaFormatWarning("write outcome unknown", err,
+				utils.LogAttr("write_outcome", "unknown"),
+				utils.LogAttr("api", protocolMessage.GetApi().Name),
+				utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()),
+				utils.LogAttr("GUID", ctx),
+			)
+			// returnedResult carries the 500 and this request's headers; only the message the
+			// client reads is replaced. The underlying error is preserved in the log line above,
+			// not concatenated into the reply — "failed relay, insufficient results" in front of
+			// "status unclear" would tell the customer both things at once.
+			return returnedResult, errUnknownWriteOutcome
+		}
 		return returnedResult, utils.LavaFormatError("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
 	}
 

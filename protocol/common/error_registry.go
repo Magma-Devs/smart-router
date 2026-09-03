@@ -97,6 +97,18 @@ type LavaError struct {
 	SubCategory ErrorSubCategory
 	Description string
 	Retryable   bool // retrying same relay with same params to a different provider has a chance of succeeding
+
+	// MayHaveReachedNode marks a failure that does NOT prove the request stayed inside this
+	// process. Connect-phase failures — refused, DNS, TLS, unreachable — do prove it: nothing was
+	// ever written to a socket. Anything that fails after the connection is established — a
+	// deadline, a reset, an EOF — leaves the upstream possibly holding a request we never read the
+	// answer to.
+	//
+	// It exists for writes, where the difference is the whole story: a transaction we could not
+	// prove undelivered may already be broadcast, and reporting that as a flat failure tells the
+	// customer something we do not know. Declared here, at registration, so adding a connection
+	// error forces the question to be answered rather than defaulted.
+	MayHaveReachedNode bool
 }
 
 func (le *LavaError) String() string {
