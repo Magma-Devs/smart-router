@@ -22,10 +22,12 @@
 # lane, which passes it as --resp-cache-addresses).
 #
 # cache-be is the preserved rollback path: with both set, resp-cache wins and
-# cache-be is never dialled — so it is intentionally fine that no cache
-# sidecar exists in this compose stack. Removing the resp-cache: block is what
-# exercises rollback, and that needs a reachable cache-be to be meaningful.
-cache-be: "127.0.0.1:20100"
+# cache-be is never dialled — so no cache sidecar needs to exist while the RESP
+# block is present. It names the cache OVERLAY's service ("cache:20100", same as
+# smartrouter_eth_cached.yml) so the rollback is real: to exercise it, remove
+# the resp-cache: block and add -f docker/docker-compose.cache.yml to the
+# compose command, which starts the sidecar this address reaches.
+cache-be: "cache:20100"
 resp-cache:
   addresses: ["valkey:6379"]
   key-prefix: "sr" # [A-Za-z0-9._-]+ — used in SCAN MATCH globs; distinct prefixes isolate flushes on a shared backend
