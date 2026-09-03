@@ -8,6 +8,72 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.5.0 — 2026-09-03
+
+### Highlights
+
+Release v1.5.0 introduces a two-tier caching architecture, allowing operators to configure a read-only secondary cache with exact-key backfill alongside the primary tier. To support distributed deployments, this release adds a RESP-compatible cache backend for Redis or Valkey, accompanied by outcome-aware metrics to monitor hit rates across both cache tiers. Secondary cache reads are strictly isolated by a foreign-reply sanitizer that allowlists transport headers and drops foreign chain state, such as `LatestBlock` data, preventing external state from leaking into the local router. The cache protocol now persists entry kinds like `IsNodeError` to accurately return upstream faults, and the router will issue a warning rather than aborting if it detects a dangling secondary cache configuration. Finally, WebSocket subscription tracking is corrected to key active subscriptions by their specific RPC method rather than just their parameters, preventing state collisions across identical parameter sets.
+
+### Changes
+
+#### New Features
+- feat(cache): persist and return entry kind (IsNodeError) through the cache protocol ([#248]) [`e6a9aa1`]
+- feat(performance): add read-only CacheReader seam and foreign-reply sanitizer ([#248]) [`e5315ed`]
+- feat(rpcsmartrouter): two-tier cache lookup — read-only secondary with exact-key backfill ([#248]) [`55668a7`]
+- feat(metrics): outcome-aware per-tier cache observability ([#248]) [`768882a`]
+- feat(cache): RESP-compatible (Redis/Valkey) cache backend ([#261]) [`443fef5`]
+
+#### Bug fixes
+- fix(rpcsmartrouter): key a subscription by its method, not only its params (MAG-3378) ([#366]) [`bd64f59`]
+- fix(secondary-cache): review corrections — exact-key validity, drop-all sanitize, populator-owned eligibility ([#248]) [`9483ed8`]
+- refactor(cache): consolidate test helpers and improve secondary cache handling ([#248]) [`934237e`]
+- fix(cache): commit the test helpers the cache suite is built against ([#248]) [`0cc19cd`]
+- fix(secondary-cache): drop the foreign LatestBlock in the sanitizer ([#248]) [`6898b06`]
+- fix(secondary-cache): record the tier outcome after the reply copy ([#248]) [`eefcced`]
+- fix(secondary-cache): warn instead of aborting on dangling secondary config ([#248]) [`7bb4923`]
+- fix(secondary-cache): allowlist transport headers instead of dropping all metadata ([#248]) [`d8f50a9`]
+- fix(secondary-cache): stop foreign chain state reaching the router past the sanitizer ([#248]) [`6ee7cde`]
+- fix(secondary-cache): clamp the backfill validity-floor lift to the local gated tip ([#248]) [`b694e9f`]
+
+#### Documentation updates
+- docs: add secondary cache backend design (PRD: Secondary Cache Backend) ([#248]) [`68021e8`]
+- docs(cache): customer-facing secondary cache overview ([#248]) [`35030b1`]
+- docs(secondary-cache): retire references to the deleted design doc ([#248]) [`5e81083`]
+- docs(secondary-cache): enhance manual demo walkthrough and clarify flow steps ([#248]) [`0d6468d`]
+- docs(secondary-cache): update demo instructions for block serving and cache recovery ([#248]) [`ffae317`]
+- docs(secondary-cache): align the overview with the review corrections ([#248]) [`a0aaddb`]
+- docs(secondary-cache): correct the tier-symmetry and scope claims ([#248]) [`69df6b4`]
+
+#### Other work
+- removed design doc ([#248]) [`f599345`]
+
+[#248]: https://github.com/magma-Devs/smart-router/pull/248
+[#261]: https://github.com/magma-Devs/smart-router/pull/261
+[#366]: https://github.com/magma-Devs/smart-router/pull/366
+[`0cc19cd`]: https://github.com/magma-Devs/smart-router/commit/0cc19cd403b2ef8edaec8602d93e665aa1c2c240
+[`0d6468d`]: https://github.com/magma-Devs/smart-router/commit/0d6468dd4ae0ee67be8ca90109dc1321bd58934b
+[`35030b1`]: https://github.com/magma-Devs/smart-router/commit/35030b130e4e718080f45393114dd380004d5181
+[`443fef5`]: https://github.com/magma-Devs/smart-router/commit/443fef5bf9d30c918acf1de2a526ebf6955ea5b6
+[`55668a7`]: https://github.com/magma-Devs/smart-router/commit/55668a72438deeba6f102f175df0e4a3992cb03f
+[`5e81083`]: https://github.com/magma-Devs/smart-router/commit/5e81083766f5e3809262c3cd89155bd9fba0fabd
+[`68021e8`]: https://github.com/magma-Devs/smart-router/commit/68021e81a55c3a3c8bc4d0993aad090ff3889b70
+[`6898b06`]: https://github.com/magma-Devs/smart-router/commit/6898b0617e1338819fa898af608ec382f707fcca
+[`69df6b4`]: https://github.com/magma-Devs/smart-router/commit/69df6b461c1592e6dab6e31be2bfcac607eed76d
+[`6ee7cde`]: https://github.com/magma-Devs/smart-router/commit/6ee7cde0ffab0d65447b3e4044002b47063ba6a1
+[`768882a`]: https://github.com/magma-Devs/smart-router/commit/768882a25579a7197c35ca18796991d662204617
+[`7bb4923`]: https://github.com/magma-Devs/smart-router/commit/7bb492376b976dc1c46282796a942bc0a0524839
+[`934237e`]: https://github.com/magma-Devs/smart-router/commit/934237e3c4d587cf6ef98a90f74d9f024a937ed2
+[`9483ed8`]: https://github.com/magma-Devs/smart-router/commit/9483ed8d0d6220adf5fc425d92443111847ada76
+[`a0aaddb`]: https://github.com/magma-Devs/smart-router/commit/a0aaddbeae10b1ed74b3a5eddc599a4e390cbe68
+[`b694e9f`]: https://github.com/magma-Devs/smart-router/commit/b694e9f93d41dd3e5f6c4f82f802a666a9e4648c
+[`bd64f59`]: https://github.com/magma-Devs/smart-router/commit/bd64f59b504fbf97833cd2763ab4757b0bfe2e00
+[`d8f50a9`]: https://github.com/magma-Devs/smart-router/commit/d8f50a9e5fe1c99055bf5eeedd4f10b8cf7a1bf9
+[`e5315ed`]: https://github.com/magma-Devs/smart-router/commit/e5315ed97c3f7a10fc065f8c2793515ed7669734
+[`e6a9aa1`]: https://github.com/magma-Devs/smart-router/commit/e6a9aa1475b5764c74fda68bacee91ff892626f5
+[`eefcced`]: https://github.com/magma-Devs/smart-router/commit/eefccede6d190a141986cf6f5231aee9c22e3631
+[`f599345`]: https://github.com/magma-Devs/smart-router/commit/f59934531c5face2c4a98bee902c18354b735c89
+[`ffae317`]: https://github.com/magma-Devs/smart-router/commit/ffae3173cf1bb9db16a960a5127b5351fc0031e2
+
 ## v1.4.1 — 2026-09-02
 
 ### Highlights
