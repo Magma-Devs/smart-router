@@ -13,10 +13,10 @@ import (
 
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	relaytypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"github.com/spf13/pflag"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -31,29 +31,16 @@ const (
 	ExpirationBlocksHashesToHeightsFlagName      = "expiration-blocks-hashes-to-heights"
 	ExpirationNodeErrorsOnFinalizedFlagName      = "expiration-finalized-node-errors"
 	FlagCacheSizeName                            = "max-items"
-	DefaultExpirationForNonFinalized             = 500 * time.Millisecond
-	// SharedStateTipBlockMultiplier bounds how long a pod's published chain tip lives in the
-	// shared cache: SharedStateTipBlockMultiplier * averageBlockTime. It mirrors the smart
-	// router's own tip-staleness horizon (chainstate.StalenessWindow) so a dead pod's tip
-	// evaporates on roughly the same timescale the router considers a tip stale, rather than
-	// lingering for the full finalized (~1h) TTL.
-	SharedStateTipBlockMultiplier = 10
-	// MinSharedStateTipExpiration is the absolute floor for that TTL, mirroring the router-side
-	// floor (chainstate.minStalenessWindow) rather than importing it — ecosystem/cache is a
-	// standalone binary and must not depend on protocol/. It is a hard-coded constant, NOT an
-	// operator-tunable duration, because it underwrites two guarantees the tunables cannot:
-	//   - non-zero: ristretto treats a zero TTL as "never expires", so a dead pod's tip would
-	//     linger forever. ExpirationNonFinalized alone cannot prevent this — it is
-	//     flag * multiplier, both operator-settable, and either being 0 makes it 0.
-	//   - long enough to be useful: a chain tip must outlive the gap between requests. At the
-	//     500ms ExpirationNonFinalized default a tip published for a spec with no
-	//     average_block_time would evaporate between relays, silently disabling shared state.
-	MinSharedStateTipExpiration                 = 2 * time.Second
+	// TTL formula constants moved to core (core.Policy owns the TTL table);
+	// re-exported here for the package's existing consumers and tests.
+	DefaultExpirationForNonFinalized            = core.DefaultExpirationForNonFinalized
+	SharedStateTipBlockMultiplier               = core.SharedStateTipBlockMultiplier
+	MinSharedStateTipExpiration                 = core.MinSharedStateTipExpiration
 	DefaultExpirationTimeFinalizedMultiplier    = 1.0
 	DefaultExpirationTimeNonFinalizedMultiplier = 1.0
-	DefaultExpirationBlocksHashesToHeights      = 48 * time.Hour
-	DefaultExpirationTimeFinalized              = time.Hour
-	DefaultExpirationNodeErrors                 = 250 * time.Millisecond
+	DefaultExpirationBlocksHashesToHeights      = core.DefaultExpirationBlocksHashesToHeights
+	DefaultExpirationTimeFinalized              = core.DefaultExpirationTimeFinalized
+	DefaultExpirationNodeErrors                 = core.DefaultExpirationNodeErrors
 	CacheNumCounters                            = 100000000 // expect 10M items
 	unixPrefix                                  = "unix:"
 )
@@ -220,24 +207,14 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 	}
 }
 
+// ExpirationForChain and SharedStateTipExpiration delegate to the core TTL
+// policy (see core.Policy for the formulas and their rationale).
 func (cs *CacheServer) ExpirationForChain(averageBlockTimeForChain time.Duration) time.Duration {
-	eighthBlock := averageBlockTimeForChain / 8
-	return lavaslices.Max([]time.Duration{eighthBlock, cs.ExpirationNonFinalized})
+	return core.Policy{NonFinalized: cs.ExpirationNonFinalized}.ForChain(averageBlockTimeForChain)
 }
 
-// SharedStateTipExpiration returns the TTL for a pod's published chain tip in shared-state
-// mode: SharedStateTipBlockMultiplier * averageBlockTime, floored at ExpirationNonFinalized and
-// then at the hard MinSharedStateTipExpiration.
-//
-// The second floor is the load-bearing one. ExpirationNonFinalized is derived from two operator
-// flags (duration * multiplier), so it is neither guaranteed non-zero — a zero TTL means "never
-// expires" in ristretto, so a dead pod's tip would linger forever — nor guaranteed long enough:
-// at its 500ms default a tip for a spec that omits average_block_time (0 * multiplier = 0) would
-// evaporate between relays and silently disable shared state. MinSharedStateTipExpiration is a
-// constant precisely so no flag combination can defeat either guarantee.
 func (cs *CacheServer) SharedStateTipExpiration(averageBlockTimeForChain time.Duration) time.Duration {
-	ttl := averageBlockTimeForChain * SharedStateTipBlockMultiplier
-	return lavaslices.Max([]time.Duration{ttl, cs.ExpirationNonFinalized, MinSharedStateTipExpiration})
+	return core.Policy{NonFinalized: cs.ExpirationNonFinalized}.SharedStateTip(averageBlockTimeForChain)
 }
 
 func (cs *CacheServer) GetTotalCacheSize() int64 {

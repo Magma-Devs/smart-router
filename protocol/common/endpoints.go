@@ -34,6 +34,12 @@ const (
 	LAVA_IDENTIFIED_NODE_ERROR_HEADER               = "lava-identified-node-error"
 	LAVA_HEDGE_TRIGGERED_HEADER                     = "lava-hedge-triggered"
 	SMART_ROUTER_VERSION_HEADER_NAME                = "Smart-Router-Version"
+	// CACHE_BACKEND_HEADER_NAME names the cache backend that served a hit — the
+	// cache-be address, or the RESP node actually dialled (the current master
+	// under sentinel, the touched shard under cluster). Debug-only: it exposes
+	// internal infrastructure addresses, so it is emitted ONLY under
+	// --debug-relays, never to ordinary clients.
+	CACHE_BACKEND_HEADER_NAME = "Lava-Cache-Backend"
 	// these headers need to be lowercase
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME         = "lava-providers-block"
 	RELAY_TIMEOUT_HEADER_NAME                     = "lava-relay-timeout"

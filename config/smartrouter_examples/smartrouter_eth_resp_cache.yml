@@ -1,0 +1,63 @@
+# Smart Router Direct RPC Configuration — Ethereum with a RESP cache backend
+# Mode: Direct connections to Ethereum JSON-RPC endpoints (no Lava providers!)
+#
+# Same as smartrouter_eth.yml, but caching runs against a RESP-compatible
+# (Redis/Valkey) backend instead of the cache sidecar: the router executes the
+# cache engine in-process and stores entries in the backend declared below
+# (docs/RESP-CACHE.md). When both resp-cache: and cache-be: are configured,
+# resp-cache wins and cache-be is preserved as the rollback path.
+#
+# Run it with the RESP overlay (which starts the valkey service):
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_eth_resp_cache.yml \
+#     docker compose -f docker/docker-compose.yml \
+#                    -f docker/docker-compose.resp-cache.yml up --build
+
+# RESP cache backend ("valkey:6379" is the compose service name + port).
+# Full surface: topology (standalone|sentinel|cluster), read-addresses,
+# credentials (password-file rotates live), tls, timeouts — docs/RESP-CACHE.md.
+# Addresses here are resolved FROM THE ROUTER. Under compose the router is a
+# container, so it must use the service name "valkey:6379" — 127.0.0.1 is the
+# router container's own loopback and dials nothing. Use the host-published
+# 127.0.0.1:63790 only when the router runs on the host (e.g. the pre_setups
+# lane, which passes it as --resp-cache-addresses).
+#
+# cache-be is the preserved rollback path: with both set, resp-cache wins and
+# cache-be is never dialled — so no cache sidecar needs to exist while the RESP
+# block is present. It names the cache OVERLAY's service ("cache:20100", same as
+# smartrouter_eth_cached.yml) so the rollback is real: to exercise it, remove
+# the resp-cache: block and add -f docker/docker-compose.cache.yml to the
+# compose command, which starts the sidecar this address reaches.
+cache-be: "cache:20100"
+resp-cache:
+  addresses: ["valkey:6379"]
+  key-prefix: "sr" # [A-Za-z0-9._-]+ — used in SCAN MATCH globs; distinct prefixes isolate flushes on a shared backend
+
+# Prometheus metrics (scrape at http://<host>:7779/metrics). Set to
+# "disabled" to turn off. The resp backend adds smartrouter_resp_cache_*.
+metrics-listen-address: "0.0.0.0:7779"
+
+endpoints:
+  - listen-address: "0.0.0.0:3360"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    network-address: "0.0.0.0:3360"
+
+direct-rpc:
+  # Endpoint 1 — PublicNode (HTTP + WS)
+  - name: "eth-publicnode"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://ethereum-rpc.publicnode.com"
+      - url: "wss://ethereum-rpc.publicnode.com"
+
+  # Endpoint 2 — dRPC public endpoint (HTTP + WS). Tenderly's public WS
+  # gateway rejects the chain-tracker's subscription probes ("method not
+  # found"), and the ETH1 spec requires a websocket leg per provider — an
+  # HTTP-only provider is excluded at verification and fails overall-health.
+  - name: "eth-drpc"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "https://eth.drpc.org"
+      - url: "wss://eth.drpc.org"

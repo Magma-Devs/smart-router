@@ -61,7 +61,7 @@ type RPCSmartRouterServer struct {
 	sessionManager       *lavasession.ConsumerSessionManager
 	listenEndpoint       *lavasession.RPCEndpoint
 	rpcSmartRouterLogs   *metrics.RPCConsumerLogs
-	cache                *performance.Cache
+	cache                performance.CacheBackend
 	consistencyConfig    *relaycore.ConsistencyValidationConfig // Configuration for consistency validation
 	sharedState          bool                                   // using the cache backend to sync the latest seen block
 	relaysMonitor        *metrics.RelaysMonitor
@@ -118,7 +118,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	listenEndpoint *lavasession.RPCEndpoint,
 	chainParser chainlib.ChainParser,
 	sessionManager *lavasession.ConsumerSessionManager,
-	cache *performance.Cache,
+	cache performance.CacheBackend,
 	secondaryCache performance.CacheReader,
 	secondaryCacheTimeout time.Duration,
 	rpcSmartRouterLogs *metrics.RPCConsumerLogs,
@@ -3321,11 +3321,28 @@ func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlo
 
 // peerObservationStore returns the fleet observation store for the per-endpoint tracker gate,
 // or nil when shared state is off or no cache backend is configured (MAG-2981).
+//
+// Endpoint observations are a cache-be RPC, not a cache-engine behaviour: the cache server keeps
+// them in a dedicated in-memory store alongside the relay caches, so they do not travel through
+// the KVStore seam the RESP backend implements. A router on the RESP backend therefore gets no
+// peer gate and polls locally — the same degradation this store already applies to a cache-be
+// that predates the RPC (see cachePeerObservations.warnIfUnimplemented). Called once per listen
+// endpoint, so the warning matches that granularity rather than firing per tick.
 func (rpcss *RPCSmartRouterServer) peerObservationStore() endpointstate.PeerObservationStore {
 	if !rpcss.sharedState || rpcss.cache == nil {
 		return nil
 	}
-	return endpointstate.NewCachePeerObservations(rpcss.cache)
+	// Typed-nil *Cache (no --cache-be) is handled inside NewCachePeerObservations.
+	grpcCache, isGRPCCache := rpcss.cache.(*performance.Cache)
+	if !isGRPCCache {
+		utils.LavaFormatWarning("fleet tracker gate: the configured cache backend does not implement endpoint observations; polling locally", nil,
+			utils.LogAttr("backend", fmt.Sprintf("%T", rpcss.cache)),
+			utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
+			utils.LogAttr("apiInterface", rpcss.listenEndpoint.ApiInterface),
+		)
+		return nil
+	}
+	return endpointstate.NewCachePeerObservations(grpcCache)
 }
 
 // adoptSharedStateTip feeds a peer pod's chain tip — read from the shared cache under the
@@ -3386,8 +3403,8 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	relayResult *common.RelayResult,
 	resolvedBlock *int64,
 ) {
-	// Skip if cache is not active
-	if !rpcss.cache.CacheActive() {
+	// Skip if cache is not active (nil interface: server wired without a backend)
+	if rpcss.cache == nil || !rpcss.cache.CacheActive() {
 		return
 	}
 
@@ -3670,7 +3687,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// attempted iff it is itself active — a
 	// healthy secondary keeps serving while the primary is down or unconfigured.
 	crossValidationEnabled := selection == relaycore.CrossValidation && crossValidationParams != nil
-	primaryCacheActive := rpcss.cache.CacheActive()
+	primaryCacheActive := rpcss.cache != nil && rpcss.cache.CacheActive()
 	secondaryCacheActive := rpcss.secondaryCacheActive()
 	if primaryCacheActive || secondaryCacheActive {
 		if crossValidationEnabled {
@@ -4699,6 +4716,22 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			Name:  common.PROVIDER_ADDRESS_HEADER_NAME,
 			Value: providerAddress,
 		})
+
+		// On a cache hit, name the backend that served it. Debug-gated: the
+		// value is an internal infrastructure address (a Redis node, a cache-be
+		// pod) and must never reach ordinary clients. Under sentinel it is the
+		// current master, so it visibly changes across a failover — which is
+		// what makes a promotion observable from the outside.
+		if providerAddress == "Cached" && rpcss.debugRelays && rpcss.cache != nil {
+			if reporter, ok := rpcss.cache.(performance.BackendEndpointReporter); ok {
+				if endpoint := reporter.BackendEndpoint(); endpoint != "" {
+					metadataReply = append(metadataReply, pairingtypes.Metadata{
+						Name:  common.CACHE_BACKEND_HEADER_NAME,
+						Value: endpoint,
+					})
+				}
+			}
+		}
 
 		// add the relay retried count: total attempts minus 1 (the initial attempt is not a retry)
 		successResults, nodeErrorResults, protocolErrorResults := relayProcessor.GetResultsData()

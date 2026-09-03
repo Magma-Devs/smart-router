@@ -218,11 +218,17 @@ type RPCSmartRouter struct {
 	// deferred to Stop()'s drain phase, not to Start(). Closing it in Start
 	// would shut the BatchProcessor down while relays are still emitting.
 	usageSink metrics.UsageEventSink
+
+	// cacheBackend is the cache-be client handed to Start (typed-nil *Cache
+	// when --cache-be is unset). Held here so Stop can Close it after the
+	// client-facing drain — late async populator writes then fail fast
+	// instead of holding a connection open past shutdown.
+	cacheBackend performance.CacheBackend
 }
 
 type rpcSmartRouterStartOptions struct {
 	rpcEndpoints             []*lavasession.RPCEndpoint
-	cache                    *performance.Cache
+	cache                    performance.CacheBackend
 	secondaryCache           performance.CacheReader // optional read-only fallback tier (docs/SECONDARY-CACHE.md); nil when unconfigured
 	secondaryCacheTimeout    time.Duration
 	strategy                 provideroptimizer.Strategy
@@ -252,6 +258,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	rpsr.failedStaticProviders = make(map[string][]*lavasession.RPCStaticProviderEndpoint)
 	rpsr.failedBackupProviders = make(map[string][]*lavasession.RPCStaticProviderEndpoint)
 	rpsr.rpcServers = make(map[string]*RPCSmartRouterServer)
+	rpsr.cacheBackend = options.cache
 	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
 
 	// RPCSmartRouter always runs in standalone mode with time-based epochs
@@ -456,6 +463,16 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 		}
 		if server.grpcSubscriptionManager != nil {
 			server.grpcSubscriptionManager.Stop()
+		}
+	}
+
+	// Close the cache-be client after the client-facing drain: in-flight relays
+	// are done, so the only remaining callers are stray async populator writes,
+	// which now fail fast (NotConnectedError) instead of holding a connection
+	// open past shutdown. Nil-safe for routers started without a cache.
+	if rpsr.cacheBackend != nil {
+		if err := rpsr.cacheBackend.Close(); err != nil {
+			utils.LavaFormatWarning("cache backend close returned error", err)
 		}
 	}
 
@@ -3207,16 +3224,14 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version)
 			rand.InitRandomSeed()
 
-			var cache *performance.Cache = nil
-			// viper (not cmd.Flags) so --cache-be can also come from the config file.
-			if cacheAddr := viper.GetString(performance.CacheFlagName); cacheAddr != "" {
-				var err error
-				cache, err = performance.InitCache(ctx, cacheAddr)
-				if err != nil {
-					utils.LavaFormatError("Failed To Connect to cache at address", err, utils.Attribute{Key: "address", Value: cacheAddr})
-				} else {
-					utils.LavaFormatInfo("cache service connected", utils.Attribute{Key: "address", Value: cacheAddr})
-				}
+			// Backend selection (viper, not cmd.Flags, so every knob can also
+			// come from the config file): the resp-cache block wins over
+			// cache-be, which stays preserved as the rollback path; neither
+			// yields an inert typed-nil backend. Configuration errors abort
+			// startup.
+			cache, err := performance.SelectCacheBackend(ctx, viper.GetViper())
+			if err != nil {
+				return utils.LavaFormatError("invalid cache backend configuration", err)
 			}
 
 			// Optional read-only secondary cache tier (docs/SECONDARY-CACHE.md).
@@ -3226,8 +3241,19 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				Timeout: viper.GetDuration(performance.SecondaryCacheTimeoutFlagName),
 				Mode:    viper.GetString(performance.SecondaryCacheModeFlagName),
 			}
+			// The secondary tier's advisory warnings key on whether a PRIMARY
+			// exists — which, since the RESP backend landed, is no longer
+			// synonymous with cache-be: with resp-cache configured the RESP
+			// backend IS the primary the backfill writes through (tryCacheWrite
+			// goes through the CacheBackend seam), so "secondary without a
+			// primary: nothing backfills" would be false there. LoadRespCacheConfig
+			// is a pure read of the same viper the selection above used.
+			primaryAddressForSecondary := viper.GetString(performance.CacheFlagName)
+			if respConfig, respEnabled, _ := performance.LoadRespCacheConfig(viper.GetViper()); respEnabled {
+				primaryAddressForSecondary = strings.Join(respConfig.Addresses, ",")
+			}
 			secondaryWarnings, secondaryErr := secondaryCacheConfig.Validate(
-				viper.GetString(performance.CacheFlagName),
+				primaryAddressForSecondary,
 				viper.IsSet(performance.SecondaryCacheTimeoutFlagName),
 				viper.IsSet(performance.SecondaryCacheModeFlagName),
 			)
@@ -3382,6 +3408,8 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Int(performance.PyroscopeBlockProfileRateFlagName, performance.DefaultBlockProfileRate, "block profile rate in nanoseconds (1 records all blocking events)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeTagsFlagName, "", "comma-separated list of tags in key=value format (e.g., instance=router-1,region=us-east)")
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
+	cmdRPCSmartRouter.Flags().String(performance.RespCacheAddressesFlagName, "", "RESP-compatible (Redis/Valkey) cache backend address(es), comma-separated — enables the RESP backend, which takes precedence over cache-be. Standalone: the node address; sentinel: the sentinel addresses; cluster: the configuration endpoint. The full surface (TLS, credentials, read/write split) lives in the resp-cache config block")
+	cmdRPCSmartRouter.Flags().String(performance.RespCacheTopologyFlagName, "", "RESP cache topology: standalone (default), sentinel, or cluster")
 	cmdRPCSmartRouter.Flags().String(performance.SecondaryCacheFlagName, "", "address for an optional read-only secondary cache, queried when the primary cache produces no hit (docs/SECONDARY-CACHE.md)")
 	cmdRPCSmartRouter.Flags().Duration(performance.SecondaryCacheTimeoutFlagName, performance.DefaultSecondaryCacheTimeout, "per-lookup time budget for the secondary cache; an exceeded lookup is treated as a miss")
 	cmdRPCSmartRouter.Flags().String(performance.SecondaryCacheModeFlagName, performance.SecondaryCacheModeReadOnly, "secondary cache access mode; only read-only is supported")
@@ -3448,7 +3476,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(common.CorsMethodsFlag, "GET,POST,PUT,DELETE,OPTIONS", "set up Allowed OPTIONS methods, defaults to: \"GET,POST,PUT,DELETE,OPTIONS\"")
 	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Lava-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
 	cmdRPCSmartRouter.Flags().String(common.CDNCacheDurationFlag, "86400", "set up preflight options response cache duration, default 86400 (24h in seconds)")
-	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (requires --cache-be): the consumer consistency seen-block, and per-endpoint chain-tracker poll observations so an upstream is polled about once per interval fleet-wide instead of once per pod")
+	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache): the consumer consistency seen-block travels through either. The per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod) additionally require --cache-be — the RESP backend does not carry them, so a RESP-backed router polls locally and logs a warning (docs/RESP-CACHE.md)")
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")

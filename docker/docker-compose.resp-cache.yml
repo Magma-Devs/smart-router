@@ -1,0 +1,33 @@
+# RESP cache overlay — layer on top of docker-compose.yml to run the router
+# against a Redis/Valkey backend instead of the cache sidecar (docs/RESP-CACHE.md).
+#
+#   SR_CONFIG=config/smartrouter_examples/smartrouter_eth_resp_cache.yml \
+#     docker compose -f docker/docker-compose.yml \
+#                    -f docker/docker-compose.resp-cache.yml up --build
+#
+# The router reaches the backend via the resp-cache: block in the
+# *_resp_cache.yml config (addresses: ["valkey:6379"]) — same flag-vs-YAML
+# rule as cache-be. Inspect what the router stored:
+#
+#   docker exec smart-router-valkey-1 valkey-cli --scan --pattern 'sr:*'
+#
+# TLS/AUTH variants: mount certs, extend the command with --tls-port /
+# --requirepass, and mirror the settings in the config's resp-cache block.
+
+services:
+  valkey:
+    image: valkey/valkey:7.2
+    # volatile-lru: every key the router writes carries a TTL, so eviction can
+    # target the whole keyspace by recency without touching foreign non-TTL
+    # keys — see the maxmemory-policy discussion in docs/RESP-CACHE.md.
+    command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+    expose:
+      - "6379"
+    ports:
+      - "63790:6379" # host access for valkey-cli / debugging
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
