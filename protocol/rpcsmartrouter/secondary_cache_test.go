@@ -261,10 +261,14 @@ func TestSecondaryCacheTimeoutAndErrorAreMisses(t *testing.T) {
 // validation. Scenario: ParseRelay stamped SeenBlock=99, the guarded tip advanced
 // to 100 by lookup time (requestedBlockForCache=100), and the cached entry has
 // Reply.LatestBlock=0 (an eth_call-style reply with no parsable height). The
-// backfill must land at key 100 with a validity SeenBlock lifted to 100 — the
-// follow-up primary GET with RequestedBlock=100/SeenBlock=100 must return it.
-// Without the lift the server stores SeenBlock=99 and rejects that GET as
-// "reply seen block is smaller than our expectations".
+// backfill must land at key 100 with a validity floor of 100 — the follow-up
+// primary GET with RequestedBlock=100/SeenBlock=100 must return it. Two local
+// values deliver that floor, and this test fails only if BOTH regress: the lift
+// raises the SET's SeenBlock toward the resolved block (clamped to the gated
+// tip — TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip is why), and
+// the re-stamp writes the tip into Reply.LatestBlock. With neither, the server
+// stores a floor of 99 and rejects the GET as "reply seen block is smaller
+// than our expectations".
 func TestSecondaryHitBackfillsPrimaryWithExactKeyAndValidSeenBlock(t *testing.T) {
 	primary, rcs := startCacheServerForTest(t)
 	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 99)
@@ -277,6 +281,11 @@ func TestSecondaryHitBackfillsPrimaryWithExactKeyAndValidSeenBlock(t *testing.T)
 		},
 	}
 	rpcss := newSecondaryTestServer(chainParser, primary, fake, 100*time.Millisecond)
+	// The scenario says the guarded tip advanced to 100 by lookup time — that is
+	// where requestedBlockForCache=100 came from, and it is also what entitles the
+	// lift: the validity-floor clamp trusts resolvedBlock only up to this tip.
+	rpcss.chainState = chainstate.New("LAVA", chainstate.DefaultConfig(12*time.Second))
+	rpcss.chainState.SetLatestBlock(100)
 
 	hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
 	require.NoError(t, err)
@@ -653,6 +662,84 @@ func TestSecondaryHitOmitsLatestBlockWithNoLocalTip(t *testing.T) {
 	served, result := runSecondaryLookup(t, rpcss, protocolMessage, 100)
 	require.True(t, served)
 	require.Zero(t, result.Reply.LatestBlock, "no local tip means no header, not a foreign one")
+}
+
+// The fourth foreign-chain-state channel: the backfill KEY itself. For an
+// explicit-block request, requestedBlockForCache is the RAW user-requested height
+// (sendRelayToEndpoint resolves only LATEST against the local tip), and the
+// exact-key lift raises the SET's validity floor to it. SetRelay then publishes
+// max(Response.LatestBlock, SeenBlock) as the cache server's chain-level tip via a
+// monotonic-max write, and that key is what LATEST/SAFE/FINALIZED/PENDING resolve
+// to for the whole chain. Unbounded, one request at a user-chosen far-future key,
+// answered by a foreign secondary whose reply is fully sanitize-clean — the poison
+// is the KEY, not the payload, so nothing SanitizeForeignCacheReply can reach —
+// retargets negative-tag resolution on this router's own primary until expiry.
+// The lift must therefore be clamped to the local gated tip, which the legitimate
+// cases never exceed: a LATEST-resolved block came from that tip, and a requester's
+// SeenBlock is a local parse-time value.
+func TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip(t *testing.T) {
+	const (
+		localTip  = int64(100)
+		farFuture = int64(987654321)
+	)
+	primary, rcs := startCacheServerForTest(t)
+	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), localTip)
+
+	// Baseline: an honest entry at the local tip. It pins the server's chain-level
+	// tip at 100 and makes the final assertion non-vacuous — a nil LATEST result
+	// below could not be told apart from "no tip was ever published".
+	honestPayload := []byte(`{"block":{"header":{"height":"100"}}}`)
+	hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
+	require.NoError(t, err)
+	_, err = rcs.SetRelay(context.Background(), &pairingtypes.RelayCacheSet{
+		RequestHash:      hashKey,
+		ChainId:          "LAVA",
+		RequestedBlock:   localTip,
+		SeenBlock:        localTip,
+		Response:         &pairingtypes.RelayReply{Data: honestPayload, LatestBlock: localTip},
+		Finalized:        false,
+		AverageBlockTime: int64(15 * time.Second),
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return directGet(rcs, hashKey, spectypes.LATEST_BLOCK, 0).GetReply() != nil
+	}, 3*time.Second, 25*time.Millisecond, "baseline: LATEST must resolve to the honest tip entry before the poison attempt")
+
+	// The foreign tier answers the far-future key with a reply that is already
+	// sanitize-clean: no LatestBlock, no metadata, no signatures. Its only
+	// statement is "an entry exists at the key you asked for".
+	farPayload := []byte(`{"block":{"header":{"height":"987654321"}}}`)
+	fake := &fakeCacheReader{
+		active: true,
+		reply: &pairingtypes.CacheRelayReply{
+			Reply: &pairingtypes.RelayReply{Data: farPayload, LatestBlock: 0},
+		},
+	}
+	rpcss := newSecondaryTestServer(chainParser, primary, fake, 100*time.Millisecond)
+	rpcss.chainState = chainstate.New("LAVA", chainstate.DefaultConfig(12*time.Second))
+	rpcss.chainState.SetLatestBlock(localTip)
+
+	// Production shape for an explicit-block request: the lookup key is the raw
+	// user-chosen height, not the local tip.
+	served, _ := runSecondaryLookup(t, rpcss, protocolMessage, farFuture)
+	require.True(t, served)
+
+	// The backfill still lands, on its exact key — clamping the floor must not
+	// suppress the write itself.
+	require.Eventually(t, func() bool {
+		return directGet(rcs, hashKey, farFuture, 0).GetReply() != nil
+	}, 3*time.Second, 25*time.Millisecond, "clamping must not suppress the backfill itself")
+	stored := directGet(rcs, hashKey, farFuture, 0)
+	require.LessOrEqual(t, stored.GetSeenBlock(), localTip,
+		"the stored validity floor must be bounded by the local gated tip, never by the requested key")
+
+	// The consequence that matters: the chain-level tip did not move. LATEST still
+	// resolves to the honest entry at 100 — not to the far-future key, and not to
+	// nothing.
+	byTag := directGet(rcs, hashKey, spectypes.LATEST_BLOCK, 0)
+	require.NotNil(t, byTag.GetReply(), "LATEST must still resolve to the local tip after the far-key backfill")
+	require.Equal(t, honestPayload, byTag.GetReply().Data,
+		"LATEST must serve the honest tip entry, not the foreign far-future one")
 }
 
 // ---------------------------------------------------------------------------
