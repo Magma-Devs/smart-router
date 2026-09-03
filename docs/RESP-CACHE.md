@@ -76,7 +76,7 @@ router never starts half-configured.
 | `tls.cert-file` / `tls.key-file` | *(unset)* | Client keypair for mTLS (both or neither). |
 | `tls.server-name` | *(unset)* | Overrides the verification/SNI name. |
 | `tls.insecure-skip-verify` | `false` | Skips server verification (testing only). |
-| `dial-timeout` / `read-timeout` / `write-timeout` | client defaults | Per-operation network limits. The handshake of a **fresh** connection is bounded by `dial-timeout`, not by the relay's per-lookup budget — keep it tight if a hung backend must not slow cold lookups. |
+| `dial-timeout` / `read-timeout` / `write-timeout` | `500ms` dial; client defaults for read/write | Per-operation network limits. A **fresh** connection's dial and TLS handshake are bounded by `dial-timeout` *and* by the caller's own deadline, whichever is sooner — the default is deliberately sub-second so a black-holed backend cannot make cold lookups linger. |
 | `pool-size` | client default | Connection pool size (per client; the read client has its own). |
 
 TTLs are the cache engine's own (finalized ~1h, non-finalized scaled to the chain's block

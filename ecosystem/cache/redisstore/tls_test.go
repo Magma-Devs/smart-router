@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -19,6 +20,46 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
 )
+
+// The context deadline must bound the TLS HANDSHAKE, not only the TCP dial.
+// go-redis's stock dialer takes the ctx-less tls.DialWithDialer branch for
+// TLS, under which a black-holed endpoint (accepts, never handshakes) keeps
+// the dial attempt alive for the full dial-timeout — 5s by go-redis default.
+//
+// The layer matters: the CALLER of a command was already bounded (go-redis's
+// ctx machinery returns deadline-exceeded to it on time either way — verified
+// empirically), but the pool's dialConn runs the dialer synchronously, so the
+// ATTEMPT itself kept burning its full timeout underneath: the pool slot stays
+// held, retries serialize behind it, and the 10s-cadence health probe can
+// spend seconds per tick. That is why this test drives baseDialer directly —
+// the store-level latency does not discriminate, the dialer's does.
+// DialTimeout is set LONG on purpose so only the context's 150ms deadline can
+// be what ends the attempt.
+func TestTLSHandshakeBoundedByCallerContext(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lis.Close() })
+	go func() {
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			// Swallow the ClientHello, never answer: a handshake that stalls.
+			go func(c net.Conn) { _, _ = io.Copy(io.Discard, c) }(conn)
+		}
+	}()
+
+	dial := baseDialer(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = dial(ctx, "tcp", lis.Addr().String())
+	elapsed := time.Since(start)
+	require.Error(t, err, "a stalled handshake must fail, not hang")
+	require.Less(t, elapsed, 2*time.Second,
+		"the context's 150ms deadline must bound the handshake — the 5s DialTimeout must not be the effective limit")
+}
 
 // testPKI is a throwaway CA with a server and a client leaf, written as PEM
 // files so the file-based TLSConfig surface is exercised end to end.

@@ -57,40 +57,48 @@ func listenLocal(t *testing.T) net.Listener {
 // The endpoint tracker must name the DATA node, never a sentinel.
 //
 // go-redis reuses FailoverOptions.Dialer for the sentinel control-plane
-// connections, so an unfiltered tracking dialer records sentinel addresses
-// alongside the master's — last write wins, and sentinels re-dial at arbitrary
-// times (discovery, the +switch-master subscription). That makes
-// Lava-Cache-Backend, the header a failover is observed through, nondeterministic.
-func TestSentinelAddressesAreNotRecordedAsTheDataNode(t *testing.T) {
-	sentinel := listenLocal(t)
+// connections — including sentinels DISCOVERED at runtime (SENTINEL sentinels
+// reports peers as IPs, so no exclude list built from configured hostnames can
+// name them) — and sentinels re-dial at arbitrary times. That would make
+// Lava-Cache-Backend, the header a failover is observed through,
+// nondeterministic. The fix discriminates by which CLIENT dials: the failover
+// client's hook chain (markDataDialsHook, installed by buildClient) stamps
+// data-path dials, and the sentinel tracker records marked dials only. This
+// test drives exactly that composition: the marked path is the hook's DialHook
+// wrapped around the dialer, the unmarked path is the raw dialer — which is
+// precisely how go-redis reaches it for sentinel connections.
+func TestSentinelTrackerRecordsOnlyMarkedDataDials(t *testing.T) {
+	discoveredSentinel := listenLocal(t) // in NO configured list — the exclude-list approach missed these
 	master := listenLocal(t)
-	sentinelAddr, masterAddr := sentinel.Addr().String(), master.Addr().String()
+	sentinelAddr, masterAddr := discoveredSentinel.Addr().String(), master.Addr().String()
 
 	tracker := &endpointTracker{}
-	dial := trackingDialerExcluding(nil, time.Second, tracker, []string{sentinelAddr})
+	dial := trackingDialerMarkedOnly(nil, time.Second, tracker)
+	markedDial := markDataDialsHook{}.DialHook(dial)
 
-	dialOnce := func(addr string) {
+	dialOnce := func(dialFunc func(context.Context, string, string) (net.Conn, error), addr string) {
 		t.Helper()
-		conn, err := dial(context.Background(), "tcp", addr)
+		conn, err := dialFunc(context.Background(), "tcp", addr)
 		require.NoError(t, err)
 		_ = conn.Close()
 	}
 
-	dialOnce(sentinelAddr)
-	require.Empty(t, tracker.current(), "a sentinel dial must not be recorded as the data node")
+	dialOnce(dial, sentinelAddr)
+	require.Empty(t, tracker.current(),
+		"an unmarked (control-plane) dial must not be recorded, whatever its address")
 
-	dialOnce(masterAddr)
-	require.Equal(t, masterAddr, tracker.current(), "the data node is what the tracker names")
+	dialOnce(markedDial, masterAddr)
+	require.Equal(t, masterAddr, tracker.current(), "a marked (data) dial is what the tracker names")
 
-	dialOnce(sentinelAddr)
+	dialOnce(dial, sentinelAddr)
 	require.Equal(t, masterAddr, tracker.current(),
-		"a later sentinel re-dial must not clobber the recorded master — this is the "+
-			"nondeterminism that makes the failover header untrustworthy")
+		"a later control-plane re-dial — e.g. a runtime-discovered sentinel — must not "+
+			"clobber the recorded master; this is the nondeterminism the static exclude list left open")
 }
 
-// The unfiltered dialer still records everything it dials; standalone and
-// cluster depend on that.
-func TestTrackingDialerRecordsWhenNothingIsExcluded(t *testing.T) {
+// The plain dialer records everything it dials; standalone and cluster depend
+// on that (every dial there is a data dial).
+func TestTrackingDialerRecordsEveryDial(t *testing.T) {
 	node := listenLocal(t)
 	tracker := &endpointTracker{}
 	dial := trackingDialer(nil, time.Second, tracker)

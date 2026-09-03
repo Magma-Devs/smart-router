@@ -204,41 +204,105 @@ func (cfg Config) sentinelPassword() (string, error) {
 // Config → go-redis options mapping (pure, so tests assert it directly)
 // ---------------------------------------------------------------------------
 
-// trackingDialer wraps go-redis's own dialer so the store learns which address
-// it actually connected to. It delegates to redis.NewDialer rather than dialing
-// itself, because that is where TLS negotiation lives — hand-rolling the dial
-// here would silently drop TLS.
-//
-// This is the only way to name the serving node: the configured address is the
-// sentinel set (not the master) under sentinel, and a discovery seed (not the
-// shard) under cluster.
-func trackingDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
-	return trackingDialerExcluding(tlsCfg, dialTimeout, tracker, nil)
+// DefaultDialTimeout bounds a fresh connection's dial and handshake when the
+// config leaves dial-timeout unset. go-redis's own default is 5 seconds —
+// sized for batch clients, not for a dialer on the relay path, where every
+// cold lookup against a black-holed backend pays the full dial budget (one
+// per pool slot) before degrading to a miss.
+const DefaultDialTimeout = 500 * time.Millisecond
+
+func (cfg Config) dialTimeout() time.Duration {
+	if cfg.DialTimeout <= 0 {
+		return DefaultDialTimeout
+	}
+	return cfg.DialTimeout
 }
 
-// trackingDialerExcluding is trackingDialer with a set of addresses whose dials
-// are made but never recorded.
-//
-// Sentinel needs this. go-redis copies FailoverOptions.Dialer verbatim into the
-// options it builds for the SENTINEL control-plane connections
-// (sentinelOptions, sentinel.go), so a plain tracking dialer records sentinel
-// addresses alongside the master's — last write wins, and the sentinels re-dial
-// at arbitrary times (discovery, the +switch-master subscription). The tracker
-// feeds the Lava-Cache-Backend header, which is how a failover is observed, so
-// an unfiltered tracker turns that signal into a coin flip. FailoverOptions
-// exposes no separate sentinel dialer, so filtering here is the available fix.
-func trackingDialerExcluding(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker, exclude []string) func(context.Context, string, string) (net.Conn, error) {
-	base := redis.NewDialer(&redis.Options{TLSConfig: tlsCfg, DialTimeout: dialTimeout})
-	excluded := make(map[string]struct{}, len(exclude))
-	for _, addr := range exclude {
-		excluded[addr] = struct{}{}
+// baseDialer is the transport dialer every client variant shares. It exists
+// instead of redis.NewDialer for one reason: go-redis's TLS branch is the
+// ctx-less tls.DialWithDialer, so a caller's context deadline bounds a
+// plaintext dial but never a TLS handshake — a black-holed (SYN-dropped) TLS
+// endpoint then costs every cold lookup the full DialTimeout instead of the
+// relay's cache budget. tls.Dialer.DialContext threads the context through
+// both the TCP dial and the handshake; whichever bound (context deadline or
+// DialTimeout) is sooner applies.
+func baseDialer(tlsCfg *tls.Config, dialTimeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
+	netDialer := &net.Dialer{Timeout: dialTimeout}
+	if tlsCfg == nil {
+		return func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return netDialer.DialContext(ctx, network, addr)
+		}
 	}
+	tlsDialer := &tls.Dialer{NetDialer: netDialer, Config: tlsCfg}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return tlsDialer.DialContext(ctx, network, addr)
+	}
+}
+
+// trackingDialer records every successful dial so the store learns which
+// address it actually connected to — the standalone/cluster tracker, where
+// every dial is a data dial (cluster discovery dials ARE cluster nodes).
+//
+// This is the only way to name the serving node: the configured address is a
+// discovery seed (not the shard) under cluster.
+func trackingDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
+	base := baseDialer(tlsCfg, dialTimeout)
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		conn, err := base(ctx, network, addr)
 		if err == nil {
-			if _, isExcluded := excluded[addr]; !isExcluded {
-				tracker.note(addr)
-			}
+			tracker.note(addr)
+		}
+		return conn, err
+	}
+}
+
+// dataDialMarkKey is the context key markDataDialsHook stamps on every dial
+// that traverses the failover client's own hook chain.
+type dataDialMarkKey struct{}
+
+// markDataDialsHook marks data-path dials so trackingDialerMarkedOnly can tell
+// them apart from sentinel control-plane dials.
+//
+// Why a hook and not an address list: go-redis copies FailoverOptions.Dialer
+// verbatim into the options it builds for the SENTINEL control-plane
+// connections (sentinelOptions), and discoverSentinels APPENDS every peer the
+// quorum reports — as IPs, while configs seed hostnames — so a static exclude
+// list built from the configured addresses always misses the discovered peers,
+// and the tracker records a sentinel after all (last write wins; sentinels
+// re-dial at arbitrary times). The tracker feeds the Lava-Cache-Backend
+// header, which is how a failover is observed, so that pollution turns the
+// signal into a coin flip.
+//
+// The hook discriminates by WHICH CLIENT dials instead of by how an address is
+// spelled: NewFailoverClient builds its data pool through the returned
+// client's own hook chain (rdb.dialHook wraps the pool's dials), while the
+// internal sentinel clients are separate *Clients built from sentinelOptions
+// that never traverse that chain. A dial carries the mark iff it is a data
+// dial — by construction, not by heuristic. buildClient installs the hook;
+// trackingDialerMarkedOnly is the other half of the pair.
+type markDataDialsHook struct{}
+
+func (markDataDialsHook) DialHook(next redis.DialHook) redis.DialHook {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return next(context.WithValue(ctx, dataDialMarkKey{}, struct{}{}), network, addr)
+	}
+}
+
+func (markDataDialsHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook { return next }
+
+func (markDataDialsHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// trackingDialerMarkedOnly records only dials carrying the data-dial mark —
+// the sentinel-topology tracker (see markDataDialsHook for why sentinel cannot
+// use the plain trackingDialer).
+func trackingDialerMarkedOnly(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
+	base := baseDialer(tlsCfg, dialTimeout)
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := base(ctx, network, addr)
+		if err == nil && ctx.Value(dataDialMarkKey{}) != nil {
+			tracker.note(addr)
 		}
 		return conn, err
 	}
@@ -246,12 +310,12 @@ func trackingDialerExcluding(tlsCfg *tls.Config, dialTimeout time.Duration, trac
 
 func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.Options {
 	return &redis.Options{
-		Dialer:                       trackingDialer(tlsCfg, cfg.DialTimeout, tracker),
+		Dialer:                       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
 		Addr:                         addrs[0],
 		DB:                           cfg.DB,
 		StreamingCredentialsProvider: provider,
 		TLSConfig:                    tlsCfg,
-		DialTimeout:                  cfg.DialTimeout,
+		DialTimeout:                  cfg.dialTimeout(),
 		ReadTimeout:                  cfg.ReadTimeout,
 		WriteTimeout:                 cfg.WriteTimeout,
 		PoolSize:                     cfg.PoolSize,
@@ -273,10 +337,12 @@ func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider
 func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source CredentialsSource, sentinelPassword string, tracker *endpointTracker) *redis.FailoverOptions {
 	return &redis.FailoverOptions{
 		// Records the DATA-node address — whichever node currently holds the
-		// master role, which changes on every failover. The sentinel addresses
-		// are excluded because this same dialer is reused for the sentinel
-		// control-plane connections; see trackingDialerExcluding.
-		Dialer:           trackingDialerExcluding(tlsCfg, cfg.DialTimeout, tracker, addrs),
+		// master role, which changes on every failover. This same dialer is
+		// reused verbatim for the sentinel control-plane connections (including
+		// runtime-DISCOVERED sentinels no config list can name), so it records
+		// only dials carrying the data-dial mark stamped by markDataDialsHook —
+		// which buildClient installs on the failover client's hook chain.
+		Dialer:           trackingDialerMarkedOnly(tlsCfg, cfg.dialTimeout(), tracker),
 		MasterName:       cfg.MasterName,
 		SentinelAddrs:    addrs,
 		SentinelUsername: cfg.SentinelUsername,
@@ -286,7 +352,7 @@ func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source Cre
 			return source.Credentials()
 		},
 		TLSConfig:    tlsCfg,
-		DialTimeout:  cfg.DialTimeout,
+		DialTimeout:  cfg.dialTimeout(),
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		PoolSize:     cfg.PoolSize,
@@ -297,11 +363,11 @@ func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source Cre
 
 func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.ClusterOptions {
 	return &redis.ClusterOptions{
-		Dialer:                       trackingDialer(tlsCfg, cfg.DialTimeout, tracker),
+		Dialer:                       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
 		Addrs:                        addrs,
 		StreamingCredentialsProvider: provider,
 		TLSConfig:                    tlsCfg,
-		DialTimeout:                  cfg.DialTimeout,
+		DialTimeout:                  cfg.dialTimeout(),
 		ReadTimeout:                  cfg.ReadTimeout,
 		WriteTimeout:                 cfg.WriteTimeout,
 		PoolSize:                     cfg.PoolSize,
@@ -318,7 +384,12 @@ func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, provider *Stre
 		if err != nil {
 			return nil, err
 		}
-		return redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, cfg.credentialsSource(), sentinelPassword, tracker)), nil
+		client := redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, cfg.credentialsSource(), sentinelPassword, tracker))
+		// The mark half of the tracker pair (trackingDialerMarkedOnly is the
+		// other): this hook chain wraps only the returned client's own data-pool
+		// dials, never the internal sentinel clients' — see markDataDialsHook.
+		client.AddHook(markDataDialsHook{})
+		return client, nil
 	case TopologyCluster:
 		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, provider, tracker)), nil
 	default:
