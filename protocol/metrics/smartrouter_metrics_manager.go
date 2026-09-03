@@ -105,11 +105,11 @@ type SmartRouterMetricsManager struct {
 	incidentHedgeFailedMetric         *prometheus.CounterVec   // smartrouter_hedge_failed_total        {spec, apiInterface, method}
 	incidentHedgeAttemptsHistogram    *prometheus.HistogramVec // smartrouter_hedge_attempts            {spec, apiInterface, method}
 
-	// Cache group metrics (labels: spec, apiInterface, method)
+	// Cache group metrics (labels: spec, apiInterface, method, cache_tier; failed adds outcome)
 	cacheRequestsTotalMetric *prometheus.CounterVec   // smartrouter_cache_requests_total
 	cacheSuccessTotalMetric  *prometheus.CounterVec   // smartrouter_cache_success_total
-	cacheFailedTotalMetric   *prometheus.CounterVec   // smartrouter_cache_failed_total
-	cacheLatencyHistogram    *prometheus.HistogramVec // smartrouter_cache_latency_milliseconds
+	cacheFailedTotalMetric   *prometheus.CounterVec   // smartrouter_cache_failed_total {…, outcome=miss|error|timeout}
+	cacheLatencyHistogram    *prometheus.HistogramVec // smartrouter_cache_latency_milliseconds — observed on EVERY attempted lookup
 
 	// CSM state-store size gauges (labels: spec, apiInterface). Expose otherwise
 	// black-box internal state so integration tests can verify /debug/reset-all
@@ -582,22 +582,22 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help: `Label normalizations that fell into method="Default-other": the spec exhausted its distinct unmatched-API name budget. Sustained growth means clients are hitting URLs the spec does not match — concrete IDs in the path mint a new name per request — which usually indicates a spec gap (e.g. a path variant the templates miss).`,
 	}, []string{"spec"})
 
-	cacheLabels := []string{"spec", "apiInterface", "method"}
+	cacheLabels := []string{"spec", "apiInterface", "method", "cache_tier"}
 	cacheRequestsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_requests_total",
-		Help: "Total number of cache lookup attempts.",
+		Help: "Total number of cache lookup attempts, per cache tier (primary|secondary). Skipped/inactive tiers are not counted.",
 	}, cacheLabels)
 	cacheSuccessTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_success_total",
-		Help: "Total number of cache lookups that returned a cached response (hits).",
+		Help: "Total number of cache lookups that returned a cached response (hits), per cache tier.",
 	}, cacheLabels)
 	cacheFailedTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_failed_total",
-		Help: "Total number of cache lookups that did not find a cached response (misses).",
-	}, cacheLabels)
+		Help: "Total number of cache lookups that did not produce a cached response, per cache tier, split by outcome (miss = clean not-found, error = transport/server error, timeout = lookup budget exceeded).",
+	}, append(append([]string{}, cacheLabels...), "outcome"))
 	cacheLatencyHistogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_cache_latency_milliseconds",
-		Help:    "Distribution of cache lookup latency in milliseconds.",
+		Help:    "Distribution of cache lookup latency in milliseconds, per cache tier, observed on every attempted lookup (hits and non-hits).",
 		Buckets: latencyBuckets,
 	}, cacheLabels)
 
@@ -1367,20 +1367,20 @@ func (m *SmartRouterMetricsManager) SetRelayNodeErrorMetric(chainId string, apiI
 	m.incidentNodeErrorsTotalMetric.WithLabelValues(chainId, apiInterface, providerAddress, method).Inc()
 }
 
-func (m *SmartRouterMetricsManager) RecordCacheResult(chainId, apiInterface, method string, hit bool, latencyMs float64) {
+func (m *SmartRouterMetricsManager) RecordCacheResult(chainId, apiInterface, method, cacheTier, outcome string, latencyMs float64) {
 	if m == nil {
 		return
 	}
 	method = m.normalizeMethodLabel(chainId, method)
-	m.cacheRequestsTotalMetric.WithLabelValues(chainId, apiInterface, method).Inc()
-	if hit {
-		m.cacheSuccessTotalMetric.WithLabelValues(chainId, apiInterface, method).Inc()
+	m.cacheRequestsTotalMetric.WithLabelValues(chainId, apiInterface, method, cacheTier).Inc()
+	if outcome == CacheOutcomeHit {
+		m.cacheSuccessTotalMetric.WithLabelValues(chainId, apiInterface, method, cacheTier).Inc()
 	} else {
-		m.cacheFailedTotalMetric.WithLabelValues(chainId, apiInterface, method).Inc()
+		m.cacheFailedTotalMetric.WithLabelValues(chainId, apiInterface, method, cacheTier, outcome).Inc()
 	}
-	if hit {
-		m.cacheLatencyHistogram.WithLabelValues(chainId, apiInterface, method).Observe(latencyMs)
-	}
+	// Every attempted lookup is observed — hit-only latency hid exactly the tail
+	// that matters for a network-hop tier.
+	m.cacheLatencyHistogram.WithLabelValues(chainId, apiInterface, method, cacheTier).Observe(latencyMs)
 }
 
 func (m *SmartRouterMetricsManager) SetProtocolError(chainId string, apiInterface string, providerAddress string, method string) {

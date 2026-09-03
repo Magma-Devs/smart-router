@@ -217,6 +217,52 @@ func TestParityLatestResolutionAndTipMonotonicity(t *testing.T) {
 	}
 }
 
+// Entry kind and writer-recorded status (the MAG-2596 wire contract) must
+// round-trip identically through both backends: the gRPC path persists them in
+// CacheValue, the RESP path in storedEnvelope. A backend that dropped either
+// would silently degrade the secondary-cache tier's backfill-eligibility checks
+// to the legacy CACHED_ERROR placeholder fallback — nothing at the call sites
+// would notice. This is the integration parity case for the two cache features.
+func TestParityEntryKindAndStatusRoundTrip(t *testing.T) {
+	for name, build := range parityBackends {
+		t.Run(name, func(t *testing.T) {
+			backend := build(t)
+			nodeErrHash := []byte("parity-kind-node-error")
+			okHash := []byte("parity-kind-success")
+
+			require.NoError(t, backend.SetEntry(context.Background(), &pairingtypes.RelayCacheSet{
+				RequestHash: nodeErrHash, ChainId: "ETH1",
+				RequestedBlock: 100, SeenBlock: 100, Finalized: false,
+				IsNodeError:      true,
+				StatusCode:       429,
+				AverageBlockTime: int64(12 * time.Second),
+				Response:         &pairingtypes.RelayReply{Data: []byte(`{"error":"execution reverted"}`), LatestBlock: 100},
+			}))
+			require.NoError(t, backend.SetEntry(context.Background(), &pairingtypes.RelayCacheSet{
+				RequestHash: okHash, ChainId: "ETH1",
+				RequestedBlock: 100, SeenBlock: 100, Finalized: false,
+				StatusCode:       203,
+				AverageBlockTime: int64(12 * time.Second),
+				Response:         &pairingtypes.RelayReply{Data: []byte(`{"result":"0x64"}`), LatestBlock: 100},
+			}))
+
+			require.Eventually(t, func() bool {
+				nodeErr := getForParity(t, backend, nodeErrHash, nil, 100, 100, false)
+				success := getForParity(t, backend, okHash, nil, 100, 100, false)
+				return nodeErr.GetReply() != nil && success.GetReply() != nil
+			}, 2*time.Second, 20*time.Millisecond, "both entries must become readable")
+
+			nodeErr := getForParity(t, backend, nodeErrHash, nil, 100, 100, false)
+			require.True(t, nodeErr.GetIsNodeError(), "entry kind must survive storage")
+			require.Equal(t, 429, nodeErr.GetStatusCode(), "writer-recorded status must survive storage")
+
+			success := getForParity(t, backend, okHash, nil, 100, 100, false)
+			require.False(t, success.GetIsNodeError(), "a success entry must not read as a node error")
+			require.Equal(t, 203, success.GetStatusCode())
+		})
+	}
+}
+
 func TestParityFlushClearsEverything(t *testing.T) {
 	for name, build := range parityBackends {
 		t.Run(name, func(t *testing.T) {

@@ -240,8 +240,8 @@ func (rpccl *RPCConsumerLogs) RecordEndToEndLatency(chainId string, apiInterface
 	rpccl.consumerMetricsManager.RecordEndToEndLatency(chainId, apiInterface, method, latencyMs)
 }
 
-func (rpccl *RPCConsumerLogs) RecordCacheResult(chainId, apiInterface, method string, hit bool, latencyMs float64) {
-	rpccl.consumerMetricsManager.RecordCacheResult(chainId, apiInterface, method, hit, latencyMs)
+func (rpccl *RPCConsumerLogs) RecordCacheResult(chainId, apiInterface, method, cacheTier, outcome string, latencyMs float64) {
+	rpccl.consumerMetricsManager.RecordCacheResult(chainId, apiInterface, method, cacheTier, outcome, latencyMs)
 }
 
 func (rpccl *RPCConsumerLogs) RecordProviderLatency(chainId string, apiInterface string, providerAddress string, method string, latencyMs float64) {

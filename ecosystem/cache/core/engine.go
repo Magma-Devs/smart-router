@@ -275,7 +275,7 @@ func (e *Engine) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCa
 	latestKnownBlock := int64(math.Max(float64(relayCacheSet.Response.LatestBlock), float64(relayCacheSet.SeenBlock)))
 
 	cacheKey := RelayKey(relayCacheSet.Finalized, relayCacheSet.ChainId, relayCacheSet.RequestHash, relayCacheSet.RequestedBlock)
-	cacheValue := NewEnvelope(relayCacheSet.Response, relayCacheSet.BlockHash, relayCacheSet.Finalized, relayCacheSet.OptionalMetadata, latestKnownBlock)
+	cacheValue := NewEnvelope(relayCacheSet.Response, relayCacheSet.BlockHash, relayCacheSet.Finalized, relayCacheSet.OptionalMetadata, latestKnownBlock, relayCacheSet.IsNodeError, relayCacheSet.StatusCode)
 	utils.LavaFormatDebug("Got Cache Set",
 		utils.Attribute{Key: "cacheKey", Value: cacheKey},
 		utils.Attribute{Key: "finalized", Value: relayCacheSet.Finalized},

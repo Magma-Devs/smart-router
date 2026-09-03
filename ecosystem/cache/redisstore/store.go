@@ -286,7 +286,14 @@ type storedEnvelope struct {
 	Hash             []byte                `json:"hash,omitempty"`
 	OptionalMetadata []relaytypes.Metadata `json:"optional_metadata,omitempty"`
 	SeenBlock        int64                 `json:"seen_block"`
-	IsCompressed     bool                  `json:"is_compressed"`
+	// IsNodeError / StatusCode mirror core.Envelope's entry-kind contract
+	// (MAG-2596): added as plain fields, no version bump — the repo's cache wire
+	// convention is JSON-additive (absent decodes to the zero value, which both
+	// fields define as "legacy unknown", and unknown fields are ignored), so
+	// entries written before this field set read back exactly as before.
+	IsNodeError  bool `json:"is_node_error,omitempty"`
+	StatusCode   int  `json:"status_code,omitempty"`
+	IsCompressed bool `json:"is_compressed"`
 }
 
 func encodeEnvelope(env *core.Envelope) ([]byte, error) {
@@ -296,6 +303,8 @@ func encodeEnvelope(env *core.Envelope) ([]byte, error) {
 		Hash:             env.Hash,
 		OptionalMetadata: env.OptionalMetadata,
 		SeenBlock:        env.SeenBlock,
+		IsNodeError:      env.IsNodeError,
+		StatusCode:       env.StatusCode,
 		IsCompressed:     env.IsCompressed,
 	})
 }
@@ -310,6 +319,8 @@ func decodeEnvelope(data []byte) (*core.Envelope, error) {
 		Hash:             stored.Hash,
 		OptionalMetadata: stored.OptionalMetadata,
 		SeenBlock:        stored.SeenBlock,
+		IsNodeError:      stored.IsNodeError,
+		StatusCode:       stored.StatusCode,
 		IsCompressed:     stored.IsCompressed,
 	}, nil
 }

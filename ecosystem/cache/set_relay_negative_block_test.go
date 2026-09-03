@@ -11,16 +11,7 @@ import (
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 
-func newCacheServerForTest(t *testing.T) *RelayerCacheServer {
-	t.Helper()
-	return &RelayerCacheServer{CacheServer: &CacheServer{
-		tempCache:                  newRistrettoForTest(t),
-		finalizedCache:             newRistrettoForTest(t),
-		blocksHashesToHeightsCache: newRistrettoForTest(t),
-		ExpirationFinalized:        time.Hour,
-		ExpirationNonFinalized:     500 * time.Millisecond,
-	}}
-}
+// newCacheServerForTest lives in helpers_test.go.
 
 // TestSetRelay_RejectsNegativeRequestedBlock pins the cache-server contract that
 // the smart router's tryCacheWrite guard relies on: SetRelay refuses every

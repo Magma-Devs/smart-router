@@ -25,7 +25,14 @@ type Envelope struct {
 	Hash             []byte
 	OptionalMetadata []relaytypes.Metadata
 	SeenBlock        int64
-	IsCompressed     bool
+	// IsNodeError persists RelayCacheSet.IsNodeError so GetRelay can report entry
+	// kind — before this the flag only selected the write TTL and was then lost,
+	// leaving readers unable to tell a cached node error from a success.
+	IsNodeError bool
+	// StatusCode persists the writer-recorded upstream HTTP status (zero = unknown,
+	// legacy writers) so readers can re-apply status-based eligibility rules.
+	StatusCode   int
+	IsCompressed bool
 }
 
 func (cv *Envelope) ToCacheReply() *relaytypes.CacheRelayReply {
@@ -42,6 +49,8 @@ func (cv *Envelope) ToCacheReply() *relaytypes.CacheRelayReply {
 		Reply:            &response,
 		OptionalMetadata: cv.OptionalMetadata,
 		SeenBlock:        cv.SeenBlock,
+		IsNodeError:      cv.IsNodeError,
+		StatusCode:       cv.StatusCode,
 	}
 }
 
@@ -52,7 +61,7 @@ func (cv *Envelope) Cost() int64 {
 // NewEnvelope builds the stored value for a SetRelay write. It mutates the
 // passed response in place — the provider signature is zeroed (never served
 // from cache) and Data is swapped for its gzip form when compression pays.
-func NewEnvelope(response *relaytypes.RelayReply, hash []byte, finalized bool, optionalMetadata []relaytypes.Metadata, seenBlock int64) Envelope {
+func NewEnvelope(response *relaytypes.RelayReply, hash []byte, finalized bool, optionalMetadata []relaytypes.Metadata, seenBlock int64, isNodeError bool, statusCode int) Envelope {
 	response.Sig = []byte{}
 
 	compressed, isCompressed, err := compressData(response.Data)
@@ -68,6 +77,8 @@ func NewEnvelope(response *relaytypes.RelayReply, hash []byte, finalized bool, o
 			Hash:             hash,
 			OptionalMetadata: optionalMetadata,
 			SeenBlock:        seenBlock,
+			IsNodeError:      isNodeError,
+			StatusCode:       statusCode,
 			IsCompressed:     isCompressed,
 		}
 	}
@@ -76,6 +87,8 @@ func NewEnvelope(response *relaytypes.RelayReply, hash []byte, finalized bool, o
 		Hash:             nil,
 		OptionalMetadata: optionalMetadata,
 		SeenBlock:        seenBlock,
+		IsNodeError:      isNodeError,
+		StatusCode:       statusCode,
 		IsCompressed:     isCompressed,
 	}
 }

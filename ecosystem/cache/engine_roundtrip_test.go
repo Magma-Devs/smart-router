@@ -37,7 +37,7 @@ func waitAllStores(cs *CacheServer) {
 	cs.blocksHashesToHeightsCache.Wait()
 }
 
-func setRelayForTest(t *testing.T, srv *RelayerCacheServer, finalized bool, hash, blockHash, data []byte, block, seenBlock int64) {
+func roundTripSet(t *testing.T, srv *RelayerCacheServer, finalized bool, hash, blockHash, data []byte, block, seenBlock int64) {
 	t.Helper()
 	_, err := srv.SetRelay(context.Background(), &relaytypes.RelayCacheSet{
 		RequestHash:      hash,
@@ -56,7 +56,7 @@ func TestRoundTripSetThenGet(t *testing.T) {
 	srv, cs := newRoundTripServer(t)
 	hash := []byte("req-hash-1")
 
-	setRelayForTest(t, srv, false, hash, nil, []byte(`{"result":"0x64"}`), 100, 100)
+	roundTripSet(t, srv, false, hash, nil, []byte(`{"result":"0x64"}`), 100, 100)
 	waitAllStores(cs)
 
 	reply, err := srv.GetRelay(context.Background(), &relaytypes.RelayCacheGet{
@@ -80,8 +80,8 @@ func TestRoundTripVariantCoexistence(t *testing.T) {
 	hash := []byte("req-hash-2")
 	blockHash := []byte("0xblockhash")
 
-	setRelayForTest(t, srv, false, hash, blockHash, []byte(`temp-variant`), 100, 100)
-	setRelayForTest(t, srv, true, hash, nil, []byte(`finalized-variant`), 100, 100)
+	roundTripSet(t, srv, false, hash, blockHash, []byte(`temp-variant`), 100, 100)
+	roundTripSet(t, srv, true, hash, nil, []byte(`finalized-variant`), 100, 100)
 	waitAllStores(cs)
 
 	getWith := func(finalized bool, bh []byte) *relaytypes.CacheRelayReply {
@@ -111,7 +111,7 @@ func TestRoundTripCompression(t *testing.T) {
 	// Compressible payload above the 1 KiB threshold.
 	data := bytes.Repeat([]byte(`{"result":"0x0"},`), 200)
 
-	setRelayForTest(t, srv, true, hash, nil, append([]byte{}, data...), 100, 100)
+	roundTripSet(t, srv, true, hash, nil, append([]byte{}, data...), 100, 100)
 	waitAllStores(cs)
 
 	stored, found := cs.finalizedCache.Get(core.RelayKey(true, "ETH1", hash, 100))
@@ -138,7 +138,7 @@ func TestRoundTripLatestResolution(t *testing.T) {
 	srv, cs := newRoundTripServer(t)
 	hash := []byte("req-hash-4")
 
-	setRelayForTest(t, srv, false, hash, nil, []byte(`latest-payload`), 100, 100)
+	roundTripSet(t, srv, false, hash, nil, []byte(`latest-payload`), 100, 100)
 	waitAllStores(cs)
 
 	reply, err := srv.GetRelay(context.Background(), &relaytypes.RelayCacheGet{

@@ -118,9 +118,9 @@ func TestClusterDocker(t *testing.T) {
 		require.NoError(t, store.SetHeight(ctx, core.HeightKey("ETH1", fmt.Sprintf("0xhash-%d", i)), int64(i), time.Hour))
 		require.NoError(t, foreign.SetHeight(ctx, core.HeightKey("ETH1", fmt.Sprintf("0xhash-%d", i)), int64(i), time.Hour))
 	}
-	env := core.NewEnvelope(&relaytypes.RelayReply{Data: []byte(`cluster-entry`)}, nil, false, nil, 100)
+	env := core.NewEnvelope(&relaytypes.RelayReply{Data: []byte(`cluster-entry`)}, nil, false, nil, 100, false, 0)
 	require.NoError(t, store.SetEntry(ctx, core.RelayKey(false, "ETH1", []byte{0x01}, 100), &env, time.Hour))
-	envF := core.NewEnvelope(&relaytypes.RelayReply{Data: []byte(`cluster-entry-f`)}, nil, true, nil, 100)
+	envF := core.NewEnvelope(&relaytypes.RelayReply{Data: []byte(`cluster-entry-f`)}, nil, true, nil, 100, false, 0)
 	require.NoError(t, store.SetEntry(ctx, core.RelayKey(true, "ETH1", []byte{0x01}, 100), &envF, time.Hour))
 
 	nodesWithKeys := 0

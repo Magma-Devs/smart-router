@@ -282,22 +282,27 @@ func TestRecordConsistencyStats(t *testing.T) {
 func TestRecordCacheResult(t *testing.T) {
 	tests := []struct {
 		name      string
+		tier      string
+		outcome   string
 		hit       bool
 		latencyMs float64
 	}{
-		{name: "cache hit", hit: true, latencyMs: 1.5},
-		{name: "cache miss", hit: false, latencyMs: 0.3},
-		{name: "zero latency", hit: true, latencyMs: 0},
+		{name: "primary cache hit", tier: "primary", outcome: "hit", hit: true, latencyMs: 1.5},
+		{name: "primary cache miss", tier: "primary", outcome: "miss", hit: false, latencyMs: 0.3},
+		{name: "secondary timeout", tier: "secondary", outcome: "timeout", hit: false, latencyMs: 50},
+		{name: "zero latency", tier: "primary", outcome: "hit", hit: true, latencyMs: 0},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			attrs := recordSpanWith(t, func(span trace.Span) {
-				RecordCacheResult(context.Background(), span, tc.hit, tc.latencyMs)
+				RecordCacheResult(context.Background(), span, tc.tier, tc.outcome, tc.hit, tc.latencyMs)
 			})
 
 			require.Equal(t, tc.hit, attrs[attrCacheHit].AsBool())
 			require.Equal(t, tc.latencyMs, attrs[attrCacheLatencyMs].AsFloat64())
+			require.Equal(t, tc.tier, attrs[attrCacheTier].AsString())
+			require.Equal(t, tc.outcome, attrs[attrCacheOutcome].AsString())
 		})
 	}
 }
@@ -312,7 +317,7 @@ func TestRecordCacheResult_BubblesToRelaySpan(t *testing.T) {
 	ctx = WithRelaySpan(ctx, relaySpan)
 	_, cacheSpan := tracer.Start(ctx, "smartrouter.CacheLookup")
 
-	RecordCacheResult(ctx, cacheSpan, true, 1.2)
+	RecordCacheResult(ctx, cacheSpan, "secondary", "hit", true, 1.2)
 
 	cacheSpan.End()
 	relaySpan.End()
@@ -321,19 +326,24 @@ func TestRecordCacheResult_BubblesToRelaySpan(t *testing.T) {
 	require.Len(t, spans, 2)
 
 	// Verify cache.hit landed on BOTH spans (the cache lookup child and the
-	// relay parent).
+	// relay parent), and the serving tier is stamped on both — the parent gets
+	// cache.tier only on a hit, identifying which cache served without a
+	// child-span walk.
 	for _, s := range spans {
-		var hit bool
-		var found bool
+		var hit, hitFound bool
+		var tier string
 		for _, attr := range s.Attributes {
-			if string(attr.Key) == attrCacheHit {
+			switch string(attr.Key) {
+			case attrCacheHit:
 				hit = attr.Value.AsBool()
-				found = true
-				break
+				hitFound = true
+			case attrCacheTier:
+				tier = attr.Value.AsString()
 			}
 		}
-		require.True(t, found, "cache.hit must be present on %s", s.Name)
+		require.True(t, hitFound, "cache.hit must be present on %s", s.Name)
 		require.True(t, hit, "cache.hit must be true on %s", s.Name)
+		require.Equal(t, "secondary", tier, "cache.tier must identify the serving tier on %s", s.Name)
 	}
 }
 

@@ -246,7 +246,7 @@ func TestGetRelayBatchesBlockHashLookups(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func seedEntry(store *fakeStore, finalized bool, chainId string, hash []byte, block, seenBlock int64, data []byte) {
-	env := NewEnvelope(&relaytypes.RelayReply{Data: data}, nil, finalized, nil, seenBlock)
+	env := NewEnvelope(&relaytypes.RelayReply{Data: data}, nil, finalized, nil, seenBlock, false, 0)
 	_ = store.SetEntry(context.Background(), RelayKey(finalized, chainId, hash, block), &env, time.Minute)
 }
 
@@ -326,7 +326,7 @@ func TestGetRelayHashValidation(t *testing.T) {
 	blockHash := []byte("0xblockhash")
 
 	seedWithBlockHash := func(store *fakeStore) {
-		env := NewEnvelope(&relaytypes.RelayReply{Data: []byte(`hashed`)}, blockHash, false, nil, 100)
+		env := NewEnvelope(&relaytypes.RelayReply{Data: []byte(`hashed`)}, blockHash, false, nil, 100, false, 0)
 		_ = store.SetEntry(context.Background(), RelayKey(false, "LAV1", hash, 100), &env, time.Minute)
 	}
 

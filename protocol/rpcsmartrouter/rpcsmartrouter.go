@@ -229,6 +229,8 @@ type RPCSmartRouter struct {
 type rpcSmartRouterStartOptions struct {
 	rpcEndpoints             []*lavasession.RPCEndpoint
 	cache                    performance.CacheBackend
+	secondaryCache           performance.CacheReader // optional read-only fallback tier (docs/SECONDARY-CACHE.md); nil when unconfigured
+	secondaryCacheTimeout    time.Duration
 	strategy                 provideroptimizer.Strategy
 	analyticsServerAddresses AnalyticsServerAddresses
 	cmdFlags                 common.ConsumerCmdFlags
@@ -2909,7 +2911,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// ServeRPCRequests. No single-node tip, no fire-and-forget poller per pod.
 
 	// Convert smartRouterIdentifier string to empty sdk.AccAddress for smart router
-	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, rpcSmartRouterMetrics, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
+	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, options.secondaryCache, options.secondaryCacheTimeout, rpcSmartRouterMetrics, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
 	if err != nil {
 		err = utils.LavaFormatError("failed serving rpc requests", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err
@@ -3231,6 +3233,55 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			if err != nil {
 				return utils.LavaFormatError("invalid cache backend configuration", err)
 			}
+
+			// Optional read-only secondary cache tier (docs/SECONDARY-CACHE.md).
+			// Deliberately independent of the primary: valid with cache-be unset.
+			secondaryCacheConfig := performance.SecondaryCacheConfig{
+				Address: viper.GetString(performance.SecondaryCacheFlagName),
+				Timeout: viper.GetDuration(performance.SecondaryCacheTimeoutFlagName),
+				Mode:    viper.GetString(performance.SecondaryCacheModeFlagName),
+			}
+			// The secondary tier's advisory warnings key on whether a PRIMARY
+			// exists — which, since the RESP backend landed, is no longer
+			// synonymous with cache-be: with resp-cache configured the RESP
+			// backend IS the primary the backfill writes through (tryCacheWrite
+			// goes through the CacheBackend seam), so "secondary without a
+			// primary: nothing backfills" would be false there. LoadRespCacheConfig
+			// is a pure read of the same viper the selection above used.
+			primaryAddressForSecondary := viper.GetString(performance.CacheFlagName)
+			if respConfig, respEnabled, _ := performance.LoadRespCacheConfig(viper.GetViper()); respEnabled {
+				primaryAddressForSecondary = strings.Join(respConfig.Addresses, ",")
+			}
+			secondaryWarnings, secondaryErr := secondaryCacheConfig.Validate(
+				primaryAddressForSecondary,
+				viper.IsSet(performance.SecondaryCacheTimeoutFlagName),
+				viper.IsSet(performance.SecondaryCacheModeFlagName),
+			)
+			if secondaryErr != nil {
+				return utils.LavaFormatError("invalid secondary cache configuration", secondaryErr)
+			}
+			for _, warning := range secondaryWarnings {
+				utils.LavaFormatWarning(warning, nil)
+			}
+			var secondaryCacheReader performance.CacheReader
+			if secondaryCacheConfig.Enabled() {
+				secondaryCache, err := performance.InitCache(ctx, secondaryCacheConfig.Address)
+				if err != nil {
+					// Same contract as the primary: never fatal — the client reconnects
+					// in the background and the tier is skipped until it is live.
+					utils.LavaFormatError("Failed To Connect to secondary cache at address", err, utils.Attribute{Key: "address", Value: secondaryCacheConfig.Address})
+				} else {
+					utils.LavaFormatInfo("secondary cache service connected", utils.Attribute{Key: "address", Value: secondaryCacheConfig.Address})
+				}
+				secondaryCacheReader = secondaryCache
+				// Startup visibility (PRD nice-to-have): one line with the
+				// full secondary configuration.
+				utils.LavaFormatInfo("secondary cache configured",
+					utils.Attribute{Key: "address", Value: secondaryCacheConfig.Address},
+					utils.Attribute{Key: "mode", Value: secondaryCacheConfig.Mode},
+					utils.Attribute{Key: "timeout", Value: secondaryCacheConfig.Timeout},
+				)
+			}
 			if strategyFlag.Strategy != provideroptimizer.StrategyBalanced {
 				utils.LavaFormatInfo("Working with selection strategy: " + strategyFlag.String())
 			}
@@ -3316,6 +3367,8 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			err = rpcSmartRouter.Start(ctx, &rpcSmartRouterStartOptions{
 				rpcEndpoints:             rpcEndpoints,
 				cache:                    cache,
+				secondaryCache:           secondaryCacheReader,
+				secondaryCacheTimeout:    secondaryCacheConfig.Timeout,
 				strategy:                 strategyFlag.Strategy,
 				analyticsServerAddresses: analyticsServerAddresses,
 				cmdFlags:                 consumerPropagatedFlags,
@@ -3357,6 +3410,9 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
 	cmdRPCSmartRouter.Flags().String(performance.RespCacheAddressesFlagName, "", "RESP-compatible (Redis/Valkey) cache backend address(es), comma-separated — enables the RESP backend, which takes precedence over cache-be. Standalone: the node address; sentinel: the sentinel addresses; cluster: the configuration endpoint. The full surface (TLS, credentials, read/write split) lives in the resp-cache config block")
 	cmdRPCSmartRouter.Flags().String(performance.RespCacheTopologyFlagName, "", "RESP cache topology: standalone (default), sentinel, or cluster")
+	cmdRPCSmartRouter.Flags().String(performance.SecondaryCacheFlagName, "", "address for an optional read-only secondary cache, queried when the primary cache produces no hit (docs/SECONDARY-CACHE.md)")
+	cmdRPCSmartRouter.Flags().Duration(performance.SecondaryCacheTimeoutFlagName, performance.DefaultSecondaryCacheTimeout, "per-lookup time budget for the secondary cache; an exceeded lookup is treated as a miss")
+	cmdRPCSmartRouter.Flags().String(performance.SecondaryCacheModeFlagName, performance.SecondaryCacheModeReadOnly, "secondary cache access mode; only read-only is supported")
 	cmdRPCSmartRouter.Flags().Int(relaycore.ConsistencyBlockGapFactorFlagName, 0, "consistency-relief: widen the consistency endpoint-lag gate (blockLagForQosSync x factor; default 2). Allowed [2,8]; out-of-range reverts to default.")
 	// Block-hash polling (fork detection) is OFF by default — see EnableForkDetectionFlagName
 	// for why. Process-wide, which matters because one process can serve several chains (see

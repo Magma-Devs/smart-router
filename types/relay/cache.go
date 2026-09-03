@@ -26,6 +26,18 @@ type CacheRelayReply struct {
 	OptionalMetadata      []Metadata           `json:"optional_metadata"`
 	SeenBlock             int64                `json:"seen_block"`
 	BlocksHashesToHeights []*BlockHashToHeight `json:"blocks_hashes_to_heights"`
+	// IsNodeError marks entries whose payload is a cached node error rather than a
+	// normal successful response. Absent on the wire from older cache servers, which
+	// decodes to false — consumers that must not treat a node error as a success
+	// (e.g. secondary-cache backfill) combine this with the legacy placeholder check
+	// (common.CachedErrorGUIDPlaceholder).
+	IsNodeError bool `json:"is_node_error"`
+	// StatusCode is the upstream HTTP status recorded when the entry was written.
+	// Zero means "unknown" (entry written by an older writer that did not record
+	// status) and retains the legacy assume-success semantics; readers that gate on
+	// status (e.g. the caching populator's 429/504/non-2xx checks) treat zero as
+	// no-signal rather than as a failure.
+	StatusCode int `json:"status_code"`
 }
 
 func (c *CacheRelayReply) GetReply() *RelayReply {
@@ -54,6 +66,20 @@ func (c *CacheRelayReply) GetBlocksHashesToHeights() []*BlockHashToHeight {
 		return c.BlocksHashesToHeights
 	}
 	return nil
+}
+
+func (c *CacheRelayReply) GetIsNodeError() bool {
+	if c != nil {
+		return c.IsNodeError
+	}
+	return false
+}
+
+func (c *CacheRelayReply) GetStatusCode() int {
+	if c != nil {
+		return c.StatusCode
+	}
+	return 0
 }
 
 // RelayCacheGet is the request message sent to the relay cache service.
@@ -138,6 +164,10 @@ type RelayCacheSet struct {
 	AverageBlockTime      int64                `json:"average_block_time"`
 	IsNodeError           bool                 `json:"is_node_error"`
 	BlocksHashesToHeights []*BlockHashToHeight `json:"blocks_hashes_to_heights"`
+	// StatusCode is the upstream HTTP status of the response being cached; zero when
+	// the writer does not know it (legacy writers, non-HTTP flows). See
+	// CacheRelayReply.StatusCode for reader semantics.
+	StatusCode int `json:"status_code"`
 }
 
 func (r *RelayCacheSet) GetRequestHash() []byte {
@@ -215,6 +245,13 @@ func (r *RelayCacheSet) GetIsNodeError() bool {
 		return r.IsNodeError
 	}
 	return false
+}
+
+func (r *RelayCacheSet) GetStatusCode() int {
+	if r != nil {
+		return r.StatusCode
+	}
+	return 0
 }
 
 func (r *RelayCacheSet) GetBlocksHashesToHeights() []*BlockHashToHeight {
