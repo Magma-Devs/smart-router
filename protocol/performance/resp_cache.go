@@ -176,11 +176,18 @@ func (cache *RespCache) CacheActive() bool {
 	return cache != nil
 }
 
-// GetEntry mirrors the gRPC cache server's reply contract exactly: the reply
-// is always non-nil with a nil inner Reply on a miss, and the error is nil —
-// including when the backend itself failed, which degrades to a miss so the
-// relay proceeds to the upstreams. Backend-level failures (never clean misses)
-// are counted on the resp_cache failure series, split error vs timeout.
+// GetEntry answers like the seam it replaces — the gRPC cache CLIENT: the
+// reply is always non-nil with a nil inner Reply on a miss, semantic miss
+// reasons (not-found, hash mismatch, seen-block rejection) are error-free, and
+// a failure of the BACKEND itself is returned alongside the reply, exactly as
+// the client surfaces a transport error. The call site already degrades any
+// error to a miss, so relays still proceed to the upstreams — but it also
+// labels the lookup (ClassifyCacheLookupOutcome reads through the errors.Join
+// to context.DeadlineExceeded), so swallowing the store failure here would
+// report a backend outage as outcome="miss" in the outcome-labelled
+// smartrouter_cache_failed_total series, indistinguishable from a cold cache.
+// The failure is also counted on the resp_cache series, split error vs
+// timeout.
 func (cache *RespCache) GetEntry(ctx context.Context, relayCacheGet *pairingtypes.RelayCacheGet) (*pairingtypes.CacheRelayReply, error) {
 	if cache == nil {
 		return nil, NotInitializedError
@@ -188,6 +195,7 @@ func (cache *RespCache) GetEntry(ctx context.Context, relayCacheGet *pairingtype
 	reply, _, err := cache.engine.GetRelay(ctx, relayCacheGet)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpGet, err)
+		return reply, err
 	}
 	return reply, nil
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -46,7 +47,14 @@ func degradedGet(t *testing.T, cache *RespCache, ctx context.Context) *pairingty
 		RequestedBlock: 100,
 		SeenBlock:      100,
 	})
-	require.NoError(t, err, "a failing backend must read as a miss, never an error")
+	if err != nil {
+		// A failing BACKEND reports its store failure — the call site degrades it
+		// to a miss but labels the outcome error/timeout instead of "miss"
+		// (swallowing it here was reviewed as misreporting an outage as a cold
+		// cache). Semantic misses against a healthy backend stay error-free.
+		require.ErrorIs(t, err, core.StoreError,
+			"the only error GetEntry may return is a store failure")
+	}
 	require.NotNil(t, reply)
 	return reply
 }
@@ -62,6 +70,33 @@ func TestRespCacheBackendDownAtStartup(t *testing.T) {
 	reply := degradedGet(t, cache, context.Background())
 	require.Nil(t, reply.GetReply(), "the relay proceeds to the upstreams on a dead backend")
 	require.GreaterOrEqual(t, delta(), float64(1), "the backend failure is counted, not swallowed")
+}
+
+// The returned store failure is what the call site's outcome classifier reads:
+// a dead backend must label outcome="error" in the shared
+// smartrouter_cache_failed_total series, never "miss" — the misreport that
+// swallowing the error here used to cause. A healthy backend's clean miss
+// stays error-free, so the classifier still reads it as a miss.
+func TestRespCacheStoreFailureClassifiesAsErrorNotMiss(t *testing.T) {
+	mr := miniredis.RunT(t)
+	deadAddr := mr.Addr()
+	mr.Close()
+	dead := respCacheOverAddr(t, deadAddr)
+
+	_, err := dead.GetEntry(context.Background(), &pairingtypes.RelayCacheGet{
+		RequestHash: []byte("degraded-hash"), ChainId: "ETH1", RequestedBlock: 100, SeenBlock: 100,
+	})
+	require.ErrorIs(t, err, core.StoreError, "a dead backend must surface the store failure")
+	require.Equal(t, metrics.CacheOutcomeError, metrics.ClassifyCacheLookupOutcome(err, false),
+		"a backend outage must classify as error, not miss")
+
+	healthy := respCacheOverAddr(t, miniredis.RunT(t).Addr())
+	reply, err := healthy.GetEntry(context.Background(), &pairingtypes.RelayCacheGet{
+		RequestHash: []byte("never-written"), ChainId: "ETH1", RequestedBlock: 100, SeenBlock: 100,
+	})
+	require.NoError(t, err, "a semantic miss must stay error-free")
+	require.Nil(t, reply.GetReply())
+	require.Equal(t, metrics.CacheOutcomeMiss, metrics.ClassifyCacheLookupOutcome(err, false))
 }
 
 func TestRespCacheBackendDiesMidRun(t *testing.T) {
@@ -102,9 +137,9 @@ func TestRespCacheSlowBackendTimesOutWithinBudget(t *testing.T) {
 		}
 	}()
 
-	// The handshake of a fresh connection is bounded by DialTimeout (a
-	// caller's context does not reach it) — which is exactly why the config
-	// carries per-op timeouts.
+	// Fresh-connection dials are bounded by the sooner of dial-timeout and the
+	// caller's deadline (redisstore's baseDialer); the explicit tight timeouts
+	// here keep every phase of the attempt inside the test's budget.
 	store, err := redisstore.New(redisstore.Config{
 		Addresses:    []string{lis.Addr().String()},
 		DialTimeout:  200 * time.Millisecond,
