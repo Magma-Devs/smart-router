@@ -3517,11 +3517,29 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		// stored max(SeenBlock, Reply.LatestBlock) — a follow-up GET at key N with
 		// SeenBlock=N rejects an entry stored with SeenBlock=N-1 as "smaller than
 		// our expectations" (ecosystem/cache/handlers.go GetRelay), which would make
-		// the backfill invisible to the very lookup it was written for. The resolved
-		// block came from the LOCAL guarded tip at lookup time — never the foreign
-		// reply's SeenBlock — so lifting the SET's validity floor to it stays inside
-		// the local trust boundary.
-		seenBlock = *resolvedBlock
+		// the backfill invisible to the very lookup it was written for.
+		//
+		// The lift is BOUNDED by the local gated tip, because resolvedBlock is only
+		// locally vouched for up to there. For a LATEST-tagged request it came from
+		// getLatestBlock() itself, so the bound never cuts it. For an explicit-block
+		// request it is the RAW user-requested height — vouched for by nothing but
+		// the foreign tier's willingness to answer that key — and SetRelay publishes
+		// max(Response.LatestBlock, SeenBlock) as the cache server's chain-level tip
+		// through a monotonic-max write that resolves LATEST/SAFE/FINALIZED/PENDING
+		// for the whole chain. Lifted past the local tip, one request at a far-future
+		// key would retarget negative-tag resolution on this router's own primary
+		// until expiry (TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip).
+		// Clamping costs the legitimate cases nothing: the entry still lands on its
+		// exact key, and it stays visible to its own follow-up GET because a
+		// requester's SeenBlock is a local parse-time value that cannot exceed the
+		// local tip this floor is clamped to.
+		lift := *resolvedBlock
+		if localTip := int64(rpcss.getLatestBlock()); lift > localTip {
+			lift = localTip
+		}
+		if lift > seenBlock {
+			seenBlock = lift
+		}
 	}
 
 	// Get shared state ID if enabled
