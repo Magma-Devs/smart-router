@@ -2,6 +2,7 @@ package redisstore
 
 import (
 	"context"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -94,6 +95,44 @@ func TestSentinelTrackerRecordsOnlyMarkedDataDials(t *testing.T) {
 	require.Equal(t, masterAddr, tracker.current(),
 		"a later control-plane re-dial — e.g. a runtime-discovered sentinel — must not "+
 			"clobber the recorded master; this is the nondeterminism the static exclude list left open")
+}
+
+// The wiring half the mechanism test above cannot see: through the REAL New()
+// construction, sentinel control-plane dials must leave the endpoint tracker
+// untouched. The fake listener stands in for a sentinel — the TCP dial
+// SUCCEEDS (so an unmarked-but-recording dialer would note it) but no RESP
+// ever comes back, so discovery fails and Ping errors. If buildClient stopped
+// installing markDataDialsHook, or the tracker's mark check were dropped,
+// ReadEndpoint would name the fake sentinel here. The positive half — data
+// dials recorded through the real construction — needs a live master to dial
+// and lives in the docker sentinel drill and the sentinel demo lane.
+func TestNewSentinelWiringDoesNotRecordControlPlaneDials(t *testing.T) {
+	fakeSentinel := listenLocal(t)
+	go func() {
+		for {
+			conn, err := fakeSentinel.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) { _, _ = io.Copy(io.Discard, c) }(conn)
+		}
+	}()
+
+	store, err := New(Config{
+		Topology:    TopologySentinel,
+		Addresses:   []string{fakeSentinel.Addr().String()},
+		MasterName:  "mymaster",
+		DialTimeout: 500 * time.Millisecond,
+		ReadTimeout: 500 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.Error(t, store.Ping(ctx), "a sentinel that never answers cannot yield a master")
+	require.Empty(t, store.ReadEndpoint(),
+		"control-plane dials through the real construction must never be recorded as the data node")
 }
 
 // The plain dialer records everything it dials; standalone and cluster depend
