@@ -1,0 +1,45 @@
+# Cross-pod sticky-session test: one chain, four interchangeable upstreams.
+# All three router replicas run this same config, exactly as three pods of one
+# Deployment would.
+endpoints:
+  - network-address: "0.0.0.0:3360"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+
+# The fleet-wide sticky claim registry lives here. Paired with --shared-state,
+# this is what makes a sticky id resolve to one upstream across all three pods.
+cache-be: "cache:20100"
+
+# Four upstreams that are deliberately interchangeable: same head, same history.
+# The only thing distinguishing them is the name they stamp into replies, which is
+# how the driver sees which one served a request. `name` is the router's routing
+# identity, and it is what a sticky claim actually stores.
+direct-rpc:
+  - name: "node-a"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "http://node-a:8545"
+        timeout: 10s
+        skip-verifications: [pruning, tx-indexing, chain-id]
+  - name: "node-b"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "http://node-b:8545"
+        timeout: 10s
+        skip-verifications: [pruning, tx-indexing, chain-id]
+  - name: "node-c"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "http://node-c:8545"
+        timeout: 10s
+        skip-verifications: [pruning, tx-indexing, chain-id]
+  - name: "node-d"
+    chain-id: "ETH1"
+    api-interface: "jsonrpc"
+    node-urls:
+      - url: "http://node-d:8545"
+        timeout: 10s
+        skip-verifications: [pruning, tx-indexing, chain-id]
