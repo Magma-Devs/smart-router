@@ -49,6 +49,7 @@ func (NoOpConsumerMetrics) SetCSMBlockedProvidersByReason(string, string, map[st
 func (NoOpConsumerMetrics) SetCSMPreviousEpochBlockedProvidersCount(string, string, int)   {}
 func (NoOpConsumerMetrics) SetCSMBlockedBackupProvidersCount(string, string, int)          {}
 func (NoOpConsumerMetrics) SetCSMStickySessionsCount(string, string, int)                  {}
+func (NoOpConsumerMetrics) RecordStickyClaim(string, string, string)                       {}
 func (NoOpConsumerMetrics) SetCSMReportedProvidersCount(string, string, int)               {}
 func (NoOpConsumerMetrics) SetWsSubscriptionRequestMetric(string, string)                  {}
 func (NoOpConsumerMetrics) SetFailedWsSubscriptionRequestMetric(string, string)            {}
@@ -121,6 +122,8 @@ type ConsumerMetricsManagerInf interface {
 	SetCSMPreviousEpochBlockedProvidersCount(chainId, apiInterface string, count int)
 	SetCSMBlockedBackupProvidersCount(chainId, apiInterface string, count int)
 	SetCSMStickySessionsCount(chainId, apiInterface string, count int)
+	// RecordStickyClaim counts one cross-pod sticky-session claim resolution by outcome.
+	RecordStickyClaim(chainId, apiInterface, outcome string)
 	SetCSMReportedProvidersCount(chainId, apiInterface string, count int)
 
 	// --- WebSocket (DirectWSSubscriptionManager) ---
