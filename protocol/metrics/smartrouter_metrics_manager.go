@@ -114,14 +114,15 @@ type SmartRouterMetricsManager struct {
 	// CSM state-store size gauges (labels: spec, apiInterface). Expose otherwise
 	// black-box internal state so integration tests can verify /debug/reset-all
 	// emptied each store. See MAG-1762.
-	csmBlockedProvidersCount       *prometheus.GaugeVec // smartrouter_csm_blocked_providers
-	csmPrevEpochBlockedProviders   *prometheus.GaugeVec // smartrouter_csm_previous_epoch_blocked_providers
-	csmProviderBlocked             *prometheus.GaugeVec // smartrouter_csm_provider_blocked
-	csmBlockedProvidersByReason    *prometheus.GaugeVec // smartrouter_csm_blocked_providers_by_reason
-	csmBlockedBackupProvidersCount *prometheus.GaugeVec // smartrouter_csm_blocked_backup_providers
-	endpointServingTier            *prometheus.GaugeVec // smartrouter_endpoint_serving_tier
-	csmStickySessionsCount         *prometheus.GaugeVec // smartrouter_csm_sticky_sessions
-	csmReportedProvidersCount      *prometheus.GaugeVec // smartrouter_csm_reported_providers
+	csmBlockedProvidersCount       *prometheus.GaugeVec   // smartrouter_csm_blocked_providers
+	csmPrevEpochBlockedProviders   *prometheus.GaugeVec   // smartrouter_csm_previous_epoch_blocked_providers
+	csmProviderBlocked             *prometheus.GaugeVec   // smartrouter_csm_provider_blocked
+	csmBlockedProvidersByReason    *prometheus.GaugeVec   // smartrouter_csm_blocked_providers_by_reason
+	csmBlockedBackupProvidersCount *prometheus.GaugeVec   // smartrouter_csm_blocked_backup_providers
+	endpointServingTier            *prometheus.GaugeVec   // smartrouter_endpoint_serving_tier
+	csmStickySessionsCount         *prometheus.GaugeVec   // smartrouter_csm_sticky_sessions
+	csmStickyClaims                *prometheus.CounterVec // smartrouter_csm_sticky_claims_total
+	csmReportedProvidersCount      *prometheus.GaugeVec   // smartrouter_csm_reported_providers
 
 	// Router-scoped request group metrics (labels: spec, apiInterface, provider_address, method)
 	routerRequestsTotal      *prometheus.CounterVec
@@ -519,6 +520,15 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_csm_sticky_sessions",
 		Help: "Number of live sticky-session affinities tracked by the smart router. Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels)
+	csmStickyClaims := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_csm_sticky_claims_total",
+		Help: "Cross-pod sticky-session claim resolutions by outcome. " +
+			"local_hit: answered from this pod's confirmed table, no round trip. " +
+			"adopted: took a claim another pod had already made — the signal that cross-pod stickiness is doing its job, and zero here on a multi-replica fleet means it is wired but never firing. " +
+			"claimed: this pod made the claim. " +
+			"lost_race: claimed at the same moment as a peer and adopted the peer's winner. " +
+			"error: the claim could not be established, and the request was failed rather than served off an unverified pin.",
+	}, []string{"spec", "apiInterface", "outcome"})
 	csmReportedProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_reported_providers",
 		Help: "Number of providers currently in the ReportedProviders unresponsiveness register. Goes to 0 after /debug/reset-all.",
@@ -655,6 +665,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	csmBlockedProvidersByReason = registerOrReuse(csmBlockedProvidersByReason)
 	csmBlockedBackupProvidersCount = registerOrReuse(csmBlockedBackupProvidersCount)
 	csmStickySessionsCount = registerOrReuse(csmStickySessionsCount)
+	csmStickyClaims = registerOrReuse(csmStickyClaims)
 	csmReportedProvidersCount = registerOrReuse(csmReportedProvidersCount)
 	endpointServingTier = registerOrReuse(endpointServingTier)
 
@@ -753,6 +764,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		csmBlockedProvidersByReason:    csmBlockedProvidersByReason,
 		csmBlockedBackupProvidersCount: csmBlockedBackupProvidersCount,
 		csmStickySessionsCount:         csmStickySessionsCount,
+		csmStickyClaims:                csmStickyClaims,
 		csmReportedProvidersCount:      csmReportedProvidersCount,
 		endpointServingTier:            endpointServingTier,
 
@@ -1661,6 +1673,14 @@ func (m *SmartRouterMetricsManager) SetCSMStickySessionsCount(chainId, apiInterf
 		return
 	}
 	m.csmStickySessionsCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
+}
+
+// RecordStickyClaim counts one cross-pod sticky-session claim resolution by outcome.
+func (m *SmartRouterMetricsManager) RecordStickyClaim(chainId, apiInterface, outcome string) {
+	if m == nil {
+		return
+	}
+	m.csmStickyClaims.WithLabelValues(chainId, apiInterface, outcome).Inc()
 }
 
 // SetCSMReportedProvidersCount publishes the size of the ReportedProviders register.

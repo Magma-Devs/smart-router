@@ -57,8 +57,12 @@ type ConsumerSessionManager struct {
 	lock           sync.RWMutex
 	pairing        map[string]*ConsumerSessionsWithProvider // key == provider address
 	stickySessions *StickySessionStore
-	currentEpoch   uint64
-	numberOfResets uint64
+	// sharedSticky is the fleet-wide claim registry. Nil leaves stickiness pod-local, which is
+	// the pre-existing behaviour. stickyEpochDuration sizes a claim's backstop lifetime.
+	sharedSticky        SharedStickyStore
+	stickyEpochDuration time.Duration
+	currentEpoch        uint64
+	numberOfResets      uint64
 
 	// original pairingAddresses for current epoch
 	// contains all addresses from the initial pairing. and the keys are the indexes of the pairing query (these indexes are used for data reliability)
@@ -1619,6 +1623,23 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		}
 		internalPath = opts[0].InternalPath
 	}
+	// Cross-pod stickiness resolves BEFORE any lock is taken, because it may call the fleet
+	// store and no network round trip may happen while csm.lock is held.
+	//
+	// A resolved claim is then carried as selectedProvider rather than as stickiness. That is
+	// not a shortcut: under the fail-closed contract a fleet claim and a header-pinned provider
+	// have identical semantics — route here or fail — so reusing that path gives the guarantee
+	// exactly, and leaves the locked selection code untouched. With no store wired, stickiness
+	// passes through unchanged and keeps its pod-local meaning.
+	if stickiness != "" && csm.sharedSticky != nil {
+		resolved, stickyErr := csm.resolveStickyPin(ctx, stickiness, cuNeededForSession, requestedBlock, addon, common.GetExtensionNames(extensions), stateful)
+		if stickyErr != nil {
+			return nil, stickyErr
+		}
+		selectedProvider = resolved
+		stickiness = ""
+	}
+
 	// set usedProviders if they were chosen for this relay
 	timeoutCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
@@ -3767,4 +3788,128 @@ func (csm *ConsumerSessionManager) startStateSizesPublisher() {
 			csm.publishStateSizes()
 		}
 	}()
+}
+
+const (
+	// stickyStoreTimeout bounds each fleet-store call on the relay path. Under the fail-closed
+	// contract a timeout FAILS the request rather than degrading it, which cuts both ways: too
+	// short turns a briefly slow backend into refused traffic, too long spends the caller's
+	// relay budget before any upstream is contacted. The backend is an in-cluster hop, so this
+	// is generous for a healthy one and still well inside a normal relay deadline.
+	stickyStoreTimeout = 300 * time.Millisecond
+	// stickyClaimEpochSpan sizes a claim's backstop TTL in epochs. It must exceed the window the
+	// epoch rule accepts (an entry stays valid through the following epoch), or the store would
+	// drop claims that readers still honour — reopening the split this feature closes.
+	stickyClaimEpochSpan = 2
+
+	// Outcomes for smartrouter_csm_sticky_claims_total. A closed set, so the series stays bounded.
+	stickyOutcomeLocalHit = "local_hit"
+	stickyOutcomeAdopted  = "adopted"
+	stickyOutcomeClaimed  = "claimed"
+	stickyOutcomeLostRace = "lost_race"
+	stickyOutcomeError    = "error"
+)
+
+// SetSharedStickyStore wires the fleet-wide claim registry and the epoch length used to size a
+// claim's lifetime. Called once at construction; nil leaves stickiness pod-local.
+func (csm *ConsumerSessionManager) SetSharedStickyStore(store SharedStickyStore, epochDuration time.Duration) {
+	csm.sharedSticky = store
+	csm.stickyEpochDuration = epochDuration
+}
+
+// stickyEpochValid applies the same staleness rule the pod-local table applies when the pairing
+// refreshes: a claim survives the epoch it was made in and the one after it. Epochs come from
+// wall clock, so every pod reaches the same verdict without comparing clocks. Written as an
+// addition rather than a subtraction because epoch is unsigned and may legitimately be 0.
+func (csm *ConsumerSessionManager) stickyEpochValid(epoch uint64) bool {
+	return epoch+1 >= csm.atomicReadCurrentEpoch()
+}
+
+func (csm *ConsumerSessionManager) stickyClaimTTL() time.Duration {
+	return csm.stickyEpochDuration * stickyClaimEpochSpan
+}
+
+// stickyCandidate picks the upstream this pod would choose for a session it has never seen,
+// using the ordinary optimizer path. Held under the read lock only for the pick itself: the
+// fleet-store round trip that follows must never happen while csm.lock is held, or a slow
+// backend would stall pairing updates and provider blocking fleet-wide.
+func (csm *ConsumerSessionManager) stickyCandidate(ctx context.Context, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32) (string, error) {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	addresses, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "")
+	if err != nil {
+		return "", err
+	}
+	if len(addresses) == 0 {
+		return "", PairingListEmptyError
+	}
+	return addresses[0], nil
+}
+
+// resolveStickyPin turns a client's sticky id into the upstream the WHOLE FLEET routes it to.
+//
+// The fast path is a locally confirmed claim, which costs nothing: a confirmed claim cannot go
+// stale while the epoch rule still accepts it, because the store keeps it for longer than that
+// and first-writer-wins stops any peer claiming a different upstream in the meantime. Only a
+// pod that has never seen the session pays a round trip.
+//
+// Every failure is returned, never swallowed. Answering "no claim" when the truth is "could not
+// find out" would let this pod invent its own upstream while a peer routes the same session
+// elsewhere, which is the split cross-pod stickiness exists to remove.
+func (csm *ConsumerSessionManager) resolveStickyPin(ctx context.Context, stickiness string, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32) (string, error) {
+	if pin, ok := csm.stickySessions.Get(stickiness); ok && pin.Confirmed && csm.stickyEpochValid(pin.Epoch) {
+		csm.recordStickyOutcome(stickyOutcomeLocalHit)
+		return pin.Provider, nil
+	}
+
+	digest := StickyIDDigest(stickiness)
+	chainID := csm.rpcEndpoint.ChainID
+	apiInterface := csm.rpcEndpoint.ApiInterface
+
+	fetchCtx, cancelFetch := context.WithTimeout(ctx, stickyStoreTimeout)
+	provider, epoch, found, err := csm.sharedSticky.Fetch(fetchCtx, chainID, apiInterface, digest)
+	cancelFetch()
+	if err != nil {
+		csm.recordStickyOutcome(stickyOutcomeError)
+		return "", utils.LavaFormatWarning("sticky session: could not read the fleet claim", ErrStickyUnavailable,
+			utils.LogAttr("error", err), utils.LogAttr("chainID", chainID), utils.LogAttr("GUID", ctx))
+	}
+	if found && csm.stickyEpochValid(epoch) {
+		csm.stickySessions.Set(stickiness, &StickySession{Provider: provider, Epoch: epoch, Confirmed: true})
+		csm.recordStickyOutcome(stickyOutcomeAdopted)
+		return provider, nil
+	}
+
+	// Nobody holds a live claim, so this pod proposes one. The claim is what makes the choice
+	// fleet-wide; the local pick alone would only be this pod's opinion.
+	candidate, err := csm.stickyCandidate(ctx, cuNeededForSession, requestedBlock, addon, extensions, stateful)
+	if err != nil {
+		csm.recordStickyOutcome(stickyOutcomeError)
+		return "", err
+	}
+
+	publishCtx, cancelPublish := context.WithTimeout(ctx, stickyStoreTimeout)
+	winner, winnerEpoch, err := csm.sharedSticky.PublishIfAbsent(publishCtx, chainID, apiInterface, digest, candidate, csm.atomicReadCurrentEpoch(), csm.stickyClaimTTL())
+	cancelPublish()
+	if err != nil {
+		csm.recordStickyOutcome(stickyOutcomeError)
+		return "", utils.LavaFormatWarning("sticky session: could not claim an upstream for the fleet", ErrStickyUnavailable,
+			utils.LogAttr("error", err), utils.LogAttr("chainID", chainID), utils.LogAttr("GUID", ctx))
+	}
+	csm.recordStickyOutcome(map[bool]string{true: stickyOutcomeClaimed, false: stickyOutcomeLostRace}[winner == candidate])
+	if winner != candidate {
+		// A peer claimed this session first. Adopting its winner here — rather than using our
+		// own pick and letting the two pods disagree until the claim expires — is why the write
+		// returns the effective claim instead of a bare success.
+		utils.LavaFormatTrace("sticky session: adopting a peer's claim after losing the race",
+			utils.LogAttr("ourPick", candidate), utils.LogAttr("winner", winner), utils.LogAttr("GUID", ctx))
+	}
+	csm.stickySessions.Set(stickiness, &StickySession{Provider: winner, Epoch: winnerEpoch, Confirmed: true})
+	return winner, nil
+}
+
+// recordStickyOutcome publishes one claim resolution. The metrics manager is nil-safe, and
+// SafeMetrics guarantees a non-nil consumer, so this needs no guard of its own.
+func (csm *ConsumerSessionManager) recordStickyOutcome(outcome string) {
+	csm.consumerMetricsManager.RecordStickyClaim(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, outcome)
 }
