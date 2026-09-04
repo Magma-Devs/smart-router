@@ -345,3 +345,70 @@ func (r *EndpointObservationReply) GetAgeMs() int64 {
 	}
 	return 0
 }
+
+// StickySessionSet claims an upstream for one sticky session id so every router replica
+// resolves that id to the same node (cross-pod stickiness). The claim is FIRST-WRITER-WINS:
+// the server refuses to overwrite a live entry and replies with whatever is actually stored,
+// so a pod that lost the race learns the winner from its own write and can adopt it without a
+// second round trip. Last-write-wins was rejected deliberately — pods judge node health
+// locally, so pods with different health views would otherwise overwrite each other in a loop.
+//
+// StickyId is an opaque digest of the client's session id computed by the router. The raw id is
+// customer-supplied and may carry a user identifier, and the fleet only needs a stable key to
+// agree on, so the plaintext never crosses this wire.
+//
+// Provider is the provider NAME — the router's routing identity for an upstream, validated
+// unique per chain + api interface and identical on every pod running the same config. It is
+// never a node URL: those carry credentials.
+//
+// Epoch is the router epoch the claim was made in. Epochs are derived from wall clock, so every
+// pod computes the same number without coordinating, which lets a reader apply the same
+// staleness rule the pod-local pin table applies. TtlMs is only a backstop so a claim cannot
+// outlive its usefulness if nobody reads it; the epoch is what decides validity.
+type StickySessionSet struct {
+	ChainId      string `json:"chain_id"`
+	ApiInterface string `json:"api_interface"`
+	StickyId     string `json:"sticky_id"`
+	Provider     string `json:"provider"`
+	Epoch        uint64 `json:"epoch"`
+	TtlMs        int64  `json:"ttl_ms"`
+}
+
+// StickySessionGet asks the cache backend which upstream the fleet has pinned for one sticky
+// session id.
+type StickySessionGet struct {
+	ChainId      string `json:"chain_id"`
+	ApiInterface string `json:"api_interface"`
+	StickyId     string `json:"sticky_id"`
+}
+
+// StickySessionReply carries the EFFECTIVE pin — the entry the store actually holds after the
+// call. On a read, Found=false means no live claim exists (never made, or expired). On a write
+// it is never a miss: it is either the claim just accepted or the live claim that beat it, which
+// is what makes a lost race resolvable inside the request that caused it.
+type StickySessionReply struct {
+	Found    bool   `json:"found"`
+	Provider string `json:"provider"`
+	Epoch    uint64 `json:"epoch"`
+}
+
+func (r *StickySessionReply) GetFound() bool {
+	if r != nil {
+		return r.Found
+	}
+	return false
+}
+
+func (r *StickySessionReply) GetProvider() string {
+	if r != nil {
+		return r.Provider
+	}
+	return ""
+}
+
+func (r *StickySessionReply) GetEpoch() uint64 {
+	if r != nil {
+		return r.Epoch
+	}
+	return 0
+}

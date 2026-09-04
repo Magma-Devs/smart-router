@@ -15,6 +15,7 @@ const (
 	SharedTipPrefix      = "tip:"
 	ChainTipPrefix       = "chaintip:"
 	HeightPrefix         = "h2h:"
+	StickyPrefix         = "sticky:"
 )
 
 // RelayKey addresses one variant of a cached relay entry.
@@ -51,4 +52,13 @@ func ChainTipKey(chainId string) string {
 // HeightKey addresses a block-hash → height scalar.
 func HeightKey(chainId, blockHash string) string {
 	return HeightPrefix + chainId + ":" + blockHash
+}
+
+// StickyKey addresses a fleet-wide sticky-session pin. stickyId is a digest of the client's
+// session id computed by the router, never the plaintext: the raw id is customer-supplied and
+// may identify an end user, while the fleet only needs a stable string to agree on. The api
+// interface is part of the key because a session manager — and therefore an upstream name — is
+// scoped to one chain AND one api interface.
+func StickyKey(chainId, apiInterface, stickyId string) string {
+	return StickyPrefix + chainId + ":" + apiInterface + ":" + stickyId
 }
