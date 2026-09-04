@@ -27,14 +27,24 @@ type fakeStore struct {
 	// call regardless of key count, so a test can tell a batched lookup from a
 	// per-hash loop.
 	heightCalls int
+
+	// stickyPins backs the first-writer-wins claim surface. stickyTTLs records the TTL each
+	// claim was stored with, so a test can assert the engine clamped it.
+	stickyPins map[string]StickyPin
+	stickyTTLs map[string]time.Duration
+	// stickyErr, when set, makes both sticky operations fail — the "cannot determine the
+	// claim" path that callers must not mistake for "unclaimed".
+	stickyErr error
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		entries: map[string]*Envelope{},
-		ttls:    map[string]time.Duration{},
-		int64s:  map[string]int64{},
-		heights: map[string]int64{},
+		entries:    map[string]*Envelope{},
+		ttls:       map[string]time.Duration{},
+		int64s:     map[string]int64{},
+		stickyPins: map[string]StickyPin{},
+		stickyTTLs: map[string]time.Duration{},
+		heights:    map[string]int64{},
 	}
 }
 
@@ -54,6 +64,30 @@ func (f *fakeStore) SetEntry(ctx context.Context, key string, env *Envelope, ttl
 	f.entries[key] = env
 	f.ttls[key] = ttl
 	return nil
+}
+
+func (f *fakeStore) GetSticky(ctx context.Context, key string) (StickyPin, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stickyErr != nil {
+		return StickyPin{}, false, f.stickyErr
+	}
+	pin, ok := f.stickyPins[key]
+	return pin, ok, nil
+}
+
+func (f *fakeStore) SetStickyIfAbsent(ctx context.Context, key string, pin StickyPin, ttl time.Duration) (StickyPin, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stickyErr != nil {
+		return StickyPin{}, f.stickyErr
+	}
+	if existing, ok := f.stickyPins[key]; ok {
+		return existing, nil
+	}
+	f.stickyPins[key] = pin
+	f.stickyTTLs[key] = ttl
+	return pin, nil
 }
 
 func (f *fakeStore) GetInt64(ctx context.Context, key string) (int64, bool, error) {
