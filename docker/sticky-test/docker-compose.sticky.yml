@@ -1,0 +1,103 @@
+# Cross-pod sticky sessions, end to end.
+#
+#   docker/sticky-test/run.sh
+#
+# Shape: nginx (round-robin) -> 3 router replicas -> 4 interchangeable upstreams,
+# with one cache-be pod holding the fleet-wide sticky claims.
+#
+# The point of three replicas behind a plain round-robin ingress is that a sticky id
+# lands on a different pod almost every request. Before cross-pod stickiness each pod
+# answered from its own in-process table and the same id resolved to a different
+# upstream per pod; with it, all three agree.
+name: sticky-test
+
+x-node: &node
+  image: python:3.12-alpine
+  volumes:
+    - ./fake_node.py:/app/fake_node.py:ro
+  command: ["python3", "/app/fake_node.py"]
+  healthcheck:
+    test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8545/__stats')"]
+    interval: 3s
+    timeout: 3s
+    retries: 10
+
+x-router: &router
+  image: smart-router:dev
+  build:
+    context: ../..
+    dockerfile: docker/Dockerfile
+  volumes:
+    - ./router.yml:/smart-router/config/sticky/router.yml:ro
+  command:
+    - "config/sticky/router.yml"
+    - "--use-static-spec"
+    - "specs/"
+    # The operator signal for "this chain runs on several replicas behind one cache".
+    # Settable so the harness can run its own negative control: with
+    # STICKY_SHARED_STATE=false the feature is off, each pod falls back to its private
+    # affinity table, and the sticky phase MUST fail. A harness that passes either way
+    # is not measuring anything.
+    - "--shared-state=${STICKY_SHARED_STATE:-true}"
+    # Metrics default to disabled; the harness needs them to read the sticky claim
+    # outcomes, which are how an operator tells a wired feature from a firing one.
+    - "--metrics-listen-address"
+    - "0.0.0.0:7779"
+    - "--log-level"
+    - "${SR_LOG_LEVEL:-info}"
+    - "--skip-websocket-verification"
+  depends_on:
+    cache:
+      condition: service_healthy
+    node-a:
+      condition: service_healthy
+    node-b:
+      condition: service_healthy
+    node-c:
+      condition: service_healthy
+    node-d:
+      condition: service_healthy
+
+services:
+  node-a:
+    <<: *node
+    environment: [NODE_NAME=node-a]
+  node-b:
+    <<: *node
+    environment: [NODE_NAME=node-b]
+  node-c:
+    <<: *node
+    environment: [NODE_NAME=node-c]
+  node-d:
+    <<: *node
+    environment: [NODE_NAME=node-d]
+
+  cache:
+    image: smart-router:dev
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+    command: ["cache", "0.0.0.0:20100", "--metrics_address", "0.0.0.0:5555"]
+    healthcheck:
+      test: ["CMD", "/busybox/wget", "-qO-", "http://localhost:5555/metrics"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  router-a:
+    <<: *router
+    ports: ["7801:7779"]
+  router-b:
+    <<: *router
+    ports: ["7802:7779"]
+  router-c:
+    <<: *router
+    ports: ["7803:7779"]
+
+  ingress:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "18080:8080"
+    depends_on: [router-a, router-b, router-c]

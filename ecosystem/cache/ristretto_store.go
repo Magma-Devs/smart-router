@@ -181,6 +181,24 @@ func (r ristrettoStore) SetHeight(ctx context.Context, key string, height int64,
 // assumes no concurrent Set/Get; Wait() drains the asynchronous Set buffer so
 // a Set in flight at Clear time can't survive the flush and serve a hit on
 // the next Get. Nil-safe per store for partially initialised fixtures.
+func (r ristrettoStore) GetSticky(ctx context.Context, key string) (core.StickyPin, bool, error) {
+	if r.cs.stickyPins == nil {
+		return core.StickyPin{}, false, nil
+	}
+	pin, found := r.cs.stickyPins.get(key)
+	return pin, found, nil
+}
+
+func (r ristrettoStore) SetStickyIfAbsent(ctx context.Context, key string, pin core.StickyPin, ttl time.Duration) (core.StickyPin, error) {
+	if r.cs.stickyPins == nil {
+		// No store means no claim can be held, so the caller's own pin is trivially effective.
+		// Reporting it as the winner here would be a lie the caller cannot detect, so this is
+		// unreachable by construction (InitCache always builds one) and defensive only.
+		return pin, nil
+	}
+	return r.cs.stickyPins.setIfAbsent(key, pin, ttl), nil
+}
+
 func (r ristrettoStore) Purge(ctx context.Context) error {
 	if c := r.cs.tempCache; c != nil {
 		c.Clear()
@@ -193,6 +211,9 @@ func (r ristrettoStore) Purge(ctx context.Context) error {
 	if c := r.cs.blocksHashesToHeightsCache; c != nil {
 		c.Clear()
 		c.Wait()
+	}
+	if r.cs.stickyPins != nil {
+		r.cs.stickyPins.clear()
 	}
 	return nil
 }

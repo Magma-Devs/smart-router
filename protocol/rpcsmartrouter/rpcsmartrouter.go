@@ -2416,6 +2416,14 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Create active subscription provider storage for each unique chain
 	activeSubscriptionProvidersStorage := lavasession.NewActiveSubscriptionProvidersStorage()
 	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
+	// Cross-pod sticky sessions. Gated on --shared-state, the same operator signal the chain-tip
+	// and tracker-gate sharing use: "this chain runs on several replicas behind one cache". A
+	// single-replica router needs no registry, and its absence leaves stickiness pod-local.
+	// Claim lifetime is sized in epochs, which every pod derives from wall clock identically, so
+	// no clock agreement is needed between them.
+	if options.stateShare {
+		sessionManager.SetSharedStickyStore(performance.NewCacheStickyStore(options.cache), rpsr.epochTimer.GetEpochDuration())
+	}
 
 	// Set callback to get Lava blockchain block height for RelaySession.Epoch
 	// Smart router doesn't connect to blockchain, so calculate approximate block height from epoch
@@ -3476,7 +3484,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(common.CorsMethodsFlag, "GET,POST,PUT,DELETE,OPTIONS", "set up Allowed OPTIONS methods, defaults to: \"GET,POST,PUT,DELETE,OPTIONS\"")
 	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Lava-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
 	cmdRPCSmartRouter.Flags().String(common.CDNCacheDurationFlag, "86400", "set up preflight options response cache duration, default 86400 (24h in seconds)")
-	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache): the consumer consistency seen-block travels through either. The per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod) additionally require --cache-be — the RESP backend does not carry them, so a RESP-backed router polls locally and logs a warning (docs/RESP-CACHE.md)")
+	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache): the consumer consistency seen-block travels through either. The per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod) additionally require --cache-be — the RESP backend does not carry them, so a RESP-backed router polls locally and logs a warning (docs/RESP-CACHE.md). Cross-pod sticky sessions (a lava-stickiness id resolving to the same upstream on every replica) travel through either backend; without this flag stickiness stays pod-local")
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")

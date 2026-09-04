@@ -234,3 +234,23 @@ func (cache *RespCache) Close() error {
 	})
 	return err
 }
+
+// GetStickySession reads the fleet's sticky-session claim straight from the RESP store. The
+// gRPC backend reaches the same engine call over a cache-be hop; both satisfy
+// StickySessionBackend, so the router does not care which is configured.
+func (cache *RespCache) GetStickySession(ctx context.Context, chainId, apiInterface, stickyId string) (core.StickyPin, bool, error) {
+	if cache == nil {
+		return core.StickyPin{}, false, NotInitializedError
+	}
+	return cache.engine.GetSticky(ctx, chainId, apiInterface, stickyId)
+}
+
+// SetStickySessionIfAbsent claims an upstream for one sticky session id, first-writer-wins,
+// returning the effective claim. The RESP adapter resolves the race in a single atomic script,
+// so two routers claiming the same cold id cannot both win.
+func (cache *RespCache) SetStickySessionIfAbsent(ctx context.Context, chainId, apiInterface, stickyId string, pin core.StickyPin, ttl time.Duration) (core.StickyPin, error) {
+	if cache == nil {
+		return core.StickyPin{}, NotInitializedError
+	}
+	return cache.engine.SetStickyIfAbsent(ctx, chainId, apiInterface, stickyId, pin, ttl)
+}
