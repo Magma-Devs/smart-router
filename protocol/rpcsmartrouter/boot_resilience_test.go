@@ -178,7 +178,7 @@ func TestRetryIntervalFor(t *testing.T) {
 func TestSeedInitialHealth_DarkChainReportsUnhealthyImmediately(t *testing.T) {
 	// The monitor is optimistic by default, which would answer 200 on the health
 	// path for a chain that came up with nothing to serve from.
-	monitor := metrics.NewRelaysMonitor(time.Minute, "BSC", "jsonrpc")
+	monitor := metrics.NewRelaysMonitor(time.Minute, time.Minute, "BSC", "jsonrpc")
 	require.True(t, monitor.IsHealthy(), "default is optimistic")
 
 	monitor.SeedInitialHealth(false)

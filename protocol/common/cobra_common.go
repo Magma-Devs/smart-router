@@ -28,7 +28,11 @@ const (
 	CDNCacheDurationFlag    = "cdn-cache-duration"     // how long to cache the preflight response default 24 hours (in seconds) "86400"
 	RelaysHealthEnableFlag  = "relays-health-enable"   // enable relays health check, default true
 	RelayHealthIntervalFlag = "relays-health-interval" // interval between each relay health check, default 5m
-	SharedStateFlag         = "shared-state"
+	// interval between relay health checks while a chain is unhealthy, default 15s. Recovery of an
+	// unhealthy chain is only ever discovered by the health probe (a not-ready pod receives no real
+	// relays), so the probe tightens to this cadence until the chain is healthy again.
+	RelayHealthUnhealthyIntervalFlag = "relays-health-unhealthy-interval"
+	SharedStateFlag                  = "shared-state"
 	// SetRelayRetryLimitFlag controls the maximum number of retry attempts on relay errors
 	// (both node errors and protocol errors) for consumers and smart routers.
 	SetRelayRetryLimitFlag = "set-relay-retry-limit"
@@ -150,23 +154,24 @@ const (
 
 // helper struct to propagate flags deeper into the code in an organized manner
 type ConsumerCmdFlags struct {
-	HeadersFlag              string        // comma separated list of headers, or * for all, default simple cors specification headers
-	CredentialsFlag          string        // access-control-allow-credentials, defaults to "true"
-	OriginFlag               string        // comma separated list of origins, or * for all, default enabled completely
-	MethodsFlag              string        // whether to allow access control headers *, most proxies have their own access control so its not required
-	ExposeHeadersFlag        string        // Access-Control-Expose-Headers — response headers the browser is allowed to read (e.g. Lava-Provider-Address). Empty = none.
-	CDNCacheDuration         string        // how long to cache the preflight response defaults 24 hours (in seconds) "86400"
-	RelaysHealthEnableFlag   bool          // enables relay health check
-	RelaysHealthIntervalFlag time.Duration // interval for relay health check
-	DebugRelays              bool          // enables debug mode for relays
-	StaticSpecPaths          []string      // paths to spec sources (files, directories, or remote URLs). Later entries override earlier for same chain ID.
-	GitHubToken              string        // GitHub personal access token for accessing private repositories
-	GitLabToken              string        // GitLab personal access token for accessing private repositories
-	EpochDuration            time.Duration // duration of each epoch for time-based epoch system (standalone mode)
-	EnableSelectionStats     bool          // enables selection stats header for debugging provider selection
-	DebugAddress             string        // address for the debug HTTP server, e.g. ":9999". Empty = disabled.
-	ResponseCompression      string        // "gzip" (default), "brotli", or "off" — controls client-facing response compression
-	ShutdownGracePeriod      time.Duration // graceful shutdown deadline; passed to chain listeners and upstream cleanup
+	HeadersFlag                       string        // comma separated list of headers, or * for all, default simple cors specification headers
+	CredentialsFlag                   string        // access-control-allow-credentials, defaults to "true"
+	OriginFlag                        string        // comma separated list of origins, or * for all, default enabled completely
+	MethodsFlag                       string        // whether to allow access control headers *, most proxies have their own access control so its not required
+	ExposeHeadersFlag                 string        // Access-Control-Expose-Headers — response headers the browser is allowed to read (e.g. Lava-Provider-Address). Empty = none.
+	CDNCacheDuration                  string        // how long to cache the preflight response defaults 24 hours (in seconds) "86400"
+	RelaysHealthEnableFlag            bool          // enables relay health check
+	RelaysHealthIntervalFlag          time.Duration // interval for relay health check
+	RelaysHealthUnhealthyIntervalFlag time.Duration // probe interval while a chain is unhealthy (recovery detection latency)
+	DebugRelays                       bool          // enables debug mode for relays
+	StaticSpecPaths                   []string      // paths to spec sources (files, directories, or remote URLs). Later entries override earlier for same chain ID.
+	GitHubToken                       string        // GitHub personal access token for accessing private repositories
+	GitLabToken                       string        // GitLab personal access token for accessing private repositories
+	EpochDuration                     time.Duration // duration of each epoch for time-based epoch system (standalone mode)
+	EnableSelectionStats              bool          // enables selection stats header for debugging provider selection
+	DebugAddress                      string        // address for the debug HTTP server, e.g. ":9999". Empty = disabled.
+	ResponseCompression               string        // "gzip" (default), "brotli", or "off" — controls client-facing response compression
+	ShutdownGracePeriod               time.Duration // graceful shutdown deadline; passed to chain listeners and upstream cleanup
 }
 
 // default rolling logs behavior (if enabled) will store 3 files each 100MB for up to 1 day every time.
