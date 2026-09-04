@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
@@ -313,4 +314,62 @@ func (cache *Cache) GetEndpointObservation(ctx context.Context, get *pairingtype
 		cache.clientStore.resetOnConnectionError(err)
 	}
 	return reply, err
+}
+
+// GetStickySession reads the fleet's sticky-session claim for one session id. A miss is a reply
+// with Found=false, not an error; an error means the claim could not be determined, which callers
+// must not treat as "unclaimed" — inventing a claim there is exactly the cross-pod split that
+// sticky sessions exist to prevent.
+func (cache *Cache) GetStickySession(ctx context.Context, chainId, apiInterface, stickyId string) (core.StickyPin, bool, error) {
+	if cache == nil {
+		return core.StickyPin{}, false, NotInitializedError
+	}
+
+	client := cache.clientStore.getClient()
+	if client == nil {
+		return core.StickyPin{}, false, NotConnectedError
+	}
+
+	reply, err := client.GetStickySession(ctx, &pairingtypes.StickySessionGet{
+		ChainId:      chainId,
+		ApiInterface: apiInterface,
+		StickyId:     stickyId,
+	})
+	if err != nil {
+		cache.clientStore.resetOnConnectionError(err)
+		return core.StickyPin{}, false, err
+	}
+	if !reply.GetFound() {
+		return core.StickyPin{}, false, nil
+	}
+	return core.StickyPin{Provider: reply.GetProvider(), Epoch: reply.GetEpoch()}, true, nil
+}
+
+// SetStickySessionIfAbsent claims an upstream for one sticky session id, first-writer-wins, and
+// returns the EFFECTIVE claim: the one just accepted, or the live one that beat it. Unlike the
+// endpoint-observation publish this is NOT fire-and-forget — a lost publish would leave this pod
+// routing on a claim no peer knows about, which is the split the guarantee rules out.
+func (cache *Cache) SetStickySessionIfAbsent(ctx context.Context, chainId, apiInterface, stickyId string, pin core.StickyPin, ttl time.Duration) (core.StickyPin, error) {
+	if cache == nil {
+		return core.StickyPin{}, NotInitializedError
+	}
+
+	client := cache.clientStore.getClient()
+	if client == nil {
+		return core.StickyPin{}, NotConnectedError
+	}
+
+	reply, err := client.SetStickySession(ctx, &pairingtypes.StickySessionSet{
+		ChainId:      chainId,
+		ApiInterface: apiInterface,
+		StickyId:     stickyId,
+		Provider:     pin.Provider,
+		Epoch:        pin.Epoch,
+		TtlMs:        ttl.Milliseconds(),
+	})
+	if err != nil {
+		cache.clientStore.resetOnConnectionError(err)
+		return core.StickyPin{}, err
+	}
+	return core.StickyPin{Provider: reply.GetProvider(), Epoch: reply.GetEpoch()}, nil
 }

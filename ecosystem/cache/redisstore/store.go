@@ -569,6 +569,79 @@ func (s *Store) SetHeight(ctx context.Context, key string, height int64, ttl tim
 // multi-key UNLINK over a scan page would fail with CROSSSLOT in Cluster,
 // where multi-key operations require all keys in one hash slot. In Cluster
 // mode each master is scanned individually.
+// ---------------------------------------------------------------------------
+// Sticky-session pins
+// ---------------------------------------------------------------------------
+
+// A pin is stored as a JSON object so an upstream name may contain any character a config
+// allows — a delimiter-joined encoding would be ambiguous for a name containing the delimiter.
+type stickyPinValue struct {
+	Provider string `json:"provider"`
+	Epoch    uint64 `json:"epoch"`
+}
+
+// setStickyIfAbsentScript claims a key only when no live claim exists, and returns the
+// EFFECTIVE claim either way. It must stay a script rather than a GET-then-SET pair in the
+// adapter: resolving the race between two pods is the entire purpose, and two round trips
+// reintroduce the window the claim exists to close.
+//
+// Deliberately not `SET ... NX GET`, which would do this in one command: that form needs
+// Redis 6.2 or newer, and a script keeps the adapter working against the same backend range
+// as the rest of this file (and stays testable under miniredis).
+var setStickyIfAbsentScript = redis.NewScript(`
+local cur = redis.call('GET', KEYS[1])
+if cur then
+  return cur
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+return ARGV[1]
+`)
+
+func (s *Store) GetSticky(ctx context.Context, key string) (core.StickyPin, bool, error) {
+	raw, err := s.read.Get(ctx, s.key(key)).Result()
+	if err == redis.Nil {
+		return core.StickyPin{}, false, nil
+	}
+	if err != nil {
+		return core.StickyPin{}, false, err
+	}
+	pin, decodeErr := decodeStickyPin(raw)
+	if decodeErr != nil {
+		// Unlike the int64 tip — where a corrupt value reads as a miss so a foreign writer
+		// cannot disturb a backend shared with other tenants — a corrupt pin is surfaced. A
+		// miss here would tell the caller "no upstream is claimed for this session", which
+		// invents a free claim and splits the session: exactly the failure sticky sessions
+		// exist to prevent. Better to fail the request than to answer it from the wrong node.
+		return core.StickyPin{}, false, decodeErr
+	}
+	return pin, true, nil
+}
+
+func (s *Store) SetStickyIfAbsent(ctx context.Context, key string, pin core.StickyPin, ttl time.Duration) (core.StickyPin, error) {
+	if ttl < 0 {
+		ttl = 0
+	}
+	encoded, err := json.Marshal(stickyPinValue{Provider: pin.Provider, Epoch: pin.Epoch})
+	if err != nil {
+		return core.StickyPin{}, err
+	}
+	raw, err := setStickyIfAbsentScript.Run(ctx, s.write, []string{s.key(key)}, string(encoded), ttl.Milliseconds()).Text()
+	if err != nil {
+		return core.StickyPin{}, err
+	}
+	// The reply is whichever claim is now authoritative: ours, or the one that beat us.
+	return decodeStickyPin(raw)
+}
+
+func decodeStickyPin(raw string) (core.StickyPin, error) {
+	var value stickyPinValue
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		utils.LavaFormatError("corrupt sticky pin in RESP backend", err, utils.LogAttr("value", raw))
+		return core.StickyPin{}, err
+	}
+	return core.StickyPin{Provider: value.Provider, Epoch: value.Epoch}, nil
+}
+
 func (s *Store) Purge(ctx context.Context) error {
 	match := s.prefix + ":*"
 	if clusterClient, ok := s.write.(*redis.ClusterClient); ok {

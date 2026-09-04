@@ -19,6 +19,7 @@ var (
 	NotFoundError     = errors.New("cache entry for specific block and request wasn't found")
 	HashMismatchError = errors.New("cache entry for specific block and request had a mismatching hash stored")
 	EntryTypeError    = errors.New("cache entry for specific block and request had a mismatching object stored")
+	ErrEmptyStickyId  = errors.New("sticky session id is empty")
 	// StoreError marks a failure of the underlying KVStore itself (backend
 	// unreachable, timeout), as opposed to the semantic miss reasons above.
 	// Joined with the raw cause so errors.Is sees both this sentinel and the
@@ -307,4 +308,52 @@ func (e *Engine) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCa
 // Purge drops every entry in the underlying store.
 func (e *Engine) Purge(ctx context.Context) error {
 	return e.Store.Purge(ctx)
+}
+
+const (
+	// MinStickyTTL / MaxStickyTTL clamp the TTL a router asks for on a sticky pin. The floor
+	// guards a writer that computes a zero or negative TTL, which would publish a claim that is
+	// dead on arrival and let every pod believe it won. The ceiling stops a claim outliving the
+	// deployment that made it.
+	//
+	// Both are far wider than the endpoint-observation clamp on purpose: an observation is
+	// judged against a sub-second freshness window, while a sticky pin is judged against the
+	// router epoch (15 minutes by default). A five-minute ceiling would expire pins the epoch
+	// rule still accepts, which is the silent split this feature exists to remove.
+	MinStickyTTL = time.Minute
+	MaxStickyTTL = time.Hour
+)
+
+// ClampStickyTTL bounds a requested sticky TTL to [MinStickyTTL, MaxStickyTTL].
+func ClampStickyTTL(requested time.Duration) time.Duration {
+	if requested < MinStickyTTL {
+		return MinStickyTTL
+	}
+	if requested > MaxStickyTTL {
+		return MaxStickyTTL
+	}
+	return requested
+}
+
+// GetSticky reads the fleet's sticky pin for one session id.
+//
+// Unlike GetSharedTip, which reports a miss for a failed read because a missing chain tip only
+// costs the caller a local poll, this surfaces the error. A sticky pin is authoritative: telling
+// a caller "no upstream is claimed" when the truth is "we could not find out" invents a free
+// claim and splits the session, which is the failure the feature exists to prevent.
+func (e *Engine) GetSticky(ctx context.Context, chainId, apiInterface, stickyId string) (StickyPin, bool, error) {
+	if stickyId == "" {
+		return StickyPin{}, false, nil
+	}
+	return e.Store.GetSticky(ctx, StickyKey(chainId, apiInterface, stickyId))
+}
+
+// SetStickyIfAbsent claims an upstream for one sticky session id, first-writer-wins, and returns
+// the EFFECTIVE pin — the claim just accepted, or the live claim that beat it. A caller that
+// finds someone else's pin in the reply lost the race and should adopt what it was handed.
+func (e *Engine) SetStickyIfAbsent(ctx context.Context, chainId, apiInterface, stickyId string, pin StickyPin, ttl time.Duration) (StickyPin, error) {
+	if stickyId == "" {
+		return StickyPin{}, ErrEmptyStickyId
+	}
+	return e.Store.SetStickyIfAbsent(ctx, StickyKey(chainId, apiInterface, stickyId), pin, ClampStickyTTL(ttl))
 }

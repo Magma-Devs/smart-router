@@ -160,3 +160,45 @@ func (m *EndpointObservationReply) String() string {
 
 func (m *EndpointObservationReply) Marshal() ([]byte, error) { return json.Marshal(m) }
 func (m *EndpointObservationReply) Unmarshal(b []byte) error { return json.Unmarshal(b, m) }
+
+// ---------------------------------------------------------------------------
+// StickySessionSet
+// ---------------------------------------------------------------------------
+
+func (m *StickySessionSet) Reset()        { *m = StickySessionSet{} }
+func (m *StickySessionSet) ProtoMessage() {}
+func (m *StickySessionSet) String() string {
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+func (m *StickySessionSet) Marshal() ([]byte, error) { return json.Marshal(m) }
+func (m *StickySessionSet) Unmarshal(b []byte) error { return json.Unmarshal(b, m) }
+
+// ---------------------------------------------------------------------------
+// StickySessionGet
+// ---------------------------------------------------------------------------
+
+func (m *StickySessionGet) Reset()        { *m = StickySessionGet{} }
+func (m *StickySessionGet) ProtoMessage() {}
+func (m *StickySessionGet) String() string {
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+func (m *StickySessionGet) Marshal() ([]byte, error) { return json.Marshal(m) }
+func (m *StickySessionGet) Unmarshal(b []byte) error { return json.Unmarshal(b, m) }
+
+// ---------------------------------------------------------------------------
+// StickySessionReply
+// ---------------------------------------------------------------------------
+
+func (m *StickySessionReply) Reset()        { *m = StickySessionReply{} }
+func (m *StickySessionReply) ProtoMessage() {}
+func (m *StickySessionReply) String() string {
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+func (m *StickySessionReply) Marshal() ([]byte, error) { return json.Marshal(m) }
+func (m *StickySessionReply) Unmarshal(b []byte) error { return json.Unmarshal(b, m) }

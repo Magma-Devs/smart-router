@@ -2,7 +2,9 @@ package performance
 
 import (
 	"context"
+	"time"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
@@ -37,4 +39,26 @@ type BackendEndpointReporter interface {
 var (
 	_ BackendEndpointReporter = (*Cache)(nil)
 	_ BackendEndpointReporter = (*RespCache)(nil)
+)
+
+// StickySessionBackend is implemented by cache backends that can hold fleet-wide sticky-session
+// claims, so one session id resolves to the same upstream on every router replica.
+//
+// It is a capability interface rather than part of CacheBackend because not every backend can
+// serve it — but unlike BackendEndpointReporter, which is a debug affordance, this one carries a
+// correctness contract. Both shipped backends implement it: the gRPC client reaches the cache
+// server's engine over an RPC pair, and the RESP backend reaches the same engine in-process.
+// Claims travel through the KVStore seam precisely so the RESP backend is not left out the way
+// endpoint observations are — a guarantee that silently lapses on one backend is not a guarantee.
+//
+// A backend that does NOT implement this cannot support cross-pod stickiness, and the router
+// must refuse to serve sticky traffic rather than quietly falling back to per-pod affinity.
+type StickySessionBackend interface {
+	GetStickySession(ctx context.Context, chainId, apiInterface, stickyId string) (core.StickyPin, bool, error)
+	SetStickySessionIfAbsent(ctx context.Context, chainId, apiInterface, stickyId string, pin core.StickyPin, ttl time.Duration) (core.StickyPin, error)
+}
+
+var (
+	_ StickySessionBackend = (*Cache)(nil)
+	_ StickySessionBackend = (*RespCache)(nil)
 )

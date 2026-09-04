@@ -52,6 +52,10 @@ type CacheServer struct {
 	// endpointObservations holds the fleet's per-endpoint poll observations for the fleet
 	// tracker gate (MAG-2981). See endpoint_observations.go for why it is not a ristretto store.
 	endpointObservations *endpointObservationStore
+	// stickyPins holds the fleet's sticky-session claims (cross-pod stickiness). Not a
+	// ristretto store, for the reason in sticky_sessions.go: a first-writer-wins claim cannot
+	// tolerate a dropped write.
+	stickyPins *stickyPinStore
 
 	ExpirationFinalized             time.Duration
 	ExpirationNonFinalized          time.Duration
@@ -119,6 +123,7 @@ func (cs *CacheServer) InitCache(
 	}
 
 	cs.endpointObservations = newEndpointObservationStore()
+	cs.stickyPins = newStickyPinStore()
 
 	go cs.periodicCacheSizeUpdate(ctx)
 }

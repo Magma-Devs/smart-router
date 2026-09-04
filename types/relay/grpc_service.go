@@ -226,6 +226,8 @@ type RelayerCacheClient interface {
 	FlushCache(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	SetEndpointObservation(ctx context.Context, in *EndpointObservationSet, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetEndpointObservation(ctx context.Context, in *EndpointObservationGet, opts ...grpc.CallOption) (*EndpointObservationReply, error)
+	SetStickySession(ctx context.Context, in *StickySessionSet, opts ...grpc.CallOption) (*StickySessionReply, error)
+	GetStickySession(ctx context.Context, in *StickySessionGet, opts ...grpc.CallOption) (*StickySessionReply, error)
 }
 
 // RelayerCacheServer is the server API for the RelayerCache service.
@@ -242,6 +244,15 @@ type RelayerCacheServer interface {
 	// observation instead of each polling the same upstream.
 	SetEndpointObservation(context.Context, *EndpointObservationSet) (*emptypb.Empty, error)
 	GetEndpointObservation(context.Context, *EndpointObservationGet) (*EndpointObservationReply, error)
+	// SetStickySession claims an upstream for one sticky session id and GetStickySession reads
+	// the claim back, both keyed by chain + api interface + sticky-id digest. They back
+	// cross-pod sticky sessions: every router replica resolves one id to the same upstream.
+	//
+	// SetStickySession is FIRST-WRITER-WINS and returns the EFFECTIVE claim, not an empty reply
+	// — a pod that lost the race learns the winner from its own write and adopts it inside the
+	// same request, with no second round trip.
+	SetStickySession(context.Context, *StickySessionSet) (*StickySessionReply, error)
+	GetStickySession(context.Context, *StickySessionGet) (*StickySessionReply, error)
 }
 
 // UnimplementedRelayerCacheServer must be embedded to satisfy RelayerCacheServer
@@ -270,6 +281,14 @@ func (UnimplementedRelayerCacheServer) SetEndpointObservation(_ context.Context,
 
 func (UnimplementedRelayerCacheServer) GetEndpointObservation(_ context.Context, _ *EndpointObservationGet) (*EndpointObservationReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetEndpointObservation not implemented")
+}
+
+func (UnimplementedRelayerCacheServer) SetStickySession(_ context.Context, _ *StickySessionSet) (*StickySessionReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetStickySession not implemented")
+}
+
+func (UnimplementedRelayerCacheServer) GetStickySession(_ context.Context, _ *StickySessionGet) (*StickySessionReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetStickySession not implemented")
 }
 
 // relayerCacheClient wraps a grpc.ClientConnInterface for the RelayerCache service.
@@ -334,6 +353,76 @@ func (c *relayerCacheClient) GetEndpointObservation(ctx context.Context, in *End
 		return nil, err
 	}
 	return out, nil
+}
+
+func (c *relayerCacheClient) SetStickySession(ctx context.Context, in *StickySessionSet, opts ...grpc.CallOption) (*StickySessionReply, error) {
+	out := new(StickySessionReply)
+	err := c.cc.Invoke(ctx, "/smartrouter.pairing.RelayerCache/SetStickySession", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayerCacheClient) GetStickySession(ctx context.Context, in *StickySessionGet, opts ...grpc.CallOption) (*StickySessionReply, error) {
+	out := new(StickySessionReply)
+	err := c.cc.Invoke(ctx, "/smartrouter.pairing.RelayerCache/GetStickySession", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func _RelayerCache_SetStickySession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StickySessionSet)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	server, ok := srv.(RelayerCacheServer)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "unexpected server type %T for SetStickySession", srv)
+	}
+	if interceptor == nil {
+		return server.SetStickySession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/smartrouter.pairing.RelayerCache/SetStickySession",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		typed, ok := req.(*StickySessionSet)
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "unexpected request type %T for SetStickySession", req)
+		}
+		return server.SetStickySession(ctx, typed)
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RelayerCache_GetStickySession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StickySessionGet)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	server, ok := srv.(RelayerCacheServer)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "unexpected server type %T for GetStickySession", srv)
+	}
+	if interceptor == nil {
+		return server.GetStickySession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/smartrouter.pairing.RelayerCache/GetStickySession",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		typed, ok := req.(*StickySessionGet)
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "unexpected request type %T for GetStickySession", req)
+		}
+		return server.GetStickySession(ctx, typed)
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 // RegisterRelayerCacheServer registers srv with the gRPC server s.
@@ -524,6 +613,14 @@ var _RelayerCache_serviceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetEndpointObservation",
 			Handler:    _RelayerCache_GetEndpointObservation_Handler,
+		},
+		{
+			MethodName: "SetStickySession",
+			Handler:    _RelayerCache_SetStickySession_Handler,
+		},
+		{
+			MethodName: "GetStickySession",
+			Handler:    _RelayerCache_GetStickySession_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
