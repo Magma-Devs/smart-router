@@ -43,7 +43,6 @@ func SetDebugProbes(enabled bool) { debugProbes.Store(enabled) }
 func DebugProbesEnabled() bool { return debugProbes.Load() }
 
 var (
-	retrySecondChanceAfter = time.Minute * 3
 	// ProbeLoopInterval is the configurable cadence (MAG-2161 D5) of the proactive health prober
 	// (rpcsmartrouter.runProbeLoop) — the single source of truth for direct-RPC endpoint health and
 	// probe-fed QoS. Default 5s; validated at startup (a non-positive value is rejected back to the
@@ -87,7 +86,6 @@ type ConsumerSessionManager struct {
 	// contains all provider addresses that are currently valid
 	validAddresses []string
 	// provider addresses that were given a second chance instead of reporting them immediately
-	secondChanceGivenToAddresses map[string]struct{}
 
 	// rateLimitHoldoff is consulted at provider selection so requests prefer providers
 	// that are not currently held off after a 429 (docs/RATE-LIMIT-HOLDOFF.md).
@@ -216,19 +214,17 @@ type ProviderRoutingSnapshot struct {
 
 // BlockedProviderInfo is one blocked provider and why, for /debug/provider-routing.
 //
-// Reported and SecondChanceGranted are included because they determine which recovery routes can
-// fire — Reported=false means the 30-second reconnect loop will never look at it, and
-// SecondChanceGranted=true means it returns on its own — which is the question that follows "why".
+// Reported is included because it determines which recovery routes can fire — Reported=false means
+// the 30-second reconnect loop will never look at it — which is the question that follows "why".
 type BlockedProviderInfo struct {
 	Address string
 	Reason  BlockReason
 	// Since is when the block was decided, preserved across epoch carry-over.
 	Since time.Time
 	// BlockedForSeconds is Since rendered as an age, so a reader does not have to subtract.
-	BlockedForSeconds   float64
-	Detail              string
-	Reported            bool
-	SecondChanceGranted bool
+	BlockedForSeconds float64
+	Detail            string
+	Reported          bool
 	// Carries is how many epoch transitions this block has survived.
 	Carries uint32
 	// Scope is "primary" or "backup". For a provider blocked in both pools it names the block that
@@ -274,15 +270,14 @@ func (csm *ConsumerSessionManager) blockedProviderInfoLocked(now time.Time) []Bl
 	blocked := make([]BlockedProviderInfo, 0, len(csm.blockedProviderRecords))
 	for address, record := range csm.blockedProviderRecords {
 		blocked = append(blocked, BlockedProviderInfo{
-			Address:             address,
-			Reason:              record.Reason,
-			Since:               record.Since,
-			BlockedForSeconds:   record.blockedFor(now).Seconds(),
-			Detail:              record.Detail,
-			Reported:            record.Reported,
-			SecondChanceGranted: record.SecondChanceGranted,
-			Carries:             record.Carries,
-			Scope:               blockScope(record.Backup),
+			Address:           address,
+			Reason:            record.Reason,
+			Since:             record.Since,
+			BlockedForSeconds: record.blockedFor(now).Seconds(),
+			Detail:            record.Detail,
+			Reported:          record.Reported,
+			Carries:           record.Carries,
+			Scope:             blockScope(record.Backup),
 		})
 	}
 	sort.Slice(blocked, func(i, j int) bool {
@@ -538,8 +533,6 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	for blockedAddr := range previouslyBlockedBackups {
 		csm.releaseBlockRecordLocked(blockedAddr, true)
 	}
-
-	csm.secondChanceGivenToAddresses = make(map[string]struct{})
 
 	csm.reportedProviders.Reset()
 	csm.pairingAddressesLength = uint64(pairingListLength)
@@ -852,7 +845,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 	connected, endpoints, providerAddress, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, tryReconnectToDisabledEndpoints, true, "", nil, nil)
 	if err != nil || !connected {
 		if errors.Is(err, AllProviderEndpointsDisabledError) {
-			csm.blockProvider(ctx, providerAddress, BlockReasonAllEndpointsDisabled, true, epoch, MaxConsecutiveConnectionAttempts, 0, false, csm.GenerateReconnectCallback(consumerSessionsWithProvider)) // reporting and blocking provider this epoch
+			csm.blockProvider(ctx, providerAddress, BlockReasonAllEndpointsDisabled, true, epoch, MaxConsecutiveConnectionAttempts, 0, csm.GenerateReconnectCallback(consumerSessionsWithProvider)) // reporting and blocking provider this epoch
 		}
 		return 0, providerAddress, err
 	}
@@ -1680,7 +1673,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 				// verify err is AllProviderEndpointsDisabled and report.
 				if errors.Is(err, AllProviderEndpointsDisabledError) {
 					tempIgnoredProviders.providers[providerAddress] = struct{}{}
-					err = csm.blockProvider(ctx, providerAddress, BlockReasonAllEndpointsDisabled, true, sessionEpoch, MaxConsecutiveConnectionAttempts, 0, false, csm.GenerateReconnectCallback(consumerSessionsWithProvider)) // reporting and blocking provider this epoch
+					err = csm.blockProvider(ctx, providerAddress, BlockReasonAllEndpointsDisabled, true, sessionEpoch, MaxConsecutiveConnectionAttempts, 0, csm.GenerateReconnectCallback(consumerSessionsWithProvider)) // reporting and blocking provider this epoch
 					if err != nil {
 						if !errors.Is(err, EpochMismatchError) {
 							// only acceptable error is EpochMismatchError so if different, throw fatal
@@ -1717,12 +1710,18 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 					// we can get a different provider, adding this provider to the list of providers to skip on.
 					tempIgnoredProviders.providers[providerAddress] = struct{}{}
 				} else if errors.Is(err, MaximumNumberOfBlockListedSessionsError) {
-					// provider has too many block listed sessions. we block it until the next epoch and ignore it so it won't pop up again when resetting the provider list.
+					// This address has hit its retired-session cap. Skip the provider for THIS
+					// request only. The cap bounds session growth — retired sessions are not
+					// reclaimed until the epoch rebuilds them — it is not a health verdict.
+					//
+					// It used to also block the provider outright, until the next epoch. That was
+					// dropped with FAILOVER-TASKS section 2: reaching the cap takes ~5,300
+					// consecutive failures spread over 333 retired sessions, the threshold is
+					// MaxSessionsAllowedPerProvider/3 rather than a number chosen to mean anything
+					// about health, and the block it produced was never reported — so the 30-second
+					// reconnect loop could never release it. bench-after is the health signal;
+					// this stays a plain resource guard.
 					tempIgnoredProviders.providers[providerAddress] = struct{}{}
-					err = csm.blockProvider(ctx, providerAddress, BlockReasonTooManyDeadSessions, false, sessionEpoch, 0, 0, false, nil)
-					if err != nil {
-						utils.LavaFormatError("Failed to block provider: ", err, utils.LogAttr("GUID", ctx))
-					}
 				} else {
 					utils.LavaFormatFatal("Unsupported Error", err, utils.LogAttr("GUID", ctx))
 				}
@@ -2576,7 +2575,7 @@ func blockDetail(disconnections, consecutiveErrors uint64) string {
 // reason names WHY, and is recorded against the address for as long as the block stands so
 // /debug/provider-routing, the per-reason gauge and the log line below can all answer the question
 // (MAG-2599). Every call site names one; there is no default.
-func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address string, reason BlockReason, reportProvider bool, sessionEpoch uint64, disconnections uint64, consecutiveErrors uint64, allowSecondChance bool, reconnectCallback func() error) error {
+func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address string, reason BlockReason, reportProvider bool, sessionEpoch uint64, disconnections uint64, consecutiveErrors uint64, reconnectCallback func() error) error {
 	utils.LavaFormatDebug("🔒 BLOCKING PROVIDER", utils.LogAttr("address", address), utils.LogAttr("reason", reason), utils.LogAttr("GUID", ctx))
 
 	// find Index of the address
@@ -2584,14 +2583,12 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 		return EpochMismatchError
 	}
 
-	var runSecondChance bool
 	// Set only once the provider is genuinely out of rotation, so the INFO below cannot fire for a
 	// block that did not happen — an epoch mismatch, or an address in neither pool.
 	var blocked *BlockRecord
 	var blockedCount, validRemaining int
 
 	csm.lock.Lock() // we lock RW here because we need to make sure nothing changes while we verify validAddresses/addedToPurgeAndReport
-	// on unlock we also want to trigger a routine that will remove blocked providers from block list if they exist and we allow them a second chance
 	defer func() {
 		csm.lock.Unlock()
 
@@ -2604,31 +2601,11 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 				utils.LogAttr("block_reason", blocked.Reason),
 				utils.LogAttr("detail", blocked.Detail),
 				utils.LogAttr("reported", blocked.Reported),
-				utils.LogAttr("second_chance", blocked.SecondChanceGranted),
 				utils.LogAttr("scope", blockScope(blocked.Backup)),
 				utils.LogAttr("blocked_count", blockedCount),
 				utils.LogAttr("valid_remaining", validRemaining),
 				utils.LogAttr("GUID", ctx),
 			)
-		}
-
-		if runSecondChance {
-			// Read on the CALLING goroutine, not inside the timer. retrySecondChanceAfter is a
-			// package var that tests rewrite, and reading it from the spawned goroutine has no
-			// happens-before edge to that write — a real (if benign in production) cross-goroutine
-			// read, and enough to make `go test -race` on this package fail. Hoisting it creates the
-			// edge the tests already assume, and no test has to know about it.
-			retryAfter := retrySecondChanceAfter
-			// if we decide to allow a second chance, this provider will return to our list of valid providers (if it exists)
-			go func() {
-				<-time.After(retryAfter)
-				// check epoch is still relevant, if not just return
-				if sessionEpoch != csm.atomicReadCurrentEpoch() {
-					return
-				}
-				utils.LavaFormatDebug("Running second chance for provider", utils.LogAttr("address", address), utils.LogAttr("GUID", ctx))
-				csm.validateAndReturnBlockedProviderToValidAddressesList(address, ReleaseSecondChanceTimer)
-			}()
 		}
 	}()
 
@@ -2637,9 +2614,8 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 	}
 
 	// Reported is filled in after the report flow below, not from reportProvider: asking to report
-	// and actually reporting are different outcomes. A first offence with allowSecondChance set
-	// takes the second chance INSTEAD of being reported, so reportProvider=true would claim a
-	// register entry that does not exist — and the epoch's release pass reads that field.
+	// and actually reporting are different outcomes — the report is a no-op on an address already
+	// in the register, and the epoch's release pass reads that field.
 	record := BlockRecord{
 		Reason: reason,
 		Since:  time.Now(),
@@ -2673,57 +2649,24 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 		blocked = &record
 	}
 
+	// A caller asking to report reports, first offence or not. The second-chance arm that used to
+	// withhold the first report for 3 minutes was removed with FAILOVER-TASKS section 2 — see
+	// OnSessionFailure for why it was never a health mechanism.
 	reportedNow := false
-	if reportProvider { // Report provider flow
-		if allowSecondChance { // on epoch change, we don't report providers immediately we allow them a recovery phase.
-			if _, ok := csm.secondChanceGivenToAddresses[address]; ok {
-				// already exists in second chance, need to block.
-				csm.reportedProviders.ReportProvider(address, consecutiveErrors, disconnections, reconnectCallback)
-				reportedNow = true
-			} else {
-				// first time reported, allowing a second chance.
-				csm.secondChanceGivenToAddresses[address] = struct{}{}
-				// Mark the provider as on probation: it has now consumed its single
-				// second chance. A later successful relay (OnSessionDone) clears both
-				// this flag and the secondChanceGivenToAddresses entry, so genuine
-				// recovery renews eligibility. Without this, in direct-rpc mode (no
-				// epoch transitions to clear the map) any provider that trips a block
-				// twice — even with full health in between — is hard-blocked for the
-				// rest of the process lifetime.
-				if provider, ok := csm.pairing[address]; ok {
-					provider.atomicMarkSecondChanceProbation()
-				}
-				// address was removed from valid addresses, we can still return it after a duration for second chance.
-				runSecondChance = true
-			}
-		} else {
-			csm.reportedProviders.ReportProvider(address, consecutiveErrors, disconnections, reconnectCallback)
-			reportedNow = true
-		}
+	if reportProvider {
+		csm.reportedProviders.ReportProvider(address, consecutiveErrors, disconnections, reconnectCallback)
+		reportedNow = true
 	}
 
-	// The second-chance decision is only known now, and it is the difference between a provider that
-	// returns on its own in three minutes and one that does not — so the stored record and the log
-	// both have to wait for it.
+	// Whether the provider was actually reported is only known after the flow above, and the epoch's
+	// release pass reads that field — so the stored record and the log both have to wait for it.
 	if blocked != nil {
 		blocked.Reported = reportedNow
-		// A backup never gets a second chance it can use: the timer calls
-		// validateAndReturnBlockedProviderToValidAddressesList, which walks only
-		// currentlyBlockedProviderAddresses, so a provider held in blockedBackupProviders is never
-		// found and the timer returns having done nothing. Recording the grant anyway would have the
-		// record assert a recovery that cannot happen — and combined with Reported=false it would
-		// claim BOTH that the reconnect loop will never look at it and that it comes back on its own.
-		//
-		// That backups are not released by the timer is pre-existing and is NOT changed here; this
-		// only stops the record advertising it. Whether the timer should release backups, or whether
-		// backups should skip the chance and be reported immediately, is a behaviour question filed
-		// alongside the epoch clean-slate defect.
-		blocked.SecondChanceGranted = runSecondChance && !blocked.Backup
 		csm.blockedProviderRecords[address] = *blocked
 		blockedCount = csm.blockedTotalLocked()
 		validRemaining = len(csm.validAddresses)
 	} else {
-		csm.refreshBlockOutcomeLocked(address, reportedNow, runSecondChance)
+		csm.refreshBlockOutcomeLocked(address, reportedNow)
 	}
 
 	return nil
@@ -2734,38 +2677,27 @@ func (csm *ConsumerSessionManager) blockProvider(ctx context.Context, address st
 //
 // A repeat call takes the provider out of nothing — it is already out — so the identity of the block
 // (Reason, Since, Detail) stays with the call that actually did it. But the report flow runs
-// regardless of that, and the call that genuinely REPORTS a provider is usually the second one: the
-// first offence takes the second chance instead, and the repeat finds secondChanceGivenToAddresses
-// already set and reports. On that call blocked is nil, so without this the record keeps Reported =
-// false forever — the map is edge-triggered and the next edge is the release.
+// regardless of that: a call can block nothing and still be the one that puts the address into the
+// reported register. On that call blocked is nil, so without this the record keeps Reported = false
+// forever — the map is edge-triggered and the next edge is the release.
 //
 // That inverts the contract BlockRecord documents: Reported == false is supposed to mean the
 // 30-second reconnect loop will never look at this provider, so an operator reads
 // /debug/provider-routing and concludes manual intervention is needed while the reconnect loop is in
 // fact already working on it.
 //
-// Neither field is ever cleared here: a provider that has been reported stays reported for as long
-// as the block stands, and a timer that was started cannot be unstarted. csm.lock must be held.
-func (csm *ConsumerSessionManager) refreshBlockOutcomeLocked(address string, reportedNow, secondChanceGranted bool) {
-	if !reportedNow && !secondChanceGranted {
+// Reported is never cleared here: a provider that has been reported stays reported for as long as
+// the block stands. csm.lock must be held.
+func (csm *ConsumerSessionManager) refreshBlockOutcomeLocked(address string, reportedNow bool) {
+	if !reportedNow {
 		return
 	}
 	record, ok := csm.blockedProviderRecords[address]
 	if !ok {
 		return // not blocked in either store — nothing this call did, and nothing to refresh
 	}
-	changed := false
-	if reportedNow && !record.Reported {
+	if !record.Reported {
 		record.Reported = true
-		changed = true
-	}
-	// Same backup carve-out as the fresh-block path above: the timer cannot release a backup, so the
-	// record must not claim it will.
-	if secondChanceGranted && !record.SecondChanceGranted && !record.Backup {
-		record.SecondChanceGranted = true
-		changed = true
-	}
-	if changed {
 		csm.blockedProviderRecords[address] = record
 	}
 }
@@ -2854,8 +2786,8 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 
 	// check if need to block & report
 	var blockProvider, reportProvider bool
-	// Why we would block, for the operator-facing record. Overwritten below if the
-	// never-served-a-relay rule fires instead of (or as well as) an explicit sentinel.
+	// Why we would block, for the operator-facing record. Only the explicit sentinels reach
+	// blockProvider from here now that the never-served rule is gone (FAILOVER-TASKS section 2).
 	blockReason := BlockReasonExplicitSignal
 	if errors.Is(errorReceived, ReportAndBlockProviderError) {
 		blockProvider = true
@@ -2881,8 +2813,6 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 	csm.qosManager.AddFailedRelay(consumerSession.epoch, consumerSession.SessionId)
 	consumerSession.ConsecutiveErrors = append(consumerSession.ConsecutiveErrors, errorReceived)
 	consumerSession.errorsCount += 1
-	// set allow second change if we want to allow the provider to return the pool without being reported if the downtime was temporary.
-	allowSecondChance := false
 	// if this session failed more than MaximumNumberOfFailuresAllowedPerConsumerSession times or session went out of sync we block it.
 	if len(consumerSession.ConsecutiveErrors) > MaximumNumberOfFailuresAllowedPerConsumerSession || IsSessionSyncLoss(errorReceived) {
 		utils.LavaFormatInfo("Blocking consumer session",
@@ -2892,16 +2822,21 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 		)
 		consumerSession.BlockListed = true // block this session from future usages
 
-		// check if this session is a redemption session meaning we already blocked and reported the provider if it was necessary.
-		if !redemptionSession {
-			// we will check the total number of cu for this provider and decide if we need to report it.
-			if consumerSession.Parent.atomicReadUsedComputeUnits() <= consumerSession.LatestRelayCu { // if we had 0 successful relays and we reached block session we need to report this provider
-				blockProvider = true
-				reportProvider = true
-				allowSecondChance = true
-				blockReason = BlockReasonNeverServed
-			}
-		}
+		// A dead session used to block the whole provider here when its compute-unit total showed
+		// no successful relay ("never served successfully"), granting a 3-minute second chance
+		// instead of reporting it. Both were removed with FAILOVER-TASKS section 2:
+		//
+		//   - The rule only ever caught a provider broken from its very first request. One success
+		//     leaves a permanent entry on the total, after which it can never fire again — so a
+		//     provider that worked an hour ago and is failing everything now was never caught.
+		//     Concurrent in-flight requests inflate the same total, switching it off on a busy
+		//     router, and the epoch rebuild resets it every 15 minutes anyway.
+		//   - The second chance was not a health mechanism. It came from Lava, where reporting a
+		//     provider filed an on-chain unresponsiveness complaint against an operator with staked
+		//     collateral; the 3 minutes existed so a brief restart could not cost them money. This
+		//     product submits that list nowhere, so the penalty it deferred does not exist.
+		//
+		// bench-after replaces both. A timed return after a bench is section 3's cooldown.
 	}
 	cuToDecrease := consumerSession.LatestRelayCu
 	// latency, isHangingApi, syncScore aren't updated when there is a failure
@@ -2920,7 +2855,7 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 
 	if !redemptionSession && blockProvider {
 		publicProviderAddress, pairingEpoch := parentConsumerSessionsWithProvider.getPublicLavaAddressAndPairingEpoch()
-		err = csm.blockProvider(context.Background(), publicProviderAddress, blockReason, reportProvider, pairingEpoch, 0, consecutiveErrors, allowSecondChance, nil)
+		err = csm.blockProvider(context.Background(), publicProviderAddress, blockReason, reportProvider, pairingEpoch, 0, consecutiveErrors, nil)
 		if err != nil {
 			if errors.Is(err, EpochMismatchError) {
 				return nil // no effects this epoch has been changed
@@ -3076,16 +3011,6 @@ func (csm *ConsumerSessionManager) logProviderReleased(providerAddress string, r
 	)
 }
 
-// forgetSecondChanceGiven removes a provider from the second-chance memory after
-// it has proven recovery with a successful relay (see OnSessionDone). This lets a
-// future isolated failure be treated as a first offense again instead of an
-// immediate hard block. Must NOT be called while holding csm.lock.
-func (csm *ConsumerSessionManager) forgetSecondChanceGiven(providerAddress string) {
-	csm.lock.Lock()
-	defer csm.lock.Unlock()
-	delete(csm.secondChanceGivenToAddresses, providerAddress)
-}
-
 // RestoreRecoveredProvider returns a probe-recovered provider to normal routing (F2). The prober
 // (Topic D) re-enables an endpoint's transport bit (Endpoint.Enabled) when it proves recovery, but
 // the endpoint can still be unroutable because its PROVIDER is blocked at the session-manager level:
@@ -3145,16 +3070,6 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		defer func() {
 			go csm.validateAndReturnBlockedProviderToValidAddressesList(providerAddress, ReleaseSuccessfulRelay)
 		}()
-	}
-
-	// A successful relay proves the provider has recovered. If it was on
-	// second-chance probation, forget that it ever used its second chance so a
-	// future isolated failure is treated as a first offense again (gets a fresh
-	// 3-minute second chance) instead of an immediate, lifetime-long hard block.
-	// The atomic CAS ensures exactly one cleanup is scheduled across concurrent relays.
-	if consumerSession.Parent.atomicTryClearSecondChanceProbation() {
-		recoveredProviderAddress := consumerSession.Parent.PublicLavaAddress
-		defer func() { go csm.forgetSecondChanceGiven(recoveredProviderAddress) }()
 	}
 
 	defer consumerSession.Free(nil)                        // we need to be locked here, if we didn't get it locked we try lock anyway
@@ -3510,7 +3425,6 @@ func (csm *ConsumerSessionManager) SetLavaBlockHeightCallback(getLavaBlockHeight
 //
 // Cleared:
 //   - previousEpochBlockedProviders (cross-epoch known-bad memory)
-//   - secondChanceGivenToAddresses (per-epoch second-chance memory)
 //   - blockedBackupProviders (backup-provider failure memory for this epoch)
 //   - stickySessions (session affinities)
 //   - reportedProviders (accumulated unresponsiveness reports)
@@ -3524,7 +3438,6 @@ func (csm *ConsumerSessionManager) SetLavaBlockHeightCallback(getLavaBlockHeight
 func (csm *ConsumerSessionManager) ResetTransientFailureState() {
 	csm.lock.Lock()
 	csm.previousEpochBlockedProviders = make(map[string]BlockRecord)
-	csm.secondChanceGivenToAddresses = make(map[string]struct{})
 	// Backup blocks are cleared here, so their reason records go with them. Regular blocks are
 	// deliberately preserved (see the doc comment above), and so are their records — including for a
 	// provider blocked in BOTH pools, whose regular block survives this reset.

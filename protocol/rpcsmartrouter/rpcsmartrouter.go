@@ -968,8 +968,8 @@ type routerConfigResponse struct {
 	SchemaVersion int
 
 	// lavasession
-	MaxConsecutiveConnectionAttempts                 int
-	TimeoutForEstablishingAConnection                int64 // milliseconds
+	MaxConsecutiveConnectionAttempts                 uint64 // the --bench-after setting
+	TimeoutForEstablishingAConnection                int64  // milliseconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession int
 
 	// relaycore (flag-bound package vars — these report the live value)
@@ -3302,6 +3302,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			if err := scoreutils.SetProbeUpdateWeight(viper.GetFloat64(common.ProbeUpdateWeightFlagName)); err != nil {
 				return err
 			}
+			lavasession.SetBenchAfter(viper.GetUint64(common.BenchAfterFlagName))
 			upstreamSelectorConfig, err := resolveSelectionWeights(cmd.Flags())
 			if err != nil {
 				return err
@@ -3511,6 +3512,14 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 
 	cmdRPCSmartRouter.Flags().DurationVar(&common.DefaultTimeout, common.DefaultProcessingTimeoutFlagName, common.DefaultTimeout, "default timeout for relay processing (e.g., 30s, 1m)")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.MinimumTimePerRelayDelay, common.MinRelayTimeoutFlagName, common.MinimumTimePerRelayDelay, "minimum relay timeout floor applied to all methods when CU-based timeout is lower (e.g., 1s, 5s)")
+	cmdRPCSmartRouter.Flags().Uint64(common.BenchAfterFlagName, lavasession.DefaultBenchAfter,
+		"consecutive failed requests to one endpoint address before it is taken out of rotation; a successful relay resets the count. Must be > 0")
+	// Bound to viper so the value is readable from config.yml, not just the command line. Without
+	// this, viper.GetUint64 below reads 0 for every operator who sets it in YAML — and 0 is exactly
+	// the value SetBenchAfter rejects, so the setting would silently do nothing.
+	if err := viper.BindPFlag(common.BenchAfterFlagName, cmdRPCSmartRouter.Flags().Lookup(common.BenchAfterFlagName)); err != nil {
+		utils.LavaFormatFatal("failed binding bench-after flag", err)
+	}
 	cmdRPCSmartRouter.Flags().IntVar(&lavasession.MaxSessionsAllowedPerProvider, common.MaxSessionsPerProviderFlagName, lavasession.MaxSessionsAllowedPerProvider, "max number of sessions allowed per provider")
 
 	// batch request size limit

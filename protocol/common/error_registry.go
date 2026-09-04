@@ -40,6 +40,7 @@ const (
 	SubCategoryUnsupportedMethod                  // zero retries, zero CU, cached response, no provider scoring
 	SubCategoryRateLimit                          // rate-limit signal: endpoint is healthy but busy, apply backoff, do not mark unhealthy
 	SubCategoryDataScope                          // endpoint does not hold the data: retry elsewhere may help, but it is not unhealthy
+	SubCategoryNodeCapability                     // endpoint does not offer this capability: retry elsewhere may help, but it is not unhealthy
 )
 
 func (sc ErrorSubCategory) String() string {
@@ -50,6 +51,8 @@ func (sc ErrorSubCategory) String() string {
 		return "rate_limit"
 	case SubCategoryDataScope:
 		return "data_scope"
+	case SubCategoryNodeCapability:
+		return "node_capability"
 	default:
 		return "none"
 	}
@@ -85,6 +88,63 @@ func (sc ErrorSubCategory) IsRateLimit() bool {
 // endpoint's availability score untouched.
 func (sc ErrorSubCategory) IsDataScope() bool {
 	return sc == SubCategoryDataScope
+}
+
+// IsNodeCapability reports whether this subcategory represents "the endpoint answered
+// authoritatively that it does not offer this capability" — a method that exists on the
+// API surface but is switched off on this particular node (provider tier, policy, admin
+// config). NODE_METHOD_NOT_SUPPORTED (2002) is the case.
+//
+// It is the same fault axis as IsDataScope, one level up: data scope is "I do not hold
+// that", capability is "I do not serve that". Both mean the endpoint did its job and told
+// us the truth about itself, and both keep Retryable TRUE so the request reaches a node
+// that can serve it — the full-node-primary / archive-backup shape.
+//
+// Deliberately NOT SubCategoryUnsupportedMethod, even though the wording is close.
+// ShouldRetryErrorWithContext hard-stops on that subcategory REGARDLESS of the Retryable
+// flag, so reusing it would kill the retry this classification exists to allow. The
+// distinction is real: NODE_METHOD_NOT_FOUND (2001) means the method exists nowhere, so
+// retrying is pointless; 2002 means it exists but not here, so retrying is the whole point.
+//
+// Health-tracking callers should therefore keep retrying elsewhere but leave the
+// endpoint's availability score untouched.
+func (sc ErrorSubCategory) IsNodeCapability() bool {
+	return sc == SubCategoryNodeCapability
+}
+
+// EndpointAtFault reports whether this classification is POSITIVE evidence that the endpoint
+// itself is broken or unable to serve — the one question the endpoint-health counter asks
+// (FAILOVER-TASKS section 2, decision 4).
+//
+// It is deliberately NOT Retryable. Retryable answers "would asking someone else help", which is a
+// routing question; this answers "is this endpoint at fault", which is a health question. They
+// diverge in both directions: a data-scope or capability answer is retryable and blameless, while a
+// caller-fault rejection is non-retryable and equally blameless.
+//
+// Absence of information is not fault. An unclassified error returns false, so an endpoint failing
+// in a way the registry has never seen is demoted by QoS but never disabled by the counter. That is
+// accepted: disabling a URL is a hard action and warrants evidence, and the fix per occurrence is
+// one registry line — which TestFaultAxis_EveryRegisteredCodeIsAccountedFor forces to be a
+// deliberate choice.
+//
+// Defined here rather than at the call sites so the endpoint counter, the relay result's
+// IsNodeAtFault flag and anything added later cannot drift apart.
+func (le *LavaError) EndpointAtFault() bool {
+	if le == nil || le == LavaErrorUnknown {
+		return false
+	}
+	// The four "not the endpoint's fault" axes: it answered truthfully about what it serves,
+	// what it holds, or how busy it is.
+	if le.SubCategory.IsUnsupportedMethod() || le.SubCategory.IsNodeCapability() ||
+		le.SubCategory.IsDataScope() || le.SubCategory.IsRateLimit() {
+		return false
+	}
+	if le.Category == CategoryInternal {
+		return true // could not reach it, or the transport broke
+	}
+	// CategoryExternal + Retryable is the node saying it is broken or not ready (internal error,
+	// bad gateway, syncing). Non-retryable external errors are the caller's fault.
+	return le.Category == CategoryExternal && le.Retryable
 }
 
 // LavaError is the central error definition — a classification struct, not a Go error.

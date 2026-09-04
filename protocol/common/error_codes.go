@@ -191,6 +191,7 @@ var (
 	// description and the Retryable flag.
 	LavaErrorNodeMethodNotSupported = registerError(&LavaError{
 		Code: 2002, Name: "NODE_METHOD_NOT_SUPPORTED", Category: CategoryExternal,
+		SubCategory: SubCategoryNodeCapability,
 		Description: "Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider. Distinct from NODE_METHOD_NOT_FOUND (2001) which means the method does not exist at all.", Retryable: true,
 	})
 	LavaErrorNodeInternalError = registerError(&LavaError{
@@ -236,10 +237,12 @@ var (
 	})
 	LavaErrorNodeResourceNotFound = registerError(&LavaError{
 		Code: 2012, Name: "NODE_RESOURCE_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Resource not found at node level", Retryable: true,
 	})
 	LavaErrorNodeResourceUnavailable = registerError(&LavaError{
 		Code: 2013, Name: "NODE_RESOURCE_UNAVAILABLE", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Resource exists but unavailable", Retryable: true,
 	})
 	LavaErrorNodeGatewayTimeout = registerError(&LavaError{
@@ -260,10 +263,17 @@ var (
 	})
 	// NODE_DATA_NOT_HELD: the endpoint answered correctly and the answer is "I do
 	// not have this" — a pruned height, an object that never existed, a request
-	// outside the range this node retains. Distinct from NODE_RESOURCE_NOT_FOUND
-	// (2012) in the fault axis, not the symptom: 2012 stays scoreable because a
-	// JSON-RPC -32001 is an error the node RAISED, whereas this is the node
-	// truthfully describing its own data scope.
+	// outside the range this node retains.
+	//
+	// This used to be the ONLY code on this fault axis, and was documented as
+	// distinct from NODE_RESOURCE_NOT_FOUND (2012) on the grounds that a JSON-RPC
+	// -32001 is an error the node RAISED rather than a description of itself.
+	// FAILOVER-TASKS section 2 reversed that: from the endpoint's side both are
+	// "the answer you want is not here", and the distinction does not survive the
+	// case that motivated it — a customer polling for a transaction that is not
+	// mined yet gets not-found from EVERY endpoint, so scoring it walks the whole
+	// fleet toward being taken out for a question none of them could answer. 2012,
+	// 2013 and 3201-3206 now carry this subcategory too.
 	//
 	// Retryable stays true so a pruned node still falls through to an archive one.
 	// SubCategoryDataScope is what keeps it out of the availability signal, which
@@ -405,26 +415,32 @@ var (
 	// State/data errors (3200-3299)
 	LavaErrorChainBlockNotFound = registerError(&LavaError{
 		Code: 3201, Name: "CHAIN_BLOCK_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Block not found", Retryable: true,
 	})
 	LavaErrorChainTxNotFound = registerError(&LavaError{
 		Code: 3202, Name: "CHAIN_TX_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Transaction not found", Retryable: true,
 	})
 	LavaErrorChainReceiptNotFound = registerError(&LavaError{
 		Code: 3203, Name: "CHAIN_RECEIPT_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Transaction receipt not found", Retryable: true,
 	})
 	LavaErrorChainStatePruned = registerError(&LavaError{
 		Code: 3204, Name: "CHAIN_STATE_PRUNED", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "State pruned/missing trie node", Retryable: true,
 	})
 	LavaErrorChainDataNotAvailable = registerError(&LavaError{
 		Code: 3205, Name: "CHAIN_DATA_NOT_AVAILABLE", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Historical data not available", Retryable: true,
 	})
 	LavaErrorChainBlockTooOld = registerError(&LavaError{
 		Code: 3206, Name: "CHAIN_BLOCK_TOO_OLD", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Block results only for recent blocks", Retryable: true,
 	})
 	LavaErrorChainLogResponseTooLarge = registerError(&LavaError{
@@ -440,6 +456,7 @@ var (
 	})
 	LavaErrorChainSolanaLedgerJump = registerError(&LavaError{
 		Code: 3303, Name: "CHAIN_SOLANA_LEDGER_JUMP", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Missing due to ledger jump/snapshot (-32007)", Retryable: true,
 	})
 	LavaErrorChainSolanaBlockhashNotFound = registerError(&LavaError{
@@ -464,6 +481,7 @@ var (
 	})
 	LavaErrorChainSolanaBlockStatusUnavailable = registerError(&LavaError{
 		Code: 3309, Name: "CHAIN_SOLANA_BLOCK_STATUS_UNAVAILABLE", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Block status unavailable (-32014)", Retryable: true,
 	})
 	LavaErrorChainSolanaTxVersionUnsupported = registerError(&LavaError{
@@ -472,6 +490,7 @@ var (
 	})
 	LavaErrorChainSolanaMinContextSlotNotReached = registerError(&LavaError{
 		Code: 3311, Name: "CHAIN_SOLANA_MIN_CONTEXT_SLOT_NOT_REACHED", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Minimum context slot not reached (-32016)", Retryable: true,
 	})
 
@@ -523,10 +542,12 @@ var (
 	})
 	LavaErrorChainStarknetBlockNotFound = registerError(&LavaError{
 		Code: 3331, Name: "CHAIN_STARKNET_BLOCK_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Block not found (code 24)", Retryable: true,
 	})
 	LavaErrorChainStarknetTxHashNotFound = registerError(&LavaError{
 		Code: 3332, Name: "CHAIN_STARKNET_TX_HASH_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Transaction hash not found (code 29)", Retryable: true,
 	})
 	LavaErrorChainStarknetDuplicateTx = registerError(&LavaError{
@@ -565,10 +586,12 @@ var (
 	// Source: NEAR RPC docs (error names in JSON-RPC error.cause.name)
 	LavaErrorChainNEARUnknownBlock = registerError(&LavaError{
 		Code: 3360, Name: "CHAIN_NEAR_UNKNOWN_BLOCK", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Block not found or garbage-collected (UNKNOWN_BLOCK)", Retryable: true,
 	})
 	LavaErrorChainNEARUnknownChunk = registerError(&LavaError{
 		Code: 3361, Name: "CHAIN_NEAR_UNKNOWN_CHUNK", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Chunk not found (UNKNOWN_CHUNK)", Retryable: true,
 	})
 	LavaErrorChainNEARInvalidShardID = registerError(&LavaError{
