@@ -186,6 +186,11 @@ type Endpoint struct {
 	// after this instant, so a poll that succeeded BEFORE the disable can never re-enable (F1).
 	// Cleared (zeroed) on every re-enable.
 	disabledAt time.Time
+	// disableReason is WHY the endpoint was taken out, captured on the same Enabled→false edge that
+	// stamps disabledAt and cleared alongside it on re-enable. The provider-level BlockReason cannot
+	// answer this: it reads `all-endpoints-disabled`, which is a count of endpoints rather than a
+	// cause. See EndpointDisableReason.
+	disableReason EndpointDisableReason
 	// lastRecoveryPoll is the LastSuccessfulPoll value already counted toward the hysteresis streak,
 	// so a probe cadence faster than the poll cadence cannot count one successful poll twice — only a
 	// strictly newer successful poll advances the streak (F1: "distinct post-disable polls").
@@ -275,8 +280,12 @@ func (e *Endpoint) IsEnabled() bool {
 // never observes a half-applied MarkUnhealthy / RecordProbeVerdict transition. DisabledAt and
 // LastRecoveryPoll are zero while the endpoint is enabled / has never disabled.
 type EndpointHealthSnapshot struct {
-	Enabled                  bool
-	DisabledAt               time.Time
+	Enabled    bool
+	DisabledAt time.Time
+	// DisableReason is WHY the endpoint was taken out, captured on the same transition as
+	// DisabledAt and empty while enabled. The provider-level BlockReason cannot answer this — it
+	// reads `all-endpoints-disabled`, a count rather than a cause.
+	DisableReason            EndpointDisableReason
 	ConsecutiveHealthyProbes uint64 // distinct post-disable successful polls counted toward F1 re-enable
 	LastRecoveryPoll         time.Time
 	// RelayProbeMethod is the read-only method recorded as this disable episode's failing relay
@@ -304,6 +313,7 @@ func (e *Endpoint) HealthSnapshot() EndpointHealthSnapshot {
 	return EndpointHealthSnapshot{
 		Enabled:                  e.Enabled,
 		DisabledAt:               e.disabledAt,
+		DisableReason:            e.disableReason,
 		ConsecutiveHealthyProbes: e.consecutiveHealthyProbes,
 		LastRecoveryPoll:         e.lastRecoveryPoll,
 		RelayProbeMethod:         e.relayProbeMethod,
@@ -371,6 +381,10 @@ func (e *Endpoint) clearRecoveryStreakLocked() {
 func (e *Endpoint) clearRecoveryTrackingLocked() {
 	e.clearRecoveryStreakLocked()
 	e.disabledAt = time.Time{}
+	// The reason describes the episode that just ended, so it is cleared with the timestamp it was
+	// captured alongside. An enabled endpoint carrying a stale reason would read, in
+	// /debug/endpoint-state, as an endpoint that is somehow both serving and disabled-because-of-X.
+	e.disableReason = ""
 	e.dropRelayProbeEvidenceLocked()
 }
 
@@ -439,9 +453,21 @@ func endpointApproachingDisable(wasEnabled, transitioned bool, refusals uint64) 
 	return wasEnabled && !transitioned && refusals+endpointDisableWarningWindow >= MaxConsecutiveConnectionAttempts
 }
 
-// MarkUnhealthy increments connection refusals and disables endpoint if threshold exceeded.
-func (e *Endpoint) MarkUnhealthy() {
-	e.markUnhealthyAt(time.Now())
+// MarkUnhealthy increments connection refusals and disables the endpoint if the threshold is
+// exceeded, recording WHY on the disable itself.
+//
+// reason is required. Every call site already holds it — the relay path has the classified error or
+// the HTTP status in hand at the moment it decides to call this — and passing "" is treated as a bug
+// (EndpointDisableUnspecified) rather than silently meaning "no reason".
+func (e *Endpoint) MarkUnhealthy(reason EndpointDisableReason) {
+	e.markUnhealthyAt(time.Now(), reason)
+}
+
+// DisableReason reports why the endpoint was last taken out of rotation. Empty while enabled.
+func (e *Endpoint) DisableReason() EndpointDisableReason {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.disableReason
 }
 
 // markUnhealthyAt is MarkUnhealthy with an injectable clock (tests drive the disable instant so they
@@ -449,7 +475,10 @@ func (e *Endpoint) MarkUnhealthy() {
 // Enabled→false transition (edge-triggered): a repeated MarkUnhealthy on an already-disabled endpoint
 // must NOT push disabledAt forward, or it would silently invalidate post-disable poll evidence the
 // prober has already accumulated (F1).
-func (e *Endpoint) markUnhealthyAt(at time.Time) {
+func (e *Endpoint) markUnhealthyAt(at time.Time, reason EndpointDisableReason) {
+	if reason == "" {
+		reason = EndpointDisableUnspecified
+	}
 	e.mu.Lock()
 	e.ConnectionRefusals++
 	wasEnabled := e.Enabled
@@ -458,6 +487,10 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 	if disabled && wasEnabled {
 		e.Enabled = false
 		e.disabledAt = at
+		// Edge-triggered with disabledAt, and for the same reason: the reason belongs to the failure
+		// that actually took the endpoint out. A later failure of a different kind against an
+		// already-disabled endpoint must not rewrite the record of why it went down.
+		e.disableReason = reason
 		e.clearRecoveryStreakLocked()
 		// If this disable follows a probe re-enable that no successful relay ever validated, the probe's
 		// grant was wasted (the endpoint answers cheap polls but fails real relays). Escalate the next
@@ -475,6 +508,7 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 	if transitioned {
 		utils.LavaFormatWarning("disabled unhealthy endpoint", nil,
 			utils.LogAttr("endpoint", addr),
+			utils.LogAttr("disable_reason", reason),
 			utils.LogAttr("refusals", refusals),
 			utils.LogAttr("is_direct_rpc", isDirect),
 		)
