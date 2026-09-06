@@ -11,6 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -101,51 +102,50 @@ func TestAttemptStillBoundedByItsBudget(t *testing.T) {
 
 // The fairness test behind the availability verdict for a relay that produced nothing.
 //
-// Elapsed time is the input rather than why the request ended, and both consequences are wanted:
-// an endpoint that hung is blamed even when the request succeeded through someone else, and an
-// endpoint dispatched just before the budget expired is not blamed, because it never had a fair
-// chance.
-func TestEndpointGotItsWindow(t *testing.T) {
-	const window = 10 * time.Second
-
+// The obvious test — "was it given its full window" — was tried first and is wrong. A hedge is
+// dispatched AT the window, so a race loser has always been silent for longer than its window by the
+// time it is cancelled; the test is true for every loser, always. Measured against the real router: a
+// healthy endpoint answering in 55s, cancelled at 35s when a faster one won, on a request that
+// SUCCEEDED, was blamed at waited=35s window=28s. That is the structural penalty MAG-2648 removed —
+// every node but the fastest, on a broadcast — and the pre-change code never did it, because an
+// attempt could not outlive its window in the first place.
+//
+// Budget exhaustion is the honest question and needs no threshold: did this endpoint run out of road,
+// or did we cut it short while it was still working?
+func TestRequestRanOutOfRoad(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		elapsed time.Duration
-		window  time.Duration
-		want    bool
-		why     string
+		name       string
+		stopReason string
+		want       bool
+		why        string
 	}{
 		{
-			name: "hung for the whole window", elapsed: window, window: window, want: true,
-			why: "exactly the window is a full window — the endpoint had every moment it was promised",
+			name: "budget expired", stopReason: relaycore.StopReasonProcessingTimeout, want: true,
+			why: "the request used everything it had and this endpoint was still silent — it hung",
 		},
 		{
-			name: "hung well past the window", elapsed: 3 * window, window: window, want: true,
-			why: "an endpoint cancelled long after its window answered nothing and must be blamed",
+			name: "another endpoint answered", stopReason: "Success", want: false,
+			why: "MAG-2648: a loser cancelled while still inside its budget was cut short, not shown to be unavailable",
 		},
 		{
-			name: "race loser stopped early", elapsed: 500 * time.Millisecond, window: window, want: false,
-			why: "MAG-2648: a relay we stopped before its window was never actually tested",
+			name: "policy stopped the request", stopReason: "Stateful", want: false,
+			why: "the request ended on a decision, not on time running out; nothing was proved about the endpoint",
 		},
 		{
-			name: "cancelled one tick short", elapsed: window - time.Nanosecond, window: window, want: false,
-			why: "below the window is below the window; blame needs the full promise to have been kept",
+			name: "no providers to try", stopReason: "AllProvidersExhausted", want: false,
+			why: "nothing was in flight to blame",
 		},
 		{
-			name: "dispatched just before the budget expired", elapsed: 2 * time.Second, window: window, want: false,
-			why: "the end-of-budget case falls out of elapsed time without a special case",
+			name: "first message never sent", stopReason: "FirstMessageFailed", want: false,
+			why: "the endpoint was never actually exercised",
 		},
 		{
-			name: "no window configured", elapsed: time.Hour, window: 0, want: false,
-			why: "nothing was promised, so nothing can be judged against it — withhold blame rather than invent it",
-		},
-		{
-			name: "negative window", elapsed: time.Hour, window: -time.Second, want: false,
-			why: "a nonsensical window must not become a blanket blame rule",
+			name: "no stop reason recorded", stopReason: "", want: false,
+			why: "absence of a reason is not evidence of a hang — withhold blame rather than invent it",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, endpointGotItsWindow(tc.elapsed, tc.window), tc.why)
+			assert.Equal(t, tc.want, requestRanOutOfRoad(tc.stopReason), tc.why)
 		})
 	}
 }

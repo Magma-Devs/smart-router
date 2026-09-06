@@ -37,7 +37,7 @@ func TestUnknownWriteOutcome(t *testing.T) {
 		{
 			name: "no evidence at all",
 			want: true,
-			why:  "the ordinary hung write since attempts stopped being killed at their window: the goroutine was still in flight when the budget expired, so nothing was ever recorded",
+			why:  "the ordinary hung write: the goroutine was still in flight when the budget expired, so nothing was ever recorded. Reached only when the caller has already established the request ran out of budget — see TestRequestRanOutOfRoad and the guard in writeOutcomeIsUnknown, without which a request that never dispatched anything would land here too",
 		},
 		{
 			name:           "deadline exceeded",
