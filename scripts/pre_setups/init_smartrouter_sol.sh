@@ -184,7 +184,6 @@ echo ""
 
 screen -d -m -S smartrouter bash -c "cd $PROJECT_ROOT && source ~/.bashrc; \"$SMARTROUTER_BIN\" \
 config/smartrouter_examples/smartrouter_sol.yml \
---geolocation 1 \
 --log-level debug \
 --cache-be \"127.0.0.1:20100\" \
 --use-static-spec $SPECS_DIR \

@@ -191,7 +191,6 @@ echo ""
 echo "[Setup] starting Smart Router (trace log -> $LOG_FILE)"
 screen -d -m -S smartrouter bash -c "cd \"$PROJECT_ROOT\" && source ~/.bashrc; smartrouter \
 $CONFIG_REL \
---geolocation 1 \
 --log-level trace \
 --cache-be \"$CACHE_ADDR\" \
 --use-static-spec \"$SPECS_DIR\" \
