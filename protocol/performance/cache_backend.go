@@ -145,8 +145,8 @@ func boolPtr(b bool) *bool { return &b }
 // A backend that does NOT implement this cannot support cross-pod stickiness, and the router
 // must refuse to serve sticky traffic rather than quietly falling back to per-pod affinity.
 type StickySessionBackend interface {
-	GetStickySession(ctx context.Context, chainId, apiInterface, stickyId string) (core.StickyPin, bool, error)
-	SetStickySessionIfAbsent(ctx context.Context, chainId, apiInterface, stickyId string, pin core.StickyPin, ttl time.Duration) (core.StickyPin, error)
+	GetStickySession(ctx context.Context, chainId, apiInterface, service, stickyId string) (core.StickyPin, bool, error)
+	SetStickySessionIfAbsent(ctx context.Context, chainId, apiInterface, service, stickyId string, pin core.StickyPin, ttl time.Duration) (core.StickyPin, error)
 }
 
 var (

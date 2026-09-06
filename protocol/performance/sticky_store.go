@@ -47,16 +47,16 @@ func NewCacheStickyStore(cache CacheBackend) lavasession.SharedStickyStore {
 	return &cacheStickyStore{backend: backend}
 }
 
-func (c *cacheStickyStore) Fetch(ctx context.Context, chainID, apiInterface, stickyID string) (string, uint64, bool, error) {
-	pin, found, err := c.backend.GetStickySession(ctx, chainID, apiInterface, stickyID)
+func (c *cacheStickyStore) Fetch(ctx context.Context, chainID, apiInterface, service, stickyID string) (string, uint64, bool, error) {
+	pin, found, err := c.backend.GetStickySession(ctx, chainID, apiInterface, service, stickyID)
 	if err != nil {
 		return "", 0, false, err
 	}
 	return pin.Provider, pin.Epoch, found, nil
 }
 
-func (c *cacheStickyStore) PublishIfAbsent(ctx context.Context, chainID, apiInterface, stickyID, provider string, epoch uint64, ttl time.Duration) (string, uint64, error) {
-	winner, err := c.backend.SetStickySessionIfAbsent(ctx, chainID, apiInterface, stickyID, core.StickyPin{Provider: provider, Epoch: epoch}, ttl)
+func (c *cacheStickyStore) PublishIfAbsent(ctx context.Context, chainID, apiInterface, service, stickyID, provider string, epoch uint64, ttl time.Duration) (string, uint64, error) {
+	winner, err := c.backend.SetStickySessionIfAbsent(ctx, chainID, apiInterface, service, stickyID, core.StickyPin{Provider: provider, Epoch: epoch}, ttl)
 	if err != nil {
 		return "", 0, err
 	}

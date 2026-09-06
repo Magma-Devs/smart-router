@@ -532,8 +532,11 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help: "Cross-pod sticky-session claim resolutions by outcome. " +
 			"local_hit: answered from this pod's confirmed table, no round trip. " +
 			"adopted: took a claim another pod had already made — the signal that cross-pod stickiness is doing its job, and zero here on a multi-replica fleet means it is wired but never firing. " +
-			"claimed: this pod made the claim. " +
-			"lost_race: claimed at the same moment as a peer and adopted the peer's winner. " +
+			"claimed: this pod's write created the claim. " +
+			"lost_race: a peer's claim was already live and named a DIFFERENT upstream, so this pod adopted it. " +
+			"(A peer claim naming the same upstream this pod would have picked is indistinguishable from winning, and counts as claimed.) " +
+			"no_candidate: this pod had no upstream to offer, which is a pairing problem rather than a registry one. " +
+			"invalidated: a local claim was dropped because its upstream could not serve here; a climbing series means claims outlive the upstreams they name. " +
 			"error: the claim could not be established, and the request was failed rather than served off an unverified pin.",
 	}, []string{"spec", "apiInterface", "outcome"})
 	csmReportedProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{

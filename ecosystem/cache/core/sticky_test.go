@@ -23,18 +23,25 @@ func TestEngineSticky_ClampsTTL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newFakeStore()
 			engine := &Engine{Store: store}
-			_, err := engine.SetStickyIfAbsent(context.Background(), "ETH1", "jsonrpc", "id", StickyPin{Provider: "node-a"}, tc.asked)
+			_, err := engine.SetStickyIfAbsent(context.Background(), "ETH1", "jsonrpc", "base", "id", StickyPin{Provider: "node-a"}, tc.asked)
 			require.NoError(t, err)
-			require.Equal(t, tc.expected, store.stickyTTLs[StickyKey("ETH1", "jsonrpc", "id")])
+			require.Equal(t, tc.expected, store.stickyTTLs[StickyKey("ETH1", "jsonrpc", "base", "id")])
 		})
 	}
 }
 
-// The default epoch window is 15 minutes and a pin must outlive two of them, so a ceiling
-// shorter than that would expire pins the epoch rule still accepts — the silent split this
-// feature removes. This pins the relationship rather than the constant.
-func TestEngineSticky_CeilingOutlivesTwoEpochs(t *testing.T) {
-	require.GreaterOrEqual(t, MaxStickyTTL, 2*15*time.Minute)
+// Readers honour a claim for two router epochs, so the ceiling must clear two epochs at every
+// epoch length an operator can actually configure — not merely at the default.
+//
+// The previous version compared MaxStickyTTL against a hardcoded 2*15m. That is two constants,
+// so it passed at every setting and could never catch the case it was written for:
+// --epoch-duration is operator-settable and its help text suggests 1h, where readers trusted a
+// claim for two hours while the store dropped it after one.
+func TestEngineSticky_CeilingClearsTwoEpochsAtEverySupportedEpochLength(t *testing.T) {
+	for _, epoch := range []time.Duration{15 * time.Minute, 30 * time.Minute, time.Hour} {
+		require.GreaterOrEqualf(t, MaxStickyTTL, 2*epoch,
+			"a %s epoch makes readers trust a claim for %s, which the ceiling must cover", epoch, 2*epoch)
+	}
 }
 
 func TestEngineSticky_KeysAreScopedPerChainAndInterface(t *testing.T) {
@@ -42,17 +49,17 @@ func TestEngineSticky_KeysAreScopedPerChainAndInterface(t *testing.T) {
 	engine := &Engine{Store: store}
 	ctx := context.Background()
 
-	_, err := engine.SetStickyIfAbsent(ctx, "ETH1", "jsonrpc", "same-id", StickyPin{Provider: "node-a", Epoch: 1}, time.Minute)
+	_, err := engine.SetStickyIfAbsent(ctx, "ETH1", "jsonrpc", "base", "same-id", StickyPin{Provider: "node-a", Epoch: 1}, time.Minute)
 	require.NoError(t, err)
 
 	// A session manager is scoped to one chain AND one api interface, so an upstream name only
 	// means anything inside that scope. Sharing a key across scopes would hand a router a name
 	// its pairing does not contain.
-	_, found, err := engine.GetSticky(ctx, "ETH1", "rest", "same-id")
+	_, found, err := engine.GetSticky(ctx, "ETH1", "rest", "base", "same-id")
 	require.NoError(t, err)
 	require.False(t, found)
 
-	_, found, err = engine.GetSticky(ctx, "POLYGON1", "jsonrpc", "same-id")
+	_, found, err = engine.GetSticky(ctx, "POLYGON1", "jsonrpc", "base", "same-id")
 	require.NoError(t, err)
 	require.False(t, found)
 }
@@ -64,20 +71,20 @@ func TestEngineSticky_StoreErrorIsNotAMiss(t *testing.T) {
 	store.stickyErr = errors.New("backend unreachable")
 	engine := &Engine{Store: store}
 
-	_, found, err := engine.GetSticky(context.Background(), "ETH1", "jsonrpc", "id")
+	_, found, err := engine.GetSticky(context.Background(), "ETH1", "jsonrpc", "base", "id")
 	require.Error(t, err)
 	require.False(t, found)
 
-	_, err = engine.SetStickyIfAbsent(context.Background(), "ETH1", "jsonrpc", "id", StickyPin{Provider: "node-a"}, time.Minute)
+	_, err = engine.SetStickyIfAbsent(context.Background(), "ETH1", "jsonrpc", "base", "id", StickyPin{Provider: "node-a"}, time.Minute)
 	require.Error(t, err)
 }
 
 func TestEngineSticky_EmptyIdIsRejectedOnWrite(t *testing.T) {
 	engine := &Engine{Store: newFakeStore()}
-	_, err := engine.SetStickyIfAbsent(context.Background(), "ETH1", "jsonrpc", "", StickyPin{Provider: "node-a"}, time.Minute)
+	_, err := engine.SetStickyIfAbsent(context.Background(), "ETH1", "jsonrpc", "base", "", StickyPin{Provider: "node-a"}, time.Minute)
 	require.ErrorIs(t, err, ErrEmptyStickyId)
 
-	_, found, err := engine.GetSticky(context.Background(), "ETH1", "jsonrpc", "")
+	_, found, err := engine.GetSticky(context.Background(), "ETH1", "jsonrpc", "base", "")
 	require.NoError(t, err)
 	require.False(t, found)
 }

@@ -1,19 +1,20 @@
-# Shaped after the customer's own ConfigMap, so the false-gap test runs against the
-# arrangement they actually deploy rather than a convenient one.
+# Shaped after a real production ConfigMap, so the false-gap test runs against the arrangement
+# operators actually deploy rather than a convenient one. Names are generic on purpose: this
+# repo is public, and upstream names in a real config identify a deployment's node software,
+# topology and replica layout.
 #
-# Kept from their config:
+# Kept from the real shape:
 #   * metrics-listen-address declared HERE, not as a flag
 #   * listener on :3000
-#   * three primary providers, with their real provider names — the name is the router's
-#     routing identity and is exactly what a sticky claim stores
-#   * debug / trace addon urls on the reth provider
+#   * three primary providers — the provider NAME is the router's routing identity and is
+#     exactly what a sticky claim stores
+#   * debug / trace addon urls on one provider
 #   * a backup-direct-rpc tier
 #
 # Changed for a local run:
 #   * cluster DNS names become compose service names
-#   * the backup tier points at local fakes instead of the lava gateway and quicknode,
-#     so no credentials are involved
-#   * skip-verifications, because these are fakes rather than real erigon/reth nodes
+#   * the backup tier points at local fakes, so no credentials are involved
+#   * skip-verifications, because these are fakes rather than real nodes
 #   * the ws:// url on each provider is DROPPED, and that deviation is worth knowing about.
 #     The fakes speak HTTP only, and ONE unreachable node-url excludes the WHOLE provider from
 #     the pool — not just that url. Left in, all three primaries were dropped at startup
@@ -21,10 +22,10 @@
 #     to the backup tier, and totalValidAddresses was 0. --skip-websocket-verification does
 #     NOT cover this; it skips a different check. The customer runs ws on every provider, so
 #     an unreachable ws endpoint costs them the whole upstream even when its http side is
-#     healthy. Worth raising with them separately.
+#     healthy. Worth raising separately.
 #
 # The heads are deliberately out of lockstep (see HEAD_OFFSET in the compose file). That is
-# the customer's actual failure condition: ask the pool for the head, then ask for that block
+# the reported failure condition: ask the pool for the head, then ask for that block
 # and land on a node which has not reached it yet.
 metrics-listen-address: 0.0.0.0:7779
 
@@ -41,39 +42,39 @@ cache-be: "cache:20100"
 direct-rpc:
   - chain-id: ETH1
     api-interface: jsonrpc
-    name: chain-evm-1-erigon-lighthouse-active-0
+    name: upstream-primary-0
     node-urls:
-      - url: http://node-erigon-active:8545
+      - url: http://node-primary-0:8545
         skip-verifications: [pruning, tx-indexing, chain-id]
   - chain-id: ETH1
     api-interface: jsonrpc
-    name: chain-evm-1-erigon-lighthouse-test-0
+    name: upstream-primary-1
     node-urls:
-      - url: http://node-erigon-test:8545
+      - url: http://node-primary-1:8545
         skip-verifications: [pruning, tx-indexing, chain-id]
   - chain-id: ETH1
     api-interface: jsonrpc
-    name: chain-evm-1-reth-lighthouse-public-active-0
+    name: upstream-primary-2
     node-urls:
-      - url: http://node-reth-public:8545
+      - url: http://node-primary-2:8545
         skip-verifications: [pruning, tx-indexing, chain-id]
-      - url: http://node-reth-public:8545
+      - url: http://node-primary-2:8545
         addons: [debug]
         skip-verifications: [pruning, tx-indexing, chain-id]
-      - url: http://node-reth-public:8545
+      - url: http://node-primary-2:8545
         addons: [trace]
         skip-verifications: [pruning, tx-indexing, chain-id]
 
 backup-direct-rpc:
   - chain-id: ETH1
     api-interface: jsonrpc
-    name: ethereum-lava
+    name: upstream-backup-0
     node-urls:
-      - url: http://node-backup-lava:8545
+      - url: http://node-backup-0:8545
         skip-verifications: [pruning, tx-indexing, chain-id]
   - chain-id: ETH1
     api-interface: jsonrpc
-    name: ethereum-quicknode
+    name: upstream-backup-1
     node-urls:
-      - url: http://node-backup-quicknode:8545
+      - url: http://node-backup-1:8545
         skip-verifications: [pruning, tx-indexing, chain-id]

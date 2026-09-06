@@ -406,7 +406,7 @@ func (cache *Cache) GetEndpointObservation(ctx context.Context, get *pairingtype
 // with Found=false, not an error; an error means the claim could not be determined, which callers
 // must not treat as "unclaimed" — inventing a claim there is exactly the cross-pod split that
 // sticky sessions exist to prevent.
-func (cache *Cache) GetStickySession(ctx context.Context, chainId, apiInterface, stickyId string) (core.StickyPin, bool, error) {
+func (cache *Cache) GetStickySession(ctx context.Context, chainId, apiInterface, service, stickyId string) (core.StickyPin, bool, error) {
 	if cache == nil {
 		return core.StickyPin{}, false, NotInitializedError
 	}
@@ -419,6 +419,7 @@ func (cache *Cache) GetStickySession(ctx context.Context, chainId, apiInterface,
 	reply, err := client.GetStickySession(ctx, &pairingtypes.StickySessionGet{
 		ChainId:      chainId,
 		ApiInterface: apiInterface,
+		Service:      service,
 		StickyId:     stickyId,
 	})
 	if err != nil {
@@ -435,7 +436,7 @@ func (cache *Cache) GetStickySession(ctx context.Context, chainId, apiInterface,
 // returns the EFFECTIVE claim: the one just accepted, or the live one that beat it. Unlike the
 // endpoint-observation publish this is NOT fire-and-forget — a lost publish would leave this pod
 // routing on a claim no peer knows about, which is the split the guarantee rules out.
-func (cache *Cache) SetStickySessionIfAbsent(ctx context.Context, chainId, apiInterface, stickyId string, pin core.StickyPin, ttl time.Duration) (core.StickyPin, error) {
+func (cache *Cache) SetStickySessionIfAbsent(ctx context.Context, chainId, apiInterface, service, stickyId string, pin core.StickyPin, ttl time.Duration) (core.StickyPin, error) {
 	if cache == nil {
 		return core.StickyPin{}, NotInitializedError
 	}
@@ -448,6 +449,7 @@ func (cache *Cache) SetStickySessionIfAbsent(ctx context.Context, chainId, apiIn
 	reply, err := client.SetStickySession(ctx, &pairingtypes.StickySessionSet{
 		ChainId:      chainId,
 		ApiInterface: apiInterface,
+		Service:      service,
 		StickyId:     stickyId,
 		Provider:     pin.Provider,
 		Epoch:        pin.Epoch,

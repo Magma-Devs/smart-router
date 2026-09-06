@@ -25,9 +25,9 @@ INGRESS = "http://127.0.0.1:18081"
 # Where each primary fake is reachable from the host, so phase D can break the exact node a
 # session got pinned to.
 NODE_ADMIN = {
-    "chain-evm-1-erigon-lighthouse-active-0": "http://127.0.0.1:18545",
-    "chain-evm-1-erigon-lighthouse-test-0": "http://127.0.0.1:18546",
-    "chain-evm-1-reth-lighthouse-public-active-0": "http://127.0.0.1:18547",
+    "upstream-primary-0": "http://127.0.0.1:18545",
+    "upstream-primary-1": "http://127.0.0.1:18546",
+    "upstream-primary-2": "http://127.0.0.1:18547",
 }
 
 

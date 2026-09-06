@@ -88,15 +88,15 @@ eth_getBlockByNumber(H)      -> the block, or null
 If the two calls land on different upstreams and the second is behind, it answers `null` inside
 a successful response. Nothing retries, and the caller records a gap in a chain that has none.
 
-## Shaped after their deployment
+## Shaped after a real deployment
 
-`router-kraken.yml` follows their real ConfigMap: their three provider names, the reth
-`debug`/`trace` addon urls, a `backup-direct-rpc` tier, the listener on `:3000`, and
+`router-lagging-pool.yml` follows the shape of a real production ConfigMap: three primary
+providers, `debug`/`trace` addon urls, a `backup-direct-rpc` tier, the listener on `:3000`, and
 `metrics-listen-address` declared in the config rather than as a flag.
 
 Two deliberate deviations, both documented in that file:
 
-- The fakes replace real erigon/reth nodes, so verifications are skipped.
+- The fakes replace real nodes, so verifications are skipped.
 - **The `ws://` urls are dropped.** With them in place all three primaries were excluded at
   startup — one unreachable node-url costs the whole provider, and
   `--skip-websocket-verification` does not cover it. Every relay then fell to the backup tier.

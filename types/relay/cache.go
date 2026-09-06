@@ -368,10 +368,14 @@ func (r *EndpointObservationReply) GetAgeMs() int64 {
 type StickySessionSet struct {
 	ChainId      string `json:"chain_id"`
 	ApiInterface string `json:"api_interface"`
-	StickyId     string `json:"sticky_id"`
-	Provider     string `json:"provider"`
-	Epoch        uint64 `json:"epoch"`
-	TtlMs        int64  `json:"ttl_ms"`
+	// Service is the add-on / extension class this claim belongs to. Selection is filtered by
+	// it, so a claim that spanned classes could pin a session to an upstream unable to serve
+	// half of it. Empty means the base collection.
+	Service  string `json:"service"`
+	StickyId string `json:"sticky_id"`
+	Provider string `json:"provider"`
+	Epoch    uint64 `json:"epoch"`
+	TtlMs    int64  `json:"ttl_ms"`
 }
 
 // StickySessionGet asks the cache backend which upstream the fleet has pinned for one sticky
@@ -379,6 +383,7 @@ type StickySessionSet struct {
 type StickySessionGet struct {
 	ChainId      string `json:"chain_id"`
 	ApiInterface string `json:"api_interface"`
+	Service      string `json:"service"`
 	StickyId     string `json:"sticky_id"`
 }
 
