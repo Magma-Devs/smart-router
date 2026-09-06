@@ -324,7 +324,6 @@ assert_refuses_to_start() {
 	echo "    (throwaway instance on :$port — expected to exit, not to serve traffic)"
 	( cd "$PROJECT_ROOT" && source ~/.bashrc; timeout 60 smartrouter \
 		"$cfg" \
-		--geolocation 1 \
 		--log-level debug \
 		--use-static-spec "$SPECS_DIR" \
 		--min-relay-timeout 5s ) > "$log" 2>&1
@@ -361,7 +360,6 @@ echo ""
 echo "[Setup] starting Smart Router (trace log -> $LOG_FILE)"
 screen -d -m -S smartrouter bash -c "cd \"$PROJECT_ROOT\" && source ~/.bashrc; smartrouter \
 $CONFIG_REL \
---geolocation 1 \
 --log-level trace \
 --cache-be \"$CACHE_ADDR\" \
 --use-static-spec \"$SPECS_DIR\" \
@@ -586,8 +584,8 @@ echo "  # the CV counters (note the per-group 'group' label on mismatch metrics)
 echo "  curl -s http://127.0.0.1:$METRICS_PORT/metrics | grep cross_validation"
 echo ""
 echo "  # the two capacity fail-fasts (each MUST refuse to start):"
-echo "  smartrouter $NEG1_CONFIG_REL --geolocation 1 --use-static-spec '$SPECS_DIR'   # diversity"
-echo "  smartrouter $NEG2_CONFIG_REL --geolocation 1 --use-static-spec '$SPECS_DIR'   # per-group"
+echo "  smartrouter $NEG1_CONFIG_REL --use-static-spec '$SPECS_DIR'   # diversity"
+echo "  smartrouter $NEG2_CONFIG_REL --use-static-spec '$SPECS_DIR'   # per-group"
 echo ""
 echo "📊 Logs:   tail -f $LOG_FILE"
 echo "🟢 Router LEFT RUNNING in the background (screen session 'smartrouter', port $TM_PORT)."

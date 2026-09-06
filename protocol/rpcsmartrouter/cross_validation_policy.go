@@ -433,7 +433,7 @@ func (r *CrossValidationPolicyResolver) ValidateNoStatefulPolicies(isStateful fu
 		}
 		chainID, apiInterface, method := splitPolicyKey(key)
 		if isStateful(chainID, apiInterface, method) {
-			return fmt.Errorf("cross-validation policy on stateful method %s/%s/%s is not allowed: cross-validating a transaction-submission response is a no-op (see UC-3); strengthen write paths via the stateful fan-out instead", chainID, apiInterface, method)
+			return fmt.Errorf("cross-validation policy on stateful method %s/%s/%s is not allowed: cross-validating a transaction-submission response is a no-op (the response is an acknowledgement, not an observation); strengthen write paths via the stateful fan-out instead", chainID, apiInterface, method)
 		}
 	}
 	return nil
