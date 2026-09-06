@@ -145,9 +145,12 @@ the cache overlay (`docker/docker-compose.cache.yml`) so the preserved
 `cache-be:` has a sidecar to reach.
 
 Note: `/metrics/overall-health` (and the container health status) is
-fail-closed and reports 503 until the first relays health-check cycle —
-`--relays-health-interval` defaults to 5 minutes, so a freshly started stack
-is "unhealthy" while it warms up even though relays already serve.
+fail-closed: it reports 503 until at least one chain has verified a provider,
+which happens as endpoint setup completes — a freshly started stack turns 200
+as soon as its relays serve. A 503 that persists means no upstream answers the
+health probe; while unhealthy the router re-probes every
+`--relays-health-unhealthy-interval` (default 15s), so recovery shows within
+seconds of an upstream coming back.
 
 ## Example configs
 
