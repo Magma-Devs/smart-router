@@ -3071,9 +3071,9 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 	return csm.releaseWithAvailabilityFailure(consumerSession, errorReceived, "OnSessionFailure")
 }
 
-// OnSessionUnresponsive releases a session whose relay was dispatched, was given its full
-// per-attempt window, and produced no response at all — the endpoint hung. It records the same
-// availability failure as OnSessionFailure.
+// OnSessionUnresponsive releases a session whose relay was dispatched, was still silent when the
+// request's whole budget expired, and produced no response at all — the endpoint hung. It records
+// the same availability failure as OnSessionFailure.
 //
 // It is a separate name from OnSessionFailure on purpose, and the separation is the point rather
 // than the current behaviour: "failed" means the endpoint answered with something we could not use,
@@ -3083,9 +3083,9 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 // byte-identical today while leaving the seam to diverge at. Same reasoning as OnSessionDiscarded
 // versus OnSessionCancelled above.
 //
-// Not to be confused with OnSessionCancelled: that is for a relay WE stopped before it had its
-// window — a race loser or a client disconnect — where the endpoint's availability was never
-// actually tested. Here it was tested, for the full window, and produced nothing. Routing these
+// Not to be confused with OnSessionCancelled: that is for a relay WE stopped while it still had
+// budget left — a race loser or a client disconnect — where the endpoint's availability was never
+// actually tested. Here the request ran out of budget with this endpoint still silent. Routing these
 // through OnSessionCancelled is the bug it exists to prevent: nothing at all would be recorded, so a
 // permanently hung endpoint would keep whatever score it had and be selected again next request.
 func (csm *ConsumerSessionManager) OnSessionUnresponsive(consumerSession *SingleConsumerSession, errorReceived error) error {

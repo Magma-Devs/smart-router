@@ -7,9 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// An endpoint that was given its full answer window and produced nothing has NOT been exercised
-// the way a race loser has: its availability was tested, for the whole window, and it failed the
-// test. Before the per-attempt timeout stopped killing attempts, such a relay surfaced as a
+// An endpoint still silent when the request's whole budget expired has NOT been exercised the way a
+// race loser has: it was given every second the request had, and produced nothing. Before the per-attempt timeout stopped killing attempts, such a relay surfaced as a
 // DeadlineExceeded and landed on OnSessionFailure by itself. Now the attempt outlives the window
 // and ends as a cancellation when the request ends, so without a dedicated release path a hang
 // would route into the MAG-2648 no-penalty carve-out and be forgiven — nothing recorded at all,
@@ -31,7 +30,7 @@ func TestOnSessionUnresponsiveRecordsBlame(t *testing.T) {
 	require.NoError(t, csm.OnSessionUnresponsive(session, context.Canceled))
 
 	require.Greater(t, csm.qosManager.GetTotalRelays(epoch, session.SessionId), totalBefore,
-		"an endpoint that answered nothing within its window must count against availability")
+		"an endpoint that answered nothing before the budget ran out must count against availability")
 	require.Equal(t, answeredBefore, csm.qosManager.GetAnsweredRelays(epoch, session.SessionId),
 		"it answered nothing, so the answered count must not move")
 	require.NotEmpty(t, session.ConsecutiveErrors,

@@ -387,11 +387,28 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					// Decide never runs here, and the field would otherwise be blank on exactly
 					// the exhaustion cases an operator reads the line to understand.
 					if isPairingListEmpty && sm.config.EnableCircuitBreaker {
-						sm.setStopReason("AllProvidersExhausted")
+						// "Exhausted" is about the DISPATCHER, not the endpoints: the pairing list
+						// came back empty because every provider is already busy with an attempt
+						// from this same request, which is what the warning below means by
+						// "relays already in flight may still answer". They are healthy.
+						//
+						// So this only names the request's stop reason when the request is really
+						// stopping. It used to be able to claim it unconditionally because an
+						// attempt was killed at its window: "cannot start more" and "the request is
+						// over" were the same instant. Attempts now outlive their window, so at the
+						// moment the pool runs dry the request can still have most of its budget of
+						// real work in flight — and a stop reason recorded then describes a stop
+						// that never happens, and takes the slot the timeout needs. Availability
+						// scoring reads that slot to tell a hung endpoint from one we cut short, so
+						// a premature claim here silently forgives a hang.
+						if sm.usedProviders.CurrentlyUsed() == 0 {
+							sm.setStopReason("AllProvidersExhausted")
+						}
 						utils.LavaFormatWarning("Circuit breaker: all providers exhausted, stopping new attempts — relays already in flight may still answer",
 							nil,
 							utils.LogAttr("GUID", sm.ctx),
 							utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
+							utils.LogAttr("stillInFlight", sm.usedProviders.CurrentlyUsed()),
 						)
 					} else if sm.usedProviders.BatchNumber() == 0 && sm.policy.GetConsecutiveBatchErrors() == sm.config.SendRelayAttempts+1 {
 						sm.setStopReason("FirstMessageFailed")

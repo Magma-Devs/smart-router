@@ -1045,25 +1045,35 @@ var errUnknownWriteOutcome = errors.New("transaction status unclear: timeout rea
 // writeOutcomeIsUnknown reports whether a FAILED request was a write whose outcome we genuinely do
 // not know, as opposed to one we know did not happen.
 //
-// Three conditions, and the third is the interesting one:
+// The rule is about silence, not about the errors that came back:
 //
 //   - it is a write. A read that fails is simply a read that failed.
-//   - no node answered. If any node replied at all, even with an error, that reply is its answer
-//     and is passed through untouched — we never overwrite what a node said.
-//   - we cannot PROVE the request never left this process. Connect-phase failures do prove it:
-//     refused, DNS, TLS and unreachable all mean no bytes were written, and they return in
-//     milliseconds. Everything else leaves the upstream possibly holding the transaction.
+//   - nothing succeeded. If any endpoint answered successfully that answer is the result, and this
+//     never runs.
+//   - some endpoint that was asked did not answer at all. It may be holding the transaction.
 //
-// The absence of evidence resolves to "unknown", which is the safe direction for a write and also
-// the common one since the attempt stopped being killed at its window: a hung write now ends when
-// the request's budget expires, with its goroutine still in flight and nothing recorded at all. A
-// rule keyed on the error code would see nothing there and wrongly report a clean failure.
+// Reading only the errors that came back is what got this wrong before, and measurably so: a hung
+// endpoint contributes NO error, so it is invisible to any rule that inspects the error list. On a
+// write where one endpoint returned HTTP 500 in under a millisecond and another hung for the whole
+// budget, the 500 was the only thing recorded, and the customer was told the write failed while the
+// silent endpoint may already have broadcast it. The same held when the sibling refused instead.
 //
-// It is deliberately evaluated at the request level rather than inside the results manager, because
-// a failed request can arrive at the client through either of two branches in SendParsedRelay
-// depending on whether an in-flight goroutine happened to push before the caller looked. Deciding
-// once, here, is what stops that race from being visible to the customer as two different errors
-// for the same incident.
+// So silence is detected by counting: an endpoint that was dispatched and produced neither a
+// response nor an error is one we are still waiting on. When every endpoint answered — even if they
+// all answered with errors — nothing is silent, the outcome is known, and the node's own reply
+// passes through untouched.
+//
+// The absence of ANY record is the other face of the same question, and it needs the extra check
+// below: it means either a dispatched attempt still in flight (silent — unknown) or a request where
+// nothing was ever sent at all (no pairings, every endpoint filtered out, the policy stopping before
+// a first message). Telling the second one "your transaction may already have been submitted" is the
+// same lie as the bug this message exists to fix, pointing the other way. Only a request that used
+// its whole budget can have had something in flight.
+//
+// It is evaluated at the request level rather than inside the results manager because a failed
+// request can reach the client through either of two branches in SendParsedRelay depending on
+// whether an in-flight goroutine happened to push before the caller looked. Deciding once, here, is
+// what stops that race from being visible to the customer as two different errors for one incident.
 func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) bool {
 	if chainlib.GetStateful(protocolMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return false
@@ -1074,41 +1084,34 @@ func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProces
 	}
 
 	successResults, nodeErrors, protocolErrors := relayProcessor.GetResultsData()
-	// Nothing recorded at all has two very different causes, and only one of them is ambiguous: a
-	// dispatched attempt still in flight when the budget expired, versus a request where nothing was
-	// ever sent — no pairings, every endpoint filtered out, the policy stopping before a first
-	// message. Telling the second one "your transaction may already have been submitted" is the same
-	// lie as the bug this message exists to fix, pointing the other way. Only a request that used its
-	// whole budget can have had something in flight.
-	if len(successResults) == 0 && len(nodeErrors) == 0 && len(protocolErrors) == 0 &&
-		!requestRanOutOfRoad(relayProcessor.GetStopReason()) {
-		return false
-	}
+	answered := len(successResults) + len(nodeErrors) + len(protocolErrors)
+	dispatched := relayProcessor.GetUsedProviders().SessionsLatestBatch()
 
-	return unknownWriteOutcome(successResults, nodeErrors, protocolErrors)
+	return unknownWriteOutcome(len(successResults), answered, dispatched,
+		requestRanOutOfRoad(relayProcessor.GetStopReason()))
 }
 
 // unknownWriteOutcome is the judgement itself, split from the lookup above so it can be exercised
-// directly: it is a pure function of what came back, and the interesting cases (no evidence at all,
-// evidence that proves nothing) are awkward to stage through a live processor.
+// directly: it is a pure function of four numbers, and the interesting cases — nothing recorded at
+// all, or a silent endpoint hidden behind a sibling's error — are awkward to stage through a live
+// processor.
 //
 // Assumes the caller has already established that this is a failed write.
-func unknownWriteOutcome(successResults, nodeErrors []common.RelayResult, protocolErrors []relaycore.RelayError) bool {
-	if len(successResults) > 0 || len(nodeErrors) > 0 {
-		// A node answered. That reply is its answer and is passed through untouched.
+func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad bool) bool {
+	if successes > 0 {
+		// Some endpoint served the write. That answer is the result.
 		return false
 	}
 
-	for _, protocolError := range protocolErrors {
-		// An unclassified error proves nothing either, so it counts as "may have reached".
-		if protocolError.LavaError == nil || protocolError.LavaError.MayHaveReachedNode {
-			return true
-		}
+	if answered == 0 {
+		// Nothing was recorded. Only a request that spent its whole budget can have had an attempt
+		// in flight; anything else never dispatched one.
+		return ranOutOfRoad
 	}
 
-	// No evidence at all: nothing was recorded because the attempt was still in flight when the
-	// budget expired. That is the ordinary shape of a hung write, and it is unknown, not failed.
-	return len(protocolErrors) == 0
+	// Something answered, but not everyone we asked. Whoever is still silent may be holding the
+	// transaction, so the outcome is unknown however loudly the others failed.
+	return answered < dispatched
 }
 
 func (rpcss *RPCSmartRouterServer) SendParsedRelay(
