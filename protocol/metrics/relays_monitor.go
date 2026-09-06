@@ -129,10 +129,10 @@ func (sem *RelaysMonitor) startInner(ctx context.Context) {
 // from it: lazy while healthy, unhealthyInterval while not — the probe is the
 // only recovery path for a pod that readiness has already pulled out of
 // rotation. LogRelay stays on the healthy cadence unconditionally, since a
-// successful real relay is itself proof of health.
+// successful real relay is itself proof of health. Verdict and cadence are
+// written under one lock, as LogRelay does, so a relay landing between the two
+// cannot leave a healthy chain on the unhealthy cadence.
 func (sem *RelaysMonitor) recordProbeResult(success bool) {
-	sem.storeHealthStatus(success)
-
 	interval := sem.interval
 	if !success {
 		interval = sem.unhealthyInterval
@@ -140,6 +140,7 @@ func (sem *RelaysMonitor) recordProbeResult(success bool) {
 
 	sem.lock.Lock()
 	defer sem.lock.Unlock()
+	sem.storeHealthStatus(success)
 	sem.ticker.Reset(interval)
 }
 
