@@ -115,6 +115,33 @@ func TestValidateAndCapMinRelayTimeout(t *testing.T) {
 	}
 }
 
+// --- ValidateAndCapMinRelayTimeout: the CacheTimeout guard ---
+
+func TestValidateAndCapCacheTimeout(t *testing.T) {
+	tests := []struct {
+		name  string
+		input time.Duration
+		want  time.Duration
+	}{
+		{name: "positive value kept (WAN-sized budget)", input: 400 * time.Millisecond, want: 400 * time.Millisecond},
+		{name: "default kept", input: DefaultCacheTimeout, want: DefaultCacheTimeout},
+		{name: "zero resets to default", input: 0, want: DefaultCacheTimeout},
+		{name: "negative resets to default", input: -time.Second, want: DefaultCacheTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := CacheTimeout
+			t.Cleanup(func() { CacheTimeout = orig })
+			CacheTimeout = tt.input
+
+			ValidateAndCapMinRelayTimeout()
+
+			require.Equal(t, tt.want, CacheTimeout)
+		})
+	}
+}
+
 // --- GetTimePerCu respects MinimumTimePerRelayDelay ---
 
 func TestGetTimePerCu_DefaultFloor(t *testing.T) {

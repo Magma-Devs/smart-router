@@ -82,6 +82,17 @@ router never starts half-configured.
 TTLs are the cache engine's own (finalized ~1h, non-finalized scaled to the chain's block
 time, short-lived node errors) — the same table the default cache uses.
 
+One budget lives on the **router**, not in this block: every cache **lookup** runs inside
+the per-relay `--cache-timeout` flag (default `50ms`, sized for a same-zone backend; writes
+are asynchronous under a separate 5s budget). A warm-connection read costs one network
+round trip, so a backend further away than the budget times out on **every** lookup —
+`smartrouter_resp_cache_failed_total{kind="timeout",op="get"}` climbs while writes keep
+landing, and no relay is ever served as `Cached`. For a cross-region backend raise the flag
+above the round-trip time (e.g. `--cache-timeout 400ms`), and prefer co-locating the router
+with the backend: a hit always costs ~1 RTT, and a miss waits out the budget before falling
+through to the upstream. (`--secondary-cache-timeout` is the same knob for the secondary
+tier.)
+
 Config values are **not** environment-expanded: a `${VAR}` written here is read literally as
 the value.
 

@@ -127,6 +127,7 @@ const (
 	MaxSessionsPerProviderFlagName   = "max-sessions-per-provider"  // Max number of sessions allowed per provider
 	DefaultProcessingTimeoutFlagName = "default-processing-timeout" // default timeout for relay processing
 	MinRelayTimeoutFlagName          = "min-relay-timeout"          // minimum relay timeout floor (default 1s)
+	CacheTimeoutFlagName             = "cache-timeout"              // per-relay cache lookup budget (default 50ms)
 
 	// ResponseCompressionFlag controls the encoding used by the fiber compress
 	// middleware on client-facing responses. Accepted values: "gzip", "brotli", "off".

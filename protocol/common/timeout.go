@@ -13,7 +13,7 @@ const (
 	CacheWriteTimeout     = 5 * time.Second
 	AverageWorldLatency   = 300 * time.Millisecond
 	DefaultTimeoutSeconds = 30 // default timeout in seconds, can be overridden by flag
-	CacheTimeout          = 50 * time.Millisecond
+	DefaultCacheTimeout   = 50 * time.Millisecond
 	// On subscriptions we must use context.Background(),
 	// we cant have a context.WithTimeout() context, meaning we can hang for ever.
 	// to avoid that we introduced a first reply timeout using a routine.
@@ -24,6 +24,18 @@ const (
 // DefaultTimeout is the configurable default timeout for relay processing.
 // It can be overridden via the --default-processing-timeout flag on consumer and smart router commands.
 var DefaultTimeout = time.Duration(DefaultTimeoutSeconds) * time.Second
+
+// CacheTimeout is the per-relay cache LOOKUP budget (reads only; writes are
+// asynchronous under CacheWriteTimeout). The default is sized for a same-zone
+// backend; it can be overridden via the --cache-timeout flag on the smart
+// router command for backends a network away — a RESP backend such as
+// ElastiCache in another region needs at least one round trip per lookup, so
+// a budget below the RTT turns every read into a timeout while writes still
+// land. Raising it trades added miss latency (a miss now waits up to this
+// budget before falling through to the upstream) for the ability to hit at
+// all; the secondary tier's --secondary-cache-timeout exists for the same
+// reason.
+var CacheTimeout = DefaultCacheTimeout
 
 // MinimumTimePerRelayDelay is the minimum relay timeout floor used by GetTimePerCu.
 // It can be overridden via the --min-relay-timeout flag on consumer and smart router commands.
@@ -69,6 +81,17 @@ func ValidateAndCapMinRelayTimeout() {
 			utils.LogAttr("invalid_value", MinimumTimePerRelayDelay),
 		)
 		MinimumTimePerRelayDelay = time.Second
+	}
+
+	// Guard CacheTimeout <= 0: the lookup context would be born expired and
+	// every cache read would fail immediately — a silently disabled cache.
+	if CacheTimeout <= 0 {
+		utils.LavaFormatWarning("cache-timeout is zero or negative, resetting to default",
+			nil,
+			utils.LogAttr("invalid_value", CacheTimeout),
+			utils.LogAttr("reset_to", DefaultCacheTimeout),
+		)
+		CacheTimeout = DefaultCacheTimeout
 	}
 }
 
