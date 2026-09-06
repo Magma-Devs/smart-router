@@ -299,7 +299,7 @@ func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 		utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 	)
 
-	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.stopReasonOr("ProcessingTimeout")}
+	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.stopReasonOr(StopReasonProcessingTimeout)}
 	return true
 }
 
@@ -490,7 +490,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 						utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
 						utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 					)
-					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.stopReasonOr("ProcessingTimeout")}
+					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.stopReasonOr(StopReasonProcessingTimeout)}
 				}
 				return
 			}
