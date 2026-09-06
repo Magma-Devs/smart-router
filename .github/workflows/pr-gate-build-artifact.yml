@@ -294,6 +294,39 @@ jobs:
           preflight_result="passed"
           echo "dev-sim-prtests preflight passed"
 
+      - name: Checkout smart-router-automation
+        uses: actions/checkout@v7
+        with:
+          repository: Magma-Devs/smart-router-automation
+          token: ${{ secrets.SMART_ROUTER_AUTOMATION_READ_TOKEN }}
+          path: smart-router-automation
+          persist-credentials: false
+
+      - name: Wake dev-sim-prtests routers for validation
+        id: wake_routers
+        timeout-minutes: 4
+        env:
+          SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
+          SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
+          NAMESPACE: smart-router
+        run: |
+          set -euo pipefail
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          export SSH_OPTS="-i $key_file -o StrictHostKeyChecking=accept-new -o RemoteCommand=none -o RequestTTY=no -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+          server="${SSH_HOST##*@}"
+          ssh_user="${SSH_HOST%@*}"
+          if [ "$ssh_user" = "$SSH_HOST" ]; then
+            ssh_user="$(id -un)"
+          fi
+          echo "::add-mask::${server}"
+          # Includes eth-sim-router and every deployed chain; the real-node
+          # sleep/wake scripts have a fixed list that omits simulator routers.
+          # The following rollout validates readiness using the new PR image.
+          bash smart-router-automation/scripts/router_power.sh on "$server" "$ssh_user" --replicas 1
+
       - name: Deploy and validate dev-sim-prtests Kubernetes rollout
         env:
           SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
@@ -1286,14 +1319,6 @@ jobs:
 
           append_summary "passed"
 
-      - name: Checkout smart-router-automation
-        uses: actions/checkout@v7
-        with:
-          repository: Magma-Devs/smart-router-automation
-          token: ${{ secrets.SMART_ROUTER_AUTOMATION_READ_TOKEN }}
-          path: smart-router-automation
-          persist-credentials: false
-
       - name: Set up Python for automation tests
         uses: actions/setup-python@v7
         with:
@@ -1351,6 +1376,72 @@ jobs:
             echo "- Result: \`failed\`"
           } >> "$GITHUB_STEP_SUMMARY"
           exit 1
+
+      # Keep shutdown in this job, inside the shared workflow concurrency
+      # group, so it finishes before the next PR can wake the same server.
+      - name: Sleep dev-sim-prtests routers after validation
+        if: ${{ always() && steps.wake_routers.outcome != 'skipped' }}
+        timeout-minutes: 4
+        env:
+          SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
+          SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
+          NAMESPACE: smart-router
+        run: |
+          set -euo pipefail
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          export SSH_OPTS="-i $key_file -o StrictHostKeyChecking=accept-new -o RemoteCommand=none -o RequestTTY=no -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+          server="${SSH_HOST##*@}"
+          ssh_user="${SSH_HOST%@*}"
+          if [ "$ssh_user" = "$SSH_HOST" ]; then
+            ssh_user="$(id -un)"
+          fi
+          echo "::add-mask::${server}"
+          # Retry transient SSH/scale failures. A failed shutdown must fail
+          # the gate instead of reporting success while routers keep polling.
+          stopped=false
+          for attempt in 1 2 3; do
+            if bash smart-router-automation/scripts/router_power.sh off "$server" "$ssh_user"; then
+              stopped=true
+              break
+            fi
+            echo "::warning::Router shutdown attempt ${attempt} failed"
+            sleep 5
+          done
+          if [ "$stopped" != true ]; then
+            echo "::error::Could not stop dev-sim-prtests routers"
+            exit 1
+          fi
+          # router_power.sh scales deployments; also check the resulting
+          # state so a failed deployment listing cannot look like success.
+          ssh -i "$key_file" -o StrictHostKeyChecking=accept-new \
+            -o BatchMode=yes -o ConnectTimeout=20 -o RemoteCommand=none \
+            -o RequestTTY=no -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+            "$SSH_HOST" 'bash -se' <<'REMOTE_SLEEP'
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if kubectl -n smart-router get deployments -o json | jq -e '
+              [.items[] | select(.metadata.name | endswith("-router"))]
+              | length > 0 and all(.[];
+                  .spec.replicas == 0 and
+                  (.status.replicas // 0) == 0 and
+                  (.status.terminatingReplicas // 0) == 0)
+            ' >/dev/null; then
+              echo "All dev-sim-prtests chain routers are asleep"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: dev-sim-prtests routers did not reach zero replicas" >&2
+          exit 1
+          REMOTE_SLEEP
+          {
+            echo "### dev-sim-prtests router lifecycle"
+            echo ""
+            echo "- Result: all chain routers scaled to 0 after validation"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   preflight-status:
     name: Publish PR Validation Status
