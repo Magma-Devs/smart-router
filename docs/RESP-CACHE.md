@@ -633,6 +633,8 @@ Router 2 stays up on `:3365`; `--stop` removes both.
 | Relays fail or the smoke check fails | Public endpoint rate limits. Set `ETH_RPC_URL_1/2` and `ETH_WS_URL_1/2` to your own endpoints. |
 
 Readiness timing note: `/metrics/overall-health` (and the container health that follows it)
-starts **fail-closed** and reports 503 until the first relays health-check cycle completes —
-`--relays-health-interval` defaults to 5 minutes. A freshly started stack showing 503 while
-serving relays is warming up, not broken; the lanes shorten the interval for this reason.
+starts **fail-closed** and turns 200 once at least one chain has verified a provider — at
+endpoint-setup completion on a healthy boot. A 503 that persists means no upstream answers the
+health probe; while unhealthy the router re-probes every `--relays-health-unhealthy-interval`
+(default 15s), so recovery shows within seconds. The lanes also shorten `--relays-health-interval`
+so the periodic backstop sweep runs often enough to watch.

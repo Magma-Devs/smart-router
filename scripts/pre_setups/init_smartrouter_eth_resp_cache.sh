@@ -176,12 +176,10 @@ echo "        --resp-cache-addresses 127.0.0.1:${VALKEY_PORT} (overrides the con
 # No --skip-websocket-verification: the example config supplies a WS leg per
 # provider and this lane must prove that.
 #
-# --relays-health-interval: /metrics/overall-health starts FAIL-CLOSED (503) and
-# only flips once RelaysMonitorAggregator runs its first sweep — and that
-# aggregator acts on the first TICK, never immediately. At the 5m production
-# default the endpoint is therefore legitimately 503 for five minutes after
-# boot, which no reasonable lane can wait out. We shorten the cadence for the
-# lane instead of sleeping blindly: readiness is then observed, not assumed.
+# --relays-health-interval: cadence of the periodic health sweep. Readiness is
+# fail-closed only until endpoint setup verifies a provider, so the lane's
+# router turns 200 as soon as it serves; a short cadence keeps the periodic
+# backstop sweep frequent enough to observe within the lane's budget.
 HEALTH_INTERVAL="${HEALTH_INTERVAL:-15s}"
 screen -d -m -S "$SCREEN_NAME" bash -c "cd $PROJECT_ROOT && source ~/.bashrc; smartrouter \
 $CONFIG_REL \
@@ -258,9 +256,8 @@ if [[ "$RUN_DEMO" == "1" ]]; then
     [[ "$LAVA_HEALTH" == "200" ]] && note "router /lava/health" "200" \
         || { note "router /lava/health" "$LAVA_HEALTH (expected 200)"; DEMO_FAIL=1; }
 
-    # 2. metrics health — overall-health is fail-closed until the aggregator's
-    #    first sweep (cadence set by --relays-health-interval above), so poll
-    #    rather than sampling once. The budget must exceed that interval.
+    # 2. metrics health — overall-health is fail-closed until endpoint setup
+    #    has verified a provider, so poll rather than sampling once.
     OVERALL=""
     for _ in $(seq 1 60); do
         OVERALL=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${METRICS_PORT}/metrics/overall-health")
