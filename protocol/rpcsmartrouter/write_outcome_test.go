@@ -7,7 +7,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
-	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,102 +20,53 @@ import (
 // connect-phase failure proves nothing was sent. Everything else, including no evidence at all,
 // leaves the outcome genuinely unknown, and that is what the client is told.
 
-func relayErrorWith(le *common.LavaError) relaycore.RelayError {
-	return relaycore.RelayError{LavaError: le}
-}
-
+// The rule is about silence, so the table is written in the terms the rule actually uses:
+// how many succeeded, how many answered at all, how many were asked, and whether the request
+// spent its whole budget.
 func TestUnknownWriteOutcome(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		successResults []common.RelayResult
-		nodeErrors     []common.RelayResult
-		protocolErrors []relaycore.RelayError
-		want           bool
-		why            string
+		name                            string
+		successes, answered, dispatched int
+		ranOutOfRoad                    bool
+		want                            bool
+		why                             string
 	}{
 		{
-			name: "no evidence at all",
-			want: true,
-			why:  "the ordinary hung write: the goroutine was still in flight when the budget expired, so nothing was ever recorded. Reached only when the caller has already established the request ran out of budget — see TestRequestRanOutOfRoad and the guard in writeOutcomeIsUnknown, without which a request that never dispatched anything would land here too",
+			name: "one endpoint asked, it hung", answered: 0, dispatched: 1, ranOutOfRoad: true, want: true,
+			why: "the ordinary hung write — nothing recorded because the attempt was still in flight when the budget expired",
 		},
 		{
-			name:           "deadline exceeded",
-			protocolErrors: []relaycore.RelayError{relayErrorWith(common.LavaErrorContextDeadline)},
-			want:           true,
-			why:            "the failure mode behind both incidents — the upstream had the request and never replied",
+			name: "one answered with an error, one still silent", answered: 1, dispatched: 2, ranOutOfRoad: true, want: true,
+			why: "THE REGRESSION: a sibling's fast HTTP 500 used to decide this, while the silent endpoint may hold the transaction",
 		},
 		{
-			name:           "connection reset mid-flight",
-			protocolErrors: []relaycore.RelayError{relayErrorWith(common.LavaErrorConnectionReset)},
-			want:           true,
-			why:            "a reset arrives on an established connection, so the request may already have been read",
+			name: "one refused, one still silent", answered: 1, dispatched: 2, ranOutOfRoad: true, want: true,
+			why: "same shape with a connection refusal — a proven non-delivery on one endpoint says nothing about the other",
 		},
 		{
-			name:           "connection closed (EOF)",
-			protocolErrors: []relaycore.RelayError{relayErrorWith(common.LavaErrorConnectionClosed)},
-			want:           true,
-			why:            "an EOF likewise means we got as far as an established connection",
+			name: "every endpoint answered, all with errors", answered: 3, dispatched: 3, want: false,
+			why: "nobody is silent, so the outcome is known and the node's own reply passes through untouched",
 		},
 		{
-			name:           "connection refused",
-			protocolErrors: []relaycore.RelayError{relayErrorWith(common.LavaErrorConnectionRefused)},
-			want:           false,
-			why:            "the connect phase failed, so no bytes were written — this one really did not happen and must not be softened",
+			name: "every endpoint refused", answered: 2, dispatched: 2, want: false,
+			why: "all connect-phase failures, none silent — this write really did not happen and must not be softened",
 		},
 		{
-			name:           "DNS failure",
-			protocolErrors: []relaycore.RelayError{relayErrorWith(common.LavaErrorDNSFailure)},
-			want:           false,
-			why:            "we never resolved a host, let alone sent to one",
+			name: "one succeeded", successes: 1, answered: 2, dispatched: 3, want: false,
+			why: "an endpoint served the write; that answer is the result no matter who else stayed quiet",
 		},
 		{
-			name: "every endpoint refused",
-			protocolErrors: []relaycore.RelayError{
-				relayErrorWith(common.LavaErrorConnectionRefused),
-				relayErrorWith(common.LavaErrorNetworkUnreachable),
-				relayErrorWith(common.LavaErrorTLSMismatch),
-			},
-			want: false,
-			why:  "a fan-out where every attempt failed to connect proves the write did not happen",
+			name: "nothing recorded and nothing dispatched", answered: 0, dispatched: 0, ranOutOfRoad: false, want: false,
+			why: "no pairings, or every endpoint filtered out — telling this client the transaction may be on chain is the same lie, pointing the other way",
 		},
 		{
-			name: "one endpoint refused, another timed out",
-			protocolErrors: []relaycore.RelayError{
-				relayErrorWith(common.LavaErrorConnectionRefused),
-				relayErrorWith(common.LavaErrorContextDeadline),
-			},
-			want: true,
-			why:  "on a fan-out a single endpoint that may have been reached is enough to make the outcome unknown",
-		},
-		{
-			name:           "unclassified protocol error",
-			protocolErrors: []relaycore.RelayError{relayErrorWith(nil)},
-			want:           true,
-			why:            "an error we could not classify proves nothing either, and for a write the safe direction is unknown",
-		},
-		{
-			name:       "the node answered with an error",
-			nodeErrors: []common.RelayResult{{StatusCode: 400}},
-			want:       false,
-			why:        "the node replied, so that reply is the answer — we never overwrite what a node said",
-		},
-		{
-			name:           "a node answered successfully",
-			successResults: []common.RelayResult{{StatusCode: 200}},
-			want:           false,
-			why:            "not a failure at all",
-		},
-		{
-			name:           "a node answered and another timed out",
-			successResults: []common.RelayResult{{StatusCode: 200}},
-			protocolErrors: []relaycore.RelayError{relayErrorWith(common.LavaErrorContextDeadline)},
-			want:           false,
-			why:            "a real answer outranks a hung sibling on a fan-out",
+			name: "nothing recorded but the budget was spent", answered: 0, dispatched: 0, ranOutOfRoad: true, want: true,
+			why: "only a request that used its whole budget can have had an attempt in flight to be silent",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want,
-				unknownWriteOutcome(tc.successResults, tc.nodeErrors, tc.protocolErrors), tc.why)
+				unknownWriteOutcome(tc.successes, tc.answered, tc.dispatched, tc.ranOutOfRoad), tc.why)
 		})
 	}
 }
