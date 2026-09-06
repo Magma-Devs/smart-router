@@ -8,6 +8,25 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.5.1 — 2026-09-06
+
+### Highlights
+
+Release v1.5.1 introduces a configurable lookup budget for the RESP cache backend to help operators strictly bound remote cache latency. By setting the new `--cache-timeout` flag, integrators can prevent slow external cache queries from degrading overall RPC response times. On the orchestration side, this release corrects the behavior of the `/readyz` endpoint so that it is observable immediately upon boot. The readiness probe now registers internal health transitions faster, ensuring orchestrators and load balancers can accurately route traffic without artificial delays during startup or failover events.
+
+### Changes
+
+#### New Features
+- feat(resp-cache): configurable cache lookup budget (--cache-timeout) + remote lab test lanes ([#371]) [`e4331c4`]
+
+#### Bug fixes
+- fix(metrics): make /readyz observed from boot and fast on health transitions ([#354]) [`ee1e437`]
+
+[#354]: https://github.com/magma-Devs/smart-router/pull/354
+[#371]: https://github.com/magma-Devs/smart-router/pull/371
+[`e4331c4`]: https://github.com/magma-Devs/smart-router/commit/e4331c4a50d00ef64ea3c6cc924d9b3cda293260
+[`ee1e437`]: https://github.com/magma-Devs/smart-router/commit/ee1e437e663fca716da7abe7860dd138b007bb76
+
 ## v1.5.0 — 2026-09-03
 
 ### Highlights
