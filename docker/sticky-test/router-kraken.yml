@@ -1,0 +1,79 @@
+# Shaped after the customer's own ConfigMap, so the false-gap test runs against the
+# arrangement they actually deploy rather than a convenient one.
+#
+# Kept from their config:
+#   * metrics-listen-address declared HERE, not as a flag
+#   * listener on :3000
+#   * three primary providers, with their real provider names — the name is the router's
+#     routing identity and is exactly what a sticky claim stores
+#   * debug / trace addon urls on the reth provider
+#   * a backup-direct-rpc tier
+#
+# Changed for a local run:
+#   * cluster DNS names become compose service names
+#   * the backup tier points at local fakes instead of the lava gateway and quicknode,
+#     so no credentials are involved
+#   * skip-verifications, because these are fakes rather than real erigon/reth nodes
+#   * the ws:// url on each provider is DROPPED, and that deviation is worth knowing about.
+#     The fakes speak HTTP only, and ONE unreachable node-url excludes the WHOLE provider from
+#     the pool — not just that url. Left in, all three primaries were dropped at startup
+#     ("provider validation failed - excluding from provider list"), every relay fell through
+#     to the backup tier, and totalValidAddresses was 0. --skip-websocket-verification does
+#     NOT cover this; it skips a different check. The customer runs ws on every provider, so
+#     an unreachable ws endpoint costs them the whole upstream even when its http side is
+#     healthy. Worth raising with them separately.
+#
+# The heads are deliberately out of lockstep (see HEAD_OFFSET in the compose file). That is
+# the customer's actual failure condition: ask the pool for the head, then ask for that block
+# and land on a node which has not reached it yet.
+metrics-listen-address: 0.0.0.0:7779
+
+endpoints:
+  - chain-id: ETH1
+    api-interface: jsonrpc
+    network-address: 0.0.0.0:3000
+
+# The fleet-wide sticky claim registry. Note this key is absent from the customer's own
+# ConfigMap — worth confirming with them, because without a cache backend cross-pod
+# stickiness cannot work at all.
+cache-be: "cache:20100"
+
+direct-rpc:
+  - chain-id: ETH1
+    api-interface: jsonrpc
+    name: chain-evm-1-erigon-lighthouse-active-0
+    node-urls:
+      - url: http://node-erigon-active:8545
+        skip-verifications: [pruning, tx-indexing, chain-id]
+  - chain-id: ETH1
+    api-interface: jsonrpc
+    name: chain-evm-1-erigon-lighthouse-test-0
+    node-urls:
+      - url: http://node-erigon-test:8545
+        skip-verifications: [pruning, tx-indexing, chain-id]
+  - chain-id: ETH1
+    api-interface: jsonrpc
+    name: chain-evm-1-reth-lighthouse-public-active-0
+    node-urls:
+      - url: http://node-reth-public:8545
+        skip-verifications: [pruning, tx-indexing, chain-id]
+      - url: http://node-reth-public:8545
+        addons: [debug]
+        skip-verifications: [pruning, tx-indexing, chain-id]
+      - url: http://node-reth-public:8545
+        addons: [trace]
+        skip-verifications: [pruning, tx-indexing, chain-id]
+
+backup-direct-rpc:
+  - chain-id: ETH1
+    api-interface: jsonrpc
+    name: ethereum-lava
+    node-urls:
+      - url: http://node-backup-lava:8545
+        skip-verifications: [pruning, tx-indexing, chain-id]
+  - chain-id: ETH1
+    api-interface: jsonrpc
+    name: ethereum-quicknode
+    node-urls:
+      - url: http://node-backup-quicknode:8545
+        skip-verifications: [pruning, tx-indexing, chain-id]
