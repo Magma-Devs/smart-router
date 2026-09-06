@@ -1,0 +1,106 @@
+# The customer's false-gap bug, reproduced.
+#
+#   docker/sticky-test/run-falsegap.sh
+#
+# Same shape as their deployment: an ingress in front of three router replicas, a pool of
+# upstreams that is NOT in lockstep, and a cache pod holding the fleet-wide sticky claims.
+# The router config mirrors their ConfigMap (see router-kraken.yml).
+#
+# The pool drifts on purpose. erigon-active is at the tip, erigon-test is one block behind,
+# reth-public is two behind. Ask the pool for the head and you may get the tip; ask for that
+# block and you may land on a node that has not reached it, which answers null inside a
+# successful response. That is the bug.
+name: falsegap-test
+
+x-node: &node
+  image: python:3.12-alpine
+  volumes:
+    - ./fake_node.py:/app/fake_node.py:ro
+  command: ["python3", "/app/fake_node.py"]
+  healthcheck:
+    test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8545/__stats')"]
+    interval: 3s
+    timeout: 3s
+    retries: 10
+
+x-router: &router
+  image: smart-router:dev
+  build:
+    context: ../..
+    dockerfile: docker/Dockerfile
+  volumes:
+    - ./router-kraken.yml:/smart-router/config/sticky/router-kraken.yml:ro
+  command:
+    - "config/sticky/router-kraken.yml"
+    - "--use-static-spec"
+    - "specs/"
+    - "--shared-state=${STICKY_SHARED_STATE:-true}"
+    - "--log-level"
+    - "${SR_LOG_LEVEL:-info}"
+    # The fakes speak HTTP only. The config keeps the customer's ws url pairs for fidelity,
+    # so the startup reachability check has to be skipped; nothing here tests subscriptions.
+    - "--skip-websocket-verification"
+  depends_on:
+    cache: {condition: service_healthy}
+    node-erigon-active: {condition: service_healthy}
+    node-erigon-test: {condition: service_healthy}
+    node-reth-public: {condition: service_healthy}
+    node-backup-lava: {condition: service_healthy}
+    node-backup-quicknode: {condition: service_healthy}
+
+services:
+  # HEAD_OFFSET is how far behind the tip each node sits. This is the whole experiment.
+  node-erigon-active:
+    <<: *node
+    # Published so the driver can switch failure injection on for whichever node a session
+    # got pinned to (phase D).
+    ports: ["18545:8545"]
+    environment: [NODE_NAME=chain-evm-1-erigon-lighthouse-active-0, HEAD_OFFSET=0, BLOCK_TIME=1]
+  node-erigon-test:
+    <<: *node
+    # Published so the driver can switch failure injection on for whichever node a session
+    # got pinned to (phase D).
+    ports: ["18546:8545"]
+    environment: [NODE_NAME=chain-evm-1-erigon-lighthouse-test-0, HEAD_OFFSET=1, BLOCK_TIME=1]
+  node-reth-public:
+    <<: *node
+    # Published so the driver can switch failure injection on for whichever node a session
+    # got pinned to (phase D).
+    ports: ["18547:8545"]
+    environment: [NODE_NAME=chain-evm-1-reth-lighthouse-public-active-0, HEAD_OFFSET=2, BLOCK_TIME=1]
+  node-backup-lava:
+    <<: *node
+    environment: [NODE_NAME=ethereum-lava, HEAD_OFFSET=1, BLOCK_TIME=1]
+  node-backup-quicknode:
+    <<: *node
+    environment: [NODE_NAME=ethereum-quicknode, HEAD_OFFSET=2, BLOCK_TIME=1]
+
+  cache:
+    image: smart-router:dev
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+    command: ["cache", "0.0.0.0:20100", "--metrics_address", "0.0.0.0:5555"]
+    healthcheck:
+      test: ["CMD", "/busybox/wget", "-qO-", "http://localhost:5555/metrics"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  router-a:
+    <<: *router
+    ports: ["7811:7779"]
+  router-b:
+    <<: *router
+    ports: ["7812:7779"]
+  router-c:
+    <<: *router
+    ports: ["7813:7779"]
+
+  ingress:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx-falsegap.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "18081:8080"
+    depends_on: [router-a, router-b, router-c]

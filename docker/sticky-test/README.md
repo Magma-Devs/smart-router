@@ -64,3 +64,74 @@ curl -s :7801/metrics | grep smartrouter_csm_sticky_claims_total
 - `local_hit` — answered from this pod's confirmed table with no round trip.
 - `error` — the claim could not be established and the request was failed rather than
   served off an unverified pin.
+
+---
+
+# The customer's bug — false gaps (`run-falsegap.sh`)
+
+The test above asks *"does one session id reach one upstream across pods"*. This one asks the
+question the customer actually cares about: *"does my ingestion still record gaps that are not
+there"*.
+
+```bash
+docker/sticky-test/run-falsegap.sh
+KEEP=1 docker/sticky-test/run-falsegap.sh
+```
+
+## Their sequence, run as one unit
+
+```
+eth_blockNumber              -> H
+eth_getBlockByNumber(H)      -> the block, or null
+```
+
+If the two calls land on different upstreams and the second is behind, it answers `null` inside
+a successful response. Nothing retries, and the caller records a gap in a chain that has none.
+
+## Shaped after their deployment
+
+`router-kraken.yml` follows their real ConfigMap: their three provider names, the reth
+`debug`/`trace` addon urls, a `backup-direct-rpc` tier, the listener on `:3000`, and
+`metrics-listen-address` declared in the config rather than as a flag.
+
+Two deliberate deviations, both documented in that file:
+
+- The fakes replace real erigon/reth nodes, so verifications are skipped.
+- **The `ws://` urls are dropped.** With them in place all three primaries were excluded at
+  startup — one unreachable node-url costs the whole provider, and
+  `--skip-websocket-verification` does not cover it. Every relay then fell to the backup tier.
+
+## Why the chain has to move
+
+`BLOCK_TIME=1` makes every fake advance one block per second, keeping its fixed distance behind
+the tip.
+
+This is not for realism. With a frozen chain every round asks for the same block, and the second
+round onward is answered from cache without any upstream being contacted — **including a cached
+`null`**. The first version of this harness reported 30/30 false gaps while the nodes recorded
+almost no traffic at all. The measurement described the cache, not provider selection.
+
+## Phases
+
+| phase | what it does | fails the run? |
+|---|---|---|
+| **A** | no affinity — **must** produce false gaps | yes, aborts if it cannot |
+| **B** | with affinity — must produce none | yes |
+| **C** | distinct sessions must still spread over the pool | yes |
+| **D** | breaks the pinned node and reports what the retry does | no, informational |
+
+Phase A is load-bearing. A clean phase B means nothing unless phase A proved the harness can see
+the bug.
+
+Phase D documents a known limit rather than a regression: a pin is dropped on retry (MAG-2228),
+so a genuine error on the pinned node can send the retry to an upstream that is behind. It is
+reported, never asserted.
+
+## Measured
+
+| | false gaps in 20 rounds |
+|---|---|
+| no affinity | 4–8 |
+| with affinity | 0, across all 3 replicas, work still spread over all 3 upstreams |
+
+Theory predicts roughly a third of unpinned rounds should fail with heads at H, H−1, H−2.
