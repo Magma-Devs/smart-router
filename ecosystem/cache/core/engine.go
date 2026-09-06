@@ -321,7 +321,13 @@ const (
 	// router epoch (15 minutes by default). A five-minute ceiling would expire pins the epoch
 	// rule still accepts, which is the silent split this feature exists to remove.
 	MinStickyTTL = time.Minute
-	MaxStickyTTL = time.Hour
+	// The ceiling has to clear the window READERS honour, which is two router epochs. A flat
+	// hour did not: --epoch-duration is operator-settable and its own help text suggests 1h,
+	// where readers trust a claim for two hours while the store dropped it after one. In that
+	// gap a cold pod finds no claim and picks its own upstream — the split this feature exists
+	// to remove, reachable from a documented setting. Six hours clears epochs up to three,
+	// and the router warns at wiring time if its epoch would still exceed it.
+	MaxStickyTTL = 6 * time.Hour
 )
 
 // ClampStickyTTL bounds a requested sticky TTL to [MinStickyTTL, MaxStickyTTL].
@@ -341,19 +347,19 @@ func ClampStickyTTL(requested time.Duration) time.Duration {
 // costs the caller a local poll, this surfaces the error. A sticky pin is authoritative: telling
 // a caller "no upstream is claimed" when the truth is "we could not find out" invents a free
 // claim and splits the session, which is the failure the feature exists to prevent.
-func (e *Engine) GetSticky(ctx context.Context, chainId, apiInterface, stickyId string) (StickyPin, bool, error) {
+func (e *Engine) GetSticky(ctx context.Context, chainId, apiInterface, service, stickyId string) (StickyPin, bool, error) {
 	if stickyId == "" {
 		return StickyPin{}, false, nil
 	}
-	return e.Store.GetSticky(ctx, StickyKey(chainId, apiInterface, stickyId))
+	return e.Store.GetSticky(ctx, StickyKey(chainId, apiInterface, service, stickyId))
 }
 
 // SetStickyIfAbsent claims an upstream for one sticky session id, first-writer-wins, and returns
 // the EFFECTIVE pin — the claim just accepted, or the live claim that beat it. A caller that
 // finds someone else's pin in the reply lost the race and should adopt what it was handed.
-func (e *Engine) SetStickyIfAbsent(ctx context.Context, chainId, apiInterface, stickyId string, pin StickyPin, ttl time.Duration) (StickyPin, error) {
+func (e *Engine) SetStickyIfAbsent(ctx context.Context, chainId, apiInterface, service, stickyId string, pin StickyPin, ttl time.Duration) (StickyPin, error) {
 	if stickyId == "" {
 		return StickyPin{}, ErrEmptyStickyId
 	}
-	return e.Store.SetStickyIfAbsent(ctx, StickyKey(chainId, apiInterface, stickyId), pin, ClampStickyTTL(ttl))
+	return e.Store.SetStickyIfAbsent(ctx, StickyKey(chainId, apiInterface, service, stickyId), pin, ClampStickyTTL(ttl))
 }

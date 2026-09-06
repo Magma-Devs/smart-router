@@ -4,10 +4,10 @@
 #
 # Same shape as their deployment: an ingress in front of three router replicas, a pool of
 # upstreams that is NOT in lockstep, and a cache pod holding the fleet-wide sticky claims.
-# The router config mirrors their ConfigMap (see router-kraken.yml).
+# The router config mirrors their ConfigMap (see router-lagging-pool.yml).
 #
-# The pool drifts on purpose. erigon-active is at the tip, erigon-test is one block behind,
-# reth-public is two behind. Ask the pool for the head and you may get the tip; ask for that
+# The pool drifts on purpose. primary-0 is at the tip, primary-1 is one block behind,
+# primary-2 is two behind. Ask the pool for the head and you may get the tip; ask for that
 # block and you may land on a node that has not reached it, which answers null inside a
 # successful response. That is the bug.
 name: falsegap-test
@@ -29,9 +29,9 @@ x-router: &router
     context: ../..
     dockerfile: docker/Dockerfile
   volumes:
-    - ./router-kraken.yml:/smart-router/config/sticky/router-kraken.yml:ro
+    - ./router-lagging-pool.yml:/smart-router/config/sticky/router-lagging-pool.yml:ro
   command:
-    - "config/sticky/router-kraken.yml"
+    - "config/sticky/router-lagging-pool.yml"
     - "--use-static-spec"
     - "specs/"
     - "--shared-state=${STICKY_SHARED_STATE:-true}"
@@ -42,38 +42,38 @@ x-router: &router
     - "--skip-websocket-verification"
   depends_on:
     cache: {condition: service_healthy}
-    node-erigon-active: {condition: service_healthy}
-    node-erigon-test: {condition: service_healthy}
-    node-reth-public: {condition: service_healthy}
-    node-backup-lava: {condition: service_healthy}
-    node-backup-quicknode: {condition: service_healthy}
+    node-primary-0: {condition: service_healthy}
+    node-primary-1: {condition: service_healthy}
+    node-primary-2: {condition: service_healthy}
+    node-backup-0: {condition: service_healthy}
+    node-backup-1: {condition: service_healthy}
 
 services:
   # HEAD_OFFSET is how far behind the tip each node sits. This is the whole experiment.
-  node-erigon-active:
+  node-primary-0:
     <<: *node
     # Published so the driver can switch failure injection on for whichever node a session
     # got pinned to (phase D).
     ports: ["18545:8545"]
-    environment: [NODE_NAME=chain-evm-1-erigon-lighthouse-active-0, HEAD_OFFSET=0, BLOCK_TIME=1]
-  node-erigon-test:
+    environment: [NODE_NAME=upstream-primary-0, HEAD_OFFSET=0, BLOCK_TIME=1]
+  node-primary-1:
     <<: *node
     # Published so the driver can switch failure injection on for whichever node a session
     # got pinned to (phase D).
     ports: ["18546:8545"]
-    environment: [NODE_NAME=chain-evm-1-erigon-lighthouse-test-0, HEAD_OFFSET=1, BLOCK_TIME=1]
-  node-reth-public:
+    environment: [NODE_NAME=upstream-primary-1, HEAD_OFFSET=1, BLOCK_TIME=1]
+  node-primary-2:
     <<: *node
     # Published so the driver can switch failure injection on for whichever node a session
     # got pinned to (phase D).
     ports: ["18547:8545"]
-    environment: [NODE_NAME=chain-evm-1-reth-lighthouse-public-active-0, HEAD_OFFSET=2, BLOCK_TIME=1]
-  node-backup-lava:
+    environment: [NODE_NAME=upstream-primary-2, HEAD_OFFSET=2, BLOCK_TIME=1]
+  node-backup-0:
     <<: *node
-    environment: [NODE_NAME=ethereum-lava, HEAD_OFFSET=1, BLOCK_TIME=1]
-  node-backup-quicknode:
+    environment: [NODE_NAME=upstream-backup-0, HEAD_OFFSET=1, BLOCK_TIME=1]
+  node-backup-1:
     <<: *node
-    environment: [NODE_NAME=ethereum-quicknode, HEAD_OFFSET=2, BLOCK_TIME=1]
+    environment: [NODE_NAME=upstream-backup-1, HEAD_OFFSET=2, BLOCK_TIME=1]
 
   cache:
     image: smart-router:dev

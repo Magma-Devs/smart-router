@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,8 +41,32 @@ var ErrStickyUnavailable = errors.New("sticky session claim could not be establi
 // stickyId first-writer-wins and returns the EFFECTIVE claim, so a caller that lost the race
 // learns the winner from its own write and adopts it in the same request.
 type SharedStickyStore interface {
-	Fetch(ctx context.Context, chainID, apiInterface, stickyID string) (provider string, epoch uint64, found bool, err error)
-	PublishIfAbsent(ctx context.Context, chainID, apiInterface, stickyID, provider string, epoch uint64, ttl time.Duration) (winner string, winnerEpoch uint64, err error)
+	Fetch(ctx context.Context, chainID, apiInterface, service, stickyID string) (provider string, epoch uint64, found bool, err error)
+	PublishIfAbsent(ctx context.Context, chainID, apiInterface, service, stickyID, provider string, epoch uint64, ttl time.Duration) (winner string, winnerEpoch uint64, err error)
+}
+
+// StickyServiceScope names the capability class a claim belongs to: the add-on plus the sorted
+// extension set. Selection is filtered by both, so an upstream that serves the base collection
+// may be unable to serve an archive or debug call. Claims are therefore per class — one claim
+// spanning them would pin a session to an upstream that cannot answer half of it, and because a
+// resolved claim is enforced as a hard pin, that half fails for as long as the claim lives.
+//
+// Extensions are sorted so two pods handed the same set in a different order agree on the key.
+func StickyServiceScope(addon string, extensions []string) string {
+	if addon == "" && len(extensions) == 0 {
+		return "base"
+	}
+	sorted := append([]string(nil), extensions...)
+	sort.Strings(sorted)
+	return addon + "+" + strings.Join(sorted, ",")
+}
+
+// StickyLocalKey scopes the POD-LOCAL pin table the same way the fleet key is scoped. Without
+// it the local fast path would answer an archive request from a claim made for a plain one, and
+// the wedge this scoping removes would simply move from the registry into the local table.
+// NUL separates because it cannot appear in either half.
+func StickyLocalKey(scope, stickyID string) string {
+	return scope + "\x00" + stickyID
 }
 
 // StickyIDDigest is the opaque key a session id travels under. The raw id is chosen by the

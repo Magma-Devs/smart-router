@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	cachecore "github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
@@ -2583,7 +2584,21 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Claim lifetime is sized in epochs, which every pod derives from wall clock identically, so
 	// no clock agreement is needed between them.
 	if options.stateShare {
-		sessionManager.SetSharedStickyStore(performance.NewCacheStickyStore(options.cache), rpsr.epochTimer.GetEpochDuration())
+		epochDuration := rpsr.epochTimer.GetEpochDuration()
+		// Readers honour a claim for two epochs, so the store must keep it at least that long.
+		// The store clamps what it is asked for, and a long epoch can push the request past the
+		// ceiling — leaving a window where the claim is gone while pods still route on their
+		// local copies, which is the split this feature removes. Warn rather than fail: the
+		// feature still helps, and refusing to start over a tuning choice is worse.
+		if wanted := epochDuration * lavasession.StickyClaimEpochSpan; wanted > cachecore.MaxStickyTTL {
+			utils.LavaFormatWarning("cross-pod sticky sessions: epoch duration exceeds the claim TTL ceiling; claims may expire while pods still honour them", nil,
+				utils.LogAttr("epochDuration", epochDuration),
+				utils.LogAttr("requestedClaimTTL", wanted),
+				utils.LogAttr("ceiling", cachecore.MaxStickyTTL),
+				utils.LogAttr("chain", rpcEndpoint.ChainID),
+			)
+		}
+		sessionManager.SetSharedStickyStore(performance.NewCacheStickyStore(options.cache), epochDuration)
 	}
 
 	// Read per manager rather than once for the process: one manager serves one chain +

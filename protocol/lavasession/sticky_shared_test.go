@@ -25,25 +25,25 @@ func newFakeSharedSticky() *fakeSharedSticky {
 	return &fakeSharedSticky{claims: map[string]StickySession{}}
 }
 
-func (f *fakeSharedSticky) Fetch(_ context.Context, chainID, apiInterface, stickyID string) (string, uint64, bool, error) {
+func (f *fakeSharedSticky) Fetch(_ context.Context, chainID, apiInterface, service, stickyID string) (string, uint64, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fetches++
 	if f.err != nil {
 		return "", 0, false, f.err
 	}
-	claim, ok := f.claims[chainID+"|"+apiInterface+"|"+stickyID]
+	claim, ok := f.claims[chainID+"|"+apiInterface+"|"+service+"|"+stickyID]
 	return claim.Provider, claim.Epoch, ok, nil
 }
 
-func (f *fakeSharedSticky) PublishIfAbsent(_ context.Context, chainID, apiInterface, stickyID, provider string, epoch uint64, _ time.Duration) (string, uint64, error) {
+func (f *fakeSharedSticky) PublishIfAbsent(_ context.Context, chainID, apiInterface, service, stickyID, provider string, epoch uint64, _ time.Duration) (string, uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.writes++
 	if f.err != nil {
 		return "", 0, f.err
 	}
-	key := chainID + "|" + apiInterface + "|" + stickyID
+	key := chainID + "|" + apiInterface + "|" + service + "|" + stickyID
 	if existing, ok := f.claims[key]; ok {
 		return existing.Provider, existing.Epoch, nil
 	}
@@ -168,7 +168,7 @@ func TestSharedSticky_LoserOfARaceAdoptsTheWinner(t *testing.T) {
 	csm := stickyCSM(t, store)
 
 	// A peer claimed this session first, naming an upstream this pod also knows.
-	store.claims["stub|stub|"+StickyIDDigest("session-1")] = StickySession{Provider: "provider1", Epoch: firstEpochHeight}
+	store.claims["stub|stub|base|"+StickyIDDigest("session-1")] = StickySession{Provider: "provider1", Epoch: firstEpochHeight}
 
 	require.Equal(t, "provider1", resolvedProvider(t, csm, "session-1"))
 }
@@ -199,4 +199,78 @@ func TestStickyIDDigest_HidesThePlaintextAndIsStable(t *testing.T) {
 	require.NotContains(t, digest, id, "the raw session id must not travel to the registry")
 	require.Equal(t, digest, StickyIDDigest(id), "every pod must derive the same key")
 	require.NotEqual(t, digest, StickyIDDigest("customer-user-43"))
+}
+
+// --- regressions found in review of the first cut ---------------------------------------
+
+// lava-select-provider names an upstream explicitly, which is the more specific ask, and it has
+// always taken priority — getValidProviderAddresses handles it and returns before the sticky
+// block. The first cut of cross-pod stickiness overwrote it unconditionally, inverting that
+// order on any deployment running --shared-state.
+func TestSharedSticky_SelectProviderBeatsAStickyClaim(t *testing.T) {
+	store := newFakeSharedSticky()
+	csm := stickyCSM(t, store)
+
+	// A live fleet claim for this session names provider1.
+	store.claims["stub|stub|base|"+StickyIDDigest("session-1")] = StickySession{Provider: "provider1", Epoch: firstEpochHeight}
+
+	sessions, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "session-1", "provider3")
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	for provider := range sessions {
+		require.Equal(t, "provider3", provider, "the explicitly named provider must win over the fleet claim")
+	}
+}
+
+// Selection is filtered by add-on and extension, so an upstream serving the base collection may
+// be unable to serve an archive call. A single claim spanning both would pin such a session to
+// an upstream that cannot answer half of it — and since a resolved claim is enforced as a hard
+// pin, that half would fail for as long as the claim lived.
+func TestSharedSticky_ClaimsAreScopedPerServiceClass(t *testing.T) {
+	require.NotEqual(t, StickyServiceScope("", nil), StickyServiceScope("", []string{"archive"}),
+		"an archive request must not share a claim with a plain one")
+	require.NotEqual(t, StickyServiceScope("", nil), StickyServiceScope("debug", nil))
+
+	// Extension order must not change the key, or two pods handed the same set in a different
+	// order would claim separately and split the session.
+	require.Equal(t, StickyServiceScope("debug", []string{"archive", "trace"}),
+		StickyServiceScope("debug", []string{"trace", "archive"}))
+
+	// The pod-local table is scoped the same way, or the wedge just moves from the registry
+	// into local memory.
+	require.NotEqual(t, StickyLocalKey("base", "s1"), StickyLocalKey("base+archive", "s1"))
+	require.NotEqual(t, StickyLocalKey("base", "s1"), StickyLocalKey("base", "s2"))
+}
+
+// A claim outliving the upstream it names must not wedge the session. The resolved claim is a
+// hard pin, so the request fails — but the local copy has to be dropped, or the fast path
+// replays that same dead decision on every later request until it ages out an epoch or two on.
+func TestSharedSticky_UnusableClaimIsDroppedSoTheNextRequestRecovers(t *testing.T) {
+	store := newFakeSharedSticky()
+	csm := stickyCSM(t, store)
+
+	pinned := resolvedProvider(t, csm, "session-1")
+	localKey := StickyLocalKey(StickyServiceScope("", nil), "session-1")
+	_, cached := csm.stickySessions.Get(localKey)
+	require.True(t, cached, "the resolved claim should be remembered locally")
+
+	// The pinned upstream stops being selectable on this pod.
+	csm.lock.Lock()
+	remaining := make([]string, 0, len(csm.validAddresses))
+	for _, address := range csm.validAddresses {
+		if address != pinned {
+			remaining = append(remaining, address)
+		}
+	}
+	csm.validAddresses = remaining
+	// getValidAddresses answers from the per-addon cache when it is warm, so trimming the base
+	// list alone changes nothing until that cache is dropped too.
+	csm.addonAddresses = nil
+	csm.lock.Unlock()
+
+	_, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "session-1", "")
+	require.Error(t, err, "a hard pin on an unusable upstream must fail rather than reroute silently")
+
+	_, stillCached := csm.stickySessions.Get(localKey)
+	require.False(t, stillCached, "the dead claim must be dropped, or every later request replays it")
 }

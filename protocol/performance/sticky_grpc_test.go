@@ -48,17 +48,17 @@ func TestStickySession_RoundTripOverGRPC(t *testing.T) {
 	client := startStickyCacheGRPC(t, newStickyCacheServer(t))
 	ctx := context.Background()
 
-	_, found, err := client.GetStickySession(ctx, "ETH1", "jsonrpc", "digest-1")
+	_, found, err := client.GetStickySession(ctx, "ETH1", "jsonrpc", "base", "digest-1")
 	require.NoError(t, err)
 	require.False(t, found, "nothing claimed yet is a miss, not an error")
 
-	won, err := client.SetStickySessionIfAbsent(ctx, "ETH1", "jsonrpc", "digest-1",
+	won, err := client.SetStickySessionIfAbsent(ctx, "ETH1", "jsonrpc", "base", "digest-1",
 		core.StickyPin{Provider: "node-a", Epoch: 11}, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, "node-a", won.Provider)
 	require.EqualValues(t, 11, won.Epoch)
 
-	pin, found, err := client.GetStickySession(ctx, "ETH1", "jsonrpc", "digest-1")
+	pin, found, err := client.GetStickySession(ctx, "ETH1", "jsonrpc", "base", "digest-1")
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, "node-a", pin.Provider)
@@ -73,19 +73,19 @@ func TestStickySession_TwoRoutersAgreeOnOneUpstream(t *testing.T) {
 	ctx := context.Background()
 
 	// Pod A sees the session first and claims its own optimizer pick.
-	claimA, err := podA.SetStickySessionIfAbsent(ctx, "ETH1", "jsonrpc", "digest-1",
+	claimA, err := podA.SetStickySessionIfAbsent(ctx, "ETH1", "jsonrpc", "base", "digest-1",
 		core.StickyPin{Provider: "node-a", Epoch: 1}, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, "node-a", claimA.Provider)
 
 	// Pod B, which would have picked differently on its own, is handed the fleet's claim.
-	pin, found, err := podB.GetStickySession(ctx, "ETH1", "jsonrpc", "digest-1")
+	pin, found, err := podB.GetStickySession(ctx, "ETH1", "jsonrpc", "base", "digest-1")
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, "node-a", pin.Provider, "both replicas must route this session to one upstream")
 
 	// And if pod B raced instead of reading, its own write still returns pod A's winner.
-	claimB, err := podB.SetStickySessionIfAbsent(ctx, "ETH1", "jsonrpc", "digest-1",
+	claimB, err := podB.SetStickySessionIfAbsent(ctx, "ETH1", "jsonrpc", "base", "digest-1",
 		core.StickyPin{Provider: "node-b", Epoch: 1}, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, "node-a", claimB.Provider, "the loser of a race learns the winner from its own write")
@@ -98,11 +98,11 @@ func TestStickySession_LegacyBackendIsUnimplementedNotSilent(t *testing.T) {
 	client := startStickyCacheGRPC(t, relaytypes.UnimplementedRelayerCacheServer{})
 	ctx := context.Background()
 
-	_, _, err := client.GetStickySession(ctx, "ETH1", "jsonrpc", "digest-1")
+	_, _, err := client.GetStickySession(ctx, "ETH1", "jsonrpc", "base", "digest-1")
 	require.Error(t, err)
 	require.Equal(t, codes.Unimplemented, status.Code(err))
 
-	_, err = client.SetStickySessionIfAbsent(ctx, "ETH1", "jsonrpc", "digest-1",
+	_, err = client.SetStickySessionIfAbsent(ctx, "ETH1", "jsonrpc", "base", "digest-1",
 		core.StickyPin{Provider: "node-a", Epoch: 1}, time.Minute)
 	require.Error(t, err)
 	require.Equal(t, codes.Unimplemented, status.Code(err))
@@ -114,10 +114,10 @@ func TestStickySession_TypedNilCacheIsSafe(t *testing.T) {
 	var nilCache *performance.Cache
 	var backend performance.StickySessionBackend = nilCache
 
-	_, _, err := backend.GetStickySession(context.Background(), "ETH1", "jsonrpc", "id")
+	_, _, err := backend.GetStickySession(context.Background(), "ETH1", "jsonrpc", "base", "id")
 	require.ErrorIs(t, err, performance.NotInitializedError)
 
-	_, err = backend.SetStickySessionIfAbsent(context.Background(), "ETH1", "jsonrpc", "id",
+	_, err = backend.SetStickySessionIfAbsent(context.Background(), "ETH1", "jsonrpc", "base", "id",
 		core.StickyPin{Provider: "node-a"}, time.Minute)
 	require.ErrorIs(t, err, performance.NotInitializedError)
 }

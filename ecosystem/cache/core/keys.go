@@ -54,11 +54,17 @@ func HeightKey(chainId, blockHash string) string {
 	return HeightPrefix + chainId + ":" + blockHash
 }
 
-// StickyKey addresses a fleet-wide sticky-session pin. stickyId is a digest of the client's
+// StickyKey addresses a fleet-wide sticky-session pin, scoped to one SERVICE CLASS.
+//
+// service is what stops a claim wedging a session that mixes call types. Selection is filtered
+// by add-on and extension, so an upstream serving the base collection may be unable to serve an
+// archive or debug call. One claim spanning both would pin such a session to an upstream that
+// cannot answer half of it — and, because a resolved claim is enforced as a hard pin, the half
+// it cannot answer fails for as long as the claim lives. Each class therefore claims separately. stickyId is a digest of the client's
 // session id computed by the router, never the plaintext: the raw id is customer-supplied and
 // may identify an end user, while the fleet only needs a stable string to agree on. The api
 // interface is part of the key because a session manager — and therefore an upstream name — is
 // scoped to one chain AND one api interface.
-func StickyKey(chainId, apiInterface, stickyId string) string {
-	return StickyPrefix + chainId + ":" + apiInterface + ":" + stickyId
+func StickyKey(chainId, apiInterface, service, stickyId string) string {
+	return StickyPrefix + chainId + ":" + apiInterface + ":" + service + ":" + stickyId
 }
