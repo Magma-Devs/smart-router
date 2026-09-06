@@ -573,10 +573,10 @@ fi
 } > "$CONFIG_FILE"
 
 # --- router ------------------------------------------------------------------
-# --relays-health-interval: /metrics/overall-health starts FAIL-CLOSED (503) and
-# only flips once the health aggregator's first TICK fires. At the 5m production
-# default a freshly booted demo shows 503 while happily serving relays, which
-# reads as "broken" to an audience. Shorten the cadence instead of waiting.
+# --relays-health-interval: cadence of the periodic health sweep. Readiness
+# itself is fail-closed only until endpoint setup verifies a provider, so a
+# freshly booted demo turns 200 as soon as it serves; the short cadence keeps
+# the periodic re-check visible in the logs during a demo.
 echo "[Setup] starting the smart router (:${ROUTER_PORT})"
 screen -d -m -S "$ROUTER_SCREEN" bash -c "cd $PROJECT_ROOT && source ~/.bashrc; smartrouter \
 $CONFIG_REL \

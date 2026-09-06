@@ -347,7 +347,14 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help: "Overall health of the RPC smart router (1=healthy, 0=unhealthy).",
 	})
 	routerOverallHealth = registerOrReuse(routerOverallHealth)
-	routerOverallHealth.Set(1)
+	// 0, not 1. This gauge is the reporting half of the same state /readyz
+	// serves, and endpointsHealthChecksOk below starts fail-closed at 0 — so
+	// setting it to 1 here made the two disagree from birth. Nothing has
+	// verified a provider at construction time, and the first health check is a
+	// full RelaysMonitorAggregator interval away, so a 1 here is a claim the
+	// process cannot support: every router reported healthy for its first
+	// minutes, and a router that never became healthy went on reporting it.
+	routerOverallHealth.Set(0)
 
 	routerOverallHealthBreakdown := registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_overall_health_breakdown",
