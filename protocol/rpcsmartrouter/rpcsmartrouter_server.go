@@ -1038,10 +1038,13 @@ var errUnknownWriteOutcome = errors.New("transaction status unclear: timeout rea
 
 // writeOutcomeIsUnknown reports whether a failed request was a write whose outcome we do not know.
 //
-// The rule is silence, not the errors that came back: nothing succeeded, and some endpoint we asked
-// did not answer at all — it may be holding the transaction. A hung endpoint records no error, so
-// any rule inspecting the error list misses it. When every endpoint answered, nothing is silent and
-// the node's own reply passes through untouched.
+// The rule is silence: nothing succeeded, and some endpoint we asked did not answer at all — it may
+// be holding the transaction. A hung endpoint records no error, so any rule inspecting only the
+// error list misses it.
+//
+// Silence is not the whole of it. An endpoint whose connection died after the request went out has
+// come back without answering, so when everyone came back we still ask whether any of them was cut
+// off mid-delivery. A node error is a real reply and passes through untouched.
 //
 // No record at all means either an attempt still in flight (unknown) or a request that never
 // dispatched one (no pairings, everything filtered out). Only a request that spent its whole budget
@@ -1062,21 +1065,36 @@ func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProces
 	answered := len(successResults) + len(nodeErrors) + len(protocolErrors)
 	dispatched := relayProcessor.GetUsedProviders().SessionsLatestBatch()
 
+	// A node error is a reply, so it settles that endpoint. A transport error may not: an
+	// unclassified one proves nothing, and a reset, EOF or timeout can arrive after the request was
+	// already on the wire.
+	cutOffMidDelivery := false
+	for _, protocolError := range protocolErrors {
+		if protocolError.LavaError == nil || protocolError.LavaError.MayHaveReachedNode {
+			cutOffMidDelivery = true
+			break
+		}
+	}
+
 	return unknownWriteOutcome(len(successResults), answered, dispatched,
-		requestRanOutOfRoad(relayProcessor.GetStopReason()))
+		requestRanOutOfRoad(relayProcessor.GetStopReason()), cutOffMidDelivery)
 }
 
 // unknownWriteOutcome is the judgement, split out so it can be tested directly. Assumes the caller
 // has established that this is a failed write.
-func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad bool) bool {
+func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad, cutOffMidDelivery bool) bool {
 	if successes > 0 {
 		return false // an endpoint served the write; that answer is the result
 	}
 	if answered == 0 {
 		return ranOutOfRoad // nothing recorded: in flight only if the budget was spent
 	}
-	// Someone we asked is still silent, so the outcome is unknown however loudly the others failed.
-	return answered < dispatched
+	if answered < dispatched {
+		return true // someone we asked is still silent, however loudly the others failed
+	}
+	// Everyone came back — but "came back" is not the same as answered. A connection that died
+	// after the request went out settles nothing about whether the node received it.
+	return cutOffMidDelivery
 }
 
 func (rpcss *RPCSmartRouterServer) SendParsedRelay(

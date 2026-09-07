@@ -20,53 +20,62 @@ func TestUnknownWriteOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name                            string
 		successes, answered, dispatched int
-		ranOutOfRoad                    bool
+		ranOutOfRoad, cutOff            bool
 		want                            bool
 		why                             string
 	}{
 		{
 			name: "one endpoint asked, it hung", answered: 0, dispatched: 1, ranOutOfRoad: true, want: true,
-			why: "the ordinary hung write — nothing recorded because the attempt was still in flight when the budget expired",
+			why: "nothing recorded because the attempt was still in flight when the budget expired",
 		},
 		{
 			name: "one answered with an error, one still silent", answered: 1, dispatched: 2, ranOutOfRoad: true, want: true,
-			why: "THE REGRESSION: a sibling's fast HTTP 500 used to decide this, while the silent endpoint may hold the transaction",
+			why: "a sibling's fast error must not decide this while another endpoint may hold the transaction",
 		},
 		{
 			name: "one refused, one still silent", answered: 1, dispatched: 2, ranOutOfRoad: true, want: true,
-			why: "same shape with a connection refusal — a proven non-delivery on one endpoint says nothing about the other",
+			why: "a proven non-delivery on one endpoint says nothing about the other",
 		},
 		{
-			name: "every endpoint answered, all with errors", answered: 3, dispatched: 3, want: false,
-			why: "nobody is silent, so the outcome is known and the node's own reply passes through untouched",
+			name: "every endpoint answered, all with node errors", answered: 3, dispatched: 3, want: false,
+			why: "every node replied, so the outcome is known and the reply passes through untouched",
 		},
 		{
 			name: "every endpoint refused", answered: 2, dispatched: 2, want: false,
-			why: "all connect-phase failures, none silent — this write really did not happen and must not be softened",
+			why: "connect-phase failures prove nothing was sent — this write really did not happen",
 		},
 		{
-			name: "one succeeded", successes: 1, answered: 2, dispatched: 3, want: false,
-			why: "an endpoint served the write; that answer is the result no matter who else stayed quiet",
+			name:     "single endpoint, connection died after the request went out",
+			answered: 1, dispatched: 1, cutOff: true, want: true,
+			why: "a reset or EOF mid-delivery settles nothing; the node may already have the transaction",
+		},
+		{
+			name:     "every endpoint answered, one was cut off mid-delivery",
+			answered: 3, dispatched: 3, cutOff: true, want: true,
+			why: "nobody is silent, but one of them never actually answered",
+		},
+		{
+			name: "one succeeded", successes: 1, answered: 2, dispatched: 3, cutOff: true, want: false,
+			why: "an endpoint served the write; that answer is the result whatever happened elsewhere",
 		},
 		{
 			name: "nothing recorded and nothing dispatched", answered: 0, dispatched: 0, ranOutOfRoad: false, want: false,
-			why: "no pairings, or every endpoint filtered out — telling this client the transaction may be on chain is the same lie, pointing the other way",
+			why: "no pairings — claiming the transaction may be on chain is the same lie, pointing the other way",
 		},
 		{
 			name: "nothing recorded but the budget was spent", answered: 0, dispatched: 0, ranOutOfRoad: true, want: true,
-			why: "only a request that used its whole budget can have had an attempt in flight to be silent",
+			why: "only a request that used its whole budget can have had an attempt in flight",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want,
-				unknownWriteOutcome(tc.successes, tc.answered, tc.dispatched, tc.ranOutOfRoad), tc.why)
+				unknownWriteOutcome(tc.successes, tc.answered, tc.dispatched, tc.ranOutOfRoad, tc.cutOff), tc.why)
 		})
 	}
 }
 
-// The classification the rule depends on, asserted at the registration site rather than trusted.
-// Getting one of these backwards silently converts an honest "unclear" into a false "failed", or
-// the reverse, on exactly the requests that matter most.
+// The classification the rule reads for the cut-off-mid-delivery case. Getting one backwards turns
+// an honest "unclear" into a false "failed", or the reverse, on the requests that matter most.
 func TestMayHaveReachedNodeClassification(t *testing.T) {
 	for _, tc := range []struct {
 		err  *common.LavaError
