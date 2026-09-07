@@ -1,7 +1,7 @@
 #!/bin/bash
 # Two-zone secondary-cache integration lane (docs/SECONDARY-CACHE.md).
 #
-# Reproduces the PRD's Kraken topology on one machine:
+# Reproduces the PRD's two-zone topology on one machine:
 #
 #   internal zone: router-internal (:3361) --cache-be cache-internal (:20101)
 #   external zone: router-external (:3360) --cache-be cache-external (:20100)
