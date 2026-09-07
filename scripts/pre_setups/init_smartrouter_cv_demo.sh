@@ -13,10 +13,10 @@
 #   --uc4   Quorum mismatch -> metric      (reply-time dissent and straggler dissent,
 #                                           with the group + finality labels)
 #   --uc5   Quorum failure -> structured   (quorum-time vs structural reasons, and the
-#           signal to the client            contrast with a generic upstream error)
+#           signal to the client            contrast with a real upstream error)
 #   --uc6   Outlier excluded from result   (outvoted under a tolerant policy, fatal
 #                                           under a unanimous one)
-#   --all   every sub-demo, in order
+#   --all   bring the stack up fresh, smoke it, then run every sub-demo in order
 #
 # UC-7 (a deployment with no policies at all) is its own lane, because the whole
 # point of it is a config that does NOT have this one's `cross-validation:` block:
@@ -31,9 +31,14 @@
 # admits. Latency knobs decide who wins the race to quorum, so the reply-time and
 # straggler paths are selected deterministically rather than by luck.
 #
+# THE SIMULATOR IS SHARED. It is reused when already up, never torn down, and
+# never reset globally — this lane states the six providers it owns explicitly
+# instead. Even so, the two cross-validation lanes drive overlapping provider
+# ids, so run them one at a time.
+#
 # USAGE
 #   scripts/pre_setups/init_smartrouter_cv_demo.sh            # bring it up + smoke
-#   scripts/pre_setups/init_smartrouter_cv_demo.sh --all      # ... then every use case
+#   scripts/pre_setups/init_smartrouter_cv_demo.sh --all      # fresh stack, then every use case
 #   scripts/pre_setups/init_smartrouter_cv_demo.sh --uc2      # one use case (stack must be up)
 #   scripts/pre_setups/init_smartrouter_cv_demo.sh --status
 #   scripts/pre_setups/init_smartrouter_cv_demo.sh --stop
@@ -45,11 +50,12 @@
 #
 # OWNERSHIP SAFETY. This lane never runs `killall smartrouter` or `killall
 # screen`: other lanes and other checkouts routinely have routers running. It
-# reclaims only what it can prove it started (a pid file carrying a process
-# start-time fingerprint, a screen under its own name) and refuses to run if its
-# ports are held by anything else, printing the override to use instead. The
-# simulator is shared infrastructure, so it is reused when already up and is
-# never torn down.
+# reclaims only what it can prove it started — a pid file carrying a process
+# start-time fingerprint, a screen under a name derived from THIS checkout, or a
+# process whose command line names this checkout's ABSOLUTE config path — and
+# refuses to run if its ports are held by anything else, printing the override to
+# use instead. The shared helpers live in _cv_lane_lib.sh so that contract has
+# one implementation rather than two that can drift.
 
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 PROJECT_ROOT=$(cd "${__dir}"/../.. && pwd)
@@ -63,11 +69,18 @@ METRICS_PORT="${METRICS_PORT:-7794}"
 DEBUG_PORT="${DEBUG_PORT:-6796}"
 NEG_PORT="${NEG_PORT:-3398}"
 
-ROUTER_SCREEN="sr-cv-demo"
+source "$__dir"/_cv_lane_lib.sh
+
+# Screen names and pid files are global to the user, so they carry a per-checkout
+# tag: without it a second checkout's lane reclaims the first one's session.
+LANE="$(lane_tag)"
+ROUTER_SCREEN="sr-cv-demo-${LANE}"
 CONFIG_REL="debugging/smartrouter_cv_demo.yml"
 CONFIG_FILE="${PROJECT_ROOT}/${CONFIG_REL}"
 NEG_DIVERSITY_REL="debugging/smartrouter_cv_demo_neg_diversity.yml"
 NEG_PERGROUP_REL="debugging/smartrouter_cv_demo_neg_pergroup.yml"
+NEG_DIVERSITY_FILE="${PROJECT_ROOT}/${NEG_DIVERSITY_REL}"
+NEG_PERGROUP_FILE="${PROJECT_ROOT}/${NEG_PERGROUP_REL}"
 PIDFILE="${PROJECT_ROOT}/debugging/.cv-demo-router.pid"
 ROUTER_LOG="${LOGS_DIR}/SMARTROUTER_CV_DEMO.log"
 SIM_LOG="${LOGS_DIR}/CV_DEMO_SIM.log"
@@ -77,7 +90,6 @@ SPEC_FILE="${PROJECT_ROOT}/specs/ethereum.json"
 # --- the fleet: provider_simulator eth-sim, 6 providers in 3 groups -----------
 # Ports come from the simulator's constants.py (ETH_PRIMARY_PORTS 18545-18547,
 # ETH_BACKUP_PORTS 18560-18562); the control API keys providers as "pool:pid".
-SIM_CONTROL="127.0.0.1:19000"
 SIM_PORTS="18545 18546 18547 18560 18561 18562"     # sim-1 .. sim-6, positionally
 GROUP_A="tier-1"      # sim-1, sim-2
 GROUP_B="external"    # sim-3, sim-4
@@ -98,104 +110,34 @@ M_DIVERSITY="eth_getTransactionCount"  # UC-2 min-groups
 M_PERGROUP="eth_call"               # UC-2 per-group quorum
 M_STRICT="eth_getStorageAt"         # UC-6 unanimous policy
 M_NOPOLICY="eth_getBlockByNumber"   # no policy at all — the caller-driven control
+M_UPSTREAM_ERR="eth_getTransactionByHash"  # UC-5 step 3 — forced to a real node error
 
 HDR=""   # set in main(); the header dump every check reads
-
-# =============================================================================
-# Ownership helpers (same contract as the RESP cache lanes)
-# =============================================================================
-
-# A pid alone is not proof — pids get recycled. Record the process start time
-# alongside it and require both to match before signalling anything.
-proc_fingerprint() { ps -p "$1" -o lstart= 2>/dev/null | tr -s ' '; }
-
-reclaim_owned() {
-    local pidfile="$1" what="$2"
-    [[ -f "$pidfile" ]] || return 0
-    local rec_pid rec_fp cur_fp
-    rec_pid=$(cut -d'|' -f1 "$pidfile" 2>/dev/null)
-    rec_fp=$(cut -d'|' -f2- "$pidfile" 2>/dev/null)
-    [[ -n "$rec_pid" ]] || { rm -f "$pidfile"; return 0; }
-    cur_fp=$(proc_fingerprint "$rec_pid")
-    if [[ -z "$cur_fp" ]]; then rm -f "$pidfile"; return 0; fi          # already gone
-    if [[ "$cur_fp" != "$rec_fp" ]]; then
-        echo "  stale pid file for the $what (pid $rec_pid now belongs to another process) — leaving it alone"
-        rm -f "$pidfile"; return 0
-    fi
-    echo "  stopping this lane's previous $what (pid $rec_pid)"
-    kill "$rec_pid" 2>/dev/null || true
-    for _ in $(seq 1 20); do
-        [[ -z "$(proc_fingerprint "$rec_pid")" ]] && break
-        sleep 0.25
-    done
-    rm -f "$pidfile"
-}
-
-record_owned() {
-    local pidfile="$1" port="$2" what="$3" pid=""
-    for _ in $(seq 1 60); do
-        pid=$(lsof -nP -iTCP:${port} -sTCP:LISTEN -t 2>/dev/null | head -1)
-        [[ -n "$pid" ]] && break
-        sleep 1
-    done
-    if [[ -z "$pid" ]]; then
-        echo "ERROR: the $what never bound :${port} — refusing to continue without an"
-        echo "       ownership record, since a later run could not tell it from a foreign process."
-        return 1
-    fi
-    printf '%s|%s\n' "$pid" "$(proc_fingerprint "$pid")" > "$pidfile"
-    echo "  $what pid ${pid} recorded"
-    return 0
-}
-
-# Fallback ownership signal for an interrupted run that never wrote a pid file: a
-# process is still provably ours when the port we own is held by a command line
-# naming a config only this lane generates. That is identity, not a name match on
-# "smartrouter", so it cannot reach another lane or another checkout.
-reclaim_by_identity() { # port, unique-substring, what
-    local port="$1" needle="$2" what="$3" pid
-    pid=$(lsof -nP -iTCP:${port} -sTCP:LISTEN -t 2>/dev/null | head -1)
-    [[ -n "$pid" ]] || return 0
-    ps -p "$pid" -o command= 2>/dev/null | grep -qF -- "$needle" || return 0
-    echo "  stopping this lane's $what by identity (pid $pid, no pid file)"
-    kill "$pid" 2>/dev/null || true
-    for _ in $(seq 1 20); do
-        lsof -nP -iTCP:${port} -sTCP:LISTEN -t >/dev/null 2>&1 || break
-        sleep 0.25
-    done
-}
 
 teardown() {
     echo "[Teardown] stopping this lane's resources (nothing else is signalled)"
     reclaim_owned "$PIDFILE" "router"
-    reclaim_by_identity "$ROUTER_PORT" "$CONFIG_REL" "router"
+    reclaim_by_identity "$ROUTER_PORT" "$CONFIG_FILE" "router"
+    # An interrupted --uc2 can leave a throwaway negative router holding NEG_PORT.
+    reclaim_by_identity "$NEG_PORT" "$NEG_DIVERSITY_FILE" "negative router"
+    reclaim_by_identity "$NEG_PORT" "$NEG_PERGROUP_FILE" "negative router"
     screen -S "$ROUTER_SCREEN" -X quit >/dev/null 2>&1 || true
     echo "  the provider_simulator is shared infrastructure — left running"
     echo "[Teardown] done"
 }
 
 # =============================================================================
-# Simulator control
+# Fleet control
 # =============================================================================
-sim_up() { curl -s --max-time 2 "http://$SIM_CONTROL/health" >/dev/null 2>&1; }
-sim_reset() { curl -s -X POST "http://$SIM_CONTROL/reset/all" >/dev/null 2>&1; }
 
-# sim_scenario <json> : POST a scenario fragment, failing loudly on a rejected key
-# rather than letting a silently-ignored override read as "the router held".
-sim_scenario() {
-    local response
-    response=$(curl -s -w '\n%{http_code}' -X POST "http://$SIM_CONTROL/scenario" \
-        -H 'Content-Type: application/json' -d "$1")
-    if [[ "$(printf '%s' "$response" | tail -n1)" != "200" ]]; then
-        echo "  ! simulator rejected the scenario: $(printf '%s' "$response" | sed '$d')"
-        return 1
-    fi
-}
-
-# fleet_clean : every provider honest and fast. Always call this before injecting,
-# so no scenario inherits the previous one's latency or body override.
+# fleet_clean : every provider of THIS lane honest and fast.
+#
+# It states all six providers rather than calling POST /reset/all, which is
+# unscoped and would wipe every other harness's fixtures on the shared simulator.
+# Stating the whole fleet each time also means no scenario can inherit the
+# previous one's latency or body override. sim_scenario dies on a rejection, so
+# a failed injection can never be mistaken for a router defect downstream.
 fleet_clean() {
-    sim_reset
     sim_scenario '{"providers":{
         "eth-sim:1":{"latency_ms":0,"responses":{}},
         "eth-sim:2":{"latency_ms":0,"responses":{}},
@@ -215,6 +157,13 @@ dissent() {
         \"responses\":{\"$method\":{\"result\":\"$value\"}}}}}"
 }
 
+# node_error <pid> <method> : make sim-<pid> answer <method> with a real JSON-RPC
+# error, so a genuine upstream failure can be contrasted with a quorum failure.
+node_error() {
+    sim_scenario "{\"providers\":{\"eth-sim:$1\":{\"latency_ms\":0,
+        \"responses\":{\"$2\":{\"error_stub\":\"revert\"}}}}}"
+}
+
 # slow <pid> <ms> : delay a provider without changing what it answers. Latency is
 # how this lane picks the recording path deterministically — all six upstreams are
 # local and answer in microseconds, so who wins the race to quorum is otherwise
@@ -222,32 +171,8 @@ dissent() {
 slow() { sim_scenario "{\"providers\":{\"eth-sim:$1\":{\"latency_ms\":$2}}}"; }
 
 # =============================================================================
-# Request + assertion helpers
+# Lane-specific helpers
 # =============================================================================
-PASS=0; FAIL=0
-pass() { printf '  PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
-fail() { printf '  FAIL  %s\n' "$1"; FAIL=$((FAIL + 1)); }
-check() { # check <description> <actual> <expected>
-    if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1 (got '$2', want '$3')"; fi
-}
-note() { printf '    %-38s %s\n' "$1" "$2"; }
-
-# call <method> <params-json> [curl args...] : one request through the router.
-# Headers land in $HDR; the body is echoed.
-call() {
-    local method="$1" params="$2"; shift 2
-    curl -s -m 40 -D "$HDR" -X POST "http://127.0.0.1:${ROUTER_PORT}" \
-        -H 'Content-Type: application/json' "$@" \
-        -d "{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params},\"id\":1}"
-}
-
-# addr <n> : a distinct account per call. Nothing is cached in this lane (no
-# cache-be), but a varying address also keeps upstream-side memoisation out of it.
-addr() { printf '0x%040x' "$1"; }
-
-hdr() { grep -i "^lava-cross-validation-$1:" "$HDR" | head -1 | tr -d '\r' | cut -d' ' -f2-; }
-cv_present() { grep -qi '^lava-cross-validation-' "$HDR"; }
-count_csv() { printf '%s' "$1" | tr ',' '\n' | grep -c '[^[:space:]]' | tr -d ' '; }
 
 # group_of <provider-name> : the group-label this lane wrote into the config. The
 # response headers name providers, not groups, so the mapping is re-stated here.
@@ -273,32 +198,17 @@ distinct_groups() { # <csv of provider names> -> count of distinct groups
     done | sort -u | grep -c '[^[:space:]]' | tr -d ' '
 }
 
-# metric <substring...> : sum the value of every metrics line matching ALL the
-# given substrings. Absent series read 0, so a delta is always computable.
-metric() {
-    local out
-    out=$(curl -s -m 10 "http://127.0.0.1:${METRICS_PORT}/metrics" 2>/dev/null)
-    local pat
-    for pat in "$@"; do out=$(printf '%s' "$out" | grep -F -- "$pat"); done
-    printf '%s' "$out" | awk '{s+=$NF} END {printf "%d", s+0}'
-}
-
-wait_ready() {
-    for _ in $(seq 1 60); do
-        if [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:${ROUTER_PORT}/lava/health")" == "200" ]]; then
-            return 0
-        fi
-        screen -list 2>/dev/null | grep -q "$ROUTER_SCREEN" || return 1
-        sleep 1
-    done
-    return 1
-}
-
-router_up() { curl -s -o /dev/null -m 5 "http://127.0.0.1:${ROUTER_PORT}/lava/health" 2>/dev/null; }
+# log_mark / log_since : read only the lines THIS sub-demo produced.
+#
+# Greping the whole accumulated router log asserts on something an earlier
+# sub-demo (or the smoke) already guaranteed, so the check passes even when the
+# requests it is about produced nothing.
+log_mark() { wc -l < "$ROUTER_LOG" 2>/dev/null | tr -d ' ' || echo 0; }
+log_since() { tail -n "+$(( ${1:-0} + 1 ))" "$ROUTER_LOG" 2>/dev/null; }
 
 require_up() {
-    router_up && return 0
-    echo "ERROR: no router answering on :${ROUTER_PORT}."
+    router_healthy && return 0
+    echo "ERROR: no router answering 200 on :${ROUTER_PORT}/lava/health."
     echo "       Bring the lane up first:  $0"
     exit 1
 }
@@ -342,10 +252,9 @@ EOF
     done
 }
 
-write_config() {
-    {
-        emit_fleet "$ROUTER_PORT"
-        cat <<EOF
+emit_config() {
+    emit_fleet "$ROUTER_PORT"
+    cat <<EOF
 
 # One policy per use case. A method absent from this list is untouched: it is
 # cross-validated only when the caller sends the lava-cross-validation-* headers,
@@ -399,6 +308,15 @@ cross-validation:
       min-groups: 2
       max-participants: 4
 
+    # UC-5 contrast. A mandated method used to show that a genuine upstream error
+    # is reported as an error, without a cross-validation failure-reason.
+    - chain-id: ETH1
+      api-interface: jsonrpc
+      method: $M_UPSTREAM_ERR
+      enabled: true
+      agreement-threshold: 2
+      max-participants: 6
+
     # UC-6 contrast. Unanimity: with agreement-threshold == max-participants a
     # single outlier drops the agreeing count below the threshold, so the request
     # fails instead of returning a quorum that excluded it.
@@ -409,14 +327,12 @@ cross-validation:
       agreement-threshold: 6
       max-participants: 6
 EOF
-    } > "$CONFIG_FILE"
 }
 
 # The two negative configs are never served — they exist to be REFUSED at startup.
-write_negative_configs() {
-    {
-        emit_fleet "$NEG_PORT"
-        cat <<EOF
+emit_neg_diversity() {
+    emit_fleet "$NEG_PORT"
+    cat <<EOF
 
 # UNSATISFIABLE ON PURPOSE: min-groups 4 over a fleet with 3 groups. No request
 # could ever satisfy it, so the router must refuse to start rather than fail
@@ -431,11 +347,11 @@ cross-validation:
       max-participants: 6
       min-groups: 4
 EOF
-    } > "${PROJECT_ROOT}/${NEG_DIVERSITY_REL}"
+}
 
-    {
-        emit_fleet "$NEG_PORT"
-        cat <<EOF
+emit_neg_pergroup() {
+    emit_fleet "$NEG_PORT"
+    cat <<EOF
 
 # UNSATISFIABLE ON PURPOSE: per-group quorum needs
 # max-participants >= min-groups * agreement-threshold (2 * 2 = 4), and this asks
@@ -451,7 +367,12 @@ cross-validation:
       min-groups: 2
       max-participants: 3
 EOF
-    } > "${PROJECT_ROOT}/${NEG_PERGROUP_REL}"
+}
+
+write_config() { write_config_atomic "$CONFIG_FILE" emit_config; }
+write_negative_configs() {
+    write_config_atomic "$NEG_DIVERSITY_FILE" emit_neg_diversity
+    write_config_atomic "$NEG_PERGROUP_FILE" emit_neg_pergroup
 }
 
 # =============================================================================
@@ -463,6 +384,7 @@ uc1() {
     echo "UC-1 — Per-method validation policy"
     echo "============================================"
     fleet_clean
+    local mark; mark=$(log_mark)
 
     echo ""
     echo "[1] '$M_MANDATE' has a policy with enabled: true — no caller headers sent"
@@ -525,10 +447,13 @@ uc1() {
 
     echo ""
     echo "[6] policy resolution is logged at request time"
-    if grep -q "CrossValidation mode enabled (policy-resolved)" "$ROUTER_LOG" 2>/dev/null; then
-        pass "the router logged which path resolved the parameters"
+    # Only the lines THIS sub-demo produced: the smoke already issued a mandated
+    # call, so greping the whole log would pass even if none of the five requests
+    # above reached the resolver.
+    if log_since "$mark" | grep -q "CrossValidation mode enabled (policy-resolved)"; then
+        pass "the router logged which path resolved the parameters, for these requests"
     else
-        fail "no policy-resolution line in $ROUTER_LOG (needs --log-level debug)"
+        fail "no policy-resolution line for this sub-demo's requests in $ROUTER_LOG (needs --log-level debug)"
     fi
 }
 
@@ -597,31 +522,38 @@ uc2() {
 
     echo ""
     echo "[5] a policy the fleet can NEVER satisfy is refused at STARTUP, not per request"
+    # The patterns are the router's own error strings, anchored. A loose pattern
+    # such as `distinct.*group` also matches the HEALTHY startup line
+    # ("... policies loaded ... distinctGroups=3") and every served relay, so a
+    # router whose guard regressed would still be reported as having refused.
     assert_refuses_to_start "$NEG_DIVERSITY_REL" \
-        "min-groups|distinct.*group|insufficient-groups" \
+        "cross-validation min-groups policy cannot be satisfied" \
         "min-groups: 4 over a 3-group fleet"
     assert_refuses_to_start "$NEG_PERGROUP_REL" \
-        "per-group-quorum needs max-participants|min-groups \* agreement-threshold" \
+        "per-group-quorum needs max-participants" \
         "per-group-quorum with max-participants 3 < 2 * 2"
 }
 
 # assert_refuses_to_start <config-rel> <error-regex> <what>
 # A time-boxed foreground router. A satisfiable config would instead run until the
-# timeout kills it and answer on its port — both of which fail this check, so a
-# port clash or a dead upstream cannot masquerade as a passing capacity test.
+# bound expires (rc 124) and answer on its port — both of which fail this check,
+# so a port clash or a dead upstream cannot masquerade as a passing capacity test.
 assert_refuses_to_start() {
     local cfg="$1" rx="$2" what="$3" rc
     echo "    trying to start: $what"
-    ( cd "$PROJECT_ROOT" && timeout 90 smartrouter "$cfg" \
-        --log-level debug \
-        --use-static-spec "$SPEC_FILE" \
-        --skip-websocket-verification ) > "$NEG_LOG" 2>&1
+    run_bounded 90 "$NEG_LOG" "$PROJECT_ROOT" \
+        smartrouter "$cfg" \
+            --log-level debug \
+            --use-static-spec "$SPEC_FILE" \
+            --skip-websocket-verification
     rc=$?
-    if grep -qiE "$rx" "$NEG_LOG"; then
+    if [[ "$rc" == "124" ]]; then
+        fail "the unsatisfiable config KEPT RUNNING until the bound expired — $what"
+    elif grep -qE "$rx" "$NEG_LOG"; then
         pass "refused to start — $what"
-        grep -iE "$rx" "$NEG_LOG" | head -n1 | cut -c1-160 | sed 's/^/        /'
+        grep -E "$rx" "$NEG_LOG" | head -n1 | cut -c1-160 | sed 's/^/        /'
     else
-        fail "expected a capacity error matching /$rx/ (rc=$rc); tail of $NEG_LOG:"
+        fail "expected the router's own capacity error /$rx/ (rc=$rc); tail of $NEG_LOG:"
         tail -n 8 "$NEG_LOG" 2>/dev/null | cut -c1-160 | sed 's/^/        /'
     fi
     if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${NEG_PORT}/lava/health" 2>/dev/null; then
@@ -637,7 +569,7 @@ uc4() {
     echo "============================================"
     echo "UC-4 — Quorum mismatch -> metric for alerting"
     echo "============================================"
-    local before after straggler_before straggler_after
+    local before after fin_before fin_after straggler_before straggler_after snap
 
     echo ""
     echo "[1] reply-time dissent: sim-6 ($GROUP_C) answers FIRST and answers wrong"
@@ -646,26 +578,24 @@ uc4() {
     local p
     for p in 1 2 3 4 5; do slow "$p" 400; done
     dissent 6 "$M_MANDATE" "0xdeadbeef" 0
-    before=$(metric cross_validation_mismatch_total "group=\"${GROUP_C}\"")
+    # One scrape, two readings — and both are deltas: a cumulative counter is
+    # already non-zero on any re-run, so an absolute assertion cannot fail.
+    snap=$(metrics_scrape)
+    before=$(metric_in "$snap" cross_validation_mismatch_total "group=\"${GROUP_C}\"")
+    fin_before=$(metric_in "$snap" cross_validation_mismatch_total 'finality="finalized"')
     call "$M_MANDATE" "[\"$(addr 41)\",\"$BLOCK\"]" >/dev/null
-    after=$(metric cross_validation_mismatch_total "group=\"${GROUP_C}\"")
+    snap=$(metrics_scrape)
+    after=$(metric_in "$snap" cross_validation_mismatch_total "group=\"${GROUP_C}\"")
+    fin_after=$(metric_in "$snap" cross_validation_mismatch_total 'finality="finalized"')
     note "status" "$(hdr status)"
     note "disagreeing-providers" "$(hdr disagreeing-providers)"
     note "mismatch_total{group=$GROUP_C}" "${before} -> ${after}"
+    note "mismatch_total{finality=finalized}" "${fin_before} -> ${fin_after}"
     check "the quorum still formed around the honest answer" "$(hdr status)" "success"
     check "the dissenter is named in the response headers" "$(hdr disagreeing-providers)" "sim-6"
-    if [[ "$after" -gt "$before" ]]; then
-        pass "the alerting counter moved for the outlier's group"
-    else
-        fail "mismatch_total{group=$GROUP_C} did not move (${before} -> ${after})"
-    fi
-    curl -s -m 10 "http://127.0.0.1:${METRICS_PORT}/metrics" \
-        | grep '^smartrouter_cross_validation_mismatch_total' | sed 's/^/        /'
-    if [[ "$(metric cross_validation_mismatch_total 'finality="finalized"')" -gt 0 ]]; then
-        pass "the finality label reads 'finalized' — divergence on settled state"
-    else
-        fail "no finalized-labelled mismatch; the request may not have carried a block number"
-    fi
+    check_gt "the alerting counter moved for the outlier's group" "$after" "$before"
+    check_gt "THIS request was labelled finality=finalized" "$fin_after" "$fin_before"
+    printf '%s' "$snap" | grep '^smartrouter_cross_validation_mismatch_total' | sed 's/^/        /'
 
     echo ""
     echo "[2] straggler dissent: the SAME outlier, delayed past the quorum early-exit"
@@ -690,11 +620,7 @@ uc4() {
         sleep 1
     done
     note "straggler_total{outcome=disagreed}" "${straggler_before} -> ${straggler_after}"
-    if [[ "$straggler_after" -gt "$straggler_before" ]]; then
-        pass "the late dissent still reached the alerting surface"
-    else
-        fail "the straggler was never resolved as disagreed"
-    fi
+    check_gt "the late dissent still reached the alerting surface" "$straggler_after" "$straggler_before"
 
     fleet_clean
 }
@@ -707,14 +633,17 @@ uc5() {
     echo "============================================"
     echo "UC-5 — Quorum failure -> structured signal to the client"
     echo "============================================"
-    local body
+    local body na_before na_after cap_before cap_after snap p
+
+    snap=$(metrics_scrape)
+    na_before=$(metric_in "$snap" cross_validation_failures_total 'reason="no-agreement"')
+    cap_before=$(metric_in "$snap" cross_validation_failures_total 'reason="insufficient-capacity"')
 
     echo ""
     echo "[1] QUORUM-TIME failure: all six answer differently, so nothing reaches 2"
     fleet_clean
-    local p
     for p in 1 2 3 4 5 6; do dissent "$p" "$M_MANDATE" "0x${p}${p}"; done
-    body=$(call "$M_MANDATE" "[\"$(addr 51)\",\"$BLOCK\"]")
+    call "$M_MANDATE" "[\"$(addr 51)\",\"$BLOCK\"]" >/dev/null
     note "status" "$(hdr status)"
     note "failure-reason" "$(hdr failure-reason)"
     note "all-providers" "$(hdr all-providers)"
@@ -744,30 +673,48 @@ uc5() {
     fi
 
     echo ""
-    echo "[3] the contrast: a plain upstream error carries NO cross-validation headers"
+    echo "[3] the contrast: a REAL upstream error on a cross-validated method"
+    echo "    (every provider returns a JSON-RPC error, so this is an upstream failure,"
+    echo "     not a disagreement — the client must be able to tell them apart)"
     fleet_clean
-    call "eth_getBlockByHash" "[\"0xnotahash\",false]" >/dev/null
-    if cv_present; then
-        fail "a non-cross-validated error was decorated with CV headers"
+    for p in 1 2 3 4 5 6; do node_error "$p" "$M_UPSTREAM_ERR"; done
+    body=$(call "$M_UPSTREAM_ERR" "[\"0x$(printf '%064x' 52)\"]")
+    local up_status up_reason
+    up_status=$(hdr status); up_reason=$(hdr failure-reason)
+    note "body" "$(printf '%s' "$body" | head -c 120)"
+    note "status" "${up_status:-<absent>}"
+    note "failure-reason" "${up_reason:-<absent>}"
+    if printf '%s' "$body" | grep -q '"error"'; then
+        pass "the upstream error reaches the client as an error"
     else
-        pass "'quorum failure' is distinguishable from a generic upstream error"
+        fail "expected a JSON-RPC error body, got: $(printf '%s' "$body" | head -c 120)"
     fi
+    # The discriminator: an upstream failure never carries a quorum-time reason.
+    # (It may still be reported as a cross-validation failure, but with
+    # insufficient-responses — nobody answered successfully — which is a
+    # different and honest statement than "they disagreed".)
+    case "$up_reason" in
+        no-agreement|diversity-unmet|group-quorum-unmet)
+            fail "an all-error upstream was reported as a disagreement: $up_reason" ;;
+        *)
+            pass "not reported as a disagreement (reason: ${up_reason:-none})" ;;
+    esac
+    fleet_clean
 
     echo ""
     echo "[4] both failures are broken out by reason for alerting"
-    curl -s -m 10 "http://127.0.0.1:${METRICS_PORT}/metrics" \
-        | grep '^smartrouter_cross_validation_failures_total' | sed 's/^/        /'
-    if [[ "$(metric cross_validation_failures_total 'reason="no-agreement"')" -gt 0 \
-       && "$(metric cross_validation_failures_total 'reason="insufficient-capacity"')" -gt 0 ]]; then
-        pass "failures_total separates the quorum-time reason from the structural one"
-    else
-        fail "failures_total is missing one of the two reasons"
-    fi
+    snap=$(metrics_scrape)
+    na_after=$(metric_in "$snap" cross_validation_failures_total 'reason="no-agreement"')
+    cap_after=$(metric_in "$snap" cross_validation_failures_total 'reason="insufficient-capacity"')
+    printf '%s' "$snap" | grep '^smartrouter_cross_validation_failures_total' | sed 's/^/        /'
+    note "failures_total{no-agreement}" "${na_before} -> ${na_after}"
+    note "failures_total{insufficient-capacity}" "${cap_before} -> ${cap_after}"
+    check_gt "THIS run recorded the quorum-time reason" "$na_after" "$na_before"
+    check_gt "THIS run recorded the structural reason" "$cap_after" "$cap_before"
 
     echo ""
     echo "    The router did NOT retry either request with a different provider set —"
     echo "    that decision is deliberately the client's (PRD: no bespoke retry in the router)."
-    fleet_clean
 }
 
 # =============================================================================
@@ -778,7 +725,7 @@ uc6() {
     echo "============================================"
     echo "UC-6 — Outlier provider excluded from the result set"
     echo "============================================"
-    local body result
+    local body result p
 
     echo ""
     echo "[1] tolerant policy ('$M_MANDATE', 2 of 6): one provider diverges"
@@ -787,7 +734,6 @@ uc6() {
     # the reply while the outlier is still in flight, and it lands in
     # pending-providers — a straggler, which is UC-4's second scenario, not this one.
     fleet_clean
-    local p
     for p in 1 2 3 4 6; do slow "$p" 400; done
     dissent 5 "$M_MANDATE" "0xbadbadbad" 0
     body=$(call "$M_MANDATE" "[\"$(addr 61)\",\"$BLOCK\"]")
@@ -842,7 +788,7 @@ smoke() {
     call "$M_MANDATE" "[\"$(addr 1)\",\"$BLOCK\"]" >/dev/null
     note "mandated cross-validation" "$(hdr status)"
     note "agreeing providers" "$(hdr agreeing-providers)"
-    check "the policy block loaded" "$(printf '%s' "$layout" | grep -o 'policies=[0-9]*' | head -1)" "policies=6"
+    check "the policy block loaded" "$(printf '%s' "$layout" | grep -o 'policies=[0-9]*' | head -1)" "policies=7"
     check "all three groups were resolved" "$(printf '%s' "$layout" | grep -o 'distinctGroups=[0-9]*' | head -1)" "distinctGroups=3"
     check "a mandated request reaches quorum" "$(hdr status)" "success"
     echo ""
@@ -869,86 +815,40 @@ bring_up() {
     echo "============================================"
     echo ""
 
+    # `timeout` is in this list because it is NOT present on a stock macOS — the
+    # platform this lane targets — and its absence would otherwise surface as two
+    # FAILs against the startup fail-fast rather than as a missing dependency.
+    # (run_bounded replaces it, so this is a belt-and-braces check for anything
+    # else in pre_setups that still shells out to it.)
     for tool in jq curl python3 lsof screen; do
-        command_exists "$tool" || { echo "ERROR: '$tool' is required."; exit 1; }
+        command_exists "$tool" || die "'$tool' is required."
     done
-    [[ -f "$SPEC_FILE" ]] || { echo "ERROR: spec not found: $SPEC_FILE"; exit 1; }
+    [[ -f "$SPEC_FILE" ]] || die "spec not found: $SPEC_FILE"
 
     echo "[Setup] reclaiming this lane's previous run (if any)"
     reclaim_owned "$PIDFILE" "router"
-    reclaim_by_identity "$ROUTER_PORT" "$CONFIG_REL" "router"
+    reclaim_by_identity "$ROUTER_PORT" "$CONFIG_FILE" "router"
     screen -S "$ROUTER_SCREEN" -X quit >/dev/null 2>&1 || true
     sleep 1
 
-    local blocked=0 port
-    for port in $ROUTER_PORT $METRICS_PORT $DEBUG_PORT $NEG_PORT; do
-        if lsof -nP -iTCP:$port -sTCP:LISTEN >/dev/null 2>&1; then
-            if [[ "$blocked" == "0" ]]; then
-                echo ""
-                echo "ERROR: this lane's port(s) are held by process(es) it does not own."
-                echo "       Refusing to run. Nothing was signalled or removed."
-            fi
-            echo "  port $port:"
-            lsof -nP -iTCP:$port -sTCP:LISTEN | sed 's/^/    /'
-            blocked=1
-        fi
-    done
-    if [[ "$blocked" == "1" ]]; then
-        echo ""
-        echo "Stop the owning process yourself, or run the lane on free ports:"
-        echo "  ROUTER_PORT=3496 METRICS_PORT=7894 DEBUG_PORT=6896 NEG_PORT=3498 $0"
-        exit 1
-    fi
+    require_free_ports \
+        "ROUTER_PORT=3496 METRICS_PORT=7894 DEBUG_PORT=6896 NEG_PORT=3498 $0" \
+        "$ROUTER_PORT" "$METRICS_PORT" "$DEBUG_PORT" "$NEG_PORT"
 
     echo "[Setup] installing binaries"
-    make -C "$PROJECT_ROOT" install || { echo "ERROR: make install failed"; exit 1; }
+    make -C "$PROJECT_ROOT" install || die "make install failed"
 
-    # --- provider_simulator ---------------------------------------------------
-    # Search upward for the sibling checkout rather than assuming one layout: a
-    # working copy nested under a per-branch directory sits two levels down from
-    # the workspace root, not one. SIM_DIR=... overrides the search entirely.
-    if [[ -z "$SIM_DIR" ]]; then
-        local candidate
-        for candidate in "$PROJECT_ROOT/.." "$PROJECT_ROOT/../.." "$PROJECT_ROOT/../../.."; do
-            if [[ -f "$candidate/provider_simulator/run.py" ]]; then
-                SIM_DIR=$(cd "$candidate/provider_simulator" && pwd)
-                break
-            fi
-        done
-        SIM_DIR="${SIM_DIR:-$(cd "$PROJECT_ROOT/.." && pwd)/provider_simulator}"
-    fi
     echo ""
-    if sim_up; then
-        echo "[Setup] provider_simulator already running on $SIM_CONTROL (reusing it)"
-    else
-        echo "[Setup] starting provider_simulator from $SIM_DIR"
-        [[ -f "$SIM_DIR/run.py" ]] || {
-            echo "ERROR: $SIM_DIR/run.py not found. Set SIM_DIR=... to the provider_simulator checkout."
-            exit 1; }
-        local sim_py; sim_py="$(command -v python3.12 || command -v python3)"
-        # The trailing >/dev/null 2>&1 </dev/null on the SUBSHELL, not just on the
-        # simulator, is load-bearing: a backgrounded child that inherits this
-        # script's stdout keeps the write end of the pipe open, so `lane | tee`
-        # never sees EOF and appears to hang long after the lane has finished.
-        ( cd "$SIM_DIR" && nohup "$sim_py" -u run.py > "$SIM_LOG" 2>&1 & ) >/dev/null 2>&1 </dev/null
-        for _ in $(seq 1 30); do sim_up && break; sleep 1; done
-        sim_up || {
-            echo "ERROR: the simulator did not become ready. See $SIM_LOG"
-            tail -n 20 "$SIM_LOG" 2>/dev/null | sed 's/^/    /'
-            exit 1; }
-        echo "  simulator up (control $SIM_CONTROL, eth-sim on $SIM_PORTS)"
-    fi
+    sim_ensure "$SIM_LOG"
     fleet_clean
-    echo "  every provider honest and fast (clean slate for startup verification)"
+    echo "  this lane's six providers set honest and fast (the simulator is not reset globally)"
 
-    # --- config ---------------------------------------------------------------
     echo ""
     echo "[Setup] generating ${CONFIG_REL} (+ two deliberately unsatisfiable ones)"
     write_config
     write_negative_configs
-    echo "  $(wc -c < "$CONFIG_FILE" | tr -d ' ') bytes, 6 providers / 3 groups / 6 policies"
+    echo "  $(wc -c < "$CONFIG_FILE" | tr -d ' ') bytes, 6 providers / 3 groups / 7 policies"
 
-    # --- router ---------------------------------------------------------------
     # No cache: a cache hit would short-circuit the fan-out and there would be no
     # second opinion to compare against. --debug-address installs the
     # cross-validation event recorder that /debug/cross-validation-events serves.
@@ -963,11 +863,18 @@ $CONFIG_REL \
 --skip-websocket-verification 2>&1 | tee \"$ROUTER_LOG\"" && sleep 0.25
 
     echo "[Setup] waiting for the router ..."
-    wait_ready || {
-        echo "ERROR: the router never became healthy. Tail of $ROUTER_LOG:"
+    wait_healthy "$ROUTER_PORT" "$ROUTER_SCREEN" || {
+        echo "Tail of $ROUTER_LOG:"
         tail -n 30 "$ROUTER_LOG" 2>/dev/null | sed 's/^/    /'
-        exit 1; }
+        die "the router never answered 200 on /lava/health"
+    }
     record_owned "$PIDFILE" "$ROUTER_PORT" "router" || exit 1
+
+    # /lava/health going 200 is not provider readiness — the listener starts while
+    # validation is still running, so a request issued now can see a partial fleet.
+    echo "[Setup] waiting for all six providers to become selectable ..."
+    wait_providers "$ROUTER_PORT" 6 "$M_NOPOLICY" \
+        || echo "  WARNING: the full fleet was not selectable in time; checks may fail on capacity"
     # Let the chain tracker learn the head, so a request for $BLOCK resolves to
     # "finalized" rather than "unknown" on the mismatch metric.
     sleep 5
@@ -993,14 +900,18 @@ The group-diversity method, and the per-group one:
 Make a provider diverge / delay it (pid 1-6 = sim-1..sim-6):
   curl -s -X POST http://${SIM_CONTROL}/scenario -H 'Content-Type: application/json' \\
     -d '{"providers":{"eth-sim:6":{"latency_ms":0,"responses":{"${M_MANDATE}":{"result":"0xdeadbeef"}}}}}'
-  curl -s -X POST http://${SIM_CONTROL}/reset/all        # everyone honest again
+
+  # ... and back to honest. Do NOT use POST /reset/all: it is unscoped and would
+  # wipe every other harness's fixtures on the shared simulator.
+  curl -s -X POST http://${SIM_CONTROL}/scenario -H 'Content-Type: application/json' \\
+    -d '{"providers":{"eth-sim:6":{"latency_ms":0,"responses":{}}}}'
 
 The alerting surface:
   curl -s http://127.0.0.1:${METRICS_PORT}/metrics | grep cross_validation
   curl -s http://127.0.0.1:${DEBUG_PORT}/debug/cross-validation-events | jq
   curl -s "http://127.0.0.1:${DEBUG_PORT}/debug/cross-validation-events?outcome=disagreed" | jq
 
-Sub-demos (the stack stays up between them; --all runs them in order):
+Sub-demos (the stack stays up between them; --all restarts it first, then runs all):
   $0 --uc1     per-method policy
   $0 --uc2     group diversity + the startup fail-fasts
   $0 --uc4     mismatch metric
@@ -1016,7 +927,7 @@ EOF
 }
 
 status() {
-    echo "router  :${ROUTER_PORT}   $(router_up && echo UP || echo DOWN)"
+    echo "router  :${ROUTER_PORT}   $(router_healthy && echo UP || echo DOWN)"
     echo "metrics :${METRICS_PORT}  $(curl -s -o /dev/null -m 3 "http://127.0.0.1:${METRICS_PORT}/metrics" && echo UP || echo DOWN)"
     echo "debug   :${DEBUG_PORT}   $(curl -s -o /dev/null -m 3 "http://127.0.0.1:${DEBUG_PORT}/debug/cross-validation-events" && echo UP || echo DOWN)"
     echo "sim     ${SIM_CONTROL}  $(sim_up && echo UP || echo DOWN)"
@@ -1041,13 +952,12 @@ case "${1:-}" in
     --uc5)    require_up; uc5 ;;
     --uc6)    require_up; uc6 ;;
     --all)
-        if router_up; then
-            echo "[Setup] reusing the running lane on :${ROUTER_PORT}"
-            write_negative_configs
-        else
-            bring_up
-            [[ "$SKIP_SMOKE" == "1" ]] || smoke
-        fi
+        # Always brought up fresh. Reusing a running router would mean driving
+        # whatever config it happens to hold — an older revision of this script,
+        # or a hand-edited debugging/ file — and reporting the resulting
+        # mismatches as cross-validation defects.
+        bring_up
+        [[ "$SKIP_SMOKE" == "1" ]] || smoke
         uc1; uc2; uc4; uc5; uc6
         ;;
     "")
