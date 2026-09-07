@@ -274,3 +274,56 @@ func TestSharedSticky_UnusableClaimIsDroppedSoTheNextRequestRecovers(t *testing.
 	_, stillCached := csm.stickySessions.Get(localKey)
 	require.False(t, stillCached, "the dead claim must be dropped, or every later request replays it")
 }
+
+// The guarantee has to survive a claimed upstream that is BUSY, not just one that is gone.
+//
+// Every earlier test here made an upstream unusable by removing it from the valid set — the
+// failure shape of a drained or unhealthy node. There is a second, much more ordinary shape:
+// the upstream is valid, healthy and serving, but cannot take THIS relay because its compute
+// units for the epoch are spent or it is at its session cap. That check happens later, in the
+// refill loop, and the refill used to blank the pin — so the request was quietly served by a
+// different upstream with no error and no metric.
+//
+// For this feature that is the exact split it exists to remove, arriving under ordinary load
+// rather than during an incident, and invisible when it does.
+func TestSharedSticky_BusyClaimedUpstreamFailsRatherThanRerouting(t *testing.T) {
+	store := newFakeSharedSticky()
+	csm := stickyCSM(t, store)
+
+	pinned := resolvedProvider(t, csm, "session-1")
+
+	// Spend the pinned upstream's compute units for this epoch. It stays a valid address —
+	// not blocked, still serving the collection — it simply cannot take this relay.
+	csm.lock.RLock()
+	cswp := csm.pairing[pinned]
+	csm.lock.RUnlock()
+	cswp.Lock.Lock()
+	cswp.UsedComputeUnits = cswp.MaxComputeUnits
+	cswp.Lock.Unlock()
+
+	sessions, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil),
+		servicedBlockNumber, "", nil, common.NO_STATE, 0, "session-1", "")
+
+	if err == nil {
+		served := ""
+		for provider := range sessions {
+			served = provider
+		}
+		require.Failf(t, "the claim was silently abandoned",
+			"the fleet claim named %s, but %s served the request with no error — a busy upstream must fail the request, not reroute it",
+			pinned, served)
+	}
+	require.ErrorIs(t, err, SelectedProviderAlreadyFailedError)
+
+	// The claim is deliberately KEPT. A busy upstream is not a bad one: the fleet's answer is
+	// still correct and the next request should use it. Dropping it would spend a registry
+	// round trip to be handed the very same claim back.
+	//
+	// This is the distinction between the two sentinels. `Unavailable` — blocked, unhealthy, or
+	// missing the add-on — means the claim names something that cannot serve this class at all,
+	// and THAT one drops the local pin (see the deferred invalidation in GetSessions).
+	// `AlreadyFailed` means healthy but busy this instant, and leaves it alone.
+	pin, held := csm.stickySessions.Get(StickyLocalKey(StickyServiceScope("", nil), "session-1"))
+	require.True(t, held, "a busy upstream must not cost the session its claim")
+	require.Equal(t, pinned, pin.Provider)
+}
