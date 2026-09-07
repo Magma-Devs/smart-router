@@ -497,6 +497,10 @@ type errorMapping struct {
 var LavaErrorUnknown = &LavaError{
 	Code: 0, Name: "UNKNOWN_ERROR", Category: CategoryExternal,
 	Description: "Unclassified error — no matcher matched", Retryable: true,
+	// An error nobody matched proves nothing about whether the request left this process, and for
+	// a write the unprovable direction is the safe one: "unclear" is recoverable, a false
+	// "definitely failed" invites a resubmit of a transaction that may already be on chain.
+	MayHaveReachedNode: true,
 }
 
 // ---------------------------------------------------------------------------
