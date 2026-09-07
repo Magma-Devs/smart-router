@@ -2603,8 +2603,21 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 			}
 		}
 
-		// If we do not have enough fetch more
-		providerAddresses, err = csm.getValidProviderAddresses(ctx, 1, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, "")
+		// If we do not have enough fetch more.
+		//
+		// selectedProvider is carried into the refill, NOT blanked. Blanking it silently broke
+		// the pin: an upstream that is perfectly valid but cannot take THIS relay — its compute
+		// units for the epoch are spent, or it is at its session cap — is added to the ignored
+		// set just above, and a pin-less refill then served the request from a different
+		// upstream with no error and no metric. For a header-pinned provider that is the
+		// opposite of what the header asks for; for a resolved sticky claim it is the exact
+		// split cross-pod stickiness exists to remove, arriving under ordinary load rather than
+		// during an incident.
+		//
+		// Carrying it through routes the refill into the "selected provider already failed in
+		// this request" guard, so the request fails instead — which is what pinning means. The
+		// first fetch above has always passed it; only this one did not.
+		providerAddresses, err = csm.getValidProviderAddresses(ctx, 1, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider)
 
 		// If error exists but we have providers, return them
 		if err != nil && len(sessionWithProviderMap) != 0 {
