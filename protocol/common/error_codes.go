@@ -7,9 +7,8 @@ package common
 
 var (
 	// Connection errors (1001-1009)
-	// MayHaveReachedNode: assigned from net.Error.Timeout(), which covers a dial timeout AND a
-	// timeout waiting for the response. The two are indistinguishable here, so take the safe
-	// direction for a write — "unclear" is recoverable, a false "definitely failed" is not.
+	// MayHaveReachedNode: net.Error.Timeout() covers both a dial and a response timeout, and the
+	// two are indistinguishable here. For a write, "unclear" is the recoverable direction.
 	LavaErrorConnectionTimeout = registerError(&LavaError{
 		Code: 1001, Name: "PROTOCOL_CONNECTION_TIMEOUT", Category: CategoryInternal,
 		Description: "Network operation timed out connecting to provider", Retryable: true,
@@ -27,14 +26,13 @@ var (
 		Code: 1004, Name: "PROTOCOL_TLS_MISMATCH", Category: CategoryInternal,
 		Description: "HTTP/HTTPS protocol mismatch", Retryable: false,
 	})
-	// MayHaveReachedNode: a reset arrives on an established connection, so the request may already
-	// have been written and read by the upstream.
+	// MayHaveReachedNode: a reset arrives on an established connection.
 	LavaErrorConnectionReset = registerError(&LavaError{
 		Code: 1005, Name: "PROTOCOL_CONNECTION_RESET", Category: CategoryInternal,
 		Description: "Connection reset by peer", Retryable: true,
 		MayHaveReachedNode: true,
 	})
-	// MayHaveReachedNode: an EOF likewise means we got as far as an established connection.
+	// MayHaveReachedNode: an EOF likewise implies an established connection.
 	LavaErrorConnectionClosed = registerError(&LavaError{
 		Code: 1006, Name: "PROTOCOL_CONNECTION_CLOSED", Category: CategoryInternal,
 		Description: "Connection closed (EOF)", Retryable: true,
@@ -47,8 +45,7 @@ var (
 	LavaErrorContextDeadline = registerError(&LavaError{
 		Code: 1007, Name: "PROTOCOL_CONTEXT_DEADLINE", Category: CategoryInternal,
 		Description: "Caller's context.Context deadline expired before the relay completed (can fire at any layer — consumer request timeout, processing timeout, subrequest timeout)", Retryable: true,
-		// MayHaveReachedNode: the failure mode behind both GK8 write incidents. The upstream
-		// accepted the request and never answered; the transaction was broadcast regardless.
+		// MayHaveReachedNode: the upstream accepted the request and never answered.
 		MayHaveReachedNode: true,
 	})
 	LavaErrorContextCanceled = registerError(&LavaError{

@@ -3071,23 +3071,17 @@ func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsu
 	return csm.releaseWithAvailabilityFailure(consumerSession, errorReceived, "OnSessionFailure")
 }
 
-// OnSessionUnresponsive releases a session whose relay was dispatched, was still silent when the
-// request's whole budget expired, and produced no response at all — the endpoint hung. It records
-// the same availability failure as OnSessionFailure.
+// OnSessionUnresponsive releases a session that was still silent when the request's budget expired
+// — the endpoint hung. Records the same availability failure as OnSessionFailure.
 //
-// It is a separate name from OnSessionFailure on purpose, and the separation is the point rather
-// than the current behaviour: "failed" means the endpoint answered with something we could not use,
-// "unresponsive" means it answered nothing. A punishment added to failure handling later — a harsher
-// block rule, an on-chain report, a different decay — must not land on hung endpoints unless someone
-// decides it should. Sharing the accounting through releaseWithAvailabilityFailure keeps the two
-// byte-identical today while leaving the seam to diverge at. Same reasoning as OnSessionDiscarded
-// versus OnSessionCancelled above.
+// Separate from OnSessionFailure on purpose: "failed" means the endpoint answered with something
+// unusable, "unresponsive" means it answered nothing, and a punishment added to failure handling
+// later must not land on hangs by default. Same reasoning as OnSessionDiscarded vs
+// OnSessionCancelled above.
 //
-// Not to be confused with OnSessionCancelled: that is for a relay WE stopped while it still had
-// budget left — a race loser or a client disconnect — where the endpoint's availability was never
-// actually tested. Here the request ran out of budget with this endpoint still silent. Routing these
-// through OnSessionCancelled is the bug it exists to prevent: nothing at all would be recorded, so a
-// permanently hung endpoint would keep whatever score it had and be selected again next request.
+// Not OnSessionCancelled: that is for a relay we stopped while it still had budget left (a race
+// loser or client disconnect), where availability was never tested. Routing a hang there records
+// nothing, so the endpoint keeps its score and is selected again.
 func (csm *ConsumerSessionManager) OnSessionUnresponsive(consumerSession *SingleConsumerSession, errorReceived error) error {
 	return csm.releaseWithAvailabilityFailure(consumerSession, errorReceived, "OnSessionUnresponsive")
 }

@@ -16,14 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The per-attempt timeout used to do two jobs with one number: it decided when to dispatch the
-// next endpoint AND it killed the attempt in flight. Because both jobs read the same value, the
-// moment the next endpoint was dispatched was the moment the current one died, so a method
-// genuinely slower than that number could never succeed on ANY endpoint — three attempts killed at
-// the window, the error tolerance exhausted by timeouts our own timer manufactured, and the
-// request abandoned with most of its budget unspent.
-//
-// The window now only triggers. The attempt lives on the request's budget.
+// The per-attempt timeout used to serve as both the hedge interval and the attempt deadline, so an
+// attempt was killed the instant the next endpoint was dispatched. The window now only triggers.
 
 // An upstream slower than the window but well inside the budget must now be allowed to answer.
 // This is the headline regression: before the split, passing the window here killed the relay.
@@ -100,18 +94,9 @@ func TestAttemptStillBoundedByItsBudget(t *testing.T) {
 	assert.Less(t, elapsed, 3*time.Second, "the budget must still stop a hung upstream")
 }
 
-// The fairness test behind the availability verdict for a relay that produced nothing.
-//
-// The obvious test — "was it given its full window" — was tried first and is wrong. A hedge is
-// dispatched AT the window, so a race loser has always been silent for longer than its window by the
-// time it is cancelled; the test is true for every loser, always. Measured against the real router: a
-// healthy endpoint answering in 55s, cancelled at 35s when a faster one won, on a request that
-// SUCCEEDED, was blamed at waited=35s window=28s. That is the structural penalty MAG-2648 removed —
-// every node but the fastest, on a broadcast — and the pre-change code never did it, because an
-// attempt could not outlive its window in the first place.
-//
-// Budget exhaustion is the honest question and needs no threshold: did this endpoint run out of road,
-// or did we cut it short while it was still working?
+// The fairness test for a relay that produced nothing. "Was it given its full window" is the wrong
+// question — a hedge is dispatched AT the window, so every race loser passes it, and blaming those
+// is the MAG-2648 penalty. Budget exhaustion asks the answerable question instead.
 func TestRequestRanOutOfRoad(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

@@ -7,18 +7,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// An endpoint still silent when the request's whole budget expired has NOT been exercised the way a
-// race loser has: it was given every second the request had, and produced nothing. Before the per-attempt timeout stopped killing attempts, such a relay surfaced as a
-// DeadlineExceeded and landed on OnSessionFailure by itself. Now the attempt outlives the window
-// and ends as a cancellation when the request ends, so without a dedicated release path a hang
-// would route into the MAG-2648 no-penalty carve-out and be forgiven — nothing recorded at all,
-// the endpoint keeping whatever score it had, selected again on the next request.
+// An endpoint still silent when the request's budget expired was given every second the request
+// had. Before attempts outlived their window a hang surfaced as DeadlineExceeded and was blamed by
+// the failure path; now it ends as a cancellation, so without a dedicated path it would take the
+// MAG-2648 no-penalty carve-out and keep its score.
 //
-// OnSessionUnresponsive is that path. It shares OnSessionFailure's accounting today; the tests
-// below pin BOTH halves of the contract: the blame is really recorded, and the two functions are
-// currently indistinguishable — so the day they diverge, it is a deliberate and visible change
-// rather than a drift.
-
+// These pin both halves: the blame is recorded, and the two release calls are indistinguishable
+// today — so the day they diverge it is a deliberate edit.
 func TestOnSessionUnresponsiveRecordsBlame(t *testing.T) {
 	csm, _, session, usedProviders, routerKey := newCancellableTestSession(t, "provider-hung")
 	usedProviders.ReleaseFromLatestBatch("provider-hung", routerKey, context.Canceled)

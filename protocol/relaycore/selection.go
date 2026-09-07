@@ -24,11 +24,6 @@ const (
 	CrossValidation                  // maxParticipants providers at once, no retries, waits for agreementThreshold matching responses
 )
 
-// StopReasonProcessingTimeout is the stop reason recorded when a request ended because its whole
-// budget expired, rather than because an attempt answered or the policy gave up.
-//
-// It is the only evidence that an attempt still in flight had run out of road rather than being cut
-// short, and availability scoring turns on that distinction: an endpoint we cancelled while it was
-// still working, still inside its budget, has not been shown to be unavailable — it was merely
-// slower than whoever won. Blaming that endpoint is the structural penalty MAG-2648 removed.
+// StopReasonProcessingTimeout marks a request that ended because its budget expired. Availability
+// scoring uses it to tell an endpoint that ran out of road from one we cut short (MAG-2648).
 const StopReasonProcessingTimeout = "ProcessingTimeout"

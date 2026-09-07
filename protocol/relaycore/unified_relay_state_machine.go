@@ -356,12 +356,8 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 			NumOfProviders: numProviders,
 		}
 
-		// Initialize parameters.
-		//
-		// relayTimeout is the attempt WINDOW, and here it is used for the only job it should ever
-		// have had: deciding when to dispatch another endpoint. It no longer doubles as the deadline
-		// that kills the attempt in flight, so a dispatch here genuinely hedges the previous attempt
-		// rather than replacing one that was killed at the same instant.
+		// relayTimeout is the attempt WINDOW: when to dispatch another endpoint. It no longer also
+		// kills the attempt in flight, so this genuinely hedges rather than replaces.
 		startNewBatchTicker := time.NewTicker(relayTimeout)
 		defer startNewBatchTicker.Stop()
 
@@ -387,20 +383,11 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					// Decide never runs here, and the field would otherwise be blank on exactly
 					// the exhaustion cases an operator reads the line to understand.
 					if isPairingListEmpty && sm.config.EnableCircuitBreaker {
-						// "Exhausted" is about the DISPATCHER, not the endpoints: the pairing list
-						// came back empty because every provider is already busy with an attempt
-						// from this same request, which is what the warning below means by
-						// "relays already in flight may still answer". They are healthy.
-						//
-						// So this only names the request's stop reason when the request is really
-						// stopping. It used to be able to claim it unconditionally because an
-						// attempt was killed at its window: "cannot start more" and "the request is
-						// over" were the same instant. Attempts now outlive their window, so at the
-						// moment the pool runs dry the request can still have most of its budget of
-						// real work in flight — and a stop reason recorded then describes a stop
-						// that never happens, and takes the slot the timeout needs. Availability
-						// scoring reads that slot to tell a hung endpoint from one we cut short, so
-						// a premature claim here silently forgives a hang.
+						// "Exhausted" describes the dispatcher, not the endpoints: the pool is empty
+						// because every provider is already busy on this request. Only name the stop
+						// reason when the request is really stopping — attempts now outlive their
+						// window, so a reason recorded here would describe a stop that never happens
+						// and take the slot the timeout needs for availability scoring.
 						if sm.usedProviders.CurrentlyUsed() == 0 {
 							sm.setStopReason("AllProvidersExhausted")
 						}

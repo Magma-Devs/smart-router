@@ -572,16 +572,11 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 	return latestCallback(currentLatestRequestedBlock, parsedBlock), earliestCallback(currentEarliestRequestedBlock, parsedBlock)
 }
 
-// GetRelayTimeout returns the per-attempt WINDOW: how long an endpoint is expected to take on this
-// method. It is the interval after which the state machine dispatches another endpoint, and the
-// span an endpoint must be given before a non-answer counts against its availability.
+// GetRelayTimeout returns the per-attempt WINDOW: how long an endpoint is expected to take, and so
+// the interval after which the state machine dispatches another one.
 //
-// It is NOT how long an attempt may live — that is the processing budget, see GetTimeoutForProcessing
-// and sendRelayToDirectEndpoints. The two were one value until the window stopped killing the
-// attempt; a previous comment here promised the value would "increase every time we fail a relay on
-// timeout", which was never implemented and is deliberately not being implemented: growing the
-// window would slow failover, and the reason a slow method used to fail was the killing, not the
-// size of the window.
+// It is NOT how long an attempt may live — that is the processing budget, see
+// GetTimeoutForProcessing and sendRelayToDirectEndpoints.
 func GetRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Duration) time.Duration {
 	if chainMessage.TimeoutOverride() != 0 {
 		return chainMessage.TimeoutOverride()
