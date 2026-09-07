@@ -347,12 +347,8 @@ func sanitizeEndpointURL(rawURL string) string {
 // SendDirectRelay sends a relay request directly to an RPC endpoint
 // SendDirectRelay routes to the appropriate protocol handler (JSON-RPC or REST)
 //
-// attemptBudget is how long this attempt may live, NOT how long we wait before trying another
-// endpoint. Those are two different clocks and they used to be the same value, which is why a
-// method slower than the hedge interval could never succeed on any endpoint: the attempt was killed
-// at the exact moment the next one was dispatched, three times over, until the error tolerance gave
-// up with most of the request budget unspent. The hedge interval stays in the state machine's
-// ticker; this is the request's own budget, so an endpoint that is merely slow is allowed to finish.
+// attemptBudget is how long this attempt may live, NOT the interval before another endpoint is
+// tried — that stays in the state machine's ticker. See sendRelayToDirectEndpoints.
 func (d *DirectRPCRelaySender) SendDirectRelay(
 	ctx context.Context,
 	chainMessage chainlib.ChainMessage,

@@ -11,18 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Both GK8 write incidents ended the same way: the transaction reached the upstream, the upstream
-// never answered, our deadline fired, and the customer was told the write had FAILED. It had not —
-// it was broadcast. "Failed" is the worst of the three possible answers there, because it invites a
-// resubmit of a transaction that may already be on chain.
+// A write that reached an upstream which never answered used to be reported as failed. That is the
+// worst of the three answers: it invites a resubmit of a transaction that may already be on chain.
 //
-// The rule is about what we can prove. A node's own reply is passed through untouched. A
-// connect-phase failure proves nothing was sent. Everything else, including no evidence at all,
-// leaves the outcome genuinely unknown, and that is what the client is told.
-
-// The rule is about silence, so the table is written in the terms the rule actually uses:
-// how many succeeded, how many answered at all, how many were asked, and whether the request
-// spent its whole budget.
+// The rule is silence. A node's own reply passes through untouched; a connect-phase failure proves
+// nothing was sent; anything else, including no evidence at all, leaves the outcome unknown.
 func TestUnknownWriteOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name                            string

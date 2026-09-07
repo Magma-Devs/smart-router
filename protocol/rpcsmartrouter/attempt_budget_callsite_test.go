@@ -19,16 +19,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// budgetCallSiteStateMachine is a Stateless state machine stub, so the dispatch path under test is
-// the ordinary one rather than the cross-validation variant.
+// Stateless stub, so the dispatch path under test is the ordinary one, not cross-validation.
 type budgetCallSiteStateMachine struct {
 	usedProviders   *lavasession.UsedProviders
 	protocolMessage chainlib.ProtocolMessage
 }
 
-// The results manager reads the protocol message when it files a response, so this has to be the
-// real one — returning nil here panics on the success path, after the timing under test has already
-// been exercised, which is a confusing way to fail.
+// The results manager reads this when filing a response; nil panics on the success path.
 func (m *budgetCallSiteStateMachine) GetProtocolMessage() chainlib.ProtocolMessage {
 	return m.protocolMessage
 }
@@ -48,27 +45,17 @@ func (m *budgetCallSiteStateMachine) SetResultsChecker(rc relaycore.ResultsCheck
 func (m *budgetCallSiteStateMachine) SetRelayRetriesManager(rm *lavaprotocol.RelayRetriesManager) {
 }
 
-// The whole behavioural fix is one line — which of two durations the dispatcher hands to
-// SendDirectRelay — and nothing was guarding it.
+// The behavioural fix is one line: which of two durations the dispatcher hands to SendDirectRelay.
 //
-// This test exists because the first attempt at covering it did not. Those tests call
-// SendDirectRelay directly with a duration the test itself picked, so they prove that function
-// honours its argument, never that the CALLER hands it the right one. Reverting the call site to the
-// window left all nine of them green, so the fix could have been undone silently.
-//
-// So this drives the real dispatcher, with a real chain parser, a real session manager and a real
-// upstream, and separates the two clocks far enough apart that only the correct one can pass: the
-// upstream answers well after the window and well inside the budget. If the dispatcher ever goes
-// back to handing over the window, the relay is killed mid-flight and no successful result is
-// recorded — and this fails.
+// Tests that call SendDirectRelay directly prove only that it honours its argument, never that the
+// caller passes the right one — reverting the call site left all of them green. So this drives the
+// real dispatcher and separates the two clocks: the upstream answers well after the window and well
+// inside the budget, so only the correct one passes.
 func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 	ctx := context.Background()
 
-	// The window is max(CU x 100ms, min-relay-timeout). This message's api carries compute units, so
-	// the CU term decides it and pinning the floor low keeps the window independent of whatever the
-	// default floor happens to be. The assertions below re-derive both clocks from the parser rather
-	// than trusting this arithmetic — an earlier draft of this test guessed the window wrong, and
-	// that guard is what caught it.
+	// Window is max(CU x 100ms, min-relay-timeout); this api has compute units, so the CU term wins.
+	// The assertions below re-derive both clocks from the parser rather than trusting that.
 	const upstreamDelay = 1500 * time.Millisecond
 	originalFloor := common.MinimumTimePerRelayDelay
 	common.MinimumTimePerRelayDelay = 200 * time.Millisecond
@@ -91,12 +78,8 @@ func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 	}
 	require.NoError(t, err)
 
-	// Confirm the two clocks really are far apart before relying on the result below. Without this
-	// the test could pass for the wrong reason — a window that happens to exceed the upstream delay
-	// would let a broken dispatcher through.
-	// A real parsed message, not a stub: the dispatcher hands it to the transport, which reads the
-	// api collection and the RPC message off it. A stub that returns nil there would panic before
-	// the timing this test is about is ever exercised.
+	// Confirm the clocks are far apart, or the test could pass for the wrong reason.
+	// A real parsed message: the transport reads the api collection and RPC message off it.
 	const restPath = "/cosmos/base/tendermint/v1beta1/blocks/latest"
 	chainMessage, err := chainParser.ParseMsg(restPath, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
@@ -152,14 +135,13 @@ func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 			lavasession.NewActiveSubscriptionProvidersStorage()),
 	}
 
-	// Generous relative to the budget: this bounds a hung test, it must not be the thing that ends
-	// the relay, or the assertion below would be measuring the wrong deadline.
+	// Bounds a hung test only; must not be what ends the relay.
 	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
 	require.NoError(t, rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, protocolMsg, relayProcessor, nil, nil))
 
-	// The dispatch is asynchronous, so wait for the one relay to resolve rather than racing it.
+	// Dispatch is asynchronous; wait for the relay rather than racing it.
 	waitCtx, waitCancel := context.WithTimeout(callCtx, 10*time.Second)
 	defer waitCancel()
 	relayProcessor.WaitForResults(waitCtx)

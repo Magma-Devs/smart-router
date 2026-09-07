@@ -1031,49 +1031,24 @@ func (rpcss *RPCSmartRouterServer) ParseRelay(
 	return protocolMessage, nil
 }
 
-// errUnknownWriteOutcome is what a client is told when a write ended with no node having answered.
-//
-// "Failed" would be a claim we cannot support. The request reached an upstream that never replied,
-// and our deadline cannot un-send it — both GK8 incidents ended with the transaction broadcast and
-// the customer told it had failed, which is the worst of the three possible answers because it
-// invites a resubmit of a transaction that may already be on chain.
-//
-// It names the action rather than only the state on purpose: the useful thing for a caller holding
-// this error is to check the chain, not to retry.
+// errUnknownWriteOutcome is returned when a write ended with no endpoint having answered. "Failed"
+// would be a claim we cannot support: our deadline cannot un-send a transaction, and reporting a
+// failure invites a resubmit of one that may already be on chain.
 var errUnknownWriteOutcome = errors.New("transaction status unclear: timeout reached before any node responded; the transaction may already have been submitted — verify on-chain before resubmitting")
 
-// writeOutcomeIsUnknown reports whether a FAILED request was a write whose outcome we genuinely do
-// not know, as opposed to one we know did not happen.
+// writeOutcomeIsUnknown reports whether a failed request was a write whose outcome we do not know.
 //
-// The rule is about silence, not about the errors that came back:
+// The rule is silence, not the errors that came back: nothing succeeded, and some endpoint we asked
+// did not answer at all — it may be holding the transaction. A hung endpoint records no error, so
+// any rule inspecting the error list misses it. When every endpoint answered, nothing is silent and
+// the node's own reply passes through untouched.
 //
-//   - it is a write. A read that fails is simply a read that failed.
-//   - nothing succeeded. If any endpoint answered successfully that answer is the result, and this
-//     never runs.
-//   - some endpoint that was asked did not answer at all. It may be holding the transaction.
+// No record at all means either an attempt still in flight (unknown) or a request that never
+// dispatched one (no pairings, everything filtered out). Only a request that spent its whole budget
+// can have had something in flight, hence the ranOutOfRoad argument.
 //
-// Reading only the errors that came back is what got this wrong before, and measurably so: a hung
-// endpoint contributes NO error, so it is invisible to any rule that inspects the error list. On a
-// write where one endpoint returned HTTP 500 in under a millisecond and another hung for the whole
-// budget, the 500 was the only thing recorded, and the customer was told the write failed while the
-// silent endpoint may already have broadcast it. The same held when the sibling refused instead.
-//
-// So silence is detected by counting: an endpoint that was dispatched and produced neither a
-// response nor an error is one we are still waiting on. When every endpoint answered — even if they
-// all answered with errors — nothing is silent, the outcome is known, and the node's own reply
-// passes through untouched.
-//
-// The absence of ANY record is the other face of the same question, and it needs the extra check
-// below: it means either a dispatched attempt still in flight (silent — unknown) or a request where
-// nothing was ever sent at all (no pairings, every endpoint filtered out, the policy stopping before
-// a first message). Telling the second one "your transaction may already have been submitted" is the
-// same lie as the bug this message exists to fix, pointing the other way. Only a request that used
-// its whole budget can have had something in flight.
-//
-// It is evaluated at the request level rather than inside the results manager because a failed
-// request can reach the client through either of two branches in SendParsedRelay depending on
-// whether an in-flight goroutine happened to push before the caller looked. Deciding once, here, is
-// what stops that race from being visible to the customer as two different errors for one incident.
+// Evaluated here rather than in the results manager because a failed request reaches the client
+// through either of two branches in SendParsedRelay; deciding once keeps that invisible.
 func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) bool {
 	if chainlib.GetStateful(protocolMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return false
@@ -1091,26 +1066,16 @@ func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProces
 		requestRanOutOfRoad(relayProcessor.GetStopReason()))
 }
 
-// unknownWriteOutcome is the judgement itself, split from the lookup above so it can be exercised
-// directly: it is a pure function of four numbers, and the interesting cases — nothing recorded at
-// all, or a silent endpoint hidden behind a sibling's error — are awkward to stage through a live
-// processor.
-//
-// Assumes the caller has already established that this is a failed write.
+// unknownWriteOutcome is the judgement, split out so it can be tested directly. Assumes the caller
+// has established that this is a failed write.
 func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad bool) bool {
 	if successes > 0 {
-		// Some endpoint served the write. That answer is the result.
-		return false
+		return false // an endpoint served the write; that answer is the result
 	}
-
 	if answered == 0 {
-		// Nothing was recorded. Only a request that spent its whole budget can have had an attempt
-		// in flight; anything else never dispatched one.
-		return ranOutOfRoad
+		return ranOutOfRoad // nothing recorded: in flight only if the budget was spent
 	}
-
-	// Something answered, but not everyone we asked. Whoever is still silent may be holding the
-	// transaction, so the outcome is unknown however loudly the others failed.
+	// Someone we asked is still silent, so the outcome is unknown however loudly the others failed.
 	return answered < dispatched
 }
 
@@ -1766,18 +1731,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// Extract original request bytes (for batch support - we need to forward the original JSON)
 	originalRequestData := protocolMessage.RelayPrivateData().Data
 
-	// Two clocks, deliberately separate.
-	//
-	// relayTimeout is the WINDOW: how long an endpoint is expected to take, and therefore both when
-	// the state machine's ticker dispatches the next endpoint and how long an endpoint must be given
-	// before a non-answer counts against it. attemptBudget is how long an attempt may actually LIVE.
-	//
-	// They used to be the same value, so the moment the next endpoint was dispatched was the moment
-	// the current one was killed. A method genuinely slower than the window could therefore never
-	// succeed on any endpoint: three attempts killed at the window, the error tolerance exhausted by
-	// timeouts our own timer manufactured, and the request abandoned with most of its budget unspent.
-	// The provider-side chain proxies never had this problem — CapTimeoutForSend has always handed an
-	// attempt the whole processing budget — so this brings the direct path back in line with them.
+	// Two clocks, deliberately separate. relayTimeout is the WINDOW: when the ticker dispatches the
+	// next endpoint. attemptBudget is how long an attempt may LIVE. They used to be one value, so an
+	// attempt was killed the instant the next was dispatched — and a method slower than the window
+	// could never succeed anywhere. The provider-side proxies never had this (CapTimeoutForSend has
+	// always used the processing budget).
 	_, averageBlockTime, _, _ := rpcss.chainParser.ChainBlockStats()
 	relayTimeout := chainlib.GetRelayTimeout(protocolMessage, averageBlockTime)
 	attemptBudget := common.GetTimeoutForProcessing(relayTimeout, chainlib.GetTimeoutInfo(protocolMessage))
@@ -1996,10 +1954,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		// phase precisely (they keep hiding), bound it at relayTimeout + attemptBudget + max
 		// url.Timeout + grace, which dominates any real relay-phase sum.
 		//
-		// The send phase is bounded by the ATTEMPT BUDGET, not the window: an attempt is no longer
-		// killed at the window. The old 2*relayTimeout form silently became an under-estimate the
-		// moment those two values stopped being equal, which would have made the watcher give up on
-		// a straggler that was still legitimately in flight and report it as never received. The watcher normally exits early when the last
+		// The send phase is bounded by the ATTEMPT BUDGET, not the window: the old 2*relayTimeout
+		// form under-estimates once those two values differ, and would report a straggler still in
+		// flight as never received. The watcher normally exits early when the last
 		// straggler pushes, so this bound only bites when a goroutine genuinely leaks; then
 		// "not-received" is the honest outcome. Overshoot cost is holding the processor a little
 		// longer in that rare case.
@@ -2104,9 +2061,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				analytics,
 			)
 
-			// Did the request run out of road, or did we cut this attempt short? The answer decides,
-			// below, whether a relay that produced nothing is an endpoint that hung or a race loser
-			// that was still working when we stopped it.
+			// Did the request run out of road, or did we cut this attempt short? Decides below
+			// whether a relay that produced nothing is a hang or a race loser.
 			ranOutOfRoad := requestRanOutOfRoad(relayProcessor.GetStopReason())
 
 			// Did WE stop this relay? On a stateful broadcast every endpoint is queried and the
@@ -2126,10 +2082,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				outcome := metrics.RelayOutcomeSuccess
 				switch {
 				case isClientCancel && ranOutOfRoad:
-					// Silent when the budget ran out. Cancelled is the wrong label — that one
-					// deliberately keeps the relay out of the error and latency series, which is
-					// right for a race loser and wrong for a hang. Report it as the error it is, so
-					// the metrics agree with the availability sample recorded below.
+					// Silent when the budget ran out. Cancelled would keep it out of the error and
+					// latency series, which is right for a race loser and wrong for a hang.
 					outcome = metrics.RelayOutcomeError
 				case isClientCancel:
 					outcome = metrics.RelayOutcomeCancelled
@@ -2200,20 +2154,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			}
 
 			if isClientCancel && ranOutOfRoad {
-				// We cancelled it, but only because the request had used its entire budget and this
-				// endpoint was still silent. That is not a race loser, it is an endpoint that hung,
-				// and the availability signal has to say so — otherwise nothing at all is recorded,
-				// the endpoint keeps whatever score it had, and we select it again next request.
-				//
-				// This case only exists because an attempt is no longer killed at the window. It
-				// used to surface as a DeadlineExceeded, which is not a cancellation and so landed
-				// on the failure path by itself. Now the attempt outlives the window and is
-				// cancelled when the request ends, which without this branch would route a hang
-				// into the MAG-2648 no-penalty path and quietly forgive it.
-				//
-				// OnSessionUnresponsive rather than OnSessionFailure: same accounting today, but a
-				// hang and a failure are different events and must be free to be punished
-				// differently later.
+				// Cancelled only because the request spent its whole budget with this endpoint
+				// still silent: a hang, not a race loser. A hang used to surface as DeadlineExceeded
+				// and land on the failure path by itself; now it is a cancellation, and without this
+				// branch it would take the MAG-2648 no-penalty path and be forgiven.
 				utils.LavaFormatInfo("endpoint produced no response before the budget ran out",
 					utils.LogAttr("endpoint", endpointAddress),
 					utils.LogAttr("budget", attemptBudget),
@@ -2226,11 +2170,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					)
 				}
 			} else if isClientCancel {
-				// We cancelled it while it still had budget left, so the endpoint's availability was
-				// never actually tested — release the session and return its CU without a QoS
-				// penalty (MAG-2648). Routing this through OnSessionFailure is the bug: it feeds
-				// AddFailedRelay and the optimizer an availability sample of 0, and on a broadcast
-				// that lands on every healthy node except the single fastest one.
+				// Cancelled while it still had budget left, so availability was never tested —
+				// release without a QoS penalty (MAG-2648). OnSessionFailure here would feed the
+				// optimizer a 0 and, on a broadcast, hit every healthy node but the fastest.
 				//
 				// This branch precedes the shouldFailSession test on purpose — a cancelled relay
 				// always has err != nil, so it would otherwise be swallowed by the failure arm.
@@ -4569,32 +4511,17 @@ func (rpcss *RPCSmartRouterServer) getMetadataFromRelayTrailer(metadataHeaders [
 	}
 }
 
-// requestRanOutOfRoad reports whether the request ended because its whole budget expired, rather
-// than because an attempt answered or the policy stopped it.
+// requestRanOutOfRoad reports whether the request ended because its budget expired, rather than
+// because an attempt answered or the policy stopped it.
 //
-// It is the fairness test behind the availability verdict for a relay that produced nothing, and it
-// asks the only question the evidence can actually answer: did this endpoint run out of road, or did
-// we cut it short?
+// It is the fairness test behind the availability verdict for a relay that produced nothing: did
+// this endpoint run out of road, or did we cut it short? "Was it given its full window" is the
+// wrong test — a hedge is dispatched AT the window, so a race loser has always been silent longer
+// than its window by the time it is cancelled, and blaming it is the MAG-2648 penalty.
 //
-// The distinction is the whole point. An attempt is no longer killed at its window, so a hung
-// endpoint's relay now ends when the REQUEST ends — as a cancellation. Without a test here every
-// hang would route to the no-penalty path built for race losers (MAG-2648), nothing would be
-// recorded, and a permanently hung endpoint would keep its score and be picked again next request.
-//
-// But the obvious test — "was it given its full window" — is wrong, and measurably so. A hedge is
-// dispatched AT the window, so by the time there is a race to lose, the loser has always been silent
-// for longer than its window; the test would be true for every race loser, always. Measured: a
-// healthy endpoint answering in 55s, cancelled at 35s when a faster one won, on a request that
-// SUCCEEDED. Blaming it is exactly the structural penalty MAG-2648 removed — every node but the
-// fastest, on a broadcast — and the old code never did it, because an attempt could not outlive its
-// window to begin with.
-//
-// Budget exhaustion has no such flaw and needs no threshold. An endpoint still inside its budget was
-// cut short and has proved nothing; an endpoint still silent when the budget ran out has.
-//
-// The trade this accepts: an endpoint that hangs while a different one answers is not blamed for
-// that request. That is the honest reading — we cancelled it early, so we do not know it hung — and
-// a genuinely hung endpoint is still caught on every request that has no other answer.
+// Trade: an endpoint that hangs while a different one answers is not blamed for that request. We
+// cancelled it early, so we do not know it hung; a real hang is still caught on every request that
+// has no other answer.
 func requestRanOutOfRoad(stopReason string) bool {
 	return stopReason == relaycore.StopReasonProcessingTimeout
 }
