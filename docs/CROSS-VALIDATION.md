@@ -141,14 +141,20 @@ recording path) for test suites that cannot scrape the metrics port — see
 ## Local testing lanes
 
 Two lanes, each bringing up its own stack, checking itself, and then printing how to drive
-it by hand. They use distinct ports and can run at the same time — which is the point of the
-second one, since comparing a configured router against an unconfigured one is the
-backwards-compatibility claim.
+it by hand. They run the **same six simulator providers**, so the only interesting difference
+between them is the configuration — which is the point of the second one, since comparing a
+configured router against an unconfigured one is the backwards-compatibility claim.
 
 | Lane | Covers |
 | --- | --- |
-| [`scripts/pre_setups/init_smartrouter_cv_demo.sh`](../scripts/pre_setups/init_smartrouter_cv_demo.sh) | Six simulator providers in three groups, six policies. Sub-demos `--uc1` `--uc2` `--uc4` `--uc5` `--uc6` (or `--all`) drive per-method policy, group diversity, mismatch metrics, the structured failure signal, and outlier exclusion. |
-| [`scripts/pre_setups/init_smartrouter_cv_default.sh`](../scripts/pre_setups/init_smartrouter_cv_default.sh) | The same fleet with **no** `cross-validation:` block and **no** group labels — the pre-feature shape, proving existing deployments and callers are untouched. |
+| [`scripts/pre_setups/init_smartrouter_cv_demo.sh`](../scripts/pre_setups/init_smartrouter_cv_demo.sh) | Six simulator providers in three groups, seven policies. Sub-demos `--uc1` `--uc2` `--uc4` `--uc5` `--uc6` (or `--all`) drive per-method policy, group diversity, mismatch metrics, the structured failure signal, and outlier exclusion. |
+| [`scripts/pre_setups/init_smartrouter_cv_default.sh`](../scripts/pre_setups/init_smartrouter_cv_default.sh) | The same six providers with **no** `cross-validation:` block and **no** group labels — the pre-feature shape, proving existing deployments and callers are untouched. |
+
+**Run them one at a time.** Their router ports are distinct, but the simulator is shared
+mutable state and both lanes drive the same provider ids, so a dissent injected by one is a
+fixture the other is relying on. Neither lane ever issues the simulator's unscoped
+`POST /reset/all` — each states the providers it owns explicitly — so they leave *other*
+harnesses alone, but they cannot help colliding with each other.
 
 Both are ownership-safe: they reclaim only the process they recorded starting (pid plus a
 start-time fingerprint), never run `killall`, and **refuse to start** if their ports are held
@@ -186,7 +192,7 @@ scripts/pre_setups/init_smartrouter_cv_demo.sh
 | | Where | Role |
 | --- | --- | --- |
 | provider_simulator | control `127.0.0.1:19000`, eth-sim on `18545-18547` + `18560-18562` | six upstreams whose answers you control |
-| Smart Router | `0.0.0.0:3396`, metrics `:7794`, debug `:6796` | six policies over three provider groups |
+| Smart Router | `0.0.0.0:3396`, metrics `:7794`, debug `:6796` | seven policies over three provider groups |
 
 The fleet is deliberately lopsided in a useful way — three groups of two:
 
@@ -201,15 +207,15 @@ It ends with a self-check, so a broken stack is caught before you start:
 ```
 [Smoke] policy load -> fan-out -> quorum
     router /lava/health                    200
-    policies loaded                        policies=6
+    policies loaded                        policies=7
     distinct groups                        distinctGroups=3
     mandated cross-validation              success
-    agreeing providers                     sim-2,sim-4
+    agreeing providers                     sim-1,sim-4
 
   SMOKE PASS — the stack is demo-ready.
 ```
 
-`policies=6` and `distinctGroups=3` come from the router's own startup line — the resolved
+`policies=7` and `distinctGroups=3` come from the router's own startup line — the resolved
 provider→group layout, logged once so an operator can confirm the diversity a config actually
 yields rather than the diversity it looks like it asks for.
 
@@ -359,9 +365,18 @@ scripts/pre_setups/init_smartrouter_cv_demo.sh --uc5
     failure-reason                         insufficient-capacity
   PASS  no provider lists — nothing was queried, and the headers say so
 
-[3] the contrast: a plain upstream error carries NO cross-validation headers
-  PASS  'quorum failure' is distinguishable from a generic upstream error
+[3] the contrast: a REAL upstream error on a cross-validated method
+    body      {"error":{"code":-32000,"data":{"error":"failed processing responses…
+    status    failed
+    failure-reason  insufficient-responses
+  PASS  the upstream error reaches the client as an error
+  PASS  not reported as a disagreement (reason: insufficient-responses)
 ```
+
+Step 3 is the one that is easy to get wrong. Every provider is made to return a JSON-RPC
+error, so nothing disagreed — nobody answered at all — and the router says exactly that:
+`insufficient-responses`, never `no-agreement`. A client that keys its retry logic on the
+reason therefore cannot mistake "your fleet is down" for "your fleet disagreed".
 
 The split in the reason enum is the client's decision procedure. A **quorum-time** reason
 (`no-agreement`, `insufficient-responses`, `diversity-unmet`, `group-quorum-unmet`) means
@@ -440,8 +455,9 @@ on any provider, and no thresholds:
 
 The policy-layout line being *absent* rather than reading `policies=0` is the honest signal:
 the resolver was never populated, so the router is on the path it ran before this feature
-existed, not on the new path in a disabled state. The two configs differ by exactly the block
-this page is about:
+existed, not on the new path in a disabled state. Because both lanes run the same six
+providers, the diff between their configs is the feature and nothing else — the
+`cross-validation:` block, the `group-label:` lines, and the listen port:
 
 ```bash
 diff debugging/smartrouter_cv_default.yml debugging/smartrouter_cv_demo.yml
@@ -470,5 +486,5 @@ policy floor instead.
 | A dissent shows up as *pending* instead of *disagreeing* | The quorum early-exited before the outlier answered. Give the honest providers a `latency_ms` so the outlier wins the race — that is exactly what the lane does to pick the reply-time path. |
 | `finality="unknown"` on the mismatch metric | The request did not carry a resolvable block number, or the chain tracker had not learned the head yet. Query a concrete finalized block, not `latest`. |
 | A cross-validated method answers without fanning out | Something served it from cache. These lanes configure no cache for that reason; if you add one, vary the request parameters. |
-| Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy — compare `min-groups` and `max-participants` against the `distinctGroups` / `groupSizes` in the startup log. |
-| `/debug/cross-validation-events` returns 503 | The recorder is not installed: the router is missing `--debug-address`. A 503 is not an empty result — "nothing was recorded" and "nothing dissented" are opposite answers. |
+| Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy. The error itself carries the numbers: `requiredGroups` / `configuredGroups` on the `min-groups` refusal, `groupSizes` on the per-group one. Don't look for the `distinctGroups` startup line — the validation runs *before* it, so a router that exits this way never logs it. |
+| `/debug/cross-validation-events` is refused / connection reset | The router was started without `--debug-address`, so there is no debug listener at all. A **503** is a different state — the listener is up but the recorder was never installed — and it is not an empty result: "nothing was recorded" and "nothing dissented" are opposite answers. |
