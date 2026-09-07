@@ -388,14 +388,17 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 						// reason when the request is really stopping — attempts now outlive their
 						// window, so a reason recorded here would describe a stop that never happens
 						// and take the slot the timeout needs for availability scoring.
-						if sm.usedProviders.CurrentlyUsed() == 0 {
+						// Read once: the log is the evidence for this decision, so it has to report
+						// the value the decision actually used.
+						stillInFlight := sm.usedProviders.CurrentlyUsed()
+						if stillInFlight == 0 {
 							sm.setStopReason("AllProvidersExhausted")
 						}
 						utils.LavaFormatWarning("Circuit breaker: all providers exhausted, stopping new attempts — relays already in flight may still answer",
 							nil,
 							utils.LogAttr("GUID", sm.ctx),
 							utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
-							utils.LogAttr("stillInFlight", sm.usedProviders.CurrentlyUsed()),
+							utils.LogAttr("stillInFlight", stillInFlight),
 						)
 					} else if sm.usedProviders.BatchNumber() == 0 && sm.policy.GetConsecutiveBatchErrors() == sm.config.SendRelayAttempts+1 {
 						sm.setStopReason("FirstMessageFailed")

@@ -1063,6 +1063,9 @@ func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProces
 
 	successResults, nodeErrors, protocolErrors := relayProcessor.GetResultsData()
 	answered := len(successResults) + len(nodeErrors) + len(protocolErrors)
+	// SessionsLatestBatch is per-batch and reset on each new one, while answered is cumulative.
+	// Comparable only because a write is a single batch — the stateful gate above is what keeps
+	// multi-batch requests out of this comparison.
 	dispatched := relayProcessor.GetUsedProviders().SessionsLatestBatch()
 
 	// A node error is a reply, so it settles that endpoint. A transport error may not: an
@@ -1070,7 +1073,9 @@ func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProces
 	// already on the wire.
 	cutOffMidDelivery := false
 	for _, protocolError := range protocolErrors {
-		if protocolError.LavaError == nil || protocolError.LavaError.MayHaveReachedNode {
+		// Unmatched errors classify as UNKNOWN_ERROR, which carries the flag for the same reason,
+		// so a nil check here would be dead code rather than a safety net.
+		if protocolError.LavaError != nil && protocolError.LavaError.MayHaveReachedNode {
 			cutOffMidDelivery = true
 			break
 		}
@@ -1109,6 +1114,17 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 
 	relaySentTime := time.Now()
 	relayProcessor, err := rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
+
+	// Both failure returns below ask the same question, and the answer cannot differ between them.
+	// Memoised so the results snapshot and its two locks are taken once.
+	var unknownWriteOnce sync.Once
+	var unknownWriteAnswer bool
+	unknownWrite := func() bool {
+		unknownWriteOnce.Do(func() {
+			unknownWriteAnswer = writeOutcomeIsUnknown(protocolMessage, relayProcessor)
+		})
+		return unknownWriteAnswer
+	}
 	if err != nil && (relayProcessor == nil || !relayProcessor.HasResults()) {
 		userData := protocolMessage.GetUserData()
 		// we can't send anymore, and we don't have any responses
@@ -1124,7 +1140,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			}
 		}
 
-		if writeOutcomeIsUnknown(protocolMessage, relayProcessor) {
+		if unknownWrite() {
 			utils.LavaFormatWarning("write outcome unknown", err,
 				utils.LogAttr("write_outcome", "unknown"),
 				utils.LogAttr("api", protocolMessage.GetApi().Name),
@@ -1218,7 +1234,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName(), pendingProviders)
 
 	if err != nil {
-		if writeOutcomeIsUnknown(protocolMessage, relayProcessor) {
+		if unknownWrite() {
 			utils.LavaFormatWarning("write outcome unknown", err,
 				utils.LogAttr("write_outcome", "unknown"),
 				utils.LogAttr("api", protocolMessage.GetApi().Name),
