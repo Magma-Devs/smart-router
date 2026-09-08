@@ -1585,16 +1585,16 @@ func promoteConsistencyFallback(
 //     asks for — an endpoint failing in a way we have not catalogued is still failing — and
 //     narrowing the gate to positively-classified errors would silently exempt exactly the novel
 //     failures we most want to catch.
-//  2. Errors that ARE classified retryable but are request-shaped rather than node-shaped
-//     (CHAIN_BLOCK_NOT_FOUND 3201, CHAIN_TX_NOT_FOUND 3202, CHAIN_RECEIPT_NOT_FOUND 3203,
-//     CHAIN_DATA_NOT_AVAILABLE 3205, NODE_RESOURCE_NOT_FOUND 2012, NODE_RESOURCE_UNAVAILABLE 2013)
-//     are scored. Retryable=true is defined as "another endpoint has a chance of succeeding", so
-//     the endpoint IS the differentiator and demoting it is defensible; when it is not — every
-//     endpoint lacks the tx — all of them demote equally and weighted_selector collapses to uniform
-//     random rather than starving. Tag these with a fault-axis SubCategory if that proves wrong in
-//     production — SubCategoryDataScope is exactly that escape hatch being used, and the JSON-RPC
-//     and REST codes listed here are deliberately left on the scoring side for now: only the gRPC
-//     status codes were shown to be a routine query outcome rather than an error the node raised.
+//  2. Request-shaped retryable errors are NO LONGER scored. This paragraph used to record the
+//     opposite — that CHAIN_BLOCK_NOT_FOUND 3201, CHAIN_TX_NOT_FOUND 3202, 3203, 3205,
+//     NODE_RESOURCE_NOT_FOUND 2012 and NODE_RESOURCE_UNAVAILABLE 2013 were "deliberately left on
+//     the scoring side for now", with SubCategoryDataScope named as the escape hatch if that
+//     proved wrong. FAILOVER-TASKS section 2 used it: those six, plus the Starknet / Solana / NEAR
+//     not-found equivalents, now carry SubCategoryDataScope and are excluded by the carve-out
+//     above. The case that decided it is the one the old text called out as the exception — a
+//     customer polling for a transaction that is not mined yet gets not-found from EVERY endpoint,
+//     and each retry lands on a different one, so a single unanswerable question wrote a mark
+//     against the whole fleet.
 //
 // Every relay through this gate also feeds ConsecutiveErrors. An endpoint with ZERO successful
 // relays is blocklisted on its 16th consecutive failure (consumer_session_manager.go), so a
@@ -4324,15 +4324,20 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// The verdict was already resolved by the sender's ApplyNodeErrorClassification, so this reads
 	// it rather than re-classifying — one answer to "was the endpoint at fault", wherever it is
 	// asked (common.LavaError.EndpointAtFault).
+	//
+	// The two arms are CHAINED, not two independent ifs: one answer must never both blame the
+	// endpoint and certify it. On JSON-RPC and gRPC that cannot arise anyway, because a body error
+	// always sets IsNodeError and the reset gate reads it. REST is what makes the chaining
+	// load-bearing — there IsNodeError comes from the HTTP status alone, so a 200 carrying a fault
+	// would take BOTH arms, counting up and then resetting to zero in the same relay. No registry
+	// row produces that shape today; the chaining is what keeps it impossible when one is added.
 	if result.IsNodeAtFault && targetEndpoint != nil {
 		rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 		targetEndpoint.MarkUnhealthy()
 		rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
-	}
-
-	// Reset only on POSITIVE proof the endpoint served — see relayProvesEndpointHealthy for why
-	// this is no longer the negation of the failure gate.
-	if targetEndpoint != nil && relayProvesEndpointHealthy(result) {
+	} else if targetEndpoint != nil && relayProvesEndpointHealthy(result) {
+		// Reset only on POSITIVE proof the endpoint served — see relayProvesEndpointHealthy for why
+		// this is no longer the negation of the failure gate.
 		if targetEndpoint.ResetHealth() {
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, true)
 		}

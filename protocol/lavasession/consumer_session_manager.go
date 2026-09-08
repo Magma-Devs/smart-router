@@ -85,7 +85,6 @@ type ConsumerSessionManager struct {
 
 	// contains all provider addresses that are currently valid
 	validAddresses []string
-	// provider addresses that were given a second chance instead of reporting them immediately
 
 	// rateLimitHoldoff is consulted at provider selection so requests prefer providers
 	// that are not currently held off after a 429 (docs/RATE-LIMIT-HOLDOFF.md).
@@ -1709,29 +1708,39 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 			// Get session from endpoint or create new or continue. if more than 10 connections are open.
 			consumerSession, pairingEpoch, err := consumerSessionsWithProvider.GetConsumerSessionInstanceFromEndpoint(endpoint.chosenEndpointConnection, numberOfResets, csm.qosManager, endpoint.endpoint.NetworkAddress)
 			if err != nil {
-				utils.LavaFormatError("Error on consumerSessionWithProvider.getConsumerSessionInstanceFromEndpoint", err,
-					utils.LogAttr("providerAddress", providerAddress),
-					utils.LogAttr("validAddresses", csm.validAddresses),
-					utils.LogAttr("Error", err.Error()),
-					utils.LogAttr("GUID", ctx),
-				)
-				if errors.Is(err, MaximumNumberOfSessionsExceededError) {
-					// we can get a different provider, adding this provider to the list of providers to skip on.
-					tempIgnoredProviders.providers[providerAddress] = struct{}{}
-				} else if errors.Is(err, MaximumNumberOfBlockListedSessionsError) {
-					// This address has hit its retired-session cap. Skip the provider for THIS
-					// request only. The cap bounds session growth — retired sessions are not
-					// reclaimed until the epoch rebuilds them — it is not a health verdict.
+				// Capacity is not an error, and section 2 changed how often we land here. The
+				// blocklisted-session cap used to block the provider, so this fired once and the
+				// address left validAddresses; now the provider stays selectable and every
+				// subsequent request re-selects it, fails here, and logs again for the rest of the
+				// epoch. At ERROR that is a per-request line for a routine skip.
+				//
+				// validAddresses is deliberately not logged: it is read without csm.lock, which the
+				// surrounding code avoids for exactly that reason, and this call site now runs often
+				// enough for the race to matter.
+				if errors.Is(err, MaximumNumberOfSessionsExceededError) || errors.Is(err, MaximumNumberOfBlockListedSessionsError) {
+					utils.LavaFormatDebug("provider is at its session cap, skipping it for this request",
+						utils.LogAttr("providerAddress", providerAddress),
+						utils.LogAttr("error", err.Error()),
+						utils.LogAttr("GUID", ctx),
+					)
+					// Both are capacity, not health: this provider cannot hand out a session right
+					// now, so skip it for THIS request and pick another.
 					//
-					// It used to also block the provider outright, until the next epoch. That was
-					// dropped with FAILOVER-TASKS section 2: reaching the cap takes ~5,300
-					// consecutive failures spread over 333 retired sessions, the threshold is
-					// MaxSessionsAllowedPerProvider/3 rather than a number chosen to mean anything
-					// about health, and the block it produced was never reported — so the 30-second
-					// reconnect loop could never release it. bench-after is the health signal;
-					// this stays a plain resource guard.
+					// The blocklisted-session cap used to ALSO block the provider outright until
+					// the next epoch. That was dropped with FAILOVER-TASKS section 2: reaching it
+					// takes ~5,300 consecutive failures spread over 333 retired sessions, the
+					// threshold is MaxSessionsAllowedPerProvider/3 rather than a number chosen to
+					// mean anything about health, and the block it produced was never reported — so
+					// the 30-second reconnect loop could never release it. bench-after is the health
+					// signal; the cap stays a plain resource guard bounding session growth, since
+					// retired sessions are not reclaimed until the epoch rebuilds them.
 					tempIgnoredProviders.providers[providerAddress] = struct{}{}
 				} else {
+					utils.LavaFormatError("Error on consumerSessionWithProvider.getConsumerSessionInstanceFromEndpoint", err,
+						utils.LogAttr("providerAddress", providerAddress),
+						utils.LogAttr("Error", err.Error()),
+						utils.LogAttr("GUID", ctx),
+					)
 					utils.LavaFormatFatal("Unsupported Error", err, utils.LogAttr("GUID", ctx))
 				}
 

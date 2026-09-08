@@ -482,7 +482,7 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 		utils.LavaFormatDebug("endpoint approaching the disable threshold",
 			utils.LogAttr("endpoint", addr),
 			utils.LogAttr("refusals", refusals),
-			utils.LogAttr("threshold", uint64(MaxConsecutiveConnectionAttempts)),
+			utils.LogAttr("threshold", MaxConsecutiveConnectionAttempts),
 			utils.LogAttr("remaining", MaxConsecutiveConnectionAttempts-refusals),
 			utils.LogAttr("is_direct_rpc", isDirect),
 		)
