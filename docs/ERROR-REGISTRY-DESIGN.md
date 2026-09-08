@@ -56,7 +56,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 |------|------|-------------|-----------|---------------|
 | **Generic Node Errors (2000-2099)** |||||
 | 2001 | `NODE_METHOD_NOT_FOUND` | Method does not exist on this node (unknown to the API surface); non-retryable (SubCategoryUnsupportedMethod) | No | JSON-RPC -32601 |
-| 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider. | Yes | JSON-RPC -32004 |
+| 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 |
 | 2003 | `NODE_INTERNAL_ERROR` | Internal node error | Yes | JSON-RPC -32603 |
 | 2004 | `NODE_SERVER_ERROR` | Generic server error | Yes | JSON-RPC -32000 |
 | 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / MessageContains("rate limit") |
@@ -66,12 +66,18 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2009 | `NODE_ENDPOINT_NOT_FOUND` | REST endpoint not found (SubCategoryUnsupportedMethod) | No | HTTP 404 |
 | 2010 | `NODE_METHOD_NOT_ALLOWED` | REST method not allowed (SubCategoryUnsupportedMethod) | No | HTTP 405 |
 | 2011 | `NODE_LIMIT_EXCEEDED` | Request exceeds node limit (e.g., eth_getLogs range) (SubCategoryRateLimit) | No | JSON-RPC -32005 |
-| 2012 | `NODE_RESOURCE_NOT_FOUND` | Resource not found at node level | Yes | JSON-RPC -32001 |
-| 2013 | `NODE_RESOURCE_UNAVAILABLE` | Resource exists but unavailable | Yes | JSON-RPC -32002 |
+| 2012 | `NODE_RESOURCE_NOT_FOUND` | Resource not found at node level (SubCategoryDataScope) | Yes | JSON-RPC -32001 |
+| 2013 | `NODE_RESOURCE_UNAVAILABLE` | Resource exists but unavailable (SubCategoryDataScope) | Yes | JSON-RPC -32002 |
 | 2014 | `NODE_GATEWAY_TIMEOUT` | Gateway timeout (HTTP 504 from provider) | Yes | HTTP 504 |
 | 2015 | `NODE_BAD_GATEWAY` | Bad gateway (HTTP 502 from provider) | Yes | HTTP 502 |
 | 2016 | `NODE_UNAUTHORIZED` | Upstream rejected router credentials (HTTP 401) | No | HTTP 401 |
 | 2017 | `NODE_DATA_NOT_HELD` | Endpoint does not hold the requested data — pruned or never existed (SubCategoryDataScope) | Yes | gRPC 5, gRPC 11 |
+
+> **SubCategoryDataScope is no longer 2017 alone.** FAILOVER-TASKS section 2 extended it to every
+> "the answer you want is not here" code: 2012, 2013, 3201-3206, and the chain-specific not-found
+> equivalents 3303, 3309, 3311, 3331, 3332, 3360, 3361. `protocol/common/error_fault_axis_test.go`
+> is the machine-checked contract — it pins the subcategory and retryability of every 2xxx/3xxx code
+> and fails if one is added without a deliberate fault-axis decision.
 | **Bitcoin/UTXO Node Errors (2100-2149)** |||||
 | 2101 | `NODE_BITCOIN_WARMUP` | Node still warming up (Bitcoin -28 / RPC_IN_WARMUP) | Yes | — |
 | 2102 | `NODE_BITCOIN_INITIAL_DOWNLOAD` | Node in initial block download (Bitcoin -10 / RPC_CLIENT_IN_INITIAL_DOWNLOAD) | Yes | — |
@@ -414,11 +420,19 @@ const (
     SubCategoryUnsupportedMethod                         // zero retries, zero CU, cached response, no provider scoring
     SubCategoryRateLimit                                 // endpoint is healthy but busy; apply backoff, do not mark unhealthy
     SubCategoryDataScope                                 // endpoint does not hold the data; keep retrying elsewhere, but do not score it
+    SubCategoryNodeCapability                            // endpoint does not offer this capability; keep retrying elsewhere, but do not score it
 )
 
 func (sc ErrorSubCategory) IsUnsupportedMethod() bool { return sc == SubCategoryUnsupportedMethod }
 func (sc ErrorSubCategory) IsRateLimit() bool         { return sc == SubCategoryRateLimit }
 func (sc ErrorSubCategory) IsDataScope() bool         { return sc == SubCategoryDataScope }
+func (sc ErrorSubCategory) IsNodeCapability() bool    { return sc == SubCategoryNodeCapability }
+
+// EndpointAtFault resolves the four subcategories plus category and retryability into the single
+// question the endpoint-health counter asks: is this POSITIVE evidence the endpoint is broken?
+// Deliberately not Retryable — that answers "would asking someone else help", a routing question.
+// An unclassified error returns false: absence of information is not fault.
+func (le *LavaError) EndpointAtFault() bool
 
 
 // LavaError is the central error definition
