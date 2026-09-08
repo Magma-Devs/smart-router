@@ -829,7 +829,7 @@ func TestEpochTransition_ProbeIsRequiredOnlyForAReportedProvider(t *testing.T) {
 			require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, false), nil))
 
 			require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
-				tc.reportProvider, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, false, nil))
+				tc.reportProvider, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, nil))
 			require.Equal(t, tc.wantReported, blockedRecord(t, csm, address).Reported)
 			require.False(t, isValidAddress(csm, address))
 
@@ -851,7 +851,7 @@ func TestEpochTransition_AReportedProviderThatPassesItsProbeIsReleased(t *testin
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, true), nil))
 
 	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
-		true, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, false, nil))
+		true, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, nil))
 	require.True(t, blockedRecord(t, csm, address).Reported)
 	require.False(t, isValidAddress(csm, address))
 
@@ -871,7 +871,7 @@ func TestEpochTransition_AMissingRecordStillFacesTheProbe(t *testing.T) {
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, false), nil))
 
 	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
-		true, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, false, nil))
+		true, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, nil))
 
 	// Strand the block: the record is gone while the provider stays blocked. The store paths that
 	// could do this are fixed, so this is the defensive case — which is the one worth pinning,
@@ -897,8 +897,8 @@ func TestEpochTransition_BackupAlwaysFacesTheProbeWhateverItsReportState(t *test
 		createNamedPairingList("regular-a"), epochPairing(t, address, false)))
 
 	// reportProvider=false: on the regular path this would mean "no evidence, release immediately".
-	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonTooManyDeadSessions,
-		false, csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonExplicitSignal,
+		false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
 	require.False(t, blockedRecord(t, csm, address).Reported)
 
 	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight,
@@ -920,10 +920,10 @@ func TestEpochTransition_AProviderReportedByARepeatBlockStillFacesTheProbe(t *te
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, false), nil))
 	epoch := csm.atomicReadCurrentEpoch()
 
-	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonTooManyDeadSessions,
-		false, epoch, 0, 0, false, nil))
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonExplicitSignal,
+		false, epoch, 0, 0, nil))
 	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
-		true, epoch, MaxConsecutiveConnectionAttempts, 0, false, nil))
+		true, epoch, MaxConsecutiveConnectionAttempts, 0, nil))
 
 	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, epochPairing(t, address, false), nil))
 	awaitEpochReleasePass(t, csm)
@@ -932,22 +932,8 @@ func TestEpochTransition_AProviderReportedByARepeatBlockStillFacesTheProbe(t *te
 		"it was reported, so it owes a probe — a stale record here is a working bypass of the fix")
 }
 
-// The dead-session cap on its own is the other half, and it was untested in either direction. It is
-// released without a probe, and that is correct rather than a gap: the epoch rebuilds every session
-// object, so the blocklisted-session count that caused this block is already back at zero. There is
-// nothing left for a probe to find.
-func TestEpochTransition_DeadSessionCapIsReleasedWithoutAProbe(t *testing.T) {
-	const address = "provider-dead-sessions"
-	csm := CreateConsumerSessionManager()
-	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, false), nil))
-
-	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonTooManyDeadSessions,
-		false, csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
-	require.False(t, blockedRecord(t, csm, address).Reported, "this path blocks quietly by design")
-
-	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, epochPairing(t, address, false), nil))
-	awaitEpochReleasePass(t, csm)
-
-	require.True(t, isValidAddress(csm, address),
-		"nothing was recorded against it, and the condition it was blocked on is reset by the epoch itself")
-}
+// The dead-session cap used to have its own case here, asserting that a provider blocked for it was
+// released without a probe. FAILOVER-TASKS section 2 deleted that block trigger and its reason, so
+// the case had no producer left to exercise. The rule it rested on — an UNREPORTED block is released
+// without a probe — is unchanged and is covered by the "unreported provider is released without one"
+// row of TestEpochTransition_ProbeIsRequiredOnlyForAReportedProvider above.
