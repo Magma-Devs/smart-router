@@ -381,3 +381,32 @@ func TestStickyPodLocal_ExhaustedProviderDoesNotSpinTheRefillLoop(t *testing.T) 
 			"holding csm.lock.RLock and starving every writer on this chain")
 	}
 }
+
+// A sticky request must not invent an outage when there is no PRIMARY to claim.
+//
+// Claims only ever name primaries today, so with the primary pool empty there is nothing for
+// the request to be consistent with. Failing closed would buy the caller nothing and cost it
+// the backup tier that identical traffic without the header still gets — so an
+// all-primaries-blocked incident would hard-fail every NEW sticky session while ordinary
+// traffic rode it out on backups.
+//
+// Fail closed protects a claim that exists. It must not fire where no claim could be made.
+func TestSharedSticky_NoPrimaryToClaimServesFromBackupUnpinned(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	csm.SetSharedStickyStore(newFakeSharedSticky(), 15*time.Minute)
+
+	backup := NewConsumerSessionWithProvider("backupA",
+		[]*Endpoint{{NetworkAddress: grpcListener, Enabled: true, Connections: []*EndpointConnection{}}},
+		999999, firstEpochHeight, int64(0))
+	backup.StaticProvider = true
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, nil, map[uint64]*ConsumerSessionsWithProvider{0: backup}))
+
+	sessions, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil),
+		servicedBlockNumber, "", nil, common.NO_STATE, 0, "session-1", "")
+
+	require.NoError(t, err, "a sticky request must still reach the backup tier when no primary can be claimed")
+	require.Len(t, sessions, 1)
+	for provider := range sessions {
+		require.Equal(t, "backupA", provider)
+	}
+}
