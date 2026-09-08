@@ -58,17 +58,25 @@ func classifyAndWrap(err error, chainFamily common.ChainFamily, transport common
 // and/or backed off based on the classified error.
 //
 // Rules:
-//   - isClientCancellation (relay race loser / client disconnect) → neither,
-//     regardless of category. The endpoint is not at fault.
-//   - CategoryInternal (timeout, connection refused, DNS) → unhealthy + backoff
+// Rules, in the order the switch below applies them — the order is load-bearing, so read it as a
+// sequence rather than a set:
+//
+//   - isClientCancellation (relay race loser / client disconnect) → neither, regardless of
+//     category. The endpoint is not at fault.
 //   - unsupported method / node capability / data scope → neither. The endpoint answered
 //     truthfully about what it serves or holds; the relay processor steers the request elsewhere
+//   - rate limited → backoff only (endpoint is healthy, just busy), whatever its category. This
+//     now precedes the category checks, which changes two verdicts, both inert today:
+//     NODE_LIMIT_EXCEEDED 2011 gains backoff, and PROTOCOL_RATE_LIMITED 1020 — the only
+//     CategoryInternal code carrying the rate-limit subcategory — loses unhealthy. 1020 has no
+//     producer in the tree, and needsBackoff is discarded at relayInnerDirect's only call site.
 //   - unrecognised error → unhealthy + backoff. Reaching here means the relay produced no usable
 //     answer, so it is a fault even unnamed. Decision 4's carve-out is for unrecognised ANSWERS,
 //     which arrive on the node-error path instead
-//   - CategoryExternal + Retryable (5xx, syncing) → backoff + unhealthy (except rate limit)
-//   - CategoryExternal + Retryable + RateLimited → backoff only (endpoint is healthy, just busy)
-//   - CategoryExternal + !Retryable (4xx, unsupported) → neither (error is the user's)
+//   - everything else defers to LavaError.EndpointAtFault, which resolves to: CategoryInternal
+//     (timeout, connection refused, DNS) → unhealthy + backoff; CategoryExternal + Retryable
+//     (5xx, syncing) → unhealthy + backoff; CategoryExternal + !Retryable (4xx, caller fault)
+//     → neither.
 //
 // The isClientCancellation carve-out lives here so callers have exactly one
 // source of truth for endpoint-health decisions — see common.IsClientCancellation

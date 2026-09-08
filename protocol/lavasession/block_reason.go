@@ -107,11 +107,15 @@ const (
 
 // BlockRecord is everything known at the moment a provider was blocked.
 //
-// Reported and SecondChanceGranted are stored rather than recomputed because they decide WHICH
-// recovery routes can ever fire, which is the immediate follow-up question after "why":
+// Reported is stored rather than recomputed because it decides WHICH recovery routes can ever
+// fire, which is the immediate follow-up question after "why":
 //
-//	Reported == false            → the 30-second reconnect loop will never look at it
-//	SecondChanceGranted == true  → it comes back on its own in retrySecondChanceAfter
+//	Reported == false  → the 30-second reconnect loop will never look at it
+//
+// It used to have a companion, SecondChanceGranted, naming the block that returned on its own
+// after retrySecondChanceAfter. FAILOVER-TASKS section 2 deleted that mechanism, so a timed return
+// is no longer one of the routes — until section 3's cooldown, the ways back are the health prober,
+// a last-resort trial from the blocked list, and the epoch rebuild.
 //
 // Guarded by ConsumerSessionManager.lock, like the blocked lists it describes.
 type BlockRecord struct {
