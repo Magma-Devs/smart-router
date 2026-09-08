@@ -2,7 +2,6 @@ package lavasession
 
 import (
 	"context"
-	"sort"
 	"sync"
 	"testing"
 
@@ -225,6 +224,13 @@ func TestStatefulSelection_DoesNotMutateTheSharedAddressSlice(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Distinct compute units, or this test cannot fail. With every provider equal the descending
+	// comparator never returns true, sort.Slice performs no swaps, and the in-place mutation this
+	// test exists to catch produces neither a reordering nor a write for -race to flag.
+	require.NoError(t, csm.pairing["primary-a"].addUsedComputeUnits(10, 0))
+	require.NoError(t, csm.pairing["primary-b"].addUsedComputeUnits(20, 0))
+	require.NoError(t, csm.pairing["primary-c"].addUsedComputeUnits(30, 0))
+
 	// Warm the addon-address cache first. Until cacheAddonAddresses has run, getValidAddresses
 	// recomputes a fresh slice per call and there is nothing shared to race over — so without this
 	// the test passes even against the in-place sort it exists to catch.
@@ -261,10 +267,10 @@ func TestStatefulSelection_DoesNotMutateTheSharedAddressSlice(t *testing.T) {
 	after := append([]string(nil), csm.getValidAddresses("", nil, ctx)...)
 	csm.lock.RUnlock()
 
-	sort.Strings(before)
-	sortedAfter := append([]string(nil), after...)
-	sort.Strings(sortedAfter)
-	require.Equal(t, before, sortedAfter, "the shared slice must keep its membership")
+	// Order, not just membership: an in-place sort permutes the slice without changing what is in
+	// it, so a membership comparison passes against the very bug this guards. Asserting order is
+	// also what makes the guard reachable from `make test`, which runs no -race.
+	require.Equal(t, before, after, "the shared cached slice must not be reordered by selection")
 }
 
 // End to end through GetSessions: the flag decides whether the returned session map spans tiers.
