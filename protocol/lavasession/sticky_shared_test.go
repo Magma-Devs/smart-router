@@ -327,3 +327,57 @@ func TestSharedSticky_BusyClaimedUpstreamFailsRatherThanRerouting(t *testing.T) 
 	require.True(t, held, "a busy upstream must not cost the session its claim")
 	require.Equal(t, pinned, pin.Provider)
 }
+
+// Pod-local stickiness (no fleet registry — the default deployment) must not spin when the
+// pinned provider cannot take the relay.
+//
+// Selection tops itself up in a loop: a provider that is returned but cannot serve — compute
+// units for the epoch spent, connection down, session cap reached — is added to the ignored set
+// and a replacement is requested. The sticky lookup used to consult only the valid-address list,
+// which still contains that provider (being out of budget is not the same as being unhealthy),
+// so it handed back the same one every time. That loop has no counter, no context check, and
+// holds the read lock throughout, so it pegs a core and starves the next provider-list update —
+// the whole chain stops.
+//
+// Written with an explicit deadline because the failure mode is a hang, which would otherwise
+// surface as a ten-minute package timeout with no attribution.
+func TestStickyPodLocal_ExhaustedProviderDoesNotSpinTheRefillLoop(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
+
+	pinned := resolvedProvider(t, csm, "session-1")
+
+	// Spend the pinned provider's budget for the epoch. It stays healthy and stays a valid
+	// address; it simply cannot take another relay.
+	csm.lock.RLock()
+	cswp := csm.pairing[pinned]
+	csm.lock.RUnlock()
+	cswp.Lock.Lock()
+	cswp.UsedComputeUnits = cswp.MaxComputeUnits
+	cswp.Lock.Unlock()
+
+	type outcome struct {
+		sessions ConsumerSessionsMap
+		err      error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		sessions, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil),
+			servicedBlockNumber, "", nil, common.NO_STATE, 0, "session-1", "")
+		done <- outcome{sessions, err}
+	}()
+
+	select {
+	case got := <-done:
+		// Either answer is acceptable; what matters is that it terminates. Serving from another
+		// provider is the expected one, because pod-local stickiness is best effort.
+		if got.err == nil {
+			for provider := range got.sessions {
+				require.NotEqual(t, pinned, provider, "the exhausted provider cannot have served this relay")
+			}
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("GetSessions did not return: the refill loop is spinning on the pinned provider, " +
+			"holding csm.lock.RLock and starving every writer on this chain")
+	}
+}
