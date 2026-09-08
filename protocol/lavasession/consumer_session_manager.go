@@ -1648,16 +1648,36 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	// deployments running --shared-state.
 	if stickiness != "" && selectedProvider == "" && csm.sharedSticky != nil {
 		resolved, localKey, stickyErr := csm.resolveStickyPin(ctx, stickiness, cuNeededForSession, requestedBlock, addon, common.GetExtensionNames(extensions), stateful)
-		if stickyErr != nil {
+		switch {
+		case errors.Is(stickyErr, PairingListEmptyError):
+			// This pod has no PRIMARY upstream to claim. Claims only ever name primaries today,
+			// so there is nothing here to be consistent with — and failing closed would buy the
+			// caller nothing while costing it the backup tier that ordinary traffic still gets.
+			//
+			// Without this, an all-primaries-blocked incident hard-failed every NEW sticky
+			// session while identical traffic without the header was served from backups. Fail
+			// closed protects a claim that exists; it must not invent an outage where no claim
+			// could be made in the first place.
+			//
+			// The request proceeds unclaimed: normal selection runs, which is what reaches the
+			// backup cascade. The session is simply not pinned until primaries return. Backup
+			// providers becoming claimable is separate work.
+			utils.LavaFormatDebug("sticky session: no primary upstream to claim, serving unpinned",
+				utils.LogAttr("chainID", csm.rpcEndpoint.ChainID), utils.LogAttr("GUID", ctx))
+			stickiness = ""
+		case stickyErr != nil:
 			return nil, stickyErr
+		default:
+			selectedProvider = resolved
+			stickiness = ""
 		}
-		selectedProvider = resolved
-		stickiness = ""
 		// A resolved claim is enforced as a hard pin below, so an upstream that is no longer
 		// selectable here fails this request. Drop the local claim on that outcome, or the fast
 		// path replays the same dead decision on every following request until it ages out.
 		defer func() {
-			if errors.Is(errRet, SelectedProviderUnavailableError) {
+			// selectedProvider is empty on the unpinned fall-through above, so this only ever
+			// fires for a request that actually routed on a claim.
+			if selectedProvider != "" && errors.Is(errRet, SelectedProviderUnavailableError) {
 				csm.invalidateStickyPin(localKey)
 			}
 		}()
