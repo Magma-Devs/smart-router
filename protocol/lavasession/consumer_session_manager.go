@@ -1893,6 +1893,15 @@ func (csm *ConsumerSessionManager) rankStatefulTier(addresses []string, ignoredP
 // scan rather than a set: alreadySelected is capped at statefulFanoutPerTier, so building one costs
 // more than the comparisons it saves.
 //
+// currentlyBlockedProviderAddresses is deliberately NOT consulted, and the omission is a decision
+// rather than an oversight: a provider blocked out of the primary tier for repeated failures can
+// still be broadcast to as a backup. It only bites for an address configured in both pools — one
+// blocked as a primary is absent from validAddresses, so it is absent from alreadySelected and this
+// exclusion does not catch it — and ValidateUniqueProviderNames rejects that configuration at boot,
+// so nothing reaches it today. Whether a node the router has already judged bad should serve as the
+// backup it is paying for is a policy question, and changing it here would widen this change past
+// the broadcast. Revisit it with the tier consolidation, not in passing.
+//
 // The hold-off is a plain exclusion here, unlike filterRateLimitedProviders, which keeps the
 // soonest-to-expire candidate rather than leave a request with nowhere to go. That rescue cannot be
 // needed on this path: the backup tier is additive, and a stateful broadcast only gets here with at
