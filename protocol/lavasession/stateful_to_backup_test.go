@@ -160,6 +160,29 @@ func TestStatefulToBackup_SkipsBackupMissingAddon(t *testing.T) {
 		"the backup declares no addons, so it cannot join an archive broadcast")
 }
 
+// A provider configured in both tiers must be broadcast to once. UpdateAllProviders does not dedup
+// the two pools, and a repeated address puts the caller's target above what its session map can
+// hold: the "enough providers" check then never fires and every stateful relay pays a second,
+// pointless selection pass.
+func TestStatefulToBackup_ProviderInBothTiersAppearsOnce(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	dual := mkStatefulProvider("dual-provider")
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight,
+		map[uint64]*ConsumerSessionsWithProvider{0: dual, 1: mkStatefulProvider("primary-b")},
+		map[uint64]*ConsumerSessionsWithProvider{0: mkStatefulProvider("backup-1"), 1: dual}))
+	csm.SetStatefulToBackup(true)
+
+	selected := statefulSelection(csm, nil)
+	require.ElementsMatch(t, []string{"dual-provider", "primary-b", "backup-1"}, selected,
+		"the overlapping provider is broadcast to once, on its primary side")
+
+	sessions, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil),
+		servicedBlockNumber, "", nil, common.CONSISTENCY_SELECT_ALL_PROVIDERS, 0, "", "")
+	require.NoError(t, err)
+	require.Len(t, sessions, len(selected),
+		"the selection count must be reachable by the session map, or the caller's target never fires")
+}
+
 // The flag with no backups configured is a no-op rather than an error.
 func TestStatefulToBackup_OnWithNoBackupsConfigured(t *testing.T) {
 	csm := setupStatefulCSM(t, []string{"primary-a", "primary-b"}, nil)

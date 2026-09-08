@@ -1829,7 +1829,7 @@ func (csm *ConsumerSessionManager) getProvidersForStatefulCalls(ctx context.Cont
 		return providers
 	}
 
-	backups := csm.rankStatefulTier(csm.eligibleBackupsForStateful(ctx, ignoredProvidersList, addon, extensions), ignoredProvidersList)
+	backups := csm.rankStatefulTier(csm.eligibleBackupsForStateful(ctx, ignoredProvidersList, addon, extensions, providers), ignoredProvidersList)
 	if len(backups) == 0 {
 		return providers
 	}
@@ -1883,8 +1883,15 @@ func (csm *ConsumerSessionManager) rankStatefulTier(addresses []string, ignoredP
 }
 
 // eligibleBackupsForStateful returns the backups a stateful broadcast may include: not already
-// tried by this request, not blocked, able to serve the addon and extensions asked for, and not
-// currently held off after a 429.
+// chosen from the primary tier, not already tried by this request, not blocked, able to serve the
+// addon and extensions asked for, and not currently held off after a 429.
+//
+// alreadySelected is the primary tier's result. UpdateAllProviders builds the two pools from
+// separate inputs with no dedup, so one address can sit in both — and appending it twice would put
+// the caller's target above what its session map can hold, so the caller's "enough providers" check
+// would never fire and every stateful relay would pay a second, pointless selection pass. A linear
+// scan rather than a set: alreadySelected is capped at statefulFanoutPerTier, so building one costs
+// more than the comparisons it saves.
 //
 // The hold-off is a plain exclusion here, unlike filterRateLimitedProviders, which keeps the
 // soonest-to-expire candidate rather than leave a request with nowhere to go. That rescue cannot be
@@ -1892,10 +1899,13 @@ func (csm *ConsumerSessionManager) rankStatefulTier(addresses []string, ignoredP
 // least one primary already chosen.
 //
 // csm must be rlocked here.
-func (csm *ConsumerSessionManager) eligibleBackupsForStateful(ctx context.Context, ignoredProvidersList map[string]struct{}, addon string, extensions []string) []string {
+func (csm *ConsumerSessionManager) eligibleBackupsForStateful(ctx context.Context, ignoredProvidersList map[string]struct{}, addon string, extensions []string, alreadySelected []string) []string {
 	eligible := make([]string, 0, len(csm.backupProviders))
 	for address, provider := range csm.backupProviders {
 		if provider == nil {
+			continue
+		}
+		if slices.Contains(alreadySelected, address) {
 			continue
 		}
 		if _, alreadyTried := ignoredProvidersList[address]; alreadyTried {
