@@ -2191,16 +2191,36 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 	}
 
 	if stickysession, ok := csm.stickySessions.Get(stickiness); ok {
-		// Check if sticky session provider is still valid
-		providerValid := slices.Contains(validAddresses, stickysession.Provider)
-		if providerValid {
+		// A pinned provider is only usable if it is BOTH still a valid address AND has not
+		// already been set aside during this GetSessions call.
+		//
+		// The ignored-set half is what bounds the caller's refill loop. When a provider is
+		// returned but cannot take the relay — its compute units for the epoch are spent, its
+		// connection is not up, its session cap is reached — the caller adds it to
+		// ignoredProvidersList and calls back here for a replacement. Checking only
+		// validAddresses handed the very same provider back every time: being out of budget
+		// does not make an address invalid. The refill loop above has no counter and no context
+		// check and holds csm.lock.RLock throughout, so that is an unbounded spin which pegs a
+		// core and starves the next UpdateAllProviders writer, wedging the whole chain.
+		//
+		// The lava-select-provider branch above already carries exactly this guard, added for
+		// exactly this reason. It was never mirrored here.
+		_, alreadyTried := ignoredProvidersList[stickysession.Provider]
+		if !alreadyTried && slices.Contains(validAddresses, stickysession.Provider) {
 			addresses = []string{stickysession.Provider}
 			utils.LavaFormatTrace("returning sticky session", utils.LogAttr("provider", stickysession.Provider), utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
 			return addresses, nil
-		} else {
-			utils.LavaFormatTrace("sticky session provider is no longer valid, deleting", utils.LogAttr("provider", stickysession.Provider), utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
-			csm.stickySessions.Delete(stickiness)
 		}
+		// Fall through to ordinary selection. Pod-local stickiness is best effort — it has never
+		// promised to fail rather than serve — so one request moving off the pin is the right
+		// trade against wedging the chain. The tail of this function re-pins the session to
+		// whatever is chosen instead.
+		utils.LavaFormatTrace("sticky session provider unusable for this request, re-selecting",
+			utils.LogAttr("provider", stickysession.Provider),
+			utils.LogAttr("alreadyTriedThisRequest", alreadyTried),
+			utils.LogAttr("id", stickiness),
+			utils.LogAttr("GUID", ctx))
+		csm.stickySessions.Delete(stickiness)
 	}
 
 	if totalValidLength <= 0 {
