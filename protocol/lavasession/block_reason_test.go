@@ -144,41 +144,55 @@ func TestBlockReason_ExplicitSignal_ViaSentinel(t *testing.T) {
 	require.True(t, record.Reported)
 }
 
-// The retired-session cap no longer blocks the provider.
+// A retired session must not cost the provider its capacity once the upstream is working again.
 //
-// It used to: hitting the allowance blocked the provider until the next epoch, quietly, so the
-// 30-second reconnect loop could never release it. FAILOVER-TASKS section 2 removed that — the cap
-// stays as a plain resource guard (retired sessions are not reclaimed until the epoch rebuilds
-// them), and the provider is only skipped for the request that hit it.
+// Two things used to stand between a recovered upstream and a new session, and they were load
+// bearing for each other. A provider was refused a new session once MaxSessionsAllowedPerProvider/3
+// of its sessions had been retired; hitting that refusal blocked the provider; and the block
+// emptied validAddresses, which triggered a pool reset, which raised the allowance by another
+// third. The block was the only thing that ever raised it.
 //
-// Driven by shrinking the session cap rather than retiring 333 sessions: the allowance is derived
-// from MaxSessionsAllowedPerProvider, so a small cap reaches the same branch through the same code.
+// FAILOVER-TASKS section 2 removed the block. Keeping the lower ceiling on its own left an upstream
+// that reached it refused for the rest of the epoch — retired sessions are never reclaimed inside
+// one — while answering every probe perfectly. So the ceiling went too. The total-session ceiling
+// still bounds growth, which is the only job the lower one was really doing.
 //
-// This FAILS on pre-removal code, where the provider is blocked and a record is written.
-func TestRetiredSessionCapDoesNotBlockTheProvider(t *testing.T) {
+// Driven by shrinking the session cap rather than retiring 333 sessions: the old allowance was
+// derived from MaxSessionsAllowedPerProvider, so a small cap reaches the same code with less setup.
+//
+// This FAILS on the code that carried the lower ceiling, on the second GetSessions.
+func TestRetiredSessionDoesNotStrandTheProvider(t *testing.T) {
 	original := MaxSessionsAllowedPerProvider
-	MaxSessionsAllowedPerProvider = 3 // allowance becomes 3/3 = 1 blocklisted session
+	MaxSessionsAllowedPerProvider = 3 // the old allowance would have been 3/3 = 1 retired session
 	t.Cleanup(func() { MaxSessionsAllowedPerProvider = original })
 
 	const address = "provider-dead-sessions"
 	csm := singleProviderCSM(t, address, true)
 	ctx := context.Background()
+	get := func() (ConsumerSessionsMap, error) {
+		return csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+	}
 
 	// Retire a session the way a session-sync loss does — immediately, whatever the error count.
-	sessions, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+	sessions, err := get()
 	require.NoError(t, err)
 	for _, session := range sessions {
 		require.NoError(t, csm.OnSessionFailure(session.Session, SessionOutOfSyncError))
 	}
 	require.Empty(t, blockedRecordCount(csm), "losing a session must not block the provider")
 
-	// The next request finds the allowance exhausted. It fails — the provider is skipped for THIS
-	// request — but the provider itself stays eligible for the next one.
-	_, err = csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
-	require.Error(t, err, "the cap still refuses a new session on that address")
+	// The upstream is fine now. It must be able to serve the very next request, without a block, a
+	// pool reset, or an epoch rebuild. This is the assertion the old ceiling failed.
+	sessions, err = get()
+	require.NoError(t, err, "a retired session must not strand a working upstream")
+	require.NotEmpty(t, sessions)
+	for _, session := range sessions {
+		require.NoError(t, csm.OnSessionDiscarded(session.Session, nil))
+	}
 
-	require.Empty(t, blockedRecordCount(csm), "but the cap is a resource guard, not a health verdict")
+	require.Empty(t, blockedRecordCount(csm), "and none of this is a health verdict")
 	require.False(t, csm.reportedProviders.IsReported(address))
+	require.Zero(t, csm.atomicReadNumberOfResets(), "recovery must not depend on a pool reset")
 }
 
 // The reason has to outlive the epoch tick. Without carry-over every block would read

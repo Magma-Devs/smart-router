@@ -24,10 +24,6 @@ import (
 
 var MaxSessionsAllowedPerProvider = 1000 // Max number of sessions allowed per provider, configurable via flag
 
-func GetMaxAllowedBlockListedSessionPerProvider() int {
-	return MaxSessionsAllowedPerProvider / 3
-}
-
 // MaxConsecutiveConnectionAttempts is the number of consecutive failed requests after which an
 // endpoint is backed off (endpoint.Enabled = false) — the `bench-after` setting in
 // FAILOVER-TASKS section 6. Configurable via --bench-after; see DefaultBenchAfter for the default

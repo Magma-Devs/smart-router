@@ -1574,14 +1574,22 @@ func TestPairingWithStateful(t *testing.T) {
 	})
 }
 
-func TestMaximumBlockedSessionsErrorsInPairingListEmpty(t *testing.T) {
+// A provider that keeps failing must eventually exhaust the pairing list rather than loop forever.
+//
+// The ceiling that produces this used to be the retired-session one at MaxSessionsAllowedPerProvider/3.
+// FAILOVER-TASKS section 2 removed it — see TestRetiredSessionCapacityRecovers for why — so the
+// property is now delivered by the total-session ceiling instead, one session further along. Same
+// guarantee, three times as much rope.
+func TestSessionCeilingErrorsInPairingListEmpty(t *testing.T) {
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()
 	pairingList := createPairingList("", true)
 	err := csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{0: pairingList[0]}, nil) // update the providers.
 	require.NoError(t, err)
 	utils.LavaFormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
-	for i := 0; i < MaxSessionsAllowedPerProvider; i++ {
+	// One past the ceiling: every session is retired on failure, so the last iteration is the one
+	// that leaves the provider with no room to create another.
+	for i := 0; i <= MaxSessionsAllowedPerProvider; i++ {
 		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
 		require.NoError(t, err)
 		for _, cs := range css {
