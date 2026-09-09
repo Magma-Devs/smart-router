@@ -1115,6 +1115,25 @@ func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProces
 		requestRanOutOfRoad(relayProcessor.GetStopReason()), cutOffMidDelivery)
 }
 
+// withUnclearWriteStatus forces the HTTP status of an unclear-write reply to 500.
+//
+// Two statuses could otherwise reach the client, and both are wrong. buildFailureResult stamps 503
+// when every recorded failure was a rate limit, and 503 is the status clients treat as "safe to
+// retry" — precisely the wrong advice for a transaction that may already be broadcast, and it also
+// points the blame at the router rather than at an upstream. And a node error carries the node's own
+// status, typically 200, so an unclear write could go out looking like a success.
+//
+// Copied rather than mutated: returnedResult aliases a stored RelayResult, and the reply path is not
+// the owner of it.
+func withUnclearWriteStatus(result *common.RelayResult) *common.RelayResult {
+	if result == nil {
+		return nil
+	}
+	stamped := *result
+	stamped.StatusCode = http.StatusInternalServerError
+	return &stamped
+}
+
 // unknownWriteOutcome is the judgement, split out so it can be tested directly. Assumes the caller
 // has established that this is a failed write.
 func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad, cutOffMidDelivery bool) bool {
@@ -1263,20 +1282,31 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// nothing is pending or no consensus was reached.
 	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName(), pendingProviders)
 
-	if err != nil {
-		if unknownWrite() {
-			utils.LavaFormatWarning("write outcome unknown", err,
-				utils.LogAttr("write_outcome", "unknown"),
-				utils.LogAttr("api", protocolMessage.GetApi().Name),
-				utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()),
-				utils.LogAttr("GUID", ctx),
-			)
-			// returnedResult carries the 500 and this request's headers; only the message the
-			// client reads is replaced. The underlying error is preserved in the log line above,
-			// not concatenated into the reply — "failed relay, insufficient results" in front of
-			// "status unclear" would tell the customer both things at once.
-			return returnedResult, errUnknownWriteOutcome
+	// Checked BEFORE the err branch, and independently of it. processNonCrossValidationResult returns
+	// the first node error with err == nil whenever there are no successes, so gating this on
+	// err != nil skipped exactly the case a write cares about most: one endpoint answered with an
+	// error inside an HTTP 200 while a sibling was still silent and may have broadcast. That request
+	// was reported to the client as the node's error, and counted as a SUCCESS in analytics.
+	//
+	// Safe to hoist: writeOutcomeIsUnknown returns false unless this is a stateful relay with no
+	// successes, so a served write and every read are unaffected.
+	if unknownWrite() {
+		if analytics != nil {
+			analytics.Success = false
 		}
+		utils.LavaFormatWarning("write outcome unknown", err,
+			utils.LogAttr("write_outcome", "unknown"),
+			utils.LogAttr("api", protocolMessage.GetApi().Name),
+			utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()),
+			utils.LogAttr("GUID", ctx),
+		)
+		// The reply keeps this request's headers; only the status and the message the client reads
+		// are replaced. The underlying error stays in the log line above rather than being
+		// concatenated into the reply — "failed relay, insufficient results" in front of "status
+		// unclear" would tell the customer both things at once.
+		return withUnclearWriteStatus(returnedResult), errUnknownWriteOutcome
+	}
+	if err != nil {
 		return returnedResult, utils.LavaFormatError("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
 	}
 

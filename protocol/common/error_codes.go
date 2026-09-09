@@ -48,9 +48,14 @@ var (
 		// MayHaveReachedNode: the upstream accepted the request and never answered.
 		MayHaveReachedNode: true,
 	})
+	// MayHaveReachedNode: a cancellation says when we stopped waiting, never how far the request
+	// got. The relay may already have been on the wire — cancelling the context does not recall it —
+	// so for a write the transaction may be held by the node. A race LOSER is excluded separately by
+	// the successes>0 check in the write verdict, which is why this flag costs nothing there.
 	LavaErrorContextCanceled = registerError(&LavaError{
 		Code: 1008, Name: "PROTOCOL_CONTEXT_CANCELED", Category: CategoryInternal,
 		Description: "Request context was canceled (client disconnect or relay race resolved)", Retryable: false,
+		MayHaveReachedNode: true,
 	})
 
 	// Provider availability (1010-1019)
@@ -251,13 +256,19 @@ var (
 		Code: 2013, Name: "NODE_RESOURCE_UNAVAILABLE", Category: CategoryExternal,
 		Description: "Resource exists but unavailable", Retryable: true,
 	})
+	// MayHaveReachedNode on both: a 502/504 is the PROXY reporting that its own upstream did not
+	// answer it in time, which is exactly the deadline case one hop further out. The proxy forwarded
+	// the request before it gave up, so for a write the node behind it may hold the transaction. The
+	// reasoning the deadline, reset and EOF entries above already carry applies here unchanged.
 	LavaErrorNodeGatewayTimeout = registerError(&LavaError{
 		Code: 2014, Name: "NODE_GATEWAY_TIMEOUT", Category: CategoryExternal,
 		Description: "Gateway timeout (HTTP 504 from provider)", Retryable: true,
+		MayHaveReachedNode: true,
 	})
 	LavaErrorNodeBadGateway = registerError(&LavaError{
 		Code: 2015, Name: "NODE_BAD_GATEWAY", Category: CategoryExternal,
 		Description: "Bad gateway (HTTP 502 from provider)", Retryable: true,
+		MayHaveReachedNode: true,
 	})
 	// NODE_UNAUTHORIZED: upstream rejected the smart-router's credentials
 	// (HTTP 401). Non-retryable because the same credentials are reused on
