@@ -424,7 +424,7 @@ func TestRESTRelay_501_NotImplemented_relayInnerDirect(t *testing.T) {
 	}
 
 	relayResult := &common.RelayResult{}
-	_, relayErr, _ := rpcss.relayInnerDirect(ctx, session, relayResult, 5*time.Second, 5*time.Second, chainMessage, nil, nil)
+	_, relayErr, _ := rpcss.relayInnerDirect(ctx, session, relayResult, 5*time.Second, 5*time.Second, chainMessage, nil, nil, nil)
 
 	// DESIRED (post-fix): a REST 501 "not implemented" is a NodeError, so
 	// relayInnerDirect must NOT convert it into a Go error (which routes it to

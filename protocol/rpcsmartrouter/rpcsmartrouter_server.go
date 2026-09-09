@@ -2123,6 +2123,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				chainMessage,
 				originalRequestData,
 				analytics,
+				func() bool { return requestRanOutOfRoad(relayProcessor.GetStopReason()) },
 			)
 
 			// Did the request run out of road, or did we cut this attempt short? Decides below
@@ -4232,6 +4233,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 // relayInnerDirect handles relay requests using direct RPC connections (smart router mode)
 // relayTimeout is the WINDOW — how long this endpoint is expected to take. attemptBudget is how
 // long the attempt may live. See sendRelayToDirectEndpoints for why the two must not be one value.
+//
+// budgetExpired reports whether the REQUEST ran out of budget, read at the moment the endpoint-health
+// decision is made rather than passed as a value, because it is only knowable once the attempt has
+// ended. It is what separates a hang from a cancellation for the per-URL health machinery: nil is
+// treated as "not expired", which is the safe default for callers with no request context (tests).
 func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	ctx context.Context,
 	singleConsumerSession *lavasession.SingleConsumerSession,
@@ -4241,6 +4247,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	chainMessage chainlib.ChainMessage,
 	originalRequestData []byte,
 	analytics *metrics.RelayMetrics,
+	budgetExpired func() bool,
 ) (relayLatency time.Duration, err error, needsBackoff bool) {
 	// Get direct connection from session
 	directConnection, ok := singleConsumerSession.GetDirectConnection()
@@ -4390,8 +4397,18 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		}
 
 		// Decide endpoint health based on error classification.
+		//
+		// One condition, deliberately: if the REQUEST ran out of budget while this endpoint was still
+		// silent, that is a hang and it counts — whatever the context error happens to look like. Every
+		// other ending stays exempt, unchanged.
+		//
+		// Needed because a budget cancel reaches here indistinguishable from a race loser, and the
+		// client-cancellation carve-out returns early before looking at anything else. That carve-out is
+		// right for a race loser (MAG-2648) but it also swallowed genuine hangs, so a single bad URL
+		// behind a provider with several was never disabled, never probed for recovery, and never moved
+		// the health metric — while the provider's own QoS availability did drop.
 		var shouldMarkUnhealthy bool
-		shouldMarkUnhealthy, needsBackoff = classifyEndpointHealth(classified, isClientCancel)
+		shouldMarkUnhealthy, needsBackoff = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
 
 		// Apply health tracking based on error classification. The failing request is recorded
 		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,
