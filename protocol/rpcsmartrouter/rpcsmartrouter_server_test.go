@@ -1924,6 +1924,11 @@ type MockProtocolMessage struct {
 	// directiveHeaders drives the per-request debug gate in appendHeadersToRelayResult
 	// (lava-debug-relay). Nil means an ordinary client request.
 	directiveHeaders map[string]string
+	// repliesAreNodeErrors makes CheckResponseError report every reply as a node error. Default
+	// false, so every existing test keeps filing replies as successes. Without it this mock cannot
+	// express a node error at ALL, which is why "one endpoint answered with an error while a sibling
+	// was still silent" — the write case that reached a customer as a success — had no test.
+	repliesAreNodeErrors bool
 }
 
 func (m *MockProtocolMessage) GetApi() *spectypes.Api {
@@ -2004,6 +2009,9 @@ func (m *MockProtocolMessage) SetForceCacheRefresh(force bool) bool {
 }
 
 func (m *MockProtocolMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
+	if m.repliesAreNodeErrors {
+		return true, "node error"
+	}
 	return false, ""
 }
 

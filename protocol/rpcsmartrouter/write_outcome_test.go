@@ -81,16 +81,25 @@ func TestMayHaveReachedNodeClassification(t *testing.T) {
 		err  *common.LavaError
 		want bool
 	}{
+		// The request may already have been on the wire when this failure surfaced.
 		{common.LavaErrorConnectionTimeout, true},
 		{common.LavaErrorConnectionReset, true},
 		{common.LavaErrorConnectionClosed, true},
 		{common.LavaErrorContextDeadline, true},
+		// A cancellation says when we stopped waiting, never how far the request got — cancelling a
+		// context does not recall a relay already sent. A race loser is excluded by the successes>0
+		// check instead, not by pretending the request never left.
+		{common.LavaErrorContextCanceled, true},
+		// The proxy is reporting that ITS upstream did not answer in time, having already forwarded
+		// the request: the deadline case one hop further out.
+		{common.LavaErrorNodeGatewayTimeout, true},
+		{common.LavaErrorNodeBadGateway, true},
 
+		// Connect-phase failures do prove the request never left this process.
 		{common.LavaErrorConnectionRefused, false},
 		{common.LavaErrorDNSFailure, false},
 		{common.LavaErrorTLSMismatch, false},
 		{common.LavaErrorNetworkUnreachable, false},
-		{common.LavaErrorContextCanceled, false},
 	} {
 		t.Run(tc.err.Name, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.err.MayHaveReachedNode)

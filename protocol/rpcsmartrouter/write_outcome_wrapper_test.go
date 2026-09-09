@@ -109,6 +109,39 @@ func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
 			"a sibling's proven non-delivery must not settle this while another endpoint is silent")
 	})
 
+	// The gap the review named: covered for a connect-phase failure and for a mid-delivery cut-off
+	// beside a silent sibling, but not for a NODE error beside one. That is the shape that reached a
+	// customer as "success".
+	t.Run("one answered with a node error, one still silent", func(t *testing.T) {
+		msg := writeMessage(common.CONSISTENCY_SELECT_ALL_PROVIDERS)
+		msg.repliesAreNodeErrors = true
+		processor := newWriteOutcomeProcessor(t, msg, 2)
+		processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
+		relaycoretest.SendNodeError(processor, "lava@a", 0)
+		drain(t, processor)
+		require.True(t, writeOutcomeIsUnknown(msg, processor),
+			"one endpoint replying with an error settles only itself; the silent sibling may have broadcast")
+	})
+
+	// And the reason that verdict never used to be consulted for the case above: the result path
+	// hands back a node error with a NIL error, so a caller gated on err != nil skips the check
+	// entirely. This pins the shape rather than the old gate, so it keeps its meaning after the fix.
+	t.Run("a node error is returned with no error, so the verdict cannot be gated on err", func(t *testing.T) {
+		msg := writeMessage(common.CONSISTENCY_SELECT_ALL_PROVIDERS)
+		msg.repliesAreNodeErrors = true
+		processor := newWriteOutcomeProcessor(t, msg, 2)
+		processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
+		relaycoretest.SendNodeError(processor, "lava@a", 0)
+		drain(t, processor)
+
+		result, err := processor.ProcessingResult()
+		require.NoError(t, err,
+			"a node error with no successes comes back as a result, not an error — which is why gating the write verdict on err != nil skipped it")
+		require.NotNil(t, result)
+		require.True(t, writeOutcomeIsUnknown(msg, processor),
+			"the verdict itself was always right; only the caller's gate was wrong")
+	})
+
 	t.Run("everyone came back, one was cut off mid-delivery", func(t *testing.T) {
 		msg := writeMessage(common.CONSISTENCY_SELECT_ALL_PROVIDERS)
 		processor := newWriteOutcomeProcessor(t, msg, 1)
@@ -119,5 +152,39 @@ func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
 		drain(t, processor)
 		require.True(t, writeOutcomeIsUnknown(msg, processor),
 			"nobody is silent, but a connection that died mid-delivery settles nothing")
+	})
+}
+
+// An unclear write must never go out with a status that invites a retry or reads as a success.
+//
+// Two statuses could otherwise reach the client. buildFailureResult stamps 503 when every recorded
+// failure was a rate limit, and 503 is the one clients treat as "safe to retry" — the wrong advice
+// for a transaction that may already be broadcast, and it also blames the router rather than an
+// upstream. And a node error carries the NODE's status, typically 200, so once the verdict is
+// consulted on that path an unclear write could go out looking like it worked.
+func TestWithUnclearWriteStatus(t *testing.T) {
+	t.Run("503 from the all-rate-limited path becomes 500", func(t *testing.T) {
+		require.Equal(t, 500, withUnclearWriteStatus(&common.RelayResult{StatusCode: 503}).StatusCode)
+	})
+
+	t.Run("a node error's 200 becomes 500", func(t *testing.T) {
+		require.Equal(t, 500, withUnclearWriteStatus(&common.RelayResult{StatusCode: 200}).StatusCode)
+	})
+
+	t.Run("an unset status becomes 500", func(t *testing.T) {
+		require.Equal(t, 500, withUnclearWriteStatus(&common.RelayResult{}).StatusCode)
+	})
+
+	t.Run("nil stays nil", func(t *testing.T) {
+		require.Nil(t, withUnclearWriteStatus(nil))
+	})
+
+	// returnedResult aliases a RelayResult the results manager owns, and the reply path is not its
+	// owner, so the stamp must not be applied in place.
+	t.Run("the stored result is not mutated", func(t *testing.T) {
+		stored := &common.RelayResult{StatusCode: 503}
+		stamped := withUnclearWriteStatus(stored)
+		require.Equal(t, 503, stored.StatusCode, "the caller's result must be left alone")
+		require.Equal(t, 500, stamped.StatusCode)
 	})
 }
