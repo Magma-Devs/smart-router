@@ -25,7 +25,33 @@ var (
 	MaxIdleTimeInSeconds = int64(20 * 60)   // 20 minutes of idle time will disconnect the websocket connection
 )
 
+// The server pings a live connection every keep-alive interval. Proxies in front
+// of the router (Cloudflare, the Envoy Gateway) close a silent WebSocket after
+// ~2 minutes and send no close frame, so an idle subscription reaches the client
+// as a transport error rather than an unsubscribe; pinging inside that window
+// keeps it open. The interval is a startup flag, held in an atomic so tests can
+// shorten it while other connections are running. Zero or less disables pings.
+var webSocketKeepAliveInterval = func() *atomic.Int64 {
+	interval := &atomic.Int64{}
+	interval.Store(int64(DefaultWebSocketKeepAliveInterval))
+	return interval
+}()
+
+func SetWebSocketKeepAliveInterval(interval time.Duration) {
+	webSocketKeepAliveInterval.Store(int64(interval))
+}
+
+func GetWebSocketKeepAliveInterval() time.Duration {
+	return time.Duration(webSocketKeepAliveInterval.Load())
+}
+
 const (
+	DefaultWebSocketKeepAliveInterval = 30 * time.Second
+	// websocketWriteTimeout bounds a single frame write so the connection
+	// goroutine is never pinned by a client that stopped reading: the write fails
+	// on the deadline, the writer exits, and the read loop tears the conn down.
+	websocketWriteTimeout = 10 * time.Second
+
 	WebSocketRateLimitHeader            = "x-lava-websocket-rate-limit"
 	WebSocketOpenConnectionsLimitHeader = "x-lava-websocket-open-connections-limit"
 
@@ -126,6 +152,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	websocketConn := cwm.websocketConn
 	logger := cwm.rpcConsumerLogs
 
+	// Closed by the writer goroutine on its way out.
+	writerDone := make(chan struct{})
+
 	webSocketCtx, cancelWebSocketCtx := context.WithCancel(context.Background())
 	guid := utils.GenerateUniqueIdentifier()
 	guidString := strconv.FormatUint(guid, 10)
@@ -133,6 +162,10 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	utils.LavaFormatDebug("consumer websocket manager started", utils.LogAttr("GUID", webSocketCtx))
 	defer func() {
 		cancelWebSocketCtx() // In case there's a problem make sure to cancel the connection
+		// gofiber recycles the connection the moment this handler returns, so wait
+		// for the writer goroutine to stop touching it — otherwise a keep-alive ping
+		// can land on a released conn. websocketWriteTimeout bounds the wait.
+		<-writerDone
 		utils.LavaFormatDebug("consumer websocket manager stopped", utils.LogAttr("GUID", webSocketCtx))
 	}()
 
@@ -149,13 +182,40 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		}
 	}
 
-	// Single writer goroutine: serves both regular messages and the server-shutdown
-	// close frame. Single-writer discipline guarantees we never call WriteMessage
-	// concurrently — the underlying gorilla/fasthttp websocket library is not safe
-	// for concurrent writes.
+	// writeFrame is the writer goroutine's only way to the connection. The
+	// deadline keeps a stalled client from blocking the goroutine forever, which
+	// would in turn stall the handler waiting on writerDone.
+	writeFrame := func(messageType int, data []byte) error {
+		_ = cwm.websocketConn.SetWriteDeadline(time.Now().Add(websocketWriteTimeout))
+		return cwm.websocketConn.WriteMessage(messageType, data)
+	}
+
+	// Single writer goroutine: serves regular messages, the keep-alive ping and the
+	// server-shutdown close frame. Single-writer discipline guarantees we never call
+	// WriteMessage concurrently — the underlying gorilla/fasthttp websocket library
+	// is not safe for concurrent writes.
 	go func() {
+		defer close(writerDone)
+		// A nil channel blocks forever, so a non-positive interval disables the
+		// keep-alive without a second select arm.
+		var keepAlive <-chan time.Time
+		if interval := GetWebSocketKeepAliveInterval(); interval > 0 {
+			keepAliveTicker := time.NewTicker(interval)
+			defer keepAliveTicker.Stop()
+			keepAlive = keepAliveTicker.C
+		}
 		for {
 			select {
+			case <-keepAlive:
+				// Ping from inside the writer goroutine to keep the single-writer
+				// discipline. A failed write means the connection is already gone:
+				// unblock the read loop with an immediate read deadline, the same way
+				// the shutdown branch below does, and leave the Close to the handler.
+				if err := writeFrame(websocket.PingMessage, nil); err != nil {
+					utils.LavaFormatTrace("error writing keep-alive ping to the websocket")
+					_ = cwm.websocketConn.SetReadDeadline(time.Now())
+					return
+				}
 			case <-ctx.Done():
 				// Server-wide shutdown — send a CloseGoingAway (1001) frame so the client can
 				// distinguish an intentional shutdown from a crash, then unblock the read loop by
@@ -166,7 +226,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				// goroutine is still inside Close() — a use-after-recycle data race. SetReadDeadline
 				// returns immediately (the read loop breaks on the resulting error) and lets the handler,
 				// the conn's sole owner, do the single Close on return.
-				_ = cwm.websocketConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
+				_ = writeFrame(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
 				_ = cwm.websocketConn.SetReadDeadline(time.Now())
 				return
 			case <-webSocketCtx.Done():
@@ -176,7 +236,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				if !ok {
 					return
 				}
-				if err := cwm.websocketConn.WriteMessage(msg.messageType, msg.msg); err != nil {
+				if err := writeFrame(msg.messageType, msg.msg); err != nil {
 					utils.LavaFormatTrace("error writing msg to the websocket")
 					return
 				}

@@ -799,3 +799,72 @@ func TestJsonRPCChainListener_GracefulShutdown_RejectsNewConnectionsAfterShutdow
 
 // Quiet the unused-import warning if sync isn't used.
 var _ = sync.WaitGroup{}
+
+// A WebSocket client that dials the bare endpoint URL (wss://host/) upgrades on
+// any path, because the ws/wss scheme never reaches the server — only the
+// upgrade header does. /ws and /websocket keep working, and a GET without the
+// header still answers 405.
+func TestJsonRPCChainListener_WebSocketUpgradesOnAnyPath(t *testing.T) {
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	_, addr := startTestJsonRPCListener(t, serveCtx, false)
+
+	for _, path := range []string{"/", "/ws", "/websocket", "/lava@dapp"} {
+		client, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+path, nil)
+		require.NoError(t, err, "WS dial on %q should upgrade", path)
+		require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode, "path %q", path)
+		_ = client.Close()
+	}
+}
+
+func TestJsonRPCChainListener_PlainGetIsStillMethodNotAllowed(t *testing.T) {
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	_, addr := startTestJsonRPCListener(t, serveCtx, false)
+
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	resp, err := httpClient.Get("http://" + addr + "/")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+}
+
+// An idle subscription must not go silent: proxies in front of the router close
+// a quiet WebSocket after ~2 minutes without a close frame, so the server pings
+// on an interval to keep the connection alive.
+func TestJsonRPCChainListener_WebSocketSendsKeepAlivePings(t *testing.T) {
+	previousInterval := GetWebSocketKeepAliveInterval()
+	SetWebSocketKeepAliveInterval(50 * time.Millisecond)
+	defer SetWebSocketKeepAliveInterval(previousInterval)
+
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	_, addr := startTestJsonRPCListener(t, serveCtx, false)
+
+	client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/", nil)
+	require.NoError(t, err)
+	defer client.Close()
+
+	pinged := make(chan struct{}, 1)
+	client.SetPingHandler(func(string) error {
+		select {
+		case pinged <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	// Control frames are only processed while a read is in flight.
+	go func() {
+		for {
+			if _, _, readErr := client.ReadMessage(); readErr != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-pinged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no keep-alive ping arrived within 5s")
+	}
+}

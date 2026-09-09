@@ -603,7 +603,16 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 	}
 
 	app.Post("/*", handlerPost)
-	app.Get("/*", handlerGet)
+	// A caller that guesses the bare endpoint URL (wss://host/) sends a GET
+	// carrying the upgrade headers — the ws/wss scheme never reaches the server,
+	// so that header is the only signal. Serve any such GET from the handler
+	// /ws and /websocket already use; every other GET is a URI-style query.
+	app.Get("/*", func(fiberCtx *fiber.Ctx) error {
+		if !websocket.IsWebSocketUpgrade(fiberCtx) {
+			return handlerGet(fiberCtx)
+		}
+		return fiberCtx.Next()
+	}, wsUpgradeMiddleware, websocketCallbackWithDappID)
 	//
 	// Go
 	addrChannel := make(chan string)
