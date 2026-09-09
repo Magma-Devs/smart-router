@@ -24,9 +24,6 @@ import (
 type RelayProcessor struct {
 	usedProviders                *lavasession.UsedProviders
 	responses                    chan *RelayResponse
-	// ctx is the request's context, kept so SetResponse can tell "the buffer is momentarily full"
-	// from "the request is over and nothing will ever read this". See SetResponse.
-	ctx context.Context
 	crossValidationParams        *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	lock                         sync.RWMutex
 	guid                         uint64
@@ -62,6 +59,11 @@ type RelayProcessor struct {
 	// "ProcessingTimeout", "Success", …), so the request's final log line can say why there was
 	// no further attempt. Guarded by rp.lock.
 	stopReason string
+
+	// ctx is the request's context, kept so SetResponse can tell "the buffer is momentarily full"
+	// from "the request is over and nothing will ever read this". Read-only after construction, so
+	// it needs no lock. See SetResponse.
+	ctx context.Context
 }
 
 // quorumStat is the per-hash agreement tally for cross-validation: how many providers returned this exact
