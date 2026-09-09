@@ -62,8 +62,9 @@ type Store struct {
 	// configuration cannot answer this: under sentinel the serving node changes
 	// on every failover, and under cluster it depends on the key's slot.
 	// Observability only — nothing in the cache path reads these.
-	readEndpoint  *endpointTracker
-	writeEndpoint *endpointTracker
+	readEndpoint        *endpointTracker
+	writeEndpoint       *endpointTracker
+	configuredAddresses string
 
 	// stopWatcher terminates the credential poll loop (nil when the
 	// credentials are static).
@@ -152,6 +153,7 @@ func New(cfg Config) (*Store, error) {
 		}
 		return nil, err
 	}
+	store.configuredAddresses = strings.Join(cfg.Addresses, ",")
 	store.writeEndpoint = writeTracker
 	store.readEndpoint = readTracker
 	if cfg.PasswordFile != "" {
@@ -172,6 +174,14 @@ func New(cfg Config) (*Store, error) {
 		}
 	}
 	return store, nil
+}
+
+// ConfiguredAddresses returns the operator-provided primary RESP addresses.
+func (s *Store) ConfiguredAddresses() string {
+	if s == nil {
+		return ""
+	}
+	return s.configuredAddresses
 }
 
 // warnIfReadSplitIsDiscoveryScoped flags the one read-split shape that does

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
@@ -33,6 +34,7 @@ type RespCache struct {
 
 	healthStop chan struct{}
 	closeOnce  sync.Once
+	reachable  atomic.Bool
 }
 
 var _ CacheBackend = (*RespCache)(nil)
@@ -71,6 +73,7 @@ func (cache *RespCache) healthLoop(interval time.Duration) {
 	}
 
 	updateGauges := func(connected bool) {
+		cache.reachable.Store(connected)
 		if connected {
 			cache.metrics.connected.Set(1)
 		} else {
@@ -174,6 +177,17 @@ func (cache *RespCache) BackendEndpoint() string {
 // (a lookup that errors is a miss) rather than flipping the whole cache off.
 func (cache *RespCache) CacheActive() bool {
 	return cache != nil
+}
+
+func (cache *RespCache) CacheEngine() string { return "resp" }
+func (cache *RespCache) CacheAddress() string {
+	if cache == nil || cache.store == nil {
+		return ""
+	}
+	return cache.store.ConfiguredAddresses()
+}
+func (cache *RespCache) CacheReachable() bool {
+	return cache != nil && cache.reachable.Load()
 }
 
 // GetEntry answers like the seam it replaces — the gRPC cache CLIENT: the
