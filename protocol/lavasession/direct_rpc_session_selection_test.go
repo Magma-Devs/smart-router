@@ -46,7 +46,6 @@ func TestGetConsumerSessionInstanceFromEndpoint_DirectRPC(t *testing.T) {
 	// Call GetConsumerSessionInstanceFromEndpoint with nil endpointConnection (direct RPC mode)
 	session, epoch, err := cswp.GetConsumerSessionInstanceFromEndpoint(
 		nil,         // endpointConnection = nil triggers direct RPC mode
-		0,           // numberOfResets
 		qosManager,  // qosManager
 		nodeUrl.Url, // networkAddress
 	)
@@ -108,7 +107,6 @@ func TestGetConsumerSessionInstanceFromEndpoint_ProviderRelay(t *testing.T) {
 	// Call GetConsumerSessionInstanceFromEndpoint with actual endpointConnection (provider-relay mode)
 	session, epoch, err := cswp.GetConsumerSessionInstanceFromEndpoint(
 		endpointConn,   // endpointConnection != nil triggers provider-relay mode
-		0,              // numberOfResets
 		qosManager,     // qosManager
 		networkAddress, // networkAddress
 	)
