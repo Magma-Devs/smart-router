@@ -365,6 +365,17 @@ across `outcome`, where before `_failed_total` was a single series.
 > (`cache_tier="secondary"`) appears only when `secondary-cache-be` is
 > configured; see `docs/SECONDARY-CACHE.md`.
 
+> **Do not use these counters to check a single request.** They are incremented
+> on a detached goroutine **after** the reply is written, and nothing orders the
+> two — so reading one straight after its reply is a race, and polling until it
+> settles makes the result depend on how long you waited rather than on what the
+> router did. Send the `lava-debug-relay` directive instead and read
+> `Lava-Cache-Tier` / `Lava-Cache-Outcome` off the reply, which cannot race
+> because it *is* the reply. The `outcome` values are the same four, plus `off`
+> / `skipped` / `unknown` for a tier that was not consulted (those three never
+> label a metric — there was no lookup to count). See
+> [SECONDARY-CACHE.md](SECONDARY-CACHE.md#reading-the-tier-per-request).
+
 #### RESP cache backend — `smartrouter_resp_cache_*`
 
 Present only when the router runs with a RESP-compatible (Redis/Valkey) cache
