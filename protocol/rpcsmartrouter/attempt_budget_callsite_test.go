@@ -139,7 +139,7 @@ func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	require.NoError(t, rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, protocolMsg, relayProcessor, nil, nil))
+	require.NoError(t, rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{}))
 
 	// Dispatch is asynchronous; wait for the relay rather than racing it.
 	waitCtx, waitCancel := context.WithTimeout(callCtx, 10*time.Second)
