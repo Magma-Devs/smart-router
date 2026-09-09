@@ -6,20 +6,29 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 // Cache tier and lookup-outcome label values (docs/METRICS.md#cache).
 // Both are closed enums: cache_tier distinguishes the primary cache from the
 // optional read-only secondary, and outcome splits the former catch-all "failed"
 // classification so operators can tell a clean miss from a broken or slow tier.
+//
+// Aliased from protocol/common, which is where the same values are also rendered into
+// the per-request Lava-Cache-Tier / Lava-Cache-Outcome headers. One definition, so a
+// counter and a header describing the same lookup cannot drift apart. common carries
+// three further not-consulted values (off / skipped / unknown) that are deliberately
+// NOT aliased here: no lookup happened, so there is nothing to count, and admitting
+// them would widen a metric label enum documented as closed.
 const (
-	CacheTierPrimary   = "primary"
-	CacheTierSecondary = "secondary"
+	CacheTierPrimary   = common.CacheTierPrimary
+	CacheTierSecondary = common.CacheTierSecondary
 
-	CacheOutcomeHit     = "hit"
-	CacheOutcomeMiss    = "miss"
-	CacheOutcomeError   = "error"
-	CacheOutcomeTimeout = "timeout"
+	CacheOutcomeHit     = common.CacheOutcomeHit
+	CacheOutcomeMiss    = common.CacheOutcomeMiss
+	CacheOutcomeError   = common.CacheOutcomeError
+	CacheOutcomeTimeout = common.CacheOutcomeTimeout
 )
 
 // ClassifyCacheLookupOutcome maps a cache GetEntry result onto the closed outcome

@@ -1651,6 +1651,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	relayProcessor *relaycore.RelayProcessor,
 	consistencyFallback *consistencyFallbackState,
 	analytics *metrics.RelayMetrics,
+	// cacheReport is what the cache tiers did on this attempt, already complete before
+	// this call: passed by value and only read from here on, so the relay goroutines
+	// below can each copy it onto their own result without synchronization.
+	cacheReport common.CacheLookupReport,
 ) error {
 	chainMessage := protocolMessage
 
@@ -1913,6 +1917,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			localRelayResult := &common.RelayResult{
 				ProviderInfo: common.ProviderInfo{ProviderAddress: endpointAddress},
 				Finalized:    true, // Direct responses don't need consensus
+				// A provider is answering, so no tier served — but the tiers were still
+				// consulted, and whether the secondary missed, errored or timed out on
+				// the way is exactly what the resilience cases assert alongside "a
+				// provider answered". ServedTier stays "none" here.
+				CacheLookup: cacheReport,
 			}
 
 			var errResponse error
@@ -3689,6 +3698,22 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	crossValidationEnabled := selection == relaycore.CrossValidation && crossValidationParams != nil
 	primaryCacheActive := rpcss.cache != nil && rpcss.cache.CacheActive()
 	secondaryCacheActive := rpcss.secondaryCacheActive()
+
+	// What the tiers did on THIS attempt, carried onto every result this attempt
+	// produces so the caller can read it off the reply instead of racing the
+	// cache_tier counter, which is incremented after the reply has gone out
+	// (MAG-3540). Seeded to the truth for a request that performs no lookup at all:
+	// an inactive tier reports "off", an active one that is never asked — because a
+	// bypass rule applied below, or because the primary hit first — keeps "skipped".
+	// Each branch that does look up overwrites its own field.
+	cacheReport := common.CacheLookupReport{ServedTier: common.CacheTierNone, PrimaryOutcome: common.CacheOutcomeOff, SecondaryOutcome: common.CacheOutcomeOff}
+	if primaryCacheActive {
+		cacheReport.PrimaryOutcome = common.CacheOutcomeSkipped
+	}
+	if secondaryCacheActive {
+		cacheReport.SecondaryOutcome = common.CacheOutcomeSkipped
+	}
+
 	if primaryCacheActive || secondaryCacheActive {
 		if crossValidationEnabled {
 			// Cross-validation requires fresh endpoint validation - cache would defeat consensus verification
@@ -3771,7 +3796,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							utils.LogAttr("lookupFinalized", lookupFinalized),
 						)
 
-						cacheLatencyMs := func() float64 {
+						// Returns the outcome alongside the latency so the span, the counter and
+						// the response header all describe the same classification of the same
+						// lookup, rather than each re-deriving it from cacheError.
+						cacheLatencyMs, primaryOutcome := func() (float64, string) {
 							_, cacheSpan := tracing.StartInternalSpan(ctx, tracing.SpanCacheLookup)
 							defer cacheSpan.End()
 							cacheStart := time.Now()
@@ -3788,9 +3816,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							cancel()
 							latencyMs := float64(time.Since(cacheStart).Milliseconds())
 							cacheHit := cacheError == nil && cacheReply != nil && cacheReply.GetReply() != nil
-							tracing.RecordCacheResult(ctx, cacheSpan, metrics.CacheTierPrimary, metrics.ClassifyCacheLookupOutcome(cacheError, cacheHit), cacheHit, latencyMs)
-							return latencyMs
+							outcome := metrics.ClassifyCacheLookupOutcome(cacheError, cacheHit)
+							tracing.RecordCacheResult(ctx, cacheSpan, metrics.CacheTierPrimary, outcome, cacheHit, latencyMs)
+							return latencyMs, outcome
 						}()
+						cacheReport.PrimaryOutcome = primaryOutcome
 
 						// Generate the actual cache key that will be used for lookup
 						actualLookupCacheKey := make([]byte, len(hashKey))
@@ -3843,6 +3873,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 								// lava-identified-node-error header exactly like a live one.
 								IsNodeError:  isNodeError,
 								ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
+								// The secondary is only consulted after a primary non-hit, so it
+								// keeps whichever not-consulted value it was seeded with.
+								CacheLookup: cacheReport.ServedBy(common.CacheTierPrimary),
 							}
 							// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was
 							// current when the response was CACHED — it is not a fresh observation of the
@@ -3865,7 +3898,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.CacheOutcomeHit, cacheLatencyMs)
 							return nil
 						}
-						go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.ClassifyCacheLookupOutcome(cacheError, false), cacheLatencyMs)
+						go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
 						// Cache miss - will relay to endpoint
 						latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
 						utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))
@@ -3877,7 +3910,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 					// left them: those scalars steer local block resolution and archive routing,
 					// and the secondary is a trust boundary, not a second source of chain state.
 					if secondaryCacheActive {
-						if rpcss.trySecondaryCacheLookup(ctx, protocolMessage, localRelayData, relayProcessor, analytics, hashKey, outputFormatter, requestedBlockForCache) {
+						if rpcss.trySecondaryCacheLookup(ctx, protocolMessage, localRelayData, relayProcessor, analytics, hashKey, outputFormatter, requestedBlockForCache, &cacheReport) {
 							return nil
 						}
 					}
@@ -4026,7 +4059,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		utils.LogAttr("num_sessions", len(sessions)),
 		utils.LogAttr("GUID", ctx),
 	)
-	return rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMessage, relayProcessor, consistencyFallback, analytics)
+	return rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMessage, relayProcessor, consistencyFallback, analytics, cacheReport)
 }
 
 // relayInnerDirect handles relay requests using direct RPC connections (smart router mode)
@@ -4722,8 +4755,26 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// pod) and must never reach ordinary clients. Under sentinel it is the
 		// current master, so it visibly changes across a failover — which is
 		// what makes a promotion observable from the outside.
-		if providerAddress == "Cached" && rpcss.debugRelays && rpcss.cache != nil {
-			if reporter, ok := rpcss.cache.(performance.BackendEndpointReporter); ok {
+		//
+		// The reporter is chosen by the tier that actually served (MAG-3540). It used
+		// to be the primary unconditionally, but a SECONDARY hit also arrives here with
+		// providerAddress == "Cached" — so an entry the secondary served was reported
+		// with the primary's backend address. The tier was not merely unreported then,
+		// it was misreported. No recorded tier means no header rather than a guess.
+		//
+		// Note the gate: --debug-relays, the operator flag, NOT the client-settable
+		// lava-debug-relay directive the cache-tier headers below use. The tier name is
+		// a fact about routing; this is an infrastructure address, and a client must not
+		// be able to ask for one.
+		if providerAddress == "Cached" && rpcss.debugRelays {
+			var reporter performance.BackendEndpointReporter
+			switch relayResult.CacheLookup.ServedTier {
+			case common.CacheTierPrimary:
+				reporter, _ = rpcss.cache.(performance.BackendEndpointReporter)
+			case common.CacheTierSecondary:
+				reporter, _ = rpcss.secondaryCache.(performance.BackendEndpointReporter)
+			}
+			if reporter != nil {
 				if endpoint := reporter.BackendEndpoint(); endpoint != "" {
 					metadataReply = append(metadataReply, pairingtypes.Metadata{
 						Name:  common.CACHE_BACKEND_HEADER_NAME,
@@ -4935,6 +4986,34 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			pairingtypes.Metadata{
 				Name:  common.REQUESTED_BLOCK_HEADER_NAME,
 				Value: strconv.FormatInt(protocolMessage.RelayPrivateData().GetRequestBlock(), 10),
+			})
+
+		// Which tier served this request, and what each tier did on the way (MAG-3540).
+		// Gated on the per-request directive rather than --debug-relays because no
+		// deployed router sets that flag, so a flag-gated header would be silently
+		// absent on exactly the runners that need it; the directive is owned by the
+		// caller and needs no deploy change. It is safe to gate on a client-settable
+		// header precisely because these two values name nothing internal.
+		//
+		// lava-debug-relay is also the only directive that can carry this without
+		// breaking it: hashCacheRequest marshals the whole RelayPrivateData, metadata
+		// included, into the cache key, so a newly minted request header would put the
+		// flagged request in its own cache lane — it would never hit, and a test would
+		// assert against a miss having measured nothing. lava-debug-relay is registered
+		// in common.SPECIAL_LAVA_DIRECTIVE_HEADERS and stripped by LavaDirectiveHeaders
+		// before ParseMsg, so it never reaches the key.
+		//
+		// Both are emitted unconditionally under the directive, including "none" and
+		// the not-consulted outcomes: an absent header must be able to mean only
+		// "router too old / directive not honored", never "nothing served it".
+		metadataReply = append(metadataReply,
+			pairingtypes.Metadata{
+				Name:  common.CACHE_TIER_HEADER_NAME,
+				Value: relayResult.CacheLookup.TierHeaderValue(),
+			},
+			pairingtypes.Metadata{
+				Name:  common.CACHE_OUTCOME_HEADER_NAME,
+				Value: relayResult.CacheLookup.OutcomeHeaderValue(),
 			})
 
 		routerKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())

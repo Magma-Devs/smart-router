@@ -137,6 +137,15 @@ func newSecondaryTestServer(chainParser chainlib.ChainParser, primary *performan
 // processed result when one was served.
 func runSecondaryLookup(t *testing.T, rpcss *RPCSmartRouterServer, protocolMessage chainlib.ProtocolMessage, requestedBlockForCache int64) (bool, *common.RelayResult) {
 	t.Helper()
+	served, result, _ := runSecondaryLookupWithReport(t, rpcss, protocolMessage, requestedBlockForCache)
+	return served, result
+}
+
+// runSecondaryLookupWithReport is runSecondaryLookup plus the cache report the lookup
+// wrote. The report is the only way to see what the secondary did when it did NOT
+// serve, which is what the resilience cases assert.
+func runSecondaryLookupWithReport(t *testing.T, rpcss *RPCSmartRouterServer, protocolMessage chainlib.ProtocolMessage, requestedBlockForCache int64) (bool, *common.RelayResult, common.CacheLookupReport) {
+	t.Helper()
 	ctx := context.Background()
 	hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("LAVA")
 	require.NoError(t, err)
@@ -151,17 +160,24 @@ func runSecondaryLookup(t *testing.T, rpcss *RPCSmartRouterServer, protocolMessa
 	waitDone := make(chan struct{})
 	go func() { _ = relayProcessor.WaitForResults(waitCtx); close(waitDone) }()
 
-	served := rpcss.trySecondaryCacheLookup(ctx, protocolMessage, protocolMessage.RelayPrivateData(), relayProcessor, nil, hashKey, outputFormatter, requestedBlockForCache)
+	// Seeded the way sendRelayToEndpoint seeds it for an active secondary consulted
+	// after a primary that produced no hit.
+	cacheReport := common.CacheLookupReport{
+		ServedTier:       common.CacheTierNone,
+		PrimaryOutcome:   common.CacheOutcomeMiss,
+		SecondaryOutcome: common.CacheOutcomeSkipped,
+	}
+	served := rpcss.trySecondaryCacheLookup(ctx, protocolMessage, protocolMessage.RelayPrivateData(), relayProcessor, nil, hashKey, outputFormatter, requestedBlockForCache, &cacheReport)
 	if !served {
 		waitCancel()
 		<-waitDone
-		return false, nil
+		return false, nil, cacheReport
 	}
 	<-waitDone
 	result, processingErr := relayProcessor.ProcessingResult()
 	require.NoError(t, processingErr)
 	require.NotNil(t, result)
-	return true, result
+	return true, result, cacheReport
 }
 
 func directGet(rcs *ecocache.RelayerCacheServer, hashKey []byte, block, seenBlock int64) *pairingtypes.CacheRelayReply {
@@ -231,7 +247,7 @@ func TestSecondaryCacheTimeoutAndErrorAreMisses(t *testing.T) {
 		hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("LAVA")
 		require.NoError(t, err)
 		served := rpcss.trySecondaryCacheLookup(context.Background(), protocolMessage,
-			protocolMessage.RelayPrivateData(), nil, nil, hashKey, outputFormatter, 100)
+			protocolMessage.RelayPrivateData(), nil, nil, hashKey, outputFormatter, 100, &common.CacheLookupReport{})
 		require.False(t, served, "a not-found must fall through to providers")
 
 		gets := fake.recorded()
@@ -254,6 +270,54 @@ func TestSecondaryCacheTimeoutAndErrorAreMisses(t *testing.T) {
 		rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
 		served, _ := runSecondaryLookup(t, rpcss, protocolMessage, 100)
 		require.False(t, served)
+	})
+}
+
+// A non-hit degrades to a miss for SERVING, but it must not degrade to a miss for
+// REPORTING: the four resilience cases in MAG-2659 assert that a provider answered
+// AND what the secondary did on the way, and "the secondary was consulted and it
+// errored" is exactly what a miss would hide (MAG-3540). This drives the real lookup
+// rather than a hand-built report, so it fails if the report is never written.
+func TestSecondaryCacheReportsItsOutcomeOnEveryNonHit(t *testing.T) {
+	chainParser, protocolMessage := buildRestProtocolMessage(t, context.Background(), 100)
+
+	t.Run("clean miss", func(t *testing.T) {
+		fake := &fakeCacheReader{active: true, reply: &pairingtypes.CacheRelayReply{Reply: nil}}
+		rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
+		served, _, report := runSecondaryLookupWithReport(t, rpcss, protocolMessage, 100)
+		require.False(t, served)
+		require.Equal(t, common.CacheOutcomeMiss, report.SecondaryOutcome)
+		require.Equal(t, common.CacheTierNone, report.ServedTier, "a non-hit must not claim to have served")
+	})
+
+	t.Run("transport error", func(t *testing.T) {
+		fake := &fakeCacheReader{active: true, err: errors.New("connection reset")}
+		rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
+		served, _, report := runSecondaryLookupWithReport(t, rpcss, protocolMessage, 100)
+		require.False(t, served)
+		require.Equal(t, common.CacheOutcomeError, report.SecondaryOutcome,
+			"a dead secondary must be distinguishable from one that simply did not hold the entry")
+		require.Equal(t, common.CacheTierNone, report.ServedTier)
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		fake := &fakeCacheReader{active: true, delay: 500 * time.Millisecond, reply: &pairingtypes.CacheRelayReply{Reply: &pairingtypes.RelayReply{Data: []byte("late")}}}
+		rpcss := newSecondaryTestServer(chainParser, nil, fake, 30*time.Millisecond)
+		served, _, report := runSecondaryLookupWithReport(t, rpcss, protocolMessage, 100)
+		require.False(t, served)
+		require.Equal(t, common.CacheOutcomeTimeout, report.SecondaryOutcome)
+		require.Equal(t, common.CacheTierNone, report.ServedTier)
+	})
+
+	t.Run("hit names the secondary on the served result", func(t *testing.T) {
+		fake := &fakeCacheReader{active: true, reply: &pairingtypes.CacheRelayReply{Reply: &pairingtypes.RelayReply{Data: []byte(`{"ok":true}`)}}}
+		rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
+		served, result, report := runSecondaryLookupWithReport(t, rpcss, protocolMessage, 100)
+		require.True(t, served)
+		require.Equal(t, common.CacheOutcomeHit, report.SecondaryOutcome)
+		// The result is what carries the answer out to the reply, so assert there too.
+		require.Equal(t, common.CacheTierSecondary, result.CacheLookup.ServedTier)
+		require.Equal(t, common.CacheOutcomeHit, result.CacheLookup.SecondaryOutcome)
 	})
 }
 
@@ -607,7 +671,7 @@ func TestSecondaryLookupNeverRequestsForeignBlockHashHeights(t *testing.T) {
 	hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("ETH1")
 	require.NoError(t, err)
 	served := rpcss.trySecondaryCacheLookup(context.Background(), protocolMessage,
-		protocolMessage.RelayPrivateData(), nil, nil, hashKey, outputFormatter, 100)
+		protocolMessage.RelayPrivateData(), nil, nil, hashKey, outputFormatter, 100, &common.CacheLookupReport{})
 	require.False(t, served, "reply-less entry is a miss")
 
 	gets := fake.recorded()

@@ -54,8 +54,10 @@ func (rpcss *RPCSmartRouterServer) secondaryCacheActive() bool {
 //   - The lookup runs under the operator-configured secondary-cache-timeout rather
 //     than the primary's fixed budget.
 //   - Every attempted lookup is recorded with cache_tier=secondary and its outcome
-//     (hit|miss|error|timeout) in the smartrouter_cache_* series and on its own
-//     smartrouter.CacheLookup span. Router request counters
+//     (hit|miss|error|timeout) in the smartrouter_cache_* series, on its own
+//     smartrouter.CacheLookup span, and on cacheReport — the last of which is the only
+//     one of the three the caller of a single request can read without racing the
+//     reply. Router request counters
 //     (RecordCacheHitRequest, provider_address="Cached") fire for a hit on either
 //     tier, unchanged in shape.
 func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
@@ -67,6 +69,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	hashKey []byte,
 	outputFormatter func([]byte) []byte,
 	requestedBlockForCache int64,
+	cacheReport *common.CacheLookupReport,
 ) (served bool) {
 	chainId, apiInterface := rpcss.GetChainIdAndApiInterface()
 
@@ -121,6 +124,13 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	}
 	tracing.RecordCacheResult(ctx, cacheSpan, metrics.CacheTierSecondary, outcome, hit, latencyMs)
 	cacheSpan.End()
+	// Recorded for every outcome, not just a hit: the four resilience cases in
+	// MAG-2659 assert that a provider served the request AND that the secondary
+	// failed on the way (miss / error / timeout). Their whole point is the second
+	// half, which no header on a winning cache result could carry — on those
+	// requests no tier wins. The caller carries this report on to the provider
+	// result, so the pair survives to the reply either way.
+	cacheReport.SecondaryOutcome = outcome
 	go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierSecondary, outcome, latencyMs)
 	if !hit {
 		// miss, error, and timeout all degrade to a miss; nothing from the reply is
@@ -177,6 +187,11 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		// populator's node-error check is what rejects its backfill.
 		IsNodeError:  isNodeError,
 		ProviderInfo: common.ProviderInfo{ProviderAddress: ""}, // rendered as "Cached", same as a primary hit
+		// What distinguishes this reply from a primary hit for the caller: both carry
+		// the same locally minted header set and the same bytes, so before MAG-3540
+		// nothing in the response named the tier. It also picks which backend the
+		// debug-gated Lava-Cache-Backend header reports.
+		CacheLookup: cacheReport.ServedBy(common.CacheTierSecondary),
 	}
 
 	// Backfill: the populator owns ALL eligibility — node-error, status-code,

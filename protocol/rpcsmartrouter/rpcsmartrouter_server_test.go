@@ -1921,6 +1921,9 @@ type MockProtocolMessage struct {
 	api            *spectypes.Api
 	requestedBlock int64 // configurable requested block, defaults to 0
 	userData       common.UserData
+	// directiveHeaders drives the per-request debug gate in appendHeadersToRelayResult
+	// (lava-debug-relay). Nil means an ordinary client request.
+	directiveHeaders map[string]string
 }
 
 func (m *MockProtocolMessage) GetApi() *spectypes.Api {
@@ -1952,7 +1955,7 @@ func (m *MockProtocolMessage) GetExtensions() []*spectypes.Extension {
 }
 
 func (m *MockProtocolMessage) GetDirectiveHeaders() map[string]string {
-	return nil
+	return m.directiveHeaders
 }
 
 func (m *MockProtocolMessage) GetCrossValidationParameters() (common.CrossValidationParams, bool, error) {
@@ -3250,7 +3253,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	defer cancel()
 
 	start := time.Now()
-	sendErr := rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, protocolMsg, relayProcessor, nil, nil)
+	sendErr := rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{})
 	elapsed := time.Since(start)
 
 	require.Less(t, elapsed, time.Second,
@@ -3450,6 +3453,7 @@ func (s *stubCacheBackend) CacheActive() bool { return true }
 func (s *stubCacheBackend) GetEntry(ctx context.Context, _ *pairingtypes.RelayCacheGet) (*pairingtypes.CacheRelayReply, error) {
 	return &pairingtypes.CacheRelayReply{}, nil
 }
+
 func (s *stubCacheBackend) SetEntry(ctx context.Context, _ *pairingtypes.RelayCacheSet) error {
 	return nil
 }
@@ -3457,31 +3461,53 @@ func (s *stubCacheBackend) Flush(ctx context.Context) error { return nil }
 func (s *stubCacheBackend) Close() error                    { return nil }
 func (s *stubCacheBackend) BackendEndpoint() string         { return s.endpoint }
 
-// The Lava-Cache-Backend header names the node that served a hit. It exposes an
-// internal infrastructure address, so it must appear ONLY under --debug-relays.
-func TestCacheBackendHeaderIsDebugGated(t *testing.T) {
-	ctx := context.Background()
+// stubSecondaryCache is a CacheReader that also reports a backend endpoint, so the
+// backend header can be shown to name the SECONDARY's node on a secondary hit.
+type stubSecondaryCache struct{ endpoint string }
 
-	findHeader := func(metadata []pairingtypes.Metadata, name string) *pairingtypes.Metadata {
-		for i := range metadata {
-			if metadata[i].Name == name {
-				return &metadata[i]
-			}
+func (s *stubSecondaryCache) CacheActive() bool { return true }
+func (s *stubSecondaryCache) GetEntry(ctx context.Context, _ *pairingtypes.RelayCacheGet) (*pairingtypes.CacheRelayReply, error) {
+	return &pairingtypes.CacheRelayReply{}, nil
+}
+func (s *stubSecondaryCache) BackendEndpoint() string { return s.endpoint }
+
+// findMetadataHeader returns the named header from a reply's metadata, or nil.
+func findMetadataHeader(metadata []pairingtypes.Metadata, name string) *pairingtypes.Metadata {
+	for i := range metadata {
+		if metadata[i].Name == name {
+			return &metadata[i]
 		}
-		return nil
 	}
+	return nil
+}
 
-	// A cache-resolved relay: no provider address, so the header logic reports
-	// "Cached" and considers naming the backend.
+// appendHeadersForCacheHit runs the header pass over a cache-resolved relay: no
+// provider address, so the header logic reports "Cached" and considers naming the
+// backend. The report is what the two cache hit sites stamp on their result.
+func appendHeadersForCacheHit(t *testing.T, server *RPCSmartRouterServer, report common.CacheLookupReport, directives map[string]string) []pairingtypes.Metadata {
+	t.Helper()
+	relayResult := &common.RelayResult{
+		ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
+		Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
+		CacheLookup:  report,
+	}
+	server.appendHeadersToRelayResult(context.Background(), relayResult, 0, &MockRelayProcessorForHeaders{
+		successResults: []common.RelayResult{{ProviderInfo: common.ProviderInfo{ProviderAddress: ""}}},
+	}, &MockProtocolMessage{api: &spectypes.Api{Name: "eth_blockNumber"}, directiveHeaders: directives}, "eth_blockNumber", nil, true)
+	return relayResult.Reply.Metadata
+}
+
+// The Lava-Cache-Backend header names the node that served a hit. It exposes an
+// internal infrastructure address, so it must appear ONLY under --debug-relays — and
+// it must name the backend of the tier that ACTUALLY served (MAG-3540). It used to
+// report the primary's address unconditionally, so an entry the secondary served was
+// labelled with the primary's node.
+func TestCacheBackendHeaderIsDebugGated(t *testing.T) {
+	servedByPrimary := common.CacheLookupReport{ServedTier: common.CacheTierPrimary, PrimaryOutcome: common.CacheOutcomeHit, SecondaryOutcome: common.CacheOutcomeSkipped}
+	servedBySecondary := common.CacheLookupReport{ServedTier: common.CacheTierSecondary, PrimaryOutcome: common.CacheOutcomeMiss, SecondaryOutcome: common.CacheOutcomeHit}
+
 	appendFor := func(server *RPCSmartRouterServer) []pairingtypes.Metadata {
-		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
-			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
-		}
-		server.appendHeadersToRelayResult(ctx, relayResult, 0, &MockRelayProcessorForHeaders{
-			successResults: []common.RelayResult{{ProviderInfo: common.ProviderInfo{ProviderAddress: ""}}},
-		}, &MockProtocolMessage{api: &spectypes.Api{Name: "eth_blockNumber"}}, "eth_blockNumber", nil, true)
-		return relayResult.Reply.Metadata
+		return appendHeadersForCacheHit(t, server, servedByPrimary, nil)
 	}
 
 	t.Run("debug on - names the serving backend", func(t *testing.T) {
@@ -3489,7 +3515,7 @@ func TestCacheBackendHeaderIsDebugGated(t *testing.T) {
 			debugRelays: true,
 			cache:       &stubCacheBackend{endpoint: "10.0.0.11:63812"},
 		})
-		header := findHeader(metadata, common.CACHE_BACKEND_HEADER_NAME)
+		header := findMetadataHeader(metadata, common.CACHE_BACKEND_HEADER_NAME)
 		require.NotNil(t, header)
 		require.Equal(t, "10.0.0.11:63812", header.Value)
 	})
@@ -3499,9 +3525,9 @@ func TestCacheBackendHeaderIsDebugGated(t *testing.T) {
 			debugRelays: false,
 			cache:       &stubCacheBackend{endpoint: "10.0.0.11:63812"},
 		})
-		require.Nil(t, findHeader(metadata, common.CACHE_BACKEND_HEADER_NAME),
+		require.Nil(t, findMetadataHeader(metadata, common.CACHE_BACKEND_HEADER_NAME),
 			"the header leaks internal infrastructure addresses and must stay behind --debug-relays")
-		require.NotNil(t, findHeader(metadata, common.PROVIDER_ADDRESS_HEADER_NAME),
+		require.NotNil(t, findMetadataHeader(metadata, common.PROVIDER_ADDRESS_HEADER_NAME),
 			"the ordinary provider header is unaffected")
 	})
 
@@ -3510,11 +3536,155 @@ func TestCacheBackendHeaderIsDebugGated(t *testing.T) {
 			debugRelays: true,
 			cache:       &stubCacheBackend{endpoint: ""},
 		})
-		require.Nil(t, findHeader(metadata, common.CACHE_BACKEND_HEADER_NAME))
+		require.Nil(t, findMetadataHeader(metadata, common.CACHE_BACKEND_HEADER_NAME))
 	})
 
 	t.Run("no cache backend - nil interface is safe", func(t *testing.T) {
 		metadata := appendFor(&RPCSmartRouterServer{debugRelays: true})
-		require.Nil(t, findHeader(metadata, common.CACHE_BACKEND_HEADER_NAME))
+		require.Nil(t, findMetadataHeader(metadata, common.CACHE_BACKEND_HEADER_NAME))
+	})
+
+	// The mislabel regression: both tiers are live and reachable, and the SECONDARY
+	// served. Before MAG-3540 this reported the primary's address.
+	t.Run("secondary served - names the secondary's backend, not the primary's", func(t *testing.T) {
+		metadata := appendHeadersForCacheHit(t, &RPCSmartRouterServer{
+			debugRelays:    true,
+			cache:          &stubCacheBackend{endpoint: "10.0.0.11:63812"},
+			secondaryCache: &stubSecondaryCache{endpoint: "10.9.9.9:6379"},
+		}, servedBySecondary, nil)
+		header := findMetadataHeader(metadata, common.CACHE_BACKEND_HEADER_NAME)
+		require.NotNil(t, header)
+		require.Equal(t, "10.9.9.9:6379", header.Value,
+			"a secondary hit must not be attributed to the primary's backend")
+	})
+
+	t.Run("secondary served but only the primary can report - header omitted rather than wrong", func(t *testing.T) {
+		metadata := appendHeadersForCacheHit(t, &RPCSmartRouterServer{
+			debugRelays: true,
+			cache:       &stubCacheBackend{endpoint: "10.0.0.11:63812"},
+		}, servedBySecondary, nil)
+		require.Nil(t, findMetadataHeader(metadata, common.CACHE_BACKEND_HEADER_NAME),
+			"with no reporter for the serving tier the router must say nothing, not name another tier's node")
+	})
+
+	t.Run("no tier recorded - no backend is guessed", func(t *testing.T) {
+		metadata := appendHeadersForCacheHit(t, &RPCSmartRouterServer{
+			debugRelays: true,
+			cache:       &stubCacheBackend{endpoint: "10.0.0.11:63812"},
+		}, common.CacheLookupReport{}, nil)
+		require.Nil(t, findMetadataHeader(metadata, common.CACHE_BACKEND_HEADER_NAME))
+	})
+}
+
+// MAG-3540. Which tier served a request was previously readable only from the
+// cache_tier counter, which is incremented on a detached goroutine AFTER the reply is
+// written — so a test reading it straight after its reply races it. These two headers
+// are part of the reply, so there is nothing to wait for.
+func TestCacheTierHeaders(t *testing.T) {
+	withDirective := map[string]string{common.LAVA_DEBUG_RELAY: "true"}
+
+	tierOf := func(metadata []pairingtypes.Metadata) *pairingtypes.Metadata {
+		return findMetadataHeader(metadata, common.CACHE_TIER_HEADER_NAME)
+	}
+	outcomeOf := func(metadata []pairingtypes.Metadata) *pairingtypes.Metadata {
+		return findMetadataHeader(metadata, common.CACHE_OUTCOME_HEADER_NAME)
+	}
+
+	t.Run("no directive - neither header is emitted", func(t *testing.T) {
+		metadata := appendHeadersForCacheHit(t, &RPCSmartRouterServer{},
+			common.CacheLookupReport{ServedTier: common.CacheTierPrimary, PrimaryOutcome: common.CacheOutcomeHit}, nil)
+		require.Nil(t, tierOf(metadata))
+		require.Nil(t, outcomeOf(metadata))
+	})
+
+	// Every case an MAG-2659 test asserts, hit and resilience alike.
+	for _, tc := range []struct {
+		name    string
+		report  common.CacheLookupReport
+		tier    string
+		outcome string
+	}{
+		{
+			name:    "primary hit - the secondary is never asked",
+			report:  common.CacheLookupReport{ServedTier: common.CacheTierPrimary, PrimaryOutcome: common.CacheOutcomeHit, SecondaryOutcome: common.CacheOutcomeSkipped},
+			tier:    "primary",
+			outcome: "primary=hit,secondary=skipped",
+		},
+		{
+			name:    "secondary hit after a primary miss - the cross-zone rescue",
+			report:  common.CacheLookupReport{ServedTier: common.CacheTierSecondary, PrimaryOutcome: common.CacheOutcomeMiss, SecondaryOutcome: common.CacheOutcomeHit},
+			tier:    "secondary",
+			outcome: "primary=miss,secondary=hit",
+		},
+		{
+			// P1.2: a provider answered, and the point of the case is that BOTH
+			// tiers missed on the way.
+			name:    "both tiers miss - a provider served",
+			report:  common.CacheLookupReport{ServedTier: common.CacheTierNone, PrimaryOutcome: common.CacheOutcomeMiss, SecondaryOutcome: common.CacheOutcomeMiss},
+			tier:    "none",
+			outcome: "primary=miss,secondary=miss",
+		},
+		{
+			// P3.1 / P3.2: the resilience acceptance criterion. Both halves have to
+			// be provable at once — the request succeeded, AND the secondary failed.
+			name:    "secondary errored - a provider served anyway",
+			report:  common.CacheLookupReport{ServedTier: common.CacheTierNone, PrimaryOutcome: common.CacheOutcomeMiss, SecondaryOutcome: common.CacheOutcomeError},
+			tier:    "none",
+			outcome: "primary=miss,secondary=error",
+		},
+		{
+			// P3.4: just over the timeout boundary.
+			name:    "secondary timed out - a provider served anyway",
+			report:  common.CacheLookupReport{ServedTier: common.CacheTierNone, PrimaryOutcome: common.CacheOutcomeMiss, SecondaryOutcome: common.CacheOutcomeTimeout},
+			tier:    "none",
+			outcome: "primary=miss,secondary=timeout",
+		},
+		{
+			name:    "no secondary configured - reported off, not miss",
+			report:  common.CacheLookupReport{ServedTier: common.CacheTierNone, PrimaryOutcome: common.CacheOutcomeMiss, SecondaryOutcome: common.CacheOutcomeOff},
+			tier:    "none",
+			outcome: "primary=miss,secondary=off",
+		},
+		{
+			// A bypass rule (cross-validation, stateful, force-refresh) means no
+			// lookup ran. Reported distinctly so a test cannot assert a cache
+			// outcome on a request that never consulted the cache and pass having
+			// measured nothing.
+			name:    "cache bypassed - both tiers skipped",
+			report:  common.CacheLookupReport{ServedTier: common.CacheTierNone, PrimaryOutcome: common.CacheOutcomeSkipped, SecondaryOutcome: common.CacheOutcomeSkipped},
+			tier:    "none",
+			outcome: "primary=skipped,secondary=skipped",
+		},
+		{
+			// A result built off the cache path entirely (a fail-fast, a synthesized
+			// error). It carries no observation of either tier, and says so rather
+			// than reporting "off" for tiers that may well be live.
+			name:    "no record at all - unknown, and the tier is still explicit",
+			report:  common.CacheLookupReport{},
+			tier:    "none",
+			outcome: "primary=unknown,secondary=unknown",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := appendHeadersForCacheHit(t, &RPCSmartRouterServer{}, tc.report, withDirective)
+
+			tier := tierOf(metadata)
+			require.NotNil(t, tier, "the tier header must always be present under the directive")
+			require.Equal(t, tc.tier, tier.Value)
+
+			outcome := outcomeOf(metadata)
+			require.NotNil(t, outcome, "the outcome header must always be present under the directive")
+			require.Equal(t, tc.outcome, outcome.Value)
+		})
+	}
+
+	// The load-bearing property: absence can only mean "router too old / directive not
+	// honored". It must never be how "no tier served" is expressed, or a test could
+	// pass having measured nothing.
+	t.Run("no tier served - says none rather than going silent", func(t *testing.T) {
+		metadata := appendHeadersForCacheHit(t, &RPCSmartRouterServer{},
+			common.CacheLookupReport{ServedTier: common.CacheTierNone, PrimaryOutcome: common.CacheOutcomeMiss, SecondaryOutcome: common.CacheOutcomeMiss}, withDirective)
+		require.NotNil(t, tierOf(metadata))
+		require.Equal(t, common.CacheTierNone, tierOf(metadata).Value)
 	})
 }
