@@ -1,6 +1,8 @@
 package lavasession
 
 import (
+	"os"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -102,19 +104,28 @@ func TestEndpointDisableReason_EmptyBecomesUnspecified(t *testing.T) {
 
 // Keep AllEndpointDisableReasons in step with the constants: a reason missing from the list is a
 // metric series that never returns to zero once it has fired.
+// Scans the source rather than comparing two hand-written lists. A hand-copied `declared` slice
+// cannot catch the failure this guards — a constant added to neither list would satisfy both sides
+// of the comparison and pass. Mirrors TestBlockReasons_ListCoversEveryDeclaredConstant, which reads
+// block_reason.go for exactly this reason.
 func TestEndpointDisableReasons_ListCoversEveryDeclaredConstant(t *testing.T) {
-	declared := []EndpointDisableReason{
-		EndpointDisableUnreachable,
-		EndpointDisableNodeError,
-		EndpointDisableServerError,
-		EndpointDisableUnspecified,
-	}
-	require.ElementsMatch(t, declared, AllEndpointDisableReasons())
+	source, err := os.ReadFile("endpoint_disable_reason.go")
+	require.NoError(t, err)
 
-	seen := map[EndpointDisableReason]bool{}
-	for _, r := range AllEndpointDisableReasons() {
-		require.NotEmpty(t, r, "a reason string must never be empty — that is the unspecified marker")
-		require.False(t, seen[r], "duplicate reason %q", r)
-		seen[r] = true
+	declared := regexp.MustCompile(`EndpointDisableReason\s*=\s*"([^"]+)"`).FindAllStringSubmatch(string(source), -1)
+	require.NotEmpty(t, declared, "the declarations must be findable, or this guard is silently useless")
+
+	listed := make(map[EndpointDisableReason]struct{}, len(AllEndpointDisableReasons()))
+	for _, reason := range AllEndpointDisableReasons() {
+		require.NotEmpty(t, reason, "a reason string must never be empty — that is the unspecified marker")
+		_, duplicate := listed[reason]
+		require.Falsef(t, duplicate, "duplicate reason %q in AllEndpointDisableReasons()", reason)
+		listed[reason] = struct{}{}
 	}
+	for _, match := range declared {
+		_, ok := listed[EndpointDisableReason(match[1])]
+		require.Truef(t, ok, "EndpointDisableReason %q is declared but missing from AllEndpointDisableReasons() — "+
+			"its gauge series would never return to 0", match[1])
+	}
+	require.Len(t, listed, len(declared), "AllEndpointDisableReasons() lists a reason that is not declared")
 }
