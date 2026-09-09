@@ -60,7 +60,7 @@ func classifyThroughRelayPath(err error, transport common.TransportType) *common
 // the string-fallback table has no matching row, so those faults classify as LavaErrorUnknown —
 // which is CategoryExternal, and every External maps to node-error. That is a pre-existing gap in
 // the shared classifier (it predates the disable-reason work and is used by retry, QoS and backoff
-// as well), so it is fixed in its own ticket rather than here. See MAG-XXXX.
+// as well), so it is fixed in its own ticket rather than here. See MAG-3563.
 func TestEndpointDisableReasonFor_RealTransportFaults(t *testing.T) {
 	refused := syscall.ECONNREFUSED
 	cases := []struct {
@@ -68,7 +68,7 @@ func TestEndpointDisableReasonFor_RealTransportFaults(t *testing.T) {
 		err        error
 		transport  common.TransportType
 		want       lavasession.EndpointDisableReason
-		knownWrong lavasession.EndpointDisableReason // non-empty = what it SHOULD be once MAG-XXXX lands
+		knownWrong lavasession.EndpointDisableReason // non-empty = what it SHOULD be once MAG-3563 lands
 	}{
 		{
 			name: "connection refused", err: &net.OpError{Op: "dial", Net: "tcp", Err: &refused},
