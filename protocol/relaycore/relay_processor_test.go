@@ -1928,10 +1928,17 @@ func TestResponseBufferSize(t *testing.T) {
 	// Cross-validation fans out to MaxParticipants at once.
 	require.Equal(t, 3+RelayRetryLimit, responseBufferSize(CrossValidation, cv))
 
-	// Every other selection launches one relay at a time (NumOfProviders: 1 in the state machine), so the
-	// fan-out does not depend on the cross-validation params even when they are present.
+	// A stateful write is BROADCAST: the state machine asks for NumOfProviders: 1, but stateful
+	// selection ignores that and returns up to its per-tier cap, and the session layer then resizes
+	// the request to however many it returned. Sizing this at a fan-out of 1 — which this test used to
+	// assert — left the buffer smaller than the number of attempts that can post to it.
+	require.Equal(t, statefulFanOutCeiling+RelayRetryLimit, responseBufferSize(Stateful, nil))
+	require.Greater(t, responseBufferSize(Stateful, nil), responseBufferSize(Stateless, nil),
+		"a broadcast needs room for more than one attempt")
+
+	// A stateless relay does launch one at a time, so its fan-out does not depend on the
+	// cross-validation params even when they are present.
 	require.Equal(t, 1+RelayRetryLimit, responseBufferSize(Stateless, nil))
-	require.Equal(t, 1+RelayRetryLimit, responseBufferSize(Stateful, nil))
 	require.Equal(t, 1+RelayRetryLimit, responseBufferSize(Stateless, cv))
 
 	// CrossValidation with nil params cannot read MaxParticipants; fall back to a single relay rather

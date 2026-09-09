@@ -909,7 +909,11 @@ func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays 
 		utils.LogAttr("apiInterface", rpcss.listenEndpoint.ApiInterface),
 	)
 
-	ctx := utils.WithUniqueIdentifier(context.Background(), utils.GenerateUniqueIdentifier())
+	// Cancellable, so the RelayProcessor built from it has a Done to give up on. Without one, an
+	// attempt that finishes after this function returns can park forever in SetResponse — the
+	// internal path has no client to disconnect and no deadline of its own to close the context.
+	ctx, cancel := context.WithCancel(utils.WithUniqueIdentifier(context.Background(), utils.GenerateUniqueIdentifier()))
+	defer cancel()
 	ok, relay, chainMessage, _ := rpcss.craftRelay(ctx)
 	if !ok {
 		return true, nil
