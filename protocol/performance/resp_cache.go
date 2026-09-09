@@ -34,7 +34,24 @@ type RespCache struct {
 
 	healthStop chan struct{}
 	closeOnce  sync.Once
-	reachable  atomic.Bool
+	// health is the last probe result, published for GET /debug/cache-state. Stored
+	// as a whole snapshot behind one atomic so the verdict, its timestamp and its
+	// reason can never be read torn apart from each other.
+	health atomic.Pointer[respCacheHealth]
+}
+
+// respCacheHealth is one health-probe result. Its ABSENCE (a nil pointer in
+// RespCache.health) is meaningful and is the zero state: the probe has not
+// completed yet. A plain atomic.Bool cannot express that — it zero-values to
+// false, so a healthy backend reads as unreachable for the first probe interval,
+// and anything that starts the router and polls promptly sees a false outage.
+type respCacheHealth struct {
+	reachable bool
+	at        time.Time
+	// detail preserves what a boolean throws away: an authentication rejection
+	// reported as plain "unreachable" sends an operator to check networking when
+	// the real fault is a credential.
+	detail string
 }
 
 var _ CacheBackend = (*RespCache)(nil)
@@ -72,8 +89,19 @@ func (cache *RespCache) healthLoop(interval time.Duration) {
 		return err == nil, err
 	}
 
+	// publishHealth records the probe for /debug/cache-state. safeProbeDetail is
+	// reused rather than storing the raw error: it reduces an auth rejection to a
+	// fixed phrase, because the server's reply names the failing user and no
+	// credential may reach a debug endpoint any more than a log.
+	publishHealth := func(connected bool, err error) {
+		cache.health.Store(&respCacheHealth{
+			reachable: connected,
+			at:        time.Now(),
+			detail:    safeProbeDetail(err),
+		})
+	}
+
 	updateGauges := func(connected bool) {
-		cache.reachable.Store(connected)
 		if connected {
 			cache.metrics.connected.Set(1)
 		} else {
@@ -87,6 +115,7 @@ func (cache *RespCache) healthLoop(interval time.Duration) {
 	}
 
 	lastConnected, probeErr := probe()
+	publishHealth(lastConnected, probeErr)
 	updateGauges(lastConnected)
 	if !lastConnected {
 		logUnavailable("resp-cache backend unavailable at startup; relays degrade to cache misses until it recovers", probeErr)
@@ -111,6 +140,7 @@ func (cache *RespCache) healthLoop(interval time.Duration) {
 				}
 				lastConnected = connected
 			}
+			publishHealth(connected, err)
 			updateGauges(connected)
 		}
 	}
@@ -179,15 +209,54 @@ func (cache *RespCache) CacheActive() bool {
 	return cache != nil
 }
 
-func (cache *RespCache) CacheEngine() string { return "resp" }
-func (cache *RespCache) CacheAddress() string {
+// DebugCacheState reports this tier for GET /debug/cache-state. Read-only: it
+// reads the last published health snapshot rather than probing, so a scrape
+// cannot perturb what it measures.
+//
+// Reachability here is a SNAPSHOT up to respCacheHealthInterval +
+// respCachePingTimeout old, not a live read — hence CheckedAt, so a consumer can
+// see how stale the verdict is instead of assuming it is current.
+func (cache *RespCache) DebugCacheState() DebugCacheState {
 	if cache == nil || cache.store == nil {
-		return ""
+		return DebugCacheState{Engine: CacheEngineRESP}
 	}
-	return cache.store.ConfiguredAddresses()
+	state := DebugCacheState{
+		Configured: true,
+		Engine:     CacheEngineRESP,
+		Address:    cache.store.ConfiguredEndpoints(),
+		// The opposite of the gRPC tier, and the reason this field exists:
+		// CacheActive() is unconditionally true here, so an unreachable RESP
+		// backend is still asked on every relay and pays the full cache timeout
+		// each time. Same reachable:false, entirely different operational cost.
+		WhenUnreachable: CacheWhenUnreachableAttempted,
+		Lifetimes:       cache.lifetimes(),
+	}
+	// A nil snapshot means the first probe has not returned yet. Left as nil
+	// Reachable ("not determined") rather than false, which would report a
+	// perfectly healthy backend as down to anything polling at startup.
+	if health := cache.health.Load(); health != nil {
+		state.Reachable = boolPtr(health.reachable)
+		state.CheckedAt = health.at
+		state.Detail = health.detail
+	} else {
+		state.Detail = "no health probe has completed yet"
+	}
+	return state
 }
-func (cache *RespCache) CacheReachable() bool {
-	return cache != nil && cache.reachable.Load()
+
+// lifetimes reports the TTL policy this backend actually applies. It can answer
+// where a cache-be tier cannot: the policy is a field on the in-process engine,
+// whereas the gRPC client's TTLs are owned by a different pod.
+func (cache *RespCache) lifetimes() *CacheLifetimes {
+	if cache == nil || cache.engine == nil {
+		return nil
+	}
+	policy := cache.engine.Policy
+	return &CacheLifetimes{
+		FinalizedSeconds:    policy.Finalized.Seconds(),
+		NonFinalizedSeconds: policy.NonFinalized.Seconds(),
+		NodeErrorsSeconds:   policy.NodeErrors.Seconds(),
+	}
 }
 
 // GetEntry answers like the seam it replaces — the gRPC cache CLIENT: the
@@ -244,6 +313,15 @@ func (cache *RespCache) Close() error {
 	var err error
 	cache.closeOnce.Do(func() {
 		close(cache.healthStop)
+		// Publish the closed state before tearing the clients down. The health loop
+		// stops here, so whatever it published last would otherwise stand forever —
+		// and a cache closed while reachable would keep reporting reachable:true for
+		// connections that no longer exist. That window is reachable in practice:
+		// RPCSmartRouter.Stop() closes the cache while the debug server is torn down
+		// independently by its own ctx watcher, with no ordering between them. The
+		// gRPC tier already flips false on close (its connection goes away), so
+		// without this the two engines disagree about what a closed cache looks like.
+		cache.health.Store(&respCacheHealth{at: time.Now(), detail: "cache backend closed"})
 		err = cache.store.Close()
 	})
 	return err

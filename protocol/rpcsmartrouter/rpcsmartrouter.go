@@ -31,7 +31,6 @@ import (
 	"syscall"
 	"time"
 
-	cachepkg "github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
@@ -412,8 +411,11 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 			router:     rpsr,
 			cache:      options.cache,
 			qosClient:  smartRouterOptimizerQoSClient,
-			cacheState: cacheStateInfo{primary: options.cache, secondary: options.secondaryCache,
-				finalized: viper.GetDuration(cachepkg.ExpirationFlagName), nonFinalized: viper.GetDuration(cachepkg.ExpirationNonFinalizedFlagName)},
+			// TTL lifetimes are NOT read here. The expiration flags are registered on
+			// the cache-server cobra command and never on the router's, so
+			// viper.GetDuration returns zero on every deployment; each backend reports
+			// the policy it is actually applying instead.
+			secondaryCache: options.secondaryCache,
 		})
 		srv := &http.Server{Addr: options.cmdFlags.DebugAddress, Handler: debugMux}
 		// Watcher goroutine: shuts the server down gracefully when ctx is cancelled
@@ -516,15 +518,13 @@ type debugMuxDeps struct {
 	// lie on any deployment running with --cache-be (MAG-1764). Reached
 	// through cacheFlusher rather than the concrete *performance.Cache so
 	// tests can inject a fake without standing up a gRPC client.
-	cache      cacheFlusher
-	cacheState cacheStateInfo
-}
-
-type cacheStateInfo struct {
-	primary      performance.CacheBackend
-	secondary    performance.CacheReader
-	finalized    time.Duration
-	nonFinalized time.Duration
+	cache cacheFlusher
+	// secondaryCache is the read-only second tier, for /debug/cache-state only.
+	// The primary is NOT duplicated here: it is deps.cache above. Holding it twice
+	// let a fixture wire one and leave the other zero, so on the same mux
+	// /debug/reset-all would flush a live cache while /debug/cache-state reported
+	// no cache configured — two endpoints on one router contradicting each other.
+	secondaryCache performance.CacheReader
 }
 
 // debugPollNowTimeout caps how long POST /debug/poll-now waits per request (MAG-2649). A single
@@ -974,6 +974,128 @@ type routerConfigOptimizerWeights struct {
 	SelectionMode      string
 }
 
+// debugCacheStateResponse is the JSON body of GET /debug/cache-state: which cache
+// backend is actually serving this router, and the state of each tier.
+//
+// A package-level type with explicit json tags, matching routerConfigResponse below,
+// so a consumer can unmarshal into a shared type and a contract test can assert the
+// wire keys. Declaring it inside the handler would leave every reader re-deriving the
+// shape from a map literal.
+type debugCacheStateResponse struct {
+	SchemaVersion int `json:"schema_version"`
+
+	// Engine is a convenience: the engine of the tier that is serving. It reads from
+	// the primary, falling back to the SECONDARY when no primary is configured —
+	// a secondary-only router is a documented topology (reads work, nothing
+	// backfills), and reporting "none" there would tell a reader no cache is in play
+	// while one is serving every read. "none" means neither tier is configured.
+	//
+	// Prefer the per-tier engine below when the two could differ. This field cannot
+	// express that case, and the case is real: the secondary is always a gRPC client
+	// (performance.InitCache is its only constructor) while the primary becomes RESP
+	// whenever the resp-cache block is set. That pairing is documented as
+	// unsupported but nothing validates it, so the endpoint must be able to show it
+	// rather than average it away.
+	Engine string          `json:"engine"`
+	Tiers  debugCacheTiers `json:"tiers"`
+}
+
+type debugCacheTiers struct {
+	Primary   debugCacheTier `json:"primary"`
+	Secondary debugCacheTier `json:"secondary"`
+}
+
+// debugCacheTier is one cache tier on the wire.
+//
+// No omitempty anywhere: this endpoint's whole job is telling states apart, and
+// omitempty erases the difference between "the router cannot name this" and "the
+// field does not apply". A missing address on a configured tier is a real and
+// distinct condition, not an absence.
+type debugCacheTier struct {
+	Configured bool   `json:"configured"`
+	Engine     string `json:"engine"`
+	Address    string `json:"address"`
+	// Reachable is a pointer for its THIRD state: null means reachability has not
+	// been determined — a RESP backend before its first probe returns, a gRPC
+	// connection mid-dial. Collapsing that into false reports a healthy backend as
+	// down to anything that polls at startup. Always present; "is this tier
+	// configured" is answered by Configured, not by this field's absence.
+	Reachable *bool `json:"reachable"`
+	// ReachableCheckedAt stamps a reachability value that is a periodic snapshot
+	// rather than a live read (the RESP tier's probe cadence), so a consumer can see
+	// how stale it is. Empty when the value was read live.
+	ReachableCheckedAt string `json:"reachable_checked_at"`
+	ReachableDetail    string `json:"reachable_detail"`
+	// WhenUnreachable is what the router DOES when this tier is unreachable:
+	// "skipped" (bypassed before any I/O, costs nothing) or "attempted" (every
+	// lookup still runs against the dead backend and pays the full timeout). The two
+	// engines sit on opposite sides of this, so reachable:false alone does not tell
+	// an operator whether their relays are being taxed.
+	WhenUnreachable string `json:"when_unreachable"`
+	// Lifetimes is null when this tier cannot answer for its own TTLs — a cache-be
+	// tier's expirations are configured in, and applied by, a different pod. It was
+	// previously read from the router's own viper, which returns zero on every
+	// deployment because those flags are registered on the cache-server command.
+	Lifetimes *performance.CacheLifetimes `json:"lifetimes"`
+}
+
+// buildCacheStateResponse renders both tiers. Split out of the handler so the shape
+// is testable without an HTTP round-trip.
+func buildCacheStateResponse(deps debugMuxDeps) debugCacheStateResponse {
+	// deps.cache is the same value the flush handler uses. Reading it here rather
+	// than keeping a second copy is what stops one endpoint from being wired in a
+	// fixture while the other silently reports "no cache".
+	primary := debugCacheTierFrom(deps.cache)
+	secondary := debugCacheTierFrom(deps.secondaryCache)
+
+	engine := "none"
+	switch {
+	case primary.Configured:
+		engine = primary.Engine
+	case secondary.Configured:
+		engine = secondary.Engine
+	}
+	return debugCacheStateResponse{
+		SchemaVersion: 1,
+		Engine:        engine,
+		Tiers:         debugCacheTiers{Primary: primary, Secondary: secondary},
+	}
+}
+
+// debugCacheTierFrom renders one tier from whatever the router holds for it.
+//
+// The `any` parameter is deliberate: the two tiers have different static types
+// (CacheBackend and CacheReader) and either may be absent, so the assertion is the
+// only thing they have in common.
+//
+// Note what is NOT used to decide "configured": the interface being non-nil. An
+// unconfigured cache travels as a TYPED-nil *Cache inside a non-nil interface, which
+// still satisfies the reporter — that is why a router with no cache at all used to
+// report engine "grpc" and configured true, on the default deployment. The backend
+// decides its own Configured on its own receiver.
+func debugCacheTierFrom(backend any) debugCacheTier {
+	reporter, ok := backend.(performance.DebugCacheStateReporter)
+	if !ok {
+		return debugCacheTier{}
+	}
+	state := reporter.DebugCacheState()
+	if !state.Configured {
+		// Report nothing about a tier that is not there — not even the engine name
+		// of the type that happened to be carrying the nil.
+		return debugCacheTier{}
+	}
+	return debugCacheTier{
+		Configured:         true,
+		Engine:             state.Engine,
+		Address:            state.Address,
+		Reachable:          state.Reachable,
+		ReachableCheckedAt: debugTimeRFC3339(state.CheckedAt),
+		ReachableDetail:    state.Detail,
+		WhenUnreachable:    state.WhenUnreachable,
+		Lifetimes:          state.Lifetimes,
+	}
+}
+
 // routerConfigResponse is the JSON body of GET /debug/runtime-config. It exposes the
 // router's live tuning values so the test suite can read them at runtime instead of
 // hardcoding copies that silently drift when the source changes (e.g. when
@@ -1056,32 +1178,27 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	const maxDebugOffsetSeconds = float64(24 * 3600) // 86400 s
 
 	mux := http.NewServeMux()
+	// GET /debug/cache-state — which cache backend is serving, per tier. Read-only
+	// and nil-router safe like the rest of /debug/*, and read-only in the strict
+	// sense: it never touches a connection. The obvious liveness accessor does
+	// (CacheActive -> getClient spawns a reconnect), so both backends answer through
+	// DebugCacheState, which is contractually side-effect free. A monitoring scrape
+	// must not be able to change the state it is measuring.
 	mux.HandleFunc("/debug/cache-state", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "GET only", http.StatusMethodNotAllowed)
 			return
 		}
-		type tier struct {
-			Configured bool   `json:"configured"`
-			Reachable  *bool  `json:"reachable,omitempty"`
-			Address    string `json:"address,omitempty"`
-		}
-		state := deps.cacheState
-		engine := "none"
-		primary := tier{}
-		if reporter, ok := state.primary.(performance.DebugCacheStateReporter); ok {
-			engine = reporter.CacheEngine()
-			reachable := reporter.CacheReachable()
-			primary = tier{Configured: true, Reachable: &reachable, Address: reporter.CacheAddress()}
-		}
-		secondary := tier{}
-		if reporter, ok := state.secondary.(performance.DebugCacheStateReporter); ok {
-			reachable := reporter.CacheReachable()
-			secondary = tier{Configured: true, Reachable: &reachable, Address: reporter.CacheAddress()}
-		}
-		resp := map[string]any{"engine": engine, "tiers": map[string]tier{"primary": primary, "secondary": secondary}, "lifetimes": map[string]float64{"finalized_seconds": state.finalized.Seconds(), "non_finalized_seconds": state.nonFinalized.Seconds()}}
+		resp := buildCacheStateResponse(deps)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		body, err := json.Marshal(resp)
+		if err != nil {
+			// Scalars and fixed structs only — Marshal cannot realistically fail;
+			// surface a 500 rather than a half-written body, as runtime-config does.
+			http.Error(w, "failed to marshal cache state", http.StatusInternalServerError)
+			return
+		}
+		w.Write(body)
 	})
 
 	mux.HandleFunc("/debug/time-warp", func(w http.ResponseWriter, r *http.Request) {

@@ -11,6 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -36,6 +37,27 @@ func newRelayerCacheClientStore(ctx context.Context, address string) (*relayerCa
 		address: address,
 	}
 	return clientStore, clientStore.connectClient()
+}
+
+// peekConnState reports the live connectivity of the installed connection WITHOUT
+// touching it. It exists because getClient() is not a read: it spawns
+// `go reconnectClient()` whenever the client is nil, so an observer that called it
+// to ask "is the cache up?" would dial the cache as a side effect of asking.
+// /debug/cache-state is documented read-only and must not do that.
+//
+// The second return distinguishes "no connection installed" from a state reading.
+// grpc.ClientConn.GetState() is a plain accessor — unlike Connect() and
+// WaitForStateChange() it neither triggers nor waits on a transition.
+func (r *relayerCacheClientStore) peekConnState() (connectivity.State, bool) {
+	if r == nil {
+		return connectivity.Shutdown, false
+	}
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+	if r.client == nil || r.conn == nil {
+		return connectivity.Shutdown, false
+	}
+	return r.conn.GetState(), true
 }
 
 func (r *relayerCacheClientStore) getClient() pairingtypes.RelayerCacheClient {
@@ -174,8 +196,12 @@ func (r *relayerCacheClientStore) resetOnConnectionError(err error) {
 }
 
 type Cache struct {
+	// The configured address deliberately lives in exactly ONE place —
+	// clientStore.address, the string actually dialled — and is read back through
+	// BackendEndpoint. Cache used to carry a second copy that InitCache kept in sync
+	// by assigning the same argument to both; two accessors for one fact is how they
+	// eventually disagree.
 	clientStore *relayerCacheClientStore
-	address     string
 	serviceCtx  context.Context
 }
 
@@ -183,7 +209,6 @@ func InitCache(ctx context.Context, addr string) (*Cache, error) {
 	clientStore, err := newRelayerCacheClientStore(ctx, addr)
 	cache := &Cache{
 		clientStore: clientStore,
-		address:     addr,
 		serviceCtx:  ctx,
 	}
 	if err != nil {
@@ -216,14 +241,66 @@ func (cache *Cache) CacheActive() bool {
 	return cache != nil && cache.clientStore.getClient() != nil
 }
 
-func (cache *Cache) CacheEngine() string { return "grpc" }
-func (cache *Cache) CacheAddress() string {
-	if cache == nil {
-		return ""
+// DebugCacheState reports this tier for GET /debug/cache-state. Read-only: it
+// reads the connection's state rather than asking for a client, so observing a
+// down cache does not dial it.
+//
+// Reachability comes from the gRPC connectivity state, NOT from "a client pointer
+// is installed" (what CacheActive answers). The installed pointer is a latch: it is
+// cleared only by resetOnConnectionError, which returns early for every status code
+// except Unavailable and fires only from a relay's own GetEntry/SetEntry/Flush. So
+// on an idle router a cache-be killed an hour ago still reads as active, while the
+// connection has long since left Ready.
+//
+// The remaining gap is deliberate and documented rather than papered over: a cache-be
+// that ACCEPTS connections but hangs keeps its transport in Ready, so this reports
+// reachable while every operation times out. That is the honest reading of a
+// connectivity state — the backend is reachable and unresponsive, which are different
+// faults — and distinguishing them needs an active probe this read-only endpoint
+// must not perform.
+func (cache *Cache) DebugCacheState() DebugCacheState {
+	// A typed-nil *Cache is how an unconfigured cache travels inside the
+	// CacheBackend interface (see the wiring convention on CacheBackend), and a
+	// typed nil still satisfies this interface — so "configured" must be decided
+	// here, on the receiver, and never by the caller's `!= nil` on the interface.
+	//
+	// Both the configured test and the reported value read BackendEndpoint, so
+	// there is exactly one source for the address.
+	address := cache.BackendEndpoint()
+	if address == "" {
+		return DebugCacheState{Engine: CacheEngineGRPC}
 	}
-	return cache.address
+	state := DebugCacheState{
+		Configured: true,
+		Engine:     CacheEngineGRPC,
+		Address:    address,
+		// A gRPC tier that is not reachable is SKIPPED, not attempted: GetEntry
+		// returns NotConnectedError before any I/O, so an unreachable primary costs
+		// nothing per relay. The RESP tier does the opposite, which is why this is
+		// reported rather than assumed.
+		WhenUnreachable: CacheWhenUnreachableSkipped,
+	}
+	connState, connected := cache.clientStore.peekConnState()
+	if !connected {
+		state.Reachable = boolPtr(false)
+		state.Detail = "no connection installed"
+		return state
+	}
+	state.Detail = connState.String()
+	switch connState {
+	case connectivity.Ready, connectivity.Idle:
+		// Idle is a healthy connection with no active transport (gRPC drops one
+		// after an idle period); it dials on the next call. Reporting it as
+		// unreachable would make a quiet router look broken.
+		state.Reachable = boolPtr(true)
+	case connectivity.Connecting:
+		// Genuinely undetermined — the dial is in flight. Left nil rather than
+		// guessed either way.
+	default: // TransientFailure, Shutdown
+		state.Reachable = boolPtr(false)
+	}
+	return state
 }
-func (cache *Cache) CacheReachable() bool { return cache.CacheActive() }
 
 func (cache *Cache) SetEntry(ctx context.Context, cacheSet *pairingtypes.RelayCacheSet) error {
 	if cache == nil {

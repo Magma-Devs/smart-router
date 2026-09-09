@@ -27,7 +27,7 @@ func TestCacheBackendTypedNilIsInert(t *testing.T) {
 // drops the client so the cache reads as inactive, and is idempotent.
 func TestCacheCloseStopsReconnectAndIsIdempotent(t *testing.T) {
 	store := &relayerCacheClientStore{ctx: context.Background(), address: "test-addr"}
-	cache := &Cache{clientStore: store, address: "test-addr", serviceCtx: context.Background()}
+	cache := &Cache{clientStore: store, serviceCtx: context.Background()}
 
 	require.NoError(t, cache.Close())
 	require.True(t, store.closed.Load())
