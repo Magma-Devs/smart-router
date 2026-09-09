@@ -46,7 +46,6 @@ func TestGetConsumerSessionInstanceFromEndpoint_DirectRPC(t *testing.T) {
 	// Call GetConsumerSessionInstanceFromEndpoint with nil endpointConnection (direct RPC mode)
 	session, epoch, err := cswp.GetConsumerSessionInstanceFromEndpoint(
 		nil,         // endpointConnection = nil triggers direct RPC mode
-		0,           // numberOfResets
 		qosManager,  // qosManager
 		nodeUrl.Url, // networkAddress
 	)
@@ -108,7 +107,6 @@ func TestGetConsumerSessionInstanceFromEndpoint_ProviderRelay(t *testing.T) {
 	// Call GetConsumerSessionInstanceFromEndpoint with actual endpointConnection (provider-relay mode)
 	session, epoch, err := cswp.GetConsumerSessionInstanceFromEndpoint(
 		endpointConn,   // endpointConnection != nil triggers provider-relay mode
-		0,              // numberOfResets
 		qosManager,     // qosManager
 		networkAddress, // networkAddress
 	)
@@ -229,7 +227,7 @@ func TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal(t *testing.T) {
 
 	// (1) + (2a): one short of the threshold the endpoint is still enabled and is
 	// offered for relay despite the unreachable upstream.
-	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
+	for i := uint64(0); i < MaxConsecutiveConnectionAttempts-1; i++ {
 		endpoint.MarkUnhealthy()
 	}
 	require.True(t, endpoint.Enabled, "endpoint must stay enabled below the consecutive-failure threshold")

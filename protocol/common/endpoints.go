@@ -563,6 +563,16 @@ type RelayResult struct {
 	// hold it — but the endpoint is healthy, so the direct-RPC availability gate
 	// excludes it. Orthogonal to both flags above.
 	IsDataScope bool
+	// IsNodeCapability — the endpoint answered truthfully that it does not offer
+	// this capability: the method exists on the API surface but is switched off on
+	// this node (provider tier, policy, admin config). Retryable — a node on a
+	// different tier may serve it — but the endpoint is healthy, so the direct-RPC
+	// availability gate excludes it. Same axis as IsDataScope, one level up.
+	IsNodeCapability bool
+	// IsNodeAtFault — positive evidence the endpoint itself is broken or unable to serve, as
+	// opposed to answering truthfully about a request it cannot satisfy. This is what the
+	// endpoint-health counter reads; see LavaError.EndpointAtFault for why it is not Retryable.
+	IsNodeAtFault bool
 	// CacheLookup is what each cache tier did on the attempt that produced this result,
 	// surfaced to the caller as Lava-Cache-Tier / Lava-Cache-Outcome when the request
 	// carried lava-debug-relay. Same shape as the per-request serving facts above that
@@ -587,6 +597,8 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	rr.IsUnsupportedMethod = classification.IsUnsupportedMethod
 	rr.IsRateLimited = classification.IsRateLimited
 	rr.IsDataScope = classification.IsDataScope
+	rr.IsNodeCapability = classification.IsNodeCapability
+	rr.IsNodeAtFault = classification.IsNodeAtFault
 }
 
 func (rr *RelayResult) GetReplyServer() pairingtypes.Relayer_RelaySubscribeClient {

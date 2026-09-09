@@ -482,7 +482,7 @@ func (e *Endpoint) markUnhealthyAt(at time.Time) {
 		utils.LavaFormatDebug("endpoint approaching the disable threshold",
 			utils.LogAttr("endpoint", addr),
 			utils.LogAttr("refusals", refusals),
-			utils.LogAttr("threshold", uint64(MaxConsecutiveConnectionAttempts)),
+			utils.LogAttr("threshold", MaxConsecutiveConnectionAttempts),
 			utils.LogAttr("remaining", MaxConsecutiveConnectionAttempts-refusals),
 			utils.LogAttr("is_direct_rpc", isDirect),
 		)
@@ -793,12 +793,7 @@ type ConsumerSessionsWithProvider struct {
 	// blocked provider recovery status if 0 currently not used, if 1 a session has tried resume communication with this provider
 	// if the provider is not blocked at all this field is irrelevant
 	blockedAndUsedWithChanceForRecoveryStatus uint32
-	// onSecondChanceProbation is 1 once this provider has consumed its single
-	// second chance (see ConsumerSessionManager.secondChanceGivenToAddresses). A
-	// successful relay clears it so a future isolated failure is treated as a
-	// first offense again instead of an immediate hard block. 0 == not on probation.
-	onSecondChanceProbation uint32
-	StaticProvider          bool
+	StaticProvider                            bool
 	// GroupLabel is the provider's configured cross-validation group (from RPCStaticProviderEndpoint.GroupLabel).
 	// It rides on the provider record so it can be read off a session's Parent without an address-keyed lookup.
 	// Empty string means the implicit common.DefaultProviderGroup.
@@ -822,19 +817,6 @@ func (cswp *ConsumerSessionsWithProvider) atomicReadBlockedStatus() uint32 {
 
 func (cswp *ConsumerSessionsWithProvider) atomicWriteBlockedStatus(status uint32) {
 	atomic.StoreUint32(&cswp.blockedAndUsedWithChanceForRecoveryStatus, status) // we can only set conflict to "reported".
-}
-
-// atomicMarkSecondChanceProbation records that the provider has used its single
-// second chance. Called under ConsumerSessionManager.lock from blockProvider.
-func (cswp *ConsumerSessionsWithProvider) atomicMarkSecondChanceProbation() {
-	atomic.StoreUint32(&cswp.onSecondChanceProbation, 1)
-}
-
-// atomicTryClearSecondChanceProbation transitions the probation flag 1->0 and
-// reports whether this call performed the transition. Only the first caller
-// after a successful relay returns true, so exactly one cleanup is scheduled.
-func (cswp *ConsumerSessionsWithProvider) atomicTryClearSecondChanceProbation() bool {
-	return atomic.CompareAndSwapUint32(&cswp.onSecondChanceProbation, 1, 0)
 }
 
 func (cswp *ConsumerSessionsWithProvider) atomicReadConflictReported() bool {
@@ -1013,11 +995,9 @@ func (cswp *ConsumerSessionsWithProvider) ConnectRawClientWithTimeout(ctx contex
 	return c, conn, nil
 }
 
-func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint(endpointConnection *EndpointConnection, numberOfResets uint64, qosManager *qos.QoSManager, networkAddress string) (singleConsumerSession *SingleConsumerSession, pairingEpoch uint64, err error) {
+func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint(endpointConnection *EndpointConnection, qosManager *qos.QoSManager, networkAddress string) (singleConsumerSession *SingleConsumerSession, pairingEpoch uint64, err error) {
 	// TODO: validate that the endpoint even belongs to the ConsumerSessionsWithProvider and is enabled.
 
-	// Multiply numberOfReset +1 by MaxAllowedBlockListedSessionPerProvider as every reset needs to allow more blocked sessions allowed.
-	maximumBlockedSessionsAllowed := uint64(utils.Min(MaxSessionsAllowedPerProvider, GetMaxAllowedBlockListedSessionPerProvider()*(int(numberOfResets)+1))) // +1 as we start from 0
 	cswp.Lock.Lock()
 	defer cswp.Lock.Unlock()
 
@@ -1026,7 +1006,6 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 	isProviderRelay := (endpointConnection != nil)
 
 	// try to lock an existing session, if can't create a new one
-	var numberOfBlockedSessions uint64 = 0
 	for _, session := range cswp.Sessions {
 		// Match session to connection (different logic for provider-relay vs direct RPC)
 		matchesConnection := false
@@ -1041,21 +1020,23 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 			// skip sessions that don't belong to the active connection
 			continue
 		}
-		blocked, ok := session.TryUseSession()
-		if ok {
+		if _, ok := session.TryUseSession(); ok {
 			return session, cswp.PairingEpoch, nil
-		}
-		if blocked {
-			numberOfBlockedSessions += 1 // increase the number of blocked sessions so we can block this provider is too many are blocklisted
-		}
-
-		// this must come after the TryUseSession, as we need to check if we reached the maximum number of blocked sessions allowed.
-		if numberOfBlockedSessions >= maximumBlockedSessionsAllowed {
-			return nil, 0, MaximumNumberOfBlockListedSessionsError
 		}
 	}
 
-	// No Sessions available, create a new session or return an error upon maximum sessions allowed
+	// No free session, so create one — bounded only by the total-session ceiling below.
+	//
+	// There used to be a second, lower ceiling here: a provider was refused a new session once
+	// MaxSessionsAllowedPerProvider/3 of its sessions had been retired, and the count grew by that
+	// same third on every pool reset. It is gone (FAILOVER-TASKS section 2).
+	//
+	// It could not be kept once the provider block was dropped. Retired sessions are never
+	// reclaimed inside an epoch, and the only thing that raised that ceiling was the reset the
+	// block itself triggered — so with the block gone the ceiling was fixed at a third, and an
+	// upstream that reached it was refused every session for the rest of the epoch while answering
+	// perfectly. The ceiling below still bounds session growth, which is the one job the lower one
+	// was really doing.
 	if len(cswp.Sessions) > MaxSessionsAllowedPerProvider {
 		return nil, 0, MaximumNumberOfSessionsExceededError
 	}
