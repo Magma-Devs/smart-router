@@ -135,3 +135,35 @@ reported, never asserted.
 | with affinity | 0, across all 3 replicas, work still spread over all 3 upstreams |
 
 Theory predicts roughly a third of unpinned rounds should fail with heads at H, H−1, H−2.
+
+
+---
+
+# Production-readiness scenarios (`run-qa.sh`)
+
+```bash
+docker/sticky-test/run-qa.sh                          # 7 scenarios, ~6 min
+STICKY_SHARED_STATE=false docker/sticky-test/run-qa.sh # negative control: 5 of 7 MUST fail
+```
+
+Brings the stack up once and runs every scenario against it, including the ones that need the
+infrastructure disturbed — a replica restarted, the registry stopped and started again.
+
+| Scenario | What it proves | Detects a broken feature? |
+|---|---|---|
+| Customer sequence across replicas | head-then-fetch over 3 replicas, no false gaps | yes |
+| Session id on every call | the id must be on the head request too, not only the fetch | yes |
+| Concurrent requests on one id | simultaneous requests do not split across upstreams | weakly |
+| `lava-select-provider` beats a claim | naming a provider explicitly still wins | no, by design |
+| A replica restarts | a pod with an empty table adopts the fleet's claim | yes |
+| Registry unreachable | sticky fails closed; traffic without the header is unaffected | yes |
+| Registry restored | sticky works again | yes |
+
+Two of these do not discriminate, and that is stated on purpose rather than left to look stronger
+than it is: `select-provider` does not depend on shared state at all, and the concurrency check
+passed once with the feature disabled.
+
+**Known gap, not covered here.** A sticky request can be answered from the response cache before
+any upstream is chosen, so the pin is not consulted. Measured on a cold start: 24 sticky requests
+produced 19 claim resolutions. It shows up mainly as the first traffic after start-up. Awaiting a
+product decision; see the follow-up ticket.
