@@ -40,6 +40,15 @@ const (
 	// internal infrastructure addresses, so it is emitted ONLY under
 	// --debug-relays, never to ordinary clients.
 	CACHE_BACKEND_HEADER_NAME = "Lava-Cache-Backend"
+	// CACHE_TIER_HEADER_NAME names the cache tier that served the response
+	// ("primary" | "secondary" | "none"), and CACHE_OUTCOME_HEADER_NAME gives what
+	// each tier did ("primary=miss,secondary=error"). Both are emitted together
+	// whenever the request carried the lava-debug-relay directive — see
+	// CacheLookupReport for why a header rather than the cache_tier counter, and note
+	// that unlike CACHE_BACKEND_HEADER_NAME above these values name no infrastructure,
+	// which is what makes a client-settable directive an acceptable gate for them.
+	CACHE_TIER_HEADER_NAME    = "Lava-Cache-Tier"
+	CACHE_OUTCOME_HEADER_NAME = "Lava-Cache-Outcome"
 	// these headers need to be lowercase
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME         = "lava-providers-block"
 	RELAY_TIMEOUT_HEADER_NAME                     = "lava-relay-timeout"
@@ -554,6 +563,12 @@ type RelayResult struct {
 	// hold it — but the endpoint is healthy, so the direct-RPC availability gate
 	// excludes it. Orthogonal to both flags above.
 	IsDataScope bool
+	// CacheLookup is what each cache tier did on the attempt that produced this result,
+	// surfaced to the caller as Lava-Cache-Tier / Lava-Cache-Outcome when the request
+	// carried lava-debug-relay. Same shape as the per-request serving facts above that
+	// headers already read (IsNodeError, StatusCode, CrossValidationFailureReason);
+	// see CacheLookupReport for why the cache_tier counter could not answer this.
+	CacheLookup CacheLookupReport
 }
 
 // ApplyNodeErrorClassification stamps every registry-derived policy flag onto a node-error
