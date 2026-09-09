@@ -52,6 +52,25 @@ const (
 	PairingInitializationTimeout = 30 * time.Second
 	PairingCheckInterval         = 1 * time.Second
 	RelayRetryBackoffDuration    = 2 * time.Millisecond
+
+	// internalRelayTryTimeout bounds ONE try of a relay the ROUTER sends for itself — the startup
+	// check and the recurring health monitor. It never applies to a customer request.
+	//
+	// Not to be confused with the endpoint prober (ProbeLoopInterval, recovery_probe.go), which is a
+	// separate mechanism with its own cadence; this is the timeout for the crafted GET_BLOCKNUM relay
+	// that sendCraftedRelays sends through the ordinary relay path.
+	//
+	// These relays ask a single question — "is this endpoint answering?" — so they have no business
+	// waiting a client-sized budget. They used to be bounded by the attempt WINDOW (about a second),
+	// because the window and the attempt lifetime were the same value. Separating those two clocks
+	// left them inheriting the request budget instead: 30s per try, and sendCraftedRelays runs up to
+	// MaxRelayRetries of them, so one hung endpoint could hold a health cycle for three minutes.
+	//
+	// Deliberately more generous than the window it replaces, so a slow chain's boot check is not cut
+	// shorter than before, and deliberately far below the 30s budget. Fixed rather than configurable:
+	// the right value does not vary by deployment, and a setting here is one more thing to
+	// misconfigure on a path no customer request touches.
+	internalRelayTryTimeout = 5 * time.Second
 )
 
 // implements Relay Sender interfaced and uses an ChainListener to get it called
@@ -828,16 +847,21 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 			usedEndpointsResets++
 			relayProcessor.GetUsedProviders().ClearUnwanted()
 		}
-		err = rpcss.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(ctx, protocolMessage), relayProcessor, nil, nil)
+		// One try, one short deadline. Bounding the try rather than the whole loop keeps the point of
+		// the loop — up to `retries` attempts at different endpoints — while stopping any single hung
+		// endpoint from consuming a client-sized budget. Cancelled on both exits below rather than
+		// deferred, so a hung attempt from this try does not outlive it.
+		tryCtx, cancelTry := context.WithTimeout(ctx, internalRelayTryTimeout)
+		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(tryCtx, protocolMessage), relayProcessor, nil, nil)
 		if errors.Is(err, lavasession.PairingListEmptyError) {
 			// we don't have pairings anymore, could be related to unwanted endpoints
 			relayProcessor.GetUsedProviders().ClearUnwanted()
-			err = rpcss.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(ctx, protocolMessage), relayProcessor, nil, nil)
+			err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(tryCtx, protocolMessage), relayProcessor, nil, nil)
 		}
 		if err != nil {
 			utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
 		} else {
-			err := relayProcessor.WaitForResults(ctx)
+			err := relayProcessor.WaitForResults(tryCtx)
 			if err != nil {
 				utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
 			} else {
@@ -861,6 +885,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 					// If this is the first time we send relays, we want to send all of them, instead of break on first successful relay
 					// That way, we populate the endpoints with the latest blocks with successful relays
 					if !initialRelays {
+						cancelTry()
 						break
 					}
 				} else if err != nil {
@@ -870,6 +895,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 				}
 			}
 		}
+		cancelTry()
 		time.Sleep(RelayRetryBackoffDuration)
 	}
 
