@@ -290,6 +290,22 @@ func (sm *UnifiedRelayStateMachine) GetProtocolMessage() chainlib.ProtocolMessag
 	return latestState.GetProtocolMessage()
 }
 
+// endOfRoadReason names why processingCtx ended, distinguishing our own budget expiring from the
+// caller cancelling from outside.
+//
+// Both arrive here as a non-nil ctx.Err(), and both used to be labelled ProcessingTimeout. That
+// label is what availability scoring reads to decide an endpoint "ran out of road" and may be
+// blamed, so a websocket or gRPC client hanging up mid-request could record a failure against an
+// endpoint that was healthy and still working. Only a genuine deadline earns the timeout label.
+//
+// A reason already recorded by the policy still wins over both — see stopReasonOr.
+func (sm *UnifiedRelayStateMachine) endOfRoadReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return sm.stopReasonOr(StopReasonProcessingTimeout)
+	}
+	return sm.stopReasonOr(StopReasonCallerGone)
+}
+
 // checkAndHandleTimeout checks if processingCtx has expired and handles cleanup if so.
 func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 	processingCtx context.Context,
@@ -314,7 +330,7 @@ func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 		utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 	)
 
-	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.stopReasonOr(StopReasonProcessingTimeout)}
+	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.endOfRoadReason(processingCtx.Err())}
 	return true
 }
 
@@ -537,7 +553,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 						utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
 						utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 					)
-					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.stopReasonOr(StopReasonProcessingTimeout)}
+					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.endOfRoadReason(processingCtx.Err())}
 				}
 				return
 			}
