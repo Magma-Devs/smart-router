@@ -219,6 +219,69 @@ A router started with `--debug-relays` adds `Lava-Cache-Backend` to cache-served
 naming the node that served the hit — the current master under sentinel, the touched shard
 under cluster. It is debug-gated because it exposes internal infrastructure addresses.
 
+### `GET /debug/cache-state`
+
+A router started with `--debug-address` serves a read-only snapshot of which backend is
+actually caching for it:
+
+```bash
+curl -s http://127.0.0.1:6161/debug/cache-state | jq
+```
+
+```json
+{
+  "schema_version": 1,
+  "engine": "resp",
+  "tiers": {
+    "primary": {
+      "configured": true,
+      "engine": "resp",
+      "address": "redis-primary:6379 read=reader.eu-west-1:6379 prefix=sr",
+      "reachable": true,
+      "reachable_checked_at": "2026-09-09T14:31:02Z",
+      "reachable_detail": "no error reported",
+      "when_unreachable": "attempted",
+      "lifetimes": {"finalized_seconds": 3600, "non_finalized_seconds": 0.5, "node_errors_seconds": 60}
+    },
+    "secondary": {"configured": false, "engine": "", "address": "", "reachable": null,
+                  "reachable_checked_at": "", "reachable_detail": "", "when_unreachable": "", "lifetimes": null}
+  }
+}
+```
+
+Four things are easy to misread:
+
+- **`reachable` has three values.** `true`, `false`, and `null` for *not yet determined* — a
+  RESP backend before its first probe returns, a `cache-be` connection mid-dial. `null` is not
+  "unreachable"; a router polled immediately after startup legitimately answers it. Whether a
+  tier exists is `configured`, never the presence of this field.
+- **`when_unreachable` is why `reachable: false` is not one fact.** For a RESP tier it is
+  `attempted`: the backend is still asked on every relay and pays the full cache timeout each
+  time. For a `cache-be` tier it is `skipped`: the client returns not-connected before any
+  I/O, so an unreachable tier costs nothing. Same flag, opposite bill.
+- **`reachable_checked_at` marks a snapshot.** The RESP verdict comes from the 10s health
+  probe, so it can be up to ~13s old. The `cache-be` verdict is read live from the connection
+  and carries no timestamp.
+- **`lifetimes` is `null` for a `cache-be` tier.** Those TTLs are configured in, and applied
+  by, the cache-server pod; this router does not know them. `null` says so — a number would
+  assert a value no deployment uses. Where they are reported, they are the policy's base
+  values: the effective non-finalized TTL is `max(averageBlockTime/8, non_finalized_seconds)`
+  per chain, so that field is a floor.
+
+Reading this endpoint never touches the backend. That is deliberate rather than incidental:
+the obvious liveness accessor on the `cache-be` client dials on demand, so a monitoring scrape
+would otherwise change the state it is measuring, and a backend that recovered between two
+polls would look healthy *because of* the first poll.
+
+> **Bind the debug listener to loopback.** This is the first `/debug` route to publish the
+> router's own backing-store addresses, and the debug listener has **no authentication** — any
+> route on it is readable by anything that can reach the port. No credential is exposed
+> (`password` / `password-file` are separate configuration and never appear here), so this is
+> an exposure decision rather than a leak: under `topology: sentinel` these are sentinel
+> control-plane addresses, and they name infrastructure worth not advertising. Pass
+> `--debug-address 127.0.0.1:6161` rather than `:6161`, and reach it through
+> `kubectl port-forward` in a cluster.
+
 ## Flush semantics
 
 The router's `/debug/reset-all` flushes the RESP backend **prefix-scoped**: `SCAN` over

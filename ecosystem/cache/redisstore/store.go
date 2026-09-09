@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -62,9 +63,21 @@ type Store struct {
 	// configuration cannot answer this: under sentinel the serving node changes
 	// on every failover, and under cluster it depends on the key's slot.
 	// Observability only — nothing in the cache path reads these.
-	readEndpoint        *endpointTracker
-	writeEndpoint       *endpointTracker
-	configuredAddresses string
+	readEndpoint  *endpointTracker
+	writeEndpoint *endpointTracker
+
+	// configuredEndpoints is the STATIC configuration the trackers above
+	// deliberately do not answer — what an operator wrote down, so a debug reader
+	// can compare it against the node actually serving. Kept separate from that
+	// group precisely because their doc comment argues against static
+	// configuration for THEIR purpose.
+	//
+	// New() sets it from the operator's Config, which is the authoritative source.
+	// The NewWithClient/NewWithClients seams have no Config, so newStore derives
+	// what it can from the clients themselves: those two constructors are what
+	// every RESP test injects a miniredis client through, and leaving them empty
+	// is what would make this field untestable without a live Redis.
+	configuredEndpoints storeEndpoints
 
 	// stopWatcher terminates the credential poll loop (nil when the
 	// credentials are static).
@@ -153,7 +166,13 @@ func New(cfg Config) (*Store, error) {
 		}
 		return nil, err
 	}
-	store.configuredAddresses = strings.Join(cfg.Addresses, ",")
+	// The operator's own configuration is authoritative, so it replaces whatever
+	// newStore derived from the clients.
+	store.configuredEndpoints = storeEndpoints{
+		Addresses:     append([]string(nil), cfg.Addresses...),
+		ReadAddresses: append([]string(nil), cfg.ReadAddresses...),
+		KeyPrefix:     store.prefix,
+	}
 	store.writeEndpoint = writeTracker
 	store.readEndpoint = readTracker
 	if cfg.PasswordFile != "" {
@@ -176,12 +195,76 @@ func New(cfg Config) (*Store, error) {
 	return store, nil
 }
 
-// ConfiguredAddresses returns the operator-provided primary RESP addresses.
-func (s *Store) ConfiguredAddresses() string {
+// storeEndpoints is the operator-facing identity of a RESP deployment: every
+// address the store uses, plus the keyspace it uses them in.
+//
+// All three parts are load-bearing for a debug reader, and each was learnt by
+// asking what an operator would do wrong without it:
+//
+//   - ReadAddresses, because Ping probes BOTH clients and returns the first
+//     error. With reads split to another region, killing the reader reports the
+//     store unreachable while naming only the healthy writer — the operator curls
+//     the printed address, finds it fine, and blames the endpoint, while every
+//     cache LOOKUP is failing against an address nothing ever showed them.
+//   - KeyPrefix, because it decides which keyspace this router occupies. Two
+//     routers on one Valkey with different prefixes share zero entries and are
+//     otherwise indistinguishable in this output.
+type storeEndpoints struct {
+	Addresses     []string
+	ReadAddresses []string
+	KeyPrefix     string
+}
+
+// String renders the endpoints for the debug payload's address field. Read
+// addresses are named as such so the two roles are never confused for a list of
+// interchangeable nodes.
+func (e storeEndpoints) String() string {
+	if len(e.Addresses) == 0 && len(e.ReadAddresses) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if len(e.Addresses) > 0 {
+		parts = append(parts, strings.Join(e.Addresses, ","))
+	}
+	if len(e.ReadAddresses) > 0 {
+		parts = append(parts, "read="+strings.Join(e.ReadAddresses, ","))
+	}
+	if e.KeyPrefix != "" {
+		parts = append(parts, "prefix="+e.KeyPrefix)
+	}
+	return strings.Join(parts, " ")
+}
+
+// ConfiguredEndpoints renders every address this store is configured to use and
+// the key prefix it uses them under. Empty only when the store was built from
+// clients whose addresses could not be determined.
+func (s *Store) ConfiguredEndpoints() string {
 	if s == nil {
 		return ""
 	}
-	return s.configuredAddresses
+	return s.configuredEndpoints.String()
+}
+
+// clientAddresses recovers the configured addresses from an already-constructed
+// client, for the NewWithClient/NewWithClients seams that never see a Config.
+// Unknown implementations (including test doubles) yield nothing rather than a
+// guess.
+func clientAddresses(client redis.UniversalClient) []string {
+	switch c := client.(type) {
+	case *redis.Client:
+		return []string{c.Options().Addr}
+	case *redis.ClusterClient:
+		return append([]string(nil), c.Options().Addrs...)
+	case *redis.Ring:
+		addrs := make([]string, 0, len(c.Options().Addrs))
+		for _, addr := range c.Options().Addrs {
+			addrs = append(addrs, addr)
+		}
+		sort.Strings(addrs) // Ring addresses come from a map; keep the output stable
+		return addrs
+	default:
+		return nil
+	}
 }
 
 // warnIfReadSplitIsDiscoveryScoped flags the one read-split shape that does
@@ -224,12 +307,20 @@ func newStore(writeClient, readClient redis.UniversalClient, keyPrefix string) (
 	if !keyPrefixPattern.MatchString(keyPrefix) {
 		return nil, fmt.Errorf("invalid resp-cache key prefix %q: must match %s — SCAN MATCH patterns are globs, so glob characters could purge unrelated keys", keyPrefix, keyPrefixPattern.String())
 	}
+	// Derived rather than left empty so the exported NewWithClient/NewWithClients
+	// seams produce a usable address. New() overwrites this with the operator's
+	// Config, which knows the read addresses too.
+	endpoints := storeEndpoints{Addresses: clientAddresses(writeClient), KeyPrefix: keyPrefix}
+	if readClient != writeClient {
+		endpoints.ReadAddresses = clientAddresses(readClient)
+	}
 	return &Store{
-		write:         writeClient,
-		read:          readClient,
-		prefix:        keyPrefix,
-		readEndpoint:  &endpointTracker{},
-		writeEndpoint: &endpointTracker{},
+		write:               writeClient,
+		read:                readClient,
+		prefix:              keyPrefix,
+		readEndpoint:        &endpointTracker{},
+		writeEndpoint:       &endpointTracker{},
+		configuredEndpoints: endpoints,
 	}, nil
 }
 
