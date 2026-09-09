@@ -120,7 +120,7 @@ func TestBlameAtCallSite(t *testing.T) {
 			}
 
 			relayCtx, cancelRelay := context.WithCancel(ctx)
-			require.NoError(t, rpcss.sendRelayToDirectEndpoints(relayCtx, sessions, protocolMsg, relayProcessor, nil, nil))
+			require.NoError(t, rpcss.sendRelayToDirectEndpoints(relayCtx, sessions, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{}))
 
 			// Cancel the way the request does when it unwinds, then let the goroutine release.
 			time.Sleep(200 * time.Millisecond)
