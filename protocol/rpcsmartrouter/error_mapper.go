@@ -55,6 +55,26 @@ func classifyAndWrap(err error, chainFamily common.ChainFamily, transport common
 	return wrapped
 }
 
+// endpointCancellationIsExempt reports whether a cancelled attempt should keep the
+// client-cancellation exemption from the per-URL health machinery.
+//
+// A relay-race loser and an endpoint still silent when the budget expired both arrive as a cancelled
+// context and are otherwise indistinguishable, so the exemption that protects the first was also
+// swallowing the second: a single bad URL behind a provider with several was never disabled, never
+// probed for recovery, and never moved the health metric, even though the provider's own QoS
+// availability did drop.
+//
+// Exactly one condition lifts the exemption — the REQUEST ran out of budget. Every other way an
+// attempt can be cut short stays exempt, unchanged. budgetExpired is a function because the answer is
+// only knowable once the attempt has ended; nil means "not expired", the safe default for callers
+// with no request context.
+func endpointCancellationIsExempt(isClientCancel bool, budgetExpired func() bool) bool {
+	if !isClientCancel {
+		return false
+	}
+	return budgetExpired == nil || !budgetExpired()
+}
+
 // classifyEndpointHealth decides whether an endpoint should be marked unhealthy
 // and/or backed off based on the classified error.
 //
