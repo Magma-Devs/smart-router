@@ -24,6 +24,9 @@ import (
 type RelayProcessor struct {
 	usedProviders                *lavasession.UsedProviders
 	responses                    chan *RelayResponse
+	// ctx is the request's context, kept so SetResponse can tell "the buffer is momentarily full"
+	// from "the request is over and nothing will ever read this". See SetResponse.
+	ctx context.Context
 	crossValidationParams        *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	lock                         sync.RWMutex
 	guid                         uint64
@@ -77,10 +80,23 @@ type quorumStat struct {
 // MaxParticipants is the number of candidate endpoints that actually exist, which
 // validateCrossValidationCapacity checks per request before this processor is constructed. RelayRetryLimit
 // of headroom covers a retry landing before the previous batch's response has been drained.
+// statefulFanOutCeiling mirrors the session manager's per-tier cap on a stateful broadcast. A write
+// is sent to every provider selected, not to one, so sizing its buffer at a fan-out of 1 left the
+// channel far smaller than the number of attempts that can post to it.
+//
+// A ceiling rather than the exact number, because the buffer is allocated before selection has run
+// and the real count is not known yet. Getting it wrong is no longer fatal — SetResponse gives up
+// once the request is over — so this only keeps a legitimate response from being crowded out while
+// the request is still reading.
+const statefulFanOutCeiling = 10
+
 func responseBufferSize(selection Selection, crossValidationParams *common.CrossValidationParams) int {
 	fanOut := 1
-	if selection == CrossValidation && crossValidationParams != nil {
+	switch {
+	case selection == CrossValidation && crossValidationParams != nil:
 		fanOut = crossValidationParams.MaxParticipants
+	case selection == Stateful:
+		fanOut = statefulFanOutCeiling
 	}
 	return fanOut + RelayRetryLimit
 }
@@ -114,6 +130,7 @@ func NewRelayProcessor(
 
 	chainID, _ := chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
 	relayProcessor := &RelayProcessor{
+		ctx:                          ctx,
 		crossValidationParams:        crossValidationParams,
 		responses:                    make(chan *RelayResponse, responseBufferSize(selection, crossValidationParams)), // buffered to prevent blocking
 		ResultsManager:               NewResultsManager(guid, chainID),
@@ -364,6 +381,18 @@ func (rp *RelayProcessor) NodeResults() []common.RelayResult {
 	return rp.ResultsManager.NodeResults()
 }
 
+// SetResponse hands a finished attempt's result to whoever is still reading.
+//
+// The send must not be unconditional. Attempts used to die staggered at their own window, while the
+// reader was re-armed between batches, so a full buffer drained itself. Now an attempt lives until
+// the request ends, which means every in-flight attempt finishes at once AFTER the last reader has
+// gone: WaitForResults has returned on processingCtx, and on the non-cross-validation path nothing
+// reads this channel again. One attempt past the buffer's capacity then parked its goroutine
+// forever, and with it the whole RelayProcessor it holds — one leak per request.
+//
+// Giving up on rp.ctx rather than dropping on a full buffer: while the request is alive a full
+// buffer is transient and the response is still wanted, so blocking is correct. Only once the
+// request is over is the result genuinely unreadable.
 func (rp *RelayProcessor) SetResponse(response *RelayResponse) {
 	if rp == nil {
 		return
@@ -371,7 +400,11 @@ func (rp *RelayProcessor) SetResponse(response *RelayResponse) {
 	if response == nil {
 		return
 	}
-	rp.responses <- response
+	select {
+	case rp.responses <- response:
+	case <-rp.ctx.Done():
+		// Request is over; nobody will read this. Dropping it is the only alternative to leaking.
+	}
 }
 
 func (rp *RelayProcessor) checkEndProcessing(responsesCount int) bool {
