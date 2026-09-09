@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	cachepkg "github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
@@ -411,6 +412,8 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 			router:     rpsr,
 			cache:      options.cache,
 			qosClient:  smartRouterOptimizerQoSClient,
+			cacheState: cacheStateInfo{primary: options.cache, secondary: options.secondaryCache,
+				finalized: viper.GetDuration(cachepkg.ExpirationFlagName), nonFinalized: viper.GetDuration(cachepkg.ExpirationNonFinalizedFlagName)},
 		})
 		srv := &http.Server{Addr: options.cmdFlags.DebugAddress, Handler: debugMux}
 		// Watcher goroutine: shuts the server down gracefully when ctx is cancelled
@@ -513,7 +516,15 @@ type debugMuxDeps struct {
 	// lie on any deployment running with --cache-be (MAG-1764). Reached
 	// through cacheFlusher rather than the concrete *performance.Cache so
 	// tests can inject a fake without standing up a gRPC client.
-	cache cacheFlusher
+	cache      cacheFlusher
+	cacheState cacheStateInfo
+}
+
+type cacheStateInfo struct {
+	primary      performance.CacheBackend
+	secondary    performance.CacheReader
+	finalized    time.Duration
+	nonFinalized time.Duration
 }
 
 // debugPollNowTimeout caps how long POST /debug/poll-now waits per request (MAG-2649). A single
@@ -1045,6 +1056,33 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	const maxDebugOffsetSeconds = float64(24 * 3600) // 86400 s
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/cache-state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		type tier struct {
+			Configured bool   `json:"configured"`
+			Reachable  *bool  `json:"reachable,omitempty"`
+			Address    string `json:"address,omitempty"`
+		}
+		state := deps.cacheState
+		engine := "none"
+		primary := tier{}
+		if reporter, ok := state.primary.(performance.DebugCacheStateReporter); ok {
+			engine = reporter.CacheEngine()
+			reachable := reporter.CacheReachable()
+			primary = tier{Configured: true, Reachable: &reachable, Address: reporter.CacheAddress()}
+		}
+		secondary := tier{}
+		if reporter, ok := state.secondary.(performance.DebugCacheStateReporter); ok {
+			reachable := reporter.CacheReachable()
+			secondary = tier{Configured: true, Reachable: &reachable, Address: reporter.CacheAddress()}
+		}
+		resp := map[string]any{"engine": engine, "tiers": map[string]tier{"primary": primary, "secondary": secondary}, "lifetimes": map[string]float64{"finalized_seconds": state.finalized.Seconds(), "non_finalized_seconds": state.nonFinalized.Seconds()}}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
 
 	mux.HandleFunc("/debug/time-warp", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

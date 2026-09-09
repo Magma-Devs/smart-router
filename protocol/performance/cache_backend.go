@@ -34,6 +34,15 @@ type BackendEndpointReporter interface {
 	BackendEndpoint() string
 }
 
+// DebugCacheStateReporter exposes the runtime facts needed by the debug cache
+// state endpoint. It is deliberately optional so the cache backend contract
+// remains focused on serving relays.
+type DebugCacheStateReporter interface {
+	CacheEngine() string
+	CacheAddress() string
+	CacheReachable() bool
+}
+
 var (
 	_ BackendEndpointReporter = (*Cache)(nil)
 	_ BackendEndpointReporter = (*RespCache)(nil)

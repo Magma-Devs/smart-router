@@ -216,6 +216,15 @@ func (cache *Cache) CacheActive() bool {
 	return cache != nil && cache.clientStore.getClient() != nil
 }
 
+func (cache *Cache) CacheEngine() string { return "grpc" }
+func (cache *Cache) CacheAddress() string {
+	if cache == nil {
+		return ""
+	}
+	return cache.address
+}
+func (cache *Cache) CacheReachable() bool { return cache.CacheActive() }
+
 func (cache *Cache) SetEntry(ctx context.Context, cacheSet *pairingtypes.RelayCacheSet) error {
 	if cache == nil {
 		return NotInitializedError
