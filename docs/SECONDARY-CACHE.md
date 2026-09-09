@@ -86,11 +86,11 @@ outside the router — the last column is what you look at to confirm it.
 
 | Situation | What the router does | How you see it |
 | --- | --- | --- |
-| **Primary misses, secondary has it** | Serves the secondary's answer to the caller, then copies it into the primary. No upstream call. | Response header `Lava-Provider-Address: Cached`; `smartrouter_cache_success_total{cache_tier="secondary"}` increments |
-| **Both tiers miss** | Falls through to your upstream nodes exactly as it does today. The only cost is the one extra lookup, bounded by the timeout. | `smartrouter_cache_failed_total{cache_tier="secondary",outcome="miss"}` increments; the response carries a real upstream address |
+| **Primary misses, secondary has it** | Serves the secondary's answer to the caller, then copies it into the primary. No upstream call. | `Lava-Cache-Tier: secondary` on the reply (under `lava-debug-relay`); `smartrouter_cache_success_total{cache_tier="secondary"}` increments |
+| **Both tiers miss** | Falls through to your upstream nodes exactly as it does today. The only cost is the one extra lookup, bounded by the timeout. | `Lava-Cache-Outcome: primary=miss,secondary=miss` on the reply; `smartrouter_cache_failed_total{cache_tier="secondary",outcome="miss"}` increments; the response carries a real upstream address |
 | **Secondary is configured read-only** | Reads it, never writes it — for responses or for admin operations. | No write traffic from this router in the secondary's log. The router has no code path that can write it (see below) |
-| **Secondary is down, slow, or unreachable** | Skips the tier and goes to upstreams. Reconnects in the background. Request serving is unaffected. | `outcome="error"` or `outcome="timeout"` on `smartrouter_cache_failed_total`; latency stays inside `secondary-cache-timeout` |
-| **No secondary configured** (the default) | Identical to previous releases. Nothing is added to the request path. | No `cache_tier="secondary"` series exist at all |
+| **Secondary is down, slow, or unreachable** | Skips the tier and goes to upstreams. Reconnects in the background. Request serving is unaffected. | `Lava-Cache-Outcome: …,secondary=error` (or `timeout`) alongside a real upstream address on the same reply — both halves at once; the matching `smartrouter_cache_failed_total` outcome; latency stays inside `secondary-cache-timeout` |
+| **No secondary configured** (the default) | Identical to previous releases. Nothing is added to the request path. | `Lava-Cache-Outcome: …,secondary=off`; no `cache_tier="secondary"` series exist at all |
 
 Two of these are worth calling out because they are guaranteed rather than
 merely implemented:
@@ -162,6 +162,58 @@ enabled, each lookup is a span carrying `cache.tier` and `cache.outcome`, and
 the request's root span records which tier served it. See
 [METRICS.md](METRICS.md#cache) for the full reference and the dashboard
 migration note.
+
+### Reading the tier per request
+
+The counters answer "which tier is serving my traffic". They cannot answer
+"which tier served *this* request" — they are incremented on a separate thread
+**after** the reply has already been written, so reading one straight after a
+reply is a race, and waiting for it makes the answer a matter of timing rather
+than of what the router did.
+
+Send `lava-debug-relay` and the reply carries the answer itself:
+
+```bash
+curl -si -X POST http://<router>:3360 -H 'Content-Type: application/json' \
+  -H 'lava-debug-relay: true' \
+  -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x1194567",false],"id":1}' \
+  | grep -i lava-cache
+```
+
+```
+Lava-Cache-Tier: secondary
+Lava-Cache-Outcome: primary=miss,secondary=hit
+```
+
+`Lava-Cache-Tier` is the tier that served — `primary`, `secondary`, or `none`
+when a provider answered. `Lava-Cache-Outcome` always names both tiers, in that
+order, so a caller can match the whole string:
+
+| Outcome value | The tier was |
+| --- | --- |
+| `hit` / `miss` / `error` / `timeout` | consulted; same four values the `outcome` metric label uses |
+| `off` | not consulted — unconfigured, or its client has marked itself disconnected |
+| `skipped` | active but not asked: a bypass rule applied (cross-validation, stateful, `lava-force-cache-refresh`, a non-cacheable block), or the primary hit first and the secondary is only consulted after a primary non-hit |
+| `unknown` | not observed at all — this reply was built on a path that performs no cache lookup |
+
+Both headers are emitted on every reply that carries the directive, including
+`none` and the not-consulted values. An absent header therefore means only
+"router too old, or the directive was not honored" — never "nothing served it".
+
+Two limits worth knowing:
+
+- **They describe the winning attempt.** Retries and hedges each run their own
+  cache lookup; the reply reports the lookups made on the attempt whose response
+  you received.
+- **WebSocket has no per-message response headers**, so a cache hit delivered
+  over a subscription cannot carry them — the same limitation
+  `Lava-Provider-Address` already has there. Use the counters for WebSocket.
+
+Under `--debug-relays` (the operator flag, not this directive) a cache hit also
+carries `Lava-Cache-Backend`, naming the node that served it — the primary's
+cache-be address or the secondary's, chosen by the tier that actually answered.
+That one stays behind the flag because it exposes an internal infrastructure
+address, which no client should be able to ask for.
 
 ## Seeing it work
 
@@ -395,15 +447,29 @@ Serve two blocks neither cache holds:
 
 ```bash
 for b in 0x1030301 0x1030302; do
-  curl -s --max-time 25 -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' \
-    -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$b\",false],\"id\":1}" | head -c 500; echo
+  curl -si --max-time 25 -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' \
+    -H 'lava-debug-relay: true' \
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$b\",false],\"id\":1}" \
+    | grep -iE 'lava-provider-address|lava-cache-outcome'
 done
 sleep 1
 curl -s http://127.0.0.1:7779/metrics | grep '^smartrouter_cache_failed_total' \
   | grep 'cache_tier="secondary"' | grep eth_getBlockByNumber
 ```
 
-Both requests return real block data from upstream, and the metrics show:
+Both requests return real block data from upstream, and the headers show both
+halves of the acceptance criterion on the same reply — a provider served it,
+**and** the secondary failed on the way:
+
+```
+Lava-Provider-Address: 0x…                        ← a real upstream, not "Cached"
+Lava-Cache-Outcome: primary=miss,secondary=error   ← first request
+
+Lava-Provider-Address: 0x…
+Lava-Cache-Outcome: primary=miss,secondary=off     ← second request
+```
+
+The metrics say the same thing in aggregate:
 
 ```
 smartrouter_cache_failed_total{…,cache_tier="secondary",method="eth_getBlockByNumber",outcome="error"} 1
@@ -411,9 +477,11 @@ smartrouter_cache_failed_total{…,cache_tier="secondary",method="eth_getBlockBy
 
 Exactly **one** `error`, then silence — the client detects the dead connection
 once, marks the tier inactive, and subsequent requests skip it entirely rather
-than paying the timeout every time. (Filtering on the method keeps the router's
-own `eth_blockNumber` tip queries, which carry their own series, out of the
-way.)
+than paying the timeout every time. That is why the second reply reads `off`
+rather than `error`: `off` means the tier is not being consulted at all, which
+is precisely the state the single counter increment describes. (Filtering on the
+method keeps the router's own `eth_blockNumber` tip queries, which carry their
+own series, out of the way.)
 
 #### Restart it and watch the router heal
 
@@ -472,25 +540,30 @@ the wrong tier:
 B='{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x1194567",false],"id":1}'
 curl -s -X POST http://127.0.0.1:3361 -H 'Content-Type: application/json' -d "$B" >/dev/null
 sleep 2
-curl -si -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' -d "$B" \
-  | grep -i lava-provider-address
-sleep 1
-curl -s http://127.0.0.1:7779/metrics | grep '^smartrouter_cache_success_total' \
-  | grep 'cache_tier="secondary"'
+curl -si -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' \
+  -H 'lava-debug-relay: true' -d "$B" \
+  | grep -iE 'lava-provider-address|lava-cache-tier|lava-cache-outcome'
 ```
 
 ```
 Lava-Provider-Address: Cached
-smartrouter_cache_success_total{…,cache_tier="secondary",method="eth_getBlockByNumber"} 1   ← +1
+Lava-Cache-Tier: secondary
+Lava-Cache-Outcome: primary=miss,secondary=hit
 ```
 
-The header alone cannot close this step: nothing in the response names the tier
-that answered — both carry the same locally minted header set, and the body is
-the same bytes. (The one difference is invisible here and by design: an entry
-that came from the secondary replays only its `Content-Type` /
-`Content-Encoding`, not whatever other upstream headers the writer's node
-happened to send.) The `cache_tier` counter is what tells you which tier
-answered.
+`Lava-Provider-Address` alone cannot close this step — a primary hit and a
+secondary hit both report `Cached`, both carry the same locally minted header
+set, and the body is the same bytes. (The one difference is invisible here and
+by design: an entry that came from the secondary replays only its
+`Content-Type` / `Content-Encoding`, not whatever other upstream headers the
+writer's node happened to send.)
+
+`Lava-Cache-Tier` names the tier that answered, and `Lava-Cache-Outcome` says
+what each tier did on the way. Both are part of the reply, so there is nothing
+to wait for — see [Reading the tier per
+request](#reading-the-tier-per-request) below. The `cache_tier` counter answers
+the same question in aggregate, and is what you want for a dashboard rather
+than for one request.
 
 ### UC-5 — Unconfigured is fully backwards compatible
 
@@ -598,7 +671,7 @@ walkthrough](#manual-demo-walkthrough); this section records where each one is
 | **UC-1** Primary miss with secondary fallback — served without hitting providers, populator decides the backfill | Covered | `TestSecondaryCacheHitServesWithoutPrimary`, `TestSecondaryHitBackfillsPrimaryWithExactKeyAndValidSeenBlock` (backfill goes through a **real** cache server, so a follow-up primary GET provably hits) |
 | **UC-2** Secondary miss — full fall-through, no overhead beyond the lookup | Covered | `TestSecondaryCacheTimeoutAndErrorAreMisses` — one subtest per outcome (`clean not-found`, `timeout`, `error`), each pinning that the miss leaves nothing behind |
 | **UC-3** Secondary configured read-only — never modified by this router | Covered | Structural: `performance.CacheReader` exposes only `CacheActive`/`GetEntry`, so writes are a compile error. `TestSecondaryCacheConfigValidate` pins that any mode but `read-only` aborts startup |
-| **UC-4** Secondary unreachable — skipped, no impact, reconnects | Covered | `TestSecondaryCacheTimeoutAndErrorAreMisses` (bounded by the timeout), `TestSecondaryCacheActiveNilSafety`; reconnection is the primary's own loop, shared unchanged |
+| **UC-4** Secondary unreachable — skipped, no impact, reconnects | Covered | `TestSecondaryCacheTimeoutAndErrorAreMisses` (bounded by the timeout), `TestSecondaryCacheReportsItsOutcomeOnEveryNonHit` (the failure stays reportable on a provider-served reply), `TestSecondaryCacheActiveNilSafety`; reconnection is the primary's own loop, shared unchanged |
 | **UC-5** No secondary configured — fully backwards compatible | Covered | `TestSecondaryCacheActiveNilSafety` (nil interface *and* typed-nil client), `TestSecondaryCacheFlagAndYamlWiring` |
 
 ### Must-have requirements
@@ -619,7 +692,7 @@ walkthrough](#manual-demo-walkthrough); this section records where each one is
 
 | Requirement | Status |
 | --- | --- |
-| Prometheus metric parity with a `cache_tier` label | Built, exactly as the PRD suggested — one label rather than separate metric names, plus an `outcome` label splitting miss/error/timeout |
+| Prometheus metric parity with a `cache_tier` label | Built, exactly as the PRD suggested — one label rather than separate metric names, plus an `outcome` label splitting miss/error/timeout. The same facts are also readable per request off the reply, which the counters cannot do — see [Reading the tier per request](#reading-the-tier-per-request) |
 | Secondary lookups visible in traces | Built — each lookup is a span carrying `cache.tier` and `cache.outcome`; the root span records which tier served |
 | Log the secondary configuration at startup | Built — one line with address, mode, and timeout |
 | Configurable access mode | Built as an explicit setting; only `read-only` is accepted. Read-write is deferred and rejected at startup rather than ignored |
