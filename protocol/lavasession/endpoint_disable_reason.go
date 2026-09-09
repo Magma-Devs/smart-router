@@ -20,6 +20,20 @@ package lavasession
 // The strings are operator-facing — they appear in that log line and in /debug/endpoint-state — so
 // the same two rules as BlockReason apply: say what HAPPENED rather than which counter tripped, and
 // prefer adding a value over redefining one, since renaming breaks dashboards and log queries.
+// MERGE NOTE — #340 (bench-after) adds a THIRD disable call site that this PR cannot see.
+//
+// #340 introduces a disable for a node error delivered inside an HTTP 200 — the freeze it exists to
+// fix — at rpcsmartrouter_server.go. Merging the two branches is a COMPILE ERROR, not a silent
+// mismatch ("not enough arguments in call to targetEndpoint.MarkUnhealthy"), plus four textual
+// conflicts in direct_rpc_session_selection_test.go and endpoint_probe_reenable_test.go where #340
+// changed the loop counter to uint64 and this branch added the reason argument — both changes are
+// needed, so take theirs and keep the uint64.
+//
+// That third site MUST pass EndpointDisableNodeError. It is the commonest shape of a dying node and
+// the whole point of FAILOVER-TASKS section 2; resolving the compile error with
+// EndpointDisableUnspecified would make it build while shipping section 2's main disable path with
+// no reason at all — defeating this file precisely where it matters most.
+
 type EndpointDisableReason string
 
 const (
