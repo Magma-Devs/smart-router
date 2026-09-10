@@ -463,11 +463,29 @@ func (e *Endpoint) MarkUnhealthy(reason EndpointDisableReason) {
 	e.markUnhealthyAt(time.Now(), reason)
 }
 
-// DisableReason reports why the endpoint was last taken out of rotation. Empty while enabled.
-func (e *Endpoint) DisableReason() EndpointDisableReason {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.disableReason
+// disableLocked performs the Enabled→false transition and records the evidence that belongs to it:
+// the instant, the reason, and a cleared recovery streak. Caller must hold e.mu for writing and must
+// have already checked that the endpoint IS currently enabled — this is the edge, not a level.
+//
+// It exists so "every disable transition records disabledAt AND a reason" is an invariant of the
+// type rather than a property that each disabling caller has to remember. There are two such callers
+// (markUnhealthyAt on the relay path, and the dial-failure path in fetchEndpointConnectionFromConsumerSessionWithProvider),
+// and before this was extracted the second one stamped the timestamp but not the reason — producing
+// a snapshot that read {Enabled: false, DisabledAt: set, DisableReason: ""}, which the field docs
+// define as an enabled endpoint.
+func (e *Endpoint) disableLocked(at time.Time, reason EndpointDisableReason) {
+	if reason == "" {
+		// Unreachable on current callers — both pass a named constant. Kept so a future caller cannot
+		// introduce a silently empty reason, which would read as "enabled" in /debug/endpoint-state.
+		reason = EndpointDisableUnspecified
+	}
+	e.Enabled = false
+	e.disabledAt = at
+	// Edge-triggered with disabledAt, and for the same reason: the reason belongs to the failure that
+	// actually took the endpoint out. A later failure of a different kind against an already-disabled
+	// endpoint must not rewrite the record of why it went down.
+	e.disableReason = reason
+	e.clearRecoveryStreakLocked()
 }
 
 // markUnhealthyAt is MarkUnhealthy with an injectable clock (tests drive the disable instant so they
@@ -476,22 +494,13 @@ func (e *Endpoint) DisableReason() EndpointDisableReason {
 // must NOT push disabledAt forward, or it would silently invalidate post-disable poll evidence the
 // prober has already accumulated (F1).
 func (e *Endpoint) markUnhealthyAt(at time.Time, reason EndpointDisableReason) {
-	if reason == "" {
-		reason = EndpointDisableUnspecified
-	}
 	e.mu.Lock()
 	e.ConnectionRefusals++
 	wasEnabled := e.Enabled
 	disabled := e.ConnectionRefusals >= MaxConsecutiveConnectionAttempts
 	transitioned := false
 	if disabled && wasEnabled {
-		e.Enabled = false
-		e.disabledAt = at
-		// Edge-triggered with disabledAt, and for the same reason: the reason belongs to the failure
-		// that actually took the endpoint out. A later failure of a different kind against an
-		// already-disabled endpoint must not rewrite the record of why it went down.
-		e.disableReason = reason
-		e.clearRecoveryStreakLocked()
+		e.disableLocked(at, reason)
 		// If this disable follows a probe re-enable that no successful relay ever validated, the probe's
 		// grant was wasted (the endpoint answers cheap polls but fails real relays). Escalate the next
 		// re-enable's hysteresis to dampen the flap; the cap bounds how long it stays disabled.
@@ -502,13 +511,17 @@ func (e *Endpoint) markUnhealthyAt(at time.Time, reason EndpointDisableReason) {
 		transitioned = true
 	}
 	addr, refusals, isDirect := e.NetworkAddress, e.ConnectionRefusals, e.IsDirectRPC()
+	// Read back what was actually recorded rather than re-using the argument: disableLocked
+	// normalises an empty reason, and the log line must not disagree with /debug/endpoint-state
+	// about why this endpoint went down.
+	recordedReason := e.disableReason
 	approaching := endpointApproachingDisable(wasEnabled, transitioned, refusals)
 	e.mu.Unlock()
 
 	if transitioned {
 		utils.LavaFormatWarning("disabled unhealthy endpoint", nil,
 			utils.LogAttr("endpoint", addr),
-			utils.LogAttr("disable_reason", reason),
+			utils.LogAttr("disable_reason", recordedReason),
 			utils.LogAttr("refusals", refusals),
 			utils.LogAttr("is_direct_rpc", isDirect),
 		)
@@ -1395,19 +1408,24 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					)
 
 					if endpoint.ConnectionRefusals >= MaxConsecutiveConnectionAttempts {
-						// Edge-trigger disabledAt on the actual enabled→false transition, mirroring
+						// Edge-trigger the disable on the actual enabled→false transition, mirroring
 						// MarkUnhealthy (F1). This path disables only PROVIDER-RELAY endpoints (direct-RPC
 						// returns early above and is disabled solely via MarkUnhealthy), so it is inert for
-						// the prober's recovery today — but stamping here keeps "every disable transition
-						// records disabledAt" an invariant of the type, not a property of one caller.
+						// the prober's recovery today — but going through disableLocked keeps "every disable
+						// transition records disabledAt AND a reason" an invariant of the type, not a
+						// property of one caller.
+						//
+						// EndpointDisableUnreachable is this constant's definition: the dial itself failed,
+						// so nothing ever reached a node.
 						if endpoint.Enabled {
-							endpoint.Enabled = false
-							endpoint.disabledAt = time.Now()
-							endpoint.clearRecoveryStreakLocked()
+							endpoint.disableLocked(time.Now(), EndpointDisableUnreachable)
 						}
 						utils.LavaFormatWarning("disabling provider endpoint for the duration of current epoch.", nil,
 							utils.LogAttr("Endpoint", networkAddress),
 							utils.LogAttr("address", cswp.PublicLavaAddress),
+							// Read back rather than hardcoding, so this line cannot drift from what
+							// /debug/endpoint-state reports for the same endpoint.
+							utils.LogAttr("disable_reason", endpoint.disableReason),
 							utils.LogAttr("GUID", ctx),
 						)
 					}

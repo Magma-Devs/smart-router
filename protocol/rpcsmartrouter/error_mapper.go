@@ -109,15 +109,26 @@ func classifyEndpointHealth(classified *common.LavaError, isClientCancellation b
 
 // endpointDisableReasonFor maps a classified relay error to the reason recorded on the disable.
 //
-// It is only ever consulted once classifyEndpointHealth has already decided the endpoint is at
-// fault, so it does not repeat that judgement — it only names which KIND of fault, which is the
-// distinction the provider-level `all-endpoints-disabled` cannot express.
+// It is consulted once the endpoint has already been judged at fault — by classifyEndpointHealth on
+// the error path, or by classifyHTTPStatus on the status path — so it does not repeat that
+// judgement. It only names which KIND of fault, which is the distinction the provider-level
+// `all-endpoints-disabled` cannot express.
 //
 // The split is the registry's own category boundary: Internal means the request never got an answer,
 // External means the node answered and the answer was its own failure. Those lead an operator to
-// different places — the network path versus the node process.
+// different places — the network path versus the node process. Both disable sites route through
+// here, so one upstream fault gets one reason regardless of which api-interface carried it.
+//
+// KNOWN GAP (MAG-3563): DNS, TLS and EOF faults arrive here classified External and are therefore
+// reported as node-error, though no node answered. The gap is in the shared classifier, not this
+// mapping — see the KNOWN-WRONG rows in endpoint_disable_reason_mapping_test.go.
 func endpointDisableReasonFor(classified *common.LavaError) lavasession.EndpointDisableReason {
 	if classified == nil {
+		// Unreachable today: ClassifyError never returns nil (its Step 3 falls back to
+		// LavaErrorUnknown) and extractLavaError's nil result is replaced before reaching here. Kept
+		// as a guard so a future caller cannot silently record an empty reason, which would read as
+		// "enabled" in /debug/endpoint-state. Pinned by
+		// TestEndpointDisableReasonFor_MapsRegistryCategory.
 		return lavasession.EndpointDisableUnspecified
 	}
 	if classified.Category == common.CategoryInternal {
