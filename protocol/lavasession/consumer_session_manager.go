@@ -3068,9 +3068,28 @@ func (csm *ConsumerSessionManager) OnSessionRateLimited(consumerSession *SingleC
 
 // Report session failure, mark it as blocked from future usages, report if timeout happened.
 func (csm *ConsumerSessionManager) OnSessionFailure(consumerSession *SingleConsumerSession, errorReceived error) error {
+	return csm.releaseWithAvailabilityFailure(consumerSession, errorReceived, "OnSessionFailure")
+}
+
+// OnSessionUnresponsive releases a session that was still silent when the request's budget expired
+// — the endpoint hung. Records the same availability failure as OnSessionFailure.
+//
+// Separate from OnSessionFailure on purpose: "failed" means the endpoint answered with something
+// unusable, "unresponsive" means it answered nothing, and a punishment added to failure handling
+// later must not land on hangs by default. Same reasoning as OnSessionDiscarded vs
+// OnSessionCancelled above.
+//
+// Not OnSessionCancelled: that is for a relay we stopped while it still had budget left (a race
+// loser or client disconnect), where availability was never tested. Routing a hang there records
+// nothing, so the endpoint keeps its score and is selected again.
+func (csm *ConsumerSessionManager) OnSessionUnresponsive(consumerSession *SingleConsumerSession, errorReceived error) error {
+	return csm.releaseWithAvailabilityFailure(consumerSession, errorReceived, "OnSessionUnresponsive")
+}
+
+func (csm *ConsumerSessionManager) releaseWithAvailabilityFailure(consumerSession *SingleConsumerSession, errorReceived error, caller string) error {
 	// consumerSession must be locked when getting here.
 	if err := consumerSession.VerifyLock(); err != nil {
-		return fmt.Errorf("OnSessionFailure, consumerSession.lock must be locked before accessing this method, additional info: %w", err)
+		return fmt.Errorf("%s, consumerSession.lock must be locked before accessing this method, additional info: %w", caller, err)
 	}
 	// redemptionSession = true, if we got this provider from the blocked provider list.
 	// if so, it means we already reported this provider and blocked it we do not need to do it again.

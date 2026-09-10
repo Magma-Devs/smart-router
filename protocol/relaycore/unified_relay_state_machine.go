@@ -40,6 +40,21 @@ type UnifiedRelayStateMachine struct {
 	// goroutine; stopReasonLock guards it against a future caller off that goroutine.
 	stopReason     string
 	stopReasonLock sync.RWMutex
+
+	// hedgePending records that the ticker has asked for a hedge whose dispatch has not yet been
+	// reported back. HedgeCount is incremented when that dispatch SUCCEEDS rather than when the
+	// ticker asks, because the two are not the same event: with an attempt in flight and the pool
+	// empty, the ticker asks every window and every ask fails, which inflated the count by one per
+	// window for the life of the request.
+	//
+	// pairingEmptyWarned keeps the "all providers exhausted" WARNING to the first time it is true
+	// for a request. It is a fact about the request, not about the window, so repeating it once per
+	// window says nothing new — roughly 180 identical lines on a 180s request.
+	//
+	// Both are touched only from the select loop in GetRelayTaskChannel, which is a single
+	// goroutine, so neither needs a lock.
+	hedgePending       bool
+	pairingEmptyWarned bool
 }
 
 // setStopReason records why the state machine is stopping. Last writer wins: a request that
@@ -275,6 +290,22 @@ func (sm *UnifiedRelayStateMachine) GetProtocolMessage() chainlib.ProtocolMessag
 	return latestState.GetProtocolMessage()
 }
 
+// endOfRoadReason names why processingCtx ended, distinguishing our own budget expiring from the
+// caller cancelling from outside.
+//
+// Both arrive here as a non-nil ctx.Err(), and both used to be labelled ProcessingTimeout. That
+// label is what availability scoring reads to decide an endpoint "ran out of road" and may be
+// blamed, so a websocket or gRPC client hanging up mid-request could record a failure against an
+// endpoint that was healthy and still working. Only a genuine deadline earns the timeout label.
+//
+// A reason already recorded by the policy still wins over both — see stopReasonOr.
+func (sm *UnifiedRelayStateMachine) endOfRoadReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return sm.stopReasonOr(StopReasonProcessingTimeout)
+	}
+	return sm.stopReasonOr(StopReasonCallerGone)
+}
+
 // checkAndHandleTimeout checks if processingCtx has expired and handles cleanup if so.
 func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 	processingCtx context.Context,
@@ -299,7 +330,7 @@ func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 		utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 	)
 
-	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.stopReasonOr("ProcessingTimeout")}
+	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.endOfRoadReason(processingCtx.Err())}
 	return true
 }
 
@@ -313,7 +344,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 		gotResults := make(chan bool, 1)
 		processingTimeout, relayTimeout := sm.relaySender.GetProcessingTimeout(sm.GetProtocolMessage())
 		if sm.debugRelays {
-			utils.LavaFormatDebug("Relay initiated with the following timeout schedule", utils.LogAttr("processingTimeout", processingTimeout), utils.LogAttr("newRelayTimeout", relayTimeout), utils.LogAttr("GUID", sm.ctx))
+			utils.LavaFormatDebug("Relay initiated with the following timeout schedule", utils.LogAttr("processingTimeout", processingTimeout), utils.LogAttr("attemptWindow", relayTimeout), utils.LogAttr("GUID", sm.ctx))
 		}
 		processingCtx, processingCtxCancel := context.WithTimeout(sm.ctx, processingTimeout)
 		defer processingCtxCancel()
@@ -356,7 +387,8 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 			NumOfProviders: numProviders,
 		}
 
-		// Initialize parameters
+		// relayTimeout is the attempt WINDOW: when to dispatch another endpoint. It no longer also
+		// kills the attempt in flight, so this genuinely hedges rather than replaces.
 		startNewBatchTicker := time.NewTicker(relayTimeout)
 		defer startNewBatchTicker.Stop()
 
@@ -376,24 +408,57 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 
 				switch result {
 				case SendSuccess:
-					// continue to select loop
+					// An attempt actually went out. If the ticker asked for this one, that is a
+					// hedge that fired, and the only point at which counting it is truthful.
+					if sm.hedgePending {
+						sm.hedgePending = false
+						if sm.analytics != nil {
+							sm.analytics.HedgeCount++
+						}
+					}
 				case SendStop:
 					// This arm stops without consulting the policy, so it names its own reason:
 					// Decide never runs here, and the field would otherwise be blank on exactly
 					// the exhaustion cases an operator reads the line to understand.
 					if isPairingListEmpty && sm.config.EnableCircuitBreaker {
-						sm.setStopReason("AllProvidersExhausted")
-						utils.LavaFormatWarning("Circuit breaker: all providers exhausted, stopping new attempts — relays already in flight may still answer",
-							nil,
-							utils.LogAttr("GUID", sm.ctx),
-							utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
-						)
+						// "Exhausted" describes the dispatcher, not the endpoints: the pool is empty
+						// because every provider is already busy on this request. Only name the stop
+						// reason when the request is really stopping — attempts now outlive their
+						// window, so a reason recorded here would describe a stop that never happens
+						// and take the slot the timeout needs for availability scoring.
+						// Read once: the log is the evidence for this decision, so it has to report
+						// the value the decision actually used.
+						stillInFlight := sm.usedProviders.CurrentlyUsed()
+						if stillInFlight == 0 {
+							sm.setStopReason("AllProvidersExhausted")
+						}
+						// Once per request, not once per window. The ticker keeps asking for a hedge
+						// while an attempt is in flight, and every ask lands here, so an unconditional
+						// WARNING produced one identical line per window for the whole request.
+						// Repeats carry no new information: the same pool is still empty for the same
+						// reason. The trace keeps them available when debugging a single relay.
+						if sm.pairingEmptyWarned {
+							utils.LavaFormatTrace("[StateMachine] circuit breaker: pool still empty",
+								utils.LogAttr("GUID", sm.ctx),
+								utils.LogAttr("stillInFlight", stillInFlight),
+							)
+						} else {
+							sm.pairingEmptyWarned = true
+							utils.LavaFormatWarning("Circuit breaker: all providers exhausted, stopping new attempts — relays already in flight may still answer",
+								nil,
+								utils.LogAttr("GUID", sm.ctx),
+								utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
+								utils.LogAttr("stillInFlight", stillInFlight),
+							)
+						}
 					} else if sm.usedProviders.BatchNumber() == 0 && sm.policy.GetConsecutiveBatchErrors() == sm.config.SendRelayAttempts+1 {
 						sm.setStopReason("FirstMessageFailed")
 						utils.LavaFormatWarning("Failed Sending First Message", err, utils.LogAttr("consecutive errors", sm.policy.GetConsecutiveBatchErrors()), utils.LogAttr("GUID", sm.ctx))
 					} else {
 						sm.setStopReason("BatchSendFailed")
 					}
+					// The request is ending; a hedge the ticker asked for will never go out.
+					sm.hedgePending = false
 					go validateReturnCondition(err)
 				case SendRetry:
 					if sm.config.EnableTimeoutPriority {
@@ -437,6 +502,9 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 				)
 
 				if output.Action == ActionRetry {
+					// A retry after a completed attempt, not a hedge. Clear any hedge the ticker asked
+					// for and never got out, so this dispatch is not counted as that hedge firing.
+					sm.hedgePending = false
 					sm.stateTransition(sm.getLatestState(), nodeErrors, &output.Mutation)
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 				} else {
@@ -461,9 +529,9 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					utils.LavaFormatTrace("[StateMachine] ticker triggered", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
 					sm.stateTransition(sm.getLatestState(), nodeErrors, &output.Mutation)
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
-					if sm.analytics != nil {
-						sm.analytics.HedgeCount++
-					}
+					// Counted when the dispatch is confirmed, in the batchUpdate arm — asking for a
+					// hedge is not the same as sending one.
+					sm.hedgePending = true
 				}
 
 			case returnErr := <-returnCondition:
@@ -485,7 +553,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 						utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
 						utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 					)
-					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.stopReasonOr("ProcessingTimeout")}
+					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.endOfRoadReason(processingCtx.Err())}
 				}
 				return
 			}

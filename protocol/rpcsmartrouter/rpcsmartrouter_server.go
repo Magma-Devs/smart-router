@@ -52,6 +52,25 @@ const (
 	PairingInitializationTimeout = 30 * time.Second
 	PairingCheckInterval         = 1 * time.Second
 	RelayRetryBackoffDuration    = 2 * time.Millisecond
+
+	// internalRelayTryTimeout bounds ONE try of a relay the ROUTER sends for itself — the startup
+	// check and the recurring health monitor. It never applies to a customer request.
+	//
+	// Not to be confused with the endpoint prober (ProbeLoopInterval, recovery_probe.go), which is a
+	// separate mechanism with its own cadence; this is the timeout for the crafted GET_BLOCKNUM relay
+	// that sendCraftedRelays sends through the ordinary relay path.
+	//
+	// These relays ask a single question — "is this endpoint answering?" — so they have no business
+	// waiting a client-sized budget. They used to be bounded by the attempt WINDOW (about a second),
+	// because the window and the attempt lifetime were the same value. Separating those two clocks
+	// left them inheriting the request budget instead: 30s per try, and sendCraftedRelays runs up to
+	// MaxRelayRetries of them, so one hung endpoint could hold a health cycle for three minutes.
+	//
+	// Deliberately more generous than the window it replaces, so a slow chain's boot check is not cut
+	// shorter than before, and deliberately far below the 30s budget. Fixed rather than configurable:
+	// the right value does not vary by deployment, and a setting here is one more thing to
+	// misconfigure on a path no customer request touches.
+	internalRelayTryTimeout = 5 * time.Second
 )
 
 // implements Relay Sender interfaced and uses an ChainListener to get it called
@@ -828,16 +847,21 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 			usedEndpointsResets++
 			relayProcessor.GetUsedProviders().ClearUnwanted()
 		}
-		err = rpcss.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(ctx, protocolMessage), relayProcessor, nil, nil)
+		// One try, one short deadline. Bounding the try rather than the whole loop keeps the point of
+		// the loop — up to `retries` attempts at different endpoints — while stopping any single hung
+		// endpoint from consuming a client-sized budget. Cancelled on both exits below rather than
+		// deferred, so a hung attempt from this try does not outlive it.
+		tryCtx, cancelTry := context.WithTimeout(ctx, internalRelayTryTimeout)
+		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(tryCtx, protocolMessage), relayProcessor, nil, nil)
 		if errors.Is(err, lavasession.PairingListEmptyError) {
 			// we don't have pairings anymore, could be related to unwanted endpoints
 			relayProcessor.GetUsedProviders().ClearUnwanted()
-			err = rpcss.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(ctx, protocolMessage), relayProcessor, nil, nil)
+			err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(tryCtx, protocolMessage), relayProcessor, nil, nil)
 		}
 		if err != nil {
 			utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
 		} else {
-			err := relayProcessor.WaitForResults(ctx)
+			err := relayProcessor.WaitForResults(tryCtx)
 			if err != nil {
 				utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
 			} else {
@@ -861,6 +885,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 					// If this is the first time we send relays, we want to send all of them, instead of break on first successful relay
 					// That way, we populate the endpoints with the latest blocks with successful relays
 					if !initialRelays {
+						cancelTry()
 						break
 					}
 				} else if err != nil {
@@ -870,6 +895,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 				}
 			}
 		}
+		cancelTry()
 		time.Sleep(RelayRetryBackoffDuration)
 	}
 
@@ -883,7 +909,11 @@ func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays 
 		utils.LogAttr("apiInterface", rpcss.listenEndpoint.ApiInterface),
 	)
 
-	ctx := utils.WithUniqueIdentifier(context.Background(), utils.GenerateUniqueIdentifier())
+	// Cancellable, so the RelayProcessor built from it has a Done to give up on. Without one, an
+	// attempt that finishes after this function returns can park forever in SetResponse — the
+	// internal path has no client to disconnect and no deadline of its own to close the context.
+	ctx, cancel := context.WithCancel(utils.WithUniqueIdentifier(context.Background(), utils.GenerateUniqueIdentifier()))
+	defer cancel()
 	ok, relay, chainMessage, _ := rpcss.craftRelay(ctx)
 	if !ok {
 		return true, nil
@@ -1031,6 +1061,96 @@ func (rpcss *RPCSmartRouterServer) ParseRelay(
 	return protocolMessage, nil
 }
 
+// errUnknownWriteOutcome is returned when a write ended with no endpoint having answered. "Failed"
+// would be a claim we cannot support: our deadline cannot un-send a transaction, and reporting a
+// failure invites a resubmit of one that may already be on chain.
+var errUnknownWriteOutcome = errors.New("transaction status unclear: timeout reached before any node responded; the transaction may already have been submitted — verify on-chain before resubmitting")
+
+// writeOutcomeIsUnknown reports whether a failed request was a write whose outcome we do not know.
+//
+// The rule is silence: nothing succeeded, and some endpoint we asked did not answer at all — it may
+// be holding the transaction. A hung endpoint records no error, so any rule inspecting only the
+// error list misses it.
+//
+// Silence is not the whole of it. An endpoint whose connection died after the request went out has
+// come back without answering, so when everyone came back we still ask whether any of them was cut
+// off mid-delivery. A node error is a real reply and passes through untouched.
+//
+// No record at all means either an attempt still in flight (unknown) or a request that never
+// dispatched one (no pairings, everything filtered out). Only a request that spent its whole budget
+// can have had something in flight, hence the ranOutOfRoad argument.
+//
+// Evaluated here rather than in the results manager because a failed request reaches the client
+// through either of two branches in SendParsedRelay; deciding once keeps that invisible.
+func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) bool {
+	if chainlib.GetStateful(protocolMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+		return false
+	}
+	if relayProcessor == nil {
+		// The request failed before a processor existed, so nothing was ever dispatched.
+		return false
+	}
+
+	successResults, nodeErrors, protocolErrors := relayProcessor.GetResultsData()
+	answered := len(successResults) + len(nodeErrors) + len(protocolErrors)
+	// SessionsLatestBatch is per-batch and reset on each new one, while answered is cumulative.
+	// Comparable only because a write is a single batch — the stateful gate above is what keeps
+	// multi-batch requests out of this comparison.
+	dispatched := relayProcessor.GetUsedProviders().SessionsLatestBatch()
+
+	// A node error is a reply, so it settles that endpoint. A transport error may not: an
+	// unclassified one proves nothing, and a reset, EOF or timeout can arrive after the request was
+	// already on the wire.
+	cutOffMidDelivery := false
+	for _, protocolError := range protocolErrors {
+		// Unmatched errors classify as UNKNOWN_ERROR, which carries the flag for the same reason,
+		// so a nil check here would be dead code rather than a safety net.
+		if protocolError.LavaError != nil && protocolError.LavaError.MayHaveReachedNode {
+			cutOffMidDelivery = true
+			break
+		}
+	}
+
+	return unknownWriteOutcome(len(successResults), answered, dispatched,
+		requestRanOutOfRoad(relayProcessor.GetStopReason()), cutOffMidDelivery)
+}
+
+// withUnclearWriteStatus forces the HTTP status of an unclear-write reply to 500.
+//
+// Two statuses could otherwise reach the client, and both are wrong. buildFailureResult stamps 503
+// when every recorded failure was a rate limit, and 503 is the status clients treat as "safe to
+// retry" — precisely the wrong advice for a transaction that may already be broadcast, and it also
+// points the blame at the router rather than at an upstream. And a node error carries the node's own
+// status, typically 200, so an unclear write could go out looking like a success.
+//
+// Copied rather than mutated: returnedResult aliases a stored RelayResult, and the reply path is not
+// the owner of it.
+func withUnclearWriteStatus(result *common.RelayResult) *common.RelayResult {
+	if result == nil {
+		return nil
+	}
+	stamped := *result
+	stamped.StatusCode = http.StatusInternalServerError
+	return &stamped
+}
+
+// unknownWriteOutcome is the judgement, split out so it can be tested directly. Assumes the caller
+// has established that this is a failed write.
+func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad, cutOffMidDelivery bool) bool {
+	if successes > 0 {
+		return false // an endpoint served the write; that answer is the result
+	}
+	if answered == 0 {
+		return ranOutOfRoad // nothing recorded: in flight only if the budget was spent
+	}
+	if answered < dispatched {
+		return true // someone we asked is still silent, however loudly the others failed
+	}
+	// Everyone came back — but "came back" is not the same as answered. A connection that died
+	// after the request went out settles nothing about whether the node received it.
+	return cutOffMidDelivery
+}
+
 func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	ctx context.Context,
 	analytics *metrics.RelayMetrics,
@@ -1043,6 +1163,17 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 
 	relaySentTime := time.Now()
 	relayProcessor, err := rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
+
+	// Both failure returns below ask the same question, and the answer cannot differ between them.
+	// Memoised so the results snapshot and its two locks are taken once.
+	var unknownWriteOnce sync.Once
+	var unknownWriteAnswer bool
+	unknownWrite := func() bool {
+		unknownWriteOnce.Do(func() {
+			unknownWriteAnswer = writeOutcomeIsUnknown(protocolMessage, relayProcessor)
+		})
+		return unknownWriteAnswer
+	}
 	if err != nil && (relayProcessor == nil || !relayProcessor.HasResults()) {
 		userData := protocolMessage.GetUserData()
 		// we can't send anymore, and we don't have any responses
@@ -1056,6 +1187,15 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			if reason := relayProcessor.GetCrossValidationFailFastReason(); reason != "" {
 				return rpcss.crossValidationFailFast(reason, protocolMessage), err
 			}
+		}
+
+		if unknownWrite() {
+			utils.LavaFormatWarning("write outcome unknown", err,
+				utils.LogAttr("write_outcome", "unknown"),
+				utils.LogAttr("api", protocolMessage.GetApi().Name),
+				utils.LogAttr("GUID", ctx),
+			)
+			return nil, errUnknownWriteOutcome
 		}
 
 		return nil, err
@@ -1142,6 +1282,30 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// nothing is pending or no consensus was reached.
 	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName(), pendingProviders)
 
+	// Checked BEFORE the err branch, and independently of it. processNonCrossValidationResult returns
+	// the first node error with err == nil whenever there are no successes, so gating this on
+	// err != nil skipped exactly the case a write cares about most: one endpoint answered with an
+	// error inside an HTTP 200 while a sibling was still silent and may have broadcast. That request
+	// was reported to the client as the node's error, and counted as a SUCCESS in analytics.
+	//
+	// Safe to hoist: writeOutcomeIsUnknown returns false unless this is a stateful relay with no
+	// successes, so a served write and every read are unaffected.
+	if unknownWrite() {
+		if analytics != nil {
+			analytics.Success = false
+		}
+		utils.LavaFormatWarning("write outcome unknown", err,
+			utils.LogAttr("write_outcome", "unknown"),
+			utils.LogAttr("api", protocolMessage.GetApi().Name),
+			utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()),
+			utils.LogAttr("GUID", ctx),
+		)
+		// The reply keeps this request's headers; only the status and the message the client reads
+		// are replaced. The underlying error stays in the log line above rather than being
+		// concatenated into the reply — "failed relay, insufficient results" in front of "status
+		// unclear" would tell the customer both things at once.
+		return withUnclearWriteStatus(returnedResult), errUnknownWriteOutcome
+	}
 	if err != nil {
 		return returnedResult, utils.LavaFormatError("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
 	}
@@ -1661,13 +1825,19 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// Extract original request bytes (for batch support - we need to forward the original JSON)
 	originalRequestData := protocolMessage.RelayPrivateData().Data
 
-	// Get relay timeout
+	// Two clocks, deliberately separate. relayTimeout is the WINDOW: when the ticker dispatches the
+	// next endpoint. attemptBudget is how long an attempt may LIVE. They used to be one value, so an
+	// attempt was killed the instant the next was dispatched — and a method slower than the window
+	// could never succeed anywhere. The provider-side proxies never had this (CapTimeoutForSend has
+	// always used the processing budget).
 	_, averageBlockTime, _, _ := rpcss.chainParser.ChainBlockStats()
 	relayTimeout := chainlib.GetRelayTimeout(protocolMessage, averageBlockTime)
+	attemptBudget := common.GetTimeoutForProcessing(relayTimeout, chainlib.GetTimeoutInfo(protocolMessage))
 
 	utils.LavaFormatDebug("sending direct RPC relay",
 		utils.LogAttr("num_endpoints", len(sessions)),
-		utils.LogAttr("timeout", relayTimeout),
+		utils.LogAttr("window", relayTimeout),
+		utils.LogAttr("attempt_budget", attemptBudget),
 		utils.LogAttr("method", chainMessage.GetApi().Name),
 		utils.LogAttr("GUID", ctx),
 	)
@@ -1832,7 +2002,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// its context as soon as the quorum early-exits, which used to kill straggler relays mid-flight —
 	// their responses were silently dropped and never compared against the consensus. Detached
 	// stragglers run to completion (bounded by the reflection pre-check + SendDirectRelay's
-	// relayTimeout+url.Timeout window) and always push their response via the deferred SetResponse,
+	// attemptBudget+url.Timeout window) and always push their response via the deferred SetResponse,
 	// feeding the post-reply straggler watcher. Values (GUID, IP forwarding metadata) are preserved
 	// by WithoutCancel. Non-CV selections keep the batch cancel: aborting the hedged losers on first
 	// success is a deliberate resource-saver there. Trade-off: in CV mode a client disconnect no
@@ -1874,9 +2044,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		// Stamp a deliberately GENEROUS upper bound for the straggler watcher, anchored at launch.
 		// A detached goroutine's lifetime is the sum of individually-bounded phases — the gRPC
 		// reflection pre-check (≤ relayTimeout, see relayInnerDirect) THEN SendDirectRelay's
-		// relayTimeout+url.Timeout window THEN post-relay bookkeeping — so rather than track each
-		// phase precisely (they keep hiding), bound it at 2*relayTimeout + max url.Timeout + grace,
-		// which dominates any real relay-phase sum. The watcher normally exits early when the last
+		// attemptBudget+url.Timeout window THEN post-relay bookkeeping — so rather than track each
+		// phase precisely (they keep hiding), bound it at relayTimeout + attemptBudget + max
+		// url.Timeout + grace, which dominates any real relay-phase sum.
+		//
+		// The send phase is bounded by the ATTEMPT BUDGET, not the window: the old 2*relayTimeout
+		// form under-estimates once those two values differ, and would report a straggler still in
+		// flight as never received. The watcher normally exits early when the last
 		// straggler pushes, so this bound only bites when a goroutine genuinely leaks; then
 		// "not-received" is the honest outcome. Overshoot cost is holding the processor a little
 		// longer in that rare case.
@@ -1891,7 +2065,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				}
 			}
 		}
-		relayProcessor.SetCrossValidationRelayDeadline(time.Now().Add(2*relayTimeout + maxNodeTimeout + crossValidationStragglerGrace))
+		relayProcessor.SetCrossValidationRelayDeadline(time.Now().Add(relayTimeout + attemptBudget + maxNodeTimeout + crossValidationStragglerGrace))
 	}
 
 	// Launch goroutines for each direct RPC endpoint (parallel relay pattern)
@@ -1975,10 +2149,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				singleConsumerSession,
 				localRelayResult,
 				relayTimeout,
+				attemptBudget,
 				chainMessage,
 				originalRequestData,
 				analytics,
+				func() bool { return requestRanOutOfRoad(relayProcessor.GetStopReason()) },
 			)
+
+			// Did the request run out of road, or did we cut this attempt short? Decides below
+			// whether a relay that produced nothing is a hang or a race loser.
+			ranOutOfRoad := requestRanOutOfRoad(relayProcessor.GetStopReason())
 
 			// Did WE stop this relay? On a stateful broadcast every endpoint is queried and the
 			// first answer cancels the rest, so N-1 goroutines land here holding context.Canceled
@@ -1996,6 +2176,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// straggler goroutine; the per-relay outcome is passed explicitly.
 				outcome := metrics.RelayOutcomeSuccess
 				switch {
+				case isClientCancel && ranOutOfRoad:
+					// Silent when the budget ran out. Cancelled would keep it out of the error and
+					// latency series, which is right for a race loser and wrong for a hang.
+					outcome = metrics.RelayOutcomeError
 				case isClientCancel:
 					outcome = metrics.RelayOutcomeCancelled
 				case err != nil:
@@ -2064,12 +2248,26 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				holdoffURL = targetEndpoint.NetworkAddress
 			}
 
-			if isClientCancel {
-				// We cancelled it, so the endpoint's availability was never actually tested —
-				// release the session and return its CU without a QoS penalty (MAG-2648).
-				// Routing this through OnSessionFailure is the bug: it feeds AddFailedRelay and
-				// the optimizer an availability sample of 0, and on a broadcast that lands on
-				// every healthy node except the single fastest one.
+			if isClientCancel && ranOutOfRoad {
+				// Cancelled only because the request spent its whole budget with this endpoint
+				// still silent: a hang, not a race loser. A hang used to surface as DeadlineExceeded
+				// and land on the failure path by itself; now it is a cancellation, and without this
+				// branch it would take the MAG-2648 no-penalty path and be forgiven.
+				utils.LavaFormatInfo("endpoint produced no response before the budget ran out",
+					utils.LogAttr("endpoint", endpointAddress),
+					utils.LogAttr("budget", attemptBudget),
+					utils.LogAttr("waited", relayLatency),
+					utils.LogAttr("GUID", goroutineCtx),
+				)
+				if errSession := rpcss.sessionManager.OnSessionUnresponsive(singleConsumerSession, err); errSession != nil {
+					utils.LavaFormatWarning("OnSessionUnresponsive failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if isClientCancel {
+				// Cancelled while it still had budget left, so availability was never tested —
+				// release without a QoS penalty (MAG-2648). OnSessionFailure here would feed the
+				// optimizer a 0 and, on a broadcast, hit every healthy node but the fastest.
 				//
 				// This branch precedes the shouldFailSession test on purpose — a cancelled relay
 				// always has err != nil, so it would otherwise be swallowed by the failure arm.
@@ -4063,14 +4261,23 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 }
 
 // relayInnerDirect handles relay requests using direct RPC connections (smart router mode)
+// relayTimeout is the WINDOW — how long this endpoint is expected to take. attemptBudget is how
+// long the attempt may live. See sendRelayToDirectEndpoints for why the two must not be one value.
+//
+// budgetExpired reports whether the REQUEST ran out of budget, read at the moment the endpoint-health
+// decision is made rather than passed as a value, because it is only knowable once the attempt has
+// ended. It is what separates a hang from a cancellation for the per-URL health machinery: nil is
+// treated as "not expired", which is the safe default for callers with no request context (tests).
 func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	ctx context.Context,
 	singleConsumerSession *lavasession.SingleConsumerSession,
 	relayResult *common.RelayResult,
 	relayTimeout time.Duration,
+	attemptBudget time.Duration,
 	chainMessage chainlib.ChainMessage,
 	originalRequestData []byte,
 	analytics *metrics.RelayMetrics,
+	budgetExpired func() bool,
 ) (relayLatency time.Duration, err error, needsBackoff bool) {
 	// Get direct connection from session
 	directConnection, ok := singleConsumerSession.GetDirectConnection()
@@ -4080,7 +4287,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 	if rpcss.debugRelays {
 		utils.LavaFormatDebug("Sending direct RPC relay",
-			utils.LogAttr("timeout", relayTimeout),
+			utils.LogAttr("window", relayTimeout),
+			utils.LogAttr("attempt_budget", attemptBudget),
 			utils.LogAttr("method", chainMessage.GetApi().Name),
 			utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
 			utils.LogAttr("protocol", directConnection.GetProtocol()),
@@ -4125,7 +4333,9 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			// Bound the reflection lookup explicitly: it dials + queries the upstream's reflection
 			// service, and detached CV relay contexts carry no deadline — an upstream that accepts the
 			// connection but never answers would otherwise block this goroutine (and leak its session)
-			// forever, since the relay-timeout bound is only applied later inside SendDirectRelay.
+			// forever, since the attempt-budget bound is only applied later inside SendDirectRelay.
+			// Bounded by the WINDOW rather than the budget on purpose: this is a cheap capability
+			// probe, not the relay, and it should not be allowed to consume the whole request.
 			streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
 			isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
 			streamCheckCancel()
@@ -4159,7 +4369,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 	// Send relay directly to RPC endpoint
 	startTime := time.Now()
-	result, err := directSender.SendDirectRelay(ctx, chainMessage, relayTimeout)
+	result, err := directSender.SendDirectRelay(ctx, chainMessage, attemptBudget)
 	relayLatency = time.Since(startTime)
 
 	// Get endpoint for health tracking (use stored reference, not string lookup)
@@ -4217,8 +4427,18 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		}
 
 		// Decide endpoint health based on error classification.
+		//
+		// One condition, deliberately: if the REQUEST ran out of budget while this endpoint was still
+		// silent, that is a hang and it counts — whatever the context error happens to look like. Every
+		// other ending stays exempt, unchanged.
+		//
+		// Needed because a budget cancel reaches here indistinguishable from a race loser, and the
+		// client-cancellation carve-out returns early before looking at anything else. That carve-out is
+		// right for a race loser (MAG-2648) but it also swallowed genuine hangs, so a single bad URL
+		// behind a provider with several was never disabled, never probed for recovery, and never moved
+		// the health metric — while the provider's own QoS availability did drop.
 		var shouldMarkUnhealthy bool
-		shouldMarkUnhealthy, needsBackoff = classifyEndpointHealth(classified, isClientCancel)
+		shouldMarkUnhealthy, needsBackoff = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
 
 		// Apply health tracking based on error classification. The failing request is recorded
 		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,
@@ -4402,6 +4622,21 @@ func (rpcss *RPCSmartRouterServer) getMetadataFromRelayTrailer(metadataHeaders [
 	}
 }
 
+// requestRanOutOfRoad reports whether the request ended because its budget expired, rather than
+// because an attempt answered or the policy stopped it.
+//
+// It is the fairness test behind the availability verdict for a relay that produced nothing: did
+// this endpoint run out of road, or did we cut it short? "Was it given its full window" is the
+// wrong test — a hedge is dispatched AT the window, so a race loser has always been silent longer
+// than its window by the time it is cancelled, and blaming it is the MAG-2648 penalty.
+//
+// Trade: an endpoint that hangs while a different one answers is not blamed for that request. We
+// cancelled it early, so we do not know it hung; a real hang is still caught on every request that
+// has no other answer.
+func requestRanOutOfRoad(stopReason string) bool {
+	return stopReason == relaycore.StopReasonProcessingTimeout
+}
+
 // crossValidationStragglerGrace pads the straggler watcher's launch-anchored deadline to absorb the
 // overhead outside the bounded relay phases — goroutine scheduling before the relay clock starts, and
 // post-relay bookkeeping (tip harvest, OnSessionDone under session-manager locks) before the deferred
@@ -4439,7 +4674,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 		chainId, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 	}
 	// Deadline: the generous per-batch bound stamped at launch (see sendRelayToDirectEndpoints —
-	// 2*relayTimeout + max url.Timeout + grace, anchored at launch, dominating any real relay-phase
+	// relayTimeout + attemptBudget + max url.Timeout + grace, anchored at launch, dominating any real relay-phase
 	// sum). The watcher normally returns early when the last straggler pushes, so this only bounds a
 	// genuinely leaked goroutine. Fallback (callers that never launched a batch through
 	// sendRelayToDirectEndpoints) uses the same generous shape from now.
@@ -4448,7 +4683,8 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 		maxWait = time.Until(deadline)
 	} else {
 		_, averageBlockTime, _, _ := rpcss.chainParser.ChainBlockStats()
-		maxWait = 2*chainlib.GetRelayTimeout(protocolMessage, averageBlockTime) + crossValidationStragglerGrace
+		relayWindow := chainlib.GetRelayTimeout(protocolMessage, averageBlockTime)
+		maxWait = relayWindow + common.GetTimeoutForProcessing(relayWindow, chainlib.GetTimeoutInfo(protocolMessage)) + crossValidationStragglerGrace
 	}
 	if maxWait < crossValidationStragglerGrace {
 		maxWait = crossValidationStragglerGrace

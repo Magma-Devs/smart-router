@@ -97,6 +97,12 @@ type LavaError struct {
 	SubCategory ErrorSubCategory
 	Description string
 	Retryable   bool // retrying same relay with same params to a different provider has a chance of succeeding
+
+	// MayHaveReachedNode reports that the failure does not prove the request stayed inside this
+	// process. Connect-phase failures (refused, DNS, TLS, unreachable) do prove it; a deadline,
+	// reset or EOF leaves the upstream possibly holding the request. Matters for writes, where a
+	// transaction we cannot prove undelivered may already be broadcast.
+	MayHaveReachedNode bool
 }
 
 func (le *LavaError) String() string {
@@ -491,6 +497,10 @@ type errorMapping struct {
 var LavaErrorUnknown = &LavaError{
 	Code: 0, Name: "UNKNOWN_ERROR", Category: CategoryExternal,
 	Description: "Unclassified error — no matcher matched", Retryable: true,
+	// An error nobody matched proves nothing about whether the request left this process, and for
+	// a write the unprovable direction is the safe one: "unclear" is recoverable, a false
+	// "definitely failed" invites a resubmit of a transaction that may already be on chain.
+	MayHaveReachedNode: true,
 }
 
 // ---------------------------------------------------------------------------

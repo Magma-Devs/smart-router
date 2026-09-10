@@ -23,3 +23,16 @@ const (
 	Stateful                         // All top providers at once, waits for best result (no retries) or for all providers to return a response
 	CrossValidation                  // maxParticipants providers at once, no retries, waits for agreementThreshold matching responses
 )
+
+// StopReasonProcessingTimeout marks a request that ended because its budget expired. Availability
+// scoring uses it to tell an endpoint that ran out of road from one we cut short (MAG-2648).
+const StopReasonProcessingTimeout = "ProcessingTimeout"
+
+// StopReasonCallerGone marks a request whose context was cancelled from outside rather than by its
+// own deadline — a websocket or gRPC client that hung up mid-request.
+//
+// It exists so that ending is not spelled the same way as running out of budget. Availability
+// scoring reads the stop reason, and only the budget case may blame an endpoint: a caller closing
+// its connection says nothing about the endpoint still working on the answer. The HTTP listeners
+// build their request context from Background, so only the streaming transports reach this.
+const StopReasonCallerGone = "CallerGone"

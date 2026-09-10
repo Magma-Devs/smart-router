@@ -572,6 +572,11 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 	return latestCallback(currentLatestRequestedBlock, parsedBlock), earliestCallback(currentEarliestRequestedBlock, parsedBlock)
 }
 
+// GetRelayTimeout returns the per-attempt WINDOW: how long an endpoint is expected to take, and so
+// the interval after which the state machine dispatches another one.
+//
+// It is NOT how long an attempt may live — that is the processing budget, see
+// GetTimeoutForProcessing and sendRelayToDirectEndpoints.
 func GetRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Duration) time.Duration {
 	if chainMessage.TimeoutOverride() != 0 {
 		return chainMessage.TimeoutOverride()
@@ -585,7 +590,6 @@ func GetRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Dur
 	if chainMessage.GetApi().TimeoutMs > 0 {
 		relayTimeAddition = time.Millisecond * time.Duration(chainMessage.GetApi().TimeoutMs)
 	}
-	// Set relay timout, increase it every time we fail a relay on timeout
 	return extraRelayTimeout + relayTimeAddition
 }
 
