@@ -909,7 +909,15 @@ jobs:
                 metrics: []
                 behavior: {}
               nodes:
+                # PublicNode's free endpoint answers any request for a block behind
+                # head with "403 Archive requests require a personal token" (seen
+                # 2026-09-10; gate runs 34445468359 and 34446688209 both timed out
+                # here). The ETH1 spec's pruning verification asks for head minus 128
+                # at startup, so without this skip the router never reports ready and
+                # helm --wait expires. chain-id still runs. The chart renders this
+                # node-level key as skip-verifications on the node-url.
                 - name: "PublicNode"
+                  skip_verifications: "pruning"
                   endpoints:
                     - url: "https://ethereum-rpc.publicnode.com/"
                       interface: "jsonrpc"
