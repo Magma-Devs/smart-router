@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"syscall"
 	"testing"
 
@@ -129,20 +130,45 @@ func TestEndpointDisableReasonFor_RealTransportFaults(t *testing.T) {
 	}
 }
 
-// The two disable sites derive the reason by different mechanisms — site 1 through the registry,
-// site 2 from the raw HTTP status — so the same upstream 5xx is labelled differently depending on
-// which api-interface the customer configured. Pinned so the divergence is a decision on the record
-// rather than a surprise on a dashboard grouped by disable_reason.
-func TestEndpointDisableReason_FiveHundredDivergesByTransport(t *testing.T) {
-	viaJSONRPC := endpointDisableReasonFor(
-		classifyThroughRelayPath(&lavasession.HTTPStatusError{StatusCode: 503, Status: "503"}, common.TransportJsonRPC))
+// One upstream 5xx must produce ONE reason, whichever api-interface carried it.
+//
+// The two disable sites reach the status by different routes: JSON-RPC's sender wraps it into an
+// HTTPStatusError that arrives as an error, while REST returns (result, nil) with StatusCode set, so
+// it lands on the status branch instead. An earlier draft of this change let the second site name a
+// reason from the raw code (`http-server-error`), which split one incident into two reasons purely
+// by customer configuration — a dashboard grouped by disable_reason would have shown two
+// half-incidents and neither would have matched the outage. Both sites now classify through the
+// registry, so this pins the convergence rather than the divergence.
+func TestEndpointDisableReason_FiveHundredAgreesAcrossTransports(t *testing.T) {
+	for _, statusCode := range []int{500, 502, 503} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			// Site 1's route: the sender wrapped the status into an error.
+			viaJSONRPC := endpointDisableReasonFor(classifyThroughRelayPath(
+				&lavasession.HTTPStatusError{StatusCode: statusCode, Status: http.StatusText(statusCode)},
+				common.TransportJsonRPC))
 
-	// REST never reaches endpointDisableReasonFor at all: sendRESTRelay returns (result, nil) with
-	// StatusCode set, so the status branch at the call site hardcodes this constant instead.
-	viaREST := lavasession.EndpointDisableServerError
+			// Site 2's route: (result, nil) with StatusCode set, classified from the status alone.
+			// Mirrors the call in relayInnerDirect exactly — nil connection error, empty message.
+			viaREST := endpointDisableReasonFor(
+				common.ClassifyError(nil, common.ChainFamilyEVM, common.TransportREST, statusCode, ""))
 
-	require.Equal(t, lavasession.EndpointDisableNodeError, viaJSONRPC,
-		"a 5xx arrives at the JSON-RPC site already wrapped as an error, so it is classified by the registry")
-	require.NotEqual(t, viaJSONRPC, viaREST,
-		"documented divergence: one upstream 5xx incident splits into two reasons by api-interface")
+			require.Equal(t, lavasession.EndpointDisableNodeError, viaJSONRPC,
+				"a 5xx means the node answered and the answer was its own failure")
+			require.Equal(t, viaJSONRPC, viaREST,
+				"one upstream incident, one reason — the label must describe the fault, not the transport")
+		})
+	}
+}
+
+// 429 must never reach the disable path: a rate-limited endpoint is not an unhealthy one, and
+// benching it would remove capacity precisely when the upstream is asking for less load. Guarded
+// here because the enclosing status branch matches `>= 500 || == 429`, so the whole carve-out lives
+// in classifyHTTPStatus and nothing else pinned it.
+func TestClassifyHTTPStatus_RateLimitDoesNotDisable(t *testing.T) {
+	shouldMarkUnhealthy, needsBackoff := classifyHTTPStatus(http.StatusTooManyRequests)
+	require.False(t, shouldMarkUnhealthy, "a 429 must not disable the endpoint")
+	require.True(t, needsBackoff, "but it must still back off")
+
+	shouldMarkUnhealthy, _ = classifyHTTPStatus(http.StatusServiceUnavailable)
+	require.True(t, shouldMarkUnhealthy, "control: a 5xx does disable")
 }

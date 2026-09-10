@@ -4181,28 +4181,12 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		classified := extractLavaError(err)
 		if classified == nil {
 			// Fallback: derive transport and chain family, classify from scratch
-			transport := common.TransportJsonRPC
-			switch directConnection.GetProtocol() {
-			case lavasession.DirectRPCProtocolGRPC:
-				transport = common.TransportGRPC
-			case lavasession.DirectRPCProtocolHTTP, lavasession.DirectRPCProtocolHTTPS:
-				// HTTP could be JSON-RPC or REST — use the endpoint's API interface
-				if rpcss.listenEndpoint.ApiInterface == "rest" {
-					transport = common.TransportREST
-				}
-			}
-
-			// Resolve chain family for Tier 2 matchers
-			chainFamily := common.ChainFamily(-1)
-			if family, ok := common.GetChainFamily(rpcss.listenEndpoint.ChainID); ok {
-				chainFamily = family
-			}
-
 			errorCode := 0
 			if httpErr, ok := err.(*lavasession.HTTPStatusError); ok {
 				errorCode = httpErr.StatusCode
 			}
-			classified = common.ClassifyError(common.DetectConnectionError(err), chainFamily, transport, errorCode, err.Error())
+			classified = common.ClassifyError(common.DetectConnectionError(err),
+				rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection), errorCode, err.Error())
 		}
 
 		// PROTOCOL_CONTEXT_CANCELED is expected in two cases:
@@ -4265,10 +4249,15 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
-			// Decided on the status alone, without reading the body — so this is the case where the
-			// registry has told us nothing, and it is named separately from node-error to keep that
-			// visible rather than merged away.
-			targetEndpoint.MarkUnhealthy(lavasession.EndpointDisableServerError)
+			// Classify the status through the registry rather than naming a reason from the raw code.
+			// This branch is reached when the sender returned (result, nil) with an error status —
+			// REST's shape. The JSON-RPC sender wraps the same status into an HTTPStatusError that
+			// reaches the site above and is classified there, so deciding locally here would label one
+			// upstream 5xx incident two different ways depending only on the customer's api-interface,
+			// and a dashboard grouped by disable_reason would show two half-incidents.
+			statusClassified := common.ClassifyError(nil,
+				rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection), statusCode, "")
+			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(statusClassified))
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.LavaFormatDebug("endpoint returned error status",
 				utils.LogAttr("status", statusCode),
@@ -5171,6 +5160,34 @@ func metadataFromDirectiveHeaders(directiveHeaders map[string]string) []pairingt
 		metadata = append(metadata, pairingtypes.Metadata{Name: name, Value: value})
 	}
 	return metadata
+}
+
+// directRelayTransport resolves which registry transport a direct-RPC connection speaks, so an
+// error can be classified with the same Tier-2 matchers the sender would have used.
+//
+// Shared by the two disable sites in relayInnerDirect. It used to be inlined at the first of them
+// only, which is how the second site ended up deciding a reason from the raw HTTP status instead —
+// splitting one upstream 5xx incident into two disable reasons by api-interface.
+func (rpcss *RPCSmartRouterServer) directRelayTransport(directConnection lavasession.DirectRPCConnection) common.TransportType {
+	switch directConnection.GetProtocol() {
+	case lavasession.DirectRPCProtocolGRPC:
+		return common.TransportGRPC
+	case lavasession.DirectRPCProtocolHTTP, lavasession.DirectRPCProtocolHTTPS:
+		// HTTP could be JSON-RPC or REST — use the endpoint's API interface
+		if rpcss.listenEndpoint.ApiInterface == "rest" {
+			return common.TransportREST
+		}
+	}
+	return common.TransportJsonRPC
+}
+
+// directRelayChainFamily resolves the chain family for Tier 2 matchers, or ChainFamily(-1) when the
+// chain is not one the registry knows.
+func (rpcss *RPCSmartRouterServer) directRelayChainFamily() common.ChainFamily {
+	if family, ok := common.GetChainFamily(rpcss.listenEndpoint.ChainID); ok {
+		return family
+	}
+	return common.ChainFamily(-1)
 }
 
 // classifyHTTPStatus classifies an HTTP status code for endpoint health decisions.

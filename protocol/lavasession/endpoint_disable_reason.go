@@ -9,9 +9,8 @@ package lavasession
 //
 // The causes that matter are all one level down, and they lead to different actions:
 //
-//	unreachable        network, DNS, TLS, a firewall — the request never arrived
-//	node-error         the node answered, and the answer was its own failure
-//	http-server-error  the node answered 5xx
+//	unreachable  network, DNS, TLS, a firewall — the request never arrived
+//	node-error   the node answered, and the answer was its own failure
 //
 // Every one of those produced the identical line before this existed:
 //
@@ -20,7 +19,17 @@ package lavasession
 // The strings are operator-facing — they appear in that log line and in /debug/endpoint-state — so
 // the same two rules as BlockReason apply: say what HAPPENED rather than which counter tripped, and
 // prefer adding a value over redefining one, since renaming breaks dashboards and log queries.
-// MERGE NOTE — #340 (bench-after) adds a THIRD disable call site that this PR cannot see.
+//
+// The vocabulary is deliberately the registry's own Internal/External boundary and nothing else.
+// An earlier draft carried a third value, `http-server-error`, for the disable site that decides on
+// an HTTP status without reading the body. It was dropped before merge because it did not name a
+// KIND of fault: JSON-RPC wraps a 5xx into an HTTPStatusError that reaches the registry and lands on
+// node-error, while REST returns it as a status and reached the status branch — so one upstream 5xx
+// incident split into two reasons purely by which api-interface the customer had configured, and a
+// dashboard grouped by reason would have shown two half-incidents. Both sites now classify through
+// the registry, so the label describes the fault rather than the transport that carried it.
+//
+// MERGE NOTE — #340 (bench-after) adds a THIRD disable call site that this branch cannot see.
 //
 // #340 introduces a disable for a node error delivered inside an HTTP 200 — the freeze it exists to
 // fix — at rpcsmartrouter_server.go. Merging the two branches is a COMPILE ERROR, not a silent
@@ -42,26 +51,30 @@ const (
 	//
 	// Actionable as an infrastructure problem: the address, the network path, or the credentials
 	// needed to open the connection.
+	//
+	// KNOWN GAP (MAG-3563): DNS, TLS and EOF faults do NOT reach this value today. The shared
+	// classifier has no branch for *net.DNSError, x509 errors or io.EOF, so they fall through to
+	// LavaErrorUnknown — CategoryExternal — and are recorded as node-error despite no node having
+	// answered. Pinned by the KNOWN-WRONG rows in
+	// rpcsmartrouter/endpoint_disable_reason_mapping_test.go, which turn red when MAG-3563 lands.
 	EndpointDisableUnreachable EndpointDisableReason = "unreachable"
 
 	// EndpointDisableNodeError — the node answered, and the answer was its own failure: an internal
-	// error, a bad gateway, not-ready-yet. CategoryExternal and retryable, with none of the
-	// not-at-fault subcategories.
+	// error, a bad gateway, not-ready-yet, an HTTP 5xx. CategoryExternal and retryable, with none of
+	// the not-at-fault subcategories.
 	//
 	// Actionable as a node problem: the process is up and reachable but cannot serve.
 	EndpointDisableNodeError EndpointDisableReason = "node-error"
 
-	// EndpointDisableServerError — the node answered with an HTTP 5xx, decided on the status alone
-	// without reading the body.
-	//
-	// Kept distinct from node-error even though both mean "it answered badly": this one carries no
-	// registry classification at all, so it is the case where we know least. Merging them would hide
-	// that.
-	EndpointDisableServerError EndpointDisableReason = "http-server-error"
-
 	// EndpointDisableUnspecified — an endpoint was disabled without naming a reason. This is a bug:
 	// every call site names one. It exists so a missing reason is visibly wrong rather than an empty
 	// string that reads like "no reason needed".
+	//
+	// Unreachable by construction today — every call site passes a named constant, and the two
+	// normalisation guards that can produce it (markUnhealthyAt's empty check and
+	// endpointDisableReasonFor's nil check) are both dead on current callers. They are kept as
+	// invariant guards so a FUTURE call site cannot introduce a silently empty reason, and both are
+	// pinned by tests rather than left to be rediscovered.
 	EndpointDisableUnspecified EndpointDisableReason = "unspecified"
 )
 
@@ -70,15 +83,20 @@ const (
 var allEndpointDisableReasons = []EndpointDisableReason{
 	EndpointDisableUnreachable,
 	EndpointDisableNodeError,
-	EndpointDisableServerError,
 	EndpointDisableUnspecified,
 }
 
-// AllEndpointDisableReasons lists every reason a disable can carry, so a per-reason gauge can
-// publish a zero for the ones not currently in use and stay self-correcting.
+// AllEndpointDisableReasons lists every reason a disable can carry.
 //
-// Keep in sync with the constants above — a reason missing here is a series that never returns to 0
-// once it has fired. TestEndpointDisableReasons_ListCoversEveryDeclaredConstant guards that.
+// It has no production caller yet. It exists for a per-reason gauge that is NOT wired in this
+// change — smartrouter_csm_disabled_endpoints_by_reason, mirroring how AllBlockReasons feeds
+// smartrouter_csm_blocked_providers_by_reason — so that gauge can publish a zero for the reasons not
+// currently in use and stay self-correcting. Tracked in the PR's "Follow-up, not in this PR"
+// section. Until then it is used only by the coverage test below.
+//
+// Keep in sync with the constants above — a reason missing here would, once that gauge exists, be a
+// series that never returns to 0 after it has fired.
+// TestEndpointDisableReasons_ListCoversEveryDeclaredConstant guards that by scanning this file.
 //
 // The returned slice is shared; callers must not mutate it.
 func AllEndpointDisableReasons() []EndpointDisableReason { return allEndpointDisableReasons }

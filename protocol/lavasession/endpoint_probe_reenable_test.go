@@ -17,12 +17,21 @@ var probeBase = time.Unix(1_700_000_000, 0)
 
 // disableAt drives an endpoint to the disabled state via the relay path at a fixed instant, so
 // disabledAt is deterministic (edge-triggered on the actual Enabled→false transition).
-func disableAt(t *testing.T, e *Endpoint, at time.Time) {
+//
+// The reason is a parameter because the disable-reason tests need to vary it; every other caller
+// wants "some disable happened" and passes EndpointDisableUnreachable via disableAtDefault.
+func disableAtWithReason(t *testing.T, e *Endpoint, at time.Time, reason EndpointDisableReason) {
 	t.Helper()
 	for i := 0; i < MaxConsecutiveConnectionAttempts; i++ {
-		e.markUnhealthyAt(at, EndpointDisableUnreachable)
+		e.markUnhealthyAt(at, reason)
 	}
 	require.False(t, e.Enabled, "endpoint must be disabled after the relay disable threshold")
+}
+
+// disableAt is disableAtWithReason for the tests that do not care which reason took the endpoint out.
+func disableAt(t *testing.T, e *Endpoint, at time.Time) {
+	t.Helper()
+	disableAtWithReason(t, e, at, EndpointDisableUnreachable)
 }
 
 // healthyPoll is a valid post-disable recovery verdict: a successful poll at pollTime, keeping up.
