@@ -21,17 +21,23 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      # golangci-lint is currently advisory on this repo: the fork is on
-      # Go 1.26 and earlier golangci-lint releases refuse to lint a newer
-      # toolchain than they were built with. Once a stable v2.x is pinned
-      # and known to produce a clean run against this codebase, drop the
-      # continue-on-error flags on the retries.
+      # golangci-lint GATES this repo: a finding fails the job.
+      #
+      # The version is pinned rather than tracking `latest` so that a linter
+      # release cannot change the finding set without a change here. The pin
+      # has a floor as well as a ceiling: golangci-lint refuses to lint a Go
+      # toolchain newer than the one it was built with, and this module is on
+      # go 1.26 — v2.13.1's release binary is built with go1.27.0, which is
+      # what makes it usable. Re-run the linter locally before moving the pin.
+      #
+      # The first two attempts are advisory so an install or network flake
+      # retries rather than failing the job; the third one decides.
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         continue-on-error: true
         id: lint_first_try
         with:
-          version: latest
+          version: v2.13.1
           args: --config .golangci.yml -v
 
       - name: Lint Retry 1
@@ -40,20 +46,18 @@ jobs:
         continue-on-error: true
         id: lint_retry_1
         with:
-          version: latest
+          version: v2.13.1
           args: --config .golangci.yml -v
 
       - name: Lint Retry 2
         if: steps.lint_retry_1.outcome == 'failure'
         uses: golangci/golangci-lint-action@v9
-        continue-on-error: true
         id: lint_retry_2
         with:
-          version: latest
+          version: v2.13.1
           args: --config .golangci.yml -v
 
-  # Supply-chain vuln scan. Unlike golangci-lint above (advisory while the
-  # Go 1.26 toolchain outpaces stable linter releases), this job GATES: a
+  # Supply-chain vuln scan. Like golangci-lint above, this job GATES: a
   # known-vulnerable dependency or stdlib version should block the merge.
   # govulncheck is call-graph aware — it only flags advisories whose
   # vulnerable symbols are actually reachable from this codebase, so it
