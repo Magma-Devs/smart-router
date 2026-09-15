@@ -40,8 +40,8 @@ func newCancellableTestSession(t *testing.T, address string) (*ConsumerSessionMa
 }
 
 func TestOnSessionCancelledReturnsReservationWithoutPenalty(t *testing.T) {
-	csm, parent, session, usedProviders, routerKey := newCancellableTestSession(t, "provider-race-loser")
-	usedProviders.ReleaseFromLatestBatch("provider-race-loser", routerKey, context.Canceled)
+	csm, parent, session, usedProviders, _ := newCancellableTestSession(t, "provider-race-loser")
+	require.Equal(t, 1, usedProviders.CurrentlyUsed())
 
 	require.NoError(t, csm.OnSessionCancelled(session, context.Canceled))
 
@@ -49,6 +49,8 @@ func TestOnSessionCancelledReturnsReservationWithoutPenalty(t *testing.T) {
 		require.Zero(t, parent.atomicReadUsedComputeUnits(), "reserved CU must be returned")
 		require.Zero(t, session.LatestRelayCu)
 		require.Zero(t, usedProviders.CurrentlyUsed())
+		require.Equal(t, 1, usedProviders.SessionsLatestBatch())
+		require.Equal(t, 1, usedProviders.SessionsDispatched())
 	})
 	t.Run("no blame recorded", func(t *testing.T) {
 		require.Empty(t, session.ConsecutiveErrors,
@@ -67,8 +69,7 @@ func TestOnSessionCancelledReturnsReservationWithoutPenalty(t *testing.T) {
 // relay must leave both counts untouched — counting it as "total but not answered" is
 // precisely what dragged availability toward zero.
 func TestOnSessionCancelledLeavesQoSUntouched(t *testing.T) {
-	csm, _, session, usedProviders, routerKey := newCancellableTestSession(t, "provider-qos")
-	usedProviders.ReleaseFromLatestBatch("provider-qos", routerKey, context.Canceled)
+	csm, _, session, _, _ := newCancellableTestSession(t, "provider-qos")
 
 	epoch := csm.atomicReadCurrentEpoch()
 	totalBefore := csm.qosManager.GetTotalRelays(epoch, session.SessionId)
@@ -84,8 +85,7 @@ func TestOnSessionCancelledLeavesQoSUntouched(t *testing.T) {
 // COLLATERAL GUARD: a genuine failure must still be penalised, so the carve-out cannot be
 // accused of hiding real faults.
 func TestOnSessionFailureStillRecordsPenalty(t *testing.T) {
-	csm, _, session, usedProviders, routerKey := newCancellableTestSession(t, "provider-real-fault")
-	usedProviders.ReleaseFromLatestBatch("provider-real-fault", routerKey, nil)
+	csm, _, session, _, _ := newCancellableTestSession(t, "provider-real-fault")
 
 	epoch := csm.atomicReadCurrentEpoch()
 	totalBefore := csm.qosManager.GetTotalRelays(epoch, session.SessionId)
