@@ -1077,8 +1077,8 @@ var errUnknownWriteOutcome = errors.New("transaction status unclear: timeout rea
 // off mid-delivery. A node error is a real reply and passes through untouched.
 //
 // No record at all means either an attempt still in flight (unknown) or a request that never
-// dispatched one (no pairings, everything filtered out). Only a request that spent its whole budget
-// can have had something in flight, hence the ranOutOfRoad argument.
+// dispatched one (no pairings, everything filtered out, or a deadline before dispatch). An expired
+// deadline alone does not prove delivery; uncertainty requires at least one dispatched endpoint.
 //
 // Evaluated here rather than in the results manager because a failed request reaches the client
 // through either of two branches in SendParsedRelay; deciding once keeps that invisible.
@@ -1139,6 +1139,9 @@ func withUnclearWriteStatus(result *common.RelayResult) *common.RelayResult {
 // unknownWriteOutcome is the judgement, split out so it can be tested directly. Assumes the caller
 // has established that this is a failed write.
 func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad, cutOffMidDelivery bool) bool {
+	if dispatched == 0 {
+		return false // no endpoint was asked, so none can hold the transaction
+	}
 	if successes > 0 {
 		return false // an endpoint served the write; that answer is the result
 	}
