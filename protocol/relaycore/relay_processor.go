@@ -395,12 +395,28 @@ func (rp *RelayProcessor) NodeResults() []common.RelayResult {
 // Giving up on rp.ctx rather than dropping on a full buffer: while the request is alive a full
 // buffer is transient and the response is still wanted, so blocking is correct. Only once the
 // request is over is the result genuinely unreadable.
+//
+// The send is attempted on its own FIRST, and that ordering is the whole contract for
+// cross-validation. rp.ctx is ProcessRelaySend's, cancelled the moment the quorum early-exits —
+// which is BEFORE the straggler watcher starts, so every detached straggler pushes into an
+// already-cancelled ctx. Both cases of a two-arm select would then be ready (a closed Done, and a
+// buffer with room, because WaitForResults drained everything that arrived before the exit) and Go
+// picks among ready cases at random: roughly half of all late responses would vanish, be missing
+// from the ResultsManager too, and so be reported not-received by a watcher that was about to read
+// them. Trying the send alone keeps the give-up arm for the state it was written for — a buffer
+// that is genuinely full — and nothing else.
 func (rp *RelayProcessor) SetResponse(response *RelayResponse) {
 	if rp == nil {
 		return
 	}
 	if response == nil {
 		return
+	}
+	select {
+	case rp.responses <- response:
+		return
+	default:
+		// Buffer full. Only now is giving up a choice between a dropped response and a leak.
 	}
 	select {
 	case rp.responses <- response:
