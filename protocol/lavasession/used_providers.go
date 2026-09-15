@@ -56,7 +56,12 @@ type UsedProviders struct {
 	originalUnwantedProviders map[string]struct{}
 	selecting                 bool
 	sessionsLatestBatch       int
-	batchNumber               int
+	// sessionsDispatched is sessionsLatestBatch without the per-batch reset: how many sessions this
+	// request has dispatched in total. Callers comparing against a CUMULATIVE tally — "did everyone
+	// we asked come back?" — need this one; sessionsLatestBatch answers a per-batch question and
+	// silently means something else the moment a request runs a second batch.
+	sessionsDispatched int
+	batchNumber        int
 	// chainID is used for chain-aware unsupported-method detection (so
 	// chain-native messages don't collide with broad Tier-1 substring
 	// matchers). Empty means classification falls back to Tier-1 only.
@@ -114,6 +119,18 @@ func (up *UsedProviders) SessionsLatestBatch() int {
 	up.lock.RLock()
 	defer up.lock.RUnlock()
 	return up.sessionsLatestBatch
+}
+
+// SessionsDispatched returns how many sessions this request has dispatched across every batch.
+// Use it, not SessionsLatestBatch, whenever the other side of the comparison is cumulative.
+func (up *UsedProviders) SessionsDispatched() int {
+	if up == nil {
+		utils.LavaFormatError("UsedProviders.SessionsDispatched is nil, misuse detected", nil)
+		return 0
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return up.sessionsDispatched
 }
 
 func (up *UsedProviders) BatchNumber() int {
@@ -245,6 +262,10 @@ func (up *UsedProviders) ReleaseFromLatestBatch(provider string, routerKey Route
 	if up.sessionsLatestBatch > 0 {
 		up.sessionsLatestBatch--
 	}
+	// Same reason: this provider never dispatched, so it must not count as one we asked.
+	if up.sessionsDispatched > 0 {
+		up.sessionsDispatched--
+	}
 }
 
 func (up *UsedProviders) RemoveUsed(provider string, routerKey RouterKey, err error) {
@@ -335,6 +356,7 @@ func (up *UsedProviders) AddUsed(sessions ConsumerSessionsMap, err error) {
 			uniqueUsedProviders := up.createOrUseUniqueUsedProvidersForKey(routerKey)
 			uniqueUsedProviders.providers[provider] = struct{}{}
 			up.sessionsLatestBatch++
+			up.sessionsDispatched++
 		}
 		// increase batch number
 		up.batchNumber++

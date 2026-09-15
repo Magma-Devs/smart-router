@@ -188,3 +188,33 @@ func TestWithUnclearWriteStatus(t *testing.T) {
 		require.Equal(t, 500, stamped.StatusCode)
 	})
 }
+
+// A write is not always a single batch, and the verdict's two counts must stay comparable when it
+// is not. relaypolicy carves out a retry for a stateful relay whose whole batch was rate limited —
+// the upstream refused before executing anything, so nothing is at risk from trying elsewhere. That
+// second batch resets the per-batch session count while the answered tally keeps climbing, so a
+// verdict reading the per-batch number sees FEWER endpoints than have already answered and concludes
+// everyone came back — while the retry's endpoint is still silent and may be holding the transaction.
+func TestWriteOutcomeIsUnknown_SecondBatchWithASilentEndpoint(t *testing.T) {
+	msg := writeMessage(common.CONSISTENCY_SELECT_ALL_PROVIDERS)
+	processor := newWriteOutcomeProcessor(t, msg, 2)
+
+	// Refusals on purpose: a refused connection proves nothing was delivered to THAT endpoint, so
+	// neither the silence clause nor the mid-delivery clause can be what produces the answer. Only
+	// the count of endpoints still owing one can.
+	relaycoretest.SendProtocolError(processor, "lava@a", 0, errors.New("connection refused"))
+	relaycoretest.SendProtocolError(processor, "lava@b", 0, errors.New("connection refused"))
+	drain(t, processor)
+
+	// The retry lands on a third endpoint, which never answers.
+	processor.GetUsedProviders().AddUsed(lavasession.ConsumerSessionsMap{"lava@c": &lavasession.SessionInfo{}}, nil)
+	processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
+
+	require.Equal(t, 1, processor.GetUsedProviders().SessionsLatestBatch(),
+		"the per-batch count now reads 1 while two endpoints have already answered — the trap this covers")
+	require.Equal(t, 3, processor.GetUsedProviders().SessionsDispatched(),
+		"three endpoints were asked across the two batches")
+
+	require.True(t, writeOutcomeIsUnknown(msg, processor),
+		"the retry's endpoint is still silent and may have broadcast; telling the customer the write failed invites a resubmit")
+}
