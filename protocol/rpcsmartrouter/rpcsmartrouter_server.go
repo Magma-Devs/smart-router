@@ -1093,10 +1093,12 @@ func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProces
 
 	successResults, nodeErrors, protocolErrors := relayProcessor.GetResultsData()
 	answered := len(successResults) + len(nodeErrors) + len(protocolErrors)
-	// SessionsLatestBatch is per-batch and reset on each new one, while answered is cumulative.
-	// Comparable only because a write is a single batch — the stateful gate above is what keeps
-	// multi-batch requests out of this comparison.
-	dispatched := relayProcessor.GetUsedProviders().SessionsLatestBatch()
+	// Both sides of this comparison must count the same thing. answered is cumulative, so dispatched
+	// is too: SessionsLatestBatch resets on each new batch, and a write is NOT always a single batch
+	// — relaypolicy carves out a retry for a stateful relay whose whole batch was rate limited (the
+	// upstream refused before executing anything). On that path a per-batch count reads as fewer
+	// endpoints than answered, and the verdict flips to "failed" while one is still silent.
+	dispatched := relayProcessor.GetUsedProviders().SessionsDispatched()
 
 	// A node error is a reply, so it settles that endpoint. A transport error may not: an
 	// unclassified one proves nothing, and a reset, EOF or timeout can arrive after the request was

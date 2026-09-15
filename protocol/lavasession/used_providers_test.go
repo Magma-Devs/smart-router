@@ -244,3 +244,36 @@ func TestDecideEligibility(t *testing.T) {
 		}
 	})
 }
+
+// SessionsLatestBatch answers "how many did THIS batch launch"; SessionsDispatched answers "how
+// many has this request asked in total". They are the same number until a second batch runs, which
+// is exactly when a caller that picked the wrong one starts getting a wrong answer with no symptom.
+func TestUsedProviders_SessionsDispatchedIsCumulativeAcrossBatches(t *testing.T) {
+	usedProviders := NewUsedProviders(nil)
+
+	usedProviders.AddUsed(ConsumerSessionsMap{
+		"lava@a": &SessionInfo{},
+		"lava@b": &SessionInfo{},
+	}, nil)
+	require.Equal(t, 2, usedProviders.SessionsLatestBatch())
+	require.Equal(t, 2, usedProviders.SessionsDispatched())
+
+	// A retry. SessionsLatestBatch resets to describe the new batch alone.
+	usedProviders.AddUsed(ConsumerSessionsMap{"lava@c": &SessionInfo{}}, nil)
+	require.Equal(t, 1, usedProviders.SessionsLatestBatch(),
+		"the per-batch count describes the latest batch only — that is its job")
+	require.Equal(t, 3, usedProviders.SessionsDispatched(),
+		"three endpoints were asked; a cumulative comparison must see all three")
+
+	// A provider dropped by a pre-dispatch filter was never asked, so it leaves both counts.
+	usedProviders.ReleaseFromLatestBatch("lava@c", NewRouterKey(nil), nil)
+	require.Equal(t, 0, usedProviders.SessionsLatestBatch())
+	require.Equal(t, 2, usedProviders.SessionsDispatched(),
+		"released before dispatch means never asked, in the cumulative count too")
+
+	// A provider that ANSWERED goes through RemoveUsed, which must leave both alone — it did
+	// dispatch, and the caller compares it against the responses it produced.
+	usedProviders.RemoveUsed("lava@a", NewRouterKey(nil), nil)
+	require.Equal(t, 2, usedProviders.SessionsDispatched(),
+		"a provider that answered still counts as one we asked")
+}
