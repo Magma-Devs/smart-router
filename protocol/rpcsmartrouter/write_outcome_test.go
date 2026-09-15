@@ -15,7 +15,7 @@ import (
 // worst of the three answers: it invites a resubmit of a transaction that may already be on chain.
 //
 // The rule is silence. A node's own reply passes through untouched; a connect-phase failure proves
-// nothing was sent; anything else, including no evidence at all, leaves the outcome unknown.
+// nothing was sent; a missing reply leaves the outcome unknown only if an endpoint was dispatched.
 func TestUnknownWriteOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name                            string
@@ -63,8 +63,8 @@ func TestUnknownWriteOutcome(t *testing.T) {
 			why: "no pairings — claiming the transaction may be on chain is the same lie, pointing the other way",
 		},
 		{
-			name: "nothing recorded but the budget was spent", answered: 0, dispatched: 0, ranOutOfRoad: true, want: true,
-			why: "only a request that used its whole budget can have had an attempt in flight",
+			name: "deadline expired before any endpoint was dispatched", answered: 0, dispatched: 0, ranOutOfRoad: true, want: false,
+			why: "an expired deadline does not imply that the transaction was sent to an endpoint",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

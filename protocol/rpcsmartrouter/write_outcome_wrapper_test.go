@@ -57,6 +57,41 @@ func writeMessage(stateful uint32) *MockProtocolMessage {
 	}
 }
 
+type expiredWriteChainParser struct{ chainlib.ChainParser }
+
+func (expiredWriteChainParser) ChainBlockStats() (int64, time.Duration, uint32, uint32) {
+	return 0, time.Second, 0, 0
+}
+
+type expiredWriteProtocolMessage struct{ *MockProtocolMessage }
+
+func (expiredWriteProtocolMessage) GetApiCollection() *spectypes.ApiCollection {
+	return &spectypes.ApiCollection{}
+}
+
+func TestSendParsedRelay_ExpiredBeforeWriteDispatch(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	msg := expiredWriteProtocolMessage{writeMessage(common.CONSISTENCY_SELECT_ALL_PROVIDERS)}
+	server := &RPCSmartRouterServer{
+		listenEndpoint:      &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		chainParser:         expiredWriteChainParser{},
+		sessionManager:      &lavasession.ConsumerSessionManager{},
+		relayRetriesManager: lavaprotocol.NewRelayRetriesManager(),
+	}
+
+	// The real state machine can report a timeout without dispatching an endpoint.
+	processor, err := server.ProcessRelaySend(ctx, msg, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Zero(t, processor.GetUsedProviders().SessionsDispatched())
+	require.Equal(t, relaycore.StopReasonProcessingTimeout, processor.GetStopReason())
+
+	// Preserve that error through the client-facing path: no node could hold this write.
+	result, err := server.SendParsedRelay(ctx, nil, msg)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
 	t.Run("a read is never given the write message", func(t *testing.T) {
 		msg := writeMessage(common.NO_STATE)
