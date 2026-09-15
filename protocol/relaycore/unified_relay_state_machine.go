@@ -51,10 +51,15 @@ type UnifiedRelayStateMachine struct {
 	// for a request. It is a fact about the request, not about the window, so repeating it once per
 	// window says nothing new — roughly 180 identical lines on a 180s request.
 	//
-	// Both are touched only from the select loop in GetRelayTaskChannel, which is a single
-	// goroutine, so neither needs a lock.
+	// pendingStopReason holds a reason that was decided while attempts were STILL IN FLIGHT, so it
+	// describes the dispatcher rather than the request's ending. It becomes the stop reason only if
+	// the request goes on to end with nothing in flight — see recordStopReason and settleStopReason.
+	//
+	// All three are touched only from the select loop in GetRelayTaskChannel, which is a single
+	// goroutine, so none needs a lock.
 	hedgePending       bool
 	pairingEmptyWarned bool
+	pendingStopReason  string
 }
 
 // setStopReason records why the state machine is stopping. Last writer wins: a request that
@@ -79,6 +84,46 @@ func (sm *UnifiedRelayStateMachine) stopReasonOr(fallback string) string {
 		return reason
 	}
 	return fallback
+}
+
+// relaysInFlight reports whether any attempt from this request is still running.
+func (sm *UnifiedRelayStateMachine) relaysInFlight() bool {
+	return sm.usedProviders != nil && sm.usedProviders.CurrentlyUsed() > 0
+}
+
+// recordStopReason records why there will be no further attempt — which is not the same claim as
+// "the request is over", now that an attempt outlives the window that dispatched it.
+//
+// Every reason on these paths is decided while relays may still be running: the policy's own branch
+// says so ("in-flight relays from earlier batches may still succeed"), and the circuit breaker's
+// warning says so too ("relays already in flight may still answer"). A reason filed then describes
+// the dispatcher, and it would take the slot the timeout needs — availability scoring blames an
+// endpoint only on StopReasonProcessingTimeout, so a hung endpoint on a request that really did run
+// out of budget would be forgiven because the pool had emptied, or the retries had run out, minutes
+// earlier. That was harmless while an attempt died at its window, because "cannot start more" and
+// "the request is over" were then the same instant.
+//
+// So it is held rather than dropped: if the last attempt finishes before the budget, this is still
+// the honest reason and settleStopReason promotes it. If the budget expires first, the timeout is.
+func (sm *UnifiedRelayStateMachine) recordStopReason(reason string) {
+	if sm.relaysInFlight() {
+		sm.pendingStopReason = reason
+		return
+	}
+	sm.setStopReason(reason)
+}
+
+// settleStopReason names the request's stop reason at the one moment it is certainly over: the
+// return condition, which fires only once nothing is in flight. A reason held back by
+// recordStopReason is the right answer here and nowhere earlier.
+func (sm *UnifiedRelayStateMachine) settleStopReason() string {
+	if reason := sm.getStopReason(); reason != "" {
+		return reason
+	}
+	if sm.pendingStopReason != "" {
+		sm.setStopReason(sm.pendingStopReason)
+	}
+	return sm.getStopReason()
 }
 
 func NewUnifiedRelayStateMachine(
@@ -422,16 +467,13 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					// the exhaustion cases an operator reads the line to understand.
 					if isPairingListEmpty && sm.config.EnableCircuitBreaker {
 						// "Exhausted" describes the dispatcher, not the endpoints: the pool is empty
-						// because every provider is already busy on this request. Only name the stop
-						// reason when the request is really stopping — attempts now outlive their
-						// window, so a reason recorded here would describe a stop that never happens
-						// and take the slot the timeout needs for availability scoring.
+						// because every provider is already busy on this request. recordStopReason
+						// holds it back while that is true, so it cannot take the slot the timeout
+						// needs for availability scoring.
 						// Read once: the log is the evidence for this decision, so it has to report
 						// the value the decision actually used.
 						stillInFlight := sm.usedProviders.CurrentlyUsed()
-						if stillInFlight == 0 {
-							sm.setStopReason("AllProvidersExhausted")
-						}
+						sm.recordStopReason("AllProvidersExhausted")
 						// Once per request, not once per window. The ticker keeps asking for a hedge
 						// while an attempt is in flight, and every ask lands here, so an unconditional
 						// WARNING produced one identical line per window for the whole request.
@@ -452,10 +494,10 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 							)
 						}
 					} else if sm.usedProviders.BatchNumber() == 0 && sm.policy.GetConsecutiveBatchErrors() == sm.config.SendRelayAttempts+1 {
-						sm.setStopReason("FirstMessageFailed")
+						sm.recordStopReason("FirstMessageFailed")
 						utils.LavaFormatWarning("Failed Sending First Message", err, utils.LogAttr("consecutive errors", sm.policy.GetConsecutiveBatchErrors()), utils.LogAttr("GUID", sm.ctx))
 					} else {
-						sm.setStopReason("BatchSendFailed")
+						sm.recordStopReason("BatchSendFailed")
 					}
 					// The request is ending; a hedge the ticker asked for will never go out.
 					sm.hedgePending = false
@@ -508,7 +550,11 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					sm.stateTransition(sm.getLatestState(), nodeErrors, &output.Mutation)
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 				} else {
-					sm.setStopReason(output.Reason)
+					// Held back, not filed, while relays are still in flight — the same reason the
+					// line below does not return immediately. One of them may still answer, and if
+					// none does because the budget ran out, that timeout is what the request stopped
+					// for and what availability scoring has to read.
+					sm.recordStopReason(output.Reason)
 					// Don't return immediately — in-flight relays from earlier batches
 					// may still succeed. validateReturnCondition waits 15ms and checks
 					// whether any relays are still CurrentlyUsed before concluding.
@@ -536,7 +582,9 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 
 			case returnErr := <-returnCondition:
 				utils.LavaFormatTrace("[StateMachine] returnErr := <-returnCondition", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
-				relayTaskChannel <- RelayStateSendInstructions{Err: returnErr, Done: true, StopReason: sm.getStopReason()}
+				// validateReturnCondition only fires with nothing in flight, so this is the moment a
+				// reason held back by recordStopReason becomes the truth about the whole request.
+				relayTaskChannel <- RelayStateSendInstructions{Err: returnErr, Done: true, StopReason: sm.settleStopReason()}
 				return
 
 			case <-processingCtx.Done():
