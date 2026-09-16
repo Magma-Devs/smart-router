@@ -529,6 +529,19 @@ func (h *handler) runMethod(ctx context.Context, msg *JsonrpcMessage, callb *cal
 	return msg.response(result)
 }
 
+// forgetClientSub drops sub from the dispatch table once its forwarding loop has been
+// told to quit. Runs on the dispatch goroutine, which is the only owner of clientSubs.
+// A push for the id that still arrives is dropped by deliverSubscriptionPush as an
+// unmatched notification, exactly as before the entry was removed.
+func (h *handler) forgetClientSub(sub *ClientSubscription) {
+	if sub == nil {
+		return
+	}
+	if current, ok := h.clientSubs[sub.subid]; ok && current == sub {
+		delete(h.clientSubs, sub.subid)
+	}
+}
+
 // unsubscribe is the callback function for all *_unsubscribe calls.
 func (h *handler) unsubscribe(ctx context.Context, id ID) (bool, error) {
 	h.subLock.Lock()

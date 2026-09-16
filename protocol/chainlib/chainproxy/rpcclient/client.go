@@ -104,14 +104,15 @@ type Client struct {
 
 	// for dispatch
 	close       chan struct{}
-	closing     chan struct{}    // closed when client is quitting
-	didClose    chan struct{}    // closed when client quits
-	reconnected chan ServerCodec // where write/reconnect sends the new connection
-	readOp      chan readOp      // read messages
-	readErr     chan error       // errors from read
-	reqInit     chan *requestOp  // register response IDs, takes write lock
-	reqSent     chan error       // signals write completion, releases write lock
-	reqTimeout  chan *requestOp  // removes response IDs when call timeout expires
+	closing     chan struct{}            // closed when client is quitting
+	didClose    chan struct{}            // closed when client quits
+	reconnected chan ServerCodec         // where write/reconnect sends the new connection
+	readOp      chan readOp              // read messages
+	readErr     chan error               // errors from read
+	reqInit     chan *requestOp          // register response IDs, takes write lock
+	reqSent     chan error               // signals write completion, releases write lock
+	reqTimeout  chan *requestOp          // removes response IDs when call timeout expires
+	subDone     chan *ClientSubscription // drops a subscription's dispatch entry after Unsubscribe
 }
 
 type reconnectFunc func(ctx context.Context) (ServerCodec, error)
@@ -214,6 +215,7 @@ func initClient(conn ServerCodec, idgen func() ID, services *serviceRegistry) *C
 		reqInit:     make(chan *requestOp),
 		reqSent:     make(chan error, 1),
 		reqTimeout:  make(chan *requestOp),
+		subDone:     make(chan *ClientSubscription),
 	}
 	if !isHTTP {
 		go c.dispatch(conn)
@@ -724,8 +726,28 @@ func (c *Client) dispatch(codec ServerCodec) {
 
 		case op := <-c.reqTimeout:
 			conn.handler.removeRequestOp(op)
+
+		case sub := <-c.subDone:
+			conn.handler.forgetClientSub(sub)
 		}
 	}
+}
+
+// forgetSubscription asks the dispatch loop to drop the handler's entry for sub. Until
+// now that entry lived until the connection closed, one per subscription ever torn
+// down on a pooled connection (MAG-3722). It runs on its own goroutine because
+// dispatch may be busy delivering to another subscription whose consumer is waiting
+// on a lock the Unsubscribe caller holds.
+func (c *Client) forgetSubscription(sub *ClientSubscription) {
+	if c == nil || c.isHTTP {
+		return
+	}
+	go func() {
+		select {
+		case c.subDone <- sub:
+		case <-c.closing:
+		}
+	}()
 }
 
 // drainRead drops read messages until an error occurs.

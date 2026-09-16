@@ -274,6 +274,7 @@ func (sub *ClientSubscription) Unsubscribe() {
 			// Unsubscribe already requested (or subscription already closed).
 		}
 		close(sub.err)
+		sub.client.forgetSubscription(sub)
 	})
 }
 
