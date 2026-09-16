@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Two-zone secondary-cache integration lane (docs/SECONDARY-CACHE.md).
 #
 # Reproduces the PRD's two-zone topology on one machine:
