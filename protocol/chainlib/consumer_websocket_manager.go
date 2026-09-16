@@ -105,6 +105,75 @@ func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]b
 	return bytesRateLimitError, nil
 }
 
+// webSocketMsgWithType is one frame queued for the connection's writer goroutine.
+type webSocketMsgWithType struct {
+	messageType int
+	msg         []byte
+}
+
+// websocketFrameWriter is the slice of the connection the writer goroutine touches.
+// *websocket.Conn satisfies it; tests hand in a fake whose writes fail on demand.
+type websocketFrameWriter interface {
+	WriteMessage(messageType int, data []byte) error
+	SetReadDeadline(t time.Time) error
+}
+
+// runWebsocketWriter is the connection's single writer. Single-writer discipline
+// guarantees WriteMessage is never called concurrently, which the underlying
+// gorilla/fasthttp websocket library does not allow.
+//
+// It serves regular frames and the server-shutdown close frame, and closes writerDone
+// on its way out. A failed write ends it, and that used to leave every later
+// enqueueWebsocketFrame caller blocked forever: the read loop's own error path sends a
+// frame before it can return, so the handler never returned, and fasthttp kept the
+// 128 KiB read buffer, the handler goroutine and the per-IP limiter slot for the life
+// of the process (MAG-3722). Now a failed write also sets an immediate read deadline so
+// the read loop wakes and the handler tears the connection down.
+func runWebsocketWriter(ctx, webSocketCtx context.Context, conn websocketFrameWriter, frames <-chan webSocketMsgWithType, writerDone chan<- struct{}) {
+	defer close(writerDone)
+	for {
+		select {
+		case <-ctx.Done():
+			// Server-wide shutdown — send a CloseGoingAway (1001) frame so the client can
+			// distinguish an intentional shutdown from a crash, then unblock the read loop by
+			// setting an immediate read deadline rather than Close()-ing the conn here.
+			//
+			// Close() from this goroutine raced gofiber's handler cleanup: it unblocks ReadMessage,
+			// the handler returns, and gofiber recycles the Conn (fasthttp pooling) WHILE this
+			// goroutine is still inside Close() — a use-after-recycle data race. SetReadDeadline
+			// returns immediately (the read loop breaks on the resulting error) and lets the handler,
+			// the conn's sole owner, do the single Close on return.
+			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
+			_ = conn.SetReadDeadline(time.Now())
+			return
+		case <-webSocketCtx.Done():
+			utils.LavaFormatTrace("websocket's context cancelled", utils.LogAttr("GUID", webSocketCtx))
+			return
+		case msg, ok := <-frames:
+			if !ok {
+				return
+			}
+			if err := conn.WriteMessage(msg.messageType, msg.msg); err != nil {
+				utils.LavaFormatTrace("error writing msg to the websocket", utils.LogAttr("err", err))
+				_ = conn.SetReadDeadline(time.Now())
+				return
+			}
+		}
+	}
+}
+
+// enqueueWebsocketFrame hands a frame to the writer goroutine, but gives up as soon as
+// ctx (server shutdown) or webSocketCtx (per-connection cleanup) cancels or the writer
+// is gone: a plain send would park the caller for good.
+func enqueueWebsocketFrame(ctx, webSocketCtx context.Context, writerDone <-chan struct{}, frames chan<- webSocketMsgWithType, msg webSocketMsgWithType) {
+	select {
+	case frames <- msg:
+	case <-ctx.Done():
+	case <-webSocketCtx.Done():
+	case <-writerDone:
+	}
+}
+
 func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	// adding metrics for how many active connections we have.
 	cwm.rpcConsumerLogs.SetWebSocketConnectionActive(cwm.chainId, cwm.apiInterface, true)
@@ -116,12 +185,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		err         error
 	)
 
-	type webSocketMsgWithType struct {
-		messageType int
-		msg         []byte
-	}
-
 	websocketConnWriteChan := make(chan webSocketMsgWithType)
+	// Closed by the writer goroutine on its way out.
+	writerDone := make(chan struct{})
 
 	websocketConn := cwm.websocketConn
 	logger := cwm.rpcConsumerLogs
@@ -132,57 +198,26 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	webSocketCtx = utils.WithUniqueIdentifier(webSocketCtx, guid)
 	utils.LavaFormatDebug("consumer websocket manager started", utils.LogAttr("GUID", webSocketCtx))
 	defer func() {
+		// The connection is over. Release every subscription this client still holds
+		// right here, synchronously: reply channels close and the forwarder goroutines
+		// below end now, not whenever a cancelled context happens to be noticed. dappID
+		// and the remote address are per-connection, so this key matches every
+		// subscribe the loop registered.
+		if cwm.wsSubscriptionManager != nil {
+			dappID, _ := websocketConn.Locals(ProjectIDHeader).(string)
+			if err := cwm.wsSubscriptionManager.UnsubscribeAll(webSocketCtx, dappID, websocketConn.RemoteAddr().String(), cwm.WebsocketConnectionUID, nil); err != nil {
+				utils.LavaFormatDebug("error releasing subscriptions on websocket close", utils.LogAttr("err", err), utils.LogAttr("GUID", webSocketCtx))
+			}
+		}
 		cancelWebSocketCtx() // In case there's a problem make sure to cancel the connection
 		utils.LavaFormatDebug("consumer websocket manager stopped", utils.LogAttr("GUID", webSocketCtx))
 	}()
 
-	// sendWS enqueues a frame for the writer goroutine, but unblocks if either
-	// ctx (server shutdown) or webSocketCtx (per-conn cleanup) cancels first —
-	// the writer exits on those signals, so a plain send would deadlock the
-	// caller and leave the connection goroutine stuck (preventing wsWG.Done()
-	// from firing during graceful shutdown).
 	sendWS := func(msg webSocketMsgWithType) {
-		select {
-		case websocketConnWriteChan <- msg:
-		case <-ctx.Done():
-		case <-webSocketCtx.Done():
-		}
+		enqueueWebsocketFrame(ctx, webSocketCtx, writerDone, websocketConnWriteChan, msg)
 	}
 
-	// Single writer goroutine: serves both regular messages and the server-shutdown
-	// close frame. Single-writer discipline guarantees we never call WriteMessage
-	// concurrently — the underlying gorilla/fasthttp websocket library is not safe
-	// for concurrent writes.
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				// Server-wide shutdown — send a CloseGoingAway (1001) frame so the client can
-				// distinguish an intentional shutdown from a crash, then unblock the read loop by
-				// setting an immediate read deadline rather than Close()-ing the conn here.
-				//
-				// Close() from this goroutine raced gofiber's handler cleanup: it unblocks ReadMessage,
-				// the handler returns, and gofiber recycles the Conn (fasthttp pooling) WHILE this
-				// goroutine is still inside Close() — a use-after-recycle data race. SetReadDeadline
-				// returns immediately (the read loop breaks on the resulting error) and lets the handler,
-				// the conn's sole owner, do the single Close on return.
-				_ = cwm.websocketConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
-				_ = cwm.websocketConn.SetReadDeadline(time.Now())
-				return
-			case <-webSocketCtx.Done():
-				utils.LavaFormatTrace("websocket's context cancelled", utils.LogAttr("GUID", webSocketCtx))
-				return
-			case msg, ok := <-websocketConnWriteChan:
-				if !ok {
-					return
-				}
-				if err := cwm.websocketConn.WriteMessage(msg.messageType, msg.msg); err != nil {
-					utils.LavaFormatTrace("error writing msg to the websocket")
-					return
-				}
-			}
-		}
-	}()
+	go runWebsocketWriter(ctx, webSocketCtx, cwm.websocketConn, websocketConnWriteChan, writerDone)
 
 	// set up a routine to check for rate limits or idle time
 	idleFor := atomic.Int64{}

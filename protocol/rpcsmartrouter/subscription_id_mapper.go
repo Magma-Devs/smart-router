@@ -85,6 +85,23 @@ func (m *SubscriptionIDMapper) GenerateRouterID(clientKey string) string {
 	return fmt.Sprintf("rs_%s_%05d", clientHash, count)
 }
 
+// RemoveClient forgets a client's ID counter. Call it once the client holds no
+// subscriptions: the key carries the per-connection GUID, so nothing reuses it,
+// and without this call the map kept one entry per connection that ever
+// subscribed (MAG-3722).
+func (m *SubscriptionIDMapper) RemoveClient(clientKey string) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	delete(m.clientCounters, clientKey)
+}
+
+// ClientCount reports how many clients currently hold an ID counter.
+func (m *SubscriptionIDMapper) ClientCount() int {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	return len(m.clientCounters)
+}
+
 // GenerateNumericRouterID creates a router subscription ID for chains that number their
 // subscriptions rather than naming them (Solana). The id is returned in the same canonical
 // decimal-string form as every other id here — every map in this type stays string-keyed —
