@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Cross-Validation — DEMO LANE (PRD "Cross Validation Enhancements")
 #
 # One router, one fleet, one config that carries every shipped use case of the
