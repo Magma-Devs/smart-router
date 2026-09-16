@@ -148,16 +148,15 @@ func (bcp *BaseChainParser) HandleHeaders(metadata []pairingtypes.Metadata, apiC
 	retMetadata := []pairingtypes.Metadata{}
 	for _, header := range metadata {
 		headerName := strings.ToLower(header.Name)
-		if headersDirection == spectypes.Header_pass_send && header.Value != "" && forwardsClientBodyHeader(apiCollection, headerName) {
-			// Forwarded without a directive; a spec pass_override or pass_nullify for the
-			// same name is appended below and so still wins when the request reaches the wire.
-			retMetadata = append(retMetadata, header)
-			continue
-		}
 		apiKey := ApiKey{Name: headerName, ConnectionType: apiCollection.CollectionData.Type}
 		headerDirective, ok := bcp.headers[apiKey]
 		if !ok {
-			// this header is not handled
+			// Undeclared. A client body header on a REST body is forwarded anyway; a spec
+			// that declares the name keeps its exact say, and a pass_override or
+			// pass_nullify is appended below and so wins when the request reaches the wire.
+			if headersDirection == spectypes.Header_pass_send && header.Value != "" && forwardsClientBodyHeader(apiCollection, headerName) {
+				retMetadata = append(retMetadata, header)
+			}
 			continue
 		}
 		if headerDirective.Kind == headersDirection || headerDirective.Kind == spectypes.Header_pass_both {

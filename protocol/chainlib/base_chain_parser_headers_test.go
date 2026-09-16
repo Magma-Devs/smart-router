@@ -89,12 +89,21 @@ func TestHandleHeaders_RestContentTypeIsForwardedWithoutDirective(t *testing.T) 
 		require.Equal(t, clientContentType, filtered)
 	})
 
+	t.Run("a spec that declares it keeps its say: pass_ignore still drops it", func(t *testing.T) {
+		bcp := &BaseChainParser{headers: map[ApiKey]*spectypes.Header{
+			{Name: "content-type", ConnectionType: http.MethodPost}: {Name: "content-type", Kind: spectypes.Header_pass_ignore},
+		}}
+		filtered, _, _ := bcp.HandleHeaders(clientContentType, restCollection(http.MethodPost), spectypes.Header_pass_send)
+		require.Empty(t, filtered)
+	})
+
 	t.Run("a spec pass_override still wins over the client", func(t *testing.T) {
 		bcp := &BaseChainParser{headers: map[ApiKey]*spectypes.Header{
 			{Name: "content-type", ConnectionType: http.MethodPost}: {Name: "content-type", Kind: spectypes.Header_pass_override, Value: "application/json"},
 		}}
 		filtered, _, _ := bcp.HandleHeaders(clientContentType, restCollection(http.MethodPost), spectypes.Header_pass_send)
 		require.Equal(t, "application/json", effectiveHeaders(filtered).Get("Content-Type"))
+		require.Len(t, filtered, 1, "the declared name is the spec's alone; the client's entry is not carried alongside it")
 	})
 
 	t.Run("a spec pass_nullify still removes it", func(t *testing.T) {
