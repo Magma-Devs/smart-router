@@ -877,15 +877,53 @@ func (po *ProviderOptimizer) updateDecayingWeightedAverage(providerData Provider
 	return providerData, nil
 }
 
-// updateRelayTime adds a relay sample time to a provider's data
+// relayStatsWindowSize bounds how many relay sample times are kept per provider.
+//
+// calculateHalfTime reads exactly one of them, the median, so the window only has
+// to be wide enough for that median to mean "the time it takes this provider to
+// serve half a window of relays". Unbounded, the slice grew by 24 bytes on every
+// relay for the life of the process and its median drifted to half the uptime,
+// which the MaxHalfTime clamp then discarded anyway (MAG-3722).
+const relayStatsWindowSize = 128
+
+// relayTimeWindow holds a provider's most recent relay sample times in arrival order.
+// It is mutated in place under the provider's stripe lock, so the pointer stored in
+// providerRelayStats never needs a replacement Set once it is in the cache.
+type relayTimeWindow struct {
+	times [relayStatsWindowSize]time.Time
+	next  int // slot the next sample lands in
+	count int // samples held, at most len(times)
+}
+
+// add records one sample, overwriting the oldest once the window is full.
+func (w *relayTimeWindow) add(sampleTime time.Time) {
+	w.times[w.next] = sampleTime
+	w.next = (w.next + 1) % len(w.times)
+	if w.count < len(w.times) {
+		w.count++
+	}
+}
+
+// median returns the middle sample by arrival order, which for monotonic sample
+// times is the median time. ok is false while the window is empty.
+func (w *relayTimeWindow) median() (median time.Time, ok bool) {
+	if w.count == 0 {
+		return time.Time{}, false
+	}
+	oldest := (w.next - w.count + len(w.times)) % len(w.times)
+	return w.times[(oldest+(w.count-1)/2)%len(w.times)], true
+}
+
+// updateRelayTime adds a relay sample time to a provider's window.
 func (po *ProviderOptimizer) updateRelayTime(providerAddress string, sampleTime time.Time) {
-	times := po.getRelayStatsTimes(providerAddress)
-	if len(times) == 0 {
-		po.providerRelayStats.Set(providerAddress, []time.Time{sampleTime}, 1)
+	window := po.getRelayStatsWindow(providerAddress)
+	if window == nil {
+		window = &relayTimeWindow{}
+		window.add(sampleTime)
+		po.providerRelayStats.Set(providerAddress, window, 1)
 		return
 	}
-	times = append(times, sampleTime)
-	po.providerRelayStats.Set(providerAddress, times, 1)
+	window.add(sampleTime)
 }
 
 // calculateHalfTime calculates a provider's half life time for a relay sampled in sampleTime
@@ -901,13 +939,16 @@ func (po *ProviderOptimizer) calculateHalfTime(providerAddress string, sampleTim
 	return halfTime
 }
 
-// getRelayStatsTimeDiff returns the time passed since the provider optimizer's saved relay times median
+// getRelayStatsTimeDiff returns the time passed since the median of the provider's recent relay times
 func (po *ProviderOptimizer) getRelayStatsTimeDiff(providerAddress string, sampleTime time.Time) time.Duration {
-	times := po.getRelayStatsTimes(providerAddress)
-	if len(times) == 0 {
+	window := po.getRelayStatsWindow(providerAddress)
+	if window == nil {
 		return 0
 	}
-	medianTime := times[(len(times)-1)/2]
+	medianTime, ok := window.median()
+	if !ok {
+		return 0
+	}
 	if medianTime.Before(sampleTime) {
 		return sampleTime.Sub(medianTime)
 	}
@@ -919,16 +960,17 @@ func (po *ProviderOptimizer) getRelayStatsTimeDiff(providerAddress string, sampl
 	return time.Since(medianTime)
 }
 
-func (po *ProviderOptimizer) getRelayStatsTimes(providerAddress string) []time.Time {
+// getRelayStatsWindow returns the provider's relay time window, or nil when none is cached yet.
+func (po *ProviderOptimizer) getRelayStatsWindow(providerAddress string) *relayTimeWindow {
 	storedVal, found := po.providerRelayStats.Get(providerAddress)
-	if found {
-		times, ok := storedVal.([]time.Time)
-		if !ok {
-			utils.LavaFormatFatal("invalid usage of optimizer relay stats cache", nil, utils.Attribute{Key: "storedVal", Value: storedVal})
-		}
-		return times
+	if !found {
+		return nil
 	}
-	return nil
+	window, ok := storedVal.(*relayTimeWindow)
+	if !ok {
+		utils.LavaFormatFatal("invalid usage of optimizer relay stats cache", nil, utils.Attribute{Key: "storedVal", Value: storedVal})
+	}
+	return window
 }
 
 func NewProviderOptimizer(strategy Strategy, averageBlockTIme time.Duration, wantedNumProvidersInConcurrency uint, consumerOptimizerQoSClient consumerOptimizerQoSClientInf, chainId string) *ProviderOptimizer {
