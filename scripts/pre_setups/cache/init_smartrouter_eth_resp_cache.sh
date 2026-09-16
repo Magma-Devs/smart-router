@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # RESP cache backend integration lane (docs/RESP-CACHE.md).
 #
 # Runs the router against a REAL Valkey (docker) instead of the cache sidecar,
