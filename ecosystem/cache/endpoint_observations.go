@@ -11,12 +11,6 @@ import (
 )
 
 const (
-	// MinEndpointObservationTTL / MaxEndpointObservationTTL clamp the TTL a router asks for on
-	// a published endpoint observation. The floor guards against a writer that computes a
-	// zero/negative TTL (which would publish nothing useful); the ceiling guards against a
-	// dead pod's observation outliving every peer's freshness window by hours.
-	MinEndpointObservationTTL = 500 * time.Millisecond
-	MaxEndpointObservationTTL = 5 * time.Minute
 	// endpointObservationSweepEvery bounds how many writes land between expiry sweeps. The
 	// store is tiny (one entry per chain × interface × endpoint across the fleet), so a full
 	// sweep every N writes keeps it bounded without a background goroutine.
@@ -47,10 +41,6 @@ type endpointObservationStore struct {
 
 func newEndpointObservationStore() *endpointObservationStore {
 	return &endpointObservationStore{byKey: make(map[string]endpointObservation), now: time.Now}
-}
-
-func endpointObservationKey(chainID, apiInterface, endpointID string) string {
-	return chainID + "|" + apiInterface + "|" + endpointID
 }
 
 // set publishes an observation, block-monotonic while the stored one is live: a lower block
@@ -110,44 +100,26 @@ func (s *endpointObservationStore) len() int {
 	return len(s.byKey)
 }
 
-// clampEndpointObservationTTL bounds a requested TTL to [MinEndpointObservationTTL,
-// MaxEndpointObservationTTL].
-func clampEndpointObservationTTL(requested time.Duration) time.Duration {
-	if requested < MinEndpointObservationTTL {
-		return MinEndpointObservationTTL
-	}
-	if requested > MaxEndpointObservationTTL {
-		return MaxEndpointObservationTTL
-	}
-	return requested
-}
-
 // SetEndpointObservation publishes one pod's successful poll of an endpoint (MAG-2981). The
-// request carries only an opaque endpoint digest — never the URL — and the TTL is clamped so a
-// misconfigured writer can neither publish a dead-on-arrival entry nor a near-permanent one.
+// request carries only an opaque endpoint digest — never the URL. Validation and the TTL clamp
+// live in the engine, so the RESP backend applies exactly the same rules in-process.
 func (s *RelayerCacheServer) SetEndpointObservation(ctx context.Context, req *relaytypes.EndpointObservationSet) (*emptypb.Empty, error) {
 	if s.CacheServer == nil || s.CacheServer.endpointObservations == nil {
 		return &emptypb.Empty{}, nil
 	}
-	if req.ChainId == "" || req.EndpointId == "" {
-		return nil, utils.LavaFormatError("invalid endpoint observation set, missing chain id or endpoint id", nil,
+	applied, err := s.engine().PublishEndpointObservation(ctx, req.ChainId, req.ApiInterface, req.EndpointId, req.PodId, req.Block,
+		time.Duration(req.TtlMs)*time.Millisecond)
+	if err != nil {
+		return nil, utils.LavaFormatError("invalid endpoint observation set", err,
 			utils.LogAttr("chainId", req.ChainId),
 			utils.LogAttr("apiInterface", req.ApiInterface),
-		)
-	}
-	if req.Block <= 0 {
-		return nil, utils.LavaFormatError("invalid endpoint observation set, block is not positive", nil,
-			utils.LogAttr("chainId", req.ChainId),
 			utils.LogAttr("block", req.Block),
 		)
 	}
-	ttl := clampEndpointObservationTTL(time.Duration(req.TtlMs) * time.Millisecond)
-	key := endpointObservationKey(req.ChainId, req.ApiInterface, req.EndpointId)
-	applied := s.CacheServer.endpointObservations.set(key, req.Block, req.PodId, ttl)
 	utils.LavaFormatTrace("endpoint observation set",
-		utils.LogAttr("key", key),
+		utils.LogAttr("chainId", req.ChainId),
+		utils.LogAttr("apiInterface", req.ApiInterface),
 		utils.LogAttr("block", req.Block),
-		utils.LogAttr("ttl", ttl),
 		utils.LogAttr("applied", applied),
 	)
 	return &emptypb.Empty{}, nil
@@ -160,10 +132,12 @@ func (s *RelayerCacheServer) GetEndpointObservation(ctx context.Context, req *re
 	if s.CacheServer == nil || s.CacheServer.endpointObservations == nil {
 		return &relaytypes.EndpointObservationReply{}, nil
 	}
-	key := endpointObservationKey(req.ChainId, req.ApiInterface, req.EndpointId)
-	block, podID, age, found := s.CacheServer.endpointObservations.get(key)
+	obs, age, found, err := s.engine().GetEndpointObservation(ctx, req.ChainId, req.ApiInterface, req.EndpointId)
+	if err != nil {
+		return nil, err
+	}
 	if !found {
 		return &relaytypes.EndpointObservationReply{}, nil
 	}
-	return &relaytypes.EndpointObservationReply{Found: true, Block: block, AgeMs: age.Milliseconds(), PodId: podID}, nil
+	return &relaytypes.EndpointObservationReply{Found: true, Block: obs.Block, AgeMs: age.Milliseconds(), PodId: obs.PodID}, nil
 }

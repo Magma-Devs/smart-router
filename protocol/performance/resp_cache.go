@@ -346,3 +346,32 @@ func (cache *RespCache) SetStickySessionIfAbsent(ctx context.Context, chainId, a
 	}
 	return cache.engine.SetStickyIfAbsent(ctx, chainId, apiInterface, service, stickyId, pin, ttl)
 }
+
+// SetEndpointObservation publishes this pod's successful poll of an upstream endpoint for the
+// fleet tracker gate (MAG-2981), straight into the RESP store. The engine validates and clamps
+// exactly as the cache server does for the gRPC backend, and the store stamps the entry with
+// the backend's clock.
+func (cache *RespCache) SetEndpointObservation(ctx context.Context, set *pairingtypes.EndpointObservationSet) error {
+	if cache == nil {
+		return NotInitializedError
+	}
+	_, err := cache.engine.PublishEndpointObservation(ctx, set.ChainId, set.ApiInterface, set.EndpointId, set.PodId, set.Block,
+		time.Duration(set.TtlMs)*time.Millisecond)
+	return err
+}
+
+// GetEndpointObservation reads the freshest peer observation of an upstream endpoint. A miss is
+// a reply with Found=false, not an error; age is on the backend's clock.
+func (cache *RespCache) GetEndpointObservation(ctx context.Context, get *pairingtypes.EndpointObservationGet) (*pairingtypes.EndpointObservationReply, error) {
+	if cache == nil {
+		return nil, NotInitializedError
+	}
+	obs, age, found, err := cache.engine.GetEndpointObservation(ctx, get.ChainId, get.ApiInterface, get.EndpointId)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return &pairingtypes.EndpointObservationReply{}, nil
+	}
+	return &pairingtypes.EndpointObservationReply{Found: true, Block: obs.Block, AgeMs: age.Milliseconds(), PodId: obs.PodID}, nil
+}

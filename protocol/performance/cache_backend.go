@@ -139,8 +139,8 @@ func boolPtr(b bool) *bool { return &b }
 // serve it — but unlike BackendEndpointReporter, which is a debug affordance, this one carries a
 // correctness contract. Both shipped backends implement it: the gRPC client reaches the cache
 // server's engine over an RPC pair, and the RESP backend reaches the same engine in-process.
-// Claims travel through the KVStore seam precisely so the RESP backend is not left out the way
-// endpoint observations are — a guarantee that silently lapses on one backend is not a guarantee.
+// Claims travel through the KVStore seam precisely so the RESP backend is not left out — a
+// guarantee that silently lapses on one backend is not a guarantee.
 //
 // A backend that does NOT implement this cannot support cross-pod stickiness, and the router
 // must refuse to serve sticky traffic rather than quietly falling back to per-pod affinity.
@@ -152,4 +152,24 @@ type StickySessionBackend interface {
 var (
 	_ StickySessionBackend = (*Cache)(nil)
 	_ StickySessionBackend = (*RespCache)(nil)
+)
+
+// EndpointObservationBackend is implemented by cache backends that can carry the fleet tracker
+// gate's per-endpoint poll observations (MAG-2981), so one pod's successful upstream poll can be
+// borrowed by its peers instead of repeated.
+//
+// A capability interface for the same reason StickySessionBackend is one: the router wires the
+// gate against whatever backend is configured and must be able to tell "this backend cannot
+// carry observations" from "no backend at all". Both shipped backends implement it — the gRPC
+// client over the cache server's RPC pair, the RESP backend through the same engine in-process —
+// and observations travel through the KVStore seam so the two stay at parity. The request and
+// reply types are the RPC pair's own, so the gate's adapter is one implementation for both.
+type EndpointObservationBackend interface {
+	SetEndpointObservation(ctx context.Context, set *pairingtypes.EndpointObservationSet) error
+	GetEndpointObservation(ctx context.Context, get *pairingtypes.EndpointObservationGet) (*pairingtypes.EndpointObservationReply, error)
+}
+
+var (
+	_ EndpointObservationBackend = (*Cache)(nil)
+	_ EndpointObservationBackend = (*RespCache)(nil)
 )

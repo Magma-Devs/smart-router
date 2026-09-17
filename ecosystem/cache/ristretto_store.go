@@ -199,6 +199,27 @@ func (r ristrettoStore) SetStickyIfAbsent(ctx context.Context, key string, pin c
 	return r.cs.stickyPins.setIfAbsent(key, pin, ttl), nil
 }
 
+// The observation store is the cache server's mutex-guarded map (see endpoint_observations.go
+// for why it is not ristretto); this adapter only routes the seam onto it, so the cache-be RPC
+// handlers and the RESP backend run the same engine code above it.
+func (r ristrettoStore) PublishEndpointObservation(ctx context.Context, key string, obs core.EndpointObservation, ttl time.Duration) (bool, error) {
+	if r.cs.endpointObservations == nil {
+		return false, nil
+	}
+	return r.cs.endpointObservations.set(key, obs.Block, obs.PodID, ttl), nil
+}
+
+func (r ristrettoStore) GetEndpointObservation(ctx context.Context, key string) (core.EndpointObservation, time.Duration, bool, error) {
+	if r.cs.endpointObservations == nil {
+		return core.EndpointObservation{}, 0, false, nil
+	}
+	block, podID, age, found := r.cs.endpointObservations.get(key)
+	if !found {
+		return core.EndpointObservation{}, 0, false, nil
+	}
+	return core.EndpointObservation{Block: block, PodID: podID}, age, true, nil
+}
+
 func (r ristrettoStore) Purge(ctx context.Context) error {
 	if c := r.cs.tempCache; c != nil {
 		c.Clear()
@@ -214,6 +235,9 @@ func (r ristrettoStore) Purge(ctx context.Context) error {
 	}
 	if r.cs.stickyPins != nil {
 		r.cs.stickyPins.clear()
+	}
+	if r.cs.endpointObservations != nil {
+		r.cs.endpointObservations.clear()
 	}
 	return nil
 }

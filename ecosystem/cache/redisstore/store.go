@@ -743,6 +743,104 @@ func decodeStickyPin(raw string) (core.StickyPin, error) {
 	return core.StickyPin{Provider: value.Provider, Epoch: value.Epoch}, nil
 }
 
+// ---------------------------------------------------------------------------
+// Endpoint observations (the fleet tracker gate)
+// ---------------------------------------------------------------------------
+
+// An observation is stored as "block|storedAtUnixMs|podID". The stamp is the BACKEND's clock,
+// taken inside the script with TIME, so age is measured on the same clock on read and no
+// writer's wall clock reaches a peer's freshness decision — the property the cache server's
+// in-memory store gets for free by stamping receipt time. The pod id goes last because it is
+// the one field with no character restriction; the first two are digits.
+//
+// The compare-and-set stays a script for the same reason the sticky claim does: a GET-then-SET
+// pair from the adapter reopens the race between two pods the monotonic rule exists to close.
+// The corrupt-value handling mirrors setInt64GEScript — a stored value that does not parse
+// falls THROUGH to the write rather than fencing it forever.
+//
+// TIME inside a writing script needs effects replication, which every Redis from 5.0 and every
+// Valkey uses by default; on the 3.x/4.x line it would need redis.replicate_commands(), which
+// this adapter does not target.
+var publishEndpointObservationScript = redis.NewScript(`
+local cur = redis.call('GET', KEYS[1])
+if cur then
+	local curBlock = string.match(cur, '^(%d+)|')
+	local curn = curBlock and tonumber(curBlock)
+	if curn and tonumber(ARGV[1]) < curn then
+		return 0
+	end
+end
+local t = redis.call('TIME')
+local atMs = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+redis.call('SET', KEYS[1], ARGV[1] .. '|' .. string.format('%.0f', atMs) .. '|' .. ARGV[2], 'PX', ARGV[3])
+return 1
+`)
+
+func (s *Store) PublishEndpointObservation(ctx context.Context, key string, obs core.EndpointObservation, ttl time.Duration) (bool, error) {
+	// The engine clamps to a sub-second floor; this guard only keeps a direct caller from
+	// issuing SET PX 0, which the backend rejects.
+	if ttl < time.Millisecond {
+		ttl = time.Millisecond
+	}
+	applied, err := publishEndpointObservationScript.Run(ctx, s.write, []string{s.key(key)}, obs.Block, obs.PodID, ttl.Milliseconds()).Int()
+	if err != nil {
+		return false, err
+	}
+	return applied == 1, nil
+}
+
+// GetEndpointObservation reads the entry and the backend's clock in ONE pipelined round trip,
+// no script: the read may be served by a reader endpoint (read-addresses), and plain commands
+// run there without question. The two commands are not atomic, and need not be — the skew
+// between them is microseconds against a freshness window of a block time.
+func (s *Store) GetEndpointObservation(ctx context.Context, key string) (core.EndpointObservation, time.Duration, bool, error) {
+	pipe := s.read.Pipeline()
+	getCmd := pipe.Get(ctx, s.key(key))
+	timeCmd := pipe.Time(ctx)
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return core.EndpointObservation{}, 0, false, err
+	}
+	if getCmd.Err() == redis.Nil {
+		return core.EndpointObservation{}, 0, false, nil
+	}
+	if err := getCmd.Err(); err != nil {
+		return core.EndpointObservation{}, 0, false, err
+	}
+	now, err := timeCmd.Result()
+	if err != nil {
+		return core.EndpointObservation{}, 0, false, err
+	}
+	obs, storedAtMs, ok := decodeEndpointObservation(getCmd.Val())
+	if !ok {
+		// Same policy as the int64 tip: a router-embedded backend on a SHARED store must not
+		// be derailed by a foreign writer, so corruption reads as a miss (and the next publish
+		// overwrites it — see the script's fall-through).
+		utils.LavaFormatError("corrupt endpoint observation in RESP backend, treating as miss", nil, utils.LogAttr("key", s.key(key)), utils.LogAttr("value", getCmd.Val()))
+		return core.EndpointObservation{}, 0, false, nil
+	}
+	age := time.Duration(now.UnixMilli()-storedAtMs) * time.Millisecond
+	if age < 0 {
+		age = 0
+	}
+	return obs, age, true, nil
+}
+
+func decodeEndpointObservation(raw string) (obs core.EndpointObservation, storedAtMs int64, ok bool) {
+	parts := strings.SplitN(raw, "|", 3)
+	if len(parts) != 3 {
+		return core.EndpointObservation{}, 0, false
+	}
+	block, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return core.EndpointObservation{}, 0, false
+	}
+	storedAtMs, err = strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return core.EndpointObservation{}, 0, false
+	}
+	return core.EndpointObservation{Block: block, PodID: parts[2]}, storedAtMs, true
+}
+
 func (s *Store) Purge(ctx context.Context) error {
 	match := s.prefix + ":*"
 	if clusterClient, ok := s.write.(*redis.ClusterClient); ok {

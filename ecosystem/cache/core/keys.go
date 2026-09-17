@@ -10,12 +10,13 @@ import (
 // (hash, block) identity may hold both variants at once, and lookup order —
 // not the key — expresses finality preference.
 const (
-	RelayFinalizedPrefix = "rel:f:"
-	RelayTempPrefix      = "rel:t:"
-	SharedTipPrefix      = "tip:"
-	ChainTipPrefix       = "chaintip:"
-	HeightPrefix         = "h2h:"
-	StickyPrefix         = "sticky:"
+	RelayFinalizedPrefix      = "rel:f:"
+	RelayTempPrefix           = "rel:t:"
+	SharedTipPrefix           = "tip:"
+	ChainTipPrefix            = "chaintip:"
+	HeightPrefix              = "h2h:"
+	StickyPrefix              = "sticky:"
+	EndpointObservationPrefix = "obs:"
 )
 
 // RelayKey addresses one variant of a cached relay entry.
@@ -67,4 +68,12 @@ func HeightKey(chainId, blockHash string) string {
 // scoped to one chain AND one api interface.
 func StickyKey(chainId, apiInterface, service, stickyId string) string {
 	return StickyPrefix + chainId + ":" + apiInterface + ":" + service + ":" + stickyId
+}
+
+// EndpointObservationKey addresses the fleet's freshest poll observation of one upstream
+// endpoint (the fleet tracker gate). endpointId is the router's digest of the endpoint URL,
+// never the URL itself — URLs carry credentials. The api interface is part of the key because
+// one endpoint may serve several interfaces and the tracker polls each separately.
+func EndpointObservationKey(chainId, apiInterface, endpointId string) string {
+	return EndpointObservationPrefix + chainId + ":" + apiInterface + ":" + endpointId
 }
