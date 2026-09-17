@@ -817,16 +817,24 @@ func TestJsonRPCChainListener_WebSocketUpgradesOnAnyPath(t *testing.T) {
 	}
 }
 
+// The whole 405 answer has to survive, not just its status code. Registering a
+// GET route to catch upgrades takes fiber's own method-mismatch path out of play,
+// and that path is what supplied Allow — asserting the status alone let the header
+// disappear while this test stayed green. RFC 9110 §15.5.6 requires it.
 func TestJsonRPCChainListener_PlainGetIsStillMethodNotAllowed(t *testing.T) {
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
 	_, addr := startTestJsonRPCListener(t, serveCtx, false)
 
 	httpClient := &http.Client{Timeout: 2 * time.Second}
-	resp, err := httpClient.Get("http://" + addr + "/")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+	for _, path := range []string{"/", "/some/dapp/path"} {
+		resp, err := httpClient.Get("http://" + addr + path)
+		require.NoError(t, err, "path %q", path)
+		require.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode, "path %q", path)
+		require.Equal(t, "POST", resp.Header.Get("Allow"),
+			"a 405 must name the methods it does accept; path %q", path)
+		resp.Body.Close()
+	}
 }
 
 // An idle subscription must not go silent: proxies in front of the router close
