@@ -304,6 +304,19 @@ func (sm *UnifiedRelayStateMachine) getResultsSummary() ResultsSummary {
 	return sm.resultsChecker.GetResultsSummary()
 }
 
+// signalReturnCondition hands the main loop a return reason without ever blocking.
+//
+// The loop reads returnCondition at most once and may already have left on another
+// branch, so only the first signal can matter. A plain send from the third trigger in
+// one burst parked its goroutine forever, pinning the whole state machine and the
+// request it carries (MAG-3722).
+func signalReturnCondition(returnCondition chan<- error, err error) {
+	select {
+	case returnCondition <- err:
+	default:
+	}
+}
+
 // buildDecisionInput assembles the DecisionInput for the policy engine.
 func (sm *UnifiedRelayStateMachine) buildDecisionInput(numberOfNodeErrors uint64, isTickerHedge bool) DecisionInput {
 	latestState := sm.getLatestState()
@@ -410,7 +423,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 			utils.LavaFormatTrace("[StateMachine] validating return condition", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
 			if batchOnStart == sm.usedProviders.BatchNumber() && sm.usedProviders.CurrentlyUsed() == 0 {
 				utils.LavaFormatTrace("[StateMachine] return condition triggered", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("err", err), utils.LogAttr("GUID", sm.ctx))
-				returnCondition <- err
+				signalReturnCondition(returnCondition, err)
 			}
 		}
 

@@ -83,14 +83,34 @@ type ClientRateLimiter struct {
 	mu sync.Mutex
 
 	// subscribeLimiters tracks subscription creation rate per client
-	subscribeLimiters map[string]*rate.Limiter
+	subscribeLimiters map[string]*clientLimiter
 	// unsubscribeLimiters tracks unsubscription rate per client
-	unsubscribeLimiters map[string]*rate.Limiter
+	unsubscribeLimiters map[string]*clientLimiter
 
 	subscribeRate    rate.Limit // subscriptions per second
 	unsubscribeRate  rate.Limit // unsubscribes per second
 	subscribeBurst   int        // max burst for subscriptions
 	unsubscribeBurst int        // max burst for unsubscribes
+
+	// idleTTL is how long an untouched limiter is kept. It is the time a limiter needs
+	// to refill a full burst, so an entry older than that decides exactly as a fresh one
+	// would and can be dropped without changing any outcome (MAG-3722).
+	idleTTL time.Duration
+}
+
+// clientLimiter pairs a limiter with the last time it was consulted, so SweepIdle can
+// tell an abandoned entry from a live one.
+type clientLimiter struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+// refillDuration is how long a limiter with the given rate takes to refill burst tokens.
+func refillDuration(limit rate.Limit, burst int) time.Duration {
+	if limit <= 0 || burst <= 0 {
+		return time.Minute
+	}
+	return time.Duration(float64(burst) / float64(limit) * float64(time.Second))
 }
 
 // NewClientRateLimiter creates a new rate limiter based on config
@@ -99,38 +119,51 @@ func NewClientRateLimiter(config *WebsocketConfig) *ClientRateLimiter {
 	subscribeRate := rate.Limit(float64(config.SubscriptionsPerMinutePerClient) / 60.0)
 	unsubscribeRate := rate.Limit(float64(config.UnsubscribesPerMinutePerClient) / 60.0)
 
+	// Both limiters set the burst to the per-minute allowance and the rate to that
+	// allowance per second, so burst/rate is one minute for every configuration and
+	// this always evaluates to a minute today. The derivation stays so a future
+	// burst/rate split cannot silently shorten the sweep.
+	idleTTL := max(
+		refillDuration(subscribeRate, config.SubscriptionsPerMinutePerClient),
+		refillDuration(unsubscribeRate, config.UnsubscribesPerMinutePerClient),
+		time.Minute,
+	)
+
 	return &ClientRateLimiter{
-		subscribeLimiters:   make(map[string]*rate.Limiter),
-		unsubscribeLimiters: make(map[string]*rate.Limiter),
+		subscribeLimiters:   make(map[string]*clientLimiter),
+		unsubscribeLimiters: make(map[string]*clientLimiter),
 		subscribeRate:       subscribeRate,
 		unsubscribeRate:     unsubscribeRate,
 		subscribeBurst:      config.SubscriptionsPerMinutePerClient, // Allow burst up to full minute's worth
 		unsubscribeBurst:    config.UnsubscribesPerMinutePerClient,
+		idleTTL:             idleTTL,
 	}
 }
 
 // AllowSubscribe checks if the client is allowed to create a subscription
 func (crl *ClientRateLimiter) AllowSubscribe(clientKey string) bool {
 	crl.mu.Lock()
-	limiter, exists := crl.subscribeLimiters[clientKey]
+	entry, exists := crl.subscribeLimiters[clientKey]
 	if !exists {
-		limiter = rate.NewLimiter(crl.subscribeRate, crl.subscribeBurst)
-		crl.subscribeLimiters[clientKey] = limiter
+		entry = &clientLimiter{limiter: rate.NewLimiter(crl.subscribeRate, crl.subscribeBurst)}
+		crl.subscribeLimiters[clientKey] = entry
 	}
+	entry.lastSeen = time.Now()
 	crl.mu.Unlock()
-	return limiter.Allow()
+	return entry.limiter.Allow()
 }
 
 // AllowUnsubscribe checks if the client is allowed to unsubscribe
 func (crl *ClientRateLimiter) AllowUnsubscribe(clientKey string) bool {
 	crl.mu.Lock()
-	limiter, exists := crl.unsubscribeLimiters[clientKey]
+	entry, exists := crl.unsubscribeLimiters[clientKey]
 	if !exists {
-		limiter = rate.NewLimiter(crl.unsubscribeRate, crl.unsubscribeBurst)
-		crl.unsubscribeLimiters[clientKey] = limiter
+		entry = &clientLimiter{limiter: rate.NewLimiter(crl.unsubscribeRate, crl.unsubscribeBurst)}
+		crl.unsubscribeLimiters[clientKey] = entry
 	}
+	entry.lastSeen = time.Now()
 	crl.mu.Unlock()
-	return limiter.Allow()
+	return entry.limiter.Allow()
 }
 
 // CleanupClient removes rate limiters for a disconnected client
@@ -139,6 +172,30 @@ func (crl *ClientRateLimiter) CleanupClient(clientKey string) {
 	defer crl.mu.Unlock()
 	delete(crl.subscribeLimiters, clientKey)
 	delete(crl.unsubscribeLimiters, clientKey)
+}
+
+// SweepIdle drops every limiter not consulted since now minus idleTTL and reports how
+// many went. It is the backstop for clients that never reached a disconnect hook.
+func (crl *ClientRateLimiter) SweepIdle(now time.Time) int {
+	crl.mu.Lock()
+	defer crl.mu.Unlock()
+	removed := 0
+	for _, limiters := range []map[string]*clientLimiter{crl.subscribeLimiters, crl.unsubscribeLimiters} {
+		for clientKey, entry := range limiters {
+			if now.Sub(entry.lastSeen) >= crl.idleTTL {
+				delete(limiters, clientKey)
+				removed++
+			}
+		}
+	}
+	return removed
+}
+
+// ClientCount reports how many clients currently hold a limiter of either kind.
+func (crl *ClientRateLimiter) ClientCount() int {
+	crl.mu.Lock()
+	defer crl.mu.Unlock()
+	return len(crl.subscribeLimiters) + len(crl.unsubscribeLimiters)
 }
 
 // EnforcementMode represents how limit violations are handled

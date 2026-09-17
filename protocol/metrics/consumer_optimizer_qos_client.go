@@ -522,6 +522,13 @@ func (coqc *ConsumerOptimizerQoSClient) setProviderStake(chainId, providerAddres
 	}
 
 	epochMap[epoch] = stake
+	// Reads only ever ask for the epoch being scored, so anything older than the previous
+	// one is dead weight that used to accumulate for the life of the process (MAG-3722).
+	for storedEpoch := range epochMap {
+		if storedEpoch+1 < epoch {
+			delete(epochMap, storedEpoch)
+		}
+	}
 }
 
 func (coqc *ConsumerOptimizerQoSClient) UpdatePairingListStake(stakeMap map[string]int64, chainId string, epoch uint64) {
