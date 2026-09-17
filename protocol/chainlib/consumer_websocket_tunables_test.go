@@ -28,3 +28,23 @@ func TestWebSocketKeepAliveOutlivesIdleReaper(t *testing.T) {
 		})
 	}
 }
+
+// TestWebSocketWriteTimeoutUnbounded pins the other startup warning: the write deadline
+// is the only bound on a client that stopped reading, and with it off the handler that
+// waits on the writer never returns.
+func TestWebSocketWriteTimeoutUnbounded(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		writeTimeout time.Duration
+		want         bool
+	}{
+		{"default: every write bounded", DefaultWebSocketWriteTimeout, false},
+		{"a short deadline is still a deadline", time.Millisecond, false},
+		{"zero: nothing ends a stalled write", 0, true},
+		{"negative counts as off, as the writer treats it", -time.Second, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, WebSocketWriteTimeoutUnbounded(tc.writeTimeout))
+		})
+	}
+}

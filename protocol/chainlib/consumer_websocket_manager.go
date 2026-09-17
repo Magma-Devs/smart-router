@@ -95,6 +95,17 @@ func WebSocketKeepAliveOutlivesIdleReaper(keepAlive time.Duration, maxIdleSecond
 	return keepAlive > 0 && maxIdleSeconds <= 0
 }
 
+// WebSocketWriteTimeoutUnbounded reports whether nothing bounds a frame write. The
+// deadline is the only thing that ends a write to a client that stopped reading: with
+// it off, WriteMessage never returns, the writer never closes writerDone, and
+// ListenToMessages waits on writerDone before it returns — so the handler goroutine,
+// its read buffer and the per-IP limiter slot are held for the life of the process.
+// Disabling the deadline is the operator's to choose, but it costs more than the flag's
+// "0 disables" suggests, so it gets the same startup warning as the pairing above.
+func WebSocketWriteTimeoutUnbounded(writeTimeout time.Duration) bool {
+	return writeTimeout <= 0
+}
+
 const (
 	DefaultMaxIdleTimeInSeconds       = int64(20 * 60) // 20 minutes of idle time will disconnect the websocket connection
 	DefaultWebSocketKeepAliveInterval = 30 * time.Second

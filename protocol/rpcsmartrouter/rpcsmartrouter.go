@@ -3534,6 +3534,11 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 					utils.LogAttr(common.LimitWebsocketIdleTimeFlag, chainlib.GetMaxIdleTimeInSeconds()),
 				)
 			}
+			if chainlib.WebSocketWriteTimeoutUnbounded(chainlib.GetWebSocketWriteTimeout()) {
+				utils.LavaFormatWarning("websocket write deadline is off: a client that stops reading blocks its writer forever, and the connection's handler goroutine, read buffer and per-ip limiter slot are held for the life of the process", nil,
+					utils.LogAttr(common.WebsocketWriteTimeoutFlag, chainlib.GetWebSocketWriteTimeout()),
+				)
+			}
 
 			consumerPropagatedFlags := common.ConsumerCmdFlags{
 				HeadersFlag:                       viper.GetString(common.CorsHeadersFlag),
