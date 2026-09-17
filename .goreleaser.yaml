@@ -57,10 +57,11 @@ archives:
     name_template: '{{ .Binary }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}-{{ . }}{{ end }}'
 
 # dockers_v2 (v2.15+) replaces the per-arch dockers: + docker_manifests:
-# combo with a single block. GoReleaser stages each platform's binary at
-# `linux/<arch>/smartrouter` in the build context, and docker/Dockerfile.release
-# resolves the right one via $TARGETPLATFORM. The multi-arch manifest is
-# created automatically from the platforms list.
+# combo with a single block. `extra_files` stages the built binaries into
+# the build context under their `dist/smartrouter_<os>_<arch>_<variant>/`
+# paths, and docker/Dockerfile.release copies this platform's one via
+# $TARGETARCH. The multi-arch manifest is created automatically from the
+# platforms list.
 #
 # Build-time NEVER pushes :latest. Every release is born a prerelease
 # (release.prerelease: true below), so the tag-push build only ever
@@ -79,15 +80,25 @@ dockers_v2:
     tags:
       - "{{ .Tag }}"
     dockerfile: docker/Dockerfile.release
-    # Bare platforms — NO CPU-variant suffix, even though builds[] pins
-    # goamd64 v3 / goarm64 v8.2. The published index must stay
-    # variant-free: containerd matches a node's default `linux/amd64`
+    # The binaries reach the build context through here, NOT through the
+    # `ids` + `platforms` match: GoReleaser reads a bare `linux/amd64` as
+    # the baseline CPU variant, which our goamd64 v3 / goarm64 v8.2 builds
+    # never satisfy, so that match stages nothing and logs a "no binaries
+    # or packages found" warning. extra_files ignores platform matching
+    # and copies each path verbatim, keeping the `dist/` prefix.
+    #
+    # The variants are spelled out because the paths are goamd64 /
+    # goarm64 above — change one and change the other, or the image build
+    # fails on a COPY that finds no file.
+    extra_files:
+      - dist/smartrouter_linux_amd64_v3/smartrouter
+      - dist/smartrouter_linux_arm64_v8.2/smartrouter
+    # Bare platforms — NO CPU-variant suffix. The published index must
+    # stay variant-free: containerd matches a node's default `linux/amd64`
     # against the index verbatim, and an entry tagged `linux/amd64/v3`
     # fails that match ("no match for platform in manifest") — the image
-    # pulls but never unpacks. GoReleaser is pinned to v2.18.1 in
-    # .github/workflows/release.yml because v2.18.2 reads a bare platform
-    # as the BASELINE variant and then finds no binary to stage. Read that
-    # pin's comment before touching either file.
+    # pulls but never unpacks, so every node lands in ImagePullBackOff
+    # while `docker pull` on a laptop still works.
     platforms:
       - linux/amd64
       - linux/arm64

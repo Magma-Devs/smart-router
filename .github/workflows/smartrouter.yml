@@ -216,5 +216,10 @@ jobs:
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
-          version: '~> v2'
+          # The same exact pin as the release job in release.yml, so this
+          # gate validates the config against the GoReleaser that will
+          # actually build the tag — a floating range here would pass a
+          # config the pinned release then rejects, or vice versa. Bump
+          # both together.
+          version: 'v2.18.2'
           args: check
