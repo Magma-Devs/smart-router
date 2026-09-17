@@ -140,7 +140,9 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 >   `code = Unavailable`, followed by a reconnect loop that recovers on its own.
 > - **out of date**: `fleet tracker gate: the cache backend does not implement endpoint observations`,
 >   logged **once per listen endpoint** (one adapter is built per chain+interface), and it will not
->   clear until the backend is upgraded.
+>   clear until the backend is upgraded. The same line with `polling locally` from a router below
+>   v1.6.0 on the RESP backend (`resp-cache:`) means the same thing: that release carries the
+>   gate on both backends, earlier ones only on `cache-be`.
 >
 > A URL mismatch between pods presents as `peer` at zero with errors **also** at zero, exactly like a
 > healthy single replica: observations are keyed by `chain | apiInterface | sha256(url)`, so pods that

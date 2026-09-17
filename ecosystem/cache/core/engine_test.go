@@ -35,6 +35,12 @@ type fakeStore struct {
 	// stickyErr, when set, makes both sticky operations fail — the "cannot determine the
 	// claim" path that callers must not mistake for "unclaimed".
 	stickyErr error
+
+	// observations backs the block-monotonic endpoint-observation surface; observationTTLs
+	// records the TTL each publish was stored with, so a test can assert the engine clamped it.
+	observations    map[string]EndpointObservation
+	observationTTLs map[string]time.Duration
+	observationErr  error
 }
 
 func newFakeStore() *fakeStore {
@@ -45,7 +51,34 @@ func newFakeStore() *fakeStore {
 		stickyPins: map[string]StickyPin{},
 		stickyTTLs: map[string]time.Duration{},
 		heights:    map[string]int64{},
+
+		observations:    map[string]EndpointObservation{},
+		observationTTLs: map[string]time.Duration{},
 	}
+}
+
+func (f *fakeStore) PublishEndpointObservation(ctx context.Context, key string, obs EndpointObservation, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.observationErr != nil {
+		return false, f.observationErr
+	}
+	if cur, ok := f.observations[key]; ok && obs.Block < cur.Block {
+		return false, nil
+	}
+	f.observations[key] = obs
+	f.observationTTLs[key] = ttl
+	return true, nil
+}
+
+func (f *fakeStore) GetEndpointObservation(ctx context.Context, key string) (EndpointObservation, time.Duration, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.observationErr != nil {
+		return EndpointObservation{}, 0, false, f.observationErr
+	}
+	obs, ok := f.observations[key]
+	return obs, 0, ok, nil
 }
 
 func (f *fakeStore) GetEntries(ctx context.Context, keys []string) ([]*Envelope, error) {

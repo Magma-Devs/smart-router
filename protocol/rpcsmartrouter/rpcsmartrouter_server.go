@@ -3534,19 +3534,22 @@ func isFinalizedForCacheWrite(requestedBlock, replyLatestBlock, trackedLatestBlo
 // peerObservationStore returns the fleet observation store for the per-endpoint tracker gate,
 // or nil when shared state is off or no cache backend is configured (MAG-2981).
 //
-// Endpoint observations are a cache-be RPC, not a cache-engine behaviour: the cache server keeps
-// them in a dedicated in-memory store alongside the relay caches, so they do not travel through
-// the KVStore seam the RESP backend implements. A router on the RESP backend therefore gets no
-// peer gate and polls locally — the same degradation this store already applies to a cache-be
-// that predates the RPC (see cachePeerObservations.warnIfUnimplemented). Called once per listen
-// endpoint, so the warning matches that granularity rather than firing per tick.
+// Observations travel through the KVStore seam, so both shipped backends carry them: the gRPC
+// client over the cache server's RPC pair, the RESP backend in-process. The capability check is
+// on the interface, not the concrete type, so a backend that truly lacks the pair polls locally
+// with a warning — the same degradation the adapter applies to a cache-be that predates the RPC
+// (see cachePeerObservations.warnIfUnimplemented). Called once per listen endpoint, so the
+// warning matches that granularity rather than firing per tick.
 func (rpcss *RPCSmartRouterServer) peerObservationStore() endpointstate.PeerObservationStore {
 	if !rpcss.sharedState || rpcss.cache == nil {
 		return nil
 	}
-	// Typed-nil *Cache (no --cache-be) is handled inside NewCachePeerObservations.
-	grpcCache, isGRPCCache := rpcss.cache.(*performance.Cache)
-	if !isGRPCCache {
+	// An unconfigured cache travels as a typed-nil *Cache (no --cache-be): no store, gate off.
+	if grpcCache, isGRPCCache := rpcss.cache.(*performance.Cache); isGRPCCache && grpcCache == nil {
+		return nil
+	}
+	backend, ok := rpcss.cache.(performance.EndpointObservationBackend)
+	if !ok {
 		utils.LavaFormatWarning("fleet tracker gate: the configured cache backend does not implement endpoint observations; polling locally", nil,
 			utils.LogAttr("backend", fmt.Sprintf("%T", rpcss.cache)),
 			utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
@@ -3554,7 +3557,7 @@ func (rpcss *RPCSmartRouterServer) peerObservationStore() endpointstate.PeerObse
 		)
 		return nil
 	}
-	return endpointstate.NewCachePeerObservations(grpcCache)
+	return endpointstate.NewCachePeerObservations(backend)
 }
 
 // adoptSharedStateTip feeds a peer pod's chain tip — read from the shared cache under the

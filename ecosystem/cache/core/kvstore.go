@@ -31,6 +31,15 @@ type StickyPin struct {
 	Epoch    uint64
 }
 
+// EndpointObservation is one pod's published poll result for one upstream endpoint: the block
+// it saw and which pod saw it (the fleet tracker gate, MAG-2981). The store stamps it with ITS
+// OWN clock on write and reports age against that same clock on read, so a writer's clock never
+// enters a peer's freshness decision.
+type EndpointObservation struct {
+	Block int64
+	PodID string
+}
+
 type KVStore interface {
 	// GetEntries fetches relay envelopes for the given keys, index-aligned with
 	// the input; a nil element is a miss. Adapters should batch where the
@@ -79,6 +88,21 @@ type KVStore interface {
 	// the whole point is to resolve a race between two pods.
 	GetSticky(ctx context.Context, key string) (StickyPin, bool, error)
 	SetStickyIfAbsent(ctx context.Context, key string, pin StickyPin, ttl time.Duration) (StickyPin, error)
+
+	// Endpoint observations, BLOCK-MONOTONIC WHILE LIVE.
+	//
+	// PublishEndpointObservation stores an observation unless a live entry already holds a
+	// higher block: a lower block from a slower peer must not regress what the fleet has seen.
+	// An equal-or-higher block replaces the entry and refreshes its stamp; an expired entry is
+	// always replaced (a reorg or a fresh restart may legitimately publish a lower block once the
+	// old one aged out). Returns whether the write applied.
+	//
+	// GetEndpointObservation returns the live entry with its age ON THE STORE'S CLOCK, or
+	// found=false for a miss or an expired entry. Age is a store-side measurement on purpose:
+	// the reader compares it against a freshness window, and two pods' wall clocks are not a
+	// thing the gate should have to trust.
+	PublishEndpointObservation(ctx context.Context, key string, obs EndpointObservation, ttl time.Duration) (applied bool, err error)
+	GetEndpointObservation(ctx context.Context, key string) (obs EndpointObservation, age time.Duration, found bool, err error)
 
 	// Purge drops every entry this store holds (the FlushCache RPC).
 	Purge(ctx context.Context) error

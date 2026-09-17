@@ -278,3 +278,49 @@ func TestParityFlushClearsEverything(t *testing.T) {
 		})
 	}
 }
+
+// Endpoint observations (the fleet tracker gate) travel through the KVStore seam, so both
+// backends carry them with identical semantics: miss, publish, read back with a store-clock age,
+// block-monotonic while live, and a writer bug refused before it reaches any store.
+func TestParityEndpointObservations(t *testing.T) {
+	for name, newBackend := range parityBackends {
+		t.Run(name, func(t *testing.T) {
+			backend, ok := newBackend(t).(performance.EndpointObservationBackend)
+			require.True(t, ok, "%s must carry endpoint observations", name)
+			ctx := context.Background()
+			get := &pairingtypes.EndpointObservationGet{ChainId: "ETH1", ApiInterface: "jsonrpc", EndpointId: "ep1"}
+
+			reply, err := backend.GetEndpointObservation(ctx, get)
+			require.NoError(t, err)
+			require.False(t, reply.Found, "nothing published is a clean miss")
+
+			require.NoError(t, backend.SetEndpointObservation(ctx, &pairingtypes.EndpointObservationSet{
+				ChainId: "ETH1", ApiInterface: "jsonrpc", EndpointId: "ep1", PodId: "pod-a", Block: 500, TtlMs: 5000,
+			}))
+			reply, err = backend.GetEndpointObservation(ctx, get)
+			require.NoError(t, err)
+			require.True(t, reply.Found)
+			require.Equal(t, int64(500), reply.Block)
+			require.Equal(t, "pod-a", reply.PodId)
+			require.Less(t, reply.AgeMs, int64(1000))
+
+			// A slower peer's lower block never regresses what the fleet has seen.
+			require.NoError(t, backend.SetEndpointObservation(ctx, &pairingtypes.EndpointObservationSet{
+				ChainId: "ETH1", ApiInterface: "jsonrpc", EndpointId: "ep1", PodId: "pod-b", Block: 499, TtlMs: 5000,
+			}))
+			reply, err = backend.GetEndpointObservation(ctx, get)
+			require.NoError(t, err)
+			require.Equal(t, int64(500), reply.Block)
+			require.Equal(t, "pod-a", reply.PodId)
+
+			// Other interfaces and endpoints are isolated.
+			reply, err = backend.GetEndpointObservation(ctx, &pairingtypes.EndpointObservationGet{ChainId: "ETH1", ApiInterface: "rest", EndpointId: "ep1"})
+			require.NoError(t, err)
+			require.False(t, reply.Found)
+
+			require.Error(t, backend.SetEndpointObservation(ctx, &pairingtypes.EndpointObservationSet{
+				ChainId: "ETH1", ApiInterface: "jsonrpc", EndpointId: "ep1", PodId: "pod-a", Block: 0, TtlMs: 5000,
+			}), "a non-positive block is a writer bug, refused on both backends")
+		})
+	}
+}

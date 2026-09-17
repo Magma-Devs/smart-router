@@ -304,14 +304,13 @@ Switching backends is a configuration change; the RESP cache starts cold (no dat
 
 ## Caveats
 
-- **Fleet tracker gate is not carried over.** The per-endpoint chain-tracker gate (MAG-2981)
-  lets pods borrow each other's successful upstream polls. It is a `cache-be` *RPC* backed by a
-  dedicated in-memory store on the cache server, not a cache-engine behaviour, so it does not
-  travel through the key/value seam this backend implements. A router on the RESP backend logs
-  a warning once per listen endpoint and **polls locally** — the same degradation already
-  applied to a `cache-be` that predates the RPC. Everything else the sidecar caches (relay
-  entries, chain tip, shared-state seen-block, block-hash→height) works identically. If you
-  need the peer gate, stay on `cache-be`.
+- **Fleet tracker gate needs v1.6.0 or later.** The per-endpoint chain-tracker gate (MAG-2981)
+  lets pods borrow each other's successful upstream polls. Since v1.6.0 the observations travel
+  through the same key/value seam as everything else this backend stores, so the gate works
+  identically on `cache-be` and here. A router older than that logs
+  `fleet tracker gate: the configured cache backend does not implement endpoint observations;
+  polling locally` once per listen endpoint and polls locally — nothing fails, every replica
+  just polls its upstreams itself.
 - **Sentinel credential rotation** applies per connection attempt, not in place — see
   [Credential rotation](#credential-rotation).
 - **`read-addresses` selects an endpoint, not a replica role** — see
