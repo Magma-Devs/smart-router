@@ -208,19 +208,15 @@ jobs:
         with:
           distribution: goreleaser
           # Pinned exactly, NOT a `~> v2` range: a floating range let
-          # v2.18.2 land mid-release and break the v1.5.2 tag push.
+          # v2.18.2 land mid-release and break the v1.5.2 tag push. A
+          # release reproduces only if the tool is part of the commit.
           #
-          # v2.18.2 reads a bare `platforms: linux/amd64` as amd64 v1, so
-          # our goamd64 v3 / goarm64 v8.2 binaries match nothing, the
-          # docker build context comes up empty and
-          # `COPY $TARGETPLATFORM/smartrouter` fails. Spelling the
-          # variants into `platforms` builds green but publishes an index
-          # tagged linux/amd64/v3, which containerd will not match against
-          # a node's plain linux/amd64 — so that is not the way out.
           # Before bumping this pin, snapshot-build and confirm
           # `docker buildx imagetools inspect` still reports bare
-          # linux/amd64 + linux/arm64.
-          version: 'v2.18.1'
+          # linux/amd64 + linux/arm64 with no CPU-variant suffix — an
+          # index containerd refuses to match is the failure mode this
+          # config is shaped around (see `extra_files` in .goreleaser.yaml).
+          version: 'v2.18.2'
           # --release-notes makes the file contents the entire release
           # body and disables goreleaser's own changelog generation (we
           # also set changelog.disable: true in .goreleaser.yaml for
