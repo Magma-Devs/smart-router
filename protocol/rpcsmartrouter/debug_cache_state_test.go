@@ -139,7 +139,7 @@ func TestCacheStateEngineFallsBackToSecondary(t *testing.T) {
 		_, resp := getCacheState(t, debugMuxDeps{
 			cache: &stubCacheStateBackend{state: performance.DebugCacheState{
 				Configured: true, Engine: performance.CacheEngineRESP, Address: "redis:6379",
-				WhenUnreachable: performance.CacheWhenUnreachableAttempted,
+				WhenUnreachable: performance.CacheWhenUnreachableSkipped,
 			}},
 			secondaryCache: &stubCacheStateReader{state: grpcTier("secondary:20100", boolPtr(true))},
 		})
@@ -155,7 +155,7 @@ func TestCacheStateEngineFallsBackToSecondary(t *testing.T) {
 		_, resp := getCacheState(t, debugMuxDeps{
 			cache: &stubCacheStateBackend{state: performance.DebugCacheState{
 				Configured: true, Engine: performance.CacheEngineRESP, Address: "redis:6379",
-				WhenUnreachable: performance.CacheWhenUnreachableAttempted,
+				WhenUnreachable: performance.CacheWhenUnreachableSkipped,
 			}},
 			secondaryCache: &stubCacheStateReader{state: grpcTier("cache-be:20100", boolPtr(true))},
 		})
@@ -166,21 +166,22 @@ func TestCacheStateEngineFallsBackToSecondary(t *testing.T) {
 	})
 }
 
-// reachable:false means opposite things per engine — the gRPC tier is skipped before
-// any I/O, the RESP tier still issues every lookup and pays the full timeout. Same
-// key, opposite operational cost, so the payload has to say which.
+// when_unreachable is carried per tier, verbatim from the backend, rather than derived here:
+// the payload states what reachable:false costs instead of leaving a reader to assume it.
+// Both shipped engines answer "skipped" today; the field exists so that stays a fact on the
+// wire and not an assumption in a dashboard.
 func TestCacheStateReportsWhatUnreachableCosts(t *testing.T) {
 	_, resp := getCacheState(t, debugMuxDeps{
 		cache: &stubCacheStateBackend{state: performance.DebugCacheState{
 			Configured: true, Engine: performance.CacheEngineRESP, Address: "redis:6379",
 			Reachable:       boolPtr(false),
-			WhenUnreachable: performance.CacheWhenUnreachableAttempted,
+			WhenUnreachable: performance.CacheWhenUnreachableSkipped,
 		}},
 		secondaryCache: &stubCacheStateReader{state: grpcTier("cache-be:20100", boolPtr(false))},
 	})
 
-	require.Equal(t, performance.CacheWhenUnreachableAttempted, resp.Tiers.Primary.WhenUnreachable,
-		"a dead RESP backend is still asked on every relay")
+	require.Equal(t, performance.CacheWhenUnreachableSkipped, resp.Tiers.Primary.WhenUnreachable,
+		"a dead RESP backend is bypassed by its breaker and costs nothing")
 	require.Equal(t, performance.CacheWhenUnreachableSkipped, resp.Tiers.Secondary.WhenUnreachable,
 		"a dead gRPC tier is bypassed and costs nothing")
 }
@@ -225,7 +226,7 @@ func TestCacheStateLifetimesComeFromTheBackend(t *testing.T) {
 		_, resp := getCacheState(t, debugMuxDeps{
 			cache: &stubCacheStateBackend{state: performance.DebugCacheState{
 				Configured: true, Engine: performance.CacheEngineRESP, Address: "redis:6379",
-				WhenUnreachable: performance.CacheWhenUnreachableAttempted,
+				WhenUnreachable: performance.CacheWhenUnreachableSkipped,
 				Lifetimes: &performance.CacheLifetimes{
 					FinalizedSeconds: 3600, NonFinalizedSeconds: 0.5, NodeErrorsSeconds: 60,
 				},
@@ -295,7 +296,7 @@ func TestCacheStateWireContract(t *testing.T) {
 		rr, _ := getCacheState(t, debugMuxDeps{
 			cache: &stubCacheStateBackend{state: performance.DebugCacheState{
 				Configured: true, Engine: performance.CacheEngineRESP,
-				WhenUnreachable: performance.CacheWhenUnreachableAttempted,
+				WhenUnreachable: performance.CacheWhenUnreachableSkipped,
 			}},
 		})
 		require.Contains(t, rr.Body.String(), `"address":""`,
@@ -308,7 +309,7 @@ func TestCacheStateWireContract(t *testing.T) {
 			cache: &stubCacheStateBackend{state: performance.DebugCacheState{
 				Configured: true, Engine: performance.CacheEngineRESP, Address: "redis:6379",
 				Reachable: boolPtr(true), CheckedAt: checked, Detail: "no error reported",
-				WhenUnreachable: performance.CacheWhenUnreachableAttempted,
+				WhenUnreachable: performance.CacheWhenUnreachableSkipped,
 			}},
 		})
 		require.Equal(t, "2026-09-09T12:00:00Z", resp.Tiers.Primary.ReachableCheckedAt,

@@ -43,13 +43,12 @@ const (
 	CacheEngineRESP = "resp"
 
 	// CacheWhenUnreachableSkipped: the tier is bypassed before any I/O, so an
-	// unreachable backend costs nothing per relay (the gRPC client returns
-	// NotConnectedError up front).
+	// unreachable backend costs nothing per relay. Both shipped engines report it:
+	// the gRPC client drops CacheActive with its connection and returns
+	// NotConnectedError up front; the RESP backend does the same through its
+	// breaker. The field stays on the wire so a consumer can read the cost rather
+	// than assume it.
 	CacheWhenUnreachableSkipped = "skipped"
-	// CacheWhenUnreachableAttempted: every lookup and write is still issued against
-	// the dead backend and pays the full timeout (the RESP backend degrades
-	// per-operation rather than flipping itself off).
-	CacheWhenUnreachableAttempted = "attempted"
 )
 
 // CacheLifetimes is the TTL policy a backend is actually applying, in seconds.
@@ -98,8 +97,8 @@ type DebugCacheState struct {
 	// networking when the real fault is a credential.
 	Detail string
 	// WhenUnreachable is what the router DOES when this tier is unreachable, one of
-	// the CacheWhenUnreachable* values. Reported because Reachable=false means
-	// opposite things per engine, and nothing else in the payload marks it.
+	// the CacheWhenUnreachable* values. Reported so a consumer reads the cost of
+	// Reachable=false instead of assuming it.
 	WhenUnreachable string
 	// Lifetimes is nil when this backend cannot answer for its own TTLs.
 	Lifetimes *CacheLifetimes
