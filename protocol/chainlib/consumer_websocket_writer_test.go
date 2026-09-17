@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofiber/websocket/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -72,6 +73,73 @@ func TestWebsocketWriterFailure_UnblocksSenders(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a frame sent after the writer died must not block")
 	}
+}
+
+// recordingFrameWriter is the mirror of failingFrameWriter: every write succeeds,
+// so a test can assert on what actually reached the connection.
+type recordingFrameWriter struct {
+	mu           sync.Mutex
+	writes       []webSocketMsgWithType
+	readDeadline bool
+}
+
+func (r *recordingFrameWriter) WriteMessage(messageType int, data []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.writes = append(r.writes, webSocketMsgWithType{messageType: messageType, msg: data})
+	return nil
+}
+
+func (r *recordingFrameWriter) SetReadDeadline(time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.readDeadline = true
+	return nil
+}
+
+func (r *recordingFrameWriter) SetWriteDeadline(time.Time) error { return nil }
+
+// TestWebsocketWriter_FinalFrameTearsDownConnection: the idle reaper hands the writer a
+// close frame and returns, so the writer is the only thing left that can end the
+// connection. Waiting for the client to close on that frame is not enough — one that
+// ignores it used to be reaped by the proxy in front of the router, and the keep-alive
+// ping means the connection is never silent enough for that to happen any more.
+func TestWebsocketWriter_FinalFrameTearsDownConnection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	webSocketCtx, cancelWebSocketCtx := context.WithCancel(context.Background())
+	defer cancelWebSocketCtx()
+
+	conn := &recordingFrameWriter{}
+	frames := make(chan webSocketMsgWithType)
+	writerDone := make(chan struct{})
+	go runWebsocketWriter(ctx, webSocketCtx, conn, frames, writerDone)
+
+	// A regular frame leaves the writer serving the connection...
+	enqueueWebsocketFrame(ctx, webSocketCtx, writerDone, frames, webSocketMsgWithType{messageType: websocket.TextMessage, msg: []byte("subscription payload")})
+	select {
+	case <-writerDone:
+		t.Fatal("a regular frame must not end the writer")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// ...a final one ends it, after putting the frame on the wire.
+	enqueueWebsocketFrame(ctx, webSocketCtx, writerDone, frames, webSocketMsgWithType{
+		messageType: websocket.CloseMessage,
+		msg:         websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Connection idle for too long"),
+		final:       true,
+	})
+	select {
+	case <-writerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a final frame must end the writer goroutine")
+	}
+
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	require.Len(t, conn.writes, 2, "the final frame must reach the connection before teardown")
+	require.Equal(t, websocket.CloseMessage, conn.writes[1].messageType)
+	require.True(t, conn.readDeadline, "a final frame must wake the read loop so the handler can return")
 }
 
 // TestWebsocketWriter_ExitsOnConnectionContext keeps the normal teardown path honest:

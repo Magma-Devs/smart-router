@@ -868,3 +868,41 @@ func TestJsonRPCChainListener_WebSocketSendsKeepAlivePings(t *testing.T) {
 		t.Fatal("no keep-alive ping arrived within 5s")
 	}
 }
+
+// The idle reaper must release the connection itself, not wait for the client to
+// act on the close frame it sends. A client that ignores that frame used to be
+// reaped by the proxy in front of the router — it closes a silent socket within
+// ~2 minutes, which woke the read loop for us. A kept-alive connection is never
+// silent, so that backstop is gone: without the router completing its own
+// teardown the handler goroutine, its 128 KiB read buffer and the per-IP limiter
+// slot are held for the life of the process (the MAG-3722 leak).
+func TestJsonRPCChainListener_IdleConnectionIsReleasedWhenClientIgnoresClose(t *testing.T) {
+	previousIdleTime := GetMaxIdleTimeInSeconds()
+	SetMaxIdleTimeInSeconds(1)
+	defer SetMaxIdleTimeInSeconds(previousIdleTime)
+
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	listener, addr := startTestJsonRPCListener(t, serveCtx, false)
+
+	// Dial and then go silent: never read, never close. The idle close frame
+	// sits unprocessed in this client's receive buffer, exactly like a client
+	// that has hung.
+	client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/", nil)
+	require.NoError(t, err)
+	defer client.Close()
+
+	// wsWG is incremented in the upgrade middleware and released when the
+	// connection handler returns, so draining it is the handler's own teardown.
+	handlerReturned := make(chan struct{})
+	go func() {
+		defer close(handlerReturned)
+		listener.wsWG.Wait()
+	}()
+
+	select {
+	case <-handlerReturned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the idle connection's handler never returned: the router is holding it for the life of the process")
+	}
+}

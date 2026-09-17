@@ -22,8 +22,26 @@ import (
 var (
 	WebSocketRateLimit   = -1               // rate limit requests per second on websocket connection
 	WebSocketBanDuration = time.Duration(0) // once rate limit is reached, will not allow new incoming message for a duration
-	MaxIdleTimeInSeconds = int64(20 * 60)   // 20 minutes of idle time will disconnect the websocket connection
 )
+
+// How long a connection may go without traffic in either direction before the
+// router closes it. Same shape as the keep-alive interval below and for the same
+// reason: it is written once from a startup flag but read by every live
+// connection's idle reaper, so a test that shortens it would otherwise race the
+// connections already running.
+var maxIdleTimeInSeconds = func() *atomic.Int64 {
+	idleTime := &atomic.Int64{}
+	idleTime.Store(DefaultMaxIdleTimeInSeconds)
+	return idleTime
+}()
+
+func SetMaxIdleTimeInSeconds(seconds int64) {
+	maxIdleTimeInSeconds.Store(seconds)
+}
+
+func GetMaxIdleTimeInSeconds() int64 {
+	return maxIdleTimeInSeconds.Load()
+}
 
 // The server pings a live connection every keep-alive interval. Proxies in front
 // of the router (Cloudflare, the Envoy Gateway) close a silent WebSocket after
@@ -46,6 +64,7 @@ func GetWebSocketKeepAliveInterval() time.Duration {
 }
 
 const (
+	DefaultMaxIdleTimeInSeconds       = int64(20 * 60) // 20 minutes of idle time will disconnect the websocket connection
 	DefaultWebSocketKeepAliveInterval = 30 * time.Second
 	// websocketWriteTimeout bounds a single frame write so the connection
 	// goroutine is never pinned by a client that stopped reading: the write fails
@@ -135,6 +154,11 @@ func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]b
 type webSocketMsgWithType struct {
 	messageType int
 	msg         []byte
+	// final marks the last frame of the connection: once it is on the wire the
+	// writer tears the connection down itself instead of waiting for the peer to
+	// act on it. Senders that decide a connection is over — the idle reaper — set
+	// it, because they run on goroutines that must not touch the conn directly.
+	final bool
 }
 
 // websocketFrameWriter is the slice of the connection the writer goroutine touches.
@@ -213,6 +237,14 @@ func runWebsocketWriter(ctx, webSocketCtx context.Context, conn websocketFrameWr
 				_ = conn.SetReadDeadline(time.Now())
 				return
 			}
+			if msg.final {
+				// The sender has ended the connection and its frame is on the wire.
+				// Tear down exactly as the shutdown branch does rather than waiting
+				// for a peer that may never act on the close frame: the read loop
+				// wakes on the deadline and the handler does the single Close.
+				_ = conn.SetReadDeadline(time.Now())
+				return
+			}
 		}
 	}
 }
@@ -283,7 +315,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	idleFor.Store(time.Now().Unix())
 	requestsPerSecond := &atomic.Uint64{}
 	go func() {
-		if WebSocketRateLimit <= 0 && cwm.headerRateLimit <= 0 && MaxIdleTimeInSeconds <= 0 {
+		if WebSocketRateLimit <= 0 && cwm.headerRateLimit <= 0 && GetMaxIdleTimeInSeconds() <= 0 {
 			return
 		}
 		ticker := time.NewTicker(time.Second) // rate limit per second.
@@ -294,18 +326,25 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				utils.LavaFormatDebug("ctx done in time checker")
 				return
 			case <-ticker.C:
-				if MaxIdleTimeInSeconds > 0 {
-					utils.LavaFormatDebug("checking idle time", utils.LogAttr("idleFor", idleFor.Load()), utils.LogAttr("maxIdleTime", MaxIdleTimeInSeconds), utils.LogAttr("now", time.Now().Unix()))
-					idleDuration := idleFor.Load() + MaxIdleTimeInSeconds
+				if maxIdleTime := GetMaxIdleTimeInSeconds(); maxIdleTime > 0 {
+					utils.LavaFormatDebug("checking idle time", utils.LogAttr("idleFor", idleFor.Load()), utils.LogAttr("maxIdleTime", maxIdleTime), utils.LogAttr("now", time.Now().Unix()))
+					idleDuration := idleFor.Load() + maxIdleTime
 					if time.Now().Unix() > idleDuration {
 						// Route the idle-close frame through the single writer goroutine (sendWS), NOT a
 						// direct WriteMessage: this goroutine is separate from the writer, and gofiber/
 						// gorilla forbids concurrent writers — a direct write here raced the writer
-						// goroutine's WriteMessage (data race). The client closing on this frame unblocks
-						// the read loop, which tears the connection down.
+						// goroutine's WriteMessage (data race).
+						//
+						// final tears the connection down once that frame is out rather than trusting
+						// the client to close on it. A client that ignores it used to be reaped by the
+						// proxy in front of the router, which closes a silent socket within ~2 minutes
+						// and so woke the read loop for us; the keep-alive ping means the connection is
+						// never silent, so that backstop is gone and nothing else would ever free the
+						// handler goroutine, its read buffer or the per-IP limiter slot (MAG-3722).
 						sendWS(webSocketMsgWithType{
 							messageType: websocket.CloseMessage,
 							msg:         websocket.FormatCloseMessage(websocket.CloseNormalClosure, fmt.Sprintf("Connection idle for too long, closing connection. Idle time: %d", idleDuration)),
+							final:       true,
 						})
 						return
 					}
