@@ -4124,32 +4124,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 
 	addon := chainlib.GetAddon(protocolMessage)
 	reqBlock = rpcss.resolveRequestedBlock(reqBlock, localRelayData.SeenBlock, latestBlockHashRequested, protocolMessage)
-	usedProviders := relayProcessor.GetUsedProviders()
-
-	// check whether we need a new protocol message with the new earliest block hash requested.
-	//
-	// This can add the archive extension, from earliest-block data the cache supplied on THIS
-	// attempt — evidence, not speculation, and unrelated to the attempt-number upgrade that used
-	// to live in the state machine. Adding it rebuilds the message under a different routerKey,
-	// and the used/unwanted exclusion is keyed by routerKey: providers this request has already
-	// tried are excluded under the OLD key and would not be excluded under the new one, so a
-	// provider that just failed could be re-selected for this attempt (MAG-2228).
-	//
-	// It is one-shot per request (isEarliestUsed) and usually fires on attempt 0, where there is
-	// nothing to carry. It matters when the cache only returns earliest data on a later attempt.
-	// The migration used to happen by accident: the speculative archive upgrade rewrote the same
-	// key one transition earlier and carried the exclusion with it. With that upgrade gone, this
-	// trigger needs its own carry — here, where the key actually changes.
-	earliestRouterKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
+	// check whether we need a new protocol message with the new earliest block hash requested
 	protocolMessage = rpcss.updateProtocolMessageIfNeededWithNewEarliestData(ctx, relayState, protocolMessage, earliestBlockHashRequested, addon)
-	if updatedRouterKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions()); earliestRouterKey.String() != updatedRouterKey.String() {
-		utils.LavaFormatDebug("earliest-block data changed the request's extensions, carrying the provider exclusion across",
-			utils.LogAttr("from", earliestRouterKey.String()),
-			utils.LogAttr("to", updatedRouterKey.String()),
-			utils.LogAttr("GUID", ctx),
-		)
-		usedProviders.MigrateUnwantedProviders(earliestRouterKey, updatedRouterKey)
-	}
 
 	// Smart router doesn't track epochs, use fixed value
 	virtualEpoch := uint64(0)
@@ -4158,6 +4134,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 
 	// Debug: Check if the protocol message has the archive extension in its internal state
 	utils.LavaFormatTrace("[Archive Debug] RelayPrivateData extensions", utils.LogAttr("relayPrivateDataExtensions", localRelayData.Extensions), utils.LogAttr("GUID", ctx))
+	usedProviders := relayProcessor.GetUsedProviders()
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 
 	// MAG-2228: honor lava-select-provider / lava-stickiness only on the FIRST attempt.
