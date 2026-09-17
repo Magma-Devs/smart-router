@@ -59,3 +59,52 @@ func TestRealCommand_WebsocketTunablesFromYAML(t *testing.T) {
 	require.Equal(t, int64(120), viper.GetInt64(common.LimitWebsocketIdleTimeFlag))
 	require.Equal(t, 7*time.Second, viper.GetDuration(common.WebsocketWriteTimeoutFlag))
 }
+
+// A bare number in YAML is read as nanoseconds, so `websocket-keep-alive-interval: 30`
+// means 30ns — while `limit-websocket-connection-idle-time: 120` beside it genuinely
+// means 120 seconds. An operator consistent across the block gets a ping ticker nine
+// orders of magnitude too fast and a write deadline that fails the first frame on every
+// connection, silently. Startup rejects the unitless form instead.
+func TestRealCommand_WebsocketDurationsRejectBareNumbers(t *testing.T) {
+	for _, flagName := range []string{common.WebsocketKeepAliveIntervalFlag, common.WebsocketWriteTimeoutFlag} {
+		t.Run(flagName, func(t *testing.T) {
+			wireLikeRunE(t, flagName+": 30\n")
+
+			// The value really is nanoseconds, which is what makes the check necessary.
+			require.Equal(t, 30*time.Nanosecond, viper.GetDuration(flagName),
+				"a bare number is read as nanoseconds; that is the trap being guarded")
+
+			err := common.ValidateDurationConfigValues(viper.GetViper(),
+				common.WebsocketKeepAliveIntervalFlag, common.WebsocketWriteTimeoutFlag)
+			require.Error(t, err, "startup must refuse a unitless duration")
+			require.Contains(t, err.Error(), flagName)
+		})
+	}
+}
+
+// The forms an operator is meant to use must all pass: a unit in YAML, an explicit
+// flag, and the registered default with nothing set. The seconds-valued neighbour is
+// not a duration key and must not be caught by the same check.
+func TestRealCommand_WebsocketDurationsAcceptEveryValidForm(t *testing.T) {
+	durations := []string{common.WebsocketKeepAliveIntervalFlag, common.WebsocketWriteTimeoutFlag}
+
+	for _, tc := range []struct {
+		name  string
+		yaml  string
+		flags []string
+	}{
+		{"defaults, nothing set", "", nil},
+		{"yaml with units", common.WebsocketKeepAliveIntervalFlag + ": 45s\n" + common.WebsocketWriteTimeoutFlag + ": 7s\n", nil},
+		{"explicit flags", "", []string{"--" + common.WebsocketKeepAliveIntervalFlag, "5s", "--" + common.WebsocketWriteTimeoutFlag, "3s"}},
+		{
+			"alongside the seconds-valued neighbour as a bare number",
+			common.LimitWebsocketIdleTimeFlag + ": 120\n" + common.WebsocketKeepAliveIntervalFlag + ": 45s\n",
+			nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wireLikeRunE(t, tc.yaml, tc.flags...)
+			require.NoError(t, common.ValidateDurationConfigValues(viper.GetViper(), durations...))
+		})
+	}
+}

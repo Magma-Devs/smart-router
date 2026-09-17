@@ -201,3 +201,34 @@ func SetupRollingLogger() func() {
 		viper.GetString(RollingLogFormat),
 	)
 }
+
+// ValidateDurationConfigValues rejects a duration config key written as a bare number.
+//
+// viper.GetDuration reads a bare number as nanoseconds, so
+// `websocket-keep-alive-interval: 30` in a config file means 30ns rather than 30
+// seconds: a ping ticker nine orders of magnitude too fast, and a write deadline that
+// fails the first frame on every connection. The trap is the key registered beside
+// them — LimitWebsocketIdleTimeFlag IS a plain seconds count — so an operator being
+// consistent across the block gets it wrong, silently.
+//
+// The test is exact rather than a threshold, so there is no number to justify: a flag
+// default, an explicit --flag and a unit-suffixed config value all reach viper as
+// strings, and only a bare config number arrives as a number. The shape of the value
+// answers the question.
+//
+// Applied to the keys the caller names rather than every duration flag in the command:
+// a config that already carries a bare number for some older key is running with the
+// value it has today, and failing its next startup is a larger change than this is.
+func ValidateDurationConfigValues(v *viper.Viper, flagNames ...string) error {
+	for _, flagName := range flagNames {
+		switch raw := v.Get(flagName).(type) {
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+			return utils.LavaFormatError("duration config value has no unit, and a bare number is read as nanoseconds", nil,
+				utils.LogAttr("flag", flagName),
+				utils.LogAttr("value", raw),
+				utils.LogAttr("write_it_as", "a duration with a unit, e.g. 30s, 500ms or 2m"),
+			)
+		}
+	}
+	return nil
+}
