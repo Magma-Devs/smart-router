@@ -33,11 +33,14 @@
 # instructions are printed at the end.
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-LOGS_DIR=${__dir}/../../debugging/logs
-mkdir -p "$LOGS_DIR"
-LOGS_DIR=$(cd "$LOGS_DIR" && pwd)
+# Repo root. Derived from git rather than by counting "../" levels, so moving
+# this script between directories cannot silently repoint it (MAG-3705).
+PROJECT_ROOT=$(git -C "$__dir" rev-parse --show-toplevel 2>/dev/null || true)
+[[ -f "$PROJECT_ROOT/go.mod" ]] || { echo "ERROR: cannot locate the smart-router repo root from $__dir"; exit 1; }
 
-PROJECT_ROOT=$(cd "${__dir}"/../.. && pwd)
+LOGS_DIR="${PROJECT_ROOT}/debugging/logs"
+mkdir -p "$LOGS_DIR"
+
 # Reuse the checked-in example rather than generating a throwaway config.
 CONFIG_REL="config/smartrouter_examples/smartrouter_eth_resp_cache.yml"
 CONFIG_FILE="$PROJECT_ROOT/$CONFIG_REL"
