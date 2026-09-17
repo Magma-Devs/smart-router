@@ -47,13 +47,17 @@ jobs:
       RELEASE_VERSION: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}
 
     steps:
-    # Every action in this job is pinned to a commit SHA, with its version
-    # in the trailing comment. A tag like `@v7` is mutable: it can be moved
-    # onto different code between two runs of the same commit, which is both
-    # a supply-chain surface and the reason the v1.5.2 tag push failed (see
-    # the GoReleaser pin below). Dependabot's github-actions ecosystem bumps
-    # these weekly and rewrites the comment, so pinning costs no maintenance.
-    # Resolve a new one with: gh api repos/OWNER/REPO/commits/vX --jq .sha
+      # Every action in every workflow of this repository is pinned to a
+      # commit SHA, with its version in the trailing comment. A tag like
+      # `@v7` is mutable: it can be moved onto different code between two
+      # runs of the same commit. That is a supply-chain surface in any job
+      # holding a write token (this one signs and publishes; the CI jobs
+      # push to the same GHCR image and set the merge-gate statuses), and
+      # the same class of drift as the floating GoReleaser range that broke
+      # the v1.5.2 tag push (see the GoReleaser pin below). Dependabot's
+      # github-actions ecosystem bumps these weekly and rewrites the
+      # comment, so pinning costs no maintenance.
+      # Resolve a new one with: gh api repos/OWNER/REPO/commits/vX --jq .sha
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
