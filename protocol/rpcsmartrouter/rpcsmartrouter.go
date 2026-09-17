@@ -1027,11 +1027,9 @@ type debugCacheTier struct {
 	// how stale it is. Empty when the value was read live.
 	ReachableCheckedAt string `json:"reachable_checked_at"`
 	ReachableDetail    string `json:"reachable_detail"`
-	// WhenUnreachable is what the router DOES when this tier is unreachable:
-	// "skipped" (bypassed before any I/O, costs nothing) or "attempted" (every
-	// lookup still runs against the dead backend and pays the full timeout). The two
-	// engines sit on opposite sides of this, so reachable:false alone does not tell
-	// an operator whether their relays are being taxed.
+	// WhenUnreachable is what the router DOES when this tier is unreachable. Both
+	// shipped engines answer "skipped" (bypassed before any I/O, costs nothing); the
+	// field is reported so an operator reads that rather than assumes it.
 	WhenUnreachable string `json:"when_unreachable"`
 	// Lifetimes is null when this tier cannot answer for its own TTLs — a cache-be
 	// tier's expirations are configured in, and applied by, a different pod. It was

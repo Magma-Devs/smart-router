@@ -3,8 +3,11 @@ package performance
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
@@ -20,6 +23,12 @@ const (
 	// gauges, and reachability transition logs.
 	respCacheHealthInterval = 10 * time.Second
 	respCachePingTimeout    = 3 * time.Second
+	// respCacheTrippedProbeInterval is the PING cadence while the breaker is open, so a
+	// backend that comes back is noticed within a second instead of a full interval.
+	respCacheTrippedProbeInterval = time.Second
+	// respCacheTimeoutTripThreshold is how many CONSECUTIVE timed-out operations open the
+	// breaker. One timeout is a slow reply; three in a row is a backend that is not answering.
+	respCacheTimeoutTripThreshold = 3
 )
 
 // RespCache is the RESP-compatible (Redis/Valkey) cache backend: the same
@@ -34,6 +43,20 @@ type RespCache struct {
 
 	healthStop chan struct{}
 	closeOnce  sync.Once
+
+	// breakerOpen is the circuit breaker. While set, CacheActive reports false — the same
+	// latch the gRPC client drops when its connection is gone — so the relay path bypasses this
+	// tier before any I/O instead of paying the cache timeout on every relay against a dark
+	// backend, and every operation still called returns NotConnectedError. Opened by a
+	// connection-class error, by consecutive timeouts, or by a failed health probe; closed by
+	// the next successful probe, which runs every respCacheTrippedProbeInterval while open.
+	breakerOpen         atomic.Bool
+	consecutiveTimeouts atomic.Int32
+	// probeNow wakes the health loop so a trip is followed by a probe within milliseconds
+	// rather than at the next tick. Buffered by one: a second wake while one is pending is
+	// redundant.
+	probeNow chan struct{}
+
 	// health is the last probe result, published for GET /debug/cache-state. Stored
 	// as a whole snapshot behind one atomic so the verdict, its timestamp and its
 	// reason can never be read torn apart from each other.
@@ -69,9 +92,88 @@ func newRespCacheWithHealthInterval(store *redisstore.Store, policy core.Policy,
 		store:      store,
 		metrics:    getRespCacheMetrics(),
 		healthStop: make(chan struct{}),
+		probeNow:   make(chan struct{}, 1),
 	}
 	go cache.healthLoop(healthInterval)
 	return cache
+}
+
+// openBreaker trips the breaker once per outage: the first caller flips it, counts the trip,
+// drops the connected gauge and wakes the health loop; later callers during the same outage
+// find it already open and return.
+func (cache *RespCache) openBreaker(reason string) {
+	if !cache.breakerOpen.CompareAndSwap(false, true) {
+		return
+	}
+	cache.metrics.breakerTrips.Inc()
+	cache.metrics.connected.Set(0)
+	utils.LavaFormatWarning("resp-cache breaker opened; relays bypass the cache until a health probe succeeds", nil,
+		utils.Attribute{Key: "reason", Value: reason})
+	select {
+	case cache.probeNow <- struct{}{}:
+	default:
+	}
+}
+
+// closeBreaker is called on every successful probe; it logs only on the open→closed edge.
+func (cache *RespCache) closeBreaker() {
+	cache.consecutiveTimeouts.Store(0)
+	if cache.breakerOpen.CompareAndSwap(true, false) {
+		utils.LavaFormatInfo("resp-cache breaker closed; relays use the cache again")
+	}
+}
+
+// noteOutcome feeds an operation's result to the breaker. A clean result ends the timeout
+// streak; a connection-class failure opens the breaker at once; a timeout opens it only after
+// respCacheTimeoutTripThreshold in a row — one slow reply is not an outage. Any other command
+// error (OOM under noeviction, a rejected credential, a script error) leaves the breaker alone:
+// the backend answered, and skipping it would trade a fast failure for a lost cache.
+func (cache *RespCache) noteOutcome(err error) {
+	if err == nil {
+		if cache.consecutiveTimeouts.Load() != 0 {
+			cache.consecutiveTimeouts.Store(0)
+		}
+		return
+	}
+	switch {
+	case isTimeoutError(err):
+		if cache.consecutiveTimeouts.Add(1) >= respCacheTimeoutTripThreshold {
+			cache.openBreaker("consecutive timeouts")
+		}
+	case isConnectionError(err):
+		cache.openBreaker("connection error: " + safeProbeDetail(err))
+	}
+}
+
+// probeInterval is the health cadence for the breaker's current state.
+func (cache *RespCache) probeInterval(interval time.Duration) time.Duration {
+	if cache.breakerOpen.Load() && respCacheTrippedProbeInterval < interval {
+		return respCacheTrippedProbeInterval
+	}
+	return interval
+}
+
+// isTimeoutError: the caller's budget ran out, or a dial/read/write limit did. Both mean the
+// backend did not answer in time; neither says it is gone.
+func isTimeoutError(err error) bool {
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
+}
+
+// isConnectionError: the transport failed rather than the command — a refused or reset
+// connection, a closed socket, a client torn down. This is the "backend is gone" class, and the
+// one that opens the breaker on a single occurrence.
+func isConnectionError(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, redis.ErrClosed) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 // healthLoop probes the backend on a fixed cadence: the connected gauge and
@@ -114,35 +216,54 @@ func (cache *RespCache) healthLoop(interval time.Duration) {
 		cache.metrics.poolStaleConns.Set(float64(stats.StaleConns))
 	}
 
-	lastConnected, probeErr := probe()
-	publishHealth(lastConnected, probeErr)
-	updateGauges(lastConnected)
-	if !lastConnected {
-		logUnavailable("resp-cache backend unavailable at startup; relays degrade to cache misses until it recovers", probeErr)
+	// settle applies one probe verdict: metrics and the debug snapshot, the transition log, and
+	// the breaker — a failed probe opens it (an idle router learns of an outage from the probe,
+	// not from a relay), a successful one closes it.
+	var lastConnected bool
+	settle := func(connected bool, err error, first bool) {
+		if connected != lastConnected || first {
+			switch {
+			case connected && !first:
+				utils.LavaFormatInfo("resp-cache backend reachable again")
+			case !connected && first:
+				logUnavailable("resp-cache backend unavailable at startup; relays bypass the cache until it recovers", err)
+			case !connected:
+				logUnavailable("resp-cache backend became unavailable; relays bypass the cache until it recovers", err)
+			}
+			lastConnected = connected
+		}
+		publishHealth(connected, err)
+		updateGauges(connected)
+		if connected {
+			cache.closeBreaker()
+		} else {
+			cache.openBreaker("health probe failed")
+		}
 	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	connected, probeErr := probe()
+	settle(connected, probeErr, true)
+
+	timer := time.NewTimer(cache.probeInterval(interval))
+	defer timer.Stop()
 	for {
 		select {
 		case <-cache.healthStop:
 			return
-		case <-ticker.C:
-			connected, err := probe()
-			// Logging is transition-only: a backend that stays down stays
-			// quiet after the first report, so a persistent auth failure
-			// cannot flood the log.
-			if connected != lastConnected {
-				if connected {
-					utils.LavaFormatInfo("resp-cache backend reachable again")
-				} else {
-					logUnavailable("resp-cache backend became unavailable; relays degrade to cache misses until it recovers", err)
+		case <-cache.probeNow:
+			// A trip asked for an immediate verdict; drain the pending tick so the loop does
+			// not probe twice back to back.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
 				}
-				lastConnected = connected
 			}
-			publishHealth(connected, err)
-			updateGauges(connected)
+		case <-timer.C:
 		}
+		connected, probeErr = probe()
+		settle(connected, probeErr, false)
+		timer.Reset(cache.probeInterval(interval))
 	}
 }
 
@@ -202,11 +323,12 @@ func (cache *RespCache) BackendEndpoint() string {
 	return cache.store.ReadEndpoint()
 }
 
-// CacheActive reports whether the backend is configured. Reachability is NOT
-// probed here — like the gRPC client, a failing backend degrades per-operation
-// (a lookup that errors is a miss) rather than flipping the whole cache off.
+// CacheActive reports whether this tier should be consulted: configured, and the breaker
+// closed. The relay path gates every lookup and write on it, so an open breaker makes an
+// unreachable backend cost nothing per relay — the gRPC client answers the same question from
+// its connection latch. Reading it never touches the backend.
 func (cache *RespCache) CacheActive() bool {
-	return cache != nil
+	return cache != nil && !cache.breakerOpen.Load()
 }
 
 // DebugCacheState reports this tier for GET /debug/cache-state. Read-only: it
@@ -224,11 +346,9 @@ func (cache *RespCache) DebugCacheState() DebugCacheState {
 		Configured: true,
 		Engine:     CacheEngineRESP,
 		Address:    cache.store.ConfiguredEndpoints(),
-		// The opposite of the gRPC tier, and the reason this field exists:
-		// CacheActive() is unconditionally true here, so an unreachable RESP
-		// backend is still asked on every relay and pays the full cache timeout
-		// each time. Same reachable:false, entirely different operational cost.
-		WhenUnreachable: CacheWhenUnreachableAttempted,
+		// The breaker drops CacheActive while the backend is unreachable, so the relay path
+		// bypasses this tier before any I/O — the same cost as the gRPC tier: none.
+		WhenUnreachable: CacheWhenUnreachableSkipped,
 		Lifetimes:       cache.lifetimes(),
 	}
 	// A nil snapshot means the first probe has not returned yet. Left as nil
@@ -275,11 +395,16 @@ func (cache *RespCache) GetEntry(ctx context.Context, relayCacheGet *pairingtype
 	if cache == nil {
 		return nil, NotInitializedError
 	}
+	if cache.breakerOpen.Load() {
+		return nil, NotConnectedError
+	}
 	reply, _, err := cache.engine.GetRelay(ctx, relayCacheGet)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpGet, err)
+		cache.noteOutcome(err)
 		return reply, err
 	}
+	cache.noteOutcome(nil)
 	return reply, nil
 }
 
@@ -287,9 +412,19 @@ func (cache *RespCache) SetEntry(ctx context.Context, cacheSet *pairingtypes.Rel
 	if cache == nil {
 		return NotInitializedError
 	}
+	if cache.breakerOpen.Load() {
+		return NotConnectedError
+	}
 	err := cache.engine.SetRelay(ctx, cacheSet)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpSet, err)
+		cache.noteOutcome(err)
+		return err
+	}
+	// A semantic rejection is not a backend verdict; only a store failure or a clean result
+	// speaks to the breaker.
+	if err == nil {
+		cache.noteOutcome(nil)
 	}
 	return err
 }
@@ -334,7 +469,12 @@ func (cache *RespCache) GetStickySession(ctx context.Context, chainId, apiInterf
 	if cache == nil {
 		return core.StickyPin{}, false, NotInitializedError
 	}
-	return cache.engine.GetSticky(ctx, chainId, apiInterface, service, stickyId)
+	if cache.breakerOpen.Load() {
+		return core.StickyPin{}, false, NotConnectedError
+	}
+	pin, found, err := cache.engine.GetSticky(ctx, chainId, apiInterface, service, stickyId)
+	cache.noteOutcome(err)
+	return pin, found, err
 }
 
 // SetStickySessionIfAbsent claims an upstream for one sticky session id, first-writer-wins,
@@ -344,5 +484,12 @@ func (cache *RespCache) SetStickySessionIfAbsent(ctx context.Context, chainId, a
 	if cache == nil {
 		return core.StickyPin{}, NotInitializedError
 	}
-	return cache.engine.SetStickyIfAbsent(ctx, chainId, apiInterface, service, stickyId, pin, ttl)
+	if cache.breakerOpen.Load() {
+		return core.StickyPin{}, NotConnectedError
+	}
+	effective, err := cache.engine.SetStickyIfAbsent(ctx, chainId, apiInterface, service, stickyId, pin, ttl)
+	if err == nil || !errors.Is(err, core.ErrEmptyStickyId) {
+		cache.noteOutcome(err)
+	}
+	return effective, err
 }

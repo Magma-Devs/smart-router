@@ -130,9 +130,9 @@ func TestRespCacheDebugState(t *testing.T) {
 	require.Contains(t, state.Address, "prefix=srtest",
 		"the key prefix decides which keyspace this router occupies")
 
-	// Unlike the gRPC tier, an unreachable RESP backend is still asked on every
-	// relay and pays the full cache timeout each time.
-	require.Equal(t, CacheWhenUnreachableAttempted, state.WhenUnreachable)
+	// The breaker drops CacheActive while the backend is unreachable, so this tier is
+	// bypassed before any I/O — the same answer the gRPC tier gives.
+	require.Equal(t, CacheWhenUnreachableSkipped, state.WhenUnreachable)
 
 	// This backend owns its policy, so it can answer where a cache-be tier cannot.
 	require.NotNil(t, state.Lifetimes)

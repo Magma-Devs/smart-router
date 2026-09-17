@@ -1,9 +1,6 @@
 package performance
 
 import (
-	"context"
-	"errors"
-	"net"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -27,6 +24,7 @@ type respCacheMetricsSet struct {
 	connectionErrors prometheus.Counter
 	opsFailed        *prometheus.CounterVec
 	connected        prometheus.Gauge
+	breakerTrips     prometheus.Counter
 	poolTotalConns   prometheus.Gauge
 	poolIdleConns    prometheus.Gauge
 	poolStaleConns   prometheus.Gauge
@@ -50,7 +48,11 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 			}, []string{"op", "kind"}),
 			connected: prometheus.NewGauge(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_connected",
-				Help: "1 while the last health probe (PING) against the RESP cache backend succeeded, 0 after a failed probe.",
+				Help: "1 while the last health probe (PING) against the RESP cache backend succeeded, 0 after a failed probe or while the breaker is open.",
+			}),
+			breakerTrips: prometheus.NewCounter(prometheus.CounterOpts{
+				Name: "smartrouter_resp_cache_breaker_trips_total",
+				Help: "Times the RESP cache breaker opened (connection error, consecutive timeouts, or a failed health probe); while open the tier is bypassed before any I/O until a probe succeeds.",
 			}),
 			poolTotalConns: prometheus.NewGauge(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_pool_total_conns",
@@ -65,7 +67,7 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 				Help: "Stale connections removed from the RESP client pool(s).",
 			}),
 		}
-		prometheus.MustRegister(m.connectionErrors, m.opsFailed, m.connected, m.poolTotalConns, m.poolIdleConns, m.poolStaleConns)
+		prometheus.MustRegister(m.connectionErrors, m.opsFailed, m.connected, m.breakerTrips, m.poolTotalConns, m.poolIdleConns, m.poolStaleConns)
 		respCacheMetrics = m
 	})
 	return respCacheMetrics
@@ -78,8 +80,7 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 // the caller's context) classify as timeouts.
 func (m *respCacheMetricsSet) recordOpFailure(op string, err error) {
 	kind := respCacheFailureKindError
-	var netErr net.Error
-	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+	if isTimeoutError(err) {
 		kind = respCacheFailureKindTimeout
 	}
 	m.opsFailed.WithLabelValues(op, kind).Inc()
