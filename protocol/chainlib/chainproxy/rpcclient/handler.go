@@ -531,8 +531,10 @@ func (h *handler) runMethod(ctx context.Context, msg *JsonrpcMessage, callb *cal
 
 // forgetClientSub drops sub from the dispatch table once its forwarding loop has been
 // told to quit. Runs on the dispatch goroutine, which is the only owner of clientSubs.
-// A push for the id that still arrives is dropped by deliverSubscriptionPush as an
-// unmatched notification, exactly as before the entry was removed.
+// A push for the id that still arrives then reaches deliverSubscriptionPush as an
+// unmatched frame: without a request id it is dropped, the fate it met while the entry
+// existed; with one it goes to the call path, which answers the node with a JSON-RPC
+// error where the entry used to swallow it.
 func (h *handler) forgetClientSub(sub *ClientSubscription) {
 	if sub == nil {
 		return
