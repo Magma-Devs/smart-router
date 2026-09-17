@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Two-zone secondary-cache integration lane (docs/SECONDARY-CACHE.md).
 #
 # Reproduces the PRD's two-zone topology on one machine:
@@ -13,15 +13,16 @@
 # "Cached", and is backfilled into the external primary — which serves the next
 # repeat directly. RUN_DEMO=1 executes and verifies the flow automatically.
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-source "$__dir"/../useful_commands.sh
-. "${__dir}"/../vars/variables.sh
 
-LOGS_DIR=${__dir}/../../debugging/logs
-mkdir -p $LOGS_DIR
-LOGS_DIR=$(cd "$LOGS_DIR" && pwd)
-rm $LOGS_DIR/*.log 2>/dev/null || true
+# Repo root. Derived from git rather than by counting "../" levels, so moving
+# this script between directories cannot silently repoint it (MAG-3705).
+PROJECT_ROOT=$(git -C "$__dir" rev-parse --show-toplevel 2>/dev/null || true)
+[[ -f "$PROJECT_ROOT/go.mod" ]] || { echo "ERROR: cannot locate the smart-router repo root from $__dir"; exit 1; }
 
-PROJECT_ROOT=$(cd ${__dir}/../.. && pwd)
+LOGS_DIR="${PROJECT_ROOT}/debugging/logs"
+mkdir -p "$LOGS_DIR"
+rm "$LOGS_DIR"/*.log 2>/dev/null || true
+
 CONFIG_EXTERNAL="$PROJECT_ROOT/config/smartrouter_examples/smartrouter_eth_zone_external.yml"
 CONFIG_INTERNAL="$PROJECT_ROOT/config/smartrouter_examples/smartrouter_eth_zone_internal.yml"
 

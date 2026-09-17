@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Regression harness for the RESP lane's ownership safety.
 #
 # The lane must NEVER signal a process merely because its executable is named
@@ -10,12 +10,16 @@
 # Safe by construction: it binds a throwaway port with its own helper process
 # and never touches 3360/7779/63790 or any real router.
 #
-#   bash scripts/pre_setups/test_resp_lane_ownership.sh
+#   bash scripts/pre_setups/cache/test_resp_lane_ownership.sh
 set -u
 
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 LANE="$__dir/init_smartrouter_eth_resp_cache.sh"
-PROJECT_ROOT=$(cd "${__dir}"/../.. && pwd)
+
+# Repo root. Derived from git rather than by counting "../" levels, so moving
+# this script between directories cannot silently repoint it (MAG-3705).
+PROJECT_ROOT=$(git -C "$__dir" rev-parse --show-toplevel 2>/dev/null || true)
+[[ -f "$PROJECT_ROOT/go.mod" ]] || { echo "ERROR: cannot locate the smart-router repo root from $__dir"; exit 1; }
 
 # Throwaway ports, deliberately far from the real lane's defaults.
 T_ROUTER=39361
