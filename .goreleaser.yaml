@@ -79,6 +79,15 @@ dockers_v2:
     tags:
       - "{{ .Tag }}"
     dockerfile: docker/Dockerfile.release
+    # Bare platforms — NO CPU-variant suffix, even though builds[] pins
+    # goamd64 v3 / goarm64 v8.2. The published index must stay
+    # variant-free: containerd matches a node's default `linux/amd64`
+    # against the index verbatim, and an entry tagged `linux/amd64/v3`
+    # fails that match ("no match for platform in manifest") — the image
+    # pulls but never unpacks. GoReleaser is pinned to v2.18.1 in
+    # .github/workflows/release.yml because v2.18.2 reads a bare platform
+    # as the BASELINE variant and then finds no binary to stage. Read that
+    # pin's comment before touching either file.
     platforms:
       - linux/amd64
       - linux/arm64
