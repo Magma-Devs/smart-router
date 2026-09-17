@@ -77,41 +77,28 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 		}
 	}
 
-	// 6. ARCHIVE MUTATION
-	mutation := p.decideMutation(input)
-
-	// 7. DEFAULT: RETRY
-	return DecisionOutput{Action: Retry, Mutation: mutation, Reason: "Default"}
-}
-
-// decideMutation determines archive and cache side effects for the current attempt.
-func (p *Policy) decideMutation(input DecisionInput) MutationOutput {
-	if input.ArchiveStatus == nil {
-		return MutationOutput{}
-	}
-
-	isUpgraded := input.ArchiveStatus.IsUpgraded()
-	isArchive := input.ArchiveStatus.IsArchive()
-
-	// If upgraded and 2+ node errors, cache hashes and remove archive
-	if isUpgraded && input.NodeErrors >= 2 {
-		return MutationOutput{
-			ArchiveAction: RemoveArchive,
-			CacheHashes:   true,
-		}
-	}
-
-	// Add archive on first retry (attempt 1)
-	if !isArchive && input.AttemptNumber == 1 {
-		return MutationOutput{ArchiveAction: AddArchive}
-	}
-
-	// Remove archive on second retry (attempt 2) if upgraded
-	if isUpgraded && input.AttemptNumber == 2 {
-		return MutationOutput{ArchiveAction: RemoveArchive}
-	}
-
-	return MutationOutput{}
+	// 6. DEFAULT: RETRY
+	//
+	// A retry re-sends the SAME request to a different endpoint. It does not rewrite it.
+	//
+	// This used to add the archive extension on attempt 1 and take it off again on attempt 2,
+	// keyed on the attempt number and nothing else. That came from a network where a
+	// misclassified historical request was cheap to paper over by forcing archive and seeing
+	// what happened. It does not hold here: the spec's own archive rule
+	// (extensionslib.ArchiveParserRule) already decides whether a request needs archive, and it
+	// decides on attempt 0, from the requested block. A historical request is therefore ALREADY
+	// on an archive endpoint before any retry exists, and the only requests the upgrade could
+	// still fire on were the ones that rule had just judged non-archive — including plain
+	// `latest` reads, which no reading of "archive" covers.
+	//
+	// Adding it anyway inverted the retry: the extension filter dropped every endpoint without
+	// archive, so one failed attempt narrowed a five-endpoint pool to whichever single endpoint
+	// declared the addon — skipping healthy untried endpoints, reaching into the backup tier,
+	// and charging the archive CU multiplier for a request that was never archive.
+	//
+	// So a misclassification is now fixed where it is made — in the spec's rule.block threshold
+	// for that chain — and not compensated for once per request, forever, by spending a retry.
+	return DecisionOutput{Action: Retry, Reason: "Default"}
 }
 
 // OnSendRelayResult handles pre-relay send decisions. Called from the state machine's

@@ -18,7 +18,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
@@ -737,7 +736,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
 		require.NoError(t, smErr)
 		require.Equal(t, relaycore.CrossValidation, sm.GetSelection(), "caller CV headers must enable cross-validation")
-		rp := relaycore.NewRelayProcessor(ctx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, sm)
+		rp := relaycore.NewRelayProcessor(ctx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, sm)
 		rp.SetCrossValidationQueriedProviders([]string{"p1", "p2", "p3"})
 		pushSuccess(rp, "p1", "g1", consensusBody)
 		pushSuccess(rp, "p2", "g2", consensusBody)
@@ -3135,9 +3134,8 @@ func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidation
 	return m.cvParams
 }
 
-func (m *cvGuardStateMachine) GetUsedProviders() *lavasession.UsedProviders                { return m.usedProviders }
-func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf)            {}
-func (m *cvGuardStateMachine) SetRelayRetriesManager(rm *lavaprotocol.RelayRetriesManager) {}
+func (m *cvGuardStateMachine) GetUsedProviders() *lavasession.UsedProviders     { return m.usedProviders }
+func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf) {}
 
 // cvGuardMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter
 // for the CV-guard test. The early-exit path does not hit metrics callbacks.
@@ -3235,7 +3233,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	metricsStub := cvGuardMetrics{}
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, cvParams, metricsStub, metricsStub,
-		lavaprotocol.NewRelayRetriesManager(), sm)
+		sm)
 
 	// Real session manager — OnSessionFailure runs against it for the 2 dropped sessions.
 	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}

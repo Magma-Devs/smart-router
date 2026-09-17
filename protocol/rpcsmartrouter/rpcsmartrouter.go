@@ -1387,9 +1387,8 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    Surfaced in the response body as the "chain-state" capability below.
 		resetAllChainStates(deps)
 		//
-		// 3. Per-server RelayRetriesManagers (6h hash ban cache), 4. per-CSM
-		//    transient failure state, and 4b. per-CSM blocked-providers list.
-		//    All require the router to be present; test fixtures without a
+		// 3. Per-CSM transient failure state, and 3b. per-CSM blocked-providers
+		//    list. Both require the router to be present; test fixtures without a
 		//    router still get a useful partial reset above and we report which
 		//    stores actually moved.
 		//
@@ -1404,11 +1403,6 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    for /debug/* paths; production relay paths never reach it.
 		if deps.router != nil {
 			deps.router.mu.Lock()
-			for _, server := range deps.router.rpcServers {
-				if server != nil && server.relayRetriesManager != nil {
-					server.relayRetriesManager.Reset()
-				}
-			}
 			for _, csm := range deps.router.sessionManagers {
 				if csm != nil {
 					csm.ResetTransientFailureState()

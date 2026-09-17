@@ -36,7 +36,7 @@ func newStopReasonHarness(t *testing.T) (*relaycore.RelayProcessor, *lavasession
 	usedProviders := lavasession.NewUsedProviders(nil)
 	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil, tickerValue: 10 * time.Second}, protocolMessage, nil, false)
 	require.NoError(t, err)
-	return relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, stateMachine), usedProviders
+	return relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine), usedProviders
 }
 
 // Every terminating path names a reason on the Done instruction, and ProcessRelaySend copies that
