@@ -18,7 +18,7 @@ import (
 // while upstream nodes return their own IDs. This mapper maintains the translation.
 //
 // Key invariants:
-//   - Router IDs are unique per client (counter ensures this)
+//   - Router IDs are unique across the mapper (one counter numbers them all)
 //   - Upstream IDs never exposed to clients
 //   - Multiple router IDs can map to same upstream ID (subscription sharing)
 //   - All operations are thread-safe
@@ -30,15 +30,18 @@ type SubscriptionIDMapper struct {
 	// One upstream subscription can serve multiple router subscriptions (dedup)
 	upstreamToRouters map[string][]string
 
-	// clientCounters tracks per-client monotonic counters for ID generation
-	clientCounters map[string]*atomic.Uint64
+	// routerCounter numbers every id GenerateRouterID hands out. It is one counter for
+	// the whole mapper rather than one per client: a per-client counter needed a map
+	// entry per connection that ever subscribed, which nothing removed (MAG-3722), and
+	// an id only has to be unique, which a single counter guarantees for the life of the
+	// process without any per-client state to release.
+	routerCounter atomic.Uint64
 
-	// numericCounter backs GenerateNumericRouterID. Unlike clientCounters it is not
-	// per-client: a numeric id is handed to the client verbatim and is compared against
-	// upstream ids during unsubscribe, so it has to be unique across every client this
-	// mapper serves. That is the scope the lookups actually need — each manager builds its
-	// own mapper, so two managers do issue the same numbers, and nothing may key across
-	// them on this value.
+	// numericCounter backs GenerateNumericRouterID. A numeric id is handed to the client
+	// verbatim and is compared against upstream ids during unsubscribe, so it has to be
+	// unique across every client this mapper serves. That is the scope the lookups
+	// actually need — each manager builds its own mapper, so two managers do issue the
+	// same numbers, and nothing may key across them on this value.
 	numericCounter atomic.Uint64
 
 	lock sync.RWMutex
@@ -61,45 +64,15 @@ func NewSubscriptionIDMapper() *SubscriptionIDMapper {
 	return &SubscriptionIDMapper{
 		routerToUpstream:  make(map[string]string),
 		upstreamToRouters: make(map[string][]string),
-		clientCounters:    make(map[string]*atomic.Uint64),
 	}
 }
 
 // GenerateRouterID creates a new router subscription ID for a client.
-// Format: "rs_{clientHash6}_{counter5}" - e.g., "rs_a1b2c3_00042"
-// The ID is unique per client and monotonically increasing.
+// Format: "rs_{clientHash6}_{counter}" - e.g., "rs_a1b2c3_00042". The hash names the
+// client for log correlation; the counter is mapper-wide, so an id is never reused
+// for the life of the process, by any client.
 func (m *SubscriptionIDMapper) GenerateRouterID(clientKey string) string {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	counter, exists := m.clientCounters[clientKey]
-	if !exists {
-		counter = &atomic.Uint64{}
-		m.clientCounters[clientKey] = counter
-	}
-
-	// Format: rs_{first 6 chars of client hash}_{zero-padded counter}
-	clientHash := sha256Short(clientKey)
-	count := counter.Add(1)
-
-	return fmt.Sprintf("rs_%s_%05d", clientHash, count)
-}
-
-// RemoveClient forgets a client's ID counter. Call it once the client holds no
-// subscriptions: the key carries the per-connection GUID, so nothing reuses it,
-// and without this call the map kept one entry per connection that ever
-// subscribed (MAG-3722).
-func (m *SubscriptionIDMapper) RemoveClient(clientKey string) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	delete(m.clientCounters, clientKey)
-}
-
-// ClientCount reports how many clients currently hold an ID counter.
-func (m *SubscriptionIDMapper) ClientCount() int {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-	return len(m.clientCounters)
+	return fmt.Sprintf("rs_%s_%05d", sha256Short(clientKey), m.routerCounter.Add(1))
 }
 
 // GenerateNumericRouterID creates a router subscription ID for chains that number their

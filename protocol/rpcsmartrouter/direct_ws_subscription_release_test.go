@@ -36,10 +36,20 @@ func newReleaseHarness(t *testing.T) *releaseHarness {
 	return &releaseHarness{t: t, srv: srv, manager: manager}
 }
 
+// subscription is what one client got back from subscribe.
+type subscription struct {
+	ctx        context.Context
+	disconnect context.CancelFunc
+	replies    <-chan *pairingtypes.RelayReply
+	clientKey  string
+	routerID   string
+	uid        string
+}
+
 // subscribe opens a subscription for a client named uid on its own connection context.
-func (h *releaseHarness) subscribe(uid string) (ctx context.Context, disconnect context.CancelFunc, replies <-chan *pairingtypes.RelayReply, clientKey string) {
+func (h *releaseHarness) subscribe(uid string) subscription {
 	h.t.Helper()
-	ctx, disconnect = context.WithCancel(context.Background())
+	ctx, disconnect := context.WithCancel(context.Background())
 	body, err := json.Marshal(map[string]interface{}{
 		"jsonrpc": "2.0",
 		"method":  "eth_subscribe",
@@ -55,7 +65,49 @@ func (h *releaseHarness) subscribe(uid string) (ctx context.Context, disconnect 
 	require.NoError(h.t, err)
 	require.NotNil(h.t, reply)
 	require.NotNil(h.t, replies, "every subscriber, joiner or creator, gets a reply channel")
-	return ctx, disconnect, replies, h.manager.CreateWebSocketConnectionUniqueKey("dapp", "10.0.0.1", uid)
+	var resp struct {
+		Result string `json:"result"`
+	}
+	require.NoError(h.t, json.Unmarshal(reply.Data, &resp))
+	require.NotEmpty(h.t, resp.Result, "the subscribe reply carries the router id")
+	return subscription{
+		ctx:        ctx,
+		disconnect: disconnect,
+		replies:    replies,
+		clientKey:  h.manager.CreateWebSocketConnectionUniqueKey("dapp", "10.0.0.1", uid),
+		routerID:   resp.Result,
+		uid:        uid,
+	}
+}
+
+// unsubscribe sends the client's explicit eth_unsubscribe for its router id.
+func (h *releaseHarness) unsubscribe(sub subscription) {
+	h.t.Helper()
+	body, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "eth_unsubscribe",
+		"params":  []interface{}{sub.routerID},
+		"id":      2,
+	})
+	require.NoError(h.t, err)
+	msg := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{method: "eth_unsubscribe", params: []interface{}{sub.routerID}},
+		rawData:               body,
+	}
+	_, err = h.manager.Unsubscribe(sub.ctx, msg, "dapp", "10.0.0.1", sub.uid, nil)
+	require.NoError(h.t, err)
+}
+
+// connectionClosed is what the ingress does when a client's socket ends.
+func (h *releaseHarness) connectionClosed(sub subscription) {
+	h.t.Helper()
+	require.NoError(h.t, h.manager.UnsubscribeAll(sub.ctx, "dapp", "10.0.0.1", sub.uid, nil))
+}
+
+func (h *releaseHarness) connectedClientCount() int {
+	h.manager.lock.RLock()
+	defer h.manager.lock.RUnlock()
+	return len(h.manager.connectedClients)
 }
 
 func (h *releaseHarness) upstreamCalls(method string) int {
@@ -117,35 +169,34 @@ func goroutinesIn(fn string) int {
 func TestJoinedClientDisconnect_IsReleased(t *testing.T) {
 	h := newReleaseHarness(t)
 
-	_, disconnectA, repliesA, keyA := h.subscribe("ws-a")
-	_, disconnectB, repliesB, keyB := h.subscribe("ws-b")
-	defer disconnectA()
-	defer disconnectB()
+	a := h.subscribe("ws-a")
+	b := h.subscribe("ws-b")
+	defer a.disconnect()
+	defer b.disconnect()
 
 	require.Equal(t, 1, h.upstreamCalls("eth_subscribe"), "the second client must join, not resubscribe")
-	require.True(t, h.attached(keyA))
-	require.True(t, h.attached(keyB))
-	require.Equal(t, 2, h.manager.idMapper.ClientCount())
+	require.True(t, h.attached(a.clientKey))
+	require.True(t, h.attached(b.clientKey))
+	require.NotEqual(t, a.routerID, b.routerID, "each client gets its own id on the shared subscription")
 
 	// The joiner closes its socket without unsubscribing.
-	disconnectB()
+	b.disconnect()
 
-	require.Eventually(t, func() bool { return !h.attached(keyB) }, 5*time.Second, 20*time.Millisecond,
+	require.Eventually(t, func() bool { return !h.attached(b.clientKey) }, 5*time.Second, 20*time.Millisecond,
 		"a joined client must be released when its connection ends")
-	require.True(t, channelClosed(repliesB, 5*time.Second),
+	require.True(t, channelClosed(b.replies, 5*time.Second),
 		"the joiner's reply channel must close so the ingress forwarder goroutine can end")
-	require.Eventually(t, func() bool { return h.manager.idMapper.ClientCount() == 1 }, 5*time.Second, 20*time.Millisecond,
-		"the joiner's id counter must go with it")
-	require.True(t, h.attached(keyA), "the creator is unaffected")
+	require.True(t, h.attached(a.clientKey), "the creator is unaffected")
 	require.Equal(t, 0, h.upstreamCalls("eth_unsubscribe"), "the subscription still has a subscriber")
 
 	// The creator leaves too: last one out tells the node.
-	disconnectA()
-	require.True(t, channelClosed(repliesA, 5*time.Second), "the creator's reply channel must close on disconnect")
+	a.disconnect()
+	require.True(t, channelClosed(a.replies, 5*time.Second), "the creator's reply channel must close on disconnect")
 	require.Eventually(t, func() bool { return h.upstreamCalls("eth_unsubscribe") == 1 }, 15*time.Second, 50*time.Millisecond,
 		"the last client leaving must tell the node to stop pushing")
 	require.Eventually(t, func() bool { return h.activeSubscriptionCount() == 0 }, 5*time.Second, 20*time.Millisecond)
-	require.Eventually(t, func() bool { return h.manager.idMapper.ClientCount() == 0 }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return h.connectedClientCount() == 0 }, 5*time.Second, 20*time.Millisecond)
+	require.Equal(t, 0, h.manager.stickyStore.Len(), "no sticky endpoint survives its client")
 	require.Equal(t, 0, h.manager.rateLimiter.ClientCount(), "no rate limiter survives its client")
 }
 
@@ -155,21 +206,21 @@ func TestJoinedClientDisconnect_IsReleased(t *testing.T) {
 func TestCreatorDisconnect_ClosesItsReplyChannel(t *testing.T) {
 	h := newReleaseHarness(t)
 
-	_, disconnectA, repliesA, keyA := h.subscribe("ws-a")
-	_, disconnectB, repliesB, keyB := h.subscribe("ws-b")
-	defer disconnectB()
+	a := h.subscribe("ws-a")
+	b := h.subscribe("ws-b")
+	defer b.disconnect()
 
-	disconnectA()
+	a.disconnect()
 
-	require.True(t, channelClosed(repliesA, 5*time.Second), "the creator's reply channel must close on disconnect")
-	require.Eventually(t, func() bool { return !h.attached(keyA) }, 5*time.Second, 20*time.Millisecond)
-	require.True(t, h.attached(keyB), "the joiner keeps the subscription alive")
+	require.True(t, channelClosed(a.replies, 5*time.Second), "the creator's reply channel must close on disconnect")
+	require.Eventually(t, func() bool { return !h.attached(a.clientKey) }, 5*time.Second, 20*time.Millisecond)
+	require.True(t, h.attached(b.clientKey), "the joiner keeps the subscription alive")
 	require.Equal(t, 1, h.activeSubscriptionCount())
 	require.Equal(t, 0, h.upstreamCalls("eth_unsubscribe"))
 
 	// The joiner still receives pushes after the creator left.
 	select {
-	case reply, ok := <-repliesB:
+	case reply, ok := <-b.replies:
 		require.True(t, ok, "the joiner's channel must stay open")
 		require.NotNil(t, reply)
 	case <-time.After(5 * time.Second):
@@ -184,28 +235,59 @@ func TestCreatorDisconnect_ClosesItsReplyChannel(t *testing.T) {
 func TestUnsubscribeAll_ReleasesWatchersAndTellsNode(t *testing.T) {
 	h := newReleaseHarness(t)
 
-	ctxA, disconnectA, repliesA, keyA := h.subscribe("ws-a")
-	ctxB, disconnectB, repliesB, keyB := h.subscribe("ws-b")
-	defer disconnectA()
-	defer disconnectB()
+	a := h.subscribe("ws-a")
+	b := h.subscribe("ws-b")
+	defer a.disconnect()
+	defer b.disconnect()
 
 	require.Eventually(t, func() bool { return goroutinesIn("handleClientDisconnect") == 2 }, 5*time.Second, 20*time.Millisecond,
 		"one disconnect watcher per attached client")
 
-	require.NoError(t, h.manager.UnsubscribeAll(ctxB, "dapp", "10.0.0.1", "ws-b", nil))
-	require.False(t, h.attached(keyB))
-	require.True(t, channelClosed(repliesB, 5*time.Second))
+	h.connectionClosed(b)
+	require.False(t, h.attached(b.clientKey))
+	require.True(t, channelClosed(b.replies, 5*time.Second))
 	require.Eventually(t, func() bool { return goroutinesIn("handleClientDisconnect") == 1 }, 5*time.Second, 20*time.Millisecond,
 		"an explicit release must wake the client's watcher instead of leaving it parked until the socket closes")
-	require.True(t, h.attached(keyA))
+	require.True(t, h.attached(a.clientKey))
 	require.Equal(t, 0, h.upstreamCalls("eth_unsubscribe"))
 
-	require.NoError(t, h.manager.UnsubscribeAll(ctxA, "dapp", "10.0.0.1", "ws-a", nil))
-	require.True(t, channelClosed(repliesA, 5*time.Second))
+	h.connectionClosed(a)
+	require.True(t, channelClosed(a.replies, 5*time.Second))
 	require.Eventually(t, func() bool { return h.upstreamCalls("eth_unsubscribe") == 1 }, 15*time.Second, 50*time.Millisecond,
 		"the last client leaving through UnsubscribeAll must tell the node to stop pushing")
 	require.Eventually(t, func() bool { return goroutinesIn("handleClientDisconnect") == 0 }, 5*time.Second, 20*time.Millisecond)
 	require.Equal(t, 0, h.activeSubscriptionCount())
-	require.Equal(t, 0, h.manager.idMapper.ClientCount())
+	require.Equal(t, 0, h.connectedClientCount())
+	require.Equal(t, 0, h.manager.stickyStore.Len())
 	require.Equal(t, 0, h.manager.rateLimiter.ClientCount())
+}
+
+// TestUnsubscribeThenDisconnect_LeavesNothingBehind covers the commonest well-behaved
+// client: subscribe, eth_unsubscribe, close the socket. The explicit unsubscribe empties
+// the client's subscription set, and the connection-close release then found nothing to
+// do and returned before handing back the client's sticky endpoint and rate limiters,
+// so a well-behaved client leaked those per connection (MAG-3722, review finding).
+func TestUnsubscribeThenDisconnect_LeavesNothingBehind(t *testing.T) {
+	h := newReleaseHarness(t)
+
+	a := h.subscribe("ws-a")
+	defer a.disconnect()
+	require.Equal(t, 1, h.manager.stickyStore.Len(), "the creator pins the endpoint it subscribed on")
+
+	h.unsubscribe(a)
+	require.True(t, channelClosed(a.replies, 5*time.Second), "an explicit unsubscribe closes the reply channel")
+	require.Eventually(t, func() bool { return h.activeSubscriptionCount() == 0 }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return goroutinesIn("handleClientDisconnect") == 0 }, 5*time.Second, 20*time.Millisecond,
+		"the disconnect watcher must not stay parked once the client unsubscribed")
+	require.Equal(t, 1, h.upstreamCalls("eth_unsubscribe"))
+	require.Equal(t, 0, h.connectedClientCount())
+	require.Equal(t, 1, h.manager.stickyStore.Len(), "the sticky endpoint outlives an unsubscribe while the socket is open")
+
+	// The socket closes. The ingress calls UnsubscribeAll for a client that has nothing
+	// left to unsubscribe, and that must still hand back its per-client state.
+	h.connectionClosed(a)
+	require.Equal(t, 0, h.manager.stickyStore.Len(), "closing the socket releases the sticky endpoint")
+	require.Equal(t, 0, h.manager.rateLimiter.ClientCount(), "closing the socket releases the rate limiters")
+	require.Equal(t, 0, h.connectedClientCount())
+	require.Equal(t, 1, h.upstreamCalls("eth_unsubscribe"), "nothing is unsubscribed twice")
 }

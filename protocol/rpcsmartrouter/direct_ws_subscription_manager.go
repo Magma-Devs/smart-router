@@ -1048,14 +1048,12 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	activeSub.releaseClientLocked(clientKey)
 	dwsm.forgetSubscriptionForClientLocked(clientKey, hashedParams, false)
 
+	// lastClient is the mapper's view after this client's mapping went, read under the
+	// lock: a client that joined during the unlocked upstream call above registered its
+	// mapping first, so it keeps the subscription. The node was already told, so the
+	// teardown skips the wire call.
 	if lastClient {
-		activeSub.upstreamSubscription.Unsubscribe()
-		activeSub.cancel()
-		delete(dwsm.activeSubscriptions, hashedParams)
-		dwsm.totalSubscriptions.Add(-1)
-		if activeSub.upstreamConnection != nil {
-			activeSub.upstreamPool.NotifySubscriptionRemoved(activeSub.upstreamConnection)
-		}
+		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, false)
 	}
 
 	return nodeResp, nil
@@ -1146,7 +1144,12 @@ func (dwsm *DirectWSSubscriptionManager) UnsubscribeAll(
 
 	clientSubs, ok := dwsm.connectedClients[clientKey]
 	if !ok {
-		return nil // No subscriptions for this client
+		// Nothing left to unsubscribe, but the client can still own per-client state: a
+		// client that unsubscribed everything explicitly keeps its sticky endpoint and
+		// rate limiters for the rest of its connection, and this is where the connection
+		// ending hands them back. Returning early here left them behind (MAG-3722).
+		dwsm.forgetClientLocked(clientKey)
+		return nil
 	}
 
 	// Iterate over all subscriptions for this client
@@ -1733,8 +1736,7 @@ func (dwsm *DirectWSSubscriptionManager) forgetSubscriptionForClientLocked(clien
 func (dwsm *DirectWSSubscriptionManager) forgetClientLocked(clientKey string) {
 	dwsm.stickyStore.Delete(clientKey)
 	dwsm.rateLimiter.CleanupClient(clientKey)
-	dwsm.idMapper.RemoveClient(clientKey)
-	utils.LavaFormatTrace("DirectWS: cleared sticky session, rate limiter and id counter for a gone client",
+	utils.LavaFormatTrace("DirectWS: cleared sticky session and rate limiter for a gone client",
 		utils.LogAttr("clientKey", clientKey),
 	)
 }
@@ -1858,15 +1860,19 @@ func (dwsm *DirectWSSubscriptionManager) Close() {
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
 
-	// Close all subscriptions
+	// Release every client through the same path a disconnect takes, so reply channels
+	// close and watchers wake, then end each subscription. The pools closing below is
+	// what ends the node side.
 	for _, sub := range dwsm.activeSubscriptions {
+		for clientKey := range sub.connectedClients {
+			sub.releaseClientLocked(clientKey)
+		}
 		sub.upstreamSubscription.Unsubscribe()
 		sub.cancel()
-		for _, sender := range sub.connectedClients {
-			sender.Close()
-		}
+		sub.stopUpstreamListener()
 	}
 	dwsm.activeSubscriptions = make(map[string]*directActiveSubscription)
+	dwsm.connectedClients = make(map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
 
 	// Close all pools
 	for _, pool := range dwsm.upstreamPools {

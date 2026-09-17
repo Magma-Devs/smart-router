@@ -42,11 +42,12 @@ func TestSubscriptionIDMapper_GenerateRouterID_DifferentClients(t *testing.T) {
 	id2a := mapper.GenerateRouterID(client2)
 	id2b := mapper.GenerateRouterID(client2)
 
-	// Each client has independent counter
+	// One counter numbers every id the mapper issues, so no two clients can ever be
+	// handed the same id and nothing per client has to be released (MAG-3722).
 	assert.Contains(t, id1a, "_00001")
 	assert.Contains(t, id1b, "_00002")
-	assert.Contains(t, id2a, "_00001")
-	assert.Contains(t, id2b, "_00002")
+	assert.Contains(t, id2a, "_00003")
+	assert.Contains(t, id2b, "_00004")
 
 	// Different hash prefixes for different clients
 	parts1 := strings.Split(id1a, "_")

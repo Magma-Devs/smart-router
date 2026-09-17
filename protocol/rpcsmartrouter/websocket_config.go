@@ -119,6 +119,10 @@ func NewClientRateLimiter(config *WebsocketConfig) *ClientRateLimiter {
 	subscribeRate := rate.Limit(float64(config.SubscriptionsPerMinutePerClient) / 60.0)
 	unsubscribeRate := rate.Limit(float64(config.UnsubscribesPerMinutePerClient) / 60.0)
 
+	// Both limiters set the burst to the per-minute allowance and the rate to that
+	// allowance per second, so burst/rate is one minute for every configuration and
+	// this always evaluates to a minute today. The derivation stays so a future
+	// burst/rate split cannot silently shorten the sweep.
 	idleTTL := max(
 		refillDuration(subscribeRate, config.SubscriptionsPerMinutePerClient),
 		refillDuration(unsubscribeRate, config.UnsubscribesPerMinutePerClient),
