@@ -704,6 +704,13 @@ func TestJsonRPCChainListener_Shutdown_NilApp(t *testing.T) {
 // and returns the listener plus its dynamic address once Serve is ready.
 func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler bool) (*JsonRPCChainListener, string) {
 	t.Helper()
+	return startTestJsonRPCListenerWithHealthPath(t, ctx, common.DEFAULT_HEALTH_PATH)
+}
+
+// startTestJsonRPCListenerWithHealthPath serves a listener whose health route sits on
+// healthPath, so a test can put it where an operator might: on "/".
+func startTestJsonRPCListenerWithHealthPath(t *testing.T, ctx context.Context, healthPath string) (*JsonRPCChainListener, string) {
+	t.Helper()
 	// ListenToMessages uses the custom rand package which requires initialization.
 	// The package-level TestMain (chain_router_test.go) does not call InitRandomSeed,
 	// so we do it here. InitRandomSeed is idempotent.
@@ -714,11 +721,11 @@ func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler boo
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "ETH1",
 		ApiInterface:    "jsonrpc",
-		HealthCheckPath: "/lava/health",
+		HealthCheckPath: healthPath,
 	}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	listener := NewJrpcChainListener(ctx, endpoint, nil, nil, logger, nil, nil)
+	listener := NewJrpcChainListener(ctx, endpoint, nil, alwaysHealthyReporter{}, logger, nil, nil)
 
 	cmdFlags := common.ConsumerCmdFlags{}
 	go listener.Serve(ctx, cmdFlags)
@@ -814,6 +821,35 @@ func TestJsonRPCChainListener_WebSocketUpgradesOnAnyPath(t *testing.T) {
 		require.NoError(t, err, "WS dial on %q should upgrade", path)
 		require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode, "path %q", path)
 		_ = client.Close()
+	}
+}
+
+// The health route is registered before the upgrade catch-all and fiber matches in
+// registration order, so an upgrade on the health path used to be answered with a
+// health body. With health-check-path set to "/" that is the bare-URL failure this
+// PR fixes, silently back. An upgrade wins on the health path; a plain GET there is
+// still the health check.
+func TestJsonRPCChainListener_WebSocketUpgradesOnTheHealthPath(t *testing.T) {
+	for _, healthPath := range []string{"/", common.DEFAULT_HEALTH_PATH} {
+		t.Run(healthPath, func(t *testing.T) {
+			serveCtx, cancelServe := context.WithCancel(context.Background())
+			defer cancelServe()
+			_, addr := startTestJsonRPCListenerWithHealthPath(t, serveCtx, healthPath)
+
+			client, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+healthPath, nil)
+			require.NoError(t, err, "an upgrade on the health path must be served as a websocket")
+			require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+			_ = client.Close()
+
+			httpClient := &http.Client{Timeout: 2 * time.Second}
+			healthResp, err := httpClient.Get("http://" + addr + healthPath)
+			require.NoError(t, err)
+			defer healthResp.Body.Close()
+			body, err := io.ReadAll(healthResp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, healthResp.StatusCode, "a plain GET on the health path is still the health check")
+			require.Equal(t, "Health status OK", string(body))
+		})
 	}
 }
 

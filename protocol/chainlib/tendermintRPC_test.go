@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/assert"
@@ -424,6 +427,46 @@ func TestTendermintRpcChainListener_Shutdown_NilApp(t *testing.T) {
 // and returns the listener plus its dynamic address once Serve is ready.
 func startTestTendermintListener(t *testing.T, ctx context.Context) (*TendermintRpcChainListener, string) {
 	t.Helper()
+	return startTestTendermintListenerWithOptions(t, ctx, common.DEFAULT_HEALTH_PATH, nil)
+}
+
+// tendermintGetRelayStub is the slice of RelaySender the URI-style GET path uses: it
+// records what it was asked for and answers with a fixed reply.
+type tendermintGetRelayStub struct {
+	mu   sync.Mutex
+	urls []string
+}
+
+const tendermintGetStubReply = `{"jsonrpc":"2.0","id":-1,"result":{"stub":true}}`
+
+func (s *tendermintGetRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.urls = append(s.urls, url)
+	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(tendermintGetStubReply)}, StatusCode: http.StatusOK}, nil
+}
+
+func (s *tendermintGetRelayStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
+	return nil, errors.New("not used")
+}
+
+func (s *tendermintGetRelayStub) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
+	return nil, errors.New("not used")
+}
+
+func (s *tendermintGetRelayStub) CancelSubscriptionContext(subscriptionKey string) {}
+
+func (s *tendermintGetRelayStub) seen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.urls...)
+}
+
+// startTestTendermintListenerWithOptions serves a listener with its health route on
+// healthPath and the given relay sender behind its GET path (nil when a test never
+// drives a plain GET: the handler dereferences it).
+func startTestTendermintListenerWithOptions(t *testing.T, ctx context.Context, healthPath string, relaySender RelaySender) (*TendermintRpcChainListener, string) {
+	t.Helper()
 	// ListenToMessages uses the custom rand package which requires initialization.
 	// The package-level TestMain (chain_router_test.go) does not call InitRandomSeed,
 	// so we do it here. InitRandomSeed is idempotent.
@@ -434,11 +477,11 @@ func startTestTendermintListener(t *testing.T, ctx context.Context) (*Tendermint
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "COS5",
 		ApiInterface:    "tendermintrpc",
-		HealthCheckPath: "/lava/health",
+		HealthCheckPath: healthPath,
 	}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	listener := NewTendermintRpcChainListener(ctx, endpoint, nil, nil, logger, nil, nil)
+	listener := NewTendermintRpcChainListener(ctx, endpoint, relaySender, alwaysHealthyReporter{}, logger, nil, nil)
 
 	cmdFlags := common.ConsumerCmdFlags{}
 	go listener.Serve(ctx, cmdFlags)
@@ -515,4 +558,58 @@ func TestTendermintRpcChainListener_WebSocketUpgradesOnAnyPath(t *testing.T) {
 		require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode, "path %q", path)
 		_ = client.Close()
 	}
+}
+
+// Same shadowing as the jsonrpc listener: the health route is registered first and
+// never handed an upgrade on, so with health-check-path "/" the bare URL answered
+// with a health body. An upgrade wins on the health path; a plain GET there is
+// still the health check.
+func TestTendermintRpcChainListener_WebSocketUpgradesOnTheHealthPath(t *testing.T) {
+	for _, healthPath := range []string{"/", common.DEFAULT_HEALTH_PATH} {
+		t.Run(healthPath, func(t *testing.T) {
+			serveCtx, cancelServe := context.WithCancel(context.Background())
+			defer cancelServe()
+			_, addr := startTestTendermintListenerWithOptions(t, serveCtx, healthPath, &tendermintGetRelayStub{})
+
+			client, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+healthPath, nil)
+			require.NoError(t, err, "an upgrade on the health path must be served as a websocket")
+			require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+			_ = client.Close()
+
+			httpClient := &http.Client{Timeout: 2 * time.Second}
+			healthResp, err := httpClient.Get("http://" + addr + healthPath)
+			require.NoError(t, err)
+			defer healthResp.Body.Close()
+			body, err := io.ReadAll(healthResp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, healthResp.StatusCode, "a plain GET on the health path is still the health check")
+			require.Equal(t, "Health status OK", string(body))
+		})
+	}
+}
+
+// The catch-all sits in front of the URI-style GET path this listener serves, so
+// the one property the change must keep is that a plain GET still reaches the relay
+// path with its path and query intact, while an upgrade on the same path never does.
+func TestTendermintRpcChainListener_PlainGetReachesTheRelayPath(t *testing.T) {
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	stub := &tendermintGetRelayStub{}
+	_, addr := startTestTendermintListenerWithOptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, stub)
+
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	resp, err := httpClient.Get("http://" + addr + "/status?height=7")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.JSONEq(t, tendermintGetStubReply, string(body), "the relay path's reply must reach the caller")
+	require.Equal(t, []string{"status?height=7"}, stub.seen(), "the relay path must see the path and query the client sent")
+
+	client, wsResp, err := websocket.DefaultDialer.Dial("ws://"+addr+"/status", nil)
+	require.NoError(t, err, "an upgrade on a query path is still a websocket")
+	require.Equal(t, http.StatusSwitchingProtocols, wsResp.StatusCode)
+	_ = client.Close()
+	require.Len(t, stub.seen(), 1, "an upgrade must never reach the relay path")
 }

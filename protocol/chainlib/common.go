@@ -15,6 +15,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/favicon"
+	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -711,6 +712,14 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 	})
 
 	app.Get(healthCheckPath, func(fiberCtx *fiber.Ctx) error {
+		// A GET carrying the upgrade headers is a websocket client, whatever path it
+		// guessed. Fiber matches routes in registration order and this one is
+		// registered before the listeners' upgrade catch-all, so with
+		// health-check-path set to "/" a client dialling the bare endpoint URL was
+		// answered with a health body instead of an upgrade. Hand it on.
+		if websocket.IsWebSocketUpgrade(fiberCtx) {
+			return fiberCtx.Next()
+		}
 		if healthReporter.IsHealthy() {
 			fiberCtx.Status(http.StatusOK)
 			return fiberCtx.SendString("Health status OK")
