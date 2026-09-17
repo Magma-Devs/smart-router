@@ -391,7 +391,9 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 	}
 
 	// Setup HTTP Server
-	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter)
+	// true: this listener registers a GET catch-all that upgrades, so the health
+	// route may hand an upgrade on its own path past the health handler.
+	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true)
 	apil.app = app
 	chainID := apil.endpoint.ChainID
 	apiInterface := apil.endpoint.ApiInterface

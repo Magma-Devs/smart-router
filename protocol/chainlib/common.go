@@ -663,7 +663,12 @@ func stripBrotliAcceptEncoding(c *fiber.Ctx) error {
 }
 
 // setup a common preflight and cors configuration allowing wild cards and preflight caching.
-func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter) *fiber.App {
+//
+// servesWebSocketUpgrades says whether the caller registers a route that can serve a
+// websocket upgrade. Only those listeners may hand an upgrade on the health path
+// past the health handler; see the health route below for why the distinction has
+// to be explicit rather than inferred.
+func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades bool) *fiber.App {
 	app := fiber.New(fiber.Config{
 		JSONEncoder: json.Marshal,
 		JSONDecoder: json.Unmarshal,
@@ -717,7 +722,14 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 		// registered before the listeners' upgrade catch-all, so with
 		// health-check-path set to "/" a client dialling the bare endpoint URL was
 		// answered with a health body instead of an upgrade. Hand it on.
-		if websocket.IsWebSocketUpgrade(fiberCtx) {
+		//
+		// Only where there is something to hand it to. Next() means "whatever route
+		// is registered after this one", which is the upgrade catch-all on the
+		// jsonrpc and tendermint listeners but the relay handler on rest, which
+		// registers no GET route at all — handing on there turned a health probe
+		// into a chain request. The caller states which it is, so a new listener
+		// cannot inherit the wrong answer by default.
+		if servesWebSocketUpgrades && websocket.IsWebSocketUpgrade(fiberCtx) {
 			return fiberCtx.Next()
 		}
 		if healthReporter.IsHealthy() {

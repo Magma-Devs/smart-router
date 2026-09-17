@@ -378,7 +378,9 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	}
 	test_mode := common.IsTestMode(ctx)
 	// Setup HTTP Server
-	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter)
+	// true: this listener registers a GET catch-all that upgrades, so the health
+	// route may hand an upgrade on its own path past the health handler.
+	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true)
 	apil.app = app
 
 	// wsWG.Add must run synchronously inside the request handler so that
