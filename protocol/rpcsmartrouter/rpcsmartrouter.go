@@ -3518,6 +3518,13 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 
 			chainlib.SetWebSocketKeepAliveInterval(viper.GetDuration(common.WebsocketKeepAliveIntervalFlag))
 			chainlib.SetMaxIdleTimeInSeconds(viper.GetInt64(common.LimitWebsocketIdleTimeFlag))
+			chainlib.SetWebSocketWriteTimeout(viper.GetDuration(common.WebsocketWriteTimeoutFlag))
+			if chainlib.WebSocketKeepAliveOutlivesIdleReaper(chainlib.GetWebSocketKeepAliveInterval(), chainlib.GetMaxIdleTimeInSeconds()) {
+				utils.LavaFormatWarning("websocket keep-alive is on with no idle limit: a quiet connection stays open for as long as its client keeps the socket, and a client that vanished is noticed only once its pings stop being acknowledged", nil,
+					utils.LogAttr(common.WebsocketKeepAliveIntervalFlag, chainlib.GetWebSocketKeepAliveInterval()),
+					utils.LogAttr(common.LimitWebsocketIdleTimeFlag, chainlib.GetMaxIdleTimeInSeconds()),
+				)
+			}
 
 			consumerPropagatedFlags := common.ConsumerCmdFlags{
 				HeadersFlag:                       viper.GetString(common.CorsHeadersFlag),
@@ -3698,6 +3705,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Int64(common.LimitWebsocketIdleTimeFlag, chainlib.DefaultMaxIdleTimeInSeconds, "limit the idle time in seconds for a websocket connection, default is 20 minutes ( 20 * 60 )")
 	cmdRPCSmartRouter.Flags().DurationVar(&chainlib.WebSocketBanDuration, common.BanDurationForWebsocketRateLimitExceededFlag, chainlib.WebSocketBanDuration, "once websocket rate limit is reached, user will be banned Xfor a duration, default no ban")
 	cmdRPCSmartRouter.Flags().Duration(common.WebsocketKeepAliveIntervalFlag, chainlib.DefaultWebSocketKeepAliveInterval, "how often to ping an open websocket connection so proxies in front of the router do not reap it as idle, 0 disables")
+	cmdRPCSmartRouter.Flags().Duration(common.WebsocketWriteTimeoutFlag, chainlib.DefaultWebSocketWriteTimeout, "how long one websocket frame write may take before the router closes the connection of a client that stopped reading, 0 disables the deadline")
 
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerificationDefault, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerificationDefault, "skip websocket verification for chains that require ws/wss endpoints")
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipAllVerifications, common.SkipAllVerificationsFlag, chainlib.SkipAllVerifications, "skip ALL spec verifications for every provider this process serves, healthy ones included. An escape hatch for bringing a router up against upstreams that cannot survive being probed; prefer the per-node-url skip-verifications config (which accepts \"*\") for anything ongoing")

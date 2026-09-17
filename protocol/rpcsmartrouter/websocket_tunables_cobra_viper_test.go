@@ -30,6 +30,8 @@ func TestRealCommand_WebsocketTunablesDefaultWhenUnset(t *testing.T) {
 		"--%s must fall back to its registered default; 0 would disable keep-alive pings", common.WebsocketKeepAliveIntervalFlag)
 	require.Equal(t, chainlib.DefaultMaxIdleTimeInSeconds, viper.GetInt64(common.LimitWebsocketIdleTimeFlag),
 		"--%s must fall back to its registered default; 0 would disable the idle reaper", common.LimitWebsocketIdleTimeFlag)
+	require.Equal(t, chainlib.DefaultWebSocketWriteTimeout, viper.GetDuration(common.WebsocketWriteTimeoutFlag),
+		"--%s must fall back to its registered default; 0 would remove the write deadline", common.WebsocketWriteTimeoutFlag)
 }
 
 // Both flags are registered on the shipped command and reach viper. Parse would
@@ -38,18 +40,22 @@ func TestRealCommand_WebsocketTunablesFromFlags(t *testing.T) {
 	wireLikeRunE(t, "",
 		"--"+common.WebsocketKeepAliveIntervalFlag, "5s",
 		"--"+common.LimitWebsocketIdleTimeFlag, "90",
+		"--"+common.WebsocketWriteTimeoutFlag, "3s",
 	)
 
 	require.Equal(t, 5*time.Second, viper.GetDuration(common.WebsocketKeepAliveIntervalFlag))
 	require.Equal(t, int64(90), viper.GetInt64(common.LimitWebsocketIdleTimeFlag))
+	require.Equal(t, 3*time.Second, viper.GetDuration(common.WebsocketWriteTimeoutFlag))
 }
 
 // Operators configure the router from a YAML file far more often than from the
 // command line, and these keys are read the same way either way.
 func TestRealCommand_WebsocketTunablesFromYAML(t *testing.T) {
 	wireLikeRunE(t, common.WebsocketKeepAliveIntervalFlag+": 45s\n"+
-		common.LimitWebsocketIdleTimeFlag+": 120\n")
+		common.LimitWebsocketIdleTimeFlag+": 120\n"+
+		common.WebsocketWriteTimeoutFlag+": 7s\n")
 
 	require.Equal(t, 45*time.Second, viper.GetDuration(common.WebsocketKeepAliveIntervalFlag))
 	require.Equal(t, int64(120), viper.GetInt64(common.LimitWebsocketIdleTimeFlag))
+	require.Equal(t, 7*time.Second, viper.GetDuration(common.WebsocketWriteTimeoutFlag))
 }

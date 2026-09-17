@@ -63,13 +63,42 @@ func GetWebSocketKeepAliveInterval() time.Duration {
 	return time.Duration(webSocketKeepAliveInterval.Load())
 }
 
+// How long one frame write may take before the router gives up on the client. A
+// client that stopped reading blocks the writer inside WriteMessage once the socket
+// buffers fill; without a bound that pins the writer, every sender waiting on it,
+// and the handler that waits for the writer on return. On the deadline the write
+// fails, the writer exits, and the read loop tears the connection down. Same shape
+// as the two tunables above. Zero or less disables the deadline, which removes the
+// only bound on such a client.
+var webSocketWriteTimeout = func() *atomic.Int64 {
+	timeout := &atomic.Int64{}
+	timeout.Store(int64(DefaultWebSocketWriteTimeout))
+	return timeout
+}()
+
+func SetWebSocketWriteTimeout(timeout time.Duration) {
+	webSocketWriteTimeout.Store(int64(timeout))
+}
+
+func GetWebSocketWriteTimeout() time.Duration {
+	return time.Duration(webSocketWriteTimeout.Load())
+}
+
+// WebSocketKeepAliveOutlivesIdleReaper reports whether the two tunables together let
+// a quiet connection live for as long as its client keeps the socket open: the
+// keep-alive pings stop the proxy in front of the router from reaping it, and with
+// the idle limit off the router never will either. That is what an operator who
+// disables the idle limit asked for, but before the keep-alive existed the proxy
+// reaped such a connection within minutes anyway, so the combination deserves a
+// warning at startup rather than silence.
+func WebSocketKeepAliveOutlivesIdleReaper(keepAlive time.Duration, maxIdleSeconds int64) bool {
+	return keepAlive > 0 && maxIdleSeconds <= 0
+}
+
 const (
 	DefaultMaxIdleTimeInSeconds       = int64(20 * 60) // 20 minutes of idle time will disconnect the websocket connection
 	DefaultWebSocketKeepAliveInterval = 30 * time.Second
-	// websocketWriteTimeout bounds a single frame write so the connection
-	// goroutine is never pinned by a client that stopped reading: the write fails
-	// on the deadline, the writer exits, and the read loop tears the conn down.
-	websocketWriteTimeout = 10 * time.Second
+	DefaultWebSocketWriteTimeout      = 10 * time.Second
 
 	WebSocketRateLimitHeader            = "x-lava-websocket-rate-limit"
 	WebSocketOpenConnectionsLimitHeader = "x-lava-websocket-open-connections-limit"
@@ -183,21 +212,41 @@ type websocketFrameWriter interface {
 func runWebsocketWriter(ctx, webSocketCtx context.Context, conn websocketFrameWriter, frames <-chan webSocketMsgWithType, writerDone chan<- struct{}) {
 	defer close(writerDone)
 
+	// The keep-alive fires only after a full interval with nothing written: every
+	// frame that goes out resets the ticker, so a busy connection is never pinged
+	// and a quiet one is pinged exactly once per interval of silence, which is the
+	// silence the proxy measures. A nil channel blocks forever, so a non-positive
+	// interval disables the keep-alive without a second select arm.
+	//
+	// Deliberately unlike the upstream client in chainproxy/rpcclient/websocket.go,
+	// which pings on its own cadence and drops the node when a pong is late: that
+	// side owns a connection to a node the router chose, whereas the peer here is a
+	// customer on whatever network they have. A late pong does not end a customer's
+	// connection. A peer that vanished is still caught, by the TCP retransmission
+	// timeout once the pings stop being acknowledged, and a peer that stopped
+	// reading by the write deadline below.
+	var keepAlive <-chan time.Time
+	var keepAliveTicker *time.Ticker
+	interval := GetWebSocketKeepAliveInterval()
+	if interval > 0 {
+		keepAliveTicker = time.NewTicker(interval)
+		defer keepAliveTicker.Stop()
+		keepAlive = keepAliveTicker.C
+	}
+
 	// writeFrame is the only way to the connection. The deadline keeps a stalled
 	// client from blocking the goroutine forever, which would in turn stall the
 	// handler waiting on writerDone.
+	writeTimeout := GetWebSocketWriteTimeout()
 	writeFrame := func(messageType int, data []byte) error {
-		_ = conn.SetWriteDeadline(time.Now().Add(websocketWriteTimeout))
-		return conn.WriteMessage(messageType, data)
-	}
-
-	// A nil channel blocks forever, so a non-positive interval disables the
-	// keep-alive without a second select arm.
-	var keepAlive <-chan time.Time
-	if interval := GetWebSocketKeepAliveInterval(); interval > 0 {
-		keepAliveTicker := time.NewTicker(interval)
-		defer keepAliveTicker.Stop()
-		keepAlive = keepAliveTicker.C
+		if writeTimeout > 0 {
+			_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		}
+		err := conn.WriteMessage(messageType, data)
+		if err == nil && keepAliveTicker != nil {
+			keepAliveTicker.Reset(interval)
+		}
+		return err
 	}
 
 	for {
