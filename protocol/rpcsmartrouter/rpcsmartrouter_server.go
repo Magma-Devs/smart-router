@@ -4097,6 +4097,25 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 						}
 						go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
 						// Cache miss - will relay to endpoint
+						//
+						// INERT IN DIRECT-RPC MODE. Both values below are always NOT_APPLICABLE here,
+						// so everything downstream of them is a no-op — the archive re-evaluation in
+						// updateProtocolMessageIfNeededWithNewEarliestData and the block bump in
+						// resolveRequestedBlock alike.
+						//
+						// The mechanism resolves a block hash to a height, for requests that name a
+						// block by hash (BTC getblock, ETH1 trace_transaction, Tendermint tx) where the
+						// archive rule has no number to compare against. It works by asking the cache
+						// what it knows. But this router never TELLS the cache any hash→height mapping:
+						// both of its cache writes pass BlocksHashesToHeights: nil, "Not available in
+						// direct RPC mode", and the cache server only stores what it is given. So the
+						// index the read depends on is never populated and the reply always says
+						// unknown.
+						//
+						// Check the writers before concluding this path is live — reading only the
+						// consumers makes it look wired. Deleting it, or giving it a real writer,
+						// spans the ProtocolMessage interface and its mock, so it is tracked
+						// separately rather than done in passing.
 						latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
 						utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))
 					}
