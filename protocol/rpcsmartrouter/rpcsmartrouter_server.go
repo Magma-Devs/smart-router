@@ -4550,7 +4550,12 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// row produces that shape today; the chaining is what keeps it impossible when one is added.
 	if result.IsNodeAtFault && targetEndpoint != nil {
 		rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
-		targetEndpoint.MarkUnhealthy()
+		// EndpointDisableNodeError unconditionally, rather than through endpointDisableReasonFor:
+		// reaching this arm REQUIRES an answer to have arrived (err == nil, and the status was
+		// neither 5xx nor 429), so the node replied and the reply carried its own failure. That is
+		// the definition of node-error, and unreachable is unrepresentable here by construction —
+		// a stronger guarantee than the category check the other two arms need, not a weaker one.
+		targetEndpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
 		rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 	} else if targetEndpoint != nil && relayProvesEndpointHealthy(result) {
 		// Reset only on POSITIVE proof the endpoint served — see relayProvesEndpointHealthy for why
