@@ -50,7 +50,7 @@ type consumerOptimizerQoSClientInf interface {
 type ProviderOptimizer struct {
 	strategy                        Strategy
 	providersStorage                cacheInf
-	providerRelayStats              *ristretto.Cache[string, any] // used to decide on the half time of the decay
+	providerRelayStats              *relayTimeWindows // per-provider relay times, used to decide on the half time of the decay
 	averageBlockTime                time.Duration
 	wantedNumProvidersInConcurrency uint
 	latestSyncData                  ConcurrentBlockStore
@@ -882,48 +882,105 @@ func (po *ProviderOptimizer) updateDecayingWeightedAverage(providerData Provider
 // calculateHalfTime reads exactly one of them, the median, so the window only has
 // to be wide enough for that median to mean "the time it takes this provider to
 // serve half a window of relays". Unbounded, the slice grew by 24 bytes on every
-// relay for the life of the process and its median drifted to half the uptime,
-// which the MaxHalfTime clamp then discarded anyway (MAG-3722).
+// relay for the life of the process, and its median drifted to half the uptime:
+// after six hours every provider sat on the MaxHalfTime clamp, so scores decayed
+// on a 3 h half-life regardless of traffic. With the window, a provider serving
+// more than a window of relays per hour decays on DefaultHalfLifeTime (1 h) and
+// only a sparse one stretches towards the clamp, which is what the heuristic was
+// written to do. That is a change in production routing dynamics for busy
+// providers, 3 h to 1 h, not only a memory fix (MAG-3722).
 const relayStatsWindowSize = 128
 
 // relayTimeWindow holds a provider's most recent relay sample times in arrival order.
-// It is mutated in place under the provider's stripe lock, so the pointer stored in
-// providerRelayStats never needs a replacement Set once it is in the cache.
+// It grows one sample at a time until it is full and then wraps, so a provider that
+// has served a handful of relays costs a handful of entries.
 type relayTimeWindow struct {
-	times [relayStatsWindowSize]time.Time
-	next  int // slot the next sample lands in
-	count int // samples held, at most len(times)
+	times []time.Time // at most relayStatsWindowSize entries
+	next  int         // slot the next sample overwrites once the window is full
 }
 
 // add records one sample, overwriting the oldest once the window is full.
 func (w *relayTimeWindow) add(sampleTime time.Time) {
-	w.times[w.next] = sampleTime
-	w.next = (w.next + 1) % len(w.times)
-	if w.count < len(w.times) {
-		w.count++
+	if len(w.times) < relayStatsWindowSize {
+		w.times = append(w.times, sampleTime)
+		return
 	}
+	w.times[w.next] = sampleTime
+	w.next = (w.next + 1) % relayStatsWindowSize
 }
 
 // median returns the middle sample by arrival order, which for monotonic sample
 // times is the median time. ok is false while the window is empty.
 func (w *relayTimeWindow) median() (median time.Time, ok bool) {
-	if w.count == 0 {
+	n := len(w.times)
+	if n == 0 {
 		return time.Time{}, false
 	}
-	oldest := (w.next - w.count + len(w.times)) % len(w.times)
-	return w.times[(oldest+(w.count-1)/2)%len(w.times)], true
+	oldest := 0
+	if n == relayStatsWindowSize {
+		oldest = w.next // the slot about to be overwritten holds the oldest sample
+	}
+	return w.times[(oldest+(n-1)/2)%n], true
+}
+
+// relayTimeWindows holds one relayTimeWindow per provider behind a mutex. A plain map
+// rather than a ristretto cache: the set is bounded by the pairing list, nothing in it
+// should ever be evicted, and ristretto's asynchronous Set let the relay right after a
+// window's birth miss it and start a second window that dropped the samples between.
+type relayTimeWindows struct {
+	mu      sync.Mutex
+	windows map[string]*relayTimeWindow
+}
+
+func newRelayTimeWindows() *relayTimeWindows {
+	return &relayTimeWindows{windows: make(map[string]*relayTimeWindow)}
+}
+
+// record adds one sample to the provider's window, creating the window on first use.
+func (s *relayTimeWindows) record(providerAddress string, sampleTime time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	window, ok := s.windows[providerAddress]
+	if !ok {
+		window = &relayTimeWindow{}
+		s.windows[providerAddress] = window
+	}
+	window.add(sampleTime)
+}
+
+// median returns the median sample time of the provider's window; ok is false when
+// the provider has no samples.
+func (s *relayTimeWindows) median(providerAddress string) (median time.Time, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	window, found := s.windows[providerAddress]
+	if !found {
+		return time.Time{}, false
+	}
+	return window.median()
+}
+
+// size reports how many samples the provider's window holds.
+func (s *relayTimeWindows) size(providerAddress string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	window, found := s.windows[providerAddress]
+	if !found {
+		return 0
+	}
+	return len(window.times)
+}
+
+// Clear drops every window.
+func (s *relayTimeWindows) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.windows = make(map[string]*relayTimeWindow)
 }
 
 // updateRelayTime adds a relay sample time to a provider's window.
 func (po *ProviderOptimizer) updateRelayTime(providerAddress string, sampleTime time.Time) {
-	window := po.getRelayStatsWindow(providerAddress)
-	if window == nil {
-		window = &relayTimeWindow{}
-		window.add(sampleTime)
-		po.providerRelayStats.Set(providerAddress, window, 1)
-		return
-	}
-	window.add(sampleTime)
+	po.providerRelayStats.record(providerAddress, sampleTime)
 }
 
 // calculateHalfTime calculates a provider's half life time for a relay sampled in sampleTime
@@ -941,11 +998,7 @@ func (po *ProviderOptimizer) calculateHalfTime(providerAddress string, sampleTim
 
 // getRelayStatsTimeDiff returns the time passed since the median of the provider's recent relay times
 func (po *ProviderOptimizer) getRelayStatsTimeDiff(providerAddress string, sampleTime time.Time) time.Duration {
-	window := po.getRelayStatsWindow(providerAddress)
-	if window == nil {
-		return 0
-	}
-	medianTime, ok := window.median()
+	medianTime, ok := po.providerRelayStats.median(providerAddress)
 	if !ok {
 		return 0
 	}
@@ -960,25 +1013,8 @@ func (po *ProviderOptimizer) getRelayStatsTimeDiff(providerAddress string, sampl
 	return time.Since(medianTime)
 }
 
-// getRelayStatsWindow returns the provider's relay time window, or nil when none is cached yet.
-func (po *ProviderOptimizer) getRelayStatsWindow(providerAddress string) *relayTimeWindow {
-	storedVal, found := po.providerRelayStats.Get(providerAddress)
-	if !found {
-		return nil
-	}
-	window, ok := storedVal.(*relayTimeWindow)
-	if !ok {
-		utils.LavaFormatFatal("invalid usage of optimizer relay stats cache", nil, utils.Attribute{Key: "storedVal", Value: storedVal})
-	}
-	return window
-}
-
 func NewProviderOptimizer(strategy Strategy, averageBlockTIme time.Duration, wantedNumProvidersInConcurrency uint, consumerOptimizerQoSClient consumerOptimizerQoSClientInf, chainId string) *ProviderOptimizer {
 	cache, err := ristretto.NewCache(&ristretto.Config[string, any]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
-	if err != nil {
-		utils.LavaFormatFatal("failed setting up cache for queries", err)
-	}
-	relayCache, err := ristretto.NewCache(&ristretto.Config[string, any]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
 	if err != nil {
 		utils.LavaFormatFatal("failed setting up cache for queries", err)
 	}
@@ -1015,7 +1051,7 @@ func NewProviderOptimizer(strategy Strategy, averageBlockTIme time.Duration, wan
 		strategy:                        strategy,
 		providersStorage:                cache,
 		averageBlockTime:                averageBlockTIme,
-		providerRelayStats:              relayCache,
+		providerRelayStats:              newRelayTimeWindows(),
 		wantedNumProvidersInConcurrency: wantedNumProvidersInConcurrency,
 		stakeCache:                      NewProviderStakeCache(),
 		consumerOptimizerQoSClient:      consumerOptimizerQoSClient,

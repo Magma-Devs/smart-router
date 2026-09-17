@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/utils/score"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,11 +23,20 @@ func TestRelayTimeWindow_BoundedAndMedian(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, base, median, "one sample is its own median")
 
-	const total = 10 * relayStatsWindowSize
-	for i := 1; i < total; i++ {
+	// Half full: the median is the middle of what has arrived so far.
+	for i := 1; i < relayStatsWindowSize/2; i++ {
 		w.add(base.Add(time.Duration(i) * time.Second))
 	}
-	require.Equal(t, relayStatsWindowSize, w.count, "the window must stop growing at its size")
+	require.Len(t, w.times, relayStatsWindowSize/2, "the window grows one sample at a time")
+	median, ok = w.median()
+	require.True(t, ok)
+	require.Equal(t, base.Add(time.Duration((relayStatsWindowSize/2-1)/2)*time.Second), median)
+
+	const total = 10 * relayStatsWindowSize
+	for i := relayStatsWindowSize / 2; i < total; i++ {
+		w.add(base.Add(time.Duration(i) * time.Second))
+	}
+	require.Len(t, w.times, relayStatsWindowSize, "the window must stop growing at its size")
 
 	// The window holds samples [total-size, total). Its median is the one at offset
 	// (size-1)/2 from the oldest retained sample.
@@ -51,11 +61,8 @@ func TestUpdateRelayTime_DoesNotGrowWithRelays(t *testing.T) {
 	for i := 0; i < relays; i++ {
 		po.updateRelayTime(addr, base.Add(time.Duration(i)*time.Second))
 	}
-	po.providerRelayStats.Wait() // ristretto Set is asynchronous
 
-	window := po.getRelayStatsWindow(addr)
-	require.NotNil(t, window, "the provider's window must be cached")
-	require.Equal(t, relayStatsWindowSize, window.count,
+	require.Equal(t, relayStatsWindowSize, po.providerRelayStats.size(addr),
 		"after %d relays the window must hold exactly its size, not one entry per relay", relays)
 
 	// The median of the last relayStatsWindowSize one-second samples sits
@@ -65,12 +72,41 @@ func TestUpdateRelayTime_DoesNotGrowWithRelays(t *testing.T) {
 	wantAge := time.Duration(relayStatsWindowSize/2) * time.Second
 	require.Equal(t, wantAge, po.getRelayStatsTimeDiff(addr, newest))
 
-	// A busy provider therefore keeps the default half-life; only a provider slower
-	// than a window per DefaultHalfLifeTime stretches it.
-	require.Equal(t, po.calculateHalfTime(addr, newest), po.calculateHalfTime("never-seen", newest),
+	// A busy provider therefore decays on the default half-life. Before the window,
+	// the median sat at half the uptime, so every provider on a pod up more than six
+	// hours decayed on the 3 h clamp instead; this pins the intended behaviour.
+	require.Equal(t, score.DefaultHalfLifeTime, po.calculateHalfTime(addr, newest),
 		"a provider serving relays every second must decay on the default half-life")
 
 	po.ResetState()
-	po.providerRelayStats.Wait()
-	require.Nil(t, po.getRelayStatsWindow(addr), "ResetState must drop the window")
+	require.Equal(t, 0, po.providerRelayStats.size(addr), "ResetState must drop the window")
+}
+
+// TestCalculateHalfTime_StretchesOnlyForSparseProviders pins the heuristic the window
+// serves: the half-life is the time it takes a provider to serve half a window of
+// relays, floored at the default and capped at the clamp.
+func TestCalculateHalfTime_StretchesOnlyForSparseProviders(t *testing.T) {
+	po := setupProviderOptimizer(1)
+	base := time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)
+	halfWindow := time.Duration(relayStatsWindowSize / 2)
+
+	for _, tc := range []struct {
+		name    string
+		spacing time.Duration
+		want    time.Duration
+	}{
+		{"one relay a second stays on the default", time.Second, score.DefaultHalfLifeTime},
+		{"one relay every two minutes stretches to the window's half", 2 * time.Minute, halfWindow * 2 * time.Minute},
+		{"one relay every five minutes hits the clamp", 5 * time.Minute, score.MaxHalfTime},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr := "provider-" + tc.name
+			var newest time.Time
+			for i := 0; i < relayStatsWindowSize; i++ {
+				newest = base.Add(time.Duration(i) * tc.spacing)
+				po.updateRelayTime(addr, newest)
+			}
+			require.Equal(t, tc.want, po.calculateHalfTime(addr, newest))
+		})
+	}
 }
