@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -83,6 +84,41 @@ resp-cache:
 	for _, key := range mr.Keys() {
 		require.True(t, strings.HasPrefix(key, "selecttest:"), "key %q must carry the configured prefix", key)
 	}
+}
+
+// MAG-3631: the expiration keys of the `resp-cache:` block reach the TTL the
+// backend actually writes with.
+//
+// Asserted on the store's own TTL rather than on the resolved Policy, because
+// the Policy resolving correctly is not the claim — the claim is that it
+// arrives at the engine that writes. Before this seam existed SelectCacheBackend
+// passed core.DefaultPolicy() unconditionally and this key would read 1h no
+// matter what the block said.
+func TestSelectBackendRespCarriesConfiguredExpirations(t *testing.T) {
+	mr := miniredis.RunT(t)
+	backend := selectBackend(t, fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+  key-prefix: ttltest
+  expiration-multiplier: 1.5
+`, mr.Addr()))
+
+	// Finalized: the entry kind the chart's multiplier lengthens.
+	setForParity(t, backend, true, []byte("ttl-hash"), nil, []byte(`payload`), 100, 100)
+	eventuallyData(t, backend, []byte("ttl-hash"), nil, 100, 100, true, []byte(`payload`))
+
+	// Only the relay entry: the same write also publishes a chain tip, which
+	// carries its own unrelated TTL and would make a store-wide assertion pass
+	// or fail for the wrong reason.
+	var entryKeys []string
+	for _, key := range mr.Keys() {
+		if strings.Contains(key, core.RelayFinalizedPrefix) {
+			entryKeys = append(entryKeys, key)
+		}
+	}
+	require.Len(t, entryKeys, 1, "expected exactly one finalized relay entry, got %v", mr.Keys())
+	require.Equal(t, 90*time.Minute, mr.TTL(entryKeys[0]),
+		"the finalized entry must carry 1h scaled by the block's 1.5 — the chart's own default, and 1h without this seam")
 }
 
 // Precedence + rollback: with BOTH configured the RESP backend serves (and the

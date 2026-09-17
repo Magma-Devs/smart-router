@@ -3,8 +3,10 @@
 The Smart Router can run its cache against any **RESP-compatible backend** (Redis, Valkey,
 and managed services such as AWS ElastiCache or MemoryDB) instead of the default
 `smartrouter cache` sidecar. The router executes the same cache engine in-process — lookup
-rules, validity checks, and TTLs are identical to the default cache — and stores entries in
-the backend you configure.
+rules, validity checks, and the TTL table are the default cache's own — and stores entries in
+the backend you configure. The TTL *values* are yours to set, under the sidecar's own flag
+names: see [Expirations](#expirations), and carry the chart's multipliers over if you are
+moving off the sidecar.
 
 Parity is structural rather than reimplemented: the cache semantics live in one
 storage-agnostic engine (`ecosystem/cache/core`) that both the sidecar and this backend
@@ -79,8 +81,43 @@ router never starts half-configured.
 | `dial-timeout` / `read-timeout` / `write-timeout` | `500ms` dial; client defaults for read/write | Per-operation network limits. A **fresh** connection's dial and TLS handshake are bounded by `dial-timeout` *and* by the caller's own deadline, whichever is sooner — the default is deliberately sub-second so a black-holed backend cannot make cold lookups linger. |
 | `pool-size` | client default | Connection pool size (per client; the read client has its own). |
 
-TTLs are the cache engine's own (finalized ~1h, non-finalized scaled to the chain's block
-time, short-lived node errors) — the same table the default cache uses.
+### Expirations
+
+TTLs are the cache engine's own — the same table, chosen by the same code, as the default
+cache. What differs is **who configures it**: the sidecar reads its own `--expiration-*`
+flags, which the Helm chart sets; a router on this backend builds the table in-process, where
+no cache-server flag reaches. These keys are that route. They take the sidecar's flag names
+verbatim, so a value moves across unchanged.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `expiration` | `1h` | Base TTL for a **finalized** entry — an answer about a block that can no longer change. |
+| `expiration-multiplier` | `1` | Scales `expiration`. **The chart ships `1.5`** (`miscellaneous.cache.expiration_multiplier`), so a deployment moving off the sidecar wants this set to match, or finalized answers are kept 60 minutes where they used to be kept 90. |
+| `expiration-non-finalized` | `500ms` | **Floor**, not a duration: the effective TTL is `max(averageBlockTime/8, this)`. |
+| `expiration-non-finalized-multiplier` | `1` | Scales the floor. **The chart ships `1.25`.** |
+| `expiration-finalized-node-errors` | `250ms` | How long a node error is served. The engine additionally caps it at one block time. |
+| `expiration-blocks-hashes-to-heights` | `48h` | Block-hash → height mappings. |
+
+Every key is optional and an omitted one keeps the default above, so a block that sets only
+connection details behaves exactly as it did before these keys existed.
+
+**The floor is not the inert knob it looks like.** Because the effective non-finalized TTL is
+`max(averageBlockTime/8, floor)`, the floor only decides on chains whose block time is under
+**5s** — above that the eighth-of-a-block term wins and the multiplier changes nothing. That
+threshold is easy to measure your way past: a 13s chain gives 1.625s either way, which looks
+like parity. Most chains in `specs/` are under 5s, where the chart's `1.25` is the difference
+between a 500ms and a 625ms floor.
+
+A key that is **present and non-positive** is rejected at startup rather than clamped. This
+is the one place these keys deliberately do not mirror the cache server: the sidecar accepts
+`--expiration-multiplier 0` and writes a zero TTL, which Ristretto reads as "never expires"
+and which dies with the pod anyway. Here a zero TTL is a key with **no expiry at all**, in a
+store you own, that survives every restart and is reclaimed only by eviction. Omit a key to
+get its default; never set it to zero.
+
+Both paths report what they are applying: `GET /debug/cache-state` shows this table under
+`tiers.primary.lifetimes` (see [below](#get-debugcache-state) — a `cache-be` tier reports
+`null` there, because its TTLs live in another pod).
 
 One budget lives on the **router**, not in this block: every cache **lookup** runs inside
 the per-relay `--cache-timeout` flag (default `50ms`, sized for a same-zone backend; writes
@@ -266,7 +303,9 @@ Four things are easy to misread:
   by, the cache-server pod; this router does not know them. `null` says so — a number would
   assert a value no deployment uses. Where they are reported, they are the policy's base
   values: the effective non-finalized TTL is `max(averageBlockTime/8, non_finalized_seconds)`
-  per chain, so that field is a floor.
+  per chain, so that field is a floor. For a RESP tier this is the one place to confirm your
+  [expiration keys](#expirations) landed — `finalized_seconds: 5400` is the chart's `1.5`
+  carried over, `3600` is the unscaled default.
 
 Reading this endpoint never touches the backend. That is deliberate rather than incidental:
 the obvious liveness accessor on the `cache-be` client dials on demand, so a monitoring scrape

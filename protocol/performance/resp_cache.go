@@ -57,8 +57,10 @@ type respCacheHealth struct {
 var _ CacheBackend = (*RespCache)(nil)
 
 // NewRespCache assembles the backend from a connected store and a TTL policy
-// (core.DefaultPolicy() mirrors the cache server's defaults) and starts the
-// background health probe.
+// and starts the background health probe. The policy comes from the
+// `resp-cache:` block's expiration keys (RespCacheExpirations.Policy), which
+// falls back to core.DefaultPolicy() — the cache server's flag defaults — for
+// every key the operator left out.
 func NewRespCache(store *redisstore.Store, policy core.Policy) *RespCache {
 	return newRespCacheWithHealthInterval(store, policy, respCacheHealthInterval)
 }

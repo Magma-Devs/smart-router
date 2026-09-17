@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/viper"
@@ -13,7 +12,10 @@ import (
 
 const (
 	// RespCacheViperKey is the config-file block holding the full RESP backend
-	// surface (see redisstore.Config for the keys).
+	// surface: connection keys (see redisstore.Config) and expiration keys
+	// (see RespCacheExpirations). Both are read from this one block, by two
+	// unmarshals, because the TTL table is the cache engine's and has no place
+	// in the store adapter's connection config.
 	RespCacheViperKey = "resp-cache"
 
 	// Flags for the common path; the full surface lives in the YAML block. An
@@ -87,6 +89,10 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 	if err != nil {
 		return nil, err
 	}
+	respExpirations, err := LoadRespCacheExpirations(v)
+	if err != nil {
+		return nil, err
+	}
 	cacheAddr := v.GetString(CacheFlagName)
 
 	if respEnabled {
@@ -98,16 +104,27 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 		if storeErr != nil {
 			return nil, storeErr
 		}
+		// The TTL table this backend will write with: the cache server's flag
+		// defaults unless the block carried expirations over (MAG-3631 — the
+		// chart's multipliers configure the sidecar's Policy and cannot reach
+		// a router-embedded one, so without this they are silently dropped).
+		policy := respExpirations.Policy()
 		utils.LavaFormatInfo("resp-cache backend configured",
 			utils.LogAttr("topology", respConfig.Topology),
 			utils.LogAttr("addresses", respConfig.Addresses),
 			utils.LogAttr("read-addresses", respConfig.ReadAddresses),
 			utils.LogAttr("key-prefix", respConfig.KeyPrefix),
 			utils.LogAttr("tls", respConfig.TLS.Enabled),
+			// Logged as the resolved table rather than the raw keys: an
+			// operator comparing this router against a sidecar is comparing
+			// effective TTLs, and a multiplier alone does not show them.
+			utils.LogAttr("expirations-configured", respExpirations.configured()),
+			utils.LogAttr("expiration-finalized", policy.Finalized),
+			utils.LogAttr("expiration-non-finalized-floor", policy.NonFinalized),
+			utils.LogAttr("expiration-node-errors", policy.NodeErrors),
+			utils.LogAttr("expiration-blocks-hashes-to-heights", policy.BlocksHashesToHeights),
 		)
-		// TTL policy mirrors the cache server's defaults; router-side TTL
-		// tuning is a deliberate non-goal for now.
-		return NewRespCache(store, core.DefaultPolicy()), nil
+		return NewRespCache(store, policy), nil
 	}
 
 	var cache CacheBackend = (*Cache)(nil)
