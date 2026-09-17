@@ -51,8 +51,11 @@ func (h *directRelayHarness) relay(t *testing.T, hasNodeError bool, message stri
 		msg.checkResponseError = func([]byte, int) (bool, string) { return true, message }
 	}
 	relayResult := &common.RelayResult{}
+	// attemptBudget and budgetExpired came in with main's write-timeout work. A generous budget
+	// that never expires keeps these tests about endpoint health, which is what they pin.
 	_, _, _ = h.rpcss.relayInnerDirect(
-		context.Background(), h.session, relayResult, 5*time.Second, msg, msg.requestData, nil,
+		context.Background(), h.session, relayResult, 5*time.Second, 30*time.Second,
+		msg, msg.requestData, nil, func() bool { return false },
 	)
 	// Read directly: the relay above ran synchronously on this goroutine, so there is no
 	// concurrent writer. IsEnabled takes the lock; ConnectionRefusals has no exported accessor.
@@ -127,8 +130,8 @@ func TestRelayInnerDirect_CleanAnswerResetsTheCounter(t *testing.T) {
 	benchAfter(t, 5)
 	h := newDirectRelayHarness(t, http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0xabc"}`)
 
-	h.endpoint.MarkUnhealthy()
-	h.endpoint.MarkUnhealthy()
+	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
 
 	refusals, enabled := h.relay(t, false, "")
 	require.Zero(t, refusals, "a clean 2xx is positive proof the endpoint serves")
@@ -148,8 +151,8 @@ func TestRelayInnerDirect_BlamelessAnswerNeitherBlamesNorCertifies(t *testing.T)
 	h := newDirectRelayHarness(t, http.StatusOK,
 		`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"transaction not found"}}`)
 
-	h.endpoint.MarkUnhealthy()
-	h.endpoint.MarkUnhealthy()
+	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
 
 	for i := 0; i < 3; i++ {
 		refusals, enabled := h.relay(t, true, "transaction not found")
@@ -167,8 +170,8 @@ func TestRelayInnerDirect_UnrecognisedStatusDoesNotCertifyHealth(t *testing.T) {
 	benchAfter(t, 5)
 	h := newDirectRelayHarness(t, http.StatusForbidden, `{"error":"go away"}`)
 
-	h.endpoint.MarkUnhealthy()
-	h.endpoint.MarkUnhealthy()
+	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
 
 	refusals, _ := h.relay(t, false, "")
 	require.Equal(t, uint64(2), refusals,

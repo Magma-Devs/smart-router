@@ -66,7 +66,7 @@ func retiredSessionCapacityRecovers(t *testing.T, sessionLimit int) {
 		for i := 0; i <= MaximumNumberOfFailuresAllowedPerConsumerSession; i++ {
 			sessions, err = get()
 			require.NoError(t, err, "burst %d attempt %d", retired, i)
-			endpoint.MarkUnhealthy()
+			endpoint.MarkUnhealthy(EndpointDisableNodeError)
 			for _, info := range sessions {
 				require.NoError(t, csm.OnSessionFailure(info.Session, errors.New("transient upstream failure")))
 			}

@@ -44,11 +44,11 @@ func TestBenchAfter_ThresholdDrivesTheDisable(t *testing.T) {
 	withBenchAfter(t, 3)
 
 	e := &Endpoint{NetworkAddress: "http://bench-after-test", Enabled: true}
-	e.MarkUnhealthy()
-	e.MarkUnhealthy()
+	e.MarkUnhealthy(EndpointDisableNodeError)
+	e.MarkUnhealthy(EndpointDisableNodeError)
 	require.True(t, e.Enabled, "two failures is under the threshold of three")
 
-	e.MarkUnhealthy()
+	e.MarkUnhealthy(EndpointDisableNodeError)
 	require.False(t, e.Enabled, "the third failure must disable it — the flag decides when, not the constant")
 }
 
@@ -60,8 +60,8 @@ func TestBenchAfter_IsConsecutiveNotCumulative(t *testing.T) {
 
 	e := &Endpoint{NetworkAddress: "http://bench-after-test", Enabled: true}
 	for i := 0; i < 10; i++ {
-		e.MarkUnhealthy()
-		e.MarkUnhealthy()
+		e.MarkUnhealthy(EndpointDisableNodeError)
+		e.MarkUnhealthy(EndpointDisableNodeError)
 		e.ResetHealth() // a successful relay
 		require.True(t, e.Enabled, "twenty failures broken up by successes must never disable it")
 	}
@@ -79,7 +79,7 @@ func TestBenchAfter_ProbeTrialBudgetTracksTheThreshold(t *testing.T) {
 
 	e := &Endpoint{NetworkAddress: "http://bench-after-test", Enabled: true}
 	for i := uint64(0); i < 10; i++ {
-		e.MarkUnhealthy()
+		e.MarkUnhealthy(EndpointDisableNodeError)
 	}
 	require.False(t, e.Enabled, "precondition: disabled at the threshold")
 
@@ -92,7 +92,7 @@ func TestBenchAfter_ProbeTrialBudgetTracksTheThreshold(t *testing.T) {
 		"and it came back on trial, not on a fresh budget")
 
 	for i := uint64(0); i < probeReenableTrialBudget; i++ {
-		e.MarkUnhealthy()
+		e.MarkUnhealthy(EndpointDisableNodeError)
 	}
 	require.False(t, e.Enabled, "%d more failures must re-disable it", probeReenableTrialBudget)
 }
@@ -104,7 +104,7 @@ func TestBenchAfter_ThresholdBelowTrialBudgetDoesNotUnderflow(t *testing.T) {
 	withBenchAfter(t, 1)
 
 	e := &Endpoint{NetworkAddress: "http://bench-after-test", Enabled: true}
-	e.MarkUnhealthy()
+	e.MarkUnhealthy(EndpointDisableNodeError)
 	require.False(t, e.Enabled, "precondition: one failure disables at a threshold of one")
 
 	e.mu.Lock()

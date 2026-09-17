@@ -123,7 +123,7 @@ func TestEndpointFault_CounterMovesOnlyOnFault(t *testing.T) {
 	endpointWith := func(refusals uint64) *lavasession.Endpoint {
 		e := &lavasession.Endpoint{NetworkAddress: "http://fault-test", Enabled: true}
 		for i := uint64(0); i < refusals; i++ {
-			e.MarkUnhealthy()
+			e.MarkUnhealthy(lavasession.EndpointDisableNodeError)
 		}
 		return e
 	}
@@ -134,7 +134,7 @@ func TestEndpointFault_CounterMovesOnlyOnFault(t *testing.T) {
 	// One short of the threshold, the blaming answer is what disables it.
 	e := endpointWith(lavasession.MaxConsecutiveConnectionAttempts - 1)
 	require.True(t, e.Enabled, "precondition: still enabled one failure short")
-	e.MarkUnhealthy() // the relay path's call, gated on IsNodeAtFault
+	e.MarkUnhealthy(lavasession.EndpointDisableNodeError) // the relay path's call, gated on IsNodeAtFault
 	require.False(t, e.Enabled,
 		"a node error inside a 200 must be able to disable the endpoint — this is the whole freeze fix")
 
@@ -146,7 +146,7 @@ func TestEndpointFault_CounterMovesOnlyOnFault(t *testing.T) {
 	survivor := endpointWith(lavasession.MaxConsecutiveConnectionAttempts - 1)
 	for i := 0; i < 100; i++ {
 		if blameless.IsNodeAtFault { // never true; mirrors the relay path's gate
-			survivor.MarkUnhealthy()
+			survivor.MarkUnhealthy(lavasession.EndpointDisableNodeError)
 		}
 	}
 	require.True(t, survivor.Enabled,
