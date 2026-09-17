@@ -499,14 +499,14 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 }
 
 // debugMuxDeps bundles the state the debug HTTP handlers reach into. Bundling
-// rather than positional args lets us add stores (router-wide retry caches,
+// rather than positional args lets us add stores (router-wide caches,
 // session managers, etc.) without breaking the existing test fixtures, which
 // can leave router=nil and exercise just the optimizer+offset surface.
 type debugMuxDeps struct {
 	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]
 	offsetNano *atomic.Int64
 	// router is optional. When provided, /debug/reset-all also flushes
-	// per-server RelayRetriesManagers and per-CSM transient failure state.
+	// per-CSM transient failure state and the blocked-providers list.
 	router *RPCSmartRouter
 	// qosClient is the optional optimizer-QoS sampler. When provided,
 	// GET /debug/provider-scores reads the live per-provider quality scores
@@ -1344,8 +1344,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-all — flush every state store the test framework
 	// cares about in a single call: in-process Ristretto, optimizer scores,
-	// relay retry bans, sticky
-	// sessions, reported providers, cross-epoch blocked-provider memory,
+	// sticky sessions, reported providers, cross-epoch blocked-provider memory,
 	// and — when --cache-be is configured — the external cache-be pod
 	// (MAG-1764). Equivalent to the legacy time-warp(+3600) → time-warp(0)
 	// → reset-scores dance plus the surviving state above.
@@ -1468,6 +1467,13 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// signals MAG-1764 end-to-end coverage, "blocked-providers" signals
 		// MAG-1810, and "endpoint-health" + "pairing" signal the MAG-2186
 		// endpoint-health reset and cold pairing rebuild added above.
+		//
+		// "retries-manager" is retained on the same grounds as "seen-block": the
+		// store it named is gone (the relay-retries hash cache went with the
+		// speculative archive retry, which was its only writer), and the key is
+		// part of the contract an out-of-repo prober reads. Its postcondition —
+		// "no retry hash bans survive this call" — still holds, vacuously. Drop
+		// the key only together with the prober that requires it.
 		w.Header().Set("Content-Type", "application/json")
 		if cacheBeFlushed {
 			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","cache-be"]}`)
