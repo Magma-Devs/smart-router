@@ -900,7 +900,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	dwsm.successPendingSubscription(hashedParams)
 
 	// Start listening for upstream messages
-	go dwsm.listenForUpstreamMessages(subCtx, hashedParams, activeSub, upstreamSub)
+	go dwsm.listenForUpstreamMessages(subCtx, hashedParams, activeSub, upstreamSub, msgChan)
 
 	// Handle client disconnect
 	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams)
@@ -1463,11 +1463,18 @@ type upstreamErrSource interface {
 // for calling cleanupSubscription on every failure path (reconnect timeout, GetConnection
 // failure post-reconnect, re-subscribe failure) so a failed restoration does not leak the
 // subscription. See handleUpstreamDisconnect for the corresponding cleanup-on-failure calls.
+//
+// messagesChan is the channel of the upstream subscription this listener serves,
+// handed in rather than read off activeSub on every loop: a reconnect replaces the
+// subscription's channel under dwsm.lock and starts a fresh listener for it, so a
+// listener reading the field unlocked would race that write. Each listener owns
+// one channel for its whole life.
 func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 	ctx context.Context,
 	hashedParams string,
 	activeSub *directActiveSubscription,
 	upstreamSub upstreamErrSource,
+	messagesChan <-chan *rpcclient.JsonrpcMessage,
 ) {
 	reconnectInFlight := false
 	defer func() {
@@ -1501,7 +1508,7 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 			}
 			return
 
-		case msg := <-activeSub.messagesChan:
+		case msg := <-messagesChan:
 			if msg == nil {
 				continue
 			}
@@ -1654,7 +1661,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	)
 
 	// Start listening for messages on the new subscription
-	go dwsm.listenForUpstreamMessages(activeSub.ctx, hashedParams, activeSub, newUpstreamSub)
+	go dwsm.listenForUpstreamMessages(activeSub.ctx, hashedParams, activeSub, newUpstreamSub, newMsgChan)
 }
 
 // handleClientDisconnect releases one client from one subscription when the client's

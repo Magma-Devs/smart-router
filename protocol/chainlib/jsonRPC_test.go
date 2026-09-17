@@ -704,6 +704,13 @@ func TestJsonRPCChainListener_Shutdown_NilApp(t *testing.T) {
 // and returns the listener plus its dynamic address once Serve is ready.
 func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler bool) (*JsonRPCChainListener, string) {
 	t.Helper()
+	return startTestJsonRPCListenerWithHealthPath(t, ctx, common.DEFAULT_HEALTH_PATH)
+}
+
+// startTestJsonRPCListenerWithHealthPath serves a listener whose health route sits on
+// healthPath, so a test can put it where an operator might: on "/".
+func startTestJsonRPCListenerWithHealthPath(t *testing.T, ctx context.Context, healthPath string) (*JsonRPCChainListener, string) {
+	t.Helper()
 	// ListenToMessages uses the custom rand package which requires initialization.
 	// The package-level TestMain (chain_router_test.go) does not call InitRandomSeed,
 	// so we do it here. InitRandomSeed is idempotent.
@@ -714,11 +721,11 @@ func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler boo
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "ETH1",
 		ApiInterface:    "jsonrpc",
-		HealthCheckPath: "/lava/health",
+		HealthCheckPath: healthPath,
 	}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	listener := NewJrpcChainListener(ctx, endpoint, nil, nil, logger, nil, nil)
+	listener := NewJrpcChainListener(ctx, endpoint, nil, alwaysHealthyReporter{}, logger, nil, nil)
 
 	cmdFlags := common.ConsumerCmdFlags{}
 	go listener.Serve(ctx, cmdFlags)
@@ -799,3 +806,147 @@ func TestJsonRPCChainListener_GracefulShutdown_RejectsNewConnectionsAfterShutdow
 
 // Quiet the unused-import warning if sync isn't used.
 var _ = sync.WaitGroup{}
+
+// A WebSocket client that dials the bare endpoint URL (wss://host/) upgrades on
+// any path, because the ws/wss scheme never reaches the server — only the
+// upgrade header does. /ws and /websocket keep working, and a GET without the
+// header still answers 405.
+func TestJsonRPCChainListener_WebSocketUpgradesOnAnyPath(t *testing.T) {
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	_, addr := startTestJsonRPCListener(t, serveCtx, false)
+
+	for _, path := range []string{"/", "/ws", "/websocket", "/lava@dapp"} {
+		client, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+path, nil)
+		require.NoError(t, err, "WS dial on %q should upgrade", path)
+		require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode, "path %q", path)
+		_ = client.Close()
+	}
+}
+
+// The health route is registered before the upgrade catch-all and fiber matches in
+// registration order, so an upgrade on the health path used to be answered with a
+// health body. With health-check-path set to "/" that is the bare-URL failure this
+// PR fixes, silently back. An upgrade wins on the health path; a plain GET there is
+// still the health check.
+func TestJsonRPCChainListener_WebSocketUpgradesOnTheHealthPath(t *testing.T) {
+	for _, healthPath := range []string{"/", common.DEFAULT_HEALTH_PATH} {
+		t.Run(healthPath, func(t *testing.T) {
+			serveCtx, cancelServe := context.WithCancel(context.Background())
+			defer cancelServe()
+			_, addr := startTestJsonRPCListenerWithHealthPath(t, serveCtx, healthPath)
+
+			client, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+healthPath, nil)
+			require.NoError(t, err, "an upgrade on the health path must be served as a websocket")
+			require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+			_ = client.Close()
+
+			httpClient := &http.Client{Timeout: 2 * time.Second}
+			healthResp, err := httpClient.Get("http://" + addr + healthPath)
+			require.NoError(t, err)
+			defer healthResp.Body.Close()
+			body, err := io.ReadAll(healthResp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, healthResp.StatusCode, "a plain GET on the health path is still the health check")
+			require.Equal(t, "Health status OK", string(body))
+		})
+	}
+}
+
+// The whole 405 answer has to survive, not just its status code. Registering a
+// GET route to catch upgrades takes fiber's own method-mismatch path out of play,
+// and that path is what supplied Allow — asserting the status alone let the header
+// disappear while this test stayed green. RFC 9110 §15.5.6 requires it.
+func TestJsonRPCChainListener_PlainGetIsStillMethodNotAllowed(t *testing.T) {
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	_, addr := startTestJsonRPCListener(t, serveCtx, false)
+
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	for _, path := range []string{"/", "/some/dapp/path"} {
+		resp, err := httpClient.Get("http://" + addr + path)
+		require.NoError(t, err, "path %q", path)
+		require.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode, "path %q", path)
+		require.Equal(t, "POST", resp.Header.Get("Allow"),
+			"a 405 must name the methods it does accept; path %q", path)
+		resp.Body.Close()
+	}
+}
+
+// An idle subscription must not go silent: proxies in front of the router close
+// a quiet WebSocket after ~2 minutes without a close frame, so the server pings
+// on an interval to keep the connection alive.
+func TestJsonRPCChainListener_WebSocketSendsKeepAlivePings(t *testing.T) {
+	previousInterval := GetWebSocketKeepAliveInterval()
+	SetWebSocketKeepAliveInterval(50 * time.Millisecond)
+	defer SetWebSocketKeepAliveInterval(previousInterval)
+
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	_, addr := startTestJsonRPCListener(t, serveCtx, false)
+
+	client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/", nil)
+	require.NoError(t, err)
+	defer client.Close()
+
+	pinged := make(chan struct{}, 1)
+	client.SetPingHandler(func(string) error {
+		select {
+		case pinged <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	// Control frames are only processed while a read is in flight.
+	go func() {
+		for {
+			if _, _, readErr := client.ReadMessage(); readErr != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-pinged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no keep-alive ping arrived within 5s")
+	}
+}
+
+// The idle reaper must release the connection itself, not wait for the client to
+// act on the close frame it sends. A client that ignores that frame used to be
+// reaped by the proxy in front of the router — it closes a silent socket within
+// ~2 minutes, which woke the read loop for us. A kept-alive connection is never
+// silent, so that backstop is gone: without the router completing its own
+// teardown the handler goroutine, its 128 KiB read buffer and the per-IP limiter
+// slot are held for the life of the process (the MAG-3722 leak).
+func TestJsonRPCChainListener_IdleConnectionIsReleasedWhenClientIgnoresClose(t *testing.T) {
+	previousIdleTime := GetMaxIdleTimeInSeconds()
+	SetMaxIdleTimeInSeconds(1)
+	defer SetMaxIdleTimeInSeconds(previousIdleTime)
+
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	listener, addr := startTestJsonRPCListener(t, serveCtx, false)
+
+	// Dial and then go silent: never read, never close. The idle close frame
+	// sits unprocessed in this client's receive buffer, exactly like a client
+	// that has hung.
+	client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/", nil)
+	require.NoError(t, err)
+	defer client.Close()
+
+	// wsWG is incremented in the upgrade middleware and released when the
+	// connection handler returns, so draining it is the handler's own teardown.
+	handlerReturned := make(chan struct{})
+	go func() {
+		defer close(handlerReturned)
+		listener.wsWG.Wait()
+	}()
+
+	select {
+	case <-handlerReturned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the idle connection's handler never returned: the router is holding it for the life of the process")
+	}
+}

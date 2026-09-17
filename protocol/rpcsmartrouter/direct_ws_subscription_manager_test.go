@@ -2569,7 +2569,7 @@ func TestListenForUpstreamMessages_ReconnectSkipsCleanup(t *testing.T) {
 	// as it drains the Err() channel and kicks off handleUpstreamDisconnect.
 	done := make(chan struct{})
 	go func() {
-		manager.listenForUpstreamMessages(subCtx, hp, activeSub, upstreamSub)
+		manager.listenForUpstreamMessages(subCtx, hp, activeSub, upstreamSub, activeSub.messagesChan)
 		close(done)
 	}()
 	select {
@@ -2653,7 +2653,7 @@ func TestListenForUpstreamMessages_NilUpstreamSubDoesNotPanic(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		manager.listenForUpstreamMessages(subCtx, hp, activeSub, upstreamSub)
+		manager.listenForUpstreamMessages(subCtx, hp, activeSub, upstreamSub, activeSub.messagesChan)
 	}()
 
 	// Err() on a nil receiver yields a nil channel, so that select case never fires and the

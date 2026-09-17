@@ -31,9 +31,9 @@ __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 source "$__dir"/../useful_commands.sh
 
 ROUTER_URL="${ROUTER_URL:-http://127.0.0.1:3360}"
-# Solana subscriptions are served over WebSocket on the same listen-address, but
-# at the /ws (or /websocket) path — the root "/" only accepts HTTP POST and returns
-# 405 on a ws upgrade (see jsonRPC.go app.Get("/ws", ...)).
+# Solana subscriptions are served over WebSocket on the same listen-address. Any
+# GET carrying the upgrade headers is served as a websocket, whatever its path, so
+# /ws, /websocket and the bare "/" all work; a plain GET still answers 405.
 WS_URL="${WS_URL:-ws://127.0.0.1:3360/ws}"
 LOGS_DIR=${__dir}/../../debugging/logs
 ROUTER_LOG="$LOGS_DIR/SMARTROUTER.log"

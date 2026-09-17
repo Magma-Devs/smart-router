@@ -3516,6 +3516,30 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				)
 			}
 
+			// Both of these are durations sitting next to a plain seconds count
+			// (LimitWebsocketIdleTimeFlag), and a bare number in the config file would be
+			// read as nanoseconds. Refuse to start rather than ping every connection at
+			// 30ns.
+			if err := common.ValidateDurationConfigValues(viper.GetViper(),
+				common.WebsocketKeepAliveIntervalFlag, common.WebsocketWriteTimeoutFlag); err != nil {
+				return err
+			}
+
+			chainlib.SetWebSocketKeepAliveInterval(viper.GetDuration(common.WebsocketKeepAliveIntervalFlag))
+			chainlib.SetMaxIdleTimeInSeconds(viper.GetInt64(common.LimitWebsocketIdleTimeFlag))
+			chainlib.SetWebSocketWriteTimeout(viper.GetDuration(common.WebsocketWriteTimeoutFlag))
+			if chainlib.WebSocketKeepAliveOutlivesIdleReaper(chainlib.GetWebSocketKeepAliveInterval(), chainlib.GetMaxIdleTimeInSeconds()) {
+				utils.LavaFormatWarning("websocket keep-alive is on with no idle limit: a quiet connection stays open for as long as its client keeps the socket, and a client that vanished is noticed only once its pings stop being acknowledged", nil,
+					utils.LogAttr(common.WebsocketKeepAliveIntervalFlag, chainlib.GetWebSocketKeepAliveInterval()),
+					utils.LogAttr(common.LimitWebsocketIdleTimeFlag, chainlib.GetMaxIdleTimeInSeconds()),
+				)
+			}
+			if chainlib.WebSocketWriteTimeoutUnbounded(chainlib.GetWebSocketWriteTimeout()) {
+				utils.LavaFormatWarning("websocket write deadline is off: a client that stops reading blocks its writer forever, and the connection's handler goroutine, read buffer and per-ip limiter slot are held for the life of the process", nil,
+					utils.LogAttr(common.WebsocketWriteTimeoutFlag, chainlib.GetWebSocketWriteTimeout()),
+				)
+			}
+
 			consumerPropagatedFlags := common.ConsumerCmdFlags{
 				HeadersFlag:                       viper.GetString(common.CorsHeadersFlag),
 				CredentialsFlag:                   viper.GetString(common.CorsCredentialsFlag),
@@ -3692,8 +3716,10 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// websocket flags
 	cmdRPCSmartRouter.Flags().IntVar(&chainlib.WebSocketRateLimit, common.RateLimitWebSocketFlag, chainlib.WebSocketRateLimit, "rate limit (per second) websocket requests per user connection, default is unlimited")
 	cmdRPCSmartRouter.Flags().Int64Var(&chainlib.MaximumNumberOfParallelWebsocketConnectionsPerIp, common.LimitParallelWebsocketConnectionsPerIpFlag, chainlib.MaximumNumberOfParallelWebsocketConnectionsPerIp, "limit number of parallel connections to websocket, per ip, default is unlimited (0)")
-	cmdRPCSmartRouter.Flags().Int64Var(&chainlib.MaxIdleTimeInSeconds, common.LimitWebsocketIdleTimeFlag, chainlib.MaxIdleTimeInSeconds, "limit the idle time in seconds for a websocket connection, default is 20 minutes ( 20 * 60 )")
+	cmdRPCSmartRouter.Flags().Int64(common.LimitWebsocketIdleTimeFlag, chainlib.DefaultMaxIdleTimeInSeconds, "limit the idle time in seconds for a websocket connection, default is 20 minutes ( 20 * 60 )")
 	cmdRPCSmartRouter.Flags().DurationVar(&chainlib.WebSocketBanDuration, common.BanDurationForWebsocketRateLimitExceededFlag, chainlib.WebSocketBanDuration, "once websocket rate limit is reached, user will be banned Xfor a duration, default no ban")
+	cmdRPCSmartRouter.Flags().Duration(common.WebsocketKeepAliveIntervalFlag, chainlib.DefaultWebSocketKeepAliveInterval, "how often to ping an open websocket connection so proxies in front of the router do not reap it as idle, 0 disables. A duration with a unit (30s, 500ms) — unlike "+common.LimitWebsocketIdleTimeFlag+", a bare number here means nanoseconds and is rejected at startup")
+	cmdRPCSmartRouter.Flags().Duration(common.WebsocketWriteTimeoutFlag, chainlib.DefaultWebSocketWriteTimeout, "how long one websocket frame write may take before the router closes the connection of a client that stopped reading, 0 disables the deadline. A duration with a unit (10s, 500ms) — a bare number here means nanoseconds and is rejected at startup")
 
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerificationDefault, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerificationDefault, "skip websocket verification for chains that require ws/wss endpoints")
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipAllVerifications, common.SkipAllVerificationsFlag, chainlib.SkipAllVerifications, "skip ALL spec verifications for every provider this process serves, healthy ones included. An escape hatch for bringing a router up against upstreams that cannot survive being probed; prefer the per-node-url skip-verifications config (which accepts \"*\") for anything ongoing")

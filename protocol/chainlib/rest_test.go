@@ -2,9 +2,12 @@ package chainlib
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,9 +16,12 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -376,4 +382,102 @@ func TestRestChainListener_Shutdown_NilApp(t *testing.T) {
 	defer cancel()
 	// Should not panic when Shutdown is called before Serve has captured an app.
 	require.NoError(t, listener.Shutdown(ctx))
+}
+
+// restHealthRelayStub is the slice of RelaySender the rest relay path uses: it records
+// what it was asked to relay, so a test can prove the relay was never reached.
+type restHealthRelayStub struct {
+	mu   sync.Mutex
+	urls []string
+}
+
+func (s *restHealthRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.urls = append(s.urls, url)
+	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(`{"relayed":true}`)}, StatusCode: http.StatusOK}, nil
+}
+
+func (s *restHealthRelayStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
+	return nil, errors.New("not used")
+}
+
+func (s *restHealthRelayStub) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
+	return nil, errors.New("not used")
+}
+
+func (s *restHealthRelayStub) CancelSubscriptionContext(subscriptionKey string) {}
+
+func (s *restHealthRelayStub) seen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.urls...)
+}
+
+// The health route hands a websocket upgrade past the health handler so a client
+// that dialled the bare URL is not answered with a health body. rest serves no
+// websockets and registers no GET route, so the handler after the health route is
+// the relay catch-all: handing on there answers a health probe with a chain
+// response. The health path is a liveness check for the router and must never
+// reach a provider, whatever headers the probe carries.
+func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	for _, healthPath := range []string{common.DEFAULT_HEALTH_PATH, "/"} {
+		t.Run(healthPath, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			stub := &restHealthRelayStub{}
+			logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+			require.NoError(t, err)
+			endpoint := &lavasession.RPCEndpoint{
+				NetworkAddress:  "127.0.0.1:0",
+				ChainID:         "LAV1",
+				ApiInterface:    "rest",
+				HealthCheckPath: healthPath,
+			}
+			listener := NewRestChainListener(ctx, endpoint, stub, alwaysHealthyReporter{}, logger)
+			go listener.Serve(ctx, common.ConsumerCmdFlags{})
+
+			var addr string
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) && addr == "" {
+				addr = listener.GetListeningAddress()
+				time.Sleep(20 * time.Millisecond)
+			}
+			require.NotEmpty(t, addr, "listener never reported a listening address")
+
+			httpClient := &http.Client{Timeout: 3 * time.Second}
+
+			// A plain probe is the health check, as it always was.
+			plain, err := httpClient.Get("http://" + addr + healthPath)
+			require.NoError(t, err)
+			plainBody, err := io.ReadAll(plain.Body)
+			plain.Body.Close()
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, plain.StatusCode)
+			require.Equal(t, "Health status OK", string(plainBody))
+
+			// So is one carrying the upgrade headers: there is nothing on this
+			// listener to upgrade it to.
+			req, err := http.NewRequest(http.MethodGet, "http://"+addr+healthPath, nil)
+			require.NoError(t, err)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Sec-WebSocket-Version", "13")
+			req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+			upgrade, err := httpClient.Do(req)
+			require.NoError(t, err)
+			upgradeBody, err := io.ReadAll(upgrade.Body)
+			upgrade.Body.Close()
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, upgrade.StatusCode)
+			require.Equal(t, "Health status OK", string(upgradeBody),
+				"an upgrade on the health path must still be answered by the health check, not the chain")
+
+			require.Empty(t, stub.seen(), "the health path must never reach the relay")
+		})
+	}
 }

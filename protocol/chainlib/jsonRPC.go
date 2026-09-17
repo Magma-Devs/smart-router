@@ -378,7 +378,9 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	}
 	test_mode := common.IsTestMode(ctx)
 	// Setup HTTP Server
-	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter)
+	// true: this listener registers a GET catch-all that upgrades, so the health
+	// route may hand an upgrade on its own path past the health handler.
+	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true)
 	apil.app = app
 
 	// wsWG.Add must run synchronously inside the request handler so that
@@ -565,6 +567,23 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		return err
 	}
 	app.Post("/*", handlerPost)
+	// A caller that guesses the bare endpoint URL (wss://host/) sends a GET
+	// carrying the upgrade headers — the ws/wss scheme never reaches the server,
+	// so that header is the only signal. Serve any such GET from the handler
+	// /ws and /websocket already use; a GET without it still answers 405.
+	app.Get("/*", func(fiberCtx *fiber.Ctx) error {
+		if !websocket.IsWebSocketUpgrade(fiberCtx) {
+			// Registering a GET route means fiber stops reaching its own
+			// method-mismatch path, and that path is what used to attach Allow to
+			// the 405. RFC 9110 §15.5.6 requires the header on a 405, so set it
+			// here or the answer silently loses it. POST is the value fiber
+			// produced before: it is the only non-upgrade method this listener
+			// serves on /*, registered directly above.
+			fiberCtx.Set(fiber.HeaderAllow, fiber.MethodPost)
+			return fiber.ErrMethodNotAllowed
+		}
+		return fiberCtx.Next()
+	}, wsUpgradeMiddleware, websocketCallbackWithDappID)
 	// Go
 	addrChannel := make(chan string)
 	addrChannelSafe := common.NewSafeChannelSender(ctx, addrChannel)
