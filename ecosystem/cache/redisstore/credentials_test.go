@@ -1,9 +1,13 @@
 package redisstore
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +17,8 @@ import (
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/auth"
+	zerolog "github.com/rs/zerolog"
+	zerologlog "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,6 +63,75 @@ func TestFileCredentialsParsing(t *testing.T) {
 	require.Equal(t, "rotated-pass", pass)
 }
 
+// MAG-3685: whitespace on the LEFT of the file was sent as part of the
+// credential. The right side was already trimmed, which is what made the
+// report easy to dismiss as fixed — the defect was the side, not the absence.
+func TestFileCredentialsTrimBothSides(t *testing.T) {
+	for name, content := range map[string]string{
+		"leading space":     " placeholder-credential\n",
+		"leading newline":   "\nplaceholder-credential\n",
+		"leading tab":       "\tplaceholder-credential",
+		"CRLF on each side": "\r\n placeholder-credential \r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := &FileCredentials{Username: "fixed-user", Path: writeTempFile(t, "pw", content)}
+			user, pass, err := src.Credentials()
+			require.NoError(t, err)
+			require.Equal(t, "fixed-user", user)
+			require.Equal(t, "placeholder-credential", pass, "the credential must reach the store without the file's surrounding whitespace")
+		})
+	}
+
+	// In the combined form the leading whitespace landed on the USERNAME: one
+	// file, one trim, both halves exposed — and one trim fixes both.
+	src := &FileCredentials{Username: "ignored", Path: writeTempFile(t, "userpw", " rotated-user:rotated-pass\n")}
+	user, pass, err := src.Credentials()
+	require.NoError(t, err)
+	require.Equal(t, "rotated-user", user, "a leading space must not become part of the username")
+	require.Equal(t, "rotated-pass", pass)
+}
+
+// The same defect end to end: the store only accepts the exact credential, so
+// a leading space that survived into the AUTH would be refused. Both file
+// forms, against a server that requires each.
+func TestPasswordFileWithLeadingWhitespaceAuthenticates(t *testing.T) {
+	t.Run("password-only file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireAuth("placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "pw", "\n placeholder-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.NoError(t, store.Ping(context.Background()), "the trimmed password must be what reaches the store")
+	})
+
+	t.Run("username:password file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireUserAuth("cacheuser", "placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "userpw", " cacheuser:placeholder-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.NoError(t, store.Ping(context.Background()), "the trimmed username must be what reaches the store")
+	})
+
+	t.Run("control: a wrong credential in the file is still refused", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireAuth("placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "pw", " not-the-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.Error(t, store.Ping(context.Background()), "the server must be the one deciding, or the cases above prove nothing")
+	})
+}
+
 // The plumbing contract: a push reaches every subscribed connection exactly
 // when the credentials actually changed; unsubscribed listeners never hear
 // again.
@@ -79,6 +154,8 @@ func TestSentinelPasswordFileStartsNoWatcher(t *testing.T) {
 	t.Cleanup(func() { _ = sentinel.Close() })
 	require.Nil(t, sentinel.stopWatcher,
 		"a watcher under sentinel would detect every rotation and re-authenticate nothing")
+	require.Nil(t, sentinel.credentials,
+		"nothing subscribes under sentinel, so no provider is built for it either")
 
 	standalone, err := New(Config{
 		Topology:     TopologyStandalone,
@@ -169,6 +246,11 @@ func TestLiveRotationSmokeOverMiniredis(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
 	mr.RequireAuth("pw2")
+	// Two collections first: the pooled connection's subscription is anchored
+	// only by the closure the client stored on it, and must survive them
+	// (MAG-3728) — or the rotation below reaches nobody.
+	runtime.GC()
+	runtime.GC()
 	provider.Refresh()
 
 	for i := 0; i < 6; i++ {
@@ -197,4 +279,187 @@ func TestLiveRotationSmokeOverMiniredis(t *testing.T) {
 		}
 		return dials.Load() == before
 	}, 10*time.Second, 100*time.Millisecond, "the pool must converge to dial-free serving after rotation")
+}
+
+// captureLog swaps the global zerolog sink for a buffer while fn runs and
+// returns what was written. lavalog writes through that global logger and its
+// level gate defaults to debug in tests, so warnings and info both land.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	prev := zerologlog.Logger
+	t.Cleanup(func() { zerologlog.Logger = prev })
+	var buf bytes.Buffer
+	zerologlog.Logger = zerolog.New(&buf)
+	fn()
+	return buf.String()
+}
+
+// MAG-3690: an unreadable credential file was reported on every tick of the
+// refresh loop, indefinitely — 21 identical warnings in 22 seconds at a
+// one-second interval, about 8,600 a day at the shipped ten seconds — while
+// the health loop beside it wrote once over the same window, because it
+// reports transitions. This holds Refresh to that discipline: one line when
+// the source becomes unreadable, one when it is readable again, nothing in
+// between, and a later outage is a new event.
+func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
+	credFile := writeTempFile(t, "cred", "pw1")
+	provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})
+	listener := &recordingListener{}
+	_, _, err := provider.Subscribe(listener)
+	require.NoError(t, err)
+
+	const failed, recovered = "credential refresh failed", "readable again"
+
+	quiet := captureLog(t, func() { provider.Refresh() })
+	require.NotContains(t, quiet, failed, "a readable source is not an event")
+	require.NotContains(t, quiet, recovered)
+
+	require.NoError(t, os.Remove(credFile))
+	outage := captureLog(t, func() {
+		for i := 0; i < 21; i++ {
+			provider.Refresh()
+		}
+	})
+	require.Equal(t, 1, strings.Count(outage, failed), "one warning per outage, however many ticks it spans")
+	require.Empty(t, listener.recorded(), "nothing is pushed while the source is unreadable")
+
+	require.NoError(t, os.WriteFile(credFile, []byte("pw1"), 0o600))
+	back := captureLog(t, func() {
+		provider.Refresh()
+		provider.Refresh()
+	})
+	require.Equal(t, 1, strings.Count(back, recovered), "the end of the outage is reported once")
+	require.NotContains(t, back, failed)
+	require.Empty(t, listener.recorded(), "unchanged credentials still do not push after recovery")
+
+	require.NoError(t, os.Remove(credFile))
+	again := captureLog(t, func() {
+		provider.Refresh()
+		provider.Refresh()
+	})
+	require.Equal(t, 1, strings.Count(again, failed), "a second outage is a new event")
+
+	// Recovery with ROTATED contents both closes the outage and pushes.
+	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
+	rotated := captureLog(t, func() { provider.Refresh() })
+	require.Equal(t, 1, strings.Count(rotated, recovered))
+	require.Equal(t, []string{"u:pw2"}, listener.recorded(), "a rotation that lands during recovery is applied")
+}
+
+// MAG-3728: go-redis abandons a connection whose setup failed without ever
+// calling Close on it, so the unsubscribe it stored on the connection never
+// runs; the provider must therefore not be what keeps such a connection alive.
+// A subscription is anchored by its unsubscribe closure alone: while something
+// holds that closure (a live pooled connection does) the subscription is live,
+// and once nothing does, the collector reclaims it and the provider forgets it.
+func TestSubscriptionLivesAsLongAsItsUnsubscribeClosure(t *testing.T) {
+	credFile := writeTempFile(t, "cred", "pw1")
+	provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})
+
+	anchored := &recordingListener{}
+	_, keepAlive, err := provider.Subscribe(anchored)
+	require.NoError(t, err)
+	_, _, err = provider.Subscribe(&recordingListener{}) // its closure is dropped at once: an abandoned connection
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		runtime.GC()
+		return provider.subscriberCount() == 1
+	}, 5*time.Second, 20*time.Millisecond, "the subscription nobody anchors is reclaimed; the anchored one stays")
+
+	// The anchored subscription still receives rotations across collections.
+	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
+	runtime.GC()
+	provider.Refresh()
+	require.Equal(t, []string{"u:pw2"}, anchored.recorded())
+
+	require.NoError(t, keepAlive())
+	require.Equal(t, 0, provider.subscriberCount(), "an explicit unsubscribe still removes the subscription at once")
+}
+
+// cutoffListener stands in for a store cut off mid-outage, in both shapes the
+// ticket measured: it accepts every connection and either closes it at once
+// (the store closed or reset it) or holds it open and never answers (the
+// store is black-holed). Either way HELLO fails after the connection has
+// subscribed, and go-redis abandons it in the closed state without running
+// its close path.
+type cutoffListener struct {
+	listener net.Listener
+	accepted atomic.Int64
+
+	mu   sync.Mutex
+	held []net.Conn
+}
+
+func newCutoffListener(t *testing.T, hold bool) *cutoffListener {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	c := &cutoffListener{listener: lis}
+	t.Cleanup(func() {
+		_ = lis.Close()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for _, conn := range c.held {
+			_ = conn.Close()
+		}
+	})
+	go func() {
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			c.accepted.Add(1)
+			if !hold {
+				_ = conn.Close()
+				continue
+			}
+			c.mu.Lock()
+			c.held = append(c.held, conn)
+			c.mu.Unlock()
+		}
+	}()
+	return c
+}
+
+// The defect as measured, in-process: a store that fails every connection, a
+// client whose every dial therefore fails during setup, and a provider that
+// must not end up holding the wreckage. Before this fix the subscriber count
+// climbed with every failed dial and never came down — 3,510 on the ticket,
+// each one holding 64 KiB and a socket. Here it returns to zero once the
+// collector has run, because nothing anchors those subscriptions any more.
+// Both outage shapes take the same go-redis path (a failed HELLO of any
+// non-Redis kind abandons the connection), and both are covered.
+func TestAbandonedConnectionsAreNotKeptByTheProvider(t *testing.T) {
+	for name, hold := range map[string]bool{
+		"store closes every connection":                  false,
+		"store holds every connection and never answers": true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cutoff := newCutoffListener(t, hold)
+			store, err := New(Config{
+				Addresses:    []string{cutoff.listener.Addr().String()},
+				PasswordFile: writeTempFile(t, "pw", "placeholder-credential\n"),
+				DialTimeout:  200 * time.Millisecond,
+				ReadTimeout:  200 * time.Millisecond,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = store.Close() })
+			require.NotNil(t, store.credentials, "a file-backed credential is what the streaming provider exists for")
+
+			for i := 0; i < 20; i++ {
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				_ = store.SetHeight(ctx, core.HeightKey("ETH1", fmt.Sprintf("0x%d", i)), 1, time.Minute)
+				cancel()
+			}
+			require.Positive(t, cutoff.accepted.Load(), "the client did dial the store, and every setup failed")
+
+			require.Eventually(t, func() bool {
+				runtime.GC()
+				return store.credentials.subscriberCount() == 0
+			}, 10*time.Second, 50*time.Millisecond,
+				"connections abandoned after a failed setup must be reclaimed, not kept by the provider")
+		})
+	}
 }

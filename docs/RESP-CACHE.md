@@ -181,6 +181,16 @@ applies on reconnect, rather than reporting rotations it cannot deliver.
 > warning once at startup when the file contains a colon, naming only the parsed username.
 > Either avoid `:` in the password or use the explicit `username:password` form deliberately.
 
+If the file becomes unreadable while the router runs — a mount that dropped, a rotation that
+failed, a permission change — the router keeps the credentials it already holds and says so
+**once**, then once more when the file is readable again. It does not repeat the warning on
+every poll, so a long outage costs one log line rather than one per interval.
+
+A store that closes or refuses connections while requests are flowing does not cost the router
+memory: a connection whose setup failed is released, buffers and socket included, once the
+garbage collector reclaims it, rather than being kept by the rotation machinery for the life of
+the process. Its file descriptor therefore closes at the next collection, not at the failure.
+
 ## Sizing and eviction (`maxmemory-policy`)
 
 Recommended: **`volatile-lru`** with a `maxmemory` fitting your working set.

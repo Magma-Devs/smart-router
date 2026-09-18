@@ -205,6 +205,35 @@ func TestClusterOptionsMapping(t *testing.T) {
 	require.Same(t, provider, opts.StreamingCredentialsProvider.(*StreamingProvider))
 }
 
+// MAG-3728: the streaming provider is the piece that kept abandoned
+// connections alive, and static credentials never needed it. They go straight
+// into the client options; only a file-backed credential builds the provider.
+func TestStaticCredentialsSkipTheStreamingProvider(t *testing.T) {
+	static := Config{Addresses: []string{"h:6379"}, Username: "u", Password: "placeholder-credential"}
+	opts := static.standaloneOptions(static.Addresses, nil, nil, &endpointTracker{})
+	require.Nil(t, opts.StreamingCredentialsProvider)
+	require.Equal(t, "u", opts.Username)
+	require.Equal(t, "placeholder-credential", opts.Password)
+	clusterOpts := Config{Topology: TopologyCluster, Addresses: static.Addresses, Password: "placeholder-credential"}.clusterOptions(static.Addresses, nil, nil, &endpointTracker{})
+	require.Nil(t, clusterOpts.StreamingCredentialsProvider)
+	require.Equal(t, "placeholder-credential", clusterOpts.Password)
+
+	provider := NewStreamingProvider(static.credentialsSource())
+	withProvider := static.standaloneOptions(static.Addresses, nil, provider, &endpointTracker{})
+	require.Same(t, provider, withProvider.StreamingCredentialsProvider.(*StreamingProvider))
+	require.Empty(t, withProvider.Password, "with a provider the credentials come from it, never from both")
+
+	plain, err := New(static)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = plain.Close() })
+	require.Nil(t, plain.credentials, "no file, no provider")
+
+	fileBacked, err := New(Config{Addresses: []string{"h:6379"}, PasswordFile: writeTempFile(t, "pw", "placeholder-credential\n")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = fileBacked.Close() })
+	require.NotNil(t, fileBacked.credentials, "a file to rotate from is what the provider is for")
+}
+
 func TestNewFailsFastOnBadInputs(t *testing.T) {
 	_, err := New(Config{Addresses: []string{"h:1"}, PasswordFile: "/does/not/exist"})
 	require.Error(t, err, "unreadable credential file must fail construction, not first dial")
