@@ -1,6 +1,7 @@
 package redisstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -14,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -225,5 +227,130 @@ func TestMutualTLSAcceptance(t *testing.T) {
 			CAFile:     pki.caFile,
 			ServerName: "localhost",
 		}))
+	})
+}
+
+// wireCaptureListener accepts every connection and keeps the bytes each one
+// sends, never answering — the recording endpoint that stood in for the store
+// when the evidence on MAG-3683 was captured. received returns a copy of
+// everything captured so far.
+func wireCaptureListener(t *testing.T) (net.Listener, func() []byte) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lis.Close() })
+	var mu sync.Mutex
+	var captured bytes.Buffer
+	go func() {
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				chunk := make([]byte, 4096)
+				for {
+					n, readErr := c.Read(chunk)
+					if n > 0 {
+						mu.Lock()
+						captured.Write(chunk[:n])
+						mu.Unlock()
+					}
+					if readErr != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+	return lis, func() []byte {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]byte(nil), captured.Bytes()...)
+	}
+}
+
+// MAG-3683: a tls block with every file path written and no tls.enabled. The
+// files are read only when the switch is on, so before this fix the block was
+// inert: the router started, reported TLS off in one word among six fields,
+// opened a plaintext connection, and its first write carried the username and
+// password readable.
+//
+// Three directions, each keeping the previous one honest:
+//
+//  1. no tls block at all, with a password — the credential IS on the wire in
+//     the clear. That configuration is deliberate and stays allowed; here it
+//     proves the instrument sees a plaintext credential when one is sent.
+//  2. the ticket's block without the switch — refused before any dial, naming
+//     the missing key.
+//  3. the same block with the switch on — the listener sees a TLS handshake
+//     and never the credential (the control without which 2 passes on a store
+//     that sends nothing), and a missing CA file aborts construction naming
+//     the file (the ticket's second control: the files ARE read once the
+//     switch is on).
+func TestTLSBlockWithoutEnabledNeverSendsPlaintext(t *testing.T) {
+	const username, password = "cacheuser", "placeholder-cache-credential"
+	newStore := func(t *testing.T, addr string, tlsCfg TLSConfig) (*Store, error) {
+		t.Helper()
+		store, err := New(Config{
+			Addresses:   []string{addr},
+			Username:    username,
+			Password:    password,
+			TLS:         tlsCfg,
+			DialTimeout: time.Second,
+			ReadTimeout: time.Second,
+		})
+		if store != nil {
+			t.Cleanup(func() { _ = store.Close() })
+		}
+		return store, err
+	}
+	pingOnce := func(t *testing.T, store *Store) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		require.Error(t, store.Ping(ctx), "the listener never answers, so the operation must fail")
+	}
+	missing := filepath.Join(t.TempDir(), "does-not-exist", "ca.pem")
+
+	t.Run("no tls block: the credential crosses in the clear (instrument check)", func(t *testing.T) {
+		lis, received := wireCaptureListener(t)
+		store, err := newStore(t, lis.Addr().String(), TLSConfig{})
+		require.NoError(t, err)
+		pingOnce(t, store)
+		require.Eventually(t, func() bool { return bytes.Contains(received(), []byte(password)) },
+			2*time.Second, 20*time.Millisecond,
+			"without TLS the password is readable on the wire; the listener must see it, or the assertions below prove nothing")
+	})
+
+	t.Run("tls block without the switch is refused before any dial", func(t *testing.T) {
+		lis, received := wireCaptureListener(t)
+		_, err := newStore(t, lis.Addr().String(), TLSConfig{CAFile: missing, CertFile: missing, KeyFile: missing})
+		require.ErrorContains(t, err, "tls.enabled",
+			"a tls block without its switch must be refused, not started in plaintext")
+		require.Empty(t, received(), "nothing may reach the wire")
+	})
+
+	t.Run("control: with the switch on the listener sees a handshake, never the credential", func(t *testing.T) {
+		lis, received := wireCaptureListener(t)
+		pki := newTestPKI(t)
+		store, err := newStore(t, lis.Addr().String(), TLSConfig{Enabled: true, CAFile: pki.caFile, ServerName: "localhost"})
+		require.NoError(t, err)
+		pingOnce(t, store)
+		require.Eventually(t, func() bool { return len(received()) >= 3 }, 2*time.Second, 20*time.Millisecond,
+			"the client must have sent its ClientHello")
+		got := received()
+		require.Equal(t, byte(0x16), got[0], "first byte is a TLS handshake record")
+		require.Equal(t, byte(0x03), got[1], "TLS record-layer major version")
+		require.NotContains(t, string(got), password, "the credential must never appear in the clear")
+		require.NotContains(t, string(got), username)
+	})
+
+	t.Run("control: with the switch on a missing CA file aborts construction naming the file", func(t *testing.T) {
+		lis, received := wireCaptureListener(t)
+		_, err := newStore(t, lis.Addr().String(), TLSConfig{Enabled: true, CAFile: missing})
+		require.ErrorContains(t, err, missing)
+		require.Empty(t, received())
 	})
 }
