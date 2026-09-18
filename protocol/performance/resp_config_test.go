@@ -143,3 +143,43 @@ resp-cache:
 	_, _, err = LoadRespCacheConfig(v)
 	require.ErrorContains(t, err, "master-name")
 }
+
+// MAG-3683: the ticket's configuration — credentials plus a tls block carrying
+// all three file paths and no tls.enabled — must not load. Before this the
+// block was inert (the files are only opened when the switch is on) and the
+// router started in plaintext with the password in its first write.
+func TestLoadRespCacheConfigRefusesTLSBlockWithoutSwitch(t *testing.T) {
+	v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["cache.internal:6379"]
+  username: "cacheuser"
+  password: "placeholder-cache-credential"
+  tls:
+    ca-file:   "/nonexistent/path/ca.pem"
+    cert-file: "/nonexistent/path/ca.pem"
+    key-file:  "/nonexistent/path/ca.pem"
+`)
+	_, enabled, err := LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "tls.enabled")
+	require.False(t, enabled)
+
+	// Control: the same block with the switch on passes configuration and then
+	// fails at construction on the first file — the failure this configuration
+	// should always have produced.
+	v, _ = newViperWithYAML(t, `
+resp-cache:
+  addresses: ["cache.internal:6379"]
+  username: "cacheuser"
+  password: "placeholder-cache-credential"
+  tls:
+    enabled: true
+    ca-file:   "/nonexistent/path/ca.pem"
+    cert-file: "/nonexistent/path/ca.pem"
+    key-file:  "/nonexistent/path/ca.pem"
+`)
+	cfg, enabled, err := LoadRespCacheConfig(v)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	_, err = redisstore.New(cfg)
+	require.ErrorContains(t, err, "/nonexistent/path/ca.pem", "with the switch on the files are read, and the missing one names itself")
+}
