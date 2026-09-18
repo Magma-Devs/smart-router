@@ -394,3 +394,55 @@ func TestLiveRotationSmokeOverMiniredis(t *testing.T) {
 		return dials.Load() == before
 	}, 10*time.Second, 100*time.Millisecond, "the pool must converge to dial-free serving after rotation")
 }
+
+// MAG-3690: an unreadable credential file was reported on every tick of the
+// refresh loop, indefinitely — 21 identical warnings in 22 seconds at a
+// one-second interval, about 8,600 a day at the shipped ten seconds — while
+// the health loop beside it wrote once over the same window, because it
+// reports transitions. This holds Refresh to that discipline: one line when
+// the source becomes unreadable, one when it is readable again, nothing in
+// between, and a later outage is a new event.
+func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
+	credFile := writeTempFile(t, "cred", "pw1")
+	provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})
+	listener := &recordingListener{}
+	_, _, err := provider.Subscribe(listener)
+	require.NoError(t, err)
+
+	const failed, recovered = "credential refresh failed", "readable again"
+
+	quiet := captureLog(t, func() { provider.Refresh() })
+	require.NotContains(t, quiet, failed, "a readable source is not an event")
+	require.NotContains(t, quiet, recovered)
+
+	require.NoError(t, os.Remove(credFile))
+	outage := captureLog(t, func() {
+		for i := 0; i < 21; i++ {
+			provider.Refresh()
+		}
+	})
+	require.Equal(t, 1, strings.Count(outage, failed), "one warning per outage, however many ticks it spans")
+	require.Empty(t, listener.recorded(), "nothing is pushed while the source is unreadable")
+
+	require.NoError(t, os.WriteFile(credFile, []byte("pw1"), 0o600))
+	back := captureLog(t, func() {
+		provider.Refresh()
+		provider.Refresh()
+	})
+	require.Equal(t, 1, strings.Count(back, recovered), "the end of the outage is reported once")
+	require.NotContains(t, back, failed)
+	require.Empty(t, listener.recorded(), "unchanged credentials still do not push after recovery")
+
+	require.NoError(t, os.Remove(credFile))
+	again := captureLog(t, func() {
+		provider.Refresh()
+		provider.Refresh()
+	})
+	require.Equal(t, 1, strings.Count(again, failed), "a second outage is a new event")
+
+	// Recovery with ROTATED contents both closes the outage and pushes.
+	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
+	rotated := captureLog(t, func() { provider.Refresh() })
+	require.Equal(t, 1, strings.Count(rotated, recovered))
+	require.Equal(t, []string{"u:pw2"}, listener.recorded(), "a rotation that lands during recovery is applied")
+}
