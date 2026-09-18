@@ -743,14 +743,48 @@ func decodeStickyPin(raw string) (core.StickyPin, error) {
 	return core.StickyPin{Provider: value.Provider, Epoch: value.Epoch}, nil
 }
 
+// Purge drops every key under this store's prefix from every endpoint the
+// store reads from. The write endpoint is scanned and unlinked; when reads are
+// split, the read endpoint is scanned and unlinked the same way, because it may
+// be a separate store the write endpoint never feeds — the shape read-addresses
+// is documented for — and a purge that left it alone kept serving the entries
+// it was meant to remove, reset after reset (MAG-3673). Ping, PoolStats and
+// Close already touch both clients; this was the one operation that did not.
+//
+// A read endpoint that is a read-only REPLICA of the write endpoint answers
+// READONLY to the unlink. That is not a failed purge: the write-side unlinks
+// reach it through replication. It is noted at debug level and the purge
+// succeeds. Any other failure on the read side is a failed purge and says so,
+// naming the read side, because a reset that silently did half the job is the
+// defect this exists to close.
 func (s *Store) Purge(ctx context.Context) error {
 	match := s.prefix + ":*"
-	if clusterClient, ok := s.write.(*redis.ClusterClient); ok {
+	if err := purgeClient(ctx, s.write, match); err != nil {
+		return err
+	}
+	if s.read == s.write {
+		return nil
+	}
+	if err := purgeClient(ctx, s.read, match); err != nil {
+		if redis.HasErrorPrefix(err, "READONLY") {
+			utils.LavaFormatDebug("resp-cache purge: the read endpoint is a read-only replica, so the write-side purge reaches it through replication",
+				utils.LogAttr("read-endpoint", s.readEndpoint.current()))
+			return nil
+		}
+		return fmt.Errorf("resp-cache: purging the read endpoint: %w", err)
+	}
+	return nil
+}
+
+// purgeClient scans and unlinks under match on one client — per master when
+// the client is a cluster, since SCAN is per node.
+func purgeClient(ctx context.Context, client redis.UniversalClient, match string) error {
+	if clusterClient, ok := client.(*redis.ClusterClient); ok {
 		return clusterClient.ForEachMaster(ctx, func(ctx context.Context, master *redis.Client) error {
 			return purgeByScan(ctx, master, match)
 		})
 	}
-	return purgeByScan(ctx, s.write, match)
+	return purgeByScan(ctx, client, match)
 }
 
 func purgeByScan(ctx context.Context, client redis.UniversalClient, match string) error {
