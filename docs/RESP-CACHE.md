@@ -214,9 +214,9 @@ Alert on the dedicated series (full reference in
 [METRICS.md](METRICS.md#resp-cache-backend--smartrouter_resp_cache_)):
 
 - `smartrouter_resp_cache_connected` — 0 after a failed health probe (PING, 10s cadence)
-  against any endpoint; reachability transitions are also logged, naming the failing endpoint,
-  and an authentication rejection is reported as such rather than as "unreachable" (the
-  credential itself is never logged).
+  against any endpoint, or once the breaker below opens; reachability transitions are also
+  logged, naming the failing endpoint, and an authentication rejection is reported as such
+  rather than as "unreachable" (the credential itself is never logged).
 - `smartrouter_resp_cache_endpoint_connected{role}` — the same verdict per endpoint, `role` =
   `write` | `read`. With reads split this is the series to alert on, because it says **which
   half** is down; `GET /debug/cache-state` names it too, in `detail`.
@@ -224,6 +224,19 @@ Alert on the dedicated series (full reference in
   clean misses), with `kind` splitting `error` from `timeout` so saturation reads differently
   from outage.
 - `smartrouter_resp_cache_connection_errors_total`, pool gauges.
+
+- `smartrouter_resp_cache_breaker_open` and `smartrouter_resp_cache_skipped_total{op}` — the
+  breaker, below.
+
+**An unreachable backend trips a breaker.** Three consecutive operation failures, or one failed
+health probe, open it; while it is open every lookup and write returns at once with no I/O
+(counted on `smartrouter_resp_cache_skipped_total`, never as a failure the backend saw), the
+probe runs every second instead of every ten, and the first successful probe closes it. Without
+this, every lookup paid its full budget against a dead backend and every asynchronous write held
+a connection for its 5s budget, so under steady traffic the pool filled with stalled writes and
+lookups queued behind them — a forty-fold drop in serving rate for the length of the outage,
+and one more connection opened per operation. An outage now costs the relay path the handful of
+failures that opened the breaker, and recovery is noticed within about a second.
 
 The shared `smartrouter_cache_*` hit/miss series keep working unchanged.
 
@@ -252,7 +265,7 @@ curl -s http://127.0.0.1:6161/debug/cache-state | jq
       "reachable": true,
       "reachable_checked_at": "2026-09-09T14:31:02Z",
       "reachable_detail": "no error reported",
-      "when_unreachable": "attempted",
+      "when_unreachable": "skipped",
       "lifetimes": {"finalized_seconds": 3600, "non_finalized_seconds": 0.5, "node_errors_seconds": 60}
     },
     "secondary": {"configured": false, "engine": "", "address": "", "reachable": null,
@@ -267,10 +280,11 @@ Four things are easy to misread:
   RESP backend before its first probe returns, a `cache-be` connection mid-dial. `null` is not
   "unreachable"; a router polled immediately after startup legitimately answers it. Whether a
   tier exists is `configured`, never the presence of this field.
-- **`when_unreachable` is why `reachable: false` is not one fact.** For a RESP tier it is
-  `attempted`: the backend is still asked on every relay and pays the full cache timeout each
-  time. For a `cache-be` tier it is `skipped`: the client returns not-connected before any
-  I/O, so an unreachable tier costs nothing. Same flag, opposite bill.
+- **`when_unreachable` says what an unreachable tier costs the relay path.** Both shipped tiers
+  report `skipped`. A `cache-be` tier returns not-connected before any I/O. A RESP tier opens
+  its breaker (above) and skips lookups and writes until a probe succeeds, so an outage costs
+  the few failures that opened it and nothing per relay afterwards. Older routers reported
+  `attempted` for a RESP tier: every relay paid the full cache timeout.
 - **`reachable_checked_at` marks a snapshot.** The RESP verdict comes from the 10s health
   probe, so it can be up to ~13s old. The `cache-be` verdict is read live from the connection
   and carries no timestamp.

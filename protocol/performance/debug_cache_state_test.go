@@ -132,7 +132,7 @@ func TestRespCacheDebugState(t *testing.T) {
 
 	// Unlike the gRPC tier, an unreachable RESP backend is still asked on every
 	// relay and pays the full cache timeout each time.
-	require.Equal(t, CacheWhenUnreachableAttempted, state.WhenUnreachable)
+	require.Equal(t, CacheWhenUnreachableSkipped, state.WhenUnreachable)
 
 	// This backend owns its policy, so it can answer where a cache-be tier cannot.
 	require.NotNil(t, state.Lifetimes)

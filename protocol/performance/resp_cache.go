@@ -21,17 +21,52 @@ const (
 	// gauges, and reachability transition logs.
 	respCacheHealthInterval = 10 * time.Second
 	respCachePingTimeout    = 3 * time.Second
+
+	// respCacheBreakerThreshold is how many consecutive backend failures on
+	// the relay path open the breaker. One is too few — a single timeout on a
+	// briefly slow backend would cost a second of misses — and the third
+	// failure in a row of 50ms lookups arrives about 150ms into an outage.
+	respCacheBreakerThreshold = 3
+	// respCacheBreakerProbeInterval is the probe cadence while the breaker is
+	// open: the recovery latency an outage costs after the backend returns.
+	respCacheBreakerProbeInterval = time.Second
 )
+
+// ErrCacheBreakerOpen is returned, joined with core.StoreError, by a lookup or
+// write skipped because the breaker is open. Joined so call sites classify it
+// as the backend failure it stands for (outcome "error", never "miss") without
+// a second code path.
+var ErrCacheBreakerOpen = errors.New("resp-cache breaker open: the backend is unreachable, lookups and writes are skipped until a health probe succeeds")
 
 // RespCache is the RESP-compatible (Redis/Valkey) cache backend: the same
 // cache engine the gRPC cache server runs, executed in-process over a remote
 // RESP store instead of a separate cache pod. It satisfies CacheBackend, so
 // call sites cannot tell the two backends apart — and per the interface's
 // wiring convention every method is typed-nil safe.
+//
+// An unreachable backend is handled by a breaker (MAG-3676). Without one,
+// every lookup and write was still issued against a dead backend: lookups
+// paid their 50ms budget, and the asynchronous writes paid their 5s budget
+// each while holding a pool slot, so under steady traffic the pool filled
+// with stalled writes and lookups queued behind them — a forty-fold drop in
+// serving rate for as long as the outage lasted, and one more connection
+// opened for every operation. The breaker opens after
+// respCacheBreakerThreshold consecutive failures or one failed health probe;
+// while open, lookups and writes return at once with ErrCacheBreakerOpen and
+// no I/O, the probe runs every respCacheBreakerProbeInterval, and one
+// successful probe closes it.
 type RespCache struct {
 	engine  *core.Engine
 	store   *redisstore.Store
 	metrics *respCacheMetricsSet
+
+	// breakerOpen is the state the relay path reads on every operation;
+	// consecutiveFailures is what opens it from that path. probeNow nudges
+	// the health loop to probe at once when the relay path opens the breaker,
+	// so the fast cadence starts immediately rather than at the next tick.
+	breakerOpen         atomic.Bool
+	consecutiveFailures atomic.Int64
+	probeNow            chan struct{}
 
 	healthStop chan struct{}
 	// healthDone is closed by the health loop as it exits; healthCancel aborts
@@ -79,6 +114,7 @@ func newRespCacheWithHealthInterval(store *redisstore.Store, policy core.Policy,
 		engine:       &core.Engine{Store: store, Policy: policy},
 		store:        store,
 		metrics:      getRespCacheMetrics(),
+		probeNow:     make(chan struct{}, 1),
 		healthStop:   make(chan struct{}),
 		healthDone:   make(chan struct{}),
 		healthCancel: healthCancel,
@@ -146,42 +182,121 @@ func (cache *RespCache) healthLoop(loopCtx context.Context, interval time.Durati
 		cache.metrics.poolStaleConns.Set(float64(stats.StaleConns))
 	}
 
-	lastConnected, results := probe()
+	// settle steers the breaker by the probe's verdict. Logging is
+	// transition-only: a backend that stays down stays quiet after the first
+	// report, so a persistent auth failure cannot flood the log.
+	settle := func(connected bool, results []redisstore.ProbeResult, atStartup bool) {
+		wasOpen := cache.breakerOpen.Load()
+		switch {
+		case connected && wasOpen:
+			cache.closeBreaker()
+		case !connected && !wasOpen:
+			message := "resp-cache backend became unavailable; lookups and writes are skipped until a health probe succeeds"
+			if atStartup {
+				message = "resp-cache backend unavailable at startup; lookups and writes are skipped until a health probe succeeds"
+			}
+			logUnavailable(message, results)
+			cache.openBreaker()
+		}
+		publishHealth(connected, results)
+		updateGauges(connected, results)
+	}
+
+	connected, results := probe()
 	if loopCtx.Err() != nil {
 		return // closed during the first probe: publish nothing
 	}
-	publishHealth(lastConnected, results)
-	updateGauges(lastConnected, results)
-	if !lastConnected {
-		logUnavailable("resp-cache backend unavailable at startup; relays degrade to cache misses until it recovers", results)
-	}
+	settle(connected, results, true)
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	// A timer rather than a ticker: the cadence depends on the breaker, and
+	// the relay path can ask for a probe right away when it opens it.
+	timer := time.NewTimer(cache.probeCadence(interval))
+	defer timer.Stop()
 	for {
 		select {
 		case <-cache.healthStop:
 			return
-		case <-ticker.C:
-			connected, results := probe()
-			if loopCtx.Err() != nil {
-				return // closed during the probe: publish nothing
-			}
-			// Logging is transition-only: a backend that stays down stays
-			// quiet after the first report, so a persistent auth failure
-			// cannot flood the log.
-			if connected != lastConnected {
-				if connected {
-					utils.LavaFormatInfo("resp-cache backend reachable again")
-				} else {
-					logUnavailable("resp-cache backend became unavailable; relays degrade to cache misses until it recovers", results)
-				}
-				lastConnected = connected
-			}
-			publishHealth(connected, results)
-			updateGauges(connected, results)
+		case <-cache.probeNow:
+			timer.Stop()
+		case <-timer.C:
 		}
+		connected, results := probe()
+		if loopCtx.Err() != nil {
+			return // closed during the probe: publish nothing
+		}
+		settle(connected, results, false)
+		timer.Reset(cache.probeCadence(interval))
 	}
+}
+
+// probeCadence is the configured interval while the breaker is closed and the
+// faster breaker interval while it is open, so recovery is noticed within
+// about a second of the backend returning.
+func (cache *RespCache) probeCadence(interval time.Duration) time.Duration {
+	if cache.breakerOpen.Load() && respCacheBreakerProbeInterval < interval {
+		return respCacheBreakerProbeInterval
+	}
+	return interval
+}
+
+// openBreaker flips the tier to skipping. Idempotent: the relay path and the
+// health loop can both reach it, and the second caller finds it open.
+func (cache *RespCache) openBreaker() {
+	if !cache.breakerOpen.CompareAndSwap(false, true) {
+		return
+	}
+	cache.metrics.breakerOpen.Set(1)
+	cache.metrics.connected.Set(0)
+	select {
+	case cache.probeNow <- struct{}{}:
+	default:
+	}
+}
+
+// closeBreaker resumes lookups and writes after a probe succeeded.
+func (cache *RespCache) closeBreaker() {
+	if !cache.breakerOpen.CompareAndSwap(true, false) {
+		return
+	}
+	cache.consecutiveFailures.Store(0)
+	cache.metrics.breakerOpen.Set(0)
+	utils.LavaFormatInfo("resp-cache backend reachable again; lookups and writes resume")
+}
+
+// noteOperation feeds the relay path's results to the breaker: a failure of
+// the backend itself (never a semantic miss) counts toward the threshold, and
+// a success resets the count. Reaching the threshold opens the breaker from
+// here, without waiting for the next health probe — the third failure in a
+// row of 50ms lookups is about 150ms into an outage, the next probe could be
+// ten seconds away, and every write started in between held a pool slot for
+// its 5s budget.
+func (cache *RespCache) noteOperation(err error) {
+	if err == nil || !errors.Is(err, core.StoreError) {
+		cache.consecutiveFailures.Store(0)
+		return
+	}
+	failures := cache.consecutiveFailures.Add(1)
+	if failures < respCacheBreakerThreshold || cache.breakerOpen.Load() {
+		return
+	}
+	utils.LavaFormatWarning("resp-cache backend failed consecutive operations; lookups and writes are skipped until a health probe succeeds", nil,
+		utils.Attribute{Key: "failures", Value: failures},
+		utils.Attribute{Key: "detail", Value: safeProbeDetail(err)},
+	)
+	cache.health.Store(&respCacheHealth{
+		reachable: false,
+		at:        time.Now(),
+		detail:    "breaker open after consecutive operation failures: " + safeProbeDetail(err),
+	})
+	cache.openBreaker()
+}
+
+// skip answers an operation while the breaker is open: no I/O, counted on its
+// own series so an outage's cost is visible as skips rather than as failures
+// the backend never saw.
+func (cache *RespCache) skip(op string) error {
+	cache.metrics.skipped.WithLabelValues(op).Inc()
+	return errors.Join(core.StoreError, ErrCacheBreakerOpen)
 }
 
 // probeDetail renders the failing endpoints of a probe, each by role and
@@ -286,11 +401,11 @@ func (cache *RespCache) DebugCacheState() DebugCacheState {
 		Configured: true,
 		Engine:     CacheEngineRESP,
 		Address:    cache.store.ConfiguredEndpoints(),
-		// The opposite of the gRPC tier, and the reason this field exists:
-		// CacheActive() is unconditionally true here, so an unreachable RESP
-		// backend is still asked on every relay and pays the full cache timeout
-		// each time. Same reachable:false, entirely different operational cost.
-		WhenUnreachable: CacheWhenUnreachableAttempted,
+		// Skipped, like the gRPC tier, since the breaker: an unreachable
+		// backend costs the relay path the handful of failures that opened it
+		// and nothing per relay afterwards. It used to be "attempted" — every
+		// relay paid the full cache timeout — which is what MAG-3676 measured.
+		WhenUnreachable: CacheWhenUnreachableSkipped,
 		Lifetimes:       cache.lifetimes(),
 	}
 	// A nil snapshot means the first probe has not returned yet. Left as nil
@@ -337,7 +452,13 @@ func (cache *RespCache) GetEntry(ctx context.Context, relayCacheGet *pairingtype
 	if cache == nil {
 		return nil, NotInitializedError
 	}
+	if cache.breakerOpen.Load() {
+		// A miss-shaped reply, as the engine would return, with the reason
+		// alongside — the call site degrades either way and labels the outcome.
+		return &pairingtypes.CacheRelayReply{}, cache.skip(respCacheOpGet)
+	}
 	reply, _, err := cache.engine.GetRelay(ctx, relayCacheGet)
+	cache.noteOperation(err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpGet, err)
 		return reply, err
@@ -349,7 +470,11 @@ func (cache *RespCache) SetEntry(ctx context.Context, cacheSet *pairingtypes.Rel
 	if cache == nil {
 		return NotInitializedError
 	}
+	if cache.breakerOpen.Load() {
+		return cache.skip(respCacheOpSet)
+	}
 	err := cache.engine.SetRelay(ctx, cacheSet)
+	cache.noteOperation(err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpSet, err)
 	}
