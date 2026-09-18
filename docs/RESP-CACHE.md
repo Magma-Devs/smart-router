@@ -213,9 +213,13 @@ budget and requests proceed to your upstreams; writes are best-effort. Recovery 
 Alert on the dedicated series (full reference in
 [METRICS.md](METRICS.md#resp-cache-backend--smartrouter_resp_cache_)):
 
-- `smartrouter_resp_cache_connected` — 0 after a failed health probe (PING, 10s cadence);
-  reachability transitions are also logged, and an authentication rejection is reported as
-  such rather than as "unreachable" (the credential itself is never logged).
+- `smartrouter_resp_cache_connected` — 0 after a failed health probe (PING, 10s cadence)
+  against any endpoint; reachability transitions are also logged, naming the failing endpoint,
+  and an authentication rejection is reported as such rather than as "unreachable" (the
+  credential itself is never logged).
+- `smartrouter_resp_cache_endpoint_connected{role}` — the same verdict per endpoint, `role` =
+  `write` | `read`. With reads split this is the series to alert on, because it says **which
+  half** is down; `GET /debug/cache-state` names it too, in `detail`.
 - `smartrouter_resp_cache_failed_total{op, kind}` — backend-level operation failures (never
   clean misses), with `kind` splitting `error` from `timeout` so saturation reads differently
   from outage.
