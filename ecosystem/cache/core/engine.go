@@ -137,8 +137,11 @@ func (e *Engine) setBlocksHashesToHeights(ctx context.Context, chainId string, b
 // precedence order and the first present one is hash-validated against the
 // request. A nil stored hash serves unconditionally (finalized variant); a
 // stored hash must match the request's block hash exactly.
-func (e *Engine) getRelayInner(ctx context.Context, relayCacheGet *relaytypes.RelayCacheGet) (*relaytypes.CacheRelayReply, error) {
-	keys := RelayLookupKeys(relayCacheGet.Finalized, relayCacheGet.ChainId, relayCacheGet.RequestHash, relayCacheGet.RequestedBlock)
+//
+// chainId is the request's chain id already scoped to its key prefix; the
+// caller derives it once so every key of one lookup lands in one keyspace.
+func (e *Engine) getRelayInner(ctx context.Context, relayCacheGet *relaytypes.RelayCacheGet, chainId string) (*relaytypes.CacheRelayReply, error) {
+	keys := RelayLookupKeys(relayCacheGet.Finalized, chainId, relayCacheGet.RequestHash, relayCacheGet.RequestedBlock)
 	entries, err := e.Store.GetEntries(ctx, keys[:])
 	if err != nil {
 		return nil, errors.Join(StoreError, err)
@@ -194,9 +197,16 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 		}
 	}()
 
+	// Every key this lookup derives — the entry, the chain tip that resolves a
+	// negative block, the shared-state tip, the heights — is scoped to the
+	// router's keyspace. The message's own ChainId is left untouched: the gRPC
+	// handler reads it after this call for its metrics label, and it must keep
+	// naming the chain, not the keyspace.
+	chainId := ScopedChainId(relayCacheGet.KeyPrefix, relayCacheGet.ChainId)
+
 	originalRequestedBlock := relayCacheGet.RequestedBlock
 	if originalRequestedBlock < 0 {
-		getLatestBlock := e.chainTip(ctx, relayCacheGet.ChainId)
+		getLatestBlock := e.chainTip(ctx, chainId)
 		relayCacheGet.RequestedBlock = replaceRequestedBlock(originalRequestedBlock, getLatestBlock)
 	}
 
@@ -216,7 +226,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 
 		go func() {
 			defer waitGroup.Done()
-			cacheReplyTmp, err = e.getRelayInner(ctx, relayCacheGet)
+			cacheReplyTmp, err = e.getRelayInner(ctx, relayCacheGet, chainId)
 			if cacheReplyTmp != nil {
 				cacheReply = cacheReplyTmp
 			}
@@ -224,7 +234,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 
 		go func() {
 			defer waitGroup.Done()
-			seenBlock = e.GetSharedTip(ctx, relayCacheGet.ChainId, relayCacheGet.SharedStateId)
+			seenBlock = e.GetSharedTip(ctx, chainId, relayCacheGet.SharedStateId)
 			if seenBlock > relayCacheGet.SeenBlock {
 				relayCacheGet.SeenBlock = seenBlock
 			}
@@ -232,7 +242,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 
 		go func() {
 			defer waitGroup.Done()
-			blockHashes = e.getBlockHeightsFromHashes(ctx, relayCacheGet.ChainId, relayCacheGet.BlocksHashesToHeights)
+			blockHashes = e.getBlockHeightsFromHashes(ctx, chainId, relayCacheGet.BlocksHashesToHeights)
 		}()
 
 		waitGroup.Wait()
@@ -254,7 +264,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 			utils.LogAttr("requested block", relayCacheGet.RequestedBlock),
 			utils.LogAttr("request_hash", string(relayCacheGet.RequestHash)),
 		)
-		blockHashes = e.getBlockHeightsFromHashes(ctx, relayCacheGet.ChainId, relayCacheGet.BlocksHashesToHeights)
+		blockHashes = e.getBlockHeightsFromHashes(ctx, chainId, relayCacheGet.BlocksHashesToHeights)
 	}
 
 	cacheReply.BlocksHashesToHeights = blockHashes
@@ -274,8 +284,12 @@ func (e *Engine) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCa
 		return utils.LavaFormatError("invalid relay cache set data, request block is negative", nil, utils.Attribute{Key: "requestBlock", Value: relayCacheSet.RequestedBlock})
 	}
 	latestKnownBlock := int64(math.Max(float64(relayCacheSet.Response.LatestBlock), float64(relayCacheSet.SeenBlock)))
+	// Same scoping as GetRelay: the entry and all of its bookkeeping land in the
+	// writer's keyspace, so a router's chain tip is advanced only by its own
+	// writes and never by a co-tenant's.
+	chainId := ScopedChainId(relayCacheSet.KeyPrefix, relayCacheSet.ChainId)
 
-	cacheKey := RelayKey(relayCacheSet.Finalized, relayCacheSet.ChainId, relayCacheSet.RequestHash, relayCacheSet.RequestedBlock)
+	cacheKey := RelayKey(relayCacheSet.Finalized, chainId, relayCacheSet.RequestHash, relayCacheSet.RequestedBlock)
 	cacheValue := NewEnvelope(relayCacheSet.Response, relayCacheSet.BlockHash, relayCacheSet.Finalized, relayCacheSet.OptionalMetadata, latestKnownBlock, relayCacheSet.IsNodeError, relayCacheSet.StatusCode)
 	utils.LavaFormatDebug("Got Cache Set",
 		utils.Attribute{Key: "cacheKey", Value: cacheKey},
@@ -297,11 +311,11 @@ func (e *Engine) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCa
 
 	// Tip and height bookkeeping stays best-effort even when the entry write
 	// failed — and its own failures don't fail the call.
-	e.SetSharedTip(ctx, relayCacheSet.ChainId, relayCacheSet.SharedStateId, latestKnownBlock, e.Policy.SharedStateTip(time.Duration(relayCacheSet.AverageBlockTime)))
-	if err := e.Store.SetChainTipIfGreaterOrEqual(ctx, ChainTipKey(relayCacheSet.ChainId), latestKnownBlock); err != nil {
+	e.SetSharedTip(ctx, chainId, relayCacheSet.SharedStateId, latestKnownBlock, e.Policy.SharedStateTip(time.Duration(relayCacheSet.AverageBlockTime)))
+	if err := e.Store.SetChainTipIfGreaterOrEqual(ctx, ChainTipKey(chainId), latestKnownBlock); err != nil {
 		utils.LavaFormatWarning("failed setting chain tip", err, utils.LogAttr("chainId", relayCacheSet.ChainId))
 	}
-	e.setBlocksHashesToHeights(ctx, relayCacheSet.ChainId, relayCacheSet.BlocksHashesToHeights)
+	e.setBlocksHashesToHeights(ctx, chainId, relayCacheSet.BlocksHashesToHeights)
 	return storeErr
 }
 

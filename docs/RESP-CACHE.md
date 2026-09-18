@@ -45,6 +45,10 @@ resp-cache:
   addresses: ["my-valkey:6379"]
 ```
 
+If more than one router deployment shares the backend, also give each its own `key-prefix`
+(or `--resp-cache-key-prefix`) — see
+[Sharing a backend between routers](#sharing-a-backend-between-routers).
+
 Docker Compose (starts a valkey next to the router):
 
 ```bash
@@ -57,7 +61,9 @@ SR_CONFIG=config/smartrouter_examples/smartrouter_eth_resp_cache.yml \
 
 Everything lives under the `resp-cache:` block. Setting any of it **without `addresses`** is
 rejected at startup (dangling configuration), as is every invalid combination below — the
-router never starts half-configured.
+router never starts half-configured. A key the block does not define is rejected too: a
+misspelled `key-prefix` used to be ignored and put the router on the shared default without
+a word.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -70,17 +76,27 @@ router never starts half-configured.
 | `credential-refresh-interval` | `10s` | Poll cadence for `password-file`. |
 | `sentinel-username` / `sentinel-password` / `sentinel-password-file` | *(unset)* | **Sentinel control-plane** credentials — sentinels authenticate independently of the data nodes; hardened deployments fail discovery without these. Only valid with `topology: sentinel`, and read once at startup (rotating them needs a restart). |
 | `db` | `0` | Logical database (standalone/sentinel only; rejected for cluster). |
-| `key-prefix` | `sr` | Namespace for every key. Restricted to `[A-Za-z0-9._-]+` (flush uses it as a `SCAN MATCH` glob). Give each deployment sharing a backend its own prefix — flush isolation follows from it. |
-| `tls.enabled` | `false` | TLS to the backend. |
+| `key-prefix` | `sr` | The keyspace this router occupies; flag form `--resp-cache-key-prefix` (outranks the block). Restricted to `[A-Za-z0-9._-]+` (flush uses it as a `SCAN MATCH` glob). **Routers on one prefix serve each other's cached answers and resolve `latest` off one chain tip**, and the default puts every router that leaves it unset in one keyspace — give each deployment sharing a backend its own prefix unless its routers are replicas reading the same nodes; flush isolation follows from it. See [Sharing a backend between routers](#sharing-a-backend-between-routers). |
+| `tls.enabled` | `false` | TLS to the backend. **Required (`true`) whenever any other `tls.*` key is set** — a `tls` block without it is refused at startup as dangling configuration, because the alternative is a plaintext connection carrying `username`/`password` readable on the wire. To run without TLS, remove the block. |
 | `tls.ca-file` | *(system pool)* | PEM CA bundle for server verification. |
 | `tls.cert-file` / `tls.key-file` | *(unset)* | Client keypair for mTLS (both or neither). |
 | `tls.server-name` | *(unset)* | Overrides the verification/SNI name. |
 | `tls.insecure-skip-verify` | `false` | Skips server verification (testing only). |
 | `dial-timeout` / `read-timeout` / `write-timeout` | `500ms` dial; client defaults for read/write | Per-operation network limits. A **fresh** connection's dial and TLS handshake are bounded by `dial-timeout` *and* by the caller's own deadline, whichever is sooner — the default is deliberately sub-second so a black-holed backend cannot make cold lookups linger. |
 | `pool-size` | client default | Connection pool size (per client; the read client has its own). |
+| `expiration.finalized` | `1h` | Lifetime of a settled (finalized) answer. The sidecar's `--expiration`. |
+| `expiration.finalized-multiplier` | `1` | Multiplier on `expiration.finalized`. The sidecar's `--expiration-multiplier`, which the published chart sets to `1.5` (90 minutes) — this is where a router on a RESP backend keeps that. |
+| `expiration.non-finalized` | `500ms` | Floor for a recent (non-finalized) answer; the effective TTL is max(averageBlockTime/8, this). The sidecar's `--expiration-non-finalized`. |
+| `expiration.non-finalized-multiplier` | `1` | Multiplier on `expiration.non-finalized`. The sidecar's `--expiration-non-finalized-multiplier`. |
+| `expiration.node-errors` | `250ms` | Cap on a cached node error for a finalized block. The sidecar's `--expiration-finalized-node-errors`. |
+| `expiration.blocks-hashes-to-heights` | `48h` | Lifetime of a block-hash→height mapping. The sidecar's `--expiration-blocks-hashes-to-heights`. |
 
-TTLs are the cache engine's own (finalized ~1h, non-finalized scaled to the chain's block
-time, short-lived node errors) — the same table the default cache uses.
+TTLs default to the cache engine's own table (finalized 1h, non-finalized scaled to the chain's
+block time with a 500ms floor, short-lived node errors) — the same defaults the sidecar applies
+from its flags. The sidecar's flags are set by the chart; a router on a RESP backend takes the
+same values from the `expiration` block above, and `GET /debug/cache-state` reports the
+lifetimes actually in force under `lifetimes`. Without the block, a cache moved from the sidecar
+to a RESP backend runs on the defaults, not on whatever the chart had set for the sidecar.
 
 One budget lives on the **router**, not in this block: every cache **lookup** runs inside
 the per-relay `--cache-timeout` flag (default `50ms`, sized for a same-zone backend; writes
@@ -282,12 +298,50 @@ polls would look healthy *because of* the first poll.
 > `--debug-address 127.0.0.1:6161` rather than `:6161`, and reach it through
 > `kubectl port-forward` in a cluster.
 
+## Sharing a backend between routers
+
+A keyspace is one cache. Every router in it reads and writes the same entries, resolves
+`latest` / `safe` / `finalized` / `pending` through the same chain tip, shares the same
+block-hash→height mappings, and — under `--shared-state` — the same seen-block and
+sticky-session claims. That is exactly right for **replicas of one deployment**: they read
+the same nodes, so an answer one of them cached is the answer any of them would have fetched.
+
+It is wrong for two routers that declare the same chain but read **different nodes** — a
+paid tier beside a free one, a canary beside production, a router being migrated onto a new
+node set while the old one still serves. In one keyspace whichever router asks first decides
+the answer both give for as long as the entry lives, the response reports `Cached` in place
+of a node name, and nothing on either side signals it (MAG-3521). The condition is therefore:
+**routers sharing a keyspace must read the same nodes.** Anything else needs its own
+keyspace:
+
+| Backend | Setting | Default |
+| --- | --- | --- |
+| RESP (this page) | `resp-cache.key-prefix` / `--resp-cache-key-prefix` | `sr` — one shared keyspace for every router that leaves it unset |
+| gRPC sidecar (`cache-be`) | `cache-be-key-prefix` / `--cache-be-key-prefix` | empty — the shared keyspace every router occupied before the setting existed |
+
+Both take the same character set (`[A-Za-z0-9._-]+`), so one value works on either backend.
+On the RESP backend the prefix heads every key (`<prefix>:rel:f:ETH1:…`); on the sidecar it
+travels inside each request and the server folds it into every key it derives
+(`rel:f:<prefix>:ETH1:…`), which is why **the sidecar has to be a build that knows the
+field** — an older `smart-router cache` drops it on the wire silently and isolates nothing.
+`GET /debug/cache-state` names the keyspace in the tier's `address` (`prefix=…`) on both
+backends, so two routers can be checked for separation without sending traffic.
+
+What a prefix does **not** do: replicas that share a keyspace on purpose still share one
+chain tip, and that tip is a monotonic maximum with no downward path before expiry — one
+replica publishing a false high block pins `latest` resolution for its whole fleet. That is a
+trust problem rather than a naming one and is tracked separately (MAG-3755).
+
 ## Flush semantics
 
 The router's `/debug/reset-all` flushes the RESP backend **prefix-scoped**: `SCAN` over
 `key-prefix:*` with single-key `UNLINK`s. `FLUSHDB` is never issued, so a shared backend's
 other tenants (and other prefixes) are untouched. If two deployments must be flush-isolated,
 give them distinct prefixes.
+
+The gRPC sidecar is the exception: its in-memory store cannot enumerate keys by prefix, so a
+`/debug/reset-all` on any router empties **every** keyspace on that sidecar. Routers that must
+be flush-isolated from each other need separate sidecars, or the RESP backend.
 
 ## Precedence and rollback
 
@@ -694,6 +748,7 @@ Router 2 stays up on `:3365`; `--stop` removes both.
 | Header names an unexpected backend | You are talking to a different lane's router — check the port (standalone `:3360`, sentinel `:3370`, multi-region `:3380`/`:3381`). |
 | `resp_cache_connected` is 0 | Backend unreachable — the container may have been `docker stop`ped, which deletes it (`--rm`). Re-run the lane. |
 | Relays fail or the smoke check fails | Public endpoint rate limits. Set `ETH_RPC_URL_1/2` and `ETH_WS_URL_1/2` to your own endpoints. |
+| Startup fails: `tls.* options are set but tls.enabled is not true` | The `tls` block was written without its switch, and the router will not open a plaintext connection on a block that reads as encrypted. Add `enabled: true` (the files are then read and verified at startup), or remove the block to run without TLS deliberately. |
 
 Readiness timing note: `/metrics/overall-health` (and the container health that follows it)
 starts **fail-closed** and turns 200 once at least one chain has verified a provider — at

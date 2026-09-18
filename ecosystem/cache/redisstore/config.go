@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -74,6 +75,14 @@ type Config struct {
 	KeyPrefix string    `mapstructure:"key-prefix"`
 	TLS       TLSConfig `mapstructure:"tls"`
 
+	// Expiration is the TTL table the router's in-process cache engine applies
+	// over this backend. It mirrors the cache sidecar's expiration flags, which
+	// the chart sets; without it a router that moved its cache to a RESP
+	// backend silently lost the chart's settings — the shipped default
+	// multiplier of 1.5 on settled answers among them — with no way to set
+	// them back (MAG-3631). Unset fields keep the engine's built-in defaults.
+	Expiration ExpirationConfig `mapstructure:"expiration"`
+
 	DialTimeout  time.Duration `mapstructure:"dial-timeout"`
 	ReadTimeout  time.Duration `mapstructure:"read-timeout"`
 	WriteTimeout time.Duration `mapstructure:"write-timeout"`
@@ -81,6 +90,13 @@ type Config struct {
 }
 
 // TLSConfig is the file-based TLS surface (config-file friendly).
+//
+// Enabled is the switch, and it is the ONLY key that turns TLS on: build reads
+// nothing else while it is false. A block that carries any other tls.* key
+// without it is therefore refused by Config.Validate rather than accepted —
+// otherwise the router starts, opens a plaintext connection, and its first
+// write puts the configured username and password on the wire readable, while
+// the operator who wrote three certificate paths believes the opposite.
 type TLSConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// CAFile roots server verification; empty falls back to the system pool.
@@ -92,6 +108,88 @@ type TLSConfig struct {
 	// that differs from the certificate).
 	ServerName         string `mapstructure:"server-name"`
 	InsecureSkipVerify bool   `mapstructure:"insecure-skip-verify"`
+}
+
+// ExpirationConfig is the operator-facing form of core.Policy: one key per
+// cache-sidecar expiration flag, with the same meaning and the same defaults,
+// so a value moved from the chart's sidecar settings to this block yields the
+// same lifetimes. Zero means "the default" for every field.
+type ExpirationConfig struct {
+	// Finalized is the lifetime of a settled (finalized) answer; the sidecar's
+	// --expiration. Default one hour.
+	Finalized time.Duration `mapstructure:"finalized"`
+	// FinalizedMultiplier scales Finalized; the sidecar's
+	// --expiration-multiplier, which the published chart sets to 1.5.
+	FinalizedMultiplier float64 `mapstructure:"finalized-multiplier"`
+	// NonFinalized is the floor for a recent (non-finalized) answer — the
+	// effective TTL is max(averageBlockTime/8, NonFinalized); the sidecar's
+	// --expiration-non-finalized. Default 500ms.
+	NonFinalized time.Duration `mapstructure:"non-finalized"`
+	// NonFinalizedMultiplier scales NonFinalized; the sidecar's
+	// --expiration-non-finalized-multiplier.
+	NonFinalizedMultiplier float64 `mapstructure:"non-finalized-multiplier"`
+	// NodeErrors caps a cached node error on a finalized block; the sidecar's
+	// --expiration-finalized-node-errors. Default 250ms.
+	NodeErrors time.Duration `mapstructure:"node-errors"`
+	// BlocksHashesToHeights is the lifetime of a block-hash→height mapping; the
+	// sidecar's --expiration-blocks-hashes-to-heights. Default 48h.
+	BlocksHashesToHeights time.Duration `mapstructure:"blocks-hashes-to-heights"`
+}
+
+// Policy builds the engine's TTL table from the block, the way the sidecar
+// builds its own from flags: each unset duration keeps its default, and each
+// multiplier (default 1) scales the duration it belongs to.
+func (e ExpirationConfig) Policy() core.Policy {
+	policy := core.DefaultPolicy()
+	if e.Finalized > 0 {
+		policy.Finalized = e.Finalized
+	}
+	if e.FinalizedMultiplier > 0 {
+		policy.Finalized = time.Duration(float64(policy.Finalized) * e.FinalizedMultiplier)
+	}
+	if e.NonFinalized > 0 {
+		policy.NonFinalized = e.NonFinalized
+	}
+	if e.NonFinalizedMultiplier > 0 {
+		policy.NonFinalized = time.Duration(float64(policy.NonFinalized) * e.NonFinalizedMultiplier)
+	}
+	if e.NodeErrors > 0 {
+		policy.NodeErrors = e.NodeErrors
+	}
+	if e.BlocksHashesToHeights > 0 {
+		policy.BlocksHashesToHeights = e.BlocksHashesToHeights
+	}
+	return policy
+}
+
+// validate rejects what no lifetime can mean: a negative duration or a
+// negative multiplier. Zero is "the default" everywhere and is accepted.
+func (e ExpirationConfig) validate() error {
+	for name, value := range map[string]time.Duration{
+		"expiration.finalized":                e.Finalized,
+		"expiration.non-finalized":            e.NonFinalized,
+		"expiration.node-errors":              e.NodeErrors,
+		"expiration.blocks-hashes-to-heights": e.BlocksHashesToHeights,
+	} {
+		if value < 0 {
+			return fmt.Errorf("resp-cache: %s must not be negative (got %s; leave it unset for the default)", name, value)
+		}
+	}
+	for name, value := range map[string]float64{
+		"expiration.finalized-multiplier":     e.FinalizedMultiplier,
+		"expiration.non-finalized-multiplier": e.NonFinalizedMultiplier,
+	} {
+		if value < 0 {
+			return fmt.Errorf("resp-cache: %s must not be negative (got %g; leave it unset for 1)", name, value)
+		}
+	}
+	return nil
+}
+
+// hasMaterial reports whether the block carries any setting other than the
+// switch itself — the operator wrote a tls section, whatever Enabled says.
+func (c TLSConfig) hasMaterial() bool {
+	return c.CAFile != "" || c.CertFile != "" || c.KeyFile != "" || c.ServerName != "" || c.InsecureSkipVerify
 }
 
 // build materialises the tls.Config, nil when disabled. Files are read
@@ -155,7 +253,14 @@ func (cfg Config) Validate() error {
 	if cfg.SentinelPassword != "" && cfg.SentinelPasswordFile != "" {
 		return fmt.Errorf("resp-cache: sentinel-password and sentinel-password-file are mutually exclusive")
 	}
-	return nil
+	// The same rule as the sentinel-* credentials above: a half-written section
+	// is a deployment mistake, not a configuration. Here the cost of accepting
+	// it is a credential crossing the network in the clear, so this is the one
+	// combination that must not be able to start quietly.
+	if !cfg.TLS.Enabled && cfg.TLS.hasMaterial() {
+		return fmt.Errorf("resp-cache: tls.* options are set but tls.enabled is not true — dangling configuration: the connection would be plaintext and the configured credentials would cross the network readable (set tls.enabled: true, or remove the tls block)")
+	}
+	return cfg.Expiration.validate()
 }
 
 func (cfg Config) topology() Topology {

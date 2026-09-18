@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,6 +38,16 @@ func TestConfigValidateMatrix(t *testing.T) {
 		{"db on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, DB: 2}, "db selection"},
 		{"password and password-file", Config{Addresses: []string{"h:1"}, Password: "a", PasswordFile: "/f"}, "mutually exclusive"},
 		{"sentinel password and file", Config{Topology: TopologySentinel, MasterName: "m", Addresses: []string{"s:1"}, SentinelPassword: "a", SentinelPasswordFile: "/f"}, "mutually exclusive"},
+		// MAG-3683: a tls block without the switch. One case per key that can
+		// make the block look complete, because each on its own reads as "TLS
+		// is configured" to whoever wrote it.
+		{"tls ca-file without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{CAFile: "/ca.pem"}}, "tls.enabled"},
+		{"tls client keypair without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{CertFile: "/c.pem", KeyFile: "/k.pem"}}, "tls.enabled"},
+		{"tls server-name without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{ServerName: "cache.internal"}}, "tls.enabled"},
+		{"tls insecure-skip-verify without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{InsecureSkipVerify: true}}, "tls.enabled"},
+		// MAG-3631: a lifetime cannot be negative; zero means the default.
+		{"negative expiration", Config{Addresses: []string{"h:1"}, Expiration: ExpirationConfig{Finalized: -time.Second}}, "expiration.finalized"},
+		{"negative multiplier", Config{Addresses: []string{"h:1"}, Expiration: ExpirationConfig{NonFinalizedMultiplier: -1}}, "expiration.non-finalized-multiplier"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,6 +56,35 @@ func TestConfigValidateMatrix(t *testing.T) {
 			require.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+// MAG-3631: the expiration block builds the engine's TTL table the way the
+// sidecar builds its own from flags. The case that matters is the chart's: its
+// shipped multiplier of 1.5 on settled answers used to be unreachable on a RESP
+// backend, so every customer who moved their cache silently went from 90
+// minutes to 60.
+func TestExpirationConfigPolicy(t *testing.T) {
+	require.Equal(t, core.DefaultPolicy(), ExpirationConfig{}.Policy(), "an empty block is the engine's defaults, exactly")
+
+	chart := ExpirationConfig{FinalizedMultiplier: 1.5}.Policy()
+	require.Equal(t, 90*time.Minute, chart.Finalized, "the chart's default multiplier on the default hour")
+	require.Equal(t, core.DefaultExpirationForNonFinalized, chart.NonFinalized, "an unrelated field keeps its default")
+
+	fullConfig := ExpirationConfig{
+		Finalized:              2 * time.Hour,
+		FinalizedMultiplier:    1.5,
+		NonFinalized:           time.Second,
+		NonFinalizedMultiplier: 1.25,
+		NodeErrors:             100 * time.Millisecond,
+		BlocksHashesToHeights:  24 * time.Hour,
+	}
+	full := fullConfig.Policy()
+	require.Equal(t, 3*time.Hour, full.Finalized, "duration times multiplier, as the sidecar computes it")
+	require.Equal(t, 1250*time.Millisecond, full.NonFinalized)
+	require.Equal(t, 100*time.Millisecond, full.NodeErrors)
+	require.Equal(t, 24*time.Hour, full.BlocksHashesToHeights)
+
+	require.NoError(t, Config{Addresses: []string{"h:1"}, Expiration: fullConfig}.Validate())
 }
 
 func listenLocal(t *testing.T) net.Listener {
@@ -217,4 +257,7 @@ func TestNewFailsFastOnBadInputs(t *testing.T) {
 
 	_, err = New(Config{Addresses: []string{"h:1"}, KeyPrefix: "glob*"})
 	require.Error(t, err, "glob-unsafe prefix must fail construction")
+
+	_, err = New(Config{Addresses: []string{"h:1"}, Password: "placeholder-credential", TLS: TLSConfig{CAFile: "/does/not/exist"}})
+	require.ErrorContains(t, err, "tls.enabled", "a tls block without the switch must fail construction, not dial in plaintext (MAG-3683)")
 }

@@ -31,7 +31,9 @@ func viperFromYAML(t *testing.T, yaml string) *viper.Viper {
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	flags.String(performance.RespCacheAddressesFlagName, "", "")
 	flags.String(performance.RespCacheTopologyFlagName, "", "")
+	flags.String(performance.RespCacheKeyPrefixFlagName, "", "")
 	flags.String(performance.CacheFlagName, "", "")
+	flags.String(performance.CacheKeyPrefixFlagName, "", "")
 	require.NoError(t, v.BindPFlags(flags))
 	return v
 }
@@ -85,6 +87,33 @@ resp-cache:
 	}
 }
 
+// MAG-3631 end to end: the lifetimes a RESP-backed router applies are the
+// operator's, and GET /debug/cache-state reports them — the same surface the
+// ticket read the 60 minutes off. The chart's shipped multiplier of 1.5 on the
+// default hour is the case that was silently lost.
+func TestSelectBackendRespExpirationFromConfig(t *testing.T) {
+	mr := miniredis.RunT(t)
+	tuned := selectBackend(t, fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+  expiration:
+    finalized-multiplier: 1.5
+`, mr.Addr()))
+	respCache, ok := tuned.(*performance.RespCache)
+	require.True(t, ok)
+	lifetimes := respCache.DebugCacheState().Lifetimes
+	require.NotNil(t, lifetimes)
+	require.Equal(t, float64(90*60), lifetimes.FinalizedSeconds, "settled answers keep the 90 minutes the chart gives every sidecar deployment")
+	require.Equal(t, 0.5, lifetimes.NonFinalizedSeconds, "an unnamed field stays at the engine's default")
+
+	plain := selectBackend(t, fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+`, mr.Addr()))
+	plainLifetimes := plain.(*performance.RespCache).DebugCacheState().Lifetimes
+	require.Equal(t, float64(60*60), plainLifetimes.FinalizedSeconds, "no block, no change: the defaults are exactly what shipped")
+}
+
 // Precedence + rollback: with BOTH configured the RESP backend serves (and the
 // gRPC cache stays untouched); removing the resp-cache block reverts to the
 // preserved cache-be — the PRD's rollback flow, config-change only.
@@ -130,4 +159,32 @@ resp-cache:
   key-prefix: "glob*unsafe"
 `))
 	require.Error(t, err, "a glob-unsafe prefix must abort startup")
+
+	_, err = performance.SelectCacheBackend(context.Background(), viperFromYAML(t, `
+cache-be: "a:20100"
+cache-be-key-prefix: "glob*unsafe"
+`))
+	require.ErrorContains(t, err, performance.CacheKeyPrefixFlagName,
+		"the gRPC keyspace takes the same character set, and a bad one must abort startup rather than start cacheless")
+}
+
+// The gRPC keyspace setting end to end through selection: two routers selected
+// against one cache server with different cache-be-key-prefix values share no
+// entries, and the debug state names the keyspace (MAG-3521).
+func TestSelectBackendGRPCKeyPrefix(t *testing.T) {
+	addr := startLoopbackCacheServer(t)
+	tenantA := selectBackend(t, fmt.Sprintf("cache-be: %q\ncache-be-key-prefix: tenant-a\n", addr))
+	tenantB := selectBackend(t, fmt.Sprintf("cache-be: %q\ncache-be-key-prefix: tenant-b\n", addr))
+	require.Eventually(t, tenantA.CacheActive, selectEventuallyTimeout, selectEventuallyTick)
+	require.Eventually(t, tenantB.CacheActive, selectEventuallyTimeout, selectEventuallyTick)
+
+	grpcA, ok := tenantA.(*performance.Cache)
+	require.True(t, ok)
+	require.Equal(t, addr+" prefix=tenant-a", grpcA.DebugCacheState().Address)
+
+	hash := []byte("select-prefix-hash")
+	setForParity(t, tenantA, false, hash, nil, []byte(`tenant-a`), 100, 100)
+	eventuallyData(t, tenantA, hash, nil, 100, 100, false, []byte(`tenant-a`))
+	require.Nil(t, getForParity(t, tenantB, hash, nil, 100, 100, false).GetReply(),
+		"a router selected with another prefix must not see the entry")
 }
