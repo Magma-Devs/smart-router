@@ -3,6 +3,7 @@ package performance
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,7 +34,16 @@ type RespCache struct {
 	metrics *respCacheMetricsSet
 
 	healthStop chan struct{}
-	closeOnce  sync.Once
+	// healthDone is closed by the health loop as it exits; healthCancel aborts
+	// a probe in flight. Close waits on the former after calling the latter, so
+	// nothing is published — no gauge, no counter, no health snapshot — after
+	// Close returns. Without that, a probe already running when Close was
+	// called finished afterwards and overwrote the "closed" state Close had
+	// just published, and its counters landed on whichever cache came next in
+	// a test binary sharing the registry.
+	healthDone   chan struct{}
+	healthCancel context.CancelFunc
+	closeOnce    sync.Once
 	// health is the last probe result, published for GET /debug/cache-state. Stored
 	// as a whole snapshot behind one atomic so the verdict, its timestamp and its
 	// reason can never be read torn apart from each other.
@@ -64,13 +74,16 @@ func NewRespCache(store *redisstore.Store, policy core.Policy) *RespCache {
 }
 
 func newRespCacheWithHealthInterval(store *redisstore.Store, policy core.Policy, healthInterval time.Duration) *RespCache {
+	healthCtx, healthCancel := context.WithCancel(context.Background())
 	cache := &RespCache{
-		engine:     &core.Engine{Store: store, Policy: policy},
-		store:      store,
-		metrics:    getRespCacheMetrics(),
-		healthStop: make(chan struct{}),
+		engine:       &core.Engine{Store: store, Policy: policy},
+		store:        store,
+		metrics:      getRespCacheMetrics(),
+		healthStop:   make(chan struct{}),
+		healthDone:   make(chan struct{}),
+		healthCancel: healthCancel,
 	}
-	go cache.healthLoop(healthInterval)
+	go cache.healthLoop(healthCtx, healthInterval)
 	return cache
 }
 
@@ -78,35 +91,54 @@ func newRespCacheWithHealthInterval(store *redisstore.Store, policy core.Policy,
 // pool gauges track current state, failed probes count toward the
 // connection-error series, and reachability TRANSITIONS are logged — steady
 // state stays quiet.
-func (cache *RespCache) healthLoop(interval time.Duration) {
-	// The probe error is preserved (not reduced to a boolean) so an
-	// authentication rejection can be reported as such: "unreachable" sends an
-	// operator to check networking when the real fault is a credential.
-	probe := func() (bool, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), respCachePingTimeout)
+func (cache *RespCache) healthLoop(loopCtx context.Context, interval time.Duration) {
+	defer close(cache.healthDone)
+
+	// The probe pings each endpoint on its own and keeps every error (never a
+	// boolean): an authentication rejection has to be reported as such, and
+	// with reads split "the cache is unreachable" has to say WHICH half, or
+	// the alert sends the operator to the healthy address (MAG-3674). The
+	// whole-cache verdict is "every endpoint answered".
+	probe := func() (bool, []redisstore.ProbeResult) {
+		ctx, cancel := context.WithTimeout(loopCtx, respCachePingTimeout)
 		defer cancel()
-		err := cache.store.Ping(ctx)
-		return err == nil, err
+		results := cache.store.Probe(ctx)
+		connected := true
+		for _, result := range results {
+			if result.Err != nil {
+				connected = false
+			}
+		}
+		return connected, results
 	}
 
-	// publishHealth records the probe for /debug/cache-state. safeProbeDetail is
-	// reused rather than storing the raw error: it reduces an auth rejection to a
-	// fixed phrase, because the server's reply names the failing user and no
-	// credential may reach a debug endpoint any more than a log.
-	publishHealth := func(connected bool, err error) {
+	// publishHealth records the probe for /debug/cache-state. probeDetail
+	// reduces each failing endpoint's error through safeProbeDetail rather
+	// than storing it raw: the server's auth reply names the failing user, and
+	// no credential may reach a debug endpoint any more than a log.
+	publishHealth := func(connected bool, results []redisstore.ProbeResult) {
 		cache.health.Store(&respCacheHealth{
 			reachable: connected,
 			at:        time.Now(),
-			detail:    safeProbeDetail(err),
+			detail:    probeDetail(results),
 		})
 	}
 
-	updateGauges := func(connected bool) {
+	updateGauges := func(connected bool, results []redisstore.ProbeResult) {
 		if connected {
 			cache.metrics.connected.Set(1)
 		} else {
 			cache.metrics.connected.Set(0)
 			cache.metrics.connectionErrors.Inc()
+		}
+		for _, result := range results {
+			gauge := cache.metrics.endpointConnected.WithLabelValues(result.Role)
+			if result.Err == nil {
+				gauge.Set(1)
+				continue
+			}
+			gauge.Set(0)
+			cache.metrics.endpointConnectionErrors.WithLabelValues(result.Role).Inc()
 		}
 		stats := cache.store.PoolStats()
 		cache.metrics.poolTotalConns.Set(float64(stats.TotalConns))
@@ -114,11 +146,14 @@ func (cache *RespCache) healthLoop(interval time.Duration) {
 		cache.metrics.poolStaleConns.Set(float64(stats.StaleConns))
 	}
 
-	lastConnected, probeErr := probe()
-	publishHealth(lastConnected, probeErr)
-	updateGauges(lastConnected)
+	lastConnected, results := probe()
+	if loopCtx.Err() != nil {
+		return // closed during the first probe: publish nothing
+	}
+	publishHealth(lastConnected, results)
+	updateGauges(lastConnected, results)
 	if !lastConnected {
-		logUnavailable("resp-cache backend unavailable at startup; relays degrade to cache misses until it recovers", probeErr)
+		logUnavailable("resp-cache backend unavailable at startup; relays degrade to cache misses until it recovers", results)
 	}
 
 	ticker := time.NewTicker(interval)
@@ -128,7 +163,10 @@ func (cache *RespCache) healthLoop(interval time.Duration) {
 		case <-cache.healthStop:
 			return
 		case <-ticker.C:
-			connected, err := probe()
+			connected, results := probe()
+			if loopCtx.Err() != nil {
+				return // closed during the probe: publish nothing
+			}
 			// Logging is transition-only: a backend that stays down stays
 			// quiet after the first report, so a persistent auth failure
 			// cannot flood the log.
@@ -136,14 +174,30 @@ func (cache *RespCache) healthLoop(interval time.Duration) {
 				if connected {
 					utils.LavaFormatInfo("resp-cache backend reachable again")
 				} else {
-					logUnavailable("resp-cache backend became unavailable; relays degrade to cache misses until it recovers", err)
+					logUnavailable("resp-cache backend became unavailable; relays degrade to cache misses until it recovers", results)
 				}
 				lastConnected = connected
 			}
-			publishHealth(connected, err)
-			updateGauges(connected)
+			publishHealth(connected, results)
+			updateGauges(connected, results)
 		}
 	}
+}
+
+// probeDetail renders the failing endpoints of a probe, each by role and
+// configured address, for the transition log and the debug state — so the
+// reader learns which half of a split cache is down, not only that one is.
+func probeDetail(results []redisstore.ProbeResult) string {
+	var failing []string
+	for _, result := range results {
+		if result.Err != nil {
+			failing = append(failing, result.Role+" endpoint "+result.Addresses+": "+safeProbeDetail(result.Err))
+		}
+	}
+	if len(failing) == 0 {
+		return "no error reported"
+	}
+	return strings.Join(failing, "; ")
 }
 
 // probeFailureKind classifies a failed health probe. Authentication rejections
@@ -179,15 +233,23 @@ func safeProbeDetail(err error) string {
 	return err.Error()
 }
 
-// logUnavailable emits a single structured line naming the failure class.
-func logUnavailable(message string, err error) {
-	kind := classifyProbeError(err)
+// logUnavailable emits a single structured line naming the failure class and
+// the endpoint(s) that failed.
+func logUnavailable(message string, results []redisstore.ProbeResult) {
+	var first error
+	for _, result := range results {
+		if result.Err != nil {
+			first = result.Err
+			break
+		}
+	}
+	kind := classifyProbeError(first)
 	if kind == probeFailureAuth {
 		message = "resp-cache backend rejected the configured credentials; relays degrade to cache misses until the credentials are corrected"
 	}
 	utils.LavaFormatWarning(message, nil,
 		utils.Attribute{Key: "failure", Value: kind},
-		utils.Attribute{Key: "detail", Value: safeProbeDetail(err)},
+		utils.Attribute{Key: "detail", Value: probeDetail(results)},
 	)
 }
 
@@ -295,7 +357,8 @@ func (cache *RespCache) SetEntry(ctx context.Context, cacheSet *pairingtypes.Rel
 }
 
 // Flush drops every entry under this backend's key prefix — prefix-scoped so
-// a shared backend's other tenants are untouched.
+// a shared backend's other tenants are untouched — on every endpoint the store
+// reads from, the split read endpoint included (see Store.Purge).
 func (cache *RespCache) Flush(ctx context.Context) error {
 	if cache == nil {
 		return NotInitializedError
@@ -313,8 +376,13 @@ func (cache *RespCache) Close() error {
 	var err error
 	cache.closeOnce.Do(func() {
 		close(cache.healthStop)
+		// Abort any probe in flight and wait for the loop to exit, so the
+		// closed state published below is the LAST word: a probe that finished
+		// after this point used to overwrite it.
+		cache.healthCancel()
+		<-cache.healthDone
 		// Publish the closed state before tearing the clients down. The health loop
-		// stops here, so whatever it published last would otherwise stand forever —
+		// has stopped, so whatever it published last would otherwise stand forever —
 		// and a cache closed while reachable would keep reporting reachable:true for
 		// connections that no longer exist. That window is reachable in practice:
 		// RPCSmartRouter.Stop() closes the cache while the debug server is torn down

@@ -157,6 +157,14 @@ primary. It is still meaningful pointed at a **separate replicated deployment**,
 the router logs a warning rather than rejecting the config. Replica reads within one sentinel
 set or cluster are not supported; use the managed reader endpoint in `standalone` shape.
 
+**Resets reach both endpoints.** `/debug/reset-all` scans and unlinks under the key prefix on
+the read endpoint as well as the write endpoint, because a separate read store is one the
+write endpoint never feeds, and an entry left there kept being served after every reset. A
+read endpoint that is a read-only replica of the write endpoint answers `READONLY` to the
+unlink; that is left to replication, which the write-side purge reaches it through, and the
+reset still succeeds. A read endpoint that cannot be reached fails the reset, naming the read
+side.
+
 ## Credential rotation
 
 Use `password-file` with whatever refreshes the file (Kubernetes secret mounts, a sidecar
@@ -205,9 +213,13 @@ budget and requests proceed to your upstreams; writes are best-effort. Recovery 
 Alert on the dedicated series (full reference in
 [METRICS.md](METRICS.md#resp-cache-backend--smartrouter_resp_cache_)):
 
-- `smartrouter_resp_cache_connected` — 0 after a failed health probe (PING, 10s cadence);
-  reachability transitions are also logged, and an authentication rejection is reported as
-  such rather than as "unreachable" (the credential itself is never logged).
+- `smartrouter_resp_cache_connected` — 0 after a failed health probe (PING, 10s cadence)
+  against any endpoint; reachability transitions are also logged, naming the failing endpoint,
+  and an authentication rejection is reported as such rather than as "unreachable" (the
+  credential itself is never logged).
+- `smartrouter_resp_cache_endpoint_connected{role}` — the same verdict per endpoint, `role` =
+  `write` | `read`. With reads split this is the series to alert on, because it says **which
+  half** is down; `GET /debug/cache-state` names it too, in `detail`.
 - `smartrouter_resp_cache_failed_total{op, kind}` — backend-level operation failures (never
   clean misses), with `kind` splitting `error` from `timeout` so saturation reads differently
   from outage.
