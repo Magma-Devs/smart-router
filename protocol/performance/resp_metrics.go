@@ -27,9 +27,21 @@ type respCacheMetricsSet struct {
 	connectionErrors prometheus.Counter
 	opsFailed        *prometheus.CounterVec
 	connected        prometheus.Gauge
-	poolTotalConns   prometheus.Gauge
-	poolIdleConns    prometheus.Gauge
-	poolStaleConns   prometheus.Gauge
+	// endpointConnected / endpointConnectionErrors are the per-endpoint form
+	// of connected / connectionErrors, labelled by role (write | read). The
+	// unlabelled pair stays as the whole-cache verdict so existing alerts keep
+	// their meaning; these are what tells an operator WHICH half of a split
+	// cache is down, which the unlabelled pair cannot (MAG-3674).
+	endpointConnected        *prometheus.GaugeVec
+	endpointConnectionErrors *prometheus.CounterVec
+	// skipped counts operations answered by the open breaker without I/O, by
+	// op, and breakerOpen is 1 while it is open — together they are what an
+	// outage costs the relay path, as distinct from the failures that opened it.
+	skipped        *prometheus.CounterVec
+	breakerOpen    prometheus.Gauge
+	poolTotalConns prometheus.Gauge
+	poolIdleConns  prometheus.Gauge
+	poolStaleConns prometheus.Gauge
 }
 
 var (
@@ -50,7 +62,23 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 			}, []string{"op", "kind"}),
 			connected: prometheus.NewGauge(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_connected",
-				Help: "1 while the last health probe (PING) against the RESP cache backend succeeded, 0 after a failed probe.",
+				Help: "1 while the last health probe (PING) against every RESP cache endpoint succeeded, 0 after any endpoint failed its probe.",
+			}),
+			endpointConnected: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Name: "smartrouter_resp_cache_endpoint_connected",
+				Help: "Per endpoint: 1 while the last health probe (PING) against it succeeded, 0 after a failed probe. role=write is the write endpoint; role=read is the separate read endpoint when reads are split.",
+			}, []string{"role"}),
+			endpointConnectionErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: "smartrouter_resp_cache_endpoint_connection_errors_total",
+				Help: "Per endpoint: health-probe (PING) failures, by role (write | read).",
+			}, []string{"role"}),
+			skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: "smartrouter_resp_cache_skipped_total",
+				Help: "RESP cache operations skipped without I/O while the breaker was open (backend unreachable), by op (get|set). Never counted as failed: the backend never saw them.",
+			}, []string{"op"}),
+			breakerOpen: prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "smartrouter_resp_cache_breaker_open",
+				Help: "1 while the RESP cache breaker is open — lookups and writes are being skipped until a health probe succeeds — 0 otherwise.",
 			}),
 			poolTotalConns: prometheus.NewGauge(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_pool_total_conns",
@@ -65,7 +93,7 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 				Help: "Stale connections removed from the RESP client pool(s).",
 			}),
 		}
-		prometheus.MustRegister(m.connectionErrors, m.opsFailed, m.connected, m.poolTotalConns, m.poolIdleConns, m.poolStaleConns)
+		prometheus.MustRegister(m.connectionErrors, m.opsFailed, m.connected, m.endpointConnected, m.endpointConnectionErrors, m.skipped, m.breakerOpen, m.poolTotalConns, m.poolIdleConns, m.poolStaleConns)
 		respCacheMetrics = m
 	})
 	return respCacheMetrics

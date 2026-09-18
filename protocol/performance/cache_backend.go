@@ -43,12 +43,14 @@ const (
 	CacheEngineRESP = "resp"
 
 	// CacheWhenUnreachableSkipped: the tier is bypassed before any I/O, so an
-	// unreachable backend costs nothing per relay (the gRPC client returns
-	// NotConnectedError up front).
+	// unreachable backend costs nothing per relay. The gRPC client returns
+	// NotConnectedError up front; the RESP backend opens a breaker after
+	// consecutive failures or a failed probe and skips until a probe succeeds.
 	CacheWhenUnreachableSkipped = "skipped"
 	// CacheWhenUnreachableAttempted: every lookup and write is still issued against
-	// the dead backend and pays the full timeout (the RESP backend degrades
-	// per-operation rather than flipping itself off).
+	// the dead backend and pays the full timeout. No shipped tier reports it any
+	// more (the RESP backend did before its breaker, MAG-3676); kept as a wire
+	// value so a reader of older payloads can still name it.
 	CacheWhenUnreachableAttempted = "attempted"
 )
 

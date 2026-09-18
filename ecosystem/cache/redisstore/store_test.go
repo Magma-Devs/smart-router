@@ -2,6 +2,8 @@ package redisstore
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,10 +257,157 @@ func TestReadWriteRouting(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, int64(77), v, "a replicated entry on the read endpoint serves reads")
 
-	// Purge is a write-side operation: the read endpoint is out of scope.
+	// Purge reaches BOTH endpoints: the read store may be one the write store
+	// never feeds, and an entry left there is served after every reset.
 	require.NoError(t, store.Purge(ctx))
 	require.False(t, mrWrite.Exists("sr:"+key))
-	require.True(t, mrRead.Exists("sr:"+key))
+	require.False(t, mrRead.Exists("sr:"+key), "a reset must empty the store reads come from, not only the one writes go to (MAG-3673)")
+}
+
+// MAG-3673 as it was measured: three rounds, one entry planted per store per
+// round, a reset after each. The read store used to keep everything and
+// accumulate while the write store was emptied every time. Two controls, as on
+// the ticket: the read store is shown to hold its entry immediately before each
+// purge, and a key outside the prefix survives on both stores, so the purge is
+// prefix-scoped and doing work rather than deleting everything.
+func TestPurgeEmptiesASeparateReadStore(t *testing.T) {
+	mrWrite, mrRead := miniredis.RunT(t), miniredis.RunT(t)
+	store, err := NewWithClients(
+		redis.NewClient(&redis.Options{Addr: mrWrite.Addr()}),
+		redis.NewClient(&redis.Options{Addr: mrRead.Addr()}),
+		"sr")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	require.NoError(t, mrWrite.Set("othertenant:key", "must-survive"))
+	require.NoError(t, mrRead.Set("othertenant:key", "must-survive"))
+
+	for round := 1; round <= 3; round++ {
+		key := "sr:" + core.HeightKey("ETH1", fmt.Sprintf("0x%d", round))
+		require.NoError(t, mrWrite.Set(key, "1"))
+		require.NoError(t, mrRead.Set(key, "1"), "planted directly: the write endpoint never feeds this store")
+		require.True(t, mrRead.Exists(key), "control: the entry is there to lose, round %d", round)
+
+		require.NoError(t, store.Purge(ctx))
+
+		require.Empty(t, prefixedKeys(mrWrite, "sr:"), "write store emptied, round %d", round)
+		require.Empty(t, prefixedKeys(mrRead, "sr:"), "read store emptied — it used to accumulate, round %d", round)
+		require.True(t, mrWrite.Exists("othertenant:key"), "control: the purge is prefix-scoped on the write store")
+		require.True(t, mrRead.Exists("othertenant:key"), "control: the purge is prefix-scoped on the read store")
+	}
+}
+
+func prefixedKeys(mr *miniredis.Miniredis, prefix string) []string {
+	var keys []string
+	for _, k := range mr.Keys() {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// readOnlyReplica stands in for a reader endpoint that is a replica of the
+// write endpoint: it answers a write command the way a replica does, while SCAN
+// still works because replicas serve reads.
+type readOnlyReplica struct{}
+
+// replicaError satisfies redis.Error, which is what redis.HasErrorPrefix
+// matches on — a plain errors.New would not be recognised as a server reply.
+type replicaError string
+
+func (e replicaError) Error() string { return string(e) }
+func (replicaError) RedisError()     {}
+
+const readOnlyReply = replicaError("READONLY You can't write against a read only replica.")
+
+func (readOnlyReplica) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (readOnlyReplica) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "unlink" {
+			cmd.SetErr(readOnlyReply)
+			return readOnlyReply
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (readOnlyReplica) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		for _, cmd := range cmds {
+			if cmd.Name() == "unlink" {
+				cmd.SetErr(readOnlyReply)
+				return readOnlyReply
+			}
+		}
+		return next(ctx, cmds)
+	}
+}
+
+// A read endpoint that is a genuine replica answers READONLY to the unlink.
+// That is not a failed purge — the write-side purge reaches the replica
+// through replication — so the reset succeeds.
+func TestPurgeToleratesAReadOnlyReplica(t *testing.T) {
+	mrWrite, mrReplica := miniredis.RunT(t), miniredis.RunT(t)
+	replica := redis.NewClient(&redis.Options{Addr: mrReplica.Addr()})
+	replica.AddHook(readOnlyReplica{})
+	store, err := NewWithClients(redis.NewClient(&redis.Options{Addr: mrWrite.Addr()}), replica, "sr")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	key := "sr:" + core.HeightKey("ETH1", "0xreplica")
+	require.NoError(t, mrWrite.Set(key, "1"))
+	require.NoError(t, mrReplica.Set(key, "1"))
+	require.NoError(t, store.Purge(context.Background()), "a replica's READONLY is replication's business, not a failed purge")
+	require.False(t, mrWrite.Exists(key))
+	require.True(t, mrReplica.Exists(key), "the stand-in has no replication, so its copy stays; a real replica drops it when the write-side unlink replicates")
+}
+
+// A read store that cannot be reached is a failed purge, reported as such and
+// naming the read side: a reset that silently did half the job is the defect.
+func TestPurgeReportsAnUnreachableReadStore(t *testing.T) {
+	mrWrite, mrRead := miniredis.RunT(t), miniredis.RunT(t)
+	store, err := NewWithClients(
+		redis.NewClient(&redis.Options{Addr: mrWrite.Addr()}),
+		redis.NewClient(&redis.Options{Addr: mrRead.Addr()}),
+		"sr")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	mrRead.Close()
+
+	require.ErrorContains(t, store.Purge(context.Background()), "read endpoint")
+}
+
+// Probe reports each endpoint on its own; Ping keeps folding them into the
+// first failure for callers that only need a verdict.
+func TestProbeReportsEachEndpointSeparately(t *testing.T) {
+	mrWrite, mrRead := miniredis.RunT(t), miniredis.RunT(t)
+	store, err := New(Config{Addresses: []string{mrWrite.Addr()}, ReadAddresses: []string{mrRead.Addr()}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+
+	results := store.Probe(ctx)
+	require.Len(t, results, 2)
+	require.Equal(t, EndpointRoleWrite, results[0].Role)
+	require.Equal(t, mrWrite.Addr(), results[0].Addresses)
+	require.NoError(t, results[0].Err)
+	require.Equal(t, EndpointRoleRead, results[1].Role)
+	require.Equal(t, mrRead.Addr(), results[1].Addresses)
+	require.NoError(t, results[1].Err)
+	require.NoError(t, store.Ping(ctx))
+
+	mrRead.Close()
+	results = store.Probe(ctx)
+	require.NoError(t, results[0].Err, "the write half is unaffected by a read outage")
+	require.Error(t, results[1].Err, "the read half is the one reported down")
+	require.Error(t, store.Ping(ctx), "Ping still reports the first failure")
+
+	single, err := New(Config{Addresses: []string{mrWrite.Addr()}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = single.Close() })
+	require.Len(t, single.Probe(ctx), 1, "with no read split there is one endpoint to report")
 }
 
 func TestChainTipNotApplicableWhenMissing(t *testing.T) {
