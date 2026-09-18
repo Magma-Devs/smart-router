@@ -37,6 +37,13 @@ func TestConfigValidateMatrix(t *testing.T) {
 		{"db on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, DB: 2}, "db selection"},
 		{"password and password-file", Config{Addresses: []string{"h:1"}, Password: "a", PasswordFile: "/f"}, "mutually exclusive"},
 		{"sentinel password and file", Config{Topology: TopologySentinel, MasterName: "m", Addresses: []string{"s:1"}, SentinelPassword: "a", SentinelPasswordFile: "/f"}, "mutually exclusive"},
+		// MAG-3683: a tls block without the switch. One case per key that can
+		// make the block look complete, because each on its own reads as "TLS
+		// is configured" to whoever wrote it.
+		{"tls ca-file without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{CAFile: "/ca.pem"}}, "tls.enabled"},
+		{"tls client keypair without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{CertFile: "/c.pem", KeyFile: "/k.pem"}}, "tls.enabled"},
+		{"tls server-name without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{ServerName: "cache.internal"}}, "tls.enabled"},
+		{"tls insecure-skip-verify without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{InsecureSkipVerify: true}}, "tls.enabled"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,4 +224,7 @@ func TestNewFailsFastOnBadInputs(t *testing.T) {
 
 	_, err = New(Config{Addresses: []string{"h:1"}, KeyPrefix: "glob*"})
 	require.Error(t, err, "glob-unsafe prefix must fail construction")
+
+	_, err = New(Config{Addresses: []string{"h:1"}, Password: "placeholder-credential", TLS: TLSConfig{CAFile: "/does/not/exist"}})
+	require.ErrorContains(t, err, "tls.enabled", "a tls block without the switch must fail construction, not dial in plaintext (MAG-3683)")
 }
