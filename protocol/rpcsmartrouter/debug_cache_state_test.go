@@ -139,6 +139,9 @@ func TestCacheStateEngineFallsBackToSecondary(t *testing.T) {
 		_, resp := getCacheState(t, debugMuxDeps{
 			cache: &stubCacheStateBackend{state: performance.DebugCacheState{
 				Configured: true, Engine: performance.CacheEngineRESP, Address: "redis:6379",
+				// Fixture values, not the live backend's: these tests exercise the endpoint's
+				// rendering with per-tier values that differ on purpose. Since MAG-3676 both
+				// shipped tiers report "skipped"; "attempted" is kept as a wire value.
 				WhenUnreachable: performance.CacheWhenUnreachableAttempted,
 			}},
 			secondaryCache: &stubCacheStateReader{state: grpcTier("secondary:20100", boolPtr(true))},

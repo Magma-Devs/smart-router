@@ -391,6 +391,8 @@ are the alerting surface for cache degradation.
 | `smartrouter_resp_cache_connected` | Gauge | — | Whole cache: 1 while the last health probe succeeded against every endpoint, 0 after any endpoint failed. Reachability *transitions* are also logged, naming the failing endpoint; steady state stays quiet. |
 | `smartrouter_resp_cache_endpoint_connected` | Gauge | `role` | Per endpoint: 1 while its last probe succeeded, 0 after a failure. `role` = `write` \| `read` (`read` exists only with the read/write split configured). This is the series that says **which half** of a split cache is down; the unlabelled gauge cannot. |
 | `smartrouter_resp_cache_endpoint_connection_errors_total` | Counter | `role` | Per endpoint: failed health probes, by `role`. A read outage never counts against the write endpoint, and vice versa. |
+| `smartrouter_resp_cache_breaker_open` | Gauge | — | 1 while the breaker is open: three consecutive operation failures or one failed probe opened it, lookups and writes are skipped without I/O, the probe runs every second, and the first success closes it. |
+| `smartrouter_resp_cache_skipped_total` | Counter | `op` | Operations the open breaker answered without I/O, `op` = `get` \| `set`. Never counted in `smartrouter_resp_cache_failed_total`: the backend never saw them. A rising rate is what an outage costs the relay path — nothing per relay beyond this. |
 | `smartrouter_resp_cache_pool_total_conns` | Gauge | — | Connections currently held by the client pool(s) (write + read summed when the read/write split is configured). |
 | `smartrouter_resp_cache_pool_idle_conns` | Gauge | — | Idle pool connections. |
 | `smartrouter_resp_cache_pool_stale_conns` | Gauge | — | Stale connections removed from the pool. |
