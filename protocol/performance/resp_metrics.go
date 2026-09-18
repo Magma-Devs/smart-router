@@ -34,9 +34,14 @@ type respCacheMetricsSet struct {
 	// cache is down, which the unlabelled pair cannot (MAG-3674).
 	endpointConnected        *prometheus.GaugeVec
 	endpointConnectionErrors *prometheus.CounterVec
-	poolTotalConns           prometheus.Gauge
-	poolIdleConns            prometheus.Gauge
-	poolStaleConns           prometheus.Gauge
+	// skipped counts operations answered by the open breaker without I/O, by
+	// op, and breakerOpen is 1 while it is open — together they are what an
+	// outage costs the relay path, as distinct from the failures that opened it.
+	skipped        *prometheus.CounterVec
+	breakerOpen    prometheus.Gauge
+	poolTotalConns prometheus.Gauge
+	poolIdleConns  prometheus.Gauge
+	poolStaleConns prometheus.Gauge
 }
 
 var (
@@ -67,6 +72,14 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 				Name: "smartrouter_resp_cache_endpoint_connection_errors_total",
 				Help: "Per endpoint: health-probe (PING) failures, by role (write | read).",
 			}, []string{"role"}),
+			skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: "smartrouter_resp_cache_skipped_total",
+				Help: "RESP cache operations skipped without I/O while the breaker was open (backend unreachable), by op (get|set). Never counted as failed: the backend never saw them.",
+			}, []string{"op"}),
+			breakerOpen: prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "smartrouter_resp_cache_breaker_open",
+				Help: "1 while the RESP cache breaker is open — lookups and writes are being skipped until a health probe succeeds — 0 otherwise.",
+			}),
 			poolTotalConns: prometheus.NewGauge(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_pool_total_conns",
 				Help: "Connections currently held by the RESP client pool(s) (write + read when split).",
@@ -80,7 +93,7 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 				Help: "Stale connections removed from the RESP client pool(s).",
 			}),
 		}
-		prometheus.MustRegister(m.connectionErrors, m.opsFailed, m.connected, m.endpointConnected, m.endpointConnectionErrors, m.poolTotalConns, m.poolIdleConns, m.poolStaleConns)
+		prometheus.MustRegister(m.connectionErrors, m.opsFailed, m.connected, m.endpointConnected, m.endpointConnectionErrors, m.skipped, m.breakerOpen, m.poolTotalConns, m.poolIdleConns, m.poolStaleConns)
 		respCacheMetrics = m
 	})
 	return respCacheMetrics
