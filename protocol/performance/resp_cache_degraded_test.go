@@ -297,3 +297,60 @@ func TestRespCacheHealthLoopTracksReachability(t *testing.T) {
 	require.Greater(t, testutil.ToFloat64(getRespCacheMetrics().connectionErrors), probeErrsBefore,
 		"failed probes count toward the connection-error series")
 }
+
+// MAG-3674: with reads and writes split, taking either half down used to give
+// an identical reading — connected 0, the error counter plus one — so an alert
+// could not say which half, and the operator went to check whichever address
+// they remembered. The per-endpoint series and the debug detail must name the
+// half, and the healthy half must not be counted against.
+func TestRespCacheHealthNamesTheFailingEndpoint(t *testing.T) {
+	mrWrite, mrRead := miniredis.RunT(t), miniredis.RunT(t)
+	// Captured up front: a closed miniredis has no server to ask for its address.
+	writeAddr, readAddr := mrWrite.Addr(), mrRead.Addr()
+	store, err := redisstore.New(redisstore.Config{
+		Addresses:     []string{writeAddr},
+		ReadAddresses: []string{readAddr},
+	})
+	require.NoError(t, err)
+	cache := newRespCacheWithHealthInterval(store, core.DefaultPolicy(), 50*time.Millisecond)
+	t.Cleanup(func() { _ = cache.Close() })
+
+	m := getRespCacheMetrics()
+	endpointUp := func(role string) float64 { return testutil.ToFloat64(m.endpointConnected.WithLabelValues(role)) }
+	endpointErrs := func(role string) float64 { return testutil.ToFloat64(m.endpointConnectionErrors.WithLabelValues(role)) }
+	whole := func() float64 { return testutil.ToFloat64(m.connected) }
+	require.Eventually(t, func() bool {
+		return whole() == 1 && endpointUp(redisstore.EndpointRoleWrite) == 1 && endpointUp(redisstore.EndpointRoleRead) == 1
+	}, 2*time.Second, 20*time.Millisecond, "both halves healthy reads connected on every series")
+
+	// Read half down: the read series flips and counts; the write series does
+	// neither; the whole-cache gauge still reads down, as before.
+	writeErrsBefore, readErrsBefore := endpointErrs(redisstore.EndpointRoleWrite), endpointErrs(redisstore.EndpointRoleRead)
+	mrRead.Close()
+	require.Eventually(t, func() bool { return endpointUp(redisstore.EndpointRoleRead) == 0 }, 5*time.Second, 20*time.Millisecond)
+	require.Equal(t, float64(1), endpointUp(redisstore.EndpointRoleWrite), "the healthy half stays up on its own series")
+	require.Equal(t, float64(0), whole(), "the whole-cache gauge keeps its meaning: any endpoint down reads down")
+	require.Greater(t, endpointErrs(redisstore.EndpointRoleRead), readErrsBefore)
+	require.Equal(t, writeErrsBefore, endpointErrs(redisstore.EndpointRoleWrite), "a read outage must not count against the write endpoint")
+	detail := cache.DebugCacheState().Detail
+	require.Contains(t, detail, "read endpoint "+readAddr)
+	require.NotContains(t, detail, "write endpoint")
+
+	// Recovery is confirmed before the other half is taken down — the
+	// ticket's own trap: the verdict is a snapshot, and reading it before the
+	// first outage has cleared reports that outage again.
+	require.NoError(t, mrRead.Restart())
+	require.Eventually(t, func() bool { return whole() == 1 && endpointUp(redisstore.EndpointRoleRead) == 1 },
+		5*time.Second, 20*time.Millisecond, "the read half recovers")
+
+	// Write half down: the mirror image.
+	writeErrsBefore, readErrsBefore = endpointErrs(redisstore.EndpointRoleWrite), endpointErrs(redisstore.EndpointRoleRead)
+	mrWrite.Close()
+	require.Eventually(t, func() bool { return endpointUp(redisstore.EndpointRoleWrite) == 0 }, 5*time.Second, 20*time.Millisecond)
+	require.Equal(t, float64(1), endpointUp(redisstore.EndpointRoleRead))
+	require.Greater(t, endpointErrs(redisstore.EndpointRoleWrite), writeErrsBefore)
+	require.Equal(t, readErrsBefore, endpointErrs(redisstore.EndpointRoleRead), "a write outage must not count against the read endpoint")
+	detail = cache.DebugCacheState().Detail
+	require.Contains(t, detail, "write endpoint "+writeAddr)
+	require.NotContains(t, detail, "read endpoint")
+}

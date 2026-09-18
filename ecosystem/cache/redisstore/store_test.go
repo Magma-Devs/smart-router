@@ -510,6 +510,37 @@ func TestPurgeReportsAnUnreachableReadStore(t *testing.T) {
 	require.ErrorContains(t, store.Purge(context.Background()), "read endpoint")
 }
 
+// Probe reports each endpoint on its own; Ping keeps folding them into the
+// first failure for callers that only need a verdict.
+func TestProbeReportsEachEndpointSeparately(t *testing.T) {
+	mrWrite, mrRead := miniredis.RunT(t), miniredis.RunT(t)
+	store, err := New(Config{Addresses: []string{mrWrite.Addr()}, ReadAddresses: []string{mrRead.Addr()}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+
+	results := store.Probe(ctx)
+	require.Len(t, results, 2)
+	require.Equal(t, EndpointRoleWrite, results[0].Role)
+	require.Equal(t, mrWrite.Addr(), results[0].Addresses)
+	require.NoError(t, results[0].Err)
+	require.Equal(t, EndpointRoleRead, results[1].Role)
+	require.Equal(t, mrRead.Addr(), results[1].Addresses)
+	require.NoError(t, results[1].Err)
+	require.NoError(t, store.Ping(ctx))
+
+	mrRead.Close()
+	results = store.Probe(ctx)
+	require.NoError(t, results[0].Err, "the write half is unaffected by a read outage")
+	require.Error(t, results[1].Err, "the read half is the one reported down")
+	require.Error(t, store.Ping(ctx), "Ping still reports the first failure")
+
+	single, err := New(Config{Addresses: []string{mrWrite.Addr()}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = single.Close() })
+	require.Len(t, single.Probe(ctx), 1, "with no read split there is one endpoint to report")
+}
+
 func TestChainTipNotApplicableWhenMissing(t *testing.T) {
 	store, _ := newTestStore(t)
 	block, fresh, err := store.GetChainTip(context.Background(), core.ChainTipKey("NOWHERE"))
