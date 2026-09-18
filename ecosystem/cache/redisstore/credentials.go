@@ -30,8 +30,9 @@ func (s StaticCredentials) Credentials() (string, string, error) {
 
 // FileCredentials re-reads Path on every call. The file holds the password,
 // or "username:password" to rotate the username too (ACL-user rotation);
-// surrounding whitespace/newlines are trimmed. Kubernetes-mounted secrets and
-// sidecar token refreshers rotate by rewriting the file.
+// whitespace and newlines on BOTH sides are trimmed (see trimCredential).
+// Kubernetes-mounted secrets and sidecar token refreshers rotate by rewriting
+// the file.
 //
 // CONSTRAINT: the combined form makes the first ":" a separator unconditionally,
 // so a password that CONTAINS a colon cannot be expressed in this file. Such a
@@ -68,8 +69,20 @@ func (f *FileCredentials) Credentials() (string, string, error) {
 	return f.Username, raw, nil
 }
 
+// trimCredential strips whitespace from both sides of the file's contents.
+//
+// It used to trim the right side only, so a trailing newline from an editor
+// was dropped while a leading space or blank line was sent as part of the
+// credential — and in the "username:password" form it landed on the USERNAME.
+// The store answered WRONGPASS, the auth path deliberately withholds the
+// server's reply, and nothing pointed at the file's formatting (MAG-3685).
+//
+// The trade this makes is already the one that shipped: a credential ending in
+// whitespace could never be expressed in this file, and one beginning with it
+// now cannot either. Neither is a credential anyone writes on purpose, and the
+// one-sided trim was the surprising half.
 func trimCredential(raw string) string {
-	return strings.TrimRight(raw, "\r\n \t")
+	return strings.TrimSpace(raw)
 }
 
 func readCredentialFile(path string) (string, error) {
