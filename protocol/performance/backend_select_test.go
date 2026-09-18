@@ -5,6 +5,7 @@
 package performance_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -13,10 +14,24 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/magma-Devs/smart-router/protocol/performance"
+	zerolog "github.com/rs/zerolog"
+	zerologlog "github.com/rs/zerolog/log"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
+
+// captureLog swaps the global zerolog sink for a buffer while fn runs and
+// returns what was written; lavalog writes through that global logger.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	prev := zerologlog.Logger
+	t.Cleanup(func() { zerologlog.Logger = prev })
+	var buf bytes.Buffer
+	zerologlog.Logger = zerolog.New(&buf)
+	fn()
+	return buf.String()
+}
 
 const (
 	selectEventuallyTimeout = 2 * time.Second
@@ -130,4 +145,52 @@ resp-cache:
   key-prefix: "glob*unsafe"
 `))
 	require.Error(t, err, "a glob-unsafe prefix must abort startup")
+}
+
+// MAG-3671, the second finding: the startup line printed the raw topology
+// field, so an omitted topology showed as a blank and the only surface that
+// could have revealed a misresolved configuration said nothing. It must name
+// the topology the client was actually built with.
+func TestSelectBackendLogsTheResolvedTopology(t *testing.T) {
+	mr := miniredis.RunT(t)
+	logged := captureLog(t, func() {
+		backend := selectBackend(t, fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+`, mr.Addr()))
+		require.True(t, backend.CacheActive())
+	})
+	require.Contains(t, logged, "resp-cache backend configured")
+	require.Contains(t, logged, `"topology":"standalone"`, "an omitted topology is reported as what it resolves to, not as a blank")
+}
+
+// MAG-3684: turning off certificate verification was accepted in silence, so a
+// deployment running without that check looked exactly like one running with
+// it. It is now said at warning level at startup, carried on the configured
+// line, and visible on the debug state.
+func TestSelectBackendWarnsOnInsecureSkipVerify(t *testing.T) {
+	mr := miniredis.RunT(t)
+	block := func(insecure bool) string {
+		return fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+  tls:
+    enabled: true
+    insecure-skip-verify: %t
+`, mr.Addr(), insecure)
+	}
+
+	var insecure performance.CacheBackend
+	logged := captureLog(t, func() { insecure = selectBackend(t, block(true)) })
+	require.Contains(t, logged, "insecure-skip-verify is set", "the setting must be named at startup")
+	require.Contains(t, logged, `"level":"warn"`)
+	require.Contains(t, logged, `"tls-insecure-skip-verify":"true"`, "and carried on the configured line beside the tls switch")
+	respCache, ok := insecure.(*performance.RespCache)
+	require.True(t, ok)
+	require.Contains(t, respCache.DebugCacheState().Address, "tls=insecure-skip-verify",
+		"the state is visible wherever the cache's configuration is reported")
+
+	quiet := captureLog(t, func() { _ = selectBackend(t, block(false)) })
+	require.NotContains(t, quiet, "insecure-skip-verify is set", "a verifying configuration is not warned about")
+	require.Contains(t, quiet, `"tls-insecure-skip-verify":"false"`)
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -81,6 +82,13 @@ type Config struct {
 }
 
 // TLSConfig is the file-based TLS surface (config-file friendly).
+//
+// Enabled is the switch, and it is the ONLY key that turns TLS on: build reads
+// nothing else while it is false. A block that carries any other tls.* key
+// without it is therefore refused by Config.Validate rather than accepted —
+// otherwise the router starts, opens a plaintext connection, and its first
+// write puts the configured username and password on the wire readable, while
+// the operator who wrote three certificate paths believes the opposite.
 type TLSConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// CAFile roots server verification; empty falls back to the system pool.
@@ -92,6 +100,12 @@ type TLSConfig struct {
 	// that differs from the certificate).
 	ServerName         string `mapstructure:"server-name"`
 	InsecureSkipVerify bool   `mapstructure:"insecure-skip-verify"`
+}
+
+// hasMaterial reports whether the block carries any setting other than the
+// switch itself — the operator wrote a tls section, whatever Enabled says.
+func (c TLSConfig) hasMaterial() bool {
+	return c.CAFile != "" || c.CertFile != "" || c.KeyFile != "" || c.ServerName != "" || c.InsecureSkipVerify
 }
 
 // build materialises the tls.Config, nil when disabled. Files are read
@@ -146,6 +160,36 @@ func (cfg Config) Validate() error {
 	if cfg.topology() != TopologySentinel && (cfg.SentinelUsername != "" || cfg.SentinelPassword != "" || cfg.SentinelPasswordFile != "") {
 		return fmt.Errorf("resp-cache: sentinel-* credentials are set but topology is %q — dangling configuration", cfg.topology())
 	}
+	// The other half of the check above. A master-name is read by nothing
+	// except the sentinel client, so under any other topology the operator
+	// wrote a sentinel configuration and left out the line that says so: the
+	// router then dialled the first sentinel address as an ordinary data node,
+	// every cache operation failed, and the startup line printed a blank
+	// topology — byte for byte what a configuration with no master-name at all
+	// produced (MAG-3671).
+	if cfg.topology() != TopologySentinel && cfg.MasterName != "" {
+		return fmt.Errorf("resp-cache: master-name %q is set but topology is %q — dangling configuration: master-name is only read under topology: sentinel (set it, or remove master-name)", cfg.MasterName, cfg.topology())
+	}
+	// Standalone dials exactly one address (standaloneOptions takes the first
+	// element), where sentinel and cluster take the whole list. A longer list
+	// here used to be truncated in silence while the startup line echoed every
+	// address back at the operator, so a "spare" written for redundancy — or a
+	// list left behind when moving a block from a multi-node topology — read as
+	// confirmed and did nothing (MAG-3672). Refused rather than warned: there is
+	// no reading of a two-address standalone block under which the operator
+	// wanted the second one ignored. Checked after the master-name rule on
+	// purpose: a sentinel block that forgot its topology line trips both, and
+	// the master-name message is the precise diagnosis of that mistake.
+	if cfg.topology() == TopologyStandalone {
+		if len(cfg.Addresses) > 1 {
+			return fmt.Errorf("resp-cache: %d addresses are configured but topology is standalone, which dials exactly one — %s would be ignored (dangling configuration: set topology: sentinel or cluster, or configure a single address)",
+				len(cfg.Addresses), strings.Join(cfg.Addresses[1:], ", "))
+		}
+		if len(cfg.ReadAddresses) > 1 {
+			return fmt.Errorf("resp-cache: %d read-addresses are configured but topology is standalone, which dials exactly one — %s would be ignored (dangling configuration: set topology: sentinel or cluster, or configure a single read address)",
+				len(cfg.ReadAddresses), strings.Join(cfg.ReadAddresses[1:], ", "))
+		}
+	}
 	if cfg.topology() == TopologyCluster && cfg.DB != 0 {
 		return fmt.Errorf("resp-cache: db selection is not available in cluster topology")
 	}
@@ -155,6 +199,13 @@ func (cfg Config) Validate() error {
 	if cfg.SentinelPassword != "" && cfg.SentinelPasswordFile != "" {
 		return fmt.Errorf("resp-cache: sentinel-password and sentinel-password-file are mutually exclusive")
 	}
+	// The same rule as the sentinel-* credentials above: a half-written section
+	// is a deployment mistake, not a configuration. Here the cost of accepting
+	// it is a credential crossing the network in the clear, so this is the one
+	// combination that must not be able to start quietly.
+	if !cfg.TLS.Enabled && cfg.TLS.hasMaterial() {
+		return fmt.Errorf("resp-cache: tls.* options are set but tls.enabled is not true — dangling configuration: the connection would be plaintext and the configured credentials would cross the network readable (set tls.enabled: true, or remove the tls block)")
+	}
 	return nil
 }
 
@@ -163,6 +214,16 @@ func (cfg Config) topology() Topology {
 		return TopologyStandalone
 	}
 	return cfg.Topology
+}
+
+// EffectiveTopology is the topology the client is actually built with:
+// standalone when the field is empty. Anything that reports the configuration
+// back to an operator must print THIS and not the raw field — the startup line
+// used to print the field, so an omitted topology showed up as a blank, and a
+// sentinel configuration missing its topology line left no trace that it had
+// been resolved as standalone (MAG-3671).
+func (cfg Config) EffectiveTopology() Topology {
+	return cfg.topology()
 }
 
 func (cfg Config) refreshInterval() time.Duration {

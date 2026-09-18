@@ -98,12 +98,26 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 		if storeErr != nil {
 			return nil, storeErr
 		}
+		// Skipping certificate verification is legitimate on a development
+		// backend and serious anywhere else, and it is the kind of setting that
+		// is set once and then travels. Said out loud at warning level, once,
+		// so a production deployment running with it is not indistinguishable
+		// from one running without (MAG-3684).
+		if respConfig.TLS.Enabled && respConfig.TLS.InsecureSkipVerify {
+			utils.LavaFormatWarning("resp-cache tls.insecure-skip-verify is set: the connection is encrypted but the backend's certificate is NOT verified, so the store's identity is unchecked — a development setting that must not travel to production", nil,
+				utils.LogAttr("addresses", respConfig.Addresses))
+		}
+		// The RESOLVED topology, never the raw field: an omitted topology printed
+		// as a blank here, which is how a sentinel configuration missing its
+		// topology line ran as standalone without a trace (MAG-3671).
 		utils.LavaFormatInfo("resp-cache backend configured",
-			utils.LogAttr("topology", respConfig.Topology),
+			utils.LogAttr("topology", respConfig.EffectiveTopology()),
+			utils.LogAttr("master-name", respConfig.MasterName),
 			utils.LogAttr("addresses", respConfig.Addresses),
 			utils.LogAttr("read-addresses", respConfig.ReadAddresses),
 			utils.LogAttr("key-prefix", respConfig.KeyPrefix),
 			utils.LogAttr("tls", respConfig.TLS.Enabled),
+			utils.LogAttr("tls-insecure-skip-verify", respConfig.TLS.InsecureSkipVerify),
 		)
 		// TTL policy mirrors the cache server's defaults; router-side TTL
 		// tuning is a deliberate non-goal for now.

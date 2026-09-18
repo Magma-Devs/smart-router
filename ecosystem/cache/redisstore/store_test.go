@@ -299,3 +299,19 @@ func TestReadEndpointPrefersTheReadClient(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, mrRead.Addr(), store.ReadEndpoint())
 }
+
+// MAG-3684: a deployment that skips certificate verification must be
+// distinguishable from one that does not wherever the configuration is
+// reported. GET /debug/cache-state renders ConfiguredEndpoints as the tier's
+// address, so the flag is carried there.
+func TestConfiguredEndpointsNameInsecureTLS(t *testing.T) {
+	insecure, err := New(Config{Addresses: []string{"cache.internal:6379"}, TLS: TLSConfig{Enabled: true, InsecureSkipVerify: true}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = insecure.Close() })
+	require.Equal(t, "cache.internal:6379 prefix=sr tls=insecure-skip-verify", insecure.ConfiguredEndpoints())
+
+	verified, err := New(Config{Addresses: []string{"cache.internal:6379"}, TLS: TLSConfig{Enabled: true, ServerName: "cache.internal"}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = verified.Close() })
+	require.NotContains(t, verified.ConfiguredEndpoints(), "insecure", "a verifying connection carries no such marker")
+}
