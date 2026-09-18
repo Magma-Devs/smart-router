@@ -33,6 +33,13 @@ func TestConfigValidateMatrix(t *testing.T) {
 		{"no addresses", Config{Topology: TopologyStandalone}, "no addresses"},
 		{"sentinel without master-name", Config{Topology: TopologySentinel, Addresses: []string{"s:26379"}}, "master-name"},
 		{"sentinel creds on standalone", Config{Addresses: []string{"h:1"}, SentinelPassword: "pw"}, "dangling"},
+		// MAG-3671: the reverse of the case above. A master-name with the
+		// topology line forgotten used to be accepted, and the router dialled the
+		// first sentinel as a data node. The message must name master-name — a
+		// refusal that does not would pass "the router refuses" and leave the
+		// operator exactly as lost.
+		{"master-name with topology omitted", Config{Addresses: []string{"s1:26379", "s2:26379"}, MasterName: "mymaster"}, "master-name"},
+		{"master-name on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, MasterName: "mymaster"}, "master-name"},
 		{"sentinel cred file on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, SentinelPasswordFile: "/p"}, "dangling"},
 		{"db on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, DB: 2}, "db selection"},
 		{"password and password-file", Config{Addresses: []string{"h:1"}, Password: "a", PasswordFile: "/f"}, "mutually exclusive"},
@@ -269,4 +276,11 @@ func TestNewFailsFastOnBadInputs(t *testing.T) {
 
 	_, err = New(Config{Addresses: []string{"h:1"}, Password: "placeholder-credential", TLS: TLSConfig{CAFile: "/does/not/exist"}})
 	require.ErrorContains(t, err, "tls.enabled", "a tls block without the switch must fail construction, not dial in plaintext (MAG-3683)")
+}
+
+// The topology an operator is shown must be the one the client is built with.
+func TestEffectiveTopologyResolvesTheDefault(t *testing.T) {
+	require.Equal(t, TopologyStandalone, Config{}.EffectiveTopology(), "an omitted topology is standalone, and must be reported as such")
+	require.Equal(t, TopologySentinel, Config{Topology: TopologySentinel}.EffectiveTopology())
+	require.Equal(t, TopologyCluster, Config{Topology: TopologyCluster}.EffectiveTopology())
 }
