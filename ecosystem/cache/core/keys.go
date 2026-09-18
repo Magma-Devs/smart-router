@@ -2,8 +2,47 @@ package core
 
 import (
 	"encoding/hex"
+	"fmt"
+	"regexp"
 	"strconv"
 )
+
+// KeyPrefixPattern is the character set a key prefix — the operator-facing name
+// of the keyspace a router occupies — may use. Shared by both backends so one
+// value can be reused across them. Nothing with glob meaning, because the RESP
+// store feeds its prefix into SCAN MATCH on purge and a stray `*` would purge
+// unrelated keys; and no `:`, the key component separator, so a scoped chain id
+// (ScopedChainId) can never be read as a different chain.
+var KeyPrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// ValidateKeyPrefix accepts the empty prefix (no scoping) and otherwise
+// requires KeyPrefixPattern.
+func ValidateKeyPrefix(prefix string) error {
+	if prefix == "" || KeyPrefixPattern.MatchString(prefix) {
+		return nil
+	}
+	return fmt.Errorf("invalid cache key prefix %q: must match %s — SCAN MATCH patterns are globs, so glob characters could purge unrelated keys", prefix, KeyPrefixPattern.String())
+}
+
+// ScopedChainId folds a key prefix into the chain component of a key, so two
+// routers on the same chain with different prefixes share nothing: not the
+// relay entries, not the chain tip that resolves LATEST, not the block-hash
+// heights, not the shared-state tip, not the sticky claims. An empty prefix is
+// the identity, which keeps every key a router without one writes byte-for-byte
+// what it was — persisted RESP entries survive the upgrade, and a router that
+// predates the field is unchanged against a new cache server.
+//
+// The scope sits AFTER the kind prefix (rel:f:, chaintip:, ...) rather than at
+// the head of the key like the RESP store's own prefix: the in-process store
+// routes on the kind prefix, and the gRPC cache server serves many routers from
+// one store, so a router's scope has to travel inside the key rather than be
+// applied around it by a store that belongs to nobody in particular.
+func ScopedChainId(keyPrefix, chainId string) string {
+	if keyPrefix == "" {
+		return chainId
+	}
+	return keyPrefix + ":" + chainId
+}
 
 // Canonical key scheme, kind-first so adapters can route on a cheap prefix
 // check. The finalized/temp split is two namespaces of one keyspace: the same
