@@ -57,6 +57,75 @@ func TestFileCredentialsParsing(t *testing.T) {
 	require.Equal(t, "rotated-pass", pass)
 }
 
+// MAG-3685: whitespace on the LEFT of the file was sent as part of the
+// credential. The right side was already trimmed, which is what made the
+// report easy to dismiss as fixed — the defect was the side, not the absence.
+func TestFileCredentialsTrimBothSides(t *testing.T) {
+	for name, content := range map[string]string{
+		"leading space":     " placeholder-credential\n",
+		"leading newline":   "\nplaceholder-credential\n",
+		"leading tab":       "\tplaceholder-credential",
+		"CRLF on each side": "\r\n placeholder-credential \r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := &FileCredentials{Username: "fixed-user", Path: writeTempFile(t, "pw", content)}
+			user, pass, err := src.Credentials()
+			require.NoError(t, err)
+			require.Equal(t, "fixed-user", user)
+			require.Equal(t, "placeholder-credential", pass, "the credential must reach the store without the file's surrounding whitespace")
+		})
+	}
+
+	// In the combined form the leading whitespace landed on the USERNAME: one
+	// file, one trim, both halves exposed — and one trim fixes both.
+	src := &FileCredentials{Username: "ignored", Path: writeTempFile(t, "userpw", " rotated-user:rotated-pass\n")}
+	user, pass, err := src.Credentials()
+	require.NoError(t, err)
+	require.Equal(t, "rotated-user", user, "a leading space must not become part of the username")
+	require.Equal(t, "rotated-pass", pass)
+}
+
+// The same defect end to end: the store only accepts the exact credential, so
+// a leading space that survived into the AUTH would be refused. Both file
+// forms, against a server that requires each.
+func TestPasswordFileWithLeadingWhitespaceAuthenticates(t *testing.T) {
+	t.Run("password-only file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireAuth("placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "pw", "\n placeholder-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.NoError(t, store.Ping(context.Background()), "the trimmed password must be what reaches the store")
+	})
+
+	t.Run("username:password file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireUserAuth("cacheuser", "placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "userpw", " cacheuser:placeholder-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.NoError(t, store.Ping(context.Background()), "the trimmed username must be what reaches the store")
+	})
+
+	t.Run("control: a wrong credential in the file is still refused", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireAuth("placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "pw", " not-the-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.Error(t, store.Ping(context.Background()), "the server must be the one deciding, or the cases above prove nothing")
+	})
+}
+
 // The plumbing contract: a push reaches every subscribed connection exactly
 // when the credentials actually changed; unsubscribed listeners never hear
 // again.
