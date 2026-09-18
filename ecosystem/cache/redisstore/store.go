@@ -430,13 +430,49 @@ func (s *Store) PoolStats() PoolStats {
 	return out
 }
 
-// Ping probes backend connectivity — both endpoints when reads are split.
-func (s *Store) Ping(ctx context.Context) error {
-	if err := s.write.Ping(ctx).Err(); err != nil {
-		return err
-	}
+// Endpoint roles, as health reporting names the two halves of a split store.
+const (
+	EndpointRoleWrite = "write"
+	EndpointRoleRead  = "read"
+)
+
+// ProbeResult is one endpoint's health probe: which half, the addresses the
+// operator configured for it, and the error when the probe failed.
+type ProbeResult struct {
+	Role      string
+	Addresses string
+	Err       error
+}
+
+// Probe pings every endpoint the store uses and reports each one on its own.
+// With no read split there is a single result, the write endpoint. Ping folds
+// these into the first failure; the health loop reads them apart, because with
+// reads split "the cache is unreachable" cannot say which half, and an alert
+// that cannot say sends the operator to the healthy address half the time
+// (MAG-3674).
+func (s *Store) Probe(ctx context.Context) []ProbeResult {
+	results := []ProbeResult{{
+		Role:      EndpointRoleWrite,
+		Addresses: strings.Join(s.configuredEndpoints.Addresses, ","),
+		Err:       s.write.Ping(ctx).Err(),
+	}}
 	if s.read != s.write {
-		return s.read.Ping(ctx).Err()
+		results = append(results, ProbeResult{
+			Role:      EndpointRoleRead,
+			Addresses: strings.Join(s.configuredEndpoints.ReadAddresses, ","),
+			Err:       s.read.Ping(ctx).Err(),
+		})
+	}
+	return results
+}
+
+// Ping probes backend connectivity — both endpoints when reads are split —
+// and returns the first failure.
+func (s *Store) Ping(ctx context.Context) error {
+	for _, result := range s.Probe(ctx) {
+		if result.Err != nil {
+			return result.Err
+		}
 	}
 	return nil
 }
