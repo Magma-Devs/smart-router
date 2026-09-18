@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,12 +40,6 @@ const (
 	// codec) can be introduced additively.
 	envelopeVersion = 1
 )
-
-// keyPrefixPattern restricts prefixes to characters with no glob meaning:
-// Purge feeds the prefix into SCAN MATCH, whose patterns are globs, so an
-// unsafe prefix could silently match and delete unrelated keys on a shared
-// backend.
-var keyPrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // Store implements core.KVStore over a RESP backend. Reads and writes may be
 // routed to distinct clients (D8: reader endpoints in multi-region
@@ -304,8 +297,11 @@ func newStore(writeClient, readClient redis.UniversalClient, keyPrefix string) (
 	if keyPrefix == "" {
 		keyPrefix = DefaultKeyPrefix
 	}
-	if !keyPrefixPattern.MatchString(keyPrefix) {
-		return nil, fmt.Errorf("invalid resp-cache key prefix %q: must match %s — SCAN MATCH patterns are globs, so glob characters could purge unrelated keys", keyPrefix, keyPrefixPattern.String())
+	// The character set is core's (shared with the gRPC client's key prefix) so
+	// one value works on either backend; Purge feeds this prefix into SCAN
+	// MATCH, which is where a glob character would do damage.
+	if err := core.ValidateKeyPrefix(keyPrefix); err != nil {
+		return nil, fmt.Errorf("resp-cache: %w", err)
 	}
 	// Derived rather than left empty so the exported NewWithClient/NewWithClients
 	// seams produce a usable address. New() overwrites this with the operator's

@@ -92,6 +92,22 @@ type RelayCacheGet struct {
 	ChainId               string               `json:"chain_id"`
 	SeenBlock             int64                `json:"seen_block"`
 	BlocksHashesToHeights []*BlockHashToHeight `json:"blocks_hashes_to_heights"`
+	// KeyPrefix names the keyspace this router occupies on a shared cache server
+	// (the cache-be-key-prefix setting). The server folds it into every key it
+	// derives for the request — the relay entry, the chain tip that resolves
+	// LATEST, block-hash heights, the shared-state tip — so two routers on one
+	// chain with different prefixes share nothing. Empty is the unscoped keyspace
+	// every router occupied before the field existed. A cache server predating
+	// the field drops it on the wire without a word, so isolation needs the
+	// server upgraded alongside the router.
+	KeyPrefix string `json:"key_prefix"`
+}
+
+func (r *RelayCacheGet) GetKeyPrefix() string {
+	if r != nil {
+		return r.KeyPrefix
+	}
+	return ""
 }
 
 func (r *RelayCacheGet) GetRequestHash() []byte {
@@ -168,6 +184,15 @@ type RelayCacheSet struct {
 	// the writer does not know it (legacy writers, non-HTTP flows). See
 	// CacheRelayReply.StatusCode for reader semantics.
 	StatusCode int `json:"status_code"`
+	// KeyPrefix scopes every key this write derives; see RelayCacheGet.KeyPrefix.
+	KeyPrefix string `json:"key_prefix"`
+}
+
+func (r *RelayCacheSet) GetKeyPrefix() string {
+	if r != nil {
+		return r.KeyPrefix
+	}
+	return ""
 }
 
 func (r *RelayCacheSet) GetRequestHash() []byte {
@@ -376,6 +401,10 @@ type StickySessionSet struct {
 	Provider string `json:"provider"`
 	Epoch    uint64 `json:"epoch"`
 	TtlMs    int64  `json:"ttl_ms"`
+	// KeyPrefix scopes the claim to the router's keyspace, like every other key
+	// (see RelayCacheGet.KeyPrefix): a claim names an upstream by NAME, and a
+	// router on a different node set has no upstream by that name to route to.
+	KeyPrefix string `json:"key_prefix"`
 }
 
 // StickySessionGet asks the cache backend which upstream the fleet has pinned for one sticky
@@ -385,6 +414,8 @@ type StickySessionGet struct {
 	ApiInterface string `json:"api_interface"`
 	Service      string `json:"service"`
 	StickyId     string `json:"sticky_id"`
+	// KeyPrefix scopes the read to the router's keyspace; see StickySessionSet.
+	KeyPrefix string `json:"key_prefix"`
 }
 
 // StickySessionReply carries the EFFECTIVE pin — the entry the store actually holds after the

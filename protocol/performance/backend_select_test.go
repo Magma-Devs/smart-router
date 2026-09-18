@@ -31,7 +31,9 @@ func viperFromYAML(t *testing.T, yaml string) *viper.Viper {
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	flags.String(performance.RespCacheAddressesFlagName, "", "")
 	flags.String(performance.RespCacheTopologyFlagName, "", "")
+	flags.String(performance.RespCacheKeyPrefixFlagName, "", "")
 	flags.String(performance.CacheFlagName, "", "")
+	flags.String(performance.CacheKeyPrefixFlagName, "", "")
 	require.NoError(t, v.BindPFlags(flags))
 	return v
 }
@@ -130,4 +132,32 @@ resp-cache:
   key-prefix: "glob*unsafe"
 `))
 	require.Error(t, err, "a glob-unsafe prefix must abort startup")
+
+	_, err = performance.SelectCacheBackend(context.Background(), viperFromYAML(t, `
+cache-be: "a:20100"
+cache-be-key-prefix: "glob*unsafe"
+`))
+	require.ErrorContains(t, err, performance.CacheKeyPrefixFlagName,
+		"the gRPC keyspace takes the same character set, and a bad one must abort startup rather than start cacheless")
+}
+
+// The gRPC keyspace setting end to end through selection: two routers selected
+// against one cache server with different cache-be-key-prefix values share no
+// entries, and the debug state names the keyspace (MAG-3521).
+func TestSelectBackendGRPCKeyPrefix(t *testing.T) {
+	addr := startLoopbackCacheServer(t)
+	tenantA := selectBackend(t, fmt.Sprintf("cache-be: %q\ncache-be-key-prefix: tenant-a\n", addr))
+	tenantB := selectBackend(t, fmt.Sprintf("cache-be: %q\ncache-be-key-prefix: tenant-b\n", addr))
+	require.Eventually(t, tenantA.CacheActive, selectEventuallyTimeout, selectEventuallyTick)
+	require.Eventually(t, tenantB.CacheActive, selectEventuallyTimeout, selectEventuallyTick)
+
+	grpcA, ok := tenantA.(*performance.Cache)
+	require.True(t, ok)
+	require.Equal(t, addr+" prefix=tenant-a", grpcA.DebugCacheState().Address)
+
+	hash := []byte("select-prefix-hash")
+	setForParity(t, tenantA, false, hash, nil, []byte(`tenant-a`), 100, 100)
+	eventuallyData(t, tenantA, hash, nil, 100, 100, false, []byte(`tenant-a`))
+	require.Nil(t, getForParity(t, tenantB, hash, nil, 100, 100, false).GetReply(),
+		"a router selected with another prefix must not see the entry")
 }

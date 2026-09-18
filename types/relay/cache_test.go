@@ -177,3 +177,31 @@ func TestRelayReplyFieldListIsLocked(t *testing.T) {
 		Metadata:              []Metadata{{}},
 	}), "what encoding/json emits and what the struct declares disagree")
 }
+
+// The keyspace field (MAG-3521) in both directions: a request from a router that
+// predates it decodes to the shared keyspace, and the field round-trips on every
+// message that carries it.
+func TestCacheRequestsKeyPrefixWireCompat(t *testing.T) {
+	var get RelayCacheGet
+	require.NoError(t, json.Unmarshal([]byte(`{"chain_id":"ETH1","requested_block":7}`), &get))
+	require.Empty(t, get.GetKeyPrefix(), "a legacy request lands in the shared keyspace")
+	var set RelayCacheSet
+	require.NoError(t, json.Unmarshal([]byte(`{"chain_id":"ETH1","requested_block":7}`), &set))
+	require.Empty(t, set.GetKeyPrefix())
+
+	for _, msg := range []any{
+		RelayCacheGet{ChainId: "ETH1", KeyPrefix: "tenant-a"},
+		RelayCacheSet{ChainId: "ETH1", KeyPrefix: "tenant-a"},
+		StickySessionGet{ChainId: "ETH1", KeyPrefix: "tenant-a"},
+		StickySessionSet{ChainId: "ETH1", KeyPrefix: "tenant-a"},
+	} {
+		raw, err := json.Marshal(msg)
+		require.NoError(t, err)
+		require.Contains(t, string(raw), `"key_prefix":"tenant-a"`, "%T must carry the keyspace on the wire", msg)
+	}
+
+	var nilGet *RelayCacheGet
+	require.Empty(t, nilGet.GetKeyPrefix())
+	var nilSet *RelayCacheSet
+	require.Empty(t, nilSet.GetKeyPrefix())
+}
