@@ -195,6 +195,12 @@ applies on reconnect, rather than reporting rotations it cannot deliver.
 > once trimmed is refused at startup; one that is empty for a moment mid-rotation (a secret mount
 > being rewritten) is a failed read, and the live connections keep the credentials they have.
 
+If the file becomes unreadable while the router runs — a mount that dropped, a rotation that
+failed, a permission change, a file that is empty once trimmed — the router keeps the credentials
+it already holds and says so **once**, then once more when the file is readable again. It does
+not repeat the warning on every poll, so a long outage costs one log line rather than one per
+interval.
+
 ## Sizing and eviction (`maxmemory-policy`)
 
 Recommended: **`volatile-lru`** with a `maxmemory` fitting your working set.
