@@ -285,3 +285,34 @@ resp-cache:
 	require.Contains(t, respCache.DebugCacheState().Address, "topology=standalone",
 		"the running router can be asked which client it built, not only told once at startup")
 }
+
+// MAG-3684: turning off certificate verification was accepted in silence, so a
+// deployment running without that check looked exactly like one running with
+// it. It is now said at warning level at startup, carried on the configured
+// line, and visible on the debug state.
+func TestSelectBackendWarnsOnInsecureSkipVerify(t *testing.T) {
+	mr := miniredis.RunT(t)
+	block := func(insecure bool) string {
+		return fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+  tls:
+    enabled: true
+    insecure-skip-verify: %t
+`, mr.Addr(), insecure)
+	}
+
+	var insecure performance.CacheBackend
+	logged := captureLog(t, func() { insecure = selectBackend(t, block(true)) })
+	require.Contains(t, logged, "insecure-skip-verify is set", "the setting must be named at startup")
+	require.Contains(t, logged, `"level":"warn"`)
+	require.Contains(t, logged, `"tls-insecure-skip-verify":"true"`, "and carried on the configured line beside the tls switch")
+	respCache, ok := insecure.(*performance.RespCache)
+	require.True(t, ok)
+	require.Contains(t, respCache.DebugCacheState().Address, "tls=insecure-skip-verify",
+		"the state is visible wherever the cache's configuration is reported")
+
+	quiet := captureLog(t, func() { _ = selectBackend(t, block(false)) })
+	require.NotContains(t, quiet, "insecure-skip-verify is set", "a verifying configuration is not warned about")
+	require.Contains(t, quiet, `"tls-insecure-skip-verify":"false"`)
+}
