@@ -79,6 +79,12 @@ type Store struct {
 	// out, so Close can wait for it.
 	stopWatcher chan struct{}
 	watcherDone chan struct{}
+	// credentials is the streaming provider behind the standalone and cluster
+	// clients when the password is file-backed, nil otherwise: static
+	// credentials go straight into the client options, and sentinel resolves
+	// the file per connection attempt. Held so tests can read its subscriber
+	// count.
+	credentials *StreamingProvider
 }
 
 // endpointTracker holds the last successfully dialled address. Written from
@@ -138,7 +144,9 @@ func New(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// One credential set for every client of this store (see clientCredentials).
+	// One credential set for every client of this store (see clientCredentials);
+	// the provider in it exists only for a file-backed credential on a client
+	// that subscribes (MAG-3728, see resolveClientCredentials).
 	creds, err := cfg.resolveClientCredentials()
 	if err != nil {
 		return nil, err
@@ -178,6 +186,7 @@ func New(cfg Config) (*Store, error) {
 		}
 		return nil, err
 	}
+	store.credentials = provider
 	// The operator's own configuration is authoritative, so it replaces whatever
 	// newStore derived from the clients.
 	store.configuredEndpoints = storeEndpoints{
