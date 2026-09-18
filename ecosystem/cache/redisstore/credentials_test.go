@@ -377,19 +377,33 @@ func TestSubscriptionLivesAsLongAsItsUnsubscribeClosure(t *testing.T) {
 	require.Equal(t, 0, provider.subscriberCount(), "an explicit unsubscribe still removes the subscription at once")
 }
 
-// closingListener stands in for a store cut off mid-outage: it accepts every
-// connection and closes it at once, so every setup fails after subscribing.
-type closingListener struct {
+// cutoffListener stands in for a store cut off mid-outage, in both shapes the
+// ticket measured: it accepts every connection and either closes it at once
+// (the store closed or reset it) or holds it open and never answers (the
+// store is black-holed). Either way HELLO fails after the connection has
+// subscribed, and go-redis abandons it in the closed state without running
+// its close path.
+type cutoffListener struct {
 	listener net.Listener
 	accepted atomic.Int64
+
+	mu   sync.Mutex
+	held []net.Conn
 }
 
-func newClosingListener(t *testing.T) *closingListener {
+func newCutoffListener(t *testing.T, hold bool) *cutoffListener {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = lis.Close() })
-	c := &closingListener{listener: lis}
+	c := &cutoffListener{listener: lis}
+	t.Cleanup(func() {
+		_ = lis.Close()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for _, conn := range c.held {
+			_ = conn.Close()
+		}
+	})
 	go func() {
 		for {
 			conn, acceptErr := lis.Accept()
@@ -397,40 +411,55 @@ func newClosingListener(t *testing.T) *closingListener {
 				return
 			}
 			c.accepted.Add(1)
-			_ = conn.Close()
+			if !hold {
+				_ = conn.Close()
+				continue
+			}
+			c.mu.Lock()
+			c.held = append(c.held, conn)
+			c.mu.Unlock()
 		}
 	}()
 	return c
 }
 
-// The defect as measured, in-process: a store that closes every connection, a
+// The defect as measured, in-process: a store that fails every connection, a
 // client whose every dial therefore fails during setup, and a provider that
 // must not end up holding the wreckage. Before this fix the subscriber count
 // climbed with every failed dial and never came down — 3,510 on the ticket,
 // each one holding 64 KiB and a socket. Here it returns to zero once the
 // collector has run, because nothing anchors those subscriptions any more.
+// Both outage shapes take the same go-redis path (a failed HELLO of any
+// non-Redis kind abandons the connection), and both are covered.
 func TestAbandonedConnectionsAreNotKeptByTheProvider(t *testing.T) {
-	cutoff := newClosingListener(t)
-	store, err := New(Config{
-		Addresses:    []string{cutoff.listener.Addr().String()},
-		PasswordFile: writeTempFile(t, "pw", "placeholder-credential\n"),
-		DialTimeout:  200 * time.Millisecond,
-		ReadTimeout:  200 * time.Millisecond,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
-	require.NotNil(t, store.credentials, "a file-backed credential is what the streaming provider exists for")
+	for name, hold := range map[string]bool{
+		"store closes every connection":                  false,
+		"store holds every connection and never answers": true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cutoff := newCutoffListener(t, hold)
+			store, err := New(Config{
+				Addresses:    []string{cutoff.listener.Addr().String()},
+				PasswordFile: writeTempFile(t, "pw", "placeholder-credential\n"),
+				DialTimeout:  200 * time.Millisecond,
+				ReadTimeout:  200 * time.Millisecond,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = store.Close() })
+			require.NotNil(t, store.credentials, "a file-backed credential is what the streaming provider exists for")
 
-	for i := 0; i < 20; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		_ = store.SetHeight(ctx, core.HeightKey("ETH1", fmt.Sprintf("0x%d", i)), 1, time.Minute)
-		cancel()
+			for i := 0; i < 20; i++ {
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				_ = store.SetHeight(ctx, core.HeightKey("ETH1", fmt.Sprintf("0x%d", i)), 1, time.Minute)
+				cancel()
+			}
+			require.Positive(t, cutoff.accepted.Load(), "the client did dial the store, and every setup failed")
+
+			require.Eventually(t, func() bool {
+				runtime.GC()
+				return store.credentials.subscriberCount() == 0
+			}, 10*time.Second, 50*time.Millisecond,
+				"connections abandoned after a failed setup must be reclaimed, not kept by the provider")
+		})
 	}
-	require.Positive(t, cutoff.accepted.Load(), "the client did dial the store, and every setup failed")
-
-	require.Eventually(t, func() bool {
-		runtime.GC()
-		return store.credentials.subscriberCount() == 0
-	}, 10*time.Second, 50*time.Millisecond,
-		"connections abandoned after a failed setup must be reclaimed, not kept by the provider")
 }
