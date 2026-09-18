@@ -30,8 +30,9 @@ func (s StaticCredentials) Credentials() (string, string, error) {
 
 // FileCredentials re-reads Path on every call. The file holds the password,
 // or "username:password" to rotate the username too (ACL-user rotation);
-// surrounding whitespace/newlines are trimmed. Kubernetes-mounted secrets and
-// sidecar token refreshers rotate by rewriting the file.
+// whitespace and newlines on BOTH sides are trimmed (see trimCredential).
+// Kubernetes-mounted secrets and sidecar token refreshers rotate by rewriting
+// the file.
 //
 // CONSTRAINT: the combined form makes the first ":" a separator unconditionally,
 // so a password that CONTAINS a colon cannot be expressed in this file. Such a
@@ -68,8 +69,20 @@ func (f *FileCredentials) Credentials() (string, string, error) {
 	return f.Username, raw, nil
 }
 
+// trimCredential strips whitespace from both sides of the file's contents.
+//
+// It used to trim the right side only, so a trailing newline from an editor
+// was dropped while a leading space or blank line was sent as part of the
+// credential — and in the "username:password" form it landed on the USERNAME.
+// The store answered WRONGPASS, the auth path deliberately withholds the
+// server's reply, and nothing pointed at the file's formatting (MAG-3685).
+//
+// The trade this makes is already the one that shipped: a credential ending in
+// whitespace could never be expressed in this file, and one beginning with it
+// now cannot either. Neither is a credential anyone writes on purpose, and the
+// one-sided trim was the surprising half.
 func trimCredential(raw string) string {
-	return strings.TrimRight(raw, "\r\n \t")
+	return strings.TrimSpace(raw)
 }
 
 func readCredentialFile(path string) (string, error) {
@@ -102,6 +115,10 @@ type StreamingProvider struct {
 	listeners map[int]auth.CredentialsListener
 	nextID    int
 	lastRaw   string
+	// refreshFailing records that the last Refresh could not read the source,
+	// so an outage is reported once when it starts and once when it ends — the
+	// health loop's transition discipline — rather than on every tick.
+	refreshFailing bool
 }
 
 var _ auth.StreamingCredentialsProvider = (*StreamingProvider)(nil)
@@ -145,9 +162,10 @@ func (p *StreamingProvider) Subscribe(listener auth.CredentialsListener) (auth.C
 func (p *StreamingProvider) Refresh() {
 	username, password, err := p.source.Credentials()
 	if err != nil {
-		utils.LavaFormatWarning("resp-cache credential refresh failed; keeping previous credentials", err)
+		p.noteRefreshFailure(err)
 		return
 	}
+	p.noteRefreshRecovered()
 	creds := basicCredentials{username: username, password: password}
 
 	p.mu.Lock()
@@ -165,6 +183,37 @@ func (p *StreamingProvider) Refresh() {
 	utils.LavaFormatInfo("resp-cache credentials rotated; re-authenticating live connections", utils.LogAttr("connections", len(listeners)))
 	for _, listener := range listeners {
 		listener.OnNext(creds)
+	}
+}
+
+// noteRefreshFailure reports the FIRST failed read of an outage and stays quiet
+// for the rest of it. Refresh runs on a timer for the life of the process, and
+// a source that stays unreadable — a mount that dropped, a rotation that failed,
+// a permission change — used to produce one warning per tick with no end:
+// about 8,600 identical lines a day at the shipped interval, for a fact worth
+// exactly one line (MAG-3690). The router keeps the credentials it already has
+// either way; what changes is only how often it says so. The health loop in
+// resp_cache.go reports its transitions the same way, and it is the model.
+func (p *StreamingProvider) noteRefreshFailure(err error) {
+	p.mu.Lock()
+	alreadyFailing := p.refreshFailing
+	p.refreshFailing = true
+	p.mu.Unlock()
+	if alreadyFailing {
+		return
+	}
+	utils.LavaFormatWarning("resp-cache credential refresh failed; keeping previous credentials until the source is readable again (reported once per outage)", err)
+}
+
+// noteRefreshRecovered closes an outage with one line, so whoever saw the
+// warning learns that it ended without having to notice an absence.
+func (p *StreamingProvider) noteRefreshRecovered() {
+	p.mu.Lock()
+	wasFailing := p.refreshFailing
+	p.refreshFailing = false
+	p.mu.Unlock()
+	if wasFailing {
+		utils.LavaFormatInfo("resp-cache credential source readable again; refresh resumed")
 	}
 }
 

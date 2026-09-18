@@ -1,9 +1,11 @@
 package redisstore
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +15,8 @@ import (
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/auth"
+	zerolog "github.com/rs/zerolog"
+	zerologlog "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,6 +59,75 @@ func TestFileCredentialsParsing(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "rotated-user", user, "a user:pass file rotates the username too (ACL-user rotation)")
 	require.Equal(t, "rotated-pass", pass)
+}
+
+// MAG-3685: whitespace on the LEFT of the file was sent as part of the
+// credential. The right side was already trimmed, which is what made the
+// report easy to dismiss as fixed — the defect was the side, not the absence.
+func TestFileCredentialsTrimBothSides(t *testing.T) {
+	for name, content := range map[string]string{
+		"leading space":     " placeholder-credential\n",
+		"leading newline":   "\nplaceholder-credential\n",
+		"leading tab":       "\tplaceholder-credential",
+		"CRLF on each side": "\r\n placeholder-credential \r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := &FileCredentials{Username: "fixed-user", Path: writeTempFile(t, "pw", content)}
+			user, pass, err := src.Credentials()
+			require.NoError(t, err)
+			require.Equal(t, "fixed-user", user)
+			require.Equal(t, "placeholder-credential", pass, "the credential must reach the store without the file's surrounding whitespace")
+		})
+	}
+
+	// In the combined form the leading whitespace landed on the USERNAME: one
+	// file, one trim, both halves exposed — and one trim fixes both.
+	src := &FileCredentials{Username: "ignored", Path: writeTempFile(t, "userpw", " rotated-user:rotated-pass\n")}
+	user, pass, err := src.Credentials()
+	require.NoError(t, err)
+	require.Equal(t, "rotated-user", user, "a leading space must not become part of the username")
+	require.Equal(t, "rotated-pass", pass)
+}
+
+// The same defect end to end: the store only accepts the exact credential, so
+// a leading space that survived into the AUTH would be refused. Both file
+// forms, against a server that requires each.
+func TestPasswordFileWithLeadingWhitespaceAuthenticates(t *testing.T) {
+	t.Run("password-only file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireAuth("placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "pw", "\n placeholder-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.NoError(t, store.Ping(context.Background()), "the trimmed password must be what reaches the store")
+	})
+
+	t.Run("username:password file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireUserAuth("cacheuser", "placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "userpw", " cacheuser:placeholder-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.NoError(t, store.Ping(context.Background()), "the trimmed username must be what reaches the store")
+	})
+
+	t.Run("control: a wrong credential in the file is still refused", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireAuth("placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "pw", " not-the-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.Error(t, store.Ping(context.Background()), "the server must be the one deciding, or the cases above prove nothing")
+	})
 }
 
 // The plumbing contract: a push reaches every subscribed connection exactly
@@ -197,4 +270,69 @@ func TestLiveRotationSmokeOverMiniredis(t *testing.T) {
 		}
 		return dials.Load() == before
 	}, 10*time.Second, 100*time.Millisecond, "the pool must converge to dial-free serving after rotation")
+}
+
+// captureLog swaps the global zerolog sink for a buffer while fn runs and
+// returns what was written. lavalog writes through that global logger and its
+// level gate defaults to debug in tests, so warnings and info both land.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	prev := zerologlog.Logger
+	t.Cleanup(func() { zerologlog.Logger = prev })
+	var buf bytes.Buffer
+	zerologlog.Logger = zerolog.New(&buf)
+	fn()
+	return buf.String()
+}
+
+// MAG-3690: an unreadable credential file was reported on every tick of the
+// refresh loop, indefinitely — 21 identical warnings in 22 seconds at a
+// one-second interval, about 8,600 a day at the shipped ten seconds — while
+// the health loop beside it wrote once over the same window, because it
+// reports transitions. This holds Refresh to that discipline: one line when
+// the source becomes unreadable, one when it is readable again, nothing in
+// between, and a later outage is a new event.
+func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
+	credFile := writeTempFile(t, "cred", "pw1")
+	provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})
+	listener := &recordingListener{}
+	_, _, err := provider.Subscribe(listener)
+	require.NoError(t, err)
+
+	const failed, recovered = "credential refresh failed", "readable again"
+
+	quiet := captureLog(t, func() { provider.Refresh() })
+	require.NotContains(t, quiet, failed, "a readable source is not an event")
+	require.NotContains(t, quiet, recovered)
+
+	require.NoError(t, os.Remove(credFile))
+	outage := captureLog(t, func() {
+		for i := 0; i < 21; i++ {
+			provider.Refresh()
+		}
+	})
+	require.Equal(t, 1, strings.Count(outage, failed), "one warning per outage, however many ticks it spans")
+	require.Empty(t, listener.recorded(), "nothing is pushed while the source is unreadable")
+
+	require.NoError(t, os.WriteFile(credFile, []byte("pw1"), 0o600))
+	back := captureLog(t, func() {
+		provider.Refresh()
+		provider.Refresh()
+	})
+	require.Equal(t, 1, strings.Count(back, recovered), "the end of the outage is reported once")
+	require.NotContains(t, back, failed)
+	require.Empty(t, listener.recorded(), "unchanged credentials still do not push after recovery")
+
+	require.NoError(t, os.Remove(credFile))
+	again := captureLog(t, func() {
+		provider.Refresh()
+		provider.Refresh()
+	})
+	require.Equal(t, 1, strings.Count(again, failed), "a second outage is a new event")
+
+	// Recovery with ROTATED contents both closes the outage and pushes.
+	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
+	rotated := captureLog(t, func() { provider.Refresh() })
+	require.Equal(t, 1, strings.Count(rotated, recovered))
+	require.Equal(t, []string{"u:pw2"}, listener.recorded(), "a rotation that lands during recovery is applied")
 }
