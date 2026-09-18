@@ -295,7 +295,8 @@ func (cache *RespCache) SetEntry(ctx context.Context, cacheSet *pairingtypes.Rel
 }
 
 // Flush drops every entry under this backend's key prefix — prefix-scoped so
-// a shared backend's other tenants are untouched.
+// a shared backend's other tenants are untouched — on every endpoint the store
+// reads from, the split read endpoint included (see Store.Purge).
 func (cache *RespCache) Flush(ctx context.Context) error {
 	if cache == nil {
 		return NotInitializedError
