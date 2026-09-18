@@ -368,3 +368,32 @@ resp-cache:
 	require.True(t, enabled)
 	require.Equal(t, redisstore.TopologySentinel, cfg.EffectiveTopology())
 }
+
+// MAG-3672: a standalone block with a "spare" address. Both routes an operator
+// takes to it — the YAML list and the comma-separated flag — must be refused,
+// naming the address that would have been dropped.
+func TestLoadRespCacheConfigRefusesExtraAddressesUnderStandalone(t *testing.T) {
+	v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["primary:6379", "spare:6379"]
+`)
+	_, enabled, err := LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "spare:6379 would be ignored")
+	require.False(t, enabled)
+
+	v, flags := newViperWithYAML(t, ``)
+	require.NoError(t, flags.Set(RespCacheAddressesFlagName, "primary:6379,spare:6379"))
+	_, enabled, err = LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "spare:6379 would be ignored", "the flag form reaches the same rule")
+	require.False(t, enabled)
+
+	// Control: the same list under a topology that takes a list loads.
+	v, _ = newViperWithYAML(t, `
+resp-cache:
+  topology: cluster
+  addresses: ["primary:6379", "spare:6379"]
+`)
+	_, enabled, err = LoadRespCacheConfig(v)
+	require.NoError(t, err)
+	require.True(t, enabled)
+}
