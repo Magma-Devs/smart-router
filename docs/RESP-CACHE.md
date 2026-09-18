@@ -84,9 +84,19 @@ a word.
 | `tls.insecure-skip-verify` | `false` | Skips server verification (testing only). |
 | `dial-timeout` / `read-timeout` / `write-timeout` | `500ms` dial; client defaults for read/write | Per-operation network limits. A **fresh** connection's dial and TLS handshake are bounded by `dial-timeout` *and* by the caller's own deadline, whichever is sooner — the default is deliberately sub-second so a black-holed backend cannot make cold lookups linger. |
 | `pool-size` | client default | Connection pool size (per client; the read client has its own). |
+| `expiration.finalized` | `1h` | Lifetime of a settled (finalized) answer. The sidecar's `--expiration`. |
+| `expiration.finalized-multiplier` | `1` | Multiplier on `expiration.finalized`. The sidecar's `--expiration-multiplier`, which the published chart sets to `1.5` (90 minutes) — this is where a router on a RESP backend keeps that. |
+| `expiration.non-finalized` | `500ms` | Floor for a recent (non-finalized) answer; the effective TTL is max(averageBlockTime/8, this). The sidecar's `--expiration-non-finalized`. |
+| `expiration.non-finalized-multiplier` | `1` | Multiplier on `expiration.non-finalized`. The sidecar's `--expiration-non-finalized-multiplier`. |
+| `expiration.node-errors` | `250ms` | Cap on a cached node error for a finalized block. The sidecar's `--expiration-finalized-node-errors`. |
+| `expiration.blocks-hashes-to-heights` | `48h` | Lifetime of a block-hash→height mapping. The sidecar's `--expiration-blocks-hashes-to-heights`. |
 
-TTLs are the cache engine's own (finalized ~1h, non-finalized scaled to the chain's block
-time, short-lived node errors) — the same table the default cache uses.
+TTLs default to the cache engine's own table (finalized 1h, non-finalized scaled to the chain's
+block time with a 500ms floor, short-lived node errors) — the same defaults the sidecar applies
+from its flags. The sidecar's flags are set by the chart; a router on a RESP backend takes the
+same values from the `expiration` block above, and `GET /debug/cache-state` reports the
+lifetimes actually in force under `lifetimes`. Without the block, a cache moved from the sidecar
+to a RESP backend runs on the defaults, not on whatever the chart had set for the sidecar.
 
 One budget lives on the **router**, not in this block: every cache **lookup** runs inside
 the per-relay `--cache-timeout` flag (default `50ms`, sized for a same-zone backend; writes

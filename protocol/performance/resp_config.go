@@ -151,9 +151,11 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 			utils.LogAttr("key-prefix", respConfig.KeyPrefix),
 			utils.LogAttr("tls", respConfig.TLS.Enabled),
 		)
-		// TTL policy mirrors the cache server's defaults; router-side TTL
-		// tuning is a deliberate non-goal for now.
-		return NewRespCache(store, core.DefaultPolicy()), nil
+		// The TTL table is the operator's when the block carries an expiration
+		// section and the engine's defaults otherwise — the same table the cache
+		// sidecar builds from its flags, reachable here for the first time
+		// (MAG-3631). GET /debug/cache-state reports what is in force.
+		return NewRespCache(store, respConfig.Expiration.Policy()), nil
 	}
 
 	var cache CacheBackend = (*Cache)(nil)
