@@ -82,6 +82,12 @@ type Store struct {
 	// stopWatcher terminates the credential poll loop (nil when the
 	// credentials are static).
 	stopWatcher chan struct{}
+	// credentials is the streaming provider behind the standalone and cluster
+	// clients when the password is file-backed, nil otherwise: static
+	// credentials go straight into the client options, and sentinel resolves
+	// the file per connection attempt. Held so tests can read its subscriber
+	// count.
+	credentials *StreamingProvider
 }
 
 // endpointTracker holds the last successfully dialled address. Written from
@@ -134,11 +140,21 @@ func New(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	provider := NewStreamingProvider(cfg.credentialsSource())
 	// Fail fast on an unreadable credential source (e.g. missing file) before
 	// any client exists.
 	if _, _, err := cfg.credentialsSource().Credentials(); err != nil {
 		return nil, fmt.Errorf("resp-cache: reading credentials: %w", err)
+	}
+	// The streaming provider exists to push a rotated file-backed credential
+	// to live connections. Static credentials used to ride it too, for
+	// uniformity, which put every connection of every RESP client on the path
+	// that kept abandoned connections alive (MAG-3728); they now go straight
+	// into the client options, and the provider is built only when it has a
+	// file to watch and a client that subscribes (sentinel resolves the file
+	// per connection attempt instead, see failoverOptions).
+	var provider *StreamingProvider
+	if cfg.PasswordFile != "" && cfg.topology() != TopologySentinel {
+		provider = NewStreamingProvider(cfg.credentialsSource())
 	}
 
 	writeTracker := &endpointTracker{}
@@ -166,6 +182,7 @@ func New(cfg Config) (*Store, error) {
 		}
 		return nil, err
 	}
+	store.credentials = provider
 	// The operator's own configuration is authoritative, so it replaces whatever
 	// newStore derived from the clients.
 	store.configuredEndpoints = storeEndpoints{

@@ -3,8 +3,10 @@ package redisstore
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -152,6 +154,8 @@ func TestSentinelPasswordFileStartsNoWatcher(t *testing.T) {
 	t.Cleanup(func() { _ = sentinel.Close() })
 	require.Nil(t, sentinel.stopWatcher,
 		"a watcher under sentinel would detect every rotation and re-authenticate nothing")
+	require.Nil(t, sentinel.credentials,
+		"nothing subscribes under sentinel, so no provider is built for it either")
 
 	standalone, err := New(Config{
 		Topology:     TopologyStandalone,
@@ -242,6 +246,11 @@ func TestLiveRotationSmokeOverMiniredis(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
 	mr.RequireAuth("pw2")
+	// Two collections first: the pooled connection's subscription is anchored
+	// only by the closure the client stored on it, and must survive them
+	// (MAG-3728) — or the rotation below reaches nobody.
+	runtime.GC()
+	runtime.GC()
 	provider.Refresh()
 
 	for i := 0; i < 6; i++ {
@@ -335,4 +344,93 @@ func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
 	rotated := captureLog(t, func() { provider.Refresh() })
 	require.Equal(t, 1, strings.Count(rotated, recovered))
 	require.Equal(t, []string{"u:pw2"}, listener.recorded(), "a rotation that lands during recovery is applied")
+}
+
+// MAG-3728: go-redis abandons a connection whose setup failed without ever
+// calling Close on it, so the unsubscribe it stored on the connection never
+// runs; the provider must therefore not be what keeps such a connection alive.
+// A subscription is anchored by its unsubscribe closure alone: while something
+// holds that closure (a live pooled connection does) the subscription is live,
+// and once nothing does, the collector reclaims it and the provider forgets it.
+func TestSubscriptionLivesAsLongAsItsUnsubscribeClosure(t *testing.T) {
+	credFile := writeTempFile(t, "cred", "pw1")
+	provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})
+
+	anchored := &recordingListener{}
+	_, keepAlive, err := provider.Subscribe(anchored)
+	require.NoError(t, err)
+	_, _, err = provider.Subscribe(&recordingListener{}) // its closure is dropped at once: an abandoned connection
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		runtime.GC()
+		return provider.subscriberCount() == 1
+	}, 5*time.Second, 20*time.Millisecond, "the subscription nobody anchors is reclaimed; the anchored one stays")
+
+	// The anchored subscription still receives rotations across collections.
+	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
+	runtime.GC()
+	provider.Refresh()
+	require.Equal(t, []string{"u:pw2"}, anchored.recorded())
+
+	require.NoError(t, keepAlive())
+	require.Equal(t, 0, provider.subscriberCount(), "an explicit unsubscribe still removes the subscription at once")
+}
+
+// closingListener stands in for a store cut off mid-outage: it accepts every
+// connection and closes it at once, so every setup fails after subscribing.
+type closingListener struct {
+	listener net.Listener
+	accepted atomic.Int64
+}
+
+func newClosingListener(t *testing.T) *closingListener {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lis.Close() })
+	c := &closingListener{listener: lis}
+	go func() {
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			c.accepted.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	return c
+}
+
+// The defect as measured, in-process: a store that closes every connection, a
+// client whose every dial therefore fails during setup, and a provider that
+// must not end up holding the wreckage. Before this fix the subscriber count
+// climbed with every failed dial and never came down — 3,510 on the ticket,
+// each one holding 64 KiB and a socket. Here it returns to zero once the
+// collector has run, because nothing anchors those subscriptions any more.
+func TestAbandonedConnectionsAreNotKeptByTheProvider(t *testing.T) {
+	cutoff := newClosingListener(t)
+	store, err := New(Config{
+		Addresses:    []string{cutoff.listener.Addr().String()},
+		PasswordFile: writeTempFile(t, "pw", "placeholder-credential\n"),
+		DialTimeout:  200 * time.Millisecond,
+		ReadTimeout:  200 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NotNil(t, store.credentials, "a file-backed credential is what the streaming provider exists for")
+
+	for i := 0; i < 20; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_ = store.SetHeight(ctx, core.HeightKey("ETH1", fmt.Sprintf("0x%d", i)), 1, time.Minute)
+		cancel()
+	}
+	require.Positive(t, cutoff.accepted.Load(), "the client did dial the store, and every setup failed")
+
+	require.Eventually(t, func() bool {
+		runtime.GC()
+		return store.credentials.subscriberCount() == 0
+	}, 10*time.Second, 50*time.Millisecond,
+		"connections abandoned after a failed setup must be reclaimed, not kept by the provider")
 }

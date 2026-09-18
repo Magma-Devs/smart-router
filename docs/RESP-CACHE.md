@@ -186,6 +186,11 @@ failed, a permission change — the router keeps the credentials it already hold
 **once**, then once more when the file is readable again. It does not repeat the warning on
 every poll, so a long outage costs one log line rather than one per interval.
 
+A store that closes or refuses connections while requests are flowing does not cost the router
+memory: a connection whose setup failed is released, buffers and socket included, once the
+garbage collector reclaims it, rather than being kept by the rotation machinery for the life of
+the process. Its file descriptor therefore closes at the next collection, not at the failure.
+
 ## Sizing and eviction (`maxmemory-policy`)
 
 Recommended: **`volatile-lru`** with a `maxmemory` fitting your working set.
