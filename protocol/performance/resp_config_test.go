@@ -183,3 +183,30 @@ resp-cache:
 	_, err = redisstore.New(cfg)
 	require.ErrorContains(t, err, "/nonexistent/path/ca.pem", "with the switch on the files are read, and the missing one names itself")
 }
+
+// MAG-3671: the trap configuration — sentinel addresses and a master-name, no
+// topology line. It used to load, run as standalone, and dial the first
+// sentinel as a data node.
+func TestLoadRespCacheConfigRefusesMasterNameWithoutSentinelTopology(t *testing.T) {
+	v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["s1:26379", "s2:26379"]
+  master-name: mymaster
+`)
+	_, enabled, err := LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "master-name")
+	require.False(t, enabled)
+
+	// Control: the same block with the line present is the documented sentinel
+	// configuration and loads.
+	v, _ = newViperWithYAML(t, `
+resp-cache:
+  topology: sentinel
+  addresses: ["s1:26379", "s2:26379"]
+  master-name: mymaster
+`)
+	cfg, enabled, err := LoadRespCacheConfig(v)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.Equal(t, redisstore.TopologySentinel, cfg.EffectiveTopology())
+}

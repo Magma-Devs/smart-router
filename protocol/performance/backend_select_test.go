@@ -5,6 +5,7 @@
 package performance_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -13,10 +14,24 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/magma-Devs/smart-router/protocol/performance"
+	zerolog "github.com/rs/zerolog"
+	zerologlog "github.com/rs/zerolog/log"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
+
+// captureLog swaps the global zerolog sink for a buffer while fn runs and
+// returns what was written; lavalog writes through that global logger.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	prev := zerologlog.Logger
+	t.Cleanup(func() { zerologlog.Logger = prev })
+	var buf bytes.Buffer
+	zerologlog.Logger = zerolog.New(&buf)
+	fn()
+	return buf.String()
+}
 
 const (
 	selectEventuallyTimeout = 2 * time.Second
@@ -130,4 +145,21 @@ resp-cache:
   key-prefix: "glob*unsafe"
 `))
 	require.Error(t, err, "a glob-unsafe prefix must abort startup")
+}
+
+// MAG-3671, the second finding: the startup line printed the raw topology
+// field, so an omitted topology showed as a blank and the only surface that
+// could have revealed a misresolved configuration said nothing. It must name
+// the topology the client was actually built with.
+func TestSelectBackendLogsTheResolvedTopology(t *testing.T) {
+	mr := miniredis.RunT(t)
+	logged := captureLog(t, func() {
+		backend := selectBackend(t, fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+`, mr.Addr()))
+		require.True(t, backend.CacheActive())
+	})
+	require.Contains(t, logged, "resp-cache backend configured")
+	require.Contains(t, logged, `"topology":"standalone"`, "an omitted topology is reported as what it resolves to, not as a blank")
 }

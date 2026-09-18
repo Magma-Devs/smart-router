@@ -64,7 +64,7 @@ router never starts half-configured.
 | `topology` | `standalone` | `standalone` \| `sentinel` \| `cluster`. |
 | `addresses` | — (required) | Standalone: the node address. Sentinel: the **sentinel** addresses. Cluster: the **configuration endpoint** used as the discovery seed — never a node list; the client discovers topology itself. |
 | `read-addresses` | *(unset)* | Optional separate endpoint(s) for **reads** (reader endpoints). Writes stay on `addresses`. Selects an *endpoint*, not a replica role — see the caveat under [Multi-region reads](#multi-region-reads-readwrite-split). |
-| `master-name` | — | Sentinel only (required there): the monitored master set name. |
+| `master-name` | — | Sentinel only (required there): the monitored master set name. Refused under any other topology — a `master-name` with the `topology: sentinel` line forgotten is dangling configuration, since the router would otherwise dial the first sentinel address as a plain data node. |
 | `username` / `password` | *(unset)* | Static data-node credentials (AUTH / ACL). |
 | `password-file` | *(unset)* | Rotation-capable credentials: the file is polled and changes are pushed to **live connections**, which re-authenticate in place — no restart, no connection loss (standalone and cluster; under sentinel rotation applies on reconnect — see [Credential rotation](#credential-rotation)). Holds the password, or `username:password` to rotate the ACL user too — so a password containing `:` cannot be expressed here. Mutually exclusive with `password`. |
 | `credential-refresh-interval` | `10s` | Poll cadence for `password-file`. |
