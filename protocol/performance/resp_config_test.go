@@ -23,7 +23,9 @@ func newViperWithYAML(t *testing.T, yaml string) (*viper.Viper, *pflag.FlagSet) 
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	flags.String(RespCacheAddressesFlagName, "", "")
 	flags.String(RespCacheTopologyFlagName, "", "")
+	flags.String(RespCacheKeyPrefixFlagName, "", "")
 	flags.String(CacheFlagName, "", "")
+	flags.String(CacheKeyPrefixFlagName, "", "")
 	require.NoError(t, v.BindPFlags(flags))
 	return v, flags
 }
@@ -85,9 +87,11 @@ func TestLoadRespCacheConfigFlagsOutrankYAML(t *testing.T) {
 resp-cache:
   topology: standalone
   addresses: ["from-yaml:6379"]
+  key-prefix: from-yaml
 `)
 	require.NoError(t, flags.Set(RespCacheAddressesFlagName, "from-flag-1:6379, from-flag-2:6379"))
 	require.NoError(t, flags.Set(RespCacheTopologyFlagName, "cluster"))
+	require.NoError(t, flags.Set(RespCacheKeyPrefixFlagName, "from-flag"))
 
 	cfg, enabled, err := LoadRespCacheConfig(v)
 	require.NoError(t, err)
@@ -95,6 +99,21 @@ resp-cache:
 	require.Equal(t, []string{"from-flag-1:6379", "from-flag-2:6379"}, cfg.Addresses,
 		"an explicitly passed flag outranks the YAML value")
 	require.Equal(t, redisstore.TopologyCluster, cfg.Topology)
+	require.Equal(t, "from-flag", cfg.KeyPrefix,
+		"the keyspace is the one setting that must differ per deployment, so it needs a flag form (MAG-3687)")
+}
+
+// A flag is a complete route to the keyspace: the address flag plus the
+// prefix flag, no YAML block at all — what a deployment that can only pass
+// flags needs.
+func TestLoadRespCacheConfigKeyPrefixByFlagsAlone(t *testing.T) {
+	v, flags := newViperWithYAML(t, ``)
+	require.NoError(t, flags.Set(RespCacheAddressesFlagName, "solo:6379"))
+	require.NoError(t, flags.Set(RespCacheKeyPrefixFlagName, "tenant-a"))
+	cfg, enabled, err := LoadRespCacheConfig(v)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.Equal(t, "tenant-a", cfg.KeyPrefix)
 }
 
 func TestLoadRespCacheConfigFlagOnlyEnables(t *testing.T) {
@@ -123,6 +142,58 @@ resp-cache:
 		require.NoError(t, flags.Set(RespCacheTopologyFlagName, "cluster"))
 		_, _, err := LoadRespCacheConfig(v)
 		require.ErrorContains(t, err, "dangling")
+	})
+
+	t.Run("key-prefix flag without addresses", func(t *testing.T) {
+		v, flags := newViperWithYAML(t, ``)
+		require.NoError(t, flags.Set(RespCacheKeyPrefixFlagName, "tenant-a"))
+		_, _, err := LoadRespCacheConfig(v)
+		require.ErrorContains(t, err, "dangling")
+	})
+}
+
+// MAG-3677: a key the block does not define must fail loudly. The block decides
+// which keyspace the router occupies, and a `key_prefix` that was ignored put
+// the router on the shared default without a word.
+func TestLoadRespCacheConfigRejectsUnknownKeys(t *testing.T) {
+	t.Run("top-level typo", func(t *testing.T) {
+		v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  key_prefix: prod-eu
+`)
+		_, _, err := LoadRespCacheConfig(v)
+		require.ErrorContains(t, err, "key_prefix")
+		require.ErrorContains(t, err, "unknown keys are rejected")
+	})
+
+	t.Run("typo inside the tls block", func(t *testing.T) {
+		v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  tls:
+    enable: true
+    ca-file: /certs/ca.pem
+`)
+		_, _, err := LoadRespCacheConfig(v)
+		require.ErrorContains(t, err, "enable", "nested blocks are held to the same rule")
+	})
+
+	t.Run("every defined key still loads", func(t *testing.T) {
+		// The full-block test above is the positive control for this rule; this
+		// pins that strictness did not start rejecting a key the block defines.
+		v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  key-prefix: prod-eu
+  tls:
+    enabled: true
+    insecure-skip-verify: true
+`)
+		cfg, enabled, err := LoadRespCacheConfig(v)
+		require.NoError(t, err)
+		require.True(t, enabled)
+		require.Equal(t, "prod-eu", cfg.KeyPrefix)
 	})
 }
 

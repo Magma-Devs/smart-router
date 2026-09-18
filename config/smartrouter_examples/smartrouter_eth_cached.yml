@@ -20,6 +20,12 @@
 # is the compose service name + port. Remove this key (or run without the
 # cache service) to disable caching.
 cache-be: "cache:20100"
+# Keyspace on that sidecar. Routers in one keyspace serve each other's cached
+# answers and resolve `latest` off one chain tip — right for replicas reading
+# the same nodes, wrong for a second deployment on different nodes. Give each
+# such deployment its own prefix ([A-Za-z0-9._-]+); empty is the shared
+# keyspace. docs/RESP-CACHE.md, "Sharing a backend between routers".
+# cache-be-key-prefix: "prod"
 
 # Prometheus metrics (scrape at http://<host>:7779/metrics). Set to
 # "disabled" to turn off.
