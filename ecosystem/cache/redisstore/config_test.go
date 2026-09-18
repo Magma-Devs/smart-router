@@ -33,10 +33,24 @@ func TestConfigValidateMatrix(t *testing.T) {
 		{"no addresses", Config{Topology: TopologyStandalone}, "no addresses"},
 		{"sentinel without master-name", Config{Topology: TopologySentinel, Addresses: []string{"s:26379"}}, "master-name"},
 		{"sentinel creds on standalone", Config{Addresses: []string{"h:1"}, SentinelPassword: "pw"}, "dangling"},
+		// MAG-3671: the reverse of the case above. A master-name with the
+		// topology line forgotten used to be accepted, and the router dialled the
+		// first sentinel as a data node. The message must name master-name — a
+		// refusal that does not would pass "the router refuses" and leave the
+		// operator exactly as lost.
+		{"master-name with topology omitted", Config{Addresses: []string{"s1:26379", "s2:26379"}, MasterName: "mymaster"}, "master-name"},
+		{"master-name on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, MasterName: "mymaster"}, "master-name"},
 		{"sentinel cred file on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, SentinelPasswordFile: "/p"}, "dangling"},
 		{"db on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, DB: 2}, "db selection"},
 		{"password and password-file", Config{Addresses: []string{"h:1"}, Password: "a", PasswordFile: "/f"}, "mutually exclusive"},
 		{"sentinel password and file", Config{Topology: TopologySentinel, MasterName: "m", Addresses: []string{"s:1"}, SentinelPassword: "a", SentinelPasswordFile: "/f"}, "mutually exclusive"},
+		// MAG-3683: a tls block without the switch. One case per key that can
+		// make the block look complete, because each on its own reads as "TLS
+		// is configured" to whoever wrote it.
+		{"tls ca-file without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{CAFile: "/ca.pem"}}, "tls.enabled"},
+		{"tls client keypair without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{CertFile: "/c.pem", KeyFile: "/k.pem"}}, "tls.enabled"},
+		{"tls server-name without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{ServerName: "cache.internal"}}, "tls.enabled"},
+		{"tls insecure-skip-verify without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{InsecureSkipVerify: true}}, "tls.enabled"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,4 +231,14 @@ func TestNewFailsFastOnBadInputs(t *testing.T) {
 
 	_, err = New(Config{Addresses: []string{"h:1"}, KeyPrefix: "glob*"})
 	require.Error(t, err, "glob-unsafe prefix must fail construction")
+
+	_, err = New(Config{Addresses: []string{"h:1"}, Password: "placeholder-credential", TLS: TLSConfig{CAFile: "/does/not/exist"}})
+	require.ErrorContains(t, err, "tls.enabled", "a tls block without the switch must fail construction, not dial in plaintext (MAG-3683)")
+}
+
+// The topology an operator is shown must be the one the client is built with.
+func TestEffectiveTopologyResolvesTheDefault(t *testing.T) {
+	require.Equal(t, TopologyStandalone, Config{}.EffectiveTopology(), "an omitted topology is standalone, and must be reported as such")
+	require.Equal(t, TopologySentinel, Config{Topology: TopologySentinel}.EffectiveTopology())
+	require.Equal(t, TopologyCluster, Config{Topology: TopologyCluster}.EffectiveTopology())
 }

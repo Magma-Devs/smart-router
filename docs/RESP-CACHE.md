@@ -64,14 +64,14 @@ router never starts half-configured.
 | `topology` | `standalone` | `standalone` \| `sentinel` \| `cluster`. |
 | `addresses` | — (required) | Standalone: the node address. Sentinel: the **sentinel** addresses. Cluster: the **configuration endpoint** used as the discovery seed — never a node list; the client discovers topology itself. |
 | `read-addresses` | *(unset)* | Optional separate endpoint(s) for **reads** (reader endpoints). Writes stay on `addresses`. Selects an *endpoint*, not a replica role — see the caveat under [Multi-region reads](#multi-region-reads-readwrite-split). |
-| `master-name` | — | Sentinel only (required there): the monitored master set name. |
+| `master-name` | — | Sentinel only (required there): the monitored master set name. Refused under any other topology — a `master-name` with the `topology: sentinel` line forgotten is dangling configuration, since the router would otherwise dial the first sentinel address as a plain data node. |
 | `username` / `password` | *(unset)* | Static data-node credentials (AUTH / ACL). |
 | `password-file` | *(unset)* | Rotation-capable credentials: the file is polled and changes are pushed to **live connections**, which re-authenticate in place — no restart, no connection loss (standalone and cluster; under sentinel rotation applies on reconnect — see [Credential rotation](#credential-rotation)). Holds the password, or `username:password` to rotate the ACL user too — so a password containing `:` cannot be expressed here. Mutually exclusive with `password`. |
 | `credential-refresh-interval` | `10s` | Poll cadence for `password-file`. |
 | `sentinel-username` / `sentinel-password` / `sentinel-password-file` | *(unset)* | **Sentinel control-plane** credentials — sentinels authenticate independently of the data nodes; hardened deployments fail discovery without these. Only valid with `topology: sentinel`, and read once at startup (rotating them needs a restart). |
 | `db` | `0` | Logical database (standalone/sentinel only; rejected for cluster). |
 | `key-prefix` | `sr` | Namespace for every key. Restricted to `[A-Za-z0-9._-]+` (flush uses it as a `SCAN MATCH` glob). Give each deployment sharing a backend its own prefix — flush isolation follows from it. |
-| `tls.enabled` | `false` | TLS to the backend. |
+| `tls.enabled` | `false` | TLS to the backend. **Required (`true`) whenever any other `tls.*` key is set** — a `tls` block without it is refused at startup as dangling configuration, because the alternative is a plaintext connection carrying `username`/`password` readable on the wire. To run without TLS, remove the block. |
 | `tls.ca-file` | *(system pool)* | PEM CA bundle for server verification. |
 | `tls.cert-file` / `tls.key-file` | *(unset)* | Client keypair for mTLS (both or neither). |
 | `tls.server-name` | *(unset)* | Overrides the verification/SNI name. |
@@ -694,6 +694,7 @@ Router 2 stays up on `:3365`; `--stop` removes both.
 | Header names an unexpected backend | You are talking to a different lane's router — check the port (standalone `:3360`, sentinel `:3370`, multi-region `:3380`/`:3381`). |
 | `resp_cache_connected` is 0 | Backend unreachable — the container may have been `docker stop`ped, which deletes it (`--rm`). Re-run the lane. |
 | Relays fail or the smoke check fails | Public endpoint rate limits. Set `ETH_RPC_URL_1/2` and `ETH_WS_URL_1/2` to your own endpoints. |
+| Startup fails: `tls.* options are set but tls.enabled is not true` | The `tls` block was written without its switch, and the router will not open a plaintext connection on a block that reads as encrypted. Add `enabled: true` (the files are then read and verified at startup), or remove the block to run without TLS deliberately. |
 
 Readiness timing note: `/metrics/overall-health` (and the container health that follows it)
 starts **fail-closed** and turns 200 once at least one chain has verified a provider — at
