@@ -87,6 +87,33 @@ resp-cache:
 	}
 }
 
+// MAG-3631 end to end: the lifetimes a RESP-backed router applies are the
+// operator's, and GET /debug/cache-state reports them — the same surface the
+// ticket read the 60 minutes off. The chart's shipped multiplier of 1.5 on the
+// default hour is the case that was silently lost.
+func TestSelectBackendRespExpirationFromConfig(t *testing.T) {
+	mr := miniredis.RunT(t)
+	tuned := selectBackend(t, fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+  expiration:
+    finalized-multiplier: 1.5
+`, mr.Addr()))
+	respCache, ok := tuned.(*performance.RespCache)
+	require.True(t, ok)
+	lifetimes := respCache.DebugCacheState().Lifetimes
+	require.NotNil(t, lifetimes)
+	require.Equal(t, float64(90*60), lifetimes.FinalizedSeconds, "settled answers keep the 90 minutes the chart gives every sidecar deployment")
+	require.Equal(t, 0.5, lifetimes.NonFinalizedSeconds, "an unnamed field stays at the engine's default")
+
+	plain := selectBackend(t, fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+`, mr.Addr()))
+	plainLifetimes := plain.(*performance.RespCache).DebugCacheState().Lifetimes
+	require.Equal(t, float64(60*60), plainLifetimes.FinalizedSeconds, "no block, no change: the defaults are exactly what shipped")
+}
+
 // Precedence + rollback: with BOTH configured the RESP backend serves (and the
 // gRPC cache stays untouched); removing the resp-cache block reverts to the
 // preserved cache-be — the PRD's rollback flow, config-change only.

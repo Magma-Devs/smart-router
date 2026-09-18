@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -52,11 +53,22 @@ resp-cache:
     enabled: true
     ca-file: /certs/ca.pem
     server-name: cache.internal
+  expiration:
+    finalized: 2h
+    finalized-multiplier: 1.5
+    non-finalized: 1s
+    non-finalized-multiplier: 1.25
+    node-errors: 100ms
+    blocks-hashes-to-heights: 24h
 `)
 	cfg, enabled, err := LoadRespCacheConfig(v)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	require.Equal(t, redisstore.TopologySentinel, cfg.Topology)
+	require.Equal(t, 3*time.Hour, cfg.Expiration.Policy().Finalized, "the expiration block reaches the engine's TTL table (MAG-3631)")
+	require.Equal(t, 1250*time.Millisecond, cfg.Expiration.Policy().NonFinalized)
+	require.Equal(t, 100*time.Millisecond, cfg.Expiration.Policy().NodeErrors)
+	require.Equal(t, 24*time.Hour, cfg.Expiration.Policy().BlocksHashesToHeights)
 	require.Equal(t, []string{"s1:26379", "s2:26379"}, cfg.Addresses)
 	require.Equal(t, []string{"reader:6379"}, cfg.ReadAddresses)
 	require.Equal(t, "mymaster", cfg.MasterName)
@@ -73,6 +85,43 @@ resp-cache:
 	require.True(t, cfg.TLS.Enabled)
 	require.Equal(t, "/certs/ca.pem", cfg.TLS.CAFile)
 	require.Equal(t, "cache.internal", cfg.TLS.ServerName)
+}
+
+// MAG-3631: a partial expiration block keeps the defaults for what it does
+// not name, and — because the block is decoded strictly — a misspelled key is
+// refused rather than silently leaving the router on the defaults, which is
+// the exact shape of the original defect.
+func TestLoadRespCacheConfigExpirationBlock(t *testing.T) {
+	v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  expiration:
+    finalized-multiplier: 1.5
+`)
+	cfg, enabled, err := LoadRespCacheConfig(v)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	policy := cfg.Expiration.Policy()
+	require.Equal(t, 90*time.Minute, policy.Finalized, "the chart's shipped multiplier, now reachable on a RESP backend")
+	require.Equal(t, core.DefaultExpirationForNonFinalized, policy.NonFinalized, "unnamed fields keep the engine's defaults")
+
+	v, _ = newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  expiration:
+    finalised: 2h
+`)
+	_, _, err = LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "finalised", "a misspelled expiration key must not fall back to the defaults in silence")
+
+	v, _ = newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  expiration:
+    finalized: -1h
+`)
+	_, _, err = LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "expiration.finalized")
 }
 
 func TestLoadRespCacheConfigAbsentIsDisabled(t *testing.T) {
