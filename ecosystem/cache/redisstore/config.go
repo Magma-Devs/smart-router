@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -168,6 +169,26 @@ func (cfg Config) Validate() error {
 	// produced (MAG-3671).
 	if cfg.topology() != TopologySentinel && cfg.MasterName != "" {
 		return fmt.Errorf("resp-cache: master-name %q is set but topology is %q — dangling configuration: master-name is only read under topology: sentinel (set it, or remove master-name)", cfg.MasterName, cfg.topology())
+	}
+	// Standalone dials exactly one address (standaloneOptions takes the first
+	// element), where sentinel and cluster take the whole list. A longer list
+	// here used to be truncated in silence while the startup line echoed every
+	// address back at the operator, so a "spare" written for redundancy — or a
+	// list left behind when moving a block from a multi-node topology — read as
+	// confirmed and did nothing (MAG-3672). Refused rather than warned: there is
+	// no reading of a two-address standalone block under which the operator
+	// wanted the second one ignored. Checked after the master-name rule on
+	// purpose: a sentinel block that forgot its topology line trips both, and
+	// the master-name message is the precise diagnosis of that mistake.
+	if cfg.topology() == TopologyStandalone {
+		if len(cfg.Addresses) > 1 {
+			return fmt.Errorf("resp-cache: %d addresses are configured but topology is standalone, which dials exactly one — %s would be ignored (dangling configuration: set topology: sentinel or cluster, or configure a single address)",
+				len(cfg.Addresses), strings.Join(cfg.Addresses[1:], ", "))
+		}
+		if len(cfg.ReadAddresses) > 1 {
+			return fmt.Errorf("resp-cache: %d read-addresses are configured but topology is standalone, which dials exactly one — %s would be ignored (dangling configuration: set topology: sentinel or cluster, or configure a single read address)",
+				len(cfg.ReadAddresses), strings.Join(cfg.ReadAddresses[1:], ", "))
+		}
 	}
 	if cfg.topology() == TopologyCluster && cfg.DB != 0 {
 		return fmt.Errorf("resp-cache: db selection is not available in cluster topology")

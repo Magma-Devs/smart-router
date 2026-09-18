@@ -62,7 +62,7 @@ router never starts half-configured.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `topology` | `standalone` | `standalone` \| `sentinel` \| `cluster`. |
-| `addresses` | — (required) | Standalone: the node address. Sentinel: the **sentinel** addresses. Cluster: the **configuration endpoint** used as the discovery seed — never a node list; the client discovers topology itself. |
+| `addresses` | — (required) | Standalone: the node address — **exactly one**; a longer list is refused at startup rather than silently truncated to its first element, because standalone has no failover to give a spare to. Sentinel: the **sentinel** addresses. Cluster: the **configuration endpoint** used as the discovery seed — never a node list; the client discovers topology itself. |
 | `read-addresses` | *(unset)* | Optional separate endpoint(s) for **reads** (reader endpoints). Writes stay on `addresses`. Selects an *endpoint*, not a replica role — see the caveat under [Multi-region reads](#multi-region-reads-readwrite-split). |
 | `master-name` | — | Sentinel only (required there): the monitored master set name. Refused under any other topology — a `master-name` with the `topology: sentinel` line forgotten is dangling configuration, since the router would otherwise dial the first sentinel address as a plain data node. |
 | `username` / `password` | *(unset)* | Static data-node credentials (AUTH / ACL). |
