@@ -3,11 +3,13 @@ package redisstore
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
+	"weak"
 
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/redis/go-redis/v9/auth"
@@ -182,11 +184,24 @@ func (c basicCredentials) RawCredentials() string      { return c.username + ":"
 // subscribed connection, which re-AUTHs IN PLACE — rotation without
 // disconnect or redial. A poll loop (Store-owned) drives Refresh for
 // file-backed sources; tests and custom integrations may call it directly.
+//
+// Subscriptions are held WEAKLY, anchored only by the unsubscribe closure that
+// go-redis stores on the connection itself. A connection whose setup fails —
+// the store closed or reset it during HELLO — is moved to the closed state and
+// abandoned: the client never calls Close on it, so the unsubscribe never runs,
+// and a provider holding the listener strongly kept the connection, its two
+// 32 KiB buffers and its socket for the life of the process — about eight of
+// them per request for as long as an outage lasted, until the router was
+// killed for memory (MAG-3728). Anchored to the connection instead, a
+// subscription lives exactly as long as the connection is reachable: a live
+// pooled connection carries its own unsubscribe closure, so rotation still
+// reaches it, and an abandoned one becomes garbage with everything it held;
+// the runtime closes its socket when it reclaims it.
 type StreamingProvider struct {
 	source CredentialsSource
 
 	mu        sync.Mutex
-	listeners map[int]auth.CredentialsListener
+	listeners map[int]weak.Pointer[subscription]
 	nextID    int
 	// lastRaw is the credential set the subscribers were last given, the
 	// baseline Refresh compares a read against to decide whether to push.
@@ -211,10 +226,17 @@ type StreamingProvider struct {
 
 var _ auth.StreamingCredentialsProvider = (*StreamingProvider)(nil)
 
+// subscription is one subscribed connection's listener, a separate allocation
+// so the provider can hold it weakly while the unsubscribe closure handed back
+// to go-redis holds it strongly.
+type subscription struct {
+	listener auth.CredentialsListener
+}
+
 func NewStreamingProvider(source CredentialsSource) *StreamingProvider {
 	return &StreamingProvider{
 		source:    source,
-		listeners: map[int]auth.CredentialsListener{},
+		listeners: map[int]weak.Pointer[subscription]{},
 	}
 }
 
@@ -239,23 +261,44 @@ func (p *StreamingProvider) Subscribe(listener auth.CredentialsListener) (auth.C
 			return nil, nil, err
 		}
 	}
+	sub := &subscription{listener: listener}
 
 	p.mu.Lock()
 	id := p.nextID
 	p.nextID++
-	p.listeners[id] = listener
+	p.listeners[id] = weak.Make(sub)
 	if p.lastRaw == "" {
 		p.lastRaw = creds.RawCredentials()
 	}
 	p.mu.Unlock()
 
+	// The closure is the subscription's only strong anchor (see the type
+	// comment): go-redis stores it on the connection, so the subscription is
+	// reachable exactly while the connection is, and no longer.
 	unsubscribe := func() error {
 		p.mu.Lock()
 		delete(p.listeners, id)
 		p.mu.Unlock()
+		runtime.KeepAlive(sub)
 		return nil
 	}
 	return creds, unsubscribe, nil
+}
+
+// liveListenersLocked returns the listeners of subscriptions whose connection
+// is still reachable and forgets the rest: a collected subscription belonged
+// to a connection the client abandoned without unsubscribing. Caller holds mu.
+func (p *StreamingProvider) liveListenersLocked() []auth.CredentialsListener {
+	listeners := make([]auth.CredentialsListener, 0, len(p.listeners))
+	for id, ref := range p.listeners {
+		sub := ref.Value()
+		if sub == nil {
+			delete(p.listeners, id)
+			continue
+		}
+		listeners = append(listeners, sub.listener)
+	}
+	return listeners
 }
 
 // Refresh re-reads the source and, when the credentials changed, pushes them
@@ -274,10 +317,7 @@ func (p *StreamingProvider) Refresh() {
 		return
 	}
 	p.lastRaw = creds.RawCredentials()
-	listeners := make([]auth.CredentialsListener, 0, len(p.listeners))
-	for _, l := range p.listeners {
-		listeners = append(listeners, l)
-	}
+	listeners := p.liveListenersLocked()
 	p.mu.Unlock()
 
 	utils.LavaFormatInfo("resp-cache credentials rotated; re-authenticating live connections", utils.LogAttr("connections", len(listeners)))
@@ -346,11 +386,12 @@ func (p *StreamingProvider) noteSourceRecovered() {
 	}
 }
 
-// subscriberCount reports live subscriptions (observability/tests).
+// subscriberCount reports live subscriptions (observability/tests): those
+// whose connection is still reachable.
 func (p *StreamingProvider) subscriberCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.listeners)
+	return len(p.liveListenersLocked())
 }
 
 // watchCredentials polls Refresh until stop closes — the rotation driver for
