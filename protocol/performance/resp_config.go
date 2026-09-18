@@ -140,8 +140,12 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 		if storeErr != nil {
 			return nil, storeErr
 		}
+		// The RESOLVED topology, never the raw field: an omitted topology printed
+		// as a blank here, which is how a sentinel configuration missing its
+		// topology line ran as standalone without a trace (MAG-3671).
 		utils.LavaFormatInfo("resp-cache backend configured",
-			utils.LogAttr("topology", respConfig.Topology),
+			utils.LogAttr("topology", respConfig.EffectiveTopology()),
+			utils.LogAttr("master-name", respConfig.MasterName),
 			utils.LogAttr("addresses", respConfig.Addresses),
 			utils.LogAttr("read-addresses", respConfig.ReadAddresses),
 			utils.LogAttr("key-prefix", respConfig.KeyPrefix),

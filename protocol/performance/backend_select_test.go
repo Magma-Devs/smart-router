@@ -233,3 +233,20 @@ resp-cache:
 	})
 	require.NotContains(t, anonymous, warning, "with nothing to protect there is nothing to warn about")
 }
+
+// MAG-3671, the second finding: the startup line printed the raw topology
+// field, so an omitted topology showed as a blank and the only surface that
+// could have revealed a misresolved configuration said nothing. It must name
+// the topology the client was actually built with.
+func TestSelectBackendLogsTheResolvedTopology(t *testing.T) {
+	mr := miniredis.RunT(t)
+	logged := captureLog(t, func() {
+		backend := selectBackend(t, fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+`, mr.Addr()))
+		require.True(t, backend.CacheActive())
+	})
+	require.Contains(t, logged, "resp-cache backend configured")
+	require.Contains(t, logged, `"topology":"standalone"`, "an omitted topology is reported as what it resolves to, not as a blank")
+}

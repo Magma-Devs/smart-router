@@ -165,6 +165,16 @@ func (cfg Config) Validate() error {
 	if cfg.topology() != TopologySentinel && (cfg.SentinelUsername != "" || cfg.SentinelPassword != "" || cfg.SentinelPasswordFile != "") {
 		return fmt.Errorf("resp-cache: sentinel-* credentials are set but topology is %q — dangling configuration", cfg.topology())
 	}
+	// The other half of the check above. A master-name is read by nothing
+	// except the sentinel client, so under any other topology the operator
+	// wrote a sentinel configuration and left out the line that says so: the
+	// router then dialled the first sentinel address as an ordinary data node,
+	// every cache operation failed, and the startup line printed a blank
+	// topology — byte for byte what a configuration with no master-name at all
+	// produced (MAG-3671).
+	if cfg.topology() != TopologySentinel && cfg.MasterName != "" {
+		return fmt.Errorf("resp-cache: master-name %q is set but topology is %q — dangling configuration: master-name is only read under topology: sentinel (set it, or remove master-name)", cfg.MasterName, cfg.topology())
+	}
 	if cfg.topology() == TopologyCluster && cfg.DB != 0 {
 		return fmt.Errorf("resp-cache: db selection is not available in cluster topology")
 	}
@@ -190,6 +200,16 @@ func (cfg Config) topology() Topology {
 		return TopologyStandalone
 	}
 	return cfg.Topology
+}
+
+// EffectiveTopology is the topology the client is actually built with:
+// standalone when the field is empty. Anything that reports the configuration
+// back to an operator must print THIS and not the raw field — the startup line
+// used to print the field, so an omitted topology showed up as a blank, and a
+// sentinel configuration missing its topology line left no trace that it had
+// been resolved as standalone (MAG-3671).
+func (cfg Config) EffectiveTopology() Topology {
+	return cfg.topology()
 }
 
 func (cfg Config) refreshInterval() time.Duration {
