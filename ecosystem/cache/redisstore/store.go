@@ -172,6 +172,7 @@ func New(cfg Config) (*Store, error) {
 		Addresses:     append([]string(nil), cfg.Addresses...),
 		ReadAddresses: append([]string(nil), cfg.ReadAddresses...),
 		KeyPrefix:     store.prefix,
+		TLSInsecure:   cfg.TLS.Enabled && cfg.TLS.InsecureSkipVerify,
 	}
 	store.writeEndpoint = writeTracker
 	store.readEndpoint = readTracker
@@ -213,6 +214,13 @@ type storeEndpoints struct {
 	Addresses     []string
 	ReadAddresses []string
 	KeyPrefix     string
+	// TLSInsecure records that the connection is encrypted but the backend's
+	// certificate is NOT verified (tls.insecure-skip-verify). Rendered so a
+	// deployment running without that check is distinguishable from one running
+	// with it — the setting is set once for a development environment and then
+	// travels, and the person reading the deployment months later is not the
+	// person who set it (MAG-3684).
+	TLSInsecure bool
 }
 
 // String renders the endpoints for the debug payload's address field. Read
@@ -222,7 +230,7 @@ func (e storeEndpoints) String() string {
 	if len(e.Addresses) == 0 && len(e.ReadAddresses) == 0 {
 		return ""
 	}
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if len(e.Addresses) > 0 {
 		parts = append(parts, strings.Join(e.Addresses, ","))
 	}
@@ -231,6 +239,9 @@ func (e storeEndpoints) String() string {
 	}
 	if e.KeyPrefix != "" {
 		parts = append(parts, "prefix="+e.KeyPrefix)
+	}
+	if e.TLSInsecure {
+		parts = append(parts, "tls=insecure-skip-verify")
 	}
 	return strings.Join(parts, " ")
 }
