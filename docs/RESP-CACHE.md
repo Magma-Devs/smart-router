@@ -45,6 +45,10 @@ resp-cache:
   addresses: ["my-valkey:6379"]
 ```
 
+If more than one router deployment shares the backend, also give each its own `key-prefix`
+(or `--resp-cache-key-prefix`) — see
+[Sharing a backend between routers](#sharing-a-backend-between-routers).
+
 Docker Compose (starts a valkey next to the router):
 
 ```bash
@@ -57,7 +61,9 @@ SR_CONFIG=config/smartrouter_examples/smartrouter_eth_resp_cache.yml \
 
 Everything lives under the `resp-cache:` block. Setting any of it **without `addresses`** is
 rejected at startup (dangling configuration), as is every invalid combination below — the
-router never starts half-configured.
+router never starts half-configured. A key the block does not define is rejected too: a
+misspelled `key-prefix` used to be ignored and put the router on the shared default without
+a word.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -70,7 +76,7 @@ router never starts half-configured.
 | `credential-refresh-interval` | `10s` | Poll cadence for `password-file`. |
 | `sentinel-username` / `sentinel-password` / `sentinel-password-file` | *(unset)* | **Sentinel control-plane** credentials — sentinels authenticate independently of the data nodes; hardened deployments fail discovery without these. Only valid with `topology: sentinel`, and read once at startup (rotating them needs a restart). |
 | `db` | `0` | Logical database (standalone/sentinel only; rejected for cluster). |
-| `key-prefix` | `sr` | Namespace for every key. Restricted to `[A-Za-z0-9._-]+` (flush uses it as a `SCAN MATCH` glob). Give each deployment sharing a backend its own prefix — flush isolation follows from it. |
+| `key-prefix` | `sr` | The keyspace this router occupies; flag form `--resp-cache-key-prefix` (outranks the block). Restricted to `[A-Za-z0-9._-]+` (flush uses it as a `SCAN MATCH` glob). **Routers on one prefix serve each other's cached answers and resolve `latest` off one chain tip**, and the default puts every router that leaves it unset in one keyspace — give each deployment sharing a backend its own prefix unless its routers are replicas reading the same nodes; flush isolation follows from it. See [Sharing a backend between routers](#sharing-a-backend-between-routers). |
 | `tls.enabled` | `false` | TLS to the backend. **Required (`true`) whenever any other `tls.*` key is set** — a `tls` block without it is refused at startup as dangling configuration, because the alternative is a plaintext connection carrying `username`/`password` readable on the wire. That holds for an explicit `enabled: false` beside those keys too. To run without TLS, remove the other `tls.*` keys or the whole block; `tls: {enabled: false}` on its own is accepted. |
 | `tls.ca-file` | *(system pool)* | PEM CA bundle for server verification. |
 | `tls.cert-file` / `tls.key-file` | *(unset)* | Client keypair for mTLS (both or neither). |
@@ -282,12 +288,50 @@ polls would look healthy *because of* the first poll.
 > `--debug-address 127.0.0.1:6161` rather than `:6161`, and reach it through
 > `kubectl port-forward` in a cluster.
 
+## Sharing a backend between routers
+
+A keyspace is one cache. Every router in it reads and writes the same entries, resolves
+`latest` / `safe` / `finalized` / `pending` through the same chain tip, shares the same
+block-hash→height mappings, and — under `--shared-state` — the same seen-block and
+sticky-session claims. That is exactly right for **replicas of one deployment**: they read
+the same nodes, so an answer one of them cached is the answer any of them would have fetched.
+
+It is wrong for two routers that declare the same chain but read **different nodes** — a
+paid tier beside a free one, a canary beside production, a router being migrated onto a new
+node set while the old one still serves. In one keyspace whichever router asks first decides
+the answer both give for as long as the entry lives, the response reports `Cached` in place
+of a node name, and nothing on either side signals it (MAG-3521). The condition is therefore:
+**routers sharing a keyspace must read the same nodes.** Anything else needs its own
+keyspace:
+
+| Backend | Setting | Default |
+| --- | --- | --- |
+| RESP (this page) | `resp-cache.key-prefix` / `--resp-cache-key-prefix` | `sr` — one shared keyspace for every router that leaves it unset |
+| gRPC sidecar (`cache-be`) | `cache-be-key-prefix` / `--cache-be-key-prefix` | empty — the shared keyspace every router occupied before the setting existed |
+
+Both take the same character set (`[A-Za-z0-9._-]+`), so one value works on either backend.
+On the RESP backend the prefix heads every key (`<prefix>:rel:f:ETH1:…`); on the sidecar it
+travels inside each request and the server folds it into every key it derives
+(`rel:f:<prefix>:ETH1:…`), which is why **the sidecar has to be a build that knows the
+field** — an older `smart-router cache` drops it on the wire silently and isolates nothing.
+`GET /debug/cache-state` names the keyspace in the tier's `address` (`prefix=…`) on both
+backends, so two routers can be checked for separation without sending traffic.
+
+What a prefix does **not** do: replicas that share a keyspace on purpose still share one
+chain tip, and that tip is a monotonic maximum with no downward path before expiry — one
+replica publishing a false high block pins `latest` resolution for its whole fleet. That is a
+trust problem rather than a naming one and is tracked separately (MAG-3755).
+
 ## Flush semantics
 
 The router's `/debug/reset-all` flushes the RESP backend **prefix-scoped**: `SCAN` over
 `key-prefix:*` with single-key `UNLINK`s. `FLUSHDB` is never issued, so a shared backend's
 other tenants (and other prefixes) are untouched. If two deployments must be flush-isolated,
 give them distinct prefixes.
+
+The gRPC sidecar is the exception: its in-memory store cannot enumerate keys by prefix, so a
+`/debug/reset-all` on any router empties **every** keyspace on that sidecar. Routers that must
+be flush-isolated from each other need separate sidecars, or the RESP backend.
 
 ## Precedence and rollback
 
