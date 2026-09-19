@@ -181,7 +181,7 @@ func extractBlockHeightFromEVMResponse(responseData []byte, method string) int64
 			}
 		}
 
-	case "eth_getBlockByNumber", "eth_getBlockByHash":
+	case "eth_getBlockByNumber", "eth_getBlockByHash", "eth_getUncleByBlockHashAndIndex":
 		result, err := unmarshalEVMResponseData(responseData)
 		if err != nil {
 			return 0
@@ -195,12 +195,14 @@ func extractBlockHeightFromEVMResponse(responseData []byte, method string) int64
 			}
 		}
 
-	case "eth_getTransactionReceipt":
+	case "eth_getTransactionReceipt", "eth_getTransactionByHash", "eth_getTransactionByBlockHashAndIndex":
 		result, err := unmarshalEVMResponseData(responseData)
 		if err != nil {
 			return 0
 		}
-		// Response: {"result": {"blockNumber": "0x12a7b5c", ...}}
+		// Response: {"result": {"blockNumber": "0x12a7b5c", ...}}; a pending or unknown
+		// transaction answers null and yields 0, which the cache write reads as
+		// "no block, never settled" (byHashFinalized).
 		if receiptObj, ok := result.(map[string]interface{}); ok {
 			if blockNumHex, ok := receiptObj["blockNumber"].(string); ok && len(blockNumHex) > 2 {
 				if block, err := strconv.ParseInt(blockNumHex[2:], 16, 64); err == nil {
