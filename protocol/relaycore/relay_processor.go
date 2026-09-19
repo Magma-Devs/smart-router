@@ -16,7 +16,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -32,7 +31,6 @@ type RelayProcessor struct {
 	allowSessionDegradation      uint32 // used in the scenario where extension was previously used.
 	metricsInf                   MetricsInterface
 	chainIdAndApiInterfaceGetter ChainIdAndApiInterfaceGetter
-	relayRetriesManager          *lavaprotocol.RelayRetriesManager
 	ResultsManager
 	RelayStateMachine
 	// quorumMap tracks, per identical response hash, how many providers returned it and which distinct
@@ -108,7 +106,6 @@ func NewRelayProcessor(
 	crossValidationParams *common.CrossValidationParams, // nil for Stateless/Stateful
 	metricsInf MetricsInterface,
 	chainIdAndApiInterfaceGetter ChainIdAndApiInterfaceGetter,
-	relayRetriesManager *lavaprotocol.RelayRetriesManager,
 	relayStateMachine RelayStateMachine,
 ) *RelayProcessor {
 	guid, _ := utils.GetUniqueIdentifier(ctx)
@@ -140,7 +137,6 @@ func NewRelayProcessor(
 		debugRelay:                   relayStateMachine.GetDebugState(),
 		metricsInf:                   metricsInf,
 		chainIdAndApiInterfaceGetter: chainIdAndApiInterfaceGetter,
-		relayRetriesManager:          relayRetriesManager,
 		RelayStateMachine:            relayStateMachine,
 		selection:                    selection,
 		usedProviders:                relayStateMachine.GetUsedProviders(),
@@ -148,7 +144,6 @@ func NewRelayProcessor(
 		currentQuorumEqualResults:    0,
 	}
 	relayProcessor.RelayStateMachine.SetResultsChecker(relayProcessor)
-	relayProcessor.RelayStateMachine.SetRelayRetriesManager(relayRetriesManager)
 	return relayProcessor
 }
 
@@ -539,14 +534,9 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 	defer rp.lock.RUnlock()
 	resultsCount, nodeErrors, specialNodeErrors, protocolErrors := rp.GetResults()
 
-	hash, hashErr := rp.getInputMsgInfoHashString()
-
 	// CrossValidation mode: check if agreementThreshold is met across the required number of groups
 	if rp.selection == CrossValidation {
 		if rp.crossValidationQuorumReached() {
-			if hashErr == nil {
-				go rp.relayRetriesManager.RemoveHashFromCache(hash)
-			}
 			if rp.debugRelay {
 				utils.LavaFormatDebug("HasRequiredNodeResults CrossValidation quorum (count+diversity) met",
 					utils.LogAttr("GUID", rp.guid),
@@ -576,10 +566,6 @@ func (rp *RelayProcessor) HasRequiredNodeResults(tries int) (bool, int) {
 	// Original logic for Stateless and Stateful modes
 	// For Stateless/Stateful, we need at least 1 successful response
 	if resultsCount >= 1 {
-		if hashErr == nil { // Incase we had a successful relay we can remove the hash from our relay retries map
-			// Use a routine to run it in parallel
-			go rp.relayRetriesManager.RemoveHashFromCache(hash)
-		}
 		if rp.debugRelay {
 			utils.LavaFormatDebug("HasRequiredNodeResults requirements met",
 				utils.LogAttr("GUID", rp.guid),

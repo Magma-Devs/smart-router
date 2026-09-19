@@ -86,7 +86,6 @@ type RPCSmartRouterServer struct {
 	relaysMonitor        *metrics.RelaysMonitor
 	debugRelays          bool
 	chainListener        chainlib.ChainListener
-	relayRetriesManager  *lavaprotocol.RelayRetriesManager
 	initialized          atomic.Bool
 	enableSelectionStats bool // feature flag to enable selection stats header
 
@@ -158,7 +157,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.wsSubscriptionManager = wsSubscriptionManager
 	rpcss.debugRelays = cmdFlags.DebugRelays
 	rpcss.enableSelectionStats = cmdFlags.EnableSelectionStats
-	rpcss.relayRetriesManager = lavaprotocol.NewRelayRetriesManager()
 
 	// Load optional per-method cross-validation policies (empty => header-driven CV only, fully
 	// backwards compatible). Fail fast on invalid config.
@@ -835,7 +833,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		crossValidationParams,
 		rpcss.rpcSmartRouterLogs,
 		rpcss,
-		rpcss.relayRetriesManager,
 		stateMachine,
 	)
 	usedEndpointsResets := 1
@@ -1383,7 +1380,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 			&failFastParams,
 			rpcss.rpcSmartRouterLogs,
 			rpcss,
-			rpcss.relayRetriesManager,
 			stateMachine,
 		)
 		if reason != "" {
@@ -1402,7 +1398,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		crossValidationParams,
 		rpcss.rpcSmartRouterLogs,
 		rpcss,
-		rpcss.relayRetriesManager,
 		stateMachine,
 	)
 	// Cross-validation remains strict: accepting stale participants would change
@@ -3848,8 +3843,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 // that just failed — otherwise a pinned provider that returned a retryable node error gets
 // re-selected, or the retry dead-ends on "Selected provider cannot be retried"
 // (MAG-2228). firstAttempt is BatchNumber()==0, which stays 0 when attempt 1 never reached a
-// provider (e.g. PairingListEmpty), so the pin is correctly re-honored in that case. Mirrors
-// preserveRetrySafeDirectives, which omits both directives on a rebuilt archive retry.
+// provider (e.g. PairingListEmpty), so the pin is correctly re-honored in that case.
 func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string, firstAttempt bool) (selectedProvider, stickiness string) {
 	if !firstAttempt {
 		return "", ""
