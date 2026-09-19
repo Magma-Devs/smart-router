@@ -3749,22 +3749,21 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	// a stale or too-high head here would falsely finalize a mutable block into the long-TTL store.
 	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
 
-	// Convert LATEST_BLOCK to actual block number for cache key
-	// This must match the logic in cache lookup (sendRelayToEndpoint) to ensure cache hits
+	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the
+	// block the lookup in sendRelayToEndpoint computes for the same request, which is why
+	// both call latestCacheBlock: an entry is only ever found under the key it was
+	// written to.
 	requestedBlockForCache := requestedBlock
 	if resolvedBlock != nil && *resolvedBlock >= 0 {
 		// Exact-key backfill: the caller proved this block is the server-side
 		// key that hit — trust it over re-derivation.
 		requestedBlockForCache = *resolvedBlock
 	} else if requestedBlock == spectypes.LATEST_BLOCK {
-		// Use the latest block from the response (most accurate)
-		if latestBlock > 0 {
-			requestedBlockForCache = latestBlock
-		} else if relayData.SeenBlock > 0 {
-			// Fallback to seen block
-			requestedBlockForCache = relayData.SeenBlock
-		} else {
-			// Skip caching if we can't determine the actual block
+		// Never Reply.LatestBlock here: for a receipt or a block fetched by its hash that
+		// is the historical block of the object, a key no lookup asks for (MAG-3460).
+		requestedBlockForCache = rpcss.latestCacheBlock(relayData)
+		if requestedBlockForCache <= 0 {
+			// No tip was known at parse time or now, so there is no key to file this under.
 			utils.LavaFormatDebug("cache write skipped: cannot resolve LATEST_BLOCK",
 				utils.LogAttr("GUID", ctx),
 			)
@@ -4016,20 +4015,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 					// The cache server doesn't accept negative blocks
 					requestedBlockForCache := reqBlock
 					if reqBlock == spectypes.LATEST_BLOCK {
-						// For LATEST_BLOCK queries, use the current chain tip rather than the value
-						// stamped when this request started, so methods like eth_blockNumber cache
-						// against the actual current block. The tip advances continuously from every
-						// accepted observation, so it is at least as fresh as the per-user seenBlock
-						// this replaced (Topic C C-G) and is anti-lie-guarded besides.
-						latestKnownBlock := int64(rpcss.getLatestBlock())
-						if latestKnownBlock > 0 {
-							requestedBlockForCache = latestKnownBlock
-						} else if localRelayData.SeenBlock != 0 {
-							// Fallback to seen block from the protocol message
-							requestedBlockForCache = localRelayData.SeenBlock
-						} else {
-							requestedBlockForCache = 0 // Final fallback
-						}
+						// The one resolution the write shares (latestCacheBlock): an entry is only
+						// ever found under the key it was written to. 0 when no tip is known yet.
+						requestedBlockForCache = rpcss.latestCacheBlock(localRelayData)
 					}
 
 					// Always use finalized=false for lookups
