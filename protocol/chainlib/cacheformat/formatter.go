@@ -12,6 +12,11 @@ import (
 const (
 	IDFieldName    = "id"
 	DefaultIDValue = 1
+	// noExtractedID is restored when the output formatter runs for a reply whose
+	// request id was never extracted (the input formatter never ran, or ran on a
+	// batch while the reply is a single object). It is the JSON text the previous
+	// implementation produced for that edge, kept so the edge stays wire-compatible.
+	noExtractedID = `"-1"`
 )
 
 // FormatterForRelayRequestAndResponse returns input and output formatter functions for the given
@@ -34,9 +39,14 @@ func IdentityFormatter() (inputFormatter func([]byte) []byte, outputFormatter fu
 
 // FormatterForRelayRequestAndResponseJsonRPC returns formatters that remove the JSON-RPC id from
 // requests (so cache keys are id-independent) and restore the original id in responses.
+//
+// The id is carried between the two as the raw JSON text it arrived in and written back
+// verbatim, never decoded and re-encoded: the id belongs to the caller, and the only way
+// to return it byte for byte — `"abc"` as `"abc"`, a fractional or oversized number as
+// itself — is to never interpret it (MAG-3611).
 func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) []byte, outputFormatter func([]byte) []byte) {
-	var extractedID interface{} = "-1"
-	extractedIDArray := []interface{}{}
+	extractedID := noExtractedID
+	extractedIDArray := []string{}
 
 	inputFormatter = func(inpData []byte) []byte {
 		if len(inpData) < 3 {
@@ -47,7 +57,7 @@ func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) [
 		if err == nil && len(batch) >= 1 {
 			modifiedInpArray := []json.RawMessage{}
 			for _, batchData := range batch {
-				var extractedIDForBatch interface{}
+				var extractedIDForBatch string
 				var modifiedInp []byte
 				modifiedInp, extractedIDForBatch, err = getExtractedIDAndModifyInputForJSON(batchData)
 				if err != nil {
@@ -80,7 +90,7 @@ func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) [
 		if err == nil && len(batch) >= 1 && len(extractedIDArray) == len(batch) {
 			modifiedInpArray := []json.RawMessage{}
 			for i, batchData := range batch {
-				modifiedInp, err := sjson.SetBytes(batchData, IDFieldName, extractedIDArray[i])
+				modifiedInp, err := sjson.SetRawBytes(batchData, IDFieldName, []byte(extractedIDArray[i]))
 				if err != nil {
 					utils.LavaFormatWarning("failed to set id in batch cache", err)
 					return inpData
@@ -94,7 +104,7 @@ func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) [
 			}
 			return modifiedOut
 		}
-		modifiedInp, err := sjson.SetBytes(inpData, IDFieldName, extractedID)
+		modifiedInp, err := sjson.SetRawBytes(inpData, IDFieldName, []byte(extractedID))
 		if err != nil {
 			utils.LavaFormatWarning("failed to set input id in cache", err)
 			return inpData
@@ -105,15 +115,17 @@ func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) [
 	return inputFormatter, outputFormatter
 }
 
-func getExtractedIDAndModifyInputForJSON(inpData []byte) (modifiedInp []byte, extractedID interface{}, err error) {
+// getExtractedIDAndModifyInputForJSON replaces the caller's id with the fixed
+// DefaultIDValue, so every caller's request hashes to the same cache key, and
+// returns the id it removed as raw JSON text: `"abc"` for a text id, `80001` for a
+// number, `null` for a null one. A request that carries no id at all (a
+// notification) also restores as null, which is what its reply carried before
+// ids were kept raw.
+func getExtractedIDAndModifyInputForJSON(inpData []byte) (modifiedInp []byte, extractedID string, err error) {
 	result := gjson.GetBytes(inpData, IDFieldName)
-	switch result.Type {
-	case gjson.Number:
-		extractedID = result.Int()
-	case gjson.String:
-		extractedID = result.Raw
-	default:
-		extractedID = result.Value()
+	extractedID = result.Raw
+	if !result.Exists() || extractedID == "" {
+		extractedID = "null"
 	}
 	modifiedInp, err = sjson.SetBytes(inpData, IDFieldName, DefaultIDValue)
 	if err != nil {
