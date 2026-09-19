@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -13,9 +14,24 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/protocopy"
 )
+
+// usableCachedReply reports whether a foreign cache entry's bytes are a reply this router
+// can serve on the given interface. JSON-RPC and Tendermint replies must be a JSON object
+// or a batch of them (cacheformat.IsRestorableJSONRPCReply), the same shape the output
+// formatter restores an id into. REST and gRPC bodies carry no envelope to judge and are
+// covered by their recorded status alone.
+func usableCachedReply(apiInterface string, data []byte) bool {
+	switch apiInterface {
+	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
+		return cacheformat.IsRestorableJSONRPCReply(data)
+	default:
+		return true
+	}
+}
 
 // secondaryCacheActive reports whether a secondary cache is configured and worth
 // querying. Nil-safe for both the unconfigured case (interface nil) and the concrete
@@ -118,8 +134,26 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		}
 	}
 
+	// Trust boundary, continued: this router never wrote this entry, so its bytes are
+	// judged before they are reshaped or served. An entry that is not a reply at all —
+	// no bytes, a web page, a truncated envelope — is not served as one (MAG-3597): it is
+	// dropped as an error, like a copy failure, and the request proceeds to a provider.
+	// Reshaping such bytes would manufacture a reply (the formatter turned `<html>` into
+	// `{"id":7}` and a truncated object into bytes that do not parse), and serving them
+	// as a node error would put the retry loop through the same entry again.
+	unusable := false
+	if hit && !usableCachedReply(apiInterface, copyReply.Data) {
+		utils.LavaFormatWarning("secondary cache hit dropped: the entry is not a usable reply", nil,
+			utils.LogAttr("GUID", ctx),
+			utils.LogAttr("apiInterface", apiInterface),
+			utils.LogAttr("size", len(copyReply.Data)),
+		)
+		hit = false
+		unusable = true
+	}
+
 	outcome := metrics.ClassifyCacheLookupOutcome(cacheError, hit)
-	if copyFailed {
+	if copyFailed || unusable {
 		outcome = metrics.CacheOutcomeError
 	}
 	tracing.RecordCacheResult(ctx, cacheSpan, metrics.CacheTierSecondary, outcome, hit, latencyMs)
@@ -166,6 +200,21 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// (resolveCachedEntryKind) so both label a replayed node error identically.
 	isNodeError, resolvedData := resolveCachedEntryKind(ctx, cacheReply, copyReply.Data)
 	copyReply.Data = resolvedData
+	// The entry's contents decide its kind, not only the label the other zone attached:
+	// a zone whose build predates the label writes none, and its error body would reach
+	// the caller as a success, without the lava-identified-node-error header the
+	// documentation promises (MAG-3597). CheckResponseError is the verdict a live answer
+	// gets. It reads the envelope on JSON-RPC and Tendermint; on REST and gRPC it decides
+	// from the recorded status, so an error body under a 2xx status still passes there.
+	if !isNodeError {
+		if contentSaysError, errorMessage := protocolMessage.CheckResponseError(copyReply.Data, cacheReply.GetStatusCode()); contentSaysError {
+			isNodeError = true
+			utils.LavaFormatDebug("secondary cache entry served as a node error by its contents",
+				utils.LogAttr("GUID", ctx),
+				utils.LogAttr("error", errorMessage),
+			)
+		}
+	}
 
 	relayResult := common.RelayResult{
 		Reply: copyReply,

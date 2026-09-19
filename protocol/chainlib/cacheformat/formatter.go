@@ -72,7 +72,8 @@ func FormatterForRelayRequestAndResponseJsonRPC() (inputFormatter func([]byte) [
 	}
 
 	outputFormatter = func(inpData []byte) []byte {
-		if len(inpData) == 0 {
+		if !IsRestorableJSONRPCReply(inpData) {
+			// Not a reply an id can be restored into; rewriting it would manufacture one.
 			return inpData
 		}
 		batch := []json.RawMessage{}
