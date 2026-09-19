@@ -226,3 +226,61 @@ func TestPinnedProvider_UnknownNameWithHealthyPoolStillFails(t *testing.T) {
 	require.Equal(t, uint64(0), csm.numberOfResets, "a bad pin must not release anyone's block")
 	require.Len(t, csm.validAddresses, 2)
 }
+
+// The empty-pool half of TestPinnedProvider_UnknownNameWithHealthyPoolStillFails above, which is
+// where that test's own assertion — "a bad pin must not release anyone's block" — actually has
+// teeth. With a healthy pool the release never runs at all: releaseBlockedProvidersIfPoolEmpty
+// returns on its first line. Only once the pool is empty does the request reach the guard, and the
+// guard used to answer on the strength of a provider this request can never be served by.
+//
+// The damage is not to this request, which fails either way. It is that one relay carrying a
+// misspelled header wiped the standing blocked list for every other relay on the router — the
+// state section 5 exists to keep, and the state bench-after and cooldown are built on.
+func TestPinnedProvider_UnknownNameWithEmptyPoolDoesNotRelease(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, true)
+	blockEveryPrimary(csm)
+
+	// Ordinary traffic cannot move this state: it is served by backup and returns before the
+	// release. The pinned path has no backup tier by design, so it reaches the guard alone.
+	for i := 0; i < 3; i++ {
+		_, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+		require.NoError(t, err)
+	}
+	require.Equal(t, uint64(0), csm.numberOfResets, "ordinary traffic must leave the block standing")
+
+	_, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "lava@doesnotexist")
+	require.ErrorIs(t, err, SelectedProviderUnavailableError, "an unknown pin must still fail")
+
+	require.Equal(t, uint64(0), csm.numberOfResets, "an unknown pin must not release anyone's block")
+	require.Empty(t, csm.validAddresses, "the pool must still be empty")
+	require.ElementsMatch(t, []string{"lava@primary0", "lava@primary1"}, csm.currentlyBlockedProviderAddresses,
+		"the standing blocked list must survive a bad header")
+}
+
+// The third way a pinned request reaches the guard: the name IS configured, but that provider
+// cannot serve the collection asked for. A release refills validAddresses from the pairing, which
+// cannot teach a provider an addon it never registered, so it is as useless here as for a name that
+// does not exist — and the guard has to decline it for the same reason.
+//
+// The other primary DOES serve the addon, which is what made the old guard say yes. That provider
+// is exactly the one a pinned request can never be handed.
+func TestPinnedProvider_UnservableAddonWithEmptyPoolDoesNotRelease(t *testing.T) {
+	ctx := context.Background()
+	const addon = "archive"
+
+	pinned := mkProviderForBenchTest("lava@primary0") // no addons: cannot serve the pin's collection
+	capable := mkProviderForBenchTest("lava@primary1")
+	capable.Endpoints[0].Addons = map[string]struct{}{addon: {}}
+
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{0: pinned, 1: capable}, nil))
+	blockEveryPrimary(csm)
+
+	_, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, addon, nil, common.NO_STATE, 0, "", "lava@primary0")
+	require.ErrorIs(t, err, SelectedProviderUnavailableError)
+
+	require.Equal(t, uint64(0), csm.numberOfResets,
+		"another provider serving the addon cannot justify a release for a request pinned to one that does not")
+	require.ElementsMatch(t, []string{"lava@primary0", "lava@primary1"}, csm.currentlyBlockedProviderAddresses)
+}

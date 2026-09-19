@@ -1391,11 +1391,27 @@ func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions 
 // every other relay depends on. That happens whenever the pool empties *during* a request rather
 // than before it: each provider is blocked as it fails, and by the time the last one goes the
 // request has already tried them all.
-func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[string]struct{}, addon string, extensions []string, ctx context.Context) bool {
+//
+// selectedProvider narrows "any of those providers" to the one the request pinned, and is the
+// difference between a release that rescues the request and one that only destroys state. The
+// pinned path reaches this guard for three different reasons — the name is not in the pairing at
+// all, it is in the pairing but blocked, it is in the pairing but cannot serve this addon — and
+// only the middle one is fixed by a release. Without the narrowing the guard answered on the
+// strength of some OTHER provider being available, which is a fact a pinned request can never use:
+// it releases every blocked provider for every other relay and then fails anyway. The addon and
+// extension checks below still run, so the third case is declined on its own merits.
+func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[string]struct{}, addon string, extensions []string, selectedProvider string, ctx context.Context) bool {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
 	for _, address := range csm.pairingAddresses {
+		// Folded rather than resolved through resolveSelectedProviderAddress, which needs a single
+		// winner and returns none for a case collision. The question here is only "could this
+		// address be the pinned one", so the fold is the right superset: an ambiguous pin is one of
+		// the cases a release genuinely can fix, by restoring the exact spelling that resolves it.
+		if selectedProvider != "" && !strings.EqualFold(address, selectedProvider) {
+			continue
+		}
 		if _, alreadyTried := ignored[address]; alreadyTried {
 			continue
 		}
@@ -1433,7 +1449,7 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 	// snapshot after the guard put the diagnosis on the far side of the branch that swallows it.
 	inventory := csm.snapshotPoolInventory(addon, extensionNames, ctx)
 
-	if !csm.releaseCouldServeThisRequest(tempIgnoredProviders.providers, addon, extensionNames, ctx) {
+	if !csm.releaseCouldServeThisRequest(tempIgnoredProviders.providers, addon, extensionNames, selectedProvider, ctx) {
 		// A declined release is usually ordinary retry exhaustion: this request has already tried
 		// every provider, releasing rescues nothing, and that stays at DEBUG.
 		//
@@ -1445,6 +1461,19 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 		// default collection). In all three nothing was tried, and "every provider has already been
 		// tried" is not merely unhelpful, it is false — the request tried nothing. Keying on
 		// pairingSize rescued only the first of the three and left the other two on the false line.
+		//
+		// A pinned request is none of that, so it is answered first. Both lines below describe the
+		// pool, and for a pin the pool is not the finding — the named provider is. It stays at DEBUG
+		// because the loud signal already exists: getValidProviderAddresses logged the pin itself at
+		// ERROR before this chain was ever entered.
+		if selectedProvider != "" {
+			utils.LavaFormatDebug("no release can serve this pinned provider, leaving the blocked list standing",
+				utils.LogAttr("selectedProvider", selectedProvider),
+				utils.LogAttr("addon", addon),
+				utils.LogAttr("extensions", extensionNames),
+				utils.LogAttr("GUID", ctx))
+			return nil, false
+		}
 		if len(tempIgnoredProviders.providers) == 0 {
 			csm.logPoolEmpty(ctx, inventory, addon, extensionNames)
 			return nil, false
