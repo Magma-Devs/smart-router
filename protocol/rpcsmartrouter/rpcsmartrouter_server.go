@@ -3598,11 +3598,38 @@ func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peer
 	)
 }
 
+// cacheExclusionReason names why a request's answer must never be served to another
+// caller from the cache, or returns "" when it may be. Both cache gates — the lookup in
+// sendRelayToEndpoint and the write in tryCacheWriteResolved — consult this one rule, so
+// the two cannot drift apart.
+//
+// Two spec flags decide it. A stateful request (eth_sendRawTransaction) mutates chain
+// state and is broadcast to every upstream; its answer is an event, not a fact. A
+// non-deterministic one (category.deterministic=false: the spec's own statement that the
+// answer is not the same across nodes) creates or names state that lives on ONE node, or
+// reports a fact about one node: eth_newFilter hands back a filter id no other node
+// knows, eth_getFilterLogs reads a filter another caller opened, eth_accounts lists one
+// node's keys. Served from the cache, such an answer reaches a caller it was never
+// produced for (MAG-3461). The flag also covers methods whose answers merely differ
+// across nodes without harm, such as trace and log queries; they stop being cached too.
+// That is the price of taking the spec at its word rather than keeping a method list
+// the spec can drift from, and the spec is where to argue a method's flag.
+func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
+	if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+		return "stateful"
+	}
+	if !chainlib.IsDeterministic(protocolMessage) {
+		return "non-deterministic"
+	}
+	return ""
+}
+
 // tryCacheWrite attempts to write a successful relay response to the cache.
 // It runs in a separate goroutine to avoid blocking the relay response.
 // Cache writes are skipped when:
 // - Cache is not active
 // - Quorum is enabled (quorum requires fresh endpoint validation)
+// - Request is stateful or non-deterministic (cacheExclusionReason)
 // - Response is a node error
 // - Requested block is NOT_APPLICABLE
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
@@ -3634,8 +3661,13 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
-	// Skip if stateful (stateful requests mutate state - must not cache)
-	if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+	// Skip what must never reach another caller: a stateful write, or an answer the
+	// spec says is not reproducible across nodes (cacheExclusionReason).
+	if reason := cacheExclusionReason(protocolMessage); reason != "" {
+		utils.LavaFormatDebug("cache write skipped: "+reason+" request",
+			utils.LogAttr("api", protocolMessage.GetApi().Name),
+			utils.LogAttr("GUID", ctx),
+		)
 		return
 	}
 
@@ -3941,13 +3973,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				utils.LogAttr("agreementThreshold", crossValidationParams.AgreementThreshold),
 				utils.LogAttr("reason", "cross-validation requires fresh endpoint validation, cache would defeat consensus verification"),
 			)
-		} else if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
-			// Stateful requests (e.g. eth_sendTransaction) mutate state - must not read from cache
-			utils.LavaFormatDebug("Cache bypassed due to stateful request",
+		} else if reason := cacheExclusionReason(protocolMessage); reason != "" {
+			// A stateful request mutates state; a non-deterministic one has an answer that
+			// belongs to the node that produced it. Neither may be served from the cache.
+			utils.LavaFormatDebug("Cache bypassed due to "+reason+" request",
 				utils.LogAttr("GUID", ctx),
 				utils.LogAttr("cacheActive", true),
 				utils.LogAttr("api", protocolMessage.GetApi().Name),
-				utils.LogAttr("reason", "stateful requests mutate state and cannot use cached responses"),
+				utils.LogAttr("reason", reason),
 			)
 		} else if protocolMessage.GetForceCacheRefresh() {
 			// User requested cache bypass via header
