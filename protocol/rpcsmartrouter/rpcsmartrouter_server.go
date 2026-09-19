@@ -3748,13 +3748,25 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	// Finalization uses the GATED getLatestBlock (fresh tip or 0), never getLatestBlockAllowStale:
 	// a stale or too-high head here would falsely finalize a mutable block into the long-TTL store.
 	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
+	byHash := identityKeyed(protocolMessage)
+	if byHash {
+		// The object's own block decides the store, re-read from the response rather than
+		// taken from Reply.LatestBlock: a reply that carried no block (a pending
+		// transaction answers null) is stamped downstream with the endpoint's observed
+		// tip, and that value must never settle an answer that can still change.
+		finalized = byHashFinalized(extractBlockHeightFromJSONResponse(relayResult.Reply.Data, protocolMessage), int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
+	}
 
 	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the
 	// block the lookup in sendRelayToEndpoint computes for the same request, which is why
 	// both call latestCacheBlock: an entry is only ever found under the key it was
 	// written to.
 	requestedBlockForCache := requestedBlock
-	if resolvedBlock != nil && *resolvedBlock >= 0 {
+	if byHash {
+		// An answer identified by the object it names lives under one constant key on
+		// both ends, so it survives tip advance (MAG-3462).
+		requestedBlockForCache = identityKeyBlock
+	} else if resolvedBlock != nil && *resolvedBlock >= 0 {
 		// Exact-key backfill: the caller proved this block is the server-side
 		// key that hit — trust it over re-derivation.
 		requestedBlockForCache = *resolvedBlock
@@ -4041,6 +4053,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 						// The one resolution the write shares (latestCacheBlock): an entry is only
 						// ever found under the key it was written to. 0 when no tip is known yet.
 						requestedBlockForCache = rpcss.latestCacheBlock(localRelayData)
+					}
+
+					if identityKeyed(protocolMessage) {
+						// The answer is a property of the object the request names, not of the
+						// tip: its entry lives under one constant key on both ends (MAG-3462).
+						requestedBlockForCache = identityKeyBlock
 					}
 
 					// Always use finalized=false for lookups
