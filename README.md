@@ -230,7 +230,7 @@ Setup scripts are available in `scripts/pre_setups/`:
 The hot path for a single request:
 
 1. **Listen** — a per-interface listener (JSON-RPC, REST, gRPC, or Tendermint RPC) accepts the request and parses it into a normalised internal shape.
-2. **Cache lookup** — for cacheable methods (historical block data, immutable receipts, etc.), the cache layer (`ecosystem/cache`) checks for a recent response. Hits return immediately.
+2. **Cache lookup** — for cacheable methods (historical block data, immutable receipts, etc.), the cache layer (`ecosystem/cache`) checks for a recent response. Hits return immediately. Methods the chain spec marks stateful or non-deterministic (writes, filters, subscriptions, one node's own facts) are never cached: their answers belong to the node that produced them.
 3. **Upstream selection** — on cache miss, the upstream optimiser (`protocol/provideroptimizer`) picks an upstream from the configured pool using QoS-weighted scoring. Healthy/fast upstreams are preferred; flaky ones get backed off automatically.
 4. **Relay + failover** — the request is sent to the chosen upstream. On failure (timeout, malformed response, certain status codes), the retry state machine picks an alternate upstream and retries within a configurable budget.
 5. **Response** — returned to the client with metadata headers (`Smart-Router-Version`, `Lava-Provider-Address`, retry counts, etc.) annotating which upstream served the response. Prometheus metrics are emitted in parallel.
