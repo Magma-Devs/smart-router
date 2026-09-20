@@ -2,9 +2,9 @@ package redisstore
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -60,12 +60,18 @@ func TestLiveRotationAgainstRealValkey(t *testing.T) {
 	credFile := writeTempFile(t, "cred", "rotuser1:rotuser1-pw")
 	provider := NewStreamingProvider(&FileCredentials{Path: credFile})
 
+	// One connection is established before the rotation (no MinIdleConns), and
+	// the pool has room for one more: a connection whose re-authentication
+	// stalled (see rotationSettled) keeps its slot until the pool timeout, and
+	// with PoolSize 1 that left no room for the replacement, so every operation
+	// during the stall dialled one and dropped it again, a dozen dials in six
+	// seconds. That is what a pool at its size limit does in production too; the
+	// dial bound below is about a pool with capacity, the ordinary case.
 	var dials atomic.Int64
 	client := redis.NewClient(&redis.Options{
 		Addr:                         addr,
 		StreamingCredentialsProvider: provider,
-		PoolSize:                     1,
-		MaxIdleConns:                 1,
+		PoolSize:                     2,
 		Dialer: func(ctx context.Context, network, dialAddr string) (net.Conn, error) {
 			dials.Add(1)
 			return (&net.Dialer{}).DialContext(ctx, network, dialAddr)
@@ -91,21 +97,22 @@ func TestLiveRotationAgainstRealValkey(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// Server-side proof of in-place re-authentication without connection loss:
-	// the ORIGINAL connection id is still alive and now reports the new user.
+	// Server-side proof, read from CLIENT LIST: the ORIGINAL connection is either
+	// alive and now reporting the new user (re-authenticated in place) or gone
+	// (closed by the client and replaced), and traffic runs as the new user. See
+	// rotationSettled for why both are the guarantee, and rotationSettleTimeout
+	// for the bound.
+	established := map[string]bool{strconv.FormatInt(connID, 10): true}
+	var inPlace, replaced int
 	require.Eventually(t, func() bool {
-		list, listErr := admin.Do(ctx, "CLIENT", "LIST").Text()
-		if listErr != nil {
-			return false
-		}
-		needle := fmt.Sprintf("id=%d ", connID)
-		for _, line := range strings.Split(list, "\n") {
-			if strings.Contains(line, needle) {
-				return strings.Contains(line, " user=rotuser2 ")
-			}
-		}
-		return false
-	}, 5*time.Second, 100*time.Millisecond, "CLIENT LIST must show the ORIGINAL connection alive and re-authenticated as rotuser2")
+		settled, ip, rp := rotationSettled(ctx, t, admin, established, "rotuser2")
+		inPlace, replaced = ip, rp
+		return settled
+	}, rotationSettleTimeout, 100*time.Millisecond, "CLIENT LIST must show the ORIGINAL connection re-authenticated as rotuser2 or replaced, within the pool timeout")
+	t.Logf("rotation outcome: %d connection re-authenticated in place, %d replaced", inPlace, replaced)
+	require.NoError(t, op(), "the store itself serves under the new credentials, whichever path the rotation took")
+	require.LessOrEqual(t, dials.Load(), int64(2),
+		"at most one further dial: the companion go-redis opens while the original re-authenticates, or the replacement of one whose re-auth stalled; more is a reconnect storm")
 
 	// Convergence: once the re-auth cycle completes, serving ops costs no
 	// further dials (an exact count during the cycle is timing-dependent; a
@@ -174,19 +181,86 @@ func TestLiveRotationThroughConfiguredStore(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(credFile, []byte("rotwatch2:rotwatch2-pw"), 0o600))
 
+	// Operations keep flowing throughout; a failure is reported at once rather
+	// than retried (require cannot be used inside the polled condition).
+	var opErr error
+	var inPlace, replaced int
 	require.Eventually(t, func() bool {
-		if op() != nil {
-			return false
+		if err := op(); err != nil {
+			opErr = err
+			return true
 		}
-		rotated := connectionIDsForUser(ctx, t, admin, "rotwatch2")
-		for id := range established {
-			if !rotated[id] {
-				return false
+		settled, ip, rp := rotationSettled(ctx, t, admin, established, "rotwatch2")
+		inPlace, replaced = ip, rp
+		return settled
+	}, rotationSettleTimeout, 250*time.Millisecond,
+		"the Store's own credential watcher must get every established connection re-authenticated as the new ACL user, or replaced by one that is, within the pool timeout — no Refresh call, no restart")
+	require.NoError(t, opErr, "operations must continue through the rotation")
+	require.NoError(t, op(), "the store itself serves under the new credentials, whichever path the rotation took")
+	t.Logf("rotation outcome: %d connection(s) re-authenticated in place, %d replaced", inPlace, replaced)
+	after := connectionIDsForUser(ctx, t, admin, "rotwatch2")
+	require.LessOrEqual(t, len(after), len(established)+1, "no reconnect storm: at most one connection beyond those established before the rotation")
+}
+
+// rotationSettleTimeout bounds how long a rotation may take to settle: the
+// client's pool timeout, after which a connection whose re-authentication
+// stalled is closed, plus a margin. These tests leave read-timeout at the
+// client's default of five seconds, which makes the pool timeout six; a
+// negative read-timeout (no read timeout) would make it thirty, which no test
+// here configures.
+const rotationSettleTimeout = 15 * time.Second
+
+// rotationSettled reports whether every connection established before a
+// rotation has either been re-authenticated in place (listed under the same
+// id as newUser) or been replaced (no longer listed at all). It counts each
+// outcome so a run says which path it took. It deliberately does not ask that
+// some connection be listed as newUser: the pool may have dialled the
+// replacement and closed it again as excess idle capacity before this check
+// runs, so the caller proves the store serves under the new credentials with
+// an operation of its own.
+//
+// Both outcomes are what the client guarantees. go-redis v9.22 re-authenticates a
+// pooled connection through a background worker that must first see the
+// connection go idle, and that worker can miss the notification: its
+// AwaitAndTransition (internal/pool/conn_state.go) enqueues itself without
+// re-checking the state, so a transition that lands between its failed fast
+// path and the enqueue is never delivered. The connection then serves no
+// traffic (every checkout rejects it) until the worker's wait expires after the
+// pool timeout, when the client closes it and dials a fresh one under the new
+// credentials. About one rotation in four took that path against Valkey 8.1
+// (MAG-3769); the earlier assertion that the same id must re-authenticate
+// failed on exactly those runs. No operation fails either way.
+func rotationSettled(ctx context.Context, t *testing.T, admin *redis.Client, established map[string]bool, newUser string) (settled bool, inPlace, replaced int) {
+	t.Helper()
+	list, err := admin.Do(ctx, "CLIENT", "LIST").Text()
+	require.NoError(t, err)
+	listedAs := map[string]string{} // connection id -> ACL user
+	for _, line := range strings.Split(list, "\n") {
+		id, user := "", ""
+		for _, field := range strings.Fields(line) {
+			if value, found := strings.CutPrefix(field, "id="); found {
+				id = value
+			}
+			if value, found := strings.CutPrefix(field, "user="); found {
+				user = value
 			}
 		}
-		return true
-	}, 20*time.Second, 250*time.Millisecond,
-		"the Store's own credential watcher must re-authenticate every established connection as the new ACL user — no Refresh call, no reconnect, no restart")
+		if id != "" {
+			listedAs[id] = user
+		}
+	}
+	for id := range established {
+		user, listed := listedAs[id]
+		switch {
+		case !listed:
+			replaced++
+		case user == newUser:
+			inPlace++
+		default:
+			return false, 0, 0 // still authenticated as the previous user
+		}
+	}
+	return true, inPlace, replaced
 }
 
 // connectionIDsForUser reports the server-side connection ids currently

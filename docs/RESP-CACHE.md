@@ -161,9 +161,23 @@ set or cluster are not supported; use the managed reader endpoint in `standalone
 
 Use `password-file` with whatever refreshes the file (Kubernetes secret mounts, a sidecar
 token refresher). On change, the router pushes the new credentials to every live connection,
-which re-authenticates **in place** — no reconnect, no dropped operations. Custom credential
-sources (e.g. an IAM SigV4 signer) can implement the `CredentialsSource` interface in
+and go-redis re-authenticates each one **in place** — no restart, no dropped operations. Custom
+credential sources (e.g. an IAM SigV4 signer) can implement the `CredentialsSource` interface in
 `ecosystem/cache/redisstore`; the router deliberately bundles no cloud SDKs.
+
+One caveat comes from go-redis (v9.22) itself. The background worker that re-authenticates an
+idle pooled connection can miss the notification that the connection went idle (a race in its
+`AwaitAndTransition`; tracked as MAG-3769 pending an upstream fix). Such a connection serves no
+traffic while it waits, and when the wait expires after the pool timeout the client closes it
+and dials a fresh connection under the new credentials. That timeout is `read-timeout` + 1s
+when a read timeout is set (six seconds with the client's default of five), and thirty seconds
+when `read-timeout` is negative, which go-redis reads as "no read timeout". The stalled
+connection also keeps its pool slot until then, so a pool already at `pool-size` dials and
+drops a replacement for every operation in that window; leave the pool headroom. Either way no operation is dropped. What an operator may see is one connection
+replaced rather than re-authenticated per rotation, and a connection that stays authenticated
+as the previous user, idle, for up to that timeout — so keep the previous credential valid for
+a grace window at least that long, or delete the previous ACL user once the window has passed,
+which disconnects anything still authenticated as it.
 
 Under `topology: sentinel` the go-redis failover client (v9.22) does not support in-place
 streaming re-auth, so rotated credentials are resolved fresh **per connection attempt** — they
