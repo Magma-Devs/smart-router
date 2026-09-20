@@ -85,7 +85,7 @@ a word.
 | `dial-timeout` / `read-timeout` / `write-timeout` | `500ms` dial; client defaults for read/write | Per-operation network limits. A **fresh** connection's dial and TLS handshake are bounded by `dial-timeout` *and* by the caller's own deadline, whichever is sooner — the default is deliberately sub-second so a black-holed backend cannot make cold lookups linger. |
 | `pool-size` | client default | Connection pool size (per client; the read client has its own). |
 | `expiration.finalized` | `1h` | Lifetime of a settled (finalized) answer. The sidecar's `--expiration`. |
-| `expiration.finalized-multiplier` | `1` | Multiplier on `expiration.finalized`. The sidecar's `--expiration-multiplier`, which the published chart sets to `1.5` (90 minutes) — this is where a router on a RESP backend keeps that. |
+| `expiration.finalized-multiplier` | `1` | Multiplier on `expiration.finalized`. The sidecar's `--expiration-multiplier`, which the published chart sets to `1.5` (90 minutes) — this is where a router on a RESP backend keeps that. A multiplied lifetime that would round below one nanosecond, or past what a duration can hold, is refused at startup: to the store a zero lifetime is a key that never expires, not one that expires at once. |
 | `expiration.non-finalized` | `500ms` | Floor for a recent (non-finalized) answer; the effective TTL is max(averageBlockTime/8, this). The sidecar's `--expiration-non-finalized`. |
 | `expiration.non-finalized-multiplier` | `1` | Multiplier on `expiration.non-finalized`. The sidecar's `--expiration-non-finalized-multiplier`. |
 | `expiration.node-errors` | `250ms` | Cap on a cached node error for a finalized block. The sidecar's `--expiration-finalized-node-errors`. |
