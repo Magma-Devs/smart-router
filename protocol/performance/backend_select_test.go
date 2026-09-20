@@ -311,6 +311,10 @@ resp-cache:
 	require.True(t, ok)
 	require.Contains(t, respCache.DebugCacheState().Address, "tls=insecure-skip-verify",
 		"the state is visible wherever the cache's configuration is reported")
+	// Its probe keeps failing against the plaintext server and logging while it
+	// lives; close it before the next capture so that capture sees only its own
+	// cache's startup (Codex review of #402).
+	require.NoError(t, insecure.Close())
 
 	quiet := captureLog(t, func() { _ = selectBackend(t, block(false)) })
 	require.NotContains(t, quiet, "insecure-skip-verify is set", "a verifying configuration is not warned about")
