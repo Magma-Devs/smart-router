@@ -46,8 +46,9 @@ request ──► primary cache ──hit──► served ("Cached")
   attached, so an entry written by an older zone that never labelled it is still
   served as the error it is (on JSON-RPC and Tendermint; a REST or gRPC entry is
   judged by its recorded status). An entry that is not a usable reply at all —
-  empty, a web page, a truncated envelope — is never served: it counts as a
-  secondary error and the request proceeds to an upstream.
+  empty, a web page, a truncated envelope, an envelope that carries neither a
+  result nor an error, or a batch with such an element — is never served: it
+  counts as a secondary error and the request proceeds to an upstream.
 - **Independent of the primary.** The secondary keeps serving while the primary
   is down, and is even valid with no primary configured at all (reads work;
   nothing backfills — the router logs an advisory warning for this topology).
