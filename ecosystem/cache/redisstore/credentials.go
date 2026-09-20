@@ -264,6 +264,10 @@ func (p *StreamingProvider) Subscribe(listener auth.CredentialsListener) (auth.C
 	sub := &subscription{listener: listener}
 
 	p.mu.Lock()
+	// Every subscription forgets the collected ones first, so the registry is
+	// bounded by the live connections plus those not yet collected, however
+	// many handshakes an outage fails and however rarely the watcher polls.
+	p.pruneCollectedLocked()
 	id := p.nextID
 	p.nextID++
 	p.listeners[id] = weak.Make(sub)
@@ -285,18 +289,29 @@ func (p *StreamingProvider) Subscribe(listener auth.CredentialsListener) (auth.C
 	return creds, unsubscribe, nil
 }
 
-// liveListenersLocked returns the listeners of subscriptions whose connection
-// is still reachable and forgets the rest: a collected subscription belonged
-// to a connection the client abandoned without unsubscribing. Caller holds mu.
-func (p *StreamingProvider) liveListenersLocked() []auth.CredentialsListener {
-	listeners := make([]auth.CredentialsListener, 0, len(p.listeners))
+// pruneCollectedLocked forgets the records of subscriptions the collector has
+// reclaimed: each belonged to a connection the client abandoned without
+// unsubscribing. Called from every Subscribe and every Refresh, whether or
+// not the credentials changed, so the registry cannot grow across outages
+// while a file-backed password stays the same (Codex review of #407). Caller
+// holds mu.
+func (p *StreamingProvider) pruneCollectedLocked() {
 	for id, ref := range p.listeners {
-		sub := ref.Value()
-		if sub == nil {
+		if ref.Value() == nil {
 			delete(p.listeners, id)
-			continue
 		}
-		listeners = append(listeners, sub.listener)
+	}
+}
+
+// liveListenersLocked returns the listeners of subscriptions whose connection
+// is still reachable, after forgetting the rest. Caller holds mu.
+func (p *StreamingProvider) liveListenersLocked() []auth.CredentialsListener {
+	p.pruneCollectedLocked()
+	listeners := make([]auth.CredentialsListener, 0, len(p.listeners))
+	for _, ref := range p.listeners {
+		if sub := ref.Value(); sub != nil {
+			listeners = append(listeners, sub.listener)
+		}
 	}
 	return listeners
 }
@@ -312,6 +327,9 @@ func (p *StreamingProvider) Refresh() {
 	}
 
 	p.mu.Lock()
+	// Housekeeping on every tick, not only on a rotation: the unchanged-file
+	// case is the ordinary one for the whole life of a process.
+	p.pruneCollectedLocked()
 	if creds.RawCredentials() == p.lastRaw {
 		p.mu.Unlock()
 		return
@@ -387,11 +405,20 @@ func (p *StreamingProvider) noteSourceRecovered() {
 }
 
 // subscriberCount reports live subscriptions (observability/tests): those
-// whose connection is still reachable.
+// whose connection is still reachable. It prunes as it counts.
 func (p *StreamingProvider) subscriberCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.liveListenersLocked())
+}
+
+// registrySize is the raw number of records held, collected or not, with no
+// pruning: what a test reads to check that production's own housekeeping,
+// not the counting helper, keeps the registry bounded.
+func (p *StreamingProvider) registrySize() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.listeners)
 }
 
 // watchCredentials polls Refresh until stop closes — the rotation driver for
