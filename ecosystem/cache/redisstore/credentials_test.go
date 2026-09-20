@@ -337,14 +337,20 @@ func TestStreamingProviderPushes(t *testing.T) {
 	creds, unsubFirst, err := provider.Subscribe(first)
 	require.NoError(t, err)
 	require.Equal(t, "u:pw1", creds.RawCredentials(), "subscription hands out the current credentials")
-	_, _, err = provider.Subscribe(second)
+	// A subscription lives exactly as long as its unsubscribe closure is held,
+	// the way go-redis holds it on the connection; a test that dropped the
+	// closure was asserting delivery to a subscription the collector was free
+	// to reclaim (Codex review of #407).
+	_, unsubSecond, err := provider.Subscribe(second)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = unsubSecond() })
 	require.Equal(t, 2, provider.subscriberCount())
 
 	provider.Refresh()
 	require.Empty(t, first.recorded(), "unchanged credentials must not push")
 
 	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
+	runtime.GC()
 	provider.Refresh()
 	require.Equal(t, []string{"u:pw2"}, first.recorded())
 	require.Equal(t, []string{"u:pw2"}, second.recorded())
@@ -452,8 +458,10 @@ func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
 	credFile := writeTempFile(t, "cred", "pw1")
 	provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})
 	listener := &recordingListener{}
-	_, _, err := provider.Subscribe(listener)
+	_, unsubscribe, err := provider.Subscribe(listener)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = unsubscribe() }) // the anchor that keeps the subscription live
+	runtime.GC()
 
 	const failed, recovered = "credential source unreadable", "readable again; refresh resumed"
 
@@ -792,5 +800,37 @@ func TestAbandonedConnectionsAreNotKeptByTheProvider(t *testing.T) {
 			}, 10*time.Second, 50*time.Millisecond,
 				"connections abandoned after a failed setup must be reclaimed, not kept by the provider")
 		})
+	}
+}
+
+// The registry itself must stay bounded through production's own housekeeping,
+// not through the counting helper above, which prunes as it counts. The file
+// never changes here, the ordinary case for the life of a process, and each
+// batch of failed handshakes used to leave its records behind for good: the map
+// grew ten, twenty, thirty across three outages with no live subscription in it
+// (Codex review of #407). A refresh with unchanged credentials now forgets what
+// the collector reclaimed, and so does every new subscription.
+func TestProviderRegistryStaysBoundedAcrossOutages(t *testing.T) {
+	cutoff := newCutoffListener(t, false)
+	store, err := New(Config{
+		Addresses:    []string{cutoff.listener.Addr().String()},
+		PasswordFile: writeTempFile(t, "pw", "placeholder-credential\n"),
+		DialTimeout:  200 * time.Millisecond,
+		ReadTimeout:  200 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	for batch := 0; batch < 3; batch++ {
+		for i := 0; i < 10; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			_ = store.SetHeight(ctx, core.HeightKey("ETH1", fmt.Sprintf("0x%d-%d", batch, i)), 1, time.Minute)
+			cancel()
+		}
+		require.Eventually(t, func() bool {
+			runtime.GC()
+			store.credentials.Refresh() // unchanged credentials: the watcher's ordinary tick
+			return store.credentials.registrySize() == 0
+		}, 10*time.Second, 50*time.Millisecond, "batch %d: an unchanged-credentials refresh must forget the collected records", batch)
 	}
 }
