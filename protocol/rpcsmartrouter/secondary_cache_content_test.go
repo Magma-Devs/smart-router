@@ -153,6 +153,8 @@ func TestSecondaryEntryThatIsNotAReplyIsNotServed(t *testing.T) {
 		{"a truncated envelope", `{"jsonrpc":"2.0","resu`},
 		{"no bytes at all", ``},
 		{"a bare value", `"0x64"`},
+		{"an empty object", `{}`},
+		{"an envelope with no payload", `{"jsonrpc":"2.0","id":1}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,4 +172,28 @@ func TestSecondaryEntryThatIsNotAReplyIsNotServed(t *testing.T) {
 			require.Nil(t, directGetETH(rcs, hashKey, 100, 100).GetReply(), "nothing reaches the primary")
 		})
 	}
+}
+
+// A batch is judged element by element. One sibling that answers does not vouch for one
+// that answers nothing: such a batch used to be served as a success and backfilled into
+// the primary, because the batch classifier let the good element mask the empty one
+// (Codex review of #412).
+func TestSecondaryBatchWithAnElementThatAnswersNothingIsNotServed(t *testing.T) {
+	primary, rcs := startCacheServerForTest(t)
+	chainParser := secondaryEthParser(t)
+	protocolMessage := secondaryEthMessage(t, chainParser, `[{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x1111111111111111111111111111111111111111","0x64"]},{"jsonrpc":"2.0","id":2,"method":"eth_getBalance","params":["0x2222222222222222222222222222222222222222","0x64"]}]`, 100)
+	hashKey, _, err := protocolMessage.HashCacheRequest("ETH1")
+	require.NoError(t, err)
+	fake := &fakeCacheReader{active: true, reply: &pairingtypes.CacheRelayReply{
+		Reply:      &pairingtypes.RelayReply{Data: []byte(`[{"jsonrpc":"2.0","id":1,"result":"0x64"},{"jsonrpc":"2.0","id":2}]`), LatestBlock: 100},
+		SeenBlock:  100,
+		StatusCode: http.StatusOK,
+	}}
+	rpcss := newSecondaryEthTestServer(chainParser, primary, fake)
+	served, _, report := runSecondaryEthLookup(t, rpcss, protocolMessage, 100)
+	require.False(t, served, "an element with no payload makes the batch unusable")
+	require.Equal(t, metrics.CacheOutcomeError, report.SecondaryOutcome)
+
+	time.Sleep(300 * time.Millisecond)
+	require.Nil(t, directGetETH(rcs, hashKey, 100, 100).GetReply(), "nothing reaches the primary")
 }

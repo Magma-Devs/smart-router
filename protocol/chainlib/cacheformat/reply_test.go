@@ -20,6 +20,11 @@ func TestOutputFormatterLeavesANonReplyAlone(t *testing.T) {
 		{"a bare value", `"0x64"`},
 		{"an array of values", `[1,2]`},
 		{"an empty array", `[]`},
+		{"an empty object", `{}`},
+		{"an envelope with no payload", `{"jsonrpc":"2.0","id":1}`},
+		{"the object an older zone made from a web page", `{"id":7}`},
+		{"a null error and no result", `{"jsonrpc":"2.0","id":1,"error":null}`},
+		{"a batch with one element that answers nothing", `[{"jsonrpc":"2.0","id":1,"result":"0x64"},{"jsonrpc":"2.0","id":2}]`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -31,4 +36,6 @@ func TestOutputFormatterLeavesANonReplyAlone(t *testing.T) {
 	}
 	require.True(t, IsRestorableJSONRPCReply([]byte(` {"jsonrpc":"2.0","id":1,"result":"0x64"}`)))
 	require.True(t, IsRestorableJSONRPCReply([]byte(`[{"jsonrpc":"2.0","id":1,"result":"0x64"}]`)))
+	require.True(t, IsRestorableJSONRPCReply([]byte(`{"jsonrpc":"2.0","id":1,"result":null}`)), "a null result is an answer: the chain does not know the object")
+	require.True(t, IsRestorableJSONRPCReply([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}`)), "an error object is an answer, served as a node error")
 }
