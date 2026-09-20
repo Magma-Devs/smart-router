@@ -167,7 +167,7 @@ credential sources (e.g. an IAM SigV4 signer) can implement the `CredentialsSour
 
 One caveat comes from go-redis (v9.22) itself. The background worker that re-authenticates an
 idle pooled connection can miss the notification that the connection went idle (a race in its
-`AwaitAndTransition`; tracked as MAG-3769 pending an upstream fix). Such a connection serves no
+`AwaitAndTransition`, reported upstream as redis/go-redis#4027; tracked here as MAG-3769). Such a connection serves no
 traffic while it waits, and when the wait expires after the pool timeout the client closes it
 and dials a fresh connection under the new credentials. That timeout is `read-timeout` + 1s
 when a read timeout is set (six seconds with the client's default of five), and thirty seconds
