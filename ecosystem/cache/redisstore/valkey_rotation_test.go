@@ -221,10 +221,11 @@ const rotationSettleTimeout = 15 * time.Second
 //
 // Both outcomes are what the client guarantees. go-redis v9.22 re-authenticates a
 // pooled connection through a background worker that must first see the
-// connection go idle, and that worker can miss the notification: its
-// AwaitAndTransition (internal/pool/conn_state.go) enqueues itself without
-// re-checking the state, so a transition that lands between its failed fast
-// path and the enqueue is never delivered. The connection then serves no
+// connection go idle, and that worker can miss the notification: the pool's
+// Put hot path (Conn.Release, internal/pool/conn.go) marks the connection idle
+// with a bare compare-and-swap that never notifies waiters, so a worker already
+// parked in AwaitAndTransition (internal/pool/conn_state.go) is never woken
+// (a fix is proposed upstream). The connection then serves no
 // traffic (every checkout rejects it) until the worker's wait expires after the
 // pool timeout, when the client closes it and dials a fresh one under the new
 // credentials. About one rotation in four took that path against Valkey 8.1
