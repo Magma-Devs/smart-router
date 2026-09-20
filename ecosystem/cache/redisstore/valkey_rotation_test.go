@@ -228,7 +228,8 @@ const rotationSettleTimeout = 15 * time.Second
 // traffic (every checkout rejects it) until the worker's wait expires after the
 // pool timeout, when the client closes it and dials a fresh one under the new
 // credentials. About one rotation in four took that path against Valkey 8.1
-// (MAG-3769); the earlier assertion that the same id must re-authenticate
+// (MAG-3769, reported upstream as redis/go-redis#4027); the earlier assertion
+// that the same id must re-authenticate
 // failed on exactly those runs. No operation fails either way.
 func rotationSettled(ctx context.Context, t *testing.T, admin *redis.Client, established map[string]bool, newUser string) (settled bool, inPlace, replaced int) {
 	t.Helper()
