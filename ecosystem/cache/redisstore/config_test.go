@@ -108,6 +108,35 @@ func TestExpirationConfigPolicy(t *testing.T) {
 	require.NoError(t, Config{Addresses: []string{"h:1"}, Expiration: fullConfig}.Validate())
 }
 
+// A multiplied lifetime is checked as the lifetime it produces, not as its two
+// inputs. A product under one nanosecond truncates to a zero TTL, which the
+// store writes as a key with no expiry at all, so a setting meant to shorten
+// retention made a permanent key; a product past the range of a duration wraps
+// (Codex review of #405). Both are refused at startup, with the defaults
+// standing in for an unset base, and a valid product is applied exactly.
+func TestExpirationConfigRejectsALifetimeThatRoundsAway(t *testing.T) {
+	validate := func(e ExpirationConfig) error {
+		return Config{Addresses: []string{"h:1"}, Expiration: e}.Validate()
+	}
+	require.ErrorContains(t, validate(ExpirationConfig{Finalized: time.Nanosecond, FinalizedMultiplier: 0.5}),
+		"expiration.finalized with expiration.finalized-multiplier")
+	require.ErrorContains(t, validate(ExpirationConfig{Finalized: time.Nanosecond, FinalizedMultiplier: 0.5}),
+		"no expiry at all")
+	require.ErrorContains(t, validate(ExpirationConfig{NonFinalizedMultiplier: 1e-15}),
+		"expiration.non-finalized with expiration.non-finalized-multiplier", "the default base counts too")
+	require.ErrorContains(t, validate(ExpirationConfig{Finalized: 100 * time.Hour, FinalizedMultiplier: 1e15}),
+		"longer than a duration can hold")
+
+	halved := ExpirationConfig{Finalized: 2 * time.Second, FinalizedMultiplier: 0.5, NonFinalized: 400 * time.Millisecond, NonFinalizedMultiplier: 0.5}
+	require.NoError(t, validate(halved))
+	policy := halved.Policy()
+	require.Equal(t, time.Second, policy.Finalized)
+	require.Equal(t, 200*time.Millisecond, policy.NonFinalized)
+
+	clamped := ExpirationConfig{Finalized: time.Nanosecond, FinalizedMultiplier: 0.5}.Policy()
+	require.Equal(t, time.Nanosecond, clamped.Finalized, "a block that skipped validation still never yields a zero lifetime")
+}
+
 func listenLocal(t *testing.T) net.Listener {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

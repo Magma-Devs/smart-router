@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"time"
@@ -139,20 +140,20 @@ type ExpirationConfig struct {
 // Policy builds the engine's TTL table from the block, the way the sidecar
 // builds its own from flags: each unset duration keeps its default, and each
 // multiplier (default 1) scales the duration it belongs to.
+//
+// The multiplied lifetimes go through effectiveLifetime, the same computation
+// validate checks, so a block that passed validation yields exactly what it
+// promised and one that bypassed it still never yields a zero.
 func (e ExpirationConfig) Policy() core.Policy {
 	policy := core.DefaultPolicy()
 	if e.Finalized > 0 {
 		policy.Finalized = e.Finalized
 	}
-	if e.FinalizedMultiplier > 0 {
-		policy.Finalized = time.Duration(float64(policy.Finalized) * e.FinalizedMultiplier)
-	}
+	policy.Finalized, _ = effectiveLifetime(policy.Finalized, e.FinalizedMultiplier)
 	if e.NonFinalized > 0 {
 		policy.NonFinalized = e.NonFinalized
 	}
-	if e.NonFinalizedMultiplier > 0 {
-		policy.NonFinalized = time.Duration(float64(policy.NonFinalized) * e.NonFinalizedMultiplier)
-	}
+	policy.NonFinalized, _ = effectiveLifetime(policy.NonFinalized, e.NonFinalizedMultiplier)
 	if e.NodeErrors > 0 {
 		policy.NodeErrors = e.NodeErrors
 	}
@@ -162,8 +163,36 @@ func (e ExpirationConfig) Policy() core.Policy {
 	return policy
 }
 
-// validate rejects what no lifetime can mean: a negative duration or a
-// negative multiplier. Zero is "the default" everywhere and is accepted.
+// effectiveLifetime is the lifetime a duration and its multiplier produce, as
+// Policy applies it, and the reason it must not be applied when there is one.
+// A multiplier of zero means "unset" and leaves the base alone.
+//
+// The product is checked before it becomes a duration, because the conversion
+// hides two failures. A positive lifetime whose product is under one
+// nanosecond truncates to zero, and a zero TTL is not "expire at once" to the
+// store but "no expiry at all": SetEntry mirrors the in-memory adapter and
+// writes a plain SET, so a setting meant to shorten retention created a
+// permanent key, one no volatile-* eviction policy can ever reclaim (Codex
+// review of #405). A product past the range of a duration wraps. The value
+// returned alongside an error is clamped to the nearest representable
+// lifetime, so a caller that skipped validation still never stores a zero.
+func effectiveLifetime(base time.Duration, multiplier float64) (time.Duration, error) {
+	if multiplier <= 0 || base <= 0 {
+		return base, nil
+	}
+	product := float64(base) * multiplier
+	if product >= math.MaxInt64 {
+		return time.Duration(math.MaxInt64), fmt.Errorf("%s multiplied by %g is longer than a duration can hold", base, multiplier)
+	}
+	if product < 1 {
+		return time.Nanosecond, fmt.Errorf("%s multiplied by %g is shorter than 1ns and would be stored as a key with no expiry at all", base, multiplier)
+	}
+	return time.Duration(product), nil
+}
+
+// validate rejects what no lifetime can mean: a negative duration, a negative
+// multiplier, or a multiplied lifetime that no longer is one (see
+// effectiveLifetime). Zero is "the default" everywhere and is accepted.
 func (e ExpirationConfig) validate() error {
 	for name, value := range map[string]time.Duration{
 		"expiration.finalized":                e.Finalized,
@@ -182,6 +211,20 @@ func (e ExpirationConfig) validate() error {
 		if value < 0 {
 			return fmt.Errorf("resp-cache: %s must not be negative (got %g; leave it unset for 1)", name, value)
 		}
+	}
+	defaults := core.DefaultPolicy()
+	finalized, nonFinalized := defaults.Finalized, defaults.NonFinalized
+	if e.Finalized > 0 {
+		finalized = e.Finalized
+	}
+	if e.NonFinalized > 0 {
+		nonFinalized = e.NonFinalized
+	}
+	if _, err := effectiveLifetime(finalized, e.FinalizedMultiplier); err != nil {
+		return fmt.Errorf("resp-cache: expiration.finalized with expiration.finalized-multiplier: %w", err)
+	}
+	if _, err := effectiveLifetime(nonFinalized, e.NonFinalizedMultiplier); err != nil {
+		return fmt.Errorf("resp-cache: expiration.non-finalized with expiration.non-finalized-multiplier: %w", err)
 	}
 	return nil
 }
