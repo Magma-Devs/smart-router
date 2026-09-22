@@ -376,7 +376,9 @@ requested, run 2b again as a **review round** rather than skipping the seat:
    you already checked.
 2. Verify every objection against the code before acting. Real, so fix it,
    commit and push to the branch this pull request already proposes; wrong, so
-   record the reason you rejected it.
+   record the reason you rejected it. **The subagent never does this.** It
+   reports and stops; you verify, and you are the one who commits. A subagent
+   handed push authority in its brief is a write nobody approved.
 3. Findings and dispositions go to the author, **never as comments on the PR**.
    An external bot posting on a PR is the author's call; this round is not a bot
    and does not post. **Anything that outlives the session — a deferred item, an
@@ -384,8 +386,9 @@ requested, run 2b again as a **review round** rather than skipping the seat:
    reference per gate 7.** Chat is where the author reads it; it is not where it
    is kept.
 
-**This round is default-on.** Unlike asking Copilot, it needs no permission, it
-posts no comment, and it consumes no quota. It does push to the pull request's
+**This round is default-on** — that covers RUNNING it, not what you do with what
+it finds. Unlike asking Copilot, it needs no permission, it posts no comment,
+and it consumes no quota. It does push to the pull request's
 own branch when it finds something real, the same as any other fix — that is a
 change to your own work, not a write on somebody else's. Measured cost on a
 single-module pull request, 2026-08-24: 100k to 170k tokens a round. It fills
@@ -794,7 +797,15 @@ selected by a pattern that matches nothing is a permanent green.
 **Both commands are local steps, and that is not a preference.** No workflow in
 this repository runs the Go tests at all — searched every file under
 `.github/workflows/` for `go test`, `make test` and `gotestsum`, zero hits,
-against a control that finds `runs-on` in all nine of them. Coverage likewise.
+against a control finding `go build` in exactly 2 of the 9 workflow files.
+Coverage likewise.
+
+**Pick the control for what it discriminates, not for how many hits it gets.**
+`runs-on` was the first control used here and it matches all 9 of 9, so it
+proves only that the search reaches the files — it would return non-zero against
+any workflow directory in existence. `go build` is topical: it is the same shape
+of thing being searched for, it appears in some files and not others, so a zero
+beside it means something.
 So a pull request's green board says a new guard compiled, never that it ran.
 Making it fail on your own machine is the only verification there is. This is
 filed as MAG-3105.
