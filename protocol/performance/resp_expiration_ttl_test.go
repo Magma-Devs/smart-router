@@ -14,19 +14,20 @@ import (
 )
 
 // The expiration block's lifetimes must reach the key the store writes, and a
-// lifetime that would round to zero must never get that far: a zero TTL is a
-// plain SET to the store, a key that never expires (Codex review of #405). Both
-// halves go through the real loader and backend selection.
+// lifetime the store cannot express must never get that far: a value written
+// without its unit (3600 for an hour is 3.6µs) used to be stored as a 1ms
+// lifetime, and a product that rounds to zero is a plain SET to the store, a
+// key that never expires (Codex review of #405). Both halves go through the
+// real loader and backend selection.
 func TestExpirationBlockReachesTheStoredTTL(t *testing.T) {
 	mr := miniredis.RunT(t)
 	_, err := performance.SelectCacheBackend(context.Background(), viperFromYAML(t, fmt.Sprintf(`
 resp-cache:
   addresses: [%q]
   expiration:
-    finalized: 1ns
-    finalized-multiplier: 0.5
+    finalized: 3600
 `, mr.Addr())))
-	require.ErrorContains(t, err, "expiration.finalized", "a lifetime that rounds to zero is refused before any key can be written without an expiry")
+	require.ErrorContains(t, err, "expiration.finalized is 3.6µs", "a lifetime below the store's precision is refused before any key is written")
 
 	backend := selectBackend(t, fmt.Sprintf(`
 resp-cache:
