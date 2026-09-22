@@ -196,25 +196,11 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	}
 	copyReply.Data = outputFormatter(copyReply.Data)
 
-	// Entry kind + legacy GUID placeholder substitution, shared with the primary tier
-	// (resolveCachedEntryKind) so both label a replayed node error identically.
-	isNodeError, resolvedData := resolveCachedEntryKind(ctx, cacheReply, copyReply.Data)
+	// Entry kind: the label the other zone attached, or the entry's contents. Shared with
+	// the primary tier (classifyCachedEntry) so both label a replayed node error
+	// identically, and which cache answered makes no difference (MAG-3597).
+	isNodeError, resolvedData := classifyCachedEntry(ctx, protocolMessage, metrics.CacheTierSecondary, cacheReply, copyReply.Data)
 	copyReply.Data = resolvedData
-	// The entry's contents decide its kind, not only the label the other zone attached:
-	// a zone whose build predates the label writes none, and its error body would reach
-	// the caller as a success, without the lava-identified-node-error header the
-	// documentation promises (MAG-3597). CheckResponseError is the verdict a live answer
-	// gets. It reads the envelope on JSON-RPC and Tendermint; on REST and gRPC it decides
-	// from the recorded status, so an error body under a 2xx status still passes there.
-	if !isNodeError {
-		if contentSaysError, errorMessage := protocolMessage.CheckResponseError(copyReply.Data, cacheReply.GetStatusCode()); contentSaysError {
-			isNodeError = true
-			utils.LavaFormatDebug("secondary cache entry served as a node error by its contents",
-				utils.LogAttr("GUID", ctx),
-				utils.LogAttr("error", errorMessage),
-			)
-		}
-	}
 
 	relayResult := common.RelayResult{
 		Reply: copyReply,

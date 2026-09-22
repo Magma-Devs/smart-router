@@ -1519,6 +1519,53 @@ func resolveCachedEntryKind(ctx context.Context, cacheReply *pairingtypes.CacheR
 	return isNodeError, []byte(strings.Replace(dataStr, common.CachedErrorGUIDPlaceholder, common.CachedErrorGUIDKeyPrefix+guidStr+`"`, 1))
 }
 
+// classifyCachedEntry decides what a cache entry is before either tier serves it: the
+// label its writer attached, or its contents. resolveCachedEntryKind reads the label and
+// substitutes the legacy placeholder; then, for an entry that carries no label,
+// CheckResponseError, the verdict a live answer gets, classifies a well-formed error body
+// as the node error it is. A writer whose build predates the label writes none, and its
+// error body used to reach the caller as a success without the
+// lava-identified-node-error header the documentation promises (MAG-3597). That is as
+// true of a primary shared by a fleet mid-rollout as of another zone's cache, so both
+// tiers run this one step and which cache answered makes no difference to the label.
+// CheckResponseError reads the envelope on JSON-RPC and Tendermint; on REST and gRPC it
+// decides from the recorded status, so an error body under a 2xx status still passes
+// there. tier names the caller in the log line only.
+func classifyCachedEntry(ctx context.Context, protocolMessage chainlib.ProtocolMessage, tier string, cacheReply *pairingtypes.CacheRelayReply, data []byte) (isNodeError bool, resolvedData []byte) {
+	isNodeError, resolvedData = resolveCachedEntryKind(ctx, cacheReply, data)
+	if isNodeError {
+		return true, resolvedData
+	}
+	if contentSaysError, errorMessage := protocolMessage.CheckResponseError(resolvedData, cacheReply.GetStatusCode()); contentSaysError {
+		utils.LavaFormatDebug(tier+" cache entry served as a node error by its contents",
+			utils.LogAttr("GUID", ctx),
+			utils.LogAttr("error", errorMessage),
+		)
+		return true, resolvedData
+	}
+	return false, resolvedData
+}
+
+// primaryLookupVerdict classifies the primary tier's answer the way the secondary tier
+// classifies its own: a hit whose bytes are not a reply this router can serve on the
+// interface (usableCachedReply) is no hit, and is recorded as an error rather than a
+// miss, since the tier answered and this router refused what it said. Such an entry is
+// one an older build wrote from a web page or a truncated answer, and a primary shared
+// by a fleet mid-rollout can hold one (MAG-3597). The request then proceeds as on a
+// miss: to the secondary tier if there is one, and to a provider, whose answer replaces
+// the entry through the ordinary write.
+func primaryLookupVerdict(cacheError error, cacheReply *pairingtypes.CacheRelayReply, apiInterface string) (hit bool, unusable bool, outcome string) {
+	hit = cacheError == nil && cacheReply != nil && cacheReply.GetReply() != nil
+	if hit && !usableCachedReply(apiInterface, cacheReply.GetReply().Data) {
+		hit, unusable = false, true
+	}
+	outcome = metrics.ClassifyCacheLookupOutcome(cacheError, hit)
+	if unusable {
+		outcome = metrics.CacheOutcomeError
+	}
+	return hit, unusable, outcome
+}
+
 func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlock int64, latestBlockHashRequested int64, protocolMessage chainlib.ProtocolMessage) int64 {
 	if reqBlock == spectypes.LATEST_BLOCK && seenBlock != 0 {
 		// make optimizer select an endpoint that is likely to have the latest seen block
@@ -4079,7 +4126,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 						// Returns the outcome alongside the latency so the span, the counter and
 						// the response header all describe the same classification of the same
 						// lookup, rather than each re-deriving it from cacheError.
-						cacheLatencyMs, primaryOutcome := func() (float64, string) {
+						cacheLatencyMs, primaryOutcome, unusable := func() (float64, string, bool) {
 							_, cacheSpan := tracing.StartInternalSpan(ctx, tracing.SpanCacheLookup)
 							defer cacheSpan.End()
 							cacheStart := time.Now()
@@ -4095,10 +4142,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							}) // caching in the consumer doesn't care about hashes, and we don't have data on finalization yet
 							cancel()
 							latencyMs := float64(time.Since(cacheStart).Milliseconds())
-							cacheHit := cacheError == nil && cacheReply != nil && cacheReply.GetReply() != nil
-							outcome := metrics.ClassifyCacheLookupOutcome(cacheError, cacheHit)
+							// A hit whose bytes are not a reply is no hit (MAG-3597): recorded as an
+							// error, and the request proceeds as on a miss.
+							cacheHit, unusable, outcome := primaryLookupVerdict(cacheError, cacheReply, apiInterface)
 							tracing.RecordCacheResult(ctx, cacheSpan, metrics.CacheTierPrimary, outcome, cacheHit, latencyMs)
-							return latencyMs, outcome
+							return latencyMs, outcome, unusable
 						}()
 						cacheReport.PrimaryOutcome = primaryOutcome
 
@@ -4124,8 +4172,17 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 						// the same anti-lie guards as a local observation.
 						rpcss.adoptSharedStateTip(ctx, cacheReply.GetSeenBlock(), localRelayData.SeenBlock)
 
+						if unusable {
+							// The tier answered with bytes that are not a reply (primaryLookupVerdict);
+							// recorded as an error above, and the request proceeds as on a miss.
+							utils.LavaFormatWarning("primary cache hit dropped: the entry is not a usable reply", nil,
+								utils.LogAttr("GUID", ctx),
+								utils.LogAttr("apiInterface", apiInterface),
+								utils.LogAttr("size", len(reply.Data)),
+							)
+						}
 						// handle cache reply
-						if cacheError == nil && reply != nil {
+						if cacheError == nil && reply != nil && !unusable {
 							// Cache hit - return cached response
 							utils.LavaFormatDebug("cache hit",
 								utils.LogAttr("chainId", chainId),
@@ -4134,9 +4191,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							)
 							reply.Data = outputFormatter(reply.Data)
 
-							// Entry kind + legacy GUID placeholder substitution, shared with the
-							// secondary tier so both label a replayed node error identically.
-							isNodeError, resolvedData := resolveCachedEntryKind(ctx, cacheReply, reply.Data)
+							// Entry kind: the label its writer attached, or its contents. Shared
+							// with the secondary tier so both label a replayed node error
+							// identically (classifyCachedEntry).
+							isNodeError, resolvedData := classifyCachedEntry(ctx, protocolMessage, metrics.CacheTierPrimary, cacheReply, reply.Data)
 							reply.Data = resolvedData
 
 							relayResult := common.RelayResult{
