@@ -3769,6 +3769,29 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 			)
 			return
 		}
+		// The key says "the newest block as of tip N"; an answer about a block older
+		// than N is not that. For a head-shaped method (eth_blockNumber,
+		// eth_getBlockByNumber("latest")) it means the node that answered is behind the
+		// router's tip, and filing its answer under N would serve a stale head to every
+		// caller parsed at N for the non-finalized lifetime, which the old mismatch
+		// prevented by accident (MAG-3460 review). For a by-hash answer (a receipt, a
+		// block by hash) Reply.LatestBlock is the object's own block and this skips too,
+		// which is main's effective behaviour, until MAG-3462 keys those under a constant
+		// block above this branch. A node ahead of the router's tip is not stale and is
+		// filed under N as before. One harvest reports neither a tip nor an object's
+		// block: eth_getLogs yields its FIRST log's block, so a latest-tagged log query
+		// with results skips here, which is main's effective behaviour (filed under
+		// that block, never found), while an empty result harvests 0 and is filed under
+		// N for the short lifetime, also as on main.
+		if latestBlock > 0 && latestBlock < requestedBlockForCache {
+			utils.LavaFormatDebug("cache write skipped: the answer is about a block older than the tip it would be keyed under",
+				utils.LogAttr("answerBlock", latestBlock),
+				utils.LogAttr("keyBlock", requestedBlockForCache),
+				utils.LogAttr("api", protocolMessage.GetApi().Name),
+				utils.LogAttr("GUID", ctx),
+			)
+			return
+		}
 	}
 
 	// EARLIEST (-3), PENDING (-4), SAFE (-5) and FINALIZED (-6) are never resolved to a
