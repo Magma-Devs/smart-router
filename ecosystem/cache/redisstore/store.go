@@ -173,12 +173,14 @@ func New(cfg Config) (*Store, error) {
 	store.configuredEndpoints = storeEndpoints{
 		Addresses:     append([]string(nil), cfg.Addresses...),
 		ReadAddresses: append([]string(nil), cfg.ReadAddresses...),
+		Topology:      cfg.EffectiveTopology(),
+		MasterName:    cfg.MasterName,
 		KeyPrefix:     store.prefix,
 	}
 	store.writeEndpoint = writeTracker
 	store.readEndpoint = readTracker
 	if cfg.PasswordFile != "" {
-		if cfg.topology() == TopologySentinel {
+		if cfg.EffectiveTopology() == TopologySentinel {
 			// Sentinel carries data-node credentials through
 			// CredentialsProviderContext, not the streaming provider (see
 			// failoverOptions), so the provider has no subscribers here. A
@@ -212,9 +214,17 @@ func New(cfg Config) (*Store, error) {
 //   - KeyPrefix, because it decides which keyspace this router occupies. Two
 //     routers on one Valkey with different prefixes share zero entries and are
 //     otherwise indistinguishable in this output.
+//   - Topology and MasterName, because they say which client was built from
+//     those addresses: a sentinel quorum being asked for a master, or the first
+//     address dialled as a data node. The startup line names the resolved
+//     topology too, but it scrolls away; this endpoint does not (MAG-3671).
+//     Always the RESOLVED topology, so an omitted line reads as the standalone
+//     it became. Empty only for the NewWithClient seams, which see no Config.
 type storeEndpoints struct {
 	Addresses     []string
 	ReadAddresses []string
+	Topology      Topology
+	MasterName    string
 	KeyPrefix     string
 }
 
@@ -225,12 +235,18 @@ func (e storeEndpoints) String() string {
 	if len(e.Addresses) == 0 && len(e.ReadAddresses) == 0 {
 		return ""
 	}
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 5)
 	if len(e.Addresses) > 0 {
 		parts = append(parts, strings.Join(e.Addresses, ","))
 	}
 	if len(e.ReadAddresses) > 0 {
 		parts = append(parts, "read="+strings.Join(e.ReadAddresses, ","))
+	}
+	if e.Topology != "" {
+		parts = append(parts, "topology="+string(e.Topology))
+	}
+	if e.MasterName != "" {
+		parts = append(parts, "master="+e.MasterName)
 	}
 	if e.KeyPrefix != "" {
 		parts = append(parts, "prefix="+e.KeyPrefix)
@@ -283,11 +299,11 @@ func clientAddresses(client redis.UniversalClient) []string {
 // regional cluster or sentinel set fed by the infrastructure's replication),
 // which is why this warns rather than rejecting.
 func warnIfReadSplitIsDiscoveryScoped(cfg Config) {
-	if cfg.topology() == TopologyStandalone {
+	if cfg.EffectiveTopology() == TopologyStandalone {
 		return
 	}
 	utils.LavaFormatWarning("resp-cache read-addresses under a discovering topology: the read client performs its own discovery and resolves to the master(s) of the topology those addresses front — it yields replica reads only when it points at a separate replicated deployment (e.g. a regional cluster), not at replicas of the write topology", nil,
-		utils.LogAttr("topology", cfg.topology()),
+		utils.LogAttr("topology", cfg.EffectiveTopology()),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 	)
 }

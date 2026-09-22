@@ -260,7 +260,7 @@ curl -s http://127.0.0.1:6161/debug/cache-state | jq
     "primary": {
       "configured": true,
       "engine": "resp",
-      "address": "redis-primary:6379 read=reader.eu-west-1:6379 prefix=sr",
+      "address": "redis-primary:6379 read=reader.eu-west-1:6379 topology=standalone prefix=sr",
       "reachable": true,
       "reachable_checked_at": "2026-09-09T14:31:02Z",
       "reachable_detail": "no error reported",
@@ -273,8 +273,13 @@ curl -s http://127.0.0.1:6161/debug/cache-state | jq
 }
 ```
 
-Four things are easy to misread:
+Five things are easy to misread:
 
+- **`address` is the tier's configuration summary, not one address.** For a RESP tier it
+  carries the write addresses, `read=` when reads are split, `topology=` as **resolved** (an
+  omitted `topology:` line shows as `standalone`, which is how a sentinel block missing that
+  line reads at runtime), `master=` under sentinel, and `prefix=` for the keyspace. The
+  startup line says the same and then scrolls away; this field does not.
 - **`reachable` has three values.** `true`, `false`, and `null` for *not yet determined* — a
   RESP backend before its first probe returns, a `cache-be` connection mid-dial. `null` is not
   "unreachable"; a router polled immediately after startup legitimately answers it. Whether a

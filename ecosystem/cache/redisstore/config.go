@@ -151,7 +151,7 @@ func (c TLSConfig) build() (*tls.Config, error) {
 // Validate applies the fail-fast startup rules for the connection config.
 // (The key prefix has its own validation in NewWithClient.)
 func (cfg Config) Validate() error {
-	switch cfg.topology() {
+	switch cfg.EffectiveTopology() {
 	case TopologyStandalone, TopologySentinel, TopologyCluster:
 	default:
 		return fmt.Errorf("resp-cache: unknown topology %q (want standalone, sentinel, or cluster)", cfg.Topology)
@@ -159,11 +159,11 @@ func (cfg Config) Validate() error {
 	if len(cfg.Addresses) == 0 {
 		return fmt.Errorf("resp-cache: no addresses configured")
 	}
-	if cfg.topology() == TopologySentinel && cfg.MasterName == "" {
+	if cfg.EffectiveTopology() == TopologySentinel && cfg.MasterName == "" {
 		return fmt.Errorf("resp-cache: sentinel topology requires master-name")
 	}
-	if cfg.topology() != TopologySentinel && (cfg.SentinelUsername != "" || cfg.SentinelPassword != "" || cfg.SentinelPasswordFile != "") {
-		return fmt.Errorf("resp-cache: sentinel-* credentials are set but topology is %q — dangling configuration", cfg.topology())
+	if cfg.EffectiveTopology() != TopologySentinel && (cfg.SentinelUsername != "" || cfg.SentinelPassword != "" || cfg.SentinelPasswordFile != "") {
+		return fmt.Errorf("resp-cache: sentinel-* credentials are set but topology is %q — dangling configuration", cfg.EffectiveTopology())
 	}
 	// The other half of the check above. A master-name is read by nothing
 	// except the sentinel client, so under any other topology the operator
@@ -172,10 +172,10 @@ func (cfg Config) Validate() error {
 	// every cache operation failed, and the startup line printed a blank
 	// topology — byte for byte what a configuration with no master-name at all
 	// produced (MAG-3671).
-	if cfg.topology() != TopologySentinel && cfg.MasterName != "" {
-		return fmt.Errorf("resp-cache: master-name %q is set but topology is %q — dangling configuration: master-name is only read under topology: sentinel (set it, or remove master-name)", cfg.MasterName, cfg.topology())
+	if cfg.EffectiveTopology() != TopologySentinel && cfg.MasterName != "" {
+		return fmt.Errorf("resp-cache: master-name %q is set but topology is %q — dangling configuration: master-name is only read under topology: sentinel (set it, or remove master-name)", cfg.MasterName, cfg.EffectiveTopology())
 	}
-	if cfg.topology() == TopologyCluster && cfg.DB != 0 {
+	if cfg.EffectiveTopology() == TopologyCluster && cfg.DB != 0 {
 		return fmt.Errorf("resp-cache: db selection is not available in cluster topology")
 	}
 	if cfg.Password != "" && cfg.PasswordFile != "" {
@@ -195,21 +195,18 @@ func (cfg Config) Validate() error {
 	return nil
 }
 
-func (cfg Config) topology() Topology {
+// EffectiveTopology is the topology the client is actually built with:
+// standalone when the field is empty. Every decision in this package goes
+// through it, and so must anything that reports the configuration back to an
+// operator — the startup line used to print the raw field, so an omitted
+// topology showed up as a blank, and a sentinel configuration missing its
+// topology line left no trace that it had been resolved as standalone
+// (MAG-3671).
+func (cfg Config) EffectiveTopology() Topology {
 	if cfg.Topology == "" {
 		return TopologyStandalone
 	}
 	return cfg.Topology
-}
-
-// EffectiveTopology is the topology the client is actually built with:
-// standalone when the field is empty. Anything that reports the configuration
-// back to an operator must print THIS and not the raw field — the startup line
-// used to print the field, so an omitted topology showed up as a blank, and a
-// sentinel configuration missing its topology line left no trace that it had
-// been resolved as standalone (MAG-3671).
-func (cfg Config) EffectiveTopology() Topology {
-	return cfg.topology()
 }
 
 func (cfg Config) refreshInterval() time.Duration {
@@ -297,7 +294,7 @@ type clientCredentials struct {
 func (cfg Config) resolveClientCredentials() (clientCredentials, error) {
 	creds := clientCredentials{source: cfg.credentialsSource()}
 	creds.provider = NewStreamingProvider(creds.source)
-	if cfg.topology() == TopologySentinel {
+	if cfg.EffectiveTopology() == TopologySentinel {
 		pw, err := cfg.sentinelPassword()
 		if err != nil {
 			return clientCredentials{}, err
@@ -486,7 +483,7 @@ func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *S
 // buildClient constructs one client for the given address set, from the
 // credentials New resolved once for every client of the store.
 func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, creds clientCredentials, tracker *endpointTracker) (redis.UniversalClient, error) {
-	switch cfg.topology() {
+	switch cfg.EffectiveTopology() {
 	case TopologySentinel:
 		client := redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, creds.source, creds.sentinelPassword, tracker))
 		// The mark half of the tracker pair (trackingDialerMarkedOnly is the
