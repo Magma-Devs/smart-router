@@ -434,6 +434,12 @@ watches the backup serve.
 Also re-run the PR body's own "How to verify" commands where possible, and report
 how many you actually confirmed.
 
+**If the diff ADDS a test, a guard, a lint rule or a CI step, that thing is
+itself unverified until you have made it fail.** A green check proves nothing
+until you know what it examined. Work the two questions under *A guard or a test
+that cannot fail* below, and put the count and the deliberate break in the
+report's Evidence block.
+
 ## Gate 4 — regression: whose failures are these
 
 Every remaining failure gets exactly one label:
@@ -671,7 +677,9 @@ two commits is a false claim even though it was true when written.
 Then check the body against your step 1 notes. A body that omits a limitation you
 found is not merely incomplete — it is the reason the reviewer will not look for it.
 
-## A search that returns zero may be broken, not clean
+## A clean answer may mean the check never ran
+
+### A search that returns zero
 
 A broken search and a clean repo produce the same output. Every zero needs a
 positive control: the same search, run against something known present, must
@@ -702,6 +710,54 @@ nothing had flagged.
 
 Same family: **compare against the merge base, not `origin/main`.** Against a main
 that has moved, every test that landed meanwhile reads as one this branch deleted.
+
+### A guard or a test that cannot fail
+
+The same shape, one level up. "Nothing failed" and "nothing ran" produce the
+same green, and the second one is invisible. This applies to anything the diff
+adds whose job is to *notice* something: a test, a guard, a lint rule, a CI
+step, an assertion inside a helper.
+
+Two questions, and a PR that adds a guard is `INSUFFICIENT EVIDENCE` until both
+are answered in the report:
+
+1. **What did it examine, as a number?** Tests run, files matched, rows
+   returned. Not "it passed".
+2. **Can it fail?** Break the thing it guards, on purpose, and watch it go red.
+   Put the break back.
+
+```bash
+go test ./<pkg>/ -run '<TheGuard>' -count=1 -v    # names every case it ran
+go test ./<pkg>/ -run '<TheGuard>' -cover         # did the assertion branch execute
+```
+
+**Read the runner's own warning.** `testing: warning: no tests to run` means a
+`-run` pattern matched nothing, and the exit status is still zero. A guard
+selected by a pattern that matches nothing is a permanent green.
+
+**Both commands are local steps, and that is not a preference.** No workflow in
+this repository runs the Go tests at all — searched every file under
+`.github/workflows/` for `go test`, `make test` and `gotestsum`, zero hits,
+against a control that finds `runs-on` in three of them. Coverage likewise.
+So a pull request's green board says a new guard compiled, never that it ran.
+Making it fail on your own machine is the only verification there is. This is
+filed as MAG-3105.
+
+**One cousin is already automated.** `.golangci.yml` sets `nolintlint` to
+`allow-unused: false`, so a suppression that no longer suppresses anything fails
+lint. Nothing does the same for a test or a guard.
+
+Three real cases, all from the automation repository that tests this router,
+all found by a reviewer after the change had passed its own checks:
+
+| What was added | Why it could not fail |
+|---|---|
+| A guard reading a record of offending files | The plugin creates that record, empty, before collection starts. An import error still left the file there, so the guard passed on a tree it never read |
+| A check that a test carries a marker | It searched the file's raw text, and the marker's name appears in the file's own docstring. Deleting the real marker still passed |
+| A test waiting for its own entry in a store | It matched on a key prefix the router also writes under, so a background entry satisfied the wait |
+
+The first two examined nothing. The third examined somebody else's work and
+called it its own.
 
 ## The report
 
