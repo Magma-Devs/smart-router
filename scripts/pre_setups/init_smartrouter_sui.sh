@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Sui gRPC counterpart of init_smartrouter_eth.sh.
 #
 # Where the ETH script exercises JSON-RPC + WebSocket subscriptions, this one

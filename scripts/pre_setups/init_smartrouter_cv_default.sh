@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Cross-Validation — DEFAULT LANE (PRD UC-7: no cross-validation configuration)
 #
 # The other lane (init_smartrouter_cv_demo.sh) shows what the feature does. This
