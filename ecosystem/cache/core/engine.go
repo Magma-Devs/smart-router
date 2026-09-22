@@ -39,6 +39,10 @@ type Engine struct {
 
 // replaceRequestedBlock maps special block constants (LATEST, SAFE, etc.) to latestBlock.
 func replaceRequestedBlock(requestedBlock, latestBlock int64) int64 {
+	if latestBlock == tipReadFailed {
+		// Whatever the tag asked for, the store failed to answer; carry that through.
+		return tipReadFailed
+	}
 	switch requestedBlock {
 	case spectypes.LATEST_BLOCK:
 		return latestBlock
@@ -54,11 +58,28 @@ func replaceRequestedBlock(requestedBlock, latestBlock int64) int64 {
 	return requestedBlock
 }
 
-// chainTip resolves the chain-level latest block, NOT_APPLICABLE when unknown
-// or stale.
+// tipReadFailed is the block chainTip answers when the store could not be READ,
+// as opposed to NOT_APPLICABLE, a tip the store does not hold. Far below every
+// block tag, so nothing else can produce it.
+const tipReadFailed = int64(math.MinInt64)
+
+// errChainTipUnreadable names the failure GetRelay reports for tipReadFailed.
+var errChainTipUnreadable = errors.New("chain tip could not be read from the store")
+
+// chainTip resolves the chain-level latest block: NOT_APPLICABLE when unknown
+// or stale, which is a miss, and tipReadFailed when the store could not be
+// read, which is not. The two used to be folded together, so a request for a
+// symbolic block against a backend that never answered came back as a clean
+// miss with no error and the breaker counted it as a success (Codex review of
+// #406). GetRelay turns the sentinel into a store error once the requested
+// block is resolved.
 func (e *Engine) chainTip(ctx context.Context, chainId string) int64 {
 	tip, fresh, err := e.Store.GetChainTip(ctx, ChainTipKey(chainId))
-	if err != nil || !fresh {
+	if err != nil {
+		utils.LavaFormatDebug("chain tip unreadable", utils.LogAttr("chainId", chainId), utils.LogAttr("error", err))
+		return tipReadFailed
+	}
+	if !fresh {
 		return spectypes.NOT_APPLICABLE
 	}
 	return tip
@@ -260,6 +281,12 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 			cacheReply.SeenBlock = relayCacheGet.SeenBlock
 		}
 	} else {
+		if relayCacheGet.RequestedBlock == tipReadFailed {
+			// The backend, not the tip, failed: a store error like a failed entry
+			// read, so the RESP backend's breaker and failure series see it. The
+			// context's own error rides along, so a timeout is classified as one.
+			return cacheReply, false, errors.Join(StoreError, errChainTipUnreadable, ctx.Err())
+		}
 		err = utils.LavaFormatDebug("Requested block is invalid",
 			utils.LogAttr("requested block", relayCacheGet.RequestedBlock),
 			utils.LogAttr("request_hash", string(relayCacheGet.RequestHash)),
@@ -365,7 +392,13 @@ func (e *Engine) GetSticky(ctx context.Context, chainId, apiInterface, service, 
 	if stickyId == "" {
 		return StickyPin{}, false, nil
 	}
-	return e.Store.GetSticky(ctx, StickyKey(chainId, apiInterface, service, stickyId))
+	pin, found, err := e.Store.GetSticky(ctx, StickyKey(chainId, apiInterface, service, stickyId))
+	if err != nil {
+		// A store failure, marked as one so the RESP backend's breaker counts it
+		// like a failed entry read (Codex review of #406).
+		return StickyPin{}, false, errors.Join(StoreError, err)
+	}
+	return pin, found, nil
 }
 
 // SetStickyIfAbsent claims an upstream for one sticky session id, first-writer-wins, and returns
@@ -375,5 +408,9 @@ func (e *Engine) SetStickyIfAbsent(ctx context.Context, chainId, apiInterface, s
 	if stickyId == "" {
 		return StickyPin{}, ErrEmptyStickyId
 	}
-	return e.Store.SetStickyIfAbsent(ctx, StickyKey(chainId, apiInterface, service, stickyId), pin, ClampStickyTTL(ttl))
+	effective, err := e.Store.SetStickyIfAbsent(ctx, StickyKey(chainId, apiInterface, service, stickyId), pin, ClampStickyTTL(ttl))
+	if err != nil {
+		return StickyPin{}, errors.Join(StoreError, err)
+	}
+	return effective, nil
 }

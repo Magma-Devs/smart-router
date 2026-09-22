@@ -530,11 +530,26 @@ func (cache *RespCache) Close() error {
 // GetStickySession reads the fleet's sticky-session claim straight from the RESP store. The
 // gRPC backend reaches the same engine call over a cache-be hop; both satisfy
 // StickySessionBackend, so the router does not care which is configured.
+//
+// Behind the breaker like a lookup: while it is open the claim registry is
+// unavailable, and the answer is an error at once, never a missing claim. A
+// free claim would split the session, the failure stickiness exists to
+// prevent, and before this guard every new session kept paying its store
+// budget against a blackholed backend after the breaker had opened (Codex
+// review of #406). A failure feeds the breaker like any other operation.
 func (cache *RespCache) GetStickySession(ctx context.Context, chainId, apiInterface, service, stickyId string) (core.StickyPin, bool, error) {
 	if cache == nil {
 		return core.StickyPin{}, false, NotInitializedError
 	}
-	return cache.engine.GetSticky(ctx, chainId, apiInterface, service, stickyId)
+	if cache.breakerOpen.Load() {
+		return core.StickyPin{}, false, cache.skip(respCacheOpStickyGet)
+	}
+	pin, found, err := cache.engine.GetSticky(ctx, chainId, apiInterface, service, stickyId)
+	cache.noteOperation(err)
+	if err != nil && errors.Is(err, core.StoreError) {
+		cache.metrics.recordOpFailure(respCacheOpStickyGet, err)
+	}
+	return pin, found, err
 }
 
 // SetStickySessionIfAbsent claims an upstream for one sticky session id, first-writer-wins,
@@ -544,5 +559,13 @@ func (cache *RespCache) SetStickySessionIfAbsent(ctx context.Context, chainId, a
 	if cache == nil {
 		return core.StickyPin{}, NotInitializedError
 	}
-	return cache.engine.SetStickyIfAbsent(ctx, chainId, apiInterface, service, stickyId, pin, ttl)
+	if cache.breakerOpen.Load() {
+		return core.StickyPin{}, cache.skip(respCacheOpStickySet)
+	}
+	effective, err := cache.engine.SetStickyIfAbsent(ctx, chainId, apiInterface, service, stickyId, pin, ttl)
+	cache.noteOperation(err)
+	if err != nil && errors.Is(err, core.StoreError) {
+		cache.metrics.recordOpFailure(respCacheOpStickySet, err)
+	}
+	return effective, err
 }

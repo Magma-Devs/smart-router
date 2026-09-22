@@ -10,8 +10,10 @@ import (
 )
 
 const (
-	respCacheOpGet = "get"
-	respCacheOpSet = "set"
+	respCacheOpGet       = "get"
+	respCacheOpSet       = "set"
+	respCacheOpStickyGet = "sticky_get"
+	respCacheOpStickySet = "sticky_set"
 
 	respCacheFailureKindError   = "error"
 	respCacheFailureKindTimeout = "timeout"

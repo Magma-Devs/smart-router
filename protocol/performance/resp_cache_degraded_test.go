@@ -3,6 +3,7 @@ package performance
 import (
 	"context"
 	"fmt"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"io"
 	"net"
 	"sync"
@@ -532,4 +533,71 @@ func TestRespCacheBreakerOpensOnFailedProbeAndClosesOnRecovery(t *testing.T) {
 		"while open the breaker probes every second, not at the configured interval")
 	require.NoError(t, get(), "lookups resume as ordinary misses")
 	require.Equal(t, float64(1), testutil.ToFloat64(m.connected))
+}
+
+// A request for a symbolic block (SAFE, FINALIZED, PENDING) resolves the chain
+// tip before the entry, and a backend that never answers used to turn that
+// into a clean miss with no error: the breaker counted it as a success, reset
+// its streak, and every such request kept paying its full budget while the
+// breaker stayed closed (Codex review of #406). It is a store failure like any
+// other, and three in a row open the breaker.
+func TestRespCacheBreakerCountsSymbolicBlockLookups(t *testing.T) {
+	blackhole := newBlackholeListener(t)
+	store, err := redisstore.New(redisstore.Config{Addresses: []string{blackhole.addr()}})
+	require.NoError(t, err)
+	cache := newRespCacheWithHealthInterval(store, core.DefaultPolicy(), time.Hour)
+	t.Cleanup(func() { _ = cache.Close() })
+
+	lookup := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), common.DefaultCacheTimeout)
+		defer cancel()
+		_, err := cache.GetEntry(ctx, &pairingtypes.RelayCacheGet{RequestHash: []byte("symbolic"), ChainId: "ETH1", RequestedBlock: spectypes.SAFE_BLOCK, SeenBlock: 100})
+		return err
+	}
+	for i := 0; i < respCacheBreakerThreshold; i++ {
+		require.ErrorIs(t, lookup(), core.StoreError, "a tip the backend never answered is a store failure, not a miss")
+	}
+	require.True(t, cache.breakerOpen.Load(), "consecutive symbolic-block failures open the breaker like any other")
+	start := time.Now()
+	require.ErrorIs(t, lookup(), ErrCacheBreakerOpen)
+	require.Less(t, time.Since(start), common.DefaultCacheTimeout, "and the next one is skipped at once")
+}
+
+// The sticky-session calls share the breaker with lookups and writes. While it
+// is open they return an error at once, never a missing claim (a free claim
+// would split the session), and open no connection; their own failures count
+// toward opening it (Codex review of #406).
+func TestRespCacheBreakerGuardsStickySessionCalls(t *testing.T) {
+	blackhole := newBlackholeListener(t)
+	store, err := redisstore.New(redisstore.Config{Addresses: []string{blackhole.addr()}})
+	require.NoError(t, err)
+	cache := newRespCacheWithHealthInterval(store, core.DefaultPolicy(), time.Hour)
+	t.Cleanup(func() { _ = cache.Close() })
+	skippedGets, skippedSets := skippedDelta(respCacheOpStickyGet), skippedDelta(respCacheOpStickySet)
+
+	// Their failures feed the breaker.
+	for i := 0; i < respCacheBreakerThreshold; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), common.DefaultCacheTimeout)
+		_, found, err := cache.GetStickySession(ctx, "ETH1", "jsonrpc", "base", "digest-1")
+		cancel()
+		require.ErrorIs(t, err, core.StoreError)
+		require.False(t, found)
+	}
+	require.True(t, cache.breakerOpen.Load(), "consecutive sticky failures open the breaker")
+
+	// While open, both calls answer at once with an error, and reach no wire.
+	dialsAtOpen := blackhole.accepted.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, found, err := cache.GetStickySession(ctx, "ETH1", "jsonrpc", "base", "digest-1")
+	require.ErrorIs(t, err, ErrCacheBreakerOpen)
+	require.ErrorIs(t, err, core.StoreError)
+	require.False(t, found, "an unavailable registry is an error, never a missing claim")
+	_, err = cache.SetStickySessionIfAbsent(ctx, "ETH1", "jsonrpc", "base", "digest-1", core.StickyPin{}, time.Minute)
+	require.ErrorIs(t, err, ErrCacheBreakerOpen)
+	require.Less(t, time.Since(start), 50*time.Millisecond, "both skipped at once, not at the caller's budget")
+	require.Equal(t, dialsAtOpen, blackhole.accepted.Load(), "no skipped sticky call opened a connection")
+	require.Equal(t, float64(1), skippedGets())
+	require.Equal(t, float64(1), skippedSets())
 }
