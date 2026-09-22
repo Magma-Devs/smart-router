@@ -865,6 +865,36 @@ all found by a reviewer after the change had passed its own checks:
 The first two examined nothing. The third examined somebody else's work and
 called it its own.
 
+## The excuses, and what is actually true
+
+Every row is something said on a real pull request, and every reality beside it
+was then measured. Read the left column when you catch yourself thinking it.
+
+| Excuse | Reality |
+|---|---|
+| "CI is green" | The job that runs the tests was skipped. A board shows the same green whether a check ran or was never selected |
+| "Copilot reviewed it" | Its threads were still open. A posted review is not a cleared one |
+| "The command returned 43, so it found things" | 43 of what? Nine were changed lines, thirty-four were context, five were the thing being looked for |
+| "The control came back non-zero, so the search works" | It matched 9 of 9 files. A control that matches everything discriminates nothing |
+| "It is my own pull request, I know what is in it" | The author is the worst judge of whether the author finished. A reviewer using the same gates found four faults the author missed, three of them outside the hunks |
+| "The gates all passed" | The gates name the ways this repository has shipped a false ready before, not every way a change can be wrong |
+| "I fixed the instances the search reported" | Re-run the same search. A fix is not done until it returns zero, and the count before and after both cost one command |
+| "The ticket says it is done" | Read the status field, not the resolution. They can say opposite things |
+
+## Red flags — stop, and go back
+
+- You finished the gates and have nothing to put in "Looked at beyond the gates".
+- You are about to report a number you did not take yourself.
+- You reported a count and never ran a control, or ran one that could not have come out differently.
+- You are reviewing your own pull request and found nothing.
+- You read a Markdown file by its hunks rather than whole.
+- You are about to write `READY` with a review seat you cannot name.
+- A later finding contradicts something you said earlier, and you are writing a new explanation instead of re-running the first check.
+
+**Each of these means the review is not finished.** None of them is a reason to
+lower the verdict on its own; all of them are a reason to go back to the gate
+that should have caught it.
+
 ## The report
 
 Compact. One screen. No narrative.
