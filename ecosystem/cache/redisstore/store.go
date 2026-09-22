@@ -73,8 +73,10 @@ type Store struct {
 	configuredEndpoints storeEndpoints
 
 	// stopWatcher terminates the credential poll loop (nil when the
-	// credentials are static).
+	// credentials are static); watcherDone is closed by the loop on its way
+	// out, so Close can wait for it.
 	stopWatcher chan struct{}
+	watcherDone chan struct{}
 }
 
 // endpointTracker holds the last successfully dialled address. Written from
@@ -189,7 +191,8 @@ func New(cfg Config) (*Store, error) {
 			)
 		} else {
 			store.stopWatcher = make(chan struct{})
-			go watchCredentials(provider, cfg.refreshInterval(), store.stopWatcher)
+			store.watcherDone = make(chan struct{})
+			go watchCredentials(provider, cfg.refreshInterval(), store.stopWatcher, store.watcherDone)
 		}
 	}
 	return store, nil
@@ -389,11 +392,16 @@ func (s *Store) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Close stops the credential watcher and releases both clients.
+// Close stops the credential watcher and releases both clients. It returns
+// only once the watcher has returned: a tick in flight finishes first, so
+// nothing owned by this store logs or pushes after Close. Waiting is safe
+// because a tick is bounded work: a file read, and per live connection a
+// go-redis OnNext that only marks the connection for a background re-auth.
 func (s *Store) Close() error {
 	if s.stopWatcher != nil {
 		close(s.stopWatcher)
 		s.stopWatcher = nil
+		<-s.watcherDone
 	}
 	err := s.write.Close()
 	if s.read != s.write {

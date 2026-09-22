@@ -446,3 +446,29 @@ func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
 	require.Equal(t, 1, strings.Count(rotated, recovered))
 	require.Equal(t, []string{"u:pw2"}, listener.recorded(), "a rotation that lands during recovery is applied")
 }
+
+// Close must not return while a watcher tick can still run: the tick logs
+// and pushes, and a store that has been closed should do neither. The loop
+// closes its done channel only on the way out, so the channel being closed
+// when Close returns is the contract itself.
+func TestCloseWaitsForTheCredentialWatcher(t *testing.T) {
+	store, err := New(Config{
+		Addresses:                 []string{"127.0.0.1:6379"},
+		PasswordFile:              writeTempFile(t, "pw", "placeholder-credential\n"),
+		CredentialRefreshInterval: time.Millisecond,
+	})
+	require.NoError(t, err)
+	done := store.watcherDone
+	require.NotNil(t, done, "a file-backed standalone store runs the watcher")
+	time.Sleep(10 * time.Millisecond) // let a few ticks run so a tick can be in flight
+	require.NoError(t, store.Close())
+	select {
+	case <-done:
+	default:
+		t.Fatal("Close returned before the credential watcher did")
+	}
+	// A second Close must not close the stop channel twice or wait on a
+	// watcher that already returned; what go-redis answers for its own
+	// already-closed client is its business.
+	_ = store.Close()
+}

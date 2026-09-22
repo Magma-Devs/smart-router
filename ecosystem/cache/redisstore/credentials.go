@@ -299,8 +299,10 @@ func (p *StreamingProvider) subscriberCount() int {
 }
 
 // watchCredentials polls Refresh until stop closes — the rotation driver for
-// file-backed sources.
-func watchCredentials(provider *StreamingProvider, interval time.Duration, stop <-chan struct{}) {
+// file-backed sources. done is closed on the way out, after the last tick
+// has returned, for Store.Close to wait on.
+func watchCredentials(provider *StreamingProvider, interval time.Duration, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
