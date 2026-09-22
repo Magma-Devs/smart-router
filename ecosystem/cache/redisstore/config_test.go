@@ -108,24 +108,39 @@ func TestExpirationConfigPolicy(t *testing.T) {
 	require.NoError(t, Config{Addresses: []string{"h:1"}, Expiration: fullConfig}.Validate())
 }
 
-// A multiplied lifetime is checked as the lifetime it produces, not as its two
-// inputs. A product under one nanosecond truncates to a zero TTL, which the
-// store writes as a key with no expiry at all, so a setting meant to shorten
-// retention made a permanent key; a product past the range of a duration wraps
-// (Codex review of #405). Both are refused at startup, with the defaults
-// standing in for an unset base, and a valid product is applied exactly.
-func TestExpirationConfigRejectsALifetimeThatRoundsAway(t *testing.T) {
+// Every row of the table is checked as the lifetime it resolves to, against the
+// one millisecond a RESP expiry can express (minLifetime). Below that the
+// client rounds every write up to 1ms and logs it to stderr, and a product
+// under one nanosecond truncates to a zero TTL, which the store writes as a key
+// with no expiry at all (Codex review of #405). The row an operator actually
+// types is a number without a unit — 3600 for an hour is 3.6µs — so the message
+// says so; a tiny multiplier on a sound base is refused without that hint. A
+// valid product is applied exactly, and a block that skipped validation is
+// clamped to the floor rather than yielding a zero.
+func TestExpirationConfigRejectsALifetimeBelowTheStoresPrecision(t *testing.T) {
 	validate := func(e ExpirationConfig) error {
 		return Config{Addresses: []string{"h:1"}, Expiration: e}.Validate()
 	}
+	unitless := validate(ExpirationConfig{Finalized: 3600})
+	require.ErrorContains(t, unitless, "expiration.finalized is 3.6µs, shorter than the 1ms")
+	require.ErrorContains(t, unitless, "3600 is 3.6µs", "the message shows the operator what their number became")
+	require.ErrorContains(t, unitless, "such as 3600s", "and how to write it")
+
+	require.ErrorContains(t, validate(ExpirationConfig{NodeErrors: 250, BlocksHashesToHeights: 172800}),
+		"expiration.node-errors is 250ns", "rows without a multiplier are held to the same floor, in table order")
+
+	tinyMultiplier := validate(ExpirationConfig{Finalized: time.Hour, FinalizedMultiplier: 1e-12})
+	require.ErrorContains(t, tinyMultiplier, "expiration.finalized (1h0m0s) with expiration.finalized-multiplier (1e-12) is 3ns, shorter than the 1ms")
+	require.NotContains(t, tinyMultiplier.Error(), "bare number", "the base had a unit; the multiplier is the problem")
+
 	require.ErrorContains(t, validate(ExpirationConfig{Finalized: time.Nanosecond, FinalizedMultiplier: 0.5}),
-		"expiration.finalized with expiration.finalized-multiplier")
-	require.ErrorContains(t, validate(ExpirationConfig{Finalized: time.Nanosecond, FinalizedMultiplier: 0.5}),
-		"no expiry at all")
+		"shorter than the 1ms", "a product under one nanosecond is caught by the same floor")
 	require.ErrorContains(t, validate(ExpirationConfig{NonFinalizedMultiplier: 1e-15}),
-		"expiration.non-finalized with expiration.non-finalized-multiplier", "the default base counts too")
+		"expiration.non-finalized (500ms) with expiration.non-finalized-multiplier (1e-15)", "the default base counts too")
 	require.ErrorContains(t, validate(ExpirationConfig{Finalized: 100 * time.Hour, FinalizedMultiplier: 1e15}),
 		"longer than a duration can hold")
+
+	require.NoError(t, validate(ExpirationConfig{Finalized: time.Millisecond, NodeErrors: time.Millisecond}), "one millisecond is the floor, inclusive")
 
 	halved := ExpirationConfig{Finalized: 2 * time.Second, FinalizedMultiplier: 0.5, NonFinalized: 400 * time.Millisecond, NonFinalizedMultiplier: 0.5}
 	require.NoError(t, validate(halved))
@@ -133,8 +148,9 @@ func TestExpirationConfigRejectsALifetimeThatRoundsAway(t *testing.T) {
 	require.Equal(t, time.Second, policy.Finalized)
 	require.Equal(t, 200*time.Millisecond, policy.NonFinalized)
 
-	clamped := ExpirationConfig{Finalized: time.Nanosecond, FinalizedMultiplier: 0.5}.Policy()
-	require.Equal(t, time.Nanosecond, clamped.Finalized, "a block that skipped validation still never yields a zero lifetime")
+	clamped := ExpirationConfig{Finalized: 3600, NonFinalizedMultiplier: 1e-15}.Policy()
+	require.Equal(t, time.Millisecond, clamped.Finalized, "a block that skipped validation is clamped to what the store can express, never a zero")
+	require.Equal(t, time.Millisecond, clamped.NonFinalized, "every row is clamped, not only the first that failed")
 }
 
 func listenLocal(t *testing.T) net.Listener {

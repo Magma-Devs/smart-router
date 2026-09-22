@@ -137,30 +137,71 @@ type ExpirationConfig struct {
 	BlocksHashesToHeights time.Duration `mapstructure:"blocks-hashes-to-heights"`
 }
 
+// minLifetime is the shortest lifetime the store can express. A RESP expiry is
+// set with PX, whole milliseconds, and go-redis rounds anything shorter up to
+// one millisecond on every write while printing a warning through its own
+// logger (formatMs), so a lifetime below it is refused at startup instead.
+// It is also where a value written without a unit shows itself: mapstructure
+// maps a bare YAML integer onto the duration as nanoseconds, so `finalized:
+// 3600` is 3.6µs rather than an hour, and the sidecar's flag would have
+// refused it outright ("missing unit").
+const minLifetime = time.Millisecond
+
 // Policy builds the engine's TTL table from the block, the way the sidecar
 // builds its own from flags: each unset duration keeps its default, and each
 // multiplier (default 1) scales the duration it belongs to.
 //
-// The multiplied lifetimes go through effectiveLifetime, the same computation
-// validate checks, so a block that passed validation yields exactly what it
-// promised and one that bypassed it still never yields a zero.
+// The table comes from resolve, the same computation validate checks, so a
+// block that passed validation yields exactly what it promised and one that
+// bypassed it is clamped to the nearest lifetime the store can express — it
+// still never yields a zero, which to the store is a key with no expiry.
 func (e ExpirationConfig) Policy() core.Policy {
-	policy := core.DefaultPolicy()
-	if e.Finalized > 0 {
-		policy.Finalized = e.Finalized
-	}
-	policy.Finalized, _ = effectiveLifetime(policy.Finalized, e.FinalizedMultiplier)
-	if e.NonFinalized > 0 {
-		policy.NonFinalized = e.NonFinalized
-	}
-	policy.NonFinalized, _ = effectiveLifetime(policy.NonFinalized, e.NonFinalizedMultiplier)
-	if e.NodeErrors > 0 {
-		policy.NodeErrors = e.NodeErrors
-	}
-	if e.BlocksHashesToHeights > 0 {
-		policy.BlocksHashesToHeights = e.BlocksHashesToHeights
-	}
+	policy, _ := e.resolve()
 	return policy
+}
+
+// resolve computes every row of the TTL table and reports the first row that
+// is no lifetime, naming its keys. Rows are visited in a fixed order so the
+// same block always yields the same message. Every row is resolved even after
+// an error, clamped, so Policy has a complete table to hand out.
+func (e ExpirationConfig) resolve() (core.Policy, error) {
+	policy := core.DefaultPolicy()
+	rows := []struct {
+		name           string
+		multiplierName string
+		configured     time.Duration
+		multiplier     float64
+		target         *time.Duration
+	}{
+		{"expiration.finalized", "expiration.finalized-multiplier", e.Finalized, e.FinalizedMultiplier, &policy.Finalized},
+		{"expiration.non-finalized", "expiration.non-finalized-multiplier", e.NonFinalized, e.NonFinalizedMultiplier, &policy.NonFinalized},
+		{"expiration.node-errors", "", e.NodeErrors, 0, &policy.NodeErrors},
+		{"expiration.blocks-hashes-to-heights", "", e.BlocksHashesToHeights, 0, &policy.BlocksHashesToHeights},
+	}
+	var firstErr error
+	for _, row := range rows {
+		base := *row.target
+		if row.configured > 0 {
+			base = row.configured
+		}
+		lifetime, err := effectiveLifetime(base, row.multiplier)
+		*row.target = lifetime
+		if err == nil || firstErr != nil {
+			continue
+		}
+		what := row.name
+		if row.multiplier > 0 {
+			what = fmt.Sprintf("%s (%s) with %s (%g)", row.name, base, row.multiplierName, row.multiplier)
+		}
+		firstErr = fmt.Errorf("resp-cache: %s %w", what, err)
+		if row.configured > 0 && row.configured < minLifetime {
+			// The configured value itself is below the floor, whatever the
+			// multiplier did to it: almost always a number written without a unit.
+			firstErr = fmt.Errorf("%w; a bare number is read as nanoseconds (%d is %s), so write the value with a unit such as %ds",
+				firstErr, int64(row.configured), row.configured, int64(row.configured))
+		}
+	}
+	return policy, firstErr
 }
 
 // effectiveLifetime is the lifetime a duration and its multiplier produce, as
@@ -168,65 +209,59 @@ func (e ExpirationConfig) Policy() core.Policy {
 // A multiplier of zero means "unset" and leaves the base alone.
 //
 // The product is checked before it becomes a duration, because the conversion
-// hides two failures. A positive lifetime whose product is under one
-// nanosecond truncates to zero, and a zero TTL is not "expire at once" to the
-// store but "no expiry at all": SetEntry mirrors the in-memory adapter and
-// writes a plain SET, so a setting meant to shorten retention created a
-// permanent key, one no volatile-* eviction policy can ever reclaim (Codex
-// review of #405). A product past the range of a duration wraps. The value
-// returned alongside an error is clamped to the nearest representable
-// lifetime, so a caller that skipped validation still never stores a zero.
+// hides two failures. A product past the range of a duration wraps. A product
+// below minLifetime is one the store cannot express: it would be rounded up to
+// one millisecond by the client on every write, and the shape that matters
+// most, a product under one nanosecond, would truncate to a zero TTL first —
+// and a zero TTL is not "expire at once" to the store but "no expiry at all",
+// since SetEntry writes a plain SET, so a setting meant to shorten retention
+// created a permanent key that no volatile-* eviction policy can reclaim
+// (Codex review of #405). The value returned alongside an error is clamped to
+// the nearest lifetime the store can express.
 func effectiveLifetime(base time.Duration, multiplier float64) (time.Duration, error) {
-	if multiplier <= 0 || base <= 0 {
-		return base, nil
+	product := float64(base)
+	if multiplier > 0 {
+		product *= multiplier
 	}
-	product := float64(base) * multiplier
 	if product >= math.MaxInt64 {
-		return time.Duration(math.MaxInt64), fmt.Errorf("%s multiplied by %g is longer than a duration can hold", base, multiplier)
+		return time.Duration(math.MaxInt64), fmt.Errorf("is longer than a duration can hold")
 	}
-	if product < 1 {
-		return time.Nanosecond, fmt.Errorf("%s multiplied by %g is shorter than 1ns and would be stored as a key with no expiry at all", base, multiplier)
+	if product < float64(minLifetime) {
+		return minLifetime, fmt.Errorf("is %s, shorter than the %s a RESP expiry can express", time.Duration(product), minLifetime)
 	}
 	return time.Duration(product), nil
 }
 
 // validate rejects what no lifetime can mean: a negative duration, a negative
-// multiplier, or a multiplied lifetime that no longer is one (see
+// multiplier, or a resolved lifetime the store cannot express (see resolve and
 // effectiveLifetime). Zero is "the default" everywhere and is accepted.
 func (e ExpirationConfig) validate() error {
-	for name, value := range map[string]time.Duration{
-		"expiration.finalized":                e.Finalized,
-		"expiration.non-finalized":            e.NonFinalized,
-		"expiration.node-errors":              e.NodeErrors,
-		"expiration.blocks-hashes-to-heights": e.BlocksHashesToHeights,
+	for _, field := range []struct {
+		name  string
+		value time.Duration
+	}{
+		{"expiration.finalized", e.Finalized},
+		{"expiration.non-finalized", e.NonFinalized},
+		{"expiration.node-errors", e.NodeErrors},
+		{"expiration.blocks-hashes-to-heights", e.BlocksHashesToHeights},
 	} {
-		if value < 0 {
-			return fmt.Errorf("resp-cache: %s must not be negative (got %s; leave it unset for the default)", name, value)
+		if field.value < 0 {
+			return fmt.Errorf("resp-cache: %s must not be negative (got %s; leave it unset for the default)", field.name, field.value)
 		}
 	}
-	for name, value := range map[string]float64{
-		"expiration.finalized-multiplier":     e.FinalizedMultiplier,
-		"expiration.non-finalized-multiplier": e.NonFinalizedMultiplier,
+	for _, field := range []struct {
+		name  string
+		value float64
+	}{
+		{"expiration.finalized-multiplier", e.FinalizedMultiplier},
+		{"expiration.non-finalized-multiplier", e.NonFinalizedMultiplier},
 	} {
-		if value < 0 {
-			return fmt.Errorf("resp-cache: %s must not be negative (got %g; leave it unset for 1)", name, value)
+		if field.value < 0 {
+			return fmt.Errorf("resp-cache: %s must not be negative (got %g; leave it unset for 1)", field.name, field.value)
 		}
 	}
-	defaults := core.DefaultPolicy()
-	finalized, nonFinalized := defaults.Finalized, defaults.NonFinalized
-	if e.Finalized > 0 {
-		finalized = e.Finalized
-	}
-	if e.NonFinalized > 0 {
-		nonFinalized = e.NonFinalized
-	}
-	if _, err := effectiveLifetime(finalized, e.FinalizedMultiplier); err != nil {
-		return fmt.Errorf("resp-cache: expiration.finalized with expiration.finalized-multiplier: %w", err)
-	}
-	if _, err := effectiveLifetime(nonFinalized, e.NonFinalizedMultiplier); err != nil {
-		return fmt.Errorf("resp-cache: expiration.non-finalized with expiration.non-finalized-multiplier: %w", err)
-	}
-	return nil
+	_, err := e.resolve()
+	return err
 }
 
 // hasMaterial reports whether the block carries any setting other than the

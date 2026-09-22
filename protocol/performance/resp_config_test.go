@@ -124,6 +124,44 @@ resp-cache:
 	require.ErrorContains(t, err, "expiration.finalized")
 }
 
+// MAG-3631 review: a duration written without a unit is not refused by the
+// decoder — mapstructure maps a bare YAML integer onto the nanoseconds behind
+// the duration, and viper's duration hook converts strings only — so
+// `finalized: 3600`, the row an operator types by analogy with the sidecar's
+// `--expiration 3600` (which pflag refuses: "missing unit"), used to pass
+// validation as 3.6µs and be stored as a 1ms lifetime, with go-redis printing
+// a truncation warning to stderr on every write. Every resolved lifetime is now
+// held to the one millisecond a RESP expiry can express, and the message says
+// what the bare number became.
+func TestLoadRespCacheConfigRefusesALifetimeBelowOneMillisecond(t *testing.T) {
+	refused := func(block, want string) {
+		t.Helper()
+		v, _ := newViperWithYAML(t, "resp-cache:\n  addresses: [\"a:6379\"]\n  expiration:\n"+block)
+		_, _, err := LoadRespCacheConfig(v)
+		require.ErrorContains(t, err, want)
+	}
+	refused("    finalized: 3600\n", "expiration.finalized is 3.6µs")
+	refused("    finalized: 3600\n", "3600 is 3.6µs")
+	refused("    finalized: 1h\n    finalized-multiplier: 1e-12\n", "expiration.finalized (1h0m0s) with expiration.finalized-multiplier (1e-12) is 3ns")
+	refused("    node-errors: 250\n    blocks-hashes-to-heights: 172800\n", "expiration.node-errors is 250ns")
+
+	v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  expiration:
+    finalized: 3600s
+    node-errors: 250ms
+    blocks-hashes-to-heights: 172800s
+`)
+	cfg, enabled, err := LoadRespCacheConfig(v)
+	require.NoError(t, err, "the same numbers with their units are what the operator meant")
+	require.True(t, enabled)
+	policy := cfg.Expiration.Policy()
+	require.Equal(t, time.Hour, policy.Finalized)
+	require.Equal(t, 250*time.Millisecond, policy.NodeErrors)
+	require.Equal(t, 48*time.Hour, policy.BlocksHashesToHeights)
+}
+
 func TestLoadRespCacheConfigAbsentIsDisabled(t *testing.T) {
 	v, _ := newViperWithYAML(t, `cache-be: "cache:20100"`)
 	_, enabled, err := LoadRespCacheConfig(v)
