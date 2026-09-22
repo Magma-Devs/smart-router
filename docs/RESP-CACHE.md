@@ -72,9 +72,9 @@ a word.
 | `read-addresses` | *(unset)* | Optional separate endpoint(s) for **reads** (reader endpoints). Writes stay on `addresses`. Selects an *endpoint*, not a replica role — see the caveat under [Multi-region reads](#multi-region-reads-readwrite-split). |
 | `master-name` | — | Sentinel only (required there): the monitored master set name. |
 | `username` / `password` | *(unset)* | Static data-node credentials (AUTH / ACL). Without `tls.enabled: true` they are sent readable on every new connection; the router warns about that once at startup (`credentials are configured without tls`), which is fine for a loopback or private-network backend and the thing to fix for any other. |
-| `password-file` | *(unset)* | Rotation-capable credentials: the file is polled and changes are pushed to **live connections**, which re-authenticate in place — no restart, no connection loss (standalone and cluster; under sentinel rotation applies on reconnect — see [Credential rotation](#credential-rotation)). Holds the password, or `username:password` to rotate the ACL user too — so a password containing `:` cannot be expressed here. Mutually exclusive with `password`. |
+| `password-file` | *(unset)* | Rotation-capable credentials: the file is polled and changes are pushed to **live connections**, which re-authenticate in place — no restart, no connection loss (standalone and cluster; under sentinel rotation applies on reconnect — see [Credential rotation](#credential-rotation)). Holds the password, or `username:password` to rotate the ACL user too — so a password containing `:` cannot be expressed here. Surrounding ASCII whitespace (spaces, tabs, CR, LF) and a leading UTF-8 byte order mark are trimmed, from the file and from each half of `username:password`; every other byte is sent as part of the credential, and a file that is empty once trimmed is refused at startup. Mutually exclusive with `password`. |
 | `credential-refresh-interval` | `10s` | Poll cadence for `password-file`. |
-| `sentinel-username` / `sentinel-password` / `sentinel-password-file` | *(unset)* | **Sentinel control-plane** credentials — sentinels authenticate independently of the data nodes; hardened deployments fail discovery without these. Only valid with `topology: sentinel`, and read once at startup (rotating them needs a restart). |
+| `sentinel-username` / `sentinel-password` / `sentinel-password-file` | *(unset)* | **Sentinel control-plane** credentials — sentinels authenticate independently of the data nodes; hardened deployments fail discovery without these. Only valid with `topology: sentinel`, and read once at startup (rotating them needs a restart). The file is read like `password-file`: ASCII whitespace and a leading byte order mark trimmed, every other byte kept, an empty file refused. |
 | `db` | `0` | Logical database (standalone/sentinel only; rejected for cluster). |
 | `key-prefix` | `sr` | The keyspace this router occupies; flag form `--resp-cache-key-prefix` (outranks the block). Restricted to `[A-Za-z0-9._-]+` (flush uses it as a `SCAN MATCH` glob). **Routers on one prefix serve each other's cached answers and resolve `latest` off one chain tip**, and the default puts every router that leaves it unset in one keyspace — give each deployment sharing a backend its own prefix unless its routers are replicas reading the same nodes; flush isolation follows from it. See [Sharing a backend between routers](#sharing-a-backend-between-routers). |
 | `tls.enabled` | `false` | TLS to the backend. **Required (`true`) whenever any other `tls.*` key is set** — a `tls` block without it is refused at startup as dangling configuration, because the alternative is a plaintext connection carrying `username`/`password` readable on the wire. That holds for an explicit `enabled: false` beside those keys too. To run without TLS, remove the other `tls.*` keys or the whole block; `tls: {enabled: false}` on its own is accepted. |
@@ -186,6 +186,14 @@ applies on reconnect, rather than reporting rotations it cannot deliver.
 > the router deliberately withholds the server's auth reply from logs — so the router logs a
 > warning once at startup when the file contains a colon, naming only the parsed username.
 > Either avoid `:` in the password or use the explicit `username:password` form deliberately.
+
+> **What the file trim removes, and what it keeps.** Surrounding ASCII whitespace (spaces,
+> tabs, CR, LF) and a leading UTF-8 byte order mark are trimmed, on the file and on each half of
+> `username:password`; every other byte is the credential. A credential that begins with another
+> invisible rune (a zero-width space, a non-breaking space) is sent as written, and the router
+> warns once at startup naming the file and the code point, never the value. A file that is empty
+> once trimmed is refused at startup; one that is empty for a moment mid-rotation (a secret mount
+> being rewritten) is a failed read, and the live connections keep the credentials they have.
 
 ## Sizing and eviction (`maxmemory-policy`)
 

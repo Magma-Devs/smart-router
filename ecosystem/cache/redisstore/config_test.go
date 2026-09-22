@@ -174,7 +174,9 @@ func TestTrackingDialerRecordsEveryDial(t *testing.T) {
 // the mapping must carry BOTH credential sets, or discovery against hardened
 // sentinels fails before a data connection is ever attempted.
 func TestFailoverOptionsMapping(t *testing.T) {
-	sentinelPwFile := writeTempFile(t, "sentinel-pass", "placeholder-sentinel-credential\n")
+	// Leading whitespace as well as the trailing newline: the control-plane
+	// file goes through the same trim as the data-node file (MAG-3685).
+	sentinelPwFile := writeTempFile(t, "sentinel-pass", " \nplaceholder-sentinel-credential\n")
 	cfg := Config{
 		Topology:             TopologySentinel,
 		Addresses:            []string{"s1:26379", "s2:26379", "s3:26379"},
@@ -196,7 +198,7 @@ func TestFailoverOptionsMapping(t *testing.T) {
 	require.Equal(t, "mymaster", opts.MasterName)
 	require.Equal(t, cfg.Addresses, opts.SentinelAddrs)
 	require.Equal(t, "sentineluser", opts.SentinelUsername)
-	require.Equal(t, "placeholder-sentinel-credential", opts.SentinelPassword, "control-plane password comes from the file, trimmed")
+	require.Equal(t, "placeholder-sentinel-credential", opts.SentinelPassword, "control-plane password comes from the file, trimmed on both sides")
 	require.Equal(t, 1, opts.DB)
 	require.Equal(t, 7, opts.PoolSize)
 
@@ -209,6 +211,32 @@ func TestFailoverOptionsMapping(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "datauser", user)
 	require.Equal(t, "datapass", pass)
+}
+
+// The sentinel control-plane file is read by the same reader as the data-node
+// file: whitespace on both sides and a leading byte order mark are trimmed,
+// and an empty file is refused naming the path and the setting.
+func TestSentinelPasswordFileIsReadLikeTheDataNodeFile(t *testing.T) {
+	sentinelCfg := func(path string) Config {
+		return Config{Topology: TopologySentinel, Addresses: []string{"s1:26379"}, MasterName: "mymaster", SentinelPasswordFile: path}
+	}
+	for _, tc := range []struct{ name, content, want string }{
+		{"trailing newline", "placeholder-sentinel-credential\n", "placeholder-sentinel-credential"},
+		{"leading whitespace", "\n placeholder-sentinel-credential\n", "placeholder-sentinel-credential"},
+		{"UTF-8 BOM", utf8BOMBytes + "placeholder-sentinel-credential", "placeholder-sentinel-credential"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pw, err := sentinelCfg(writeTempFile(t, "sentinel-pass", tc.content)).sentinelPassword()
+			require.NoError(t, err)
+			require.Equal(t, tc.want, pw)
+		})
+	}
+	t.Run("empty file is refused naming the path", func(t *testing.T) {
+		path := writeTempFile(t, "sentinel-pass", " \n")
+		_, err := sentinelCfg(path).sentinelPassword()
+		require.ErrorContains(t, err, path)
+		require.ErrorContains(t, err, "sentinel-password-file")
+	})
 }
 
 func TestClusterOptionsMapping(t *testing.T) {

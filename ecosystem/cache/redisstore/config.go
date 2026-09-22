@@ -240,15 +240,51 @@ func (cfg Config) credentialsSource() CredentialsSource {
 // effect on a running router. This differs from the DATA-node credentials,
 // which are resolved per connection attempt (sentinel) or refreshed in place
 // (standalone/cluster). Documented in docs/RESP-CACHE.md.
+//
+// The file is read by the same reader as the data-node file, so the same
+// rules hold: a leading byte order mark and the four ASCII whitespace bytes
+// are trimmed, an empty file is refused, and a credential beginning with an
+// invisible rune is reported (MAG-3685 review).
 func (cfg Config) sentinelPassword() (string, error) {
 	if cfg.SentinelPasswordFile == "" {
 		return cfg.SentinelPassword, nil
 	}
-	pw, err := os.ReadFile(cfg.SentinelPasswordFile)
+	pw, err := readCredentialFile(cfg.SentinelPasswordFile)
 	if err != nil {
 		return "", fmt.Errorf("resp-cache: reading sentinel-password-file: %w", err)
 	}
-	return trimCredential(string(pw)), nil
+	if field, r, ok := invisibleStart("", pw); ok {
+		warnCredentialBeginsInvisibly(cfg.SentinelPasswordFile, "sentinel-"+field, r)
+	}
+	return pw, nil
+}
+
+// clientCredentials is what a client build takes from the credential
+// settings, resolved once per store: one source for the data-node
+// credentials, the provider that pushes a file-backed one to live
+// connections, and the sentinel control-plane password, read once. One of
+// each however many clients the store builds, so a file is read once at
+// startup and the once-only lines about it fire once — New used to build a
+// FileCredentials for its fail-fast, another for the provider and a third for
+// the sentinel client, and the "read as username:password" line fired for
+// each (MAG-3685 review).
+type clientCredentials struct {
+	source           CredentialsSource
+	provider         *StreamingProvider
+	sentinelPassword string
+}
+
+func (cfg Config) resolveClientCredentials() (clientCredentials, error) {
+	creds := clientCredentials{source: cfg.credentialsSource()}
+	creds.provider = NewStreamingProvider(creds.source)
+	if cfg.topology() == TopologySentinel {
+		pw, err := cfg.sentinelPassword()
+		if err != nil {
+			return clientCredentials{}, err
+		}
+		creds.sentinelPassword = pw
+	}
+	return creds, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -427,23 +463,20 @@ func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *S
 	}
 }
 
-// buildClient constructs one client for the given address set.
-func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) (redis.UniversalClient, error) {
+// buildClient constructs one client for the given address set, from the
+// credentials New resolved once for every client of the store.
+func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, creds clientCredentials, tracker *endpointTracker) (redis.UniversalClient, error) {
 	switch cfg.topology() {
 	case TopologySentinel:
-		sentinelPassword, err := cfg.sentinelPassword()
-		if err != nil {
-			return nil, err
-		}
-		client := redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, cfg.credentialsSource(), sentinelPassword, tracker))
+		client := redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, creds.source, creds.sentinelPassword, tracker))
 		// The mark half of the tracker pair (trackingDialerMarkedOnly is the
 		// other): this hook chain wraps only the returned client's own data-pool
 		// dials, never the internal sentinel clients' — see markDataDialsHook.
 		client.AddHook(markDataDialsHook{})
 		return client, nil
 	case TopologyCluster:
-		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, provider, tracker)), nil
+		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, creds.provider, tracker)), nil
 	default:
-		return redis.NewClient(cfg.standaloneOptions(addrs, tlsCfg, provider, tracker)), nil
+		return redis.NewClient(cfg.standaloneOptions(addrs, tlsCfg, creds.provider, tracker)), nil
 	}
 }
