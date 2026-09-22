@@ -103,8 +103,14 @@ type TLSConfig struct {
 
 // hasMaterial reports whether the block carries any setting other than the
 // switch itself — the operator wrote a tls section, whatever Enabled says.
+//
+// It compares the whole struct with the switch cleared rather than naming the
+// keys, so a key added to TLSConfig is covered by the rule without anyone
+// remembering to list it here; it stops compiling if a non-comparable field is
+// ever added, which is the moment to revisit it.
 func (c TLSConfig) hasMaterial() bool {
-	return c.CAFile != "" || c.CertFile != "" || c.KeyFile != "" || c.ServerName != "" || c.InsecureSkipVerify
+	c.Enabled = false
+	return c != TLSConfig{}
 }
 
 // build materialises the tls.Config, nil when disabled. Files are read
