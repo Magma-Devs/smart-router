@@ -239,9 +239,8 @@ func (sm *UnifiedRelayStateMachine) getLatestState() *RelayState {
 //
 // The next state carries the SAME protocol message as the one before it. A retry changes which
 // endpoint serves the request, never what the request asks for — see Policy.Decide for why the
-// archive add/remove that used to happen here is gone. Because the message is unchanged, its
-// routerKey is unchanged too, so the used/unwanted exclusion set carries over on its own and
-// there is nothing to migrate (MAG-2228 was about exactly that toggle).
+// archive add/remove that used to happen here is gone. Nothing here changes the routerKey, so
+// MAG-2228's exclusion migration has nothing left to migrate at this site.
 func (sm *UnifiedRelayStateMachine) stateTransition(relayState *RelayState) {
 	var nextState *RelayState
 	if relayState == nil {

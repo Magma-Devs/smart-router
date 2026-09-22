@@ -5751,10 +5751,7 @@ func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestD
 			return protocolMessage
 		}
 
-		extensionAdded := newProtocolMessage.UpdateEarliestAndValidateExtensionRules(rpcss.chainParser.ExtensionsParser(), earliestBlockHashRequested, addon, relayRequestData.SeenBlock)
-		if extensionAdded && relayState.CheckIsArchive(newProtocolMessage.RelayPrivateData()) {
-			relayState.SetIsArchive(true)
-		}
+		newProtocolMessage.UpdateEarliestAndValidateExtensionRules(rpcss.chainParser.ExtensionsParser(), earliestBlockHashRequested, addon, relayRequestData.SeenBlock)
 		relayState.SetProtocolMessage(newProtocolMessage)
 		return newProtocolMessage
 	}
