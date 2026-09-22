@@ -264,18 +264,32 @@ Alert on the dedicated series (full reference in
   from outage.
 - `smartrouter_resp_cache_connection_errors_total`, pool gauges.
 
-- `smartrouter_resp_cache_breaker_open` and `smartrouter_resp_cache_skipped_total{op}` — the
-  breaker, below.
+- `smartrouter_resp_cache_breaker_open{role}` and `smartrouter_resp_cache_skipped_total{op}` —
+  the breaker, below.
 
-**An unreachable backend trips a breaker.** Three consecutive operation failures, or one failed
-health probe, open it; while it is open every lookup and write returns at once with no I/O
+**An unreachable backend trips a breaker, per side.** Writes and the write endpoint's probe
+steer one breaker; lookups (entries, the chain tip, sticky claims) and the read endpoint's probe
+steer another. Three consecutive failures on a side, or one failed probe of its endpoint, open
+that side's breaker; while it is open every operation on that side returns at once with no I/O
 (counted on `smartrouter_resp_cache_skipped_total`, never as a failure the backend saw), the
-probe runs every second instead of every ten, and the first successful probe closes it. Without
-this, every lookup paid its full budget against a dead backend and every asynchronous write held
-a connection for its 5s budget, so under steady traffic the pool filled with stalled writes and
-lookups queued behind them — a forty-fold drop in serving rate for the length of the outage,
-and one more connection opened per operation. An outage now costs the relay path the handful of
-failures that opened the breaker, and recovery is noticed within about a second.
+probe runs every second instead of every ten, and the breaker closes on the first probe that
+answers **within that side's budget**, once it has been open for at least one probe interval.
+The other side is untouched: with reads split, a writer outage skips writes while lookups keep
+hitting on the reader, and a reader outage skips lookups while the writer keeps being populated.
+Without a read split one breaker stands behind both sides. Without any of this, every lookup
+paid its full budget against a dead backend and every asynchronous write held a connection for
+its 5s budget, so under steady traffic the pool filled with stalled writes and lookups queued
+behind them — a forty-fold drop in serving rate for the length of the outage, and one more
+connection opened per operation. An outage now costs the relay path the handful of failures
+that opened the breaker, and recovery is noticed within about a second.
+
+The budget matters for a backend that is **slow rather than dead**: one that answers `PING`
+but cannot answer a lookup within the relay's 50 ms budget keeps its read breaker open, in one
+transition, instead of closing it on every probe and reopening it on the next three lookups.
+`smartrouter_resp_cache_connected` can therefore read 1 while `smartrouter_resp_cache_breaker_open{role="read"}`
+reads 1: the endpoint answers, and is too slow to serve lookups. The write side's budget is the
+5 s write budget, beyond the probe's own deadline, so a write breaker closes on any answered
+probe.
 
 The shared `smartrouter_cache_*` hit/miss series keep working unchanged.
 
@@ -305,10 +319,12 @@ curl -s http://127.0.0.1:6161/debug/cache-state | jq
       "reachable_checked_at": "2026-09-09T14:31:02Z",
       "reachable_detail": "no error reported",
       "when_unreachable": "skipped",
-      "lifetimes": {"finalized_seconds": 3600, "non_finalized_seconds": 0.5, "node_errors_seconds": 60}
+      "lifetimes": {"finalized_seconds": 3600, "non_finalized_seconds": 0.5, "node_errors_seconds": 60},
+      "breaker": {"write_open": false, "read_open": false}
     },
     "secondary": {"configured": false, "engine": "", "address": "", "reachable": null,
-                  "reachable_checked_at": "", "reachable_detail": "", "when_unreachable": "", "lifetimes": null}
+                  "reachable_checked_at": "", "reachable_detail": "", "when_unreachable": "", "lifetimes": null,
+                  "breaker": null}
   }
 }
 ```
@@ -328,9 +344,11 @@ Five things are easy to misread:
   tier exists is `configured`, never the presence of this field.
 - **`when_unreachable` says what an unreachable tier costs the relay path.** Both shipped tiers
   report `skipped`. A `cache-be` tier returns not-connected before any I/O. A RESP tier opens
-  its breaker (above) and skips lookups and writes until a probe succeeds, so an outage costs
-  the few failures that opened it and nothing per relay afterwards. Older routers reported
-  `attempted` for a RESP tier: every relay paid the full cache timeout.
+  its breaker (above) and skips that side until a probe answers within its budget, so an outage
+  costs the few failures that opened it and nothing per relay afterwards; `breaker` says which
+  side, since with a read/write split `reachable` alone cannot (`null` for a `cache-be` tier,
+  which has none). Older routers reported `attempted` for a RESP tier: every relay paid the
+  full cache timeout.
 - **`reachable_checked_at` marks a snapshot.** The RESP verdict comes from the 10s health
   probe, so it can be up to ~13s old. The `cache-be` verdict is read live from the connection
   and carries no timestamp.

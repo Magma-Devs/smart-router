@@ -3,7 +3,6 @@ package performance
 import (
 	"context"
 	"fmt"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"io"
 	"net"
 	"sync"
@@ -17,6 +16,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -212,10 +212,13 @@ func TestRespCacheSetFailureCountedAndReturned(t *testing.T) {
 // freezableProxy forwards TCP to a target until frozen; while frozen it holds
 // all traffic, simulating a reachable-but-stalled backend on an ESTABLISHED
 // connection (the stall-listener test above only covers the cold handshake).
+// With a delay set it forwards every reply late instead, the backend that is
+// alive and answers everything, only slower than the relay budget.
 type freezableProxy struct {
 	listener net.Listener
 	target   string
 	frozen   atomic.Bool
+	delay    atomic.Int64 // nanoseconds added to every reply from the target
 }
 
 func newFreezableProxy(t *testing.T, target string) *freezableProxy {
@@ -235,7 +238,7 @@ func newFreezableProxy(t *testing.T, target string) *freezableProxy {
 				_ = client.Close()
 				continue
 			}
-			pump := func(dst, src net.Conn) {
+			pump := func(dst, src net.Conn, delayed bool) {
 				defer dst.Close()
 				buf := make([]byte, 4096)
 				for {
@@ -246,13 +249,16 @@ func newFreezableProxy(t *testing.T, target string) *freezableProxy {
 					for p.frozen.Load() {
 						time.Sleep(10 * time.Millisecond)
 					}
+					if delay := p.delay.Load(); delayed && delay > 0 {
+						time.Sleep(time.Duration(delay))
+					}
 					if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
 						return
 					}
 				}
 			}
-			go pump(upstream, client)
-			go pump(client, upstream)
+			go pump(upstream, client, false)
+			go pump(client, upstream, true)
 		}
 	}()
 	return p
@@ -447,8 +453,9 @@ func TestRespCacheBreakerBoundsWorkAgainstABlackholedBackend(t *testing.T) {
 	for i := 0; i < respCacheBreakerThreshold; i++ {
 		require.ErrorIs(t, lookup(), core.StoreError)
 	}
-	require.True(t, cache.breakerOpen.Load(), "consecutive failures open the breaker without waiting for a probe")
-	require.Equal(t, float64(1), testutil.ToFloat64(m.breakerOpen))
+	require.True(t, cache.readBreaker.open.Load(), "consecutive failures open the breaker without waiting for a probe")
+	require.Equal(t, float64(1), testutil.ToFloat64(m.breakerOpen.WithLabelValues(redisstore.EndpointRoleWrite)))
+	require.Equal(t, float64(1), testutil.ToFloat64(m.breakerOpen.WithLabelValues(redisstore.EndpointRoleRead)), "one breaker behind both sides of an unsplit store: the two series move together")
 
 	// The burst that used to pile up: writes with the asynchronous 5s budget,
 	// as many as arrive. Every one returns at once and none reaches the wire.
@@ -499,10 +506,11 @@ func TestRespCacheBreakerBoundsWorkAgainstABlackholedBackend(t *testing.T) {
 	mr := miniredis.NewMiniRedis()
 	require.NoError(t, mr.StartAddr(addr))
 	t.Cleanup(mr.Close)
-	require.Eventually(t, func() bool { return !cache.breakerOpen.Load() }, 15*time.Second, 50*time.Millisecond,
+	require.Eventually(t, func() bool { return !cache.readBreaker.open.Load() }, 15*time.Second, 50*time.Millisecond,
 		"a successful probe closes the breaker")
 	require.NoError(t, lookup(), "a clean miss again: no store error")
-	require.Equal(t, float64(0), testutil.ToFloat64(m.breakerOpen))
+	require.Equal(t, float64(0), testutil.ToFloat64(m.breakerOpen.WithLabelValues(redisstore.EndpointRoleWrite)))
+	require.Equal(t, float64(0), testutil.ToFloat64(m.breakerOpen.WithLabelValues(redisstore.EndpointRoleRead)))
 }
 
 // A failed probe opens the breaker too, so a backend that is dead when the
@@ -519,7 +527,7 @@ func TestRespCacheBreakerOpensOnFailedProbeAndClosesOnRecovery(t *testing.T) {
 		return err
 	}
 
-	require.Eventually(t, func() bool { return cache.breakerOpen.Load() }, 5*time.Second, 20*time.Millisecond,
+	require.Eventually(t, func() bool { return cache.readBreaker.open.Load() }, 5*time.Second, 20*time.Millisecond,
 		"the startup probe opens the breaker")
 	skippedGets := skippedDelta(respCacheOpGet)
 	require.ErrorIs(t, get(), ErrCacheBreakerOpen)
@@ -529,7 +537,7 @@ func TestRespCacheBreakerOpensOnFailedProbeAndClosesOnRecovery(t *testing.T) {
 	require.False(t, *state.Reachable)
 
 	require.NoError(t, mr.Restart())
-	require.Eventually(t, func() bool { return !cache.breakerOpen.Load() }, 10*time.Second, 50*time.Millisecond,
+	require.Eventually(t, func() bool { return !cache.readBreaker.open.Load() }, 10*time.Second, 50*time.Millisecond,
 		"while open the breaker probes every second, not at the configured interval")
 	require.NoError(t, get(), "lookups resume as ordinary misses")
 	require.Equal(t, float64(1), testutil.ToFloat64(m.connected))
@@ -557,7 +565,7 @@ func TestRespCacheBreakerCountsSymbolicBlockLookups(t *testing.T) {
 	for i := 0; i < respCacheBreakerThreshold; i++ {
 		require.ErrorIs(t, lookup(), core.StoreError, "a tip the backend never answered is a store failure, not a miss")
 	}
-	require.True(t, cache.breakerOpen.Load(), "consecutive symbolic-block failures open the breaker like any other")
+	require.True(t, cache.readBreaker.open.Load(), "consecutive symbolic-block failures open the breaker like any other")
 	start := time.Now()
 	require.ErrorIs(t, lookup(), ErrCacheBreakerOpen)
 	require.Less(t, time.Since(start), common.DefaultCacheTimeout, "and the next one is skipped at once")
@@ -583,7 +591,7 @@ func TestRespCacheBreakerGuardsStickySessionCalls(t *testing.T) {
 		require.ErrorIs(t, err, core.StoreError)
 		require.False(t, found)
 	}
-	require.True(t, cache.breakerOpen.Load(), "consecutive sticky failures open the breaker")
+	require.True(t, cache.readBreaker.open.Load(), "consecutive sticky failures open the breaker")
 
 	// While open, both calls answer at once with an error, and reach no wire.
 	dialsAtOpen := blackhole.accepted.Load()
@@ -600,4 +608,239 @@ func TestRespCacheBreakerGuardsStickySessionCalls(t *testing.T) {
 	require.Equal(t, dialsAtOpen, blackhole.accepted.Load(), "no skipped sticky call opened a connection")
 	require.Equal(t, float64(1), skippedGets())
 	require.Equal(t, float64(1), skippedSets())
+}
+
+// breakerTransitions samples one breaker and records every change of state
+// with its time, so a test can count openings and closings without reading
+// the log lines each transition writes.
+type breakerTransitions struct {
+	stop chan struct{}
+	done chan struct{}
+	mu   sync.Mutex
+	seen []struct {
+		at   time.Time
+		open bool
+	}
+}
+
+func watchBreaker(breaker *respCacheBreaker) *breakerTransitions {
+	w := &breakerTransitions{stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(w.done)
+		last := breaker.open.Load()
+		for {
+			select {
+			case <-w.stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			if now := breaker.open.Load(); now != last {
+				w.mu.Lock()
+				w.seen = append(w.seen, struct {
+					at   time.Time
+					open bool
+				}{time.Now(), now})
+				w.mu.Unlock()
+				last = now
+			}
+		}
+	}()
+	return w
+}
+
+// transitions stops the sampler and returns the changes it saw, as "open" /
+// "closed" in order.
+func (w *breakerTransitions) transitions() []string {
+	close(w.stop)
+	<-w.done
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []string
+	for _, change := range w.seen {
+		if change.open {
+			out = append(out, "open")
+		} else {
+			out = append(out, "closed")
+		}
+	}
+	return out
+}
+
+func splitRespCache(t *testing.T, healthInterval time.Duration) (*RespCache, *miniredis.Miniredis, *miniredis.Miniredis) {
+	t.Helper()
+	mrWrite, mrRead := miniredis.RunT(t), miniredis.RunT(t)
+	store, err := redisstore.New(redisstore.Config{
+		Addresses:     []string{mrWrite.Addr()},
+		ReadAddresses: []string{mrRead.Addr()},
+	})
+	require.NoError(t, err)
+	cache := newRespCacheWithHealthInterval(store, core.DefaultPolicy(), healthInterval)
+	t.Cleanup(func() { _ = cache.Close() })
+	return cache, mrWrite, mrRead
+}
+
+// A store split by role fails by role, and one breaker for the whole cache
+// made a writer outage skip every lookup on a healthy reader that held the
+// data (every one of them was a hit before the breaker existed), and a reader
+// outage stop the cache being populated on a healthy writer (review of #406).
+// Each side now has its own breaker: the half that is down is skipped, the
+// half that is up keeps serving.
+func TestRespCacheBreakerIsSplitByEndpoint(t *testing.T) {
+	cache, mrWrite, mrRead := splitRespCache(t, 50*time.Millisecond)
+	m := getRespCacheMetrics()
+	breakerGauge := func(role string) float64 { return testutil.ToFloat64(m.breakerOpen.WithLabelValues(role)) }
+	set := func(hash string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		return cache.SetEntry(ctx, &pairingtypes.RelayCacheSet{
+			RequestHash: []byte(hash), ChainId: "ETH1", RequestedBlock: 100, SeenBlock: 100,
+			AverageBlockTime: int64(12 * time.Second),
+			Response:         &pairingtypes.RelayReply{Data: []byte(`x`), LatestBlock: 100},
+		})
+	}
+	get := func(hash string) (*pairingtypes.CacheRelayReply, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), common.DefaultCacheTimeout)
+		defer cancel()
+		return cache.GetEntry(ctx, &pairingtypes.RelayCacheGet{RequestHash: []byte(hash), ChainId: "ETH1", RequestedBlock: 100, SeenBlock: 100})
+	}
+
+	// An entry the reader holds: written through the writer and copied to the
+	// read store by hand, since the write endpoint never feeds it — the shape
+	// read-addresses is documented for.
+	require.NoError(t, set("split"))
+	for _, key := range mrWrite.Keys() {
+		value, err := mrWrite.Get(key)
+		require.NoError(t, err)
+		require.NoError(t, mrRead.Set(key, value))
+	}
+	reply, err := get("split")
+	require.NoError(t, err)
+	require.NotNil(t, reply.GetReply(), "sanity: served from the reader")
+	require.Eventually(t, func() bool { return testutil.ToFloat64(m.connected) == 1 }, 5*time.Second, 10*time.Millisecond)
+
+	// Writer down: writes are skipped, lookups keep hitting on the reader.
+	mrWrite.Close()
+	require.Eventually(t, func() bool { return cache.writeBreaker.open.Load() }, 5*time.Second, 10*time.Millisecond,
+		"the write endpoint's failed probe opens the write breaker")
+	require.False(t, cache.readBreaker.open.Load(), "the reader is healthy and its breaker stays closed")
+	require.Equal(t, float64(1), breakerGauge(redisstore.EndpointRoleWrite))
+	require.Equal(t, float64(0), breakerGauge(redisstore.EndpointRoleRead))
+	require.ErrorIs(t, set("during-writer-outage"), ErrCacheBreakerOpen)
+	reply, err = get("split")
+	require.NoError(t, err)
+	require.NotNil(t, reply.GetReply(), "a writer outage must not skip lookups on the healthy reader that holds the data")
+	state := cache.DebugCacheState()
+	require.True(t, state.Breaker.WriteOpen)
+	require.False(t, state.Breaker.ReadOpen)
+
+	// Writer back: its breaker closes on the cadence; the reader was never touched.
+	require.NoError(t, mrWrite.Restart())
+	require.Eventually(t, func() bool { return !cache.writeBreaker.open.Load() }, 10*time.Second, 10*time.Millisecond,
+		"the write endpoint's answered probe closes the write breaker")
+	require.NoError(t, set("after-writer-recovery"))
+	require.Equal(t, float64(0), breakerGauge(redisstore.EndpointRoleWrite))
+
+	// Reader down: the mirror image. Lookups are skipped, writes keep landing.
+	writeKeysBefore := len(mrWrite.Keys())
+	mrRead.Close()
+	for i := 0; i < respCacheBreakerThreshold; i++ {
+		_, err := get("split")
+		require.ErrorIs(t, err, core.StoreError, "failed at the reader, or skipped once its probe opened the breaker")
+	}
+	require.Eventually(t, func() bool { return cache.readBreaker.open.Load() }, 5*time.Second, 10*time.Millisecond)
+	require.False(t, cache.writeBreaker.open.Load(), "the writer is healthy and its breaker stays closed")
+	require.Equal(t, float64(0), breakerGauge(redisstore.EndpointRoleWrite))
+	require.Equal(t, float64(1), breakerGauge(redisstore.EndpointRoleRead))
+	_, err = get("split")
+	require.ErrorIs(t, err, ErrCacheBreakerOpen)
+	require.NoError(t, set("during-reader-outage"), "a reader outage must not stop the cache being populated on the healthy writer")
+	require.Greater(t, len(mrWrite.Keys()), writeKeysBefore, "the write landed")
+	state = cache.DebugCacheState()
+	require.False(t, state.Breaker.WriteOpen)
+	require.True(t, state.Breaker.ReadOpen)
+}
+
+// A backend that is alive and answers everything, only slower than the relay
+// budget, used to cycle the breaker twice a second: three lookups past the
+// budget opened it, the nudged probe answered PING within its own three-second
+// deadline and closed it, the next three lookups opened it again — six opens
+// and five closes in three seconds, two log lines a cycle, with the gauges and
+// the debug state flapping (review of #406). A breaker now closes only on a
+// probe that answers within its side's budget, so a backend that cannot meet
+// it stays open, in one transition, until it can.
+func TestRespCacheBreakerStaysOpenOnABackendSlowerThanTheBudget(t *testing.T) {
+	mr := miniredis.RunT(t)
+	proxy := newFreezableProxy(t, mr.Addr())
+	store, err := redisstore.New(redisstore.Config{Addresses: []string{proxy.listener.Addr().String()}})
+	require.NoError(t, err)
+	cache := newRespCacheWithHealthInterval(store, core.DefaultPolicy(), time.Hour)
+	t.Cleanup(func() { _ = cache.Close() })
+	lookupWithin := func(budget time.Duration) error {
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		_, err := cache.GetEntry(ctx, &pairingtypes.RelayCacheGet{RequestHash: []byte("slow"), ChainId: "ETH1", RequestedBlock: 100, SeenBlock: 100})
+		return err
+	}
+	lookup := func() error { return lookupWithin(common.DefaultCacheTimeout) }
+	// Establish the connection while the proxy is fast, with a budget the cold
+	// handshake through the proxy can meet under the race detector.
+	require.NoError(t, lookupWithin(2*time.Second), "sanity: a clean miss while the proxy is fast")
+
+	// Replies now arrive well past the lookup budget and well within the
+	// probe deadline: the shape the ticket's black-holed harness cannot show.
+	proxy.delay.Store(int64(120 * time.Millisecond))
+	watch := watchBreaker(cache.readBreaker)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = lookup()
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.True(t, cache.readBreaker.open.Load(), "three lookups past the budget opened the breaker, and every probe since answered too slowly to close it")
+	require.Equal(t, []string{"open"}, watch.transitions(), "one opening and no flap across three probe intervals")
+
+	// The delay gone, the next probe answers within the budget and the
+	// breaker closes on its cadence.
+	proxy.delay.Store(0)
+	require.Eventually(t, func() bool { return !cache.readBreaker.open.Load() }, 5*time.Second, 10*time.Millisecond,
+		"a probe within the budget closes it")
+	require.NoError(t, lookup(), "a clean miss again")
+}
+
+// The relay path nudges a probe the moment it opens a breaker. On a backend
+// that had already recovered, that probe closed the breaker inside the same
+// window that opened it, which is the other half of the flap above. A breaker
+// now holds for at least one probe interval, so the earliest it can close is
+// the first probe on the open cadence.
+func TestRespCacheBreakerHoldsForAProbeInterval(t *testing.T) {
+	mr := miniredis.RunT(t)
+	proxy := newFreezableProxy(t, mr.Addr())
+	store, err := redisstore.New(redisstore.Config{Addresses: []string{proxy.listener.Addr().String()}})
+	require.NoError(t, err)
+	cache := newRespCacheWithHealthInterval(store, core.DefaultPolicy(), time.Hour)
+	t.Cleanup(func() { _ = cache.Close() })
+	lookupWithin := func(budget time.Duration) error {
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		_, err := cache.GetEntry(ctx, &pairingtypes.RelayCacheGet{RequestHash: []byte("hold"), ChainId: "ETH1", RequestedBlock: 100, SeenBlock: 100})
+		return err
+	}
+	lookup := func() error { return lookupWithin(common.DefaultCacheTimeout) }
+	require.NoError(t, lookupWithin(2*time.Second), "sanity: a clean miss while the proxy flows")
+
+	proxy.frozen.Store(true)
+	for i := 0; i < respCacheBreakerThreshold; i++ {
+		require.ErrorIs(t, lookup(), core.StoreError)
+	}
+	opened := time.Now()
+	require.True(t, cache.readBreaker.open.Load())
+	// Healthy again at once: the nudged probe finds a backend that answers
+	// within the budget, and must still not close the breaker.
+	proxy.frozen.Store(false)
+	time.Sleep(respCacheBreakerProbeInterval / 4)
+	require.True(t, cache.readBreaker.open.Load(), "the nudged probe must not close a breaker inside the window that opened it")
+
+	require.Eventually(t, func() bool { return !cache.readBreaker.open.Load() }, 5*time.Second, 5*time.Millisecond,
+		"the first probe on the open cadence closes it")
+	require.GreaterOrEqual(t, time.Since(opened), respCacheBreakerProbeInterval, "and not before one interval has passed")
+	require.NoError(t, lookup())
 }

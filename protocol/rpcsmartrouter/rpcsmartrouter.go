@@ -1038,6 +1038,10 @@ type debugCacheTier struct {
 	// previously read from the router's own viper, which returns zero on every
 	// deployment because those flags are registered on the cache-server command.
 	Lifetimes *performance.CacheLifetimes `json:"lifetimes"`
+	// Breaker is null for a tier without one (cache-be); the RESP tier reports
+	// which side of the relay path is being skipped, since with a read/write
+	// split reachable:false alone cannot say whether it is lookups or writes.
+	Breaker *performance.CacheBreakerState `json:"breaker"`
 }
 
 // buildCacheStateResponse renders both tiers. Split out of the handler so the shape
@@ -1094,6 +1098,7 @@ func debugCacheTierFrom(backend any) debugCacheTier {
 		ReachableDetail:    state.Detail,
 		WhenUnreachable:    state.WhenUnreachable,
 		Lifetimes:          state.Lifetimes,
+		Breaker:            state.Breaker,
 	}
 }
 

@@ -96,11 +96,14 @@ func TestRespCacheReachabilityIsUnknownBeforeFirstProbe(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	store, err := redisstore.NewWithClient(client, "srtest")
 	require.NoError(t, err)
+	writeBreaker, readBreaker := newRespCacheBreakers(store)
 	cache := &RespCache{
-		engine:     &core.Engine{Store: store, Policy: core.DefaultPolicy()},
-		store:      store,
-		metrics:    getRespCacheMetrics(),
-		healthStop: make(chan struct{}),
+		engine:       &core.Engine{Store: store, Policy: core.DefaultPolicy()},
+		store:        store,
+		metrics:      getRespCacheMetrics(),
+		writeBreaker: writeBreaker,
+		readBreaker:  readBreaker,
+		healthStop:   make(chan struct{}),
 	}
 
 	state := cache.DebugCacheState()
@@ -138,6 +141,11 @@ func TestRespCacheDebugState(t *testing.T) {
 	require.NotNil(t, state.Lifetimes)
 	require.Equal(t, core.DefaultPolicy().Finalized.Seconds(), state.Lifetimes.FinalizedSeconds)
 	require.Equal(t, core.DefaultPolicy().NonFinalized.Seconds(), state.Lifetimes.NonFinalizedSeconds)
+
+	// A healthy backend reports both sides of its breaker closed.
+	require.NotNil(t, state.Breaker, "a RESP tier has a breaker to report")
+	require.False(t, state.Breaker.WriteOpen)
+	require.False(t, state.Breaker.ReadOpen)
 }
 
 // Close stops the health loop, so whatever it published last would otherwise stand
@@ -168,4 +176,5 @@ func TestRespCacheDebugStateTypedNil(t *testing.T) {
 	state := cache.DebugCacheState()
 	require.False(t, state.Configured)
 	require.Nil(t, state.Reachable)
+	require.Nil(t, state.Breaker)
 }
