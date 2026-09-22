@@ -71,7 +71,7 @@ router never starts half-configured.
 | `sentinel-username` / `sentinel-password` / `sentinel-password-file` | *(unset)* | **Sentinel control-plane** credentials — sentinels authenticate independently of the data nodes; hardened deployments fail discovery without these. Only valid with `topology: sentinel`, and read once at startup (rotating them needs a restart). |
 | `db` | `0` | Logical database (standalone/sentinel only; rejected for cluster). |
 | `key-prefix` | `sr` | Namespace for every key. Restricted to `[A-Za-z0-9._-]+` (flush uses it as a `SCAN MATCH` glob). Give each deployment sharing a backend its own prefix — flush isolation follows from it. |
-| `tls.enabled` | `false` | TLS to the backend. **Required (`true`) whenever any other `tls.*` key is set** — a `tls` block without it is refused at startup as dangling configuration, because the alternative is a plaintext connection carrying `username`/`password` readable on the wire. To run without TLS, remove the block. |
+| `tls.enabled` | `false` | TLS to the backend. **Required (`true`) whenever any other `tls.*` key is set** — a `tls` block without it is refused at startup as dangling configuration, because the alternative is a plaintext connection carrying `username`/`password` readable on the wire. That holds for an explicit `enabled: false` beside those keys too. To run without TLS, remove the other `tls.*` keys or the whole block; `tls: {enabled: false}` on its own is accepted. |
 | `tls.ca-file` | *(system pool)* | PEM CA bundle for server verification. |
 | `tls.cert-file` / `tls.key-file` | *(unset)* | Client keypair for mTLS (both or neither). |
 | `tls.server-name` | *(unset)* | Overrides the verification/SNI name. |
@@ -694,7 +694,7 @@ Router 2 stays up on `:3365`; `--stop` removes both.
 | Header names an unexpected backend | You are talking to a different lane's router — check the port (standalone `:3360`, sentinel `:3370`, multi-region `:3380`/`:3381`). |
 | `resp_cache_connected` is 0 | Backend unreachable — the container may have been `docker stop`ped, which deletes it (`--rm`). Re-run the lane. |
 | Relays fail or the smoke check fails | Public endpoint rate limits. Set `ETH_RPC_URL_1/2` and `ETH_WS_URL_1/2` to your own endpoints. |
-| Startup fails: `tls.* options are set but tls.enabled is not true` | The `tls` block was written without its switch, and the router will not open a plaintext connection on a block that reads as encrypted. Add `enabled: true` (the files are then read and verified at startup), or remove the block to run without TLS deliberately. |
+| Startup fails: `tls.* options are set but tls.enabled is not true` | The `tls` block carries `ca-file`, `cert-file`, `key-file`, `server-name` or `insecure-skip-verify` while `enabled` is missing or written as anything but `true` (`false`, `0`, `null`, `""`). The router will not open a plaintext connection on a block that reads as encrypted, and a switch turned off by hand with the paths left in place is refused the same way. Set `enabled: true` (the files are then read and verified at startup), or drop the other `tls.*` keys: a bare `tls: {enabled: false}`, or no block at all, runs without TLS. |
 
 Readiness timing note: `/metrics/overall-health` (and the container health that follows it)
 starts **fail-closed** and turns 200 once at least one chain has verified a provider — at
