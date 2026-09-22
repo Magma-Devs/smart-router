@@ -188,11 +188,25 @@ type StreamingProvider struct {
 	mu        sync.Mutex
 	listeners map[int]auth.CredentialsListener
 	nextID    int
-	lastRaw   string
-	// refreshFailing records that the last Refresh could not read the source,
-	// so an outage is reported once when it starts and once when it ends — the
-	// health loop's transition discipline — rather than on every tick.
-	refreshFailing bool
+	// lastRaw is the credential set the subscribers were last given, the
+	// baseline Refresh compares a read against to decide whether to push.
+	lastRaw string
+	// lastGood is the most recent set ANY read returned, and haveLastGood
+	// whether there has been one. It can run ahead of lastRaw: a connection
+	// that subscribes between a rotation landing on disk and the watcher's
+	// next tick reads the new set first, and lastRaw must stay on the old one
+	// so that tick still pushes to the connections that have it. lastGood is
+	// what a connection opened during a source outage is handed (Subscribe).
+	lastGood     basicCredentials
+	haveLastGood bool
+	// sourceFailingWith is the text of the error the current source outage
+	// was reported with, empty while the source is readable. An outage is
+	// reported once when it starts, once more if its cause changes (a mount
+	// that dropped, then a permission denied) and once when it ends — the
+	// health loop's transition discipline — rather than on every read. The
+	// built-in sources fail with stable text; a custom source whose error text
+	// varies per call reports every variation.
+	sourceFailingWith string
 }
 
 var _ auth.StreamingCredentialsProvider = (*StreamingProvider)(nil)
@@ -206,12 +220,25 @@ func NewStreamingProvider(source CredentialsSource) *StreamingProvider {
 
 // Subscribe hands the connection its current credentials and registers it for
 // future pushes. Called by go-redis once per connection during init.
+//
+// While the source is unreadable the connection is handed the last
+// credentials any read returned, the set the live connections are still
+// using, rather than failed: go-redis opens connections throughout an outage
+// (pool growth under load, a reconnect after a network blip, an idle
+// replacement) and each would otherwise fail its setup on a file the
+// operator is about to restore, with the failure surfacing only as a counter.
+// The read failure still counts towards the outage report, so it is one
+// warning whether the watcher or a connection noticed first. Before any read
+// has succeeded there is nothing to hand out and the error stands, which is
+// New's fail-fast at startup.
 func (p *StreamingProvider) Subscribe(listener auth.CredentialsListener) (auth.Credentials, auth.UnsubscribeFunc, error) {
-	username, password, err := p.source.Credentials()
+	creds, err := p.readSource()
 	if err != nil {
-		return nil, nil, err
+		var ok bool
+		if creds, ok = p.lastGoodCredentials(); !ok {
+			return nil, nil, err
+		}
 	}
-	creds := basicCredentials{username: username, password: password}
 
 	p.mu.Lock()
 	id := p.nextID
@@ -232,15 +259,14 @@ func (p *StreamingProvider) Subscribe(listener auth.CredentialsListener) (auth.C
 }
 
 // Refresh re-reads the source and, when the credentials changed, pushes them
-// to every subscribed connection. Safe to call from any goroutine.
+// to every subscribed connection. Safe to call from any goroutine. A failed
+// read pushes nothing: the subscribers keep what they have until the source
+// is readable again.
 func (p *StreamingProvider) Refresh() {
-	username, password, err := p.source.Credentials()
+	creds, err := p.readSource()
 	if err != nil {
-		p.noteRefreshFailure(err)
 		return
 	}
-	p.noteRefreshRecovered()
-	creds := basicCredentials{username: username, password: password}
 
 	p.mu.Lock()
 	if creds.RawCredentials() == p.lastRaw {
@@ -260,31 +286,60 @@ func (p *StreamingProvider) Refresh() {
 	}
 }
 
-// noteRefreshFailure reports the FIRST failed read of an outage and stays quiet
+// readSource reads the source once, on behalf of Subscribe or Refresh. A
+// successful read becomes the last good set and closes any outage report; a
+// failed one opens or continues it. Both callers see the same outage, so it
+// is reported once however many reads observe it.
+func (p *StreamingProvider) readSource() (basicCredentials, error) {
+	username, password, err := p.source.Credentials()
+	if err != nil {
+		p.noteSourceFailure(err)
+		return basicCredentials{}, err
+	}
+	creds := basicCredentials{username: username, password: password}
+	p.mu.Lock()
+	p.lastGood, p.haveLastGood = creds, true
+	p.mu.Unlock()
+	p.noteSourceRecovered()
+	return creds, nil
+}
+
+// lastGoodCredentials returns the most recent set any read returned, and
+// whether there has been one.
+func (p *StreamingProvider) lastGoodCredentials() (basicCredentials, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastGood, p.haveLastGood
+}
+
+// noteSourceFailure reports the FIRST failed read of an outage and stays quiet
 // for the rest of it. Refresh runs on a timer for the life of the process, and
 // a source that stays unreadable — a mount that dropped, a rotation that failed,
 // a permission change — used to produce one warning per tick with no end:
 // about 8,600 identical lines a day at the shipped interval, for a fact worth
-// exactly one line (MAG-3690). The router keeps the credentials it already has
-// either way; what changes is only how often it says so. The health loop in
-// resp_cache.go reports its transitions the same way, and it is the model.
-func (p *StreamingProvider) noteRefreshFailure(err error) {
+// exactly one line (MAG-3690). The connections keep the credentials they have
+// either way, and a new one gets the last set read; what changes is only how
+// often the router says so. A change of cause mid-outage is one more line,
+// since it is news. The health loop in resp_cache.go reports its transitions
+// the same way, and it is the model.
+func (p *StreamingProvider) noteSourceFailure(err error) {
+	cause := err.Error()
 	p.mu.Lock()
-	alreadyFailing := p.refreshFailing
-	p.refreshFailing = true
+	sameCause := p.sourceFailingWith == cause
+	p.sourceFailingWith = cause
 	p.mu.Unlock()
-	if alreadyFailing {
+	if sameCause {
 		return
 	}
-	utils.LavaFormatWarning("resp-cache credential refresh failed; keeping previous credentials until the source is readable again (reported once per outage)", err)
+	utils.LavaFormatWarning("resp-cache credential source unreadable; connections keep the last credentials read until it is readable again (reported once per outage)", err)
 }
 
-// noteRefreshRecovered closes an outage with one line, so whoever saw the
+// noteSourceRecovered closes an outage with one line, so whoever saw the
 // warning learns that it ended without having to notice an absence.
-func (p *StreamingProvider) noteRefreshRecovered() {
+func (p *StreamingProvider) noteSourceRecovered() {
 	p.mu.Lock()
-	wasFailing := p.refreshFailing
-	p.refreshFailing = false
+	wasFailing := p.sourceFailingWith != ""
+	p.sourceFailingWith = ""
 	p.mu.Unlock()
 	if wasFailing {
 		utils.LavaFormatInfo("resp-cache credential source readable again; refresh resumed")

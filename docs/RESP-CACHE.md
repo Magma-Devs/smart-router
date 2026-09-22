@@ -197,9 +197,13 @@ applies on reconnect, rather than reporting rotations it cannot deliver.
 
 If the file becomes unreadable while the router runs — a mount that dropped, a rotation that
 failed, a permission change, a file that is empty once trimmed — the router keeps the credentials
-it already holds and says so **once**, then once more when the file is readable again. It does
-not repeat the warning on every poll, so a long outage costs one log line rather than one per
-interval.
+it last read, on every connection: live connections are untouched, and a connection opened during
+the outage (pool growth, a reconnect after a network blip, an idle replacement) is handed the same
+credentials rather than failing its setup on the unreadable file. The router says so **once** when
+the outage starts, once more if its cause changes, and once when the file is readable again; a
+rotation that lands with the recovery is pushed to every connection, including those opened
+during the outage. It does not repeat the warning on every poll, so a long outage costs one
+log line rather than one per interval.
 
 ## Sizing and eviction (`maxmemory-policy`)
 
