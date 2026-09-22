@@ -365,7 +365,7 @@ func TestStaticCredentialsSkipTheStreamingProvider(t *testing.T) {
 
 	provider := NewStreamingProvider(static.credentialsSource())
 	withProvider := static.standaloneOptions(static.Addresses, nil, provider, &endpointTracker{})
-	require.Same(t, provider, withProvider.StreamingCredentialsProvider.(*StreamingProvider))
+	require.Same(t, provider, withProvider.StreamingCredentialsProvider)
 	require.Empty(t, withProvider.Password, "with a provider the credentials come from it, never from both")
 
 	plain, err := New(static)
