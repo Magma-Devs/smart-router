@@ -369,19 +369,27 @@ fine" from "never looked".
 A Copilot review has a monthly quota, and the bot can be down. When one cannot be
 requested, run 2b again as a **review round** rather than skipping the seat:
 
-1. Dispatch a fresh-context subagent with only the PR number and the 2b prompt
-   above. Nothing else — no summary of the change, no list of what you already
-   checked.
+1. Dispatch a fresh-context subagent with the 2b prompt above, **rendered** —
+   the PR number, the repository, and the worktree path substituted for its
+   placeholders, because a fresh context cannot resolve `<repo>` or run
+   `git -C <worktree>`. Nothing else: no summary of the change, no list of what
+   you already checked.
 2. Verify every objection against the code before acting. Real, so fix it,
-   commit and push; wrong, so record the reason you rejected it.
-3. Findings and dispositions go to the author in chat, **never as comments on the
-   PR**. An external bot posting on a PR is the author's call; this round is not
-   a bot and does not post.
+   commit and push to the branch this pull request already proposes; wrong, so
+   record the reason you rejected it.
+3. Findings and dispositions go to the author, **never as comments on the PR**.
+   An external bot posting on a PR is the author's call; this round is not a bot
+   and does not post. **Anything that outlives the session — a deferred item, an
+   accepted gap, an objection answered rather than fixed — takes a durable
+   reference per gate 7.** Chat is where the author reads it; it is not where it
+   is kept.
 
 **This round is default-on.** Unlike asking Copilot, it needs no permission, it
-writes nothing anyone else sees, and it consumes no quota. Measured cost on a
-single-module pull request, 2026-08-24: 100k to 170k tokens a round. It fills the
-Copilot seat only. The human merge word is unchanged.
+posts no comment, and it consumes no quota. It does push to the pull request's
+own branch when it finds something real, the same as any other fix — that is a
+change to your own work, not a write on somebody else's. Measured cost on a
+single-module pull request, 2026-08-24: 100k to 170k tokens a round. It fills
+the Copilot seat only. The human merge word is unchanged.
 
 #### Axis 0 — is the review seat filled?
 
@@ -838,7 +846,7 @@ Independent ticket review (gate 2a)
 
 Adversary review (gate 2b)
 - review seat: Copilot, every thread cleared | 2b review round, run <date>
-- <objection>: confirmed | checked and disproved
+- <objection>: confirmed and fixed in <commit> | confirmed and answered, <where the answer is kept> | checked and disproved
 - <one line if it found nothing, naming where it looked>
 
 Looked at beyond the gates
