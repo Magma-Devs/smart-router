@@ -233,17 +233,24 @@ func safeProbeDetail(err error) string {
 	return err.Error()
 }
 
+// classifyProbeResults names the failure class of a whole probe from every
+// failing endpoint, not the first one met: with reads split the two halves
+// can fail for two different reasons, and an authentication rejection on
+// either needs the operator action the classification exists to name (fix
+// the credential), so it wins over the network fault the other half reports.
+func classifyProbeResults(results []redisstore.ProbeResult) string {
+	for _, result := range results {
+		if result.Err != nil && classifyProbeError(result.Err) == probeFailureAuth {
+			return probeFailureAuth
+		}
+	}
+	return probeFailureConnection
+}
+
 // logUnavailable emits a single structured line naming the failure class and
 // the endpoint(s) that failed.
 func logUnavailable(message string, results []redisstore.ProbeResult) {
-	var first error
-	for _, result := range results {
-		if result.Err != nil {
-			first = result.Err
-			break
-		}
-	}
-	kind := classifyProbeError(first)
+	kind := classifyProbeResults(results)
 	if kind == probeFailureAuth {
 		message = "resp-cache backend rejected the configured credentials; relays degrade to cache misses until the credentials are corrected"
 	}
