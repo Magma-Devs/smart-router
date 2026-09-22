@@ -89,13 +89,16 @@ resp-cache:
 }
 
 // Explicit flags outrank the YAML block — the precedence the plan requires.
+// The YAML-only keys are ones every topology reads, so the overlay's result
+// is a configuration that validates; a key the flagged topology does not read
+// is a different case, below.
 func TestRealCommand_FlagsOutrankYAML(t *testing.T) {
 	wireLikeRunE(t, `
 resp-cache:
-  topology: sentinel
-  addresses: ["yaml-a:26379", "yaml-b:26379"]
-  master-name: mymaster
+  topology: standalone
+  addresses: ["yaml-a:6379"]
   key-prefix: "yamlpfx"
+  pool-size: 7
 `,
 		"--"+performance.RespCacheAddressesFlagName, "flag-1:6379,flag-2:6379",
 		"--"+performance.RespCacheTopologyFlagName, "cluster",
@@ -112,8 +115,28 @@ resp-cache:
 		"--%s must replace, not append to, the YAML addresses", performance.RespCacheAddressesFlagName)
 
 	// ...and YAML still supplies everything the flags do not cover.
-	require.Equal(t, "mymaster", cfg.MasterName, "unflagged YAML keys survive the overlay")
-	require.Equal(t, "yamlpfx", cfg.KeyPrefix)
+	require.Equal(t, "yamlpfx", cfg.KeyPrefix, "unflagged YAML keys survive the overlay")
+	require.Equal(t, 7, cfg.PoolSize)
+}
+
+// The overlay runs before validation, so a flag that moves a YAML sentinel
+// block to another topology leaves its master-name dangling, and the merged
+// configuration is refused as such rather than started with a key nothing
+// reads (MAG-3671). This used to pass as a precedence case; it is the shape
+// the master-name rule exists for, seen through the real command.
+func TestRealCommand_FlaggedTopologyLeavesYAMLMasterNameDangling(t *testing.T) {
+	wireLikeRunE(t, `
+resp-cache:
+  topology: sentinel
+  addresses: ["yaml-a:26379", "yaml-b:26379"]
+  master-name: mymaster
+`,
+		"--"+performance.RespCacheTopologyFlagName, "cluster",
+	)
+
+	_, _, err := performance.LoadRespCacheConfig(viper.GetViper())
+	require.ErrorContains(t, err, "master-name")
+	require.ErrorContains(t, err, "dangling")
 }
 
 // RESP settings are never sourced from the environment: this repo binds no env
