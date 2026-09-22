@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,20 +42,215 @@ func (r *recordingListener) recorded() []string {
 	return append([]string{}, r.pushes...)
 }
 
-func TestFileCredentialsParsing(t *testing.T) {
-	passwordOnly := writeTempFile(t, "pw", "placeholder-credential\n")
-	src := &FileCredentials{Username: "fixed-user", Path: passwordOnly}
-	user, pass, err := src.Credentials()
-	require.NoError(t, err)
-	require.Equal(t, "fixed-user", user)
-	require.Equal(t, "placeholder-credential", pass)
+// utf8BOMBytes is the byte order mark as a file holds it, spelled in bytes so
+// no editor can drop it from this source.
+var utf8BOMBytes = string([]byte{0xEF, 0xBB, 0xBF})
 
-	userAndPass := writeTempFile(t, "userpw", "rotated-user:rotated-pass\n")
-	src = &FileCredentials{Username: "ignored", Path: userAndPass}
-	user, pass, err = src.Credentials()
+// The trim contract, row by row. MAG-3685: whitespace on the LEFT of the file
+// was sent as part of the credential while the right side was trimmed, which
+// is what made the report easy to dismiss as fixed. Each half of the combined
+// form is trimmed on its own, and a leading byte order mark goes too. The
+// cutset is the four ASCII bytes the right-hand trim always stripped, not
+// Unicode White_Space: the last two rows pin that, so a switch to TrimSpace
+// fails here rather than as WRONGPASS on an upgrade.
+func TestFileCredentialsParsing(t *testing.T) {
+	nbsp, ideographicSpace := string(rune(0x00A0)), string(rune(0x3000))
+	cases := []struct {
+		name, content, username, wantUser, wantPass string
+	}{
+		{"password only", "placeholder-credential\n", "fixed-user", "fixed-user", "placeholder-credential"},
+		{"username:password rotates the user too", "rotated-user:rotated-pass\n", "ignored", "rotated-user", "rotated-pass"},
+		{"leading space", " placeholder-credential\n", "fixed-user", "fixed-user", "placeholder-credential"},
+		{"leading newline", "\nplaceholder-credential\n", "fixed-user", "fixed-user", "placeholder-credential"},
+		{"leading tab", "\tplaceholder-credential", "fixed-user", "fixed-user", "placeholder-credential"},
+		{"CRLF on each side", "\r\n placeholder-credential \r\n", "fixed-user", "fixed-user", "placeholder-credential"},
+		{"combined form with a leading space", " rotated-user:rotated-pass\n", "ignored", "rotated-user", "rotated-pass"},
+		{"space after the colon", "cacheuser: placeholder-credential\n", "ignored", "cacheuser", "placeholder-credential"},
+		{"space before the colon", "cacheuser :placeholder-credential\n", "ignored", "cacheuser", "placeholder-credential"},
+		{"UTF-8 BOM before the password", utf8BOMBytes + "placeholder-credential\n", "fixed-user", "fixed-user", "placeholder-credential"},
+		{"UTF-8 BOM before the username", utf8BOMBytes + "cacheuser:placeholder-credential\n", "ignored", "cacheuser", "placeholder-credential"},
+		{"trailing non-breaking space is part of the credential", "placeholder-credential" + nbsp + "\n", "fixed-user", "fixed-user", "placeholder-credential" + nbsp},
+		{"leading ideographic space is part of the credential", ideographicSpace + "placeholder-credential", "fixed-user", "fixed-user", ideographicSpace + "placeholder-credential"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &FileCredentials{Username: tc.username, Path: writeTempFile(t, "cred", tc.content)}
+			user, pass, err := src.Credentials()
+			require.NoError(t, err)
+			require.Equal(t, tc.wantUser, user)
+			require.Equal(t, tc.wantPass, pass)
+		})
+	}
+}
+
+// A file the operator pointed at never means "no password". Empty once
+// trimmed, it used to yield a credential of "" that New accepted and go-redis
+// sent as a HELLO with no AUTH: NOAUTH on every command against a server that
+// requires one, an unauthenticated connection against one that does not.
+func TestFileCredentialsRefuseAnEmptyFile(t *testing.T) {
+	for _, tc := range []struct{ name, content string }{
+		{"empty", ""},
+		{"whitespace only", " \n\t\r\n"},
+		{"BOM only", utf8BOMBytes},
+		{"BOM and whitespace", utf8BOMBytes + " \n"},
+		{"combined form with an empty password", "cacheuser:\n"},
+		{"combined form with a blank password", "cacheuser: \n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempFile(t, "cred", tc.content)
+			_, _, err := (&FileCredentials{Username: "u", Path: path}).Credentials()
+			require.ErrorContains(t, err, path, "the error names the file")
+		})
+	}
+}
+
+// The startup fail-fast refuses an empty file naming the path, on both
+// credential files.
+func TestNewRefusesAnEmptyCredentialFile(t *testing.T) {
+	t.Run("password-file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireAuth("placeholder-credential")
+		path := writeTempFile(t, "pw", " \n")
+		_, err := New(Config{Addresses: []string{mr.Addr()}, PasswordFile: path})
+		require.ErrorContains(t, err, path)
+	})
+	t.Run("sentinel-password-file", func(t *testing.T) {
+		path := writeTempFile(t, "sentinel-pw", "\n\t")
+		_, err := New(Config{Topology: TopologySentinel, Addresses: []string{"127.0.0.1:26379"}, MasterName: "mymaster", SentinelPasswordFile: path})
+		require.ErrorContains(t, err, path)
+	})
+}
+
+// Mid-rotation a mounted secret can be empty for a moment. The refresh path
+// treats that as a failed read: nothing is pushed, the connections keep what
+// they have, the failure names the file, and the rotation that follows lands.
+func TestRefreshKeepsPreviousCredentialsWhenTheFileIsEmpty(t *testing.T) {
+	credFile := writeTempFile(t, "cred", "pw1")
+	provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})
+	listener := &recordingListener{}
+	creds, _, err := provider.Subscribe(listener)
 	require.NoError(t, err)
-	require.Equal(t, "rotated-user", user, "a user:pass file rotates the username too (ACL-user rotation)")
-	require.Equal(t, "rotated-pass", pass)
+	require.Equal(t, "u:pw1", creds.RawCredentials())
+
+	require.NoError(t, os.WriteFile(credFile, []byte(" \n"), 0o600))
+	out := captureLog(t, provider.Refresh)
+	require.Empty(t, listener.recorded(), "an empty file pushes nothing")
+	require.Contains(t, out, credFile, "the failed read names the file")
+
+	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
+	provider.Refresh()
+	require.Equal(t, []string{"u:pw2"}, listener.recorded(), "the rotation that follows lands")
+}
+
+// A credential that begins with a rune no trim removes is sent as written,
+// and the router says so once, naming the file and the code point and never
+// the value.
+func TestFileCredentialsWarnOnceAboutAnInvisibleLeadingRune(t *testing.T) {
+	zeroWidthSpace, nbsp := string(rune(0x200B)), string(rune(0x00A0))
+	t.Run("zero-width space before the password", func(t *testing.T) {
+		path := writeTempFile(t, "cred", zeroWidthSpace+"placeholder-credential\n")
+		src := &FileCredentials{Username: "u", Path: path}
+		out := captureLog(t, func() {
+			for i := 0; i < 3; i++ {
+				_, pass, err := src.Credentials()
+				require.NoError(t, err)
+				require.Equal(t, zeroWidthSpace+"placeholder-credential", pass, "sent as written")
+			}
+		})
+		require.Equal(t, 1, strings.Count(out, "non-printable rune"), "three reads, one line: %s", out)
+		require.Contains(t, out, "U+200B")
+		require.Contains(t, out, path)
+		require.NotContains(t, out, "placeholder-credential", "the value never reaches the log")
+	})
+	t.Run("non-breaking space before the username", func(t *testing.T) {
+		path := writeTempFile(t, "cred", nbsp+"cacheuser:placeholder-credential\n")
+		src := &FileCredentials{Username: "ignored", Path: path}
+		out := captureLog(t, func() {
+			user, _, err := src.Credentials()
+			require.NoError(t, err)
+			require.Equal(t, nbsp+"cacheuser", user)
+		})
+		require.Contains(t, out, "U+00A0")
+		require.Contains(t, out, "username")
+	})
+	t.Run("control: a clean file says nothing", func(t *testing.T) {
+		src := &FileCredentials{Username: "u", Path: writeTempFile(t, "cred", " placeholder-credential\n")}
+		out := captureLog(t, func() {
+			_, _, err := src.Credentials()
+			require.NoError(t, err)
+		})
+		require.NotContains(t, out, "non-printable rune")
+	})
+}
+
+// One store reads its credential file through one FileCredentials, so the
+// once-only line about the combined form fires once per startup. New used to
+// build one for its fail-fast and another for the provider, and the line
+// fired for each.
+func TestCombinedFormIsReportedOncePerStartup(t *testing.T) {
+	mr := miniredis.RunT(t)
+	mr.RequireUserAuth("cacheuser", "placeholder-credential")
+	out := captureLog(t, func() {
+		store, err := New(Config{Addresses: []string{mr.Addr()}, PasswordFile: writeTempFile(t, "userpw", "cacheuser:placeholder-credential\n")})
+		require.NoError(t, err)
+		require.NoError(t, store.Ping(context.Background()))
+		require.NoError(t, store.Close())
+	})
+	require.Equal(t, 1, strings.Count(out, "is read as"), "one file, one line: %s", out)
+}
+
+// The same defect end to end: the store only accepts the exact credential, so
+// a leading space that survived into the AUTH would be refused. Both file
+// forms, against a server that requires each, with a wrong password and a
+// wrong username as the controls that show the server deciding.
+func TestPasswordFileWithLeadingWhitespaceAuthenticates(t *testing.T) {
+	t.Run("password-only file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireAuth("placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "pw", "\n placeholder-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.NoError(t, store.Ping(context.Background()), "the trimmed password must be what reaches the store")
+	})
+
+	t.Run("username:password file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireUserAuth("cacheuser", "placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "userpw", " cacheuser:placeholder-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.NoError(t, store.Ping(context.Background()), "the trimmed username must be what reaches the store")
+	})
+
+	t.Run("control: a wrong password in the file is refused by the server", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireAuth("placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "pw", " not-the-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.ErrorContains(t, store.Ping(context.Background()), "WRONGPASS", "the server must be the one deciding, or the cases above prove nothing")
+	})
+
+	t.Run("control: a wrong username in the combined form is refused by the server", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		mr.RequireUserAuth("cacheuser", "placeholder-credential")
+		store, err := New(Config{
+			Addresses:    []string{mr.Addr()},
+			PasswordFile: writeTempFile(t, "userpw", " other-user:placeholder-credential\n"),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		require.ErrorContains(t, store.Ping(context.Background()), "WRONGPASS", "the username half is what the server refuses here")
+	})
 }
 
 // The plumbing contract: a push reaches every subscribed connection exactly

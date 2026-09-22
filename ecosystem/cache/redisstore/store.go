@@ -127,18 +127,23 @@ func New(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	provider := NewStreamingProvider(cfg.credentialsSource())
-	// Fail fast on an unreadable credential source (e.g. missing file) before
-	// any client exists.
-	if _, _, err := cfg.credentialsSource().Credentials(); err != nil {
+	// One credential set for every client of this store (see clientCredentials).
+	creds, err := cfg.resolveClientCredentials()
+	if err != nil {
+		return nil, err
+	}
+	// Fail fast on an unreadable credential source (a missing file, one that
+	// is empty once trimmed) before any client exists.
+	if _, _, err := creds.source.Credentials(); err != nil {
 		return nil, fmt.Errorf("resp-cache: reading credentials: %w", err)
 	}
+	provider := creds.provider
 
 	warnIfCredentialsCrossPlaintext(cfg)
 
 	writeTracker := &endpointTracker{}
 	readTracker := writeTracker
-	writeClient, err := cfg.buildClient(cfg.Addresses, tlsCfg, provider, writeTracker)
+	writeClient, err := cfg.buildClient(cfg.Addresses, tlsCfg, creds, writeTracker)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +151,7 @@ func New(cfg Config) (*Store, error) {
 	if len(cfg.ReadAddresses) > 0 {
 		warnIfReadSplitIsDiscoveryScoped(cfg)
 		readTracker = &endpointTracker{}
-		readClient, err = cfg.buildClient(cfg.ReadAddresses, tlsCfg, provider, readTracker)
+		readClient, err = cfg.buildClient(cfg.ReadAddresses, tlsCfg, creds, readTracker)
 		if err != nil {
 			_ = writeClient.Close()
 			return nil, err
