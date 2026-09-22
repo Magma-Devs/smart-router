@@ -201,6 +201,11 @@ evidence are required, and neither decides on its own — you do.
 The overall verdict is the worst one present. One unproven item makes the whole
 answer `INSUFFICIENT EVIDENCE`, even when nothing is failing.
 
+**`READY` also needs a filled review seat**, whoever wrote the pull request:
+either Copilot reviewed and every thread it opened is cleared, or gate 2b's
+review round ran and every verified finding is fixed or answered. Neither means
+not `READY`. That is axis 0, and the reasoning for it sits with gate 2b.
+
 **`NOT READY` and `INSUFFICIENT EVIDENCE` are different answers.** The first is a
 proven negative: you checked, the answer is bad. The second is the absence of an
 answer. Without the second, an agent turns "I cannot verify this ran" into
@@ -374,11 +379,15 @@ requested, run 2b again as a **review round** rather than skipping the seat:
    placeholders, because a fresh context cannot resolve `<repo>` or run
    `git -C <worktree>`. Nothing else: no summary of the change, no list of what
    you already checked.
-2. Verify every objection against the code before acting. Real, so fix it,
-   commit and push to the branch this pull request already proposes; wrong, so
-   record the reason you rejected it. **The subagent never does this.** It
-   reports and stops; you verify, and you are the one who commits. A subagent
-   handed push authority in its brief is a write nobody approved.
+2. Verify every objection against the code before acting, then split on whose
+   pull request it is. **Yours:** real, so fix it, commit and push to the branch
+   this pull request already proposes; wrong, so record the reason you rejected
+   it. **Somebody else's:** report and stop. Every finding goes to the author
+   and the author decides. A commit on a colleague's branch, made by a reviewer,
+   from a subagent's finding, with no ask, is a write nobody approved — and
+   axis 0 below puts other people's pull requests in scope, so this case is the
+   common one, not the edge. **The subagent never commits in either case.** It
+   reports; you verify.
 3. Findings and dispositions go to the author, **never as comments on the PR**.
    An external bot posting on a PR is the author's call; this round is not a bot
    and does not post. **Anything that outlives the session — a deferred item, an
@@ -388,9 +397,9 @@ requested, run 2b again as a **review round** rather than skipping the seat:
 
 **This round is default-on** — that covers RUNNING it, not what you do with what
 it finds. Unlike asking Copilot, it needs no permission, it posts no comment,
-and it consumes no quota. It does push to the pull request's
-own branch when it finds something real, the same as any other fix — that is a
-change to your own work, not a write on somebody else's. Measured cost on a
+and it consumes no quota. On your OWN pull request it also pushes a fix, the
+same as any other change to your own work. On anybody else's it writes
+nothing. Measured cost on a
 single-module pull request, 2026-08-24: 100k to 170k tokens a round. It fills
 the Copilot seat only. The human merge word is unchanged.
 
@@ -701,15 +710,39 @@ the comment or docstring attached to it and ask whether it is still true.
 
 ```bash
 BASE=$(git merge-base origin/main HEAD)
-git diff "$BASE...HEAD" -U5 -- '*.go' ':!*.pb.go' | grep -nE '^[-+ ].*(//|func )'
+git diff "$BASE...HEAD" -U0 -- ':!*.pb.go' \
+  | grep -oE '^@@.*@@ .+' | sed 's/^@@[^@]*@@ //' | sort -u
 ```
 
-Go puts a doc comment directly above its declaration, in a fixed place, so `-U5`
-shows the comment as context above every changed body. A comment that stays
-context while the body changes is the case to read. In a language whose
-docstring sits INSIDE the body, the hunk often already contains it; there the
-miss is the docstring that did NOT change, so list each changed declaration and
-read its docstring from `HEAD` against the new body.
+**Git already names the enclosing declaration in every hunk header, in every
+language.** That list is where to read. Open each one and read its comment or
+docstring against the body beneath it.
+
+Two things the list does not tell you, both measured:
+
+- **It names the nearest context GIT recognises, which is not always the
+  declaration you changed.** On a Go commit of five files it gave 11
+  declarations over 14 hunks, one per `func`. On a Python commit of three files
+  it gave two names over 13 hunks, because twelve of those hunks sat inside one
+  class and git named the class.
+- **A hunk in a brand-new file can carry no context at all.** That Python commit
+  had one such hunk; the Go commit had none. A new file contributes nothing to
+  the list, so read its prose whole.
+
+**Where the prose sits differs by language and that changes only where you
+look, not how you find it.** A comment above the declaration is visible the
+moment you open it. A docstring inside the body may already be in the diff — so
+there the miss is the docstring that did NOT change, and you read it from `HEAD`
+against the new body.
+
+**Do not count the list.** An earlier version of this section ran
+`-U5 | grep '(//|func )'` and reported its 43 matches as the answer. Of those 43,
+9 were changed lines, 34 were context, and 5 were a comment directly above a
+`func`. The number answered "how many comment-ish lines sit near a change",
+which is not the question — and it fails the discrimination test this same file
+makes 80 lines below. A window also misses any doc comment longer than the
+window: 398 of this repository's 1,936 documented top-level functions carry one
+longer than five lines.
 
 **2. A name against what the thing does.** A test named for a condition its own
 setup contradicts is worse than a bad name: the failure message and the report
@@ -806,13 +839,19 @@ proves only that the search reaches the files — it would return non-zero again
 any workflow directory in existence. `go build` is topical: it is the same shape
 of thing being searched for, it appears in some files and not others, so a zero
 beside it means something.
-So a pull request's green board says a new guard compiled, never that it ran.
-Making it fail on your own machine is the only verification there is. This is
-filed as MAG-3105.
+So a pull request's green board says the non-test code compiled, and **nothing
+at all** about a guard that lives in a `_test.go` file — `go build` does not
+compile test files. Making it fail on your own machine is the only verification
+there is. This is filed as MAG-3105, which adds the part worth knowing: the
+`Makefile` has a `test` target and no workflow calls it.
 
-**One cousin is already automated.** `.golangci.yml` sets `nolintlint` to
-`allow-unused: false`, so a suppression that no longer suppresses anything fails
-lint. Nothing does the same for a test or a guard.
+**The one thing that comes close is not a board check either.** `.golangci.yml`
+sets `nolintlint` to `allow-unused: false`, so a suppression that no longer
+suppresses anything fails the linter — locally. The lint job runs
+`golangci-lint-action` with `continue-on-error: true` on the first attempt and
+on every retry (`.github/workflows/lint.yml`, deliberately, for a stated
+toolchain reason), so it cannot fail a pull request. A counter-example that is
+itself a check unable to fail is the shape this section exists to name.
 
 Three real cases, all from the automation repository that tests this router,
 all found by a reviewer after the change had passed its own checks:
@@ -848,6 +887,8 @@ Non-blocking
 Evidence
 - <environment>: <result>
 - PR How-to-verify: <n>/<m> commands confirmed
+- guard added: <what it examined, as a number> | none added
+- guard made to fail: <what you broke, and what it reported> | n/a
 
 Independent ticket review (gate 2a)
 - <n> implemented
@@ -856,7 +897,7 @@ Independent ticket review (gate 2a)
 - <n> cannot determine
 
 Adversary review (gate 2b)
-- review seat: Copilot, every thread cleared | 2b review round, run <date>
+- review seat: Copilot, every thread cleared | Copilot, <n> threads STILL OPEN | 2b review round, run <date> | EMPTY
 - <objection>: confirmed and fixed in <commit> | confirmed and answered, <where the answer is kept> | checked and disproved
 - <one line if it found nothing, naming where it looked>
 
