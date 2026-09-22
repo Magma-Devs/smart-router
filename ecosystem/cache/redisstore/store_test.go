@@ -299,3 +299,31 @@ func TestReadEndpointPrefersTheReadClient(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, mrRead.Addr(), store.ReadEndpoint())
 }
+
+// MAG-3671: the ticket's trap (sentinel addresses and a master-name with the
+// topology line forgotten) was indistinguishable at runtime from a
+// configuration with no master-name at all. The startup line now names the
+// resolved topology, but it scrolls away; GET /debug/cache-state renders
+// ConfiguredEndpoints as the tier's address, so the running router can be
+// asked which client it built. The topology is always the resolved one.
+func TestConfiguredEndpointsNameTheTopology(t *testing.T) {
+	standalone, err := New(Config{Addresses: []string{"cache.internal:6379"}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = standalone.Close() })
+	require.Equal(t, "cache.internal:6379 topology=standalone prefix=sr", standalone.ConfiguredEndpoints(),
+		"an omitted topology is reported as the standalone it resolved to, and a standalone has no master")
+
+	sentinel, err := New(Config{Topology: TopologySentinel, MasterName: "mymaster", Addresses: []string{"s1:26379", "s2:26379"}, ReadAddresses: []string{"reader:6379"}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sentinel.Close() })
+	require.Equal(t, "s1:26379,s2:26379 read=reader:6379 topology=sentinel master=mymaster prefix=sr", sentinel.ConfiguredEndpoints(),
+		"under sentinel the addresses are the quorum and the master set name says what it is asked for")
+
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	injected, err := NewWithClient(client, "srtest")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = injected.Close() })
+	require.NotContains(t, injected.ConfiguredEndpoints(), "topology=",
+		"the NewWithClient seam sees no Config, so it does not guess a topology")
+}

@@ -237,11 +237,13 @@ resp-cache:
 // MAG-3671, the second finding: the startup line printed the raw topology
 // field, so an omitted topology showed as a blank and the only surface that
 // could have revealed a misresolved configuration said nothing. It must name
-// the topology the client was actually built with.
+// the topology the client was actually built with, and so must the debug
+// state, which is still there after the startup line has scrolled away.
 func TestSelectBackendLogsTheResolvedTopology(t *testing.T) {
 	mr := miniredis.RunT(t)
+	var backend performance.CacheBackend
 	logged := captureLog(t, func() {
-		backend := selectBackend(t, fmt.Sprintf(`
+		backend = selectBackend(t, fmt.Sprintf(`
 resp-cache:
   addresses: [%q]
 `, mr.Addr()))
@@ -249,4 +251,9 @@ resp-cache:
 	})
 	require.Contains(t, logged, "resp-cache backend configured")
 	require.Contains(t, logged, `"topology":"standalone"`, "an omitted topology is reported as what it resolves to, not as a blank")
+
+	respCache, ok := backend.(*performance.RespCache)
+	require.True(t, ok)
+	require.Contains(t, respCache.DebugCacheState().Address, "topology=standalone",
+		"the running router can be asked which client it built, not only told once at startup")
 }
