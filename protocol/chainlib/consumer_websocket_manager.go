@@ -190,6 +190,21 @@ func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]b
 	return bytesRateLimitError, nil
 }
 
+// subscriptionReplyFormatter remembers the caller's request id and returns the formatter
+// that restores it on what the router answers for the subscription: the subscribe reply,
+// a method-not-found error, an unsubscribe acknowledgement. Every frame the subscription
+// loop pushes goes through the same formatter, and a streamed notification comes out
+// untouched: it has no top-level result or error, so there is nothing to restore an id
+// into, and the formatter does not manufacture one. It used to, and every
+// eth_subscription push carried an id that JSON-RPC 2.0 says a notification does not
+// have (MAG-3597). A Tendermint event does carry a result, and keeps getting the
+// caller's id restored as before.
+func subscriptionReplyFormatter(apiInterface string, request []byte) func([]byte) []byte {
+	inputFormatter, outputFormatter := cacheformat.FormatterForRelayRequestAndResponse(apiInterface)
+	inputFormatter(request) // remembers the caller's id; the normalized request is not needed here
+	return outputFormatter
+}
+
 // webSocketMsgWithType is one frame queued for the connection's writer goroutine.
 type webSocketMsgWithType struct {
 	messageType int
@@ -558,8 +573,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		}
 
 		// Subscription flow
-		inputFormatter, outputFormatter := cacheformat.FormatterForRelayRequestAndResponse(protocolMessage.GetApiCollection().CollectionData.ApiInterface) // we use this to preserve the original jsonrpc id
-		inputFormatter(protocolMessage.RelayPrivateData().Data)                                                                                            // set the extracted jsonrpc id
+		outputFormatter := subscriptionReplyFormatter(protocolMessage.GetApiCollection().CollectionData.ApiInterface, protocolMessage.RelayPrivateData().Data)
 
 		reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(webSocketCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
 		if err != nil {
