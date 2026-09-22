@@ -677,6 +677,54 @@ two commits is a false claim even though it was true when written.
 Then check the body against your step 1 notes. A body that omits a limitation you
 found is not merely incomplete — it is the reason the reviewer will not look for it.
 
+### 9b — the diff against itself
+
+Gate 9 checks the body against the diff. This one checks the diff against the
+diff. A change lands on one line and the sentence beside it still describes what
+used to happen, so the code is right and the thing a reader reads is wrong.
+
+Three sub-checks. Each is reading, not grepping, and each takes a minute:
+
+**1. Prose beside changed code.** For every declaration this diff touched, read
+the comment or docstring attached to it and ask whether it is still true.
+
+```bash
+BASE=$(git merge-base origin/main HEAD)
+git diff "$BASE...HEAD" -U5 -- '*.go' ':!*.pb.go' | grep -nE '^[-+ ].*(//|func )'
+```
+
+Go puts a doc comment directly above its declaration, in a fixed place, so `-U5`
+shows the comment as context above every changed body. A comment that stays
+context while the body changes is the case to read. In a language whose
+docstring sits INSIDE the body, the hunk often already contains it; there the
+miss is the docstring that did NOT change, so list each changed declaration and
+read its docstring from `HEAD` against the new body.
+
+**2. A name against what the thing does.** A test named for a condition its own
+setup contradicts is worse than a bad name: the failure message and the report
+both repeat it. Read every name this diff added or changed beside the body under
+it.
+
+**3. Two places in the same diff that disagree.** A table and the paragraph
+under it. A document describing a file this PR did not change. A log line naming
+the source the assertion no longer reads.
+
+**For this one, re-read every Markdown file in the diff whole, not by hunk.**
+This contradiction lives outside the hunk by definition, so a reviewer who reads
+only the diff cannot see it.
+
+```bash
+git diff "$BASE...HEAD" --name-only -- '*.md'
+```
+
+Five real cases, all from the automation repository that tests this router, all
+found by a reviewer after the change had passed its own checks: a docstring and
+a summary line still naming the data source the new assertion stopped reading; a
+class contract promising "all rows" where the code returns on one; a test named
+"not last" whose setup puts the row last; a table assigning ownership its own
+next paragraph reassigns; and a document stating an exclusion the workflow it
+names does not carry.
+
 ## A clean answer may mean the check never ran
 
 ### A search that returns zero
