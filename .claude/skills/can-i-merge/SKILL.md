@@ -128,9 +128,54 @@ gate would ask about. Then write down, before anything else:
 2. Anything that stands out — surprising, out of place, half-finished, or that
    you do not understand.
 3. Any file you skimmed instead of reading, named.
+4. **What does this cost, and what does it buy — measured?** See below.
 
 Item 2 is the output that matters, and it has no fixed shape on purpose. If it is
 empty on a change of more than a few lines, you skimmed. Go back.
+
+### Item 4 — is this the right size for the job
+
+Every gate in this skill asks whether a change is **correct and finished**. None
+asks whether it is **the right size**, and a change can be entirely correct and
+still be the wrong answer. That kind of finding has no gate, so it has to be
+caught here or not at all.
+
+Four questions. Each wants a number or a name, not a judgement:
+
+1. **What event does this detect or prevent, and how often has it actually
+   happened?** From git history, not from an estimate. Read the thing being
+   guarded at each commit that touched it and count the changes.
+2. **Is any part of this re-deriving an answer another system already owns?**
+   Name that system, and what it would cost to ask it instead. Re-implementing
+   somebody else's rules means a second implementation that can disagree with
+   the first, and the disagreement is silent.
+3. **Does something already do this job** — upstream, in a sibling repository, in
+   a test next to the thing itself? Look before accepting that it must be built
+   here.
+4. **Where does it run, and is that where the event is noticed?** A guard that
+   skips on every pull request and fires once a day is a different product from
+   the one the PR body describes.
+
+**One smell worth naming, because it points straight at question 2.** A large
+test file whose subject is **our own helper** rather than the product. Tests of a
+helper are ordinary; hundreds of lines of them usually mean the helper is
+modelling rules that belong to something else, and the right change is to delete
+the model rather than to test it harder.
+
+**This is not a veto.** Disproportion is a discussion, not a blocker: it belongs
+in the report under Non-blocking unless the author agrees. Say what you measured
+and what the cheaper shape would be, then let the author decide.
+
+Worked example, 2026-09-13, from the automation repository that tests this
+router. A pull request added 1,727 lines to notice when a Go structure in this
+repository grows a field: 451 of them re-implementing Go's own serialisation
+rules in Python, and 846 more testing that re-implementation. Every gate in this
+skill would have passed it — the ticket was satisfied, no caller broke, the run
+was green, the body was true. The four questions above gave: the field list had
+changed twice in five months; Go answers the same question in about 40 lines;
+`types/relay/cache_test.go` already existed next to the structure; and the guard
+skipped on every pull request. The pull request came down to 991 lines and kept
+every claim it made.
 
 **Why the order is fixed.** A checklist read first fills your attention, and
 whatever fills attention also excludes. Run the gates first and they find exactly
@@ -318,6 +363,41 @@ Check every objection yourself before it enters the report. A confirmed one beco
 a Blocking or Non-blocking line. **An objection you checked and disproved still gets
 one line**, saying you checked it — that is how a reader tells "looked at, and it is
 fine" from "never looked".
+
+#### This same adversary fills the review seat when Copilot cannot
+
+A Copilot review has a monthly quota, and the bot can be down. When one cannot be
+requested, run 2b again as a **review round** rather than skipping the seat:
+
+1. Dispatch a fresh-context subagent with only the PR number and the 2b prompt
+   above. Nothing else — no summary of the change, no list of what you already
+   checked.
+2. Verify every objection against the code before acting. Real, so fix it,
+   commit and push; wrong, so record the reason you rejected it.
+3. Findings and dispositions go to the author in chat, **never as comments on the
+   PR**. An external bot posting on a PR is the author's call; this round is not
+   a bot and does not post.
+
+**This round is default-on.** Unlike asking Copilot, it needs no permission, it
+writes nothing anyone else sees, and it consumes no quota. Measured cost on a
+single-module pull request, 2026-08-24: 100k to 170k tokens a round. It fills the
+Copilot seat only. The human merge word is unchanged.
+
+#### Axis 0 — is the review seat filled?
+
+Before reporting **any** pull request as ready, and always before reporting one
+you wrote yourself, one of these must be true:
+
+- a Copilot review posted, and every thread it opened is cleared, or
+- the round above ran, and every verified finding is fixed or answered.
+
+Neither true means the pull request is not reportable as ready. Run the round
+now; it needs no ask.
+
+This axis exists because a step that waits to be remembered gets skipped. On
+2026-08-24 the Copilot quota ran out and several pull requests went to a reader
+with an empty review seat and nothing saying so. The report's adversary block
+carries the answer, so a reader can see which of the two filled the seat.
 
 ## Gate 3 — verification evidence
 
@@ -653,6 +733,7 @@ Independent ticket review (gate 2a)
 - <n> cannot determine
 
 Adversary review (gate 2b)
+- review seat: Copilot, every thread cleared | 2b review round, run <date>
 - <objection>: confirmed | checked and disproved
 - <one line if it found nothing, naming where it looked>
 
