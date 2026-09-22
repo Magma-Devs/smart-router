@@ -228,10 +228,10 @@ func TestClusterOptionsMapping(t *testing.T) {
 
 func TestNewFailsFastOnBadInputs(t *testing.T) {
 	_, err := New(Config{Addresses: []string{"h:1"}, PasswordFile: "/does/not/exist"})
-	require.Error(t, err, "unreadable credential file must fail construction, not first dial")
+	require.ErrorContains(t, err, "/does/not/exist", "unreadable credential file must fail construction naming the file, not first dial")
 
 	_, err = New(Config{Addresses: []string{"h:1"}, TLS: TLSConfig{Enabled: true, CAFile: "/does/not/exist"}})
-	require.Error(t, err, "unreadable CA must fail construction")
+	require.ErrorContains(t, err, "/does/not/exist", "unreadable CA must fail construction naming the file")
 
 	_, err = New(Config{Addresses: []string{"h:1"}, TLS: TLSConfig{Enabled: true, CertFile: "/only/cert"}})
 	require.Error(t, err, "client cert without key must fail construction")

@@ -38,9 +38,7 @@ import (
 // DialTimeout is set LONG on purpose so only the context's 150ms deadline can
 // be what ends the attempt.
 func TestTLSHandshakeBoundedByCallerContext(t *testing.T) {
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = lis.Close() })
+	lis := listenLocal(t)
 	go func() {
 		for {
 			conn, acceptErr := lis.Accept()
@@ -56,7 +54,7 @@ func TestTLSHandshakeBoundedByCallerContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err = dial(ctx, "tcp", lis.Addr().String())
+	_, err := dial(ctx, "tcp", lis.Addr().String())
 	elapsed := time.Since(start)
 	require.Error(t, err, "a stalled handshake must fail, not hang")
 	require.Less(t, elapsed, 2*time.Second,
@@ -148,16 +146,29 @@ func newTestPKIIn(t *testing.T, dir string) testPKI {
 	}
 }
 
-func pingWithTLS(t *testing.T, addr string, tlsCfg TLSConfig) error {
+// newStoreWithCreds builds a store against addr with the given credentials and
+// tls block, closed with the test. The error is returned rather than asserted
+// because the tests below care about both outcomes of construction.
+func newStoreWithCreds(t *testing.T, addr, username, password string, tlsCfg TLSConfig) (*Store, error) {
 	t.Helper()
 	store, err := New(Config{
 		Addresses:   []string{addr},
+		Username:    username,
+		Password:    password,
 		TLS:         tlsCfg,
 		DialTimeout: 2 * time.Second,
 		ReadTimeout: 2 * time.Second,
 	})
+	if store != nil {
+		t.Cleanup(func() { _ = store.Close() })
+	}
+	return store, err
+}
+
+func pingWithTLS(t *testing.T, addr string, tlsCfg TLSConfig) error {
+	t.Helper()
+	store, err := newStoreWithCreds(t, addr, "", "", tlsCfg)
 	require.NoError(t, err, "construction must succeed; only the handshake may fail")
-	t.Cleanup(func() { _ = store.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	return store.Ping(ctx)
@@ -230,17 +241,34 @@ func TestMutualTLSAcceptance(t *testing.T) {
 	})
 }
 
+// wireCapture is a locked byte sink for what a listener receives. The buffer
+// is a named field, not embedded: embedding bytes.Buffer would promote its
+// ReadFrom, io.Copy would take that path, and the writes would bypass the lock.
+type wireCapture struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *wireCapture) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+// received returns a copy of everything captured so far.
+func (w *wireCapture) received() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]byte(nil), w.buf.Bytes()...)
+}
+
 // wireCaptureListener accepts every connection and keeps the bytes each one
 // sends, never answering — the recording endpoint that stood in for the store
-// when the evidence on MAG-3683 was captured. received returns a copy of
-// everything captured so far.
-func wireCaptureListener(t *testing.T) (net.Listener, func() []byte) {
+// when the evidence on MAG-3683 was captured.
+func wireCaptureListener(t *testing.T) (net.Listener, *wireCapture) {
 	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = lis.Close() })
-	var mu sync.Mutex
-	var captured bytes.Buffer
+	lis := listenLocal(t)
+	capture := &wireCapture{}
 	go func() {
 		for {
 			conn, acceptErr := lis.Accept()
@@ -249,108 +277,65 @@ func wireCaptureListener(t *testing.T) (net.Listener, func() []byte) {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
-				chunk := make([]byte, 4096)
-				for {
-					n, readErr := c.Read(chunk)
-					if n > 0 {
-						mu.Lock()
-						captured.Write(chunk[:n])
-						mu.Unlock()
-					}
-					if readErr != nil {
-						return
-					}
-				}
+				_, _ = io.Copy(capture, c)
 			}(conn)
 		}
 	}()
-	return lis, func() []byte {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]byte(nil), captured.Bytes()...)
-	}
+	return lis, capture
 }
 
 // MAG-3683: a tls block with every file path written and no tls.enabled. The
 // files are read only when the switch is on, so before this fix the block was
 // inert: the router started, reported TLS off in one word among six fields,
 // opened a plaintext connection, and its first write carried the username and
-// password readable.
-//
-// Three directions, each keeping the previous one honest:
+// password readable. The refusal itself is asserted in TestConfigValidateMatrix,
+// TestNewFailsFastOnBadInputs and the loader's
+// TestLoadRespCacheConfigRefusesTLSBlockWithoutSwitch; what this test pins is
+// the wire, in the two directions the switch decides:
 //
 //  1. no tls block at all, with a password — the credential IS on the wire in
-//     the clear. That configuration is deliberate and stays allowed; here it
-//     proves the instrument sees a plaintext credential when one is sent.
-//  2. the ticket's block without the switch — refused before any dial, naming
-//     the missing key.
-//  3. the same block with the switch on — the listener sees a TLS handshake
-//     and never the credential (the control without which 2 passes on a store
-//     that sends nothing), and a missing CA file aborts construction naming
-//     the file (the ticket's second control: the files ARE read once the
-//     switch is on).
-func TestTLSBlockWithoutEnabledNeverSendsPlaintext(t *testing.T) {
+//     the clear. That configuration is deliberate and stays allowed (and is
+//     now warned about); here it proves the instrument sees a plaintext
+//     credential when one is sent, without which 2 would pass on a store
+//     that sends nothing.
+//  2. the switch on — the same listener sees a TLS handshake record and never
+//     the credential.
+func TestTLSSwitchDecidesWhatCrossesTheWire(t *testing.T) {
 	const username, password = "cacheuser", "placeholder-cache-credential"
-	newStore := func(t *testing.T, addr string, tlsCfg TLSConfig) (*Store, error) {
-		t.Helper()
-		store, err := New(Config{
-			Addresses:   []string{addr},
-			Username:    username,
-			Password:    password,
-			TLS:         tlsCfg,
-			DialTimeout: time.Second,
-			ReadTimeout: time.Second,
-		})
-		if store != nil {
-			t.Cleanup(func() { _ = store.Close() })
-		}
-		return store, err
-	}
-	pingOnce := func(t *testing.T, store *Store) {
-		t.Helper()
+	pingOnce := func(store *Store) {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
-		require.Error(t, store.Ping(ctx), "the listener never answers, so the operation must fail")
+		_ = store.Ping(ctx) // the listener never answers, so this can only fail; the wire is the assertion
 	}
-	missing := filepath.Join(t.TempDir(), "does-not-exist", "ca.pem")
 
 	t.Run("no tls block: the credential crosses in the clear (instrument check)", func(t *testing.T) {
-		lis, received := wireCaptureListener(t)
-		store, err := newStore(t, lis.Addr().String(), TLSConfig{})
+		lis, capture := wireCaptureListener(t)
+		store, err := newStoreWithCreds(t, lis.Addr().String(), username, password, TLSConfig{})
 		require.NoError(t, err)
-		pingOnce(t, store)
-		require.Eventually(t, func() bool { return bytes.Contains(received(), []byte(password)) },
-			2*time.Second, 20*time.Millisecond,
-			"without TLS the password is readable on the wire; the listener must see it, or the assertions below prove nothing")
-	})
-
-	t.Run("tls block without the switch is refused before any dial", func(t *testing.T) {
-		lis, received := wireCaptureListener(t)
-		_, err := newStore(t, lis.Addr().String(), TLSConfig{CAFile: missing, CertFile: missing, KeyFile: missing})
-		require.ErrorContains(t, err, "tls.enabled",
-			"a tls block without its switch must be refused, not started in plaintext")
-		require.Empty(t, received(), "nothing may reach the wire")
+		// The Ping is re-issued on every tick rather than once up front: under
+		// load one attempt's budget can run out between the dial and the HELLO
+		// write, leaving a dialled connection parked with nothing on the wire
+		// yet; the next attempt initialises that connection and the credential
+		// appears.
+		require.Eventually(t, func() bool {
+			pingOnce(store)
+			return bytes.Contains(capture.received(), []byte(password))
+		}, 5*time.Second, 20*time.Millisecond,
+			"without TLS the password is readable on the wire; the listener must see it, or the control below proves nothing")
 	})
 
 	t.Run("control: with the switch on the listener sees a handshake, never the credential", func(t *testing.T) {
-		lis, received := wireCaptureListener(t)
+		lis, capture := wireCaptureListener(t)
 		pki := newTestPKI(t)
-		store, err := newStore(t, lis.Addr().String(), TLSConfig{Enabled: true, CAFile: pki.caFile, ServerName: "localhost"})
+		store, err := newStoreWithCreds(t, lis.Addr().String(), username, password, TLSConfig{Enabled: true, CAFile: pki.caFile, ServerName: "localhost"})
 		require.NoError(t, err)
-		pingOnce(t, store)
-		require.Eventually(t, func() bool { return len(received()) >= 3 }, 2*time.Second, 20*time.Millisecond,
+		pingOnce(store)
+		require.Eventually(t, func() bool { return len(capture.received()) >= 3 }, 2*time.Second, 20*time.Millisecond,
 			"the client must have sent its ClientHello")
-		got := received()
+		got := capture.received()
 		require.Equal(t, byte(0x16), got[0], "first byte is a TLS handshake record")
 		require.Equal(t, byte(0x03), got[1], "TLS record-layer major version")
 		require.NotContains(t, string(got), password, "the credential must never appear in the clear")
 		require.NotContains(t, string(got), username)
-	})
-
-	t.Run("control: with the switch on a missing CA file aborts construction naming the file", func(t *testing.T) {
-		lis, received := wireCaptureListener(t)
-		_, err := newStore(t, lis.Addr().String(), TLSConfig{Enabled: true, CAFile: missing})
-		require.ErrorContains(t, err, missing)
-		require.Empty(t, received())
 	})
 }
