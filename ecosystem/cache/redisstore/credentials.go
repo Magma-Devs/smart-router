@@ -267,6 +267,12 @@ func (p *StreamingProvider) Subscribe(listener auth.CredentialsListener) (auth.C
 	// Every subscription forgets the collected ones first, so the registry is
 	// bounded by the live connections plus those not yet collected, however
 	// many handshakes an outage fails and however rarely the watcher polls.
+	// This walks the whole registry under mu on every connection init, the
+	// hot path of an outage, and that is acceptable only because the walk is
+	// bounded by the records not yet collected: thousands between two
+	// collections, microseconds per walk. Pruning from the watcher alone
+	// would leave the registry to grow for a whole poll interval per outage,
+	// which is the shape the Codex review of #407 found.
 	p.pruneCollectedLocked()
 	id := p.nextID
 	p.nextID++
@@ -283,6 +289,8 @@ func (p *StreamingProvider) Subscribe(listener auth.CredentialsListener) (auth.C
 		p.mu.Lock()
 		delete(p.listeners, id)
 		p.mu.Unlock()
+		// Not a no-op: this mention is what captures sub in the closure, and
+		// the capture is the strong reference the weak pointer above needs.
 		runtime.KeepAlive(sub)
 		return nil
 	}
