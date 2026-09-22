@@ -143,6 +143,7 @@ func New(cfg Config) (*Store, error) {
 	provider := creds.provider
 
 	warnIfCredentialsCrossPlaintext(cfg)
+	warnIfTLSSkipsVerification(cfg)
 
 	writeTracker := &endpointTracker{}
 	readTracker := writeTracker
@@ -344,6 +345,26 @@ func warnIfCredentialsCrossPlaintext(cfg Config) {
 		utils.LogAttr("addresses", cfg.Addresses),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 		utils.LogAttr("credential-keys", keys),
+	)
+}
+
+// warnIfTLSSkipsVerification says, once at construction, that the connection
+// will be encrypted to a backend whose certificate is not checked.
+//
+// Skipping verification is legitimate on a development backend and serious
+// anywhere else, and it is the kind of setting that is set once and then
+// travels. It lives here, next to the plaintext-credential warning and in the
+// package that honours the opt-in (TLSConfig.build), so every caller of New
+// gets it and a production deployment running with it is not
+// indistinguishable from one running without (MAG-3684). The debug endpoint
+// carries the same fact as tls=insecure-skip-verify on the tier's address.
+func warnIfTLSSkipsVerification(cfg Config) {
+	if !cfg.TLS.Enabled || !cfg.TLS.InsecureSkipVerify {
+		return
+	}
+	utils.LavaFormatWarning("resp-cache tls.insecure-skip-verify is set: the connection is encrypted but the backend's certificate is NOT verified, so the store's identity is unchecked — a development setting that must not travel to production", nil,
+		utils.LogAttr("addresses", cfg.Addresses),
+		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 	)
 }
 
