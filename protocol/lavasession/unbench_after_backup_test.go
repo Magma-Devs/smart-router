@@ -284,3 +284,88 @@ func TestPinnedProvider_UnservableAddonWithEmptyPoolDoesNotRelease(t *testing.T)
 		"another provider serving the addon cannot justify a release for a request pinned to one that does not")
 	require.ElementsMatch(t, []string{"lava@primary0", "lava@primary1"}, csm.currentlyBlockedProviderAddresses)
 }
+
+// A group-diversity mandate drops the caller's pin, and the request is served by the diverse set
+// rather than by the one pinned provider.
+//
+// The drop itself is not new. Where it happens is: it used to run at the one selection call that
+// needed it, leaving this frame holding a directive that selection had already discarded. The
+// visible half of that is here — with the pin still in force, selection returns the single pinned
+// address and then lowers its own target to match, so a caller asking for 2 providers is handed 1
+// and told nothing went wrong.
+func TestGroupDiversity_DropsThePinAndServesTheDiverseSet(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, false)
+
+	css, err := csm.GetSessions(ctx, 2, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber,
+		"", nil, common.NO_STATE, 0, "", "lava@primary0",
+		GetSessionsOptions{MinGroups: 2, PerGroupTarget: 1})
+	require.NoError(t, err)
+
+	require.Len(t, css, 2, "a group-diversity mandate outranks the pin: it must not collapse to the pinned provider")
+}
+
+// The blocked-pool half of the same thing, and the reason the drop had to move up rather than stay
+// where it was.
+//
+// With group diversity mandated the pin is discarded before selection, so an unknown name fails as
+// an ordinary empty pool — PairingListEmptyError, not SelectedProviderUnavailableError. The
+// failover cascade then reaches the release. If this frame were still carrying the discarded pin,
+// the release guard would ask whether "lava@doesnotexist" could be served, answer no, and decline
+// a release that this request genuinely needs: the cascade would fall through to the
+// blocked-provider walk and return ONE provider for a policy that asked for two.
+func TestGroupDiversity_UnknownPinStillReleasesTheBlock(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, false) // no backup, so the release is actually reached
+	blockEveryPrimary(csm)
+
+	css, err := csm.GetSessions(ctx, 2, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber,
+		"", nil, common.NO_STATE, 0, "", "lava@doesnotexist",
+		GetSessionsOptions{MinGroups: 2, PerGroupTarget: 1})
+	require.NoError(t, err, "the pin is not in force here, so an unknown name must not fail the request")
+
+	require.Len(t, css, 2, "the release must restore the whole pool, not leave the diverse fetch one short")
+	require.Equal(t, uint64(1), csm.numberOfResets)
+	require.Empty(t, csm.currentlyBlockedProviderAddresses)
+}
+
+// The release guard folds case when it matches the pin, and this is what defends that choice.
+//
+// Provider names are free-form config strings whose case the pipeline does not preserve, which is
+// why resolveSelectedProviderAddress folds. The guard has to fold the same way or it declines a
+// release for a pin that resolution would then have honoured — the pinned provider would be
+// sitting in the blocked list, reachable, and refused on spelling alone.
+func TestPinnedProvider_CaseFoldedNameStillReleasesTheBlock(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, true)
+	blockEveryPrimary(csm)
+
+	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber,
+		"", nil, common.NO_STATE, 0, "", "LAVA@PRIMARY0")
+	require.NoError(t, err, "a pin differing only in case must still reach its provider")
+	require.Len(t, css, 1)
+	for providerAddress := range css {
+		require.Equal(t, "lava@primary0", providerAddress, "the router's own spelling must win downstream")
+	}
+	require.Equal(t, uint64(1), csm.numberOfResets)
+}
+
+// Why the caller must drop the pin itself, rather than leaving it to selection to sort out.
+//
+// A pin makes getValidProviderAddresses return exactly one address, and the fetch loop then sets
+// its own target to the number of addresses it was given. So a caller asking for 3 providers gets
+// 1, and gets it with err == nil — the shortfall is not an error anywhere in this layer.
+//
+// For ordinary traffic that is correct and is the whole point of pinning. For a cross-validation
+// relay it is a policy asking for 3 participants being satisfied by a single answer that was
+// compared against nothing, which is why crossValidationOverridesPin clears the directive before
+// it ever arrives here.
+func TestPinnedProvider_CollapsesTheRequestedProviderCount(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, false)
+
+	css, err := csm.GetSessions(ctx, 2, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber,
+		"", nil, common.NO_STATE, 0, "", "lava@primary0")
+	require.NoError(t, err, "the shortfall is silent: this layer reports no error for it")
+	require.Len(t, css, 1, "a pin collapses the count to one, whatever the caller asked for")
+}

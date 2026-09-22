@@ -43,3 +43,46 @@ func TestResolvePinDirectives(t *testing.T) {
 		}
 	})
 }
+
+// TestCrossValidationOverridesPin covers the other half of the pin's life: a directive that
+// survives resolvePinDirectives can still be displaced by an operator mandate.
+//
+// The case that matters is cross-validation enabled WITHOUT group diversity, which is the default
+// shape of an enabled policy (MinGroups defaults to 1). The override used to be keyed on
+// minGroups > 1 and applied deep inside selection, so this configuration kept the pin: selection
+// returned the one pinned address, lowered its own target to match, and a policy asking for
+// MaxParticipants participants was satisfied by a single provider with no error — an answer
+// returned as validated having been compared against nothing.
+func TestCrossValidationOverridesPin(t *testing.T) {
+	cases := []struct {
+		name             string
+		crossValidation  bool
+		selectedProvider string
+		stickiness       string
+		want             bool
+	}{
+		// The regression this exists for. No group diversity anywhere in sight.
+		{"cross-validation on, header pin", true, "simprovider1", "", true},
+		{"cross-validation on, sticky claim", true, "", "sticky-1", true},
+		{"cross-validation on, both", true, "simprovider1", "sticky-1", true},
+
+		// Nothing to displace.
+		{"cross-validation on, no directive", true, "", "", false},
+
+		// Cross-validation off: the caller's directive is the only instruction there is, and a
+		// single-provider relay is exactly what a pin asks for.
+		{"cross-validation off, header pin", false, "simprovider1", "", false},
+		{"cross-validation off, sticky claim", false, "", "sticky-1", false},
+		{"cross-validation off, no directive", false, "", "", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := crossValidationOverridesPin(tc.crossValidation, tc.selectedProvider, tc.stickiness)
+			if got != tc.want {
+				t.Fatalf("crossValidationOverridesPin(%v, %q, %q) = %v, want %v",
+					tc.crossValidation, tc.selectedProvider, tc.stickiness, got, tc.want)
+			}
+		})
+	}
+}
