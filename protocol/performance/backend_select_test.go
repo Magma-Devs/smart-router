@@ -153,13 +153,16 @@ func TestSelectBackendGRPCKeyPrefix(t *testing.T) {
 
 	grpcA, ok := tenantA.(*performance.Cache)
 	require.True(t, ok)
-	require.Equal(t, addr+" prefix=tenant-a", grpcA.DebugCacheState().Address)
+	require.Equal(t, addr+" prefix=tenant-a (unconfirmed)", grpcA.DebugCacheState().Address,
+		"before the first reply nothing has confirmed the server scopes by the prefix")
 
 	hash := []byte("select-prefix-hash")
 	setForParity(t, tenantA, false, hash, nil, []byte(`tenant-a`), 100, 100)
 	eventuallyData(t, tenantA, hash, nil, 100, 100, false, []byte(`tenant-a`))
 	require.Nil(t, getForParity(t, tenantB, hash, nil, 100, 100, false).GetReply(),
 		"a router selected with another prefix must not see the entry")
+	require.Equal(t, addr+" prefix=tenant-a", grpcA.DebugCacheState().Address,
+		"a server that knows the field has echoed it by now")
 }
 
 // MAG-3683, the shape the refusal cannot reach. Credentials with no tls block

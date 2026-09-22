@@ -2,13 +2,17 @@ package performance_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/protocol/performance"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // MAG-3521 over the real hop: one cache server, three routers on one chain —
@@ -95,11 +99,107 @@ func TestKeyPrefixIsolatesStickyClaims(t *testing.T) {
 func TestKeyPrefixIsReportedInDebugState(t *testing.T) {
 	addr := startLoopbackCacheServer(t)
 	prefixed := newPrefixedGRPCBackend(t, addr, "tenant-a")
-	require.Equal(t, addr+" prefix=tenant-a", prefixed.DebugCacheState().Address)
+	require.Equal(t, addr+" prefix=tenant-a (unconfirmed)", prefixed.DebugCacheState().Address,
+		"until the server has answered on this connection, nothing has confirmed it scopes by the prefix")
 	require.Equal(t, "tenant-a", prefixed.KeyPrefix())
 	require.Equal(t, addr, prefixed.BackendEndpoint(), "the dialled address itself is unchanged")
+	getForParity(t, prefixed, []byte("debug-state-hash"), nil, 100, 100, false)
+	require.Equal(t, addr+" prefix=tenant-a", prefixed.DebugCacheState().Address,
+		"the first reply from a server that knows the field confirms the keyspace")
 
 	legacy := newPrefixedGRPCBackend(t, addr, "")
 	require.Equal(t, addr, legacy.DebugCacheState().Address, "no prefix, no suffix — the field reads exactly as before")
 	require.Empty(t, legacy.KeyPrefix())
+}
+
+// legacyCacheServer stands in for a cache server built before the keyspace
+// field existed: the field is dropped on the way in, so nothing is scoped, and
+// no reply echoes it. That is the shape MAG-3521's review names — the operator
+// set the one setting that must differ between deployments, and got no
+// isolation and no sign of it.
+type legacyCacheServer struct {
+	*cache.RelayerCacheServer
+}
+
+func (s *legacyCacheServer) GetRelay(ctx context.Context, req *pairingtypes.RelayCacheGet) (*pairingtypes.CacheRelayReply, error) {
+	stripped := *req
+	stripped.KeyPrefix = ""
+	reply, err := s.RelayerCacheServer.GetRelay(ctx, &stripped)
+	if reply != nil {
+		reply.KeyPrefix = ""
+	}
+	return reply, err
+}
+
+func (s *legacyCacheServer) SetRelay(ctx context.Context, req *pairingtypes.RelayCacheSet) (*emptypb.Empty, error) {
+	stripped := *req
+	stripped.KeyPrefix = ""
+	return s.RelayerCacheServer.SetRelay(ctx, &stripped)
+}
+
+func (s *legacyCacheServer) GetStickySession(ctx context.Context, req *pairingtypes.StickySessionGet) (*pairingtypes.StickySessionReply, error) {
+	stripped := *req
+	stripped.KeyPrefix = ""
+	reply, err := s.RelayerCacheServer.GetStickySession(ctx, &stripped)
+	if reply != nil {
+		reply.KeyPrefix = ""
+	}
+	return reply, err
+}
+
+func (s *legacyCacheServer) SetStickySession(ctx context.Context, req *pairingtypes.StickySessionSet) (*pairingtypes.StickySessionReply, error) {
+	stripped := *req
+	stripped.KeyPrefix = ""
+	reply, err := s.RelayerCacheServer.SetStickySession(ctx, &stripped)
+	if reply != nil {
+		reply.KeyPrefix = ""
+	}
+	return reply, err
+}
+
+// A server that ignores the prefix is detected from its first reply: the
+// router warns once per connection and qualifies the prefix on the debug
+// endpoint, and keeps serving. A server that scopes by it confirms it, with no
+// warning; a router with no prefix has nothing to confirm on either.
+func TestKeyPrefixEchoNamesAServerThatIgnoresIt(t *testing.T) {
+	const unisolated = "did not echo it"
+	legacyAddr := startLoopbackCacheServerWith(t, func(srv *cache.RelayerCacheServer) pairingtypes.RelayerCacheServer {
+		return &legacyCacheServer{RelayerCacheServer: srv}
+	})
+	hash := []byte("echo-hash")
+
+	prefixed := newPrefixedGRPCBackend(t, legacyAddr, "tenant-a")
+	require.Equal(t, legacyAddr+" prefix=tenant-a (unconfirmed)", prefixed.DebugCacheState().Address)
+	logged := captureLog(t, func() {
+		getForParity(t, prefixed, hash, nil, 100, 100, false)
+		getForParity(t, prefixed, hash, nil, 100, 100, false)
+		_, _, err := prefixed.GetStickySession(context.Background(), "ETH1", "jsonrpc", "base", "digest-1")
+		require.NoError(t, err)
+		setForParity(t, prefixed, false, hash, nil, []byte(`0x1`), 100, 100)
+	})
+	require.Equal(t, 1, strings.Count(logged, unisolated), "one connection, one warning, however many replies came back without the echo:\n%s", logged)
+	require.Contains(t, logged, `"key-prefix":"tenant-a"`)
+	require.Equal(t, legacyAddr+" prefix=tenant-a (ignored by the cache server)", prefixed.DebugCacheState().Address,
+		"the debug endpoint says the prefix isolates nothing on this server")
+	// Serving continues: an unisolated cache is still a cache.
+	eventuallyData(t, prefixed, hash, nil, 100, 100, false, []byte(`0x1`))
+
+	// The in-process server logs its own debug lines through the same sink, so
+	// the controls look for the warning rather than for silence.
+	unprefixed := newPrefixedGRPCBackend(t, legacyAddr, "")
+	require.NotContains(t, captureLog(t, func() {
+		getForParity(t, unprefixed, hash, nil, 100, 100, false)
+	}), unisolated, "no prefix, nothing to confirm")
+	require.Equal(t, legacyAddr, unprefixed.DebugCacheState().Address)
+
+	// The control: the same traffic against a server that scopes by the prefix
+	// confirms it and warns about nothing.
+	currentAddr := startLoopbackCacheServer(t)
+	confirmed := newPrefixedGRPCBackend(t, currentAddr, "tenant-a")
+	require.NotContains(t, captureLog(t, func() {
+		getForParity(t, confirmed, hash, nil, 100, 100, false)
+		_, _, err := confirmed.GetStickySession(context.Background(), "ETH1", "jsonrpc", "base", "digest-1")
+		require.NoError(t, err)
+	}), unisolated)
+	require.Equal(t, currentAddr+" prefix=tenant-a", confirmed.DebugCacheState().Address)
 }

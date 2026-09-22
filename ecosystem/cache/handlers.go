@@ -64,6 +64,13 @@ func (s *RelayerCacheServer) setSeenBlockOnSharedStateMode(chainId, sharedStateI
 func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCacheGet) (*relaytypes.CacheRelayReply, error) {
 	originalRequestedBlock := relayCacheGet.RequestedBlock
 	cacheReply, cacheHit, err := s.engine().GetRelay(ctx, relayCacheGet)
+	if cacheReply != nil {
+		// Echo the keyspace this lookup was scoped by, hit or miss. A server
+		// that predates the field never sets it, and an empty echo against a
+		// non-empty request is the router's one way of learning its prefix was
+		// dropped on the wire and it is unisolated (MAG-3521).
+		cacheReply.KeyPrefix = relayCacheGet.KeyPrefix
+	}
 
 	go func() {
 		cacheMetricsContext, cancel := context.WithTimeout(context.Background(), time.Second)

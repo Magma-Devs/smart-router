@@ -116,7 +116,9 @@ func (s *RelayerCacheServer) SetStickySession(ctx context.Context, req *relaytyp
 	if err != nil {
 		return nil, err
 	}
-	return &relaytypes.StickySessionReply{Found: true, Provider: pin.Provider, Epoch: pin.Epoch}, nil
+	// The keyspace is echoed on every sticky reply for the same reason the relay
+	// reply carries it: it is how a router learns whether the claim was scoped.
+	return &relaytypes.StickySessionReply{Found: true, Provider: pin.Provider, Epoch: pin.Epoch, KeyPrefix: req.KeyPrefix}, nil
 }
 
 // GetStickySession returns the fleet's live claim for one sticky session id. Found=false is a
@@ -131,7 +133,7 @@ func (s *RelayerCacheServer) GetStickySession(ctx context.Context, req *relaytyp
 		return nil, err
 	}
 	if !found {
-		return &relaytypes.StickySessionReply{}, nil
+		return &relaytypes.StickySessionReply{KeyPrefix: req.KeyPrefix}, nil
 	}
-	return &relaytypes.StickySessionReply{Found: true, Provider: pin.Provider, Epoch: pin.Epoch}, nil
+	return &relaytypes.StickySessionReply{Found: true, Provider: pin.Provider, Epoch: pin.Epoch, KeyPrefix: req.KeyPrefix}, nil
 }

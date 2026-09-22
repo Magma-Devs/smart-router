@@ -38,6 +38,20 @@ type CacheRelayReply struct {
 	// status (e.g. the caching populator's 429/504/non-2xx checks) treat zero as
 	// no-signal rather than as a failure.
 	StatusCode int `json:"status_code"`
+	// KeyPrefix echoes the keyspace the server scoped this lookup by: the
+	// request's KeyPrefix as the server read it. A cache server that predates
+	// the field drops the prefix on the way in and echoes nothing, and an empty
+	// echo against a non-empty request is how a router learns that it is
+	// unisolated — the only sign there is, since the server is otherwise
+	// silent about it (see performance.Cache).
+	KeyPrefix string `json:"key_prefix"`
+}
+
+func (c *CacheRelayReply) GetKeyPrefix() string {
+	if c != nil {
+		return c.KeyPrefix
+	}
+	return ""
 }
 
 func (c *CacheRelayReply) GetReply() *RelayReply {
@@ -426,6 +440,16 @@ type StickySessionReply struct {
 	Found    bool   `json:"found"`
 	Provider string `json:"provider"`
 	Epoch    uint64 `json:"epoch"`
+	// KeyPrefix echoes the keyspace the server scoped the claim by; see
+	// CacheRelayReply.KeyPrefix.
+	KeyPrefix string `json:"key_prefix"`
+}
+
+func (r *StickySessionReply) GetKeyPrefix() string {
+	if r != nil {
+		return r.KeyPrefix
+	}
+	return ""
 }
 
 func (r *StickySessionReply) GetFound() bool {
