@@ -794,7 +794,7 @@ selected by a pattern that matches nothing is a permanent green.
 **Both commands are local steps, and that is not a preference.** No workflow in
 this repository runs the Go tests at all — searched every file under
 `.github/workflows/` for `go test`, `make test` and `gotestsum`, zero hits,
-against a control that finds `runs-on` in three of them. Coverage likewise.
+against a control that finds `runs-on` in all nine of them. Coverage likewise.
 So a pull request's green board says a new guard compiled, never that it ran.
 Making it fail on your own machine is the only verification there is. This is
 filed as MAG-3105.
