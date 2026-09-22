@@ -110,8 +110,9 @@ resp-cache:
 resp-cache:
   addresses: [%q]
 `, mr.Addr()))
-	plainLifetimes := plain.(*performance.RespCache).DebugCacheState().Lifetimes
-	require.Equal(t, float64(60*60), plainLifetimes.FinalizedSeconds, "no block, no change: the defaults are exactly what shipped")
+	plainCache, ok := plain.(*performance.RespCache)
+	require.True(t, ok)
+	require.Equal(t, float64(60*60), plainCache.DebugCacheState().Lifetimes.FinalizedSeconds, "no block, no change: the defaults are exactly what shipped")
 }
 
 // Precedence + rollback: with BOTH configured the RESP backend serves (and the
